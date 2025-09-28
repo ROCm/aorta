@@ -1,0 +1,13 @@
+{
+  "datasets": {
+    "rocm": {
+      "count": 1248,
+      "mean_loss": 0.3469011497755463,
+      "mean_overlap_ms": 20.596117438414158,
+      "mean_compute_ms": 147.75247994134537,
+      "mean_allreduce_overlap_ms": 0.0,
+      "mean_reducescatter_overlap_ms": 20.596117438414158,
+      "overlap_ratio": 0.13939608625581368
+    }
+  }
+}

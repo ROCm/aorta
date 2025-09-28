@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+
+CONFIG=${1:-${REPO_ROOT}/config/default.yaml}
+
+GPU_COUNT=$(python - <<'PY'
+import os
+try:
+    import torch
+    print(torch.cuda.device_count())
+except Exception:
+    visible = os.environ.get('CUDA_VISIBLE_DEVICES')
+    if visible:
+        print(len([v for v in visible.split(',') if v.strip()]))
+    else:
+        print(0)
+PY
+)
+
+GPU_COUNT=${GPU_COUNT:-0}
+if [ "${GPU_COUNT}" -le 0 ]; then
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d ' ')
+  else
+    GPU_COUNT=1
+  fi
+fi
+
+NPROC=${NPROC:-${GPU_COUNT}}
+if [ "${NPROC}" -lt 1 ]; then
+  NPROC=1
+fi
+
+export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
+export TORCH_DISTRIBUTED_DEBUG=${TORCH_DISTRIBUTED_DEBUG:-DETAIL}
+export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
+
+torchrun \
+  --nproc_per_node "${NPROC}" \
+  --standalone \
+  "${REPO_ROOT}/train.py" \
+  --config "${CONFIG}"
