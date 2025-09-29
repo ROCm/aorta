@@ -17,9 +17,9 @@ This repository provides a production-ready benchmarking harness to debug comput
 - Tunable hyperparameters in `config/default.yaml` let you scale model width, depth, or batch size to probe specific bottlenecks without touching application code.
 
 ## Motivation:
-* Customer Reports sub-optimal overlap of comms and compute in their prod training workload
+* Reports of sub-optimal overlap of comms and compute in their prod training workload
 
-  ![Customer Prod Training Workload](analysis/figures/customer_prod_training_bad_overlap.png)
+  ![User Training Workload](analysis/figures/training_bad_overlap.png)
 
 ## Repository Layout
 
