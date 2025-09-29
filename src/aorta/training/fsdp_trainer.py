@@ -485,6 +485,18 @@ def _maybe_compile(module: FSDP, cfg: CompileConfig) -> FSDP:
         return module
 
 
+def _restore_rocm_profiler_env() -> None:
+    keys = [
+        "ROCPROFILER_LOG_LEVEL",
+        "ROCPROFILER_ENABLE_TRACING",
+        "ROCPROFILER_KERNEL_TIMESTAMPS",
+        "ROCPROFILER_DEVICE_CLOCK_SYNC",
+    ]
+    for key in keys:
+        if key in os.environ:
+            os.environ.pop(key, None)
+
+
 @contextlib.contextmanager
 def _torch_profiler_context(
     cfg: ProfilerConfig, output_dir: Path, rank: int, device: torch.device

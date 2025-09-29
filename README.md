@@ -16,6 +16,11 @@ This repository provides a production-ready benchmarking harness to debug comput
 - FSDP2 parameter sharding amplifies communication volume, increasing the signal-to-noise ratio when measuring compute-comm overlap improvements or regressions.
 - Tunable hyperparameters in `config/default.yaml` let you scale model width, depth, or batch size to probe specific bottlenecks without touching application code.
 
+## Motivation:
+* Customer Reports sub-optimal overlap of comms and compute in their prod training workload
+
+  ![Customer Prod Training Workload](analysis/figures/customer_prod_training_bad_overlap.png)
+
 ## Repository Layout
 
 - `config/default.yaml` – Baseline configuration for model, dataset, FSDP, and training hyperparameters.
@@ -82,6 +87,14 @@ Use dotted `--override` arguments to mutate configuration values without editing
 - Tune `compile.fullgraph`, `compile.dynamic`, or `compile.options` (passed directly to `torch.compile`) to match your workload characteristics.
 - Compilation occurs per rank, so expect extra time on the first iteration; subsequent steps reuse the optimized graph.
 
+## SDMA Prototype Benchmark
+
+- To measure theoretical compute/SDMA overlap on ROCm without modifying the full training loop, run the standalone benchmark:
+  ```bash
+  python scripts/run_sdma_prototype.py --device 0 --matrix-size 4096 --copy-mb 64
+  ```
+- The script launches GEMM-heavy kernels on one stream while issuing `hipMemcpyAsync` transfers on a high-priority stream, reporting the average duration with and without overlap plus the estimated savings.
+- Use `rocprofv3` (or `scripts/rocprof_capture.sh`) against this benchmark to inspect SDMA engine utilization and validate whether transfers run concurrently with compute on your hardware/driver stack.
 ## Profiling Outputs
 
 Each rank writes `artifacts/rank_<rank>_metrics.jsonl` containing iteration-level telemetry:
