@@ -9,6 +9,8 @@ This repository provides a production-ready benchmarking harness to debug comput
 - ROCm-specific diagnostics via `rocm-smi` (optional) and cross-platform launch scripts.
 - Reporting utilities (`analysis/overlap_report.py`) to visualise overlap efficiency and compare AMD vs NVIDIA runs.
 
+Implementation patterns throughout the repository take inspiration from publicly available examples in TorchRec and TorchTitan, which served as reference points while assembling this toolkit.
+
 **Why This Workload Helps**
 - Synthetic ranking features eliminate input variability, making any overlap shifts traceable to scheduling or communication changes instead of dataloader jitter.
 - The transformer encoder stack stresses both dense matmuls and collective-heavy layers, mirroring real recommendation models while remaining configurable.
