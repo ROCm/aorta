@@ -52,6 +52,8 @@ Implementation patterns throughout the repository take inspiration from publicly
 3. On ROCm systems, verify `rocm-smi` and `rocminfo` are in `$PATH`.
 4. Run entrypoints (`train.py`, `analysis/overlap_report.py`) from the repository root so their bundled path bootstrapper can locate the `src/` package.
 
+## Tuning Sweep
+![sweep](./docs/param_sweep.png)
 ## Running the Benchmark
 
 ### CUDA
