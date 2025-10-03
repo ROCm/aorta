@@ -2,43 +2,43 @@ logging:
   level: INFO
 
 training:
-  epochs: 1
-  batch_size: 8
-  gradient_accumulation: 1
-  mixed_precision: bf16
+  epochs: 2
+  batch_size: 24
+  gradient_accumulation: 2
+  mixed_precision: tf32
   grad_clip_norm: 1.0
-  log_interval: 5
-  max_steps: 200
-  output_dir: artifacts
+  log_interval: 10
+  max_steps: 600
+  output_dir: artifacts/tf32_overlap_eval
 
 optimizer:
-  lr: 0.0003
+  lr: 0.00025
   weight_decay: 0.01
   betas: [0.9, 0.98]
 
 scheduler:
-  warmup_steps: 100
-  total_steps: 2000
+  warmup_steps: 150
+  total_steps: 3200
 
 dataset:
-  num_samples: 10000
-  sequence_length: 64
-  dense_dim: 128
-  sparse_features: 32
-  vocab_size: 60000
-  num_dense_features: 16
-  seed: 42
+  num_samples: 150000
+  sequence_length: 96
+  dense_dim: 192
+  sparse_features: 48
+  vocab_size: 160000
+  num_dense_features: 20
+  seed: 2024
 
 model:
-  vocab_size: 60000
-  embedding_dim: 192
-  num_dense_features: 16
-  dense_dim: 128
-  model_dim: 768
-  num_heads: 12
-  num_layers: 8
+  vocab_size: 160000
+  embedding_dim: 224
+  num_dense_features: 20
+  dense_dim: 192
+  model_dim: 896
+  num_heads: 14
+  num_layers: 10
   dropout: 0.1
-  mlp_hidden_dim: 2048
+  mlp_hidden_dim: 3584
 
 fsdp:
   sharding_strategy: full_shard
@@ -58,19 +58,19 @@ compile:
   options: {}
 
 dataloader:
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
 
 profiling:
-  enabled: false
+  enabled: true
   wait: 1
   warmup: 1
-  active: 2
+  active: 3
   repeat: 1
   record_shapes: true
   profile_memory: true
   with_stack: false
   with_flops: false
   tensorboard: true
-  chrome_trace: false
-  trace_filename: trace.json
+  chrome_trace: true
+  trace_filename: trace_tf32_eval.json

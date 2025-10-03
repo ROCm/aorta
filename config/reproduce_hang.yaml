@@ -1,0 +1,82 @@
+# Configuration to reproduce the multi-stream hang issue
+# Based on Optuna sweep results: Trial 9 achieved minimal overlap (1.16%) with multiple streams
+# This configuration enables multiple RCCL streams but achieves minimal overlap, which may trigger the hang
+
+logging:
+  level: INFO
+
+training:
+  epochs: 1
+  batch_size: 64  # Very large batch size for maximum arithmetic intensity
+  gradient_accumulation: 16  # Very high gradient accumulation
+  mixed_precision: fp16  # FP16 creates more comm traffic than TF32
+  grad_clip_norm: 1.0
+  log_interval: 5
+  max_steps: 500  # More steps to increase chance of hang
+  output_dir: artifacts_hang_repro
+  inject_allreduce_copies: true  # ENABLE: Inject all_reduce → host-device copy pattern
+  allreduce_stress_level: 5  # 5 all_reduce cycles per iteration with host-device copies
+
+optimizer:
+  lr: 0.0003
+  weight_decay: 0.01
+  betas: [0.9, 0.98]
+
+scheduler:
+  warmup_steps: 100
+  total_steps: 2000
+
+dataset:
+  num_samples: 10000
+  sequence_length: 256  # 4x longer sequences for more compute
+  dense_dim: 256        # 2x larger dense features
+  sparse_features: 64   # 2x more sparse features
+  vocab_size: 60000
+  num_dense_features: 32  # 2x more dense features
+  seed: 42
+
+model:
+  vocab_size: 60000
+  embedding_dim: 512   # 2x larger embeddings
+  num_dense_features: 32  # Match dataset
+  dense_dim: 256       # Match dataset
+  model_dim: 2048      # 2x larger hidden dimension
+  num_heads: 16
+  num_layers: 24       # Even more layers for more communication
+  dropout: 0.1
+  mlp_hidden_dim: 8192  # 4x larger MLP for more compute per layer
+
+fsdp:
+  sharding_strategy: full_shard
+  backward_prefetch: BACKWARD_PRE  # Aggressive prefetch during backward
+  use_orig_params: true   # Enable to create more optimizer state traffic
+  limit_all_gathers: false  # Unlimited all-gathers to maximize overlap attempts
+  forward_prefetch: true   # ENABLED - aggressive forward prefetch
+  sync_module_states: true
+  param_init_device: cpu
+
+compile:
+  enabled: false
+  backend: inductor
+  mode: max-autotune
+  fullgraph: false
+  dynamic: false
+  options: {}
+
+dataloader:
+  num_workers: 4
+  pin_memory: true
+
+profiling:
+  enabled: false
+  wait: 1
+  warmup: 1
+  active: 2
+  repeat: 1
+  record_shapes: true
+  profile_memory: true
+  with_stack: false
+  with_flops: false
+  tensorboard: true
+  chrome_trace: false
+  trace_filename: trace.json

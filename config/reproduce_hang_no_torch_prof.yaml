@@ -1,15 +1,18 @@
+# Configuration to reproduce hang - PyTorch profiler disabled
+# Custom StreamProfiler still generates rank_*_metrics.jsonl files
+
 logging:
   level: INFO
 
 training:
   epochs: 1
-  batch_size: 8
+  batch_size: 4
   gradient_accumulation: 1
-  mixed_precision: bf16
+  mixed_precision: fp16
   grad_clip_norm: 1.0
   log_interval: 5
-  max_steps: 200
-  output_dir: artifacts
+  max_steps: 100
+  output_dir: artifacts_hang_repro
 
 optimizer:
   lr: 0.0003
@@ -43,9 +46,9 @@ model:
 fsdp:
   sharding_strategy: full_shard
   backward_prefetch: BACKWARD_PRE
-  use_orig_params: true
-  limit_all_gathers: true
-  forward_prefetch: true
+  use_orig_params: false
+  limit_all_gathers: false
+  forward_prefetch: false
   sync_module_states: true
   param_init_device: cpu
 
@@ -62,15 +65,15 @@ dataloader:
   pin_memory: true
 
 profiling:
-  enabled: false
+  enabled: false  # Disabled - PyTorch profiler crashes on ROCm with multi-stream RCCL
   wait: 1
   warmup: 1
   active: 2
   repeat: 1
-  record_shapes: true
-  profile_memory: true
+  record_shapes: false
+  profile_memory: false
   with_stack: false
   with_flops: false
-  tensorboard: true
+  tensorboard: false
   chrome_trace: false
   trace_filename: trace.json

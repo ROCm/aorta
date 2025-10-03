@@ -1,0 +1,78 @@
+logging:
+  level: INFO
+
+training:
+  epochs: 1
+  batch_size: 32
+  gradient_accumulation: 4
+  mixed_precision: bf16
+  grad_clip_norm: 1.0
+  log_interval: 5
+  max_steps: 20  # Short run for profiling
+  output_dir: artifacts/profile_overlap_short
+  inject_allreduce_copies: true  # Enable stress pattern
+  allreduce_stress_level: 5      # Moderate stress level
+
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.01
+  betas: [0.9, 0.985]
+
+scheduler:
+  warmup_steps: 10
+  total_steps: 20
+
+dataset:
+  num_samples: 5000
+  sequence_length: 128
+  dense_dim: 256
+  sparse_features: 64
+  vocab_size: 200000
+  num_dense_features: 24
+  seed: 1234
+
+model:
+  vocab_size: 200000
+  embedding_dim: 256
+  num_dense_features: 24
+  dense_dim: 256
+  model_dim: 1024
+  num_heads: 16
+  num_layers: 12
+  dropout: 0.1
+  mlp_hidden_dim: 4096
+
+fsdp:
+  sharding_strategy: full_shard
+  backward_prefetch: BACKWARD_PRE
+  use_orig_params: true
+  limit_all_gathers: false
+  forward_prefetch: true
+  sync_module_states: true
+  param_init_device: meta
+
+compile:
+  enabled: false
+  backend: inductor
+  mode: max-autotune
+  fullgraph: false
+  dynamic: false
+  options: {}
+
+dataloader:
+  num_workers: 4
+  pin_memory: true
+
+profiling:
+  enabled: false  # Disable torch profiler due to ROCm instability
+  wait: 2
+  warmup: 3
+  active: 6
+  repeat: 1
+  record_shapes: false
+  profile_memory: false
+  with_stack: false
+  with_flops: false
+  tensorboard: false
+  chrome_trace: false
+  trace_filename: trace_overlap_short.json
