@@ -1,0 +1,27 @@
+services:
+  torchenv
+    container_name: training-overlap-bugs
+    image: ${$TORCH_IMAGE:-jeffdaily/pytorch:torchrec-dlrm-complete}
+    privileged: true
+    network_mode: host
+    group_add:
+      - video
+    ipc: host
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    volumes:
+      - /home/manrao:/manrao
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    working_dir: /root
+    shm_size: 17G
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    stdin_open: true
+    tty: true
+    # services:
+
