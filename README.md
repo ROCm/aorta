@@ -42,6 +42,26 @@ Implementation patterns throughout the repository take inspiration from publicly
 - The synthetic dataset is intended for profiling and does not reflect production data distributions.
 - All processes run under a job launcher that sets `LOCAL_RANK` (e.g., `torchrun`, Slurm, or similar). Launch scripts handle this automatically.
 
+
+## Docker Setup
+* Pull Docker image and setup
+  This image contains all the necessary deps to train PyTorch models of varying complexity.
+  It contains the downloaded copy of the criteo dataset (not included in the steps below)
+  More importantly, it contains the bells and whistles to run and capture profiler traces for the training runs
+```bash
+cd docker
+docker compose up -d
+```
+* Connect to the running container via CLI or vscode
+
+* Running torchrec benchmark training pipeline
+
+```bash
+python -m torchrec.distributed.benchmark.benchmark_train_pipeline --yaml_config=$ROOT/config/torchrec_dist/sparse_data_dist_base.yaml    --name="sparse_data_dist_q_contend$(git rev-parse --short HEAD || echo $USER)"
+```
+This captures a profiler trace file locally
+
+
 ## Setup
 
 1. Ensure Python ≥ 3.10 with PyTorch and distributed support is installed on the node(s).
