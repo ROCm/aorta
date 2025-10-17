@@ -22,6 +22,7 @@ from torch.distributed.fsdp import BackwardPrefetch, FullyShardedDataParallel as
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from aorta.data import SyntheticDatasetConfig, create_dataloader
 from aorta.models import ModelConfig, RankingTransformerModel
@@ -54,6 +55,8 @@ class TrainingConfig:
     mixed_precision: str = "bf16"  # options: none, fp16, bf16
     log_interval: int = 10
     output_dir: Path = Path("artifacts")
+    inject_allreduce_copies: bool = False  # Inject all_reduce + host-device copies to trigger hang
+    allreduce_stress_level: int = 1  # Number of all_reduce ops per iteration (1-10)
 
 
 @dataclass
@@ -78,8 +81,16 @@ class CompileConfig:
 
 
 @dataclass
+class DDPConfig:
+    gradient_as_bucket_view: bool = True
+    static_graph: bool = False
+    bucket_cap_mb: int = 25
+    find_unused_parameters: bool = False
+
+
+@dataclass
 class ProfilerConfig:
-    enabled: bool = False
+    enabled: bool = True
     wait: int = 1
     warmup: int = 1
     active: int = 2
@@ -150,6 +161,15 @@ def _build_fsdp_config(raw: Dict[str, Any]) -> FSDPConfig:
     section = raw.get("fsdp", {})
     cfg = FSDPConfig()
     for field in dataclass_fields(FSDPConfig):
+        if field.name in section:
+            setattr(cfg, field.name, section[field.name])
+    return cfg
+
+
+def _build_ddp_config(raw: Dict[str, Any]) -> DDPConfig:
+    section = raw.get("distributed", {})
+    cfg = DDPConfig()
+    for field in dataclass_fields(DDPConfig):
         if field.name in section:
             setattr(cfg, field.name, section[field.name])
     return cfg
@@ -239,6 +259,31 @@ def build_fsdp_model(
     return fsdp_model
 
 
+def build_ddp_model(
+    model_cfg: ModelConfig,
+    ddp_cfg: DDPConfig,
+    compile_cfg: CompileConfig,
+    device: torch.device,
+) -> DDP:
+    model = RankingTransformerModel(model_cfg).to(device)
+    if compile_cfg.enabled:
+        model = _maybe_compile(model, compile_cfg)
+
+    device_ids = None
+    if device.type == "cuda":
+        device_ids = [device.index if device.index is not None else torch.cuda.current_device()]
+
+    ddp_model = DDP(
+        model,
+        device_ids=device_ids,
+        gradient_as_bucket_view=ddp_cfg.gradient_as_bucket_view,
+        static_graph=ddp_cfg.static_graph,
+        bucket_cap_mb=ddp_cfg.bucket_cap_mb,
+        find_unused_parameters=ddp_cfg.find_unused_parameters,
+    )
+    return ddp_model
+
+
 class MetricsLogger:
     def __init__(self, output_dir: Path, rank: int) -> None:
         self.path = output_dir / f"rank_{rank:02d}_metrics.jsonl"
@@ -301,7 +346,7 @@ def setup_signal_handlers(stop_flag: Dict[str, bool]) -> None:
 
 
 def training_loop(
-    model: FSDP,
+    model: nn.Module,
     optimizer: torch.optim.Optimizer,
     dataloader,
     training_cfg: TrainingConfig,
@@ -384,6 +429,64 @@ def training_loop(
                         if scheduler is not None:
                             scheduler.step()
 
+                    # Inject all_reduce operations to trigger hang pattern
+                    # Pattern: all_reduce → device-to-device copy → host-device copy → compute blocked
+                    if training_cfg.inject_allreduce_copies:
+                        import torch.distributed as dist
+                        if dist.is_initialized():
+                            with profiler.range("aux", f"epoch{epoch}_step{step}_allreduce_sync"):
+                                # Perform multiple all_reduce + memory copy cycles
+                                # This stresses the pattern: all_reduce → device copies → hipMemcpyWithStream → rocprim deadlock
+                                stress_level = min(max(training_cfg.allreduce_stress_level, 1), 10)
+
+                                for i in range(stress_level):
+                                    # Create moderately-sized tensors to stress RCCL and memory copy
+                                    # Size: ~4MB per tensor
+                                    tensor_size = 1024 * 1024  # 1M elements = 4MB in FP32
+                                    stress_tensor = torch.randn(tensor_size, device=device, dtype=torch.float32)
+
+                                    # All-reduce operation (collective that triggers RCCL multi-stream)
+                                    dist.all_reduce(stress_tensor, op=dist.ReduceOp.AVG)
+
+                                    # Device-to-device copy (triggers hipMemcpyAsync device-to-device)
+                                    # This happens when moving data between GPU memory regions or during P2P transfers
+                                    device_copy_1 = stress_tensor.clone()  # Explicit device copy
+                                    device_copy_2 = device_copy_1.contiguous()  # May trigger another copy if not contiguous
+
+                                    # Force device-to-device copy via different tensor
+                                    temp_storage = torch.empty_like(device_copy_2)
+                                    temp_storage.copy_(device_copy_2, non_blocking=False)  # Blocking device-to-device copy
+
+                                    # All-reduce on device-copied tensor
+                                    dist.all_reduce(temp_storage, op=dist.ReduceOp.SUM)
+
+                                    # Force blocking host-device copy (triggers hipMemcpyWithStream)
+                                    # This is the pattern that causes the hang according to customer
+                                    tensor_cpu = temp_storage.cpu()  # Device → Host copy
+                                    tensor_back = tensor_cpu.to(device, non_blocking=False)  # Host → Device blocking copy
+
+                                    # Additional all_reduce on the copied-back tensor
+                                    dist.all_reduce(tensor_back, op=dist.ReduceOp.AVG)
+
+                                    # More device-to-device copies after all-reduce
+                                    final_copy = tensor_back.clone()
+                                    _ = final_copy.contiguous()
+
+                                    # Clean up
+                                    del stress_tensor, device_copy_1, device_copy_2, temp_storage
+                                    del tensor_cpu, tensor_back, final_copy
+
+                                # Also all-reduce actual metrics (common pattern) with device copies
+                                loss_tensor = loss.detach().clone()
+                                dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
+
+                                # Device-to-device copy
+                                loss_device_copy = loss_tensor.clone()
+
+                                # Host-device copy
+                                loss_cpu = loss_device_copy.cpu()
+                                _ = loss_cpu.to(device, non_blocking=False)
+
                     profiler.record_marker("compute", f"epoch{epoch}_step{step}_end")
 
                     iteration_profile = profiler.end_iteration()
@@ -430,7 +533,7 @@ def training_loop(
     metrics_logger.close()
 
 
-def configure_optimizer(model: FSDP, cfg: OptimizerConfig) -> torch.optim.Optimizer:
+def configure_optimizer(model: nn.Module, cfg: OptimizerConfig) -> torch.optim.Optimizer:
     optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay, betas=cfg.betas)
     return optimizer
 
@@ -549,11 +652,11 @@ def _torch_profiler_context(
             )
             produce_tb = False
 
-        if produce_chrome and detect_accelerator() == "amd":
-            log.warning(
-                "Chrome trace export is unstable on ROCm; disabling chrome traces for this run"
-            )
-            produce_chrome = False
+        # if produce_chrome and detect_accelerator() == "amd":
+        #     log.warning(
+        #         "Chrome trace export is unstable on ROCm; disabling chrome traces for this run"
+        #     )
+        #     produce_chrome = False
 
         stats_available = False
         try:
@@ -612,6 +715,7 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
     model_cfg = _build_model_config(config)
     dataset_cfg = _build_dataset_config(config)
     fsdp_cfg = _build_fsdp_config(config)
+    ddp_cfg = _build_ddp_config(config)
     compile_cfg = _build_compile_config(config)
     profiler_cfg = _build_profiler_config(config)
 
@@ -628,7 +732,15 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
         pin_memory=config.get("dataloader", {}).get("pin_memory", True),
     )
 
-    model = build_fsdp_model(model_cfg, fsdp_cfg, compile_cfg, env["device"])
+    dist_mode = config.get("distributed", {}).get("mode")
+    if dist_mode is None:
+        dist_mode = "fsdp"
+    dist_mode = dist_mode.lower()
+
+    if dist_mode == "ddp":
+        model = build_ddp_model(model_cfg, ddp_cfg, compile_cfg, env["device"])
+    else:
+        model = build_fsdp_model(model_cfg, fsdp_cfg, compile_cfg, env["device"])
     optimizer = configure_optimizer(model, optimizer_cfg)
     scheduler = configure_scheduler(
         optimizer,
