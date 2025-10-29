@@ -1,7 +1,7 @@
 services:
-  torchenv
+  torchenv:
     container_name: training-overlap-bugs
-    image: ${$TORCH_IMAGE:-jeffdaily/pytorch:torchrec-dlrm-complete}
+    image: ${TORCH_IMAGE:-jeffdaily/pytorch:torchrec-dlrm-complete}
     privileged: true
     network_mode: host
     group_add:
@@ -23,5 +23,4 @@ services:
       stack: 67108864
     stdin_open: true
     tty: true
-    # services:
 
