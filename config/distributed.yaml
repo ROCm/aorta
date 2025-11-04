@@ -7,8 +7,8 @@ logging:
  
 training:
   epochs: 1
-  # batch_size: 64  # Very large batch size for maximum arithmetic intensity
-  batch_size: 8
+  batch_size: 64  # Very large batch size for maximum arithmetic intensity
+  # batch_size: 8
   gradient_accumulation: 16  # Very high gradient accumulation
   mixed_precision: fp16  # FP16 creates more comm traffic than TF32
   grad_clip_norm: 1.0
@@ -42,13 +42,13 @@ model:
   embedding_dim: 512   # 2x larger embeddings
   num_dense_features: 32  # Match dataset
   dense_dim: 256       # Match dataset
-  # model_dim: 2048      # 2x larger hidden dimension
-  model_dim: 512
+  model_dim: 2048      # 2x larger hidden dimension
+  # model_dim: 512
   num_heads: 16
   num_layers: 24       # Even more layers for more communication
   dropout: 0.1
-  # mlp_hidden_dim: 8192  # 4x larger MLP for more compute per layer
-  mlp_hidden_dim: 1024
+  mlp_hidden_dim: 8192  # 4x larger MLP for more compute per layer
+  # mlp_hidden_dim: 1024
  
 fsdp:
   sharding_strategy: full_shard
