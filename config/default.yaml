@@ -57,12 +57,6 @@ compile:
   dynamic: false
   options: {}
 
-distributed:
-  mode: fsdp
-  enable_overlap: true
-  overlap_reduce_scatter: true
-  overlap_clone_for_reduce_scatter: true
-
 dataloader:
   num_workers: 4
   pin_memory: true

@@ -27,7 +27,6 @@ Implementation patterns throughout the repository take inspiration from publicly
 
 - `config/default.yaml` – Baseline configuration for model, dataset, FSDP, and training hyperparameters.
 - `src/aorta/` – Python package containing models, data generation, utilities, profilers, and training loop.
-- `src/aorta/training/ddp_overlap.py` – DDP communication hook binding all-reduce and reduce-scatter to dedicated streams so compiled GEMMs can overlap with collectives.
 - `train.py` – CLI entry point used by launch scripts; wraps `aorta.training.fsdp_trainer`.
 - `scripts/launch_cuda.sh` / `scripts/launch_rocm.sh` – Convenience launchers for CUDA and ROCm nodes respectively.
 - `analysis/overlap_report.py` – Post-processing utility to generate summary statistics and plots from profiling logs.
@@ -135,8 +134,6 @@ All knobs below can be adjusted via `config/default.yaml` or dotted `--override`
 | | `training.mixed_precision` (`bf16`/`fp16`/`none`) | Alters kernel type/footprint. Changing precision shifts VGPR/LDS usage, influencing scheduler fairness. |
 | | `training.max_steps`, `training.log_interval` | Control run length and logging frequency for targeted profiling (e.g., warm-up vs. steady state). |
 | **Distributed env** | `RCCL_*` environment variables (`RCCL_NUM_CHANNELS`, `RCCL_ENABLE_SDMA`, `RCCL_BUFFER_SIZE`, etc.) | Steer RCCL algorithm, channel count, and SDMA usage. Set via launch scripts so experiments are reproducible. |
-| | `distributed.enable_overlap` | Enables the DDP overlap manager which issues gradient all-reduce/reduce-scatter on dedicated streams so GEMMs from compiled graphs can overlap with communication. |
-| | `distributed.overlap_reduce_scatter` / `distributed.overlap_clone_for_reduce_scatter` | Toggle telemetry reduce-scatter launches and the use of gradient clones to avoid aliasing when layering comm stress on top of DDP. |
 | | `training.output_dir` | Point to unique directories to keep profiler JSONL and artefacts isolated for each run. |
 | **Profiler** | `profiling.enabled`, `wait/warmup/active/repeat` | Adjust capture cadence. Smaller windows capture more frequently; larger windows reduce overhead and focus on steady state. |
 | | `profiling.tensorboard`, `profiling.chrome_trace` | Select output format. Chrome traces are disabled automatically on ROCm; enable only on CUDA systems. |

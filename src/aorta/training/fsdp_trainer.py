@@ -27,7 +27,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from aorta.data import SyntheticDatasetConfig, create_dataloader
 from aorta.models import ModelConfig, RankingTransformerModel
 from aorta.profiling.stream_profiler import StreamProfiler
-from aorta.training.ddp_overlap import DDPOverlapManager, DDPOverlapOptions
 from aorta.utils import detect_accelerator, get_device, get_distributed_backend, load_config, merge_cli_overrides, setup_logging
 
 log = logging.getLogger(__name__)
@@ -58,12 +57,6 @@ class TrainingConfig:
     output_dir: Path = Path("artifacts")
     inject_allreduce_copies: bool = False  # Inject all_reduce + host-device copies to trigger hang
     allreduce_stress_level: int = 1  # Number of all_reduce ops per iteration (1-10)
-    additional_compute_streams: int = 0  # Number of extra compute streams
-    lightweight_ops_per_stream: int = 3   # Number of ops per stream per iteration
-    lightweight_op_size: int = 1024       # Tensor size for lightweight ops
-    use_useful_lightweight_ops: bool = False  # Use useful ops vs dummy compute
-    lightweight_op_duration_ms: float = 50.0  # Target duration in ms
-    lightweight_op_waves: int = 3  # Number of waves to launch (1=once, 3=pre/mid/post)
 
 
 @dataclass
@@ -93,9 +86,6 @@ class DDPConfig:
     static_graph: bool = False
     bucket_cap_mb: int = 25
     find_unused_parameters: bool = False
-    enable_overlap: bool = True
-    overlap_reduce_scatter: bool = True
-    overlap_clone_for_reduce_scatter: bool = True
 
 
 @dataclass
@@ -355,119 +345,6 @@ def setup_signal_handlers(stop_flag: Dict[str, bool]) -> None:
         signal.signal(sig, _handle)
 
 
-def run_lightweight_compute_dummy(
-    profiler: StreamProfiler,
-    stream_name: str,
-    tag: str,
-    device: torch.device,
-    op_size: int = 512,
-    num_ops: int = 50
-) -> torch.Tensor:
-    """Run dummy compute operations on a separate stream for overlap testing.
-    
-    Uses matrix multiplications that don't produce useful results but create
-    sustained GPU activity for testing compute-communication overlap.
-    """
-    with profiler.range(stream_name, tag):
-        # Use matrix operations for visible, sustained compute
-        x = torch.randn(op_size, op_size, device=device, dtype=torch.float32)
-        y = torch.randn(op_size, op_size, device=device, dtype=torch.float32)
-        
-        result = x
-        for i in range(num_ops):
-            result = torch.matmul(result, y)  # Heavy compute
-            if i % 10 == 0:  # Occasional normalization to prevent overflow
-                result = result / (result.abs().max() + 1e-8)
-        
-        # Return without syncing - caller manages lifecycle
-        return result
-
-
-def run_lightweight_compute_useful(
-    profiler: StreamProfiler,
-    stream_name: str,
-    tag: str,
-    device: torch.device,
-    batch: Dict[str, torch.Tensor],
-    op_size: int = 512,
-    num_ops: int = 50,
-) -> torch.Tensor:
-    """Run useful non-gradient operations on a separate stream.
-    
-    Computes batch statistics and auxiliary operations that are actually
-    useful for monitoring, unlike pure dummy compute.
-    """
-    with profiler.range(stream_name, tag):
-        # Compute batch statistics (useful for monitoring data distribution)
-        if 'dense_features' in batch:
-            features = batch['dense_features']
-            # Compute feature statistics
-            mean = features.mean(dim=0, keepdim=True)
-            std = features.std(dim=0, keepdim=True)
-            
-            # Normalize features (common preprocessing step)
-            normalized = (features - mean) / (std + 1e-8)
-            
-            # Compute correlation matrix (useful for feature analysis)
-            centered = normalized - normalized.mean(dim=0, keepdim=True)
-            cov = torch.matmul(centered.T, centered) / max(features.shape[0] - 1, 1)
-            result = cov
-        else:
-            # Fallback: synthetic compute that mimics real workload
-            x = torch.randn(op_size, op_size, device=device, dtype=torch.float32)
-            y = torch.randn(op_size, op_size, device=device, dtype=torch.float32)
-            
-            result = x
-            for i in range(num_ops):
-                result = torch.matmul(result, y)
-                if i % 10 == 0:
-                    result = result / (result.abs().max() + 1e-8)
-        
-        return result
-
-
-def launch_lightweight_compute_wave(
-    profiler: StreamProfiler,
-    training_cfg: TrainingConfig,
-    device: torch.device,
-    batch: Dict[str, torch.Tensor],
-    epoch: int,
-    step: int,
-    wave_name: str,
-) -> list[torch.Tensor]:
-    """Launch a wave of lightweight compute operations on all additional streams.
-    
-    Returns list of result tensors to keep them alive.
-    """
-    results = []
-    if training_cfg.additional_compute_streams > 0:
-        for i in range(training_cfg.additional_compute_streams):
-            stream_name = f"compute_{i+1}"
-            tag_suffix = f"{wave_name}_{i+1}"
-            
-            if training_cfg.use_useful_lightweight_ops:
-                result = run_lightweight_compute_useful(
-                    profiler,
-                    stream_name,
-                    f"epoch{epoch}_step{step}_useful_{tag_suffix}",
-                    device,
-                    batch,
-                    op_size=training_cfg.lightweight_op_size,
-                    num_ops=training_cfg.lightweight_ops_per_stream
-                )
-            else:
-                result = run_lightweight_compute_dummy(
-                    profiler,
-                    stream_name,
-                    f"epoch{epoch}_step{step}_dummy_{tag_suffix}",
-                    device,
-                    op_size=training_cfg.lightweight_op_size,
-                    num_ops=training_cfg.lightweight_ops_per_stream
-                )
-            results.append(result)
-    return results
-
-
 def training_loop(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -475,7 +352,6 @@ def training_loop(
     training_cfg: TrainingConfig,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     environment: Dict[str, Any],
-    ddp_cfg: DDPConfig,
     profiler: StreamProfiler,
     enable_rocm_metrics: bool,
     profiler_cfg: ProfilerConfig,
@@ -484,12 +360,12 @@ def training_loop(
     world_size = environment["world_size"]
     device = environment["device"]
 
-    scaler: Optional[torch.amp.GradScaler]
+    scaler: Optional[torch.cuda.amp.GradScaler]
     autocast_dtype: Optional[torch.dtype]
     mp_mode = training_cfg.mixed_precision.lower()
     if mp_mode == "fp16":
         autocast_dtype = torch.float16
-        scaler = torch.amp.GradScaler(device="cuda")
+        scaler = torch.cuda.amp.GradScaler()
     elif mp_mode == "bf16":
         autocast_dtype = torch.bfloat16
         scaler = None
@@ -505,23 +381,6 @@ def training_loop(
     setup_signal_handlers(stop_flag)
 
     model.train()
-
-    ddp_overlap_manager: Optional[DDPOverlapManager] = None
-    if isinstance(model, DDP):
-        overlap_options = DDPOverlapOptions(
-            enable=ddp_cfg.enable_overlap,
-            enable_reduce_scatter=ddp_cfg.overlap_reduce_scatter,
-            clone_for_reduce_scatter=ddp_cfg.overlap_clone_for_reduce_scatter,
-        )
-        try:
-            ddp_overlap_manager = DDPOverlapManager(
-                model,
-                profiler,
-                world_size,
-                overlap_options,
-            )
-        except Exception as exc:  # pragma: no cover - best effort resilience
-            log.warning("Failed to configure DDP overlap manager: %s", exc, exc_info=True)
 
     profiler_dir = training_cfg.output_dir / "torch_profiler"
     with profiler.intercept_distributed_ops():
@@ -540,19 +399,6 @@ def training_loop(
 
                     optimizer.zero_grad(set_to_none=True)
 
-                    # Launch lightweight compute on additional streams (non-blocking)
-                    # Strategy: Launch multiple waves to ensure overlap throughout forward/backward
-                    lightweight_results = []
-                    num_waves = max(1, min(training_cfg.lightweight_op_waves, 3))
-                    
-                    # Wave 1: Launch before forward pass (always if waves >= 1)
-                    if num_waves >= 1:
-                        results = launch_lightweight_compute_wave(
-                            profiler, training_cfg, device, batch, epoch, step, "pre"
-                        )
-                        lightweight_results.extend(results)
-
-                    # Main compute (unchanged)
                     with profiler.range("compute", f"epoch{epoch}_step{step}_forward"):
                         if autocast_dtype:
                             with torch.autocast(device_type="cuda", dtype=autocast_dtype):
@@ -562,25 +408,11 @@ def training_loop(
                             scores = model(batch)
                             loss = compute_loss(scores, batch)
 
-                    # Wave 2: Launch between forward and backward (if waves >= 2)
-                    if num_waves >= 2:
-                        results = launch_lightweight_compute_wave(
-                            profiler, training_cfg, device, batch, epoch, step, "mid"
-                        )
-                        lightweight_results.extend(results)
-
                     with profiler.range("compute", f"epoch{epoch}_step{step}_backward"):
                         if scaler is not None:
                             scaler.scale(loss).backward()
                         else:
                             loss.backward()
-                    
-                    # Wave 3: Launch after backward (if waves >= 3, overlaps with DDP gradient reduction)
-                    if num_waves >= 3:
-                        results = launch_lightweight_compute_wave(
-                            profiler, training_cfg, device, batch, epoch, step, "post"
-                        )
-                        lightweight_results.extend(results)
 
                     grad_norm = None
                     if training_cfg.grad_clip_norm is not None and training_cfg.grad_clip_norm > 0:
@@ -655,15 +487,9 @@ def training_loop(
                                 loss_cpu = loss_device_copy.cpu()
                                 _ = loss_cpu.to(device, non_blocking=False)
 
-                    if lightweight_results:
-                        for r in lightweight_results:
-                            _ = r.sum()
-                        lightweight_results.clear()
                     profiler.record_marker("compute", f"epoch{epoch}_step{step}_end")
 
                     iteration_profile = profiler.end_iteration()
-                    if ddp_overlap_manager is not None:
-                        ddp_overlap_manager.on_iteration_end()
 
                     iteration_payload = {
                         "rank": rank,
@@ -922,7 +748,7 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
         training_cfg.max_steps or training_cfg.epochs * len(dataloader),
     )
 
-    profiler = StreamProfiler(env["device"], num_extra_compute=training_cfg.additional_compute_streams)
+    profiler = StreamProfiler(env["device"])
 
     try:
         training_loop(
@@ -932,7 +758,6 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
             training_cfg,
             scheduler,
             env,
-            ddp_cfg,
             profiler,
             enable_rocm_metrics,
             profiler_cfg,

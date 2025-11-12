@@ -37,27 +37,19 @@ class MarkerRecord:
 class StreamProfiler:
     """Track activity across multiple CUDA/HIP streams with precise timing."""
 
-    def __init__(self, device: torch.device, stream_names: Optional[Iterable[StreamName]] = None, num_extra_compute: int = 0) -> None:
+    def __init__(self, device: torch.device, stream_names: Optional[Iterable[StreamName]] = None) -> None:
         if not torch.cuda.is_available():  # pragma: no cover - runtime guard
             raise RuntimeError("StreamProfiler requires CUDA/HIP availability")
 
         self.device = device
-        
-        # Default streams
-        default_names = ["compute", "allreduce", "reducescatter", "aux"]
-        
-        # Add extra compute streams
-        for i in range(num_extra_compute):
-            default_names.append(f"compute_{i+1}")
-        
-        names = list(stream_names or default_names)
+        names = list(stream_names or ("compute", "allreduce", "reducescatter", "aux"))
         if len(set(names)) != len(names):
             raise ValueError("Stream names must be unique")
 
         self.streams: Dict[StreamName, torch.cuda.Stream] = {
             name: torch.cuda.Stream(device=self.device) for name in names
         }
-        
+
         self.iteration_records: List[Dict[str, Any]] = []
         self._current_iteration: Optional[Dict[str, Any]] = None
 
@@ -252,21 +244,6 @@ class StreamProfiler:
 
         idle_total = max(total_ms - active_union, 0.0)
         overlap_durations.setdefault("idle", idle_total)
-
-        # Track overlap between main compute and additional compute streams
-        if "compute" in active_streams:
-            # Existing overlap tracking
-            if "allreduce" in active_streams:
-                overlap_durations["compute_allreduce"] += delta
-            if "reducescatter" in active_streams:
-                overlap_durations["compute_reducescatter"] += delta
-            if any(name in active_streams for name in ("allreduce", "reducescatter")):
-                overlap_durations["compute_comm"] += delta
-            
-            # NEW: Track overlap with additional compute streams
-            additional_compute = [s for s in active_streams if s.startswith("compute_")]
-            if additional_compute:
-                overlap_durations["compute_multistream"] += delta
 
         return {
             "per_stream_ms": dict(stream_durations),
