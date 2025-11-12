@@ -736,9 +736,9 @@ def _maybe_compile(module: FSDP, cfg: CompileConfig) -> FSDP:
     kwargs: Dict[str, Any] = {}
     backend = cfg.backend or "inductor"
     accelerator = detect_accelerator()
-    if accelerator == "amd" and backend in {"inductor", "inductor_dynamic"}:
-        log.warning("torch.compile backend '%s' is experimental on ROCm; disabling compilation", backend)
-        return module
+#    if accelerator == "amd" and backend in {"inductor", "inductor_dynamic"}:
+#        log.warning("torch.compile backend '%s' is experimental on ROCm; disabling compilation", backend)
+#        return module
     kwargs["backend"] = backend
     if cfg.mode:
         kwargs["mode"] = cfg.mode
