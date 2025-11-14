@@ -98,3 +98,7 @@ profiling:
   tensorboard: true
   chrome_trace: true
   trace_filename: trace.json
+
+torch_titan:
+  checkpointing:
+    async: true  # Enable TorchTitan asynchronous checkpoint writer to minimize training stalls
