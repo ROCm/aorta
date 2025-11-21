@@ -1,7 +1,8 @@
 services:
   torchenv:
     container_name: training-overlap-bugs
-    image: ${TORCH_IMAGE:-jeffdaily/pytorch:torchrec-dlrm-complete}
+    image: ${TORCH_IMAGE:-rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly}
+    user: root
     privileged: true
     network_mode: host
     group_add:
@@ -11,12 +12,18 @@ services:
       - SYS_PTRACE
     security_opt:
       - seccomp=unconfined
+    environment:
+      - RCCL_FOLDER=/rccl
+      - LD_LIBRARY_PATH=/rccl/build/release:$LD_LIBRARY_PATH
+      - TORCH_NCCL_HIGH_PRIORITY=1
+      
     volumes:
       - /home/manrao:/manrao
+      - /home/oyazdanb/aorta:/workspace/aorta
     devices:
       - /dev/kfd
       - /dev/dri
-    working_dir: /root
+    working_dir: /workspace/aorta
     shm_size: 17G
     ulimits:
       memlock: -1

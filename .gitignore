@@ -43,6 +43,14 @@ runs/
 logs/
 tensorboard/
 
+# Experiment outputs and traces
+experiments/
+*.json
+*.xlsx
+*_merged_enhanced.json
+nccl_thread_sweep_*.log
+nccl_thread_sweep_summary_*.txt
+
 # IDE/project-specific folders
 .vscode/
 .idea/

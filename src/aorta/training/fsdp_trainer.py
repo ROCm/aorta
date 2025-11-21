@@ -589,6 +589,7 @@ def _maybe_compile(module: FSDP, cfg: CompileConfig) -> FSDP:
 
 
 def _restore_rocm_profiler_env() -> None:
+    """DEPRECATED: This function was clearing ROCm profiler vars (preventing kernel capture)."""
     keys = [
         "ROCPROFILER_LOG_LEVEL",
         "ROCPROFILER_ENABLE_TRACING",
@@ -598,6 +599,14 @@ def _restore_rocm_profiler_env() -> None:
     for key in keys:
         if key in os.environ:
             os.environ.pop(key, None)
+
+
+def _enable_rocm_profiler_env() -> None:
+    """Enable ROCm profiler environment variables for kernel-level tracing."""
+    os.environ.setdefault("ROCPROFILER_ENABLE_TRACING", "1")
+    os.environ.setdefault("ROCPROFILER_KERNEL_TIMESTAMPS", "1")
+    os.environ.setdefault("ROCPROFILER_DEVICE_CLOCK_SYNC", "1")
+    os.environ.setdefault("HSA_ENABLE_SDMA", "0")  # Disable SDMA to avoid hiding copies
 
 
 @contextlib.contextmanager
@@ -612,8 +621,9 @@ def _torch_profiler_context(
     rank_dir = output_dir / f"rank{rank}"
     rank_dir.mkdir(parents=True, exist_ok=True)
 
+    # Enable ROCm profiler for kernel-level tracing
     if detect_accelerator() == "amd":
-        _restore_rocm_profiler_env()
+        _enable_rocm_profiler_env()
 
     activities = [ProfilerActivity.CPU]
     if device.type == "cuda":
