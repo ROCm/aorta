@@ -53,3 +53,7 @@ tensorboard/
 .DS_Store
 Thumbs.db
 
+tmp_prof.*
+rocprof_traces
+overlap.*
+.*repro.*
