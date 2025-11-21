@@ -16,7 +16,7 @@ services:
       - RCCL_FOLDER=/rccl
       - LD_LIBRARY_PATH=/rccl/build/release:$LD_LIBRARY_PATH
       - TORCH_NCCL_HIGH_PRIORITY=1
-      
+
     volumes:
       - /home/manrao:/manrao
       - /home/oyazdanb/aorta:/workspace/aorta
@@ -30,4 +30,3 @@ services:
       stack: 67108864
     stdin_open: true
     tty: true
-

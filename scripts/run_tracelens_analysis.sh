@@ -82,17 +82,17 @@ for thread in "${THREAD_CONFIGS[@]}"; do
         sudo chown -R $(whoami):$(id -gn) "$OUTPUT_DIR/$thread"
         sudo chmod -R 775 "$OUTPUT_DIR/$thread"
     fi
-    
+
     for ch in ${CHANNELS[$thread]}; do
         TRACE_DIR="$SWEEP_DIR/$thread/nccl_${ch}channels/torch_profiler"
-        
+
         if [ ! -d "$TRACE_DIR" ]; then
             echo "⚠️  Skip $thread/${ch}ch - no traces"
             continue
         fi
-        
+
         echo "Processing $thread/${ch}ch..."
-        
+
         # Process ALL ranks (model parallelism = different compute per rank)
         for rank in 0 1 2 3 4 5 6 7; do
             # Try multiple trace file patterns
@@ -103,25 +103,25 @@ for thread in "${THREAD_CONFIGS[@]}"; do
                 -path "*/*_rank${rank}_*.json" -o \
                 -path "*/customer_trace*.json" \
                 \) | grep -E "rank${rank}|rank_${rank}" | head -1)
-            
+
             # If still not found, try looking in rank subdirectory with any json
             if [ -z "$TRACE" ]; then
                 TRACE=$(find "$TRACE_DIR/rank${rank}" -name "*.json" 2>/dev/null | head -1)
             fi
-            
+
             # Last resort: try rank_0X format
             if [ -z "$TRACE" ]; then
                 RANK_PADDED=$(printf "%02d" $rank)
                 TRACE=$(find "$TRACE_DIR" -path "*/rank_${RANK_PADDED}/*trace*.json" 2>/dev/null | head -1)
             fi
-            
+
             if [ -z "$TRACE" ]; then
                 echo "  ⚠️  Skip rank ${rank} - no trace file"
                 continue
             fi
-            
+
             OUTPUT="$OUTPUT_DIR/$thread/individual_reports/perf_${ch}ch_rank${rank}.xlsx"
-            
+
             echo "  Rank ${rank}..."
             TraceLens_generate_perf_report_pytorch \
                 --profile_json_path "$TRACE" \
@@ -131,7 +131,7 @@ for thread in "${THREAD_CONFIGS[@]}"; do
                 --short_kernel_threshold_us 50 \
                 --topk_ops 100 \
                 --topk_roofline_ops 100
-            
+
             echo "    ✓ $OUTPUT"
         done
         echo ""
@@ -151,31 +151,31 @@ for thread in "${THREAD_CONFIGS[@]}"; do
         sudo chown -R $(whoami):$(id -gn) "$OUTPUT_DIR/$thread"
         sudo chmod -R 775 "$OUTPUT_DIR/$thread"
     fi
-    
+
     for ch in ${CHANNELS[$thread]}; do
         TRACE_DIR="$SWEEP_DIR/$thread/nccl_${ch}channels/torch_profiler"
-        
+
         if [ ! -d "$TRACE_DIR" ]; then
             echo "⚠️  Skip $thread/${ch}ch"
             continue
         fi
-        
+
         OUTPUT="$OUTPUT_DIR/$thread/collective_reports/collective_${ch}ch.xlsx"
-        
+
         echo "Processing $thread/${ch}ch (all 8 ranks)..."
-        
+
         # Use trace_pattern instead of trace_dir for better subdirectory support
         # Find the trace filename from rank0
         SAMPLE_TRACE=$(find "$TRACE_DIR/rank0" -name "*.json" | head -1)
         TRACE_FILENAME=$(basename "$SAMPLE_TRACE")
-        
+
         TraceLens_generate_multi_rank_collective_report_pytorch \
             --trace_pattern "$TRACE_DIR/rank*/$TRACE_FILENAME" \
             --world_size 8 \
             --output_xlsx_path "$OUTPUT" \
             --detailed_analysis \
             --use_multiprocessing
-        
+
         echo "  ✓ $OUTPUT"
     done
     echo ""
@@ -204,11 +204,11 @@ echo ""
 # For each channel and each rank, compare across thread configurations
 for ch in "${ALL_CHANNELS[@]}"; do
     echo "Channel ${ch}:"
-    
+
     for rank in 0 1 2 3 4 5 6 7; do
         reports=()
         names=()
-        
+
         # Collect reports for this channel+rank from all thread configs
         for thread in "${THREAD_CONFIGS[@]}"; do
             REPORT="$OUTPUT_DIR/$thread/individual_reports/perf_${ch}ch_rank${rank}.xlsx"
@@ -217,22 +217,22 @@ for ch in "${ALL_CHANNELS[@]}"; do
                 names+=("$thread")
             fi
         done
-        
+
         # Need at least 2 reports to compare
         if [ ${#reports[@]} -lt 2 ]; then
             echo "  ⚠️  Skip rank ${rank} - only in ${#reports[@]} thread config(s)"
             continue
         fi
-        
+
         OUTPUT="$OUTPUT_DIR/comparisons/compare_${ch}ch_rank${rank}_across_threads.xlsx"
-        
+
         echo "  Rank ${rank}: comparing ${names[@]}..."
     TraceLens_compare_perf_reports_pytorch \
             "${reports[@]}" \
             --names "${names[@]}" \
         --sheets gpu_timeline ops_summary \
             -o "$OUTPUT"
-        
+
         echo "    ✓ $OUTPUT"
     done
     echo ""

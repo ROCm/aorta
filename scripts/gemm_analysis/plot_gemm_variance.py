@@ -22,7 +22,7 @@ def read_csv_data(csv_path):
         'ranks': defaultdict(list),
         'all': []
     }
-    
+
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -31,7 +31,7 @@ def read_csv_data(csv_path):
                 channel = int(row['channel'])
                 rank = int(row['rank'])
                 time_diff = float(row['time_diff'])
-                
+
                 data['threads'][threads].append(time_diff)
                 data['channels'][channel].append(time_diff)
                 data['ranks'][rank].append(time_diff)
@@ -45,32 +45,32 @@ def read_csv_data(csv_path):
             except (ValueError, KeyError) as e:
                 print(f"Skipping row due to error: {e}")
                 continue
-    
+
     return data
 
 def create_boxplot_by_threads(data, output_dir):
     """Create box plot showing time_diff distribution by thread count."""
     fig, ax = plt.subplots(figsize=(10, 6))
-    
+
     # Prepare data for boxplot
     threads_list = sorted(data['threads'].keys())
     plot_data = [data['threads'][t] for t in threads_list]
     labels = [f'{t} threads' for t in threads_list]
-    
+
     bp = ax.boxplot(plot_data, tick_labels=labels, patch_artist=True,
                     showmeans=True, meanline=True)
-    
+
     # Color the boxes
     colors = ['lightblue', 'lightcoral']
     for patch, color in zip(bp['boxes'], colors):
         patch.set_facecolor(color)
-    
+
     ax.set_ylabel('Time Difference (ms)', fontsize=14, fontweight='bold')
     ax.set_xlabel('Thread Configuration', fontsize=14, fontweight='bold')
-    ax.set_title('GEMM Kernel Time Variance by Thread Count', 
+    ax.set_title('GEMM Kernel Time Variance by Thread Count',
                  fontsize=16, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
     plt.savefig(output_dir / 'variance_by_threads_boxplot.png', dpi=300, bbox_inches='tight')
     print(f"Saved: {output_dir / 'variance_by_threads_boxplot.png'}")
@@ -79,26 +79,26 @@ def create_boxplot_by_threads(data, output_dir):
 def create_boxplot_by_channels(data, output_dir):
     """Create box plot showing time_diff distribution by channel count."""
     fig, ax = plt.subplots(figsize=(12, 6))
-    
+
     # Prepare data for boxplot
     channels_list = sorted(data['channels'].keys())
     plot_data = [data['channels'][c] for c in channels_list]
     labels = [f'{c}ch' for c in channels_list]
-    
+
     bp = ax.boxplot(plot_data, tick_labels=labels, patch_artist=True,
                     showmeans=True, meanline=True)
-    
+
     # Color the boxes with gradient
     colors = ['#e6f2ff', '#99ccff', '#4da6ff', '#0073e6']
     for patch, color in zip(bp['boxes'], colors):
         patch.set_facecolor(color)
-    
+
     ax.set_ylabel('Time Difference (ms)', fontsize=14, fontweight='bold')
     ax.set_xlabel('Channel Configuration', fontsize=14, fontweight='bold')
-    ax.set_title('GEMM Kernel Time Variance by Channel Count', 
+    ax.set_title('GEMM Kernel Time Variance by Channel Count',
                  fontsize=16, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
     plt.savefig(output_dir / 'variance_by_channels_boxplot.png', dpi=300, bbox_inches='tight')
     print(f"Saved: {output_dir / 'variance_by_channels_boxplot.png'}")
@@ -107,26 +107,26 @@ def create_boxplot_by_channels(data, output_dir):
 def create_boxplot_by_ranks(data, output_dir):
     """Create box plot showing time_diff distribution by rank."""
     fig, ax = plt.subplots(figsize=(14, 6))
-    
+
     # Prepare data for boxplot
     ranks_list = sorted(data['ranks'].keys())
     plot_data = [data['ranks'][r] for r in ranks_list]
     labels = [f'Rank {r}' for r in ranks_list]
-    
+
     bp = ax.boxplot(plot_data, tick_labels=labels, patch_artist=True,
                     showmeans=True, meanline=True)
-    
+
     # Color the boxes with gradient
     colors = plt.cm.viridis([i/len(ranks_list) for i in range(len(ranks_list))])
     for patch, color in zip(bp['boxes'], colors):
         patch.set_facecolor(color)
-    
+
     ax.set_ylabel('Time Difference (ms)', fontsize=14, fontweight='bold')
     ax.set_xlabel('Rank', fontsize=14, fontweight='bold')
-    ax.set_title('GEMM Kernel Time Variance by Rank', 
+    ax.set_title('GEMM Kernel Time Variance by Rank',
                  fontsize=16, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
     plt.savefig(output_dir / 'variance_by_ranks_boxplot.png', dpi=300, bbox_inches='tight')
     print(f"Saved: {output_dir / 'variance_by_ranks_boxplot.png'}")
@@ -135,85 +135,85 @@ def create_boxplot_by_ranks(data, output_dir):
 def create_violin_plot_combined(data, output_dir):
     """Create a combined violin plot showing all three dimensions."""
     fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-    
+
     # Prepare data for violin plots
     threads_data = []
     for threads, values in sorted(data['threads'].items()):
         for val in values:
             threads_data.append({'config': f'{threads}t', 'time_diff': val})
-    
+
     channels_data = []
     for channel, values in sorted(data['channels'].items()):
         for val in values:
             channels_data.append({'config': f'{channel}ch', 'time_diff': val})
-    
+
     ranks_data = []
     for rank, values in sorted(data['ranks'].items()):
         for val in values:
             ranks_data.append({'config': f'R{rank}', 'time_diff': val})
-    
+
     # Plot 1: Threads
     ax = axes[0]
     threads_configs = sorted(set(d['config'] for d in threads_data))
-    threads_values = [[d['time_diff'] for d in threads_data if d['config'] == c] 
+    threads_values = [[d['time_diff'] for d in threads_data if d['config'] == c]
                       for c in threads_configs]
-    
+
     parts = ax.violinplot(threads_values, positions=range(len(threads_configs)),
                           showmeans=True, showmedians=True)
     for pc in parts['bodies']:
         pc.set_facecolor('lightblue')
         pc.set_alpha(0.7)
-    
+
     ax.set_xticks(range(len(threads_configs)))
     ax.set_xticklabels(threads_configs)
     ax.set_ylabel('Time Difference (ms)', fontsize=12, fontweight='bold')
     ax.set_xlabel('Threads', fontsize=12, fontweight='bold')
     ax.set_title('By Thread Count', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='y')
-    
+
     # Plot 2: Channels
     ax = axes[1]
-    channels_configs = sorted(set(d['config'] for d in channels_data), 
+    channels_configs = sorted(set(d['config'] for d in channels_data),
                              key=lambda x: int(x[:-2]))
-    channels_values = [[d['time_diff'] for d in channels_data if d['config'] == c] 
+    channels_values = [[d['time_diff'] for d in channels_data if d['config'] == c]
                        for c in channels_configs]
-    
+
     parts = ax.violinplot(channels_values, positions=range(len(channels_configs)),
                           showmeans=True, showmedians=True)
     for pc in parts['bodies']:
         pc.set_facecolor('lightcoral')
         pc.set_alpha(0.7)
-    
+
     ax.set_xticks(range(len(channels_configs)))
     ax.set_xticklabels(channels_configs)
     ax.set_ylabel('Time Difference (ms)', fontsize=12, fontweight='bold')
     ax.set_xlabel('Channels', fontsize=12, fontweight='bold')
     ax.set_title('By Channel Count', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='y')
-    
+
     # Plot 3: Ranks
     ax = axes[2]
     ranks_configs = sorted(set(d['config'] for d in ranks_data),
                           key=lambda x: int(x[1:]))
-    ranks_values = [[d['time_diff'] for d in ranks_data if d['config'] == c] 
+    ranks_values = [[d['time_diff'] for d in ranks_data if d['config'] == c]
                     for c in ranks_configs]
-    
+
     parts = ax.violinplot(ranks_values, positions=range(len(ranks_configs)),
                           showmeans=True, showmedians=True)
     for pc in parts['bodies']:
         pc.set_facecolor('lightgreen')
         pc.set_alpha(0.7)
-    
+
     ax.set_xticks(range(len(ranks_configs)))
     ax.set_xticklabels(ranks_configs)
     ax.set_ylabel('Time Difference (ms)', fontsize=12, fontweight='bold')
     ax.set_xlabel('Ranks', fontsize=12, fontweight='bold')
     ax.set_title('By Rank', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='y')
-    
-    fig.suptitle('GEMM Kernel Time Variance Distribution', 
+
+    fig.suptitle('GEMM Kernel Time Variance Distribution',
                  fontsize=18, fontweight='bold', y=1.02)
-    
+
     plt.tight_layout()
     plt.savefig(output_dir / 'variance_violin_combined.png', dpi=300, bbox_inches='tight')
     print(f"Saved: {output_dir / 'variance_violin_combined.png'}")
@@ -222,16 +222,16 @@ def create_violin_plot_combined(data, output_dir):
 def create_interaction_plot(data, output_dir):
     """Create a plot showing interaction between threads and channels."""
     fig, ax = plt.subplots(figsize=(12, 7))
-    
+
     # Organize data by threads and channels
     thread_channel_data = defaultdict(lambda: defaultdict(list))
     for row in data['all']:
         thread_channel_data[row['threads']][row['channel']].append(row['time_diff'])
-    
+
     # Calculate means
     threads = sorted(thread_channel_data.keys())
     channels = [28, 42, 56, 70]
-    
+
     for thread in threads:
         means = []
         for channel in channels:
@@ -240,20 +240,20 @@ def create_interaction_plot(data, output_dir):
                 means.append(mean_val)
             else:
                 means.append(0)
-        
+
         marker = 'o' if thread == 256 else 's'
         label = f'{thread} threads'
         ax.plot(channels, means, marker=marker, linewidth=2, markersize=10, label=label)
-    
+
     ax.set_xlabel('Channel Count', fontsize=14, fontweight='bold')
     ax.set_ylabel('Mean Time Difference (ms)', fontsize=14, fontweight='bold')
-    ax.set_title('Thread-Channel Interaction: Mean Variance', 
+    ax.set_title('Thread-Channel Interaction: Mean Variance',
                  fontsize=16, fontweight='bold', pad=20)
     ax.set_xticks(channels)
     ax.set_xticklabels([f'{c}ch' for c in channels])
     ax.legend(fontsize=12, loc='best')
     ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
     plt.savefig(output_dir / 'variance_thread_channel_interaction.png', dpi=300, bbox_inches='tight')
     print(f"Saved: {output_dir / 'variance_thread_channel_interaction.png'}")
@@ -264,7 +264,7 @@ def print_statistics(data):
     print("\n" + "="*70)
     print("VARIANCE DISTRIBUTION STATISTICS")
     print("="*70)
-    
+
     print("\nBy Thread Count:")
     for threads in sorted(data['threads'].keys()):
         values = data['threads'][threads]
@@ -274,7 +274,7 @@ def print_statistics(data):
         print(f"  {threads} threads: mean={sum(values)/len(values):.2f}ms, "
               f"median={median:.2f}ms, "
               f"max={max(values):.2f}ms, n={len(values)}")
-    
+
     print("\nBy Channel Count:")
     for channel in sorted(data['channels'].keys()):
         values = data['channels'][channel]
@@ -284,7 +284,7 @@ def print_statistics(data):
         print(f"  {channel}ch: mean={sum(values)/len(values):.2f}ms, "
               f"median={median:.2f}ms, "
               f"max={max(values):.2f}ms, n={len(values)}")
-    
+
     print("\nBy Rank:")
     for rank in sorted(data['ranks'].keys()):
         values = data['ranks'][rank]
@@ -300,18 +300,18 @@ def main():
     # Paths
     csv_path = Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis/top5_gemm_kernels_time_variance.csv")
     output_dir = Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis/plots")
-    
+
     # Create output directory
     output_dir.mkdir(exist_ok=True, parents=True)
-    
+
     print("Reading data from CSV...")
     data = read_csv_data(csv_path)
-    
+
     print(f"Total data points: {len(data['all'])}")
-    
+
     # Print statistics
     print_statistics(data)
-    
+
     # Create plots
     print("\nGenerating plots...")
     create_boxplot_by_threads(data, output_dir)
@@ -319,7 +319,7 @@ def main():
     create_boxplot_by_ranks(data, output_dir)
     create_violin_plot_combined(data, output_dir)
     create_interaction_plot(data, output_dir)
-    
+
     print(f"\n✓ All plots saved to: {output_dir}")
     print("\nGenerated files:")
     print("  1. variance_by_threads_boxplot.png - Box plot by thread count")
@@ -330,4 +330,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

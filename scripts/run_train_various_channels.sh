@@ -100,11 +100,11 @@ cleanup() {
     echo ""
     echo -e "${RED}=== Caught interrupt signal (Ctrl+C) ===${NC}" | tee -a "${SWEEP_LOG}"
     log "Cleaning up all training processes..."
-    
+
     # Kill all train.py and torchrun processes
     sudo pkill -9 -f "train.py" 2>/dev/null || true
     sudo pkill -9 -f "torchrun" 2>/dev/null || true
-    
+
     log "✓ Cleanup complete. Exiting."
     exit 130
 }
@@ -129,30 +129,30 @@ declare -A RUN_TIMES
 # Loop through each RCCL_THREADS_PER_BLOCK value
 for THREADS in "${THREADS_TO_RUN[@]}"; do
     echo -e "${GREEN}=== Testing with RCCL_THREADS_PER_BLOCK=${THREADS} ===${NC}" | tee -a "${SWEEP_LOG}"
-    
+
     # Loop through each NCCL_MAX_NCHANNELS value
     for CHANNELS in "${CHANNELS_TO_RUN[@]}"; do
         OUTPUT_DIR="${BASE_OUTPUT_DIR}/${THREADS}thread/nccl_${CHANNELS}channels"
         RUN_KEY="${THREADS}_${CHANNELS}"
-        
+
         # Check if should skip
         if [ -d "${OUTPUT_DIR}" ] && [ "${SKIP_EXISTING}" = true ]; then
             log "Skipping THREADS=${THREADS}, CHANNELS=${CHANNELS} (directory exists)"
             RUN_STATUS[${RUN_KEY}]="SKIPPED"
             continue
         fi
-        
+
         echo -e "${YELLOW}========================================${NC}" | tee -a "${SWEEP_LOG}"
         log "Running with RCCL_THREADS_PER_BLOCK=${THREADS}, NCCL_MAX_NCHANNELS=${CHANNELS}"
         log "Output directory: ${OUTPUT_DIR}"
         echo -e "${YELLOW}========================================${NC}" | tee -a "${SWEEP_LOG}"
-        
+
         # Create output directory if it doesn't exist
         mkdir -p "${OUTPUT_DIR}"
-        
+
         # Record start time
         START_TIME=$(date +%s)
-        
+
         # Set environment variables and run the command
         # Enable ROCm profiler for kernel visibility
         RCCL_THREADS_PER_BLOCK=${THREADS} \
@@ -162,13 +162,13 @@ for THREADS in "${THREADS_TO_RUN[@]}"; do
         ${BASE_CMD} ${BASE_OVERRIDES} \
             --override training.output_dir=${OUTPUT_DIR} \
             2>&1 | tee "${OUTPUT_DIR}/run_output.log"
-        
+
         EXIT_CODE=${PIPESTATUS[0]}
         END_TIME=$(date +%s)
         DURATION=$((END_TIME - START_TIME))
-        
+
         RUN_TIMES[${RUN_KEY}]=${DURATION}
-        
+
         if [ $EXIT_CODE -eq 0 ]; then
             log "✓ Completed run with THREADS=${THREADS}, CHANNELS=${CHANNELS} (duration: ${DURATION}s)"
             RUN_STATUS[${RUN_KEY}]="SUCCESS"
@@ -176,14 +176,14 @@ for THREADS in "${THREADS_TO_RUN[@]}"; do
             log "✗ Failed run with THREADS=${THREADS}, CHANNELS=${CHANNELS} (exit code: $EXIT_CODE, duration: ${DURATION}s)"
             RUN_STATUS[${RUN_KEY}]="FAILED"
         fi
-        
+
         echo ""
-        
+
         # Wait between runs
         log "Waiting 5 seconds before next run..."
         sleep 5
     done
-    
+
     echo ""
 done
 
@@ -192,7 +192,7 @@ if [ "${AGGREGATE_RESULTS}" = true ]; then
     echo -e "${BLUE}========================================${NC}" | tee -a "${SWEEP_LOG}"
     echo -e "${BLUE}SUMMARY REPORT${NC}" | tee -a "${SWEEP_LOG}"
     echo -e "${BLUE}========================================${NC}" | tee -a "${SWEEP_LOG}"
-    
+
     # Create summary file in the output directory
     SUMMARY_FILE="${BASE_OUTPUT_DIR}/nccl_thread_sweep_summary_${TIMESTAMP}.txt"
     {
@@ -201,7 +201,7 @@ if [ "${AGGREGATE_RESULTS}" = true ]; then
         echo ""
         printf "%-10s %-15s %-10s %-15s\n" "THREADS" "CHANNELS" "STATUS" "DURATION(s)"
         echo "----------------------------------------------------"
-        
+
         for THREADS in "${THREADS_TO_RUN[@]}"; do
             for CHANNELS in "${CHANNELS_TO_RUN[@]}"; do
                 RUN_KEY="${THREADS}_${CHANNELS}"
@@ -211,7 +211,7 @@ if [ "${AGGREGATE_RESULTS}" = true ]; then
             done
             echo ""
         done
-        
+
         echo ""
         echo "Output directories:"
         for THREADS in "${THREADS_TO_RUN[@]}"; do
@@ -221,9 +221,9 @@ if [ "${AGGREGATE_RESULTS}" = true ]; then
             done
         done
     } | tee "${SUMMARY_FILE}"
-    
+
     log "Summary saved to: ${SUMMARY_FILE}"
-    
+
     # Quick comparison script
     echo ""
     echo -e "${GREEN}To compare profiler traces across runs:${NC}"
