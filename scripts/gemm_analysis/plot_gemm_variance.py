@@ -5,6 +5,7 @@ Shows time_diff distribution across different configurations.
 """
 
 import csv
+import argparse
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
@@ -296,10 +297,66 @@ def print_statistics(data):
               f"max={max(values):.2f}ms, n={len(values)}")
     print("="*70 + "\n")
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Create variance distribution plots from GEMM analysis results",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Use default settings
+  python plot_gemm_variance.py
+
+  # Specify custom CSV file and output directory
+  python plot_gemm_variance.py \\
+    --csv-path experiments/sweep_20251124_222204/tracelens_analysis/top5_gemm_kernels_time_variance.csv \\
+    --output-dir experiments/sweep_20251124_222204/tracelens_analysis/plots
+
+  # Using absolute paths
+  python plot_gemm_variance.py \\
+    --csv-path /home/oyazdanb/aorta/experiments/sweep_20251124_222204/tracelens_analysis/top5_gemm_kernels_time_variance.csv \\
+    --output-dir /home/oyazdanb/aorta/experiments/sweep_20251124_222204/tracelens_analysis/plots
+        """
+    )
+
+    parser.add_argument(
+        '--csv-path',
+        type=Path,
+        default=Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis/top5_gemm_kernels_time_variance.csv"),
+        help='Path to the GEMM variance CSV file (default: %(default)s)'
+    )
+
+    parser.add_argument(
+        '--output-dir',
+        type=Path,
+        default=None,
+        help='Output directory for plots (default: same directory as CSV with /plots suffix)'
+    )
+
+    return parser.parse_args()
+
 def main():
-    # Paths
-    csv_path = Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis/top5_gemm_kernels_time_variance.csv")
-    output_dir = Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis/plots")
+    # Parse command line arguments
+    args = parse_args()
+    
+    csv_path = args.csv_path
+    
+    # Set default output directory if not specified
+    if args.output_dir is None:
+        output_dir = csv_path.parent / "plots"
+    else:
+        output_dir = args.output_dir
+
+    # Validate CSV file exists
+    if not csv_path.exists():
+        print(f"Error: CSV file not found: {csv_path}")
+        return
+
+    print("GEMM Variance Plotting")
+    print("=" * 70)
+    print(f"Input CSV: {csv_path}")
+    print(f"Output directory: {output_dir}")
+    print()
 
     # Create output directory
     output_dir.mkdir(exist_ok=True, parents=True)
