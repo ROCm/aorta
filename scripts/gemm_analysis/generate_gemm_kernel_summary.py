@@ -189,7 +189,7 @@ Examples:
         '-o',
         '--output-plot-directory',
         type=Path,
-        default='/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis/plots',
+        default=None,
         help='Output CSV filename (default: %(default)s)'
     )
 
@@ -217,9 +217,13 @@ def plot_top_kernels(all_results, top_k, output_dir, subplots=False) :
     if(len(top_kernels) != len(unique_top_kernel)) :
         print("Duplicate top kernel, please reurn using higher top-k value")
 
-    print("Top kernel list : ")
-    for kernel in unique_top_kernel : 
-        print(f"\t {unique_top_kernel.index(kernel)}. {kernel}")
+    kernel_info_file = output_dir / "kernel_info.csv"
+    with open(kernel_info_file,"w") as file : 
+        print("Top kernel list : ")
+        file.write("id,kernel_name\n")
+        for kernel in unique_top_kernel : 
+            print(f"\t {unique_top_kernel.index(kernel)}. {kernel}")
+            file.write(f"{unique_top_kernel.index(kernel)},{kernel}\n")
 
     #generate_kernel_analysis(all_results, unique_top_kernel)
     
@@ -264,7 +268,10 @@ def main():
     ranks = args.ranks
     top_k = args.top_k
 
-    output_dir = args.output_plot_directory 
+    output_dir = args.output_plot_directory
+    if(args.output_plot_directory is None) : 
+       output_dir =  base_path / "plots"
+     
     output_dir.mkdir(exist_ok=True, parents=True)
 
     # Validate base path
