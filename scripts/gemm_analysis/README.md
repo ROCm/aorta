@@ -226,6 +226,47 @@ python scripts/merge_gpu_trace_ranks.py \
 - Debug rank imbalance and stragglers
 - Verify GEMM-collective overlap visually
 
+### 9. Create Embedded HTML Comparison Report
+
+Generate a self-contained HTML report comparing two experiment sweeps side-by-side:
+
+```bash
+python scripts/gemm_analysis/create_embeded_html_report.py \
+  --sweep1 experiments/sweep_20251121_155219 \
+  --sweep2 experiments/sweep_20251124_222204 \
+  --label1 "Base ROCm" \
+  --label2 "ROCm 7.0" \
+  --output sweep_comparison.html
+```
+
+**Parameters:**
+- `--sweep1`: Path to first sweep directory (required)
+- `--sweep2`: Path to second sweep directory (required)
+- `--label1`: Custom label for first sweep (optional, defaults to directory name)
+- `--label2`: Custom label for second sweep (optional, defaults to directory name)
+- `--output`: Output HTML file path (optional, defaults to `sweep_comparison_report.html`)
+
+**What it does:**
+- Automatically finds all plot images in both sweep directories
+- Converts images to base64 and embeds them directly in the HTML
+- Creates a self-contained HTML file (typically 2-3 MB) that can be shared easily
+- Displays plots side-by-side for easy comparison
+- Validates that sweep directories exist before processing
+
+**Output:** Single HTML file with embedded images showing:
+- Variance by thread count comparison
+- Variance by channel count comparison
+- Variance by rank comparison
+- Violin plot distributions
+- Thread-channel interaction plots
+
+**Benefits:**
+- No external dependencies - all images embedded
+- Easy to share via email or file transfer
+- Opens in any web browser
+- Professional styling with responsive layout
+- Perfect for presentations and reports
+
 ## Quick Reference
 
 ### Default Configurations
@@ -242,6 +283,7 @@ python scripts/merge_gpu_trace_ranks.py \
 3. **`top5_gemm_kernels_time_variance_with_collective_overlap.csv`** - Final analysis with overlap info
 4. **`plots/*.png`** - Visualization plots
 5. **`merged_traces/*.json`** - Multi-rank traces for Perfetto
+6. **`sweep_comparison.html`** - Self-contained HTML report comparing two sweeps
 
 ### Output Structure
 
@@ -310,4 +352,12 @@ python scripts/gemm_analysis/gemm_report_with_collective_overlap.py \
 
 # 6. Merge all traces for visualization
 bash scripts/merge_all_traces.sh experiments/sweep_20251124_222204
+
+# 7. (Optional) Create HTML comparison report between two sweeps
+python scripts/gemm_analysis/create_embeded_html_report.py \
+  --sweep1 experiments/sweep_20251121_155219 \
+  --sweep2 experiments/sweep_20251124_222204 \
+  --label1 "Base ROCm" \
+  --label2 "ROCm 7.0" \
+  --output sweep_comparison.html
 ```

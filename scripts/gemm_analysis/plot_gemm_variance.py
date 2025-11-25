@@ -31,7 +31,7 @@ def read_csv_data(csv_path):
                 threads = int(row['threads'])
                 channel = int(row['channel'])
                 rank = int(row['rank'])
-                time_diff = float(row['time_diff'])
+                time_diff = float(row['time_diff_us'])
 
                 data['threads'][threads].append(time_diff)
                 data['channels'][channel].append(time_diff)
@@ -66,7 +66,7 @@ def create_boxplot_by_threads(data, output_dir):
     for patch, color in zip(bp['boxes'], colors):
         patch.set_facecolor(color)
 
-    ax.set_ylabel('Time Difference (ms)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Time Difference (µs)', fontsize=14, fontweight='bold')
     ax.set_xlabel('Thread Configuration', fontsize=14, fontweight='bold')
     ax.set_title('GEMM Kernel Time Variance by Thread Count',
                  fontsize=16, fontweight='bold', pad=20)
@@ -94,7 +94,7 @@ def create_boxplot_by_channels(data, output_dir):
     for patch, color in zip(bp['boxes'], colors):
         patch.set_facecolor(color)
 
-    ax.set_ylabel('Time Difference (ms)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Time Difference (µs)', fontsize=14, fontweight='bold')
     ax.set_xlabel('Channel Configuration', fontsize=14, fontweight='bold')
     ax.set_title('GEMM Kernel Time Variance by Channel Count',
                  fontsize=16, fontweight='bold', pad=20)
@@ -122,7 +122,7 @@ def create_boxplot_by_ranks(data, output_dir):
     for patch, color in zip(bp['boxes'], colors):
         patch.set_facecolor(color)
 
-    ax.set_ylabel('Time Difference (ms)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Time Difference (µs)', fontsize=14, fontweight='bold')
     ax.set_xlabel('Rank', fontsize=14, fontweight='bold')
     ax.set_title('GEMM Kernel Time Variance by Rank',
                  fontsize=16, fontweight='bold', pad=20)
@@ -167,7 +167,7 @@ def create_violin_plot_combined(data, output_dir):
 
     ax.set_xticks(range(len(threads_configs)))
     ax.set_xticklabels(threads_configs)
-    ax.set_ylabel('Time Difference (ms)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Time Difference (µs)', fontsize=12, fontweight='bold')
     ax.set_xlabel('Threads', fontsize=12, fontweight='bold')
     ax.set_title('By Thread Count', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='y')
@@ -187,7 +187,7 @@ def create_violin_plot_combined(data, output_dir):
 
     ax.set_xticks(range(len(channels_configs)))
     ax.set_xticklabels(channels_configs)
-    ax.set_ylabel('Time Difference (ms)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Time Difference (µs)', fontsize=12, fontweight='bold')
     ax.set_xlabel('Channels', fontsize=12, fontweight='bold')
     ax.set_title('By Channel Count', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='y')
@@ -207,7 +207,7 @@ def create_violin_plot_combined(data, output_dir):
 
     ax.set_xticks(range(len(ranks_configs)))
     ax.set_xticklabels(ranks_configs)
-    ax.set_ylabel('Time Difference (ms)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Time Difference (µs)', fontsize=12, fontweight='bold')
     ax.set_xlabel('Ranks', fontsize=12, fontweight='bold')
     ax.set_title('By Rank', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='y')
@@ -247,7 +247,7 @@ def create_interaction_plot(data, output_dir):
         ax.plot(channels, means, marker=marker, linewidth=2, markersize=10, label=label)
 
     ax.set_xlabel('Channel Count', fontsize=14, fontweight='bold')
-    ax.set_ylabel('Mean Time Difference (ms)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Mean Time Difference (µs)', fontsize=14, fontweight='bold')
     ax.set_title('Thread-Channel Interaction: Mean Variance',
                  fontsize=16, fontweight='bold', pad=20)
     ax.set_xticks(channels)
@@ -272,9 +272,9 @@ def print_statistics(data):
         sorted_vals = sorted(values)
         n = len(values)
         median = sorted_vals[n//2] if n % 2 == 1 else (sorted_vals[n//2-1] + sorted_vals[n//2]) / 2
-        print(f"  {threads} threads: mean={sum(values)/len(values):.2f}ms, "
-              f"median={median:.2f}ms, "
-              f"max={max(values):.2f}ms, n={len(values)}")
+        print(f"  {threads} threads: mean={sum(values)/len(values):.2f}µs, "
+              f"median={median:.2f}µs, "
+              f"max={max(values):.2f}µs, n={len(values)}")
 
     print("\nBy Channel Count:")
     for channel in sorted(data['channels'].keys()):
@@ -282,9 +282,9 @@ def print_statistics(data):
         sorted_vals = sorted(values)
         n = len(values)
         median = sorted_vals[n//2] if n % 2 == 1 else (sorted_vals[n//2-1] + sorted_vals[n//2]) / 2
-        print(f"  {channel}ch: mean={sum(values)/len(values):.2f}ms, "
-              f"median={median:.2f}ms, "
-              f"max={max(values):.2f}ms, n={len(values)}")
+        print(f"  {channel}ch: mean={sum(values)/len(values):.2f}µs, "
+              f"median={median:.2f}µs, "
+              f"max={max(values):.2f}µs, n={len(values)}")
 
     print("\nBy Rank:")
     for rank in sorted(data['ranks'].keys()):
@@ -292,9 +292,9 @@ def print_statistics(data):
         sorted_vals = sorted(values)
         n = len(values)
         median = sorted_vals[n//2] if n % 2 == 1 else (sorted_vals[n//2-1] + sorted_vals[n//2]) / 2
-        print(f"  Rank {rank}: mean={sum(values)/len(values):.2f}ms, "
-              f"median={median:.2f}ms, "
-              f"max={max(values):.2f}ms, n={len(values)}")
+        print(f"  Rank {rank}: mean={sum(values)/len(values):.2f}µs, "
+              f"median={median:.2f}µs, "
+              f"max={max(values):.2f}µs, n={len(values)}")
     print("="*70 + "\n")
 
 def parse_args():

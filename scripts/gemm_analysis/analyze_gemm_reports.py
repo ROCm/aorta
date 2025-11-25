@@ -54,8 +54,8 @@ def process_excel_file(file_path, threads, channel, rank, top_k=5):
 
         # Column indices (0-based)
         # X = 23 (24th column)
-        # AG = 32 (33rd column) - Kernel Time - ms (min)
-        # AH = 33 (34th column) - Kernel Time - max (max)
+        # AG = 32 (33rd column) - Kernel Time - µs (min)
+        # AH = 33 (34th column) - Kernel Time - µs (max)
         col_x = column_letter_to_index('X')
         col_ag = column_letter_to_index('AG')
         col_ah = column_letter_to_index('AH')
@@ -95,9 +95,9 @@ def process_excel_file(file_path, threads, channel, rank, top_k=5):
                     'channel': channel,
                     'rank': rank,
                     'kernel_name': kernel_name,
-                    'kernel_time_min_ms': kernel_time_min,
-                    'kernel_time_max_ms': kernel_time_max,
-                    'time_diff': time_diff
+                    'kernel_time_min_us': kernel_time_min,
+                    'kernel_time_max_us': kernel_time_max,
+                    'time_diff_us': time_diff
                 }
 
                 # Add all other columns
@@ -260,7 +260,7 @@ def main():
         all_keys.update(row.keys())
 
     # Order columns: metadata first, then others
-    metadata_cols = ['threads', 'channel', 'rank', 'kernel_name', 'kernel_time_min_ms', 'kernel_time_max_ms', 'time_diff']
+    metadata_cols = ['threads', 'channel', 'rank', 'kernel_name', 'kernel_time_min_us', 'kernel_time_max_us', 'time_diff_us']
     other_cols = sorted([k for k in all_keys if k not in metadata_cols])
     ordered_cols = metadata_cols + other_cols
 
@@ -282,18 +282,18 @@ def main():
     print(f"\nTop {min(10, len(all_results))} kernels by time difference:")
     for i, row in enumerate(all_results[:10]):
         print(f"{i+1}. threads={row['threads']}, ch={row['channel']}, rank={row['rank']}, "
-              f"diff={row['time_diff']:.4f}ms")
+              f"diff={row['time_diff_us']:.4f}µs")
         print(f"   {row['kernel_name'][:100]}...")
 
     # Print summary statistics
-    time_diffs = [r['time_diff'] for r in all_results]
+    time_diffs = [r['time_diff_us'] for r in all_results]
     kernel_names = set(r['kernel_name'] for r in all_results)
 
     print(f"\nSummary Statistics:")
     print(f"Total unique kernels: {len(kernel_names)}")
-    print(f"Average time difference: {sum(time_diffs)/len(time_diffs):.4f} ms")
-    print(f"Max time difference: {max(time_diffs):.4f} ms")
-    print(f"Min time difference: {min(time_diffs):.4f} ms")
+    print(f"Average time difference: {sum(time_diffs)/len(time_diffs):.4f} µs")
+    print(f"Max time difference: {max(time_diffs):.4f} µs")
+    print(f"Min time difference: {min(time_diffs):.4f} µs")
 
 if __name__ == "__main__":
     main()

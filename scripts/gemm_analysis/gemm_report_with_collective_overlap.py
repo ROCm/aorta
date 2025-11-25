@@ -192,7 +192,7 @@ def enhance_csv_with_collective_overlap(input_csv: Path, output_csv: Path,
         
         # Get max duration GEMM timestamp and duration
         max_timestamp_ms = row.get('max_duration_timestamp_ms')
-        max_duration_us = row.get('max_duration_found_us', row.get('kernel_time_max_ms'))
+        max_duration_us = row.get('max_duration_found_us', row.get('kernel_time_max_us'))
         
         if pd.isna(max_timestamp_ms) or pd.isna(max_duration_us):
             print(f"  Skipping - no timestamp or duration for max GEMM")

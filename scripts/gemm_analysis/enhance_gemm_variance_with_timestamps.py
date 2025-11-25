@@ -148,9 +148,9 @@ def enhance_csv_with_timestamps(input_csv: Path, output_csv: Path, base_path: Pa
         rank = int(row['rank'])
         kernel_name = row['kernel_name']
         
-        # Get durations (despite column name saying _ms, values are actually in microseconds!)
-        min_duration_us = float(row['kernel_time_min_ms'])  # Already in microseconds
-        max_duration_us = float(row['kernel_time_max_ms'])  # Already in microseconds
+        # Get durations in microseconds
+        min_duration_us = float(row['kernel_time_min_us'])
+        max_duration_us = float(row['kernel_time_max_us'])
         
         print(f"  Config: {threads}thread/{channel}ch/rank{rank}")
         print(f"  Kernel: {kernel_name[:60]}...")
