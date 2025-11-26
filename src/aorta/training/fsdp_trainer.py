@@ -646,19 +646,6 @@ def _torch_profiler_context(
         prof.__exit__(None, None, None)
         produce_tb = cfg.tensorboard
         produce_chrome = cfg.chrome_trace
-        if cfg.tensorboard and cfg.chrome_trace:
-            log.warning(
-                "TensorBoard and Chrome trace outputs requested together; disabling TensorBoard to avoid export conflicts"
-            )
-            produce_tb = False
-
-        # if produce_chrome and detect_accelerator() == "amd":
-        #     log.warning(
-        #         "Chrome trace export is unstable on ROCm; disabling chrome traces for this run"
-        #     )
-        #     produce_chrome = False
-
-        stats_available = False
         try:
             stats_available = prof._stats() is not None  # type: ignore[attr-defined]
         except Exception:
