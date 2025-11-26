@@ -20,23 +20,44 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Use patched TraceLens wrapper for GEMM recognition
 TRACELENS_WRAPPER="python $SCRIPT_DIR/../tracelens_with_gemm_patch.py"
 
+# Parse options
+RUN_INDIVIDUAL=true
+RUN_COLLECTIVE=true
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --individual-only)
+            RUN_COLLECTIVE=false
+            shift
+            ;;
+        --collective-only)
+            RUN_INDIVIDUAL=false
+            shift
+            ;;
+        *)
+            INPUT_DIR="$1"
+            shift
+            ;;
+    esac
+done
+
 # Check if directory provided
-if [ -z "$1" ]; then
+if [ -z "$INPUT_DIR" ]; then
     echo "Error: Please provide trace directory"
     echo ""
-    echo "Usage: $0 <directory_path>"
+    echo "Usage: $0 <directory_path> [options]"
+    echo ""
+    echo "Options:"
+    echo "  --individual-only    Generate only individual reports"
+    echo "  --collective-only    Generate only collective report"
     echo ""
     echo "Examples:"
-    echo "  # Parent directory containing torch_profiler/"
-    echo "  $0 /home/oyazdanb/aorta_sonbol/saleel_data/saleelk_hip_runtime_test_traces"
-    echo ""
-    echo "  # torch_profiler/ directory directly"
-    echo "  $0 /home/oyazdanb/aorta_sonbol/saleel_data/saleelk_hip_runtime_test_traces/torch_profiler"
+    echo "  $0 /path/to/traces"
+    echo "  $0 /path/to/traces --individual-only"
+    echo "  $0 /path/to/traces --collective-only"
     echo ""
     exit 1
 fi
-
-INPUT_DIR="$1"
 
 # Verify directory exists
 if [ ! -d "$INPUT_DIR" ]; then
@@ -103,12 +124,12 @@ for rank_dir in $(find "$TORCH_PROF_DIR" -maxdepth 1 -type d -name "rank*" | sor
         echo "  $rank_name: $(basename "$trace_file")"
     fi
 done
-echo ""
-
-echo "════════════════════════════════════════════════════════════════"
-echo "Step 1: Generating Individual Performance Reports"
-echo "════════════════════════════════════════════════════════════════"
-echo ""
+if [ "$RUN_INDIVIDUAL" = true ]; then
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "Step 1: Generating Individual Performance Reports"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
 
 # Process each rank
 for rank_idx in $(seq 0 $((NUM_RANKS - 1))); do
@@ -153,11 +174,14 @@ for rank_idx in $(seq 0 $((NUM_RANKS - 1))); do
     echo ""
 done
 
-echo ""
-echo "════════════════════════════════════════════════════════════════"
-echo "Step 2: Generating Multi-Rank Collective Report"
-echo "════════════════════════════════════════════════════════════════"
-echo ""
+fi
+
+if [ "$RUN_COLLECTIVE" = true ]; then
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "Step 2: Generating Multi-Rank Collective Report"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
 
 # Find a sample trace file to get the filename pattern
 SAMPLE_TRACE=$(find "$TORCH_PROF_DIR/rank0" -name "*.json" -type f | head -1)
@@ -175,10 +199,22 @@ if [ -n "$SAMPLE_TRACE" ]; then
     OUTPUT="$OUTPUT_DIR/collective_reports/collective_all_ranks.xlsx"
 
     echo "Generating collective report for all $NUM_RANKS ranks..."
-    echo "  Trace pattern: rank*/*.json"
+    
+    # Create symlinks with consistent names for collective report
+    for rank_idx in $(seq 0 $((NUM_RANKS - 1))); do
+        RANK_DIR="$TORCH_PROF_DIR/rank${rank_idx}"
+        if [ -d "$RANK_DIR" ]; then
+            TRACE=$(find "$RANK_DIR" -name "*.json" -type f | head -1)
+            if [ -n "$TRACE" ]; then
+                ln -sf "$(basename "$TRACE")" "$RANK_DIR/trace.json"
+            fi
+        fi
+    done
+    
+    echo "  Trace pattern: rank*/trace.json"
     
     $TRACELENS_WRAPPER generate_multi_rank_collective \
-        --trace_pattern "$TORCH_PROF_DIR/rank*/*.json" \
+        --trace_pattern "$TORCH_PROF_DIR/rank*/trace.json" \
         --world_size $NUM_RANKS \
         --output_xlsx_path "$OUTPUT" \
         --detailed_analysis \
@@ -186,7 +222,9 @@ if [ -n "$SAMPLE_TRACE" ]; then
 
     echo "  Done: $OUTPUT"
 else
-    echo "⚠️  Could not generate collective report - no trace files found"
+    echo "  Could not generate collective report - no trace files found"
+fi
+
 fi
 
 echo ""
