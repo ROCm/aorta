@@ -130,6 +130,7 @@ for thread in "${THREAD_CONFIGS[@]}"; do
                 --short_kernel_study \
                 --short_kernel_threshold_us 50 \
                 --topk_ops 100 \
+		--enable_kernel_summary \
                 --topk_roofline_ops 100
 
             echo "    ✓ $OUTPUT"
