@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 Create a self-contained HTML report comparing two experiment sweeps.
@@ -68,6 +69,13 @@ Examples:
         default=None,
         help='Label for second sweep (default: directory name)'
     )
+
+    parser.add_argument(
+        '--variance',
+        type=str,
+        default='channel',
+        help='Label for second sweep (default: directory name)'
+    )
     
     parser.add_argument(
         '--output',
@@ -78,7 +86,7 @@ Examples:
     
     return parser.parse_args()
 
-def get_plot_images(sweep_path):
+def get_plot_images(sweep_path, variance):
     """Get paths to all plot images for a sweep"""
     plots_dir = sweep_path / "tracelens_analysis" / "plots"
     
@@ -88,9 +96,23 @@ def get_plot_images(sweep_path):
         'ranks': plots_dir / 'variance_by_ranks_boxplot.png',
         'violin': plots_dir / 'variance_violin_combined.png',
         'interaction': plots_dir / 'variance_thread_channel_interaction.png',
+        'gpu_summary' : plots_dir / 'comparison_summary.png',
+        'busy_time' : plots_dir / f'busy_time_{variance}_variance.png',
+        'computation_time' : plots_dir / f'computation_time_{variance}_variance.png',
+        'exposed_comm_time' : plots_dir / f'exposed_comm_time_{variance}_variance.png',
+        'exposed_memcpy_time' : plots_dir / f'exposed_memcpy_time_{variance}_variance.png',
+        'idle_time' : plots_dir / f'idle_time_{variance}_variance.png',
+        'total_comm_time' : plots_dir / f'total_comm_time_{variance}_variance.png',
+        'total_memcpy_time' : plots_dir / f'total_memcpy_time_{variance}_variance.png',
+        'total_time' : plots_dir / f'total_time_{variance}_variance.png',
+        'k0' : plots_dir / 'Kernel_0.png',
+        'k1' : plots_dir / 'Kernel_1.png',
+        'k2' : plots_dir / 'Kernel_2.png',
+        'k3' : plots_dir / 'Kernel_3.png',
     }
 
-def create_html_report(sweep1_path, sweep2_path, label1, label2, output_path):
+
+def create_html_report(sweep1_path, sweep2_path, label1, label2, variance, output_path):
     """Create HTML report comparing two sweeps"""
     
     # Get sweep names from paths if labels not provided
@@ -99,9 +121,10 @@ def create_html_report(sweep1_path, sweep2_path, label1, label2, output_path):
     if label2 is None:
         label2 = sweep2_path.name
     
+    
     # Get image paths for both sweeps
-    images_sweep1 = get_plot_images(sweep1_path)
-    images_sweep2 = get_plot_images(sweep2_path)
+    images_sweep1 = get_plot_images(sweep1_path, variance=variance)
+    images_sweep2 = get_plot_images(sweep2_path, variance=variance)
     
     # Convert images to base64
     print("Converting images to base64...")
@@ -349,6 +372,116 @@ def create_html_report(sweep1_path, sweep2_path, label1, label2, output_path):
 
 <hr>
 
+<h2> GPU Component Time Summary </h2>
+<table class="comparison-table">
+<tr>
+<th>{label1}</th>
+<th>{label2}</th>
+</tr>
+<tr>
+<td><img src="{image_data.get('gpu_summary_sweep1', '')}" alt="Summary Sweep 1"></td>
+<td><img src="{image_data.get('gpu_summary_sweep2', '')}" alt="Summary Sweep 2"></td>
+</tr>
+</table>
+
+<hr>
+
+<h2> GPU Component Time over {variance} </h2>
+
+<table>
+<tr>
+<th>Component</th>
+<th>{label1}</th>
+<th>{label2}</th>
+</tr>
+
+
+<tr>
+<td>Busy Time</td>
+<td><img src="{image_data.get('busy_time_sweep1', '')}" alt="busy_time Sweep 1"></td>
+<td><img src="{image_data.get('busy_time_sweep2', '')}" alt="busy_time Sweep 2"></td>
+</tr>
+
+<tr>
+<td>Computation Time</td>
+<td><img src="{image_data.get('computation_time_sweep1', '')}" alt="computation_time Sweep 1"></td>
+<td><img src="{image_data.get('computation_time_sweep2', '')}" alt="computation_time Sweep 2"></td>
+</tr>
+
+<tr>
+<td>Exposed Comm Time</td>
+<td><img src="{image_data.get('exposed_comm_time_sweep1', '')}" alt="exposed_comm_time Sweep 1"></td>
+<td><img src="{image_data.get('exposed_comm_time_sweep2', '')}" alt="exposed_comm_time Sweep 2"></td>
+</tr>
+
+<tr>
+<td>Exposed Memcpy Time</td>
+<td><img src="{image_data.get('exposed_memcpy_time_sweep1', '')}" alt="exposed_memcpy_time Sweep 1"></td>
+<td><img src="{image_data.get('exposed_memcpy_time_sweep2', '')}" alt="exposed_memcpy_time Sweep 2"></td>
+</tr>
+
+<tr>
+<td>Idle Time</td>
+<td><img src="{image_data.get('idle_time_sweep1', '')}" alt="idle_time Sweep 1"></td>
+<td><img src="{image_data.get('idle_time_sweep2', '')}" alt="idle_time Sweep 2"></td>
+</tr>
+
+<tr>
+<td>Total Comm Time</td>
+<td><img src="{image_data.get('total_comm_time_sweep1', '')}" alt="total_comm_time Sweep 1"></td>
+<td><img src="{image_data.get('total_comm_time_sweep2', '')}" alt="total_comm_time Sweep 2"></td>
+</tr>
+
+<tr>
+<td>Total Memcpy Time</td>
+<td><img src="{image_data.get('total_memcpy_time_sweep1', '')}" alt="total_memcpy_time Sweep 1"></td>
+<td><img src="{image_data.get('total_memcpy_time_sweep2', '')}" alt="total_memcpy_time Sweep 2"></td>
+</tr>
+
+<tr>
+<td>Total Time</td>
+<td><img src="{image_data.get('total_time_sweep1', '')}" alt="total_time Sweep 1"></td>
+<td><img src="{image_data.get('total_time_sweep2', '')}" alt="total_time Sweep 2"></td>
+</tr>
+
+</table>
+
+<hr>
+
+<table>
+
+<tr>
+<th>Index</th>
+<th>{label1}</th>
+<th>{label2}</th>
+</tr>
+
+<tr>
+<td>0</td>
+<td><img src="{image_data.get('k0_sweep1', '')}" alt="Kernel 0 Sweep 1"></td>
+<td><img src="{image_data.get('k0_sweep2', '')}" alt="Kernel 0 Sweep 2"></td>
+</tr>
+
+<tr>
+<td>1</td>
+<td><img src="{image_data.get('k1_sweep1', '')}" alt="Kernel 1 Sweep 1"></td>
+<td><img src="{image_data.get('k1_sweep2', '')}" alt="Kernel 1 Sweep 2"></td>
+</tr>
+
+<tr>
+<td>2</td>
+<td><img src="{image_data.get('k2_sweep1', '')}" alt="Kernel 2 Sweep 1"></td>
+<td><img src="{image_data.get('k2_sweep2', '')}" alt="Kernel 2 Sweep 2"></td>
+</tr>
+
+<tr>
+<td>3</td>
+<td><img src="{image_data.get('k3_sweep1', '')}" alt="Kernel 3 Sweep 1"></td>
+<td><img src="{image_data.get('k3_sweep2', '')}" alt="Kernel 3 Sweep 2"></td>
+</tr>
+
+<hr>
+
 <div class="data-section">
 <h2>Data Files Information</h2>
 
@@ -416,6 +549,7 @@ def main():
         args.sweep2,
         args.label1,
         args.label2,
+        args.variance,
         args.output
     )
     
@@ -424,6 +558,3 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
-
-
-
