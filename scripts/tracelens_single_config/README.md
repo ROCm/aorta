@@ -16,15 +16,14 @@ docker compose -f docker-compose.rccl-warpspeed.yaml up -d
 # Enter the container
 docker compose -f docker-compose.rccl-warpspeed.yaml exec rccl-warpspeed bash
 
-# Verify you're using RCCL warp_speed_v1
-echo "[INFO] RCCL installation path: $RCCL_ROOT"
-ls -la /opt/rccl-warpspeed/lib/librccl.so
-ldd $(which python) | grep rccl  # Check which RCCL library Python will use
-echo "[INFO] LD_LIBRARY_PATH: $LD_LIBRARY_PATH" | grep rccl-warpspeed
+# IMPORTANT: Verify you're using RCCL warp_speed_v1 (3 quick checks)
+echo "1. RCCL Path: $RCCL_ROOT"  # Should show: /opt/rccl-warpspeed
+ls -la /opt/rccl-warpspeed/lib/librccl.so 2>/dev/null && echo "   [OK] RCCL library found"
+echo "2. Branch:" && git -C /opt/rccl branch --show-current 2>/dev/null  # Should show: warp_speed_v1
+echo "3. Library priority:" && echo $LD_LIBRARY_PATH | grep -o '^[^:]*'  # Should start with /opt/rccl-warpspeed/lib
 
-# Optional: Check RCCL build info
-cat /opt/rccl/.git/HEAD  # Should show warp_speed_v1
-git -C /opt/rccl log --oneline -1  # Shows the latest commit
+# For detailed verification, run:
+# ./scripts/tracelens_single_config/verify_rccl.sh
 
 # Now move to workspace
 cd /workspace/aorta
