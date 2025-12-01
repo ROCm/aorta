@@ -1,0 +1,63 @@
+# Start from the existing ROCm 7.0 base
+FROM rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly
+
+# Switch to root to install packages
+USER root
+
+# Install required packages
+RUN yum install -y wget git cmake ninja-build gcc gcc-c++ make 2>/dev/null || \
+    apt-get update && apt-get install -y wget git cmake ninja-build gcc g++ make || true
+
+# Download and install amdgpu-install package for RHEL
+RUN wget https://artifactory-cdn.amd.com/artifactory/list/amdgpu-rpm/rhel/amdgpu-install-internal-7.0_9-1.noarch.rpm && \
+    yum install -y ./amdgpu-install-internal-7.0_9-1.noarch.rpm || rpm -ivh ./amdgpu-install-internal-7.0_9-1.noarch.rpm && \
+    rm amdgpu-install-internal-7.0_9-1.noarch.rpm
+
+# Update amdgpu-repo with specific builds
+RUN amdgpu-repo --amdgpu-build=2247890 --rocm-build=compute-rocm-rel-7.0-meta/7
+
+# Update ROCm runtime components
+RUN yum update -y --skip-broken \
+    rocm-hip \
+    rocm-libs \
+    rocm-hip-libraries \
+    rocm-hip-runtime-devel \
+    hip-base \
+    hip-dev \
+    hip-runtime-amd \
+    rocm-core || echo "Updated available ROCm packages"
+
+# Clone and build RCCL warp_speed_v1 branch
+WORKDIR /opt
+
+# Clone RCCL repository and checkout warp_speed_v1 branch
+RUN git clone --recursive https://github.com/mustafabar/rccl.git && \
+    cd rccl && \
+    git checkout warp_speed_v1 && \
+    git submodule update --init --recursive --depth=1
+
+# Build RCCL with specified flags
+WORKDIR /opt/rccl
+RUN ./install.sh -l -i --prefix=/opt/rccl-warpspeed
+
+# Set environment variables for RCCL
+ENV ROCM_HOME=/opt/rocm
+ENV RCCL_ROOT=/opt/rccl-warpspeed
+ENV PATH=$ROCM_HOME/bin:$RCCL_ROOT/bin:$PATH
+ENV LD_LIBRARY_PATH=$RCCL_ROOT/lib:$ROCM_HOME/lib:$LD_LIBRARY_PATH
+ENV LIBRARY_PATH=$RCCL_ROOT/lib:$LIBRARY_PATH
+ENV C_INCLUDE_PATH=$RCCL_ROOT/include:$C_INCLUDE_PATH
+ENV CPLUS_INCLUDE_PATH=$RCCL_ROOT/include:$CPLUS_INCLUDE_PATH
+ENV CMAKE_PREFIX_PATH=$RCCL_ROOT:$CMAKE_PREFIX_PATH
+
+# Set working directory
+WORKDIR /workspace
+
+# Add metadata for image identification
+LABEL maintainer="your-email@example.com" \
+      description="ROCm 7.0_9-1 with RCCL warp_speed_v1 branch" \
+      rccl.version="warp_speed_v1" \
+      rccl.build.flags="-l" \
+      rocm.version="7.0_9-1"
+
+CMD ["/bin/bash"]
