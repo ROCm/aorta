@@ -1,0 +1,10 @@
+# Dependencies for local analysis and processing scripts
+# (Training dependencies are managed in Docker - see docker/Dockerfile.*)
+# Install with: pip install -r requirements.txt
+
+# For analysis scripts
+pyyaml>=6.0
+matplotlib>=3.7.0
+
+# For trace processing (merge_gpu_trace_ranks.py, etc.)
+# No additional deps - uses only Python standard library (json, argparse, pathlib)
