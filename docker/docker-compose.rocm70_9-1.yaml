@@ -1,7 +1,9 @@
 services:
-  torchenv:
-    container_name: training-overlap-bugs
-    image: ${TORCH_IMAGE:-rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly}
+  torchenv-rocm70:
+    container_name: training-overlap-bugs-rocm70
+    build:
+      context: .
+      dockerfile: Dockerfile.rocm70
     user: root
     privileged: true
     network_mode: host
