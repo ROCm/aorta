@@ -40,6 +40,13 @@ RUN git clone --recursive https://github.com/mustafabar/rccl.git && \
 WORKDIR /opt/rccl
 RUN ./install.sh -l -i --prefix=/opt/rccl-warpspeed
 
+# Verify RCCL installation and branch
+RUN echo "===== RCCL Build Verification =====" && \
+    git log --oneline -1 && \
+    git branch --show-current && \
+    ls -la /opt/rccl-warpspeed/lib/librccl.so* && \
+    echo "===== Build Complete ====="
+
 # Set environment variables for RCCL
 ENV ROCM_HOME=/opt/rocm
 ENV RCCL_ROOT=/opt/rccl-warpspeed
