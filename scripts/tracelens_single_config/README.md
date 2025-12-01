@@ -36,11 +36,32 @@ Analysis scripts only process trace files and don't need RCCL. Run in your Pytho
 ## Quick Start
 
 ### Step 1: Generate traces (MUST run inside Docker container)
+
+The script automatically sets RCCL warp_speed environment variables for each configuration:
+
+**Configuration 1: 56 CUs, 256 threads**
+- `RCCL_WARP_SPEED_ENABLE=1`
+- `RCCL_UNROLL_FACTOR=1`
+- `RCCL_WARP_SPEED_CU_COUNT=56`
+- `RCCL_THREADS_PER_BLOCK=256`
+
+**Configuration 2: 37 CUs, 384 threads**
+- `RCCL_WARP_SPEED_ENABLE=1`
+- `RCCL_UNROLL_FACTOR=1`
+- `RCCL_WARP_SPEED_CU_COUNT=37`
+- `RCCL_THREADS_PER_BLOCK=384`
+
+**Configuration 3: 32 CUs, 512 threads**
+- `RCCL_WARP_SPEED_ENABLE=1`
+- `RCCL_UNROLL_FACTOR=1`
+- `RCCL_WARP_SPEED_CU_COUNT=32`
+- `RCCL_THREADS_PER_BLOCK=512`
+
 ```bash
-# Default configurations (56cu/256threads, 37cu/384threads, 32cu/512threads)
+# Run with default 3 configurations above
 ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh
 
-# Or specify custom configurations
+# Or specify custom CU,thread pairs
 ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh -p "56,256 37,384 32,512"
 ```
 
@@ -99,10 +120,49 @@ python scripts/tracelens_single_config/run_full_analysis.py \
   --all --skip-tracelens
 ```
 
-Each comparison generates:
-- `gpu_timeline_comparison.xlsx` - GPU kernel analysis with deltas
-- `collective_comparison.xlsx` - RCCL operation analysis with deltas
-- `final_analysis_report.xlsx` - Comprehensive report with dashboard
+Each comparison generates multiple Excel files:
+
+**Individual Comparison Files:**
+- `gpu_timeline_combined.xlsx` - Raw GPU timeline data (baseline + test)
+- `gpu_timeline_comparison.xlsx` - GPU kernel analysis with deltas and color coding
+- `collective_combined.xlsx` - Raw collective operations data (baseline + test)
+- `collective_comparison.xlsx` - RCCL collective operations analysis with deltas
+
+**Comprehensive Report (ALL-IN-ONE):**
+- `final_analysis_report.xlsx` - **Complete analysis with:**
+  - Summary Dashboard (first sheet with key metrics)
+  - All comparison sheets from above files
+  - Color coding (green=better, red=worse)
+  - Excel tables with filters
+  - Raw data sheets (hidden but accessible)
+
+**Recommended:** Use `final_analysis_report.xlsx` as it contains everything in one file.
+
+### Tabs in final_analysis_report.xlsx:
+
+**1. Summary_Dashboard** (First Sheet)
+- Key metrics at a glance
+- Baseline vs Test comparison
+- Improvement percentages
+- Status indicators (Better/Worse/Similar)
+
+**2. GPU_Summary_Cmp**
+- GPU kernel summary comparison
+- Overall GPU timeline metrics with deltas
+
+**3. GPU_ByRank_Cmp**
+- GPU kernel comparison broken down by rank
+- Per-rank GPU performance analysis
+
+**4. NCCL_ImplSync_Cmp**
+- NCCL implicit synchronization comparison
+- Communication overhead analysis
+
+**5. NCCL_Long_Cmp**
+- Detailed NCCL operations comparison
+- Long-form collective operations analysis
+
+Note: Additional raw data sheets are hidden but can be unhidden in Excel (right-click any tab → Unhide).
 
 ## Output Structure
 
