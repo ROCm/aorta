@@ -72,6 +72,45 @@ This captures a profiler trace file locally
 3. On ROCm systems, verify `rocm-smi` and `rocminfo` are in `$PATH`.
 4. Run entrypoints (`train.py`, `analysis/overlap_report.py`) from the repository root so their bundled path bootstrapper can locate the `src/` package.
 
+## Code Quality with Pre-commit
+
+This repository uses pre-commit hooks to ensure code quality. All pull requests must pass these checks.
+
+### Installing Pre-commit Hooks
+
+After cloning the repository, install the pre-commit hooks:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+### What Gets Checked
+
+The pre-commit hooks automatically check for:
+
+- Trailing whitespace removal
+- End-of-file fixes
+- YAML syntax validation
+
+### Running Checks Manually
+
+To run all checks on your changes before committing:
+
+```bash
+pre-commit run --all-files
+```
+
+Or run checks only on staged files:
+
+```bash
+pre-commit run
+```
+
+### CI Enforcement
+
+All pull requests are automatically checked by CI. If the checks fail, you must fix the issues before merging. Run the checks locally to catch issues early.
+
 ## Tuning Sweep
 ![sweep](./docs/param_sweep.png)
 ## Running the Benchmark
