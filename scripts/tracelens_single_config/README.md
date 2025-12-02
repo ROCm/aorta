@@ -1,202 +1,106 @@
-# TraceLens Single Configuration
+# RCCL Warp Speed Performance Testing
 
-Compare PyTorch profiler traces across RCCL configurations.
+Test RCCL warp_speed_v1 branch performance with distributed training.
 
-## Prerequisites
+## Goal
 
-### For Step 1 (Training/Trace Generation) - Docker Required
+Test the specific `warp_speed_v1` branch of RCCL from https://github.com/mustafabar/rccl.git
 
-Training scripts require RCCL warp_speed_v1, so Step 1 must run inside the Docker container:
+## Setup
 
+### Step 1: Start Container
 ```bash
-# Start the RCCL warp_speed_v1 Docker container
-cd /home/oyazdanb/aorta/docker
-docker compose -f docker-compose.rccl-warpspeed.yaml up -d
-
-# Enter the container
-docker compose -f docker-compose.rccl-warpspeed.yaml exec rccl-warpspeed bash
-
-# IMPORTANT: Verify you're using RCCL warp_speed_v1 (3 quick checks)
-echo "1. RCCL Path: $RCCL_ROOT"  # Should show: /opt/rccl-warpspeed
-ls -la /opt/rccl-warpspeed/lib/librccl.so 2>/dev/null && echo "   [OK] RCCL library found"
-echo "2. Branch:" && git -C /opt/rccl branch --show-current 2>/dev/null  # Should show: warp_speed_v1
-echo "3. Library priority:" && echo $LD_LIBRARY_PATH | grep -o '^[^:]*'  # Should start with /opt/rccl-warpspeed/lib
-
-# For detailed verification, run:
-# ./scripts/tracelens_single_config/verify_rccl.sh
-
-# Now move to workspace
-cd /workspace/aorta
+cd docker
+docker compose -f docker-compose.rocm70_9-1.yaml build  # First time only
+docker compose -f docker-compose.rocm70_9-1.yaml up -d
+docker compose -f docker-compose.rocm70_9-1.yaml exec torchenv-rocm70 bash
 ```
 
-### For Steps 2-3 (Analysis) - Python venv
-
-Analysis scripts only process trace files and don't need RCCL. Run in your Python virtual environment (e.g., `~/venvs/aorta`).
-
-## Quick Start
-
-### Step 1: Generate traces (MUST run inside Docker container)
-
-The script automatically sets RCCL warp_speed environment variables for each configuration:
-
-**Configuration 1: 56 CUs, 256 threads**
-- `RCCL_WARP_SPEED_ENABLE=1`
-- `RCCL_UNROLL_FACTOR=1`
-- `RCCL_WARP_SPEED_CU_COUNT=56`
-- `RCCL_THREADS_PER_BLOCK=256`
-
-**Configuration 2: 37 CUs, 384 threads**
-- `RCCL_WARP_SPEED_ENABLE=1`
-- `RCCL_UNROLL_FACTOR=1`
-- `RCCL_WARP_SPEED_CU_COUNT=37`
-- `RCCL_THREADS_PER_BLOCK=384`
-
-**Configuration 3: 32 CUs, 512 threads**
-- `RCCL_WARP_SPEED_ENABLE=1`
-- `RCCL_UNROLL_FACTOR=1`
-- `RCCL_WARP_SPEED_CU_COUNT=32`
-- `RCCL_THREADS_PER_BLOCK=512`
-
+### Step 2: Build RCCL warp_speed_v1 Branch (First Time Only)
 ```bash
-# Run with default 3 configurations above
+# Inside container - check if already built
+if [ -f /opt/rccl/build/release/librccl.so ]; then
+    echo "RCCL already built"
+    cd /opt/rccl && git log --oneline -1
+else
+    # Build warp_speed_v1 branch
+    cd /opt
+    git clone --recursive https://github.com/mustafabar/rccl.git
+    cd rccl
+    git checkout warp_speed_v1
+    ./install.sh -l --amdgpu_targets=gfx942
+fi
+```
+
+This builds RCCL at: `/opt/rccl/build/release/`
+
+### Step 3: Verify Using warp_speed_v1
+```bash
+# Check we have the right branch
+cd /opt/rccl && git branch --show-current  # Should show: warp_speed_v1
+
+# Verify library exists
+ls -lh /opt/rccl/build/release/librccl.so*
+```
+
+### Step 4: Run Tests (Inside Container)
+```bash
+cd /workspace/aorta
+
+# The script sets LD_LIBRARY_PATH to use custom RCCL
+# and exports warp_speed environment variables
+
+# Run with default 3 configurations
 ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh
 
-# Or specify custom CU,thread pairs
+# Or custom configurations
 ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh -p "56,256 37,384 32,512"
 ```
 
-Output: `experiments/rccl_warp_speed_YYYYMMDD_HHMMSS/`
-- `56cu_256threads/`
-- `37cu_384threads/`
-- `32cu_512threads/`
+The script automatically:
+- Sets `LD_LIBRARY_PATH=/opt/rccl/build/release:$LD_LIBRARY_PATH`
+- Exports RCCL_WARP_SPEED_ENABLE=1
+- Sets RCCL_WARP_SPEED_CU_COUNT and RCCL_THREADS_PER_BLOCK
 
-After traces are generated, exit the Docker container:
+### Step 5: Generate Reports (Outside Container)
 ```bash
+# Exit container
 exit
-# Optionally stop the container
-docker compose -f docker-compose.rccl-warpspeed.yaml down
-```
 
-### Step 2: Generate individual and collective reports (in Python venv)
-```bash
-# Activate your Python virtual environment (e.g., ~/venvs/aorta)
+# Activate Python environment
 source ~/venvs/aorta/bin/activate
+cd /path/to/aorta
 
-# Run for each configuration to generate needed reports
-./scripts/tracelens_single_config/run_tracelens_single_config.sh experiments/rccl_warp_speed_20251120_212921/56cu_256threads
-./scripts/tracelens_single_config/run_tracelens_single_config.sh experiments/rccl_warp_speed_20251120_212921/37cu_384threads
-./scripts/tracelens_single_config/run_tracelens_single_config.sh experiments/rccl_warp_speed_20251120_212921/32cu_512threads
-```
-Replace the timestamp with your actual output directory from Step 1.
+# Replace with your test directory
+TESTDIR=rccl_warp_speed_20251202_151333
 
-This generates individual and collective reports needed for comparison.
+# Generate individual reports
+./scripts/tracelens_single_config/run_tracelens_single_config.sh experiments/${TESTDIR}/56cu_256threads
+./scripts/tracelens_single_config/run_tracelens_single_config.sh experiments/${TESTDIR}/37cu_384threads
 
-### Step 3: Compare the 3 configurations (in venv)
-
-**Compare 56cu (baseline) vs 37cu:**
-```bash
+# Compare configurations
 python scripts/tracelens_single_config/run_full_analysis.py \
-  --baseline experiments/rccl_warp_speed_20251120_212921/56cu_256threads \
-  --test experiments/rccl_warp_speed_20251120_212921/37cu_384threads \
-  --output comparison_56cu_vs_37cu \
+  --baseline experiments/${TESTDIR}/56cu_256threads \
+  --test experiments/${TESTDIR}/37cu_384threads \
+  --output comparison_results \
   --all --skip-tracelens
 ```
 
-**Compare 56cu (baseline) vs 32cu:**
+## Important Notes
+
+- **We ARE using the custom-built warp_speed_v1 branch**, not PyTorch's bundled RCCL
+- The custom RCCL is built inside the container to avoid library compatibility issues
+- LD_LIBRARY_PATH prioritizes the custom build over PyTorch's bundled version
+- Even though PyTorch reports "NCCL 2.27.7", the warp_speed features come from our custom build
+
+## Test Different RCCL Branches
+
+Inside container:
 ```bash
-python scripts/tracelens_single_config/run_full_analysis.py \
-  --baseline experiments/rccl_warp_speed_20251120_212921/56cu_256threads \
-  --test experiments/rccl_warp_speed_20251120_212921/32cu_512threads \
-  --output comparison_56cu_vs_32cu \
-  --all --skip-tracelens
+cd /opt/rccl
+git fetch origin
+git checkout develop  # or another branch
+git pull
+./install.sh -l --amdgpu_targets=gfx942
+# Run tests again
 ```
-
-**Compare 37cu (baseline) vs 32cu:**
-```bash
-python scripts/tracelens_single_config/run_full_analysis.py \
-  --baseline experiments/rccl_warp_speed_20251120_212921/37cu_384threads \
-  --test experiments/rccl_warp_speed_20251120_212921/32cu_512threads \
-  --output comparison_37cu_vs_32cu \
-  --all --skip-tracelens
-```
-
-Each comparison generates multiple Excel files:
-
-**Individual Comparison Files:**
-- `gpu_timeline_combined.xlsx` - Raw GPU timeline data (baseline + test)
-- `gpu_timeline_comparison.xlsx` - GPU kernel analysis with deltas and color coding
-- `collective_combined.xlsx` - Raw collective operations data (baseline + test)
-- `collective_comparison.xlsx` - RCCL collective operations analysis with deltas
-
-**Comprehensive Report (ALL-IN-ONE):**
-- `final_analysis_report.xlsx` - **Complete analysis with:**
-  - Summary Dashboard (first sheet with key metrics)
-  - All comparison sheets from above files
-  - Color coding (green=better, red=worse)
-  - Excel tables with filters
-  - Raw data sheets (hidden but accessible)
-
-**Recommended:** Use `final_analysis_report.xlsx` as it contains everything in one file.
-
-### Tabs in final_analysis_report.xlsx:
-
-**1. Summary_Dashboard** (First Sheet)
-- Key metrics at a glance
-- Baseline vs Test comparison
-- Improvement percentages
-- Status indicators (Better/Worse/Similar)
-
-**2. GPU_Summary_Cmp**
-- GPU kernel summary comparison
-- Overall GPU timeline metrics with deltas
-
-**3. GPU_ByRank_Cmp**
-- GPU kernel comparison broken down by rank
-- Per-rank GPU performance analysis
-
-**4. NCCL_ImplSync_Cmp**
-- NCCL implicit synchronization comparison
-- Communication overhead analysis
-
-**5. NCCL_Long_Cmp**
-- Detailed NCCL operations comparison
-- Long-form collective operations analysis
-
-Note: Additional raw data sheets are hidden but can be unhidden in Excel (right-click any tab → Unhide).
-
-## Output Structure
-
-After Step 1:
-```
-experiments/rccl_warp_speed_*/
-├── 56cu_256threads/
-│   └── torch_profiler/rank*/trace.json
-├── 37cu_384threads/
-│   └── torch_profiler/rank*/trace.json
-└── 32cu_512threads/
-    └── torch_profiler/rank*/trace.json
-```
-
-After Step 2:
-```
-experiments/rccl_warp_speed_*/tracelens_analysis/
-├── individual_reports/
-│   ├── rank0_individual_report.xlsx
-│   └── ...
-├── collective_reports/
-│   └── collective_all_ranks.xlsx
-└── comparison_report.xlsx
-```
-
-## Notes
-
-- **Step 1** (training) must be run inside the Docker container
-- **Steps 2-3** (analysis) should be run outside Docker in your Python venv
-  - Optional: You can also run analysis inside Docker if you prefer
-- Each run takes approximately 5 minutes per configuration
-- Results are saved as timestamped directories
-- All reports are in Excel format with color-coded comparisons
-- After Step 1, stop the Docker container (unless running analysis inside):
-  ```bash
-  docker compose -f docker-compose.rccl-warpspeed.yaml down
-  ```
