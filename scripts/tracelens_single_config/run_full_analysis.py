@@ -63,22 +63,30 @@ def combine_reports(baseline_file, test_file, output_file):
     return run_command(cmd, f"Combining reports to {output_file}")
 
 
-def add_comparison_sheets(input_file, output_file):
+def add_comparison_sheets(input_file, output_file, baseline_label=None, test_label=None):
     """Add comparison sheets for GPU timeline."""
     script_path = Path(__file__).parent / "add_comparison_sheets.py"
     cmd = ["python3", str(script_path),
            "--input", input_file,
            "--output", output_file]
+    if baseline_label:
+        cmd.extend(["--baseline-label", baseline_label])
+    if test_label:
+        cmd.extend(["--test-label", test_label])
 
     return run_command(cmd, "Adding GPU timeline comparison sheets")
 
 
-def add_collective_comparison(input_file, output_file):
+def add_collective_comparison(input_file, output_file, baseline_label=None, test_label=None):
     """Add comparison sheets for collective operations."""
     script_path = Path(__file__).parent / "add_collective_comparison.py"
     cmd = ["python3", str(script_path),
            "--input", input_file,
            "--output", output_file]
+    if baseline_label:
+        cmd.extend(["--baseline-label", baseline_label])
+    if test_label:
+        cmd.extend(["--test-label", test_label])
 
     return run_command(cmd, "Adding collective comparison sheets")
 
@@ -218,10 +226,16 @@ Examples:
         print("Run without --skip-tracelens flag first")
         return 1
 
+    # Extract config labels from paths
+    baseline_label = baseline_path.name  # e.g., "56cu_256threads"
+    test_label = test_path.name  # e.g., "37cu_384threads"
+
     # Step 2: GPU Timeline Comparison
     if args.gpu_timeline:
         print("\n" + "="*80)
         print("STEP 2: GPU Timeline Comparison")
+        print(f"  Baseline: {baseline_label}")
+        print(f"  Test: {test_label}")
         print("="*80)
 
         # Process GPU timelines
@@ -232,11 +246,11 @@ Examples:
             print("Error: Individual reports not found. Run without --individual-only flag")
             return 1
 
-        print("\nProcessing baseline GPU timeline...")
+        print(f"\nProcessing baseline GPU timeline ({baseline_label})...")
         if not process_gpu_timeline(str(baseline_reports)):
             return 1
 
-        print("\nProcessing test GPU timeline...")
+        print(f"\nProcessing test GPU timeline ({test_label})...")
         if not process_gpu_timeline(str(test_reports)):
             return 1
 
@@ -250,7 +264,7 @@ Examples:
 
         # Add comparison sheets
         gpu_comparison = output_path / "gpu_timeline_comparison.xlsx"
-        if not add_comparison_sheets(str(combined_gpu), str(gpu_comparison)):
+        if not add_comparison_sheets(str(combined_gpu), str(gpu_comparison), baseline_label, test_label):
             return 1
 
         print(f"\nGPU timeline comparison saved to: {gpu_comparison}")
@@ -259,6 +273,8 @@ Examples:
     if args.collective:
         print("\n" + "="*80)
         print("STEP 3: Collective/NCCL Comparison")
+        print(f"  Baseline: {baseline_label}")
+        print(f"  Test: {test_label}")
         print("="*80)
 
         baseline_collective = baseline_analysis / "collective_reports" / "collective_all_ranks.xlsx"
@@ -277,7 +293,7 @@ Examples:
         # Add collective comparison
         collective_comparison = output_path / "collective_comparison.xlsx"
         if not add_collective_comparison(str(combined_collective),
-                                        str(collective_comparison)):
+                                        str(collective_comparison), baseline_label, test_label):
             return 1
 
         print(f"\nCollective comparison saved to: {collective_comparison}")
