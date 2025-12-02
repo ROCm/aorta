@@ -54,7 +54,7 @@ cd /workspace/aorta
 ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh
 
 # Or custom configurations
-./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh -p "56,256 37,384 32,512"
+./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh -c ./config/single_node/gemm_overlap_comm.yaml -p "56,256 37,384 32,512"
 ```
 
 The script automatically:
