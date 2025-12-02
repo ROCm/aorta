@@ -96,6 +96,61 @@ log "Config file: ${CONFIG_FILE}"
 log "Results directory: ${BASE_OUTPUT_DIR}"
 echo ""
 
+# Check RCCL version and configuration
+echo -e "${BLUE}=== RCCL Version Check ===${NC}" | tee -a "${SWEEP_LOG}"
+
+# Check if custom RCCL is available
+if [ -d "/opt/rccl/build/release" ]; then
+    echo -e "${GREEN}[OK] Custom RCCL found at /opt/rccl/build/release${NC}" | tee -a "${SWEEP_LOG}"
+
+    # Check branch and commit
+    if [ -d "/opt/rccl/.git" ]; then
+        cd /opt/rccl
+        RCCL_BRANCH=$(git branch --show-current 2>/dev/null)
+        RCCL_COMMIT=$(git log --oneline -1 2>/dev/null)
+        cd - > /dev/null
+
+        echo "  Branch: ${RCCL_BRANCH}" | tee -a "${SWEEP_LOG}"
+        echo "  Commit: ${RCCL_COMMIT}" | tee -a "${SWEEP_LOG}"
+
+        # Verify it's warp_speed_v1
+        if [[ "${RCCL_BRANCH}" == "warp_speed_v1" ]]; then
+            echo -e "  ${GREEN}[OK] Using warp_speed_v1 branch${NC}" | tee -a "${SWEEP_LOG}"
+        else
+            echo -e "  ${YELLOW}[WARNING] Not on warp_speed_v1 branch (current: ${RCCL_BRANCH})${NC}" | tee -a "${SWEEP_LOG}"
+        fi
+    fi
+
+    # Check library size to verify it's built
+    RCCL_LIB_SIZE=$(ls -lh /opt/rccl/build/release/librccl.so.1.0 2>/dev/null | awk '{print $5}')
+    echo "  Library size: ${RCCL_LIB_SIZE}" | tee -a "${SWEEP_LOG}"
+else
+    echo -e "${YELLOW}[WARNING] Custom RCCL not found, will use PyTorch bundled version${NC}" | tee -a "${SWEEP_LOG}"
+    echo "  PyTorch's bundled RCCL may not have warp_speed features!" | tee -a "${SWEEP_LOG}"
+fi
+
+# Test if RCCL responds to warp_speed environment variables
+echo "" | tee -a "${SWEEP_LOG}"
+echo "Testing warp_speed environment variable response..." | tee -a "${SWEEP_LOG}"
+export RCCL_WARP_SPEED_ENABLE=1
+export RCCL_WARP_SPEED_CU_COUNT=56
+export NCCL_DEBUG=VERSION
+
+python -c "
+import torch
+print('PyTorch version:', torch.__version__)
+if torch.cuda.is_available():
+    print('ROCm/CUDA available:', True)
+    print('Device count:', torch.cuda.device_count())
+" 2>&1 | tee -a "${SWEEP_LOG}"
+
+# Clean up test variables
+unset RCCL_WARP_SPEED_CU_COUNT
+unset NCCL_DEBUG
+
+echo -e "${BLUE}===========================${NC}" | tee -a "${SWEEP_LOG}"
+echo ""
+
 # Define configurations to test
 # Format: "NAME|CU_COUNT|THREADS_PER_BLOCK"
 if [ -n "$CUSTOM_PAIRS" ]; then
@@ -139,13 +194,21 @@ for config in "${CONFIGS[@]}"; do
     # Record start time
     START_TIME=$(date +%s)
 
-    # Set environment variables and run
-    RCCL_WARP_SPEED_ENABLE=1 \
-    RCCL_UNROLL_FACTOR=1 \
-    RCCL_WARP_SPEED_CU_COUNT=${CU_COUNT} \
-    RCCL_THREADS_PER_BLOCK=${THREADS} \
-    HSA_ENABLE_SDMA=0 \
-    PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1 \
+    # Export environment variables so child processes inherit them
+    export RCCL_WARP_SPEED_ENABLE=1
+    export RCCL_UNROLL_FACTOR=1
+    export RCCL_WARP_SPEED_CU_COUNT=${CU_COUNT}
+    export RCCL_THREADS_PER_BLOCK=${THREADS}
+    export HSA_ENABLE_SDMA=0
+    export PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1
+
+    # Use custom RCCL if available
+    if [ -d "/opt/rccl/build/release" ]; then
+        export LD_LIBRARY_PATH=/opt/rccl/build/release:${LD_LIBRARY_PATH:-}
+        log "  Using custom RCCL from /opt/rccl/build/release"
+    fi
+
+    # Run the command
     ${BASE_CMD} ${BASE_OVERRIDES} \
         --override training.output_dir=${OUTPUT_DIR} \
         2>&1 | tee "${OUTPUT_DIR}/run_output.log"
@@ -153,6 +216,10 @@ for config in "${CONFIGS[@]}"; do
     EXIT_CODE=${PIPESTATUS[0]}
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
+
+    # Unset environment variables to avoid affecting next run
+    unset RCCL_WARP_SPEED_CU_COUNT
+    unset RCCL_THREADS_PER_BLOCK
 
     RUN_TIMES[${NAME}]=${DURATION}
 

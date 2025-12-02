@@ -273,6 +273,7 @@ def build_ddp_model(
     if device.type == "cuda":
         device_ids = [device.index if device.index is not None else torch.cuda.current_device()]
 
+    print(f"===> {device_ids} {model}")
     ddp_model = DDP(
         model,
         device_ids=device_ids,
@@ -735,6 +736,7 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
         training_cfg.max_steps or training_cfg.epochs * len(dataloader),
     )
 
+    print(f"Calling main trainer with device {env['device']}")
     profiler = StreamProfiler(env["device"])
 
     try:
