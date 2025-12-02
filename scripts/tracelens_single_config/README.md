@@ -14,18 +14,24 @@ pip install pandas openpyxl matplotlib seaborn numpy
 
 ```bash
 cd docker
-docker compose -f docker-compose.rocm70_9-1.yaml build
-docker compose -f docker-compose.rocm70_9-1.yaml up -d
-docker compose -f docker-compose.rocm70_9-1.yaml exec torchenv-rocm70 bash
+docker-compose -f docker-compose.rocm70_9-1.yaml build
+docker-compose -f docker-compose.rocm70_9-1.yaml up -d
+docker-compose -f docker-compose.rocm70_9-1.yaml exec torchenv-rocm70 bash
 
-# Inside container - build warp_speed_v1 (first time only)
-if [ ! -f /opt/rccl/build/release/librccl.so ]; then
-    cd /opt
+# Inside container - build warp_speed_v1 (always rebuild)
+# Note: Set --amdgpu_targets to match your GPU architecture
+# Run 'rocminfo | grep gfx' to find your GPU target (e.g., gfx942, gfx950)
+cd /opt
+if [ -d "rccl" ]; then
+    cd rccl
+    git checkout warp_speed_v1
+    git pull
+else
     git clone --recursive https://github.com/mustafabar/rccl.git
     cd rccl
     git checkout warp_speed_v1
-    ./install.sh -l --amdgpu_targets=gfx942
 fi
+./install.sh -l --amdgpu_targets=gfx950
 
 cd /workspace/aorta
 ```
@@ -37,7 +43,7 @@ cd /workspace/aorta
 ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh
 
 # Custom configurations (CU_count,threads pairs)
-./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh -p "56,256 37,384 32,512"
+./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh -p "56,256 37,384 32,512" -c ./config/single_node/gemm_overlap_comm.yaml
 ```
 
 Output structure:
