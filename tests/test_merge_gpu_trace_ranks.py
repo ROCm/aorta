@@ -46,7 +46,7 @@ def temp_trace_dir():
         for rank in range(2):
             rank_dir = trace_dir / f'rank{rank}'
             rank_dir.mkdir()
-            with open(rank_dir / 'trace_step19.json', 'w') as f:
+            with open(rank_dir / 'trace_final.json', 'w') as f:
                 json.dump(mock_data, f)
 
         yield trace_dir
@@ -59,7 +59,8 @@ def test_basic_merge_works(temp_trace_dir):
     result = merge_gpu_traces(
         trace_dir=str(temp_trace_dir),
         output_file=str(output_file),
-        num_ranks=2
+        num_ranks=2,
+        trace_name='trace_final.json'
     )
 
     # Should succeed and create output file
@@ -82,7 +83,8 @@ def test_missing_ranks_handled(temp_trace_dir):
     result = merge_gpu_traces(
         trace_dir=str(temp_trace_dir),
         output_file=str(output_file),
-        num_ranks=2
+        num_ranks=2,
+        trace_name='trace_final.json'
     )
 
     # Should still succeed
