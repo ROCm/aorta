@@ -91,7 +91,7 @@ def add_collective_comparison(input_file, output_file, baseline_label=None, test
     return run_command(cmd, "Adding collective comparison sheets")
 
 
-def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_comparison, output_file):
+def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_comparison, output_file, baseline_label=None, test_label=None):
     """Create comprehensive final report with all data."""
     script_path = Path(__file__).parent / "create_final_report.py"
     cmd = ["python3", str(script_path),
@@ -100,6 +100,11 @@ def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_compar
            "--coll-combined", coll_combined,
            "--coll-comparison", coll_comparison,
            "--output", output_file]
+
+    if baseline_label:
+        cmd.extend(["--baseline-label", baseline_label])
+    if test_label:
+        cmd.extend(["--test-label", test_label])
 
     return run_command(cmd, "Creating comprehensive final report")
 
@@ -131,6 +136,7 @@ Examples:
     --output /path/to/output \\
     --gpu-timeline --collective --final-report \\
     --skip-tracelens
+
         """
     )
 
@@ -157,8 +163,10 @@ Examples:
                        help='Perform collective/NCCL comparison')
     parser.add_argument('--final-report', action='store_true',
                        help='Create comprehensive final report with tables and hidden raw data')
+    parser.add_argument('--generate-plots', action='store_true',
+                       help='Generate visualization plots and HTML report from final report')
     parser.add_argument('--all', action='store_true',
-                       help='Perform all analyses and comparisons including final report')
+                       help='Perform all analyses and comparisons including final report, plots, and HTML report')
 
     args = parser.parse_args()
 
@@ -167,6 +175,7 @@ Examples:
         args.gpu_timeline = True
         args.collective = True
         args.final_report = True
+        args.generate_plots = True
 
     # Validate inputs
     baseline_path = Path(args.baseline)
@@ -312,7 +321,7 @@ Examples:
 
         if not create_final_report(str(gpu_combined), str(gpu_comparison),
                                   str(collective_combined), str(collective_comparison),
-                                  str(final_report)):
+                                  str(final_report), baseline_label, test_label):
             return 1
 
         print(f"\nFinal comprehensive report saved to: {final_report}")
@@ -322,6 +331,38 @@ Examples:
         print("  - All data formatted as Excel tables with filters")
         print("  - Color coding applied (green=better, red=worse)")
 
+    # Step 5: Generate visualization plots
+    if args.generate_plots and args.final_report:
+        print("\n" + "="*80)
+        print("STEP 5: Generating Visualization Plots")
+        print("="*80)
+
+        final_report = output_path / "final_analysis_report.xlsx"
+        plots_dir = output_path / "plots"
+
+        if final_report.exists():
+            script_path = Path(__file__).parent / "generate_enhanced_plots.py"
+            cmd = ["python3", str(script_path),
+                   "--input", str(final_report),
+                   "--output", str(plots_dir)]
+
+            # The script generates HTML report by default
+            if run_command(cmd, "Generating visualization plots and HTML report"):
+                print(f"\nOutput saved to: {plots_dir}/")
+                print("\n  Generated plots:")
+                print("    - Percentage Change Overview")
+                print("    - Absolute Time Comparison")
+                print("    - Performance Heatmap by Rank")
+                print("    - Total Execution Time by Rank")
+                print("    - Time Breakdown by Rank")
+                print("    - Percentage Breakdown by Rank")
+                print("    - NCCL/Collective Metrics")
+                print("\n  HTML Report: plots/performance_analysis_report.html")
+                print("    - Open in browser to view complete report")
+                print("    - Print to PDF: Ctrl+P (or Cmd+P on Mac)")
+        else:
+            print("  Final report not found, skipping plot generation")
+
     # Summary
     print("\n" + "="*80)
     print("ANALYSIS COMPLETE!")
@@ -330,9 +371,18 @@ Examples:
 
     files = list(output_path.glob("*.xlsx"))
     if files:
-        print("\nGenerated files:")
+        print("\nGenerated Excel files:")
         for f in sorted(files):
             print(f"  - {f.name}")
+
+    if args.generate_plots:
+        plots_dir = output_path / "plots"
+        if plots_dir.exists():
+            plot_files = list(plots_dir.glob("*.png"))
+            if plot_files:
+                print("\nGenerated plots:")
+                for f in sorted(plot_files):
+                    print(f"  - plots/{f.name}")
 
     print("\nAnalysis pipeline completed successfully!")
     return 0

@@ -36,7 +36,7 @@ def combine_collective_reports(baseline_path, test_path, output_path):
             print(f"  Combined {sheet_name}: {len(baseline_df)} + {len(test_df)} = {len(combined)} rows")
 
     print(f"\nSaved: {output_path}")
-    return baseline_label, test_label  # Return the labels for use in other functions
+    return 0  # Return success code
 
 
 def main():
