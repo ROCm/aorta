@@ -231,6 +231,11 @@ for config in "${CONFIGS[@]}"; do
         RUN_STATUS[${NAME}]="FAILED"
     fi
 
+    # Fix permissions if running as root in container
+    if [ "$EUID" -eq 0 ]; then
+        chmod -R 755 "${OUTPUT_DIR}" 2>/dev/null || true
+    fi
+
     echo ""
     log "Waiting 5 seconds before next run..."
     sleep 5
@@ -272,6 +277,12 @@ SUMMARY_FILE="${BASE_OUTPUT_DIR}/rccl_warp_speed_summary_${TIMESTAMP}.txt"
 } | tee "${SUMMARY_FILE}"
 
 log "Summary saved to: ${SUMMARY_FILE}"
+
+# Fix permissions for the entire output directory if running as root
+if [ "$EUID" -eq 0 ]; then
+    echo "Fixing permissions for output directory..." | tee -a "${SWEEP_LOG}"
+    chmod -R 755 "${BASE_OUTPUT_DIR}" 2>/dev/null || true
+fi
 
 echo ""
 echo -e "${GREEN}========================================${NC}"

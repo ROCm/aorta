@@ -5,8 +5,10 @@ from openpyxl.styles import Color
 from openpyxl.formatting.rule import ColorScaleRule
 
 
-def add_collective_comparison_sheets(input_path, output_path):
+def add_collective_comparison_sheets(input_path, output_path, baseline_label='baseline', test_label='test'):
     print(f"Loading: {input_path}")
+    print(f"  Baseline label: {baseline_label}")
+    print(f"  Test label: {test_label}")
 
     xl = pd.ExcelFile(input_path)
 
@@ -28,11 +30,21 @@ def add_collective_comparison_sheets(input_path, output_path):
 
             df = pd.read_excel(input_path, sheet_name=sheet_name)
 
-            # Separate baseline and saleelk
-            baseline_df = df[df['source'] == 'baseline'].copy()
-            saleelk_df = df[df['source'] == 'saleelk'].copy()
+            # Get actual source values from the dataframe
+            sources = df['source'].unique()
+            # Determine which is baseline and which is test (baseline should be first)
+            if len(sources) >= 2:
+                actual_baseline = sources[0]
+                actual_test = sources[1]
+            else:
+                actual_baseline = baseline_label
+                actual_test = test_label
 
-            if len(baseline_df) == 0 or len(saleelk_df) == 0:
+            # Separate baseline and test
+            baseline_df = df[df['source'] == actual_baseline].copy()
+            test_df = df[df['source'] == actual_test].copy()
+
+            if len(baseline_df) == 0 or len(test_df) == 0:
                 print(f"  Skip {sheet_name} - missing data")
                 continue
 
@@ -46,20 +58,20 @@ def add_collective_comparison_sheets(input_path, output_path):
 
             # Group and compare
             baseline_grouped = baseline_df.groupby(group_cols, as_index=False)
-            saleelk_grouped = saleelk_df.groupby(group_cols, as_index=False)
+            test_grouped = test_df.groupby(group_cols, as_index=False)
 
             for name, base_group in baseline_grouped:
-                # Find matching saleelk group
+                # Find matching test group
                 if isinstance(name, tuple):
-                    mask = pd.Series([True] * len(saleelk_df), index=saleelk_df.index)
+                    mask = pd.Series([True] * len(test_df), index=test_df.index)
                     for col, val in zip(group_cols, name):
-                        mask = mask & (saleelk_df[col] == val)
+                        mask = mask & (test_df[col] == val)
                 else:
-                    mask = (saleelk_df[group_cols[0]] == name)
+                    mask = (test_df[group_cols[0]] == name)
 
-                sale_group = saleelk_df.loc[mask]
+                test_group = test_df.loc[mask]
 
-                if len(sale_group) == 0:
+                if len(test_group) == 0:
                     continue
 
                 # Create comparison row
@@ -77,28 +89,28 @@ def add_collective_comparison_sheets(input_path, output_path):
                                'Total comm latency (ms)', 'count']
 
                 for col in numeric_cols:
-                    if col not in base_group.columns or col not in sale_group.columns:
+                    if col not in base_group.columns or col not in test_group.columns:
                         continue
 
                     base_val = base_group[col].values[0]
-                    sale_val = sale_group[col].values[0]
+                    test_val = test_group[col].values[0]
 
-                    comp_row[f'baseline_{col}'] = base_val
-                    comp_row[f'saleelk_{col}'] = sale_val
-                    comp_row[f'diff_{col}'] = sale_val - base_val
+                    comp_row[f'{baseline_label}_{col}'] = base_val
+                    comp_row[f'{test_label}_{col}'] = test_val
+                    comp_row[f'diff_{col}'] = test_val - base_val
 
                     # For latency/time: positive percent_change means faster (less time)
                     # For bandwidth: positive percent_change means better (more bandwidth)
                     if 'latency' in col.lower() or 'time' in col.lower():
                         # Lower is better - positive when saleelk is faster
-                        pct_change = (base_val - sale_val) / base_val * 100 if base_val != 0 else 0
+                        pct_change = (base_val - test_val) / base_val * 100 if base_val != 0 else 0
                         comp_row[f'percent_change_{col}'] = pct_change
                     elif 'bw' in col.lower() or 'bandwidth' in col.lower():
                         # Higher is better - positive when saleelk is better
-                        pct_change = (sale_val - base_val) / base_val * 100 if base_val != 0 else 0
+                        pct_change = (test_val - base_val) / base_val * 100 if base_val != 0 else 0
                         comp_row[f'percent_change_{col}'] = pct_change
 
-                    comp_row[f'ratio_{col}'] = sale_val / base_val if base_val != 0 else 0
+                    comp_row[f'ratio_{col}'] = test_val / base_val if base_val != 0 else 0
 
                 comparison = pd.concat([comparison, pd.DataFrame([comp_row])], ignore_index=True)
 
@@ -146,10 +158,12 @@ def main():
     parser = argparse.ArgumentParser(description='Add comparison sheets to combined collective reports')
     parser.add_argument('--input', required=True, help='Input combined collective Excel file')
     parser.add_argument('--output', required=True, help='Output Excel file with comparison sheets')
+    parser.add_argument('--baseline-label', default='baseline', help='Label for baseline data')
+    parser.add_argument('--test-label', default='test', help='Label for test data')
 
     args = parser.parse_args()
 
-    return add_collective_comparison_sheets(args.input, args.output)
+    return add_collective_comparison_sheets(args.input, args.output, args.baseline_label, args.test_label)
 
 
 if __name__ == '__main__':

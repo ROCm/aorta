@@ -5,10 +5,14 @@ from pathlib import Path
 
 
 def combine_collective_reports(baseline_path, test_path, output_path):
-    print(f"Loading baseline: {baseline_path}")
+    # Extract folder names from paths for labels
+    baseline_label = Path(baseline_path).parent.parent.name  # Get the config folder name
+    test_label = Path(test_path).parent.parent.name  # Get the config folder name
+
+    print(f"Loading baseline ({baseline_label}): {baseline_path}")
     baseline_xl = pd.ExcelFile(baseline_path)
 
-    print(f"Loading test: {test_path}")
+    print(f"Loading test ({test_label}): {test_path}")
     test_xl = pd.ExcelFile(test_path)
 
     print(f"\nBaseline sheets: {baseline_xl.sheet_names}")
@@ -23,8 +27,8 @@ def combine_collective_reports(baseline_path, test_path, output_path):
             baseline_df = pd.read_excel(baseline_path, sheet_name=sheet_name)
             test_df = pd.read_excel(test_path, sheet_name=sheet_name)
 
-            baseline_df['source'] = 'baseline'
-            test_df['source'] = 'saleelk'
+            baseline_df['source'] = baseline_label
+            test_df['source'] = test_label
 
             combined = pd.concat([baseline_df, test_df], ignore_index=True)
 
@@ -32,7 +36,7 @@ def combine_collective_reports(baseline_path, test_path, output_path):
             print(f"  Combined {sheet_name}: {len(baseline_df)} + {len(test_df)} = {len(combined)} rows")
 
     print(f"\nSaved: {output_path}")
-    return 0
+    return baseline_label, test_label  # Return the labels for use in other functions
 
 
 def main():
