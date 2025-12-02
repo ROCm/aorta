@@ -30,7 +30,7 @@ while getopts "c:p:h" opt; do
             ;;
         h)
             echo "Usage: $0 [OPTIONS]"
-            echo "  -c CONFIG_FILE    Config file (default: config/distributed.yaml)"
+            echo "  -c CONFIG_FILE    Config file (default: config/single_node/gemm_overlap_comm.yaml)"
             echo "  -p PAIRS          CU,threads pairs (e.g., \"56,256 37,384 32,512\")"
             echo "  -h                Show help"
             echo ""
