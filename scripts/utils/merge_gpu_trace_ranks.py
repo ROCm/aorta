@@ -129,13 +129,13 @@ def merge_gpu_traces(trace_dir, output_file, num_ranks=8, trace_name='trace_step
         # Also need to map TIDs to avoid collisions when multiple old PIDs map to same new PID
         pid_mapping = {}
         tid_mapping = {}  # Maps (old_pid, old_tid) -> new_tid
-        
+
         # PID assignment scheme for organizing processes in trace viewer:
         # - GPU streams: rank * 1000 (e.g., Rank 0 = 0, Rank 1 = 1000, Rank 2 = 2000)
         #   The 1000 spacing allows each rank to have distinct PID ranges
         # - CPU/CUDA runtime: rank * 1000 + 500 (e.g., Rank 0 = 500, Rank 1 = 1500)
         #   The +500 offset separates CPU processes from GPU within each rank
-        #   This offset is used later (line 168) to distinguish process types via modulo check
+        #   This offset is used during event processing to distinguish process types via modulo check
         gpu_stream_pid = rank * 1000
         cpu_main_pid = rank * 1000 + 500
         next_gpu_tid = {}  # Counter for GPU stream TIDs per new PID
