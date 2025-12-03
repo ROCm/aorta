@@ -13,8 +13,8 @@ Profile GEMM kernel performance across multiple NCCL configurations.
 
 ```bash
 cd ~/aorta/docker
-docker-compose -f docker-compose.rocm70_9-1.yaml build
-docker-compose -f docker-compose.rocm70_9-1.yaml up -d
+docker compose -f docker-compose.rocm70_9-1.yaml build
+docker compose -f docker-compose.rocm70_9-1.yaml up -d
 docker exec -it training-overlap-bugs-rocm70_9-1 bash
 ```
 
