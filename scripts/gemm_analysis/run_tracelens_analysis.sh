@@ -1,7 +1,7 @@
 #!/bin/bash
 # TraceLens Analysis for Sweep Directory
 # Usage: ./run_tracelens_analysis.sh <sweep_directory>
-# Example: ./run_tracelens_analysis.sh /home/oyazdanb/aorta/experiments/sweep_20251120_212921
+# Example: ./run_tracelens_analysis.sh ~/aorta/experiments/sweep_20251120_212921
 
 set -e
 
@@ -12,7 +12,7 @@ if [ -z "$1" ]; then
     echo "Usage: $0 <sweep_directory>"
     echo ""
     echo "Example:"
-    echo "  $0 /home/oyazdanb/aorta/experiments/sweep_20251120_212921"
+    echo "  $0 ~/aorta/experiments/sweep_20251120_212921"
     echo ""
     exit 1
 fi
@@ -32,20 +32,27 @@ echo ""
 echo "Sweep directory: $SWEEP_DIR"
 echo ""
 
-# Check if sweep directory is accessible, fix permissions if needed
+# Check if sweep directory is writable
 if [ ! -w "$SWEEP_DIR" ]; then
-    echo "Fixing sweep directory permissions..."
-    sudo chown -R $(whoami):$(id -gn) "$SWEEP_DIR"
-    sudo chmod -R 775 "$SWEEP_DIR"
+    echo "Error: No write permission for sweep directory: $SWEEP_DIR"
+    echo ""
+    echo "Please fix permissions by running:"
+    echo "  sudo chown -R $(whoami):$(id -gn) $SWEEP_DIR"
+    echo "  sudo chmod -R 775 $SWEEP_DIR"
+    echo ""
+    exit 1
 fi
 
-# Create output directory (with sudo if needed)
+# Create output directory
 OUTPUT_DIR="${SWEEP_DIR}/tracelens_analysis"
 if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null; then
-    echo "Need sudo to create output directory..."
-    sudo mkdir -p "$OUTPUT_DIR"
-    sudo chown -R $(whoami):$(id -gn) "$OUTPUT_DIR"
-    sudo chmod -R 775 "$OUTPUT_DIR"
+    echo "Error: Cannot create output directory: $OUTPUT_DIR"
+    echo ""
+    echo "Please fix permissions by running:"
+    echo "  sudo chown -R $(whoami):$(id -gn) $SWEEP_DIR"
+    echo "  sudo chmod -R 775 $SWEEP_DIR"
+    echo ""
+    exit 1
 fi
 
 # Auto-discover configurations
@@ -78,16 +85,20 @@ fi
 
 for thread in "${THREAD_CONFIGS[@]}"; do
     if ! mkdir -p "$OUTPUT_DIR/$thread/individual_reports" 2>/dev/null; then
-        sudo mkdir -p "$OUTPUT_DIR/$thread/individual_reports"
-        sudo chown -R $(whoami):$(id -gn) "$OUTPUT_DIR/$thread"
-        sudo chmod -R 775 "$OUTPUT_DIR/$thread"
+        echo "Error: Cannot create directory: $OUTPUT_DIR/$thread/individual_reports"
+        echo ""
+        echo "Please fix permissions by running:"
+        echo "  sudo chown -R $(whoami):$(id -gn) $OUTPUT_DIR"
+        echo "  sudo chmod -R 775 $OUTPUT_DIR"
+        echo ""
+        exit 1
     fi
 
     for ch in ${CHANNELS[$thread]}; do
         TRACE_DIR="$SWEEP_DIR/$thread/nccl_${ch}channels/torch_profiler"
 
         if [ ! -d "$TRACE_DIR" ]; then
-            echo "⚠️  Skip $thread/${ch}ch - no traces"
+            echo "[WARN] Skip $thread/${ch}ch - no traces"
             continue
         fi
 
@@ -116,7 +127,7 @@ for thread in "${THREAD_CONFIGS[@]}"; do
             fi
 
             if [ -z "$TRACE" ]; then
-                echo "  ⚠️  Skip rank ${rank} - no trace file"
+                echo "  [WARN] Skip rank ${rank} - no trace file"
                 continue
             fi
 
@@ -133,7 +144,7 @@ for thread in "${THREAD_CONFIGS[@]}"; do
 		--enable_kernel_summary \
                 --topk_roofline_ops 100
 
-            echo "    ✓ $OUTPUT"
+            echo "    [OK] $OUTPUT"
         done
         echo ""
     done
@@ -148,16 +159,20 @@ echo ""
 
 for thread in "${THREAD_CONFIGS[@]}"; do
     if ! mkdir -p "$OUTPUT_DIR/$thread/collective_reports" 2>/dev/null; then
-        sudo mkdir -p "$OUTPUT_DIR/$thread/collective_reports"
-        sudo chown -R $(whoami):$(id -gn) "$OUTPUT_DIR/$thread"
-        sudo chmod -R 775 "$OUTPUT_DIR/$thread"
+        echo "Error: Cannot create directory: $OUTPUT_DIR/$thread/collective_reports"
+        echo ""
+        echo "Please fix permissions by running:"
+        echo "  sudo chown -R $(whoami):$(id -gn) $OUTPUT_DIR"
+        echo "  sudo chmod -R 775 $OUTPUT_DIR"
+        echo ""
+        exit 1
     fi
 
     for ch in ${CHANNELS[$thread]}; do
         TRACE_DIR="$SWEEP_DIR/$thread/nccl_${ch}channels/torch_profiler"
 
         if [ ! -d "$TRACE_DIR" ]; then
-            echo "⚠️  Skip $thread/${ch}ch"
+            echo "[WARN] Skip $thread/${ch}ch"
             continue
         fi
 
@@ -177,7 +192,7 @@ for thread in "${THREAD_CONFIGS[@]}"; do
             --detailed_analysis \
             --use_multiprocessing
 
-        echo "  ✓ $OUTPUT"
+        echo "  [OK] $OUTPUT"
     done
     echo ""
 done
@@ -190,9 +205,13 @@ echo "NOTE: Comparing per-rank across thread configs"
 echo ""
 
 if ! mkdir -p "$OUTPUT_DIR/comparisons" 2>/dev/null; then
-    sudo mkdir -p "$OUTPUT_DIR/comparisons"
-    sudo chown -R $(whoami):$(id -gn) "$OUTPUT_DIR/comparisons"
-    sudo chmod -R 775 "$OUTPUT_DIR/comparisons"
+    echo "Error: Cannot create directory: $OUTPUT_DIR/comparisons"
+    echo ""
+    echo "Please fix permissions by running:"
+    echo "  sudo chown -R $(whoami):$(id -gn) $OUTPUT_DIR"
+    echo "  sudo chmod -R 775 $OUTPUT_DIR"
+    echo ""
+    exit 1
 fi
 
 # Get all unique channel numbers across all thread configs
@@ -221,7 +240,7 @@ for ch in "${ALL_CHANNELS[@]}"; do
 
         # Need at least 2 reports to compare
         if [ ${#reports[@]} -lt 2 ]; then
-            echo "  ⚠️  Skip rank ${rank} - only in ${#reports[@]} thread config(s)"
+            echo "  [WARN] Skip rank ${rank} - only in ${#reports[@]} thread config(s)"
             continue
         fi
 
@@ -234,17 +253,17 @@ for ch in "${ALL_CHANNELS[@]}"; do
         --sheets gpu_timeline ops_summary \
             -o "$OUTPUT"
 
-        echo "    ✓ $OUTPUT"
+        echo "    [OK] $OUTPUT"
     done
     echo ""
 done
 
 echo ""
 echo "════════════════════════════════════════════════════════════════"
-echo "✅ Analysis Complete!"
+echo "Analysis Complete!"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
-echo "📁 Results location: $OUTPUT_DIR/"
+echo "Results location: $OUTPUT_DIR/"
 echo ""
 echo "Generated reports:"
 
@@ -259,7 +278,7 @@ comp=$(find "$OUTPUT_DIR/comparisons" -name "*.xlsx" 2>/dev/null | wc -l)
 echo "  Comparisons: $comp (per rank across thread configs)"
 
 echo ""
-echo "📊 Report Structure (Model Parallelism):"
+echo "Report Structure (Model Parallelism):"
 echo ""
 echo "Individual reports (per thread/channel/rank):"
 echo "  Format: perf_<channels>ch_rank<0-7>.xlsx"
@@ -282,9 +301,9 @@ echo "  Format: compare_<channels>ch_rank<0-7>_across_threads.xlsx"
 echo "  Total: $comp reports"
 
 echo ""
-echo "💡 Analysis Tips for Model Parallelism:"
-echo "  • Each rank has different operations → check individual reports per rank"
-echo "  • Look for load imbalance across ranks in collective reports"
-echo "  • Compare same rank across thread configs to see impact of RCCL settings"
+echo "Analysis Tips for Model Parallelism:"
+echo "  - Each rank has different operations - check individual reports per rank"
+echo "  - Look for load imbalance across ranks in collective reports"
+echo "  - Compare same rank across thread configs to see impact of RCCL settings"
 echo ""
-echo "🎉 Done! Open .xlsx files in Excel to explore."
+echo "Done! Open .xlsx files in Excel to explore."

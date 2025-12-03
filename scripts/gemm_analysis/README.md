@@ -12,7 +12,7 @@ Profile GEMM kernel performance across multiple NCCL configurations.
 ### 1. Build Docker Container
 
 ```bash
-cd /home/oyazdanb/aorta/docker
+cd ~/aorta/docker
 docker-compose -f docker-compose.rocm70_9-1.yaml build
 docker-compose -f docker-compose.rocm70_9-1.yaml up -d
 docker exec -it training-overlap-bugs-rocm70_9-1 bash
@@ -30,14 +30,14 @@ bash scripts/gemm_analysis/run_train_various_channels.sh \
 ### 3. Generate TraceLens Reports
 
 ```bash
-bash scripts/gemm_analysis/run_tracelens_analysis.sh /home/oyazdanb/aorta/experiments/sweep_20251124_222204
+bash scripts/gemm_analysis/run_tracelens_analysis.sh ~/aorta/experiments/sweep_20251124_222204
 ```
 
 ### 4. Extract Top GEMM Kernels
 
 ```bash
 python scripts/gemm_analysis/analyze_gemm_reports.py \
-  --base-path /home/oyazdanb/aorta/experiments/sweep_20251124_222204/tracelens_analysis \
+  --base-path ~/aorta/experiments/sweep_20251124_222204/tracelens_analysis \
   --threads 256 512 \
   --channels 28 42 56 70 \
   --ranks 0 1 2 3 4 5 6 7 \

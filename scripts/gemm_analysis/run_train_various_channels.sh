@@ -8,12 +8,16 @@ DEFAULT_CHANNELS=(28 42 56 70 )
 # Default RCCL threads per block values to test
 DEFAULT_THREADS=(256 512)
 
+# Default training parameters
+DEFAULT_NPROC=8
+
 # Parse command line arguments
 CHANNELS_TO_RUN=()
 THREADS_TO_RUN=()
 SKIP_EXISTING=false
 AGGREGATE_RESULTS=true
 CONFIG_FILE="config/distributed.yaml"
+NPROC_PER_NODE=$DEFAULT_NPROC
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -21,15 +25,17 @@ usage() {
     echo "  -c CHANNELS   Comma-separated list of channels (default: 38,42,56,70)"
     echo "  -t THREADS    Comma-separated list of threads per block (default: 256,512)"
     echo "  -f CONFIG     Config file path (default: config/distributed.yaml)"
+    echo "  -p NPROC      Number of processes per node (default: 8)"
     echo "  -s            Skip existing output directories"
     echo "  -n            No result aggregation at the end"
     echo "  -h            Show this help message"
     echo ""
-    echo "Example: $0 -c 28,42,56 -t 256,512 -f config/my_config.yaml -s"
+    echo "Example: $0 -c 28,42,56 -t 256,512 -p 8 -f config/my_config.yaml -s"
+    echo ""
     exit 1
 }
 
-while getopts "c:t:f:snh" opt; do
+while getopts "c:t:f:p:snh" opt; do
     case $opt in
         c)
             IFS=',' read -ra CHANNELS_TO_RUN <<< "$OPTARG"
@@ -39,6 +45,9 @@ while getopts "c:t:f:snh" opt; do
             ;;
         f)
             CONFIG_FILE="$OPTARG"
+            ;;
+        p)
+            NPROC_PER_NODE="$OPTARG"
             ;;
         s)
             SKIP_EXISTING=true
@@ -68,8 +77,8 @@ fi
 
 # Base configuration
 
-BASE_CMD="torchrun --nproc_per_node 8 train.py --config ${CONFIG_FILE}"
-BASE_OVERRIDES="--override training.max_steps=100 --override profiling.tensorboard=false"
+BASE_CMD="torchrun --nproc_per_node ${NPROC_PER_NODE} train.py --config ${CONFIG_FILE}"
+BASE_OVERRIDES="--override profiling.tensorboard=false"
 
 # Base output directory
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -105,7 +114,7 @@ cleanup() {
     sudo pkill -9 -f "train.py" 2>/dev/null || true
     sudo pkill -9 -f "torchrun" 2>/dev/null || true
 
-    log "✓ Cleanup complete. Exiting."
+    log "[OK] Cleanup complete. Exiting."
     exit 130
 }
 
@@ -115,6 +124,7 @@ trap cleanup SIGINT SIGTERM
 # Start sweep
 echo -e "${GREEN}=== NCCL Channel & Thread Sweep ===${NC}" | tee "${SWEEP_LOG}"
 log "Config file: ${CONFIG_FILE}"
+log "Processes per node: ${NPROC_PER_NODE}"
 log "Testing threads per block: ${THREADS_TO_RUN[*]}"
 log "Testing channels: ${CHANNELS_TO_RUN[*]}"
 log "Skip existing: ${SKIP_EXISTING}"
@@ -170,10 +180,10 @@ for THREADS in "${THREADS_TO_RUN[@]}"; do
         RUN_TIMES[${RUN_KEY}]=${DURATION}
 
         if [ $EXIT_CODE -eq 0 ]; then
-            log "✓ Completed run with THREADS=${THREADS}, CHANNELS=${CHANNELS} (duration: ${DURATION}s)"
+            log "[OK] Completed run with THREADS=${THREADS}, CHANNELS=${CHANNELS} (duration: ${DURATION}s)"
             RUN_STATUS[${RUN_KEY}]="SUCCESS"
         else
-            log "✗ Failed run with THREADS=${THREADS}, CHANNELS=${CHANNELS} (exit code: $EXIT_CODE, duration: ${DURATION}s)"
+            log "[ERROR] Failed run with THREADS=${THREADS}, CHANNELS=${CHANNELS} (exit code: $EXIT_CODE, duration: ${DURATION}s)"
             RUN_STATUS[${RUN_KEY}]="FAILED"
         fi
 
