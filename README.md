@@ -64,24 +64,52 @@ This captures a profiler trace file locally
 
 ## Setup
 
-1. Ensure Python ≥ 3.10 with PyTorch and distributed support is installed on the node(s).
-2. Install Python dependencies (if missing):
-   ```bash
-   pip install pyyaml matplotlib
-   ```
-3. On ROCm systems, verify `rocm-smi` and `rocminfo` are in `$PATH`.
-4. Run entrypoints (`train.py`, `analysis/overlap_report.py`) from the repository root so their bundled path bootstrapper can locate the `src/` package.
+### Training (Docker)
+Training runs in Docker containers with all dependencies pre-installed.
+
+```bash
+# See Docker Setup section above for launching training
+docker compose -f docker/docker-compose.yaml up
+```
+
+### Local Analysis & Processing (Python)
+For running analysis scripts and processing traces locally:
+
+```bash
+# Clone the repository
+git clone https://github.com/ROCm/aorta.git
+cd aorta
+
+# Install dependencies for analysis scripts
+pip install -r requirements.txt
+
+# For contributors: install development tools (pytest, pre-commit, etc.)
+pip install -r requirements-dev.txt
+pre-commit install
+```
+
+**What runs locally:**
+- `scripts/utils/merge_gpu_trace_ranks.py` - Merge distributed traces
+- `analysis/overlap_report.py` - Generate analysis reports
+- `scripts/analyze_*.py` - Analysis utilities
+- Test suite (`pytest tests/`)
+
+**What runs in Docker:**
+- `train.py` - Model training
+- Distributed workloads
+- GPU profiling
+
+### Additional Notes
+- On ROCm systems, verify `rocm-smi` and `rocminfo` are in `$PATH`.
+- Run scripts from the repository root so path bootstrapping works correctly.
 
 ## Code Quality with Pre-commit
 
 This repository uses pre-commit hooks to ensure code quality. All pull requests must pass these checks.
 
-### Installing Pre-commit Hooks
-
-After cloning the repository, install the pre-commit hooks:
-
+Pre-commit hooks are installed automatically when you run:
 ```bash
-pip install pre-commit
+pip install -r requirements-dev.txt
 pre-commit install
 ```
 

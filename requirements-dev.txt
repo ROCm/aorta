@@ -1,0 +1,17 @@
+# Local development dependencies for AORTA
+# (Training runs in Docker - these are for local development only)
+# Install with: pip install -r requirements-dev.txt
+
+# Include base requirements
+-r requirements.txt
+
+# Testing
+pytest>=8.0.0
+pytest-cov>=4.1.0
+
+# Code quality
+pre-commit>=3.0.0
+
+# Optional: useful testing utilities
+pytest-timeout>=2.1.0
+pytest-xdist>=3.3.0  # For parallel test execution
