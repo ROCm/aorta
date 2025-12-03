@@ -230,6 +230,110 @@ def plot_gpu_time_summary(df, labels, output_dir: Path):
     plt.close()
 
 
+"""
+def plot_improvement_chart(df, output_path):
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Color bars based on positive/negative values
+    colors = ['#2ecc71' if val > 0 else '#e74c3c' for val in df['Improvement (%)']]
+
+    bars = ax.barh(df['Metric'], df['Improvement (%)'], color=colors)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.7, color='gray')
+    ax.set_axisbelow(True)
+
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+
+    # Customize the chart
+    ax.set_ylabel('Metric', fontsize=12)
+    ax.set_xlabel('Change (%)', fontsize=12)
+    ax.set_title(
+        'GPU Metrics Percentage Change (Test vs Baseline)\n(Positive = Test is better)',
+        fontsize=14, fontweight='bold'
+    )
+
+    plt.tight_layout()
+    plt.savefig(output_path / 'improvement_chart.png', dpi=150)
+    plt.close()
+
+"""
+
+
+def plot_gpu_time_percentage_change(df, labels, output_dir: Path):
+    """
+    Create separate horizontal bar charts for each label comparing against baseline (labels[0]).
+    """
+    types = df["type"].values
+    base_label = labels[0]
+
+    # Vibrant color palette
+    vibrant_colors = [
+        "#E63946",
+        "#2A9D8F",
+        "#E9C46A",
+        "#264653",
+        "#F4A261",
+        "#8338EC",
+        "#06D6A0",
+        "#FF006E",
+    ]
+
+    fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(20, max(8, len(types) * 0.5)))
+    for i, label in enumerate(labels[1:]):
+        ax = axes[i]
+        col_name = f"percentage_change_{label}"
+        if col_name not in df.columns:
+            print(f"Column {col_name} not found, skipping")
+            continue
+
+        values = df[col_name].values
+
+        # Create 1x2 subplot figure
+
+        # Color bars based on positive/negative values (green = improvement, red = regression)
+        colors = ["#2ecc71" if val < 0 else "#e74c3c" for val in values]
+
+        # Horizontal bar chart
+        y = np.arange(len(types))
+        bars = ax.barh(
+            y, values, color=colors, alpha=0.85, edgecolor="black", linewidth=0.5
+        )
+
+        # Add vertical line at 0
+        ax.axvline(x=0, color="black", linestyle="-", linewidth=1)
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(types, fontsize=10)
+        ax.set_xlabel("Percentage Change (%)", fontsize=12, fontweight="bold")
+        ax.set_ylabel("Type", fontsize=12, fontweight="bold")
+        ax.set_title(
+            f"GPU Time Percentage Change: {label} vs {base_label}\n(Negative = Improvement)",
+            fontsize=14,
+            fontweight="bold",
+        )
+        ax.grid(True, alpha=0.3, axis="x")
+
+    plt.tight_layout()
+
+    output_file = output_dir / f"improvement_chart.png"
+    plt.savefig(output_file, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {output_file}")
+
+
+def calculate_gpu_timepercentage_change(df, labels):
+    base_label = labels[0]
+    for label in labels[1:]:
+        df[f"percentage_change_{label}"] = (
+            (df[f"time ms_{label}"] - df[f"time ms_{base_label}"])
+            / df[f"time ms_{base_label}"]
+            * 100
+        )
+    return df
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -324,6 +428,8 @@ def main():
         )
         nccl_df = pd.merge(nccl_df, nccl_dfs[i], on="index", how="outer")
 
+    summary_df = calculate_gpu_timepercentage_change(summary_df, labels)
+
     with pd.ExcelWriter(args.output, engine="openpyxl") as writer:
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
         gpu_time_per_rank_df.to_excel(
@@ -333,6 +439,7 @@ def main():
 
     output_dir = Path(args.output).parent / "plots"
     output_dir.mkdir(parents=True, exist_ok=True)
+    plot_gpu_time_percentage_change(summary_df, labels, output_dir)
     plot_gpu_time_summary(summary_df, labels, output_dir)
     plot_all_types_per_rank(gpu_time_per_rank_df, labels, output_dir)
     plot_nccl_data_per_msg(nccl_df, labels, output_dir)

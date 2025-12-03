@@ -59,7 +59,7 @@ def create_final_html(plot_file_path, output_path):
         summary_section += f"""
         <h4> Percentage Change Overview </h4>
         <img src="data:image/png;base64,{summary_chart}" alt="Summary Chart" class="chart-image">
-        Overall performance change across key GPU metrics. Positive values indicate improvement
+        Overall performance change across key GPU metrics. Negetive values indicate improvement
         """
     absolute_time_chart = get_image_data(plot_file_path / "abs_time_comparison.png")
     if absolute_time_chart is not None:
