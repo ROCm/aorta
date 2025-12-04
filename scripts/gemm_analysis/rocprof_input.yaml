@@ -1,0 +1,7 @@
+jobs:
+  - kernel_include_regex: "(gemm|Cijk_.*)"
+    kernel_trace: true          # enable kernel tracing
+    stats: true                 # enable stats collection
+    output_format: [json, csv]  # add perfetto/otf2 if desired
+    sys_trace: false
+    advanced_thread_trace: false
