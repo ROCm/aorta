@@ -5,19 +5,20 @@ For each row, this script will find the specific GEMM kernel instances with
 min and max durations and add their timestamps.
 """
 
-import os
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-
 import json
 import pandas as pd
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-import numpy as np
+from typing import Dict, Optional
 
+# TODO: Add kernel execution variance analysis
+# Currently: Finds timestamps of min/max duration kernel instances for temporal analysis
+# Enhancement: Calculate variance, std_dev, and coefficient of variation across all
+# kernel instances to identify kernels with unstable performance. Add these as
+# columns to the output CSV (variance_us, std_dev_us, cv, execution_count).
 def find_min_max_kernel_timestamps(trace_file: Path, kernel_name: str,
-                                 min_duration_us: float, max_duration_us: float) -> Dict[str, Optional[float]]:
+                                 min_duration_us: float, max_duration_us: float,
+                                 tolerance: float = 0.01) -> Dict[str, Optional[float]]:
     """
     Find timestamps for kernel instances with min and max durations.
     Durations are in microseconds to match trace file format.
@@ -65,25 +66,14 @@ def find_min_max_kernel_timestamps(trace_file: Path, kernel_name: str,
     # Sort by duration
     kernel_instances.sort(key=lambda x: x['duration_us'])
 
-    # Option 1: Use all instances (current behavior - RECOMMENDED)
     # Get the actual minimum and maximum instances
     min_instance = kernel_instances[0]  # Shortest duration
     max_instance = kernel_instances[-1]  # Longest duration
 
-    # Option 2: Match TraceLens top 100 (uncomment to use)
-    # if len(kernel_instances) > 100:
-    #     # Take only the top 100 longest-running instances
-    #     kernel_instances_top100 = kernel_instances[-100:]
-    #     min_instance = kernel_instances_top100[0]  # Min of top 100
-    #     max_instance = kernel_instances_top100[-1]  # Max of top 100
-    #     print(f"  Note: Using top 100 of {len(kernel_instances)} instances")
-    # else:
-    #     min_instance = kernel_instances[0]
-    #     max_instance = kernel_instances[-1]
 
-    # Verify the matches are reasonably close (within 1% tolerance)
-    min_tolerance = min_duration_us * 0.01
-    max_tolerance = max_duration_us * 0.01
+    # Verify the matches are reasonably close
+    min_tolerance = min_duration_us * tolerance
+    max_tolerance = max_duration_us * tolerance
 
     result = {
         'min_timestamp_ms': min_instance['timestamp_ms'],
@@ -123,7 +113,7 @@ def get_trace_file_path(base_path: Path, threads: int, channel: int, rank: int) 
 
     return trace_files[0] if trace_files else None
 
-def enhance_csv_with_timestamps(input_csv: Path, output_csv: Path, base_path: Path):
+def enhance_csv_with_timestamps(input_csv: Path, output_csv: Path, base_path: Path, tolerance: float = 0.01):
     """Add timestamp columns to the variance CSV file."""
 
     # Read the existing CSV
@@ -167,7 +157,7 @@ def enhance_csv_with_timestamps(input_csv: Path, output_csv: Path, base_path: Pa
 
         # Find timestamps
         timestamps = find_min_max_kernel_timestamps(
-            trace_file, kernel_name, min_duration_us, max_duration_us
+            trace_file, kernel_name, min_duration_us, max_duration_us, tolerance
         )
 
         if timestamps['min_timestamp_ms'] is not None:
@@ -222,7 +212,7 @@ def parse_args():
     parser.add_argument(
         '--input-csv',
         type=Path,
-        default=Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis/top5_gemm_kernels_time_variance.csv"),
+        default=Path("~/aorta/experiments/sweep_20251121_155219/tracelens_analysis/top5_gemm_kernels_time_variance.csv"),
         help='Input CSV file with GEMM variance data'
     )
 
@@ -236,8 +226,15 @@ def parse_args():
     parser.add_argument(
         '--base-path',
         type=Path,
-        default=Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219"),
+        default=Path("~/aorta/experiments/sweep_20251121_155219"),
         help='Base path to sweep directory containing trace files'
+    )
+
+    parser.add_argument(
+        '--tolerance',
+        type=float,
+        default=0.01,
+        help='Tolerance for duration matching as a fraction (default: 0.01 = 1%%)'
     )
 
     return parser.parse_args()
@@ -254,6 +251,7 @@ def main():
     print(f"Input CSV: {args.input_csv}")
     print(f"Output CSV: {args.output_csv}")
     print(f"Base path: {args.base_path}")
+    print(f"Tolerance: {args.tolerance * 100:.1f}%")
     print()
 
     # Verify input file exists
@@ -262,9 +260,9 @@ def main():
         return
 
     # Enhance the CSV with timestamps
-    enhance_csv_with_timestamps(args.input_csv, args.output_csv, args.base_path)
+    enhance_csv_with_timestamps(args.input_csv, args.output_csv, args.base_path, args.tolerance)
 
-    print("\n✅ Enhancement complete!")
+    print("\n[OK] Enhancement complete!")
 
 if __name__ == "__main__":
     main()
