@@ -4,6 +4,10 @@ Analyze GEMM reports from Excel files and extract top 5 kernels
 with largest difference between max and min times.
 """
 
+import os
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+
 import re
 import argparse
 from pathlib import Path
@@ -48,63 +52,30 @@ def process_excel_file(file_path, threads, channel, rank, top_k=5):
 
         sheet = wb['GEMM']
 
-        # Expected column positions (0-based indices)
-        col_kernel_info = column_letter_to_index('X')    # Column X
-        col_time_min = column_letter_to_index('AG')      # Column AG
-        col_time_max = column_letter_to_index('AH')      # Column AH
+        # Column indices (0-based)
+        # X = 23 (24th column)
+        # AG = 32 (33rd column) - Kernel Time - µs (min)
+        # AH = 33 (34th column) - Kernel Time - µs (max)
+        col_x = column_letter_to_index('X')
+        col_ag = column_letter_to_index('AG')
+        col_ah = column_letter_to_index('AH')
 
-        # Read header row to validate column names
+        # Read all rows
         rows_data = []
         header_row = None
 
         for i, row in enumerate(sheet.iter_rows(values_only=True)):
             if i == 0:
-                # This is the header - validate column names match expectations
+                # This is the header
                 header_row = list(row)
-
-                # Expected column names
-                expected_x = "kernel_details__summarize_kernel_stats"
-                expected_ag = "Kernel Time (µs)_min"
-                expected_ah = "Kernel Time (µs)_max"
-
-                # Validate each expected column
-                errors = []
-
-                if col_kernel_info < len(header_row):
-                    header_x = str(header_row[col_kernel_info]) if header_row[col_kernel_info] else ""
-                    if header_x != expected_x:
-                        errors.append(f"Column X: expected '{expected_x}', found '{header_x}'")
-                else:
-                    errors.append(f"Column X: not found (only {len(header_row)} columns)")
-
-                if col_time_min < len(header_row):
-                    header_ag = str(header_row[col_time_min]) if header_row[col_time_min] else ""
-                    if header_ag != expected_ag:
-                        errors.append(f"Column AG: expected '{expected_ag}', found '{header_ag}'")
-                else:
-                    errors.append(f"Column AG: not found (only {len(header_row)} columns)")
-
-                if col_time_max < len(header_row):
-                    header_ah = str(header_row[col_time_max]) if header_row[col_time_max] else ""
-                    if header_ah != expected_ah:
-                        errors.append(f"Column AH: expected '{expected_ah}', found '{header_ah}'")
-                else:
-                    errors.append(f"Column AH: not found (only {len(header_row)} columns)")
-
-                if errors:
-                    raise ValueError(
-                        f"Column validation failed in {file_path}:\n  " +
-                        "\n  ".join(errors)
-                    )
-
                 continue
 
-            if row is None or len(row) <= max(col_kernel_info, col_time_min, col_time_max):
+            if row is None or len(row) <= max(col_x, col_ag, col_ah):
                 continue
 
-            kernel_info = row[col_kernel_info] if col_kernel_info < len(row) else None
-            kernel_time_min = row[col_time_min] if col_time_min < len(row) else None
-            kernel_time_max = row[col_time_max] if col_time_max < len(row) else None
+            kernel_info = row[col_x] if col_x < len(row) else None
+            kernel_time_min = row[col_ag] if col_ag < len(row) else None
+            kernel_time_max = row[col_ah] if col_ah < len(row) else None
 
             # Extract kernel name
             kernel_name = extract_name_from_kernel_info(kernel_info)
@@ -140,8 +111,8 @@ def process_excel_file(file_path, threads, channel, rank, top_k=5):
 
         wb.close()
 
-        # Sort by time_diff_us and get top k
-        rows_data.sort(key=lambda x: x['time_diff_us'], reverse=True)
+        # Sort by time_diff and get top k
+        rows_data.sort(key=lambda x: x['time_diff'], reverse=True)
         top_results = rows_data[:top_k]
 
         return top_results
@@ -179,7 +150,7 @@ Examples:
     parser.add_argument(
         '--base-path',
         type=Path,
-        default=Path("~/aorta/experiments/sweep_20251121_155219/tracelens_analysis"),
+        default=Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis"),
         help='Base path to tracelens_analysis directory (default: %(default)s)'
     )
 
@@ -279,9 +250,9 @@ def main():
         print("No data extracted!")
         return
 
-    # Sort by time_diff_us descending
+    # Sort by time_diff descending
     print("\nCombining and sorting results...")
-    all_results.sort(key=lambda x: x['time_diff_us'], reverse=True)
+    all_results.sort(key=lambda x: x['time_diff'], reverse=True)
 
     # Get all unique keys
     all_keys = set()
