@@ -1,9 +1,9 @@
 services:
   torchenv-rocm70:
-    container_name: training-overlap-bugs-rocm70
+    container_name: training-overlap-bugs-rocm70_9-1
     build:
       context: .
-      dockerfile: Dockerfile.rocm70
+      dockerfile: Dockerfile.rocm70_9-1
     user: root
     privileged: true
     network_mode: host
@@ -16,7 +16,7 @@ services:
       - seccomp=unconfined
     environment:
       - RCCL_FOLDER=/rccl
-      - LD_LIBRARY_PATH=/rccl/build/release:$LD_LIBRARY_PATH
+      - LD_LIBRARY_PATH=/rccl/build/release:${LD_LIBRARY_PATH:-}
       - TORCH_NCCL_HIGH_PRIORITY=1
 
     volumes:
