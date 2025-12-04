@@ -27,34 +27,34 @@ def add_excel_table(worksheet, table_name, start_row=1):
     # Find data range
     max_row = worksheet.max_row
     max_col = worksheet.max_column
-    
+
     if max_row <= start_row:
         return  # No data
-    
+
     # Ensure all column headers are strings
     for col_idx in range(1, max_col + 1):
         cell = worksheet.cell(row=start_row, column=col_idx)
         if cell.value is not None and not isinstance(cell.value, str):
             cell.value = str(cell.value)
-    
+
     # Create table reference using proper column letter conversion
     start_cell = f"A{start_row}"
     end_col_letter = get_column_letter(max_col)
     end_cell = f"{end_col_letter}{max_row}"
     table_ref = f"{start_cell}:{end_cell}"
-    
+
     # Create table with style
     try:
         tab = Table(displayName=table_name, ref=table_ref)
         style = TableStyleInfo(
-            name="TableStyleMedium2", 
+            name="TableStyleMedium2",
             showFirstColumn=False,
-            showLastColumn=False, 
-            showRowStripes=True, 
+            showLastColumn=False,
+            showRowStripes=True,
             showColumnStripes=False
         )
         tab.tableStyleInfo = style
-        
+
         # Add table to worksheet
         worksheet.add_table(tab)
     except Exception as e:
@@ -63,20 +63,20 @@ def add_excel_table(worksheet, table_name, start_row=1):
 
 def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_comparison, output_file):
     """Create comprehensive report with all data."""
-    
+
     print("Creating comprehensive final report...")
     print(f"  Output: {output_file}")
-    
+
     # Track sheet info for hiding/organizing
     raw_sheets = []
     comparison_sheets = []
     summary_sheets = []
-    
+
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-        
+
         # === GPU TIMELINE SHEETS ===
         print("\nAdding GPU Timeline sheets...")
-        
+
         # Read GPU combined (raw data)
         gpu_comb_xl = pd.ExcelFile(gpu_combined)
         sheet_mapping = {
@@ -91,7 +91,7 @@ def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_compar
             df.to_excel(writer, sheet_name=new_name, index=False)
             raw_sheets.append(new_name)
             print(f"  Added {new_name} (will be hidden)")
-        
+
         # Read GPU comparison
         gpu_comp_xl = pd.ExcelFile(gpu_comparison)
         comp_mapping = {
@@ -105,10 +105,10 @@ def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_compar
                 df.to_excel(writer, sheet_name=new_name, index=False)
                 comparison_sheets.append(new_name)
                 print(f"  Added {new_name}")
-        
+
         # === COLLECTIVE SHEETS ===
         print("\nAdding Collective/NCCL sheets...")
-        
+
         # Read collective combined (raw data for hidden sheets)
         coll_comb_xl = pd.ExcelFile(coll_combined)
         coll_mapping = {
@@ -122,7 +122,7 @@ def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_compar
                 df.to_excel(writer, sheet_name=new_name, index=False)
                 raw_sheets.append(new_name)
                 print(f"  Added {new_name} (will be hidden)")
-        
+
         # Read collective comparison
         coll_comp_xl = pd.ExcelFile(coll_comparison)
         coll_cmp_mapping = {
@@ -136,13 +136,13 @@ def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_compar
                 df.to_excel(writer, sheet_name=new_name, index=False)
                 comparison_sheets.append(new_name)
                 print(f"  Added {new_name}")
-        
+
         # === CREATE SUMMARY DASHBOARD ===
         print("\nCreating Summary Dashboard...")
-        
+
         # Read key metrics for dashboard
         gpu_summary = pd.read_excel(gpu_comparison, sheet_name='Summary_Comparison')
-        
+
         # Create dashboard data
         dashboard_data = {
             'Metric': [],
@@ -151,7 +151,7 @@ def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_compar
             'Improvement (%)': [],
             'Status': []
         }
-        
+
         # Add GPU metrics
         for _, row in gpu_summary.iterrows():
             metric_type = row['type']
@@ -160,40 +160,40 @@ def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_compar
             dashboard_data['Test'].append(round(row['saleelk_time_ms'], 2))
             dashboard_data['Improvement (%)'].append(round(row['percent_change'], 2))
             dashboard_data['Status'].append('Better' if row['percent_change'] > 0 else 'Worse' if row['percent_change'] < -1 else 'Similar')
-        
+
         dashboard_df = pd.DataFrame(dashboard_data)
         dashboard_df.to_excel(writer, sheet_name='Summary_Dashboard', index=False)
         summary_sheets.append('Summary_Dashboard')
         print(f"  Added Summary_Dashboard")
-        
+
     # Now modify the workbook to hide sheets and add tables
     print("\nApplying formatting...")
     wb = load_workbook(output_file)
-    
+
     # Hide raw data sheets
     for sheet_name in raw_sheets:
         if sheet_name in wb.sheetnames:
             wb[sheet_name].sheet_state = 'hidden'
             print(f"  Hidden: {sheet_name}")
-    
+
     # Convert all sheets to tables
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        
+
         # Skip if sheet is empty
         if ws.max_row <= 1:
             continue
-            
+
         # Create unique table name from sheet name (remove special chars)
         table_name = sheet_name.replace(' ', '_').replace('-', '_').replace('(', '').replace(')', '')
         # Ensure name starts with letter and is max 255 chars
         if not table_name[0].isalpha():
             table_name = 'Tbl_' + table_name
         table_name = table_name[:255]
-        
+
         add_excel_table(ws, table_name)
         print(f"  Converted to table: {sheet_name}")
-        
+
         # Add conditional formatting for percent_change columns
         if 'Cmp' in sheet_name or 'Comparison' in sheet_name:
             # Find percent_change columns
@@ -202,7 +202,7 @@ def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_compar
                 if cell_value and 'percent_change' in str(cell_value):
                     col_letter = get_column_letter(col_idx)
                     data_range = f'{col_letter}2:{col_letter}{ws.max_row}'
-                    
+
                     # Apply color scale: red (min/negative) -> white (0) -> green (max/positive)
                     try:
                         ws.conditional_formatting.add(data_range,
@@ -214,18 +214,18 @@ def create_final_report(gpu_combined, gpu_comparison, coll_combined, coll_compar
                         print(f"    Applied color scale to {sheet_name} column {cell_value}")
                     except Exception as e:
                         print(f"    Warning: Could not apply formatting to {cell_value}: {e}")
-    
+
     # Move Summary Dashboard to first position
     if 'Summary_Dashboard' in wb.sheetnames:
         dashboard_sheet = wb['Summary_Dashboard']
         wb.move_sheet(dashboard_sheet, offset=-(len(wb.sheetnames)-1))
         wb.active = 0  # Set dashboard as active sheet
         print("\n  Moved Summary_Dashboard to first position")
-    
+
     # Save workbook
     wb.save(output_file)
     print(f"\nFinal report saved: {output_file}")
-    
+
     # Report structure
     print("\nReport Structure:")
     print("  Visible Sheets (Analysis):")
@@ -254,7 +254,7 @@ Example:
     --output final_analysis_report.xlsx
         """
     )
-    
+
     parser.add_argument('--gpu-combined', required=True,
                        help='Path to GPU timeline combined file')
     parser.add_argument('--gpu-comparison', required=True,
@@ -265,24 +265,24 @@ Example:
                        help='Path to collective comparison file')
     parser.add_argument('--output', required=True,
                        help='Output path for final report')
-    
+
     args = parser.parse_args()
-    
+
     # Validate inputs
     for file_arg in ['gpu_combined', 'gpu_comparison', 'coll_combined', 'coll_comparison']:
         file_path = getattr(args, file_arg)
         if not Path(file_path).exists():
             print(f"Error: File not found: {file_path}")
             return 1
-    
+
     create_final_report(
         args.gpu_combined,
-        args.gpu_comparison, 
+        args.gpu_comparison,
         args.coll_combined,
         args.coll_comparison,
         args.output
     )
-    
+
     return 0
 
 
