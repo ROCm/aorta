@@ -34,9 +34,11 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class OptimizerConfig:
+    name: str = "adamw"
     lr: float = 2e-4
     weight_decay: float = 1e-2
     betas: tuple[float, float] = (0.9, 0.98)
+    eps: float = 1e-8
 
 
 @dataclass
@@ -534,7 +536,19 @@ def training_loop(
 
 
 def configure_optimizer(model: nn.Module, cfg: OptimizerConfig) -> torch.optim.Optimizer:
-    optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay, betas=cfg.betas)
+    if cfg.name.lower() == "shampoo":
+        from distributed_shampoo import DistributedShampoo
+        log.info("Using DistributedShampoo optimizer")
+        optimizer = DistributedShampoo(
+            model.parameters(),
+            lr=cfg.lr,
+            betas=cfg.betas,
+            epsilon=cfg.eps,
+            weight_decay=cfg.weight_decay,
+        )
+    else:
+        log.info("Using AdamW optimizer")
+        optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay, betas=cfg.betas, eps=cfg.eps)
     return optimizer
 
 

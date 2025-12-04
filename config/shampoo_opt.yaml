@@ -1,0 +1,111 @@
+# Shampoo-only variant of the user workload.
+# NOTE: User reports this configuration produces NaNs when using Shampoo,
+# while AdamW and other optimizers remain healthy. Monitor loss closely.
+
+logging:
+  level: INFO
+
+training:
+  epochs: 1
+  batch_size: 512
+  gradient_accumulation: 2
+  mixed_precision: bf16
+  max_steps: 2200
+  grad_clip_norm: 1.0
+  output_dir: artifacts/user_shampoo
+  log_interval: 20
+  additional_compute_streams: 2
+  lightweight_op_waves: 3
+
+optimizer:
+  name: shampoo
+  lr: 0.0002
+  weight_decay: 0.01
+  betas: [0.9, 0.985]
+  eps: 1.0e-8
+
+scheduler:
+  warmup_steps: 200
+  total_steps: 2200
+
+dataset:
+  num_samples: 200000
+  sequence_length: 160
+  dense_dim: 256
+  sparse_features: 64
+  vocab_size: 350000
+  num_dense_features: 32
+  seed: 2025
+
+model:
+  vocab_size: 350000
+  embedding_dim: 256
+  num_dense_features: 32
+  dense_dim: 256
+  model_dim: 1024
+  num_heads: 16
+  num_layers: 18
+  dropout: 0.1
+  mlp_hidden_dim: 4096
+
+fsdp:
+  sharding_strategy: full_shard
+  backward_prefetch: BACKWARD_PRE
+  use_orig_params: true
+  limit_all_gathers: true
+  forward_prefetch: true
+  sync_module_states: true
+  param_init_device: meta
+
+distributed:
+  backend: nccl
+  mode: ddp
+  bucket_cap_mb: 128
+  gradient_as_bucket_view: true
+  static_graph: true
+  find_unused_parameters: false
+
+compile:
+  enabled: true
+  backend: inductor
+  mode: max-autotune
+  fullgraph: false
+  dynamic: false
+
+streams:
+  num_streams: 4
+  high_priority:
+    - allreduce
+    - reducescatter
+  stream_assignments:
+    compute:
+      - dev6_stream3
+      - dev6_stream9
+    communication:
+      - dev6_stream13
+      - dev6_stream17
+    reducescatter:
+      - dev6_stream22
+    aux:
+      - dev6_stream0
+
+dataloader:
+  num_workers: 0
+  pin_memory: true
+
+profiling:
+  enabled: true
+  wait: 2
+  warmup: 2
+  active: 6
+  repeat: 1
+  record_shapes: true
+  profile_memory: true
+  with_stack: false
+  with_flops: false
+  tensorboard: true
+  chrome_trace: true
+  trace_filename: user_shampoo.json
+
+tracelens:
+  enabled: false
