@@ -34,35 +34,63 @@ Add rocprofv3 kernel tracing to capture detailed GEMM performance:
 Simple YAML-based tracing (recommended)
 ---------------------------------------
 
-1) Create a minimal rocprof input file, e.g. `scripts/gemm_analysis/rocprof_input.yaml`:
+Use the `rocprof_cu_only.yaml` configuration file for CU utilization metrics:
+
 ```yaml
 jobs:
   - kernel_include_regex: "(gemm|Cijk_.*)"  # pattern for kernels to trace
     kernel_trace: true                      # enable kernel tracing
-    stats: true                             # set false if you don’t want stats
-    output_format: [json, csv]              # add perfetto/otf2 if desired
+    stats: true                             # timing statistics only (not CU utilization)
+    output_format: [json, csv]              # add perfetto for Chrome tracing
     sys_trace: false
     advanced_thread_trace: false            # leave false unless ATT decoder is installed
 ```
-2) Run the sweep with the YAML:
+
+Run the sweep with the CU-only YAML:
 ```bash
 bash scripts/gemm_analysis/run_train_various_channels.sh \
   --rocprof \
-  --rocprof-input scripts/gemm_analysis/rocprof_input.yaml \
+  --rocprof-input scripts/gemm_analysis/rocprof_cu_only.yaml \
   --channels 28,42,56 --threads 256,512 \
   --config config/gemm_overlap/gemm_test_1.yaml
 ```
 Notes:
 - Kernel filtering/stats come from the YAML. The current rocprofv3 build ignores CLI kernel filters, so use the YAML to include/exclude kernels.
 - Remove `advanced_thread_trace` or keep it `false` unless the ATT decoder debs are installed.
+- **Important**: `stats: true` only collects timing statistics, NOT CU utilization metrics.
+- **Output Files**: rocprof generates 5 files per rank/process:
+  - `PID_agent_info.csv`: Hardware information about CPUs and GPUs
+  - `PID_counter_collection.csv`: **Main file with CU utilization metrics** (focus on this)
+  - `PID_kernel_trace.csv`: Kernel execution timeline data
+  - `PID_results.json`: Chrome trace format for visualization
+  - `PID_results.csv`: Summary statistics
+
+**Analyzing Unique GEMM Kernels (counter_collection.csv columns):**
+- `Grid_Size`: Total number of workgroups in the kernel launch
+- `Kernel_Name`: Name of the GEMM kernel (e.g., Cijk_Alik_Bljk_SB_MT128x128x32_MI32x32x1x2)
+- `Workgroup_Size`: Number of work-items per workgroup
+- `LDS_Block_Size`: Local Data Share memory allocation per workgroup
+- `Scratch_Size`: Private memory allocation per work-item
+- `VGPR_Count`: Vector General Purpose Registers used
+- `Accum_VGPR_Count`: Accumulator VGPRs (for matrix operations)
+- `SGPR_Count`: Scalar General Purpose Registers used
+- `Counter_Name`: Performance counter being measured (e.g., SQ_BUSY_CU_CYCLES)
+- `Counter_Value`: Value of the performance counter
+- `Start_Timestamp` / `End_Timestamp`: Kernel execution timing
 
 **Key Options:**
 - `--rocprof` : Enable rocprofv3 tracing
-- `--stats` : Include CU utilization/occupancy metrics (remove if not needed)
+- `--stats` : Include timing statistics (not CU utilization)
 - `--channels VALUES` : Comma-separated NCCL channel values
 - `--threads VALUES` : Comma-separated thread values
 
 **Output:** Traces saved to `rocprof_traces/` in each run directory.
+
+**Key Performance Counters (found in counter_collection.csv files):**
+- `SQ_BUSY_CU_CYCLES`: Percentage of time CUs are active (CU utilization)
+- `SQ_WAVES`: Number of active wavefronts (occupancy indicator)
+- `SQ_INSTS_MFMA`: Matrix FMA instructions (critical for GEMM performance)
+- `SQ_INSTS_VALU`: Vector ALU instructions (general compute)
 
 ### 3. Generate TraceLens Reports
 
@@ -91,9 +119,11 @@ experiments/sweep_YYYYMMDD_HHMMSS/
 │   └── nccl_XXchannels/
 │       ├── torch_profiler/rank*/
 │       ├── rocprof_traces/           # if --rocprof flag used
-│       │   ├── *.json                # Chrome trace files
-│       │   ├── *.csv                 # Kernel stats
-│       │   └── stats.txt             # CU metrics (if --stats used)
+│       │   ├── PID_agent_info.csv    # Hardware info for each rank
+│       │   ├── PID_counter_collection.csv  # CU utilization metrics (main focus)
+│       │   ├── PID_kernel_trace.csv  # Kernel execution timeline
+│       │   ├── PID_results.json      # Chrome trace format
+│       │   └── PID_results.csv       # Summary statistics
 │       └── run_output.log
 ├── 512thread/
 │   └── nccl_XXchannels/
@@ -120,10 +150,10 @@ bash scripts/gemm_analysis/run_train_various_channels.sh \
   --channels 28,42,56,70 \
   --threads 256,512
 
-# Run with rocprof using a YAML input (recommended for filtering)
+# Run with rocprof using CU-only YAML (recommended)
 bash scripts/gemm_analysis/run_train_various_channels.sh \
   --rocprof --stats \
-  --rocprof-input scripts/gemm_analysis/rocprof_input.yaml \
+  --rocprof-input scripts/gemm_analysis/rocprof_cu_only.yaml \
   --channels 28,42,56,70 \
   --threads 256,512
 

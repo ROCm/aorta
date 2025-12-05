@@ -1,7 +1,33 @@
+# rocprofv3 configuration for GEMM kernel analysis
+# Note: stats:true only provides timing statistics, not CU utilization
+# For CU metrics, uncomment the pmc section below
 jobs:
   - kernel_include_regex: "(gemm|Cijk_.*)"
     kernel_trace: true          # enable kernel tracing
-    stats: true                 # enable stats collection
-    output_format: [json, csv]  # add perfetto/otf2 if desired
+    stats: true                 # timing statistics only
+    output_format: [json, csv, perfetto]  # generates .pftrace files
     sys_trace: false
     advanced_thread_trace: false
+    # Hardware performance counters for CU analysis
+    # Key metrics for CU utilization: SQ_BUSY_CU_CYCLES, SQ_WAVE_CYCLES
+    # Key metrics for GEMM efficiency: SQ_INSTS_MFMA, SQ_INSTS_VALU
+    # Note: Too many counters may impact performance or require multiple passes
+    pmc:
+      # Instruction metrics
+      - SQ_WAVES              # Active wavefronts
+      - SQ_INSTS_VALU         # Vector ALU instructions
+      - SQ_INSTS_MFMA         # Matrix instructions (critical for GEMM)
+      - SQ_ACTIVE_INST_ANY    # Instruction pipeline activity
+      # CU occupancy and utilization
+      - SQ_BUSY_CYCLES        # Cycles when SQ is busy
+      - SQ_BUSY_CU_CYCLES     # Cycles when CUs are busy
+      - SQ_WAVE_CYCLES        # Total wave cycles
+      - SQ_WAVES_RESTORED     # Waves restored from context switch
+      # Memory metrics
+      - SQ_INSTS_LDS          # Local data share instructions
+      - SQ_INSTS_SMEM         # Scalar memory instructions
+      - SQ_INSTS_VMEM         # Vector memory instructions
+      - SQ_WAIT_INST_LDS      # Cycles waiting for LDS
+      # Register usage
+      - SQ_INSTS_VSKIPPED     # Instructions skipped due to EXEC mask
+      - SQ_THREAD_CYCLES_VALU # Thread cycles spent in VALU
