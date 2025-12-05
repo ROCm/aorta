@@ -19,8 +19,8 @@ def process_comparison_data(base_path, channel, thread, rank) :
     col_512_time = 5 
 
     for t in thread : 
-        for r in rank : 
-            for c in channel : 
+        for c in channel : 
+            for r in rank : 
                 file_name = f"compare_{c}ch_rank{r}_across_threads.xlsx"
                 file_path = comparison_path / file_name
                 
@@ -34,8 +34,8 @@ def process_comparison_data(base_path, channel, thread, rank) :
                 for i, row in enumerate(gpu_sheet.iter_rows(values_only=True)):
                     if i==0 : 
                         continue 
-                    all_results[row[col_type_name]]['256'][r].append(float(row[col_256_time]))
-                    all_results[row[col_type_name]]['512'][r].append(float(row[col_512_time]))
+                    all_results[row[col_type_name]]['256'][c].append(float(row[col_256_time]))
+                    all_results[row[col_type_name]]['512'][c].append(float(row[col_512_time]))
     print("Done reading excels.")
     return all_results 
 def get_thread_and_type_values_over_ranks_with_mean_channel(all_result) :
@@ -50,11 +50,11 @@ def get_thread_and_type_values_over_ranks_with_mean_channel(all_result) :
     print("Done computing geomeans across channels.")
     return mean_result
 
-def plot_mean_result(output_dir, rank_length, mean_result, threads) :
+def plot_mean_result(output_dir, channels, mean_result, threads) :
     bar_width = 0.35
-    x_pos = np.arange(rank_length) 
+    x_pos = np.arange(len(channels)) 
     for type, type_info in mean_result.items() :
-        output_file = output_dir / f"{type}_rank_variance.png"
+        output_file = output_dir / f"{type}_channel_variance.png"
         plt.figure()
         
         if(len(threads) > 1)  : 
@@ -64,6 +64,7 @@ def plot_mean_result(output_dir, rank_length, mean_result, threads) :
             plt.bar(x_pos, type_info[str(threads[0])], bar_width, label="256", color='b')
         plt.ylabel("Time")
         plt.xlabel("Rank")
+        plt.xticks(x_pos, channels)
         plt.title(type)
         plt.legend()
         plt.tight_layout()
@@ -169,7 +170,7 @@ def main():
 
     all_results = process_comparison_data(base_path=base_path, channel=channels, thread=thread_configs, rank=ranks)
     mean_results = get_thread_and_type_values_over_ranks_with_mean_channel(all_results)
-    plot_mean_result(output_dir, len(ranks), mean_results, threads=thread_configs)
+    plot_mean_result(output_dir, channels, mean_results, threads=thread_configs)
 
 if __name__ == "__main__":
     main()
