@@ -86,7 +86,7 @@ def create_boxplot(
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
 
-    ax.set_ylabel("Time Difference (µs)", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Time Difference (us)", fontsize=14, fontweight="bold")
     ax.set_xlabel(xlabel, fontsize=14, fontweight="bold")
     ax.set_title(title, fontsize=16, fontweight="bold", pad=20)
     ax.grid(True, alpha=0.3)
@@ -182,7 +182,7 @@ def _create_violin_subplot(ax, data, sort_key_fn, color, xlabel, title):
 
     ax.set_xticks(range(len(configs)))
     ax.set_xticklabels(configs)
-    ax.set_ylabel("Time Difference (µs)", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Time Difference (us)", fontsize=12, fontweight="bold")
     ax.set_xlabel(xlabel, fontsize=12, fontweight="bold")
     ax.set_title(title, fontsize=14, fontweight="bold")
     ax.grid(True, alpha=0.3, axis="y")
@@ -262,7 +262,7 @@ def create_interaction_plot(data, output_dir):
         ax.plot(channels, means, marker=marker, linewidth=2, markersize=10, label=label)
 
     ax.set_xlabel("Channel Count", fontsize=14, fontweight="bold")
-    ax.set_ylabel("Mean Time Difference (µs)", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Mean Time Difference (us)", fontsize=14, fontweight="bold")
     ax.set_title(
         "Thread-Channel Interaction: Mean Variance",
         fontsize=16,
@@ -309,9 +309,9 @@ def _print_dimension_stats(data_dict, section_title, label_fmt):
         median_val = _calculate_median(values)
         label = label_fmt.format(key)
         print(
-            f"  {label}: mean={mean_val:.2f}µs, "
-            f"median={median_val:.2f}µs, "
-            f"max={max(values):.2f}µs, n={len(values)}"
+            f"  {label}: mean={mean_val:.2f}us, "
+            f"median={median_val:.2f}us, "
+            f"max={max(values):.2f}us, n={len(values)}"
         )
 
 
@@ -343,20 +343,18 @@ Examples:
     --csv-path experiments/sweep_20251124_222204/tracelens_analysis/top5_gemm_kernels_time_variance.csv \\
     --output-dir experiments/sweep_20251124_222204/tracelens_analysis/plots
 
-  # Using absolute paths
+  # Using full paths (example)
   python plot_gemm_variance.py \\
-    --csv-path /home/oyazdanb/aorta/experiments/sweep_20251124_222204/tracelens_analysis/top5_gemm_kernels_time_variance.csv \\
-    --output-dir /home/oyazdanb/aorta/experiments/sweep_20251124_222204/tracelens_analysis/plots
+    --csv-path /path/to/experiments/sweep_20251124_222204/tracelens_analysis/top5_gemm_kernels_time_variance.csv \\
+    --output-dir /path/to/experiments/sweep_20251124_222204/tracelens_analysis/plots
         """,
     )
 
     parser.add_argument(
         "--csv-path",
         type=Path,
-        default=Path(
-            "~/aorta/experiments/sweep_20251121_155219/tracelens_analysis/top5_gemm_kernels_time_variance.csv"
-        ),
-        help="Path to the GEMM variance CSV file (default: %(default)s)",
+        required=True,
+        help="Path to the GEMM variance CSV file",
     )
 
     parser.add_argument(
@@ -411,7 +409,7 @@ def main():
     create_violin_plot_combined(data, output_dir)
     create_interaction_plot(data, output_dir)
 
-    print(f"\n✓ All plots saved to: {output_dir}")
+    print(f"\n[DONE] All plots saved to: {output_dir}")
     print("\nGenerated files:")
     print("  1. variance_by_threads_boxplot.png - Box plot by thread count")
     print("  2. variance_by_channels_boxplot.png - Box plot by channel count")

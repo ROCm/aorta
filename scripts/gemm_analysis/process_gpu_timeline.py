@@ -9,7 +9,7 @@ Usage:
     python process_gpu_timeline.py --sweep-dir /path/to/sweep_directory [--geo-mean]
 
 Example:
-    python process_gpu_timeline.py --sweep-dir /home/oyazdanb/aorta/experiments/sweep_20251124_222204
+    python process_gpu_timeline.py --sweep-dir experiments/sweep_20251124_222204
 """
 
 import pandas as pd
@@ -167,7 +167,7 @@ def process_channel_config(channel_config, channel_groups, use_geo_mean, thread_
     aggregated = aggregate_rank_data(
         rank_data, thread_config, channel_config, num_ranks, use_geo_mean
     )
-    print(f"    ✓ Aggregated across {num_ranks} ranks")
+    print(f"    [OK] Aggregated across {num_ranks} ranks")
 
     return aggregated
 
@@ -288,7 +288,7 @@ def save_excel_output(final_df, output_path):
             writer, sheet_name="Summary_By_Config", index=False
         )
 
-    print(f"✓ Saved: {output_path}")
+    print(f"[SAVED] {output_path}")
     print("  Sheets created:")
     print("    1. All_Data - Complete dataset")
     print("    2. Pivot_Time_ms - Matrix view of time (ms)")

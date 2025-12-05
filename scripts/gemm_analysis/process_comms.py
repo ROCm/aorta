@@ -9,7 +9,7 @@ Usage:
     python process_nccl_to_csv.py --sweep-dir /path/to/sweep_directory
 
 Example:
-    python process_nccl_to_csv.py --sweep-dir /home/oyazdanb/aorta/experiments/sweep_20251124_222204
+    python process_nccl_to_csv.py --sweep-dir experiments/sweep_20251124_222204
 """
 
 import pandas as pd
@@ -88,10 +88,10 @@ def process_nccl_sweep(sweep_dir):
                 df['full_config'] = f"{thread_config}_{channel_config}"
 
                 all_data.append(df)
-                print(f"    ✓ Loaded {len(df)} rows")
+                print(f"    [OK] Loaded {len(df)} rows")
 
             except Exception as e:
-                print(f"    ✗ Error reading {filename}: {e}")
+                print(f"    [ERROR] Error reading {filename}: {e}")
 
     if not all_data:
         print("\nError: No data was loaded")
@@ -194,13 +194,13 @@ def process_nccl_sweep(sweep_dir):
     # Save as Excel (primary format - supports pivot tables)
     excel_path = output_dir / 'nccl_master_all_configs.xlsx'
     combined_df.to_excel(excel_path, index=False, sheet_name='NCCL_Data')
-    print(f"✓ Saved Excel: {excel_path}")
+    print(f"[SAVED] Excel: {excel_path}")
     print(f"  Rows: {len(combined_df)}, Columns: {len(combined_df.columns)}")
 
     # Also save as CSV (for pandas/command-line analysis)
     csv_path = output_dir / 'nccl_master_all_configs.csv'
     combined_df.to_csv(csv_path, index=False)
-    print(f"✓ Saved CSV: {csv_path}")
+    print(f"[SAVED] CSV: {csv_path}")
     print(f"  (Use Excel file for pivot tables, CSV for pandas/scripts)")
 
     # Print summary
@@ -241,7 +241,7 @@ def process_nccl_sweep(sweep_dir):
     print(f"  2. {csv_path} (CSV - use for pandas/scripts)")
     print("\nRecommended workflow:")
     print("  1. Open Excel file: libreoffice nccl_master_all_configs.xlsx")
-    print("  2. Create pivot table: Select all → Insert → Pivot Table")
+    print("  2. Create pivot table: Select all -> Insert -> Pivot Table")
     print("  3. Setup: Rows=operation_id, Columns=full_config, Values=comm_latency_mean")
     print("\nSee README for more examples!")
     print("="*80)

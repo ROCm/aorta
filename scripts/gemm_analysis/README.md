@@ -12,7 +12,7 @@ Profile GEMM kernel performance across multiple NCCL configurations.
 ### 1. Build Docker Container
 
 ```bash
-cd ~/aorta/docker
+cd docker
 docker compose -f docker-compose.rocm70_9-1.yaml build
 docker compose -f docker-compose.rocm70_9-1.yaml up -d
 docker exec -it training-overlap-bugs-rocm70_9-1 bash
@@ -24,20 +24,20 @@ docker exec -it training-overlap-bugs-rocm70_9-1 bash
 bash scripts/gemm_analysis/run_train_various_channels.sh \
   -c 28,42,56,70 \
   -t 256,512 \
-  -f config/gemm_overlap/gemm_test_1.yaml
+  -f config/single_node/gemm_overlap_comm.yaml
 ```
 
 ### 3. Generate TraceLens Reports
 
 ```bash
-bash scripts/gemm_analysis/run_tracelens_analysis.sh ~/aorta/experiments/sweep_20251124_222204
+bash scripts/gemm_analysis/run_tracelens_analysis.sh experiments/sweep_20251124_222204
 ```
 
 ### 4. Extract Top GEMM Kernels
 
 ```bash
 python scripts/gemm_analysis/analyze_gemm_reports.py \
-  --base-path ~/aorta/experiments/sweep_20251124_222204/tracelens_analysis \
+  --base-path experiments/sweep_20251124_222204/tracelens_analysis \
   --threads 256 512 \
   --channels 28 42 56 70 \
   --ranks 0 1 2 3 4 5 6 7 \
@@ -143,6 +143,10 @@ python scripts/gemm_analysis/create_embeded_html_report.py \
 ```
 
 Creates self-contained HTML with embedded images.
+
+Note: Currently supports pairwise (2-sweep) comparison. For comparing multiple sweeps,
+run multiple pairwise comparisons or aggregate data using the process_gpu_timeline.py
+and process_comms.py scripts.
 
 ## Additional Analysis Tools
 

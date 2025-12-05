@@ -84,10 +84,10 @@ def find_min_max_kernel_timestamps(trace_file: Path, kernel_name: str,
 
     # Print warnings if mismatch
     if abs(min_instance['duration_us'] - min_duration_us) > min_tolerance:
-        print(f"  Warning: Min duration mismatch: found {min_instance['duration_us']:.3f}µs vs expected {min_duration_us:.3f}µs")
+        print(f"  Warning: Min duration mismatch: found {min_instance['duration_us']:.3f}us vs expected {min_duration_us:.3f}us")
 
     if abs(max_instance['duration_us'] - max_duration_us) > max_tolerance:
-        print(f"  Warning: Max duration mismatch: found {max_instance['duration_us']:.3f}µs vs expected {max_duration_us:.3f}µs")
+        print(f"  Warning: Max duration mismatch: found {max_instance['duration_us']:.3f}us vs expected {max_duration_us:.3f}us")
 
     return result
 
@@ -144,7 +144,7 @@ def enhance_csv_with_timestamps(input_csv: Path, output_csv: Path, base_path: Pa
 
         print(f"  Config: {threads}thread/{channel}ch/rank{rank}")
         print(f"  Kernel: {kernel_name[:60]}...")
-        print(f"  Duration range: [{min_duration_us:.3f}, {max_duration_us:.3f}] µs")
+        print(f"  Duration range: [{min_duration_us:.3f}, {max_duration_us:.3f}] us")
 
         # Find trace file
         trace_file = get_trace_file_path(base_path, threads, channel, rank)
@@ -179,8 +179,8 @@ def enhance_csv_with_timestamps(input_csv: Path, output_csv: Path, base_path: Pa
             df.at[idx, 'time_between_min_max_ms'] = time_diff
             print(f"  Found timestamps: min at {timestamps['min_timestamp_ms']:.3f}ms, "
                   f"max at {timestamps['max_timestamp_ms']:.3f}ms (diff: {time_diff:.3f}ms)")
-            print(f"  Verification: found min={timestamps['min_duration_found_us']:.3f}µs (expected {min_duration_us:.3f}µs), "
-                  f"found max={timestamps['max_duration_found_us']:.3f}µs (expected {max_duration_us:.3f}µs)")
+            print(f"  Verification: found min={timestamps['min_duration_found_us']:.3f}us (expected {min_duration_us:.3f}us), "
+                  f"found max={timestamps['max_duration_found_us']:.3f}us (expected {max_duration_us:.3f}us)")
 
     # Save enhanced CSV
     df.to_csv(output_csv, index=False)
@@ -212,7 +212,7 @@ def parse_args():
     parser.add_argument(
         '--input-csv',
         type=Path,
-        default=Path("~/aorta/experiments/sweep_20251121_155219/tracelens_analysis/top5_gemm_kernels_time_variance.csv"),
+        required=True,
         help='Input CSV file with GEMM variance data'
     )
 
@@ -226,7 +226,7 @@ def parse_args():
     parser.add_argument(
         '--base-path',
         type=Path,
-        default=Path("~/aorta/experiments/sweep_20251121_155219"),
+        required=True,
         help='Base path to sweep directory containing trace files'
     )
 

@@ -62,7 +62,7 @@ def process_excel_file(file_path, threads, channel, rank, top_k=5):
                 # This is the header - validate column names match expectations
                 header_row = list(row)
 
-                # Expected column names
+                # Expected column names (match what TraceLens generates)
                 expected_x = "kernel_details__summarize_kernel_stats"
                 expected_ag = "Kernel Time (µs)_min"
                 expected_ah = "Kernel Time (µs)_max"
@@ -179,8 +179,8 @@ Examples:
     parser.add_argument(
         '--base-path',
         type=Path,
-        default=Path("~/aorta/experiments/sweep_20251121_155219/tracelens_analysis"),
-        help='Base path to tracelens_analysis directory (default: %(default)s)'
+        required=True,
+        help='Base path to tracelens_analysis directory'
     )
 
     parser.add_argument(
@@ -311,7 +311,7 @@ def main():
     print(f"\nTop {min(10, len(all_results))} kernels by time difference:")
     for i, row in enumerate(all_results[:10]):
         print(f"{i+1}. threads={row['threads']}, ch={row['channel']}, rank={row['rank']}, "
-              f"diff={row['time_diff_us']:.4f}µs")
+              f"diff={row['time_diff_us']:.4f}us")
         print(f"   {row['kernel_name'][:100]}...")
 
     # Print summary statistics
@@ -320,9 +320,9 @@ def main():
 
     print(f"\nSummary Statistics:")
     print(f"Total unique kernels: {len(kernel_names)}")
-    print(f"Average time difference: {sum(time_diffs)/len(time_diffs):.4f} µs")
-    print(f"Max time difference: {max(time_diffs):.4f} µs")
-    print(f"Min time difference: {min(time_diffs):.4f} µs")
+    print(f"Average time difference: {sum(time_diffs)/len(time_diffs):.4f} us")
+    print(f"Max time difference: {max(time_diffs):.4f} us")
+    print(f"Min time difference: {min(time_diffs):.4f} us")
 
 if __name__ == "__main__":
     main()

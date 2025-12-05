@@ -82,8 +82,8 @@ def load_collective_data(collective_file: Path) -> pd.DataFrame:
                 data.append({
                     'rank': row[2],
                     'collective_name': row[5],
-                    'timestamp_ms': row[15] / 1000.0 if row[15] else None,  # Convert µs to ms
-                    'duration_ms': row[16] / 1000.0 if row[16] else None  # Convert µs to ms
+                    'timestamp_ms': row[15] / 1000.0 if row[15] else None,  # Convert us to ms
+                    'duration_ms': row[16] / 1000.0 if row[16] else None  # Convert us to ms
                 })
 
         wb.close()
@@ -199,7 +199,7 @@ def enhance_csv_with_collective_overlap(input_csv: Path, output_csv: Path,
             continue
 
         print(f"  Config: {threads}thread/{channel}ch/rank{rank}")
-        print(f"  Max GEMM: timestamp={max_timestamp_ms:.3f}ms, duration={max_duration_us:.3f}µs")
+        print(f"  Max GEMM: timestamp={max_timestamp_ms:.3f}ms, duration={max_duration_us:.3f}us")
 
         # Load collective data (cache it)
         cache_key = f"{threads}thread/{channel}ch"
@@ -294,7 +294,7 @@ def parse_args():
     parser.add_argument(
         '--input-csv',
         type=Path,
-        default=Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis/top5_gemm_kernels_time_variance_with_timestamps.csv"),
+        required=True,
         help='Input CSV file with GEMM variance and timestamp data'
     )
 
@@ -308,7 +308,7 @@ def parse_args():
     parser.add_argument(
         '--tracelens-path',
         type=Path,
-        default=Path("/home/oyazdanb/aorta/experiments/sweep_20251121_155219/tracelens_analysis"),
+        required=True,
         help='Path to tracelens_analysis directory containing collective reports'
     )
 
@@ -337,7 +337,7 @@ def main():
     # Enhance the CSV with collective overlap info
     enhance_csv_with_collective_overlap(args.input_csv, args.output_csv, args.tracelens_path)
 
-    print("\n✅ Enhancement complete!")
+    print("\n[DONE] Enhancement complete!")
 
 if __name__ == "__main__":
     main()

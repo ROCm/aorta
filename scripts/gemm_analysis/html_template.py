@@ -1,4 +1,8 @@
-"""HTML template for GEMM sweep comparison report."""
+"""HTML template for GEMM sweep comparison report.
+
+Currently optimized for pairwise (2-sweep) comparison with side-by-side layout.
+TODO: Future enhancement - support N-way comparisons with adaptive grid layout.
+"""
 
 def get_comparison_template(label1, label2, sweep1_path, sweep2_path, image_data):
     """

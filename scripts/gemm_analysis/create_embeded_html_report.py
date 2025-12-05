@@ -2,6 +2,11 @@
 """
 Create a self-contained HTML report comparing two experiment sweeps.
 Embeds all images as base64 for easy sharing.
+
+TODO: Future enhancement - support multiple sweep comparisons using comma-separated
+      input (e.g., --sweeps sweep1,sweep2,sweep3) for N-way comparisons.
+      Current implementation focuses on pairwise comparison which covers the most
+      common use case of A/B testing.
 """
 
 import base64
@@ -27,9 +32,9 @@ def parse_args():
 Examples:
   # Compare two sweeps
   python create_embeded_html_report.py \\
-    --sweep1 /home/oyazdanb/aorta/experiments/sweep_20251121_155219 \\
-    --sweep2 /home/oyazdanb/aorta/experiments/sweep_20251124_222204 \\
-    --output /home/oyazdanb/sweep_comparison.html
+    --sweep1 experiments/sweep_20251121_155219 \\
+    --sweep2 experiments/sweep_20251124_222204 \\
+    --output sweep_comparison.html
 
   # With custom labels
   python create_embeded_html_report.py \\
