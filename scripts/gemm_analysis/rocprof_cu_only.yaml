@@ -1,0 +1,11 @@
+# Minimal configuration focused on CU utilization only
+# Use this for basic CU occupancy analysis
+jobs:
+  - kernel_include_regex: "(gemm|Cijk_.*)"
+    kernel_trace: true
+    output_format: [csv]
+    pmc:
+      - SQ_BUSY_CU_CYCLES     # CU utilization (most important)
+      - SQ_WAVES              # Active waves (occupancy indicator)
+      - SQ_WAVE_CYCLES        # Total wave cycles
+      - SQ_INSTS_MFMA         # Matrix ops (GEMM-specific)

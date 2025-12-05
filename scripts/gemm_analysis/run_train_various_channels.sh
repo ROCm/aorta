@@ -18,24 +18,52 @@ SKIP_EXISTING=false
 AGGREGATE_RESULTS=true
 CONFIG_FILE="config/distributed.yaml"
 NPROC_PER_NODE=$DEFAULT_NPROC
+ENABLE_ROCPROF=false
+ROCPROF_STATS=false
+ROCPROF_INPUT=""
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo "Options:"
-    echo "  -c CHANNELS   Comma-separated list of channels (default: 38,42,56,70)"
-    echo "  -t THREADS    Comma-separated list of threads per block (default: 256,512)"
-    echo "  -f CONFIG     Config file path (default: config/distributed.yaml)"
-    echo "  -p NPROC      Number of processes per node (default: 8)"
-    echo "  -s            Skip existing output directories"
-    echo "  -n            No result aggregation at the end"
-    echo "  -h            Show this help message"
+    echo "  -c, --channels CHANNELS     Comma-separated list of channels (default: 38,42,56,70)"
+    echo "  -t, --threads THREADS       Comma-separated list of threads per block (default: 256,512)"
+    echo "  -f, --config CONFIG         Config file path (default: config/distributed.yaml)"
+    echo "  -p, --nproc NPROC           Number of processes per node (default: 8)"
+    echo "  -r, --rocprof               Enable rocprofv3 tracing"
+    echo "  -m, --stats                 Enable rocprof stats (CU utilization, occupancy)"
+    echo "      --rocprof-input FILE    Use rocprofv3 input yaml/json (filtering supported)"
+    echo "  -s, --skip-existing         Skip existing output directories"
+    echo "  -n, --no-aggregate          No result aggregation at the end"
+    echo "  -h, --help                  Show this help message"
     echo ""
-    echo "Example: $0 -c 28,42,56 -t 256,512 -p 8 -f config/my_config.yaml -s"
+    echo "Examples:"
+    echo "  $0 --channels 28,42,56 --threads 256,512 --skip-existing"
+    echo "  $0 --rocprof --channels 28,42,56                    # Trace all kernels"
+    echo "  $0 --rocprof --stats --channels 28                  # Add CU stats"
+    echo "  $0 --rocprof --rocprof-input path/to/rocprof.yaml   # Use yaml to filter kernels"
     echo ""
     exit 1
 }
 
-while getopts "c:t:f:p:snh" opt; do
+# Handle long options
+for arg in "$@"; do
+    shift
+    case "$arg" in
+        --channels)       set -- "$@" "-c" ;;
+        --threads)        set -- "$@" "-t" ;;
+        --config)         set -- "$@" "-f" ;;
+        --nproc)          set -- "$@" "-p" ;;
+        --rocprof)        set -- "$@" "-r" ;;
+        --stats)          set -- "$@" "-m" ;;
+        --skip-existing)  set -- "$@" "-s" ;;
+        --no-aggregate)   set -- "$@" "-n" ;;
+        --rocprof-input)  set -- "$@" "--rocprof-input" ;;
+        --help)           set -- "$@" "-h" ;;
+        *)                set -- "$@" "$arg" ;;
+    esac
+done
+
+while getopts "c:t:f:p:snrmh-:" opt; do
     case $opt in
         c)
             IFS=',' read -ra CHANNELS_TO_RUN <<< "$OPTARG"
@@ -55,8 +83,25 @@ while getopts "c:t:f:p:snh" opt; do
         n)
             AGGREGATE_RESULTS=false
             ;;
+        r)
+            ENABLE_ROCPROF=true
+            ;;
+        m)
+            ROCPROF_STATS=true
+            ;;
         h)
             usage
+            ;;
+        -)
+            case "$OPTARG" in
+                rocprof-input)
+                    ROCPROF_INPUT="${!OPTIND}"; OPTIND=$((OPTIND+1))
+                    ;;
+                *)
+                    echo "Invalid long option: --$OPTARG" >&2
+                    usage
+                    ;;
+            esac
             ;;
         \?)
             echo "Invalid option: -$OPTARG" >&2
@@ -129,6 +174,15 @@ log "Testing threads per block: ${THREADS_TO_RUN[*]}"
 log "Testing channels: ${CHANNELS_TO_RUN[*]}"
 log "Skip existing: ${SKIP_EXISTING}"
 log "Aggregate results: ${AGGREGATE_RESULTS}"
+log "rocprofv3 enabled: ${ENABLE_ROCPROF}"
+if [ "${ENABLE_ROCPROF}" = true ]; then
+    log "  Stats enabled: ${ROCPROF_STATS}"
+    if [ -n "${ROCPROF_INPUT}" ]; then
+        log "  rocprof input: ${ROCPROF_INPUT} (filtering/stats set in yaml)"
+    else
+            log "  To filter kernels, use: --rocprof-input path/to/rocprof_input.yaml"
+    fi
+fi
 log "Results directory: ${BASE_OUTPUT_DIR}"
 echo ""
 
@@ -163,15 +217,45 @@ for THREADS in "${THREADS_TO_RUN[@]}"; do
         # Record start time
         START_TIME=$(date +%s)
 
-        # Set environment variables and run the command
-        # Enable ROCm profiler for kernel visibility
-        RCCL_THREADS_PER_BLOCK=${THREADS} \
-        NCCL_MAX_NCHANNELS=${CHANNELS} \
-        HSA_ENABLE_SDMA=0 \
-        PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1 \
-        ${BASE_CMD} ${BASE_OVERRIDES} \
-            --override training.output_dir=${OUTPUT_DIR} \
-            2>&1 | tee "${OUTPUT_DIR}/run_output.log"
+        # Set environment variables
+        export RCCL_THREADS_PER_BLOCK=${THREADS}
+        export NCCL_MAX_NCHANNELS=${CHANNELS}
+        export HSA_ENABLE_SDMA=0
+        export PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1
+
+        # Run with or without rocprofv3
+        if [ "${ENABLE_ROCPROF}" = true ]; then
+            ROCPROF_DIR="${OUTPUT_DIR}/rocprof_traces"
+            mkdir -p "${ROCPROF_DIR}"
+
+            if [ -n "${ROCPROF_INPUT}" ]; then
+                log "[INFO] Using rocprofv3 input file: ${ROCPROF_INPUT}"
+                log "[INFO] Kernel filtering/stats should be set inside the input file"
+                rocprofv3 -i "${ROCPROF_INPUT}" -d "${ROCPROF_DIR}" -- \
+                    ${BASE_CMD} ${BASE_OVERRIDES} \
+                    --override training.output_dir=${OUTPUT_DIR} \
+                    2>&1 | tee "${OUTPUT_DIR}/run_output.log"
+            else
+                # Current rocprofv3 build does not support --kernel-names; run unfiltered
+                # to avoid argument errors. Expect larger traces.
+                ROCPROF_ARGS_ARRAY=("--kernel-trace")
+                if [ -n "${KERNEL_NAMES}" ]; then
+                    log "[WARN] rocprofv3 on this system ignores kernel filter; tracing all kernels"
+                fi
+                if [ "${ROCPROF_STATS}" = true ]; then
+                    ROCPROF_ARGS_ARRAY+=("--stats")
+                fi
+
+                rocprofv3 "${ROCPROF_ARGS_ARRAY[@]}" -d "${ROCPROF_DIR}" -- \
+                    ${BASE_CMD} ${BASE_OVERRIDES} \
+                    --override training.output_dir=${OUTPUT_DIR} \
+                    2>&1 | tee "${OUTPUT_DIR}/run_output.log"
+            fi
+        else
+            ${BASE_CMD} ${BASE_OVERRIDES} \
+                --override training.output_dir=${OUTPUT_DIR} \
+                2>&1 | tee "${OUTPUT_DIR}/run_output.log"
+        fi
 
         EXIT_CODE=${PIPESTATUS[0]}
         END_TIME=$(date +%s)
