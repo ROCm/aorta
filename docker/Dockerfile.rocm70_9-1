@@ -28,7 +28,7 @@ RUN yum update -y --skip-broken \
     rocm-core || echo "Updated available ROCm packages"
 
 RUN python3.10 -m pip install git+https://github.com/AMD-AGI/TraceLens.git
-RUN python3.10 -m pip install openpyxl
+RUN python3.10 -m pip install openpyxl seaborn
 
 # Update environment variables to ensure new ROCm is used
 ENV ROCM_HOME=/opt/rocm
