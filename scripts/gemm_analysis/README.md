@@ -15,8 +15,8 @@ Analyze GEMM kernel performance across multiple NCCL configurations.
 
 ```bash
 cd /home/oyazdanb/aorta/docker
-docker-compose -f docker-compose.rocm70.yaml build
-docker-compose -f docker-compose.rocm70.yaml up -d
+docker compose -f docker-compose.rocm70.yaml build
+docker compose -f docker-compose.rocm70.yaml up -d
 docker exec -it training-overlap-bugs-rocm70 bash
 ```
 
