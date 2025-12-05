@@ -27,6 +27,9 @@ RUN yum update -y --skip-broken \
     hip-runtime-amd \
     rocm-core || echo "Updated available ROCm packages"
 
+RUN python3.10 -m pip install git+https://github.com/AMD-AGI/TraceLens.git
+RUN python3.10 -m pip install openpyxl
+
 # Update environment variables to ensure new ROCm is used
 ENV ROCM_HOME=/opt/rocm
 ENV PATH=$ROCM_HOME/bin:$PATH
