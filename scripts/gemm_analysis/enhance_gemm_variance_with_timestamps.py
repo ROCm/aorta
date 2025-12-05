@@ -44,8 +44,13 @@ def find_min_max_kernel_timestamps(trace_file: Path, kernel_name: str,
             event.get('name', '').startswith(kernel_name)):
 
             # Duration and timestamp are in microseconds in PyTorch trace file
-            duration_us = event.get('dur', 0)
-            timestamp_us = event.get('ts', 0)
+            duration_us = event.get('dur')
+            timestamp_us = event.get('ts')
+
+            # Skip events without proper duration or timestamp
+            if duration_us is None or timestamp_us is None:
+                continue
+
             timestamp_ms = timestamp_us / 1000.0
 
             kernel_instances.append({
@@ -55,7 +60,7 @@ def find_min_max_kernel_timestamps(trace_file: Path, kernel_name: str,
             })
 
     if not kernel_instances:
-        print(f"  Warning: No instances of kernel {kernel_name[:50]}... found")
+        print(f"  Warning: No valid instances of kernel {kernel_name[:50]}... found (with duration)")
         return {
             'min_timestamp_ms': None,
             'max_timestamp_ms': None,
@@ -63,7 +68,7 @@ def find_min_max_kernel_timestamps(trace_file: Path, kernel_name: str,
             'max_duration_found_us': None
         }
 
-    # Sort by duration
+    # Sort by duration (now guaranteed to exist and be non-None)
     kernel_instances.sort(key=lambda x: x['duration_us'])
 
     # Get the actual minimum and maximum instances
