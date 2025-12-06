@@ -1,0 +1,266 @@
+#!/bin/bash
+# TraceLens Analysis for Single Configuration (No Sweep)
+# Usage: ./run_tracelens_single_config.sh <directory_path>
+#
+# The script accepts either:
+#   - Path to parent directory containing torch_profiler/
+#   - Path to torch_profiler/ directory directly
+#
+# Examples:
+#   ./run_tracelens_single_config.sh /path/to/traces
+#   ./run_tracelens_single_config.sh /path/to/traces/torch_profiler
+#
+# Note: Uses GEMM-patched TraceLens wrapper to recognize ROCm Tensile kernels
+
+set -e
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Use patched TraceLens wrapper for GEMM recognition
+TRACELENS_WRAPPER="python $SCRIPT_DIR/../tracelens_with_gemm_patch.py"
+
+# Parse options
+RUN_INDIVIDUAL=true
+RUN_COLLECTIVE=true
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --individual-only)
+            RUN_COLLECTIVE=false
+            shift
+            ;;
+        --collective-only)
+            RUN_INDIVIDUAL=false
+            shift
+            ;;
+        *)
+            INPUT_DIR="$1"
+            shift
+            ;;
+    esac
+done
+
+# Check if directory provided
+if [ -z "$INPUT_DIR" ]; then
+    echo "Error: Please provide trace directory"
+    echo ""
+    echo "Usage: $0 <directory_path> [options]"
+    echo ""
+    echo "Options:"
+    echo "  --individual-only    Generate only individual reports"
+    echo "  --collective-only    Generate only collective report"
+    echo ""
+    echo "Examples:"
+    echo "  $0 /path/to/traces"
+    echo "  $0 /path/to/traces --individual-only"
+    echo "  $0 /path/to/traces --collective-only"
+    echo ""
+    exit 1
+fi
+
+# Verify directory exists
+if [ ! -d "$INPUT_DIR" ]; then
+    echo "Error: Directory not found: $INPUT_DIR"
+    exit 1
+fi
+
+# Auto-detect structure: is this torch_profiler/ or its parent?
+TORCH_PROF_DIR=""
+BASE_DIR=""
+
+# Check if INPUT_DIR contains rank directories (i.e., it IS torch_profiler/)
+if find "$INPUT_DIR" -maxdepth 1 -type d -name "rank*" | grep -q .; then
+    TORCH_PROF_DIR="$INPUT_DIR"
+    BASE_DIR=$(dirname "$INPUT_DIR")
+    echo "Detected torch_profiler directory: $TORCH_PROF_DIR"
+# Check if INPUT_DIR contains torch_profiler/ subdirectory
+elif [ -d "$INPUT_DIR/torch_profiler" ]; then
+    TORCH_PROF_DIR="$INPUT_DIR/torch_profiler"
+    BASE_DIR="$INPUT_DIR"
+    echo "Found torch_profiler subdirectory: $TORCH_PROF_DIR"
+else
+    echo "Error: Cannot find rank directories in expected structure"
+    echo ""
+    echo "Expected one of:"
+    echo "  1. Directory with rank0/, rank1/, ... subdirectories (torch_profiler/)"
+    echo "  2. Parent directory containing torch_profiler/rank0/, rank1/, ..."
+    echo ""
+    echo "Provided: $INPUT_DIR"
+    exit 1
+fi
+
+echo "════════════════════════════════════════════════════════════════"
+echo "           TraceLens Analysis - Single Configuration"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+echo "Input directory: $INPUT_DIR"
+echo "Torch profiler traces: $TORCH_PROF_DIR"
+echo ""
+
+# Create output directory in the base directory
+OUTPUT_DIR="${BASE_DIR}/tracelens_analysis"
+mkdir -p "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR/individual_reports"
+mkdir -p "$OUTPUT_DIR/collective_reports"
+
+# Detect number of ranks
+NUM_RANKS=$(find "$TORCH_PROF_DIR" -maxdepth 1 -type d -name "rank*" | wc -l)
+
+if [ $NUM_RANKS -eq 0 ]; then
+    echo "Error: No rank directories found in $TORCH_PROF_DIR"
+    exit 1
+fi
+
+echo "Detected $NUM_RANKS ranks"
+
+# Show sample trace files
+echo ""
+echo "Sample trace files:"
+for rank_dir in $(find "$TORCH_PROF_DIR" -maxdepth 1 -type d -name "rank*" | sort | head -3); do
+    rank_name=$(basename "$rank_dir")
+    trace_file=$(find "$rank_dir" -name "*.json" | head -1)
+    if [ -n "$trace_file" ]; then
+        echo "  $rank_name: $(basename "$trace_file")"
+    fi
+done
+if [ "$RUN_INDIVIDUAL" = true ]; then
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "Step 1: Generating Individual Performance Reports"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
+
+# Process each rank
+for rank_idx in $(seq 0 $((NUM_RANKS - 1))); do
+    # Try multiple directory naming patterns
+    RANK_DIR=""
+    if [ -d "$TORCH_PROF_DIR/rank${rank_idx}" ]; then
+        RANK_DIR="$TORCH_PROF_DIR/rank${rank_idx}"
+    elif [ -d "$TORCH_PROF_DIR/rank_${rank_idx}" ]; then
+        RANK_DIR="$TORCH_PROF_DIR/rank_${rank_idx}"
+    elif [ -d "$TORCH_PROF_DIR/rank_$(printf "%02d" $rank_idx)" ]; then
+        RANK_DIR="$TORCH_PROF_DIR/rank_$(printf "%02d" $rank_idx)"
+    fi
+
+    if [ -z "$RANK_DIR" ] || [ ! -d "$RANK_DIR" ]; then
+        echo "  Skip rank ${rank_idx} - directory not found"
+        continue
+    fi
+
+    # Find trace file
+    TRACE=$(find "$RANK_DIR" -name "*.json" -type f | head -1)
+
+    if [ -z "$TRACE" ]; then
+        echo "⚠️  Skip rank ${rank_idx} - no trace file found"
+        continue
+    fi
+
+    OUTPUT="$OUTPUT_DIR/individual_reports/perf_rank${rank_idx}.xlsx"
+
+    echo "Processing rank ${rank_idx}..."
+    echo "  Trace: $(basename "$TRACE")"
+
+    $TRACELENS_WRAPPER generate_perf_report \
+        --profile_json_path "$TRACE" \
+        --output_xlsx_path "$OUTPUT" \
+        --include_unlinked_kernels \
+        --short_kernel_study \
+        --short_kernel_threshold_us 50 \
+        --topk_ops 100 \
+        --topk_roofline_ops 100
+
+    echo "  Done: $OUTPUT"
+    echo ""
+done
+
+fi
+
+if [ "$RUN_COLLECTIVE" = true ]; then
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "Step 2: Generating Multi-Rank Collective Report"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
+
+# Find a sample trace file to get the filename pattern
+SAMPLE_TRACE=$(find "$TORCH_PROF_DIR/rank0" -name "*.json" -type f | head -1)
+if [ -z "$SAMPLE_TRACE" ]; then
+    # Try alternative rank naming
+    SAMPLE_TRACE=$(find "$TORCH_PROF_DIR/rank_0" -name "*.json" -type f | head -1)
+fi
+
+if [ -z "$SAMPLE_TRACE" ]; then
+    # Try rank_00
+    SAMPLE_TRACE=$(find "$TORCH_PROF_DIR/rank_00" -name "*.json" -type f | head -1)
+fi
+
+if [ -n "$SAMPLE_TRACE" ]; then
+    OUTPUT="$OUTPUT_DIR/collective_reports/collective_all_ranks.xlsx"
+
+    echo "Generating collective report for all $NUM_RANKS ranks..."
+
+    # Create symlinks with consistent names for collective report
+    for rank_idx in $(seq 0 $((NUM_RANKS - 1))); do
+        RANK_DIR="$TORCH_PROF_DIR/rank${rank_idx}"
+        if [ -d "$RANK_DIR" ]; then
+            TRACE=$(find "$RANK_DIR" -name "*.json" -type f | head -1)
+            if [ -n "$TRACE" ]; then
+                ln -sf "$(basename "$TRACE")" "$RANK_DIR/trace.json"
+            fi
+        fi
+    done
+
+    echo "  Trace pattern: rank*/trace.json"
+
+    $TRACELENS_WRAPPER generate_multi_rank_collective \
+        --trace_pattern "$TORCH_PROF_DIR/rank*/trace.json" \
+        --world_size $NUM_RANKS \
+        --output_xlsx_path "$OUTPUT" \
+        --detailed_analysis \
+        --use_multiprocessing
+
+    echo "  Done: $OUTPUT"
+else
+    echo "  Could not generate collective report - no trace files found"
+fi
+
+fi
+
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo "Analysis Complete!"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+echo "📁 Results saved to:"
+echo "   $OUTPUT_DIR/"
+echo ""
+
+# Count generated reports
+INDIV_COUNT=$(find "$OUTPUT_DIR/individual_reports" -name "*.xlsx" 2>/dev/null | wc -l)
+COLL_COUNT=$(find "$OUTPUT_DIR/collective_reports" -name "*.xlsx" 2>/dev/null | wc -l)
+
+echo "Generated reports:"
+echo "  Individual reports (per rank): $INDIV_COUNT"
+echo "  Collective reports (all ranks): $COLL_COUNT"
+echo ""
+
+echo "📊 Report Files:"
+echo ""
+echo "Individual Performance Reports:"
+if [ $INDIV_COUNT -gt 0 ]; then
+    find "$OUTPUT_DIR/individual_reports" -name "*.xlsx" | sort | sed 's/^/  /'
+else
+    echo "  (none generated)"
+fi
+echo ""
+
+echo "Collective Reports:"
+if [ $COLL_COUNT -gt 0 ]; then
+    find "$OUTPUT_DIR/collective_reports" -name "*.xlsx" | sed 's/^/  /'
+else
+    echo "  (none generated)"
+fi
+
+echo ""
+echo "Done!"
