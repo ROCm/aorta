@@ -7,7 +7,7 @@ log() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[${timestamp}] ${message}" 2>&1
 }
-            
+
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo "Options:"
