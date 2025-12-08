@@ -111,7 +111,7 @@ def plot_gpu_type_by_rank(total_time_df, output_path, title):
         linewidth=2,
         markersize=8,
         color="#e67e22",
-        label="Saleelk (Test)",
+        label="Test",
     )
 
     # Add horizontal grid lines only
@@ -229,7 +229,7 @@ def create_nccl_charts(excel_path, output_path):
             [i + width / 2 for i in x],
             df[plot_item[item]["y_col_names"][1]],
             width,
-            label="Saleelk (Test)",
+            label="Test",
             color="#e67e22",
         )
         ax.yaxis.grid(True, linestyle="--", alpha=0.7, color="gray")
@@ -298,7 +298,7 @@ def create_gpu_time_heatmap(excel_path, output_path):
     )
 
     ax.set_title(
-        "GPU Metric Percentage Change by Rank (HeatMap) \n (Positive = Better Saleelk)",
+        "GPU Metric Percentage Change by Rank (HeatMap) \n (Positive = Better Test)",
         fontsize=14,
         fontweight="bold",
     )
@@ -319,7 +319,7 @@ def main():
     parser.add_argument(
         "--report-path",
         type=Path,
-        default="/home/prosenj/aorta/aorta_single_config/aorta/expt_compare/final_analysis_report.xlsx",
+        default="~/aorta/aorta_single_config/aorta/expt_compare/final_analysis_report.xlsx",
         help="Path to the input Excel file (should have Summary_Dashboard sheet)",
     )
     parser.add_argument(

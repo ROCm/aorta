@@ -36,7 +36,7 @@ OVERALL_GPU_CHARTS = [
         "name": "Percentage Change Overview",
         "file": "improvement_chart.png",
         "alt": "Summary Chart",
-        "description": "Overall performance change across key GPU metrics. Positive values indicate improvement (Saleelk is faster/better).",
+        "description": "Overall performance change across key GPU metrics. Positive values indicate improvement (Test is faster/better).",
     },
     {
         "name": "Absolute Time Comparison",
