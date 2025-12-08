@@ -30,6 +30,14 @@ RUN yum update -y --skip-broken \
 RUN python3.10 -m pip install git+https://github.com/AMD-AGI/TraceLens.git
 RUN python3.10 -m pip install openpyxl seaborn
 
+# Download and install rocprof-trace-decoder to enable `--att` flag in rocprofv3
+# to generate thread traces.
+# NOTE: We'll periodically have to update the release tag to keep up with newer releases.
+RUN wget https://github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.rpm \
+    -O /tmp/rocprof-trace-decoder.rpm && \
+    rpm -i /tmp/rocprof-trace-decoder.rpm && \
+    rm /tmp/rocprof-trace-decoder.rpm
+
 # Update environment variables to ensure new ROCm is used
 ENV ROCM_HOME=/opt/rocm
 ENV PATH=$ROCM_HOME/bin:$PATH
