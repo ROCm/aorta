@@ -83,7 +83,7 @@ dataloader:
 profiling:
   enabled: true
   wait: 5
-  warmup: 5 
+  warmup: 5
   active: 1
   repeat: 1
   record_shapes: false
