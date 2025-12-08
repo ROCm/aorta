@@ -14,14 +14,13 @@ pip install pandas openpyxl matplotlib seaborn numpy
 
 ```bash
 cd docker
-docker-compose -f docker-compose.rocm70_9-1.yaml build
-docker-compose -f docker-compose.rocm70_9-1.yaml up -d
-docker-compose -f docker-compose.rocm70_9-1.yaml exec torchenv-rocm70 bash
+docker compose -f docker-compose.rocm70_9-1.yaml build
+docker compose -f docker-compose.rocm70_9-1.yaml up -d
+docker compose -f docker-compose.rocm70_9-1.yaml exec torchenv-rocm70 bash
 
 # Inside container - build warp_speed_v1 (always rebuild)
 # Note: Set --amdgpu_targets to match your GPU architecture
 # Run 'rocminfo | grep gfx' to find your GPU target (e.g., gfx942, gfx950)
-cd /opt
 if [ -d "rccl" ]; then
     cd rccl
     git checkout warp_speed_v1

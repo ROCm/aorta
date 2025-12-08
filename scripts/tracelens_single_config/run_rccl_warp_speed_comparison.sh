@@ -194,13 +194,40 @@ for config in "${CONFIGS[@]}"; do
     # Record start time
     START_TIME=$(date +%s)
 
+    # [FIX] Disable GPU core dumps to prevent @gpucore files
+    ulimit -c 0  # Disable core dumps entirely
+    export HSA_ENABLE_COREDUMP=0  # Disable AMD GPU core dumps
+
+    # [FIX] Reduce NCCL timeout to fail faster instead of waiting 10 minutes
+    export NCCL_TIMEOUT=60  # Timeout after 60 seconds instead of 600 seconds
+
     # Export environment variables so child processes inherit them
     export RCCL_WARP_SPEED_ENABLE=1
     export RCCL_UNROLL_FACTOR=1
     export RCCL_WARP_SPEED_CU_COUNT=${CU_COUNT}
     export RCCL_THREADS_PER_BLOCK=${THREADS}
     export HSA_ENABLE_SDMA=0
-    export PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1
+
+    # Add debugging to catch errors better
+    export AMD_SERIALIZE_KERNEL=3  # Better error reporting
+    export HIP_LAUNCH_BLOCKING=1   # Synchronous kernel launches
+
+    # [FIX] ROCm Profiler Configuration
+    # When enabled, redirect output to experiment directory instead of /tmp
+    export PYTORCH_ROCM_PROFILER_ENABLE_TRACING=0  # Set to 1 only when needed for profiling
+
+    # If profiling is enabled, redirect output files away from /tmp
+    if [[ "${PYTORCH_ROCM_PROFILER_ENABLE_TRACING}" == "1" ]]; then
+        export ROCPROFILER_OUTPUT_PATH="${OUTPUT_DIR}/rocprofiler"
+        export ROCPROFILER_LOG_PATH="${OUTPUT_DIR}/rocprofiler"
+        export HSA_TOOLS_LIB_PATH="${OUTPUT_DIR}/rocprofiler"
+        mkdir -p "${OUTPUT_DIR}/rocprofiler"
+        log "  [WARN] ROCm profiling enabled - output redirected to ${OUTPUT_DIR}/rocprofiler"
+        log "  [WARN] This will generate large trace files (several GB per rank)"
+    fi
+
+    # [FIX] Disable WarpSpeed Auto Mode - causes non-deterministic behavior
+    #export RCCL_WARP_SPEED_AUTO_MODE=0
 
     # Use custom RCCL if available
     if [ -d "/opt/rccl/build/release" ]; then
@@ -229,6 +256,11 @@ for config in "${CONFIGS[@]}"; do
     else
         log "[ERROR] Failed ${NAME} (exit code: $EXIT_CODE, duration: ${DURATION}s)"
         RUN_STATUS[${NAME}]="FAILED"
+
+        # [FIX] Clean up any hanging GPU processes after failure
+        log "  Cleaning up any remaining GPU processes..."
+        pkill -9 -f "train.py" 2>/dev/null || true
+        sleep 2
     fi
 
     # Fix permissions if running as root in container

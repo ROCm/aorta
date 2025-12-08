@@ -20,8 +20,8 @@ services:
       - TORCH_NCCL_HIGH_PRIORITY=1
 
     volumes:
-      - /home/manrao:/manrao
-      - /home/oyazdanb/aorta:/workspace/aorta
+      - ${HOME}/aorta:/workspace/aorta
+      - ${HOME}/rccl:/rccl
     devices:
       - /dev/kfd
       - /dev/dri
