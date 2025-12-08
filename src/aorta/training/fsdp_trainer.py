@@ -535,16 +535,24 @@ def training_loop(
     metrics_logger.close()
 
 
-def configure_optimizer(model: nn.Module, cfg: OptimizerConfig) -> torch.optim.Optimizer:
+def configure_optimizer(model: nn.Module, cfg: OptimizerConfig, dist_mode: str = "ddp") -> torch.optim.Optimizer:
     if cfg.name.lower() == "shampoo":
-        from distributed_shampoo import DistributedShampoo
-        log.info("Using DistributedShampoo optimizer")
+        from distributed_shampoo import DistributedShampoo, DDPDistributedConfig
+
+        # Configure distributed Shampoo for multi-GPU training
+        distributed_config = DDPDistributedConfig(
+            communication_dtype=torch.float32,
+            num_trainers_per_group=-1,  # Use all ranks in the group
+            communicate_params=False,
+        )
+        log.info("Using DistributedShampoo optimizer with DDPDistributedConfig")
         optimizer = DistributedShampoo(
             model.parameters(),
             lr=cfg.lr,
             betas=cfg.betas,
             epsilon=cfg.eps,
             weight_decay=cfg.weight_decay,
+            distributed_config=distributed_config,
         )
     else:
         log.info("Using AdamW optimizer")
@@ -742,7 +750,7 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
         model = build_ddp_model(model_cfg, ddp_cfg, compile_cfg, env["device"])
     else:
         model = build_fsdp_model(model_cfg, fsdp_cfg, compile_cfg, env["device"])
-    optimizer = configure_optimizer(model, optimizer_cfg)
+    optimizer = configure_optimizer(model, optimizer_cfg, dist_mode)
     scheduler = configure_scheduler(
         optimizer,
         scheduler_cfg,

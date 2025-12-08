@@ -6,7 +6,7 @@ logging:
   level: INFO
 
 training:
-  epochs: 1
+  epochs: 10
   batch_size: 512
   gradient_accumulation: 2
   mixed_precision: bf16
@@ -103,8 +103,10 @@ profiling:
   profile_memory: true
   with_stack: false
   with_flops: false
-  tensorboard: true
-  chrome_trace: true
+  # tensorboard: true
+  # chrome_trace: true
+  tensorboard: false
+  chrome_trace: false
   trace_filename: user_shampoo.json
 
 tracelens:
