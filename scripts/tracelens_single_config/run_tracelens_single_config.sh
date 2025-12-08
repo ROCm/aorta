@@ -1,7 +1,7 @@
 #!/bin/bash
 # TraceLens Analysis for Single Configuration (No Sweep)
 # Usage: ./run_tracelens_single_config.sh <directory_path>
-# 
+#
 # The script accepts either:
 #   - Path to parent directory containing torch_profiler/
 #   - Path to torch_profiler/ directory directly
@@ -160,7 +160,7 @@ for rank_idx in $(seq 0 $((NUM_RANKS - 1))); do
 
     echo "Processing rank ${rank_idx}..."
     echo "  Trace: $(basename "$TRACE")"
-    
+
     $TRACELENS_WRAPPER generate_perf_report \
         --profile_json_path "$TRACE" \
         --output_xlsx_path "$OUTPUT" \
@@ -199,7 +199,7 @@ if [ -n "$SAMPLE_TRACE" ]; then
     OUTPUT="$OUTPUT_DIR/collective_reports/collective_all_ranks.xlsx"
 
     echo "Generating collective report for all $NUM_RANKS ranks..."
-    
+
     # Create symlinks with consistent names for collective report
     for rank_idx in $(seq 0 $((NUM_RANKS - 1))); do
         RANK_DIR="$TORCH_PROF_DIR/rank${rank_idx}"
@@ -210,9 +210,9 @@ if [ -n "$SAMPLE_TRACE" ]; then
             fi
         fi
     done
-    
+
     echo "  Trace pattern: rank*/trace.json"
-    
+
     $TRACELENS_WRAPPER generate_multi_rank_collective \
         --trace_pattern "$TORCH_PROF_DIR/rank*/trace.json" \
         --world_size $NUM_RANKS \
@@ -264,4 +264,3 @@ fi
 
 echo ""
 echo "Done!"
-

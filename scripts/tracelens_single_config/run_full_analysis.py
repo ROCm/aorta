@@ -135,14 +135,14 @@ Examples:
     --test /path/to/test/traces \\
     --output /path/to/output \\
     --all
-  
+
   # Only GPU timeline comparison
   python run_full_analysis.py \\
     --baseline /path/to/baseline \\
     --test /path/to/test \\
     --output /path/to/output \\
     --gpu-timeline
-  
+
   # Create final report (skip TraceLens if already done)
   python run_full_analysis.py \\
     --baseline /path/to/baseline \\
