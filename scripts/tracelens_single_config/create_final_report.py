@@ -159,7 +159,7 @@ def create_final_report(
             metric_type = row["type"]
             dashboard_data["Metric"].append(f"GPU_{metric_type}")
             dashboard_data["Baseline"].append(round(row["baseline_time_ms"], 2))
-            dashboard_data["Test"].append(round(row["saleelk_time_ms"], 2))
+            dashboard_data["Test"].append(round(row["test_time_ms"], 2))
             dashboard_data["Improvement (%)"].append(round(row["percent_change"], 2))
             dashboard_data["Status"].append(
                 "Better"
