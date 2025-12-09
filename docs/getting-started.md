@@ -4,10 +4,10 @@ This guide covers prerequisites, installation, and initial setup for AORTA.
 
 ## Prerequisites
 
-- PyTorch >= 2.2 with FSDP2 APIs (CUDA/NCCL or ROCm 7/RCCL)
+- PyTorch >= 2.2 with FSDP2 APIs (ROCm 7/RCCL)
+- ROCm tooling (`rocm-smi`, `rocminfo`)
 - PyYAML, matplotlib
-- ROCm tooling (`rocm-smi`, `rocminfo`) on AMD systems
-- GPU nodes with NCCL/RCCL capable interconnects
+- GPU nodes with RCCL capable interconnects
 - Sufficient GPU memory for the configured model (see `config/default.yaml`)
 
 ## Key Assumptions

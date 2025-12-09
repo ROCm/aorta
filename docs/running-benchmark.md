@@ -4,16 +4,16 @@ This guide covers different ways to launch the AORTA benchmark on CUDA and ROCm 
 
 ## Quick Start
 
+### ROCm
+
+```bash
+bash scripts/launch_rocm.sh config/default.yaml
+```
+
 ### CUDA
 
 ```bash
 bash scripts/launch_cuda.sh config/default.yaml
-```
-
-### ROCm 7
-
-```bash
-bash scripts/launch_rocm.sh config/default.yaml
 ```
 
 Both scripts:
@@ -51,6 +51,8 @@ torchrun --nproc_per_node 4 train.py \
 - Compilation occurs per rank, so expect extra time on the first iteration; subsequent steps reuse the optimized graph.
 
 ## SDMA Prototype Benchmark
+
+![SDMA Benchmark](../analysis/figures/sdma_benchmark.png)
 
 To measure theoretical compute/SDMA overlap on ROCm without modifying the full training loop:
 

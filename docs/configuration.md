@@ -31,6 +31,8 @@ Set these via launch scripts to ensure reproducibility.
 
 ## Tuning Scenarios
 
+![GEMM Communication CU Contention](../analysis/figures/GEMM_Comm_CU_Contention.png)
+
 ### Kernel Chunking / Occupancy Capping
 
 Split large GEMMs or reduce active waves so the hardware scheduler has chances to issue communication kernels between compute launches.
