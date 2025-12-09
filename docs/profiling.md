@@ -80,6 +80,10 @@ Use these artefacts to pinpoint scheduling or synchronisation regressions betwee
 
 ## Diagnostic Insights
 
+![Overlap Breakdown](../analysis/figures/overlap_breakdown.png)
+
+![Overlap Ratio](../analysis/figures/overlap_ratio.png)
+
 ### Key Metrics
 
 | Metric | Interpretation |

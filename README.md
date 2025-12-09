@@ -2,13 +2,20 @@
 
 GPU performance benchmarking and debugging toolkit for PyTorch workloads on AMD ROCm.
 
+![Training Overlap Issue](analysis/figures/training_bad_overlap.png)
+
 ## What It Does
 
 **FSDP2 Compute-Communication Overlap Analysis**
 Debug why distributed training isn't overlapping compute with communication. Runs a synthetic transformer workload with explicit multi-stream execution, captures per-iteration timing, and generates overlap efficiency reports.
 
+![param_sweep](docs/param_sweep.png)
+
 **Hardware Queue Evaluation**
 Stress-test GPU queue scheduling with 8-64+ concurrent streams. Includes 15 workloads covering distributed training patterns (FSDP, MoE, activation checkpointing), inference (speculative decoding, continuous batching), and latency-sensitive scenarios (heterogeneous kernels, tiny kernel dispatch).
+
+![hw_queue_cmds](docs/hw_queue_cmds.png)
+
 
 ## Quick Start
 
@@ -21,6 +28,16 @@ python -m aorta.hw_queue_eval list                          # List workloads
 python -m aorta.hw_queue_eval run hetero_kernels --streams 8
 python -m aorta.hw_queue_eval sweep hetero_kernels --streams 1,2,4,8,16
 ```
+
+## Example Analysis
+
+AORTA generates comprehensive performance reports comparing ROCm versions across multiple configurations. See a [full example report](docs/comprehensive_report.html) comparing rocm-7.0.8-meta vs rocm-7.0.10-meta:
+
+- **8 configurations tested**: 256/512 threads × 28/42/56/70 RCCL channels
+- **96 visualizations**: Overlap ratios, GEMM throughput, NCCL metrics, timeline comparisons
+- **Side-by-side diffs**: Identify regressions or improvements between driver/library versions
+
+![Overlap Breakdown](analysis/figures/overlap_breakdown.png)
 
 ## Documentation
 
