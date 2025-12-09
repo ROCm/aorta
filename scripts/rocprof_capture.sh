@@ -35,7 +35,7 @@ fi
 
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 
-rocprofv3 "${ROC_PROF_ARGS[@]}" -d "${RUN_DIR}" -- \
+rocprofv3 "${ROC_PROF_ARGS[@]}" -d "${RUN_DIR}" --output-format json -- \
   torchrun \
     --standalone \
     --nproc_per_node "${GPU_COUNT}" \
