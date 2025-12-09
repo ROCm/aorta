@@ -28,7 +28,7 @@ def combine_collective_reports(baseline_path, test_path, output_path):
             test_df = pd.read_excel(test_path, sheet_name=sheet_name)
 
             baseline_df["source"] = "baseline"
-            test_df["source"] = "saleelk"
+            test_df["source"] = "test"
 
             combined = pd.concat([baseline_df, test_df], ignore_index=True)
 
