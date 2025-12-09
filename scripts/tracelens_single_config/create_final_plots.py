@@ -103,10 +103,10 @@ def plot_gpu_type_by_rank(total_time_df, output_path, title):
         label="Baseline",
     )
 
-    # Plot Saleelk (test) total_time by rank
+    # Plot Test (test) total_time by rank
     ax.plot(
         total_time_df["rank"],
-        total_time_df["saleelk_time_ms"],
+        total_time_df["test_time_ms"],
         marker="s",
         linewidth=2,
         markersize=8,
@@ -188,14 +188,14 @@ def create_nccl_charts(excel_path, output_path):
         "NCCL Communication Latency": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Communication Latency (ms)",
-            "y_col_names": ["baseline_comm_latency_mean", "saleelk_comm_latency_mean"],
+            "y_col_names": ["baseline_comm_latency_mean", "test_comm_latency_mean"],
         },
         "NCCL Algorithm Bandwidth": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Algorithm Bandwidth (GB/s)",
             "y_col_names": [
                 "baseline_algo bw (GB/s)_mean",
-                "saleelk_algo bw (GB/s)_mean",
+                "test_algo bw (GB/s)_mean",
             ],
         },
         "NCCL Bus Bandwidth": {
@@ -203,7 +203,7 @@ def create_nccl_charts(excel_path, output_path):
             "y_label": "Bus Bandwidth (GB/s)",
             "y_col_names": [
                 "baseline_bus bw (GB/s)_mean",
-                "saleelk_bus bw (GB/s)_mean",
+                "test_bus bw (GB/s)_mean",
             ],
         },
         "NCCL Total Communication Latency": {
@@ -211,7 +211,7 @@ def create_nccl_charts(excel_path, output_path):
             "y_label": "Total Communication Latency (ms)",
             "y_col_names": [
                 "baseline_Total comm latency (ms)",
-                "saleelk_Total comm latency (ms)",
+                "test_Total comm latency (ms)",
             ],
         },
     }

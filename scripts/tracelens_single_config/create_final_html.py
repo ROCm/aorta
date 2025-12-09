@@ -53,7 +53,7 @@ def create_final_html(plot_file_path, output_path):
 
 <h2> Executive Summary </h2>
 
-Comparison of GPU performance metrics between baseline and Saleelk
+Comparison of GPU performance metrics between baseline and Test
 implementations across 8 ranks.
 """
 
