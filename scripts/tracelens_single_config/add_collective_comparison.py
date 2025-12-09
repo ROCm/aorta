@@ -9,7 +9,7 @@ def add_collective_comparison_sheets(input_path, output_path):
     """
     Add comparison sheets to the combined collective reports.
     This function will create comparison sheets for the combined collective reports.
-    The comparison sheets will contain the comparison of the baseline and saleelk data.
+    The comparison sheets will contain the comparison of the baseline and test data.
     TODO : Later we need to generalize for n runs and get rid of hardcoded data labels
     """
     print(f"Loading: {input_path}")
@@ -34,11 +34,11 @@ def add_collective_comparison_sheets(input_path, output_path):
 
             df = pd.read_excel(input_path, sheet_name=sheet_name)
 
-            # Separate baseline and saleelk
+            # Separate baseline and test
             baseline_df = df[df["source"] == "baseline"].copy()
-            saleelk_df = df[df["source"] == "saleelk"].copy()
+            test_df = df[df["source"] == "test"].copy()
 
-            if len(baseline_df) == 0 or len(saleelk_df) == 0:
+            if len(baseline_df) == 0 or len(test_df) == 0:
                 print(f"  Skip {sheet_name} - missing data")
                 continue
 
@@ -52,18 +52,18 @@ def add_collective_comparison_sheets(input_path, output_path):
 
             # Group and compare
             baseline_grouped = baseline_df.groupby(group_cols, as_index=False)
-            saleelk_grouped = saleelk_df.groupby(group_cols, as_index=False)
+            test_grouped = test_df.groupby(group_cols, as_index=False)
 
             for name, base_group in baseline_grouped:
-                # Find matching saleelk group
+                # Find matching test group
                 if isinstance(name, tuple):
-                    mask = pd.Series([True] * len(saleelk_df), index=saleelk_df.index)
+                    mask = pd.Series([True] * len(test_df), index=test_df.index)
                     for col, val in zip(group_cols, name):
-                        mask = mask & (saleelk_df[col] == val)
+                        mask = mask & (test_df[col] == val)
                 else:
-                    mask = saleelk_df[group_cols[0]] == name
+                    mask = test_df[group_cols[0]] == name
 
-                sale_group = saleelk_df.loc[mask]
+                sale_group = test_df.loc[mask]
 
                 if len(sale_group) == 0:
                     continue
@@ -95,13 +95,13 @@ def add_collective_comparison_sheets(input_path, output_path):
                     sale_val = sale_group[col].values[0]
 
                     comp_row[f"baseline_{col}"] = base_val
-                    comp_row[f"saleelk_{col}"] = sale_val
+                    comp_row[f"test_{col}"] = sale_val
                     comp_row[f"diff_{col}"] = sale_val - base_val
 
                     # For latency/time: positive percent_change means faster (less time)
                     # For bandwidth: positive percent_change means better (more bandwidth)
                     if "latency" in col.lower() or "time" in col.lower():
-                        # Lower is better - positive when saleelk is faster
+                        # Lower is better - positive when test is faster
                         pct_change = (
                             (base_val - sale_val) / base_val * 100
                             if base_val != 0
@@ -109,7 +109,7 @@ def add_collective_comparison_sheets(input_path, output_path):
                         )
                         comp_row[f"percent_change_{col}"] = pct_change
                     elif "bw" in col.lower() or "bandwidth" in col.lower():
-                        # Higher is better - positive when saleelk is better
+                        # Higher is better - positive when test is better
                         pct_change = (
                             (sale_val - base_val) / base_val * 100
                             if base_val != 0

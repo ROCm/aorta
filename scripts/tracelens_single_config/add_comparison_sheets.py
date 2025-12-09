@@ -25,19 +25,19 @@ def add_comparison_sheets(input_path, output_path):
 
         # Comparison 1: Side-by-side by rank
         baseline_data = all_combined[all_combined["source"] == "baseline"]
-        saleelk_data = all_combined[all_combined["source"] == "saleelk"]
+        test_data = all_combined[all_combined["source"] == "test"]
 
         comparison_by_rank = pd.DataFrame()
         for rank in sorted(baseline_data["rank"].unique()):
             base_rank = baseline_data[baseline_data["rank"] == rank].set_index("type")
-            sale_rank = saleelk_data[saleelk_data["rank"] == rank].set_index("type")
+            sale_rank = test_data[test_data["rank"] == rank].set_index("type")
 
             for metric_type in base_rank.index:
                 if metric_type in sale_rank.index:
                     base_time = base_rank.loc[metric_type, "time ms"]
                     sale_time = sale_rank.loc[metric_type, "time ms"]
                     ratio_val = sale_time / base_time if base_time != 0 else 0
-                    # Percentage change: positive when saleelk is faster (takes less time)
+                    # Percentage change: positive when test is faster (takes less time)
                     pct_change = (
                         (base_time - sale_time) / base_time * 100
                         if base_time != 0
@@ -60,7 +60,7 @@ def add_comparison_sheets(input_path, output_path):
                                     "rank": [rank],
                                     "type": [metric_type],
                                     "baseline_time_ms": [base_time],
-                                    "saleelk_time_ms": [sale_time],
+                                    "test_time_ms": [sale_time],
                                     "diff_time_ms": [sale_time - base_time],
                                     "percent_change": [pct_change],
                                     "status": [status],
@@ -68,7 +68,7 @@ def add_comparison_sheets(input_path, output_path):
                                     "baseline_percent": [
                                         base_rank.loc[metric_type, "percent"]
                                     ],
-                                    "saleelk_percent": [
+                                    "test_percent": [
                                         sale_rank.loc[metric_type, "percent"]
                                     ],
                                     "diff_percent": [
@@ -89,15 +89,15 @@ def add_comparison_sheets(input_path, output_path):
         # Comparison 2: Summary comparison
         summary = pd.read_excel(input_path, sheet_name="Summary")
         baseline_summary = summary[summary["source"] == "baseline"].set_index("type")
-        saleelk_summary = summary[summary["source"] == "saleelk"].set_index("type")
+        test_summary = summary[summary["source"] == "test"].set_index("type")
 
         summary_comparison = pd.DataFrame()
         for metric_type in baseline_summary.index:
-            if metric_type in saleelk_summary.index:
+            if metric_type in test_summary.index:
                 base_time = baseline_summary.loc[metric_type, "time ms"]
-                sale_time = saleelk_summary.loc[metric_type, "time ms"]
+                sale_time = test_summary.loc[metric_type, "time ms"]
                 ratio_val = sale_time / base_time if base_time != 0 else 0
-                # Percentage change: positive when saleelk is faster (takes less time)
+                # Percentage change: positive when test is faster (takes less time)
                 pct_change = (
                     (base_time - sale_time) / base_time * 100 if base_time != 0 else 0
                 )
@@ -109,18 +109,18 @@ def add_comparison_sheets(input_path, output_path):
                             {
                                 "type": [metric_type],
                                 "baseline_time_ms": [base_time],
-                                "saleelk_time_ms": [sale_time],
+                                "test_time_ms": [sale_time],
                                 "diff_time_ms": [sale_time - base_time],
                                 "percent_change": [pct_change],
                                 "ratio": [ratio_val],
                                 "baseline_percent": [
                                     baseline_summary.loc[metric_type, "percent"]
                                 ],
-                                "saleelk_percent": [
-                                    saleelk_summary.loc[metric_type, "percent"]
+                                "test_percent": [
+                                    test_summary.loc[metric_type, "percent"]
                                 ],
                                 "diff_percent": [
-                                    saleelk_summary.loc[metric_type, "percent"]
+                                    test_summary.loc[metric_type, "percent"]
                                     - baseline_summary.loc[metric_type, "percent"]
                                 ],
                             }
