@@ -1,19 +1,39 @@
 #!/usr/bin/env python3
+"""
+GPU Timeline Processing for Single Configuration.
+
+Aggregates gpu_timeline data across all ranks in a tracelens analysis directory.
+
+Usage:
+    python process_gpu_timeline.py --reports-dir /path/to/individual_reports [--geo-mean]
+"""
+
 import pandas as pd
-import numpy as np
 import argparse
 from pathlib import Path
+import sys
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from utils.gpu_timeline_utils import (
+    read_gpu_timeline_from_excel,
+    aggregate_gpu_timeline,
+    get_method_suffix,
+    get_aggregation_description,
+)
 
 
-def geometric_mean(values):
-    values = np.array(values)
-    values = np.where(values == 0, 1e-10, values)
-    return np.exp(np.mean(np.log(values)))
-
-
-def process_gpu_timeline(reports_dir, use_geo_mean=False):
+def process_gpu_timeline(reports_dir: str, use_geo_mean: bool = False) -> int:
     """
-    Create mean/geometric mean aggregated GPU timeline across all ranks inside tracelens analysis directory.
+    Create mean/geometric mean aggregated GPU timeline across all ranks.
+
+    Args:
+        reports_dir: Path to directory containing perf_rank*.xlsx files
+        use_geo_mean: If True, use geometric mean; otherwise arithmetic mean
+
+    Returns:
+        int: Exit code (0 for success, 1 for error)
     """
     reports_path = Path(reports_dir)
 
@@ -22,7 +42,7 @@ def process_gpu_timeline(reports_dir, use_geo_mean=False):
         return 1
 
     print(f"Processing GPU timeline from: {reports_dir}")
-    print(f"Aggregation: {'Geometric Mean' if use_geo_mean else 'Arithmetic Mean'}")
+    print(f"Aggregation: {get_aggregation_description(use_geo_mean)}")
 
     perf_files = sorted(reports_path.glob("perf_rank*.xlsx"))
 
@@ -35,30 +55,22 @@ def process_gpu_timeline(reports_dir, use_geo_mean=False):
     rank_data = []
     for file_path in perf_files:
         rank_num = int(file_path.stem.replace("perf_rank", ""))
-        try:
-            df = pd.read_excel(file_path, sheet_name="gpu_timeline")
-            df["rank"] = rank_num
+        df, success = read_gpu_timeline_from_excel(file_path, rank=rank_num)
+        if success:
             rank_data.append(df)
             print(f"  Rank {rank_num}: OK")
-        except Exception as e:
-            print(f"  Rank {rank_num}: Error - {e}")
+        else:
+            print(f"  Rank {rank_num}: Error")
 
     if not rank_data:
         print("Error: No valid data loaded")
         return 1
 
     combined = pd.concat(rank_data, ignore_index=True)
-
-    agg_func = geometric_mean if use_geo_mean else "mean"
-    aggregated = (
-        combined.groupby("type")
-        .agg({"time ms": agg_func, "percent": agg_func})
-        .reset_index()
-    )
-
+    aggregated = aggregate_gpu_timeline(rank_data, use_geo_mean)
     aggregated["num_ranks"] = len(perf_files)
 
-    method_suffix = "geomean" if use_geo_mean else "mean"
+    method_suffix = get_method_suffix(use_geo_mean)
     output_path = reports_path.parent / f"gpu_timeline_summary_{method_suffix}.xlsx"
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -86,9 +98,7 @@ def process_gpu_timeline(reports_dir, use_geo_mean=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Aggregate GPU timeline across ranks")
-    parser.add_argument(
-        "--reports-dir", required=True, help="Path to individual_reports directory"
-    )
+    parser.add_argument("--reports-dir", required=True, help="Path to individual_reports directory")
     parser.add_argument("--geo-mean", action="store_true", help="Use geometric mean")
 
     args = parser.parse_args()
