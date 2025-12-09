@@ -13,31 +13,27 @@ Example:
 """
 
 import pandas as pd
-import numpy as np
 import os
 import glob
 import argparse
 from pathlib import Path
+import sys
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from utils.gpu_timeline_utils import (
+    read_gpu_timeline_from_excel,
+    aggregate_gpu_timeline,
+    get_method_suffix,
+    get_aggregation_description,
+    print_section,
+)
 
 
 # =============================================================================
 # Utility Functions
 # =============================================================================
-
-
-def geometric_mean(values):
-    """Calculate geometric mean, handling zeros."""
-    values = np.array(values)
-    # Replace zeros with small value to avoid log(0)
-    values = np.where(values == 0, 1e-10, values)
-    return np.exp(np.mean(np.log(values)))
-
-
-def print_section(title, char="=", width=80):
-    """Print a formatted section header."""
-    print(f"\n{char * width}")
-    print(title)
-    print(char * width)
 
 
 def parse_perf_filename(filename):
@@ -95,49 +91,32 @@ def read_rank_data(rank_files):
     """
     rank_data = []
     for rank, file_path in rank_files:
-        try:
-            df = pd.read_excel(file_path, sheet_name="gpu_timeline")
-            df["rank"] = rank
+        df, success = read_gpu_timeline_from_excel(Path(file_path), rank=rank)
+        if success:
             rank_data.append(df)
-        except Exception as e:
-            print(f"    Warning: Could not read {os.path.basename(file_path)}: {e}")
     return rank_data
 
 
-def aggregate_rank_data(
-    rank_data, thread_config, channel_config, num_ranks, use_geo_mean
-):
+def add_config_metadata(df, thread_config, channel_config, num_ranks):
     """
-    Aggregate data across ranks and add metadata.
+    Add configuration metadata columns to the dataframe.
 
     Args:
-        rank_data: List of DataFrames
+        df: Source DataFrame
         thread_config: Thread configuration string (e.g., '256thread')
         channel_config: Channel configuration string (e.g., '28ch')
         num_ranks: Number of ranks
-        use_geo_mean: Whether to use geometric mean
 
     Returns:
-        DataFrame: Aggregated data with metadata
+        DataFrame: DataFrame with added metadata columns
     """
-    combined = pd.concat(rank_data, ignore_index=True)
-
-    agg_func = geometric_mean if use_geo_mean else "mean"
-    aggregated = (
-        combined.groupby("type")
-        .agg({"time ms": agg_func, "percent": agg_func})
-        .reset_index()
-    )
-
-    # Add metadata
-    aggregated["thread_config"] = thread_config
-    aggregated["threads_num"] = int(thread_config.replace("thread", ""))
-    aggregated["channel_config"] = channel_config
-    aggregated["channels_num"] = int(channel_config.replace("ch", ""))
-    aggregated["full_config"] = f"{thread_config}_{channel_config}"
-    aggregated["num_ranks"] = num_ranks
-
-    return aggregated
+    df["thread_config"] = thread_config
+    df["threads_num"] = int(thread_config.replace("thread", ""))
+    df["channel_config"] = channel_config
+    df["channels_num"] = int(channel_config.replace("ch", ""))
+    df["full_config"] = f"{thread_config}_{channel_config}"
+    df["num_ranks"] = num_ranks
+    return df
 
 
 def process_channel_config(channel_config, channel_groups, use_geo_mean, thread_config):
@@ -164,9 +143,8 @@ def process_channel_config(channel_config, channel_groups, use_geo_mean, thread_
         print(f"    No valid data for {channel_config}")
         return None
 
-    aggregated = aggregate_rank_data(
-        rank_data, thread_config, channel_config, num_ranks, use_geo_mean
-    )
+    aggregated = aggregate_gpu_timeline(rank_data, use_geo_mean)
+    aggregated = add_config_metadata(aggregated, thread_config, channel_config, num_ranks)
     print(f"    [OK] Aggregated across {num_ranks} ranks")
 
     return aggregated
@@ -203,9 +181,7 @@ def process_thread_config(thread_config, tracelens_dir, use_geo_mean):
     results = []
 
     # Process each channel configuration (sorted by channel number)
-    sorted_channels = sorted(
-        channel_groups.keys(), key=lambda x: int(x.replace("ch", ""))
-    )
+    sorted_channels = sorted(channel_groups.keys(), key=lambda x: int(x.replace("ch", "")))
     for channel_config in sorted_channels:
         aggregated = process_channel_config(
             channel_config, channel_groups, use_geo_mean, thread_config
@@ -232,9 +208,7 @@ def create_pivot_sheet(df, value_col):
     Returns:
         DataFrame: Pivot table
     """
-    return df.pivot_table(
-        values=value_col, index="type", columns="full_config", aggfunc="first"
-    )
+    return df.pivot_table(values=value_col, index="type", columns="full_config", aggfunc="first")
 
 
 def create_summary_sheet(df):
@@ -278,15 +252,9 @@ def save_excel_output(final_df, output_path):
     """
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         final_df.to_excel(writer, sheet_name="All_Data", index=False)
-        create_pivot_sheet(final_df, "time ms").to_excel(
-            writer, sheet_name="Pivot_Time_ms"
-        )
-        create_pivot_sheet(final_df, "percent").to_excel(
-            writer, sheet_name="Pivot_Percent"
-        )
-        create_summary_sheet(final_df).to_excel(
-            writer, sheet_name="Summary_By_Config", index=False
-        )
+        create_pivot_sheet(final_df, "time ms").to_excel(writer, sheet_name="Pivot_Time_ms")
+        create_pivot_sheet(final_df, "percent").to_excel(writer, sheet_name="Pivot_Percent")
+        create_summary_sheet(final_df).to_excel(writer, sheet_name="Summary_By_Config", index=False)
 
     print(f"[SAVED] {output_path}")
     print("  Sheets created:")
@@ -310,9 +278,9 @@ def print_metric_comparison(df, metric_type, description):
         metric_type: Type of metric to filter
         description: Description to print
     """
-    metric_data = df[df["type"] == metric_type][
-        ["full_config", "time ms", "percent"]
-    ].sort_values("time ms")
+    metric_data = df[df["type"] == metric_type][["full_config", "time ms", "percent"]].sort_values(
+        "time ms"
+    )
     print(f"\n{description}:")
     print(metric_data.to_string(index=False))
 
@@ -356,16 +324,14 @@ def process_gpu_timeline_data(sweep_dir, use_geo_mean=False):
         print(f"Error: tracelens_analysis directory not found in {sweep_dir}")
         return
 
-    agg_method = "Geometric Mean" if use_geo_mean else "Arithmetic Mean"
+    agg_method = get_aggregation_description(use_geo_mean)
     print("=" * 80)
     print(f"Processing GPU Timeline data from: {sweep_dir}")
     print(f"Aggregation method: {agg_method}")
     print("=" * 80)
 
     # Find all thread configurations
-    thread_configs = [
-        d.name for d in tracelens_dir.iterdir() if d.is_dir() and "thread" in d.name
-    ]
+    thread_configs = [d.name for d in tracelens_dir.iterdir() if d.is_dir() and "thread" in d.name]
 
     if not thread_configs:
         print("Error: No thread configuration directories found")
@@ -404,7 +370,7 @@ def process_gpu_timeline_data(sweep_dir, use_geo_mean=False):
     final_df = final_df.sort_values(["threads_num", "channels_num", "type"])
 
     # Save to Excel
-    method_suffix = "geomean" if use_geo_mean else "mean"
+    method_suffix = get_method_suffix(use_geo_mean)
     output_path = tracelens_dir / f"gpu_timeline_all_configs_{method_suffix}.xlsx"
     save_excel_output(final_df, output_path)
 
