@@ -8,7 +8,7 @@ __pycache__/
 build/
 dist/
 download/
-egg-info/
+*.egg-info/
 .eggs/
 *.egg
 MANIFEST
