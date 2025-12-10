@@ -45,6 +45,10 @@ fi
 
 # Create output directory
 OUTPUT_DIR="${SWEEP_DIR}/tracelens_analysis"
+# Use patched TraceLens entrypoint with GEMM recognition.
+# Assume caller activates desired venv; fall back to python3 on PATH.
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+TL_WRAPPER="scripts/gemm_analysis/tracelense_with_gemm_path.py"
 if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null; then
     echo "Error: Cannot create output directory: $OUTPUT_DIR"
     echo ""
@@ -134,14 +138,14 @@ for thread in "${THREAD_CONFIGS[@]}"; do
             OUTPUT="$OUTPUT_DIR/$thread/individual_reports/perf_${ch}ch_rank${rank}.xlsx"
 
             echo "  Rank ${rank}..."
-            TraceLens_generate_perf_report_pytorch \
+            "$PYTHON_BIN" "$TL_WRAPPER" generate_perf_report \
                 --profile_json_path "$TRACE" \
                 --output_xlsx_path "$OUTPUT" \
                 --include_unlinked_kernels \
                 --short_kernel_study \
                 --short_kernel_threshold_us 50 \
                 --topk_ops 100 \
-		--enable_kernel_summary \
+                --enable_kernel_summary \
                 --topk_roofline_ops 100
 
             echo "    [OK] $OUTPUT"
@@ -185,7 +189,7 @@ for thread in "${THREAD_CONFIGS[@]}"; do
         SAMPLE_TRACE=$(find "$TRACE_DIR/rank0" -name "*.json" | head -1)
         TRACE_FILENAME=$(basename "$SAMPLE_TRACE")
 
-        TraceLens_generate_multi_rank_collective_report_pytorch \
+        "$PYTHON_BIN" "$TL_WRAPPER" generate_multi_rank_collective \
             --trace_pattern "$TRACE_DIR/rank*/$TRACE_FILENAME" \
             --world_size 8 \
             --output_xlsx_path "$OUTPUT" \

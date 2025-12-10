@@ -3,6 +3,14 @@
 Generate synthetic test data for GEMM analysis regression tests.
 Creates realistic PyTorch profiler traces based on actual MI350X traces
 for two channel configurations, two threads, and 7 ranks.
+
+Key requirements for TraceLens GEMM sheet generation:
+1. Use TraceLens-recognized GEMM operation names (aten::mm, aten::addmm, aten::bmm)
+2. Provide proper 2D matrix Input Dims for GEMM ops:
+   - aten::mm: [[M, K], [K, N]] for two input matrices
+   - aten::addmm: [[N], [M, K], [K, N], ...] for bias + two matrices
+   - aten::bmm: [[B, M, K], [B, K, N]] for batched matrix multiplication
+3. Include kernel_details on CPU ops with actual GEMM kernel names matching pattern C[xyz]_A[xyz]_B[xyz]
 """
 
 import json
@@ -13,7 +21,6 @@ from typing import Dict, List
 import random
 import argparse
 from datetime import datetime
-import pandas as pd
 
 # Set random seed for reproducibility
 random.seed(42)
@@ -42,6 +49,10 @@ class SyntheticDataGenerator:
 
         # Realistic GEMM kernel names from actual AMD MI350X traces
         self.gemm_kernels = [
+            # Simple names crafted to match TraceLens GEMM regex (Cxxx_Axxx_Bxxx)
+            "Cabc_Adef_Bghi_gemm0",
+            "Cxyz_Auvw_Brst_gemm1",
+            "Cfoo_Abar_Bbaz_gemm2",
             # Most common GEMM kernels from actual traces
             "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x240x64_MI16x16x1_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR0_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB2_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB256_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_15_MO40_NTn1_NTA0_NTB0_NTC6_NTD4_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO1_SRVW0_SSO1_SVW4_SK3_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG64_4_1",
             "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC0_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA1_DTLB1_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_ISA950_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPM0_LPA16_LPB16_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_8_MO40_NTn1_NTA0_NTB0_NTC0_NTD4_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA1_SIA3_SS1_SPO0_SRVW0_SSO0_SVW8_SK3_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGRO0_VSn1_VWA8_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1",
@@ -173,8 +184,9 @@ class SyntheticDataGenerator:
             })
             external_id_counter += 1
 
-            # Add CPU operations that TraceLens expects
-            cpu_op_names = ["aten::to", "aten::_to_copy", "aten::mul", "aten::add", "aten::matmul"]
+            # Add CPU operations that TraceLens expects (generic ops, not GEMM)
+            # These are placeholder ops without kernels
+            cpu_op_names = ["aten::to", "aten::_to_copy", "aten::mul", "aten::add", "aten::copy_"]
             for cpu_idx in range(5):
                 events.append({
                     "ph": "X",
@@ -223,7 +235,9 @@ class SyntheticDataGenerator:
 
             for kernel_idx in range(num_kernels_per_batch):
                 # Mix GEMM kernels with other kernels (70% GEMM, 30% other)
-                if random.random() < 0.7:
+                is_gemm_kernel = random.random() < 0.7
+
+                if is_gemm_kernel:
                     # GEMM kernel
                     kernel_name_idx = (rank + kernel_idx + batch) % len(self.gemm_kernels)
                     kernel_name = self.gemm_kernels[kernel_name_idx]
@@ -250,7 +264,17 @@ class SyntheticDataGenerator:
                 # Create a CPU launcher op that envelops the runtime + kernel so TraceLens can assign parents
                 cpu_launcher_ts = current_ts - 40
                 cpu_launcher_dur = dur_variance + 80
-                launcher_name = cpu_op_names[kernel_idx % len(cpu_op_names)]
+                # Use GEMM operation names for GEMM kernels (TraceLens recognizes these)
+                # Use other names for non-GEMM kernels
+                if is_gemm_kernel:
+                    # Use TraceLens-recognized GEMM operation names
+                    gemm_op_names = ["aten::mm", "aten::addmm", "aten::bmm"]
+                    launcher_name = gemm_op_names[kernel_idx % len(gemm_op_names)]
+                else:  # Non-GEMM kernel
+                    launcher_name = cpu_op_names[kernel_idx % len(cpu_op_names)]
+
+                # NOTE: TraceLens needs kernel_details to categorize ops properly
+                # even though real PyTorch traces may not have them initially
                 kernel_detail_entry = {
                     "name": kernel_name,
                     "dur": dur_variance,
@@ -258,6 +282,35 @@ class SyntheticDataGenerator:
                     "grid": grid_size,
                     "block": [256, 1, 1],
                 }
+
+                # Generate proper Input Dims based on operation type
+                # GEMM operations need 2D matrix dimensions for M, N, K extraction
+                if is_gemm_kernel:
+                    # Realistic GEMM matrix dimensions (vary by operation type)
+                    if launcher_name == "aten::mm":
+                        # mm(A, B) where A is MxK, B is KxN
+                        M, K, N = 8192 + rank * 1024, 4096, 2048 + rank * 512
+                        input_dims = [[M, K], [K, N]]
+                        input_strides = [[K, 1], [N, 1]]
+                        input_types = ["float", "float"]
+                    elif launcher_name == "aten::addmm":
+                        # addmm(bias, A, B) where bias is N, A is MxK, B is KxN
+                        M, K, N = 8192 + rank * 1024, 4096, 2048 + rank * 512
+                        input_dims = [[N], [M, K], [K, N], [], []]
+                        input_strides = [[1], [K, 1], [N, 1], [], []]
+                        input_types = ["float", "float", "float", "", ""]
+                    else:  # aten::bmm
+                        # bmm(A, B) where A is BxMxK, B is BxKxN
+                        B, M, K, N = 512, 176, 256, 128
+                        input_dims = [[B, M, K], [B, K, N]]
+                        input_strides = [[M*K, K, 1], [K*N, N, 1]]
+                        input_types = ["float", "float"]
+                else:
+                    # Non-GEMM operations can use simpler dims
+                    input_dims = [[512, 176, 32, 256], [], [], [], [], [], [], []]
+                    input_strides = [[1441792, 8192, 256, 1], [], [], [], [], [], [], []]
+                    input_types = ["float", "Scalar", "Scalar", "", "", "Scalar", "Scalar", ""]
+
                 events.append({
                     "ph": "X",
                     "cat": "cpu_op",
@@ -272,9 +325,9 @@ class SyntheticDataGenerator:
                         "Fwd thread id": 0,
                         "Record function id": 0,
                         "Concrete Inputs": ["", "6", "0", "", "", "True", "False", ""],
-                        "Input type": ["float", "Scalar", "Scalar", "", "", "Scalar", "Scalar", ""],
-                        "Input Strides": [[1441792, 8192, 256, 1], [], [], [], [], [], [], []],
-                        "Input Dims": [[512, 176, 32, 256], [], [], [], [], [], [], []],
+                        "Input type": input_types,
+                        "Input Strides": input_strides,
+                        "Input Dims": input_dims,
                         "Ev Idx": batch * 1000 + 600 + kernel_idx
                     },
                     "kernel_details": [kernel_detail_entry],
