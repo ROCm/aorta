@@ -308,3 +308,131 @@ python scripts/gemm_analysis/create_embeded_html_report.py \
   --sweep1 experiments/sweep1 --sweep2 experiments/sweep2 \
   --label1 "Baseline" --label2 "Optimized" --output comparison.html
 ```
+
+## Regression Testing
+
+Automated regression test suite to ensure script changes don't produce incorrect reports.
+
+### First Time Setup
+
+**Important**: Activate virtual environment and generate test data before running tests (not tracked in git):
+
+```bash
+# Activate virtual environment
+source ~/venvs/aorta/bin/activate
+
+# Step 1: Generate synthetic test data (first time only)
+python tests/gemm_analysis/generate_synthetic_data.py --output-dir tests/gemm_analysis/testdata
+
+# Step 2: Generate baseline expected outputs (first time only)
+# Run this on a known-good branch (e.g., origin/main)
+# NOTE: This will automatically run TraceLens analysis as part of the pipeline
+# If TraceLens is not installed, the test will skip with instructions
+pytest tests/gemm_analysis/test_gemm_regression.py --generate-baseline
+```
+
+**Note on TraceLens**: The end-to-end test automatically runs TraceLens analysis as part of the pipeline. If TraceLens is not installed, you have two options:
+1. Install TraceLens
+2. Manually run TraceLens once and reuse the outputs:
+   ```bash
+   bash scripts/gemm_analysis/run_tracelens_analysis.sh tests/gemm_analysis/testdata/test_sweep
+   ```
+
+### Running Regression Tests
+
+```bash
+# Ensure virtual environment is activated
+source ~/venvs/aorta/bin/activate
+
+# Run full regression test suite
+pytest tests/gemm_analysis/test_gemm_regression.py -v
+
+# Run specific test classes
+pytest tests/gemm_analysis/test_gemm_regression.py::TestFullPipeline -v
+pytest tests/gemm_analysis/test_gemm_regression.py::TestIndividualSteps -v
+pytest tests/gemm_analysis/test_gemm_regression.py::TestCustomConfigurations -v
+```
+
+### Test Architecture
+
+The test suite is organized into modular components:
+
+#### PipelineRunner Class
+Central class that encapsulates pipeline execution logic with methods for each step:
+- `run_tracelens()` - Run TraceLens analysis
+- `run_analyze_gemm()` - Analyze GEMM reports
+- `run_plot_variance()` - Generate variance plots
+- `run_enhancement_scripts()` - Run additional analysis scripts
+- `run_full_pipeline()` - Execute complete pipeline
+
+#### Test Classes
+
+1. **TestFullPipeline** - Full end-to-end regression test
+2. **TestIndividualSteps** - Test individual pipeline components in isolation
+3. **TestCustomConfigurations** - Test with different thread/channel configurations
+4. **TestErrorHandling** - Test error conditions and edge cases
+
+### What Gets Tested
+
+The regression suite validates:
+- TraceLens analysis execution (skips if not installed)
+- GEMM report analysis across configurations
+- Variance plot generation
+- Enhancement script outputs
+- GPU timeline processing
+- Numeric output consistency (within tolerance)
+- Script integration and data flow
+
+### Test Data
+
+- Uses synthetic PyTorch profiler traces (not real traces)
+- Fixed configurations: 2 threads × 2 channels × 7 ranks
+- 2 batches (ProfilerSteps) per trace
+- Based on actual MI350X trace structure
+- Located in `tests/gemm_analysis/testdata/` (not tracked in git)
+
+### Baseline Comparison
+
+- Baseline outputs stored in `tests/gemm_analysis/expected_outputs/`
+- Generated from a known-good branch (typically origin/main)
+- Current branch outputs compared against baseline
+- Numeric values checked within small tolerance
+- Cosmetic differences (whitespace, ordering) ignored
+
+## Troubleshooting
+
+### TraceLens Not Found
+If TraceLens is not installed, the test suite will skip TraceLens-dependent tests. To install TraceLens, contact your AMD representative or use pre-generated TraceLens outputs.
+
+### Import Errors
+Ensure all required packages are installed in your virtual environment:
+```bash
+pip install pandas openpyxl matplotlib
+```
+
+### Test Data Not Found
+Generate synthetic test data first:
+```bash
+python tests/gemm_analysis/generate_synthetic_data.py --output-dir tests/gemm_analysis/testdata
+```
+
+### Tests Failing After Generating Synthetic Data
+If tests fail with errors related to missing TraceLens outputs, you need to run TraceLens analysis on the synthetic data:
+```bash
+bash scripts/gemm_analysis/run_tracelens_analysis.sh tests/gemm_analysis/testdata/test_sweep
+```
+This creates the TraceLens Excel reports that the analysis scripts need to process.
+
+### Baseline Not Found
+Generate baseline outputs on a known-good branch:
+```bash
+git checkout origin/main
+pytest tests/gemm_analysis/test_gemm_regression.py --generate-baseline
+git checkout your-feature-branch
+```
+
+## References
+
+- Test suite: `tests/gemm_analysis/`
+- Test plan: `scripts/gemm_analysis/test_plan.md`
+- Implementation logs: `scripts/gemm_analysis/implementation_logs.md`
