@@ -53,6 +53,7 @@ nccl_thread_sweep_summary_*.txt
 expected_outputs/
 testdata/
 *.log
+actual_outputs/
 # IDE/project-specific folders
 .vscode/
 .idea/

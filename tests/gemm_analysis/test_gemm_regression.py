@@ -560,21 +560,25 @@ class TestErrorHandling:
 
     def test_missing_tracelens_data(self, runner, tmp_path):
         """Test graceful handling when TraceLens data is missing."""
+        from _pytest.outcomes import Skipped
+
         fake_data_dir = tmp_path / "fake_data"
         fake_data_dir.mkdir()
 
-        with pytest.raises(SystemExit):  # pytest.skip raises SystemExit
+        with pytest.raises(Skipped):  # pytest.skip raises Skipped exception
             runner.run_tracelens(fake_data_dir, skip_on_missing=True)
 
     def test_invalid_output_path(self, runner, test_data_dir):
         """Test handling of invalid output paths."""
+        from _pytest.outcomes import Failed
+
         tracelens_dir = test_data_dir / "tracelens_analysis"
         if not tracelens_dir.exists():
             pytest.skip("TraceLens outputs required for this test")
 
         invalid_path = Path("/invalid/path/that/does/not/exist/output.csv")
 
-        with pytest.raises(SystemExit):  # pytest.fail raises SystemExit
+        with pytest.raises(Failed):  # pytest.fail raises Failed exception
             runner.run_analyze_gemm(tracelens_dir, invalid_path)
 
 

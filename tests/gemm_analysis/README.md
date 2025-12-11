@@ -1,30 +1,16 @@
 # GEMM Analysis Regression Test Suite
 
-Automated regression testing for the `scripts/gemm_analysis` pipeline to ensure script changes don't introduce errors or produce incorrect reports.
-
-## Overview
-
-This test suite provides comprehensive regression testing by:
-1. Using fixed synthetic test data (2 thread configs × 2 channel configs × 7 ranks)
-2. Running the complete analysis pipeline on this data
-3. Comparing outputs against baseline expected results
-4. Allowing tolerance for numeric values and cosmetic changes
+Automated regression testing for `scripts/gemm_analysis` pipeline.
 
 ## Directory Structure
 
 ```
 tests/gemm_analysis/
-├── testdata/                  # Synthetic test data (not in git, generate locally)
+├── testdata/                  # Synthetic test data (not in git)
 │   └── test_sweep/           # Fixed test data directory
-│       ├── 256thread/
-│       │   ├── 28channels/
-│       │   └── 56channels/
-│       └── 512thread/
-│           ├── 28channels/
-│           └── 56channels/
-├── expected_outputs/          # Baseline outputs (not in git, generate locally)
-├── actual_outputs/           # Outputs from current branch (temp, not in git)
-├── test_gemm_regression.py   # Modular pytest test suite (includes baseline generation)
+├── expected_outputs/          # Baseline outputs (not in git)
+├── actual_outputs/           # Current branch outputs (temp)
+├── test_gemm_regression.py   # Pytest test suite
 ├── generate_synthetic_data.py # Synthetic data generator
 ├── compare_outputs.py        # Output comparison logic
 └── README.md                # This file
@@ -32,10 +18,8 @@ tests/gemm_analysis/
 
 ## Test Architecture
 
-The test suite is organized into modular components for easy extension:
-
 ### PipelineRunner Class
-Central class that encapsulates pipeline execution logic with methods for each step:
+Encapsulates pipeline execution with methods:
 - `run_tracelens()` - Run TraceLens analysis
 - `run_analyze_gemm()` - Analyze GEMM reports
 - `run_plot_variance()` - Generate variance plots
@@ -44,243 +28,245 @@ Central class that encapsulates pipeline execution logic with methods for each s
 
 ### Test Classes
 
-1. **TestFullPipeline** - Full end-to-end regression test (original test)
-2. **TestIndividualSteps** - Test individual pipeline components in isolation
+1. **TestFullPipeline** - Full end-to-end regression test
+2. **TestIndividualSteps** - Test individual pipeline components
 3. **TestCustomConfigurations** - Test with different thread/channel configurations
 4. **TestErrorHandling** - Test error conditions and edge cases
 
-### Adding New Tests
+### Test Coverage
 
-To add new tests, create methods in the appropriate test class or add a new test class:
+Scripts tested:
+- run_tracelens_analysis.sh
+- analyze_gemm_reports.py
+- plot_gemm_variance.py
+- enhance_gemm_variance_with_timestamps.py
+- gemm_report_with_collective_overlap.py
+- process_gpu_timeline.py
 
-```python
-class TestNewFeature:
-    def test_my_feature(self, scripts_dir):
-        runner = PipelineRunner(scripts_dir)
-        # Use runner methods to test specific functionality
-```
+Validation:
+- TraceLens analysis execution (skips if not installed)
+- GEMM report analysis across configurations
+- Variance plot generation
+- Enhancement script outputs
+- GPU timeline processing
+- Numeric output consistency (tolerance: 1e-6)
+- Script integration and data flow
 
-## Quick Start
+### Test Data
 
-### First Time Setup
+- Synthetic PyTorch profiler traces (not real traces)
+- Configurations: 2 threads (256, 512) × 2 channels (28, 56) × 8 ranks
+- 2 batches (ProfilerSteps) per trace
+- Based on MI350X trace structure
+- Generated via `generate_synthetic_data.py`
 
-**Important**: Activate virtual environment and generate test data before running tests (not tracked in git):
+### Baseline Comparison
+
+- Baseline in `expected_outputs/` (generated from origin/main)
+- Current branch outputs in `actual_outputs/`
+- Numeric values: tolerance 1e-6
+- Ignores: whitespace, column ordering, timestamps
+
+## Setup
 
 ```bash
-# Activate virtual environment
 source ~/venvs/aorta/bin/activate
 
-# Step 1: Generate synthetic test data (only needed once)
+# Generate test data (once)
 python tests/gemm_analysis/generate_synthetic_data.py --output-dir tests/gemm_analysis/testdata
 
-# Step 2: Generate baseline expected outputs (on origin/main)
-# NOTE: This automatically runs TraceLens analysis as part of the pipeline
+# Generate baseline (on origin/main)
 pytest tests/gemm_analysis/test_gemm_regression.py --generate-baseline
+
+# If TraceLens not installed, run manually:
+bash scripts/gemm_analysis/run_tracelens_analysis.sh tests/gemm_analysis/testdata/test_sweep
 ```
 
-**Important Note on TraceLens**:
-- The end-to-end regression test (`TestFullPipeline`) automatically runs TraceLens analysis
-- If TraceLens is not installed, you must manually run it once:
-  ```bash
-  bash scripts/gemm_analysis/run_tracelens_analysis.sh tests/gemm_analysis/testdata/test_sweep
-  ```
-- Individual component tests (`TestIndividualSteps`, `TestCustomConfigurations`) require TraceLens outputs to already exist
-
-### Run Full Regression Test Suite
-
-From the repository root:
+## Running Tests
 
 ```bash
-# Ensure virtual environment is activated
-source ~/venvs/aorta/bin/activate
-
-# Run all regression tests
+# All tests
 pytest tests/gemm_analysis/ -v
-```
 
-### Run Specific Tests
-
-```bash
-# Run full pipeline regression test
+# Specific test class
 pytest tests/gemm_analysis/test_gemm_regression.py::TestFullPipeline -v
-
-# Run individual component tests
 pytest tests/gemm_analysis/test_gemm_regression.py::TestIndividualSteps -v
-
-# Run custom configuration tests
 pytest tests/gemm_analysis/test_gemm_regression.py::TestCustomConfigurations -v
-
-# Run error handling tests
 pytest tests/gemm_analysis/test_gemm_regression.py::TestErrorHandling -v
 
-# Run only fast tests (skip integration)
-pytest tests/gemm_analysis/ -m "not integration" -v
-
-# Run only integration tests
+# Integration tests only
 pytest tests/gemm_analysis/ -m integration -v
+
+# Skip integration tests
+pytest tests/gemm_analysis/ -m "not integration" -v
 ```
-
-## Usage Options
-
-### Test Data Management
-
-```bash
-# Generate synthetic test data
-python tests/gemm_analysis/generate_synthetic_data.py --output-dir tests/gemm_analysis/testdata
-
-# Regenerate baseline expected outputs
-pytest tests/gemm_analysis/test_gemm_regression.py --generate-baseline
-
-# Clean all test artifacts
-rm -rf tests/gemm_analysis/testdata tests/gemm_analysis/expected_outputs tests/gemm_analysis/actual_outputs
-```
-
-### Pytest Options
-
-```bash
-# Run all tests except integration tests
-pytest . -m "not integration"
-
-# Run only integration tests
-pytest . -m integration
-
-# Run with verbose output
-pytest . -v
-
-# Run with coverage
-pytest . --cov=scripts/gemm_analysis
-```
-
-## Test Coverage
-
-### Scripts Under Test
-
-1. **run_tracelens_analysis.sh** / **.py** - Main analysis orchestrator
-2. **analyze_gemm_reports.py** - Extract GEMM kernels from reports
-3. **plot_gemm_variance.py** - Generate variance plots
-4. **enhance_gemm_variance_with_timestamps.py** - Add timestamp data
-5. **gemm_report_with_collective_overlap.py** - Analyze NCCL overlap
-6. **process_gpu_timeline.py** - Process GPU timeline data
-7. **create_embeded_html_report.py** - Generate HTML comparison reports
-
-### Test Types
-
-1. **Data Integrity Tests** - Verify synthetic test data structure
-2. **Script Execution Tests** - Ensure scripts run without errors
-3. **Output Comparison Tests** - Validate outputs against baseline
-4. **Integration Tests** - Full pipeline end-to-end testing
-
-## Output Comparison Rules
-
-The comparison logic (`compare_outputs.py`) enforces:
-
-### Strict Requirements
-- Core numeric metrics must match within tolerance (1e-6)
-- Required columns/fields must be present
-- Per-GEMM aggregates must be consistent
-- Critical data values must match
-
-### Allowed Variations
-- Extra columns in outputs (additive changes)
-- Column reordering
-- HTML styling and layout changes
-- Timestamps and build IDs
-- File paths (as long as structure is maintained)
-- Additional rows/entries (as long as core data is present)
 
 ## Adding New Tests
 
-### To add a new analysis script to the test suite:
+### Add Test Method to Existing Class
 
-1. Update `run_regression_tests.sh` to call the new script in `run_analysis_pipeline()`
-2. Add test cases in `tests/test_gemm_regression.py`
-3. Regenerate baseline outputs:
-   ```bash
-   tests/gemm_analysis/run_regression_tests.sh --generate-baseline
-   ```
+```python
+class TestIndividualSteps:
+    def test_new_feature(self, runner, test_data_dir, temp_output_dir):
+        """Test description."""
+        # Setup
+        input_file = test_data_dir / "input.csv"
+        output_file = temp_output_dir / "output.csv"
 
-### To modify test data:
+        # Execute via runner
+        result = runner.run_new_feature(input_file, output_file)
+
+        # Assert
+        assert result.exists()
+        assert result.stat().st_size > 0
+```
+
+### Add New Test Class
+
+```python
+class TestNewScript:
+    @pytest.fixture(scope="class")
+    def runner(self, scripts_dir):
+        return PipelineRunner(scripts_dir)
+
+    def test_new_script_execution(self, runner, test_data_dir):
+        """Test new script execution."""
+        # Add runner method first in PipelineRunner class
+        result = runner.run_new_script(test_data_dir)
+        assert result.returncode == 0
+```
+
+### Add Runner Method
+
+In `PipelineRunner` class:
+
+```python
+def run_new_script(self, input_path: Path, output_path: Path) -> Path:
+    """
+    Run new_script.py step.
+
+    Args:
+        input_path: Input file/directory
+        output_path: Output file/directory
+
+    Returns:
+        Path to output
+    """
+    print("\nN. Running new script...")
+
+    cmd = [
+        sys.executable,
+        str(self.scripts_dir / "new_script.py"),
+        "--input", str(input_path),
+        "--output", str(output_path)
+    ]
+
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=self.timeouts.get('new_script', 300)
+    )
+
+    if result.returncode != 0:
+        print(f"Error: {result.stderr}")
+        pytest.fail("new_script.py failed")
+
+    print(f"   Created: {output_path}")
+    return output_path
+```
+
+### Add to Full Pipeline
+
+In `run_full_pipeline()` method:
+
+```python
+def run_full_pipeline(self, test_data_dir: Path, output_dir: Path) -> Dict[str, Path]:
+    # ... existing steps ...
+
+    # Step N: New script
+    new_output = self.run_new_script(input_file, output_file)
+
+    outputs['new_output'] = new_output
+    return outputs
+```
+
+### Update Baseline Comparison
+
+If script produces output that should be compared:
+
+1. Regenerate baseline:
+```bash
+pytest tests/gemm_analysis/test_gemm_regression.py --generate-baseline
+```
+
+2. Update `compare_outputs.py` if new comparison logic needed
+
+## Output Comparison Rules
+
+### Strict Requirements
+- Core numeric metrics match within tolerance (1e-6)
+- Required columns/fields present
+- Per-GEMM aggregates consistent
+
+### Allowed Variations
+- Extra columns (additive changes)
+- Column reordering
+- HTML styling changes
+- Timestamps and build IDs
+- File paths (structure maintained)
+- Additional rows (core data present)
+
+## Modifying Test Data
 
 1. Edit `generate_synthetic_data.py`
-2. Regenerate test data and baseline:
-   ```bash
-   tests/gemm_analysis/run_regression_tests.sh --clean
-   tests/gemm_analysis/run_regression_tests.sh --generate-baseline
-   ```
+2. Regenerate:
+```bash
+python tests/gemm_analysis/generate_synthetic_data.py --output-dir tests/gemm_analysis/testdata
+bash scripts/gemm_analysis/run_tracelens_analysis.sh tests/gemm_analysis/testdata/test_sweep
+pytest tests/gemm_analysis/test_gemm_regression.py --generate-baseline
+```
 
-## Environment
+## Troubleshooting
 
-The test suite requires the aorta virtual environment:
+**testdata not found**
+```bash
+python tests/gemm_analysis/generate_synthetic_data.py --output-dir tests/gemm_analysis/testdata
+```
 
+**Baseline outdated**
+```bash
+pytest tests/gemm_analysis/test_gemm_regression.py --generate-baseline
+```
+
+**TraceLens outputs missing**
+```bash
+bash scripts/gemm_analysis/run_tracelens_analysis.sh tests/gemm_analysis/testdata/test_sweep
+```
+
+**Dependencies missing**
+```bash
+pip install pytest pandas numpy openpyxl matplotlib
+```
+
+**Virtual environment not activated**
 ```bash
 source ~/venvs/aorta/bin/activate
 ```
 
-### Dependencies
+**Tests fail after generating synthetic data**
+```bash
+# Run TraceLens analysis on synthetic data
+bash scripts/gemm_analysis/run_tracelens_analysis.sh tests/gemm_analysis/testdata/test_sweep
+```
 
-- Python 3.8+
-- pandas
-- numpy
-- openpyxl
-- pytest
-- All dependencies from `requirements.txt`
-
-## Continuous Integration
-
-To integrate with CI/CD:
+## CI/CD Integration
 
 ```bash
-# In CI pipeline
 source ~/venvs/aorta/bin/activate
-tests/gemm_analysis/run_regression_tests.sh --generate-data  # Generate test data
-tests/gemm_analysis/run_regression_tests.sh --generate-baseline  # If baseline needed
-tests/gemm_analysis/run_regression_tests.sh  # Run regression tests
+python tests/gemm_analysis/generate_synthetic_data.py --output-dir tests/gemm_analysis/testdata
+bash scripts/gemm_analysis/run_tracelens_analysis.sh tests/gemm_analysis/testdata/test_sweep
+pytest tests/gemm_analysis/test_gemm_regression.py --generate-baseline  # If baseline needed
+pytest tests/gemm_analysis/ -v
 ```
 
 Exit codes:
 - 0: All tests passed
-- 1: Test failures detected
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Test fails with "testdata not found"**
-   ```bash
-   tests/gemm_analysis/run_regression_tests.sh --generate-data
-   ```
-   Test data is not tracked in git and must be generated locally first.
-
-2. **Missing virtual environment**
-   ```bash
-   python3 -m venv ~/venvs/aorta
-   source ~/venvs/aorta/bin/activate
-   pip install -r requirements.txt
-   ```
-
-3. **Baseline outdated**
-   ```bash
-   tests/gemm_analysis/run_regression_tests.sh --generate-baseline
-   ```
-
-4. **Numeric differences**
-   - Check `compare_outputs.py` tolerance settings
-   - Review actual vs expected values in logs
-
-5. **Missing dependencies**
-   ```bash
-   pip install pytest pandas numpy openpyxl matplotlib
-   ```
-
-## Implementation Status
-
-- ✅ Test directory structure created
-- ✅ Synthetic data generator implemented
-- ✅ Main test harness script created
-- ✅ Output comparison logic with tolerance
-- ✅ Pytest test suite
-- ✅ Documentation
-
-## Contact
-
-For questions or issues with the test suite, please refer to the test plan in `scripts/gemm_analysis/test_plan.md`.
+- 1: Test failures
