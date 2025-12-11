@@ -181,12 +181,16 @@ for thread in "${THREAD_CONFIGS[@]}"; do
         echo "Processing $thread/${ch}ch (all 8 ranks)..."
 
         # Use trace_pattern instead of trace_dir for better subdirectory support
-        # Find the trace filename from rank0
-        SAMPLE_TRACE=$(find "$TRACE_DIR/rank0" -name "*.json" | head -1)
-        TRACE_FILENAME=$(basename "$SAMPLE_TRACE")
+        # It is not guaranteed that trace files will have the exact same name in all the ranks.
+        # To avoid file not found errors with `--trace_pattern` flag in TraceLens, we first
+        # create a directory called `trace` in all rank folders and then mv the respective
+        # trace file in the rank folder to the canonical `trace/pt.trace.json` path.
+        # This will satisfy TraceLens's requirement of only one `*` being present in the trace pattern
+        # while also avoiding FileNotFoundErrors due to different filenames.
+        find $TRACE_DIR/rank* -name "*.json" -exec sh -c 'mkdir -p "$(dirname "$0")/trace" && mv "$0" "$(dirname "$0")/trace/pt.trace.json"' {} \;
 
         TraceLens_generate_multi_rank_collective_report_pytorch \
-            --trace_pattern "$TRACE_DIR/rank*/$TRACE_FILENAME" \
+            --trace_pattern "$TRACE_DIR/rank*/trace/pt.trace.json" \
             --world_size 8 \
             --output_xlsx_path "$OUTPUT" \
             --detailed_analysis \
