@@ -5,6 +5,7 @@ with largest difference between max and min times.
 """
 
 import re
+import sys
 import argparse
 from pathlib import Path
 import openpyxl
@@ -276,8 +277,8 @@ def main():
                     print(f"  Found {len(results)} kernels")
 
     if not all_results:
-        print("No data extracted!")
-        return
+        print("Error: No data extracted!")
+        sys.exit(1)
 
     # Sort by time_diff_us descending
     print("\nCombining and sorting results...")
@@ -294,16 +295,30 @@ def main():
     ordered_cols = metadata_cols + other_cols
 
     # Save to CSV
-    output_file = base_path / args.output_file
+    # Handle both absolute and relative paths
+    output_file = Path(args.output_file)
+    if not output_file.is_absolute():
+        output_file = base_path / output_file
 
-    with open(output_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=ordered_cols)
-        writer.writeheader()
+    # Ensure output directory exists
+    try:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError) as e:
+        print(f"Error: Cannot create output directory: {e}")
+        sys.exit(1)
 
-        for row in all_results:
-            # Fill in missing keys with None
-            full_row = {k: row.get(k, None) for k in ordered_cols}
-            writer.writerow(full_row)
+    try:
+        with open(output_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=ordered_cols)
+            writer.writeheader()
+
+            for row in all_results:
+                # Fill in missing keys with None
+                full_row = {k: row.get(k, None) for k in ordered_cols}
+                writer.writerow(full_row)
+    except (OSError, PermissionError, FileNotFoundError) as e:
+        print(f"Error: Cannot write to output file {output_file}: {e}")
+        sys.exit(1)
 
     print(f"\nResults saved to: {output_file}")
     print(f"Total rows: {len(all_results)}")
