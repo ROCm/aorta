@@ -4,15 +4,18 @@ import argparse
 from pathlib import Path
 
 
-def combine_collective_reports(baseline_path, test_path, output_path):
+def combine_collective_reports(baseline_path, test_path, output_path, baseline_label = "baseline", test_label="test"):
     """
     Combine two collective reports into a single Excel file by adding a source column to the data.
     """
+    # Extract folder names from paths for labels
+    #baseline_label = Path(baseline_path).parent.parent.name  # Get the config folder name
+    #test_label = Path(test_path).parent.parent.name  # Get the config folder name
 
-    print(f"Loading baseline: {baseline_path}")
+    print(f"Loading baseline ({baseline_label}): {baseline_path}")
     baseline_xl = pd.ExcelFile(baseline_path)
 
-    print(f"Loading test: {test_path}")
+    print(f"Loading test ({test_label}): {test_path}")
     test_xl = pd.ExcelFile(test_path)
 
     print(f"\nBaseline sheets: {baseline_xl.sheet_names}")
@@ -27,8 +30,8 @@ def combine_collective_reports(baseline_path, test_path, output_path):
             baseline_df = pd.read_excel(baseline_path, sheet_name=sheet_name)
             test_df = pd.read_excel(test_path, sheet_name=sheet_name)
 
-            baseline_df["source"] = "baseline"
-            test_df["source"] = "test"
+            baseline_df["source"] = baseline_label
+            test_df["source"] = test_label
 
             combined = pd.concat([baseline_df, test_df], ignore_index=True)
 
@@ -50,12 +53,18 @@ def main():
         "--test", required=True, help="Path to test collective_all_ranks.xlsx"
     )
     parser.add_argument(
+        "--baseline-label", default="baseline", help="Label for baseline data"
+    )
+    parser.add_argument(
+        "--test-label", default="test", help="Label for test data"
+    )
+    parser.add_argument(
         "--output", required=True, help="Output path for combined Excel file"
     )
 
     args = parser.parse_args()
 
-    return combine_collective_reports(args.baseline, args.test, args.output)
+    return combine_collective_reports(args.baseline, args.test, args.output, args.baseline_label, args.test_label)
 
 
 if __name__ == "__main__":
