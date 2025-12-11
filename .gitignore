@@ -54,6 +54,7 @@ expected_outputs/
 testdata/
 *.log
 actual_outputs/
+*.html
 # IDE/project-specific folders
 .vscode/
 .idea/
