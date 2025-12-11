@@ -23,7 +23,7 @@ export NCCL_MAX_NCHANNELS=40
 
 # Network Interface
 # Change this to match your network interface: eth0, ib0, enp49s0f0np0, etc.
-export NCCL_SOCKET_IFNAME=enp49s0f0np0
+export NCCL_SOCKET_IFNAME=enp193s0f0
 
 # PyTorch ROCm Profiler
 export PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1

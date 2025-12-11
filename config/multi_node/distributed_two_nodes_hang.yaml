@@ -20,7 +20,7 @@ training:
   output_dir: overlap_debug_repro
   inject_allreduce_copies: true  # ENABLE: Inject all_reduce → host-device copy pattern
   allreduce_stress_level: 5  # 5 all_reduce cycles per iteration with host-device copies
-  
+
   # Lightweight compute configuration
   additional_compute_streams: 0  # Number of extra compute streams
   lightweight_ops_per_stream: 5000   # Number of matrix multiply ops per stream
@@ -110,4 +110,3 @@ profiling:
   tensorboard: true
   chrome_trace: true
   trace_filename: trace.json
-

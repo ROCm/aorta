@@ -59,10 +59,15 @@ cleanup() {
     echo ""
     echo "=== Caught interrupt signal ===" | tee -a "${LOG_FILE}"
     log "Cleaning up training processes on node ${NODE_RANK}..."
-    
+
+    # Try to kill processes inside Docker container
+    docker exec training-overlap-bugs-rocm70_9-1 pkill -9 -f "train.py" 2>/dev/null || true
+    docker exec training-overlap-bugs-rocm70_9-1 pkill -9 -f "torchrun" 2>/dev/null || true
+
+    # Also try on host (in case anything leaked)
     sudo pkill -9 -f "train.py" 2>/dev/null || true
     sudo pkill -9 -f "torchrun" 2>/dev/null || true
-    
+
     log "Cleanup complete. Exiting."
     exit 130
 }
@@ -74,42 +79,57 @@ log "Output directory: ${OUTPUT_DIR}"
 
 START_TIME=$(date +%s)
 
-# Set environment variables
-export RCCL_THREADS_PER_BLOCK=${THREADS}
-export NCCL_MAX_NCHANNELS=${CHANNELS}
-export HSA_ENABLE_SDMA=0
-export PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1
+# Docker container name (update if different)
+DOCKER_CONTAINER="training-overlap-bugs-rocm70_9-1"
+
+# Check if Docker container is running
+if ! docker ps --format '{{.Names}}' | grep -q "^${DOCKER_CONTAINER}$"; then
+    log "ERROR: Docker container '${DOCKER_CONTAINER}' is not running"
+    log "Start it with: cd /path/to/aorta/docker && docker compose -f docker-compose.rocm70_9-1.yaml up -d"
+    exit 1
+fi
+
+log "Docker container '${DOCKER_CONTAINER}' is running"
 
 # Base command for torchrun with multi-node parameters
 BASE_CMD="torchrun --nnodes ${NNODES} --node_rank ${NODE_RANK} --nproc_per_node ${NPROC_PER_NODE} --master_addr ${MASTER_IP} --master_port ${MASTER_PORT} train.py --config ${CONFIG_FILE}"
 BASE_OVERRIDES="--override profiling.tensorboard=false"
 
+# Build docker exec prefix with environment variables
+DOCKER_EXEC="docker exec \
+    -e RCCL_THREADS_PER_BLOCK=${THREADS} \
+    -e NCCL_MAX_NCHANNELS=${CHANNELS} \
+    -e HSA_ENABLE_SDMA=0 \
+    -e PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1 \
+    ${DOCKER_CONTAINER}"
+
 # Run with or without rocprofv3
 if [ "${ENABLE_ROCPROF}" = "true" ]; then
     ROCPROF_DIR="${OUTPUT_DIR}/rocprof_traces/node_${NODE_RANK}"
     mkdir -p "${ROCPROF_DIR}"
-    
+
     if [ -n "${ROCPROF_INPUT}" ]; then
         log "Using rocprofv3 input file: ${ROCPROF_INPUT}"
-        rocprofv3 -i "${ROCPROF_INPUT}" -d "${ROCPROF_DIR}" -- \
+        ${DOCKER_EXEC} bash -c "rocprofv3 -i ${ROCPROF_INPUT} -d ${ROCPROF_DIR} -- \
             ${BASE_CMD} ${BASE_OVERRIDES} \
-            --override training.output_dir=${OUTPUT_DIR} \
+            --override training.output_dir=${OUTPUT_DIR}" \
             2>&1 | tee -a "${LOG_FILE}"
     else
-        ROCPROF_ARGS_ARRAY=("--kernel-trace")
+        ROCPROF_ARGS="--kernel-trace"
         if [ "${ROCPROF_STATS}" = "true" ]; then
-            ROCPROF_ARGS_ARRAY+=("--stats")
+            ROCPROF_ARGS="${ROCPROF_ARGS} --stats"
         fi
-        
-        log "Running with rocprofv3 kernel tracing"
-        rocprofv3 "${ROCPROF_ARGS_ARRAY[@]}" -d "${ROCPROF_DIR}" -- \
+
+        log "Running with rocprofv3 kernel tracing inside Docker"
+        ${DOCKER_EXEC} bash -c "rocprofv3 ${ROCPROF_ARGS} -d ${ROCPROF_DIR} -- \
             ${BASE_CMD} ${BASE_OVERRIDES} \
-            --override training.output_dir=${OUTPUT_DIR} \
+            --override training.output_dir=${OUTPUT_DIR}" \
             2>&1 | tee -a "${LOG_FILE}"
     fi
 else
-    ${BASE_CMD} ${BASE_OVERRIDES} \
-        --override training.output_dir=${OUTPUT_DIR} \
+    log "Running inside Docker container"
+    ${DOCKER_EXEC} bash -c "${BASE_CMD} ${BASE_OVERRIDES} \
+        --override training.output_dir=${OUTPUT_DIR}" \
         2>&1 | tee -a "${LOG_FILE}"
 fi
 

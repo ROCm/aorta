@@ -1,5 +1,5 @@
 # Multi-node IP address list
-# 
+#
 # Instructions:
 # 1. Copy this file: cp node_ip_list.txt.template node_ip_list.txt
 # 2. Add your node IP addresses below (one per line)
@@ -13,6 +13,3 @@
 # 192.168.1.10
 # 192.168.1.11
 # 192.168.1.12
-
-
-

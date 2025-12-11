@@ -97,6 +97,42 @@ PY
   fi
 fi
 
+# Check git branch consistency before launching
+echo "=== Checking git branch consistency ==="
+MASTER_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "not-a-git-repo")
+
+if [[ "$MASTER_BRANCH" != "not-a-git-repo" ]]; then
+    echo "Master node branch: $MASTER_BRANCH"
+
+    node=0
+    while IFS= read -r IP || [[ -n "$IP" ]]; do
+        if [[ -z "$IP" ]]; then continue; fi
+
+        if [[ "$node" -gt 0 ]]; then
+            WORKER_BRANCH=$(ssh "$USER@$IP" "cd ~/aorta && git rev-parse --abbrev-ref HEAD 2>/dev/null" || echo "not-a-git-repo")
+
+            if [[ "$WORKER_BRANCH" == "not-a-git-repo" ]]; then
+                echo "[WARN] Worker node $IP: Not a git repository"
+            elif [[ "$MASTER_BRANCH" != "$WORKER_BRANCH" ]]; then
+                echo ""
+                echo "[ERROR] Branch mismatch on worker node $IP!"
+                echo "  Master: $MASTER_BRANCH"
+                echo "  Worker: $WORKER_BRANCH"
+                echo ""
+                echo "Fix: ssh $USER@$IP 'cd ~/aorta && git checkout $MASTER_BRANCH && git pull'"
+                echo ""
+                exit 1
+            else
+                echo "Worker node $IP: $WORKER_BRANCH [OK]"
+            fi
+        fi
+        ((node++))
+    done < "$MACHINE_IP_FILE"
+else
+    echo "[WARN] Not a git repository - skipping branch check"
+fi
+echo ""
+
 TRACE_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 EXPERIMENT_DIR="/apps/$USER/aorta/experiments/multinode_${CHANNELS}ch_${THREADS}th_${TRACE_TIMESTAMP}"
 mkdir -p "$EXPERIMENT_DIR"
@@ -134,17 +170,17 @@ while IFS= read -r IP || [[ -n "$IP" ]]; do
       MASTER_ADDR="$IP"
       echo "Master node: $MASTER_ADDR"
       echo ""
-  
+
       ./scripts/multi_node/config_node.sh "$node" "$IP" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$PWD" "$EXPERIMENT_DIR" \
         "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" \
         > "$LOG_FILE" 2>&1 &
-                                                                  
+
   else
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
           "$USER"@"$IP" bash -s -- "$node" "$IP" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$PWD" "$EXPERIMENT_DIR" \
           "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" \
         < ./scripts/multi_node/config_node.sh \
-        > "$LOG_FILE" 2>&1 &    
+        > "$LOG_FILE" 2>&1 &
   fi
 
   ((node++))
@@ -169,6 +205,3 @@ wait
 echo ""
 echo "=== Training completed ==="
 echo "Results saved to: $EXPERIMENT_DIR"
-
-
-

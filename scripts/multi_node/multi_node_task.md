@@ -19,7 +19,7 @@ Scope:
 
 Tasks:
 - Create `master_launch.sh`, `local_launch.sh` and if necessary `config_node.sh` and `set_env_variables.sh` to run `run_train_various_channels.sh` over multi nodes
-    - Hint: 
+    - Hint:
         - use the examples from DLRM including DLRM_XXX files in `multi_node` folder
         - Assume we run `aorta/scripts/gemm_analysis/run_train_various_channels.sh` with one set of thread and channels. If it does not have this functionality add it.
 

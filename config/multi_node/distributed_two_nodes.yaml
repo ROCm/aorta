@@ -1,10 +1,10 @@
 # Multi-node configuration for compute-collective overlap and GEMM variance analysis
 # Adapted from single-node config to replicate overlap analysis across multiple nodes
 # Focus: Observe GEMM-collective overlap and identify unstable GEMM kernel behavior
- 
+
 logging:
   level: INFO
- 
+
 training:
   epochs: 1
   batch_size: 512  # Match single-node for consistent comparison
@@ -14,7 +14,7 @@ training:
   log_interval: 5
   max_steps: 10  # Short for initial analysis, increase to 500 for full variance study
   output_dir: overlap_debug_multinode
-  
+
   # Compute stream configuration - CRITICAL for overlap analysis
   additional_compute_streams: 4  # Enable parallel compute streams
   lightweight_ops_per_stream: 5000
@@ -22,16 +22,16 @@ training:
   lightweight_op_duration_ms: 50
   use_useful_lightweight_ops: false
   lightweight_op_waves: 3  # Pre-forward, mid, post-backward waves
- 
+
 optimizer:
   lr: 0.0002  # Match single-node
   weight_decay: 0.01
   betas: [0.9, 0.985]  # Match single-node
- 
+
 scheduler:
   warmup_steps: 200  # Match single-node
   total_steps: 2200  # Match single-node
- 
+
 dataset:
   num_samples: 200000  # Match single-node
   sequence_length: 176  # Match single-node
@@ -40,7 +40,7 @@ dataset:
   vocab_size: 350000  # Match single-node
   num_dense_features: 32
   seed: 2025  # Match single-node
- 
+
 model:
   vocab_size: 350000  # Match single-node
   embedding_dim: 256  # Match single-node
@@ -51,7 +51,7 @@ model:
   num_layers: 20  # Match single-node
   dropout: 0.1
   mlp_hidden_dim: 4608  # Match single-node
- 
+
 fsdp:
   sharding_strategy: hybrid_shard  # Hybrid: replicate within node, shard across nodes
   backward_prefetch: BACKWARD_PRE
@@ -60,7 +60,7 @@ fsdp:
   forward_prefetch: true
   sync_module_states: true
   param_init_device: meta  # Match single-node (was cpu)
- 
+
 distributed:
   backend: nccl  # Explicit NCCL backend
   mode: fsdp  # ← CHANGED: Use FSDP mode to enable hybrid_shard strategy
@@ -74,7 +74,7 @@ distributed:
   gradient_accumulation_steps: 1
   use_reentrant_communication: false
   timeout: 180
- 
+
 compile:
   enabled: false  # DISABLED to observe individual GEMM operations and variance
   backend: inductor
@@ -82,7 +82,7 @@ compile:
   fullgraph: false
   dynamic: false
   options: {}
- 
+
 # Stream configuration - CRITICAL for overlap analysis
 streams:
   num_streams: 6
@@ -100,11 +100,11 @@ streams:
       - dev6_stream22
     aux:
       - dev6_stream0
- 
+
 dataloader:
   num_workers: 8  # Match single-node
   pin_memory: true
- 
+
 profiling:
   enabled: true
   wait: 1  # Shorter for faster iteration
@@ -119,7 +119,7 @@ profiling:
   tensorboard: false  # Match single-node
   chrome_trace: true
   trace_filename: customer_trace.json  # Match single-node naming
- 
+
 # TraceLen analysis - enable after collecting traces
 tracelens:
   enabled: false  # Set to true after first run for automated analysis
