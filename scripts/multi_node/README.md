@@ -1,42 +1,44 @@
-# Multi-Node Training Setup for Aorta
+# Multi-Node Training
 
-This directory contains scripts for orchestrating multi-node distributed training, adapted from the DLRM pattern.
+Scripts for multi-node distributed GEMM training with custom NCCL channel and thread configurations.
 
 ## Prerequisites
 
-1. **SSH Key Setup**: Ensure passwordless SSH access from head node to all worker nodes:
-   ```bash
-   ssh-copy-id user@worker_node_ip
-   ```
-
-2. **Network Configuration**: All nodes must be on the same network and able to communicate via TCP.
-
-3. **Environment Consistency**: All nodes should have:
-   - Same Python environment (conda/virtualenv)
-   - Same PyTorch version
-   - Same NCCL/RCCL version
-   - Same Aorta codebase (synced via NFS or git)
+- Passwordless SSH between nodes
+- Same network, Python environment, PyTorch/NCCL version across nodes
+- Shared codebase (NFS or git sync)
 
 ## File Structure
 
 ```
 aorta/
-├── scripts/
-│   └── multi_node/
-│       ├── master_launch.sh        # Orchestrator (run this on head node)
-│       ├── config_node.sh          # Per-node setup (called by master_launch)
-│       └── README.md               # This file
-├── node_ip_list.txt                # List of node IPs (YOU MUST CREATE THIS)
-└── config/
-    └── multi_node/
-        └── distributed_two_nodes.yaml  # Multi-node training config
+├── scripts/multi_node/
+│   ├── master_launch.sh         # Main entrypoint
+│   ├── config_node.sh           # Per-node setup
+│   ├── local_launch.sh          # Per-node training
+│   └── set_env_variables.sh     # NCCL/RCCL config
+├── node_ip_list.txt             # Node IPs (create this)
+└── config/multi_node/
+    └── distributed_multinode.yaml  # Default config
 ```
 
-## Setup Steps
+## World Size
 
-### 1. Create `node_ip_list.txt` in Aorta Root
+```
+WORLD_SIZE = NPROC_PER_NODE × NUMBER_OF_NODES
+```
 
-Create a file in the Aorta root directory with your node IP addresses, one per line. First line is the master node:
+| Nodes | GPUs/Node | World Size | Command |
+|-------|-----------|------------|---------|
+| 2 | 8 | 16 | `./scripts/multi_node/master_launch.sh` |
+| 2 | 4 | 8 | `./scripts/multi_node/master_launch.sh -p 4` |
+| 2 | 2 | 4 | `./scripts/multi_node/master_launch.sh -p 2` |
+
+## Setup
+
+Quick setup for Conductor machines: `./scripts/multi_node/setup_my_conductor_machines.sh`
+
+### 1. Create node_ip_list.txt
 
 ```bash
 cd /apps/oyazdanb/aorta
@@ -46,173 +48,149 @@ cat > node_ip_list.txt << EOF
 EOF
 ```
 
-To find your node IPs:
-```bash
-# On each node, run:
-hostname -I | awk '{print $1}'
-```
+First line is master node. Find IPs: `hostname -I | awk '{print $1}'`
 
 ### 2. Configure Network Interface
 
-Edit `config_node.sh` line 48 to set your network interface:
-
+Edit `set_env_variables.sh` line 17:
 ```bash
-export NCCL_SOCKET_IFNAME=eth0  # Change to: ib0 (InfiniBand) or eth0 (Ethernet)
+export NCCL_SOCKET_IFNAME=enp49s0f0np0  # Change to your interface
 ```
 
-To find your network interface:
+Find interface: `ifconfig | grep -E "^(eth|ib|ens)"`
+
+### 3. Test SSH
+
 ```bash
-# On each node, run:
-ifconfig  # or: ip addr show
+while read IP; do ssh "$USER@$IP" hostname; done < node_ip_list.txt
 ```
 
-Look for the interface connected to your high-speed network (InfiniBand: `ib0`, Ethernet: `eth0`, `ens0`, etc.)
+Setup keys if needed: `ssh-copy-id $USER@<node_ip>`
 
-### 3. Test SSH Connectivity
+## Usage
 
-From the head node, verify SSH access to all worker nodes:
-
-```bash
-while read IP; do
-  echo "Testing SSH to $IP..."
-  ssh -o StrictHostKeyChecking=no "$USER@$IP" "hostname && nvidia-smi -L" || echo "FAILED: $IP"
-done < node_ip_list.txt
-```
-
-### 4. (Optional) Customize Config
-
-Edit `config/multi_node/distributed_two_nodes.yaml` to adjust:
-- Model size (`model.num_layers`, `model.model_dim`)
-- Batch size (`training.batch_size`)
-- Number of training steps (`training.max_steps`)
-- FSDP sharding strategy (`fsdp.sharding_strategy`)
-
-For multi-node, `hybrid_shard` is recommended (shards across nodes, replicates within nodes).
-
-## Running Multi-Node Training
-
-### Basic Run
+### Basic
 
 ```bash
-cd /apps/oyazdanb/aorta
 ./scripts/multi_node/master_launch.sh
 ```
 
-### With Custom Config
+Default: 28 channels, 256 threads, 8 GPUs/node, config/multi_node/distributed_multinode.yaml
+
+### Parameters
 
 ```bash
-CONFIG_FILE=config/multi_node/your_custom_config.yaml ./scripts/multi_node/master_launch.sh
+./scripts/multi_node/master_launch.sh -c 28 -t 256 -p 4 -f config/custom.yaml --rocprof
 ```
 
-### With Custom Port
+| Flag | Option | Default | Description |
+|------|--------|---------|-------------|
+| -c | --channels | 28 | NCCL_MAX_NCHANNELS |
+| -t | --threads | 256 | RCCL_THREADS_PER_BLOCK |
+| -p | --nproc | 4 | GPUs per node |
+| -f | --config | config/multi_node/distributed_multinode.yaml | Config file |
+| -r | --rocprof | false | Enable rocprofv3 |
+| -m | --stats | false | rocprof stats |
+|  | --rocprof-input | none | rocprof yaml |
+|  | --master-port | auto | Master port |
+| -h | --help | - | Show help |
+
+Environment variables also supported:
+```bash
+CHANNELS=42 THREADS=512 ./scripts/multi_node/master_launch.sh
+```
+
+### GPU Subset
 
 ```bash
-MASTER_PORT=29600 ./scripts/multi_node/master_launch.sh
+# 4 GPUs per node
+./scripts/multi_node/master_launch.sh -p 4
+
+# Specific GPUs
+export CUDA_VISIBLE_DEVICES=0,2,4,6
+./scripts/multi_node/master_launch.sh -p 4
+```
+
+Note: Set CUDA_VISIBLE_DEVICES on all nodes via set_env_variables.sh
+
+### Examples
+
+```bash
+# Default run
+./scripts/multi_node/master_launch.sh
+
+# Custom parameters
+./scripts/multi_node/master_launch.sh -c 28 -t 256 -p 4
+
+# With profiling
+./scripts/multi_node/master_launch.sh -c 28 -t 256 --rocprof --stats
+
+# Custom config
+./scripts/multi_node/master_launch.sh -f config/my_config.yaml -c 28
 ```
 
 ## Monitoring
 
-### Real-time Logs (All Nodes)
-
 ```bash
+# All nodes
 tail -f experiments/multinode_*/logs/node_*.txt
-```
 
-### Master Node Only
-
-```bash
+# Master only
 tail -f experiments/multinode_*/logs/node_0_*.txt
-```
 
-### Check Training Progress
-
-```bash
-# On master node, check metrics:
+# Training metrics
 cat experiments/multinode_*/outputs/rank_00_metrics.jsonl | tail -n 5
 ```
 
 ## Troubleshooting
 
-### Issue: SSH Connection Failed
-
-**Symptom**: `Permission denied (publickey)` or `Connection refused`
-
-**Solution**:
+### SSH fails
 ```bash
-# Generate SSH key if you don't have one:
 ssh-keygen -t rsa -b 4096
+for IP in $(cat node_ip_list.txt); do ssh-copy-id $USER@$IP; done
+```
 
-# Copy to all nodes:
+### NCCL timeout
+```bash
+# Check interface
+ifconfig | grep -E "^(eth|ib|ens)"
+
+# Update set_env_variables.sh
+export NCCL_SOCKET_IFNAME=<your_interface>
+
+# Check firewall on MASTER_PORT (default 29500)
+```
+
+### World size mismatch
+```bash
+# Check GPUs per node
+rocm-smi --showid | wc -l
+
+# Adjust nproc
+./scripts/multi_node/master_launch.sh --nproc <num_gpus>
+```
+
+### Code sync
+```bash
+# Pull on all nodes
 for IP in $(cat node_ip_list.txt); do
-  ssh-copy-id $USER@$IP
+  ssh $USER@$IP "cd /apps/$USER/aorta && git pull"
 done
 ```
 
-### Issue: NCCL Initialization Timeout
+## NCCL Configuration
 
-**Symptom**: `NCCL WARN Bootstrap : no socket interface found` or timeout
+Edit `set_env_variables.sh` for network-specific tuning:
 
-**Solution**:
-1. Check network interface name:
-   ```bash
-   ifconfig | grep -E "^(eth|ib|ens)"
-   ```
-2. Update `NCCL_SOCKET_IFNAME` in `config_node.sh`
-3. Ensure firewall allows traffic on `MASTER_PORT` (default: 29500)
-
-### Issue: Mismatched World Size
-
-**Symptom**: `Expected world size X but got Y`
-
-**Solution**:
-- Verify all nodes in `node_ip_list.txt` are reachable
-- Check that each node has 8 GPUs: `nvidia-smi -L` or `rocm-smi`
-
-### Issue: Different Code Versions on Nodes
-
-**Symptom**: Import errors or unexpected behavior on some nodes
-
-**Solution**:
-- Use NFS shared filesystem for codebase, OR
-- Git pull on all nodes:
-  ```bash
-  for IP in $(cat node_ip_list.txt); do
-    ssh $USER@$IP "cd /apps/$USER/aorta && git pull"
-  done
-  ```
-
-## Example Output
-
-```
-=== Aorta Multi-Node Training ===
-Experiment directory: /apps/oyazdanb/aorta/experiments/multinode_20251124_143052
-Config file: config/multi_node/distributed_two_nodes.yaml
-Number of nodes: 2
-World size: 16 (GPUs)
-Using MASTER_PORT: 29500
-
-Setting up Node: 0, IP: 192.168.1.10
-Master node: 192.168.1.10
-
-Setting up Node: 1, IP: 192.168.1.11
-
-=== All nodes launched ===
-Monitor logs in: /apps/oyazdanb/aorta/experiments/multinode_20251124_143052/logs/
-```
-
-## Advanced: NCCL Environment Variables
-
-For optimal performance, you may need to tune NCCL settings in `config_node.sh`:
-
-### InfiniBand Networks
+### InfiniBand
 ```bash
 export NCCL_IB_DISABLE=0
-export NCCL_IB_HCA=mlx5_0  # Check with: ibstat
+export NCCL_IB_HCA=mlx5_0  # Check: ibstat
 export NCCL_IB_GID_INDEX=3
 export NCCL_SOCKET_IFNAME=ib0
 ```
 
-### Ethernet Networks (slower)
+### Ethernet
 ```bash
 export NCCL_IB_DISABLE=1
 export NCCL_SOCKET_IFNAME=eth0
@@ -220,41 +198,30 @@ export NCCL_NSOCKS_PERTHREAD=4
 export NCCL_SOCKET_NTHREADS=2
 ```
 
-### Debug NCCL Issues
+### Debug
 ```bash
 export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=ALL
 ```
 
-## Performance Tips
-
-1. **Use InfiniBand** if available (100x faster than Ethernet for all-reduce)
-2. **Tune batch size**: Multi-node works best with large batches
-3. **Use `hybrid_shard`** FSDP strategy for multi-node (reduces cross-node communication)
-4. **Profile first iteration** to verify overlap is working:
-   ```yaml
-   profiling:
-     enabled: true
-     active: 2  # Profile first 2 iterations
-   ```
-
-## Cleaning Up
-
-### Stop All Training (Emergency)
+## Emergency Stop
 
 ```bash
-# On all nodes:
 for IP in $(cat node_ip_list.txt); do
   ssh $USER@$IP "pkill -9 -f 'train.py|torchrun'"
 done
 ```
 
-### Remove Old Experiments
+## Output Structure
 
-```bash
-# Keep last 5 experiments, delete older:
-cd experiments/
-ls -t | tail -n +6 | xargs rm -rf
 ```
-
+experiments/multinode_28ch_256th_20251211_143052/
+├── logs/
+│   ├── node_0_20251211_143052.txt
+│   └── node_1_20251211_143052.txt
+└── 256thread_28channels/
+    ├── node_0_output.log
+    ├── node_1_output.log
+    └── torch_profiler/
+```
 

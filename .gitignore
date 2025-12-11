@@ -47,7 +47,8 @@ artifacts/
 artifacts_*/
 overlap_debug*/
 *.jsonl
-
+*.logs
+*.log
 # Experiment outputs and traces
 experiments/
 *.json

@@ -1,0 +1,127 @@
+#!/bin/bash
+# Multi-node local launch script for GEMM training
+# Runs on each node with single channel/thread configuration
+
+if [[ $# -lt 11 ]]; then
+  echo "Usage: $0 <NODE_RANK> <NODE_IP> <MASTER_IP> <MASTER_PORT> <NNODES> <WORLD_SIZE> <EXPERIMENT_DIR> <CONFIG_FILE> <NPROC_PER_NODE> <CHANNELS> <THREADS> [ENABLE_ROCPROF] [ROCPROF_STATS] [ROCPROF_INPUT]"
+  exit 1
+fi
+
+NODE_RANK="$1"
+NODE_IP="$2"
+MASTER_IP="$3"
+MASTER_PORT="$4"
+NNODES="$5"
+WORLD_SIZE="$6"
+EXPERIMENT_DIR="$7"
+CONFIG_FILE="$8"
+NPROC_PER_NODE="$9"
+CHANNELS="${10}"
+THREADS="${11}"
+ENABLE_ROCPROF="${12:-false}"
+ROCPROF_STATS="${13:-false}"
+ROCPROF_INPUT="${14:-}"
+
+echo "=========================================="
+echo "Local Launch Configuration"
+echo "=========================================="
+echo "Node Rank: $NODE_RANK"
+echo "Node IP: $NODE_IP"
+echo "Master IP: $MASTER_IP"
+echo "Master Port: $MASTER_PORT"
+echo "Number of Nodes: $NNODES"
+echo "World Size: $WORLD_SIZE"
+echo "Processes per node: $NPROC_PER_NODE"
+echo "Experiment Dir: $EXPERIMENT_DIR"
+echo "Config File: $CONFIG_FILE"
+echo "Channels: $CHANNELS"
+echo "Threads: $THREADS"
+echo "rocprof enabled: $ENABLE_ROCPROF"
+echo "=========================================="
+echo ""
+
+# Output directory for this configuration
+OUTPUT_DIR="${EXPERIMENT_DIR}/${THREADS}thread_${CHANNELS}channels"
+mkdir -p "${OUTPUT_DIR}"
+
+# Log file
+LOG_FILE="${OUTPUT_DIR}/node_${NODE_RANK}_output.log"
+
+# Function to log with timestamp
+log() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[${timestamp}] [Node ${NODE_RANK}] ${message}" | tee -a "${LOG_FILE}"
+}
+
+# Cleanup function
+cleanup() {
+    echo ""
+    echo "=== Caught interrupt signal ===" | tee -a "${LOG_FILE}"
+    log "Cleaning up training processes on node ${NODE_RANK}..."
+    
+    sudo pkill -9 -f "train.py" 2>/dev/null || true
+    sudo pkill -9 -f "torchrun" 2>/dev/null || true
+    
+    log "Cleanup complete. Exiting."
+    exit 130
+}
+
+trap cleanup SIGINT SIGTERM
+
+log "Starting multi-node training with RCCL_THREADS_PER_BLOCK=${THREADS}, NCCL_MAX_NCHANNELS=${CHANNELS}"
+log "Output directory: ${OUTPUT_DIR}"
+
+START_TIME=$(date +%s)
+
+# Set environment variables
+export RCCL_THREADS_PER_BLOCK=${THREADS}
+export NCCL_MAX_NCHANNELS=${CHANNELS}
+export HSA_ENABLE_SDMA=0
+export PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1
+
+# Base command for torchrun with multi-node parameters
+BASE_CMD="torchrun --nnodes ${NNODES} --node_rank ${NODE_RANK} --nproc_per_node ${NPROC_PER_NODE} --master_addr ${MASTER_IP} --master_port ${MASTER_PORT} train.py --config ${CONFIG_FILE}"
+BASE_OVERRIDES="--override profiling.tensorboard=false"
+
+# Run with or without rocprofv3
+if [ "${ENABLE_ROCPROF}" = "true" ]; then
+    ROCPROF_DIR="${OUTPUT_DIR}/rocprof_traces/node_${NODE_RANK}"
+    mkdir -p "${ROCPROF_DIR}"
+    
+    if [ -n "${ROCPROF_INPUT}" ]; then
+        log "Using rocprofv3 input file: ${ROCPROF_INPUT}"
+        rocprofv3 -i "${ROCPROF_INPUT}" -d "${ROCPROF_DIR}" -- \
+            ${BASE_CMD} ${BASE_OVERRIDES} \
+            --override training.output_dir=${OUTPUT_DIR} \
+            2>&1 | tee -a "${LOG_FILE}"
+    else
+        ROCPROF_ARGS_ARRAY=("--kernel-trace")
+        if [ "${ROCPROF_STATS}" = "true" ]; then
+            ROCPROF_ARGS_ARRAY+=("--stats")
+        fi
+        
+        log "Running with rocprofv3 kernel tracing"
+        rocprofv3 "${ROCPROF_ARGS_ARRAY[@]}" -d "${ROCPROF_DIR}" -- \
+            ${BASE_CMD} ${BASE_OVERRIDES} \
+            --override training.output_dir=${OUTPUT_DIR} \
+            2>&1 | tee -a "${LOG_FILE}"
+    fi
+else
+    ${BASE_CMD} ${BASE_OVERRIDES} \
+        --override training.output_dir=${OUTPUT_DIR} \
+        2>&1 | tee -a "${LOG_FILE}"
+fi
+
+EXIT_CODE=${PIPESTATUS[0]}
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+
+if [ $EXIT_CODE -eq 0 ]; then
+    log "Training completed successfully (duration: ${DURATION}s)"
+else
+    log "Training failed with exit code: $EXIT_CODE (duration: ${DURATION}s)"
+fi
+
+echo ""
+log "Node ${NODE_RANK} finished"

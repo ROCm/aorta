@@ -1,5 +1,5 @@
 #!/bin/bash
-# Per-node configuration and launch script for Aorta
+# Per-node configuration and launch script for Aorta GEMM training
 # This script runs on each node (via SSH or locally)
 
 NODE_RANK=$(echo "$1" | sed 's/"//g')
@@ -11,6 +11,12 @@ WORLD_SIZE=$(echo "$6" | sed 's/"//g')
 WORKDIR=$(echo "$7" | sed 's/"//g')
 EXPERIMENT_DIR=$(echo "$8" | sed 's/"//g')
 CONFIG_FILE=$(echo "$9" | sed 's/"//g')
+NPROC_PER_NODE=$(echo "${10}" | sed 's/"//g')
+CHANNELS=$(echo "${11}" | sed 's/"//g')
+THREADS=$(echo "${12}" | sed 's/"//g')
+ENABLE_ROCPROF=$(echo "${13}" | sed 's/"//g')
+ROCPROF_STATS=$(echo "${14}" | sed 's/"//g')
+ROCPROF_INPUT=$(echo "${15}" | sed 's/"//g')
 
 echo "============================================"
 echo "Node Configuration"
@@ -21,57 +27,50 @@ echo "Master IP: $MASTER_IP"
 echo "Master Port: $MASTER_PORT"
 echo "Number of Nodes: $NNODES"
 echo "World Size: $WORLD_SIZE GPUs"
+echo "Processes per node: $NPROC_PER_NODE"
 echo "Work Directory: $WORKDIR"
 echo "Experiment Directory: $EXPERIMENT_DIR"
 echo "Config File: $CONFIG_FILE"
+echo "Channels: $CHANNELS"
+echo "Threads: $THREADS"
 echo "============================================"
 echo ""
 
 # Change to working directory
 cd "$WORKDIR" || exit 1
 
-# Set up environment variables (customize for your system)
-# Example: Conda/virtualenv activation
-# source /path/to/your/venv/bin/activate
-# or
-# conda activate your_env
+# Activate virtual environment if it exists
+VENV_PATH="$WORKDIR/.venv"
+if [[ -d "$VENV_PATH" ]]; then
+    echo "Activating virtual environment at $VENV_PATH"
+    source "$VENV_PATH/bin/activate"
+fi
 
-# Optional: Set NCCL/RCCL environment variables
-export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=ALL
-export NCCL_IB_DISABLE=0  # Enable InfiniBand if available
-export NCCL_SOCKET_IFNAME=eth0  # Change to your network interface (e.g., ib0, eth0)
+# Source common environment variables
+if [[ -f "$WORKDIR/scripts/multi_node/set_env_variables.sh" ]]; then
+    echo "Sourcing set_env_variables.sh"
+    source "$WORKDIR/scripts/multi_node/set_env_variables.sh"
+else
+    echo "Warning: set_env_variables.sh not found, using default NCCL settings"
+    export NCCL_DEBUG=WARN
+    export NCCL_IB_DISABLE=0
+    export NCCL_SOCKET_IFNAME=eth0
+fi
 
-# ROCm-specific (if using AMD GPUs)
-# export HSA_ENABLE_SDMA=0
-# export RCCL_THREADS_PER_BLOCK=256
-
-# CUDA-specific (if using NVIDIA GPUs)
-# export NCCL_NSOCKS_PERTHREAD=4
-# export NCCL_SOCKET_NTHREADS=2
-
-echo "Environment configured. Starting training..."
+echo ""
+echo "Environment configured. Starting GEMM training..."
 echo ""
 
-# Launch torchrun
-# Note: torchrun will spawn 8 processes (one per GPU) on this node
-torchrun \
-  --nnodes="$NNODES" \
-  --node_rank="$NODE_RANK" \
-  --nproc_per_node=8 \
-  --master_addr="$MASTER_IP" \
-  --master_port="$MASTER_PORT" \
-  --rdzv_backend=c10d \
-  --rdzv_endpoint="${MASTER_IP}:${MASTER_PORT}" \
-  train.py \
-  --config "$CONFIG_FILE" \
-  --override training.output_dir="$EXPERIMENT_DIR/outputs" \
-  --override profiling.enabled=true \
-  --override profiling.active=5
+# Launch local_launch.sh with all parameters
+"$WORKDIR/scripts/multi_node/local_launch.sh" \
+    "$NODE_RANK" "$NODE_IP" "$MASTER_IP" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" \
+    "$EXPERIMENT_DIR" "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" \
+    "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT"
 
 echo ""
 echo "============================================"
 echo "Node $NODE_RANK training completed"
 echo "============================================"
+
 
 
