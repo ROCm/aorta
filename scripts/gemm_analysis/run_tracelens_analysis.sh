@@ -183,7 +183,7 @@ for thread in "${THREAD_CONFIGS[@]}"; do
         # Use trace_pattern instead of trace_dir for better subdirectory support
         # It is not guaranteed that trace files will have the exact same name in all the ranks.
         # To avoid file not found errors with `--trace_pattern` flag in TraceLens, we first
-        # create a directory called `trace_copy` in all rank folders and then mv the respective
+        # create a directory called `trace` in all rank folders and then mv the respective
         # trace file in the rank folder to the canonical `trace/pt.trace.json` path.
         # This will satisfy TraceLens's requirement of only one `*` being present in the trace pattern
         # while also avoiding FileNotFoundErrors due to different filenames.
