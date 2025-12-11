@@ -1,0 +1,17 @@
+# Multi-node IP address list
+# 
+# Instructions:
+# 1. Copy this file: cp node_ip_list.txt.template node_ip_list.txt
+# 2. Add your node IP addresses below (one per line)
+# 3. First line should be the master/head node
+# 4. Remove all comment lines starting with #
+#
+# To find your node IPs, run on each node:
+#   hostname -I | awk '{print $1}'
+#
+# Example (replace with your actual IPs):
+# 192.168.1.10
+# 192.168.1.11
+# 192.168.1.12
+
+

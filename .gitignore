@@ -42,6 +42,11 @@ checkpoints/
 runs/
 logs/
 tensorboard/
+experiments/
+artifacts/
+artifacts_*/
+overlap_debug*/
+*.jsonl
 
 # Experiment outputs and traces
 experiments/
@@ -72,3 +77,10 @@ tmp_prof.*
 rocprof_traces
 overlap.*
 .*repro.*
+# Multi-node IP configuration (should be customized per deployment)
+node_ip_list.txt
+
+# Profiler traces
+*.json
+*.gz
+trace_*

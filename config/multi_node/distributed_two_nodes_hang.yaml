@@ -1,0 +1,113 @@
+# Configuration to reproduce the multi-stream hang issue on 2 nodes
+# Based on Optuna sweep results: Trial 9 achieved minimal overlap (1.16%) with multiple streams
+# This configuration enables multiple RCCL streams but achieves minimal overlap, which may trigger the hang
+#
+# KEY CHANGE: Using hybrid_shard strategy for optimal 2-node performance
+# - DDP-style replication within each node (8 GPUs)
+# - FSDP-style sharding across nodes (Node 1 ↔ Node 2)
+
+logging:
+  level: INFO
+
+training:
+  epochs: 1
+  batch_size: 1024  # Very large batch size for maximum arithmetic intensity
+  gradient_accumulation: 1
+  mixed_precision: fp16  # FP16 creates more comm traffic than TF32
+  grad_clip_norm: 1.0
+  log_interval: 5
+  max_steps: 500  # More steps to increase chance of hang
+  output_dir: overlap_debug_repro
+  inject_allreduce_copies: true  # ENABLE: Inject all_reduce → host-device copy pattern
+  allreduce_stress_level: 5  # 5 all_reduce cycles per iteration with host-device copies
+  
+  # Lightweight compute configuration
+  additional_compute_streams: 0  # Number of extra compute streams
+  lightweight_ops_per_stream: 5000   # Number of matrix multiply ops per stream
+  lightweight_op_size: 512       # Matrix size (512x512 = 1MB in FP32)
+  lightweight_op_duration_ms: 50 # Target duration in ms (not currently used)
+  use_useful_lightweight_ops: false # If true: batch statistics; if false: dummy matmuls
+  lightweight_op_waves: 3        # Number of waves: 1=pre-forward, 2=+mid, 3=+post-backward
+
+optimizer:
+  lr: 0.0003
+  weight_decay: 0.01
+  betas: [0.9, 0.98]
+
+scheduler:
+  warmup_steps: 100
+  total_steps: 2000
+
+dataset:
+  num_samples: 10000
+  sequence_length: 512  # 4x longer sequences for more compute
+  dense_dim: 512        # 2x larger dense features
+  sparse_features: 64   # 2x more sparse features
+  vocab_size: 60000
+  num_dense_features: 32
+  seed: 42
+
+model:
+  vocab_size: 60000
+  embedding_dim: 1024   # 2x larger embeddings
+  num_dense_features: 32
+  dense_dim: 512
+  model_dim: 8192       # 2x larger hidden dimension
+  num_heads: 16
+  num_layers: 24        # Even more layers for more communication
+  dropout: 0.1
+  mlp_hidden_dim: 16384 # 4x larger MLP for more compute per layer
+
+fsdp:
+  # ⭐ CHANGED: hybrid_shard = DDP within nodes + FSDP across nodes
+  sharding_strategy: hybrid_shard
+  backward_prefetch: BACKWARD_PRE  # Aggressive prefetch during backward
+  use_orig_params: true   # Enable to create more optimizer state traffic
+  limit_all_gathers: false  # Unlimited all-gathers to maximize overlap attempts
+  forward_prefetch: true   # ENABLED - aggressive forward prefetch
+  sync_module_states: true
+  # ⭐ CHANGED: 'meta' device for faster multi-node initialization
+  param_init_device: meta
+
+distributed:
+  # ⭐ CHANGED: Use FSDP mode (not DDP) to enable hybrid_shard strategy
+  mode: fsdp
+  # Note: The following DDP-specific settings are ignored when mode=fsdp
+  gradient_as_bucket_view: true
+  static_graph: true
+  bucket_cap_mb: 256
+  find_unused_parameters: false
+  broadcast_buffers: false
+  overlap_grad_reduce: false
+  overlap_param_gather: false
+  gradient_accumulation_steps: 1
+  use_reentrant_communication: false
+  timeout: 180
+
+compile:
+  enabled: true
+  backend: inductor
+  mode: max-autotune
+  fullgraph: false
+  dynamic: false
+  options: {}
+
+dataloader:
+  num_workers: 4
+  pin_memory: true
+
+profiling:
+  enabled: true
+  wait: 5
+  warmup: 5
+  active: 30
+  repeat: 1
+  record_shapes: true
+  profile_memory: true
+  profile_freq: 1
+  with_stack: false
+  with_flops: false
+  tensorboard: true
+  chrome_trace: true
+  trace_filename: trace.json
+
