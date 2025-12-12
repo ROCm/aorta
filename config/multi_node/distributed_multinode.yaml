@@ -5,7 +5,7 @@ training:
   batch_size: 448
   gradient_accumulation: 4
   mixed_precision: bf16
-  max_steps: 2000
+  max_steps: 10
   grad_clip_norm: 1.0
   output_dir: artifacts/optuna_tracelens_sweep_fixed/trial_0000
   log_interval: 20
@@ -84,10 +84,10 @@ dataloader:
   pin_memory: true
 profiling:
   enabled: true
-  wait: 5
-  warmup: 5
-  active: 1
-  repeat: 1
+  wait: 1
+  warmup: 2
+  active: 5
+  repeat: 0
   record_shapes: false
   profile_memory: false
   with_stack: false

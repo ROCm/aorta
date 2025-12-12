@@ -44,6 +44,19 @@ echo ""
 OUTPUT_DIR="${EXPERIMENT_DIR}/${THREADS}thread_${CHANNELS}channels"
 mkdir -p "${OUTPUT_DIR}"
 
+# Convert host path to Docker path for use inside container
+# Docker mounts host aorta directory -> /workspace/aorta
+# Extract aorta root from EXPERIMENT_DIR (e.g., /home/user/aorta/experiments/... -> /home/user/aorta)
+AORTA_ROOT_FROM_EXP=$(echo "$EXPERIMENT_DIR" | sed 's|/experiments/.*||')
+# Replace the aorta root with /workspace/aorta
+OUTPUT_DIR_DOCKER=$(echo "$OUTPUT_DIR" | sed "s|^${AORTA_ROOT_FROM_EXP}|/workspace/aorta|")
+# Also convert CONFIG_FILE to Docker path if it's an absolute path
+if [[ "$CONFIG_FILE" =~ ^/ ]]; then
+    CONFIG_FILE_DOCKER=$(echo "$CONFIG_FILE" | sed "s|^${AORTA_ROOT_FROM_EXP}|/workspace/aorta|")
+else
+    CONFIG_FILE_DOCKER="$CONFIG_FILE"
+fi
+
 # Log file
 LOG_FILE="${OUTPUT_DIR}/node_${NODE_RANK}_output.log"
 
@@ -92,7 +105,7 @@ fi
 log "Docker container '${DOCKER_CONTAINER}' is running"
 
 # Base command for torchrun with multi-node parameters
-BASE_CMD="torchrun --nnodes ${NNODES} --node_rank ${NODE_RANK} --nproc_per_node ${NPROC_PER_NODE} --master_addr ${MASTER_IP} --master_port ${MASTER_PORT} train.py --config ${CONFIG_FILE}"
+BASE_CMD="torchrun --nnodes ${NNODES} --node_rank ${NODE_RANK} --nproc_per_node ${NPROC_PER_NODE} --master_addr ${MASTER_IP} --master_port ${MASTER_PORT} train.py --config ${CONFIG_FILE_DOCKER}"
 BASE_OVERRIDES="--override profiling.tensorboard=false"
 
 # Build docker exec prefix with environment variables
@@ -112,7 +125,7 @@ if [ "${ENABLE_ROCPROF}" = "true" ]; then
         log "Using rocprofv3 input file: ${ROCPROF_INPUT}"
         ${DOCKER_EXEC} bash -c "rocprofv3 -i ${ROCPROF_INPUT} -d ${ROCPROF_DIR} -- \
             ${BASE_CMD} ${BASE_OVERRIDES} \
-            --override training.output_dir=${OUTPUT_DIR}" \
+            --override training.output_dir=${OUTPUT_DIR_DOCKER}" \
             2>&1 | tee -a "${LOG_FILE}"
     else
         ROCPROF_ARGS="--kernel-trace"
@@ -123,13 +136,14 @@ if [ "${ENABLE_ROCPROF}" = "true" ]; then
         log "Running with rocprofv3 kernel tracing inside Docker"
         ${DOCKER_EXEC} bash -c "rocprofv3 ${ROCPROF_ARGS} -d ${ROCPROF_DIR} -- \
             ${BASE_CMD} ${BASE_OVERRIDES} \
-            --override training.output_dir=${OUTPUT_DIR}" \
+            --override training.output_dir=${OUTPUT_DIR_DOCKER}" \
             2>&1 | tee -a "${LOG_FILE}"
     fi
 else
     log "Running inside Docker container"
-    ${DOCKER_EXEC} bash -c "${BASE_CMD} ${BASE_OVERRIDES} \
-        --override training.output_dir=${OUTPUT_DIR}" \
+    log "Command: ${BASE_CMD} ${BASE_OVERRIDES} --override training.output_dir=${OUTPUT_DIR_DOCKER}"
+        ${DOCKER_EXEC} bash -c "${BASE_CMD} ${BASE_OVERRIDES} \
+        --override training.output_dir=${OUTPUT_DIR_DOCKER}" \
         2>&1 | tee -a "${LOG_FILE}"
 fi
 
