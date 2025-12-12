@@ -27,6 +27,7 @@ python scripts/tracelens_single_config/run_full_analysis.py \
 - `--gpu-timeline` - GPU timeline comparison
 - `--collective` - NCCL collective comparison
 - `--final-report` - Create comprehensive Excel report
+- `--generate-plots` - Generate visualization plots and HTML report from final report
 - `--skip-tracelens` - Skip TraceLens report generation if already done
 
 ### Output:
