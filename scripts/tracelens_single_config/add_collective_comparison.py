@@ -5,7 +5,7 @@ from openpyxl.styles import Color
 from openpyxl.formatting.rule import ColorScaleRule
 
 
-def add_collective_comparison_sheets(input_path, output_path):
+def add_collective_comparison_sheets(input_path, output_path, baseline_label='baseline', test_label='test'):
     """
     Add comparison sheets to the combined collective reports.
     This function will create comparison sheets for the combined collective reports.
@@ -34,9 +34,19 @@ def add_collective_comparison_sheets(input_path, output_path):
 
             df = pd.read_excel(input_path, sheet_name=sheet_name)
 
+            # Get actual source values from the dataframe
+            sources = df['source'].unique()
+            # Determine which is baseline and which is test (baseline should be first)
+            if len(sources) >= 2:
+                actual_baseline = sources[0]
+                actual_test = sources[1]
+            else:
+                actual_baseline = baseline_label
+                actual_test = test_label
+
             # Separate baseline and test
-            baseline_df = df[df["source"] == "baseline"].copy()
-            test_df = df[df["source"] == "test"].copy()
+            baseline_df = df[df["source"] == actual_baseline].copy()
+            test_df = df[df["source"] == actual_test].copy()
 
             if len(baseline_df) == 0 or len(test_df) == 0:
                 print(f"  Skip {sheet_name} - missing data")
@@ -63,9 +73,9 @@ def add_collective_comparison_sheets(input_path, output_path):
                 else:
                     mask = test_df[group_cols[0]] == name
 
-                sale_group = test_df.loc[mask]
+                test_group = test_df.loc[mask]
 
-                if len(sale_group) == 0:
+                if len(test_group) == 0:
                     continue
 
                 # Create comparison row
@@ -88,22 +98,22 @@ def add_collective_comparison_sheets(input_path, output_path):
                 ]
 
                 for col in numeric_cols:
-                    if col not in base_group.columns or col not in sale_group.columns:
+                    if col not in base_group.columns or col not in test_group.columns:
                         continue
 
                     base_val = base_group[col].values[0]
-                    sale_val = sale_group[col].values[0]
+                    test_val = test_group[col].values[0]
 
-                    comp_row[f"baseline_{col}"] = base_val
-                    comp_row[f"test_{col}"] = sale_val
-                    comp_row[f"diff_{col}"] = sale_val - base_val
+                    comp_row[f"{actual_baseline}_{col}"] = base_val
+                    comp_row[f"{actual_test}_{col}"] = test_val
+                    comp_row[f"diff_{col}"] = test_val - base_val
 
                     # For latency/time: positive percent_change means faster (less time)
                     # For bandwidth: positive percent_change means better (more bandwidth)
                     if "latency" in col.lower() or "time" in col.lower():
                         # Lower is better - positive when test is faster
                         pct_change = (
-                            (base_val - sale_val) / base_val * 100
+                            (base_val - test_val) / base_val * 100
                             if base_val != 0
                             else 0
                         )
@@ -111,14 +121,14 @@ def add_collective_comparison_sheets(input_path, output_path):
                     elif "bw" in col.lower() or "bandwidth" in col.lower():
                         # Higher is better - positive when test is better
                         pct_change = (
-                            (sale_val - base_val) / base_val * 100
+                            (test_val - base_val) / base_val * 100
                             if base_val != 0
                             else 0
                         )
                         comp_row[f"percent_change_{col}"] = pct_change
 
                     comp_row[f"ratio_{col}"] = (
-                        sale_val / base_val if base_val != 0 else 0
+                        test_val / base_val if base_val != 0 else 0
                     )
 
                 comparison = pd.concat(
@@ -185,10 +195,13 @@ def main():
     parser.add_argument(
         "--output", required=True, help="Output Excel file with comparison sheets"
     )
+    parser.add_argument('--baseline-label', default='baseline', help='Label for baseline data')
+    parser.add_argument('--test-label', default='test', help='Label for test data')
 
     args = parser.parse_args()
 
-    return add_collective_comparison_sheets(args.input, args.output)
+    return add_collective_comparison_sheets(args.input, args.output, args.baseline_label, args.test_label)
+
 
 
 if __name__ == "__main__":
