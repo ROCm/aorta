@@ -5,7 +5,7 @@ from openpyxl.styles import Color
 from openpyxl.formatting.rule import ColorScaleRule
 
 
-def add_comparison_sheets(input_path, output_path):
+def add_comparison_sheets(input_path, output_path, baseline_label='baseline', test_label='test'):
     """
     Create comparison sheets for the combined excel file of individual reports.
     """
@@ -23,23 +23,33 @@ def add_comparison_sheets(input_path, output_path):
         # Add comparison sheets
         all_combined = pd.read_excel(input_path, sheet_name="All_Ranks_Combined")
 
+        # Get actual source values from the dataframe
+        sources = all_combined['source'].unique()
+        # Determine which is baseline and which is test (baseline should be first)
+        if len(sources) >= 2:
+            actual_baseline = sources[0]
+            actual_test = sources[1]
+        else:
+            actual_baseline = baseline_label
+            actual_test = test_label
+
         # Comparison 1: Side-by-side by rank
-        baseline_data = all_combined[all_combined["source"] == "baseline"]
-        test_data = all_combined[all_combined["source"] == "test"]
+        baseline_data = all_combined[all_combined["source"] == actual_baseline]
+        test_data = all_combined[all_combined["source"] == actual_test]
 
         comparison_by_rank = pd.DataFrame()
         for rank in sorted(baseline_data["rank"].unique()):
             base_rank = baseline_data[baseline_data["rank"] == rank].set_index("type")
-            sale_rank = test_data[test_data["rank"] == rank].set_index("type")
+            test_rank = test_data[test_data["rank"] == rank].set_index("type")
 
             for metric_type in base_rank.index:
-                if metric_type in sale_rank.index:
+                if metric_type in test_rank.index:
                     base_time = base_rank.loc[metric_type, "time ms"]
-                    sale_time = sale_rank.loc[metric_type, "time ms"]
-                    ratio_val = sale_time / base_time if base_time != 0 else 0
+                    test_time = test_rank.loc[metric_type, "time ms"]
+                    ratio_val = test_time / base_time if base_time != 0 else 0
                     # Percentage change: positive when test is faster (takes less time)
                     pct_change = (
-                        (base_time - sale_time) / base_time * 100
+                        (base_time - test_time) / base_time * 100
                         if base_time != 0
                         else 0
                     )
@@ -59,20 +69,20 @@ def add_comparison_sheets(input_path, output_path):
                                 {
                                     "rank": [rank],
                                     "type": [metric_type],
-                                    "baseline_time_ms": [base_time],
-                                    "test_time_ms": [sale_time],
-                                    "diff_time_ms": [sale_time - base_time],
+                                    f"{baseline_label}_time_ms": [base_time],
+                                    f"{test_label}_time_ms": [test_time],
+                                    "diff_time_ms": [test_time - base_time],
                                     "percent_change": [pct_change],
                                     "status": [status],
                                     "ratio": [ratio_val],
-                                    "baseline_percent": [
+                                    f"{baseline_label}_percent": [
                                         base_rank.loc[metric_type, "percent"]
                                     ],
-                                    "test_percent": [
-                                        sale_rank.loc[metric_type, "percent"]
+                                    f"{test_label}_percent": [
+                                        test_rank.loc[metric_type, "percent"]
                                     ],
                                     "diff_percent": [
-                                        sale_rank.loc[metric_type, "percent"]
+                                        test_rank.loc[metric_type, "percent"]
                                         - base_rank.loc[metric_type, "percent"]
                                     ],
                                 }
@@ -88,18 +98,18 @@ def add_comparison_sheets(input_path, output_path):
 
         # Comparison 2: Summary comparison
         summary = pd.read_excel(input_path, sheet_name="Summary")
-        baseline_summary = summary[summary["source"] == "baseline"].set_index("type")
-        test_summary = summary[summary["source"] == "test"].set_index("type")
+        baseline_summary = summary[summary["source"] == actual_baseline].set_index("type")
+        test_summary = summary[summary["source"] == actual_test].set_index("type")
 
         summary_comparison = pd.DataFrame()
         for metric_type in baseline_summary.index:
             if metric_type in test_summary.index:
                 base_time = baseline_summary.loc[metric_type, "time ms"]
-                sale_time = test_summary.loc[metric_type, "time ms"]
-                ratio_val = sale_time / base_time if base_time != 0 else 0
+                test_time = test_summary.loc[metric_type, "time ms"]
+                ratio_val = test_time / base_time if base_time != 0 else 0
                 # Percentage change: positive when test is faster (takes less time)
                 pct_change = (
-                    (base_time - sale_time) / base_time * 100 if base_time != 0 else 0
+                    (base_time - test_time) / base_time * 100 if base_time != 0 else 0
                 )
 
                 summary_comparison = pd.concat(
@@ -108,15 +118,15 @@ def add_comparison_sheets(input_path, output_path):
                         pd.DataFrame(
                             {
                                 "type": [metric_type],
-                                "baseline_time_ms": [base_time],
-                                "test_time_ms": [sale_time],
-                                "diff_time_ms": [sale_time - base_time],
+                                f"{baseline_label}_time_ms": [base_time],
+                                f"{test_label}_time_ms": [test_time],
+                                "diff_time_ms": [test_time - base_time],
                                 "percent_change": [pct_change],
                                 "ratio": [ratio_val],
-                                "baseline_percent": [
+                                f"{baseline_label}_percent": [
                                     baseline_summary.loc[metric_type, "percent"]
                                 ],
-                                "test_percent": [
+                                f"{test_label}_percent": [
                                     test_summary.loc[metric_type, "percent"]
                                 ],
                                 "diff_percent": [
@@ -199,10 +209,12 @@ def main():
     parser.add_argument(
         "--output", required=True, help="Output Excel file with comparison sheets"
     )
+    parser.add_argument('--baseline-label', default='baseline', help='Label for baseline data')
+    parser.add_argument('--test-label', default='test', help='Label for test data')
 
     args = parser.parse_args()
 
-    return add_comparison_sheets(args.input, args.output)
+    return add_comparison_sheets(args.input, args.output, args.baseline_label, args.test_label)
 
 
 if __name__ == "__main__":
