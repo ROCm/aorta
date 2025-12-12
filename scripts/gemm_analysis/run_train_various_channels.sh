@@ -21,12 +21,14 @@ NPROC_PER_NODE=$DEFAULT_NPROC
 ENABLE_ROCPROF=false
 ROCPROF_STATS=false
 ROCPROF_INPUT=""
+OUTPUT_DIR_ARG=""
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo "Options:"
     echo "  -c, --channels CHANNELS     Comma-separated list of channels (default: 38,42,56,70)"
     echo "  -t, --threads THREADS       Comma-separated list of threads per block (default: 256,512)"
+    echo "  -o, --output-dir DIR        Base output directory (default: experiments/sweep_<timestamp>)"
     echo "  -f, --config CONFIG         Config file path (default: config/distributed.yaml)"
     echo "  -p, --nproc NPROC           Number of processes per node (default: 8)"
     echo "  -r, --rocprof               Enable rocprofv3 tracing"
@@ -38,6 +40,7 @@ usage() {
     echo ""
     echo "Examples:"
     echo "  $0 --channels 28,42,56 --threads 256,512 --skip-existing"
+    echo "  $0 --output-dir experiments/my_sweep --channels 28,42"
     echo "  $0 --rocprof --channels 28,42,56                    # Trace all kernels"
     echo "  $0 --rocprof --stats --channels 28                  # Add CU stats"
     echo "  $0 --rocprof --rocprof-input path/to/rocprof.yaml   # Use yaml to filter kernels"
@@ -51,6 +54,7 @@ for arg in "$@"; do
     case "$arg" in
         --channels)       set -- "$@" "-c" ;;
         --threads)        set -- "$@" "-t" ;;
+        --output-dir)     set -- "$@" "-o" ;;
         --config)         set -- "$@" "-f" ;;
         --nproc)          set -- "$@" "-p" ;;
         --rocprof)        set -- "$@" "-r" ;;
@@ -63,13 +67,16 @@ for arg in "$@"; do
     esac
 done
 
-while getopts "c:t:f:p:snrmh-:" opt; do
+while getopts "c:t:o:f:p:snrmh-:" opt; do
     case $opt in
         c)
             IFS=',' read -ra CHANNELS_TO_RUN <<< "$OPTARG"
             ;;
         t)
             IFS=',' read -ra THREADS_TO_RUN <<< "$OPTARG"
+            ;;
+        o)
+            OUTPUT_DIR_ARG="$OPTARG"
             ;;
         f)
             CONFIG_FILE="$OPTARG"
@@ -127,7 +134,11 @@ BASE_OVERRIDES="--override profiling.tensorboard=false"
 
 # Base output directory
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BASE_OUTPUT_DIR="experiments/sweep_${TIMESTAMP}"
+if [ -n "${OUTPUT_DIR_ARG}" ]; then
+    BASE_OUTPUT_DIR="${OUTPUT_DIR_ARG}"
+else
+    BASE_OUTPUT_DIR="experiments/sweep_${TIMESTAMP}"
+fi
 
 # Create base output directory first
 mkdir -p "${BASE_OUTPUT_DIR}"
