@@ -46,6 +46,8 @@ fsdp:
   forward_prefetch: true
   sync_module_states: true
   param_init_device: meta
+  # hybrid_shard_gpus_per_node: auto-detects from --nproc (via LOCAL_WORLD_SIZE)
+  # Only set manually if auto-detection fails
 distributed:
   backend: nccl
   mode: fsdp
@@ -54,7 +56,7 @@ distributed:
   static_graph: true
   find_unused_parameters: false
 compile:
-  enabled: true
+  enabled: false
   backend: inductor
   mode: max-autotune
   fullgraph: false

@@ -3,7 +3,9 @@
 
 set -e
 
-MACHINE_IP_FILE="node_ip_list.txt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AORTA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+MACHINE_IP_FILE="$SCRIPT_DIR/node_ip_list.txt"  # Contains hostnames or IPs
 DOCKER_COMPOSE_FILE="docker/docker-compose.rocm70_9-1.yaml"
 DOCKER_CONTAINER="training-overlap-bugs-rocm70_9-1"
 
@@ -13,35 +15,46 @@ if [[ ! -f "$MACHINE_IP_FILE" ]]; then
     exit 1
 fi
 
+cd "$AORTA_ROOT"
+
 # Check git branch consistency before starting Docker
 echo "=== Checking git branch consistency ==="
 MASTER_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "not-a-git-repo")
 
 if [[ "$MASTER_BRANCH" != "not-a-git-repo" ]]; then
     echo "Master node branch: $MASTER_BRANCH"
+    TOTAL_NODES=$(grep -c . "$MACHINE_IP_FILE" || echo "0")
+    echo "Found $TOTAL_NODES nodes in $MACHINE_IP_FILE"
+    echo ""
 
     node=0
-    while IFS= read -r IP || [[ -n "$IP" ]]; do
-        if [[ -z "$IP" ]]; then continue; fi
+    while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
+        # Skip empty lines
+        if [[ -z "$HOST" ]]; then
+            continue
+        fi
 
         if [[ "$node" -gt 0 ]]; then
-            WORKER_BRANCH=$(ssh "$USER@$IP" "cd ~/aorta && git rev-parse --abbrev-ref HEAD 2>/dev/null" || echo "not-a-git-repo")
+            echo "[STAGE] Checking worker node $node ($HOST)..."
+            WORKER_BRANCH=$(ssh -n -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" "cd ~/aorta && git rev-parse --abbrev-ref HEAD 2>/dev/null" || echo "not-a-git-repo")
 
             if [[ "$WORKER_BRANCH" == "not-a-git-repo" ]]; then
-                echo "[WARN] Worker node $IP: Not a git repository"
+                echo "  [WARN] Worker node $HOST: Not a git repository"
             elif [[ "$MASTER_BRANCH" != "$WORKER_BRANCH" ]]; then
-                echo "[ERROR] Branch mismatch on node $IP!"
+                echo "  [ERROR] Branch mismatch on node $HOST!"
                 echo "  Master: $MASTER_BRANCH"
                 echo "  Worker: $WORKER_BRANCH"
                 echo ""
-                echo "Fix: ssh $USER@$IP 'cd ~/aorta && git checkout $MASTER_BRANCH && git pull'"
+                echo "Fix: ssh $USER@$HOST 'cd ~/aorta && git checkout $MASTER_BRANCH && git pull'"
                 exit 1
             else
-                echo "Worker node $IP: $WORKER_BRANCH [OK]"
+                echo "  Worker node $HOST: $WORKER_BRANCH [OK]"
             fi
         fi
-        ((node++))
+        ((node++)) || true
     done < "$MACHINE_IP_FILE"
+    echo ""
+    echo "Branch check complete [OK]"
     echo ""
 else
     echo "[WARN] Not a git repository - skipping branch check"
@@ -49,22 +62,30 @@ else
 fi
 
 echo "=== Starting Docker containers on all nodes ==="
+TOTAL_NODES=$(wc -l < "$MACHINE_IP_FILE")
+echo "Total nodes to process: $TOTAL_NODES"
 echo ""
 
 node=0
-while IFS= read -r IP || [[ -n "$IP" ]]; do
-  if [[ -z "$IP" ]]; then
+while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
+  if [[ -z "$HOST" ]]; then
     continue
   fi
 
-  echo "Node $node (IP: $IP):"
+  echo "Node $node (Host: $HOST):"
 
   if [[ "$node" -eq 0 ]]; then
     # Master node (local)
-    echo "  Starting Docker on master node..."
-    cd docker && docker compose -f docker-compose.rocm70_9-1.yaml up -d && cd ..
+    echo "  [STAGE] Checking existing containers on master..."
+    if docker ps --format '{{.Names}}' < /dev/null | grep -q "^${DOCKER_CONTAINER}$"; then
+      echo "  [INFO] Container already running, restarting..."
+    fi
 
-    if docker ps --format '{{.Names}}' | grep -q "^${DOCKER_CONTAINER}$"; then
+    echo "  [STAGE] Running docker compose up -d on master..."
+    cd docker && docker compose -f docker-compose.rocm70_9-1.yaml up -d < /dev/null && cd ..
+
+    echo "  [STAGE] Verifying master container..."
+    if docker ps --format '{{.Names}}' < /dev/null | grep -q "^${DOCKER_CONTAINER}$"; then
       echo "  [OK] Docker container '${DOCKER_CONTAINER}' is running"
     else
       echo "  [FAIL] Failed to start Docker container"
@@ -72,12 +93,24 @@ while IFS= read -r IP || [[ -n "$IP" ]]; do
     fi
   else
     # Worker nodes (via SSH)
-    echo "  Starting Docker on worker node via SSH..."
-    ssh -o StrictHostKeyChecking=no "$USER@$IP" \
+    echo "  [STAGE] Connecting to worker via SSH..."
+    if ! ssh -n -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" "echo 'SSH connection successful'" > /dev/null 2>&1; then
+      echo "  [FAIL] Cannot SSH to worker node $HOST"
+      exit 1
+    fi
+    echo "  [OK] SSH connection successful"
+
+    echo "  [STAGE] Checking existing containers on worker..."
+    if ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" "docker ps --format '{{.Names}}'" | grep -q "^${DOCKER_CONTAINER}$"; then
+      echo "  [INFO] Container already running, restarting..."
+    fi
+
+    echo "  [STAGE] Running docker compose up -d on worker..."
+    ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" \
       "cd /home/$USER/aorta/docker && docker compose -f docker-compose.rocm70_9-1.yaml up -d"
 
-    # Verify
-    if ssh "$USER@$IP" "docker ps --format '{{.Names}}'" | grep -q "^${DOCKER_CONTAINER}$"; then
+    echo "  [STAGE] Verifying worker container..."
+    if ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" "docker ps --format '{{.Names}}'" | grep -q "^${DOCKER_CONTAINER}$"; then
       echo "  [OK] Docker container '${DOCKER_CONTAINER}' is running on worker"
     else
       echo "  [FAIL] Failed to start Docker container on worker"
@@ -86,17 +119,17 @@ while IFS= read -r IP || [[ -n "$IP" ]]; do
   fi
 
   echo ""
-  ((node++))
+  ((node++)) || true
 done < "$MACHINE_IP_FILE"
 
 echo "=== All Docker containers started successfully ==="
 echo ""
 echo "Verify with:"
 echo "  docker ps  # Check master"
-while IFS= read -r IP || [[ -n "$IP" ]]; do
-  if [[ -z "$IP" ]]; then continue; fi
+while IFS= read -r HOST || [[ -n "$HOST" ]]; do
+  if [[ -z "$HOST" ]]; then continue; fi
   if [[ "$node" -gt 1 ]]; then
-    echo "  ssh $USER@$IP 'docker ps'  # Check worker"
+    echo "  ssh $USER@$HOST 'docker ps'  # Check worker"
   fi
   ((node++))
 done < "$MACHINE_IP_FILE"

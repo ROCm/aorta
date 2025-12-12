@@ -214,20 +214,22 @@ else
 fi
 echo ""
 
-# Create node_ip_list.txt
-echo "Creating node_ip_list.txt..."
-cd "$AORTA_PATH"
+# Create node_ip_list.txt (stores hostnames, not IPs) in scripts/multi_node/
+echo "Creating node_ip_list.txt (with hostnames)..."
+NODE_IP_FILE="$AORTA_PATH/scripts/multi_node/node_ip_list.txt"
 
-# Write master IP first
-echo "$CURRENT_IP" > node_ip_list.txt
+# Write master hostname first
+echo "$CURRENT_HOST" > "$NODE_IP_FILE"
 
-# Add all worker IPs
-for WORKER_IP in "${WORKER_IPS[@]}"; do
-    echo "$WORKER_IP" >> node_ip_list.txt
+# Add all worker hostnames
+for WORKER_HOST in "${WORKER_HOSTS[@]}"; do
+    echo "$WORKER_HOST" >> "$NODE_IP_FILE"
 done
 
-echo "[OK] Created node_ip_list.txt:"
-cat node_ip_list.txt
+echo "[OK] Created $NODE_IP_FILE:"
+cat "$NODE_IP_FILE"
+echo ""
+echo "[INFO] File contains hostnames (not IPs) for SSH compatibility with config files"
 echo ""
 
 # Update network interface in set_env_variables.sh
@@ -265,7 +267,7 @@ for i in "${!WORKER_HOSTS[@]}"; do
 done
 echo ""
 echo "Node IP list created at:"
-echo "  $AORTA_PATH/node_ip_list.txt"
+echo "  $AORTA_PATH/scripts/multi_node/node_ip_list.txt"
 echo ""
 
 if [[ "${SHARED_FS:-false}" == "false" ]]; then

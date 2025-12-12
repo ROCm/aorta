@@ -25,7 +25,8 @@ usage() {
     exit 1
 }
 
-MACHINE_IP_FILE="node_ip_list.txt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MACHINE_IP_FILE="$SCRIPT_DIR/node_ip_list.txt"  # Contains hostnames or IPs
 
 # Default values (can be overridden by env vars or command-line args)
 CONFIG_FILE="${CONFIG_FILE:-config/multi_node/distributed_multinode.yaml}"
@@ -105,25 +106,25 @@ if [[ "$MASTER_BRANCH" != "not-a-git-repo" ]]; then
     echo "Master node branch: $MASTER_BRANCH"
 
     node=0
-    while IFS= read -r IP || [[ -n "$IP" ]]; do
-        if [[ -z "$IP" ]]; then continue; fi
+    while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
+        if [[ -z "$HOST" ]]; then continue; fi
 
         if [[ "$node" -gt 0 ]]; then
-            WORKER_BRANCH=$(ssh "$USER@$IP" "cd ~/aorta && git rev-parse --abbrev-ref HEAD 2>/dev/null" || echo "not-a-git-repo")
+            WORKER_BRANCH=$(ssh -n -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" "cd ~/aorta && git rev-parse --abbrev-ref HEAD 2>/dev/null" || echo "not-a-git-repo")
 
             if [[ "$WORKER_BRANCH" == "not-a-git-repo" ]]; then
-                echo "[WARN] Worker node $IP: Not a git repository"
+                echo "[WARN] Worker node $HOST: Not a git repository"
             elif [[ "$MASTER_BRANCH" != "$WORKER_BRANCH" ]]; then
                 echo ""
-                echo "[ERROR] Branch mismatch on worker node $IP!"
+                echo "[ERROR] Branch mismatch on worker node $HOST!"
                 echo "  Master: $MASTER_BRANCH"
                 echo "  Worker: $WORKER_BRANCH"
                 echo ""
-                echo "Fix: ssh $USER@$IP 'cd ~/aorta && git checkout $MASTER_BRANCH && git pull'"
+                echo "Fix: ssh $USER@$HOST 'cd ~/aorta && git checkout $MASTER_BRANCH && git pull'"
                 echo ""
                 exit 1
             else
-                echo "Worker node $IP: $WORKER_BRANCH [OK]"
+                echo "Worker node $HOST: $WORKER_BRANCH [OK]"
             fi
         fi
         ((node++))
@@ -134,7 +135,7 @@ fi
 echo ""
 
 TRACE_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-EXPERIMENT_DIR="/apps/$USER/aorta/experiments/multinode_${CHANNELS}ch_${THREADS}th_${TRACE_TIMESTAMP}"
+EXPERIMENT_DIR="$HOME/aorta/experiments/multinode_${CHANNELS}ch_${THREADS}th_${TRACE_TIMESTAMP}"
 mkdir -p "$EXPERIMENT_DIR"
 mkdir -p "$EXPERIMENT_DIR/logs"
 
@@ -156,28 +157,29 @@ echo "Using MASTER_PORT: $MASTER_PORT"
 echo ""
 
 node=0
-while IFS= read -r IP || [[ -n "$IP" ]]; do
-  if [[ -z "$IP" ]]; then
+while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
+  if [[ -z "$HOST" ]]; then
     continue
   fi
 
-  echo "Setting up Node: $node, IP: $IP"
+  echo "Setting up Node: $node, Host: $HOST"
 
   TIME=$(date +"%Y%m%d_%H%M%S")
   LOG_FILE="$EXPERIMENT_DIR/logs/node_${node}_${TIME}.txt"
 
   if [[ "$node" -eq 0 ]]; then
-      MASTER_ADDR="$IP"
+      MASTER_ADDR="$HOST"
       echo "Master node: $MASTER_ADDR"
       echo ""
 
-      ./scripts/multi_node/config_node.sh "$node" "$IP" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$PWD" "$EXPERIMENT_DIR" \
+      ./scripts/multi_node/config_node.sh "$node" "$HOST" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$PWD" "$EXPERIMENT_DIR" \
         "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" \
         > "$LOG_FILE" 2>&1 &
 
   else
+      # Note: stdin explicitly redirected from config_node.sh, so -n flag not needed
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-          "$USER"@"$IP" bash -s -- "$node" "$IP" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$PWD" "$EXPERIMENT_DIR" \
+          "$USER"@"$HOST" bash -s -- "$node" "$HOST" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$PWD" "$EXPERIMENT_DIR" \
           "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" \
         < ./scripts/multi_node/config_node.sh \
         > "$LOG_FILE" 2>&1 &
@@ -205,3 +207,17 @@ wait
 echo ""
 echo "=== Training completed ==="
 echo "Results saved to: $EXPERIMENT_DIR"
+
+# ================================================================================
+# HOW TO STOP TRAINING
+# ================================================================================
+# Press Ctrl+C above (stops monitoring, but training continues in background)
+#
+# To find running processes:
+#   ps aux | grep -E 'config_node.sh|torchrun.*train.py' | grep -v grep
+#
+# To stop by PID (replace 12345 with your PID):
+#   for HOST in $(cat scripts/multi_node/node_ip_list.txt); do
+#     ssh $USER@$HOST "kill -9 12345"
+#   done
+# ================================================================================

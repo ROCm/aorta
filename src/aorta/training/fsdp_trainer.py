@@ -70,6 +70,9 @@ class FSDPConfig:
     forward_prefetch: bool = True
     sync_module_states: bool = True
     param_init_device: str = "cpu"
+    # For HYBRID_SHARD: GPUs per node (None = auto-detect from LOCAL_WORLD_SIZE env var)
+    # Only set this if auto-detection fails or you want to override
+    hybrid_shard_gpus_per_node: Optional[int] = None
 
 
 @dataclass
@@ -245,9 +248,17 @@ def build_fsdp_model(
         transformer_auto_wrap_policy, transformer_layer_cls={nn.TransformerEncoderLayer}
     )
 
+    # Create process groups for hybrid_shard strategy
+    process_group = None
+    if sharding == ShardingStrategy.HYBRID_SHARD:
+        process_group = _create_hybrid_shard_process_groups(fsdp_cfg.hybrid_shard_gpus_per_node)
+        if process_group is not None:
+            log.info("Created custom process groups for HYBRID_SHARD strategy")
+
     fsdp_model = FSDP(
         model.to(device),
         sharding_strategy=sharding,
+        process_group=process_group,
         auto_wrap_policy=auto_wrap_policy,
         use_orig_params=fsdp_cfg.use_orig_params,
         backward_prefetch=backward_prefetch,
@@ -259,6 +270,81 @@ def build_fsdp_model(
     if compile_cfg.enabled:
         fsdp_model = _maybe_compile(fsdp_model, compile_cfg)
     return fsdp_model
+
+
+def _create_hybrid_shard_process_groups(gpus_per_node: Optional[int] = None):
+    """
+    Create process groups for HYBRID_SHARD strategy.
+
+    Args:
+        gpus_per_node: Number of GPUs per node. If None, auto-detects from LOCAL_WORLD_SIZE.
+                       This should match the --nproc value from torchrun.
+
+    Returns:
+        Tuple of (shard_group, replicate_group) or None
+    """
+    if not dist.is_initialized():
+        return None
+
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+    # Auto-detect GPUs per node from environment if not provided
+    if gpus_per_node is None:
+        # torchrun sets LOCAL_WORLD_SIZE to the number of processes per node
+        local_world_size_str = os.environ.get("LOCAL_WORLD_SIZE")
+        if local_world_size_str:
+            gpus_per_node = int(local_world_size_str)
+            log.info("Auto-detected gpus_per_node=%d from LOCAL_WORLD_SIZE", gpus_per_node)
+        else:
+            log.error(
+                "Cannot determine gpus_per_node: LOCAL_WORLD_SIZE not set and "
+                "hybrid_shard_gpus_per_node not configured. Set hybrid_shard_gpus_per_node in config."
+            )
+            return None
+
+    # Validate configuration
+    if world_size % gpus_per_node != 0:
+        log.error(
+            "Invalid HYBRID_SHARD config: world_size=%d not divisible by gpus_per_node=%d",
+            world_size, gpus_per_node
+        )
+        return None
+
+    num_nodes = world_size // gpus_per_node
+    node_id = rank // gpus_per_node
+
+    if num_nodes <= 1:
+        log.warning("HYBRID_SHARD with single node - consider using FULL_SHARD instead")
+        return None
+
+    log.info(
+        "Creating HYBRID_SHARD process groups | rank=%d world_size=%d num_nodes=%d gpus_per_node=%d node_id=%d",
+        rank, world_size, num_nodes, gpus_per_node, node_id
+    )
+
+    # Intra-node groups: shard within each node
+    for i in range(num_nodes):
+        ranks_in_node = list(range(i * gpus_per_node, (i + 1) * gpus_per_node))
+        group = dist.new_group(ranks=ranks_in_node)
+        if i == node_id:
+            my_shard_group = group
+
+    # Inter-node groups: replicate across nodes (same local_rank)
+    for local_r in range(gpus_per_node):
+        ranks_across_nodes = [node * gpus_per_node + local_r for node in range(num_nodes)]
+        group = dist.new_group(ranks=ranks_across_nodes)
+        if local_r == local_rank:
+            my_replicate_group = group
+
+    log.info(
+        "Created process groups | shard_group_size=%d replicate_group_size=%d",
+        dist.get_world_size(my_shard_group),
+        dist.get_world_size(my_replicate_group),
+    )
+
+    return (my_shard_group, my_replicate_group)
 
 
 def build_ddp_model(
