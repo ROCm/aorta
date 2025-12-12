@@ -62,7 +62,7 @@ def add_excel_table(worksheet, table_name, start_row=1):
 
 
 def create_final_report(
-    gpu_combined, gpu_comparison, coll_combined, coll_comparison, output_file
+    gpu_combined, gpu_comparison, coll_combined, coll_comparison, output_file,baseline_label='Baseline', test_label='Test'
 ):
     """Create comprehensive report with all data."""
 
@@ -127,17 +127,26 @@ def create_final_report(
 
         # Read collective comparison
         coll_comp_xl = pd.ExcelFile(coll_comparison)
-        coll_cmp_mapping = {
-            "nccl_implicit_sync_cmp": "NCCL_ImplSync_Cmp",
-            "nccl_long_cmp": "NCCL_Long_Cmp",
-        }
         for sheet_name in coll_comp_xl.sheet_names:
-            if "_cmp" in sheet_name:
-                df = pd.read_excel(coll_comparison, sheet_name=sheet_name)
-                new_name = coll_cmp_mapping.get(sheet_name, f"NCCL_{sheet_name}")
-                df.to_excel(writer, sheet_name=new_name, index=False)
+            df = pd.read_excel(coll_comparison, sheet_name=sheet_name)
+
+            # Determine appropriate naming
+            if 'nccl' in sheet_name.lower():
+                if '_cmp' in sheet_name or 'comparison' in sheet_name.lower():
+                    new_name = f"NCCL_{sheet_name.replace('nccl_', '').title().replace('_', '')}"
+                else:
+                    new_name = f"NCCL_{sheet_name}"
+            else:
+                new_name = sheet_name
+
+            df.to_excel(writer, sheet_name=new_name, index=False)
+
+            if '_cmp' in sheet_name.lower() or 'comparison' in sheet_name.lower():
                 comparison_sheets.append(new_name)
-                print(f"  Added {new_name}")
+            else:
+                raw_sheets.append(new_name)
+
+            print(f"  Added {new_name}")
 
         # === CREATE SUMMARY DASHBOARD ===
         print("\nCreating Summary Dashboard...")
@@ -147,25 +156,34 @@ def create_final_report(
 
         # Create dashboard data
         dashboard_data = {
-            "Metric": [],
-            "Baseline": [],
-            "Test": [],
-            "Improvement (%)": [],
-            "Status": [],
+            'Metric': [],
+            baseline_label: [],
+            test_label: [],
+            'Improvement (%)': [],
+            'Status': []
         }
 
         # Add GPU metrics
-        for _, row in gpu_summary.iterrows():
-            metric_type = row["type"]
-            dashboard_data["Metric"].append(f"GPU_{metric_type}")
-            dashboard_data["Baseline"].append(round(row["baseline_time_ms"], 2))
-            dashboard_data["Test"].append(round(row["test_time_ms"], 2))
-            dashboard_data["Improvement (%)"].append(round(row["percent_change"], 2))
-            dashboard_data["Status"].append(
-                "Better"
-                if row["percent_change"] > 0
-                else "Worse" if row["percent_change"] < -1 else "Similar"
-            )
+        # Find the actual column names (they may be config-specific like '32cu_512threads_time_ms')
+        time_cols = [col for col in gpu_summary.columns if 'time_ms' in col and 'diff' not in col and 'percent' not in col]
+        if len(time_cols) >= 2:
+            baseline_col = time_cols[0]
+            test_col = time_cols[1]
+        else:
+            # Fallback to default names
+            baseline_col = 'baseline_time_ms' if 'baseline_time_ms' in gpu_summary.columns else time_cols[0] if time_cols else None
+            test_col = 'test_time_ms' if 'test_time_ms' in gpu_summary.columns else time_cols[1] if len(time_cols) > 1 else None
+
+        if baseline_col and test_col:
+            for _, row in gpu_summary.iterrows():
+                metric_type = row['type']
+                dashboard_data['Metric'].append(f"GPU_{metric_type}")
+                dashboard_data[baseline_label].append(round(row[baseline_col], 2))
+                dashboard_data[test_label].append(round(row[test_col], 2))
+                dashboard_data['Improvement (%)'].append(round(row['percent_change'], 2) if 'percent_change' in row else 0)
+
+                pct_val = row['percent_change'] if 'percent_change' in row else 0
+                dashboard_data['Status'].append('Better' if pct_val > 0 else 'Worse' if pct_val < -1 else 'Similar')
 
         dashboard_df = pd.DataFrame(dashboard_data)
         dashboard_df.to_excel(writer, sheet_name="Summary_Dashboard", index=False)
@@ -291,6 +309,10 @@ Example:
         "--coll-comparison", required=True, help="Path to collective comparison file"
     )
     parser.add_argument("--output", required=True, help="Output path for final report")
+    parser.add_argument('--baseline-label', default='Baseline',
+                       help='Label for baseline configuration')
+    parser.add_argument('--test-label', default='Test',
+                       help='Label for test configuration')
 
     args = parser.parse_args()
 
@@ -312,6 +334,10 @@ Example:
         args.coll_combined,
         args.coll_comparison,
         args.output,
+        #args.baseline_label.replace('_', ' '),
+        #args.test_label.replace('_', ' ')
+        args.baseline_label,
+        args.test_label
     )
 
     return 0
