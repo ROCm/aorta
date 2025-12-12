@@ -24,7 +24,7 @@ docker exec -it training-overlap-bugs-rocm70_9-1 bash
 bash scripts/gemm_analysis/run_train_various_channels.sh \
   --channels 28,42,56,70 \
   --threads 256,512 \
-  --config config/gemm_overlap/gemm_test_1.yaml
+  --config config/single_node/gemm_overlap_comm.yaml
 ```
 
 #### rocprof Tracing Options
@@ -52,7 +52,7 @@ bash scripts/gemm_analysis/run_train_various_channels.sh \
   --rocprof \
   --rocprof-input scripts/gemm_analysis/rocprof_cu_only.yaml \
   --channels 28,42,56 --threads 256,512 \
-  --config config/gemm_overlap/gemm_test_1.yaml
+  --config config/single_node/gemm_overlap_comm.yaml
 ```
 Notes:
 - Kernel filtering/stats come from the YAML. The current rocprofv3 build ignores CLI kernel filters, so use the YAML to include/exclude kernels.
@@ -142,7 +142,7 @@ experiments/sweep_YYYYMMDD_HHMMSS/
 bash scripts/gemm_analysis/run_train_various_channels.sh \
   --channels 28,42,56,70 \
   --threads 256,512 \
-  --config config/gemm_overlap/gemm_test_1.yaml
+  --config config/single_node/gemm_overlap_comm.yaml
 
 # Run with rocprof tracing (all kernels with stats)
 bash scripts/gemm_analysis/run_train_various_channels.sh \
