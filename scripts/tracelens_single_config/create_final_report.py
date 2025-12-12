@@ -334,8 +334,6 @@ Example:
         args.coll_combined,
         args.coll_comparison,
         args.output,
-        #args.baseline_label.replace('_', ' '),
-        #args.test_label.replace('_', ' ')
         args.baseline_label,
         args.test_label
     )
