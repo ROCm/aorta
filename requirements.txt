@@ -14,6 +14,10 @@ pyyaml>=6.0
 
 # For analysis scripts
 matplotlib>=3.7.0
+panda
+seaborn
+openpyxl
+nummpy
 
 # For hw_queue_eval (optional - install with: pip install -e ".[hw-queue]")
 # click>=8.0.0
