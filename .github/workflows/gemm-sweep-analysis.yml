@@ -14,7 +14,7 @@ on:
       config:
         description: 'Path to GEMM config YAML'
         required: false
-        default: 'config/gemm_overlap/gemm_test_1.yaml'
+        default: 'config/single_node/gemm_overlap_comm.yaml'
       top_k:
         description: 'Number of top GEMM kernels to extract'
         required: false
@@ -62,7 +62,7 @@ jobs:
               --output-dir ${{ steps.setup.outputs.sweep_dir }} \
               --channels ${{ github.event.inputs.channels || '28,42,56,70' }} \
               --threads ${{ github.event.inputs.threads || '256,512' }} \
-              --config ${{ github.event.inputs.config || 'config/gemm_overlap/gemm_test_1.yaml' }}
+              --config ${{ github.event.inputs.config || 'config/single_node/gemm_overlap_comm.yaml' }}
           "
 
       - name: Generate TraceLens reports
@@ -77,7 +77,7 @@ jobs:
           # Parse channels and threads into space-separated format
           CHANNELS=$(echo "${{ github.event.inputs.channels || '28,42,56,70' }}" | tr ',' ' ')
           THREADS=$(echo "${{ github.event.inputs.threads || '256,512' }}" | tr ',' ' ')
-          
+
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
             python scripts/gemm_analysis/analyze_gemm_reports.py \
               --base-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis \
