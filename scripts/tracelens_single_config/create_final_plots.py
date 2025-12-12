@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 import seaborn as sns
-
+import numpy as np
 
 def plot_improvement_chart(df, output_path):
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -33,26 +33,28 @@ def plot_improvement_chart(df, output_path):
     plt.close()
 
 
-def plot_abs_time_comparison(df, output_path):
+def plot_abs_time_comparison(df, output_path, labels):
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
     # Set up bar positions
-    x = range(len(df))
+    x = np.arange(len(df))
     width = 0.35
 
+    colors = ["#3498db", "#e67e22"]
+    values = []
+    for label in labels:
+        values.append(df[label])
     # Create bars for Baseline and Test
-    bars1 = ax.bar(
-        [i - width / 2 for i in x],
-        df["Baseline"],
-        width,
-        label="Baseline",
-        color="#3498db",
-    )
-    bars2 = ax.bar(
-        [i + width / 2 for i in x], df["Test"], width, label="Test", color="#e67e22"
-    )
-
+    for i,val in enumerate(values):
+        offset = (i - len(labels) / 2 + 0.5) * width
+        bars = ax.bar(
+            x + offset,
+            val,
+            width,
+            label=labels[i],
+            color=colors[i],
+        )
     # Add horizontal grid lines only
     ax.xaxis.grid(True, linestyle="--", alpha=0.7, color="gray")
     ax.set_axisbelow(True)
@@ -78,41 +80,31 @@ def plot_abs_time_comparison(df, output_path):
     plt.close()
 
 
-def create_summary_charts(excel_path, output_path):
+def create_summary_charts(excel_path, output_path, labels):
 
     # Read the Summary_Dashboard sheet
     df = pd.read_excel(excel_path, sheet_name="Summary_Dashboard")
 
     plot_improvement_chart(df, output_path)
-    plot_abs_time_comparison(df, output_path)
+    plot_abs_time_comparison(df, output_path, labels)
     # Create the horizontal bar chart
 
 
-def plot_gpu_type_by_rank(total_time_df, output_path, title):
+def plot_gpu_type_by_rank(total_time_df, output_path, title, labels):
     # Create the line plot
     fig, ax = plt.subplots(figsize=(12, 6))
-
-    # Plot baseline total_time by rank
-    ax.plot(
-        total_time_df["rank"],
-        total_time_df["baseline_time_ms"],
-        marker="o",
-        linewidth=2,
-        markersize=8,
-        color="#3498db",
-        label="Baseline",
-    )
-
-    # Plot Test (test) total_time by rank
-    ax.plot(
-        total_time_df["rank"],
-        total_time_df["test_time_ms"],
-        marker="s",
-        linewidth=2,
-        markersize=8,
-        color="#e67e22",
-        label="Test",
-    )
+    colors = ["#3498db", "#e67e22"]
+    markers = ["o", "s"]
+    for i, label in enumerate(labels):
+        ax.plot(
+            total_time_df["rank"],
+            total_time_df[label + "_time_ms"],
+            marker=markers[i],
+            linewidth=2,
+            markersize=8,
+            color=colors[i],
+            label=label,
+        )
 
     # Add horizontal grid lines only
     ax.yaxis.grid(True, linestyle="--", alpha=0.7, color="gray")
@@ -129,14 +121,14 @@ def plot_gpu_type_by_rank(total_time_df, output_path, title):
     plt.close()
 
 
-def create_gpu_time_accross_all_ranks(excel_path, output_path):
+def create_gpu_time_accross_all_ranks(excel_path, output_path, labels):
     # Read the GPU_ByRank_Cmp sheet
     df = pd.read_excel(excel_path, sheet_name="GPU_ByRank_Cmp")
 
     # Filter for total_time rows only
     for type in ["total_time", "computation_time", "total_comm_time", "idle_time"]:
         total_time_df = df[df["type"] == type]
-        plot_gpu_type_by_rank(total_time_df, output_path / f"{type}_by_rank.png", type)
+        plot_gpu_type_by_rank(total_time_df, output_path / f"{type}_by_rank.png", type, labels)
 
 
 def plot_gpu_time_change_percentage_summaryby_rank(df, ax):
@@ -178,60 +170,50 @@ def create_gpu_time_change_percentage_summaryby_rank(excel_path, output_path):
     plt.close()
 
 
-def create_nccl_charts(excel_path, output_path):
+def create_nccl_charts(excel_path, output_path, labels):
     # Read the NCCL_Charst sheet
-    df = pd.read_excel(excel_path, sheet_name="NCCL_ImplSync_Cmp")
+    df = pd.read_excel(excel_path, sheet_name="NCCL_ImplicitSyncCmp")
     df["label"] = df["Collective name"] + "\n" + df["In msg nelems"].astype(str)
-    x = range(len(df))
-
+    x = np.arange(len(df))
+    colors = ["#3498db", "#e67e22"]
     plot_item = {
         "NCCL Communication Latency": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Communication Latency (ms)",
-            "y_col_names": ["baseline_comm_latency_mean", "test_comm_latency_mean"],
+            "y_col": "comm_latency_mean"
         },
         "NCCL Algorithm Bandwidth": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Algorithm Bandwidth (GB/s)",
-            "y_col_names": [
-                "baseline_algo bw (GB/s)_mean",
-                "test_algo bw (GB/s)_mean",
-            ],
+            "y_col": "algo bw (GB/s)_mean"
         },
         "NCCL Bus Bandwidth": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Bus Bandwidth (GB/s)",
-            "y_col_names": [
-                "baseline_bus bw (GB/s)_mean",
-                "test_bus bw (GB/s)_mean",
-            ],
+            "y_col": "bus bw (GB/s)_mean"
         },
         "NCCL Total Communication Latency": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Total Communication Latency (ms)",
-            "y_col_names": [
-                "baseline_Total comm latency (ms)",
-                "test_Total comm latency (ms)",
-            ],
+            "y_col": "Total comm latency (ms)"
         },
     }
     for item in plot_item.keys():
         fig, ax = plt.subplots(figsize=(14, 6))
         width = 0.35
-        bars1 = ax.bar(
-            [i - width / 2 for i in x],
-            df[plot_item[item]["y_col_names"][0]],
-            width,
-            label="Baseline",
-            color="#3498db",
-        )
-        bars2 = ax.bar(
-            [i + width / 2 for i in x],
-            df[plot_item[item]["y_col_names"][1]],
-            width,
-            label="Test",
-            color="#e67e22",
-        )
+        for i, label in enumerate(labels):
+            col_name = f"{label}_{plot_item[item]['y_col']}"
+            print(f"col_name: {col_name} {df.columns}")
+            if(col_name in df.columns):
+                values = df[col_name].values
+                offset = (i - len(labels) / 2 + 0.5) * width
+                bar = ax.bar(
+                    x + offset,
+                    values,
+                    width,
+                    label=label,
+                    color=colors[i],
+                )
         ax.yaxis.grid(True, linestyle="--", alpha=0.7, color="gray")
         ax.set_axisbelow(True)
         ax.set_xticks(x)
@@ -309,6 +291,11 @@ def create_gpu_time_heatmap(excel_path, output_path):
     plt.savefig(output_path / "gpu_time_heatmap.png", dpi=150)
     plt.show()
 
+def get_labels(excel_path):
+    # Read the Summary_Dashboard sheet
+    df = pd.read_excel(excel_path, sheet_name="Summary_Dashboard")
+    cols = df.columns.tolist()
+    return [cols[1], cols[2]] # for now just for two, later will be generalized for more than two
 
 def main():
     import argparse
@@ -317,7 +304,7 @@ def main():
         description="Generate improvement chart from generated reports"
     )
     parser.add_argument(
-        "--report-path",
+        "--input",
         type=Path,
         default="~/aorta/aorta_single_config/aorta/expt_compare/final_analysis_report.xlsx",
         help="Path to the input Excel file (should have Summary_Dashboard sheet)",
@@ -330,17 +317,18 @@ def main():
     )
 
     args = parser.parse_args()
-    output_path = args.output if args.output else args.report_path.parent / "plots"
+    output_path = args.output if args.output else args.input.parent / "plots"
     output_path.mkdir(exist_ok=True, parents=True)
-    create_summary_charts(args.report_path, output_path)
+    labels = get_labels(args.input)
+    create_summary_charts(args.input, output_path, labels)
     print(f"Summary charts saved to: {args.output}")
-    create_gpu_time_heatmap(args.report_path, output_path)
+    create_gpu_time_heatmap(args.input, output_path)
     print(f"GPU time heatmap saved to: {output_path}")
-    create_gpu_time_accross_all_ranks(args.report_path, output_path)
+    create_gpu_time_accross_all_ranks(args.input, output_path, labels)
     print(f"GPU time across all runs saved to: {output_path}")
-    create_gpu_time_change_percentage_summaryby_rank(args.report_path, output_path)
+    create_gpu_time_change_percentage_summaryby_rank(args.input, output_path)
     print(f"GPU time change percentage summary by rank saved to: {output_path}")
-    create_nccl_charts(args.report_path, output_path)
+    create_nccl_charts(args.input, output_path, labels)
     print(f"NCCL communication charts saved to: {output_path}")
 
 
