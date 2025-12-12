@@ -5,6 +5,7 @@ Scripts for multi-node distributed GEMM training with custom NCCL channel and th
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Using Shampoo Optimizer](#using-shampoo-optimizer)
 - [Usage](#usage)
 - [Setup](#setup) (one-time)
   - [Conductor Setup](#conductor-setup-automated)
@@ -33,9 +34,12 @@ aorta/
 │   ├── set_env_variables.sh            # NCCL/RCCL config
 │   └── node_ip_list.txt                # Hostnames (Conductor) or IPs (Slurm)
 ├── docker/
-│   └── docker-compose.rocm70_9-1.yaml  # Docker config
-└── config/multi_node/
-    └── distributed_multinode.yaml      # Default config
+│   ├── docker-compose.rocm70_9-1.yaml         # Default Docker config
+│   └── docker-compose.rocm70_9-1-shampoo.yaml # Docker with Shampoo optimizer
+├── config/
+│   ├── multi_node/
+│   │   └── distributed_multinode.yaml  # Default config
+│   └── shampoo_opt.yaml                # Shampoo optimizer config
 ```
 
 ## Quick Start
@@ -53,6 +57,37 @@ aorta/
 ```
 
 World size: `NPROC_PER_NODE × NUM_NODES` (e.g., 8 GPUs/node × 2 nodes = 16)
+
+---
+
+## Using Shampoo Optimizer
+
+To use the Shampoo optimizer instead of AdamW:
+
+### Step 1: Start Shampoo Docker Container
+
+```bash
+# First time: builds Docker image with Shampoo pre-installed
+./scripts/multi_node/start_docker_all_nodes.sh \
+    docker/docker-compose.rocm70_9-1-shampoo.yaml \
+    training-overlap-bugs-rocm70_9-1-shampoo
+```
+
+### Step 2: Run Training with Shampoo Config
+
+```bash
+./scripts/multi_node/master_launch.sh \
+    --channels 28 --threads 256 \
+    --config config/shampoo_opt.yaml
+```
+
+**What's different?** The Shampoo Docker image has the Facebook `distributed-shampoo` package pre-installed. The training code automatically uses Shampoo when `optimizer.name: shampoo` is set in the config file.
+
+**Verify Shampoo installation:**
+```bash
+docker exec training-overlap-bugs-rocm70_9-1-shampoo \
+    python -c "import distributed_shampoo; print('Shampoo OK')"
+```
 
 ---
 

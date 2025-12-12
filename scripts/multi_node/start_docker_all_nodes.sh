@@ -1,13 +1,16 @@
 #!/bin/bash
 # Start Docker containers on all nodes for multi-node training
+# Usage: ./start_docker_all_nodes.sh [docker-compose-file] [container-name]
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AORTA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MACHINE_IP_FILE="$SCRIPT_DIR/node_ip_list.txt"  # Contains hostnames or IPs
-DOCKER_COMPOSE_FILE="docker/docker-compose.rocm70_9-1.yaml"
-DOCKER_CONTAINER="training-overlap-bugs-rocm70_9-1"
+
+# Allow custom docker-compose file and container name via arguments
+DOCKER_COMPOSE_FILE="${1:-docker/docker-compose.rocm70_9-1.yaml}"
+DOCKER_CONTAINER="${2:-training-overlap-bugs-rocm70_9-1}"
 
 if [[ ! -f "$MACHINE_IP_FILE" ]]; then
     echo "Error: $MACHINE_IP_FILE not found"
@@ -82,7 +85,8 @@ while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
     fi
 
     echo "  [STAGE] Running docker compose up -d on master..."
-    cd docker && docker compose -f docker-compose.rocm70_9-1.yaml up -d < /dev/null && cd ..
+    COMPOSE_FILE_PATH="${DOCKER_COMPOSE_FILE#docker/}"
+    cd docker && docker compose -f "$COMPOSE_FILE_PATH" up -d < /dev/null && cd ..
 
     echo "  [STAGE] Verifying master container..."
     if docker ps --format '{{.Names}}' < /dev/null | grep -q "^${DOCKER_CONTAINER}$"; then
@@ -106,8 +110,9 @@ while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
     fi
 
     echo "  [STAGE] Running docker compose up -d on worker..."
+    COMPOSE_FILE_PATH="${DOCKER_COMPOSE_FILE#docker/}"
     ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" \
-      "cd /home/$USER/aorta/docker && docker compose -f docker-compose.rocm70_9-1.yaml up -d"
+      "cd /home/$USER/aorta/docker && docker compose -f $COMPOSE_FILE_PATH up -d"
 
     echo "  [STAGE] Verifying worker container..."
     if ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" "docker ps --format '{{.Names}}'" | grep -q "^${DOCKER_CONTAINER}$"; then
@@ -123,6 +128,7 @@ while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
 done < "$MACHINE_IP_FILE"
 
 echo "=== All Docker containers started successfully ==="
+echo "Docker container: $DOCKER_CONTAINER"
 echo ""
 echo "Verify with:"
 echo "  docker ps  # Check master"
@@ -135,4 +141,4 @@ while IFS= read -r HOST || [[ -n "$HOST" ]]; do
 done < "$MACHINE_IP_FILE"
 echo ""
 echo "Ready to launch training:"
-echo "  ./scripts/multi_node/master_launch.sh --channels 28 --threads 256"
+echo "  ./scripts/multi_node/master_launch.sh --channels 28 --threads 256 --config <your-config>.yaml"

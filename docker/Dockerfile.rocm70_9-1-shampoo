@@ -1,0 +1,57 @@
+# Start from the existing PyTorch ROCm image
+FROM rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly
+
+# Switch to root to install packages
+USER root
+
+# Install wget and git if not available
+RUN yum install -y wget git 2>/dev/null || apt-get update && apt-get install -y wget git || true
+
+# Download and install amdgpu-install package for RHEL
+RUN wget https://artifactory-cdn.amd.com/artifactory/list/amdgpu-rpm/rhel/amdgpu-install-internal-7.0_9-1.noarch.rpm && \
+    yum install -y ./amdgpu-install-internal-7.0_9-1.noarch.rpm || rpm -ivh ./amdgpu-install-internal-7.0_9-1.noarch.rpm && \
+    rm amdgpu-install-internal-7.0_9-1.noarch.rpm
+
+# Update amdgpu-repo with specific builds
+RUN amdgpu-repo --amdgpu-build=2247890 --rocm-build=compute-rocm-rel-7.0-meta/7
+
+# Since base image already has ROCm, just update the key runtime components
+RUN yum update -y --skip-broken \
+    rocm-hip \
+    rocm-libs \
+    rocm-hip-libraries \
+    rocm-hip-runtime-devel \
+    hip-base \
+    hip-dev \
+    hip-runtime-amd \
+    rocm-core || echo "Updated available ROCm packages"
+
+RUN python3.10 -m pip install git+https://github.com/AMD-AGI/TraceLens.git
+RUN python3.10 -m pip install openpyxl seaborn
+
+# Download and install rocprof-trace-decoder
+RUN wget https://github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.rpm \
+    -O /tmp/rocprof-trace-decoder.rpm && \
+    rpm -i /tmp/rocprof-trace-decoder.rpm && \
+    rm /tmp/rocprof-trace-decoder.rpm
+
+# Install Facebook Distributed Shampoo optimizer
+RUN cd /tmp && \
+    git clone https://github.com/facebookresearch/optimizers.git && \
+    cd optimizers && \
+    python3.10 -m pip install . && \
+    cd / && \
+    rm -rf /tmp/optimizers
+
+# Verify Shampoo installation
+RUN python3.10 -c "import distributed_shampoo; print('[OK] Shampoo optimizer installed successfully')"
+
+# Update environment variables
+ENV ROCM_HOME=/opt/rocm
+ENV PATH=$ROCM_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$LD_LIBRARY_PATH
+
+# Set working directory
+WORKDIR /workspace/aorta
+
+CMD ["/bin/bash"]

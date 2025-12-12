@@ -50,6 +50,7 @@ mkdir -p "${OUTPUT_DIR}"
 AORTA_ROOT_FROM_EXP=$(echo "$EXPERIMENT_DIR" | sed 's|/experiments/.*||')
 # Replace the aorta root with /workspace/aorta
 OUTPUT_DIR_DOCKER=$(echo "$OUTPUT_DIR" | sed "s|^${AORTA_ROOT_FROM_EXP}|/workspace/aorta|")
+
 # Also convert CONFIG_FILE to Docker path if it's an absolute path
 if [[ "$CONFIG_FILE" =~ ^/ ]]; then
     CONFIG_FILE_DOCKER=$(echo "$CONFIG_FILE" | sed "s|^${AORTA_ROOT_FROM_EXP}|/workspace/aorta|")
@@ -142,7 +143,7 @@ if [ "${ENABLE_ROCPROF}" = "true" ]; then
 else
     log "Running inside Docker container"
     log "Command: ${BASE_CMD} ${BASE_OVERRIDES} --override training.output_dir=${OUTPUT_DIR_DOCKER}"
-        ${DOCKER_EXEC} bash -c "${BASE_CMD} ${BASE_OVERRIDES} \
+    ${DOCKER_EXEC} bash -c "${BASE_CMD} ${BASE_OVERRIDES} \
         --override training.output_dir=${OUTPUT_DIR_DOCKER}" \
         2>&1 | tee -a "${LOG_FILE}"
 fi
