@@ -56,7 +56,7 @@ def process_gpu_timeline(reports_dir):
 
 def combine_reports(baseline_file, test_file, output_file, baseline_label=None, test_label=None):
     """Combine baseline and test reports."""
-    if(baseline_label is None or test_label is None) : 
+    if(baseline_label is None or test_label is None) :
         print("WARN : Baseline and test label are not provided, using default labels baseline and test")
         baseline_label = "baseline"
         test_label = "test"
@@ -276,7 +276,7 @@ Examples:
     baseline_label = baseline_path.name  # e.g., "56cu_256threads"
     test_label = test_path.name  # e.g., "37cu_384threads"
 
-    if(baseline_label == test_label) : 
+    if(baseline_label == test_label) :
         print(f"Same baseline and test label : {baseline_label}, reverting to default labels baseline and test")
     # Step 2: GPU Timeline Comparison
     if args.gpu_timeline:
@@ -375,7 +375,7 @@ Examples:
             str(collective_combined),
             str(collective_comparison),
             str(final_report),
-            baseline_label, 
+            baseline_label,
             test_label
         ):
             return 1
