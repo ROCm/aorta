@@ -1,0 +1,221 @@
+name: GEMM Sweep Profiling and Analysis
+
+on:
+  schedule:
+    # Run every other day at midnight UTC
+    - cron: '0 0 */2 * *'
+  workflow_dispatch:
+    inputs:
+      channels:
+        description: 'Comma-separated NCCL channel values'
+        required: true
+        default: '28,56'
+      threads:
+        description: 'Comma-separated thread values'
+        required: true
+        default: '256,512'
+      config:
+        description: 'Path to GEMM config YAML'
+        required: false
+        default: 'config/single_node/gemm_overlap_comm.yaml'
+      top_k:
+        description: 'Number of top GEMM kernels to extract'
+        required: false
+        default: '5'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/gemm_analysis/**'
+      - 'config/gemm_overlap/**'
+
+env:
+  DOCKER_COMPOSE_FILE: docker/docker-compose.rocm70_9-1.yaml
+  CONTAINER_NAME: training-overlap-bugs-rocm70_9-1
+
+jobs:
+  gemm-sweep:
+    name: Run GEMM Sweep Profiling
+    runs-on: [self-hosted, gpu, rocm]
+    timeout-minutes: 180
+    outputs:
+      sweep_dir: ${{ steps.setup.outputs.sweep_dir }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up experiment directory
+        id: setup
+        run: |
+          SWEEP_DIR="experiments/sweep_$(date +%Y%m%d_%H%M%S)"
+          echo "sweep_dir=$SWEEP_DIR" >> $GITHUB_OUTPUT
+          mkdir -p $SWEEP_DIR
+
+      - name: Build Docker container
+        working-directory: docker
+        run: |
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} build
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} up -d
+
+      - name: Run training sweep
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            bash scripts/gemm_analysis/run_train_various_channels.sh \
+              --output-dir ${{ steps.setup.outputs.sweep_dir }} \
+              --channels ${{ github.event.inputs.channels || '28,56' }} \
+              --threads ${{ github.event.inputs.threads || '256,512' }} \
+              --config ${{ github.event.inputs.config || 'config/single_node/gemm_overlap_comm.yaml' }}
+          "
+
+      - name: Generate TraceLens reports
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            pip install -r requirements.txt && \
+            bash scripts/gemm_analysis/run_tracelens_analysis.sh ${{ steps.setup.outputs.sweep_dir }}
+          "
+
+      - name: Extract top GEMM kernels
+        run: |
+          # Parse channels and threads into space-separated format
+          CHANNELS=$(echo "${{ github.event.inputs.channels || '28,56' }}" | tr ',' ' ')
+          THREADS=$(echo "${{ github.event.inputs.threads || '256,512' }}" | tr ',' ' ')
+
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            python scripts/gemm_analysis/analyze_gemm_reports.py \
+              --base-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis \
+              --threads $THREADS \
+              --channels $CHANNELS \
+              --ranks 0 1 2 3 4 5 6 7 \
+              --top-k ${{ github.event.inputs.top_k || '5' }}
+          "
+
+      - name: Upload sweep results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemm-sweep-results
+          path: ${{ steps.setup.outputs.sweep_dir }}
+          retention-days: 30
+
+      - name: Cleanup Docker container
+        if: always()
+        run: |
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} down || true
+
+  visualization:
+    name: Generate Visualizations and Reports
+    needs: gemm-sweep
+    runs-on: [self-hosted, gpu, rocm]
+    timeout-minutes: 60
+    env:
+      SWEEP_DIR: ${{ needs.gemm-sweep.outputs.sweep_dir }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download sweep results
+        uses: actions/download-artifact@v4
+        with:
+          name: gemm-sweep-results
+          path: ${{ env.SWEEP_DIR }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Generate variance plots
+        run: |
+          python scripts/gemm_analysis/plot_gemm_variance.py \
+            --csv-path ${{ env.SWEEP_DIR }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
+            --output-dir ${{ env.SWEEP_DIR }}/tracelens_analysis/plots
+
+      - name: Add timestamp information
+        run: |
+          python scripts/gemm_analysis/enhance_gemm_variance_with_timestamps.py \
+            --input-csv ${{ env.SWEEP_DIR }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
+            --base-path ${{ env.SWEEP_DIR }}
+
+      - name: Analyze collective overlap
+        run: |
+          python scripts/gemm_analysis/gemm_report_with_collective_overlap.py \
+            --input-csv ${{ env.SWEEP_DIR }}/tracelens_analysis/top5_gemm_kernels_time_variance_with_timestamps.csv \
+            --tracelens-path ${{ env.SWEEP_DIR }}/tracelens_analysis
+
+      - name: Process GPU timeline
+        run: |
+          python scripts/gemm_analysis/process_gpu_timeline.py \
+            --sweep-dir ${{ env.SWEEP_DIR }}
+
+      - name: Process NCCL communication data
+        run: |
+          python scripts/gemm_analysis/process_comms.py \
+            --sweep-dir ${{ env.SWEEP_DIR }}
+
+      - name: Upload analysis results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemm-analysis-results
+          path: |
+            ${{ env.SWEEP_DIR }}/tracelens_analysis/plots/
+            ${{ env.SWEEP_DIR }}/tracelens_analysis/*.csv
+            ${{ env.SWEEP_DIR }}/tracelens_analysis/*.xlsx
+          retention-days: 30
+
+  comparison-report:
+    name: Generate Comparison Report
+    needs: [gemm-sweep, visualization]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    env:
+      SWEEP_DIR: ${{ needs.gemm-sweep.outputs.sweep_dir }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download analysis results
+        uses: actions/download-artifact@v4
+        with:
+          name: gemm-analysis-results
+          path: ${{ env.SWEEP_DIR }}/tracelens_analysis
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Generate summary report
+        run: |
+          echo "## GEMM Sweep Analysis Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Sweep Directory**: ${{ env.SWEEP_DIR }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Channels**: ${{ github.event.inputs.channels || '28,56' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Threads**: ${{ github.event.inputs.threads || '256,512' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Top-K Kernels**: ${{ github.event.inputs.top_k || '5' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Generated Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- Variance plots (box plots, violin plots)" >> $GITHUB_STEP_SUMMARY
+          echo "- GEMM kernels with timestamps" >> $GITHUB_STEP_SUMMARY
+          echo "- Collective overlap analysis" >> $GITHUB_STEP_SUMMARY
+          echo "- GPU timeline data" >> $GITHUB_STEP_SUMMARY
+          echo "- NCCL communication data" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload final report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemm-final-report
+          path: ${{ env.SWEEP_DIR }}/
+          retention-days: 90
