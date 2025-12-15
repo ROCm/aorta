@@ -6,7 +6,7 @@ on:
       channels:
         description: 'Comma-separated NCCL channel values'
         required: true
-        default: '28,42,56,70'
+        default: '28,56'
       threads:
         description: 'Comma-separated thread values'
         required: true
@@ -60,7 +60,7 @@ jobs:
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
             bash scripts/gemm_analysis/run_train_various_channels.sh \
               --output-dir ${{ steps.setup.outputs.sweep_dir }} \
-              --channels ${{ github.event.inputs.channels || '28,42,56,70' }} \
+              --channels ${{ github.event.inputs.channels || '28,56' }} \
               --threads ${{ github.event.inputs.threads || '256,512' }} \
               --config ${{ github.event.inputs.config || 'config/single_node/gemm_overlap_comm.yaml' }}
           "
@@ -75,7 +75,7 @@ jobs:
       - name: Extract top GEMM kernels
         run: |
           # Parse channels and threads into space-separated format
-          CHANNELS=$(echo "${{ github.event.inputs.channels || '28,42,56,70' }}" | tr ',' ' ')
+          CHANNELS=$(echo "${{ github.event.inputs.channels || '28,56' }}" | tr ',' ' ')
           THREADS=$(echo "${{ github.event.inputs.threads || '256,512' }}" | tr ',' ' ')
 
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
@@ -199,7 +199,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Configuration" >> $GITHUB_STEP_SUMMARY
           echo "- **Sweep Directory**: ${{ env.SWEEP_DIR }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Channels**: ${{ github.event.inputs.channels || '28,42,56,70' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Channels**: ${{ github.event.inputs.channels || '28,56' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Threads**: ${{ github.event.inputs.threads || '256,512' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Top-K Kernels**: ${{ github.event.inputs.top_k || '5' }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
