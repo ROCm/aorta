@@ -78,7 +78,8 @@ To use the Shampoo optimizer instead of AdamW:
 ```bash
 ./scripts/multi_node/master_launch.sh \
     --channels 28 --threads 256 \
-    --config config/shampoo_opt.yaml
+    --config config/shampoo_opt.yaml \
+    --docker training-overlap-bugs-rocm70_9-1-shampoo
 ```
 
 **What's different?** The Shampoo Docker image has the Facebook `distributed-shampoo` package pre-installed. The training code automatically uses Shampoo when `optimizer.name: shampoo` is set in the config file.
@@ -109,6 +110,7 @@ docker exec training-overlap-bugs-rocm70_9-1-shampoo \
 | -t | --threads | 256 | RCCL_THREADS_PER_BLOCK |
 | -p | --nproc | 8 | GPUs per node |
 | -f | --config | config/multi_node/distributed_multinode.yaml | Config file |
+| -d | --docker | training-overlap-bugs-rocm70_9-1 | Docker container name |
 | -r | --rocprof | false | Enable rocprofv3 |
 | -m | --stats | false | rocprof stats |
 |  | --rocprof-input | none | rocprof yaml |
@@ -183,25 +185,101 @@ Only restart Docker after reboot or manual stop. Containers stay running between
 
 ## Slurm Cluster Setup
 
-**Slurm typically uses hostnames for SSH:**
+### Step 0: Pull Base Docker Image (Required)
+
+The Docker build requires a private base image. Pull it on all nodes first:
 
 ```bash
-salloc -N 2 -p gpu_partition -t 4:00:00
-srun --pty bash  # SSH to master
+docker pull rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly
+```
+
+If authentication is required:
+```bash
+docker login
+```
+
+### Step 1: Allocate Nodes
+
+```bash
+# From head node
+salloc -N 3 -p gpu_partition -t 4:00:00
+
+# Check allocation
+squeue -u $USER
+```
+
+### Step 2: Create node_ip_list.txt
+
+```bash
+# Option A: Use hostnames (recommended)
+cd /path/to/aorta/scripts/multi_node
+scontrol show hostnames $SLURM_NODELIST > node_ip_list.txt
+
+# Option B: Manual entry
+cat > node_ip_list.txt << 'EOF'
+node1-hostname
+node2-hostname
+node3-hostname
+EOF
+
+# Verify
+cat node_ip_list.txt
+```
+
+### Step 3: SSH to Master Node
+
+```bash
+# SSH to first compute node (master)
+ssh node1-hostname
+
+# Navigate to code
 cd /path/to/aorta
-hostname > scripts/multi_node/node_ip_list.txt
-ssh <worker-hostname> hostname >> scripts/multi_node/node_ip_list.txt
-./scripts/multi_node/master_launch.sh --channels 28 --threads 256
 ```
 
-**If your Slurm cluster requires IPs for SSH instead:**
+### Step 4: Test SSH Connectivity
 
 ```bash
-hostname -I | awk '{print $1}' > scripts/multi_node/node_ip_list.txt
-ssh <worker-hostname> hostname -I | awk '{print $1}' >> scripts/multi_node/node_ip_list.txt
+# Test SSH to worker nodes
+ssh node2-hostname hostname
+ssh node3-hostname hostname
 ```
 
-Then you may need to adjust SSH options in the multi-node scripts.
+### Step 5: Pull Base Image on All Nodes
+
+```bash
+# On each node, pull the private base image
+docker pull rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly
+
+# For worker nodes
+ssh node2-hostname "docker pull rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly"
+ssh node3-hostname "docker pull rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly"
+```
+
+### Step 6: Start Docker
+
+```bash
+./scripts/multi_node/start_docker_all_nodes.sh
+```
+
+### Step 7: Run Training
+
+```bash
+# For regular training (AdamW optimizer)
+./scripts/multi_node/master_launch.sh --channels 28 --threads 256 --nproc 8
+
+# For Shampoo optimizer
+./scripts/multi_node/master_launch.sh \
+    --channels 28 --threads 256 --nproc 8 \
+    --config config/shampoo_opt.yaml \
+    --docker training-overlap-bugs-rocm70_9-1-shampoo
+```
+
+### Notes
+
+- Run training from compute node, not head node
+- First line in `node_ip_list.txt` is master node
+- Use hostnames if SSH works with them, otherwise use IPs
+- Check GPU count per node: `rocm-smi --showid | wc -l`
 
 ---
 
@@ -213,15 +291,11 @@ Then you may need to adjust SSH options in the multi-node scripts.
 
 **Press `Ctrl+C`** - Stops monitoring but **training continues in background**
 
-**Find and kill by PID:**
+**To actually stop training:**
 
 ```bash
-# Find PIDs
-ps aux | grep -E 'config_node.sh|torchrun.*train.py' | grep -v grep
-
-# Kill on all nodes (replace 12345 with your PID)
 for HOST in $(cat scripts/multi_node/node_ip_list.txt); do
-  ssh $USER@$HOST "kill -9 12345"
+  ssh $HOST "docker exec training-overlap-bugs-rocm70_9-1-shampoo pkill -9 -f 'train.py|torchrun'"
 done
 ```
 

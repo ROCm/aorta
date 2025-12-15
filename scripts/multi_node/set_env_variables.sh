@@ -1,16 +1,14 @@
 #!/bin/bash
 # Global NCCL/RCCL environment variables for multi-node training
-# Based on DLRM_set_env_variables.sh
+# Configured for MI350X cluster
 
-# NCCL Debug Settings (use INFO for debugging network issues)
+# NCCL Debug Settings (enabled to track NaN/Inf failures)
 export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=INIT,NET
-# Try disabling IB if InfiniBand is not properly configured
-export NCCL_IB_DISABLE=1
+export NCCL_DEBUG_SUBSYS=COLL,INIT,NET
 
-# IB/RNIC Configuration (commented out when IB is disabled)
-# export NCCL_IB_HCA=bnxt_re0,bnxt_re1,bnxt_re2,bnxt_re3,bnxt_re4,bnxt_re5,bnxt_re6,bnxt_re7
-# export NCCL_IB_GID_INDEX=3
+# IB/RNIC Configuration for MI350X
+export NCCL_IB_HCA=bnxt_re0,bnxt_re1,bnxt_re2,bnxt_re3,bnxt_re4,bnxt_re5,bnxt_re6,bnxt_re7
+export NCCL_IB_GID_INDEX=3
 export NCCL_NCHANNELS_PER_NET_PEER=8
 
 # HSA Settings for ROCm
@@ -23,10 +21,12 @@ export NCCL_PROTO=Simple
 export NCCL_MIN_NCHANNELS=40
 export NCCL_MAX_NCHANNELS=40
 
-# Network Interface
-# Change this to match your network interface: eth0, ib0, enp49s0f0np0, etc.
-# Temporarily commented out for auto-detection:
-# export NCCL_SOCKET_IFNAME=enp193s0f0
+# Network Interface for MI350X cluster
+export NCCL_SOCKET_IFNAME=enp49s0f0np0,fenic0
+
+# Timeout settings
+export NCCL_TIMEOUT_MS=60000
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 # PyTorch ROCm Profiler
 export PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1

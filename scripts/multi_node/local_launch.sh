@@ -3,7 +3,7 @@
 # Runs on each node with single channel/thread configuration
 
 if [[ $# -lt 11 ]]; then
-  echo "Usage: $0 <NODE_RANK> <NODE_IP> <MASTER_IP> <MASTER_PORT> <NNODES> <WORLD_SIZE> <EXPERIMENT_DIR> <CONFIG_FILE> <NPROC_PER_NODE> <CHANNELS> <THREADS> [ENABLE_ROCPROF] [ROCPROF_STATS] [ROCPROF_INPUT]"
+  echo "Usage: $0 <NODE_RANK> <NODE_IP> <MASTER_IP> <MASTER_PORT> <NNODES> <WORLD_SIZE> <EXPERIMENT_DIR> <CONFIG_FILE> <NPROC_PER_NODE> <CHANNELS> <THREADS> [ENABLE_ROCPROF] [ROCPROF_STATS] [ROCPROF_INPUT] [DOCKER_CONTAINER]"
   exit 1
 fi
 
@@ -21,6 +21,7 @@ THREADS="${11}"
 ENABLE_ROCPROF="${12:-false}"
 ROCPROF_STATS="${13:-false}"
 ROCPROF_INPUT="${14:-}"
+DOCKER_CONTAINER="${15:-training-overlap-bugs-rocm70_9-1}"
 
 echo "=========================================="
 echo "Local Launch Configuration"
@@ -93,9 +94,6 @@ log "Output directory: ${OUTPUT_DIR}"
 
 START_TIME=$(date +%s)
 
-# Docker container name (update if different)
-DOCKER_CONTAINER="training-overlap-bugs-rocm70_9-1"
-
 # Check if Docker container is running
 if ! docker ps --format '{{.Names}}' | grep -q "^${DOCKER_CONTAINER}$"; then
     log "ERROR: Docker container '${DOCKER_CONTAINER}' is not running"
@@ -110,11 +108,25 @@ BASE_CMD="torchrun --nnodes ${NNODES} --node_rank ${NODE_RANK} --nproc_per_node 
 BASE_OVERRIDES="--override profiling.tensorboard=false"
 
 # Build docker exec prefix with environment variables
+# Pass through all NCCL/RCCL configuration from set_env_variables.sh
 DOCKER_EXEC="docker exec \
     -e RCCL_THREADS_PER_BLOCK=${THREADS} \
     -e NCCL_MAX_NCHANNELS=${CHANNELS} \
     -e HSA_ENABLE_SDMA=0 \
     -e PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1 \
+    -e NCCL_DEBUG=${NCCL_DEBUG:-} \
+    -e NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-} \
+    -e NCCL_IB_HCA=${NCCL_IB_HCA:-} \
+    -e NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3} \
+    -e NCCL_NCHANNELS_PER_NET_PEER=${NCCL_NCHANNELS_PER_NET_PEER:-8} \
+    -e HSA_ENABLE_IPC_MODE_LEGACY=${HSA_ENABLE_IPC_MODE_LEGACY:-1} \
+    -e NCCL_PROTO=${NCCL_PROTO:-Simple} \
+    -e NCCL_MIN_NCHANNELS=${NCCL_MIN_NCHANNELS:-40} \
+    -e NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-} \
+    -e NCCL_TIMEOUT_MS=${NCCL_TIMEOUT_MS:-60000} \
+    -e TORCH_NCCL_ASYNC_ERROR_HANDLING=${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1} \
+    -e TORCH_NCCL_TRACE_BUFFER_SIZE=10000 \
+    -e TORCH_NCCL_DUMP_ON_TIMEOUT=1 \
     ${DOCKER_CONTAINER}"
 
 # Run with or without rocprofv3

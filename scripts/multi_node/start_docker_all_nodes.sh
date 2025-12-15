@@ -112,7 +112,7 @@ while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
     echo "  [STAGE] Running docker compose up -d on worker..."
     COMPOSE_FILE_PATH="${DOCKER_COMPOSE_FILE#docker/}"
     ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" \
-      "cd /home/$USER/aorta/docker && docker compose -f $COMPOSE_FILE_PATH up -d"
+      "cd $AORTA_ROOT/docker && docker compose -f $COMPOSE_FILE_PATH up -d"
 
     echo "  [STAGE] Verifying worker container..."
     if ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" "docker ps --format '{{.Names}}'" | grep -q "^${DOCKER_CONTAINER}$"; then

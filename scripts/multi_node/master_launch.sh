@@ -9,6 +9,7 @@ usage() {
     echo "  -t, --threads THREADS       RCCL_THREADS_PER_BLOCK value (default: 256)"
     echo "  -f, --config CONFIG         Config file path (default: config/multi_node/distributed_multinode.yaml)"
     echo "  -p, --nproc NPROC           Number of processes per node (default: 8)"
+    echo "  -d, --docker CONTAINER      Docker container name (default: training-overlap-bugs-rocm70_9-1)"
     echo "  -r, --rocprof               Enable rocprofv3 tracing"
     echo "  -m, --stats                 Enable rocprof stats (CU utilization, occupancy)"
     echo "      --rocprof-input FILE    Use rocprofv3 input yaml/json"
@@ -19,6 +20,7 @@ usage() {
     echo "  $0 --channels 28 --threads 256"
     echo "  $0 -c 28 -t 256 --rocprof"
     echo "  $0 --channels 28 --config config/my_custom.yaml"
+    echo "  $0 --docker training-overlap-bugs-rocm70_9-1-shampoo"
     echo ""
     echo "Or use environment variables:"
     echo "  CHANNELS=28 THREADS=256 $0"
@@ -26,6 +28,7 @@ usage() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AORTA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MACHINE_IP_FILE="$SCRIPT_DIR/node_ip_list.txt"  # Contains hostnames or IPs
 
 # Default values (can be overridden by env vars or command-line args)
@@ -33,6 +36,7 @@ CONFIG_FILE="${CONFIG_FILE:-config/multi_node/distributed_multinode.yaml}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 CHANNELS="${CHANNELS:-28}"
 THREADS="${THREADS:-256}"
+DOCKER_CONTAINER="${DOCKER_CONTAINER:-training-overlap-bugs-rocm70_9-1}"
 ENABLE_ROCPROF="${ENABLE_ROCPROF:-false}"
 ROCPROF_STATS="${ROCPROF_STATS:-false}"
 ROCPROF_INPUT="${ROCPROF_INPUT:-}"
@@ -55,6 +59,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -p|--nproc)
             NPROC_PER_NODE="$2"
+            shift 2
+            ;;
+        -d|--docker)
+            DOCKER_CONTAINER="$2"
             shift 2
             ;;
         -r|--rocprof)
@@ -110,7 +118,7 @@ if [[ "$MASTER_BRANCH" != "not-a-git-repo" ]]; then
         if [[ -z "$HOST" ]]; then continue; fi
 
         if [[ "$node" -gt 0 ]]; then
-            WORKER_BRANCH=$(ssh -n -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" "cd ~/aorta && git rev-parse --abbrev-ref HEAD 2>/dev/null" || echo "not-a-git-repo")
+            WORKER_BRANCH=$(ssh -n -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$USER@$HOST" "cd $AORTA_ROOT && git rev-parse --abbrev-ref HEAD 2>/dev/null" || echo "not-a-git-repo")
 
             if [[ "$WORKER_BRANCH" == "not-a-git-repo" ]]; then
                 echo "[WARN] Worker node $HOST: Not a git repository"
@@ -120,7 +128,7 @@ if [[ "$MASTER_BRANCH" != "not-a-git-repo" ]]; then
                 echo "  Master: $MASTER_BRANCH"
                 echo "  Worker: $WORKER_BRANCH"
                 echo ""
-                echo "Fix: ssh $USER@$HOST 'cd ~/aorta && git checkout $MASTER_BRANCH && git pull'"
+                echo "Fix: ssh $USER@$HOST 'cd $AORTA_ROOT && git checkout $MASTER_BRANCH && git pull'"
                 echo ""
                 exit 1
             else
@@ -135,7 +143,7 @@ fi
 echo ""
 
 TRACE_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-EXPERIMENT_DIR="$HOME/aorta/experiments/multinode_${CHANNELS}ch_${THREADS}th_${TRACE_TIMESTAMP}"
+EXPERIMENT_DIR="$AORTA_ROOT/experiments/multinode_${CHANNELS}ch_${THREADS}th_${TRACE_TIMESTAMP}"
 mkdir -p "$EXPERIMENT_DIR"
 mkdir -p "$EXPERIMENT_DIR/logs"
 
@@ -172,15 +180,15 @@ while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
       echo "Master node: $MASTER_ADDR"
       echo ""
 
-      ./scripts/multi_node/config_node.sh "$node" "$HOST" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$PWD" "$EXPERIMENT_DIR" \
-        "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" \
+      ./scripts/multi_node/config_node.sh "$node" "$HOST" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$AORTA_ROOT" "$EXPERIMENT_DIR" \
+        "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" "$DOCKER_CONTAINER" \
         > "$LOG_FILE" 2>&1 &
 
   else
       # Note: stdin explicitly redirected from config_node.sh, so -n flag not needed
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-          "$USER"@"$HOST" bash -s -- "$node" "$HOST" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$PWD" "$EXPERIMENT_DIR" \
-          "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" \
+          "$USER"@"$HOST" "DOCKER_CONTAINER='$DOCKER_CONTAINER' bash -s -- '$node' '$HOST' '$MASTER_ADDR' '$MASTER_PORT' '$NNODES' '$WORLD_SIZE' '$AORTA_ROOT' '$EXPERIMENT_DIR' \
+          '$CONFIG_FILE' '$NPROC_PER_NODE' '$CHANNELS' '$THREADS' '$ENABLE_ROCPROF' '$ROCPROF_STATS' '$ROCPROF_INPUT'" \
         < ./scripts/multi_node/config_node.sh \
         > "$LOG_FILE" 2>&1 &
   fi

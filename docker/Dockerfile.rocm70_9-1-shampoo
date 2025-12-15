@@ -36,10 +36,14 @@ RUN wget https://github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/r
     rm /tmp/rocprof-trace-decoder.rpm
 
 # Install Facebook Distributed Shampoo optimizer
+# Modify pyproject.toml to allow Python 3.10 and remove strict version checks
 RUN cd /tmp && \
     git clone https://github.com/facebookresearch/optimizers.git && \
     cd optimizers && \
-    python3.10 -m pip install . && \
+    sed -i 's/requires-python = ">=3.12"/requires-python = ">=3.10"/' pyproject.toml && \
+    sed -i 's/requires-python = ">=.*"/requires-python = ">=3.10"/' pyproject.toml && \
+    sed -i 's/python_requires=">=3.12"/python_requires=">=3.10"/' setup.py 2>/dev/null || true && \
+    python3.10 -m pip install . || python3.10 setup.py install && \
     cd / && \
     rm -rf /tmp/optimizers
 

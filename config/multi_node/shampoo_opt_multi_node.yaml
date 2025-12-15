@@ -13,7 +13,7 @@ training:
   max_steps: 2200
   grad_clip_norm: 1.0
   output_dir: artifacts/user_shampoo
-  log_interval: 20
+  log_interval: 5
   additional_compute_streams: 2
   lightweight_op_waves: 3
 
@@ -95,9 +95,9 @@ dataloader:
 
 profiling:
   enabled: true
-  wait: 2
-  warmup: 2
-  active: 6
+  wait: 0
+  warmup: 0
+  active: 3
   repeat: 1
   record_shapes: true
   profile_memory: true
