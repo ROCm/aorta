@@ -1,6 +1,9 @@
 name: GEMM Sweep Profiling and Analysis
 
 on:
+  schedule:
+    # Run every other day at midnight UTC
+    - cron: '0 0 */2 * *'
   workflow_dispatch:
     inputs:
       channels:
