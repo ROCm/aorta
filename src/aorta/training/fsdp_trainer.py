@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import signal
 import subprocess
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Optional
 from functools import partial
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -23,7 +25,7 @@ from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.nn.parallel import DistributedDataParallel as DDP
-
+from datetime import timedelta
 from aorta.data import SyntheticDatasetConfig, create_dataloader
 from aorta.models import ModelConfig, RankingTransformerModel
 from aorta.profiling.stream_profiler import StreamProfiler
@@ -204,9 +206,22 @@ def dataclass_fields(cls) -> Iterable[Any]:
     return getattr(cls, "__dataclass_fields__").values()
 
 
+def set_seed(seed: int, rank: int) -> None:
+    """Set all random seeds for reproducibility across runs."""
+    seed_value = seed + rank
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    torch.manual_seed(seed_value)
+    torch.cuda.manual_seed(seed_value)
+    torch.cuda.manual_seed_all(seed_value)
+    log.info("Set random seed=%d for rank=%d (base_seed=%d)", seed_value, rank, seed)
+
+
 def init_distributed(training_cfg: TrainingConfig, log_level: str) -> Dict[str, Any]:
+    
     backend = get_distributed_backend()
-    dist.init_process_group(backend=backend)
+    timeout_seconds = int(os.environ.get("TORCH_DIST_INIT_TIMEOUT", "600"))
+    dist.init_process_group(backend=backend, timeout=timedelta(seconds=timeout_seconds))
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
@@ -508,11 +523,20 @@ def training_loop(
                             grad_norm = clip_grad_norm_(model.parameters(), training_cfg.grad_clip_norm)
 
                     with profiler.range("aux", f"epoch{epoch}_step{step}_optimizer"):
-                        if scaler is not None:
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            optimizer.step()
+                        try:
+                            if scaler is not None:
+                                scaler.step(optimizer)
+                                scaler.update()
+                            else:
+                                optimizer.step()
+                        except AssertionError as e:
+                            if "NaN" in str(e) or "Inf" in str(e):
+                                log.error("NaN/Inf detected in rank %d at step %d: %s", rank, global_step, e)
+                                log.error("Stopping training to save traces")
+                                stop_flag["stop"] = True
+                                break
+                            else:
+                                raise
 
                         if scheduler is not None:
                             scheduler.step()
@@ -520,7 +544,6 @@ def training_loop(
                     # Inject all_reduce operations to trigger hang pattern
                     # Pattern: all_reduce → device-to-device copy → host-device copy → compute blocked
                     if training_cfg.inject_allreduce_copies:
-                        import torch.distributed as dist
                         if dist.is_initialized():
                             with profiler.range("aux", f"epoch{epoch}_step{step}_allreduce_sync"):
                                 # Perform multiple all_reduce + memory copy cycles
@@ -594,6 +617,10 @@ def training_loop(
                     iteration_payload.update(collect_rocm_metrics(enable_rocm_metrics))
                     metrics_logger.log(iteration_payload)
 
+                    loss_log = training_cfg.output_dir / f"loss_rank{rank}.log"
+                    with open(loss_log, "a") as f:
+                        f.write(f"step={global_step} epoch={epoch} loss={iteration_payload['loss']:.6f} lr={iteration_payload['lr']:.6f}\n")
+
                     if global_step % training_cfg.log_interval == 0 and rank == 0:
                         log.info(
                             "epoch=%s step=%s loss=%.5f lr=%.6f overlap=%.3fms compute=%.3fms",
@@ -616,9 +643,18 @@ def training_loop(
                         break
 
                 if stop_flag["stop"]:
+                    if rank == 0:
+                        log.info("Training stopped at epoch=%d step=%d", epoch, step)
                     break
 
     metrics_logger.close()
+    
+    if rank == 0:
+        log.info("Training loop finished. Profiler will export traces in cleanup phase.")
+        log.info("Output directory: %s", training_cfg.output_dir)
+        log.info("Torch profiler traces: %s", training_cfg.output_dir / "torch_profiler")
+        log.info("Loss logs: %s/loss_rank*.log", training_cfg.output_dir)
+        log.info("Metrics: %s/rank_*_metrics.jsonl", training_cfg.output_dir)
 
 
 def configure_optimizer(model: nn.Module, cfg: OptimizerConfig, dist_mode: str = "ddp") -> torch.optim.Optimizer:
@@ -754,19 +790,16 @@ def _torch_profiler_context(
         prof.__exit__(None, None, None)
         produce_tb = cfg.tensorboard
         produce_chrome = cfg.chrome_trace
-        try:
-            stats_available = prof._stats() is not None  # type: ignore[attr-defined]
-        except Exception:
-            stats_available = False
-
-        if produce_tb and stats_available:
+        
+        if produce_tb:
             try:
                 handler = tensorboard_trace_handler(str(rank_dir))
                 handler(prof)
-            except Exception as exc:  # pragma: no cover - best effort
-                log.warning("TensorBoard trace export failed: %s", exc, exc_info=True)
+                log.info("Exported TensorBoard trace to %s", rank_dir)
+            except Exception as exc:
+                log.warning("TensorBoard trace export failed: %s", exc)
 
-        if produce_chrome and stats_available:
+        if produce_chrome:
             stem, ext = os.path.splitext(cfg.trace_filename)
             if not ext:
                 ext = ".json"
@@ -775,8 +808,9 @@ def _torch_profiler_context(
                 trace_name = f"{stem}_step{prof.step_num}{ext}"
             try:
                 prof.export_chrome_trace(str(rank_dir / trace_name))
-            except Exception as exc:  # pragma: no cover - best effort
-                log.warning("Chrome trace export failed: %s", exc, exc_info=True)
+                log.info("Exported chrome trace to %s/%s", rank_dir, trace_name)
+            except Exception as exc:
+                log.warning("Chrome trace export failed: %s", exc)
 
 
 def main_cli() -> None:  # pragma: no cover - CLI entry
@@ -818,6 +852,8 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
     env = init_distributed(training_cfg, log_level)
     rank = env["rank"]
 
+    set_seed(dataset_cfg.seed, rank)
+
     dataloader = create_dataloader(
         dataset_cfg,
         batch_size=training_cfg.batch_size,
@@ -858,8 +894,15 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
             profiler_cfg,
         )
     finally:
-        dist.barrier()
-        dist.destroy_process_group()
+        if dist.is_initialized():
+            try:
+                dist.barrier()
+            except Exception as e:
+                log.warning("Barrier failed during cleanup: %s", e)
+            try:
+                dist.destroy_process_group()
+            except Exception as e:
+                log.warning("destroy_process_group failed: %s", e)
 
 
 __all__ = ["main", "main_cli"]

@@ -35,7 +35,7 @@ dataset:
   sparse_features: 64
   vocab_size: 350000
   num_dense_features: 32
-  seed: 2025
+  seed: 42
 
 model:
   vocab_size: 350000
@@ -97,16 +97,14 @@ profiling:
   enabled: true
   wait: 0
   warmup: 0
-  active: 3
+  active: 20
   repeat: 1
   record_shapes: true
   profile_memory: true
   with_stack: false
   with_flops: false
-  # tensorboard: true
-  # chrome_trace: true
   tensorboard: false
-  chrome_trace: false
+  chrome_trace: true
   trace_filename: user_shampoo.json
 
 tracelens:

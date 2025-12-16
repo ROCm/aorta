@@ -59,20 +59,17 @@ else
     CONFIG_FILE_DOCKER="$CONFIG_FILE"
 fi
 
-# Log file
-LOG_FILE="${OUTPUT_DIR}/node_${NODE_RANK}_output.log"
-
 # Function to log with timestamp
 log() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[${timestamp}] [Node ${NODE_RANK}] ${message}" | tee -a "${LOG_FILE}"
+    echo "[${timestamp}] [Node ${NODE_RANK}] ${message}"
 }
 
 # Cleanup function
 cleanup() {
     echo ""
-    echo "=== Caught interrupt signal ===" | tee -a "${LOG_FILE}"
+    echo "=== Caught interrupt signal ==="
     log "Cleaning up training processes on node ${NODE_RANK}..."
 
     # Try to kill processes inside Docker container

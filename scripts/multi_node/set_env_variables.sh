@@ -25,7 +25,7 @@ export NCCL_MAX_NCHANNELS=40
 export NCCL_SOCKET_IFNAME=enp49s0f0np0,fenic0
 
 # Timeout settings
-export NCCL_TIMEOUT_MS=60000
+export TORCH_DIST_INIT_TIMEOUT=60
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 # PyTorch ROCm Profiler
