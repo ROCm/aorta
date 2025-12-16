@@ -1,0 +1,180 @@
+"""Comparison Report Builder for generating side-by-side comparison reports."""
+
+from pathlib import Path
+import base64
+
+from .config_reader import ReportConfigReader
+from .comparison_templates import (
+    COMPARISON_CHART_TEMPLATE,
+    SWEEP_INFO_TEMPLATE,
+    DATA_FILES_TEMPLATE,
+    COMPARISON_BODY_TEMPLATE,
+    COMPARISON_DOCUMENT_TEMPLATE,
+)
+
+
+class ComparisonReportBuilder:
+    """
+    HTML report builder for comparing two experiment sweeps.
+    Generates side-by-side comparison with embedded images.
+
+    Structure:
+        - build_* methods: Handle structure traversal and data preparation
+        - render_* methods: Handle HTML layout using Jinja2 templates
+    """
+
+    def __init__(
+        self,
+        sweep1_path: Path,
+        sweep2_path: Path,
+        output_path: Path,
+        config_path: Path,
+        label1: str | None = None,
+        label2: str | None = None,
+    ):
+        self.sweep1_path = sweep1_path
+        self.sweep2_path = sweep2_path
+        self.output_path = output_path
+        self.config = ReportConfigReader(config_path)
+
+        # Use directory names as labels if not provided
+        self.label1 = label1 if label1 else sweep1_path.name
+        self.label2 = label2 if label2 else sweep2_path.name
+
+    # -------------------------------------------------------------------------
+    # Data/Utility Methods
+    # -------------------------------------------------------------------------
+
+    def get_image_base64(self, image_path: Path) -> str | None:
+        """Read an image file and return its base64-encoded string."""
+        try:
+            with open(image_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        except Exception as e:
+            print(f"  Warning: Image not found: {image_path}")
+            return None
+
+    def get_plots_dir(self, sweep_path: Path) -> Path:
+        """Get the plots directory for a sweep."""
+        return sweep_path / "tracelens_analysis" / "plots"
+
+    def get_report_title(self) -> str:
+        """Return the main title for the report."""
+        return self.config.get_title()
+
+    def get_executive_summary(self) -> str:
+        """Return the executive summary HTML content."""
+        return self.config.get_executive_summary()
+
+    def get_sections(self) -> list[dict]:
+        """Return all section configurations from config."""
+        return self.config.get_all_sections()
+
+    # -------------------------------------------------------------------------
+    # Render Methods (Jinja2 Templates)
+    # -------------------------------------------------------------------------
+
+    def render_comparison_chart(
+        self,
+        title: str,
+        alt: str,
+        image_data1: str,
+        image_data2: str,
+    ) -> str:
+        """Render HTML layout for a side-by-side chart comparison."""
+        return COMPARISON_CHART_TEMPLATE.render(
+            title=title,
+            alt=alt,
+            label1=self.label1,
+            label2=self.label2,
+            image_data1=image_data1 or "",
+            image_data2=image_data2 or "",
+        )
+
+    def render_sweep_info(self) -> str:
+        """Render HTML layout for sweep information section."""
+        return SWEEP_INFO_TEMPLATE.render(
+            label1=self.label1,
+            label2=self.label2,
+        )
+
+    def render_data_files(self) -> str:
+        """Render HTML layout for data files section."""
+        return DATA_FILES_TEMPLATE.render(
+            label1=self.label1,
+            label2=self.label2,
+            sweep1_path=self.sweep1_path,
+            sweep2_path=self.sweep2_path,
+        )
+
+    def render_body(self, sections_html: str) -> str:
+        """Render HTML layout for the body."""
+        return COMPARISON_BODY_TEMPLATE.render(
+            title=self.get_report_title(),
+            summary=self.get_executive_summary(),
+            sweep_info=self.render_sweep_info(),
+            sections_html=sections_html,
+            data_files=self.render_data_files(),
+        )
+
+    def render_document(self, body: str) -> str:
+        """Render the complete HTML document layout."""
+        return COMPARISON_DOCUMENT_TEMPLATE.render(
+            header=self.config.get_html_header(),
+            body=body,
+            footer=self.config.get_html_footer(),
+        )
+
+    # -------------------------------------------------------------------------
+    # Build Methods (Structure Traversal)
+    # -------------------------------------------------------------------------
+
+    def build_comparison_chart(self, section: dict) -> str:
+        """Build a comparison chart section from config."""
+        plots_dir1 = self.get_plots_dir(self.sweep1_path)
+        plots_dir2 = self.get_plots_dir(self.sweep2_path)
+
+        image_path1 = plots_dir1 / section["file"]
+        image_path2 = plots_dir2 / section["file"]
+
+        print(f"  Processing: {section['id']}")
+        image_data1 = self.get_image_base64(image_path1)
+        image_data2 = self.get_image_base64(image_path2)
+
+        if image_data1:
+            print(f"    Sweep 1: [OK]")
+        else:
+            print(f"    Sweep 1: [MISSING] {image_path1}")
+
+        if image_data2:
+            print(f"    Sweep 2: [OK]")
+        else:
+            print(f"    Sweep 2: [MISSING] {image_path2}")
+
+        return self.render_comparison_chart(
+            title=section["title"],
+            alt=section["alt"],
+            image_data1=image_data1 or "",
+            image_data2=image_data2 or "",
+        )
+
+    def build_body(self) -> str:
+        """Build the HTML body by building all comparison sections."""
+        print("Converting images to base64...")
+        sections_html = ""
+        for section in self.get_sections():
+            sections_html += self.build_comparison_chart(section)
+        return self.render_body(sections_html)
+
+    def build(self) -> str:
+        """Build the complete HTML document."""
+        return self.render_document(self.build_body())
+
+    def save(self) -> None:
+        """Build and save the HTML report to the output path."""
+        final_html = self.build()
+        with open(self.output_path, "w", encoding="utf-8") as f:
+            f.write(final_html)
+        print(f"\n[OK] HTML report created: {self.output_path}")
+        print(f"     File size: {self.output_path.stat().st_size / 1024 / 1024:.2f} MB")
+
