@@ -111,6 +111,36 @@ python scripts/gemm_analysis/analyze_gemm_reports.py \
 
 This generates `top5_gemm_kernels_time_variance.csv` with the kernels showing highest time variance across runs.
 
+### 5. Generate rocprof YAML for Targeted Profiling
+
+After identifying the top GEMM kernels, generate a rocprof configuration that profiles only those specific kernels:
+
+```bash
+python scripts/gemm_analysis/generate_rocprof_yaml_from_csv.py \
+  --input-csv experiments/sweep_20251212_141317/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
+  --output-yaml scripts/gemm_analysis/rocprof_top5_kernels.yaml
+```
+
+This script:
+- Extracts all unique kernel names from the CSV
+- Creates a rocprof YAML with exact kernel name matching (using regex anchors)
+- Includes the same performance counters as `rocprof_cu_only.yaml` (CU utilization, waves, etc.)
+- Generates a companion `_kernel_list.txt` file with all kernel names for reference
+
+**Usage with profiling:**
+```bash
+bash scripts/gemm_analysis/run_train_various_channels.sh \
+  --rocprof \
+  --rocprof-input scripts/gemm_analysis/rocprof_top5_kernels.yaml \
+  --channels 28,42,56 --threads 256,512 \
+  --config config/single_node/gemm_overlap_comm.yaml
+```
+
+**Benefits:**
+- Reduces profiling overhead by focusing only on high-variance kernels
+- Speeds up trace collection and analysis
+- Enables deeper analysis with more performance counters on fewer kernels
+
 ## Output Structure
 
 ```
@@ -150,13 +180,6 @@ bash scripts/gemm_analysis/run_train_various_channels.sh \
   --channels 28,42,56,70 \
   --threads 256,512
 
-# Run with rocprof using CU-only YAML (recommended)
-bash scripts/gemm_analysis/run_train_various_channels.sh \
-  --rocprof --stats \
-  --rocprof-input scripts/gemm_analysis/rocprof_cu_only.yaml \
-  --channels 28,42,56,70 \
-  --threads 256,512
-
 # Generate TraceLens reports
 bash scripts/gemm_analysis/run_tracelens_analysis.sh experiments/sweep_YYYYMMDD_HHMMSS
 
@@ -164,6 +187,27 @@ bash scripts/gemm_analysis/run_tracelens_analysis.sh experiments/sweep_YYYYMMDD_
 python scripts/gemm_analysis/analyze_gemm_reports.py \
   --base-path experiments/sweep_YYYYMMDD_HHMMSS/tracelens_analysis \
   --threads 256 512 --channels 28 42 56 70 --top-k 5
+
+# Generate rocprof YAML for targeted profiling
+python scripts/gemm_analysis/generate_rocprof_yaml_from_csv.py \
+  --input-csv experiments/sweep_YYYYMMDD_HHMMSS/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
+  --output-yaml scripts/gemm_analysis/rocprof_top5_kernels.yaml
+
+# Run with rocprof using top kernels YAML (recommended)
+bash scripts/gemm_analysis/run_train_various_channels.sh \
+  --rocprof --stats \
+  --rocprof-input scripts/gemm_analysis/rocprof_top5_kernels.yaml \
+  --channels 28,42,56,70 \
+  --threads 256,512
+
+# OR
+
+# Run with rocprof using CU-only YAML
+bash scripts/gemm_analysis/run_train_various_channels.sh \
+  --rocprof --stats \
+  --rocprof-input scripts/gemm_analysis/rocprof_cu_only.yaml \
+  --channels 28,42,56,70 \
+  --threads 256,512
 ```
 # GEMM Visualization and Reporting
 

@@ -231,10 +231,11 @@ for THREADS in "${THREADS_TO_RUN[@]}"; do
             if [ -n "${ROCPROF_INPUT}" ]; then
                 log "[INFO] Using rocprofv3 input file: ${ROCPROF_INPUT}"
                 log "[INFO] Kernel filtering/stats should be set inside the input file"
-                rocprofv3 -i "${ROCPROF_INPUT}" -d "${ROCPROF_DIR}" -- \
-                    ${BASE_CMD} ${BASE_OVERRIDES} \
-                    --override training.output_dir=${OUTPUT_DIR} \
-                    2>&1 | tee "${OUTPUT_DIR}/run_output.log"
+                rocprof_cmd="rocprofv3 -i ${ROCPROF_INPUT} -d ${ROCPROF_DIR} -- "
+                rocprof_cmd+="${BASE_CMD} ${BASE_OVERRIDES} "
+                rocprof_cmd+="--override training.output_dir=${OUTPUT_DIR}"
+                log "[INFO] Rocprof command: ${rocprof_cmd}"
+                ${rocprof_cmd} 2>&1 | tee "${OUTPUT_DIR}/run_output.log"
             else
                 # Current rocprofv3 build does not support --kernel-names; run unfiltered
                 # to avoid argument errors. Expect larger traces.
