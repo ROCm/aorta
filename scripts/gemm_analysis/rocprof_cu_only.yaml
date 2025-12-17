@@ -3,7 +3,7 @@
 jobs:
   - kernel_include_regex: "(gemm|Cijk_.*)"
     kernel_trace: true
-    output_format: [csv]
+    output_format: [json]
     pmc:
       - SQ_BUSY_CU_CYCLES     # CU utilization (most important)
       - SQ_WAVES              # Active waves (occupancy indicator)
