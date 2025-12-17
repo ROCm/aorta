@@ -94,9 +94,23 @@ Notes:
 
 ### 3. Generate TraceLens Reports
 
+TraceLens can analyze both PyTorch profiler traces and ROCprof traces.
+
+**For PyTorch profiler traces (default):**
 ```bash
 bash scripts/gemm_analysis/run_tracelens_analysis.sh experiments/sweep_20251124_222204
 ```
+
+**For ROCprof traces:**
+```bash
+bash scripts/gemm_analysis/run_tracelens_analysis.sh experiments/sweep_20251217_103450 --rocprof
+```
+
+The `--rocprof` flag:
+- Processes `*_results.json` files from `rocprof_traces/pass_1/` directories
+- Uses `TraceLens_generate_perf_report_rocprof` command
+- Generates individual reports per rank (no collective reports for ROCprof)
+- Provides detailed kernel-level performance metrics including grid/block dimensions
 
 ### 4. Extract Top GEMM Kernels
 
@@ -157,8 +171,11 @@ bash scripts/gemm_analysis/run_train_various_channels.sh \
   --channels 28,42,56,70 \
   --threads 256,512
 
-# Generate TraceLens reports
+# Generate TraceLens reports (PyTorch profiler)
 bash scripts/gemm_analysis/run_tracelens_analysis.sh experiments/sweep_YYYYMMDD_HHMMSS
+
+# Generate TraceLens reports (ROCprof)
+bash scripts/gemm_analysis/run_tracelens_analysis.sh experiments/sweep_YYYYMMDD_HHMMSS --rocprof
 
 # Extract top GEMM kernels
 python scripts/gemm_analysis/analyze_gemm_reports.py \
