@@ -4,6 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.rocm70_9-1
+      network: host
     user: root
     privileged: true
     network_mode: host
