@@ -4,7 +4,7 @@
 
 # NCCL Debug Settings (enabled to track NaN/Inf failures)
 export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=COLL,INIT,NET
+export NCCL_DEBUG_SUBSYS=ALL
 
 # IB/RNIC Configuration for MI350X
 export NCCL_IB_HCA=bnxt_re0,bnxt_re1,bnxt_re2,bnxt_re3,bnxt_re4,bnxt_re5,bnxt_re6,bnxt_re7

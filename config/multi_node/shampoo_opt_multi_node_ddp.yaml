@@ -3,42 +3,34 @@
 # while AdamW and other optimizers remain healthy. Monitor loss closely.
 
 logging:
-  level: DEBUG
+  level: INFO
 
 training:
   epochs: 10
-  batch_size: 128
-  gradient_accumulation: 1
+  batch_size: 512
+  gradient_accumulation: 2
   mixed_precision: bf16
-  max_steps: 4400
-  grad_clip_norm: 0.5
+  max_steps: 2200
+  grad_clip_norm: 1.0
   output_dir: artifacts/user_shampoo
-  log_interval: 1
+  log_interval: 5
   additional_compute_streams: 2
   lightweight_op_waves: 3
-  # Collective stressor: inject extra all_reduce + host<->device copies each iteration.
-  # This perturbs multi-node timing/overlap patterns and can make rank-local instability easier to reproduce.
-  inject_allreduce_copies: true
-  # Clamped to [1, 10] in the trainer; higher means more stress per iteration.
-  allreduce_stress_level: 8
-  # Disable pre-step NaN/Inf scanning; rely on optimizer.step() (Shampoo) assertion to stop the job.
-  nan_check: false
-  nan_check_interval: 1
 
 optimizer:
   name: shampoo
   lr: 0.0002
   weight_decay: 0.01
   betas: [0.9, 0.985]
-  eps: 1.0e-12
+  eps: 1.0e-8
 
 scheduler:
-  warmup_steps: 100
-  total_steps: 4400
+  warmup_steps: 200
+  total_steps: 2200
 
 dataset:
   num_samples: 200000
-  sequence_length: 256
+  sequence_length: 160
   dense_dim: 256
   sparse_features: 64
   vocab_size: 350000
@@ -67,7 +59,7 @@ fsdp:
 
 distributed:
   backend: nccl
-  mode: fsdp
+  mode: ddp
   bucket_cap_mb: 128
   gradient_as_bucket_view: true
   static_graph: true
@@ -105,7 +97,7 @@ profiling:
   enabled: true
   wait: 0
   warmup: 0
-  active: 2000
+  active: 20
   repeat: 1
   record_shapes: false
   profile_memory: false

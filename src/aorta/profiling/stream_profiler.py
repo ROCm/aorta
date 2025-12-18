@@ -278,6 +278,16 @@ class DistributedOpsInterceptor:
         return None
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        # #region agent log
+        import json
+        import logging
+        log = logging.getLogger(__name__)
+        log.info("[INSTR_H1] DistributedOpsInterceptor.__exit__ | exc_type=%s", exc_type.__name__ if exc_type else None)
+        try:
+            with open("/apps/oyazdanb/.cursor/debug.log", "a") as f:
+                f.write(json.dumps({"location": "stream_profiler.py:280", "message": "DistributedOpsInterceptor exit", "data": {"exc_type": exc_type.__name__ if exc_type else None, "exc_msg": str(exc)[:200] if exc else None}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H1"}) + "\n")
+        except: pass
+        # #endregion
         for module, name, original in self._originals.values():
             setattr(module, name, original)
         self._originals.clear()

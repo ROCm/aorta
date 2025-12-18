@@ -29,9 +29,14 @@ from datetime import timedelta
 from aorta.data import SyntheticDatasetConfig, create_dataloader
 from aorta.models import ModelConfig, RankingTransformerModel
 from aorta.profiling.stream_profiler import StreamProfiler
+from aorta.training.nan_debugger import NaNDebugger
 from aorta.utils import detect_accelerator, get_device, get_distributed_backend, load_config, merge_cli_overrides, setup_logging
 
 log = logging.getLogger(__name__)
+
+
+class TrainingAbortError(RuntimeError):
+    """Raised to abort training quickly across ranks (e.g., fatal optimizer assertion)."""
 
 
 @dataclass
@@ -61,6 +66,8 @@ class TrainingConfig:
     output_dir: Path = Path("artifacts")
     inject_allreduce_copies: bool = False  # Inject all_reduce + host-device copies to trigger hang
     allreduce_stress_level: int = 1  # Number of all_reduce ops per iteration (1-10)
+    nan_check: bool = False  # Enable expensive NaN/Inf diagnostics (debug only)
+    nan_check_interval: int = 1  # Run NaN/Inf checks every N steps when enabled
 
 
 @dataclass
@@ -220,7 +227,9 @@ def set_seed(seed: int, rank: int) -> None:
 def init_distributed(training_cfg: TrainingConfig, log_level: str) -> Dict[str, Any]:
     
     backend = get_distributed_backend()
-    timeout_seconds = int(os.environ.get("TORCH_DIST_INIT_TIMEOUT", "600"))
+    # Reduce timeout for faster debugging of hangs (default 600s -> 120s)
+    # This timeout applies to ALL collective operations, not just initialization
+    timeout_seconds = int(os.environ.get("TORCH_DIST_INIT_TIMEOUT", "120"))
     dist.init_process_group(backend=backend, timeout=timedelta(seconds=timeout_seconds))
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -269,6 +278,11 @@ def build_fsdp_model(
         process_group = _create_hybrid_shard_process_groups(fsdp_cfg.hybrid_shard_gpus_per_node)
         if process_group is not None:
             log.info("Created custom process groups for HYBRID_SHARD strategy")
+            # #region agent log
+            rank = dist.get_rank() if dist.is_initialized() else -1
+            shard_pg, replicate_pg = process_group
+            log.info("[DEBUG_H3] Created HYBRID_SHARD process groups | rank=%d shard_pg_size=%d replicate_pg_size=%d", rank, dist.get_world_size(shard_pg), dist.get_world_size(replicate_pg))
+            # #endregion
 
     fsdp_model = FSDP(
         model.to(device),
@@ -458,6 +472,7 @@ def training_loop(
     profiler: StreamProfiler,
     enable_rocm_metrics: bool,
     profiler_cfg: ProfilerConfig,
+    nan_debugger: Optional[NaNDebugger] = None,
 ) -> None:
     rank = environment["rank"]
     world_size = environment["world_size"]
@@ -481,11 +496,29 @@ def training_loop(
     total_steps = training_cfg.max_steps or len(dataloader) * training_cfg.epochs
     global_step = 0
     stop_flag = {"stop": False}
+    nan_failure_flag = {"detected": False, "step": -1, "rank": -1}
     setup_signal_handlers(stop_flag)
 
     model.train()
 
     profiler_dir = training_cfg.output_dir / "torch_profiler"
+    
+    # Create TCPStore for coordinating trace export across ranks on NaN detection
+    store = None
+    if dist.is_initialized():
+        try:
+            store = dist.TCPStore(
+                host_name=os.environ.get("MASTER_ADDR", "localhost"),
+                port=int(os.environ.get("MASTER_PORT", "29500")) + 1,  # Use different port
+                world_size=world_size,
+                is_master=(rank == 0),
+                timeout=timedelta(seconds=10),
+            )
+            log.info("[Coordination] Created TCPStore for NaN coordination | rank=%d", rank)
+        except Exception as e:
+            log.warning("[Coordination] Failed to create TCPStore: %s | rank=%d", e, rank)
+            store = None
+    
     with profiler.intercept_distributed_ops():
         with _torch_profiler_context(profiler_cfg, profiler_dir, rank, device) as torch_profiler:
             for epoch in range(training_cfg.epochs):
@@ -493,6 +526,38 @@ def training_loop(
                     dataloader.sampler.set_epoch(epoch)
 
                 for step, cpu_batch in enumerate(dataloader):
+                    # Check if any rank detected NaN and signaled for trace export (non-blocking)
+                    if store is not None and not nan_failure_flag["detected"]:
+                        nan_signal = None
+                        try:
+                            # wait with zero timeout acts as a non-blocking presence check
+                            store.wait(["nan_detected"], timeout=0.0)
+                            nan_signal = store.get("nan_detected")
+                        except Exception:
+                            nan_signal = None
+                        if nan_signal:
+                            signal_data = json.loads(nan_signal.decode('utf-8'))
+                            nan_failure_flag["detected"] = True
+                            nan_failure_flag["step"] = signal_data.get("step", -1)
+                            nan_failure_flag["rank"] = signal_data.get("rank", -1)
+                            log.error(
+                                "[Coordination] Received NaN signal from rank %d at step %d | current_rank=%d current_step=%d",
+                                nan_failure_flag["rank"], nan_failure_flag["step"], rank, global_step
+                            )
+                            # Export this rank's trace
+                            if torch_profiler is not None and profiler_cfg.chrome_trace:
+                                try:
+                                    trace_file = profiler_dir / f"rank{rank}" / f"nan_coordinated_step{global_step}.json"
+                                    trace_file.parent.mkdir(parents=True, exist_ok=True)
+                                    log.info("[Profiler] Exporting trace due to NaN signal | rank=%d file=%s", rank, trace_file)
+                                    torch_profiler.export_chrome_trace(str(trace_file))
+                                    log.info("[Profiler] Trace export completed | rank=%d", rank)
+                                except Exception as export_err:
+                                    log.warning("[Profiler] Failed to export trace: %s | rank=%d", export_err, rank)
+                            # Stop training
+                            stop_flag["stop"] = True
+                            break
+                    
                     profiler.start_iteration(global_step)
 
                     with profiler.range("aux", f"epoch{epoch}_step{step}_prefetch"):
@@ -510,33 +575,142 @@ def training_loop(
                         else:
                             scores = model(batch)
                             loss = compute_loss(scores, batch)
+                    
+                    # Check loss for NaN/Inf with diagnostics
+                    if nan_debugger is not None:
+                        if nan_debugger.check_loss(loss, global_step):
+                            log.error("[NaNDebugger] NaN/Inf detected in loss - stopping training")
+                            if torch_profiler is not None and profiler_cfg.chrome_trace and getattr(torch_profiler, "_profiler", None) is not None:
+                                try:
+                                    trace_file = profiler_dir / f"rank{rank}" / f"nan_loss_step{global_step}.json"
+                                    trace_file.parent.mkdir(parents=True, exist_ok=True)
+                                    log.info("[Profiler] Exporting trace due to NaN loss | rank=%d file=%s", rank, trace_file)
+                                    torch_profiler.export_chrome_trace(str(trace_file))
+                                except Exception as export_err:
+                                    log.warning("[Profiler] Failed to export trace: %s | rank=%d", export_err, rank)
+                            else:
+                                log.warning("[Profiler] Skipping NaN loss trace export (profiler inactive) | rank=%d", rank)
+                            # Signal other ranks best-effort
+                            if store is not None and not nan_failure_flag["detected"]:
+                                try:
+                                    store.set("nan_detected", json.dumps({"step": global_step, "rank": rank}))
+                                except Exception as signal_err:
+                                    log.warning("[Coordination] Failed to send NaN signal from loss check: %s", signal_err)
+                            stop_flag["stop"] = True
+                            break
 
                     with profiler.range("compute", f"epoch{epoch}_step{step}_backward"):
                         if scaler is not None:
                             scaler.scale(loss).backward()
                         else:
                             loss.backward()
+                    
+                    # Check gradients for NaN/Inf with diagnostics
+                    if nan_debugger is not None:
+                        if nan_debugger.check_gradients(global_step):
+                            log.error("[NaNDebugger] NaN/Inf detected in gradients - stopping training")
+                            if torch_profiler is not None and profiler_cfg.chrome_trace and getattr(torch_profiler, "_profiler", None) is not None:
+                                try:
+                                    trace_file = profiler_dir / f"rank{rank}" / f"nan_gradients_step{global_step}.json"
+                                    trace_file.parent.mkdir(parents=True, exist_ok=True)
+                                    log.info("[Profiler] Exporting trace due to NaN gradients | rank=%d file=%s", rank, trace_file)
+                                    torch_profiler.export_chrome_trace(str(trace_file))
+                                except Exception as export_err:
+                                    log.warning("[Profiler] Failed to export trace: %s | rank=%d", export_err, rank)
+                            else:
+                                log.warning("[Profiler] Skipping NaN gradient trace export (profiler inactive) | rank=%d", rank)
+                            # Signal other ranks best-effort
+                            if store is not None and not nan_failure_flag["detected"]:
+                                try:
+                                    store.set("nan_detected", json.dumps({"step": global_step, "rank": rank}))
+                                except Exception as signal_err:
+                                    log.warning("[Coordination] Failed to send NaN signal from grad check: %s", signal_err)
+                            stop_flag["stop"] = True
+                            break
 
                     grad_norm = None
                     if training_cfg.grad_clip_norm is not None and training_cfg.grad_clip_norm > 0:
                         with profiler.range("aux", f"epoch{epoch}_step{step}_grad_clip"):
                             grad_norm = clip_grad_norm_(model.parameters(), training_cfg.grad_clip_norm)
 
+                   
                     with profiler.range("aux", f"epoch{epoch}_step{step}_optimizer"):
+                        # #region agent log
+                        log.info("[DEBUG_H1_H4] Before optimizer step | rank=%d global_step=%d stop_flag=%s", rank, global_step, stop_flag["stop"])
+                        # #endregion
+                        step_error_local = False
+                        step_error_msg: Optional[str] = None
+                        step_error_exception: Optional[Exception] = None
                         try:
                             if scaler is not None:
                                 scaler.step(optimizer)
                                 scaler.update()
                             else:
                                 optimizer.step()
-                        except AssertionError as e:
-                            if "NaN" in str(e) or "Inf" in str(e):
-                                log.error("NaN/Inf detected in rank %d at step %d: %s", rank, global_step, e)
-                                log.error("Stopping training to save traces")
-                                stop_flag["stop"] = True
-                                break
+                        except Exception as e:
+                            error_str = str(e)
+                            is_nan_inf = ("nan" in error_str.lower()) or ("inf" in error_str.lower())
+                            if isinstance(e, AssertionError) or is_nan_inf:
+                                # Some optimizers explicitly assert/raise when gradients contain NaN/Inf.
+                                # Do not synchronize a stop flag here: the optimizer may have been mid-collective.
+                                step_error_local = True
+                                step_error_msg = error_str
+                                step_error_exception = e
+                                
+                                # Signal to all other ranks that NaN detected (non-blocking)
+                                if store is not None and not nan_failure_flag["detected"]:
+                                    try:
+                                        signal_data = json.dumps({"step": global_step, "rank": rank})
+                                        store.set("nan_detected", signal_data)
+                                        nan_failure_flag["detected"] = True
+                                        nan_failure_flag["step"] = global_step
+                                        nan_failure_flag["rank"] = rank
+                                        log.info("[Coordination] Sent NaN signal to all ranks | rank=%d step=%d", rank, global_step)
+                                    except Exception as signal_err:
+                                        log.warning("[Coordination] Failed to send NaN signal: %s", signal_err)
+                                
+                                # Export this rank's profiler trace
+                                if torch_profiler is not None and profiler_cfg.chrome_trace and getattr(torch_profiler, "_profiler", None) is not None:
+                                    try:
+                                        trace_file = profiler_dir / f"rank{rank}" / f"nan_failure_step{global_step}.json"
+                                        trace_file.parent.mkdir(parents=True, exist_ok=True)
+                                        log.info("[Profiler] Exporting trace due to optimizer failure | rank=%d file=%s", rank, trace_file)
+                                        torch_profiler.export_chrome_trace(str(trace_file))
+                                        log.info("[Profiler] Trace export completed | rank=%d", rank)
+                                    except Exception as export_err:
+                                        log.warning("[Profiler] Failed to export trace: %s | rank=%d", export_err, rank)
+                                else:
+                                    log.warning("[Profiler] Skipping optimizer-failure trace export (profiler inactive) | rank=%d", rank)
+                                
+                                # Investigate root cause when optimizer detects NaN/Inf
+                                if nan_debugger is not None:
+                                    log.error("[NaNDebugger] Optimizer detected NaN/Inf - investigating root cause | rank=%d", rank)
+                                    log.error("[NaNDebugger] Optimizer error: %s", error_str)
+                                    # Investigate which gradients/parameters contain NaN/Inf
+                                    # These checks validate actual NaN/Inf counts to avoid false positives
+                                    nan_debugger.investigate_optimizer_failure(global_step, error_str)
+                                
+                                # Give other ranks time to see signal and export their traces
+                                import time
+                                time.sleep(2)  # 2 seconds for other ranks to export traces
                             else:
                                 raise
+
+                        # #region agent log
+                        log.info("[DEBUG_H4] After optimizer step | rank=%d global_step=%d step_error_local=%s step_error_msg=%s", rank, global_step, step_error_local, step_error_msg)
+                        # #endregion
+                        if step_error_local:
+                            # #region agent log
+                            log.error("[DEBUG_H4] Raising TrainingAbortError - will skip stress injection | rank=%d global_step=%d", rank, global_step)
+                            # #endregion
+                            log.error(
+                                "Fatal optimizer assertion; aborting training | rank=%d step=%d error=%s",
+                                rank,
+                                global_step,
+                                step_error_msg,
+                            )
+                            log.info("[DEBUG_RAISE] About to raise TrainingAbortError | rank=%d", rank)
+                            raise TrainingAbortError(step_error_msg or "optimizer assertion") from step_error_exception
 
                         if scheduler is not None:
                             scheduler.step()
@@ -545,12 +719,19 @@ def training_loop(
                     # Pattern: all_reduce → device-to-device copy → host-device copy → compute blocked
                     if training_cfg.inject_allreduce_copies:
                         if dist.is_initialized():
+                            # #region agent log
+                            log.info("[DEBUG_H1_H4] Entering stress injection block | rank=%d global_step=%d world_size=%d", rank, global_step, world_size)
+                            # #endregion
                             with profiler.range("aux", f"epoch{epoch}_step{step}_allreduce_sync"):
                                 # Perform multiple all_reduce + memory copy cycles
                                 # This stresses the pattern: all_reduce → device copies → hipMemcpyWithStream → rocprim deadlock
                                 stress_level = min(max(training_cfg.allreduce_stress_level, 1), 10)
 
                                 for i in range(stress_level):
+                                    # #region agent log
+                                    if i == 0 or i == stress_level - 1:
+                                        log.info("[DEBUG_H1_H5] Stress iteration %d/%d | rank=%d global_step=%d", i, stress_level, rank, global_step)
+                                    # #endregion
                                     # Create moderately-sized tensors to stress RCCL and memory copy
                                     # Size: ~4MB per tensor
                                     tensor_size = 1024 * 1024  # 1M elements = 4MB in FP32
@@ -597,6 +778,9 @@ def training_loop(
                                 # Host-device copy
                                 loss_cpu = loss_device_copy.cpu()
                                 _ = loss_cpu.to(device, non_blocking=False)
+                            # #region agent log
+                            log.info("[DEBUG_H1_H4] Completed stress injection block | rank=%d global_step=%d stress_level=%d", rank, global_step, stress_level)
+                            # #endregion
 
                     profiler.record_marker("compute", f"epoch{epoch}_step{step}_end")
 
@@ -648,6 +832,13 @@ def training_loop(
                     break
 
     metrics_logger.close()
+    # #region agent log
+    log.info("[INSTR_H1_H2_H3] Exiting training_loop normally | rank=%d", rank)
+    try:
+        with open("/apps/oyazdanb/.cursor/debug.log", "a") as f:
+            f.write(json.dumps({"location": "fsdp_trainer.py:889", "message": "Exiting training_loop normally", "data": {"rank": rank}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H1_H2_H3"}) + "\n")
+    except: pass
+    # #endregion
     
     if rank == 0:
         log.info("Training loop finished. Profiler will export traces in cleanup phase.")
@@ -668,6 +859,11 @@ def configure_optimizer(model: nn.Module, cfg: OptimizerConfig, dist_mode: str =
             communicate_params=False,
         )
         log.info("Using DistributedShampoo optimizer with DDPDistributedConfig")
+        # #region agent log
+        rank = dist.get_rank() if dist.is_initialized() else -1
+        world_size = dist.get_world_size() if dist.is_initialized() else -1
+        log.info("[DEBUG_H3] Creating DistributedShampoo optimizer | rank=%d world_size=%d dist_mode=%s num_trainers_per_group=-1", rank, world_size, dist_mode)
+        # #endregion
         optimizer = DistributedShampoo(
             model.parameters(),
             lr=cfg.lr,
@@ -748,6 +944,38 @@ def _restore_rocm_profiler_env() -> None:
 def _torch_profiler_context(
     cfg: ProfilerConfig, output_dir: Path, rank: int, device: torch.device
 ) -> Generator[Optional[profile], None, None]:
+    def _profiler_active(prof_obj: profile) -> bool:
+        return getattr(prof_obj, "_profiler", None) is not None
+
+    def _export_traces(prof_obj: profile, rank_dir: Path) -> None:
+        try:
+            stats_available = prof_obj._stats() is not None  # type: ignore[attr-defined]
+        except Exception:
+            stats_available = False
+
+        if not stats_available or not _profiler_active(prof_obj):
+            log.warning("Torch profiler inactive or stats unavailable; skipping trace export | rank=%d", rank)
+            return
+
+        if cfg.chrome_trace:
+            stem, ext = os.path.splitext(cfg.trace_filename)
+            if not ext:
+                ext = ".json"
+            trace_name = f"{stem}{ext}"
+            try:
+                prof_obj.export_chrome_trace(str(rank_dir / trace_name))
+                log.info("Exported chrome trace to %s/%s", rank_dir, trace_name)
+            except Exception as exc:
+                log.warning("Chrome trace export failed: %s", exc, exc_info=True)
+
+        if cfg.tensorboard:
+            try:
+                handler = tensorboard_trace_handler(str(rank_dir))
+                handler(prof_obj)
+                log.info("Exported TensorBoard trace to %s", rank_dir)
+            except Exception as exc:
+                log.warning("TensorBoard trace export failed: %s", exc, exc_info=True)
+
     if not cfg.enabled:
         yield None
         return
@@ -783,34 +1011,25 @@ def _torch_profiler_context(
         with_flops=cfg.with_flops,
     )
 
+    # Disable profiler trace export to avoid delays during exception handling
+    # Just enter/exit the profiler and let exceptions propagate naturally
+    log.info("[INSTR_H2] About to enter torch profiler context | rank=%d", rank)
     try:
         prof.__enter__()
+        log.info("[INSTR_H2] Inside torch profiler, about to yield | rank=%d", rank)
         yield prof
+        log.info("[INSTR_H2] Back from yield, exiting normally | rank=%d", rank)
+    except Exception as prof_exc:
+        log.error("[INSTR_H2] Torch profiler caught exception | rank=%d exc_type=%s", rank, type(prof_exc).__name__)
+        raise
     finally:
-        prof.__exit__(None, None, None)
-        produce_tb = cfg.tensorboard
-        produce_chrome = cfg.chrome_trace
-        
-        if produce_tb:
-            try:
-                handler = tensorboard_trace_handler(str(rank_dir))
-                handler(prof)
-                log.info("Exported TensorBoard trace to %s", rank_dir)
-            except Exception as exc:
-                log.warning("TensorBoard trace export failed: %s", exc)
-
-        if produce_chrome:
-            stem, ext = os.path.splitext(cfg.trace_filename)
-            if not ext:
-                ext = ".json"
-            trace_name = f"{stem}{ext}"
-            if cfg.repeat != 1 or cfg.active > 1:
-                trace_name = f"{stem}_step{prof.step_num}{ext}"
-            try:
-                prof.export_chrome_trace(str(rank_dir / trace_name))
-                log.info("Exported chrome trace to %s/%s", rank_dir, trace_name)
-            except Exception as exc:
-                log.warning("Chrome trace export failed: %s", exc)
+        log.info("[INSTR_H2] Torch profiler finally block | rank=%d", rank)
+        # Always clean up profiler, even on exception
+        try:
+            prof.__exit__(None, None, None)
+        except Exception:
+            pass  # Ignore cleanup errors
+        _export_traces(prof, rank_dir)
 
 
 def main_cli() -> None:  # pragma: no cover - CLI entry
@@ -880,7 +1099,26 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
     )
 
     profiler = StreamProfiler(env["device"])
+    
+    # Initialize NaN debugger for automatic root cause analysis
+    nan_debugger = NaNDebugger(
+        model=model,
+        optimizer=optimizer,
+        config=config,
+        output_dir=str(training_cfg.output_dir / "nan_diagnostics"),
+        rank=rank,
+        enabled=True,  # Always enabled for automatic diagnostics
+    )
+    log.info("[NaNDebugger] Initialized for automatic NaN detection and diagnosis")
 
+    had_fatal_error = False
+    # #region agent log
+    log.info("[INSTR_H3] About to call training_loop | rank=%d", env["rank"])
+    try:
+        with open("/apps/oyazdanb/.cursor/debug.log", "a") as f:
+            f.write(json.dumps({"location": "fsdp_trainer.py:1145", "message": "About to call training_loop", "data": {"rank": env["rank"]}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H3"}) + "\n")
+    except: pass
+    # #endregion
     try:
         training_loop(
             model,
@@ -892,13 +1130,45 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
             profiler,
             enable_rocm_metrics,
             profiler_cfg,
+            nan_debugger,
         )
+    except TrainingAbortError as e:
+        # #region agent log
+        log.info("[INSTR_H3] Caught TrainingAbortError in main() except block | rank=%d", env["rank"])
+        try:
+            with open("/apps/oyazdanb/.cursor/debug.log", "a") as f:
+                f.write(json.dumps({"location": "fsdp_trainer.py:1157", "message": "Caught TrainingAbortError in main", "data": {"rank": env["rank"], "error": str(e)[:200]}, "timestamp": __import__("time").time() * 1000, "sessionId": "debug-session", "hypothesisId": "H3"}) + "\n")
+        except: pass
+        # #endregion
+        log.info("[DEBUG_CATCH] Caught TrainingAbortError in main() | rank=%d error=%s", env["rank"], str(e)[:100])
+        had_fatal_error = True
+        raise
     finally:
         if dist.is_initialized():
-            try:
-                dist.barrier()
-            except Exception as e:
-                log.warning("Barrier failed during cleanup: %s", e)
+            # #region agent log
+            rank = dist.get_rank() if dist.is_initialized() else -1
+            log.info("[DEBUG_H2_H4] Entering cleanup finally block | rank=%d had_fatal_error=%s", rank, had_fatal_error)
+            # #endregion
+            if had_fatal_error:
+                # Best-effort fast shutdown on fatal rank-local errors (e.g., optimizer assertions).
+                # Avoid barrier: it can hang if ranks diverged mid-collective.
+                # #region agent log
+                log.info("[DEBUG_H4] Fatal error path - calling dist.abort | rank=%d", rank)
+                # #endregion
+                abort_fn = getattr(dist, "abort", None)
+                if callable(abort_fn):
+                    try:
+                        abort_fn()
+                    except Exception as e:
+                        log.warning("dist.abort() failed during cleanup: %s", e)
+            else:
+                # #region agent log
+                log.info("[DEBUG_H2] Normal cleanup - calling barrier | rank=%d", rank)
+                # #endregion
+                try:
+                    dist.barrier()
+                except Exception as e:
+                    log.warning("Barrier failed during cleanup: %s", e)
             try:
                 dist.destroy_process_group()
             except Exception as e:

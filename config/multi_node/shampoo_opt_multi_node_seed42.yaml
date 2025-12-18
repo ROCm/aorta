@@ -1,6 +1,7 @@
 # Shampoo-only variant of the user workload.
 # NOTE: User reports this configuration produces NaNs when using Shampoo,
 # while AdamW and other optimizers remain healthy. Monitor loss closely.
+# SEED: 42 (baseline)
 
 logging:
   level: DEBUG
@@ -11,17 +12,13 @@ training:
   gradient_accumulation: 1
   mixed_precision: bf16
   max_steps: 4400
-  grad_clip_norm: 0.5
-  output_dir: artifacts/user_shampoo
+  grad_clip_norm: 1
+  output_dir: artifacts/user_shampoo_seed42
   log_interval: 1
   additional_compute_streams: 2
   lightweight_op_waves: 3
-  # Collective stressor: inject extra all_reduce + host<->device copies each iteration.
-  # This perturbs multi-node timing/overlap patterns and can make rank-local instability easier to reproduce.
   inject_allreduce_copies: true
-  # Clamped to [1, 10] in the trainer; higher means more stress per iteration.
   allreduce_stress_level: 8
-  # Disable pre-step NaN/Inf scanning; rely on optimizer.step() (Shampoo) assertion to stop the job.
   nan_check: false
   nan_check_interval: 1
 
@@ -33,12 +30,12 @@ optimizer:
   eps: 1.0e-12
 
 scheduler:
-  warmup_steps: 100
-  total_steps: 4400
+  warmup_steps: 200
+  total_steps: 2200
 
 dataset:
   num_samples: 200000
-  sequence_length: 256
+  sequence_length: 512
   dense_dim: 256
   sparse_features: 64
   vocab_size: 350000
@@ -117,3 +114,4 @@ profiling:
 
 tracelens:
   enabled: false
+
