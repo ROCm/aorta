@@ -11,6 +11,7 @@ usage() {
     echo "  -p, --nproc NPROC           Number of processes per node (default: 8)"
     echo "  -d, --docker CONTAINER      Docker container name (default: training-overlap-bugs-rocm70_9-1)"
     echo "  -l, --label LABEL           Custom label to add to experiment folder name"
+    echo "  -w, --amd-wait              Enable AMD_OCL_WAIT_COMMAND=1 (all nodes)"
     echo "  -r, --rocprof               Enable rocprofv3 tracing"
     echo "  -m, --stats                 Enable rocprof stats (CU utilization, occupancy)"
     echo "      --rocprof-input FILE    Use rocprofv3 input yaml/json"
@@ -40,6 +41,7 @@ CHANNELS="${CHANNELS:-28}"
 THREADS="${THREADS:-256}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-training-overlap-bugs-rocm70_9-1}"
 LABEL="${LABEL:-}"
+AMD_WAIT="${AMD_WAIT:-false}"
 ENABLE_ROCPROF="${ENABLE_ROCPROF:-false}"
 ROCPROF_STATS="${ROCPROF_STATS:-false}"
 ROCPROF_INPUT="${ROCPROF_INPUT:-}"
@@ -71,6 +73,10 @@ while [[ $# -gt 0 ]]; do
         -l|--label)
             LABEL="$2"
             shift 2
+            ;;
+        -w|--amd-wait)
+            AMD_WAIT="true"
+            shift
             ;;
         -r|--rocprof)
             ENABLE_ROCPROF="true"
@@ -166,6 +172,7 @@ Configuration:
 - RCCL Threads: $THREADS
 - Processes per node: $NPROC_PER_NODE
 - Docker container: $DOCKER_CONTAINER
+- AMD_OCL_WAIT_COMMAND: $AMD_WAIT
 - rocprof enabled: $ENABLE_ROCPROF
 
 Git Info:
@@ -175,7 +182,7 @@ Git Info:
 - Status: $(git diff --quiet 2>/dev/null && echo "clean" || echo "modified")
 
 Command:
-$0 --channels $CHANNELS --threads $THREADS --nproc $NPROC_PER_NODE --config $CONFIG_FILE --docker $DOCKER_CONTAINER${LABEL:+ --label $LABEL}${ENABLE_ROCPROF:+ --rocprof}
+$0 --channels $CHANNELS --threads $THREADS --nproc $NPROC_PER_NODE --config $CONFIG_FILE --docker $DOCKER_CONTAINER${LABEL:+ --label $LABEL}$([ "$AMD_WAIT" = "true" ] && echo " --amd-wait")${ENABLE_ROCPROF:+ --rocprof}
 
 Notes:
 (Add notes here about code changes, hypothesis, etc.)
@@ -188,6 +195,7 @@ echo "NCCL Channels: $CHANNELS"
 echo "RCCL Threads per block: $THREADS"
 echo "Processes per node: $NPROC_PER_NODE"
 echo "Custom label: ${LABEL:-none}"
+echo "AMD_OCL_WAIT_COMMAND: $AMD_WAIT"
 echo "rocprof enabled: $ENABLE_ROCPROF"
 
 NUM_NODES=$(awk 'NF' "$MACHINE_IP_FILE" | wc -l)
@@ -216,14 +224,14 @@ while IFS= read -r HOST || [[ -n "$HOST" ]]; do  # HOST can be hostname or IP
       echo ""
 
       ./scripts/multi_node/config_node.sh "$node" "$HOST" "$MASTER_ADDR" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" "$AORTA_ROOT" "$EXPERIMENT_DIR" \
-        "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" "$DOCKER_CONTAINER" \
+        "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" "$DOCKER_CONTAINER" "$AMD_WAIT" \
         > "$LOG_FILE" 2>&1 &
 
   else
       # Note: stdin explicitly redirected from config_node.sh, so -n flag not needed
       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
           "$USER"@"$HOST" "DOCKER_CONTAINER='$DOCKER_CONTAINER' bash -s -- '$node' '$HOST' '$MASTER_ADDR' '$MASTER_PORT' '$NNODES' '$WORLD_SIZE' '$AORTA_ROOT' '$EXPERIMENT_DIR' \
-          '$CONFIG_FILE' '$NPROC_PER_NODE' '$CHANNELS' '$THREADS' '$ENABLE_ROCPROF' '$ROCPROF_STATS' '$ROCPROF_INPUT'" \
+          '$CONFIG_FILE' '$NPROC_PER_NODE' '$CHANNELS' '$THREADS' '$ENABLE_ROCPROF' '$ROCPROF_STATS' '$ROCPROF_INPUT' '$DOCKER_CONTAINER' '$AMD_WAIT'" \
         < ./scripts/multi_node/config_node.sh \
         > "$LOG_FILE" 2>&1 &
   fi

@@ -20,11 +20,15 @@ ROCPROF_INPUT=$(echo "${15}" | sed 's/"//g')
 # DOCKER_CONTAINER passed via environment variable, fallback to param 16 or default
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-$(echo "${16}" | sed 's/"//g')}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-training-overlap-bugs-rocm70_9-1}"
+AMD_WAIT=$(echo "${17}" | sed 's/"//g')
+AMD_WAIT="${AMD_WAIT:-false}"
 
 echo "============================================"
-echo "DEBUG: Received ${16} parameters"
+echo "DEBUG: Received parameters"
 echo "DEBUG: Param 16 (DOCKER_CONTAINER) = '${16}'"
-echo "DEBUG: After processing = '$DOCKER_CONTAINER'"
+echo "DEBUG: Param 17 (AMD_WAIT) = '${17}'"
+echo "DEBUG: After processing DOCKER_CONTAINER = '$DOCKER_CONTAINER'"
+echo "DEBUG: After processing AMD_WAIT = '$AMD_WAIT'"
 echo "============================================"
 echo "Node Configuration"
 echo "============================================"
@@ -41,6 +45,7 @@ echo "Config File: $CONFIG_FILE"
 echo "Channels: $CHANNELS"
 echo "Threads: $THREADS"
 echo "Docker Container: $DOCKER_CONTAINER"
+echo "AMD_OCL_WAIT_COMMAND: $AMD_WAIT"
 echo "============================================"
 echo ""
 
@@ -73,7 +78,7 @@ echo ""
 "$WORKDIR/scripts/multi_node/local_launch.sh" \
     "$NODE_RANK" "$NODE_IP" "$MASTER_IP" "$MASTER_PORT" "$NNODES" "$WORLD_SIZE" \
     "$EXPERIMENT_DIR" "$CONFIG_FILE" "$NPROC_PER_NODE" "$CHANNELS" "$THREADS" \
-    "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" "$DOCKER_CONTAINER"
+    "$ENABLE_ROCPROF" "$ROCPROF_STATS" "$ROCPROF_INPUT" "$DOCKER_CONTAINER" "$AMD_WAIT"
 
 echo ""
 echo "============================================"

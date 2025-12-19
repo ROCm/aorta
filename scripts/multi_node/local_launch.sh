@@ -3,7 +3,7 @@
 # Runs on each node with single channel/thread configuration
 
 if [[ $# -lt 11 ]]; then
-  echo "Usage: $0 <NODE_RANK> <NODE_IP> <MASTER_IP> <MASTER_PORT> <NNODES> <WORLD_SIZE> <EXPERIMENT_DIR> <CONFIG_FILE> <NPROC_PER_NODE> <CHANNELS> <THREADS> [ENABLE_ROCPROF] [ROCPROF_STATS] [ROCPROF_INPUT] [DOCKER_CONTAINER]"
+  echo "Usage: $0 <NODE_RANK> <NODE_IP> <MASTER_IP> <MASTER_PORT> <NNODES> <WORLD_SIZE> <EXPERIMENT_DIR> <CONFIG_FILE> <NPROC_PER_NODE> <CHANNELS> <THREADS> [ENABLE_ROCPROF] [ROCPROF_STATS] [ROCPROF_INPUT] [DOCKER_CONTAINER] [AMD_WAIT]"
   exit 1
 fi
 
@@ -22,6 +22,7 @@ ENABLE_ROCPROF="${12:-false}"
 ROCPROF_STATS="${13:-false}"
 ROCPROF_INPUT="${14:-}"
 DOCKER_CONTAINER="${15:-training-overlap-bugs-rocm70_9-1}"
+AMD_WAIT="${16:-false}"
 
 echo "=========================================="
 echo "Local Launch Configuration"
@@ -37,6 +38,7 @@ echo "Experiment Dir: $EXPERIMENT_DIR"
 echo "Config File: $CONFIG_FILE"
 echo "Channels: $CHANNELS"
 echo "Threads: $THREADS"
+echo "AMD_OCL_WAIT_COMMAND: $AMD_WAIT"
 echo "rocprof enabled: $ENABLE_ROCPROF"
 echo "=========================================="
 echo ""
@@ -125,7 +127,15 @@ DOCKER_EXEC="docker exec \
     -e TORCH_NCCL_TRACE_BUFFER_SIZE=10000 \
     -e TORCH_NCCL_DUMP_ON_TIMEOUT=1 \
     -e TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=120 \
-    -e TORCH_NCCL_BLOCKING_WAIT=0 \
+    -e TORCH_NCCL_BLOCKING_WAIT=0"
+
+# Add AMD_OCL_WAIT_COMMAND if enabled
+if [ "$AMD_WAIT" = "true" ]; then
+    DOCKER_EXEC="$DOCKER_EXEC \
+    -e AMD_OCL_WAIT_COMMAND=1"
+fi
+
+DOCKER_EXEC="$DOCKER_EXEC \
     ${DOCKER_CONTAINER}"
 
 # Run with or without rocprofv3

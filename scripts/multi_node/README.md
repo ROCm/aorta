@@ -125,6 +125,9 @@ See `EXPERIMENT_TRACKING.txt` for workflow patterns.
 
 # Custom parameters
 ./scripts/multi_node/master_launch.sh -c 28 -t 256 -p 4 -f config/custom.yaml
+
+# Enable AMD_OCL_WAIT_COMMAND=1 on all nodes
+./scripts/multi_node/master_launch.sh --amd-wait --label with_amd_wait
 ```
 
 ### Parameters
@@ -137,6 +140,7 @@ See `EXPERIMENT_TRACKING.txt` for workflow patterns.
 | -f | --config | config/multi_node/distributed_multinode.yaml | Config file |
 | -d | --docker | training-overlap-bugs-rocm70_9-1 | Docker container name |
 | -l | --label | none | Experiment label |
+| -w | --amd-wait | false | Enable AMD_OCL_WAIT_COMMAND=1 |
 | -r | --rocprof | false | Enable rocprofv3 |
 | -m | --stats | false | rocprof stats |
 |  | --rocprof-input | none | rocprof yaml |
