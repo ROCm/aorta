@@ -24,7 +24,7 @@ training:
   debug_stream_race_report: true
   debug_stream_race_report_max_steps: 50
   debug_stream_race_report_wait: false
-  aux_wait_compute_after_backward: false
+  aux_wait_compute_after_backward: true
 
 optimizer:
   name: adamw

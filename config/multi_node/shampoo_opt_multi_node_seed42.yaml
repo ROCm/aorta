@@ -1,6 +1,5 @@
-# Shampoo-only variant of the user workload.
-# NOTE: User reports this configuration produces NaNs when using Shampoo,
-# while AdamW and other optimizers remain healthy. Monitor loss closely.
+# AdamW optimizer variant of the user workload.
+# AdamW is more numerically stable than Shampoo for large embeddings.
 # SEED: 42 (baseline)
 
 logging:
@@ -13,21 +12,26 @@ training:
   mixed_precision: bf16
   max_steps: 4400
   grad_clip_norm: 1
-  output_dir: artifacts/user_shampoo_seed42
+  output_dir: artifacts/user_adamw_seed42
   log_interval: 1
   additional_compute_streams: 2
   lightweight_op_waves: 3
-  inject_allreduce_copies: true
+  inject_allreduce_copies: false
   allreduce_stress_level: 8
-  nan_check: false
-  nan_check_interval: 1
+  # Stream/grad safety + diagnostics:
+  # - debug_stream_race_report: logs if "aux" touches grads before "compute" backward completes.
+  # - aux_wait_compute_after_backward: enforces correct ordering (recommended for correctness).
+  debug_stream_race_report: true
+  debug_stream_race_report_max_steps: 50
+  debug_stream_race_report_wait: false
+  aux_wait_compute_after_backward: true
 
 optimizer:
   name: shampoo
   lr: 0.0002
   weight_decay: 0.01
-  betas: [0.9, 0.985]
-  eps: 1.0e-12
+  betas: [0.9, 0.98]
+  eps: 1.0e-8
 
 scheduler:
   warmup_steps: 200
@@ -99,7 +103,7 @@ dataloader:
   pin_memory: true
 
 profiling:
-  enabled: true
+  enabled: false
   wait: 0
   warmup: 0
   active: 2000
@@ -110,7 +114,7 @@ profiling:
   with_flops: false
   tensorboard: false
   chrome_trace: true
-  trace_filename: user_shampoo.json
+  trace_filename: user_adamw.json
 
 tracelens:
   enabled: false
