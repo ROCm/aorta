@@ -66,6 +66,14 @@ class TrainingConfig:
     output_dir: Path = Path("artifacts")
     inject_allreduce_copies: bool = False  # Inject all_reduce + host-device copies to trigger hang
     allreduce_stress_level: int = 1  # Number of all_reduce ops per iteration (1-10)
+    # Debug: detect potential stream race where "aux" touches gradients before "compute" backward is complete.
+    # This is expected behavior on both CUDA and ROCm/HIP unless you explicitly synchronize streams.
+    debug_stream_race_report: bool = False
+    debug_stream_race_report_max_steps: int = 50
+    debug_stream_race_report_wait: bool = False  # If True, also enforce correct ordering (slow; debugging only).
+    # Correctness toggle: ensure "aux" stream does not touch gradients before "compute" backward finishes.
+    # Recommended True when using multi-stream "aux" grad work (clipping/checks/etc.).
+    aux_wait_compute_after_backward: bool = False
 
 
 @dataclass
@@ -596,22 +604,50 @@ def training_loop(
                         else:
                             loss.backward()
                     
+                    # Optional debug: detect whether backward work on "compute" is still in flight when we are
+                    # about to touch gradients on "aux". If this triggers, you must add a stream dependency
+                    # (e.g., aux.wait_stream(compute)) or run grad ops on the compute stream.
+                    backward_done_event: Optional[torch.cuda.Event] = None
+                    if (
+                        training_cfg.debug_stream_race_report
+                        and device.type == "cuda"
+                        and global_step <= training_cfg.debug_stream_race_report_max_steps
+                    ):
+                        backward_done_event = torch.cuda.Event(enable_timing=False, blocking=False)
+                        backward_done_event.record(profiler.stream("compute"))
+
                     # IMPORTANT: backward ran on the "compute" stream. Any subsequent gradient reads/clipping/checks
                     # must wait for "compute" to finish, otherwise we can observe partially-written gradients
                     # (leading to inconsistent NaN/finite stats across checks).
-                    '''if device.type == "cuda":
-                        profiler.stream("aux").wait_stream(profiler.stream("compute"))'''
+                    if device.type == "cuda" and training_cfg.aux_wait_compute_after_backward:
+                        profiler.stream("aux").wait_stream(profiler.stream("compute"))
 
                     # Track parameter evolution before clipping (for debugging)
                     # Continue tracking until NaN is detected or step 20
                     if nan_debugger is not None and not nan_debugger.nan_detected and global_step <= 20:
                         with profiler.range("aux", f"epoch{epoch}_step{step}_param_track_preclip"):
+                            if backward_done_event is not None and not backward_done_event.query():
+                                log.warning(
+                                    "[StreamRaceReport] aux reached param tracking before compute backward finished | "
+                                    "rank=%d step=%d",
+                                    rank, global_step,
+                                )
+                                if training_cfg.debug_stream_race_report_wait:
+                                    profiler.stream("aux").wait_stream(profiler.stream("compute"))
                             nan_debugger.track_parameter_evolution(global_step)
                     
                     # Clip gradients first to prevent extreme values
                     grad_norm = None
                     if training_cfg.grad_clip_norm is not None and training_cfg.grad_clip_norm > 0:
                         with profiler.range("aux", f"epoch{epoch}_step{step}_grad_clip"):
+                            if backward_done_event is not None and not backward_done_event.query():
+                                log.warning(
+                                    "[StreamRaceReport] aux reached grad clipping before compute backward finished | "
+                                    "rank=%d step=%d",
+                                    rank, global_step,
+                                )
+                                if training_cfg.debug_stream_race_report_wait:
+                                    profiler.stream("aux").wait_stream(profiler.stream("compute"))
                             grad_norm = clip_grad_norm_(model.parameters(), training_cfg.grad_clip_norm)
                     
                     # Check gradients for NaN/Inf with diagnostics (after clipping)

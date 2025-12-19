@@ -18,13 +18,20 @@ training:
   lightweight_op_waves: 3
   inject_allreduce_copies: false
   allreduce_stress_level: 8
+  # Stream/grad safety + diagnostics:
+  # - debug_stream_race_report: logs if "aux" touches grads before "compute" backward completes.
+  # - aux_wait_compute_after_backward: enforces correct ordering (recommended for correctness).
+  debug_stream_race_report: true
+  debug_stream_race_report_max_steps: 50
+  debug_stream_race_report_wait: false
+  aux_wait_compute_after_backward: false
 
 optimizer:
   name: adamw
   lr: 0.0002
   weight_decay: 0.01
   betas: [0.9, 0.98]
-  eps: 1.0e-12
+  eps: 1.0e-8
 
 scheduler:
   warmup_steps: 200
