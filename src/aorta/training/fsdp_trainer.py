@@ -599,8 +599,8 @@ def training_loop(
                     # IMPORTANT: backward ran on the "compute" stream. Any subsequent gradient reads/clipping/checks
                     # must wait for "compute" to finish, otherwise we can observe partially-written gradients
                     # (leading to inconsistent NaN/finite stats across checks).
-                    '''if device.type == "cuda":
-                        profiler.stream("aux").wait_stream(profiler.stream("compute"))'''
+                    if device.type == "cuda":
+                        profiler.stream("aux").wait_stream(profiler.stream("compute"))
 
                     # Track parameter evolution before clipping (for debugging)
                     # Continue tracking until NaN is detected or step 20

@@ -13,7 +13,7 @@ usage() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AORTA_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+AORTA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 if [[ $# -eq 0 ]]; then
     usage
