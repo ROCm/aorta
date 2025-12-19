@@ -361,28 +361,22 @@ def load_run_data(directory):
     return label, summary, gpu_time, nccl_df
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--inputs",
-        type=str,
-        nargs="+",
-        required=True,
-        help="List of directories containing gpu_timeline_summary_mean.xlsx",
-    )
+def load_all_runs(directories):
+    """
+    Load GPU timeline and NCCL data from multiple run directories.
 
-    parser.add_argument("--output", type=Path, required=True, help="Output xls file name")
-    args = parser.parse_args()
+    Args:
+        directories: List of paths to run directories
 
-    args.output.mkdir(parents=True, exist_ok=True)
-
+    Returns:
+        tuple: (labels, summary_dfs, gpu_time_per_rank_dfs, nccl_dfs)
+    """
     labels = []
     summary_dfs = []
     gpu_time_per_rank_dfs = []
     nccl_dfs = []
 
-    # Load all the data
-    for directory in args.inputs:
+    for directory in directories:
         result = load_run_data(directory)
         if result is None:
             continue
@@ -393,7 +387,21 @@ def main():
         gpu_time_per_rank_dfs.append(gpu_time)
         nccl_dfs.append(nccl_df)
 
-    # Merge all DataFrames on 'type'
+    return labels, summary_dfs, gpu_time_per_rank_dfs, nccl_dfs
+
+
+def merge_all_dataframes(summary_dfs, gpu_time_per_rank_dfs, nccl_dfs):
+    """
+    Merge all DataFrames from multiple runs into single DataFrames.
+
+    Args:
+        summary_dfs: List of summary DataFrames
+        gpu_time_per_rank_dfs: List of GPU time per rank DataFrames
+        nccl_dfs: List of NCCL DataFrames
+
+    Returns:
+        tuple: (summary_df, gpu_time_per_rank_df, nccl_df)
+    """
     summary_df = summary_dfs[0]
     gpu_time_per_rank_df = gpu_time_per_rank_dfs[0]
     nccl_df = nccl_dfs[0]
@@ -405,41 +413,114 @@ def main():
         )
         nccl_df = pd.merge(nccl_df, nccl_dfs[i], on="index", how="outer")
 
+    return summary_df, gpu_time_per_rank_df, nccl_df
+
+
+def process_and_save_data(input_dirs, output_dir):
+    """
+    Load, merge, calculate metrics, and save all data to Excel.
+
+    Args:
+        input_dirs: List of input directories containing run data
+        output_dir: Path to output directory
+
+    Returns:
+        tuple: (labels, summary_df, gpu_time_per_rank_df, nccl_df)
+    """
+    # Load all the data
+    labels, summary_dfs, gpu_time_per_rank_dfs, nccl_dfs = load_all_runs(input_dirs)
+
+    # Merge all DataFrames on 'type'
+    summary_df, gpu_time_per_rank_df, nccl_df = merge_all_dataframes(
+        summary_dfs, gpu_time_per_rank_dfs, nccl_dfs
+    )
+
     # Calculate the percentage change in gpu time
     summary_df = calculate_gpu_timepercentage_change(summary_df, labels)
 
     # Save the data to an excel file
     with pd.ExcelWriter(
-        args.output / "final_analysis_report_for_all.xlsx", engine="openpyxl"
+        output_dir / "final_analysis_report_for_all.xlsx", engine="openpyxl"
     ) as writer:
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
         gpu_time_per_rank_df.to_excel(writer, sheet_name="Per_Rank_Time_ms", index=False)
         nccl_df.to_excel(writer, sheet_name="NCCL_Summary", index=False)
 
-    # Generate the plots
-    output_dir = Path(args.output) / "plots"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    return labels, summary_df, gpu_time_per_rank_df, nccl_df
+
+
+def generate_all_plots(summary_df, gpu_time_per_rank_df, nccl_df, labels, output_dir):
+    """
+    Generate all comparison plots.
+
+    Args:
+        summary_df: Summary DataFrame with percentage changes
+        gpu_time_per_rank_df: GPU time per rank DataFrame
+        nccl_df: NCCL DataFrame
+        labels: List of run labels
+        output_dir: Directory to save plots
+    """
     plot_gpu_time_percentage_change(summary_df, labels, output_dir)
     plot_gpu_time_summary(summary_df, labels, output_dir)
     plot_all_types_per_rank(gpu_time_per_rank_df, labels, output_dir)
     plot_nccl_data_per_msg(nccl_df, labels, output_dir)
 
-    # create the final html
+
+def generate_html_report(plots_dir, output_path):
+    """
+    Generate final HTML report from plots.
+
+    Args:
+        plots_dir: Directory containing plot files
+        output_path: Path for the output HTML file
+    """
     html_script_path = Path(__file__).parent / "create_final_html.py"
     cmd = [
         "python3",
         str(html_script_path),
         "--plot-files-directory",
-        str(output_dir),
+        str(plots_dir),
         "--output-html",
-        str(args.output / "final_analysis_report_for_all.html"),
+        str(output_path),
     ]
     if run_command(cmd, "Creating final HTML"):
-        print(
-            f"Final HTML file created at: {args.output.parent / 'final_analysis_report_for_all.html'}"
-        )
+        print(f"Final HTML file created at: {output_path}")
     else:
         print("Failed to create final HTML file")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--inputs",
+        type=str,
+        nargs="+",
+        required=True,
+        help="List of directories containing gpu_timeline_summary_mean.xlsx",
+    )
+
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Output directory name containing merged data and visualisations (plots and html)",
+    )
+    args = parser.parse_args()
+
+    args.output.mkdir(parents=True, exist_ok=True)
+
+    # Load, merge, calculate, and save data
+    labels, summary_df, gpu_time_per_rank_df, nccl_df = process_and_save_data(
+        args.inputs, args.output
+    )
+
+    # Generate the plots
+    output_dir = Path(args.output) / "plots"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generate_all_plots(summary_df, gpu_time_per_rank_df, nccl_df, labels, output_dir)
+
+    # create the final html
+    generate_html_report(output_dir, args.output / "final_analysis_report_for_all.html")
 
 
 if __name__ == "__main__":

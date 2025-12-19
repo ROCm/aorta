@@ -222,13 +222,15 @@ Examples:
         action="store_true",
         help="Generate visualization plots and HTML report from final report",
     )
-    parser.add_argument(
+
+    # Mutually exclusive group for --all and --compare-all-runs
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--all",
         action="store_true",
         help="Perform all analyses and comparisons including final report",
     )
-
-    parser.add_argument(
+    mode_group.add_argument(
         "--compare-all-runs",
         action="store_true",
         help="Merge all TraceLens analysis into a single report",
@@ -241,8 +243,7 @@ Examples:
         args.collective = True
         args.final_report = True
         args.generate_plots = True
-
-    if args.compare_all_runs:
+    elif args.compare_all_runs:
         args.gpu_timeline = True
         args.collective = False
         args.final_report = False
