@@ -32,6 +32,9 @@ aorta/
 │   ├── config_node.sh                  # Per-node setup
 │   ├── local_launch.sh                 # Per-node training (runs in Docker)
 │   ├── set_env_variables.sh            # NCCL/RCCL config
+│   ├── experiment_list.sh              # List experiments
+│   ├── experiment_note.sh              # Add notes to experiments
+│   ├── EXPERIMENT_TRACKING.txt         # Experiment workflow guide
 │   └── node_ip_list.txt                # Hostnames (Conductor) or IPs (Slurm)
 ├── docker/
 │   ├── docker-compose.rocm70_9-1.yaml         # Default Docker config
@@ -92,6 +95,28 @@ docker exec training-overlap-bugs-rocm70_9-1-shampoo \
 
 ---
 
+## Experiment Tracking
+
+Each run auto-logs: config, git commit hash, NCCL settings, and full command.
+
+```bash
+# Use --label to identify experiments
+./scripts/multi_node/master_launch.sh --label baseline [options]
+
+# List experiments
+./scripts/multi_node/experiment_list.sh
+
+# Add notes
+./scripts/multi_node/experiment_note.sh "your note"
+
+# View experiment info
+cat experiments/multinode_XXX/experiment_info.txt
+```
+
+See `EXPERIMENT_TRACKING.txt` for workflow patterns.
+
+---
+
 ## Usage
 
 ```bash
@@ -111,6 +136,7 @@ docker exec training-overlap-bugs-rocm70_9-1-shampoo \
 | -p | --nproc | 8 | GPUs per node |
 | -f | --config | config/multi_node/distributed_multinode.yaml | Config file |
 | -d | --docker | training-overlap-bugs-rocm70_9-1 | Docker container name |
+| -l | --label | none | Experiment label |
 | -r | --rocprof | false | Enable rocprofv3 |
 | -m | --stats | false | rocprof stats |
 |  | --rocprof-input | none | rocprof yaml |

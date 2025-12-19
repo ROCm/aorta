@@ -1,0 +1,72 @@
+Experiment Tracking
+===================
+
+WORKFLOW
+--------
+1. Make code changes and commit to git
+2. Run experiment with --label flag
+3. Add notes if needed
+
+Git commits between runs track code changes.
+Config files track parameter changes.
+Labels identify experiments.
+
+
+MANAGING CODE VARIATIONS
+-------------------------
+
+Test with/without code change:
+
+# Baseline
+git commit -m "baseline"
+./scripts/multi_node/master_launch.sh --label baseline [options]
+
+# Test change (e.g., comment lines 602-603)
+# Make changes in code
+git commit -m "test: no aux wait"
+./scripts/multi_node/master_launch.sh --label no_aux_wait [options]
+
+# Compare and keep winner
+
+
+CONFIG VARIATIONS
+-----------------
+
+# Test different configs
+./scripts/multi_node/master_launch.sh --config config1.yaml --label config1
+./scripts/multi_node/master_launch.sh --config config2.yaml --label config2
+
+
+TRACKING COMMANDS
+-----------------
+
+List experiments:
+  ./scripts/multi_node/experiment_list.sh
+  ./scripts/multi_node/experiment_list.sh -n 20
+  ./scripts/multi_node/experiment_list.sh -a -d
+
+Add notes:
+  ./scripts/multi_node/experiment_note.sh "your note"
+
+View experiment info:
+  cat experiments/multinode_XXX/experiment_info.txt
+
+
+LABEL EXAMPLES
+--------------
+  --label baseline
+  --label no_aux_wait
+  --label shampoo_lr0.001
+  --label adam_test
+
+
+METADATA LOGGED
+---------------
+Each experiment saves:
+- Label, timestamp, date
+- Config file used
+- NCCL/RCCL settings
+- Docker container
+- Git branch, commit hash, status
+- Full command used
+

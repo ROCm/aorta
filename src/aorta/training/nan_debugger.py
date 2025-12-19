@@ -197,18 +197,61 @@ class NaNDebugger:
                         )
                         continue
                     
+                    # Compute detailed gradient statistics
+                    grad_stats = self._compute_gradient_stats(param.grad)
+                    
                     nan_grads.append({
                         "name": name,
                         "shape": list(param.grad.shape),
                         "num_nan": num_nan,
                         "num_inf": num_inf,
                         "grad_norm": param.grad.norm().item() if torch.isfinite(param.grad).any() else float('inf'),
+                        "grad_stats": grad_stats,
                     })
         
         if nan_grads:
             self._handle_nan_gradients(nan_grads, step)
             return True
         return False
+    
+    def _compute_gradient_stats(self, grad: torch.Tensor) -> Dict[str, Any]:
+        """Compute detailed statistics for a gradient tensor."""
+        try:
+            # Get finite values only for statistics
+            finite_mask = torch.isfinite(grad)
+            finite_grads = grad[finite_mask]
+            
+            if finite_grads.numel() == 0:
+                return {
+                    "all_nan_or_inf": True,
+                    "finite_count": 0,
+                }
+            
+            stats = {
+                "finite_count": finite_grads.numel(),
+                "min": finite_grads.min().item(),
+                "max": finite_grads.max().item(),
+                "mean": finite_grads.mean().item(),
+                "std": finite_grads.std().item() if finite_grads.numel() > 1 else 0.0,
+                "abs_max": finite_grads.abs().max().item(),
+            }
+            
+            # Compute percentiles for finite values
+            if finite_grads.numel() > 100:
+                q_levels = torch.tensor([0.01, 0.25, 0.5, 0.75, 0.99], device=finite_grads.device)
+                percentiles = torch.quantile(finite_grads.float(), q_levels)
+                stats["percentiles"] = {
+                    "p01": percentiles[0].item(),
+                    "p25": percentiles[1].item(),
+                    "p50": percentiles[2].item(),
+                    "p75": percentiles[3].item(),
+                    "p99": percentiles[4].item(),
+                }
+            
+            return stats
+        except Exception as e:
+            log.warning("[NaNDebugger] Failed to compute gradient stats: %s", e)
+            return {"error": str(e)}
     
     def check_parameters(self, step: int) -> bool:
         """
@@ -478,6 +521,19 @@ class NaNDebugger:
                 log.error(f"  - {param['name']}: shape={param['shape']}, "
                          f"NaN count={param.get('num_nan', 'N/A')}, "
                          f"Inf count={param.get('num_inf', 'N/A')}")
+                
+                # Print detailed gradient statistics if available
+                if "grad_stats" in param:
+                    stats = param["grad_stats"]
+                    if "all_nan_or_inf" in stats:
+                        log.error(f"    [All values are NaN/Inf]")
+                    else:
+                        log.error(f"    Finite gradients: count={stats.get('finite_count', 'N/A')}, "
+                                 f"min={stats.get('min', 'N/A'):.6f}, max={stats.get('max', 'N/A'):.6f}, "
+                                 f"mean={stats.get('mean', 'N/A'):.6f}, std={stats.get('std', 'N/A'):.6f}")
+                        if "percentiles" in stats:
+                            p = stats["percentiles"]
+                            log.error(f"    Percentiles: p01={p['p01']:.6f}, p50={p['p50']:.6f}, p99={p['p99']:.6f}")
         
         diagnosis = report.get("diagnosis", {})
         if diagnosis:
@@ -489,6 +545,171 @@ class NaNDebugger:
         log.error("=" * 70)
         log.error(f"Full report saved to: {self.output_dir}")
         log.error("=" * 70)
+    
+    def export_profiler_trace(
+        self,
+        torch_profiler,
+        profiler_cfg,
+        profiler_dir,
+        trace_name: str,
+    ) -> bool:
+        """
+        Export PyTorch profiler trace when NaN is detected.
+        
+        Args:
+            torch_profiler: PyTorch profiler object (or None)
+            profiler_cfg: Profiler configuration
+            profiler_dir: Directory to save traces
+            trace_name: Name of the trace file (e.g., "nan_loss_step5.json")
+        
+        Returns:
+            True if trace was exported, False otherwise
+        """
+        if torch_profiler is None:
+            log.warning("[Profiler] Skipping trace export (profiler disabled) | rank=%d", self.rank)
+            return False
+        
+        if not profiler_cfg.chrome_trace:
+            log.warning("[Profiler] Skipping trace export (chrome_trace disabled) | rank=%d", self.rank)
+            return False
+        
+        # Check if profiler is actually active
+        if getattr(torch_profiler, "_profiler", None) is None:
+            log.warning("[Profiler] Skipping trace export (profiler inactive) | rank=%d", self.rank)
+            return False
+        
+        try:
+            from pathlib import Path
+            trace_file = Path(profiler_dir) / f"rank{self.rank}" / trace_name
+            trace_file.parent.mkdir(parents=True, exist_ok=True)
+            log.info("[Profiler] Exporting trace | rank=%d file=%s", self.rank, trace_file)
+            torch_profiler.export_chrome_trace(str(trace_file))
+            log.info("[Profiler] Trace export completed | rank=%d", self.rank)
+            return True
+        except Exception as export_err:
+            log.warning("[Profiler] Failed to export trace: %s | rank=%d", export_err, self.rank)
+            return False
+    
+    def signal_nan_to_ranks(self, store, step: int) -> bool:
+        """
+        Signal NaN detection to other ranks via TCPStore.
+        
+        Args:
+            store: TCPStore object (or None)
+            step: Current training step
+        
+        Returns:
+            True if signal was sent, False otherwise
+        """
+        if store is None:
+            return False
+        
+        try:
+            import json
+            signal_data = json.dumps({"step": step, "rank": self.rank})
+            store.set("nan_detected", signal_data)
+            log.info("[Coordination] Sent NaN signal to all ranks | rank=%d step=%d", self.rank, step)
+            return True
+        except Exception as signal_err:
+            log.warning("[Coordination] Failed to send NaN signal: %s | rank=%d", signal_err, self.rank)
+            return False
+    
+    def track_parameter_evolution(self, step: int, param_name: str = "_fsdp_wrapped_module.embedding.weight") -> None:
+        """
+        Track how a specific parameter evolves over time.
+        Useful for debugging when/how weights become NaN.
+        
+        Args:
+            step: Current training step
+            param_name: Name of parameter to track (default: embedding.weight)
+        """
+        if not self.enabled:
+            return
+        
+        try:
+            for name, param in self.model.named_parameters():
+                if name == param_name:
+                    # Check parameter values
+                    param_has_nan = torch.isnan(param).any().item()
+                    param_has_inf = torch.isinf(param).any().item()
+                    
+                    # Check gradient values if available
+                    grad_has_nan = False
+                    grad_has_inf = False
+                    grad_stats = None
+                    if param.grad is not None:
+                        grad_has_nan = torch.isnan(param.grad).any().item()
+                        grad_has_inf = torch.isinf(param.grad).any().item()
+                        if torch.isfinite(param.grad).any():
+                            grad_stats = self._compute_gradient_stats(param.grad)
+                    
+                    # Compute parameter statistics
+                    param_stats = {}
+                    if torch.isfinite(param).any():
+                        finite_params = param[torch.isfinite(param)]
+                        param_stats = {
+                            "min": finite_params.min().item(),
+                            "max": finite_params.max().item(),
+                            "mean": finite_params.mean().item(),
+                            "std": finite_params.std().item() if finite_params.numel() > 1 else 0.0,
+                            "abs_max": finite_params.abs().max().item(),
+                        }
+                    
+                    evolution_data = {
+                        "step": step,
+                        "param_name": name,
+                        "param_shape": list(param.shape),
+                        "param_has_nan": param_has_nan,
+                        "param_has_inf": param_has_inf,
+                        "param_stats": param_stats,
+                        "grad_has_nan": grad_has_nan,
+                        "grad_has_inf": grad_has_inf,
+                        "grad_stats": grad_stats,
+                    }
+                    
+                    # Save to file
+                    evolution_file = self.output_dir / f"param_evolution_{name.replace('.', '_')}_rank{self.rank}.jsonl"
+                    with open(evolution_file, 'a') as f:
+                        f.write(json.dumps(evolution_data) + "\n")
+                    
+                    # Log if NaN detected
+                    if param_has_nan or grad_has_nan:
+                        log.error(
+                            "[NaNDebugger] Parameter evolution: step=%d param=%s param_nan=%s grad_nan=%s",
+                            step, name, param_has_nan, grad_has_nan
+                        )
+                    
+                    break  # Only track one parameter
+        except Exception as e:
+            log.warning("[NaNDebugger] Failed to track parameter evolution: %s", e)
+    
+    def broadcast_nan_stop_signal(self, has_nan: bool, device: torch.device) -> bool:
+        """
+        Broadcast NaN detection across all ranks using all_reduce.
+        
+        Args:
+            has_nan: Whether this rank detected NaN
+            device: Device to create tensor on
+        
+        Returns:
+            True if any rank detected NaN
+        """
+        if not dist.is_initialized():
+            return has_nan
+        
+        try:
+            # Use all_reduce to broadcast NaN detection (1=NaN detected, 0=no NaN)
+            nan_tensor = torch.tensor(1 if has_nan else 0, dtype=torch.int32, device=device)
+            dist.all_reduce(nan_tensor, op=dist.ReduceOp.MAX)
+            any_rank_has_nan = nan_tensor.item() > 0
+            
+            if any_rank_has_nan and not has_nan:
+                log.error("[Coordination] Another rank detected NaN - stopping this rank too | rank=%d", self.rank)
+            
+            return any_rank_has_nan
+        except Exception as e:
+            log.warning("[Coordination] Failed to broadcast NaN signal: %s | rank=%d", e, self.rank)
+            return has_nan
     
     def get_summary(self) -> Dict[str, Any]:
         """Get summary of NaN detection session."""
