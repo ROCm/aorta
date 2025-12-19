@@ -228,37 +228,6 @@ def plot_gpu_time_summary(df, labels, output_dir: Path):
     plt.close()
 
 
-"""
-def plot_improvement_chart(df, output_path):
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    # Color bars based on positive/negative values
-    colors = ['#2ecc71' if val > 0 else '#e74c3c' for val in df['Improvement (%)']]
-
-    bars = ax.barh(df['Metric'], df['Improvement (%)'], color=colors)
-    ax.yaxis.grid(True, linestyle='--', alpha=0.7, color='gray')
-    ax.set_axisbelow(True)
-
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_visible(False)
-    ax.spines['left'].set_visible(False)
-
-    # Customize the chart
-    ax.set_ylabel('Metric', fontsize=12)
-    ax.set_xlabel('Change (%)', fontsize=12)
-    ax.set_title(
-        'GPU Metrics Percentage Change (Test vs Baseline)\n(Positive = Test is better)',
-        fontsize=14, fontweight='bold'
-    )
-
-    plt.tight_layout()
-    plt.savefig(output_path / 'improvement_chart.png', dpi=150)
-    plt.close()
-
-"""
-
-
 def plot_gpu_time_percentage_change(df, labels, output_dir: Path):
     """
     Create separate horizontal bar charts for each label comparing against baseline (labels[0]).
@@ -330,6 +299,68 @@ def calculate_gpu_timepercentage_change(df, labels):
     return df
 
 
+def load_run_data(directory):
+    """
+    Load GPU timeline and NCCL data from a run directory.
+
+    Args:
+        directory: Path to the run directory containing tracelens_analysis folder
+
+    Returns:
+        tuple: (label, summary_df, gpu_time_df, nccl_df) or None if loading fails
+    """
+    dir_path = Path(directory)
+    label = dir_path.stem
+
+    if not dir_path.exists():
+        print(f"Directory not found: {dir_path}")
+        return None
+
+    input_excel_file = dir_path / "tracelens_analysis" / "gpu_timeline_summary_mean.xlsx"
+    nccl_excel_file = (
+        dir_path / "tracelens_analysis" / "collective_reports" / "collective_all_ranks.xlsx"
+    )
+
+    if not input_excel_file.exists() or not nccl_excel_file.exists():
+        print(f"ERROR: Required files not found")
+        print(
+            f"  GPU file: {input_excel_file} - {'OK' if input_excel_file.exists() else 'MISSING'}"
+        )
+        print(f"  NCCL file: {nccl_excel_file} - {'OK' if nccl_excel_file.exists() else 'MISSING'}")
+        return None
+
+    # Read and rename columns with label suffix
+    summary = pd.read_excel(input_excel_file, sheet_name="Summary")
+    gpu_time = pd.read_excel(input_excel_file, sheet_name="Per_Rank_Time_ms")
+
+    # Rename non-key columns with label suffix
+    summary = summary.rename(
+        columns={col: f"{col}_{label}" for col in summary.columns if col != "type"}
+    )
+    gpu_time = gpu_time.rename(
+        columns={col: f"{col}_{label}" for col in gpu_time.columns if col != "type"}
+    )
+
+    print(f"Loaded: {label}")
+
+    # Process NCCL file
+    nccl_df = pd.read_excel(nccl_excel_file, sheet_name="nccl_summary_implicit_sync")
+
+    # Create index column by appending "Collective name" and "In msg nelems"
+    nccl_df["index"] = (
+        nccl_df["Collective name"].astype(str) + "_" + nccl_df["In msg nelems"].astype(str)
+    )
+
+    # Rename non-key columns with label suffix (exclude 'index' as it's the merge key)
+    nccl_df = nccl_df.rename(
+        columns={col: f"{col}_{label}" for col in nccl_df.columns if col != "index"}
+    )
+
+    print(f"Loaded: {label} NCCL")
+
+    return label, summary, gpu_time, nccl_df
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -350,60 +381,17 @@ def main():
     gpu_time_per_rank_dfs = []
     nccl_dfs = []
 
+    # Load all the data
     for directory in args.inputs:
-        dir_path = Path(directory)
-        label = dir_path.stem
-
-        if not dir_path.exists():
-            print(f"Directory not found: {dir_path}")
+        result = load_run_data(directory)
+        if result is None:
             continue
 
-        input_excel_file = dir_path / "tracelens_analysis" / "gpu_timeline_summary_mean.xlsx"
-        nccl_excel_file = (
-            dir_path / "tracelens_analysis" / "collective_reports" / "collective_all_ranks.xlsx"
-        )
-        if not input_excel_file.exists() or not nccl_excel_file.exists():
-            print(f"ERROR: Required files not found")
-            print(
-                f"  GPU file: {input_excel_file} - {'OK' if input_excel_file.exists() else 'MISSING'}"
-            )
-            print(
-                f"  NCCL file: {nccl_excel_file} - {'OK' if nccl_excel_file.exists() else 'MISSING'}"
-            )
-            continue
-
+        label, summary, gpu_time, nccl_df = result
         labels.append(label)
-
-        # Read and rename columns with label suffix
-        summary = pd.read_excel(input_excel_file, sheet_name="Summary")
-        gpu_time = pd.read_excel(input_excel_file, sheet_name="Per_Rank_Time_ms")
-
-        # Rename non-key columns with label suffix
-        summary = summary.rename(
-            columns={col: f"{col}_{label}" for col in summary.columns if col != "type"}
-        )
-        gpu_time = gpu_time.rename(
-            columns={col: f"{col}_{label}" for col in gpu_time.columns if col != "type"}
-        )
-
         summary_dfs.append(summary)
         gpu_time_per_rank_dfs.append(gpu_time)
-        print(f"Loaded: {label}")
-
-        # Process NCCL file (guaranteed to exist from earlier check)
-        nccl_df = pd.read_excel(nccl_excel_file, sheet_name="nccl_summary_implicit_sync")
-
-        # Create index column by appending "Collective name" and "In msg nelems"
-        nccl_df["index"] = (
-            nccl_df["Collective name"].astype(str) + "_" + nccl_df["In msg nelems"].astype(str)
-        )
-
-        # Rename non-key columns with label suffix (exclude 'index' as it's the merge key)
-        nccl_df = nccl_df.rename(
-            columns={col: f"{col}_{label}" for col in nccl_df.columns if col != "index"}
-        )
         nccl_dfs.append(nccl_df)
-        print(f"Loaded: {label} NCCL")
 
     # Merge all DataFrames on 'type'
     summary_df = summary_dfs[0]
@@ -417,8 +405,10 @@ def main():
         )
         nccl_df = pd.merge(nccl_df, nccl_dfs[i], on="index", how="outer")
 
+    # Calculate the percentage change in gpu time
     summary_df = calculate_gpu_timepercentage_change(summary_df, labels)
 
+    # Save the data to an excel file
     with pd.ExcelWriter(
         args.output / "final_analysis_report_for_all.xlsx", engine="openpyxl"
     ) as writer:
@@ -426,6 +416,7 @@ def main():
         gpu_time_per_rank_df.to_excel(writer, sheet_name="Per_Rank_Time_ms", index=False)
         nccl_df.to_excel(writer, sheet_name="NCCL_Summary", index=False)
 
+    # Generate the plots
     output_dir = Path(args.output) / "plots"
     output_dir.mkdir(parents=True, exist_ok=True)
     plot_gpu_time_percentage_change(summary_df, labels, output_dir)
@@ -433,6 +424,7 @@ def main():
     plot_all_types_per_rank(gpu_time_per_rank_df, labels, output_dir)
     plot_nccl_data_per_msg(nccl_df, labels, output_dir)
 
+    # create the final html
     html_script_path = Path(__file__).parent / "create_final_html.py"
     cmd = [
         "python3",

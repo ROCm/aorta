@@ -2,6 +2,10 @@
 """
 Master script for complete TraceLens analysis pipeline.
 Runs analysis on baseline and test traces, then performs all comparisons.
+
+TODO :
+1. Replace all prints using logger
+2. Instead of calling different process, call the functions directly
 """
 import argparse
 import subprocess
@@ -341,7 +345,7 @@ Examples:
             individual_report = test_path / "tracelens_analysis" / "individual_reports"
             collective_report = test_path / "tracelens_analysis" / "collective_reports"
             if not individual_report.exists() or not collective_report.exists():
-                print(f"Error: individual/collective reports not found: {test_reports}")
+                print(f"Error: individual/collective reports not found: {test_path}")
                 return 1
             print(f"Processing {test_path.name} GPU timeline...")
             if not process_gpu_timeline(str(individual_report)):
