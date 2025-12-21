@@ -1,23 +1,41 @@
 #!/bin/bash
 # TraceLens Analysis for Sweep Directory
-# Usage: ./run_tracelens_analysis.sh <sweep_directory>
+# Usage: ./run_tracelens_analysis.sh <sweep_directory> [--rocprof]
 # Example: ./run_tracelens_analysis.sh ~/aorta/experiments/sweep_20251120_212921
+# Example (rocprof): ./run_tracelens_analysis.sh ~/aorta/experiments/sweep_20251217_103450 --rocprof
 
 set -e
 
+# Parse command-line arguments
+USE_ROCPROF=false
+SWEEP_DIR=""
+
+for arg in "$@"; do
+    case $arg in
+        --rocprof)
+            USE_ROCPROF=true
+            shift
+            ;;
+        *)
+            if [ -z "$SWEEP_DIR" ]; then
+                SWEEP_DIR="$arg"
+            fi
+            ;;
+    esac
+done
+
 # Check if directory provided
-if [ -z "$1" ]; then
+if [ -z "$SWEEP_DIR" ]; then
     echo "Error: Please provide sweep directory"
     echo ""
-    echo "Usage: $0 <sweep_directory>"
+    echo "Usage: $0 <sweep_directory> [--rocprof]"
     echo ""
-    echo "Example:"
-    echo "  $0 ~/aorta/experiments/sweep_20251120_212921"
+    echo "Examples:"
+    echo "  PyTorch profiler (default): $0 ~/aorta/experiments/sweep_20251120_212921"
+    echo "  ROCprof profiler:           $0 ~/aorta/experiments/sweep_20251217_103450 --rocprof"
     echo ""
     exit 1
 fi
-
-SWEEP_DIR="$1"
 
 # Verify directory exists
 if [ ! -d "$SWEEP_DIR" ]; then
@@ -30,6 +48,11 @@ echo "           TraceLens Analysis Pipeline"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
 echo "Sweep directory: $SWEEP_DIR"
+if [ "$USE_ROCPROF" = true ]; then
+    echo "Mode: ROCprof profiler (*_results.json)"
+else
+    echo "Mode: PyTorch profiler (torch_profiler/*.json)"
+fi
 echo ""
 
 # Check if sweep directory is writable
@@ -76,10 +99,18 @@ echo "NOTE: Model parallelism - analyzing all ranks separately"
 echo ""
 
 # Show sample trace files for debugging
-SAMPLE_DIR="${SWEEP_DIR}/${THREAD_CONFIGS[0]}/nccl_${CHANNELS[${THREAD_CONFIGS[0]}]%% *}channels/torch_profiler"
+if [ "$USE_ROCPROF" = true ]; then
+    SAMPLE_DIR="${SWEEP_DIR}/${THREAD_CONFIGS[0]}/nccl_${CHANNELS[${THREAD_CONFIGS[0]}]%% *}channels/rocprof_traces/pass_1"
+else
+    SAMPLE_DIR="${SWEEP_DIR}/${THREAD_CONFIGS[0]}/nccl_${CHANNELS[${THREAD_CONFIGS[0]}]%% *}channels/torch_profiler"
+fi
 if [ -d "$SAMPLE_DIR" ]; then
     echo "Sample trace files found in first config:"
-    find "$SAMPLE_DIR" -name "*.json" 2>/dev/null | head -5 | sed 's|^|  |'
+    if [ "$USE_ROCPROF" = true ]; then
+        find "$SAMPLE_DIR" -name "*_results.json" 2>/dev/null | head -5 | sed 's|^|  |'
+    else
+        find "$SAMPLE_DIR" -name "*.json" 2>/dev/null | head -5 | sed 's|^|  |'
+    fi
     echo ""
 fi
 
@@ -95,7 +126,11 @@ for thread in "${THREAD_CONFIGS[@]}"; do
     fi
 
     for ch in ${CHANNELS[$thread]}; do
-        TRACE_DIR="$SWEEP_DIR/$thread/nccl_${ch}channels/torch_profiler"
+        if [ "$USE_ROCPROF" = true ]; then
+            TRACE_DIR="$SWEEP_DIR/$thread/nccl_${ch}channels/rocprof_traces/pass_1"
+        else
+            TRACE_DIR="$SWEEP_DIR/$thread/nccl_${ch}channels/torch_profiler"
+        fi
 
         if [ ! -d "$TRACE_DIR" ]; then
             echo "[WARN] Skip $thread/${ch}ch - no traces"
@@ -104,48 +139,84 @@ for thread in "${THREAD_CONFIGS[@]}"; do
 
         echo "Processing $thread/${ch}ch..."
 
-        # Process ALL ranks (model parallelism = different compute per rank)
-        for rank in 0 1 2 3 4 5 6 7; do
-            # Try multiple trace file patterns
-            TRACE=$(find "$TRACE_DIR" -type f \( \
-                -path "*/rank${rank}/*trace*.json" -o \
-                -path "*/rank_${rank}/*trace*.json" -o \
-                -path "*/rank${rank}*.json" -o \
-                -path "*/*_rank${rank}_*.json" -o \
-                -path "*/customer_trace*.json" \
-                \) | grep -E "rank${rank}|rank_${rank}" | head -1)
+        if [ "$USE_ROCPROF" = true ]; then
+            # ROCprof mode: Find all *_results.json files and sort by PID to map to ranks
+            ROCPROF_FILES=($(find "$TRACE_DIR" -name "*_results.json" -type f | sort))
 
-            # If still not found, try looking in rank subdirectory with any json
-            if [ -z "$TRACE" ]; then
-                TRACE=$(find "$TRACE_DIR/rank${rank}" -name "*.json" 2>/dev/null | head -1)
-            fi
-
-            # Last resort: try rank_0X format
-            if [ -z "$TRACE" ]; then
-                RANK_PADDED=$(printf "%02d" $rank)
-                TRACE=$(find "$TRACE_DIR" -path "*/rank_${RANK_PADDED}/*trace*.json" 2>/dev/null | head -1)
-            fi
-
-            if [ -z "$TRACE" ]; then
-                echo "  [WARN] Skip rank ${rank} - no trace file"
+            if [ ${#ROCPROF_FILES[@]} -eq 0 ]; then
+                echo "  [WARN] No *_results.json files found"
                 continue
             fi
 
-            OUTPUT="$OUTPUT_DIR/$thread/individual_reports/perf_${ch}ch_rank${rank}.xlsx"
+            echo "  Found ${#ROCPROF_FILES[@]} rocprof result files"
 
-            echo "  Rank ${rank}..."
-            TraceLens_generate_perf_report_pytorch \
-                --profile_json_path "$TRACE" \
-                --output_xlsx_path "$OUTPUT" \
-                --include_unlinked_kernels \
-                --short_kernel_study \
-                --short_kernel_threshold_us 50 \
-                --topk_ops 100 \
-		--enable_kernel_summary \
-                --topk_roofline_ops 100
+            # Process each file, mapping to ranks 0-7
+            for rank_idx in "${!ROCPROF_FILES[@]}"; do
+                TRACE="${ROCPROF_FILES[$rank_idx]}"
+                rank=$rank_idx
 
-            echo "    [OK] $OUTPUT"
-        done
+                if [ $rank -ge 8 ]; then
+                    echo "  [WARN] Skip file ${rank} - only processing ranks 0-7"
+                    break
+                fi
+
+                OUTPUT="$OUTPUT_DIR/$thread/individual_reports/perf_${ch}ch_rank${rank}.xlsx"
+
+                echo "  Rank ${rank}... ($(basename "$TRACE"))"
+                TraceLens_generate_perf_report_rocprof \
+                    --profile_json_path "$TRACE" \
+                    --output_xlsx_path "$OUTPUT" \
+                    --kernel_details \
+                    --short_kernel_study \
+                    --short_kernel_threshold_us 50 \
+                    --topk_kernels 100
+
+                echo "    [OK] $OUTPUT"
+            done
+        else
+            # PyTorch mode: Process ALL ranks (model parallelism = different compute per rank)
+            for rank in 0 1 2 3 4 5 6 7; do
+                # Try multiple trace file patterns
+                TRACE=$(find "$TRACE_DIR" -type f \( \
+                    -path "*/rank${rank}/*trace*.json" -o \
+                    -path "*/rank_${rank}/*trace*.json" -o \
+                    -path "*/rank${rank}*.json" -o \
+                    -path "*/*_rank${rank}_*.json" -o \
+                    -path "*/customer_trace*.json" \
+                    \) | grep -E "rank${rank}|rank_${rank}" | head -1)
+
+                # If still not found, try looking in rank subdirectory with any json
+                if [ -z "$TRACE" ]; then
+                    TRACE=$(find "$TRACE_DIR/rank${rank}" -name "*.json" 2>/dev/null | head -1)
+                fi
+
+                # Last resort: try rank_0X format
+                if [ -z "$TRACE" ]; then
+                    RANK_PADDED=$(printf "%02d" $rank)
+                    TRACE=$(find "$TRACE_DIR" -path "*/rank_${RANK_PADDED}/*trace*.json" 2>/dev/null | head -1)
+                fi
+
+                if [ -z "$TRACE" ]; then
+                    echo "  [WARN] Skip rank ${rank} - no trace file"
+                    continue
+                fi
+
+                OUTPUT="$OUTPUT_DIR/$thread/individual_reports/perf_${ch}ch_rank${rank}.xlsx"
+
+                echo "  Rank ${rank}..."
+                TraceLens_generate_perf_report_pytorch \
+                    --profile_json_path "$TRACE" \
+                    --output_xlsx_path "$OUTPUT" \
+                    --include_unlinked_kernels \
+                    --short_kernel_study \
+                    --short_kernel_threshold_us 50 \
+                    --topk_ops 100 \
+                    --enable_kernel_summary \
+                    --topk_roofline_ops 100
+
+                echo "    [OK] $OUTPUT"
+            done
+        fi
         echo ""
     done
     echo ""
@@ -157,49 +228,56 @@ echo "Step 2: Generating Collective Reports (All Ranks)"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
 
-for thread in "${THREAD_CONFIGS[@]}"; do
-    if ! mkdir -p "$OUTPUT_DIR/$thread/collective_reports" 2>/dev/null; then
-        echo "Error: Cannot create directory: $OUTPUT_DIR/$thread/collective_reports"
-        echo ""
-        echo "Please fix permissions by running:"
-        echo "  sudo chown -R $(whoami):$(id -gn) $OUTPUT_DIR"
-        echo "  sudo chmod -R 775 $OUTPUT_DIR"
-        echo ""
-        exit 1
-    fi
-
-    for ch in ${CHANNELS[$thread]}; do
-        TRACE_DIR="$SWEEP_DIR/$thread/nccl_${ch}channels/torch_profiler"
-
-        if [ ! -d "$TRACE_DIR" ]; then
-            echo "[WARN] Skip $thread/${ch}ch"
-            continue
+if [ "$USE_ROCPROF" = true ]; then
+    echo "NOTE: Collective reports are not supported for ROCprof mode."
+    echo "      Only individual per-rank reports are generated for ROCprof data."
+    echo "      Skipping Step 2..."
+    echo ""
+else
+    for thread in "${THREAD_CONFIGS[@]}"; do
+        if ! mkdir -p "$OUTPUT_DIR/$thread/collective_reports" 2>/dev/null; then
+            echo "Error: Cannot create directory: $OUTPUT_DIR/$thread/collective_reports"
+            echo ""
+            echo "Please fix permissions by running:"
+            echo "  sudo chown -R $(whoami):$(id -gn) $OUTPUT_DIR"
+            echo "  sudo chmod -R 775 $OUTPUT_DIR"
+            echo ""
+            exit 1
         fi
 
-        OUTPUT="$OUTPUT_DIR/$thread/collective_reports/collective_${ch}ch.xlsx"
+        for ch in ${CHANNELS[$thread]}; do
+            TRACE_DIR="$SWEEP_DIR/$thread/nccl_${ch}channels/torch_profiler"
 
-        echo "Processing $thread/${ch}ch (all 8 ranks)..."
+            if [ ! -d "$TRACE_DIR" ]; then
+                echo "[WARN] Skip $thread/${ch}ch"
+                continue
+            fi
 
-        # Use trace_pattern instead of trace_dir for better subdirectory support
-        # It is not guaranteed that trace files will have the exact same name in all the ranks.
-        # To avoid file not found errors with `--trace_pattern` flag in TraceLens, we first
-        # create a directory called `trace` in all rank folders and then mv the respective
-        # trace file in the rank folder to the canonical `trace/pt.trace.json` path.
-        # This will satisfy TraceLens's requirement of only one `*` being present in the trace pattern
-        # while also avoiding FileNotFoundErrors due to different filenames.
-        find $TRACE_DIR/rank* -name "*.json" -exec sh -c 'mkdir -p "$(dirname "$0")/trace" && mv "$0" "$(dirname "$0")/trace/pt.trace.json"' {} \;
+            OUTPUT="$OUTPUT_DIR/$thread/collective_reports/collective_${ch}ch.xlsx"
 
-        TraceLens_generate_multi_rank_collective_report_pytorch \
-            --trace_pattern "$TRACE_DIR/rank*/trace/pt.trace.json" \
-            --world_size 8 \
-            --output_xlsx_path "$OUTPUT" \
-            --detailed_analysis \
-            --use_multiprocessing
+            echo "Processing $thread/${ch}ch (all 8 ranks)..."
 
-        echo "  [OK] $OUTPUT"
+            # Use trace_pattern instead of trace_dir for better subdirectory support
+            # It is not guaranteed that trace files will have the exact same name in all the ranks.
+            # To avoid file not found errors with `--trace_pattern` flag in TraceLens, we first
+            # create a directory called `trace` in all rank folders and then mv the respective
+            # trace file in the rank folder to the canonical `trace/pt.trace.json` path.
+            # This will satisfy TraceLens's requirement of only one `*` being present in the trace pattern
+            # while also avoiding FileNotFoundErrors due to different filenames.
+            find $TRACE_DIR/rank* -name "*.json" -exec sh -c 'mkdir -p "$(dirname "$0")/trace" && mv "$0" "$(dirname "$0")/trace/pt.trace.json"' {} \;
+
+            TraceLens_generate_multi_rank_collective_report_pytorch \
+                --trace_pattern "$TRACE_DIR/rank*/trace/pt.trace.json" \
+                --world_size 8 \
+                --output_xlsx_path "$OUTPUT" \
+                --detailed_analysis \
+                --use_multiprocessing
+
+            echo "  [OK] $OUTPUT"
+        done
+        echo ""
     done
-    echo ""
-done
+fi
 
 echo ""
 echo "════════════════════════════════════════════════════════════════"
@@ -251,11 +329,22 @@ for ch in "${ALL_CHANNELS[@]}"; do
         OUTPUT="$OUTPUT_DIR/comparisons/compare_${ch}ch_rank${rank}_across_threads.xlsx"
 
         echo "  Rank ${rank}: comparing ${names[@]}..."
-    TraceLens_compare_perf_reports_pytorch \
-            "${reports[@]}" \
-            --names "${names[@]}" \
-        --sheets gpu_timeline ops_summary \
-            -o "$OUTPUT"
+
+        # Use different sheets based on profiler mode
+        if [ "$USE_ROCPROF" = true ]; then
+            # ROCprof reports have kernel_summary instead of ops_summary
+            TraceLens_compare_perf_reports_pytorch \
+                "${reports[@]}" \
+                --names "${names[@]}" \
+                --sheets gpu_timeline kernel_summary \
+                -o "$OUTPUT"
+        else
+            TraceLens_compare_perf_reports_pytorch \
+                "${reports[@]}" \
+                --names "${names[@]}" \
+                --sheets gpu_timeline ops_summary \
+                -o "$OUTPUT"
+        fi
 
         echo "    [OK] $OUTPUT"
     done
@@ -267,15 +356,25 @@ echo "════════════════════════�
 echo "Analysis Complete!"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
+if [ "$USE_ROCPROF" = true ]; then
+    echo "Mode: ROCprof"
+else
+    echo "Mode: PyTorch Profiler"
+fi
 echo "Results location: $OUTPUT_DIR/"
 echo ""
 echo "Generated reports:"
 
 for thread in "${THREAD_CONFIGS[@]}"; do
     indiv=$(find "$OUTPUT_DIR/$thread/individual_reports" -name "*.xlsx" 2>/dev/null | wc -l)
-    coll=$(find "$OUTPUT_DIR/$thread/collective_reports" -name "*.xlsx" 2>/dev/null | wc -l)
     channels_count=$(echo ${CHANNELS[$thread]} | wc -w)
-    echo "  $thread: $indiv individual (${channels_count} channels × 8 ranks), $coll collective"
+
+    if [ "$USE_ROCPROF" = true ]; then
+        echo "  $thread: $indiv individual reports"
+    else
+        coll=$(find "$OUTPUT_DIR/$thread/collective_reports" -name "*.xlsx" 2>/dev/null | wc -l)
+        echo "  $thread: $indiv individual (${channels_count} channels × 8 ranks), $coll collective"
+    fi
 done
 
 comp=$(find "$OUTPUT_DIR/comparisons" -name "*.xlsx" 2>/dev/null | wc -l)
@@ -291,13 +390,15 @@ for thread in "${THREAD_CONFIGS[@]}"; do
     echo "    $thread: $count reports"
 done
 
-echo ""
-echo "Collective reports (all ranks together):"
-echo "  Format: collective_<channels>ch.xlsx"
-for thread in "${THREAD_CONFIGS[@]}"; do
-    count=$(find "$OUTPUT_DIR/$thread/collective_reports" -name "*.xlsx" 2>/dev/null | wc -l)
-    echo "    $thread: $count reports"
-done
+if [ "$USE_ROCPROF" = false ]; then
+    echo ""
+    echo "Collective reports (all ranks together):"
+    echo "  Format: collective_<channels>ch.xlsx"
+    for thread in "${THREAD_CONFIGS[@]}"; do
+        count=$(find "$OUTPUT_DIR/$thread/collective_reports" -name "*.xlsx" 2>/dev/null | wc -l)
+        echo "    $thread: $count reports"
+    done
+fi
 
 echo ""
 echo "Comparisons (same rank/channel across thread configs):"
@@ -305,9 +406,17 @@ echo "  Format: compare_<channels>ch_rank<0-7>_across_threads.xlsx"
 echo "  Total: $comp reports"
 
 echo ""
-echo "Analysis Tips for Model Parallelism:"
-echo "  - Each rank has different operations - check individual reports per rank"
-echo "  - Look for load imbalance across ranks in collective reports"
-echo "  - Compare same rank across thread configs to see impact of RCCL settings"
+if [ "$USE_ROCPROF" = true ]; then
+    echo "Analysis Tips for ROCprof Mode:"
+    echo "  - Each rank has different operations - check individual reports per rank"
+    echo "  - ROCprof provides detailed kernel-level performance metrics"
+    echo "  - Use kernel_details sheets to analyze GPU resource utilization"
+    echo "  - Compare same rank across thread configs to see impact of RCCL settings"
+else
+    echo "Analysis Tips for Model Parallelism:"
+    echo "  - Each rank has different operations - check individual reports per rank"
+    echo "  - Look for load imbalance across ranks in collective reports"
+    echo "  - Compare same rank across thread configs to see impact of RCCL settings"
+fi
 echo ""
 echo "Done! Open .xlsx files in Excel to explore."
