@@ -63,10 +63,9 @@ def run_compare_all_runs(all_paths, output_path):
         "python3",
         str(script_path),
         "--inputs",
-        [str(p) for p in all_paths],
-        "--output",
-        str(output_path),
     ]
+    cmd.extend([str(p) for p in all_paths])
+    cmd.extend(["--output", str(output_path)])
     return run_command(cmd, "Comparing all runs")
 
 
@@ -354,7 +353,7 @@ Examples:
 
         if args.compare_all_runs:
             all_paths = [baseline_path] + test_paths
-            if not run_compare_all_runs(all_paths, output_path):
+            if not run_compare_all_runs(all_paths, str(output_path)):
                 return 1
             return 0
         # if not baseline_reports.exists() or not test_reports.exists():
