@@ -4,6 +4,7 @@ from pathlib import Path
 import seaborn as sns
 import numpy as np
 
+
 def plot_improvement_chart(df, output_path):
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -46,7 +47,7 @@ def plot_abs_time_comparison(df, output_path, labels):
     for label in labels:
         values.append(df[label])
     # Create bars for Baseline and Test
-    for i,val in enumerate(values):
+    for i, val in enumerate(values):
         offset = (i - len(labels) / 2 + 0.5) * width
         bars = ax.bar(
             x + offset,
@@ -68,9 +69,7 @@ def plot_abs_time_comparison(df, output_path, labels):
     # Customize the chart
     ax.set_xlabel("Metric Type", fontsize=12)
     ax.set_ylabel("Time (ms)", fontsize=12)
-    ax.set_title(
-        "GPU Metrics Absolute Time Comparison ", fontsize=14, fontweight="bold"
-    )
+    ax.set_title("GPU Metrics Absolute Time Comparison ", fontsize=14, fontweight="bold")
     ax.set_xticks(x)
     ax.set_xticklabels(df["Metric"], rotation=45, ha="right")
     ax.legend()
@@ -180,22 +179,22 @@ def create_nccl_charts(excel_path, output_path, labels):
         "NCCL Communication Latency": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Communication Latency (ms)",
-            "y_col": "comm_latency_mean"
+            "y_col": "comm_latency_mean",
         },
         "NCCL Algorithm Bandwidth": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Algorithm Bandwidth (GB/s)",
-            "y_col": "algo bw (GB/s)_mean"
+            "y_col": "algo bw (GB/s)_mean",
         },
         "NCCL Bus Bandwidth": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Bus Bandwidth (GB/s)",
-            "y_col": "bus bw (GB/s)_mean"
+            "y_col": "bus bw (GB/s)_mean",
         },
         "NCCL Total Communication Latency": {
             "x_label": "Collective Operation (Message Size)",
             "y_label": "Total Communication Latency (ms)",
-            "y_col": "Total comm latency (ms)"
+            "y_col": "Total comm latency (ms)",
         },
     }
     for item in plot_item.keys():
@@ -204,7 +203,7 @@ def create_nccl_charts(excel_path, output_path, labels):
         for i, label in enumerate(labels):
             col_name = f"{label}_{plot_item[item]['y_col']}"
             print(f"col_name: {col_name} {df.columns}")
-            if(col_name in df.columns):
+            if col_name in df.columns:
                 values = df[col_name].values
                 offset = (i - len(labels) / 2 + 0.5) * width
                 bar = ax.bar(
@@ -234,10 +233,7 @@ def create_nccl_charts(excel_path, output_path, labels):
     fig, ax = plt.subplots(nrows=1, ncols=3, figsize=(12, 6))
     plot_item_index = 0
     for item in percentage_chart_item.keys():
-        colors = [
-            "#2ecc71" if val > 0 else "#e74c3c"
-            for val in df[percentage_chart_item[item]]
-        ]
+        colors = ["#2ecc71" if val > 0 else "#e74c3c" for val in df[percentage_chart_item[item]]]
         bars = ax[plot_item_index].barh(
             df["In msg nelems"].astype(str),
             df[percentage_chart_item[item]],
@@ -254,9 +250,7 @@ def create_nccl_charts(excel_path, output_path, labels):
         fontweight="bold",
     )
     plt.tight_layout()
-    plt.savefig(
-        output_path / f"NCCL_Performance_Percentage_Change_comparison.png", dpi=150
-    )
+    plt.savefig(output_path / f"NCCL_Performance_Percentage_Change_comparison.png", dpi=150)
     plt.close()
 
 
@@ -289,13 +283,15 @@ def create_gpu_time_heatmap(excel_path, output_path):
 
     plt.tight_layout()
     plt.savefig(output_path / "gpu_time_heatmap.png", dpi=150)
-    plt.show()
+    plt.close()
+
 
 def get_labels(excel_path):
     # Read the Summary_Dashboard sheet
     df = pd.read_excel(excel_path, sheet_name="Summary_Dashboard")
     cols = df.columns.tolist()
-    return [cols[1], cols[2]] # for now just for two, later will be generalized for more than two
+    return [cols[1], cols[2]]  # for now just for two, later will be generalized for more than two
+
 
 def main():
     import argparse

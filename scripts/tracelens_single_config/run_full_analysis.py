@@ -2,6 +2,10 @@
 """
 Master script for complete TraceLens analysis pipeline.
 Runs analysis on baseline and test traces, then performs all comparisons.
+
+TODO :
+1. Replace all prints using logger
+2. Instead of calling different process, call the functions directly
 """
 import argparse
 import subprocess
@@ -28,9 +32,7 @@ def run_command(cmd, description):
     return True
 
 
-def run_tracelens_analysis(
-    trace_dir, output_name, individual_only=False, collective_only=False
-):
+def run_tracelens_analysis(trace_dir, output_name, individual_only=False, collective_only=False):
     """Run TraceLens analysis on a single trace directory."""
     print(f"\nAnalyzing: {trace_dir}")
 
@@ -54,10 +56,25 @@ def process_gpu_timeline(reports_dir):
     return run_command(cmd, "Processing GPU timeline")
 
 
+def run_compare_all_runs(all_paths, output_path):
+    """Run compare all runs."""
+    script_path = Path(__file__).parent / "compare_all_runs.py"
+    cmd = [
+        "python3",
+        str(script_path),
+        "--inputs",
+    ]
+    cmd.extend([str(p) for p in all_paths])
+    cmd.extend(["--output", str(output_path)])
+    return run_command(cmd, "Comparing all runs")
+
+
 def combine_reports(baseline_file, test_file, output_file, baseline_label=None, test_label=None):
     """Combine baseline and test reports."""
-    if(baseline_label is None or test_label is None) :
-        print("WARN : Baseline and test label are not provided, using default labels baseline and test")
+    if baseline_label is None or test_label is None:
+        print(
+            "WARN : Baseline and test label are not provided, using default labels baseline and test"
+        )
         baseline_label = "baseline"
         test_label = "test"
     script_path = Path(__file__).parent / "combine_reports.py"
@@ -82,9 +99,7 @@ def combine_reports(baseline_file, test_file, output_file, baseline_label=None, 
 def add_comparison_sheets(input_file, output_file, baseline_label=None, test_label=None):
     """Add comparison sheets for GPU timeline."""
     script_path = Path(__file__).parent / "add_comparison_sheets.py"
-    cmd = ["python3", str(script_path),
-           "--input", input_file,
-           "--output", output_file]
+    cmd = ["python3", str(script_path), "--input", input_file, "--output", output_file]
     if baseline_label:
         cmd.extend(["--baseline-label", baseline_label])
     if test_label:
@@ -95,9 +110,7 @@ def add_comparison_sheets(input_file, output_file, baseline_label=None, test_lab
 def add_collective_comparison(input_file, output_file, baseline_label=None, test_label=None):
     """Add comparison sheets for collective operations."""
     script_path = Path(__file__).parent / "add_collective_comparison.py"
-    cmd = ["python3", str(script_path),
-           "--input", input_file,
-           "--output", output_file]
+    cmd = ["python3", str(script_path), "--input", input_file, "--output", output_file]
     if baseline_label:
         cmd.extend(["--baseline-label", baseline_label])
     if test_label:
@@ -106,17 +119,29 @@ def add_collective_comparison(input_file, output_file, baseline_label=None, test
 
 
 def create_final_report(
-    gpu_combined, gpu_comparison, coll_combined, coll_comparison, output_file,baseline_label=None, test_label=None
+    gpu_combined,
+    gpu_comparison,
+    coll_combined,
+    coll_comparison,
+    output_file,
+    baseline_label=None,
+    test_label=None,
 ):
     """Create comprehensive final report with all data."""
     script_path = Path(__file__).parent / "create_final_report.py"
     cmd = [
-        "python3", str(script_path),
-        "--gpu-combined", gpu_combined,
-        "--gpu-comparison", gpu_comparison,
-        "--coll-combined", coll_combined,
-        "--coll-comparison", coll_comparison,
-        "--output", output_file,
+        "python3",
+        str(script_path),
+        "--gpu-combined",
+        gpu_combined,
+        "--gpu-comparison",
+        gpu_comparison,
+        "--coll-combined",
+        coll_combined,
+        "--coll-comparison",
+        coll_comparison,
+        "--output",
+        output_file,
     ]
     if baseline_label:
         cmd.extend(["--baseline-label", baseline_label])
@@ -157,13 +182,10 @@ Examples:
     )
 
     # Required arguments
-    parser.add_argument(
-        "--baseline", required=True, help="Path to baseline trace directory"
-    )
-    parser.add_argument("--test", required=True, help="Path to test trace directory")
-    parser.add_argument(
-        "--output", required=True, help="Output directory for comparison results"
-    )
+    parser.add_argument("--baseline", required=True, help="Path to baseline trace directory")
+    parser.add_argument("--test", nargs="+", required=True, help="Path to test trace directory")
+
+    parser.add_argument("--output", required=True, help="Output directory for comparison results")
 
     # Analysis options
     parser.add_argument(
@@ -195,34 +217,54 @@ Examples:
         help="Create comprehensive final report with tables and hidden raw data",
     )
     parser.add_argument(
-        "--generate-plots", action="store_true", help="Generate visualization plots and HTML report from final report",
+        "--generate-plots",
+        action="store_true",
+        help="Generate visualization plots and HTML report from final report",
     )
-    parser.add_argument(
+
+    # Mutually exclusive group for --all and --compare-all-runs
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--all",
         action="store_true",
         help="Perform all analyses and comparisons including final report",
     )
+    mode_group.add_argument(
+        "--compare-all-runs",
+        action="store_true",
+        help="Merge all TraceLens analysis into a single report",
+    )
 
     args = parser.parse_args()
 
-    # Handle --all flag
     if args.all:
         args.gpu_timeline = True
         args.collective = True
         args.final_report = True
         args.generate_plots = True
+    elif args.compare_all_runs:
+        args.gpu_timeline = True
+        args.collective = False
+        args.final_report = False
+        args.generate_plots = False
 
     # Validate inputs
     baseline_path = Path(args.baseline)
-    test_path = Path(args.test)
     output_path = Path(args.output)
+
+    if not args.compare_all_runs:
+        if len(args.test) > 1:
+            print("Error: --test flag must be provided only once when not comparing all runs")
+            return 1
+
+    for test_path in args.test:
+        if not Path(test_path).exists():
+            print(f"Error: Test path not found: {test_path}")
+            return 1
+    test_paths = [Path(test_path) for test_path in args.test]
 
     if not baseline_path.exists():
         print(f"Error: Baseline path not found: {args.baseline}")
-        return 1
-
-    if not test_path.exists():
-        print(f"Error: Test path not found: {args.test}")
         return 1
 
     # Create output directory
@@ -246,75 +288,101 @@ Examples:
         print("STEP 1: Running TraceLens Analysis")
         print("=" * 80)
 
-        if not run_tracelens_analysis(
-            args.baseline, "baseline", args.individual_only, args.collective_only
-        ):
-            return 1
-
-        if not run_tracelens_analysis(
-            args.test, "test", args.individual_only, args.collective_only
-        ):
-            return 1
+        temp_test_paths = test_paths.copy()
+        temp_test_paths.append(baseline_path)
+        for test_path in temp_test_paths:
+            if not run_tracelens_analysis(
+                test_path, test_path.name, args.individual_only, args.collective_only
+            ):
+                return 1
     else:
         print("\nSkipping TraceLens report generation (--skip-tracelens flag)")
 
     # Determine analysis directories
     baseline_analysis = baseline_path / "tracelens_analysis"
-    test_analysis = test_path / "tracelens_analysis"
+    # test_analysis = test_path / "tracelens_analysis"
 
     if not baseline_analysis.exists():
         print(f"Error: Baseline analysis not found: {baseline_analysis}")
         print("Run without --skip-tracelens flag first")
         return 1
 
-    if not test_analysis.exists():
-        print(f"Error: Test analysis not found: {test_analysis}")
-        print("Run without --skip-tracelens flag first")
-        return 1
+    for test_path in test_paths:
+        test_analysis = test_path / "tracelens_analysis"
+        if not test_analysis.exists():
+            print(f"Error: Test analysis not found: {test_analysis}")
+            print("Run without --skip-tracelens flag first")
+            return 1
 
     # Extract config labels from paths
     baseline_label = baseline_path.name  # e.g., "56cu_256threads"
-    test_label = test_path.name  # e.g., "37cu_384threads"
+    test_labels = [
+        test_path.name for test_path in test_paths
+    ]  # e.g., ["37cu_384threads", "38cu_384threads"]
+    test_label = test_labels[0]
 
-    if(baseline_label == test_label) :
-        print(f"Same baseline and test label : {baseline_label}, reverting to default labels baseline and test")
+    if baseline_label == test_label and not args.compare_all_runs:
+        print(
+            f"Same baseline and test label : {baseline_label}, reverting to default labels baseline and test"
+        )
     # Step 2: GPU Timeline Comparison
     if args.gpu_timeline:
         print("\n" + "=" * 80)
         print("STEP 2: GPU Timeline Comparison")
         print(f"  Baseline: {baseline_label}")
-        print(f"  Test: {test_label}")
+        print(f"  Test: {', '.join(test_labels) if args.compare_all_runs else test_label}")
         print("=" * 80)
 
         # Process GPU timelines
         baseline_reports = baseline_analysis / "individual_reports"
-        test_reports = test_analysis / "individual_reports"
+        test_reports = (
+            test_analysis / "individual_reports"
+        )  # should correctly point to the last path if multiple test os not provided.
 
-        if not baseline_reports.exists() or not test_reports.exists():
-            print(
-                "Error: Individual reports not found. Run without --individual-only flag"
-            )
-            return 1
+        temp_test_paths = test_paths.copy()
+        temp_test_paths.append(baseline_path)
+        for test_path in temp_test_paths:
+            individual_report = test_path / "tracelens_analysis" / "individual_reports"
+            collective_report = test_path / "tracelens_analysis" / "collective_reports"
+            if not individual_report.exists() or not collective_report.exists():
+                print(f"Error: individual/collective reports not found: {test_path}")
+                return 1
+            print(f"Processing {test_path.name} GPU timeline...")
+            if not process_gpu_timeline(str(individual_report)):
+                return 1
 
-        print("\nProcessing baseline GPU timeline ({baseline_label})...")
-        if not process_gpu_timeline(str(baseline_reports)):
-            return 1
+        if args.compare_all_runs:
+            all_paths = [baseline_path] + test_paths
+            if not run_compare_all_runs(all_paths, str(output_path)):
+                return 1
+            return 0
+        # if not baseline_reports.exists() or not test_reports.exists():
+        #    print("Error: Individual reports not found. Run without --individual-only flag")
+        #     return 1
 
-        print("\nProcessing test GPU timeline ({test_label})...")
-        if not process_gpu_timeline(str(test_reports)):
-            return 1
+        # print("\nProcessing baseline GPU timeline ({baseline_label})...")
+        # if not process_gpu_timeline(str(baseline_reports)):
+        #    return 1
+
+        # print("\nProcessing test GPU timeline ({test_label})...")
+        # if not process_gpu_timeline(str(test_reports)):
+        #    return 1
 
         # Combine GPU timeline summaries
         baseline_gpu = baseline_analysis / "gpu_timeline_summary_mean.xlsx"
         test_gpu = test_analysis / "gpu_timeline_summary_mean.xlsx"
         combined_gpu = output_path / "gpu_timeline_combined.xlsx"
 
-        if not combine_reports(str(baseline_gpu), str(test_gpu), str(combined_gpu), baseline_label, test_label):
+        if not combine_reports(
+            str(baseline_gpu), str(test_gpu), str(combined_gpu), baseline_label, test_label
+        ):
             return 1
 
         # Add comparison sheets
         gpu_comparison = output_path / "gpu_timeline_comparison.xlsx"
-        if not add_comparison_sheets(str(combined_gpu), str(gpu_comparison), baseline_label, test_label):
+        if not add_comparison_sheets(
+            str(combined_gpu), str(gpu_comparison), baseline_label, test_label
+        ):
             return 1
 
         print(f"\nGPU timeline comparison saved to: {gpu_comparison}")
@@ -327,31 +395,28 @@ Examples:
         print(f"  Test: {test_label}")
         print("=" * 80)
 
-        baseline_collective = (
-            baseline_analysis / "collective_reports" / "collective_all_ranks.xlsx"
-        )
-        test_collective = (
-            test_analysis / "collective_reports" / "collective_all_ranks.xlsx"
-        )
+        baseline_collective = baseline_analysis / "collective_reports" / "collective_all_ranks.xlsx"
+        test_collective = test_analysis / "collective_reports" / "collective_all_ranks.xlsx"
 
         if not baseline_collective.exists() or not test_collective.exists():
-            print(
-                "Error: Collective reports not found. Run without --collective-only flag"
-            )
+            print("Error: Collective reports not found. Run without --collective-only flag")
             return 1
 
         # Combine collective reports
         combined_collective = output_path / "collective_combined.xlsx"
         if not combine_reports(
-            str(baseline_collective), str(test_collective), str(combined_collective), baseline_label, test_label
+            str(baseline_collective),
+            str(test_collective),
+            str(combined_collective),
+            baseline_label,
+            test_label,
         ):
             return 1
 
         # Add collective comparison
         collective_comparison = output_path / "collective_comparison.xlsx"
         if not add_collective_comparison(
-            str(combined_collective), str(collective_comparison),
-            baseline_label, test_label
+            str(combined_collective), str(collective_comparison), baseline_label, test_label
         ):
             return 1
 
@@ -376,7 +441,7 @@ Examples:
             str(collective_comparison),
             str(final_report),
             baseline_label,
-            test_label
+            test_label,
         ):
             return 1
 
@@ -389,18 +454,23 @@ Examples:
 
     # Step 5: Generate visualization plots
     if args.generate_plots and args.final_report:
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("STEP 5: Generating Visualization Plots")
-        print("="*80)
+        print("=" * 80)
 
         final_report = output_path / "final_analysis_report.xlsx"
         plots_dir = output_path / "plots"
 
         if final_report.exists():
             script_path = Path(__file__).parent / "create_final_plots.py"
-            cmd = ["python3", str(script_path),
-                   "--input", str(final_report),
-                   "--output", str(plots_dir)]
+            cmd = [
+                "python3",
+                str(script_path),
+                "--input",
+                str(final_report),
+                "--output",
+                str(plots_dir),
+            ]
 
             # The script generates visualization plots
             if run_command(cmd, "Generating visualization plots and HTML report"):
@@ -415,9 +485,14 @@ Examples:
                 print("    - NCCL/Collective Metrics")
                 html_script_path = Path(__file__).parent / "create_final_html.py"
                 output_html_path = output_path / "performance_analysis_report.html"
-                cmd = ["python3", str(html_script_path),
-                       "--plot-files-directory", str(plots_dir),
-                       "--output-html", str(output_html_path)]
+                cmd = [
+                    "python3",
+                    str(html_script_path),
+                    "--plot-files-directory",
+                    str(plots_dir),
+                    "--output-html",
+                    str(output_html_path),
+                ]
                 if run_command(cmd, "Creating final HTML report"):
                     print(f"\nHTML Report saved to: {output_html_path}")
                     print("    - Open in browser to view complete report")
