@@ -65,7 +65,7 @@ jobs:
           #sudo curl -L "https://github.com/docker/compose/releases/download/v5.0.1/docker-compose-$(uname -s)-$(uname -m)"  -o ~/.docker/cli-plugins/docker-compose
           #sudo chmod +x ~/.docker/cli-plugins/docker-compose
           docker compose version
-          echo ${{ secrets.ROCM_SHARED_KEY }} | docker login -u rocmshared --password-stdin
+          docker login -u rocmshared -p ${{ secrets.ROCM_SHARED_KEY }}
           #az storage blob download  --account-name amdsharkpublic --sas-token ${{ secrets.AMD_SHARKPUBLIC_AZ_KEY }} -container-name amdsharkpublic --name prosenj/aorta/amdgpu-install-internal-7.0_9-1.noarch.rpm --file docker/amdgpu-install-internal-7.0_9-1.noarch.rpm
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} build
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} up -d
