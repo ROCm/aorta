@@ -20,8 +20,9 @@ services:
       - TORCH_NCCL_HIGH_PRIORITY=1
 
     volumes:
-      - /home/manrao:/manrao
-      - /home/oyazdanb/aorta:/workspace/aorta
+      # Mount parent directory (aorta/) to /workspace/aorta
+      # Use AORTA_WORKSPACE env var if set, otherwise default to parent dir (..)
+      - ${AORTA_WORKSPACE:-..}:/workspace/aorta
     devices:
       - /dev/kfd
       - /dev/dri
