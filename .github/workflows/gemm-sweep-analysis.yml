@@ -22,6 +22,7 @@ on:
         description: 'Number of top GEMM kernels to extract'
         required: false
         default: '5'
+  pull_request:
   push:
     branches:
       - main
@@ -36,29 +37,41 @@ env:
 jobs:
   gemm-sweep:
     name: Run GEMM Sweep Profiling
-    runs-on: [self-hosted, gpu, rocm]
+    runs-on: self-hosted
     timeout-minutes: 180
     outputs:
       sweep_dir: ${{ steps.setup.outputs.sweep_dir }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout AORTA repository
         uses: actions/checkout@v4
+        with:
+          repository: ROCm/aorta
+          ref : prosenj_gh_action
+          path: aorta
 
       - name: Set up experiment directory
         id: setup
+        working-directory: aorta
         run: |
           SWEEP_DIR="experiments/sweep_$(date +%Y%m%d_%H%M%S)"
           echo "sweep_dir=$SWEEP_DIR" >> $GITHUB_OUTPUT
           mkdir -p $SWEEP_DIR
 
       - name: Build Docker container
-        working-directory: docker
+        working-directory: aorta
         run: |
+          #mkdir -p ~/.docker/cli-plugins
+          #sudo curl -L "https://github.com/docker/compose/releases/download/v5.0.1/docker-compose-$(uname -s)-$(uname -m)"  -o ~/.docker/cli-plugins/docker-compose
+          #sudo chmod +x ~/.docker/cli-plugins/docker-compose
+          docker compose version
+          echo ${{ secrets.ROCM_SHARED_KEY }} | docker login -u rocmshared --password-stdin
+          #az storage blob download  --account-name amdsharkpublic --sas-token ${{ secrets.AMD_SHARKPUBLIC_AZ_KEY }} -container-name amdsharkpublic --name prosenj/aorta/amdgpu-install-internal-7.0_9-1.noarch.rpm --file docker/amdgpu-install-internal-7.0_9-1.noarch.rpm
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} build
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} up -d
 
       - name: Run training sweep
+        working-directory: aorta
         run: |
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
             bash scripts/gemm_analysis/run_train_various_channels.sh \
@@ -69,6 +82,7 @@ jobs:
           "
 
       - name: Generate TraceLens reports
+        working-directory: aorta
         run: |
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
             pip install -r requirements.txt && \
@@ -76,6 +90,7 @@ jobs:
           "
 
       - name: Extract top GEMM kernels
+        working-directory: aorta
         run: |
           # Parse channels and threads into space-separated format
           CHANNELS=$(echo "${{ github.event.inputs.channels || '28,56' }}" | tr ',' ' ')
@@ -94,31 +109,35 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gemm-sweep-results
-          path: ${{ steps.setup.outputs.sweep_dir }}
+          path: aorta/${{ steps.setup.outputs.sweep_dir }}
           retention-days: 30
 
       - name: Cleanup Docker container
         if: always()
+        working-directory: aorta
         run: |
-          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} down || true
+          docker compose -f docker/${{ env.DOCKER_COMPOSE_FILE }} down || true
 
   visualization:
     name: Generate Visualizations and Reports
     needs: gemm-sweep
-    runs-on: [self-hosted, gpu, rocm]
+    runs-on: linux-mi325-1gpu-ossci-nod-ai
     timeout-minutes: 60
     env:
       SWEEP_DIR: ${{ needs.gemm-sweep.outputs.sweep_dir }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout AORTA repository
         uses: actions/checkout@v4
+        with:
+          repository: ROCm/aorta
+          path: aorta
 
       - name: Download sweep results
         uses: actions/download-artifact@v4
         with:
           name: gemm-sweep-results
-          path: ${{ env.SWEEP_DIR }}
+          path: aorta/${{ env.SWEEP_DIR }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -127,33 +146,39 @@ jobs:
           cache: 'pip'
 
       - name: Install Python dependencies
+        working-directory: aorta
         run: |
           pip install -r requirements.txt
 
       - name: Generate variance plots
+        working-directory: aorta
         run: |
           python scripts/gemm_analysis/plot_gemm_variance.py \
             --csv-path ${{ env.SWEEP_DIR }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
             --output-dir ${{ env.SWEEP_DIR }}/tracelens_analysis/plots
 
       - name: Add timestamp information
+        working-directory: aorta
         run: |
           python scripts/gemm_analysis/enhance_gemm_variance_with_timestamps.py \
             --input-csv ${{ env.SWEEP_DIR }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
             --base-path ${{ env.SWEEP_DIR }}
 
       - name: Analyze collective overlap
+        working-directory: aorta
         run: |
           python scripts/gemm_analysis/gemm_report_with_collective_overlap.py \
             --input-csv ${{ env.SWEEP_DIR }}/tracelens_analysis/top5_gemm_kernels_time_variance_with_timestamps.csv \
             --tracelens-path ${{ env.SWEEP_DIR }}/tracelens_analysis
 
       - name: Process GPU timeline
+        working-directory: aorta
         run: |
           python scripts/gemm_analysis/process_gpu_timeline.py \
             --sweep-dir ${{ env.SWEEP_DIR }}
 
       - name: Process NCCL communication data
+        working-directory: aorta
         run: |
           python scripts/gemm_analysis/process_comms.py \
             --sweep-dir ${{ env.SWEEP_DIR }}
@@ -163,9 +188,9 @@ jobs:
         with:
           name: gemm-analysis-results
           path: |
-            ${{ env.SWEEP_DIR }}/tracelens_analysis/plots/
-            ${{ env.SWEEP_DIR }}/tracelens_analysis/*.csv
-            ${{ env.SWEEP_DIR }}/tracelens_analysis/*.xlsx
+            aorta/${{ env.SWEEP_DIR }}/tracelens_analysis/plots/
+            aorta/${{ env.SWEEP_DIR }}/tracelens_analysis/*.csv
+            aorta/${{ env.SWEEP_DIR }}/tracelens_analysis/*.xlsx
           retention-days: 30
 
   comparison-report:
@@ -177,14 +202,17 @@ jobs:
       SWEEP_DIR: ${{ needs.gemm-sweep.outputs.sweep_dir }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout AORTA repository
         uses: actions/checkout@v4
+        with:
+          repository: ROCm/aorta
+          path: aorta
 
       - name: Download analysis results
         uses: actions/download-artifact@v4
         with:
           name: gemm-analysis-results
-          path: ${{ env.SWEEP_DIR }}/tracelens_analysis
+          path: aorta/${{ env.SWEEP_DIR }}/tracelens_analysis
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -193,6 +221,7 @@ jobs:
           cache: 'pip'
 
       - name: Install Python dependencies
+        working-directory: aorta
         run: |
           pip install -r requirements.txt
 
@@ -217,5 +246,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gemm-final-report
-          path: ${{ env.SWEEP_DIR }}/
+          path: aorta/${{ env.SWEEP_DIR }}/
           retention-days: 90
