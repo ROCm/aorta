@@ -133,43 +133,43 @@ jobs:
         working-directory: aorta
         run: |
           python scripts/gemm_analysis/plot_gemm_variance.py \
-            --csv-path ${{ env.SWEEP_DIR }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
-            --output-dir ${{ env.SWEEP_DIR }}/tracelens_analysis/plots
+            --csv-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
+            --output-dir ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/plots
 
       - name: Add timestamp information
         working-directory: aorta
         run: |
           python scripts/gemm_analysis/enhance_gemm_variance_with_timestamps.py \
-            --input-csv ${{ env.SWEEP_DIR }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
-            --base-path ${{ env.SWEEP_DIR }}
+            --input-csv ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
+            --base-path ${{ steps.setup.outputs.sweep_dir }}
 
       - name: Analyze collective overlap
         working-directory: aorta
         run: |
           python scripts/gemm_analysis/gemm_report_with_collective_overlap.py \
-            --input-csv ${{ env.SWEEP_DIR }}/tracelens_analysis/top5_gemm_kernels_time_variance_with_timestamps.csv \
-            --tracelens-path ${{ env.SWEEP_DIR }}/tracelens_analysis
+            --input-csv ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/top5_gemm_kernels_time_variance_with_timestamps.csv \
+            --tracelens-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis
 
       - name: Process GPU timeline
         working-directory: aorta
         run: |
           python scripts/gemm_analysis/process_gpu_timeline.py \
-            --sweep-dir ${{ env.SWEEP_DIR }}
+            --sweep-dir ${{ steps.setup.outputs.sweep_dir }}
 
       - name: Process NCCL communication data
         working-directory: aorta
         run: |
           python scripts/gemm_analysis/process_comms.py \
-            --sweep-dir ${{ env.SWEEP_DIR }}
+            --sweep-dir ${{ steps.setup.outputs.sweep_dir }}
 
       - name: Upload analysis results
         uses: actions/upload-artifact@v4
         with:
           name: gemm-analysis-results
           path: |
-            aorta/${{ env.SWEEP_DIR }}/tracelens_analysis/plots/
-            aorta/${{ env.SWEEP_DIR }}/tracelens_analysis/*.csv
-            aorta/${{ env.SWEEP_DIR }}/tracelens_analysis/*.xlsx
+            aorta/${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/plots/
+            aorta/${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/*.csv
+            aorta/${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/*.xlsx
           retention-days: 30
 
   comparison-report:
