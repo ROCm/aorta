@@ -141,29 +141,32 @@ jobs:
       - name: Add timestamp information
         working-directory: aorta
         run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "  
           python scripts/gemm_analysis/enhance_gemm_variance_with_timestamps.py \
             --input-csv ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
-            --base-path ${{ steps.setup.outputs.sweep_dir }}
+            --base-path ${{ steps.setup.outputs.sweep_dir }}"
 
       - name: Analyze collective overlap
         working-directory: aorta
         run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
           python scripts/gemm_analysis/gemm_report_with_collective_overlap.py \
             --input-csv ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/top5_gemm_kernels_time_variance_with_timestamps.csv \
-            --tracelens-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis
+            --tracelens-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis"
 
       - name: Process GPU timeline
         working-directory: aorta
         run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
           python scripts/gemm_analysis/process_gpu_timeline.py \
-            --sweep-dir ${{ steps.setup.outputs.sweep_dir }}
+            --sweep-dir ${{ steps.setup.outputs.sweep_dir }}"
 
       - name: Process NCCL communication data
         working-directory: aorta
         run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
           python scripts/gemm_analysis/process_comms.py \
-            --sweep-dir ${{ steps.setup.outputs.sweep_dir }}
-
+            --sweep-dir ${{ steps.setup.outputs.sweep_dir }}"
       - name: Upload analysis results
         uses: actions/upload-artifact@v4
         with:
