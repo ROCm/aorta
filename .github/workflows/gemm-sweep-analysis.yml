@@ -127,14 +127,16 @@ jobs:
       - name: Install Python dependencies
         working-directory: aorta
         run: |
-          pip install -r requirements.txt
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "pip install -r requirements.txt"
 
       - name: Generate variance plots
         working-directory: aorta
         run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
           python scripts/gemm_analysis/plot_gemm_variance.py \
             --csv-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
-            --output-dir ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/plots
+            --output-dir ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/plots"
+        
 
       - name: Add timestamp information
         working-directory: aorta
