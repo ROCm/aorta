@@ -112,11 +112,11 @@ jobs:
           path: aorta/${{ steps.setup.outputs.sweep_dir }}
           retention-days: 30
 
-      - name: Cleanup Docker container
-        if: always()
-        working-directory: aorta
-        run: |
-          docker compose -f docker/${{ env.DOCKER_COMPOSE_FILE }} down || true
+      #- name: Cleanup Docker container
+      #  if: always()
+      #  working-directory: aorta
+      #  run: |
+      #    docker compose -f docker/${{ env.DOCKER_COMPOSE_FILE }} down || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
