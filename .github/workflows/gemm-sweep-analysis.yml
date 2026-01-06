@@ -118,27 +118,6 @@ jobs:
         run: |
           docker compose -f docker/${{ env.DOCKER_COMPOSE_FILE }} down || true
 
-  visualization:
-    name: Generate Visualizations and Reports
-    needs: gemm-sweep
-    runs-on: self-hosted
-    timeout-minutes: 60
-    env:
-      SWEEP_DIR: ${{ needs.gemm-sweep.outputs.sweep_dir }}
-
-    steps:
-      - name: Checkout AORTA repository
-        uses: actions/checkout@v4
-        with:
-          repository: ROCm/aorta
-          path: aorta
-
-      - name: Download sweep results
-        uses: actions/download-artifact@v4
-        with:
-          name: gemm-sweep-results
-          path: aorta/${{ env.SWEEP_DIR }}
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
