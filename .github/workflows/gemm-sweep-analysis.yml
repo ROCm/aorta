@@ -174,7 +174,7 @@ jobs:
 
   comparison-report:
     name: Generate Comparison Report
-    needs: [gemm-sweep, visualization]
+    needs: [gemm-sweep]
     runs-on: self-hosted
     if: github.event_name == 'workflow_dispatch'
     env:
