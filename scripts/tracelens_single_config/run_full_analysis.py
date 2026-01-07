@@ -292,7 +292,7 @@ Examples:
         temp_test_paths.append(baseline_path)
         for test_path in temp_test_paths:
             if not run_tracelens_analysis(
-                test_path, test_path.name, args.individual_only, args.collective_only
+                str(test_path), test_path.name, args.individual_only, args.collective_only
             ):
                 return 1
     else:
