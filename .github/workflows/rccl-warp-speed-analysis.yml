@@ -54,6 +54,15 @@ jobs:
           ref: ${{ github.ref }}
           path: aorta
 
+      - name: Cleanup existing container
+        working-directory: aorta
+        run: |
+          # Stop and remove any existing container with the same name
+          docker stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+          docker rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+          # Also try docker compose down in case it was started via compose
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} down 2>/dev/null || true
+
       - name: Build Docker container
         working-directory: aorta
         run: |
@@ -151,6 +160,14 @@ jobs:
         with:
           name: rccl-warp-speed-results
           path: aorta/${{ env.EXPERIMENT_DIR }}
+
+      - name: Cleanup existing container
+        working-directory: aorta
+        run: |
+          # Stop and remove any existing container with the same name
+          docker stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+          docker rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} down 2>/dev/null || true
 
       - name: Start Docker container
         working-directory: aorta
