@@ -115,7 +115,7 @@ jobs:
             export LD_LIBRARY_PATH=/rccl/rccl/build/release:\$LD_LIBRARY_PATH
             
             # Run the RCCL warp speed comparison script
-            ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh \
+            bash ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh \
               -p \"$CONFIG_PAIRS\" \
               -c $TRAINING_CONFIG
           "
@@ -153,6 +153,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ROCm/aorta
+          ref: ${{ github.ref }}
           path: aorta
 
       - name: Download test results
