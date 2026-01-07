@@ -136,12 +136,12 @@ jobs:
           python scripts/gemm_analysis/plot_gemm_variance.py \
             --csv-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
             --output-dir ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/plots"
-        
+
 
       - name: Add timestamp information
         working-directory: aorta
         run: |
-          docker exec ${{ env.CONTAINER_NAME }} bash -c "  
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
           python scripts/gemm_analysis/enhance_gemm_variance_with_timestamps.py \
             --input-csv ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
             --base-path ${{ steps.setup.outputs.sweep_dir }}"

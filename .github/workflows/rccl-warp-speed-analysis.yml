@@ -1,6 +1,9 @@
 name: RCCL Warp Speed Performance Testing
 
 on:
+  schedule:
+    # Run every other day at midnight UTC
+    - cron: '0 0 */2 * *'
   workflow_dispatch:
     inputs:
       config_pairs:
@@ -23,16 +26,16 @@ on:
         description: 'RCCL branch to test'
         required: false
         default: 'warp_speed_v1'
-  push:
-    branches:
-      - main
-    paths:
-      - 'scripts/tracelens_single_config/**'
-      - 'docker/rccl_test/**'
-  pull_request:
-    paths:
-      - 'scripts/tracelens_single_config/**'
-      - 'docker/rccl_test/**'
+  #push:
+  #  branches:
+  #    - main
+  #  paths:
+  #    - 'scripts/tracelens_single_config/**'
+  #    - 'docker/rccl_test/**'
+  #pull_request:
+  #  paths:
+  #    - 'scripts/tracelens_single_config/**'
+  #    - 'docker/rccl_test/**'
 
 env:
   DOCKER_COMPOSE_FILE: docker/rccl_test/docker-compose.rocm70_9-1.yaml
@@ -74,7 +77,7 @@ jobs:
         run: |
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
             mkdir -p /rccl && cd /rccl
-            
+
             if [ -d 'rccl' ]; then
               cd rccl
               git fetch origin
@@ -85,10 +88,10 @@ jobs:
               cd rccl
               git checkout ${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}
             fi
-            
+
             echo 'Building RCCL with GPU target: ${{ github.event.inputs.gpu_target || 'gfx950' }}'
             ./install.sh -l --amdgpu_targets=${{ github.event.inputs.gpu_target || 'gfx950' }}
-            
+
             # Verify build
             echo 'RCCL build completed. Library location:'
             ls -la /rccl/rccl/build/release/ || echo 'Build directory not found'
@@ -107,11 +110,11 @@ jobs:
         run: |
           CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
           TRAINING_CONFIG="${{ github.event.inputs.training_config || 'config/single_node/gemm_overlap_comm.yaml' }}"
-          
+
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
             # Set RCCL library path
             export LD_LIBRARY_PATH=/rccl/rccl/build/release:\$LD_LIBRARY_PATH
-            
+
             # Run the RCCL warp speed comparison script
             bash ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh \
               -p \"$CONFIG_PAIRS\" \
@@ -137,33 +140,33 @@ jobs:
           BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
           CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
           EXPERIMENT_DIR="${{ steps.find_experiment.outputs.experiment_dir }}"
-          
+
           # Parse baseline
           BASELINE_CU=$(echo $BASELINE_CONFIG | cut -d',' -f1)
           BASELINE_THREADS=$(echo $BASELINE_CONFIG | cut -d',' -f2)
           BASELINE_DIR="${EXPERIMENT_DIR}/${BASELINE_CU}cu_${BASELINE_THREADS}threads"
-          
+
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
             OUTPUT_DIR=\"${EXPERIMENT_DIR}/comparison_results\"
             mkdir -p \"\$OUTPUT_DIR\"
-            
+
             # Run comparison for each non-baseline configuration
             for pair in $CONFIG_PAIRS; do
               CU_COUNT=\$(echo \$pair | cut -d',' -f1)
               THREADS=\$(echo \$pair | cut -d',' -f2)
-              
+
               # Skip if this is the baseline
               if [ \"\$CU_COUNT\" = \"$BASELINE_CU\" ] && [ \"\$THREADS\" = \"$BASELINE_THREADS\" ]; then
                 continue
               fi
-              
+
               TEST_DIR=\"${EXPERIMENT_DIR}/\${CU_COUNT}cu_\${THREADS}threads\"
               COMPARISON_OUTPUT=\"\$OUTPUT_DIR/baseline_vs_\${CU_COUNT}cu_\${THREADS}threads\"
-              
+
               echo '========================================'
               echo \"Comparing baseline ($BASELINE_CU cu, $BASELINE_THREADS threads) vs test (\$CU_COUNT cu, \$THREADS threads)\"
               echo '========================================'
-              
+
               python scripts/tracelens_single_config/run_full_analysis.py \
                 --baseline \"$BASELINE_DIR\" \
                 --test \"\$TEST_DIR\" \
@@ -178,36 +181,36 @@ jobs:
           BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
           CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
           EXPERIMENT_DIR="${{ steps.find_experiment.outputs.experiment_dir }}"
-          
+
           # Parse baseline
           BASELINE_CU=$(echo $BASELINE_CONFIG | cut -d',' -f1)
           BASELINE_THREADS=$(echo $BASELINE_CONFIG | cut -d',' -f2)
           BASELINE_DIR="${EXPERIMENT_DIR}/${BASELINE_CU}cu_${BASELINE_THREADS}threads"
-          
+
           # Build list of all test directories (excluding baseline)
           TEST_DIRS=""
           for pair in $CONFIG_PAIRS; do
             CU_COUNT=$(echo $pair | cut -d',' -f1)
             THREADS=$(echo $pair | cut -d',' -f2)
-            
+
             # Skip if this is the baseline
             if [ "$CU_COUNT" = "$BASELINE_CU" ] && [ "$THREADS" = "$BASELINE_THREADS" ]; then
               continue
             fi
-            
+
             TEST_DIRS="$TEST_DIRS ${EXPERIMENT_DIR}/${CU_COUNT}cu_${THREADS}threads"
           done
-          
+
           echo "========================================"
           echo "Comparing all runs together"
           echo "  Baseline: $BASELINE_DIR"
           echo "  Test directories: $TEST_DIRS"
           echo "========================================"
-          
+
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
             OUTPUT_DIR=\"${EXPERIMENT_DIR}/compare_all_runs\"
             mkdir -p \"\$OUTPUT_DIR\"
-            
+
             python scripts/tracelens_single_config/run_full_analysis.py \
               --baseline \"$BASELINE_DIR\" \
               --test $TEST_DIRS \
@@ -221,7 +224,7 @@ jobs:
           BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
           CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
           EXPERIMENT_DIR="${{ steps.find_experiment.outputs.experiment_dir }}"
-          
+
           echo "## RCCL Warp Speed Performance Analysis Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Configuration" >> $GITHUB_STEP_SUMMARY
