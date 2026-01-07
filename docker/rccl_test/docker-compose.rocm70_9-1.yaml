@@ -24,8 +24,9 @@ services:
       # From docker/rccl_test/, go up two levels to reach aorta/
       # Use AORTA_WORKSPACE env var if set, otherwise default to ../..
       - ${AORTA_WORKSPACE:-../..}:/workspace/aorta
-      # RCCL will be cloned inside container at /rccl
-      - ${RCCL_WORKSPACE:-rccl_build}:/rccl
+      # RCCL build directory - use relative path for bind mount
+      # Use RCCL_WORKSPACE env var if set, otherwise default to ./rccl_build
+      - ${RCCL_WORKSPACE:-./rccl_build}:/rccl
     devices:
       - /dev/kfd
       - /dev/dri
