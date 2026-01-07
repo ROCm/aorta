@@ -22,13 +22,13 @@ on:
         description: 'Number of top GEMM kernels to extract'
         required: false
         default: '5'
-  pull_request:
-  push:
-    branches:
-      - main
-    paths:
-      - 'scripts/gemm_analysis/**'
-      - 'config/gemm_overlap/**'
+  #pull_request:
+  #push:
+  #  branches:
+  #    - main
+  #  paths:
+  #    - 'scripts/gemm_analysis/**'
+  #    - 'config/gemm_overlap/**'
 
 env:
   DOCKER_COMPOSE_FILE: docker/docker-compose.rocm70_9-1.yaml

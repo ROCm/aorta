@@ -1,0 +1,305 @@
+name: RCCL Warp Speed Performance Testing
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_pairs:
+        description: 'Space-separated CU_count,threads pairs (e.g., "56,256 37,384 32,512")'
+        required: true
+        default: '56,256 37,384 32,512'
+      baseline_config:
+        description: 'Baseline configuration (CU,threads format, e.g., "56,256")'
+        required: true
+        default: '56,256'
+      training_config:
+        description: 'Path to training config YAML'
+        required: false
+        default: 'config/single_node/gemm_overlap_comm.yaml'
+      gpu_target:
+        description: 'GPU architecture target (run "rocminfo | grep gfx" to find)'
+        required: true
+        default: 'gfx950'
+      rccl_branch:
+        description: 'RCCL branch to test'
+        required: false
+        default: 'warp_speed_v1'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/tracelens_single_config/**'
+      - 'docker/rccl_test/**'
+  pull_request:
+    paths:
+      - 'scripts/tracelens_single_config/**'
+      - 'docker/rccl_test/**'
+
+env:
+  DOCKER_COMPOSE_FILE: docker/rccl_test/docker-compose.rocm70_9-1.yaml
+  CONTAINER_NAME: training-overlap-bugs-rocm70_9-1
+
+jobs:
+  rccl-warp-speed-test:
+    name: Run RCCL Warp Speed Performance Tests
+    runs-on: self-hosted
+    timeout-minutes: 240
+    outputs:
+      experiment_dir: ${{ steps.find_experiment.outputs.experiment_dir }}
+
+    steps:
+      - name: Checkout AORTA repository
+        uses: actions/checkout@v4
+        with:
+          repository: ROCm/aorta
+          ref: ${{ github.ref }}
+          path: aorta
+
+      - name: Build Docker container
+        working-directory: aorta
+        run: |
+          docker compose version
+          docker login -u rocmshared -p ${{ secrets.ROCM_SHARED_KEY }}
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} build
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} up -d
+
+      - name: Clone and build RCCL warp_speed branch
+        working-directory: aorta
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            mkdir -p /rccl && cd /rccl
+            
+            if [ -d 'rccl' ]; then
+              cd rccl
+              git fetch origin
+              git checkout ${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}
+              git pull
+            else
+              git clone --recursive https://github.com/mustafabar/rccl.git
+              cd rccl
+              git checkout ${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}
+            fi
+            
+            echo 'Building RCCL with GPU target: ${{ github.event.inputs.gpu_target || 'gfx950' }}'
+            ./install.sh -l --amdgpu_targets=${{ github.event.inputs.gpu_target || 'gfx950' }}
+            
+            # Verify build
+            echo 'RCCL build completed. Library location:'
+            ls -la /rccl/rccl/build/release/ || echo 'Build directory not found'
+          "
+
+      - name: Install Python dependencies
+        working-directory: aorta
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            pip install -r requirements.txt
+            pip install pandas openpyxl matplotlib seaborn numpy
+          "
+
+      - name: Run RCCL warp speed comparison tests
+        working-directory: aorta
+        run: |
+          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
+          TRAINING_CONFIG="${{ github.event.inputs.training_config || 'config/single_node/gemm_overlap_comm.yaml' }}"
+          
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            # Set RCCL library path
+            export LD_LIBRARY_PATH=/rccl/rccl/build/release:\$LD_LIBRARY_PATH
+            
+            # Run the RCCL warp speed comparison script
+            ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh \
+              -p \"$CONFIG_PAIRS\" \
+              -c $TRAINING_CONFIG
+          "
+
+      - name: Find experiment directory
+        id: find_experiment
+        working-directory: aorta
+        run: |
+          # Find the most recently created rccl_warp_speed experiment directory
+          EXPERIMENT_DIR=$(ls -td experiments/rccl_warp_speed_* 2>/dev/null | head -1)
+          if [ -z "$EXPERIMENT_DIR" ]; then
+            echo "Error: No experiment directory found"
+            exit 1
+          fi
+          echo "Found experiment directory: $EXPERIMENT_DIR"
+          echo "experiment_dir=$EXPERIMENT_DIR" >> $GITHUB_OUTPUT
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: rccl-warp-speed-results
+          path: aorta/${{ steps.find_experiment.outputs.experiment_dir }}
+          retention-days: 30
+
+  comparison-analysis:
+    name: Generate Comparison Analysis
+    needs: rccl-warp-speed-test
+    runs-on: self-hosted
+    timeout-minutes: 60
+    env:
+      EXPERIMENT_DIR: ${{ needs.rccl-warp-speed-test.outputs.experiment_dir }}
+
+    steps:
+      - name: Checkout AORTA repository
+        uses: actions/checkout@v4
+        with:
+          repository: ROCm/aorta
+          path: aorta
+
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          name: rccl-warp-speed-results
+          path: aorta/${{ env.EXPERIMENT_DIR }}
+
+      - name: Start Docker container
+        working-directory: aorta
+        run: |
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} up -d
+
+      - name: Install Python dependencies
+        working-directory: aorta
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            pip install -r requirements.txt
+            pip install pandas openpyxl matplotlib seaborn numpy
+          "
+
+      - name: Run pairwise comparison analysis
+        working-directory: aorta
+        run: |
+          BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
+          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
+          EXPERIMENT_DIR="${{ env.EXPERIMENT_DIR }}"
+          
+          # Parse baseline
+          BASELINE_CU=$(echo $BASELINE_CONFIG | cut -d',' -f1)
+          BASELINE_THREADS=$(echo $BASELINE_CONFIG | cut -d',' -f2)
+          BASELINE_DIR="${EXPERIMENT_DIR}/${BASELINE_CU}cu_${BASELINE_THREADS}threads"
+          
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            OUTPUT_DIR=\"${EXPERIMENT_DIR}/comparison_results\"
+            mkdir -p \"\$OUTPUT_DIR\"
+            
+            # Run comparison for each non-baseline configuration
+            for pair in $CONFIG_PAIRS; do
+              CU_COUNT=\$(echo \$pair | cut -d',' -f1)
+              THREADS=\$(echo \$pair | cut -d',' -f2)
+              
+              # Skip if this is the baseline
+              if [ \"\$CU_COUNT\" = \"$BASELINE_CU\" ] && [ \"\$THREADS\" = \"$BASELINE_THREADS\" ]; then
+                continue
+              fi
+              
+              TEST_DIR=\"${EXPERIMENT_DIR}/\${CU_COUNT}cu_\${THREADS}threads\"
+              COMPARISON_OUTPUT=\"\$OUTPUT_DIR/baseline_vs_\${CU_COUNT}cu_\${THREADS}threads\"
+              
+              echo '========================================'
+              echo \"Comparing baseline ($BASELINE_CU cu, $BASELINE_THREADS threads) vs test (\$CU_COUNT cu, \$THREADS threads)\"
+              echo '========================================'
+              
+              python scripts/tracelens_single_config/run_full_analysis.py \
+                --baseline \"$BASELINE_DIR\" \
+                --test \"\$TEST_DIR\" \
+                --output \"\$COMPARISON_OUTPUT\" \
+                --all
+            done
+          "
+
+      - name: Run compare-all-runs analysis
+        working-directory: aorta
+        run: |
+          BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
+          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
+          EXPERIMENT_DIR="${{ env.EXPERIMENT_DIR }}"
+          
+          # Parse baseline
+          BASELINE_CU=$(echo $BASELINE_CONFIG | cut -d',' -f1)
+          BASELINE_THREADS=$(echo $BASELINE_CONFIG | cut -d',' -f2)
+          BASELINE_DIR="${EXPERIMENT_DIR}/${BASELINE_CU}cu_${BASELINE_THREADS}threads"
+          
+          # Build list of all test directories (excluding baseline)
+          TEST_DIRS=""
+          for pair in $CONFIG_PAIRS; do
+            CU_COUNT=$(echo $pair | cut -d',' -f1)
+            THREADS=$(echo $pair | cut -d',' -f2)
+            
+            # Skip if this is the baseline
+            if [ "$CU_COUNT" = "$BASELINE_CU" ] && [ "$THREADS" = "$BASELINE_THREADS" ]; then
+              continue
+            fi
+            
+            TEST_DIRS="$TEST_DIRS ${EXPERIMENT_DIR}/${CU_COUNT}cu_${THREADS}threads"
+          done
+          
+          echo "========================================"
+          echo "Comparing all runs together"
+          echo "  Baseline: $BASELINE_DIR"
+          echo "  Test directories: $TEST_DIRS"
+          echo "========================================"
+          
+          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+            OUTPUT_DIR=\"${EXPERIMENT_DIR}/compare_all_runs\"
+            mkdir -p \"\$OUTPUT_DIR\"
+            
+            python scripts/tracelens_single_config/run_full_analysis.py \
+              --baseline \"$BASELINE_DIR\" \
+              --test $TEST_DIRS \
+              --output \"\$OUTPUT_DIR\" \
+              --skip-tracelens \
+              --compare-all-runs
+          "
+
+      - name: Generate GitHub Step Summary
+        run: |
+          BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
+          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
+          
+          echo "## RCCL Warp Speed Performance Analysis Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Experiment Directory**: ${{ env.EXPERIMENT_DIR }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Baseline**: $BASELINE_CONFIG (CU,Threads)" >> $GITHUB_STEP_SUMMARY
+          echo "- **RCCL Branch**: ${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **GPU Target**: ${{ github.event.inputs.gpu_target || 'gfx950' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tested Configurations" >> $GITHUB_STEP_SUMMARY
+          for pair in $CONFIG_PAIRS; do
+            CU=$(echo $pair | cut -d',' -f1)
+            THREADS=$(echo $pair | cut -d',' -f2)
+            echo "- CU=$CU, Threads=$THREADS" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Generated Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- TraceLens individual reports (per configuration)" >> $GITHUB_STEP_SUMMARY
+          echo "- TraceLens collective reports (all ranks)" >> $GITHUB_STEP_SUMMARY
+          echo "- Pairwise comparison reports (baseline vs each test)" >> $GITHUB_STEP_SUMMARY
+          echo "- Compare-all-runs merged report (all configurations)" >> $GITHUB_STEP_SUMMARY
+          echo "- GPU timeline comparison" >> $GITHUB_STEP_SUMMARY
+          echo "- NCCL/Collective comparison" >> $GITHUB_STEP_SUMMARY
+          echo "- Final analysis report (Excel)" >> $GITHUB_STEP_SUMMARY
+          echo "- Performance visualization plots" >> $GITHUB_STEP_SUMMARY
+          echo "- HTML performance report" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload comparison results
+        uses: actions/upload-artifact@v4
+        with:
+          name: rccl-comparison-results
+          path: |
+            aorta/${{ env.EXPERIMENT_DIR }}/comparison_results/
+            aorta/${{ env.EXPERIMENT_DIR }}/compare_all_runs/
+          retention-days: 30
+
+      - name: Upload final report
+        uses: actions/upload-artifact@v4
+        with:
+          name: rccl-final-report
+          path: aorta/${{ env.EXPERIMENT_DIR }}/
+          retention-days: 90
+
+      - name: Cleanup Docker container
+        if: always()
+        working-directory: aorta
+        run: |
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} down || true
+

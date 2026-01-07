@@ -1,0 +1,38 @@
+services:
+  torchenv-rocm70:
+    container_name: training-overlap-bugs-rocm70_9-1
+    build:
+      context: .
+      dockerfile: Dockerfile.rocm70_9-1
+    user: root
+    privileged: true
+    network_mode: host
+    group_add:
+      - video
+    ipc: host
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      - RCCL_FOLDER=/rccl/rccl
+      - LD_LIBRARY_PATH=/rccl/rccl/build/release:${LD_LIBRARY_PATH:-}
+      - TORCH_NCCL_HIGH_PRIORITY=1
+
+    volumes:
+      # Mount aorta/ directory to /workspace/aorta
+      # From docker/rccl_test/, go up two levels to reach aorta/
+      # Use AORTA_WORKSPACE env var if set, otherwise default to ../..
+      - ${AORTA_WORKSPACE:-../..}:/workspace/aorta
+      # RCCL will be cloned inside container at /rccl
+      - ${RCCL_WORKSPACE:-rccl_build}:/rccl
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    working_dir: /workspace/aorta
+    shm_size: 17G
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    stdin_open: true
+    tty: true
