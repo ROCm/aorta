@@ -12,11 +12,6 @@ RUN wget https://artifactory-cdn.amd.com/artifactory/list/amdgpu-rpm/rhel/amdgpu
     yum install -y ./amdgpu-install-internal-7.0_9-1.noarch.rpm || rpm -ivh ./amdgpu-install-internal-7.0_9-1.noarch.rpm && \
     rm amdgpu-install-internal-7.0_9-1.noarch.rpm
 
-#COPY amdgpu-install-internal-7.0_9-1.noarch.rpm /tmp/amdgpu-install-internal-7.0_9-1.noarch.rpm
-#RUN yum install -y ./tmp/amdgpu-install-internal-7.0_9-1.noarch.rpm || rpm -ivh ./tmp/amdgpu-install-internal-7.0_9-1.noarch.rpm && \
-#    rm tmp/amdgpu-install-internal-7.0_9-1.noarch.rpm
-
-
 # Update amdgpu-repo with specific builds
 RUN amdgpu-repo --amdgpu-build=2247890 --rocm-build=compute-rocm-rel-7.0-meta/7
 

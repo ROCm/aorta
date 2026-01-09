@@ -39,8 +39,6 @@ jobs:
     name: Run GEMM Sweep Profiling
     runs-on: self-hosted
     timeout-minutes: 180
-    outputs:
-      sweep_dir: ${{ steps.setup.outputs.sweep_dir }}
 
     steps:
       - name: Checkout AORTA repository
@@ -61,12 +59,8 @@ jobs:
       - name: Build Docker container
         working-directory: aorta
         run: |
-          #mkdir -p ~/.docker/cli-plugins
-          #sudo curl -L "https://github.com/docker/compose/releases/download/v5.0.1/docker-compose-$(uname -s)-$(uname -m)"  -o ~/.docker/cli-plugins/docker-compose
-          #sudo chmod +x ~/.docker/cli-plugins/docker-compose
           docker compose version
-          docker login -u rocmshared -p ${{ secrets.ROCM_SHARED_KEY }}
-          #az storage blob download  --account-name amdsharkpublic --sas-token ${{ secrets.AMD_SHARKPUBLIC_AZ_KEY }} -container-name amdsharkpublic --name prosenj/aorta/amdgpu-install-internal-7.0_9-1.noarch.rpm --file docker/amdgpu-install-internal-7.0_9-1.noarch.rpm
+          docker login -u rocmshared -p ${{ secrets.ROCM_SHARED_KEY }} 
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} build
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} up -d
 
@@ -112,12 +106,6 @@ jobs:
           path: aorta/${{ steps.setup.outputs.sweep_dir }}
           retention-days: 30
 
-      #- name: Cleanup Docker container
-      #  if: always()
-      #  working-directory: aorta
-      #  run: |
-      #    docker compose -f docker/${{ env.DOCKER_COMPOSE_FILE }} down || true
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -136,7 +124,6 @@ jobs:
           python scripts/gemm_analysis/plot_gemm_variance.py \
             --csv-path ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/top5_gemm_kernels_time_variance.csv \
             --output-dir ${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/plots"
-
 
       - name: Add timestamp information
         working-directory: aorta
@@ -167,6 +154,13 @@ jobs:
           docker exec ${{ env.CONTAINER_NAME }} bash -c "
           python scripts/gemm_analysis/process_comms.py \
             --sweep-dir ${{ steps.setup.outputs.sweep_dir }}"
+
+      - name: Stop Docker container
+        if: always()
+        working-directory: aorta
+        run: |
+          docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} down
+
       - name: Upload analysis results
         uses: actions/upload-artifact@v4
         with:
@@ -177,62 +171,7 @@ jobs:
             aorta/${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/*.xlsx
           retention-days: 30
 
-  comparison-report:
-    name: Generate Comparison Report
-    needs: [gemm-sweep]
-    runs-on: self-hosted
-    if: github.event_name == 'workflow_dispatch'
-    env:
-      SWEEP_DIR: ${{ needs.gemm-sweep.outputs.sweep_dir }}
-
-    steps:
-      - name: Checkout AORTA repository
-        uses: actions/checkout@v4
-        with:
-          repository: ROCm/aorta
-          path: aorta
-
-      - name: Download analysis results
-        uses: actions/download-artifact@v4
-        with:
-          name: gemm-analysis-results
-          path: aorta/${{ env.SWEEP_DIR }}/tracelens_analysis
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
-
-      - name: Install Python dependencies
-        working-directory: aorta
-        run: |
-          pip install -r requirements.txt
-
-      - name: Generate summary report
-        run: |
-          echo "## GEMM Sweep Analysis Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "- **Sweep Directory**: ${{ env.SWEEP_DIR }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Channels**: ${{ github.event.inputs.channels || '28,56' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Threads**: ${{ github.event.inputs.threads || '256,512' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Top-K Kernels**: ${{ github.event.inputs.top_k || '5' }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Generated Artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "- Variance plots (box plots, violin plots)" >> $GITHUB_STEP_SUMMARY
-          echo "- GEMM kernels with timestamps" >> $GITHUB_STEP_SUMMARY
-          echo "- Collective overlap analysis" >> $GITHUB_STEP_SUMMARY
-          echo "- GPU timeline data" >> $GITHUB_STEP_SUMMARY
-          echo "- NCCL communication data" >> $GITHUB_STEP_SUMMARY
-
-      - name: Upload final report
-        uses: actions/upload-artifact@v4
-        with:
-          name: gemm-final-report
-          path: aorta/${{ env.SWEEP_DIR }}/
-          retention-days: 90
-
+      
       - name: Checkout aorta-report repository
         uses: actions/checkout@v4
         with:
@@ -245,7 +184,7 @@ jobs:
         run: |
           date=$(date '+%Y-%m-%d')
           mkdir -p aorta-report/${date}/gemm-sweep
-          cp -r aorta/${{ env.SWEEP_DIR }}/* aorta-report/${date}/gemm-sweep/
+          cp -r aorta/${{ steps.setup.outputs.sweep_dir }}/* aorta-report/${date}/gemm-sweep/
 
       - name: Push results to aorta-report
         working-directory: aorta-report
