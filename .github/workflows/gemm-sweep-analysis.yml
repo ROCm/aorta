@@ -22,13 +22,13 @@ on:
         description: 'Number of top GEMM kernels to extract'
         required: false
         default: '5'
-  #pull_request:
-  #push:
-  #  branches:
-  #    - main
-  #  paths:
-  #    - 'scripts/gemm_analysis/**'
-  #    - 'config/gemm_overlap/**'
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/gemm_analysis/**'
+      - 'config/gemm_overlap/**'
 
 env:
   DOCKER_COMPOSE_FILE: docker/docker-compose.rocm70_9-1.yaml
@@ -232,3 +232,27 @@ jobs:
           name: gemm-final-report
           path: aorta/${{ env.SWEEP_DIR }}/
           retention-days: 90
+
+      - name: Checkout aorta-report repository
+        uses: actions/checkout@v4
+        with:
+          repository: ROCm/aorta-report
+          ref: main
+          token: ${{ secrets.AORTA_REPORT_GITHUB_TOKEN }}
+          path: aorta-report
+
+      - name: Create date directory and copy sweep results
+        run: |
+          date=$(date '+%Y-%m-%d')
+          mkdir -p aorta-report/${date}/gemm-sweep
+          cp -r aorta/${{ env.SWEEP_DIR }}/* aorta-report/${date}/gemm-sweep/
+
+      - name: Push results to aorta-report
+        working-directory: aorta-report
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "<>"
+          date=$(date '+%Y-%m-%d')
+          git add ${date}
+          git commit -m "Add GEMM sweep results for ${date}"
+          git push origin main
