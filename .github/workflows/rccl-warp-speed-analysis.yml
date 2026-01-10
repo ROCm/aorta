@@ -26,16 +26,16 @@ on:
         description: 'RCCL branch to test'
         required: false
         default: 'warp_speed_v1'
-  #push:
-  #  branches:
-  #    - main
-  #  paths:
-  #    - 'scripts/tracelens_single_config/**'
-  #    - 'docker/rccl_test/**'
-  #pull_request:
-  #  paths:
-  #    - 'scripts/tracelens_single_config/**'
-  #    - 'docker/rccl_test/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/tracelens_single_config/**'
+      - 'docker/rccl_test/**'
+  pull_request:
+    paths:
+      - 'scripts/tracelens_single_config/**'
+      - 'docker/rccl_test/**'
 
 env:
   DOCKER_COMPOSE_FILE: docker/rccl_test/docker-compose.rocm70_9-1.yaml
@@ -279,3 +279,28 @@ jobs:
         working-directory: aorta
         run: |
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} down || true
+
+      - name: Checkout aorta-report repository
+        uses: actions/checkout@v4
+        with:
+          repository: ROCm/aorta-report
+          ref: main
+          token: ${{ secrets.AORTA_REPORT_GITHUB_TOKEN }}
+          path: aorta-report
+
+      - name: Create date directory and copy experiment results
+        run: |
+          date=$(date '+%Y-%m-%d')
+          mkdir -p aorta-report/${date}/rccl-warp-speed
+          cp -r aorta/${{ steps.find_experiment.outputs.experiment_dir }}/* aorta-report/${date}/rccl-warp-speed/
+
+      - name: Push results to aorta-report
+        working-directory: aorta-report
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "<>"
+          git pull --rebase origin main
+          date=$(date '+%Y-%m-%d')
+          git add ${date}
+          git commit -m "Add RCCL warp speed results for ${date}"
+          git push origin main

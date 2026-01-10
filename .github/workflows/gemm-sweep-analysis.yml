@@ -22,13 +22,13 @@ on:
         description: 'Number of top GEMM kernels to extract'
         required: false
         default: '5'
-  pull_request:
-  push:
-    branches:
-      - main
-    paths:
-      - 'scripts/gemm_analysis/**'
-      - 'config/gemm_overlap/**'
+  #pull_request:
+  #push:
+  #  branches:
+  #    - main
+  #  paths:
+  #    - 'scripts/gemm_analysis/**'
+  #    - 'config/gemm_overlap/**'
 
 env:
   DOCKER_COMPOSE_FILE: docker/docker-compose.rocm70_9-1.yaml
@@ -191,6 +191,7 @@ jobs:
         run: |
           git config user.name "GitHub Actions Bot"
           git config user.email "<>"
+          git pull --rebase origin main
           date=$(date '+%Y-%m-%d')
           git add ${date}
           git commit -m "Add GEMM sweep results for ${date}"
