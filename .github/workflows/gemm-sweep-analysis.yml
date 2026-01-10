@@ -60,7 +60,7 @@ jobs:
         working-directory: aorta
         run: |
           docker compose version
-          docker login -u rocmshared -p ${{ secrets.ROCM_SHARED_KEY }} 
+          docker login -u rocmshared -p ${{ secrets.ROCM_SHARED_KEY }}
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} build
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} up -d
 
@@ -171,7 +171,7 @@ jobs:
             aorta/${{ steps.setup.outputs.sweep_dir }}/tracelens_analysis/*.xlsx
           retention-days: 30
 
-      
+
       - name: Checkout aorta-report repository
         uses: actions/checkout@v4
         with:
