@@ -26,7 +26,7 @@ on:
         description: 'RCCL branch to test'
         required: false
         default: 'warp_speed_v1'
- 
+
 
 env:
   DOCKER_COMPOSE_FILE: docker/rccl_test/docker-compose.rocm70_9-1.yaml
