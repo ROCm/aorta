@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+AUTHOR: oyazdanb
 TraceLens with GEMM Recognition Patches
 
 This script applies GEMM recognition patches and runs TraceLens commands.
@@ -10,6 +11,7 @@ Usage:
     python tracelens_with_gemm_patch.py compare_perf_reports [args...]
 """
 
+import argparse
 import re
 import sys
 
@@ -103,10 +105,16 @@ def apply_gemm_patches():
     try:
         from TraceLens import util as tracelens_util
 
-        if hasattr(tracelens_util, 'TraceEventUtils'):
-            if hasattr(tracelens_util.TraceEventUtils, 'JaxOpKeys'):
+        if hasattr(tracelens_util, "TraceEventUtils"):
+            if hasattr(tracelens_util.TraceEventUtils, "JaxOpKeys"):
                 original_gemm_keys = tracelens_util.TraceEventUtils.JaxOpKeys.GemmKeys
-                enhanced_gemm_keys = ["Cijk", "gemm", "nvjet", "cublasLt", "C[a-z]{3}_A[a-z]{3}_B[a-z]{3}"]
+                enhanced_gemm_keys = [
+                    "Cijk",
+                    "gemm",
+                    "nvjet",
+                    "cublasLt",
+                    "C[a-z]{3}_A[a-z]{3}_B[a-z]{3}",
+                ]
 
                 all_keys = list(set(original_gemm_keys + enhanced_gemm_keys))
                 tracelens_util.TraceEventUtils.JaxOpKeys.GemmKeys = all_keys
@@ -142,14 +150,59 @@ def apply_gemm_patches():
     print("[OK] All GEMM patches applied successfully!\n")
 
 
+def create_parser():
+    """Create argument parser with subcommands."""
+    parser = argparse.ArgumentParser(
+        prog="tracelens_with_gemm_patch.py",
+        description="TraceLens with GEMM Recognition Patches - Apply GEMM recognition patches and run TraceLens commands.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python tracelens_with_gemm_patch.py generate_perf_report --trace-dir /path/to/traces --output report.xlsx
+    python tracelens_with_gemm_patch.py generate_multi_rank_collective --trace-dir /path/to/traces
+    python tracelens_with_gemm_patch.py compare_perf_reports --baseline base.xlsx --test test.xlsx
+        """,
+    )
+
+    subparsers = parser.add_subparsers(
+        dest="command",
+        title="commands",
+        description="Available TraceLens commands",
+        help="Command to run (use '<command> --help' for command-specific help)",
+    )
+
+    # Subparser for generate_perf_report
+    subparsers.add_parser(
+        "generate_perf_report",
+        help="Generate individual performance report from trace data",
+        add_help=False,  # Let TraceLens handle its own --help
+    )
+
+    # Subparser for generate_multi_rank_collective
+    subparsers.add_parser(
+        "generate_multi_rank_collective",
+        help="Generate multi-rank collective report from trace data",
+        add_help=False,  # Let TraceLens handle its own --help
+    )
+
+    # Subparser for compare_perf_reports
+    subparsers.add_parser(
+        "compare_perf_reports",
+        help="Compare two performance reports",
+        add_help=False,  # Let TraceLens handle its own --help
+    )
+
+    return parser
+
+
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: tracelens_with_gemm_patch.py <command> [args...]")
-        print("")
-        print("Commands:")
-        print("  generate_perf_report              - Generate individual performance report")
-        print("  generate_multi_rank_collective    - Generate multi-rank collective report")
-        print("  compare_perf_reports              - Compare performance reports")
+    parser = create_parser()
+
+    # Parse only the command, let TraceLens handle the rest
+    args, remaining_args = parser.parse_known_args()
+
+    if args.command is None:
+        parser.print_help()
         sys.exit(1)
 
     # Apply patches before importing TraceLens reporting modules
@@ -157,28 +210,20 @@ def main():
 
     # Import TraceLens after patches are applied
     from TraceLens.Reporting.generate_perf_report_pytorch import main as generate_perf_report_main
-    from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import main as generate_multi_rank_collective_report_main
+    from TraceLens.Reporting.generate_multi_rank_collective_report_pytorch import (
+        main as generate_multi_rank_collective_report_main,
+    )
     from TraceLens.Reporting.compare_perf_reports_pytorch import main as compare_perf_reports_main
 
-    command = sys.argv[1]
+    # Update sys.argv so TraceLens sees only its arguments
+    sys.argv = [sys.argv[0]] + remaining_args
 
-    # Remove the command from argv so TraceLens sees only its args
-    sys.argv = [sys.argv[0]] + sys.argv[2:]
-
-    if command == "generate_perf_report":
+    if args.command == "generate_perf_report":
         generate_perf_report_main()
-    elif command == "generate_multi_rank_collective":
+    elif args.command == "generate_multi_rank_collective":
         generate_multi_rank_collective_report_main()
-    elif command == "compare_perf_reports":
+    elif args.command == "compare_perf_reports":
         compare_perf_reports_main()
-    else:
-        print(f"Error: Unknown command '{command}'")
-        print("")
-        print("Available commands:")
-        print("  generate_perf_report")
-        print("  generate_multi_rank_collective")
-        print("  compare_perf_reports")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
