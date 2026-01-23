@@ -1,8 +1,8 @@
 # aorta-report Functional Specification
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** January 2026  
-**Status:** Draft
+**Status:** Partially Implemented
 
 ---
 
@@ -116,13 +116,13 @@ aorta-report
 | `sweep` | `--sweep1`, `--sweep2` | `--label1`, `--label2` | GEMM variance comparison between two sweeps |
 | `performance` | `--plots-dir` | - | GPU/NCCL performance analysis report |
 
-#### 2.2.4 `process` Group
+#### 2.2.4 `process` Group ✅ Implemented
 
 | Command | Arguments | Options | Description |
 |---------|-----------|---------|-------------|
 | `process gpu-timeline` | `INPUT_DIR` | `--mode` (auto/single/sweep), `--geo-mean`, `-o/--output` | Process GPU timeline from reports |
-| `process comms` | `INPUT_DIR` | `-o/--output` | Process communication data |
-| `process gemm-variance` | `INPUT_FILE` | `--timestamps`, `-o/--output` | Enhance GEMM variance with timestamps |
+| `process comms` | `SWEEP_DIR` | `-o/--output` | Process NCCL communication data from collective reports |
+| `process gemm-variance` | `INPUT_CSV` | `--base-path` (required), `--tolerance`, `-o/--output` | Enhance GEMM variance CSV with kernel timestamps |
 
 #### 2.2.5 `pipeline` Group
 
@@ -218,17 +218,43 @@ aorta-report generate plots \
     --output ./plots/
 ```
 
-### 3.6 GPU Timeline Processing
+### 3.6 Data Processing
+
+#### GPU Timeline Processing
 
 ```bash
 # Auto-detect input type and process
 aorta-report process gpu-timeline /path/to/reports
 
-# Explicit single config mode
+# Explicit single config mode (perf_rank*.xlsx files)
 aorta-report process gpu-timeline /path/to/individual_reports --mode single
 
-# Sweep mode with geometric mean
+# Sweep mode with geometric mean (perf_*ch_rank*.xlsx files)
 aorta-report process gpu-timeline /path/to/sweep --mode sweep --geo-mean
+
+# Custom output path
+aorta-report process gpu-timeline /path/to/sweep -o ./results/timeline.xlsx
+```
+
+#### NCCL Communication Processing
+
+```bash
+# Process NCCL collective reports from sweep directory
+aorta-report process comms /path/to/sweep
+
+# Custom output directory
+aorta-report process comms /path/to/sweep -o ./nccl_analysis/
+```
+
+#### GEMM Variance Timestamp Enhancement
+
+```bash
+# Enhance GEMM variance CSV with kernel timestamps
+aorta-report process gemm-variance ./gemm_variance.csv --base-path /path/to/sweep
+
+# Custom tolerance and output
+aorta-report process gemm-variance ./variance.csv --base-path /path/to/sweep \
+    --tolerance 0.02 -o ./enhanced.csv
 ```
 
 ### 3.7 Full Pipeline
@@ -361,23 +387,43 @@ aorta-report = "aorta.report:main"
 ```
 aorta/src/aorta/report/
 ├── __init__.py
-├── __main__.py              # python -m aorta.report
-├── cli.py                   # Click CLI definition
-├── commands/
+├── __main__.py                  # python -m aorta.report
+├── cli.py                       # Click CLI definition
+├── analysis/                    # ✅ Implemented - analyze command logic
 │   ├── __init__.py
-│   ├── analyze.py           # analyze subcommands
-│   ├── compare.py           # compare subcommands
-│   ├── report.py            # report subcommands
-│   ├── process.py           # process subcommands
-│   └── pipeline.py          # pipeline subcommands
-├── core/
+│   ├── tracelens_wrapper.py     # GEMM-patched TraceLens wrapper
+│   ├── analyze_gemm.py          # GEMM kernel variance analysis
+│   ├── analyze_single.py        # Single configuration analysis
+│   └── analyze_sweep.py         # Sweep configuration analysis
+├── generators/                  # ✅ Implemented - generate html command
 │   ├── __init__.py
-│   ├── tracelens_wrapper.py # GEMM-patched TraceLens
-│   ├── gpu_timeline.py      # GPU timeline processing
-│   ├── gemm_analysis.py     # GEMM analysis logic
-│   └── report_generator.py  # Report generation logic
-└── templates/
-    ├── html_template.py
-    └── html_report_config.py
+│   ├── html_generator.py        # Unified HTML generation entry point
+│   ├── sweep_comparison.py      # GEMM sweep comparison mode
+│   └── performance_report.py    # GPU/NCCL performance mode
+├── templates/                   # ✅ Implemented - HTML templates
+│   ├── __init__.py
+│   ├── sweep_comparison_template.py
+│   └── performance_report_template.py
+├── processing/                  # ✅ Implemented - process command logic
+│   ├── __init__.py
+│   ├── gpu_timeline_single.py   # Single config GPU timeline processing
+│   ├── gpu_timeline_sweep.py    # Sweep GPU timeline processing
+│   ├── process_comms.py         # NCCL communication data processing
+│   └── process_gemm_variance.py # GEMM variance timestamp enhancement
+├── ANALYZE_CMD_DEV_DOCS.md      # Developer documentation
+├── GENERATE_HTML_DEV_DOCS.md    # Developer documentation
+├── PROCESS_CMD_DEV_DOCS.md      # Developer documentation
+├── aorta-report-detail-plan.md  # Implementation plan
+└── aorta-report-functional-spec.md  # This document
 ```
+
+## Appendix C: Implementation Status
+
+| Command Group | Status | Notes |
+|---------------|--------|-------|
+| `analyze` | ✅ Implemented | `single`, `sweep`, `gemm` commands working |
+| `compare` | ⏳ Pending | CLI stubs exist, logic not implemented |
+| `generate` | ⚠️ Partial | `html` implemented, `excel`/`plots` pending |
+| `process` | ✅ Implemented | All commands working (`gpu-timeline`, `comms`, `gemm-variance`) |
+| `pipeline` | ⏳ Pending | CLI stubs exist, logic not implemented |
 

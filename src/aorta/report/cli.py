@@ -458,6 +458,10 @@ def process_gpu_timeline(ctx, input_dir, mode, geo_mean, output):
     Auto-detects the structure by default.
 
     \b
+    Single mode: Processes perf_rank*.xlsx files from individual_reports/
+    Sweep mode: Processes perf_*ch_rank*.xlsx files from tracelens_analysis/
+
+    \b
     Examples:
       aorta-report process gpu-timeline /path/to/reports
       aorta-report process gpu-timeline /path/to/individual_reports --mode single
@@ -485,7 +489,7 @@ def process_gpu_timeline(ctx, input_dir, mode, geo_mean, output):
             mode = "sweep"
         else:
             raise click.ClickException(
-                f"Could not auto-detect mode. Please specify --mode single or --mode sweep"
+                "Could not auto-detect mode. Please specify --mode single or --mode sweep"
             )
 
         if verbose:
@@ -493,18 +497,19 @@ def process_gpu_timeline(ctx, input_dir, mode, geo_mean, output):
 
     try:
         if mode == "single":
-            from .analysis.analyze_single import process_gpu_timeline as process_single
-            output_path = process_single(
+            from .processing import process_single_config
+            output_path = process_single_config(
                 reports_dir=input_path,
                 use_geo_mean=geo_mean,
+                output_path=Path(output) if output else None,
                 verbose=verbose,
             )
         else:  # sweep
-            from .analysis import analyze_sweep_config
-            output_path = analyze_sweep_config(
+            from .processing import process_sweep_config
+            output_path = process_sweep_config(
                 sweep_dir=input_path,
-                output_dir=Path(output) if output else None,
                 use_geo_mean=geo_mean,
+                output_path=Path(output) if output else None,
                 verbose=verbose,
             )
 
@@ -515,42 +520,93 @@ def process_gpu_timeline(ctx, input_dir, mode, geo_mean, output):
 
 
 @process.command("comms")
-@click.argument("input_dir", type=click.Path(exists=True))
-@click.option("-o", "--output", type=click.Path(), help="Output file path")
+@click.argument("sweep_dir", type=click.Path(exists=True))
+@click.option("-o", "--output", type=click.Path(), help="Output directory")
 @click.pass_context
-def process_comms(ctx, input_dir, output):
-    """Process communication data.
+def process_comms(ctx, sweep_dir, output):
+    """Process NCCL communication data from collective reports.
 
-    INPUT_DIR: Path to directory containing trace data.
+    SWEEP_DIR: Path to sweep directory containing tracelens_analysis/
+
+    Reads nccl_summary_implicit_sync sheet from collective_*.xlsx files,
+    combines data across all configurations, and generates master files.
+
+    \b
+    Output files:
+      - nccl_master_all_configs.xlsx (for pivot tables)
+      - nccl_master_all_configs.csv (for pandas/scripts)
 
     \b
     Examples:
-      aorta-report process comms /path/to/traces
-      aorta-report process comms /path/to/traces -o comms_processed.xlsx
+      aorta-report process comms /path/to/sweep
+      aorta-report process comms /path/to/sweep -o ./nccl_analysis/
     """
-    click.echo(f"[process comms] input_dir={input_dir}")
-    click.echo(f"  output={output}")
-    click.echo("  [NOT IMPLEMENTED]")
+    from pathlib import Path
+    from .processing import process_nccl_data
+
+    verbose = ctx.obj.get("verbose", False)
+    quiet = ctx.obj.get("quiet", False)
+
+    try:
+        excel_path, csv_path = process_nccl_data(
+            sweep_dir=Path(sweep_dir),
+            output_dir=Path(output) if output else None,
+            verbose=verbose,
+        )
+        if not quiet and excel_path:
+            click.echo(f"\nProcessing complete:")
+            click.echo(f"  Excel: {excel_path}")
+            click.echo(f"  CSV: {csv_path}")
+    except (ValueError, FileNotFoundError) as e:
+        raise click.ClickException(str(e))
 
 
 @process.command("gemm-variance")
-@click.argument("input_file", type=click.Path(exists=True))
-@click.option("--timestamps", is_flag=True, help="Include timestamp data")
-@click.option("-o", "--output", type=click.Path(), help="Output file path")
+@click.argument("input_csv", type=click.Path(exists=True))
+@click.option("--base-path", required=True, type=click.Path(exists=True),
+              help="Base path to sweep directory containing trace files")
+@click.option("--tolerance", default=0.01, type=float,
+              help="Duration matching tolerance as fraction (default: 0.01 = 1%)")
+@click.option("-o", "--output", type=click.Path(), help="Output CSV file")
 @click.pass_context
-def process_gemm_variance(ctx, input_file, timestamps, output):
-    """Enhance GEMM variance with timestamps.
+def process_gemm_variance(ctx, input_csv, base_path, tolerance, output):
+    """Enhance GEMM variance CSV with kernel timestamps.
 
-    INPUT_FILE: Path to GEMM report file.
+    INPUT_CSV: CSV file with GEMM variance data (from 'analyze gemm' command).
+
+    For each row, finds the corresponding trace file and extracts timestamps
+    for the kernel instances with minimum and maximum durations.
+
+    \b
+    Added columns:
+      - min_duration_timestamp_ms: When shortest instance occurred
+      - max_duration_timestamp_ms: When longest instance occurred
+      - time_between_min_max_ms: Time difference between occurrences
 
     \b
     Examples:
-      aorta-report process gemm-variance report.xlsx
-      aorta-report process gemm-variance report.xlsx --timestamps -o enhanced.xlsx
+      aorta-report process gemm-variance ./gemm_variance.csv --base-path /path/to/sweep
+      aorta-report process gemm-variance ./variance.csv --base-path /path/to/sweep \\
+          --tolerance 0.02 -o ./enhanced.csv
     """
-    click.echo(f"[process gemm-variance] input_file={input_file}")
-    click.echo(f"  timestamps={timestamps}, output={output}")
-    click.echo("  [NOT IMPLEMENTED]")
+    from pathlib import Path
+    from .processing import enhance_gemm_variance
+
+    verbose = ctx.obj.get("verbose", False)
+    quiet = ctx.obj.get("quiet", False)
+
+    try:
+        output_path = enhance_gemm_variance(
+            input_csv=Path(input_csv),
+            base_path=Path(base_path),
+            output_csv=Path(output) if output else None,
+            tolerance=tolerance,
+            verbose=verbose,
+        )
+        if not quiet and output_path:
+            click.echo(f"\nProcessing complete: {output_path}")
+    except (ValueError, FileNotFoundError) as e:
+        raise click.ClickException(str(e))
 
 
 # =============================================================================
