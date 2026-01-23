@@ -105,9 +105,16 @@ aorta-report
 
 | Command | Arguments | Options | Description |
 |---------|-----------|---------|-------------|
-| `generate html` | - | `--sweep1`, `--sweep2`, `--label1`, `--label2`, `-o/--output` | Generate HTML report with embedded images |
+| `generate html` | - | `--mode` (sweep/performance), mode-specific options, `-o/--output` | Generate HTML report with embedded images |
 | `generate excel` | - | `--gpu-combined`, `--gpu-comparison`, `--coll-combined`, `--coll-comparison`, `-o/--output` | Generate comprehensive Excel report |
 | `generate plots` | - | `-i/--input`, `-o/--output`, `--type` | Generate visualization plots |
+
+##### `generate html` Modes
+
+| Mode | Required Options | Optional Options | Description |
+|------|-----------------|------------------|-------------|
+| `sweep` | `--sweep1`, `--sweep2` | `--label1`, `--label2` | GEMM variance comparison between two sweeps |
+| `performance` | `--plots-dir` | - | GPU/NCCL performance analysis report |
 
 #### 2.2.4 `process` Group
 
@@ -192,13 +199,18 @@ aorta-report compare runs \
 ### 3.5 Report Generation
 
 ```bash
-# Generate HTML comparison report
-aorta-report generate html \
+# Generate HTML report - SWEEP MODE (GEMM variance comparison)
+aorta-report generate html --mode sweep \
     --sweep1 ./experiments/baseline \
     --sweep2 ./experiments/test \
     --label1 "Baseline" \
     --label2 "Optimized" \
-    -o comparison_report.html
+    -o gemm_comparison.html
+
+# Generate HTML report - PERFORMANCE MODE (GPU/NCCL analysis)
+aorta-report generate html --mode performance \
+    --plots-dir ./output/plots \
+    -o performance_report.html
 
 # Generate visualization plots
 aorta-report generate plots \
@@ -282,8 +294,8 @@ aorta-report pipeline full --help
 | `combine_reports.py` | `aorta-report compare reports` |
 | `add_collective_comparison.py` | `aorta-report compare collective` |
 | `add_comparison_sheets.py` | `aorta-report compare reports` (merged) |
-| `create_embeded_html_report.py` | `aorta-report generate html` |
-| `create_final_html.py` | `aorta-report generate html` (merged) |
+| `create_embeded_html_report.py` | `aorta-report generate html --mode sweep` |
+| `create_final_html.py` | `aorta-report generate html --mode performance` |
 | `create_final_report.py` | `aorta-report generate excel` |
 | `create_final_plots.py` | `aorta-report generate plots` |
 | `plot_gemm_variance.py` | `aorta-report generate plots --type gemm-variance` |

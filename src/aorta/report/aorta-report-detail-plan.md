@@ -267,7 +267,9 @@ aorta-report
 │   └── collective    # Compare collective ops (was: add_collective_comparison.py)
 │
 ├── generate          # Report generation
-│   ├── html          # HTML report (was: create_embeded_html_report.py, create_final_html.py)
+│   ├── html          # HTML report with two modes:
+│   │   ├── --mode sweep        # GEMM variance (was: create_embeded_html_report.py)
+│   │   └── --mode performance  # GPU/NCCL analysis (was: create_final_html.py)
 │   ├── excel         # Excel report (was: create_final_report.py)
 │   └── plots         # Generate plots (was: create_final_plots.py, plot_gemm_variance.py)
 │
@@ -363,14 +365,24 @@ def generate():
     pass
 
 @generate.command("html")
-@click.option("--sweep1", required=True, help="First sweep directory")
-@click.option("--sweep2", help="Second sweep directory (for comparison)")
-@click.option("--label1", help="Label for first sweep")
-@click.option("--label2", help="Label for second sweep")
+@click.option("--mode", type=click.Choice(["sweep", "performance"]), required=True,
+              help="Report mode: 'sweep' for GEMM variance, 'performance' for GPU/NCCL analysis")
+@click.option("--sweep1", help="[sweep mode] First sweep directory")
+@click.option("--sweep2", help="[sweep mode] Second sweep directory")
+@click.option("--label1", help="[sweep mode] Label for first sweep")
+@click.option("--label2", help="[sweep mode] Label for second sweep")
+@click.option("--plots-dir", help="[performance mode] Directory with pre-generated plots")
 @click.option("--output", "-o", required=True, help="Output HTML file")
-def generate_html(sweep1, sweep2, label1, label2, output):
-    """Generate HTML report with embedded images."""
-    pass
+def generate_html(mode, sweep1, sweep2, label1, label2, plots_dir, output):
+    """Generate HTML report with embedded images.
+    
+    Two modes:
+    - sweep: GEMM variance comparison (requires --sweep1, --sweep2)
+    - performance: GPU/NCCL analysis (requires --plots-dir)
+    """
+    from .generators import generate_html as do_generate_html
+    do_generate_html(mode=mode, output=output, sweep1=sweep1, sweep2=sweep2,
+                     label1=label1, label2=label2, plots_dir=plots_dir)
 
 @generate.command("excel")
 @click.option("--gpu-combined", required=True)
@@ -431,24 +443,59 @@ def pipeline_full(baseline, test, output, skip_tracelens, gpu_timeline, collecti
 ```
 aorta/src/aorta/report/
 ├── __init__.py
-├── __main__.py          # Entry point: python -m aorta.report
-├── cli.py               # Click CLI definition
-├── commands/
+├── __main__.py              # Entry point: python -m aorta.report
+├── cli.py                   # Click CLI definition
+├── generators/              # HTML report generators (IMPLEMENTED)
 │   ├── __init__.py
-│   ├── analyze.py       # analyze subcommands
-│   ├── compare.py       # compare subcommands
-│   ├── report.py        # report subcommands
-│   └── pipeline.py      # pipeline subcommands
-├── core/
+│   ├── html_generator.py    # Unified entry point + utilities
+│   ├── sweep_comparison.py  # GEMM sweep comparison mode
+│   └── performance_report.py # GPU/NCCL performance mode
+├── templates/               # HTML templates (IMPLEMENTED)
 │   ├── __init__.py
-│   ├── tracelens_wrapper.py  # GEMM-patched TraceLens (from tracelens_with_gemm_patch.py)
-│   ├── gpu_timeline.py       # Consolidated GPU timeline processing
-│   ├── gemm_analysis.py      # GEMM analysis logic
-│   └── report_generator.py   # Report generation logic
-└── templates/
-    ├── html_template.py
-    └── html_report_config.py
+│   ├── sweep_comparison_template.py    # GEMM comparison HTML
+│   └── performance_report_template.py  # Performance report HTML
+├── commands/                # Future: split cli.py into modules
+│   ├── __init__.py
+│   ├── analyze.py           # analyze subcommands
+│   ├── compare.py           # compare subcommands
+│   ├── report.py            # report subcommands
+│   └── pipeline.py          # pipeline subcommands
+└── core/                    # Future: shared processing logic
+    ├── __init__.py
+    ├── tracelens_wrapper.py  # GEMM-patched TraceLens
+    ├── gpu_timeline.py       # Consolidated GPU timeline processing
+    ├── gemm_analysis.py      # GEMM analysis logic
+    └── report_generator.py   # Report generation logic
 ```
+
+### `generate html` Implementation (COMPLETED)
+
+The `generate html` command supports two modes:
+
+#### Mode: `sweep` (GEMM Variance Comparison)
+- **Source:** `create_embeded_html_report.py`
+- **Input:** Two sweep directories with `tracelens_analysis/plots/` containing variance plots
+- **Expected plots:**
+  - `variance_by_threads_boxplot.png`
+  - `variance_by_channels_boxplot.png`
+  - `variance_by_ranks_boxplot.png`
+  - `variance_violin_combined.png`
+  - `variance_thread_channel_interaction.png`
+- **Output:** Side-by-side comparison HTML with embedded base64 images
+
+#### Mode: `performance` (GPU/NCCL Analysis)
+- **Source:** `create_final_html.py`
+- **Input:** Plots directory containing performance charts
+- **Expected plots:**
+  - Overall: `improvement_chart.png`, `abs_time_comparison.png`
+  - Cross-Rank: `gpu_time_heatmap.png`, `*_by_rank.png`
+  - NCCL: `NCCL_*_comparison.png`
+- **Output:** Performance analysis HTML with embedded base64 images
+
+#### Features
+- Clear plot status reporting showing expected/found/missing for each plot
+- Graceful handling of missing plots with placeholder messages
+- Base64 embedding for self-contained HTML files
 
 ### Phase 5: Entry Points
 
@@ -476,8 +523,11 @@ aorta-report analyze gemm /path/to/reports --top-k 10 -o gemm_analysis.csv
 # Compare two runs
 aorta-report compare reports -b baseline.xlsx -t test.xlsx -o comparison.xlsx
 
-# Generate HTML report
-aorta-report generate html --sweep1 ./exp1 --sweep2 ./exp2 -o report.html
+# Generate HTML report (GEMM variance comparison)
+aorta-report generate html --mode sweep --sweep1 ./exp1 --sweep2 ./exp2 -o comparison.html
+
+# Generate HTML report (GPU/NCCL performance analysis)
+aorta-report generate html --mode performance --plots-dir ./output/plots -o report.html
 
 # Full pipeline
 aorta-report pipeline full \
@@ -528,7 +578,7 @@ exec aorta-report analyze single "$@"
 | `compare_all_runs.py` | `aorta-report compare runs` |
 | `combine_reports.py` | `aorta-report compare reports` |
 | `add_collective_comparison.py` | `aorta-report compare collective` |
-| `create_embeded_html_report.py` | `aorta-report generate html` |
+| `create_embeded_html_report.py` | `aorta-report generate html --mode sweep` |
 | `create_final_report.py` | `aorta-report generate excel` |
 | `create_final_plots.py` | `aorta-report generate plots` |
 | `process_gpu_timeline.py` | `aorta-report process gpu-timeline` |

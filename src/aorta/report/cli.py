@@ -226,27 +226,72 @@ def generate(ctx):
 
 
 @generate.command("html")
-@click.option("--sweep1", required=True, type=click.Path(exists=True),
-              help="First sweep directory")
+@click.option("--mode", type=click.Choice(["sweep", "performance"]), required=True,
+              help="Report mode: 'sweep' for GEMM variance comparison, 'performance' for GPU/NCCL analysis")
+# Sweep mode options
+@click.option("--sweep1", type=click.Path(exists=True),
+              help="[sweep mode] First sweep directory")
 @click.option("--sweep2", type=click.Path(exists=True),
-              help="Second sweep directory (for comparison)")
-@click.option("--label1", help="Label for first sweep")
-@click.option("--label2", help="Label for second sweep")
+              help="[sweep mode] Second sweep directory")
+@click.option("--label1", help="[sweep mode] Label for first sweep")
+@click.option("--label2", help="[sweep mode] Label for second sweep")
+# Performance mode options
+@click.option("--plots-dir", type=click.Path(exists=True),
+              help="[performance mode] Directory containing pre-generated plots")
+# Common options
 @click.option("-o", "--output", required=True, type=click.Path(), help="Output HTML file")
 @click.pass_context
-def generate_html(ctx, sweep1, sweep2, label1, label2, output):
+def generate_html(ctx, mode, sweep1, sweep2, label1, label2, plots_dir, output):
     """Generate HTML report with embedded images.
+
+    Two modes available:
+
+    \b
+    SWEEP MODE (--mode sweep):
+      Compare GEMM kernel variance between two experiment sweeps.
+      Requires: --sweep1, --sweep2
+      Optional: --label1, --label2
+
+    \b
+    PERFORMANCE MODE (--mode performance):
+      Generate GPU/NCCL performance analysis report.
+      Requires: --plots-dir (directory with pre-generated plots)
 
     \b
     Examples:
-      aorta-report generate html --sweep1 ./exp1 -o report.html
-      aorta-report generate html --sweep1 ./exp1 --sweep2 ./exp2 \\
-          --label1 "Baseline" --label2 "Optimized" -o comparison.html
+      # Sweep comparison (GEMM variance)
+      aorta-report generate html --mode sweep \\
+          --sweep1 ./exp1 --sweep2 ./exp2 \\
+          --label1 "Baseline" --label2 "Optimized" \\
+          -o comparison.html
+
+      # Performance report (GPU/NCCL analysis)
+      aorta-report generate html --mode performance \\
+          --plots-dir ./output/plots \\
+          -o performance_report.html
     """
-    click.echo(f"[generate html] sweep1={sweep1}, sweep2={sweep2}")
-    click.echo(f"  label1={label1}, label2={label2}")
-    click.echo(f"  output={output}")
-    click.echo("  [NOT IMPLEMENTED]")
+    from pathlib import Path
+    from .generators import generate_html as do_generate_html
+
+    verbose = ctx.obj.get("verbose", False)
+
+    try:
+        output_path = do_generate_html(
+            mode=mode,
+            output=Path(output),
+            sweep1=Path(sweep1) if sweep1 else None,
+            sweep2=Path(sweep2) if sweep2 else None,
+            label1=label1,
+            label2=label2,
+            plots_dir=Path(plots_dir) if plots_dir else None,
+            verbose=verbose,
+        )
+        if not ctx.obj.get("quiet", False):
+            click.echo(f"\nReport generated successfully: {output_path}")
+    except ValueError as e:
+        raise click.UsageError(str(e))
+    except FileNotFoundError as e:
+        raise click.ClickException(str(e))
 
 
 @generate.command("excel")
