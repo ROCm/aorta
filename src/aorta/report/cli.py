@@ -635,23 +635,107 @@ def generate_excel(ctx, gpu_combined, gpu_comparison, coll_combined, coll_compar
 
 
 @generate.command("plots")
-@click.option("-i", "--input", "input_file", required=True, type=click.Path(exists=True),
-              help="Input Excel report")
-@click.option("-o", "--output", required=True, type=click.Path(), help="Output directory")
-@click.option("--type", "plot_type", type=click.Choice(["all", "gpu-timeline", "gemm-variance"]),
+@click.option("-i", "--input", "input_file", type=click.Path(exists=True),
+              help="Input file (Excel for summary, CSV for gemm)")
+@click.option("--excel-input", type=click.Path(exists=True),
+              help="Excel report file (for --type all)")
+@click.option("--gemm-csv", type=click.Path(exists=True),
+              help="GEMM variance CSV (for --type all)")
+@click.option("-o", "--output", required=True, type=click.Path(),
+              help="Output directory for PNG files")
+@click.option("--type", "plot_type",
+              type=click.Choice(["all", "summary", "gemm"]),
               default="all", help="Type of plots to generate")
+@click.option("--dpi", default=150, type=int,
+              help="DPI for output images (default: 150)")
 @click.pass_context
-def generate_plots(ctx, input_file, output, plot_type):
+def generate_plots_cmd(ctx, input_file, excel_input, gemm_csv, output, plot_type, dpi):
     """Generate visualization plots.
 
     \b
+    Plot Types:
+      summary  - GPU timeline & NCCL charts from Excel report
+      gemm     - GEMM variance distribution from CSV
+      all      - Both summary and gemm plots
+
+    \b
     Examples:
-      aorta-report generate plots -i final_report.xlsx -o ./plots/
-      aorta-report generate plots -i report.xlsx -o ./plots/ --type gemm-variance
+      # Summary plots from Excel report
+      aorta-report generate plots -i final_report.xlsx -o ./plots/ --type summary
+
+      # GEMM plots from CSV
+      aorta-report generate plots -i gemm_variance.csv -o ./plots/ --type gemm
+
+      # All plots (both inputs required)
+      aorta-report generate plots \\
+          --excel-input final_report.xlsx \\
+          --gemm-csv gemm_variance.csv \\
+          -o ./plots/ --type all
     """
-    click.echo(f"[generate plots] input={input_file}")
-    click.echo(f"  output={output}, type={plot_type}")
-    click.echo("  [NOT IMPLEMENTED]")
+    from pathlib import Path
+    from .generators import generate_plots
+
+    verbose = ctx.obj.get("verbose", False)
+    quiet = ctx.obj.get("quiet", False)
+
+    # Resolve inputs based on plot_type
+    excel_path = None
+    csv_path = None
+
+    if plot_type == "summary":
+        if input_file is None and excel_input is None:
+            raise click.UsageError("--input or --excel-input required for summary plots")
+        excel_path = Path(input_file or excel_input)
+    elif plot_type == "gemm":
+        if input_file is None and gemm_csv is None:
+            raise click.UsageError("--input or --gemm-csv required for gemm plots")
+        csv_path = Path(input_file or gemm_csv)
+    else:  # all
+        if excel_input is None:
+            raise click.UsageError("--excel-input required for --type all")
+        if gemm_csv is None:
+            raise click.UsageError("--gemm-csv required for --type all")
+        excel_path = Path(excel_input)
+        csv_path = Path(gemm_csv)
+
+    if not quiet:
+        click.echo("=" * 60)
+        click.echo("Generating Plots")
+        click.echo("=" * 60)
+        click.echo(f"Plot type: {plot_type}")
+        if excel_path:
+            click.echo(f"Excel input: {excel_path}")
+        if csv_path:
+            click.echo(f"GEMM CSV: {csv_path}")
+        click.echo(f"Output: {output}")
+        click.echo(f"DPI: {dpi}")
+
+    try:
+        results = generate_plots(
+            plot_type=plot_type,
+            output_dir=Path(output),
+            excel_input=excel_path,
+            gemm_csv=csv_path,
+            dpi=dpi,
+            verbose=verbose,
+        )
+
+        if not quiet:
+            click.echo("\n" + "=" * 60)
+            click.echo("Plots Generated!")
+            click.echo("=" * 60)
+            total = 0
+            for category, files in results.items():
+                click.echo(f"\n{category.upper()} plots:")
+                for f in files:
+                    click.echo(f"  - {f.name}")
+                total += len(files)
+            click.echo(f"\nTotal: {total} files generated in {output}")
+
+    except (ValueError, FileNotFoundError) as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Error generating plots: {e}")
 
 
 # =============================================================================
