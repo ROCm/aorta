@@ -548,14 +548,21 @@ def generate_html(ctx, mode, sweep1, sweep2, label1, label2, plots_dir, output):
 @click.option("--coll-comparison", required=True, type=click.Path(exists=True),
               help="Collective comparison report file")
 @click.option("-o", "--output", required=True, type=click.Path(), help="Output Excel file")
-@click.option("--baseline-label", help="Label for baseline")
-@click.option("--test-label", help="Label for test")
+@click.option("--baseline-label", default="Baseline", help="Label for baseline (default: Baseline)")
+@click.option("--test-label", default="Test", help="Label for test (default: Test)")
 @click.pass_context
 def generate_excel(ctx, gpu_combined, gpu_comparison, coll_combined, coll_comparison,
                    output, baseline_label, test_label):
     """Generate comprehensive Excel report.
 
-    Combines GPU timeline and collective comparison data into a single report.
+    Combines GPU timeline and collective comparison data into a single
+    well-organized Excel report with:
+
+    \b
+    - Summary Dashboard (first sheet, key metrics at a glance)
+    - Comparison sheets (visible, with color-coded changes)
+    - Raw data sheets (hidden, accessible via Unhide)
+    - Excel table formatting with filters
 
     \b
     Examples:
@@ -565,13 +572,66 @@ def generate_excel(ctx, gpu_combined, gpu_comparison, coll_combined, coll_compar
           --coll-combined coll_combined.xlsx \\
           --coll-comparison coll_comparison.xlsx \\
           -o final_report.xlsx
+
+      aorta-report generate excel \\
+          --gpu-combined gpu_combined.xlsx \\
+          --gpu-comparison gpu_comparison.xlsx \\
+          --coll-combined coll_combined.xlsx \\
+          --coll-comparison coll_comparison.xlsx \\
+          --baseline-label "ROCm 6.0" --test-label "ROCm 7.0" \\
+          -o final_report.xlsx
     """
-    click.echo(f"[generate excel] gpu_combined={gpu_combined}")
-    click.echo(f"  gpu_comparison={gpu_comparison}")
-    click.echo(f"  coll_combined={coll_combined}")
-    click.echo(f"  coll_comparison={coll_comparison}")
-    click.echo(f"  output={output}")
-    click.echo("  [NOT IMPLEMENTED]")
+    from pathlib import Path
+    from .generators import create_final_excel_report
+
+    verbose = ctx.obj.get("verbose", False)
+    quiet = ctx.obj.get("quiet", False)
+
+    if not quiet:
+        click.echo("=" * 60)
+        click.echo("Creating Final Excel Report")
+        click.echo("=" * 60)
+        click.echo(f"GPU Combined:     {gpu_combined}")
+        click.echo(f"GPU Comparison:   {gpu_comparison}")
+        click.echo(f"Coll Combined:    {coll_combined}")
+        click.echo(f"Coll Comparison:  {coll_comparison}")
+        click.echo(f"Output:           {output}")
+        click.echo(f"Baseline label:   {baseline_label}")
+        click.echo(f"Test label:       {test_label}")
+
+    try:
+        result = create_final_excel_report(
+            gpu_combined_path=Path(gpu_combined),
+            gpu_comparison_path=Path(gpu_comparison),
+            coll_combined_path=Path(coll_combined),
+            coll_comparison_path=Path(coll_comparison),
+            output_path=Path(output),
+            baseline_label=baseline_label,
+            test_label=test_label,
+            verbose=verbose,
+        )
+
+        if not quiet:
+            click.echo("\n" + "=" * 60)
+            click.echo("Report Complete!")
+            click.echo("=" * 60)
+            click.echo(f"\nOutput: {result['output_path']}")
+            click.echo("\nReport Structure:")
+            click.echo("  Visible Sheets (Analysis):")
+            for sheet in result["visible_sheets"]:
+                click.echo(f"    - {sheet}")
+            click.echo("\n  Hidden Sheets (Raw Data):")
+            for sheet in result["hidden_sheets"]:
+                click.echo(f"    - {sheet}")
+            click.echo("\nFeatures:")
+            click.echo("  - All data formatted as Excel tables with filters")
+            click.echo("  - Percent change columns are color-coded (green=better, red=worse)")
+            click.echo("  - Unhide raw data: Right-click sheet tab → Unhide")
+
+    except FileNotFoundError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Error creating report: {e}")
 
 
 @generate.command("plots")
