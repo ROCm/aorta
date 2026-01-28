@@ -1,549 +1,506 @@
-# aorta-report Detailed Implementation Plan
+# aorta-report Detailed Architecture Plan
 
-## Current State Summary
-
-| Directory | Scripts | Purpose |
-|-----------|---------|---------|
-| `gemm_analysis/` | 8 Python + 2 Shell | GEMM-specific analysis, sweep directories, HTML reports |
-| `tracelens_single_config/` | 9 Python + 2 Shell | Single-config analysis, report comparison, final reports |
-| Shared | `tracelens_with_gemm_patch.py` | GEMM-patched TraceLens wrapper |
-
-### Current Scripts Inventory
-
-#### `gemm_analysis/` directory:
-
-**Shell scripts:**
-- `run_tracelens_analysis.sh` - Main pipeline for sweep directory analysis
-- `run_train_various_channels.sh` - Training with various NCCL channels
-
-**Python scripts:**
-- `analyze_gemm_reports.py` - Analyze GEMM reports from Excel
-- `create_embeded_html_report.py` - Create HTML report with embedded images
-- `enhance_gemm_variance_with_timestamps.py` - Enhance GEMM variance data
-- `gemm_report_with_collective_overlap.py` - GEMM report with collective overlap
-- `plot_gemm_variance.py` - Plot GEMM variance
-- `process_comms.py` - Process communication data
-- `process_gpu_timeline.py` - Process GPU timeline
-
-**Support files:**
-- `html_template.py` - HTML template for reports
-- `rocprof_*.yaml` - rocprof config files
-
-#### `tracelens_single_config/` directory:
-
-**Shell scripts:**
-- `run_tracelens_single_config.sh` - TraceLens for single config
-- `run_rccl_warp_speed_comparison.sh` - RCCL comparison
-
-**Python scripts:**
-- `run_full_analysis.py` - Master pipeline script
-- `add_collective_comparison.py` - Add collective comparison sheets
-- `add_comparison_sheets.py` - Add comparison sheets
-- `combine_reports.py` - Combine reports
-- `compare_all_runs.py` - Compare all runs
-- `create_final_html.py` - Create final HTML report
-- `create_final_plots.py` - Create final plots
-- `create_final_report.py` - Create final Excel report
-- `process_gpu_timeline.py` - Process GPU timeline (duplicate!)
-
-**Support files:**
-- `html_report_config.py` - HTML config
-
-### Key Issues
-
-- Duplicate scripts (`process_gpu_timeline.py` exists in both directories)
-- Mixed Shell + Python entry points
-- No unified interface
-- Hard to discover available functionality
-- Inconsistent argument styles
+**Version:** 2.0  
+**Date:** January 2026  
+**Status:** Implemented
 
 ---
 
-## Duplicate Script Analysis: `process_gpu_timeline.py`
+## 1. Overview
 
-Both directories contain a `process_gpu_timeline.py` file with overlapping but different functionality.
+`aorta-report` is a unified CLI tool for TraceLens analysis and report generation. This document describes the modular architecture design with **colocated CLI commands**.
 
-### Comparison Summary
+### Design Philosophy
 
-| Aspect | `gemm_analysis/` | `tracelens_single_config/` |
-|--------|------------------|----------------------------|
-| **Lines of Code** | 468 | 101 |
-| **Purpose** | Multi-config sweep analysis | Single config analysis |
-| **Input Argument** | `--sweep-dir` | `--reports-dir` |
-| **File Pattern** | `perf_28ch_rank0.xlsx` | `perf_rank0.xlsx` |
+- **High Cohesion**: CLI commands live next to their implementation
+- **Single Responsibility**: Each package owns its complete interface (API + CLI)
+- **Lazy Loading**: Dependencies imported only when commands are invoked
+- **Maintainability**: Small, focused files (<300 lines each)
 
-### Detailed Differences
+---
 
-#### 1. Scope & Directory Structure
+## 2. Directory Structure
 
-**`gemm_analysis/`** - Handles **sweep directories** with multiple thread/channel configurations:
 ```
-sweep_dir/
-└── tracelens_analysis/
-    ├── 256thread/
-    │   └── individual_reports/
-    │       ├── perf_28ch_rank0.xlsx
-    │       ├── perf_28ch_rank1.xlsx
-    │       ├── perf_56ch_rank0.xlsx
-    │       └── ...
-    └── 384thread/
-        └── individual_reports/
-            └── ...
-```
-
-**`tracelens_single_config/`** - Handles **single configuration** flat directory:
-```
-reports_dir/
-├── perf_rank0.xlsx
-├── perf_rank1.xlsx
-└── ...
-```
-
-#### 2. Input Arguments
-
-```python
-# gemm_analysis/process_gpu_timeline.py
-parser.add_argument("--sweep-dir", required=True, 
-    help="Path to sweep directory (e.g., sweep_20251124_222204)")
-
-# tracelens_single_config/process_gpu_timeline.py
-parser.add_argument("--reports-dir", required=True, 
-    help="Path to individual_reports directory")
-```
-
-#### 3. Metadata Handling
-
-**`gemm_analysis/`** extracts and adds rich metadata:
-```python
-aggregated["thread_config"] = thread_config      # e.g., "256thread"
-aggregated["threads_num"] = int(...)             # e.g., 256
-aggregated["channel_config"] = channel_config    # e.g., "28ch"
-aggregated["channels_num"] = int(...)            # e.g., 28
-aggregated["full_config"] = f"{thread_config}_{channel_config}"  # e.g., "256thread_28ch"
-aggregated["num_ranks"] = num_ranks
-```
-
-**`tracelens_single_config/`** - minimal metadata:
-```python
-aggregated["num_ranks"] = len(perf_files)
-```
-
-#### 4. Output Excel Sheets
-
-**`gemm_analysis/`** creates:
-| Sheet | Description |
-|-------|-------------|
-| `All_Data` | Complete dataset with all configs |
-| `Pivot_Time_ms` | Matrix: type × full_config |
-| `Pivot_Percent` | Matrix: type × full_config |
-| `Summary_By_Config` | Key metrics per configuration |
-
-**`tracelens_single_config/`** creates:
-| Sheet | Description |
-|-------|-------------|
-| `Summary` | Aggregated metrics |
-| `All_Ranks_Combined` | Raw data from all ranks |
-| `Per_Rank_Time_ms` | Matrix: type × rank |
-| `Per_Rank_Percent` | Matrix: type × rank |
-
-#### 5. Output File Location
-
-```python
-# gemm_analysis/
-output_path = tracelens_dir / f"gpu_timeline_all_configs_{method_suffix}.xlsx"
-
-# tracelens_single_config/
-output_path = reports_path.parent / f"gpu_timeline_summary_{method_suffix}.xlsx"
-```
-
-### Shared Code (Consolidation Candidates)
-
-Both files have **identical** `geometric_mean()` function:
-```python
-def geometric_mean(values):
-    """Calculate geometric mean, handling zeros."""
-    values = np.array(values)
-    values = np.where(values == 0, 1e-10, values)
-    return np.exp(np.mean(np.log(values)))
-```
-
-And **similar** aggregation logic:
-```python
-agg_func = geometric_mean if use_geo_mean else "mean"
-aggregated = (
-    combined.groupby("type")
-    .agg({"time ms": agg_func, "percent": agg_func})
-    .reset_index()
-)
-```
-
-### Consolidation Recommendation
-
-Create a unified `process_gpu_timeline()` command that:
-
-1. **Auto-detects** input type (sweep dir vs single reports dir)
-2. Uses `--mode` flag with options: `auto`, `single`, `sweep`
-3. Shares common aggregation logic via a core module
-4. Generates appropriate output based on detected/specified mode
-
-**Proposed unified CLI command:**
-```python
-@process.command("gpu-timeline")
-@click.argument("input_dir", type=click.Path(exists=True))
-@click.option("--mode", type=click.Choice(["auto", "single", "sweep"]), default="auto",
-              help="Processing mode: auto-detect, single config, or sweep")
-@click.option("--geo-mean", is_flag=True, help="Use geometric mean instead of arithmetic mean")
-@click.option("--output", "-o", help="Output file path (auto-generated if not specified)")
-def process_gpu_timeline(input_dir, mode, geo_mean, output):
-    """Process GPU timeline data from TraceLens reports.
-    
-    Supports both single-config and sweep directory structures.
-    Auto-detects the structure by default.
-    
-    Examples:
-        # Auto-detect mode
-        aorta-report process gpu-timeline /path/to/reports
-        
-        # Explicit single config
-        aorta-report process gpu-timeline /path/to/individual_reports --mode single
-        
-        # Sweep directory with geometric mean
-        aorta-report process gpu-timeline /path/to/sweep --mode sweep --geo-mean
-    """
-    from aorta.report.core.gpu_timeline import (
-        process_single_config,
-        process_sweep_config,
-        detect_input_type
-    )
-    
-    if mode == "auto":
-        mode = detect_input_type(input_dir)
-    
-    if mode == "single":
-        return process_single_config(input_dir, geo_mean, output)
-    else:
-        return process_sweep_config(input_dir, geo_mean, output)
-```
-
-**Core module structure:**
-```python
-# aorta/src/aorta/report/core/gpu_timeline.py
-
-def geometric_mean(values):
-    """Shared geometric mean calculation."""
-    ...
-
-def aggregate_rank_data(rank_data, use_geo_mean):
-    """Shared aggregation logic."""
-    ...
-
-def detect_input_type(input_dir):
-    """Auto-detect if input is single config or sweep."""
-    ...
-
-def process_single_config(reports_dir, use_geo_mean, output):
-    """Process single configuration (from tracelens_single_config)."""
-    ...
-
-def process_sweep_config(sweep_dir, use_geo_mean, output):
-    """Process sweep directory (from gemm_analysis)."""
-    ...
+src/aorta/report/
+├── __init__.py                 # Package version and exports
+├── __main__.py                 # python -m aorta.report support
+├── cli.py                      # Main CLI orchestrator (~80 lines)
+│
+├── analysis/                   # TraceLens analysis modules
+│   ├── __init__.py            # Package exports
+│   ├── cli.py                 # 'analyze' command group (~150 lines)
+│   ├── analyze_gemm.py        # GEMM kernel analysis
+│   ├── analyze_single.py      # Single config analysis
+│   ├── analyze_sweep.py       # Sweep analysis
+│   └── tracelens_wrapper.py   # TraceLens integration
+│
+├── comparison/                 # Report comparison modules
+│   ├── __init__.py            # Package exports
+│   ├── cli.py                 # 'compare' command group (~220 lines)
+│   ├── combine.py             # Excel file combining
+│   ├── gpu_timeline_comparison.py
+│   ├── collective_comparison.py
+│   └── formatting.py          # Excel formatting utilities
+│
+├── generators/                 # Report generation modules
+│   ├── __init__.py            # Package exports
+│   ├── cli.py                 # 'generate' command group (~270 lines)
+│   ├── html_generator.py      # HTML report generation
+│   ├── excel_report.py        # Final Excel report
+│   ├── plot_generator.py      # Plot orchestration
+│   └── plot_helper/           # Individual plot functions
+│       ├── __init__.py
+│       ├── common.py
+│       ├── summary_dashboard.py
+│       ├── gpu_by_rank.py
+│       ├── gpu_percent_change.py
+│       ├── gpu_heatmap.py
+│       ├── nccl_charts.py
+│       ├── gemm_data.py
+│       ├── gemm_boxplots.py
+│       ├── gemm_violin.py
+│       └── gemm_interaction.py
+│
+├── processing/                 # Data processing modules
+│   ├── __init__.py            # Package exports
+│   ├── cli.py                 # 'process' command group (~170 lines)
+│   ├── gpu_timeline_single.py
+│   ├── gpu_timeline_sweep.py
+│   ├── process_comms.py
+│   └── process_gemm_variance.py
+│
+├── pipelines/                  # Pipeline orchestrators
+│   ├── __init__.py            # Package exports
+│   ├── cli.py                 # 'pipeline' command group (~200 lines)
+│   ├── summary_pipeline.py    # Full analysis pipeline
+│   └── gemm_pipeline.py       # GEMM analysis pipeline
+│
+└── templates/                  # HTML templates
+    ├── __init__.py
+    ├── performance_report_template.py
+    └── sweep_comparison_template.py
 ```
 
 ---
 
-## Proposed CLI Architecture
+## 3. CLI Architecture
 
-```
-aorta-report
-├── analyze           # Core analysis commands
-│   ├── single        # Single config analysis (was: run_tracelens_single_config.sh)
-│   ├── sweep         # Sweep directory analysis (was: run_tracelens_analysis.sh)
-│   └── gemm          # GEMM-specific analysis (was: analyze_gemm_reports.py)
-│
-├── compare           # Comparison commands
-│   ├── runs          # Compare multiple runs (was: compare_all_runs.py)
-│   ├── reports       # Compare two reports (was: combine_reports.py)
-│   └── collective    # Compare collective ops (was: add_collective_comparison.py)
-│
-├── generate          # Report generation
-│   ├── html          # HTML report (was: create_embeded_html_report.py, create_final_html.py)
-│   ├── excel         # Excel report (was: create_final_report.py)
-│   └── plots         # Generate plots (was: create_final_plots.py, plot_gemm_variance.py)
-│
-├── process           # Data processing
-│   ├── gpu-timeline  # Process GPU timeline (consolidated)
-│   ├── comms         # Process communications
-│   └── gemm-variance # Enhance GEMM variance
-│
-└── pipeline          # Full pipelines (composite commands)
-    ├── full          # Full analysis pipeline (was: run_full_analysis.py)
-    └── gemm          # GEMM-focused pipeline
-```
+### 3.1 Main Orchestrator (`cli.py`)
 
----
+The main `cli.py` is a **thin orchestrator** (~80 lines) that:
 
-## Implementation Plan
-
-### Phase 1: Create CLI Foundation
-
-**Create new package:** `aorta/src/aorta/report/`
+1. Defines the root `@click.group()` with global options (`--verbose`, `--quiet`)
+2. Imports command groups from each package
+3. Registers them with `cli.add_command()`
 
 ```python
-# aorta/src/aorta/report/cli.py
+# cli.py - Main orchestrator
 import click
+from . import __version__
 
 @click.group()
-@click.version_option()
-def cli():
-    """TraceLens Analysis CLI - Unified interface for trace analysis."""
-    pass
+@click.version_option(version=__version__, prog_name="aorta-report")
+@click.option("-v", "--verbose", is_flag=True)
+@click.option("--quiet", is_flag=True)
+@click.pass_context
+def cli(ctx, verbose, quiet):
+    """aorta-report: Unified CLI for TraceLens analysis."""
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+    ctx.obj["quiet"] = quiet
 
-# === ANALYZE GROUP ===
-@cli.group()
-def analyze():
+# Register command groups from subpackages
+from .analysis.cli import analyze
+from .comparison.cli import compare
+from .generators.cli import generate
+from .processing.cli import process
+from .pipelines.cli import pipeline
+
+cli.add_command(analyze)
+cli.add_command(compare)
+cli.add_command(generate)
+cli.add_command(process)
+cli.add_command(pipeline)
+
+def main():
+    cli(obj={})
+```
+
+### 3.2 Package CLI Modules
+
+Each package has its own `cli.py` that defines:
+
+1. A `@click.group()` for the command group
+2. All subcommands using `@group.command()`
+3. Imports from the same package (relative imports)
+
+**Example: `analysis/cli.py`**
+
+```python
+# analysis/cli.py
+import click
+from pathlib import Path
+
+@click.group()
+@click.pass_context
+def analyze(ctx):
     """Run TraceLens analysis on traces."""
     pass
 
 @analyze.command("single")
 @click.argument("trace_dir", type=click.Path(exists=True))
-@click.option("--individual-only", is_flag=True, help="Generate only individual reports")
-@click.option("--collective-only", is_flag=True, help="Generate only collective report")
-@click.option("--output", "-o", help="Output directory")
-def analyze_single(trace_dir, individual_only, collective_only, output):
-    """Analyze a single configuration trace directory."""
-    # Consolidate run_tracelens_single_config.sh logic
-    pass
-
-@analyze.command("sweep")
-@click.argument("sweep_dir", type=click.Path(exists=True))
-@click.option("--rocprof", is_flag=True, help="Use rocprof traces instead of PyTorch profiler")
-@click.option("--output", "-o", help="Output directory")
-def analyze_sweep(sweep_dir, rocprof, output):
-    """Analyze a sweep directory with multiple configurations."""
-    # Consolidate run_tracelens_analysis.sh logic
-    pass
-
-@analyze.command("gemm")
-@click.argument("reports_dir", type=click.Path(exists=True))
-@click.option("--top-k", default=5, help="Number of top kernels to extract")
-@click.option("--output", "-o", help="Output CSV file")
-def analyze_gemm(reports_dir, top_k, output):
-    """Analyze GEMM kernels from TraceLens reports."""
-    # From analyze_gemm_reports.py
-    pass
-
-# === COMPARE GROUP ===
-@cli.group()
-def compare():
-    """Compare traces and reports."""
-    pass
-
-@compare.command("runs")
-@click.option("--inputs", "-i", multiple=True, required=True, help="Input directories")
-@click.option("--output", "-o", required=True, help="Output directory")
-def compare_runs(inputs, output):
-    """Compare multiple TraceLens analysis runs."""
-    pass
-
-@compare.command("reports")
-@click.option("--baseline", "-b", required=True, help="Baseline report")
-@click.option("--test", "-t", required=True, help="Test report")
-@click.option("--baseline-label", help="Label for baseline")
-@click.option("--test-label", help="Label for test")
-@click.option("--output", "-o", required=True, help="Output file")
-def compare_reports(baseline, test, baseline_label, test_label, output):
-    """Combine and compare two reports."""
-    pass
-
-# === GENERATE GROUP ===
-@cli.group()
-def generate():
-    """Generate reports and visualizations."""
-    pass
-
-@generate.command("html")
-@click.option("--sweep1", required=True, help="First sweep directory")
-@click.option("--sweep2", help="Second sweep directory (for comparison)")
-@click.option("--label1", help="Label for first sweep")
-@click.option("--label2", help="Label for second sweep")
-@click.option("--output", "-o", required=True, help="Output HTML file")
-def generate_html(sweep1, sweep2, label1, label2, output):
-    """Generate HTML report with embedded images."""
-    pass
-
-@generate.command("excel")
-@click.option("--gpu-combined", required=True)
-@click.option("--gpu-comparison", required=True)
-@click.option("--coll-combined", required=True)
-@click.option("--coll-comparison", required=True)
-@click.option("--output", "-o", required=True)
-def generate_excel(gpu_combined, gpu_comparison, coll_combined, coll_comparison, output):
-    """Generate comprehensive Excel report."""
-    pass
-
-@generate.command("plots")
-@click.option("--input", "-i", required=True, help="Input Excel report")
-@click.option("--output", "-o", required=True, help="Output directory")
-def generate_plots(input, output):
-    """Generate visualization plots."""
-    pass
-
-# === PIPELINE GROUP ===
-@cli.group()
-def pipeline():
-    """Run complete analysis pipelines."""
-    pass
-
-@pipeline.command("full")
-@click.option("--baseline", "-b", required=True, help="Baseline trace directory")
-@click.option("--test", "-t", required=True, multiple=True, help="Test trace directory(s)")
-@click.option("--output", "-o", required=True, help="Output directory")
-@click.option("--skip-tracelens", is_flag=True, help="Skip TraceLens generation")
-@click.option("--gpu-timeline/--no-gpu-timeline", default=True)
-@click.option("--collective/--no-collective", default=True)
-@click.option("--final-report/--no-final-report", default=True)
-@click.option("--plots/--no-plots", default=True)
-def pipeline_full(baseline, test, output, skip_tracelens, gpu_timeline, collective, final_report, plots):
-    """Run complete analysis pipeline with comparisons."""
-    # Consolidate run_full_analysis.py
-    pass
+@click.option("--geo-mean", is_flag=True)
+@click.pass_context
+def analyze_single(ctx, trace_dir, geo_mean):
+    """Analyze a single configuration."""
+    from . import analyze_single_config  # Relative import from same package
+    
+    result = analyze_single_config(
+        input_dir=Path(trace_dir),
+        use_geo_mean=geo_mean,
+        verbose=ctx.obj.get("verbose", False),
+    )
+    click.echo(f"Complete: {result}")
 ```
 
 ---
 
-### Phase 2: Migrate Logic from Shell to Python
+## 4. Command Reference
 
-| Shell Script | → | Python Function |
-|--------------|---|-----------------|
-| `run_tracelens_single_config.sh` | → | `analyze.single()` |
-| `run_tracelens_analysis.sh` | → | `analyze.sweep()` |
-| `run_rccl_warp_speed_comparison.sh` | → | `compare.rccl()` (new) |
+### 4.1 Command Groups Summary
 
-### Phase 3: Consolidate Duplicate Code
+| Group | File | Commands | Lines |
+|-------|------|----------|-------|
+| `analyze` | `analysis/cli.py` | `single`, `sweep`, `gemm` | ~150 |
+| `compare` | `comparison/cli.py` | `gpu_timeline`, `collective` | ~220 |
+| `generate` | `generators/cli.py` | `html`, `excel`, `plots` | ~270 |
+| `process` | `processing/cli.py` | `gpu-timeline`, `comms`, `gemm-variance` | ~170 |
+| `pipeline` | `pipelines/cli.py` | `summary`, `gemm` | ~200 |
 
-- Merge both `process_gpu_timeline.py` files
-- Create shared utilities in `aorta/src/aorta/report/utils/`
-- Move `html_template.py` to shared location
-
-### Phase 4: File Structure
+### 4.2 Full Command Tree
 
 ```
-aorta/src/aorta/report/
-├── __init__.py
-├── __main__.py          # Entry point: python -m aorta.report
-├── cli.py               # Click CLI definition
-├── commands/
-│   ├── __init__.py
-│   ├── analyze.py       # analyze subcommands
-│   ├── compare.py       # compare subcommands
-│   ├── report.py        # report subcommands
-│   └── pipeline.py      # pipeline subcommands
-├── core/
-│   ├── __init__.py
-│   ├── tracelens_wrapper.py  # GEMM-patched TraceLens (from tracelens_with_gemm_patch.py)
-│   ├── gpu_timeline.py       # Consolidated GPU timeline processing
-│   ├── gemm_analysis.py      # GEMM analysis logic
-│   └── report_generator.py   # Report generation logic
-└── templates/
-    ├── html_template.py
-    └── html_report_config.py
-```
-
-### Phase 5: Entry Points
-
-Add to `pyproject.toml`:
-
-```toml
-[project.scripts]
-aorta-report = "aorta.report:main"
+aorta-report
+├── --version
+├── --verbose / -v
+├── --quiet
+│
+├── analyze
+│   ├── single <TRACE_DIR>
+│   │   ├── --individual-only
+│   │   ├── --collective-only
+│   │   ├── --geo-mean
+│   │   ├── --short-kernel-threshold INT
+│   │   ├── --topk-ops INT
+│   │   └── -o, --output PATH
+│   │
+│   ├── sweep <SWEEP_DIR>
+│   │   ├── --geo-mean
+│   │   └── -o, --output PATH
+│   │
+│   └── gemm <REPORTS_DIR>
+│       ├── -t, --threads INT (multiple)
+│       ├── -c, --channels INT (multiple)
+│       ├── -r, --ranks INT (multiple)
+│       ├── --top-k INT
+│       └── -o, --output PATH
+│
+├── compare
+│   ├── gpu_timeline
+│   │   ├── -b, --baseline PATH (required)
+│   │   ├── -t, --test PATH (required)
+│   │   ├── --baseline-label TEXT
+│   │   ├── --test-label TEXT
+│   │   └── -o, --output PATH (required)
+│   │
+│   └── collective
+│       ├── -b, --baseline PATH (required)
+│       ├── -t, --test PATH (required)
+│       ├── --baseline-label TEXT
+│       ├── --test-label TEXT
+│       └── -o, --output PATH (required)
+│
+├── generate
+│   ├── html
+│   │   ├── --mode [sweep|performance] (required)
+│   │   ├── --sweep1 PATH
+│   │   ├── --sweep2 PATH
+│   │   ├── --label1 TEXT
+│   │   ├── --label2 TEXT
+│   │   ├── --plots-dir PATH
+│   │   └── -o, --output PATH (required)
+│   │
+│   ├── excel
+│   │   ├── --gpu-combined PATH (required)
+│   │   ├── --gpu-comparison PATH (required)
+│   │   ├── --coll-combined PATH (required)
+│   │   ├── --coll-comparison PATH (required)
+│   │   ├── --baseline-label TEXT
+│   │   ├── --test-label TEXT
+│   │   └── -o, --output PATH (required)
+│   │
+│   └── plots
+│       ├── -i, --input PATH
+│       ├── --excel-input PATH
+│       ├── --gemm-csv PATH
+│       ├── --type [all|summary|gemm]
+│       ├── --dpi INT
+│       └── -o, --output PATH (required)
+│
+├── process
+│   ├── gpu-timeline <INPUT_DIR>
+│   │   ├── --mode [auto|single|sweep]
+│   │   ├── --geo-mean
+│   │   └── -o, --output PATH
+│   │
+│   ├── comms <SWEEP_DIR>
+│   │   └── -o, --output PATH
+│   │
+│   └── gemm-variance <INPUT_CSV>
+│       ├── --base-path PATH (required)
+│       ├── --tolerance FLOAT
+│       └── -o, --output PATH
+│
+└── pipeline
+    ├── summary
+    │   ├── -b, --baseline PATH (required)
+    │   ├── -t, --test PATH (required)
+    │   ├── -o, --output PATH (required)
+    │   ├── --baseline-label TEXT
+    │   ├── --test-label TEXT
+    │   ├── --skip-tracelens
+    │   ├── --gpu-timeline / --no-gpu-timeline
+    │   ├── --collective / --no-collective
+    │   ├── --final-report / --no-final-report
+    │   ├── --plots / --no-plots
+    │   └── --html / --no-html
+    │
+    └── gemm
+        ├── --sweep-dir PATH (required)
+        ├── -o, --output PATH (required)
+        ├── --top-k INT
+        ├── -t, --threads INT (multiple)
+        ├── -c, --channels INT (multiple)
+        ├── --timestamps / --no-timestamps
+        └── --plots / --no-plots
 ```
 
 ---
 
-## Usage Examples (After Implementation)
+## 5. Data Flow
 
-```bash
-# Single config analysis
-aorta-report analyze single /path/to/traces --output ./results
+### 5.1 Summary Pipeline Flow
 
-# Sweep analysis  
-aorta-report analyze sweep /path/to/sweep --rocprof
+```
+┌─────────────────┐     ┌─────────────────┐
+│ Baseline Traces │     │   Test Traces   │
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+         ▼                       ▼
+┌────────────────────────────────────────┐
+│        analyze single (TraceLens)       │
+│   analysis/analyze_single.py            │
+└────────────────────┬───────────────────┘
+                     │
+         ┌───────────┴───────────┐
+         ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐
+│  GPU Timeline   │     │  Collective     │
+│    Reports      │     │    Reports      │
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+         ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐
+│ compare         │     │ compare         │
+│ gpu_timeline    │     │ collective      │
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+         └───────────┬───────────┘
+                     ▼
+         ┌───────────────────────┐
+         │   generate excel      │
+         │   (Final Report)      │
+         └───────────┬───────────┘
+                     │
+         ┌───────────┴───────────┐
+         ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐
+│ generate plots  │     │ generate html   │
+└─────────────────┘     └─────────────────┘
+```
 
-# GEMM analysis
-aorta-report analyze gemm /path/to/reports --top-k 10 -o gemm_analysis.csv
+### 5.2 GEMM Pipeline Flow
 
-# Compare two runs
-aorta-report compare reports -b baseline.xlsx -t test.xlsx -o comparison.xlsx
-
-# Generate HTML report
-aorta-report generate html --sweep1 ./exp1 --sweep2 ./exp2 -o report.html
-
-# Full pipeline
-aorta-report pipeline full \
-    --baseline /path/to/baseline \
-    --test /path/to/test \
-    --output /path/to/output \
-    --plots
-
-# List available commands
-aorta-report --help
-aorta-report analyze --help
-aorta-report compare --help
+```
+┌─────────────────┐
+│   Sweep Dir     │
+│ tracelens_      │
+│ analysis/       │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  analyze gemm   │
+│  (Top-K Kernels)│
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ process         │
+│ gemm-variance   │
+│ (Add timestamps)│
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ generate plots  │
+│ --type gemm     │
+└─────────────────┘
 ```
 
 ---
 
-## Migration Strategy
+## 6. Benefits of Colocated CLI Design
 
-| Phase | Duration | Description |
-|-------|----------|-------------|
-| **Phase 1** | 1-2 days | Create CLI skeleton with Click |
-| **Phase 2** | 2-3 days | Migrate Python scripts as command handlers |
-| **Phase 3** | 1-2 days | Convert shell scripts to Python |
-| **Phase 4** | 1 day | Add tests and documentation |
-| **Phase 5** | Optional | Deprecate old scripts with warnings |
+### 6.1 Comparison with Alternatives
 
-### Backward Compatibility
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Single cli.py** | All in one place | 1000+ lines, hard to maintain |
+| **Separate cli/ folder** | Clear separation | Jumps between directories |
+| **Colocated** ✓ | High cohesion, easy to find | Need to look at multiple files |
 
-During migration, keep old scripts working by having them call the new CLI:
+### 6.2 Key Benefits
 
-```bash
-#!/bin/bash
-# Legacy wrapper for run_tracelens_single_config.sh
-echo "DEPRECATED: Use 'aorta-report analyze single' instead"
-exec aorta-report analyze single "$@"
+1. **Discoverability**: Working on `analysis`? CLI is right there in `analysis/cli.py`
+
+2. **Ownership**: Each package owns its complete interface:
+   - `analysis/` → business logic + CLI
+   - No cross-cutting changes needed
+
+3. **Testing**: Test `analysis/cli.py` with `analysis/` fixtures:
+   ```python
+   # tests/test_analysis_cli.py
+   from aorta.report.analysis.cli import analyze
+   ```
+
+4. **Lazy Loading**: Commands import dependencies only when invoked:
+   ```python
+   @analyze.command("gemm")
+   def analyze_gemm(ctx, ...):
+       from . import analyze_gemm_reports  # Imported only when command runs
+   ```
+
+5. **Scalability**: Adding new functionality:
+   - Add new module to package
+   - Add command to package's `cli.py`
+   - No changes to main `cli.py`
+
+---
+
+## 7. Implementation Status
+
+### 7.1 Completed Commands
+
+| Command | Package | Status |
+|---------|---------|--------|
+| `analyze single` | `analysis/` | ✅ |
+| `analyze sweep` | `analysis/` | ✅ |
+| `analyze gemm` | `analysis/` | ✅ |
+| `compare gpu_timeline` | `comparison/` | ✅ |
+| `compare collective` | `comparison/` | ✅ |
+| `generate html` | `generators/` | ✅ |
+| `generate excel` | `generators/` | ✅ |
+| `generate plots` | `generators/` | ✅ |
+| `process gpu-timeline` | `processing/` | ✅ |
+| `process comms` | `processing/` | ✅ |
+| `process gemm-variance` | `processing/` | ✅ |
+| `pipeline summary` | `pipelines/` | ✅ |
+| `pipeline gemm` | `pipelines/` | ✅ |
+
+### 7.2 Planned Commands
+
+| Command | Package | Status |
+|---------|---------|--------|
+| `compare runs` | `comparison/` | ⏸️ Deferred |
+
+---
+
+## 8. File Size Summary
+
+| File | Lines | Description |
+|------|-------|-------------|
+| `cli.py` | ~80 | Main orchestrator |
+| `analysis/cli.py` | ~150 | analyze commands |
+| `comparison/cli.py` | ~220 | compare commands |
+| `generators/cli.py` | ~270 | generate commands |
+| `processing/cli.py` | ~170 | process commands |
+| `pipelines/cli.py` | ~200 | pipeline commands |
+| **Total CLI** | **~1,090** | Split across 6 files |
+
+**Before refactoring**: 1,182 lines in single file  
+**After refactoring**: ~80 lines main + ~200 avg per package CLI
+
+---
+
+## 9. Adding New Commands
+
+### 9.1 Adding a Command to Existing Group
+
+1. Open the package's `cli.py` (e.g., `analysis/cli.py`)
+2. Add the command:
+
+```python
+@analyze.command("new_command")
+@click.argument("input_path", type=click.Path(exists=True))
+@click.option("--option", help="Some option")
+@click.pass_context
+def analyze_new_command(ctx, input_path, option):
+    """New command description."""
+    from . import new_function  # Import from same package
+    
+    result = new_function(input_path, option)
+    click.echo(f"Done: {result}")
+```
+
+3. No changes needed to main `cli.py`
+
+### 9.2 Adding a New Command Group
+
+1. Create new package: `new_package/`
+2. Create `new_package/__init__.py` with exports
+3. Create `new_package/cli.py`:
+
+```python
+import click
+
+@click.group()
+@click.pass_context
+def new_group(ctx):
+    """New command group description."""
+    pass
+
+@new_group.command("subcommand")
+def new_subcommand():
+    """Subcommand description."""
+    pass
+```
+
+4. Register in main `cli.py`:
+
+```python
+from .new_package.cli import new_group
+cli.add_command(new_group)
 ```
 
 ---
 
-## Script Mapping Reference
+## 10. Related Documentation
 
-| Old Script | New Command |
-|------------|-------------|
-| `run_tracelens_single_config.sh` | `aorta-report analyze single` |
-| `run_tracelens_analysis.sh` | `aorta-report analyze sweep` |
-| `analyze_gemm_reports.py` | `aorta-report analyze gemm` |
-| `run_full_analysis.py` | `aorta-report pipeline full` |
-| `compare_all_runs.py` | `aorta-report compare runs` |
-| `combine_reports.py` | `aorta-report compare reports` |
-| `add_collective_comparison.py` | `aorta-report compare collective` |
-| `create_embeded_html_report.py` | `aorta-report generate html` |
-| `create_final_report.py` | `aorta-report generate excel` |
-| `create_final_plots.py` | `aorta-report generate plots` |
-| `process_gpu_timeline.py` | `aorta-report process gpu-timeline` |
-| `process_comms.py` | `aorta-report process comms` |
-| `enhance_gemm_variance_with_timestamps.py` | `aorta-report process gemm-variance` |
-| `plot_gemm_variance.py` | `aorta-report generate plots --type gemm-variance` |
-
----
-
-## Benefits
-
-1. **Discoverability** - `--help` at every level shows available commands
-2. **Consistency** - Uniform argument style across all commands
-3. **Composability** - Easy to chain commands in scripts
-4. **Maintainability** - Single codebase, no shell script maintenance
-5. **Testability** - Python functions are easier to unit test
-6. **Documentation** - Auto-generated from docstrings and Click decorators
-
+- [USER_GUIDE.md](./USER_GUIDE.md) - End-user documentation
+- [ANALYZE_CMD_DEV_DOCS.md](./ANALYZE_CMD_DEV_DOCS.md) - Analyze implementation details
+- [COMPARE_CMD_DEV_DOCS.md](./COMPARE_CMD_DEV_DOCS.md) - Compare implementation details
+- [GENERATE_EXCEL_DEV_DOCS.md](./GENERATE_EXCEL_DEV_DOCS.md) - Excel generation details
+- [GENERATE_PLOTS_DEV_DOCS.md](./GENERATE_PLOTS_DEV_DOCS.md) - Plot generation details
+- [PIPELINE_DEV_DOCS.md](./PIPELINE_DEV_DOCS.md) - Pipeline implementation details
