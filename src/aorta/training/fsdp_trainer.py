@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import signal
 import subprocess
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Optional
 from functools import partial
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -23,7 +25,7 @@ from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.nn.parallel import DistributedDataParallel as DDP
-
+from datetime import timedelta
 from aorta.data import SyntheticDatasetConfig, create_dataloader
 from aorta.models import ModelConfig, RankingTransformerModel
 from aorta.profiling.stream_profiler import StreamProfiler
@@ -59,6 +61,17 @@ class TrainingConfig:
     output_dir: Path = Path("artifacts")
     inject_allreduce_copies: bool = False  # Inject all_reduce + host-device copies to trigger hang
     allreduce_stress_level: int = 1  # Number of all_reduce ops per iteration (1-10)
+
+
+@dataclass
+class WarmupConfig:
+    """Warmup settings to prevent RCCL hangs in multi-node training."""
+    # RCCL communicator warmup - runs all_reduce on process groups before FSDP init
+    enable_rccl_warmup: bool = True
+    rccl_warmup_iterations: int = 10
+    # Training warmup - runs forward/backward/optimizer steps before main loop
+    enable_training_warmup: bool = True
+    training_warmup_steps: int = 1
 
 
 @dataclass
@@ -171,6 +184,15 @@ def _build_fsdp_config(raw: Dict[str, Any]) -> FSDPConfig:
     return cfg
 
 
+def _build_warmup_config(raw: Dict[str, Any]) -> WarmupConfig:
+    section = raw.get("warmup", {})
+    cfg = WarmupConfig()
+    for field in dataclass_fields(WarmupConfig):
+        if field.name in section:
+            setattr(cfg, field.name, section[field.name])
+    return cfg
+
+
 def _build_ddp_config(raw: Dict[str, Any]) -> DDPConfig:
     section = raw.get("distributed", {})
     cfg = DDPConfig()
@@ -204,9 +226,22 @@ def dataclass_fields(cls) -> Iterable[Any]:
     return getattr(cls, "__dataclass_fields__").values()
 
 
+def set_seed(seed: int, rank: int) -> None:
+    """Set all random seeds for reproducibility across runs."""
+    seed_value = seed + rank
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    torch.manual_seed(seed_value)
+    torch.cuda.manual_seed(seed_value)
+    torch.cuda.manual_seed_all(seed_value)
+    log.info("Set random seed=%d for rank=%d (base_seed=%d)", seed_value, rank, seed)
+
+
 def init_distributed(training_cfg: TrainingConfig, log_level: str) -> Dict[str, Any]:
+
     backend = get_distributed_backend()
-    dist.init_process_group(backend=backend)
+    timeout_seconds = int(os.environ.get("TORCH_DIST_INIT_TIMEOUT", "600"))
+    dist.init_process_group(backend=backend, timeout=timedelta(seconds=timeout_seconds))
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
@@ -237,6 +272,7 @@ def build_fsdp_model(
     model_cfg: ModelConfig,
     fsdp_cfg: FSDPConfig,
     compile_cfg: CompileConfig,
+    warmup_cfg: WarmupConfig,
     device: torch.device,
 ) -> FSDP:
     model = RankingTransformerModel(model_cfg)
@@ -250,10 +286,45 @@ def build_fsdp_model(
 
     # Create process groups for hybrid_shard strategy
     process_group = None
+    shard_group = None
+    replicate_group = None
+
     if sharding == ShardingStrategy.HYBRID_SHARD:
-        process_group = _create_hybrid_shard_process_groups(fsdp_cfg.hybrid_shard_gpus_per_node)
-        if process_group is not None:
+        result = _create_hybrid_shard_process_groups(fsdp_cfg.hybrid_shard_gpus_per_node)
+        if result is not None:
+            shard_group, replicate_group = result
+            process_group = (shard_group, replicate_group)
+
+            # Warmup RCCL communicators BEFORE FSDP initialization
+            # This ensures inter-node communicators are fully established before
+            # the _sync_params_and_buffers broadcasts that can cause hangs
+            if warmup_cfg.enable_rccl_warmup:
+                _warmup_rccl_communicators(
+                    shard_group,
+                    replicate_group,
+                    device,
+                    num_warmup_ops=warmup_cfg.rccl_warmup_iterations,
+                )
             log.info("Created custom process groups for HYBRID_SHARD strategy")
+
+    # Ensure CUDA operations are complete before FSDP wrapping
+    # This helps prevent race conditions with inter-node communicators
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    # For HYBRID_SHARD with sync_module_states, we disable automatic sync and do it
+    # manually with explicit barriers to avoid RCCL race conditions
+    use_sync_module_states = fsdp_cfg.sync_module_states
+    needs_manual_sync = False
+
+    if sharding == ShardingStrategy.HYBRID_SHARD and fsdp_cfg.sync_module_states:
+        use_sync_module_states = False
+        needs_manual_sync = True
+        log.info(
+            "Disabling sync_module_states for HYBRID_SHARD - will sync manually after wrapping"
+        )
+
+    log.info("Starting FSDP model wrapping with sync_module_states=%s", use_sync_module_states)
 
     fsdp_model = FSDP(
         model.to(device),
@@ -265,8 +336,19 @@ def build_fsdp_model(
         limit_all_gathers=fsdp_cfg.limit_all_gathers,
         forward_prefetch=fsdp_cfg.forward_prefetch,
         device_id=torch.cuda.current_device(),
-        sync_module_states=fsdp_cfg.sync_module_states,
+        sync_module_states=use_sync_module_states,
     )
+
+    log.info("FSDP model wrapping complete")
+
+    # Manual parameter sync for HYBRID_SHARD after FSDP wrapping
+    if needs_manual_sync and replicate_group is not None:
+        _manual_sync_params(fsdp_model, replicate_group)
+        # Extra synchronization after manual sync before proceeding
+        torch.cuda.synchronize()
+        dist.barrier()
+        log.info("Post-sync barrier complete")
+
     if compile_cfg.enabled:
         fsdp_model = _maybe_compile(fsdp_model, compile_cfg)
     return fsdp_model
@@ -344,7 +426,225 @@ def _create_hybrid_shard_process_groups(gpus_per_node: Optional[int] = None):
         dist.get_world_size(my_replicate_group),
     )
 
+    # Note: We don't barrier here because the warmup function will handle synchronization.
+    # Calling barrier here can trigger NCCL init race conditions before warmup runs.
+
     return (my_shard_group, my_replicate_group)
+
+
+def _warmup_rccl_communicators(
+    shard_group: Optional[dist.ProcessGroup],
+    replicate_group: Optional[dist.ProcessGroup],
+    device: torch.device,
+    num_warmup_ops: int = 5,
+) -> None:
+    """
+    Warm up RCCL communicators with small operations before heavy FSDP usage.
+
+    This ensures inter-node communicators are fully established before the
+    _sync_params_and_buffers broadcasts. The race condition in RCCL/RoCE RDMA
+    setup can cause hangs during FSDP initialization if broadcasts are issued
+    before the communicators are ready.
+
+    Args:
+        shard_group: Intra-node shard process group (may be None)
+        replicate_group: Inter-node replicate process group (may be None)
+        device: CUDA device to use for warmup tensors
+        num_warmup_ops: Number of warmup operations to perform (default: 5)
+    """
+    rank = dist.get_rank()
+    # Use a larger tensor for more thorough warmup
+    warmup_tensor = torch.ones(8192, device=device, dtype=torch.float32)
+
+    log.info("Starting RCCL communicator warmup with %d iterations (rank=%d)...", num_warmup_ops, rank)
+
+    # First, warmup the global world group
+    log.info("Warming up global world group...")
+    for i in range(num_warmup_ops):
+        dist.all_reduce(warmup_tensor)
+        dist.broadcast(warmup_tensor, src=0)
+        torch.cuda.synchronize()
+
+    dist.barrier()
+    log.info("Global world group warmup complete")
+
+    # Then warmup the shard and replicate groups
+    for i in range(num_warmup_ops):
+        # Warmup intra-node shard group
+        if shard_group is not None:
+            dist.all_reduce(warmup_tensor, group=shard_group)
+            # Also do broadcast from first rank in shard group
+            shard_ranks = dist.get_process_group_ranks(shard_group)
+            dist.broadcast(warmup_tensor, src=shard_ranks[0], group=shard_group)
+
+        # Warmup inter-node replicate group (this is where the race condition occurs)
+        if replicate_group is not None:
+            # Get the ranks in this replicate group and use the first one as source
+            # Note: dist.get_process_group_ranks returns global ranks in the group
+            group_ranks = dist.get_process_group_ranks(replicate_group)
+            src_global_rank = group_ranks[0]  # First rank in the group
+            dist.broadcast(warmup_tensor, src=src_global_rank, group=replicate_group)
+            dist.all_reduce(warmup_tensor, group=replicate_group)
+
+        # Synchronize CUDA and global barrier between iterations
+        torch.cuda.synchronize()
+        dist.barrier()
+
+    # Final synchronization with extra delay
+    torch.cuda.synchronize()
+    dist.barrier()
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    log.info("RCCL communicator warmup complete (rank=%d)", rank)
+
+
+def _manual_sync_params(
+    model: FSDP,
+    replicate_group: Optional[dist.ProcessGroup],
+) -> None:
+    """
+    Manually synchronize FSDP parameters from the first rank in each replicate group.
+
+    This replaces the automatic sync_module_states with controlled synchronization
+    to avoid race conditions in RCCL/RDMA during FSDP initialization. Parameters
+    are broadcast from the first rank in each replicate group to ensure consistency.
+
+    Args:
+        model: The FSDP-wrapped model
+        replicate_group: Inter-node replicate process group for broadcasting
+    """
+    rank = dist.get_rank()
+
+    log.info("Starting manual parameter synchronization (rank=%d)...", rank)
+
+    # Synchronize before param sync
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    # Determine the source rank for this replicate group
+    # Each replicate group contains ranks with the same local_rank across nodes
+    # e.g., group for local_rank 2: [2, 10, 18] - we broadcast from rank 2 (first in group)
+    src_global_rank = None
+    if replicate_group is not None:
+        group_ranks = dist.get_process_group_ranks(replicate_group)
+        src_global_rank = group_ranks[0]  # First rank in the group
+        log.info("Manual sync: replicate group ranks=%s, src_rank=%d", group_ranks, src_global_rank)
+
+    param_count = 0
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if param.is_meta:
+                log.debug("Skipping meta parameter: %s", name)
+                continue
+
+            # Broadcast from the first rank within this replicate group
+            if replicate_group is not None and src_global_rank is not None:
+                dist.broadcast(param.data, src=src_global_rank, group=replicate_group)
+
+            param_count += 1
+
+            # Periodic sync to prevent overwhelming the network
+            if param_count % 10 == 0:
+                torch.cuda.synchronize()
+
+    # Final barrier to ensure all ranks complete
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    log.info("Manual parameter synchronization complete (rank=%d, params=%d)", rank, param_count)
+
+
+def _warmup_training_collectives(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    dataloader,
+    device: torch.device,
+    autocast_dtype: Optional[torch.dtype],
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    num_warmup_steps: int = 3,
+) -> None:
+    """
+    Warm up training collectives by running dummy forward/backward/optimizer steps.
+
+    This exercises all the collective operations used during training (all-gather,
+    reduce-scatter, all-reduce) to ensure RCCL communicators are fully established
+    before the main training loop starts.
+
+    Args:
+        model: The model (FSDP-wrapped)
+        optimizer: The optimizer
+        dataloader: Training dataloader
+        device: CUDA device
+        autocast_dtype: Mixed precision dtype (or None)
+        scaler: Gradient scaler for fp16 (or None)
+        num_warmup_steps: Number of warmup steps to run
+    """
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
+    log.info("[Warmup] Starting training warmup (rank=%d, steps=%d)...", rank, num_warmup_steps)
+
+    # Get an iterator from the dataloader
+    data_iter = iter(dataloader)
+
+    for warmup_step in range(num_warmup_steps):
+        log.info("[Warmup] Step %d/%d: Getting batch (rank=%d)...", warmup_step + 1, num_warmup_steps, rank)
+        try:
+            cpu_batch = next(data_iter)
+        except StopIteration:
+            # Restart iterator if dataloader is exhausted
+            data_iter = iter(dataloader)
+            cpu_batch = next(data_iter)
+
+        # Move batch to device
+        batch = {k: v.to(device, non_blocking=True) if hasattr(v, 'to') else v
+                 for k, v in cpu_batch.items()}
+        torch.cuda.synchronize()
+        log.info("[Warmup] Step %d/%d: Batch moved to device (rank=%d)", warmup_step + 1, num_warmup_steps, rank)
+
+        # Forward pass
+        optimizer.zero_grad(set_to_none=True)
+        log.info("[Warmup] Step %d/%d: Starting forward pass (rank=%d)...", warmup_step + 1, num_warmup_steps, rank)
+        if autocast_dtype:
+            with torch.autocast(device_type="cuda", dtype=autocast_dtype):
+                scores = model(batch)
+                loss = compute_loss(scores, batch)
+        else:
+            scores = model(batch)
+            loss = compute_loss(scores, batch)
+        torch.cuda.synchronize()
+        log.info("[Warmup] Step %d/%d: Forward pass complete, loss=%.4f (rank=%d)", warmup_step + 1, num_warmup_steps, loss.item(), rank)
+
+        # Backward pass
+        log.info("[Warmup] Step %d/%d: Starting backward pass (rank=%d)...", warmup_step + 1, num_warmup_steps, rank)
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+        torch.cuda.synchronize()
+        log.info("[Warmup] Step %d/%d: Backward pass complete (rank=%d)", warmup_step + 1, num_warmup_steps, rank)
+
+        # Optimizer step
+        log.info("[Warmup] Step %d/%d: Starting optimizer step (rank=%d)...", warmup_step + 1, num_warmup_steps, rank)
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        torch.cuda.synchronize()
+        log.info("[Warmup] Step %d/%d: Optimizer step complete (rank=%d)", warmup_step + 1, num_warmup_steps, rank)
+
+        # Synchronize all ranks after each warmup step
+        log.info("[Warmup] Step %d/%d: Starting barrier (rank=%d)...", warmup_step + 1, num_warmup_steps, rank)
+        dist.barrier()
+        log.info("[Warmup] Step %d/%d: Barrier complete (rank=%d)", warmup_step + 1, num_warmup_steps, rank)
+
+    # Reset optimizer state after warmup to not affect actual training
+    log.info("[Warmup] Resetting optimizer state (rank=%d)...", rank)
+    optimizer.zero_grad(set_to_none=True)
+    torch.cuda.synchronize()
+    dist.barrier()
+    log.info("[Warmup] Training warmup complete (rank=%d)", rank)
 
 
 def build_ddp_model(
@@ -438,6 +738,7 @@ def training_loop(
     optimizer: torch.optim.Optimizer,
     dataloader,
     training_cfg: TrainingConfig,
+    warmup_cfg: WarmupConfig,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     environment: Dict[str, Any],
     profiler: StreamProfiler,
@@ -469,6 +770,16 @@ def training_loop(
     setup_signal_handlers(stop_flag)
 
     model.train()
+
+    # Warmup training collectives before main loop to avoid RCCL race conditions
+    # This exercises forward/backward/optimizer step on all communicators
+    if warmup_cfg.enable_training_warmup:
+        log.info("Starting training warmup pass (rank=%d, num_steps=%d)...", rank, warmup_cfg.training_warmup_steps)
+        _warmup_training_collectives(model, optimizer, dataloader, device, autocast_dtype, scaler, num_warmup_steps=warmup_cfg.training_warmup_steps)
+        log.info("Training warmup complete (rank=%d)", rank)
+
+    # Note: force_async is now controlled dynamically per-step in training loop
+    # Only racing ranks (local 1, 2 on Node 0) at step >= 3 will have force_async enabled
 
     profiler_dir = training_cfg.output_dir / "torch_profiler"
     with profiler.intercept_distributed_ops():
@@ -508,11 +819,20 @@ def training_loop(
                             grad_norm = clip_grad_norm_(model.parameters(), training_cfg.grad_clip_norm)
 
                     with profiler.range("aux", f"epoch{epoch}_step{step}_optimizer"):
-                        if scaler is not None:
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            optimizer.step()
+                        try:
+                            if scaler is not None:
+                                scaler.step(optimizer)
+                                scaler.update()
+                            else:
+                                optimizer.step()
+                        except AssertionError as e:
+                            if "NaN" in str(e) or "Inf" in str(e):
+                                log.error("NaN/Inf detected in rank %d at step %d: %s", rank, global_step, e)
+                                log.error("Stopping training to save traces")
+                                stop_flag["stop"] = True
+                                break
+                            else:
+                                raise
 
                         if scheduler is not None:
                             scheduler.step()
@@ -520,7 +840,6 @@ def training_loop(
                     # Inject all_reduce operations to trigger hang pattern
                     # Pattern: all_reduce → device-to-device copy → host-device copy → compute blocked
                     if training_cfg.inject_allreduce_copies:
-                        import torch.distributed as dist
                         if dist.is_initialized():
                             with profiler.range("aux", f"epoch{epoch}_step{step}_allreduce_sync"):
                                 # Perform multiple all_reduce + memory copy cycles
@@ -594,6 +913,10 @@ def training_loop(
                     iteration_payload.update(collect_rocm_metrics(enable_rocm_metrics))
                     metrics_logger.log(iteration_payload)
 
+                    loss_log = training_cfg.output_dir / f"loss_rank{rank}.log"
+                    with open(loss_log, "a") as f:
+                        f.write(f"step={global_step} epoch={epoch} loss={iteration_payload['loss']:.6f} lr={iteration_payload['lr']:.6f}\n")
+
                     if global_step % training_cfg.log_interval == 0 and rank == 0:
                         log.info(
                             "epoch=%s step=%s loss=%.5f lr=%.6f overlap=%.3fms compute=%.3fms",
@@ -616,9 +939,18 @@ def training_loop(
                         break
 
                 if stop_flag["stop"]:
+                    if rank == 0:
+                        log.info("Training stopped at epoch=%d step=%d", epoch, step)
                     break
 
     metrics_logger.close()
+
+    if rank == 0:
+        log.info("Training loop finished. Profiler will export traces in cleanup phase.")
+        log.info("Output directory: %s", training_cfg.output_dir)
+        log.info("Torch profiler traces: %s", training_cfg.output_dir / "torch_profiler")
+        log.info("Loss logs: %s/loss_rank*.log", training_cfg.output_dir)
+        log.info("Metrics: %s/rank_*_metrics.jsonl", training_cfg.output_dir)
 
 
 def configure_optimizer(model: nn.Module, cfg: OptimizerConfig, dist_mode: str = "ddp") -> torch.optim.Optimizer:
@@ -754,19 +1086,16 @@ def _torch_profiler_context(
         prof.__exit__(None, None, None)
         produce_tb = cfg.tensorboard
         produce_chrome = cfg.chrome_trace
-        try:
-            stats_available = prof._stats() is not None  # type: ignore[attr-defined]
-        except Exception:
-            stats_available = False
 
-        if produce_tb and stats_available:
+        if produce_tb:
             try:
                 handler = tensorboard_trace_handler(str(rank_dir))
                 handler(prof)
-            except Exception as exc:  # pragma: no cover - best effort
-                log.warning("TensorBoard trace export failed: %s", exc, exc_info=True)
+                log.info("Exported TensorBoard trace to %s", rank_dir)
+            except Exception as exc:
+                log.warning("TensorBoard trace export failed: %s", exc)
 
-        if produce_chrome and stats_available:
+        if produce_chrome:
             stem, ext = os.path.splitext(cfg.trace_filename)
             if not ext:
                 ext = ".json"
@@ -775,8 +1104,9 @@ def _torch_profiler_context(
                 trace_name = f"{stem}_step{prof.step_num}{ext}"
             try:
                 prof.export_chrome_trace(str(rank_dir / trace_name))
-            except Exception as exc:  # pragma: no cover - best effort
-                log.warning("Chrome trace export failed: %s", exc, exc_info=True)
+                log.info("Exported chrome trace to %s/%s", rank_dir, trace_name)
+            except Exception as exc:
+                log.warning("Chrome trace export failed: %s", exc)
 
 
 def main_cli() -> None:  # pragma: no cover - CLI entry
@@ -810,6 +1140,7 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
     model_cfg = _build_model_config(config)
     dataset_cfg = _build_dataset_config(config)
     fsdp_cfg = _build_fsdp_config(config)
+    warmup_cfg = _build_warmup_config(config)
     ddp_cfg = _build_ddp_config(config)
     compile_cfg = _build_compile_config(config)
     profiler_cfg = _build_profiler_config(config)
@@ -817,6 +1148,8 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
     log_level = config.get("logging", {}).get("level", "INFO")
     env = init_distributed(training_cfg, log_level)
     rank = env["rank"]
+
+    set_seed(dataset_cfg.seed, rank)
 
     dataloader = create_dataloader(
         dataset_cfg,
@@ -835,7 +1168,7 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
     if dist_mode == "ddp":
         model = build_ddp_model(model_cfg, ddp_cfg, compile_cfg, env["device"])
     else:
-        model = build_fsdp_model(model_cfg, fsdp_cfg, compile_cfg, env["device"])
+        model = build_fsdp_model(model_cfg, fsdp_cfg, compile_cfg, warmup_cfg, env["device"])
     optimizer = configure_optimizer(model, optimizer_cfg, dist_mode)
     scheduler = configure_scheduler(
         optimizer,
@@ -851,6 +1184,7 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
             optimizer,
             dataloader,
             training_cfg,
+            warmup_cfg,
             scheduler,
             env,
             profiler,
@@ -858,8 +1192,15 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
             profiler_cfg,
         )
     finally:
-        dist.barrier()
-        dist.destroy_process_group()
+        if dist.is_initialized():
+            try:
+                dist.barrier()
+            except Exception as e:
+                log.warning("Barrier failed during cleanup: %s", e)
+            try:
+                dist.destroy_process_group()
+            except Exception as e:
+                log.warning("destroy_process_group failed: %s", e)
 
 
 __all__ = ["main", "main_cli"]

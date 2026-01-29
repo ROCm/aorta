@@ -60,6 +60,7 @@ expected_outputs/
 testdata/
 actual_outputs/
 *.html
+*.zip
 
 # IDE/project-specific folders
 .vscode/

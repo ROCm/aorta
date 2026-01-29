@@ -211,6 +211,34 @@ done
 | NCCL timeout | Update `NCCL_SOCKET_IFNAME` in `set_env_variables.sh` |
 | World size mismatch | Check `rocm-smi --showid \| wc -l`, adjust `--nproc` |
 
+### Training Hangs at RCCL Initialization
+
+If training hangs at "Warming up global world group..." or during FSDP initialization:
+
+1. **Ensure NCCL environment variables are set** in `local_launch.sh`:
+   - `NCCL_SOCKET_IFNAME` and `TORCH_NCCL_DUMP_ON_TIMEOUT=1` are critical
+   - See the full set in `local_launch.sh` DOCKER_EXEC section
+
+2. **Enable warmup settings** in your config YAML:
+
+```yaml
+warmup:
+  # RCCL communicator warmup - runs all_reduce before FSDP init
+  enable_rccl_warmup: true
+  rccl_warmup_iterations: 5
+  # Training warmup - runs forward/backward/optimizer before main loop
+  enable_training_warmup: true
+  training_warmup_steps: 1
+```
+
+3. **Debug with NCCL logging**:
+```bash
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=ALL
+```
+
+The warmup settings exercise RCCL communicators before the main training loop starts, preventing race conditions during inter-node RDMA setup with HYBRID_SHARD strategy.
+
 ---
 
 ## NCCL Configuration

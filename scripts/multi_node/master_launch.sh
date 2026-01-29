@@ -1,11 +1,6 @@
 #!/bin/bash
 # Multi-node orchestration script for Aorta GEMM training
 # Adapted from DLRM master_launch.sh pattern
-#
-# TODO: Convert to SLURM-native launch using srun instead of SSH to individual nodes.
-#       Currently this script runs from a compute node and SSHs to other nodes.
-#       Ideally, we should run SLURM commands from the login node, which would
-#       eliminate the need for SSH connectivity checks and branch verification.
 
 usage() {
     echo "Usage: $0 [OPTIONS]"

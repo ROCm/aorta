@@ -6,19 +6,28 @@ logging:
   level: INFO
 
 training:
-  epochs: 10
+  epochs: 100
   batch_size: 512
   gradient_accumulation: 2
   mixed_precision: bf16
-  max_steps: 2200
+  max_steps: 4400
   grad_clip_norm: 1.0
   output_dir: artifacts/user_shampoo
-  log_interval: 20
+  log_interval: 5
   additional_compute_streams: 2
   lightweight_op_waves: 3
 
+# Warmup settings to prevent RCCL hangs in multi-node training
+warmup:
+  # RCCL communicator warmup - runs all_reduce on process groups before FSDP init
+  enable_rccl_warmup: true
+  rccl_warmup_iterations: 5
+  # Training warmup - runs forward/backward/optimizer steps before main loop
+  enable_training_warmup: true
+  training_warmup_steps: 1
+
 optimizer:
-  name: shampoo
+  name: adamW
   lr: 0.0002
   weight_decay: 0.01
   betas: [0.9, 0.985]
@@ -35,7 +44,7 @@ dataset:
   sparse_features: 64
   vocab_size: 350000
   num_dense_features: 32
-  seed: 2025
+  seed: 42
 
 model:
   vocab_size: 350000
@@ -94,19 +103,17 @@ dataloader:
   pin_memory: true
 
 profiling:
-  enabled: true
-  wait: 2
-  warmup: 2
-  active: 6
+  enabled: false
+  wait: 0
+  warmup: 0
+  active: 20
   repeat: 1
   record_shapes: true
   profile_memory: true
   with_stack: false
   with_flops: false
-  # tensorboard: true
-  # chrome_trace: true
   tensorboard: false
-  chrome_trace: false
+  chrome_trace: true
   trace_filename: user_shampoo.json
 
 tracelens:

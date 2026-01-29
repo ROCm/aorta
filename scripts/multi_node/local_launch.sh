@@ -1,6 +1,9 @@
 #!/bin/bash
 # Multi-node local launch script for GEMM training
 # Runs on each node with single channel/thread configuration
+#
+# NCCL/RCCL environment variables are sourced from set_env_variables.sh
+# Edit that file to change NCCL configuration - no need to modify this script.
 
 if [[ $# -lt 11 ]]; then
   echo "Usage: $0 <NODE_RANK> <NODE_IP> <MASTER_IP> <MASTER_PORT> <NNODES> <WORLD_SIZE> <EXPERIMENT_DIR> <CONFIG_FILE> <NPROC_PER_NODE> <CHANNELS> <THREADS> [ENABLE_ROCPROF] [ROCPROF_STATS] [ROCPROF_INPUT] [DOCKER_CONTAINER]"
@@ -23,6 +26,16 @@ ROCPROF_STATS="${13:-false}"
 ROCPROF_INPUT="${14:-}"
 DOCKER_CONTAINER="${15:-training-overlap-bugs-rocm70_9-1}"
 
+# Source environment variables (should already be sourced by config_node.sh, but ensure it's loaded)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/set_env_variables.sh" ]]; then
+    source "$SCRIPT_DIR/set_env_variables.sh"
+fi
+
+# Override channel/thread settings from command line arguments
+export NCCL_MAX_NCHANNELS="${CHANNELS}"
+export RCCL_THREADS_PER_BLOCK="${THREADS}"
+
 echo "=========================================="
 echo "Local Launch Configuration"
 echo "=========================================="
@@ -37,7 +50,6 @@ echo "Experiment Dir: $EXPERIMENT_DIR"
 echo "Config File: $CONFIG_FILE"
 echo "Channels: $CHANNELS"
 echo "Threads: $THREADS"
-echo "Docker Container: $DOCKER_CONTAINER"
 echo "rocprof enabled: $ENABLE_ROCPROF"
 echo "=========================================="
 echo ""
@@ -60,25 +72,22 @@ else
     CONFIG_FILE_DOCKER="$CONFIG_FILE"
 fi
 
-# Log file
-LOG_FILE="${OUTPUT_DIR}/node_${NODE_RANK}_output.log"
-
 # Function to log with timestamp
 log() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[${timestamp}] [Node ${NODE_RANK}] ${message}" | tee -a "${LOG_FILE}"
+    echo "[${timestamp}] [Node ${NODE_RANK}] ${message}"
 }
 
 # Cleanup function
 cleanup() {
     echo ""
-    echo "=== Caught interrupt signal ===" | tee -a "${LOG_FILE}"
+    echo "=== Caught interrupt signal ==="
     log "Cleaning up training processes on node ${NODE_RANK}..."
 
     # Try to kill processes inside Docker container
-    docker exec "$DOCKER_CONTAINER" pkill -9 -f "train.py" 2>/dev/null || true
-    docker exec "$DOCKER_CONTAINER" pkill -9 -f "torchrun" 2>/dev/null || true
+    docker exec training-overlap-bugs-rocm70_9-1 pkill -9 -f "train.py" 2>/dev/null || true
+    docker exec training-overlap-bugs-rocm70_9-1 pkill -9 -f "torchrun" 2>/dev/null || true
 
     # Also try on host (in case anything leaked)
     sudo pkill -9 -f "train.py" 2>/dev/null || true
@@ -109,12 +118,15 @@ BASE_CMD="torchrun --nnodes ${NNODES} --node_rank ${NODE_RANK} --nproc_per_node 
 BASE_OVERRIDES="--override profiling.tensorboard=false"
 
 # Build docker exec prefix with environment variables
-DOCKER_EXEC="docker exec \
-    -e RCCL_THREADS_PER_BLOCK=${THREADS} \
-    -e NCCL_MAX_NCHANNELS=${CHANNELS} \
-    -e HSA_ENABLE_SDMA=0 \
-    -e PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1 \
-    ${DOCKER_CONTAINER}"
+# All NCCL/RCCL variables are defined in set_env_variables.sh
+DOCKER_ENV_FLAGS=$(build_docker_env_flags)
+DOCKER_EXEC="docker exec ${DOCKER_ENV_FLAGS} ${DOCKER_CONTAINER}"
+
+# Log which env vars are being passed
+log "Docker environment variables:"
+for var in "${DOCKER_ENV_VARS[@]}"; do
+    log "  ${var}=${!var}"
+done
 
 # Run with or without rocprofv3
 if [ "${ENABLE_ROCPROF}" = "true" ]; then

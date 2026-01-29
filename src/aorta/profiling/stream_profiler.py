@@ -37,7 +37,11 @@ class MarkerRecord:
 class StreamProfiler:
     """Track activity across multiple CUDA/HIP streams with precise timing."""
 
-    def __init__(self, device: torch.device, stream_names: Optional[Iterable[StreamName]] = None) -> None:
+    def __init__(
+        self,
+        device: torch.device,
+        stream_names: Optional[Iterable[StreamName]] = None,
+    ) -> None:
         if not torch.cuda.is_available():  # pragma: no cover - runtime guard
             raise RuntimeError("StreamProfiler requires CUDA/HIP availability")
 
