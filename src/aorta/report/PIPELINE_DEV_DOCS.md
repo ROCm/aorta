@@ -1,7 +1,7 @@
 # Pipeline Commands - Developer Documentation
 
-**Version:** 1.0  
-**Date:** January 2026  
+**Version:** 1.0
+**Date:** January 2026
 **Status:** ✅ Implemented
 
 ---
@@ -345,110 +345,110 @@ class PipelineResult:
 def run_summary_pipeline(config: SummaryPipelineConfig) -> PipelineResult:
     """
     Run the complete summary pipeline.
-    
+
     Returns PipelineResult with success status and generated files.
     """
     result = PipelineResult(
         success=True,
         output_dir=config.output_dir,
     )
-    
+
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Extract labels from directory names if not provided
     baseline_label = config.baseline_label or config.baseline_path.name
     test_label = config.test_label or config.test_path.name
-    
+
     try:
         # Step 1: TraceLens Analysis
         if not config.skip_tracelens:
             _step_tracelens_analysis(config, result)
         else:
             result.steps_skipped.append("tracelens_analysis")
-        
+
         # Step 2: Process GPU Timelines
         if config.gpu_timeline:
             _step_process_gpu_timelines(config, result)
-        
+
         # Step 3: Compare GPU Timelines
         if config.gpu_timeline:
             _step_compare_gpu_timeline(config, result, baseline_label, test_label)
         else:
             result.steps_skipped.append("compare_gpu_timeline")
-        
+
         # Step 4: Compare Collective
         if config.collective:
             _step_compare_collective(config, result, baseline_label, test_label)
         else:
             result.steps_skipped.append("compare_collective")
-        
+
         # Step 5: Generate Final Report
         if config.final_report and config.gpu_timeline and config.collective:
             _step_generate_final_report(config, result, baseline_label, test_label)
         elif config.final_report:
             result.steps_skipped.append("final_report (requires both gpu_timeline and collective)")
-        
+
         # Step 6: Generate Plots
         if config.plots and "final_analysis_report.xlsx" in str(result.files_generated):
             _step_generate_plots(config, result)
         elif config.plots:
             result.steps_skipped.append("plots (requires final_report)")
-        
+
         # Step 7: Generate HTML
         if config.html and result.files_generated.get("plots_dir"):
             _step_generate_html(config, result)
         elif config.html:
             result.steps_skipped.append("html (requires plots)")
-            
+
     except Exception as e:
         result.success = False
         result.errors.append(str(e))
-    
+
     return result
 
 
 def _step_tracelens_analysis(config: SummaryPipelineConfig, result: PipelineResult) -> None:
     """Step 1: Run TraceLens analysis on baseline and test."""
     from ..analysis import analyze_single_config
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 1: TraceLens Analysis")
         print("=" * 60)
-    
+
     # Analyze baseline
     if config.verbose:
         print(f"\nAnalyzing baseline: {config.baseline_path}")
     analyze_single_config(config.baseline_path, verbose=config.verbose)
-    
+
     # Analyze test
     if config.verbose:
         print(f"\nAnalyzing test: {config.test_path}")
     analyze_single_config(config.test_path, verbose=config.verbose)
-    
+
     result.steps_completed.append("tracelens_analysis")
 
 
 def _step_process_gpu_timelines(config: SummaryPipelineConfig, result: PipelineResult) -> None:
     """Step 2: Process GPU timelines for both baseline and test."""
     from ..processing import process_single_config
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 2: Process GPU Timelines")
         print("=" * 60)
-    
+
     baseline_reports = config.baseline_path / "tracelens_analysis" / "individual_reports"
     test_reports = config.test_path / "tracelens_analysis" / "individual_reports"
-    
+
     if config.verbose:
         print(f"\nProcessing baseline: {baseline_reports}")
     process_single_config(baseline_reports, verbose=config.verbose)
-    
+
     if config.verbose:
         print(f"\nProcessing test: {test_reports}")
     process_single_config(test_reports, verbose=config.verbose)
-    
+
     result.steps_completed.append("process_gpu_timelines")
 
 
@@ -460,26 +460,26 @@ def _step_compare_gpu_timeline(
 ) -> None:
     """Step 3: Compare GPU timelines."""
     from ..comparison import combine_excel_files, add_gpu_timeline_comparison, save_with_formatting
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 3: Compare GPU Timelines")
         print("=" * 60)
-    
+
     baseline_gpu = config.baseline_path / "tracelens_analysis" / "gpu_timeline_summary_mean.xlsx"
     test_gpu = config.test_path / "tracelens_analysis" / "gpu_timeline_summary_mean.xlsx"
-    
+
     # Combine
     combined = combine_excel_files(baseline_gpu, test_gpu, baseline_label, test_label, verbose=config.verbose)
-    
+
     # Save combined
     combined_path = config.output_dir / "gpu_timeline_combined.xlsx"
     save_with_formatting(combined, combined_path, {})
     result.files_generated["gpu_combined"] = combined_path
-    
+
     # Add comparison
     comparison = add_gpu_timeline_comparison(combined, baseline_label, test_label, verbose=config.verbose)
-    
+
     # Save comparison
     comparison_path = config.output_dir / "gpu_timeline_comparison.xlsx"
     format_columns = {
@@ -488,7 +488,7 @@ def _step_compare_gpu_timeline(
     }
     save_with_formatting(comparison, comparison_path, format_columns)
     result.files_generated["gpu_comparison"] = comparison_path
-    
+
     result.steps_completed.append("compare_gpu_timeline")
 
 
@@ -501,29 +501,29 @@ def _step_compare_collective(
     """Step 4: Compare collective/NCCL."""
     from ..comparison import combine_excel_files, add_collective_comparison, save_with_formatting
     from ..comparison.collective_comparison import get_percent_change_columns
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 4: Compare Collective/NCCL")
         print("=" * 60)
-    
+
     baseline_coll = config.baseline_path / "tracelens_analysis" / "collective_reports" / "collective_all_ranks.xlsx"
     test_coll = config.test_path / "tracelens_analysis" / "collective_reports" / "collective_all_ranks.xlsx"
-    
+
     # Combine (filter summary sheets only)
     combined = combine_excel_files(
         baseline_coll, test_coll, baseline_label, test_label,
         filter_summary_only=True, verbose=config.verbose
     )
-    
+
     # Save combined
     combined_path = config.output_dir / "collective_combined.xlsx"
     save_with_formatting(combined, combined_path, {})
     result.files_generated["coll_combined"] = combined_path
-    
+
     # Add comparison
     comparison = add_collective_comparison(combined, baseline_label, test_label, verbose=config.verbose)
-    
+
     # Save comparison
     comparison_path = config.output_dir / "collective_comparison.xlsx"
     format_columns = {}
@@ -534,7 +534,7 @@ def _step_compare_collective(
                 format_columns[sheet_name] = pct_cols
     save_with_formatting(comparison, comparison_path, format_columns)
     result.files_generated["coll_comparison"] = comparison_path
-    
+
     result.steps_completed.append("compare_collective")
 
 
@@ -546,14 +546,14 @@ def _step_generate_final_report(
 ) -> None:
     """Step 5: Generate final Excel report."""
     from ..generators import create_final_excel_report
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 5: Generate Final Excel Report")
         print("=" * 60)
-    
+
     final_report_path = config.output_dir / "final_analysis_report.xlsx"
-    
+
     create_final_excel_report(
         gpu_combined_path=result.files_generated["gpu_combined"],
         gpu_comparison_path=result.files_generated["gpu_comparison"],
@@ -564,7 +564,7 @@ def _step_generate_final_report(
         test_label=test_label,
         verbose=config.verbose,
     )
-    
+
     result.files_generated["final_report"] = final_report_path
     result.steps_completed.append("final_report")
 
@@ -572,20 +572,20 @@ def _step_generate_final_report(
 def _step_generate_plots(config: SummaryPipelineConfig, result: PipelineResult) -> None:
     """Step 6: Generate plots."""
     from ..generators import generate_summary_plots
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 6: Generate Plots")
         print("=" * 60)
-    
+
     plots_dir = config.output_dir / "plots"
-    
+
     generate_summary_plots(
         excel_path=result.files_generated["final_report"],
         output_dir=plots_dir,
         verbose=config.verbose,
     )
-    
+
     result.files_generated["plots_dir"] = plots_dir
     result.steps_completed.append("plots")
 
@@ -593,21 +593,21 @@ def _step_generate_plots(config: SummaryPipelineConfig, result: PipelineResult) 
 def _step_generate_html(config: SummaryPipelineConfig, result: PipelineResult) -> None:
     """Step 7: Generate HTML report."""
     from ..generators import generate_html
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 7: Generate HTML Report")
         print("=" * 60)
-    
+
     html_path = config.output_dir / "performance_analysis_report.html"
-    
+
     generate_html(
         mode="performance",
         output=html_path,
         plots_dir=result.files_generated["plots_dir"],
         verbose=config.verbose,
     )
-    
+
     result.files_generated["html_report"] = html_path
     result.steps_completed.append("html")
 ```
@@ -660,20 +660,20 @@ class GemmPipelineResult:
 def run_gemm_pipeline(config: GemmPipelineConfig) -> GemmPipelineResult:
     """
     Run the complete GEMM analysis pipeline.
-    
+
     Returns GemmPipelineResult with success status and generated files.
     """
     result = GemmPipelineResult(
         success=True,
         output_dir=config.output_dir,
     )
-    
+
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     try:
         # Step 1: Analyze GEMM Reports
         _step_analyze_gemm(config, result)
-        
+
         # Step 2: Enhance with Timestamps
         if config.timestamps and result.csv_path:
             _step_enhance_timestamps(config, result)
@@ -681,7 +681,7 @@ def run_gemm_pipeline(config: GemmPipelineConfig) -> GemmPipelineResult:
             result.steps_skipped.append("timestamps (analyze_gemm failed)")
         else:
             result.steps_skipped.append("timestamps")
-        
+
         # Step 3: Generate GEMM Plots
         if config.plots and result.csv_path:
             _step_generate_plots(config, result)
@@ -689,26 +689,26 @@ def run_gemm_pipeline(config: GemmPipelineConfig) -> GemmPipelineResult:
             result.steps_skipped.append("plots (analyze_gemm failed)")
         else:
             result.steps_skipped.append("plots")
-            
+
     except Exception as e:
         result.success = False
         result.errors.append(str(e))
-    
+
     return result
 
 
 def _step_analyze_gemm(config: GemmPipelineConfig, result: GemmPipelineResult) -> None:
     """Step 1: Analyze GEMM reports."""
     from ..analysis import analyze_gemm_reports
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 1: Analyze GEMM Reports")
         print("=" * 60)
-    
+
     reports_dir = config.sweep_dir / "tracelens_analysis"
     output_file = f"top{config.top_k}_gemm_kernels_time_variance.csv"
-    
+
     csv_path = analyze_gemm_reports(
         base_path=reports_dir,
         threads=config.threads,
@@ -718,7 +718,7 @@ def _step_analyze_gemm(config: GemmPipelineConfig, result: GemmPipelineResult) -
         output_file=str(config.output_dir / output_file),
         verbose=config.verbose,
     )
-    
+
     result.csv_path = csv_path
     result.steps_completed.append("analyze_gemm")
 
@@ -726,16 +726,16 @@ def _step_analyze_gemm(config: GemmPipelineConfig, result: GemmPipelineResult) -
 def _step_enhance_timestamps(config: GemmPipelineConfig, result: GemmPipelineResult) -> None:
     """Step 2: Enhance with timestamps."""
     from ..processing import enhance_gemm_variance
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 2: Enhance with Timestamps")
         print("=" * 60)
-    
+
     output_csv = result.csv_path.with_name(
         result.csv_path.stem + "_with_timestamps.csv"
     )
-    
+
     try:
         enhanced_path = enhance_gemm_variance(
             input_csv=result.csv_path,
@@ -753,20 +753,20 @@ def _step_enhance_timestamps(config: GemmPipelineConfig, result: GemmPipelineRes
 def _step_generate_plots(config: GemmPipelineConfig, result: GemmPipelineResult) -> None:
     """Step 3: Generate GEMM plots."""
     from ..generators import generate_gemm_plots
-    
+
     if config.verbose:
         print("\n" + "=" * 60)
         print("STEP 3: Generate GEMM Plots")
         print("=" * 60)
-    
+
     plots_dir = config.output_dir / "plots"
-    
+
     generate_gemm_plots(
         csv_path=result.csv_path,
         output_dir=plots_dir,
         verbose=config.verbose,
     )
-    
+
     result.plots_dir = plots_dir
     result.steps_completed.append("plots")
 ```
@@ -825,9 +825,9 @@ __all__ = [
 def pipeline_summary(ctx, baseline, test, output, baseline_label, test_label,
                      skip_tracelens, gpu_timeline, collective, final_report, plots, html):
     """Run complete summary analysis pipeline.
-    
+
     Orchestrates the full TraceLens analysis workflow:
-    
+
     \b
     1. TraceLens Analysis (optional, skip with --skip-tracelens)
     2. Process GPU timelines
@@ -836,13 +836,13 @@ def pipeline_summary(ctx, baseline, test, output, baseline_label, test_label,
     5. Generate final Excel report
     6. Generate visualization plots
     7. Generate HTML report
-    
+
     \b
     Examples:
       # Full pipeline
       aorta-report pipeline summary \\
           -b /path/to/baseline -t /path/to/test -o /path/to/output
-      
+
       # Skip TraceLens (already done)
       aorta-report pipeline summary \\
           -b /path/to/baseline -t /path/to/test -o /path/to/output \\
@@ -850,10 +850,10 @@ def pipeline_summary(ctx, baseline, test, output, baseline_label, test_label,
     """
     from pathlib import Path
     from .pipelines import run_summary_pipeline, SummaryPipelineConfig
-    
+
     verbose = ctx.obj.get("verbose", False)
     quiet = ctx.obj.get("quiet", False)
-    
+
     config = SummaryPipelineConfig(
         baseline_path=Path(baseline),
         test_path=Path(test),
@@ -868,7 +868,7 @@ def pipeline_summary(ctx, baseline, test, output, baseline_label, test_label,
         html=html,
         verbose=verbose,
     )
-    
+
     if not quiet:
         click.echo("=" * 60)
         click.echo("SUMMARY ANALYSIS PIPELINE")
@@ -879,35 +879,35 @@ def pipeline_summary(ctx, baseline, test, output, baseline_label, test_label,
         click.echo(f"Options: skip_tracelens={skip_tracelens}, gpu_timeline={gpu_timeline}")
         click.echo(f"         collective={collective}, final_report={final_report}")
         click.echo(f"         plots={plots}, html={html}")
-    
+
     result = run_summary_pipeline(config)
-    
+
     if not quiet:
         click.echo("\n" + "=" * 60)
         click.echo("PIPELINE COMPLETE!" if result.success else "PIPELINE FAILED!")
         click.echo("=" * 60)
-        
+
         if result.steps_completed:
             click.echo("\nSteps completed:")
             for step in result.steps_completed:
                 click.echo(f"  ✓ {step}")
-        
+
         if result.steps_skipped:
             click.echo("\nSteps skipped:")
             for step in result.steps_skipped:
                 click.echo(f"  - {step}")
-        
+
         if result.errors:
             click.echo("\nErrors:")
             for err in result.errors:
                 click.echo(f"  ✗ {err}")
-        
+
         if result.files_generated:
             click.echo(f"\nOutput directory: {result.output_dir}")
             click.echo("Generated files:")
             for name, path in result.files_generated.items():
                 click.echo(f"  - {path.name}")
-    
+
     if not result.success:
         raise click.ClickException("Pipeline failed")
 ```
@@ -933,31 +933,31 @@ def pipeline_summary(ctx, baseline, test, output, baseline_label, test_label,
 @click.pass_context
 def pipeline_gemm(ctx, sweep_dir, output, top_k, threads, channels, timestamps, plots):
     """Run GEMM variance analysis pipeline.
-    
+
     Analyzes GEMM kernel time variance across configurations:
-    
+
     \b
     1. Analyze GEMM reports to extract top-K kernels
     2. Enhance with timestamps (optional)
     3. Generate variance plots (optional)
-    
+
     \b
     Examples:
       # Full pipeline
       aorta-report pipeline gemm --sweep-dir /path/to/sweep -o /path/to/output
-      
+
       # Custom top-k
       aorta-report pipeline gemm --sweep-dir /path/to/sweep -o ./output --top-k 10
-      
+
       # Skip plots
       aorta-report pipeline gemm --sweep-dir /path/to/sweep -o ./output --no-plots
     """
     from pathlib import Path
     from .pipelines import run_gemm_pipeline, GemmPipelineConfig
-    
+
     verbose = ctx.obj.get("verbose", False)
     quiet = ctx.obj.get("quiet", False)
-    
+
     config = GemmPipelineConfig(
         sweep_dir=Path(sweep_dir),
         output_dir=Path(output),
@@ -968,7 +968,7 @@ def pipeline_gemm(ctx, sweep_dir, output, top_k, threads, channels, timestamps, 
         plots=plots,
         verbose=verbose,
     )
-    
+
     if not quiet:
         click.echo("=" * 60)
         click.echo("GEMM VARIANCE ANALYSIS PIPELINE")
@@ -979,29 +979,29 @@ def pipeline_gemm(ctx, sweep_dir, output, top_k, threads, channels, timestamps, 
         click.echo(f"Threads: {list(threads)}")
         click.echo(f"Channels: {list(channels)}")
         click.echo(f"Options: timestamps={timestamps}, plots={plots}")
-    
+
     result = run_gemm_pipeline(config)
-    
+
     if not quiet:
         click.echo("\n" + "=" * 60)
         click.echo("PIPELINE COMPLETE!" if result.success else "PIPELINE FAILED!")
         click.echo("=" * 60)
-        
+
         if result.steps_completed:
             click.echo("\nSteps completed:")
             for step in result.steps_completed:
                 click.echo(f"  ✓ {step}")
-        
+
         if result.steps_skipped:
             click.echo("\nSteps skipped:")
             for step in result.steps_skipped:
                 click.echo(f"  - {step}")
-        
+
         if result.errors:
             click.echo("\nErrors:")
             for err in result.errors:
                 click.echo(f"  ✗ {err}")
-        
+
         click.echo(f"\nOutput directory: {result.output_dir}")
         if result.csv_path:
             click.echo(f"  - {result.csv_path.name}")
@@ -1009,7 +1009,7 @@ def pipeline_gemm(ctx, sweep_dir, output, top_k, threads, channels, timestamps, 
             click.echo(f"  - {result.csv_with_timestamps_path.name}")
         if result.plots_dir:
             click.echo(f"  - plots/ (5 files)")
-    
+
     if not result.success:
         raise click.ClickException("Pipeline failed")
 ```
@@ -1076,4 +1076,3 @@ def pipeline_gemm(ctx, sweep_dir, output, top_k, threads, channels, timestamps, 
 5. **Graceful Degradation:** Continue on non-critical errors
 6. **Progress Reporting:** Clear step-by-step output with `verbose` flag
 7. **Label Auto-Extract:** Use directory names as default labels
-

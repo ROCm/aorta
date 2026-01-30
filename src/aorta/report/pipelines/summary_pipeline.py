@@ -11,7 +11,7 @@ Orchestrates complete TraceLens analysis workflow:
 """
 
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List
 from dataclasses import dataclass, field
 
 
@@ -80,8 +80,7 @@ def run_summary_pipeline(config: SummaryPipelineConfig) -> PipelineResult:
             )
         if not test_analysis.exists():
             raise FileNotFoundError(
-                f"Test analysis not found: {test_analysis}. "
-                "Run without --skip-tracelens first."
+                f"Test analysis not found: {test_analysis}. " "Run without --skip-tracelens first."
             )
 
         # Step 2: Process GPU Timelines
@@ -110,9 +109,7 @@ def run_summary_pipeline(config: SummaryPipelineConfig) -> PipelineResult:
         ):
             _step_generate_final_report(config, result, baseline_label, test_label)
         elif config.final_report:
-            result.steps_skipped.append(
-                "final_report (requires both gpu_timeline and collective)"
-            )
+            result.steps_skipped.append("final_report (requires both gpu_timeline and collective)")
 
         # Step 6: Generate Plots
         if config.plots and "final_report" in result.files_generated:
@@ -133,9 +130,7 @@ def run_summary_pipeline(config: SummaryPipelineConfig) -> PipelineResult:
     return result
 
 
-def _step_tracelens_analysis(
-    config: SummaryPipelineConfig, result: PipelineResult
-) -> None:
+def _step_tracelens_analysis(config: SummaryPipelineConfig, result: PipelineResult) -> None:
     """Step 1: Run TraceLens analysis on baseline and test."""
     from ..analysis import analyze_single_config
 
@@ -157,9 +152,7 @@ def _step_tracelens_analysis(
     result.steps_completed.append("tracelens_analysis")
 
 
-def _step_process_gpu_timelines(
-    config: SummaryPipelineConfig, result: PipelineResult
-) -> None:
+def _step_process_gpu_timelines(config: SummaryPipelineConfig, result: PipelineResult) -> None:
     """Step 2: Process GPU timelines for both baseline and test."""
     from ..processing import process_single_config
 
@@ -168,9 +161,7 @@ def _step_process_gpu_timelines(
         print("STEP 2: Process GPU Timelines")
         print("=" * 60)
 
-    baseline_reports = (
-        config.baseline_path / "tracelens_analysis" / "individual_reports"
-    )
+    baseline_reports = config.baseline_path / "tracelens_analysis" / "individual_reports"
     test_reports = config.test_path / "tracelens_analysis" / "individual_reports"
 
     if config.verbose:
@@ -202,12 +193,8 @@ def _step_compare_gpu_timeline(
         print("STEP 3: Compare GPU Timelines")
         print("=" * 60)
 
-    baseline_gpu = (
-        config.baseline_path / "tracelens_analysis" / "gpu_timeline_summary_mean.xlsx"
-    )
-    test_gpu = (
-        config.test_path / "tracelens_analysis" / "gpu_timeline_summary_mean.xlsx"
-    )
+    baseline_gpu = config.baseline_path / "tracelens_analysis" / "gpu_timeline_summary_mean.xlsx"
+    test_gpu = config.test_path / "tracelens_analysis" / "gpu_timeline_summary_mean.xlsx"
 
     if not baseline_gpu.exists():
         raise FileNotFoundError(f"Baseline GPU timeline not found: {baseline_gpu}")
@@ -271,10 +258,7 @@ def _step_compare_collective(
         / "collective_all_ranks.xlsx"
     )
     test_coll = (
-        config.test_path
-        / "tracelens_analysis"
-        / "collective_reports"
-        / "collective_all_ranks.xlsx"
+        config.test_path / "tracelens_analysis" / "collective_reports" / "collective_all_ranks.xlsx"
     )
 
     if not baseline_coll.exists():
@@ -355,9 +339,7 @@ def _step_generate_final_report(
     result.steps_completed.append("final_report")
 
 
-def _step_generate_plots(
-    config: SummaryPipelineConfig, result: PipelineResult
-) -> None:
+def _step_generate_plots(config: SummaryPipelineConfig, result: PipelineResult) -> None:
     """Step 6: Generate plots."""
     from ..generators import generate_summary_plots
 
@@ -383,9 +365,7 @@ def _step_generate_plots(
     result.steps_completed.append("plots")
 
 
-def _step_generate_html(
-    config: SummaryPipelineConfig, result: PipelineResult
-) -> None:
+def _step_generate_html(config: SummaryPipelineConfig, result: PipelineResult) -> None:
     """Step 7: Generate HTML report."""
     from ..generators import generate_html
 
@@ -409,4 +389,3 @@ def _step_generate_html(
         print(f"  HTML report: {html_path}")
 
     result.steps_completed.append("html")
-
