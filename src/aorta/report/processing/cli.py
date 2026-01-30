@@ -185,4 +185,3 @@ def process_gemm_variance(ctx, input_csv, base_path, tolerance, output):
             click.echo(f"\nProcessing complete: {output_path}")
     except (ValueError, FileNotFoundError) as e:
         raise click.ClickException(str(e))
-

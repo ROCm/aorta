@@ -138,7 +138,7 @@ def process_nccl_data(
 
     # Create unique operation IDs based on message size
     print("\nCreating unique operation IDs...")
-    
+
     if "Full msg size (MB)" not in combined_df.columns:
         print("Warning: 'Full msg size (MB)' column not found, skipping operation ID creation")
     else:
@@ -288,4 +288,3 @@ def process_nccl_data(
     print("  3. Setup: Rows=operation_id, Columns=full_config, Values=comm_latency_mean")
 
     return excel_path, csv_path
-
