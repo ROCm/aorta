@@ -12,23 +12,9 @@ import glob
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 
-
-def geometric_mean(values: np.ndarray) -> float:
-    """
-    Calculate geometric mean, handling zeros.
-
-    Args:
-        values: Array of values
-
-    Returns:
-        Geometric mean value
-    """
-    values = np.array(values)
-    values = np.where(values == 0, 1e-10, values)
-    return float(np.exp(np.mean(np.log(values))))
+from aorta.report.utils import geometric_mean
 
 
 def parse_perf_filename(filename: str) -> Tuple[str, int]:
