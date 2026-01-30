@@ -55,9 +55,7 @@ def group_files_by_channel(perf_files: List[str]) -> Dict[str, List[Tuple[int, s
     return channel_groups
 
 
-def read_rank_data(
-    rank_files: List[Tuple[int, str]], verbose: bool = False
-) -> List[pd.DataFrame]:
+def read_rank_data(rank_files: List[Tuple[int, str]], verbose: bool = False) -> List[pd.DataFrame]:
     """
     Read gpu_timeline data from all rank files.
 
@@ -75,8 +73,8 @@ def read_rank_data(
             df["rank"] = rank
             rank_data.append(df)
         except Exception as e:
-            if verbose:
-                print(f"    Warning: Could not read {Path(file_path).name}: {e}")
+            # if verbose:
+            print(f"    Error - Could not read {Path(file_path).name}: {e}")
     return rank_data
 
 
@@ -104,9 +102,7 @@ def aggregate_rank_data(
 
     agg_func = geometric_mean if use_geo_mean else "mean"
     aggregated = (
-        combined.groupby("type")
-        .agg({"time ms": agg_func, "percent": agg_func})
-        .reset_index()
+        combined.groupby("type").agg({"time ms": agg_func, "percent": agg_func}).reset_index()
     )
 
     # Add metadata columns
@@ -196,9 +192,7 @@ def process_thread_config(
     results = []
 
     # Process each channel configuration (sorted by channel number)
-    sorted_channels = sorted(
-        channel_groups.keys(), key=lambda x: int(x.replace("ch", ""))
-    )
+    sorted_channels = sorted(channel_groups.keys(), key=lambda x: int(x.replace("ch", "")))
     for channel_config in sorted_channels:
         aggregated = process_channel_config(
             channel_config, channel_groups, use_geo_mean, thread_config, verbose
@@ -220,9 +214,7 @@ def create_pivot_sheet(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
     Returns:
         Pivot table DataFrame
     """
-    return df.pivot_table(
-        values=value_col, index="type", columns="full_config", aggfunc="first"
-    )
+    return df.pivot_table(values=value_col, index="type", columns="full_config", aggfunc="first")
 
 
 def create_summary_sheet(df: pd.DataFrame) -> pd.DataFrame:
@@ -265,9 +257,9 @@ def print_metric_comparison(df: pd.DataFrame, metric_type: str, description: str
         metric_type: Type of metric to filter
         description: Description to print
     """
-    metric_data = df[df["type"] == metric_type][
-        ["full_config", "time ms", "percent"]
-    ].sort_values("time ms")
+    metric_data = df[df["type"] == metric_type][["full_config", "time ms", "percent"]].sort_values(
+        "time ms"
+    )
     print(f"\n{description}:")
     print(metric_data.to_string(index=False))
 
@@ -327,9 +319,7 @@ def process_sweep_config(
     tracelens_dir = sweep_path / "tracelens_analysis"
 
     if not tracelens_dir.exists():
-        raise FileNotFoundError(
-            f"tracelens_analysis directory not found in {sweep_dir}"
-        )
+        raise FileNotFoundError(f"tracelens_analysis directory not found in {sweep_dir}")
 
     agg_method = "Geometric Mean" if use_geo_mean else "Arithmetic Mean"
     print("=" * 80)
@@ -338,9 +328,7 @@ def process_sweep_config(
     print("=" * 80)
 
     # Find all thread configurations
-    thread_configs = [
-        d.name for d in tracelens_dir.iterdir() if d.is_dir() and "thread" in d.name
-    ]
+    thread_configs = [d.name for d in tracelens_dir.iterdir() if d.is_dir() and "thread" in d.name]
 
     if not thread_configs:
         raise ValueError("No thread configuration directories found")
@@ -392,15 +380,9 @@ def process_sweep_config(
     # Save to Excel with multiple sheets
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         final_df.to_excel(writer, sheet_name="All_Data", index=False)
-        create_pivot_sheet(final_df, "time ms").to_excel(
-            writer, sheet_name="Pivot_Time_ms"
-        )
-        create_pivot_sheet(final_df, "percent").to_excel(
-            writer, sheet_name="Pivot_Percent"
-        )
-        create_summary_sheet(final_df).to_excel(
-            writer, sheet_name="Summary_By_Config", index=False
-        )
+        create_pivot_sheet(final_df, "time ms").to_excel(writer, sheet_name="Pivot_Time_ms")
+        create_pivot_sheet(final_df, "percent").to_excel(writer, sheet_name="Pivot_Percent")
+        create_summary_sheet(final_df).to_excel(writer, sheet_name="Summary_By_Config", index=False)
 
     print(f"[SAVED] {output_path}")
     print("  Sheets created:")
