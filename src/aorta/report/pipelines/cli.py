@@ -165,12 +165,29 @@ def pipeline_summary(
     "--sweep-dir",
     required=True,
     type=click.Path(exists=True),
-    help="Sweep directory containing tracelens_analysis/",
+    help="Sweep directory with thread/channel subdirectories",
 )
 @click.option(
     "-o", "--output", required=True, type=click.Path(), help="Output directory for results"
 )
-@click.option("--top-k", default=5, type=int, help="Number of top kernels to extract (default: 5)")
+@click.option(
+    "--skip-tracelens",
+    is_flag=True,
+    help="Skip TraceLens analysis, use existing reports",
+)
+@click.option(
+    "--short-kernel-threshold",
+    default=50,
+    type=int,
+    help="Threshold for short kernel study in microseconds (default: 50)",
+)
+@click.option(
+    "--topk-ops",
+    default=100,
+    type=int,
+    help="Number of top operations to include in TraceLens analysis (default: 100)",
+)
+@click.option("--top-k", default=5, type=int, help="Number of top GEMM kernels to extract (default: 5)")
 @click.option(
     "--threads",
     "-t",
@@ -193,21 +210,28 @@ def pipeline_summary(
 @click.option("--plots/--no-plots", default=True, help="Generate plots (default: True)")
 @click.option("--html/--no-html", default=True, help="Generate HTML report (default: True)")
 @click.pass_context
-def pipeline_gemm(ctx, sweep_dir, output, top_k, threads, channels, timestamps, plots, html):
+def pipeline_gemm(ctx, sweep_dir, output, skip_tracelens, short_kernel_threshold, topk_ops,
+                  top_k, threads, channels, timestamps, plots, html):
     """Run GEMM variance analysis pipeline.
 
-    Analyzes GEMM kernel time variance across configurations:
+    By default, runs TraceLens on all configurations first, then analyzes GEMM kernels.
+    Use --skip-tracelens to use existing TraceLens reports.
 
     \b
-    1. Analyze GEMM reports to extract top-K kernels with highest variance
-    2. Enhance with timestamps (optional)
-    3. Generate variance plots (optional)
-    4. Generate HTML report (optional)
+    Steps:
+      0. Run TraceLens on sweep (default, skip with --skip-tracelens)
+      1. Analyze GEMM reports to extract top-K kernels with highest variance
+      2. Enhance with timestamps (optional)
+      3. Generate variance plots (optional)
+      4. Generate HTML report (optional)
 
     \b
     Examples:
-      # Full pipeline
+      # Full pipeline (runs TraceLens + GEMM analysis)
       aorta-report pipeline gemm --sweep-dir /path/to/sweep -o /path/to/output
+
+      # Skip TraceLens, use existing reports
+      aorta-report pipeline gemm --sweep-dir /path/to/sweep -o ./output --skip-tracelens
 
       # Custom top-k
       aorta-report pipeline gemm --sweep-dir /path/to/sweep -o ./output --top-k 10
@@ -234,6 +258,9 @@ def pipeline_gemm(ctx, sweep_dir, output, top_k, threads, channels, timestamps, 
         top_k=top_k,
         threads=list(threads),
         channels=list(channels),
+        skip_tracelens=skip_tracelens,
+        short_kernel_threshold_us=short_kernel_threshold,
+        topk_ops=topk_ops,
         timestamps=timestamps,
         plots=plots,
         html=html,
@@ -246,7 +273,8 @@ def pipeline_gemm(ctx, sweep_dir, output, top_k, threads, channels, timestamps, 
         click.echo("=" * 60)
         click.echo(f"Sweep dir: {sweep_dir}")
         click.echo(f"Output: {output}")
-        click.echo(f"Top-K: {top_k}")
+        click.echo(f"TraceLens: {'skip' if skip_tracelens else 'run'}")
+        click.echo(f"Top-K GEMM kernels: {top_k}")
         click.echo(f"Threads: {list(threads)}")
         click.echo(f"Channels: {list(channels)}")
         click.echo(f"Options: timestamps={timestamps}, plots={plots}, html={html}")

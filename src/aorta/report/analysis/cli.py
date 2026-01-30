@@ -75,18 +75,43 @@ def analyze_single(ctx, trace_dir, individual_only, collective_only, geo_mean,
 
 @analyze.command("sweep")
 @click.argument("sweep_dir", type=click.Path(exists=True))
+@click.option("--skip-tracelens", is_flag=True,
+              help="Skip TraceLens analysis, only aggregate existing reports")
 @click.option("--geo-mean", is_flag=True, help="Use geometric mean instead of arithmetic mean")
+@click.option("--short-kernel-threshold", default=50, type=int,
+              help="Threshold for short kernel study (microseconds)")
+@click.option("--topk-ops", default=100, type=int,
+              help="Number of top operations to include")
 @click.option("-o", "--output", type=click.Path(), help="Output directory")
 @click.pass_context
-def analyze_sweep(ctx, sweep_dir, geo_mean, output):
+def analyze_sweep(ctx, sweep_dir, skip_tracelens, geo_mean, short_kernel_threshold,
+                  topk_ops, output):
     """Analyze a sweep directory with multiple configurations.
 
-    SWEEP_DIR: Path to the sweep directory containing tracelens_analysis/
-    with multiple thread/channel configs.
+    SWEEP_DIR: Path to the sweep directory containing thread/channel subdirectories.
+
+    By default, runs TraceLens analysis on all configurations first, then
+    aggregates the results. Use --skip-tracelens to only aggregate existing reports.
+
+    \b
+    Expected directory structure:
+      sweep_dir/
+      ├── 256thread/
+      │   ├── nccl_28channels/
+      │   │   └── torch_profiler/rank*/
+      │   └── nccl_42channels/
+      └── 512thread/
+          └── ...
 
     \b
     Examples:
+      # Run TraceLens + aggregate (default)
       aorta-report analyze sweep /path/to/sweep_20251124
+
+      # Only aggregate existing reports
+      aorta-report analyze sweep /path/to/sweep --skip-tracelens
+
+      # With geometric mean aggregation
       aorta-report analyze sweep /path/to/sweep --geo-mean
     """
     from . import analyze_sweep_config
@@ -99,6 +124,9 @@ def analyze_sweep(ctx, sweep_dir, geo_mean, output):
             sweep_dir=Path(sweep_dir),
             output_dir=Path(output) if output else None,
             use_geo_mean=geo_mean,
+            skip_tracelens=skip_tracelens,
+            short_kernel_threshold_us=short_kernel_threshold,
+            topk_ops=topk_ops,
             verbose=verbose,
         )
         if not quiet and output_path:

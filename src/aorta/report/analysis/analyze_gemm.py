@@ -38,12 +38,48 @@ def extract_name_from_kernel_info(kernel_info_str: str) -> Optional[str]:
         return None
 
 
-def column_letter_to_index(letter: str) -> int:
-    """Convert Excel column letter to 0-based index."""
-    index = 0
-    for i, char in enumerate(reversed(letter.upper())):
-        index += (ord(char) - ord("A") + 1) * (26**i)
-    return index - 1
+def find_column_indices(
+    header_row: List[Any],
+    required_columns: Dict[str, str],
+) -> Dict[str, int]:
+    """
+    Find column indices by matching column names in header row.
+
+    Args:
+        header_row: List of column header values
+        required_columns: Dict mapping logical names to expected column names
+                         e.g., {"kernel_info": "kernel_details__summarize_kernel_stats"}
+
+    Returns:
+        Dict mapping logical names to column indices (0-based)
+
+    Raises:
+        ValueError: If any required column is not found
+    """
+    # Create a mapping of column name -> index
+    header_map = {}
+    for idx, col_name in enumerate(header_row):
+        if col_name is not None:
+            header_map[str(col_name)] = idx
+
+    # Find indices for required columns
+    column_indices = {}
+    missing_columns = []
+
+    for logical_name, expected_name in required_columns.items():
+        if expected_name in header_map:
+            column_indices[logical_name] = header_map[expected_name]
+        else:
+            missing_columns.append(f"'{expected_name}' (for {logical_name})")
+
+    if missing_columns:
+        available = list(header_map.keys())[:20]  # Show first 20 columns
+        raise ValueError(
+            f"Required columns not found: {', '.join(missing_columns)}\n"
+            f"Available columns (first 20): {available}"
+        )
+
+    return column_indices
 
 
 def process_excel_file(
@@ -66,6 +102,13 @@ def process_excel_file(
     Returns:
         List of dictionaries containing kernel data
     """
+    # Define required columns by their expected names
+    REQUIRED_COLUMNS = {
+        "kernel_info": "kernel_details__summarize_kernel_stats",
+        "time_min": "Kernel Time (µs)_min",
+        "time_max": "Kernel Time (µs)_max",
+    }
+
     try:
         # Open the workbook
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -77,62 +120,24 @@ def process_excel_file(
 
         sheet = wb["GEMM"]
 
-        # Expected column positions (0-based indices)
-        col_kernel_info = column_letter_to_index("X")  # Column X
-        col_time_min = column_letter_to_index("AG")  # Column AG
-        col_time_max = column_letter_to_index("AH")  # Column AH
-
-        # Read header row to validate column names
         rows_data = []
         header_row = None
+        col_indices = None
 
         for i, row in enumerate(sheet.iter_rows(values_only=True)):
             if i == 0:
-                # This is the header - validate column names match expectations
+                # Parse header row and find column indices dynamically
                 header_row = list(row)
-
-                # Expected column names (match what TraceLens generates)
-                expected_x = "kernel_details__summarize_kernel_stats"
-                expected_ag = "Kernel Time (µs)_min"
-                expected_ah = "Kernel Time (µs)_max"
-
-                # Validate each expected column
-                errors = []
-
-                if col_kernel_info < len(header_row):
-                    header_x = str(header_row[col_kernel_info]) if header_row[col_kernel_info] else ""
-                    if header_x != expected_x:
-                        errors.append(f"Column X: expected '{expected_x}', found '{header_x}'")
-                else:
-                    errors.append(f"Column X: not found (only {len(header_row)} columns)")
-
-                if col_time_min < len(header_row):
-                    header_ag = str(header_row[col_time_min]) if header_row[col_time_min] else ""
-                    if header_ag != expected_ag:
-                        errors.append(f"Column AG: expected '{expected_ag}', found '{header_ag}'")
-                else:
-                    errors.append(f"Column AG: not found (only {len(header_row)} columns)")
-
-                if col_time_max < len(header_row):
-                    header_ah = str(header_row[col_time_max]) if header_row[col_time_max] else ""
-                    if header_ah != expected_ah:
-                        errors.append(f"Column AH: expected '{expected_ah}', found '{header_ah}'")
-                else:
-                    errors.append(f"Column AH: not found (only {len(header_row)} columns)")
-
-                if errors:
-                    raise ValueError(
-                        f"Column validation failed in {file_path}:\n  " + "\n  ".join(errors)
-                    )
-
+                col_indices = find_column_indices(header_row, REQUIRED_COLUMNS)
                 continue
 
-            if row is None or len(row) <= max(col_kernel_info, col_time_min, col_time_max):
+            if row is None or col_indices is None:
                 continue
 
-            kernel_info = row[col_kernel_info] if col_kernel_info < len(row) else None
-            kernel_time_min = row[col_time_min] if col_time_min < len(row) else None
-            kernel_time_max = row[col_time_max] if col_time_max < len(row) else None
+            # Extract values using dynamically found indices
+            kernel_info = row[col_indices["kernel_info"]] if col_indices["kernel_info"] < len(row) else None
+            kernel_time_min = row[col_indices["time_min"]] if col_indices["time_min"] < len(row) else None
+            kernel_time_max = row[col_indices["time_max"]] if col_indices["time_max"] < len(row) else None
 
             # Extract kernel name
             kernel_name = extract_name_from_kernel_info(kernel_info)

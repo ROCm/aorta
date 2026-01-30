@@ -264,7 +264,10 @@ else
             # trace file in the rank folder to the canonical `trace/pt.trace.json` path.
             # This will satisfy TraceLens's requirement of only one `*` being present in the trace pattern
             # while also avoiding FileNotFoundErrors due to different filenames.
-            find $TRACE_DIR/rank* -name "*.json" -exec sh -c 'mkdir -p "$(dirname "$0")/trace" && mv "$0" "$(dirname "$0")/trace/pt.trace.json"' {} \;
+            # OLD (not idempotent - running twice creates trace/trace/pt.trace.json):
+            # find $TRACE_DIR/rank* -name "*.json" -exec sh -c 'mkdir -p "$(dirname "$0")/trace" && mv "$0" "$(dirname "$0")/trace/pt.trace.json"' {} \;
+            # NEW: -not -path "*/trace/*" ensures this is idempotent (safe to run multiple times)
+            find $TRACE_DIR/rank* -name "*.json" -not -path "*/trace/*" -exec sh -c 'mkdir -p "$(dirname "$0")/trace" && mv "$0" "$(dirname "$0")/trace/pt.trace.json"' {} \;
 
             TraceLens_generate_multi_rank_collective_report_pytorch \
                 --trace_pattern "$TRACE_DIR/rank*/trace/pt.trace.json" \

@@ -1,9 +1,11 @@
 """GEMM variance analysis pipeline.
 
 Orchestrates GEMM kernel variance analysis:
+0. Run TraceLens on sweep (optional, default: enabled)
 1. Analyze GEMM Reports
 2. Enhance with Timestamps (optional)
 3. Generate GEMM Plots (optional)
+4. Generate HTML Report (optional)
 """
 
 from pathlib import Path
@@ -21,6 +23,9 @@ class GemmPipelineConfig:
     threads: List[int] = field(default_factory=lambda: [256, 512])
     channels: List[int] = field(default_factory=lambda: [28, 42, 56, 70])
     ranks: List[int] = field(default_factory=lambda: list(range(8)))
+    skip_tracelens: bool = False  # Run TraceLens by default
+    short_kernel_threshold_us: int = 50
+    topk_ops: int = 100
     timestamps: bool = True
     plots: bool = True
     html: bool = True
@@ -56,6 +61,12 @@ def run_gemm_pipeline(config: GemmPipelineConfig) -> GemmPipelineResult:
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        # Step 0: Run TraceLens on sweep (unless skipped)
+        if not config.skip_tracelens:
+            _step_run_tracelens(config, result)
+        else:
+            result.steps_skipped.append("tracelens")
+
         # Step 1: Analyze GEMM Reports
         _step_analyze_gemm(config, result)
 
@@ -88,6 +99,31 @@ def run_gemm_pipeline(config: GemmPipelineConfig) -> GemmPipelineResult:
         result.errors.append(str(e))
 
     return result
+
+
+def _step_run_tracelens(config: GemmPipelineConfig, result: GemmPipelineResult) -> None:
+    """Step 0: Run TraceLens analysis on all configurations in the sweep."""
+    from ..analysis import analyze_sweep_config
+
+    if config.verbose:
+        print("\n" + "=" * 60)
+        print("STEP 0: Run TraceLens Analysis")
+        print("=" * 60)
+
+    try:
+        analyze_sweep_config(
+            sweep_dir=config.sweep_dir,
+            skip_tracelens=False,  # Always run TraceLens in this step
+            short_kernel_threshold_us=config.short_kernel_threshold_us,
+            topk_ops=config.topk_ops,
+            verbose=config.verbose,
+        )
+        result.steps_completed.append("tracelens")
+    except Exception as e:
+        # Don't fail the whole pipeline if TraceLens fails
+        # The subsequent steps will check if tracelens_analysis/ exists
+        result.errors.append(f"TraceLens analysis failed: {e}")
+        result.steps_skipped.append("tracelens (failed)")
 
 
 def _step_analyze_gemm(config: GemmPipelineConfig, result: GemmPipelineResult) -> None:
