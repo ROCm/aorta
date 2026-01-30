@@ -1,7 +1,7 @@
 # `process` Command Group - Developer Documentation
 
-**Version:** 1.0  
-**Date:** January 2026  
+**Version:** 1.0
+**Date:** January 2026
 **Status:** ✅ Implemented
 
 ---
@@ -207,7 +207,7 @@ aggregated["num_ranks"] = len(perf_files)
 # Rich metadata for each configuration
 aggregated["thread_config"] = thread_config      # e.g., "256thread"
 aggregated["threads_num"] = 256                  # numeric for sorting
-aggregated["channel_config"] = channel_config    # e.g., "28ch"  
+aggregated["channel_config"] = channel_config    # e.g., "28ch"
 aggregated["channels_num"] = 28                  # numeric for sorting
 aggregated["full_config"] = "256thread_28ch"     # combined identifier
 aggregated["num_ranks"] = num_ranks
@@ -219,25 +219,25 @@ aggregated["num_ranks"] = num_ranks
 def detect_mode(input_dir):
     """Auto-detect processing mode from directory structure."""
     input_path = Path(input_dir)
-    
+
     # Check for sweep structure
     tracelens_dir = input_path / "tracelens_analysis"
     if tracelens_dir.exists():
-        thread_dirs = [d for d in tracelens_dir.iterdir() 
+        thread_dirs = [d for d in tracelens_dir.iterdir()
                        if d.is_dir() and "thread" in d.name]
         if thread_dirs:
             return "sweep"
-    
+
     # Check for single config structure
     if input_path.name == "individual_reports":
         return "single"
     if list(input_path.glob("perf_rank*.xlsx")):
         return "single"
-    
+
     # Check for sweep files in current directory
     if list(input_path.glob("perf_*ch_rank*.xlsx")):
         return "sweep"
-    
+
     raise ValueError("Could not auto-detect mode")
 ```
 
@@ -321,7 +321,7 @@ sweep_dir/
    unique_sizes = sorted(combined_df['Full msg size (MB)'].unique())
    size_to_id = {size: f"OP_{i+1:02d}" for i, size in enumerate(unique_sizes)}
    combined_df['operation_id'] = combined_df['Full msg size (MB)'].map(size_to_id)
-   
+
    # Create readable operation names
    def create_op_name(row):
        size_mb = row['Full msg size (MB)']
@@ -350,27 +350,27 @@ sweep_dir/
 column_order = [
     # Unique identifiers
     'operation_id', 'operation_name', 'Full msg size (MB)', 'In msg nelems',
-    
+
     # Configuration
     'threads_num', 'thread_config', 'channels_num', 'channel_config', 'full_config',
-    
+
     # Operation info
     'Collective name', 'dtype', 'Group size', 'count',
-    
+
     # Communication Latency
     'comm_latency_mean', 'comm_latency_median', 'comm_latency_min', 'comm_latency_max',
     'Total comm latency (ms)',
-    
+
     # Algorithm Bandwidth
     'algo bw (GB/s)_mean', 'algo bw (GB/s)_median', 'algo bw (GB/s)_min', 'algo bw (GB/s)_max',
-    
+
     # Bus Bandwidth
     'bus bw (GB/s)_mean', 'bus bw (GB/s)_median', 'bus bw (GB/s)_min', 'bus bw (GB/s)_max',
-    
+
     # Start/End Time Skew
     'skew in start time_mean', 'skew in start time_median', ...
     'skew in end time_mean', 'skew in end time_median', ...
-    
+
     # Process Group Info
     'Process Group Name', 'source_file'
 ]
@@ -416,14 +416,14 @@ For each row in the variance CSV:
 
 2. **Search Trace for Kernel Instances**
    ```python
-   def find_min_max_kernel_timestamps(trace_file, kernel_name, 
+   def find_min_max_kernel_timestamps(trace_file, kernel_name,
                                        min_duration_us, max_duration_us, tolerance=0.01):
        with open(trace_file, 'r') as f:
            data = json.load(f)
-       
+
        events = data['traceEvents']
        kernel_instances = []
-       
+
        for event in events:
            if event.get('cat') == 'kernel' and \
               event.get('name', '').startswith(kernel_name):
@@ -433,13 +433,13 @@ For each row in the variance CSV:
                    'duration_us': duration_us,
                    'timestamp_ms': timestamp_us / 1000.0,
                })
-       
+
        # Sort by duration
        kernel_instances.sort(key=lambda x: x['duration_us'])
-       
+
        min_instance = kernel_instances[0]   # Shortest duration
        max_instance = kernel_instances[-1]  # Longest duration
-       
+
        return {
            'min_timestamp_ms': min_instance['timestamp_ms'],
            'max_timestamp_ms': max_instance['timestamp_ms'],
@@ -524,13 +524,13 @@ def process_single_config(
 ) -> Optional[Path]:
     """
     Process GPU timeline from single config individual reports.
-    
+
     Args:
         reports_dir: Path to individual_reports directory
         use_geo_mean: Use geometric mean instead of arithmetic mean
         output_path: Custom output path
         verbose: Print verbose output
-    
+
     Returns:
         Path to output Excel file
     """
@@ -546,13 +546,13 @@ def process_sweep_config(
 ) -> Optional[Path]:
     """
     Process GPU timeline from sweep directory with multiple configs.
-    
+
     Args:
         sweep_dir: Path to sweep directory
         use_geo_mean: Use geometric mean
         output_path: Custom output path
         verbose: Print verbose output
-    
+
     Returns:
         Path to output Excel file
     """
@@ -563,7 +563,7 @@ def parse_perf_filename(filename: str) -> Tuple[str, int]:
 def group_files_by_channel(perf_files: List[str]) -> Dict[str, List[Tuple[int, str]]]:
     """Group performance files by channel configuration."""
 
-def aggregate_rank_data(rank_data, thread_config, channel_config, 
+def aggregate_rank_data(rank_data, thread_config, channel_config,
                         num_ranks, use_geo_mean) -> pd.DataFrame:
     """Aggregate data across ranks with metadata."""
 
@@ -583,12 +583,12 @@ def process_nccl_data(
 ) -> Tuple[Optional[Path], Optional[Path]]:
     """
     Process NCCL collective reports from sweep directory.
-    
+
     Args:
         sweep_dir: Path to sweep directory
         output_dir: Custom output directory
         verbose: Print verbose output
-    
+
     Returns:
         Tuple of (excel_path, csv_path)
     """
@@ -611,19 +611,19 @@ def enhance_gemm_variance(
 ) -> Optional[Path]:
     """
     Enhance GEMM variance CSV with timestamp information.
-    
+
     Args:
         input_csv: Input CSV file with GEMM variance data
         base_path: Base path to sweep directory with trace files
         output_csv: Output CSV path
         tolerance: Duration matching tolerance (fraction)
         verbose: Print verbose output
-    
+
     Returns:
         Path to output CSV file
     """
 
-def get_trace_file_path(base_path: Path, threads: int, 
+def get_trace_file_path(base_path: Path, threads: int,
                         channel: int, rank: int) -> Optional[Path]:
     """Find trace file for a given configuration."""
 
@@ -1006,4 +1006,3 @@ Time between min/max occurrences:
 | Trace file not found | Print warning, skip row |
 | No kernel instances found | Print warning, set timestamps to `None` |
 | Duration mismatch | Print warning with expected vs found values |
-

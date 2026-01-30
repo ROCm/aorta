@@ -18,4 +18,3 @@ def geometric_mean(values: np.ndarray) -> float:
     values = np.array(values)
     values = np.where(values == 0, 1e-10, values)
     return float(np.exp(np.mean(np.log(values))))
-
