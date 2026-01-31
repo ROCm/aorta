@@ -17,4 +17,3 @@ __version__ = "0.1.0"
 from .cli import cli, main
 
 __all__ = ["cli", "main", "__version__"]
-
