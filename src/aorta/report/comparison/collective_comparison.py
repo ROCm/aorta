@@ -235,4 +235,3 @@ def _calculate_percent_change(
 def get_percent_change_columns(comparison_df: pd.DataFrame) -> List[str]:
     """Get list of percent_change columns in a comparison DataFrame."""
     return [col for col in comparison_df.columns if col.startswith("percent_change_")]
-

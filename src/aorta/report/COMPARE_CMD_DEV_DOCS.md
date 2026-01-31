@@ -1,7 +1,7 @@
 # `compare` Command Group - Developer Documentation
 
-**Version:** 1.0  
-**Date:** January 2026  
+**Version:** 1.0
+**Date:** January 2026
 **Status:** ✅ Implemented
 
 ---
@@ -127,18 +127,18 @@ aorta-report compare collective \
 def combine_collective_reports(baseline_path, test_path, output_path, baseline_label, test_label):
     baseline_xl = pd.ExcelFile(baseline_path)
     test_xl = pd.ExcelFile(test_path)
-    
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         for sheet_name in baseline_xl.sheet_names:
             if sheet_name not in test_xl.sheet_names:
                 continue  # Skip sheets not in both files
-            
+
             baseline_df = pd.read_excel(baseline_path, sheet_name=sheet_name)
             test_df = pd.read_excel(test_path, sheet_name=sheet_name)
-            
+
             baseline_df["source"] = baseline_label
             test_df["source"] = test_label
-            
+
             combined = pd.concat([baseline_df, test_df], ignore_index=True)
             combined.to_excel(writer, sheet_name=sheet_name, index=False)
 ```
@@ -156,38 +156,38 @@ def combine_collective_reports(baseline_path, test_path, output_path, baseline_l
 ```python
 def add_comparison_sheets(input_path, output_path, baseline_label, test_label):
     xl = pd.ExcelFile(input_path)
-    
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         # 1. Copy all original sheets
         for sheet_name in xl.sheet_names:
             df = pd.read_excel(input_path, sheet_name=sheet_name)
             df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
+
         # 2. Read combined data
         all_combined = pd.read_excel(input_path, sheet_name="All_Ranks_Combined")
-        
+
         # Get actual source values from dataframe
         sources = all_combined['source'].unique()
         actual_baseline = sources[0]
         actual_test = sources[1]
-        
+
         # 3. Create Comparison_By_Rank
         baseline_data = all_combined[all_combined["source"] == actual_baseline]
         test_data = all_combined[all_combined["source"] == actual_test]
-        
+
         comparison_by_rank = pd.DataFrame()
         for rank in sorted(baseline_data["rank"].unique()):
             base_rank = baseline_data[baseline_data["rank"] == rank].set_index("type")
             test_rank = test_data[test_data["rank"] == rank].set_index("type")
-            
+
             for metric_type in base_rank.index:
                 if metric_type in test_rank.index:
                     base_time = base_rank.loc[metric_type, "time ms"]
                     test_time = test_rank.loc[metric_type, "time ms"]
-                    
+
                     # percent_change: positive when test is faster (takes less time)
                     pct_change = (base_time - test_time) / base_time * 100 if base_time != 0 else 0
-                    
+
                     # Determine status
                     if pct_change > 1:
                         status = "Better"
@@ -195,7 +195,7 @@ def add_comparison_sheets(input_path, output_path, baseline_label, test_label):
                         status = "Worse"
                     else:
                         status = "Similar"
-                    
+
                     # Build row with all metrics
                     row = {
                         "rank": rank,
@@ -211,12 +211,12 @@ def add_comparison_sheets(input_path, output_path, baseline_label, test_label):
                         "diff_percent": test_rank.loc[metric_type, "percent"] - base_rank.loc[metric_type, "percent"],
                     }
                     comparison_by_rank = pd.concat([comparison_by_rank, pd.DataFrame([row])], ignore_index=True)
-        
+
         comparison_by_rank.to_excel(writer, sheet_name="Comparison_By_Rank", index=False)
-        
+
         # 4. Create Summary_Comparison (similar logic with Summary sheet)
         # ...
-        
+
         # 5. Apply conditional formatting
         ws = writer.sheets["Comparison_By_Rank"]
         # Find percent_change column and apply color scale
@@ -263,7 +263,7 @@ def add_comparison_sheets(input_path, output_path, baseline_label, test_label):
 ```python
 def add_collective_comparison_sheets(input_path, output_path, baseline_label, test_label):
     xl = pd.ExcelFile(input_path)
-    
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         # 1. Copy only summary sheets
         for sheet_name in xl.sheet_names:
@@ -271,25 +271,25 @@ def add_collective_comparison_sheets(input_path, output_path, baseline_label, te
                 continue  # Skip non-summary sheets
             df = pd.read_excel(input_path, sheet_name=sheet_name)
             df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
+
         # 2. Process each summary sheet
         for sheet_name in ["nccl_summary_implicit_sync", "nccl_summary_long"]:
             if sheet_name not in xl.sheet_names:
                 continue
-            
+
             df = pd.read_excel(input_path, sheet_name=sheet_name)
-            
+
             # Get actual source values
             sources = df['source'].unique()
             actual_baseline = sources[0]
             actual_test = sources[1]
-            
+
             baseline_df = df[df["source"] == actual_baseline]
             test_df = df[df["source"] == actual_test]
-            
+
             # Group columns
             group_cols = ["Collective name", "dtype", "In msg nelems"]
-            
+
             # Metrics to compare
             numeric_cols = [
                 "comm_latency_mean",
@@ -298,28 +298,28 @@ def add_collective_comparison_sheets(input_path, output_path, baseline_label, te
                 "Total comm latency (ms)",
                 "count",
             ]
-            
+
             comparison = pd.DataFrame()
-            
+
             for name, base_group in baseline_df.groupby(group_cols):
                 # Find matching test group
                 # ... matching logic ...
-                
+
                 comp_row = {}
-                
+
                 # Copy grouping columns
                 for col, val in zip(group_cols, name):
                     comp_row[col] = val
-                
+
                 # Compare each metric
                 for col in numeric_cols:
                     base_val = base_group[col].values[0]
                     test_val = test_group[col].values[0]
-                    
+
                     comp_row[f"{actual_baseline}_{col}"] = base_val
                     comp_row[f"{actual_test}_{col}"] = test_val
                     comp_row[f"diff_{col}"] = test_val - base_val
-                    
+
                     # percent_change semantics differ by metric type
                     if "latency" in col.lower() or "time" in col.lower():
                         # Lower is better - positive when test is faster
@@ -329,16 +329,16 @@ def add_collective_comparison_sheets(input_path, output_path, baseline_label, te
                         pct_change = (test_val - base_val) / base_val * 100
                     else:
                         pct_change = 0
-                    
+
                     comp_row[f"percent_change_{col}"] = pct_change
                     comp_row[f"ratio_{col}"] = test_val / base_val if base_val != 0 else 0
-                
+
                 comparison = pd.concat([comparison, pd.DataFrame([comp_row])], ignore_index=True)
-            
+
             # Sheet name: nccl_summary_implicit_sync → nccl_implicit_sync_cmp
             comparison_sheet_name = sheet_name.replace("nccl_summary_", "nccl_") + "_cmp"
             comparison.to_excel(writer, sheet_name=comparison_sheet_name, index=False)
-            
+
             # Apply formatting to all percent_change columns
             # ...
 ```
@@ -443,7 +443,7 @@ def combine_excel_files(
 ) -> Dict[str, pd.DataFrame]:
     """
     Combine two Excel files by adding a 'source' column.
-    
+
     Args:
         baseline_path: Path to baseline Excel file
         test_path: Path to test Excel file
@@ -452,10 +452,10 @@ def combine_excel_files(
         sheets_to_combine: Specific sheets to combine (None = all common sheets)
         filter_summary_only: If True, only keep sheets with 'summary' in name
         verbose: Print progress messages
-    
+
     Returns:
         Dict mapping sheet_name to combined DataFrame
-    
+
     Raises:
         FileNotFoundError: If input files don't exist
         ValueError: If no common sheets found
@@ -489,31 +489,31 @@ def add_gpu_timeline_comparison(
 ) -> Dict[str, pd.DataFrame]:
     """
     Add comparison sheets for GPU timeline data.
-    
+
     Args:
         combined_data: Dict from combine_excel_files()
         baseline_label: Label for baseline (for column naming)
         test_label: Label for test (for column naming)
         verbose: Print progress messages
-    
+
     Returns:
         Dict with original sheets + new comparison sheets:
         - 'Comparison_By_Rank': Per-rank comparison
         - 'Summary_Comparison': Overall comparison
-    
+
     Expects combined_data to have:
         - 'All_Ranks_Combined' sheet with: source, rank, type, time ms, percent
         - 'Summary' sheet with: source, type, time ms, percent
-    
+
     Comparison columns created:
         - {baseline_label}_time_ms, {test_label}_time_ms
         - diff_time_ms, percent_change, status, ratio
         - {baseline_label}_percent, {test_label}_percent, diff_percent
-    
+
     percent_change formula: (baseline - test) / baseline × 100
         - Positive = test is faster (better)
         - Negative = test is slower (worse)
-    
+
     status thresholds:
         - "Better" if percent_change > 1
         - "Worse" if percent_change < -1
@@ -560,28 +560,28 @@ def add_collective_comparison(
 ) -> Dict[str, pd.DataFrame]:
     """
     Add comparison sheets for collective/NCCL data.
-    
+
     Args:
         combined_data: Dict from combine_excel_files()
         baseline_label: Label for baseline
         test_label: Label for test
         verbose: Print progress messages
-    
+
     Returns:
         Dict with summary sheets + new comparison sheets:
         - 'nccl_implicit_sync_cmp': Comparison for nccl_summary_implicit_sync
         - 'nccl_long_cmp': Comparison for nccl_summary_long
-    
+
     Processes sheets:
         - 'nccl_summary_implicit_sync' → 'nccl_implicit_sync_cmp'
         - 'nccl_summary_long' → 'nccl_long_cmp'
-    
+
     Groups by: ['Collective name', 'dtype', 'In msg nelems']
-    
+
     For each metric, creates columns:
         - {baseline}_{metric}, {test}_{metric}
         - diff_{metric}, percent_change_{metric}, ratio_{metric}
-    
+
     percent_change semantics (positive = better):
         - Latency/time: (baseline - test) / baseline × 100
         - Bandwidth: (test - baseline) / baseline × 100
@@ -617,7 +617,7 @@ GREEN = "63BE7B"
 def get_column_letter(col_idx: int) -> str:
     """
     Convert 1-based column index to Excel column letter.
-    
+
     Examples:
         1 → 'A', 26 → 'Z', 27 → 'AA', 28 → 'AB'
     """
@@ -626,7 +626,7 @@ def get_column_letter(col_idx: int) -> str:
 def create_color_scale_rule() -> ColorScaleRule:
     """
     Create standard red-white-green color scale rule.
-    
+
     Red (min/negative) → White (0) → Green (max/positive)
     """
     return ColorScaleRule(
@@ -647,7 +647,7 @@ def apply_color_scale_to_column(
 ) -> None:
     """
     Apply color scale formatting to a specific column.
-    
+
     Args:
         worksheet: openpyxl worksheet
         col_idx: 1-based column index
@@ -663,16 +663,16 @@ def save_with_formatting(
 ) -> Path:
     """
     Save DataFrames to Excel with conditional formatting.
-    
+
     Args:
         data: Dict[sheet_name, DataFrame]
         output_path: Output file path
         format_columns: Dict[sheet_name, list of column names to format]
         verbose: Print progress
-    
+
     Returns:
         Path to saved file
-    
+
     Example:
         format_columns = {
             "Comparison_By_Rank": ["percent_change"],
@@ -975,14 +975,14 @@ def test_label_extraction_from_path():
 def extract_label_from_path(file_path: Path) -> str:
     """
     Extract label from file path using grandparent directory name.
-    
+
     Examples:
         /path/to/56cu_256threads/tracelens_analysis/gpu_timeline.xlsx
         → "56cu_256threads"
-        
+
         /path/to/run1/tracelens_analysis/collective_reports/collective.xlsx
         → "run1" (or "tracelens_analysis" depending on depth)
-    
+
     Fallback: "baseline" or "test" if extraction fails
     """
     try:
@@ -1055,4 +1055,3 @@ Options:
 | `python add_collective_comparison.py --input combined.xlsx --output comparison.xlsx` | `aorta-report compare collective -b b.xlsx -t t.xlsx -o comparison.xlsx` |
 
 The new CLI combines both steps (combine + add comparison) into a single command.
-

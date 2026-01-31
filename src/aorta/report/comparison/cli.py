@@ -251,4 +251,3 @@ def compare_collective(ctx, baseline, test, baseline_label, test_label, output):
 
     except (ValueError, FileNotFoundError) as e:
         raise click.ClickException(str(e))
-

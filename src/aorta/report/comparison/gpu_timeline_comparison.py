@@ -219,4 +219,3 @@ def _create_summary_comparison(
         print(f"  Created Summary_Comparison ({len(summary_comparison)} rows)")
 
     return summary_comparison
-
