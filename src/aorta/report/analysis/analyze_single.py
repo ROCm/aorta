@@ -34,14 +34,15 @@ def detect_trace_directory(input_dir: Path) -> Tuple[Path, Path]:
         ValueError: If directory structure cannot be determined
     """
     # Check if input_dir contains rank directories (i.e., it IS torch_profiler/)
-    rank_dirs = list(input_dir.glob("rank*"))
+    # Use is_dir() to filter out files matching rank* pattern (e.g., rank0.log)
+    rank_dirs = [p for p in input_dir.glob("rank*") if p.is_dir()]
     if rank_dirs:
         return input_dir, input_dir.parent
 
     # Check if input_dir contains torch_profiler/ subdirectory
     torch_prof_dir = input_dir / "torch_profiler"
     if torch_prof_dir.exists():
-        rank_dirs = list(torch_prof_dir.glob("rank*"))
+        rank_dirs = [p for p in torch_prof_dir.glob("rank*") if p.is_dir()]
         if rank_dirs:
             return torch_prof_dir, input_dir
 
@@ -55,10 +56,30 @@ def detect_trace_directory(input_dir: Path) -> Tuple[Path, Path]:
 
 
 def find_trace_file(rank_dir: Path) -> Optional[Path]:
-    """Find trace file in a rank directory."""
+    """Find trace file in a rank directory.
+    
+    Searches for JSON trace files in the following order:
+    1. Directly in rank_dir (e.g., rank0/*.json)
+    2. In trace/ subdirectory (e.g., rank0/trace/pt.trace.json)
+    3. Recursively in any subdirectory (e.g., rank0/**/*.json)
+    """
+    # First, look directly in the rank directory
     json_files = list(rank_dir.glob("*.json"))
     if json_files:
         return json_files[0]
+    
+    # Then check trace/ subdirectory (common after collective report prep)
+    trace_subdir = rank_dir / "trace"
+    if trace_subdir.exists():
+        json_files = list(trace_subdir.glob("*.json"))
+        if json_files:
+            return json_files[0]
+    
+    # Finally, search recursively
+    json_files = list(rank_dir.glob("**/*.json"))
+    if json_files:
+        return json_files[0]
+    
     return None
 
 
@@ -155,6 +176,7 @@ def analyze_single_config(
     short_kernel_threshold_us: int = 50,
     topk_ops: int = 100,
     verbose: bool = False,
+    output_prefix: Optional[str] = None,
 ) -> dict:
     """
     Run TraceLens analysis on a single configuration trace directory.
@@ -169,6 +191,7 @@ def analyze_single_config(
         short_kernel_threshold_us: Threshold for short kernel study
         topk_ops: Number of top operations to include
         verbose: Whether to print verbose output
+        output_prefix: Custom prefix for output files (e.g., "28ch" -> perf_28ch_rank0.xlsx)
 
     Returns:
         Dictionary with paths to generated reports
@@ -239,7 +262,11 @@ def analyze_single_config(
                 print(f"  Skip {rank_name} - no trace file found")
                 continue
 
-            output_file = individual_reports_dir / f"perf_rank{rank_num}.xlsx"
+            # Use custom prefix if provided (for sweep mode), otherwise default naming
+            if output_prefix:
+                output_file = individual_reports_dir / f"perf_{output_prefix}_rank{rank_num}.xlsx"
+            else:
+                output_file = individual_reports_dir / f"perf_rank{rank_num}.xlsx"
 
             print(f"\nProcessing {rank_name}...")
             print(f"  Trace: {trace_file.name}")
@@ -274,8 +301,11 @@ def analyze_single_config(
                 symlink_path = rank_dir / "trace.json"
                 if not symlink_path.exists():
                     try:
-                        symlink_path.symlink_to(trace_file.name)
-                    except (OSError, FileExistsError):
+                        # Use relative path from rank_dir to trace_file
+                        # This handles cases where trace is in subdirectory (e.g., trace/pt.trace.json)
+                        relative_path = trace_file.relative_to(rank_dir)
+                        symlink_path.symlink_to(relative_path)
+                    except (OSError, FileExistsError, ValueError):
                         pass  # Symlink already exists or cannot be created
 
         trace_pattern = str(torch_prof_dir / "rank*" / "trace.json")

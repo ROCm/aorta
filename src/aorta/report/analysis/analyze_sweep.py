@@ -3,14 +3,130 @@ Sweep configuration analysis - analyze traces from parameter sweep experiments.
 
 Processes GPU timeline data from TraceLens individual reports across multiple
 thread and channel configurations, aggregating across ranks.
+
+Supports two modes:
+1. Run TraceLens on all configurations then aggregate (default)
+2. Aggregate existing TraceLens reports only (--skip-tracelens)
 """
 
 import glob
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 import numpy as np
 import pandas as pd
+
+from .analyze_single import analyze_single_config
+
+
+def discover_and_run_tracelens(
+    sweep_dir: Path,
+    short_kernel_threshold_us: int = 50,
+    topk_ops: int = 100,
+    verbose: bool = False,
+) -> Path:
+    """
+    Discover thread/channel configs and run TraceLens on each.
+
+    Expected input structure:
+        sweep_dir/
+        ├── 256thread/
+        │   ├── nccl_28channels/
+        │   │   └── torch_profiler/rank*/
+        │   └── nccl_42channels/
+        └── 512thread/
+            └── ...
+
+    Output structure:
+        sweep_dir/
+        └── tracelens_analysis/
+            ├── 256thread/
+            │   └── individual_reports/
+            │       ├── perf_28ch_rank0.xlsx
+            │       └── ...
+            └── 512thread/
+                └── ...
+
+    Args:
+        sweep_dir: Path to sweep directory with thread/channel subdirectories
+        short_kernel_threshold_us: Threshold for short kernel study
+        topk_ops: Number of top operations to include
+        verbose: Whether to print verbose output
+
+    Returns:
+        Path to tracelens_analysis output directory
+    """
+    sweep_path = Path(sweep_dir)
+    output_base = sweep_path / "tracelens_analysis"
+
+    # Discover thread configurations (e.g., "256thread", "512thread")
+    thread_dirs = sorted([
+        d for d in sweep_path.iterdir()
+        if d.is_dir() and "thread" in d.name
+    ])
+
+    if not thread_dirs:
+        raise ValueError(f"No thread configurations found in {sweep_dir}")
+
+    print("=" * 80)
+    print("Step 0: Running TraceLens on All Configurations")
+    print("=" * 80)
+    print(f"\nDiscovered thread configs: {[d.name for d in thread_dirs]}")
+
+    for thread_dir in thread_dirs:
+        thread_name = thread_dir.name  # e.g., "256thread"
+
+        # Find channel configs (e.g., "nccl_28channels")
+        channel_dirs = sorted([
+            d for d in thread_dir.iterdir()
+            if d.is_dir() and "channel" in d.name
+        ])
+
+        if not channel_dirs:
+            print(f"  [WARN] No channel configs in {thread_name}")
+            continue
+
+        print(f"\n{thread_name}: {[d.name for d in channel_dirs]}")
+
+        for channel_dir in channel_dirs:
+            # Extract channel number (e.g., "nccl_28channels" -> "28")
+            channel_name = channel_dir.name
+            channel_match = re.search(r"(\d+)", channel_name)
+            channel_num = channel_match.group(1) if channel_match else "0"
+
+            # Look for torch_profiler directory
+            trace_dir = channel_dir / "torch_profiler"
+            if not trace_dir.exists():
+                print(f"    [SKIP] {channel_name} - no torch_profiler/")
+                continue
+
+            # Output to: tracelens_analysis/{thread}/individual_reports/
+            output_dir = output_base / thread_name
+
+            print(f"  Processing {channel_name}...")
+
+            try:
+                analyze_single_config(
+                    input_dir=trace_dir,
+                    output_dir=output_dir,
+                    run_individual=True,
+                    run_collective=False,  # Skip collective for sweep
+                    aggregate_timeline=False,  # Will aggregate at sweep level
+                    short_kernel_threshold_us=short_kernel_threshold_us,
+                    topk_ops=topk_ops,
+                    verbose=verbose,
+                    output_prefix=f"{channel_num}ch",  # e.g., "28ch"
+                )
+                print(f"    [OK] {channel_name}")
+            except Exception as e:
+                print(f"    [ERROR] {channel_name}: {e}")
+
+    print("\n" + "=" * 80)
+    print("TraceLens Analysis Complete")
+    print("=" * 80)
+
+    return output_base
 
 
 def geometric_mean(values: np.ndarray) -> float:
@@ -300,15 +416,25 @@ def analyze_sweep_config(
     sweep_dir: Path,
     output_dir: Optional[Path] = None,
     use_geo_mean: bool = False,
+    skip_tracelens: bool = False,
+    short_kernel_threshold_us: int = 50,
+    topk_ops: int = 100,
     verbose: bool = False,
 ) -> Optional[Path]:
     """
-    Process GPU timeline data from all individual reports in a sweep.
+    Analyze a sweep directory: run TraceLens on all configs and aggregate results.
+
+    By default, runs TraceLens analysis on all thread/channel configurations first,
+    then aggregates GPU timeline data. Use skip_tracelens=True to only aggregate
+    existing reports.
 
     Args:
-        sweep_dir: Path to sweep directory containing tracelens_analysis/
+        sweep_dir: Path to sweep directory with thread/channel subdirectories
         output_dir: Output directory (default: sweep_dir/tracelens_analysis/)
         use_geo_mean: If True, use geometric mean; otherwise use arithmetic mean
+        skip_tracelens: If True, skip TraceLens analysis (only aggregate existing)
+        short_kernel_threshold_us: Threshold for short kernel study
+        topk_ops: Number of top operations to include
         verbose: Whether to print verbose output
 
     Returns:
@@ -317,6 +443,16 @@ def analyze_sweep_config(
     sweep_path = Path(sweep_dir)
     tracelens_dir = sweep_path / "tracelens_analysis"
 
+    # Step 1: Run TraceLens on all configurations (unless skipped)
+    if not skip_tracelens:
+        discover_and_run_tracelens(
+            sweep_dir=sweep_path,
+            short_kernel_threshold_us=short_kernel_threshold_us,
+            topk_ops=topk_ops,
+            verbose=verbose,
+        )
+
+    # Step 2: Aggregate results
     if not tracelens_dir.exists():
         raise FileNotFoundError(
             f"tracelens_analysis directory not found in {sweep_dir}"
