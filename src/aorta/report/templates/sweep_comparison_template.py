@@ -279,4 +279,3 @@ def _image_or_placeholder(image_data, alt_text):
         return f'<img src="{image_data}" alt="{alt_text}">'
     else:
         return f'<div class="missing-image">Image not available: {alt_text}</div>'
-

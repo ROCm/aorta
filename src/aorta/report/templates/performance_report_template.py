@@ -170,4 +170,3 @@ NCCL_CHARTS = [
         "description": "Aggregate communication latency summed across all operations for each message size.",
     },
 ]
-

@@ -15,7 +15,7 @@ def get_gemm_report_template(label, sweep_path, image_data, csv_path=None):
         HTML content as string
     """
     csv_info = f"<p><strong>Data:</strong> {csv_path}</p>" if csv_path else ""
-    
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -123,7 +123,7 @@ def get_gemm_report_template(label, sweep_path, image_data, csv_path=None):
 <body>
     <div class="container">
         <h1>🔬 GEMM Kernel Variance Analysis</h1>
-        
+
         <div class="info-box">
             <p><strong>Analysis:</strong> {label}</p>
             <p><strong>Source:</strong> {sweep_path}</p>
@@ -131,7 +131,7 @@ def get_gemm_report_template(label, sweep_path, image_data, csv_path=None):
         </div>
 
         <h2>📊 Variance Distribution by Configuration</h2>
-        
+
         <div class="plot-grid">
             <div class="plot-card">
                 <h3>By Thread Count</h3>
@@ -142,7 +142,7 @@ def get_gemm_report_template(label, sweep_path, image_data, csv_path=None):
                 {_image_or_missing(image_data.get('channels', ''), 'Channel variance plot')}
             </div>
         </div>
-        
+
         <div class="plot-grid">
             <div class="plot-card">
                 <h3>By Rank</h3>
@@ -158,7 +158,7 @@ def get_gemm_report_template(label, sweep_path, image_data, csv_path=None):
 
         <h2>🔗 Thread-Channel Interaction</h2>
         <p>This plot shows how variance changes across different thread and channel configurations, helping identify optimal settings.</p>
-        
+
         <div class="summary-section">
             {_image_or_missing(image_data.get('interaction', ''), 'Interaction plot')}
         </div>
