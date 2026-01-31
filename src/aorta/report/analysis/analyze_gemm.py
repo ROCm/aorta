@@ -322,4 +322,3 @@ def analyze_gemm_reports(
     print(f"Min time difference: {min(time_diffs):.4f} us")
 
     return output_path
-

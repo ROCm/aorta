@@ -183,4 +183,3 @@ def analyze_gemm(ctx, reports_dir, threads, channels, ranks, top_k, output):
             click.echo(f"\nAnalysis complete: {output_path}")
     except (ValueError, FileNotFoundError) as e:
         raise click.ClickException(str(e))
-

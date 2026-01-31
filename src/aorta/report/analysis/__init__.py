@@ -12,4 +12,3 @@ __all__ = [
     "analyze_sweep_config",
     "discover_and_run_tracelens",
 ]
-

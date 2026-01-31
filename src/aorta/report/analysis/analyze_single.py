@@ -57,7 +57,7 @@ def detect_trace_directory(input_dir: Path) -> Tuple[Path, Path]:
 
 def find_trace_file(rank_dir: Path) -> Optional[Path]:
     """Find trace file in a rank directory.
-    
+
     Searches for JSON trace files in the following order:
     1. Directly in rank_dir (e.g., rank0/*.json)
     2. In trace/ subdirectory (e.g., rank0/trace/pt.trace.json)
@@ -67,19 +67,19 @@ def find_trace_file(rank_dir: Path) -> Optional[Path]:
     json_files = list(rank_dir.glob("*.json"))
     if json_files:
         return json_files[0]
-    
+
     # Then check trace/ subdirectory (common after collective report prep)
     trace_subdir = rank_dir / "trace"
     if trace_subdir.exists():
         json_files = list(trace_subdir.glob("*.json"))
         if json_files:
             return json_files[0]
-    
+
     # Finally, search recursively
     json_files = list(rank_dir.glob("**/*.json"))
     if json_files:
         return json_files[0]
-    
+
     return None
 
 
@@ -366,4 +366,3 @@ def analyze_single_config(
         print(f"  {results['gpu_timeline_summary'].name}")
 
     return results
-

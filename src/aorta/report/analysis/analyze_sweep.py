@@ -545,4 +545,3 @@ def analyze_sweep_config(
     print("Open in Excel to create custom pivots and charts!")
 
     return output_file
-

@@ -339,4 +339,3 @@ class TraceLensWrapper:
             sys.argv = original_argv
 
         return output_path
-
