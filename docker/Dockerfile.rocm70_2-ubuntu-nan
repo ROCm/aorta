@@ -1,0 +1,201 @@
+# Start from the existing PyTorch ROCm image (same as working Dockerfile)
+FROM ubuntu:22.04
+#FROM rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly
+
+# Switch to root to install packages
+USER root
+
+## Set ROCm version and build info
+#ENV ROCM_VERSION=7.0.2
+#ENV ROCM_BUILD=9428210
+#ENV AMDGPU_BUILD=2247890
+
+# Basic system setup
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg2 \
+    software-properties-common \
+    apt-utils \
+    ca-certificates \
+    curl \
+    git \
+    vim \
+    build-essential \
+    pkg-config \
+    python3.10 \
+    python3.10-dev \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install amdgpu-install package for debian
+RUN wget https://artifactory-cdn.amd.com:8443/artifactory/list/amdgpu-deb/amdgpu-install-internal_7.0.2.1-22.04-1_all.deb
+RUN apt-get update && \
+    apt-get install -y ca-certificates gnupg lsb-release sudo && \
+    apt-get install -y ./amdgpu-install-internal_7.0.2.1-22.04-1_all.deb
+
+# Update amdgpu-repo with specific builds (ROCm 7.0 Build #19, Jan 20, 2026)
+RUN amdgpu-repo --amdgpu-build=2281818 --rocm-build=compute-rocm-rel-7.0-meta/19
+RUN apt-get update && apt-get install -y \
+    rocm-hip-sdk \
+    rocm-libs \
+    rocblas \
+    hipblaslt \
+    rocm-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+#RUN apt-get install -y \
+#    rocm-hip \
+#    rocm-libs \
+#    rocm-hip-libraries \
+#    rocm-hip-runtime-devel \
+#    hip-base \
+#    hip-dev \
+#    hip-runtime-amd \
+#    rocm-core
+
+    #amdgpu-install --usecase=rocm
+
+
+## Install ROCm packages with specific versions
+## Note: Installing rocm-dkms is not needed in Docker containers (no kernel modules)
+#RUN apt-get update && apt-get install -y \
+#    rocm-core \
+#    rocm-hip-runtime \
+#    rocm-hip-libraries \
+#    rocm-hip-sdk \
+#    rocm-dev \
+#    rocm-libs \
+#    hip-base \
+#    hip-dev \
+#    hip-runtime-amd \
+#    rocblas \
+#    rocblas-dev \
+#    hipblaslt \
+#    hipblaslt-dev \
+#    rocrand \
+#    rocrand-dev \
+#    rocsparse \
+#    rocsparse-dev \
+#    hipsparse \
+#    hipsparse-dev \
+#    rocfft \
+#    rocfft-dev \
+#    hipcub \
+#    hipcub-dev \
+#    rocprim \
+#    rocprim-dev \
+#    rccl \
+#    rccl-dev \
+#    miopen-hip \
+#    miopen-hip-dev \
+#    rocm-smi-lib \
+#    roctracer \
+#    roctracer-dev \
+#    rocprofiler \
+#    rocprofiler-dev \
+#    && rm -rf /var/lib/apt/lists/*
+#
+## Set ROCm environment variables
+#ENV ROCM_HOME=/opt/rocm
+#ENV PATH=$ROCM_HOME/bin:$PATH
+#ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$ROCM_HOME/lib64:$LD_LIBRARY_PATH
+#ENV CPATH=$ROCM_HOME/include:$CPATH
+#ENV HIP_PLATFORM=amd
+#ENV HSA_OVERRIDE_GFX_VERSION=9.5.0
+#ENV PYTORCH_ROCM_ARCH=gfx950
+
+ENV ROCM_HOME=/opt/rocm
+ENV PATH=$ROCM_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$LD_LIBRARY_PATH
+
+# Upgrade pip and install basic Python packages
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+# Install PyTorch 2.11.0 with ROCm 7.0 support
+# Note: PyTorch 2.11 nightly builds for ROCm 7.0
+RUN pip3 install --pre \
+    torch==2.11.0.dev20260202+rocm7.0 \
+    torchvision==0.25.0.dev20260203+rocm7.0 \
+    torchaudio==2.11.0.dev20260203+rocm7.0 \
+    --index-url https://download.pytorch.org/whl/nightly/rocm7.0
+
+# Verify installations
+RUN python3.10 -c "import torch; print(f'PyTorch version: {torch.__version__}')" && \
+    python3.10 -c "import torch; print(f'ROCm available: {torch.cuda.is_available()}')" && \
+    python3.10 -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
+
+# Set up work directory
+WORKDIR /workspace/sdpa
+
+CMD ["/bin/bash"]
+
+## Install additional Python packages commonly needed
+#RUN pip3 install \
+#    numpy \
+#    scipy \
+#    matplotlib \
+#    pandas \
+#    pyyaml \
+#    tqdm \
+#    scikit-learn \
+#    jupyterlab \
+#    ipython
+#
+## Install ROCm profiling tools
+#RUN apt-get update && apt-get install -y \
+#    rocm-profiler \
+#    roctracer \
+#    && rm -rf /var/lib/apt/lists/*
+#
+## Download and install rocprof-trace-decoder for enhanced profiling
+#RUN wget https://github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/rocprof-trace-decoder-0.1.6-Linux.deb \
+#    -O /tmp/rocprof-trace-decoder.deb && \
+#    apt-get update && \
+#    apt-get install -y /tmp/rocprof-trace-decoder.deb && \
+#    rm /tmp/rocprof-trace-decoder.deb && \
+#    rm -rf /var/lib/apt/lists/*
+#
+## Install TraceLens for trace analysis
+#RUN pip3 install git+https://github.com/AMD-AGI/TraceLens.git
+#
+## Install additional analysis tools
+#RUN pip3 install openpyxl seaborn
+
+## Verify installations
+#RUN echo "=== Verifying Installation ===" && \
+#    python3 --version && \
+#    python3 -c "import torch; print(f'PyTorch version: {torch.__version__}')" && \
+#    python3 -c "import torch; print(f'CUDA/ROCm available: {torch.cuda.is_available()}')" && \
+#    python3 -c "import torch; print(f'ROCm version: {torch.version.hip}')" && \
+#    rocm-smi --version || echo "ROCm SMI check skipped (no GPU in build environment)" && \
+#    hipcc --version
+#
+## Create a version info script
+#RUN echo '#!/bin/bash\n\
+#echo "=== Environment Versions ==="\n\
+#echo "Ubuntu: $(lsb_release -d | cut -f2)"\n\
+#echo ""\n\
+#python3 -c "\n\
+#import torch\n\
+#print(f'"'"'PyTorch version: {torch.__version__}'"'"')\n\
+#if torch.cuda.is_available():\n\
+#    print(f'"'"'Gcn arch name: {torch.cuda.get_device_properties(0).gcnArchName}'"'"')\n\
+#    print(f'"'"'Number of GPUs: {torch.cuda.device_count()}'"'"')\n\
+#print(f'"'"'ROCm version: {torch.version.hip}'"'"')\n\
+#"\n\
+#echo ""\n\
+#echo "ROCm path: $ROCM_HOME"\n\
+#rocm-smi --showproductname 2>/dev/null || echo "No GPU detected (normal in build environment)"\n\
+#echo ""\n\
+#dpkg -l | grep -E "rocblas|hipblaslt" | awk '"'"'{print $2, $3}'"'"'\n\
+#' > /usr/local/bin/check-versions && chmod +x /usr/local/bin/check-versions
+#
+## Set default command
+#CMD ["/bin/bash"]
+#
+## Labels for image metadata
+#LABEL maintainer="AORTA Team"
+#LABEL description="Ubuntu 22.04 with ROCm 7.0.2, PyTorch 2.11.0 for AMD MI350 GPUs"
+#LABEL rocm.version="7.0.2"
+#LABEL pytorch.version="2.11.0"
+#LABEL gpu.arch="gfx950"
