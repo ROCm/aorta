@@ -1,0 +1,88 @@
+# Start from the existing PyTorch ROCm image (same as working Dockerfile)
+FROM ubuntu:22.04
+#FROM rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly
+
+# Switch to root to install packages
+USER root
+
+# Basic system setup
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg2 \
+    software-properties-common \
+    apt-utils \
+    ca-certificates \
+    curl \
+    git \
+    vim \
+    build-essential \
+    pkg-config \
+    python3.10 \
+    python3.10-dev \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install amdgpu-install package for debian
+RUN wget https://artifactory-cdn.amd.com:8443/artifactory/list/amdgpu-deb/amdgpu-install-internal_7.0.2.1-22.04-1_all.deb
+RUN apt-get update && \
+    apt-get install -y ca-certificates gnupg lsb-release sudo && \
+    apt-get install -y ./amdgpu-install-internal_7.0.2.1-22.04-1_all.deb
+
+# Update amdgpu-repo with specific builds (ROCm 7.0 Build #19, Jan 20, 2026)
+RUN amdgpu-repo --amdgpu-build=2281818 --rocm-build=compute-rocm-rel-7.0-meta/19
+RUN apt-get update && apt-get install -y \
+    rocm-hip-sdk \
+    rocm-libs \
+    rocblas \
+    hipblaslt \
+    rocm-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV ROCM_HOME=/opt/rocm
+ENV PATH=$ROCM_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$LD_LIBRARY_PATH
+
+# Upgrade pip and install basic Python packages
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+RUN git clone https://github.com/pytorch/pytorch.git
+ENV _GLIBCXX_USE_CXX11_ABI=1
+RUN cd pytorch && \
+    git submodule update --init --recursive && \
+    python3.10 tools/amd_build/build_amd.py
+
+
+# Install modern CMake (required by PyTorch)
+RUN wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc | gpg --dearmor -o /usr/share/keyrings/kitware.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/kitware.gpg] https://apt.kitware.com/ubuntu/ jammy main" \
+      > /etc/apt/sources.list.d/kitware.list && \
+    apt-get update && \
+    apt-get install -y cmake && \
+    cmake --version
+
+RUN pip3 install --no-cache-dir \
+	pyyaml \
+	typing_extensions
+
+ENV PYTORCH_ROCM_ARCH=gfx950
+
+RUN cd pytorch && python3.10 setup.py develop
+
+
+# Install PyTorch 2.11.0 with ROCm 7.0 support
+# Note: PyTorch 2.11 nightly builds for ROCm 7.0
+#RUN pip3 install --pre \
+#    torch==2.11.0.dev20260202+rocm7.0 \
+#    torchvision==0.25.0.dev20260203+rocm7.0 \
+#    torchaudio==2.11.0.dev20260203+rocm7.0 \
+#    --index-url https://download.pytorch.org/whl/nightly/rocm7.0
+
+# Verify installations
+RUN python3.10 -c "import torch; print(f'PyTorch version: {torch.__version__}')" && \
+    python3.10 -c "import torch; print(f'ROCm available: {torch.cuda.is_available()}')" && \
+    python3.10 -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
+
+# Set up work directory
+WORKDIR /workspace/sdpa
+
+CMD ["/bin/bash"]
