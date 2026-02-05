@@ -45,8 +45,42 @@ ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$LD_LIBRARY_PATH
 # Upgrade pip and install basic Python packages
 RUN python3 -m pip install --upgrade pip setuptools wheel
 
-RUN git clone https://github.com/pytorch/pytorch.git
+# PyTorch Build Configuration Flags
+# ==================================
+
+# _GLIBCXX_USE_CXX11_ABI=1
+# Enable C++11 ABI for GCC/libstdc++. This ensures compatibility with pre-built
+# binaries and libraries that use the new C++11 ABI (default since GCC 5.1).
+# Set to 0 for old ABI compatibility with legacy libraries.
 ENV _GLIBCXX_USE_CXX11_ABI=1
+
+# USE_ROCM_CK_SDPA=0
+# Disable ROCm Composable Kernel (CK) backend for Scaled Dot Product Attention (SDPA).
+# When set to 0, PyTorch will use generic/fallback implementations for attention layers
+# instead of CK-optimized kernels. This may be needed for:
+# - Debugging: Isolate issues related to CK kernels
+# - Compatibility: Some CK kernels may not support all input shapes/dtypes
+# - Stability: Use more mature fallback implementations
+# Set to 1 to enable CK optimized attention kernels for better transformer performance.
+ENV USE_ROCM_CK_SDPA=0
+
+# PYTORCH_ROCM_ARCH=gfx950
+# Specify target GPU architecture for ROCm compilation. This tells PyTorch to
+# generate optimized code for specific AMD GPU architecture(s).
+# - gfx950: AMD MI350 series GPUs
+# Multiple architectures can be specified with semicolons: gfx90a;gfx940;gfx950
+# Matching the exact architecture improves performance but increases build time.
+ENV PYTORCH_ROCM_ARCH=gfx950
+
+# Clone PyTorch source repository
+RUN git clone https://github.com/pytorch/pytorch.git
+
+# Build PyTorch for AMD/ROCm
+# The build_amd.py script applies ROCm-specific patches and prepares the source
+# for compilation with AMD GPU support. This includes:
+# - Applying ROCm compatibility patches
+# - Setting up ROCm-specific build configurations
+# - Preparing HIPified CUDA kernels (CUDA -> HIP translation)
 RUN cd pytorch && \
     git submodule update --init --recursive && \
     python3.10 tools/amd_build/build_amd.py
@@ -60,12 +94,32 @@ RUN wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc | gpg --d
     apt-get install -y cmake && \
     cmake --version
 
+# Install PyTorch build dependencies
 RUN pip3 install --no-cache-dir \
 	pyyaml \
-	typing_extensions
+	typing_extensions \
+    numpy \
+    pandas
 
-ENV PYTORCH_ROCM_ARCH=gfx950
-
+# Build and install PyTorch from source in development mode
+# =========================================================
+# Using 'setup.py develop' instead of 'setup.py install' creates a development
+# installation where the source directory is linked rather than copied. This allows:
+# - Faster rebuilds during development (changes reflected immediately)
+# - Easier debugging (source code available)
+# - Lower disk space usage
+#
+# Build flags inherited from environment variables:
+# - USE_ROCM=1 (auto-detected from ROCM_HOME)
+# - PYTORCH_ROCM_ARCH=gfx950 (target GPU architecture)
+# - USE_ROCM_CK_SDPA=0 (disable CK optimized attention kernels, use fallback)
+# - _GLIBCXX_USE_CXX11_ABI=1 (C++11 ABI compatibility)
+#
+# Additional implicit build flags (can be overridden):
+# - USE_CUDA=0 (disabled, using ROCm instead)
+# - BUILD_TEST=0 (skip building C++ tests, set to 1 to enable)
+# - USE_DISTRIBUTED=1 (enable distributed training support)
+# - USE_NCCL=1 (enable RCCL for AMD GPUs, equivalent to NCCL for NVIDIA)
 RUN cd pytorch && python3.10 setup.py develop
 
 

@@ -23,12 +23,79 @@ Training runs in Docker containers with all dependencies pre-installed.
 
 ### Quick Start
 
+#### Option 1: Using the Setup Script (Recommended for First-Time Users)
+
+The interactive setup script guides you through creating your personal `.env` configuration:
+
+```bash
+cd docker
+bash setup-env.sh
+docker compose -f docker-compose.build.yaml up -d
+```
+
+The script will prompt you to:
+- Select a Dockerfile (ROCm version, with/without Shampoo optimizer, etc.)
+- Choose a container name (defaults to `${USER}-${variant}-${date}`)
+- Configure workspace and RCCL paths
+- Set up optional volume mounts
+
+#### Option 2: Manual .env Configuration
+
+For more control, manually create your `.env` file:
+
+```bash
+cd docker
+cp .env.example .env
+# Edit .env with your preferred editor
+nano .env  # or vim, code, etc.
+docker compose -f docker-compose.build.yaml up -d
+```
+
+**Available Dockerfiles:**
+- `Dockerfile.rocm70_9-1` - Standard ROCm 7.0.9.1 build
+- `Dockerfile.rocm70_9-1-shampoo` - ROCm 7.0.9.1 with Shampoo optimizer
+- `Dockerfile.rocm70_2-ubuntu-pytorch` - ROCm 7.0.2 Ubuntu PyTorch build
+- `Dockerfile.rocm70_2-ubuntu-nan` - ROCm 7.0.2 with NaN debugging tools
+
+**Example `.env` configurations:**
+
+For standard ROCm development:
+```bash
+DOCKERFILE=Dockerfile.rocm70_9-1
+CONTAINER_NAME=myuser-rocm70-dev
+AORTA_WORKSPACE=..
+RCCL_PATH=/tmp/rccl_placeholder
+```
+
+For Shampoo optimizer testing with custom RCCL:
+```bash
+DOCKERFILE=Dockerfile.rocm70_9-1-shampoo
+CONTAINER_NAME=myuser-shampoo-exp1
+AORTA_WORKSPACE=/apps/username/aorta_work/aorta_1
+RCCL_PATH=/apps/username/rccl
+```
+
+#### Option 3: Pre-built Image (Alternative)
+
+If you prefer using a pre-built image instead of building from a Dockerfile:
+
 ```bash
 cd docker
 docker compose up -d
 ```
 
-Connect to the running container via CLI or VSCode.
+This uses the default `docker-compose.yaml` with a pre-configured image.
+
+### Connecting to Your Container
+
+Connect to the running container via CLI or VSCode:
+
+```bash
+# Via Docker CLI
+docker exec -it <your-container-name> bash
+
+# Or use VSCode's "Attach to Running Container" feature
+```
 
 ### Running TorchRec Benchmark
 

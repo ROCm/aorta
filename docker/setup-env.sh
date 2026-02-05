@@ -1,0 +1,199 @@
+#!/bin/bash
+#
+# Interactive script to generate .env file for Docker Compose
+#
+# Usage:
+#   bash setup-env.sh
+#
+# This script will guide you through creating a .env file with your
+# preferred Dockerfile, container name, and volume mount configurations.
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
+
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}  Docker Environment Setup for Aorta  ${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo ""
+
+# Check if .env already exists
+if [ -f "$ENV_FILE" ]; then
+    echo -e "${YELLOW}Warning: .env file already exists at: $ENV_FILE${NC}"
+    read -p "Do you want to overwrite it? (y/N): " overwrite
+    if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
+        echo -e "${RED}Aborted. Existing .env file kept.${NC}"
+        exit 0
+    fi
+    echo ""
+fi
+
+# Step 1: Select Dockerfile
+echo -e "${GREEN}Step 1: Select Dockerfile${NC}"
+echo "Available Dockerfiles:"
+echo "  1) Dockerfile.rocm70_9-1              - Standard ROCm 7.0.9.1 build"
+echo "  2) Dockerfile.rocm70_9-1-shampoo      - ROCm 7.0.9.1 with Shampoo optimizer"
+echo "  3) Dockerfile.rocm70_2-ubuntu-pytorch - ROCm 7.0.2 Ubuntu PyTorch build"
+echo "  4) Dockerfile.rocm70_2-ubuntu-nan     - ROCm 7.0.2 with NaN debugging tools"
+echo ""
+
+while true; do
+    read -p "Enter choice [1-4]: " dockerfile_choice
+    case $dockerfile_choice in
+        1)
+            DOCKERFILE="Dockerfile.rocm70_9-1"
+            VARIANT="rocm70_9-1"
+            break
+            ;;
+        2)
+            DOCKERFILE="Dockerfile.rocm70_9-1-shampoo"
+            VARIANT="rocm70_9-1-shampoo"
+            break
+            ;;
+        3)
+            DOCKERFILE="Dockerfile.rocm70_2-ubuntu-pytorch"
+            VARIANT="rocm70_2-ubuntu-pytorch"
+            break
+            ;;
+        4)
+            DOCKERFILE="Dockerfile.rocm70_2-ubuntu-nan"
+            VARIANT="rocm70_2-ubuntu-nan"
+            break
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Please enter 1-4.${NC}"
+            ;;
+    esac
+done
+
+echo -e "${GREEN}Selected: $DOCKERFILE${NC}"
+echo ""
+
+# Step 2: Container Name
+echo -e "${GREEN}Step 2: Container Name${NC}"
+DEFAULT_CONTAINER_NAME="${USER:-default}-${VARIANT}-$(date +%Y%m%d)"
+echo "Suggested default: $DEFAULT_CONTAINER_NAME"
+read -p "Enter container name (or press Enter to use default): " CONTAINER_NAME
+CONTAINER_NAME=${CONTAINER_NAME:-$DEFAULT_CONTAINER_NAME}
+echo -e "${GREEN}Container name: $CONTAINER_NAME${NC}"
+echo ""
+
+# Step 3: Aorta Workspace Path
+echo -e "${GREEN}Step 3: Aorta Workspace Path${NC}"
+echo "This is the path to your aorta workspace directory."
+echo "Default: .. (parent directory - assumes you're running from docker/ subdirectory)"
+read -p "Enter path (or press Enter for default '..'): " AORTA_WORKSPACE
+AORTA_WORKSPACE=${AORTA_WORKSPACE:-..}
+echo -e "${GREEN}Aorta workspace: $AORTA_WORKSPACE${NC}"
+echo ""
+
+# Step 4: RCCL Path
+echo -e "${GREEN}Step 4: RCCL Build Path${NC}"
+echo "Path to your custom RCCL build directory."
+echo "Default: /tmp/rccl_placeholder (use if you don't have a custom RCCL build)"
+read -p "Enter path (or press Enter for default): " RCCL_PATH
+RCCL_PATH=${RCCL_PATH:-/tmp/rccl_placeholder}
+echo -e "${GREEN}RCCL path: $RCCL_PATH${NC}"
+echo ""
+
+# Step 5: AMD GPU Driver Variant (optional)
+echo -e "${GREEN}Step 5: AMD GPU Driver Variant (Optional)${NC}"
+echo "Set driver variant for environment_info.json"
+echo "Possible values: patched, base, mqd_vram, default, or leave empty"
+read -p "Enter variant (or press Enter to skip): " AMDGPU_DRIVER_VARIANT
+echo ""
+
+# Step 6: Additional mounts (optional)
+echo -e "${GREEN}Step 6: Additional Volume Mounts (Optional)${NC}"
+echo "Do you need any additional volume mounts?"
+read -p "Add extra mounts? (y/N): " add_mounts
+
+EXTRA_MOUNTS=""
+if [[ "$add_mounts" =~ ^[Yy]$ ]]; then
+    mount_count=1
+    while true; do
+        echo ""
+        echo "Extra mount #$mount_count:"
+        read -p "  Source path (host): " mount_src
+        if [ -z "$mount_src" ]; then
+            break
+        fi
+        read -p "  Destination path (container): " mount_dst
+        if [ -z "$mount_dst" ]; then
+            break
+        fi
+        
+        EXTRA_MOUNTS+="EXTRA_MOUNT_SRC_${mount_count}=${mount_src}"$'\n'
+        EXTRA_MOUNTS+="EXTRA_MOUNT_DST_${mount_count}=${mount_dst}"$'\n'
+        
+        mount_count=$((mount_count + 1))
+        read -p "Add another mount? (y/N): " add_another
+        if [[ ! "$add_another" =~ ^[Yy]$ ]]; then
+            break
+        fi
+    done
+fi
+
+# Generate .env file
+echo ""
+echo -e "${BLUE}Generating .env file...${NC}"
+
+cat > "$ENV_FILE" << EOF
+# Docker Compose Environment Configuration
+# Generated by setup-env.sh on $(date)
+
+# ==============================================================================
+# DOCKERFILE SELECTION
+# ==============================================================================
+DOCKERFILE=$DOCKERFILE
+
+# ==============================================================================
+# CONTAINER NAME
+# ==============================================================================
+CONTAINER_NAME=$CONTAINER_NAME
+
+# ==============================================================================
+# VOLUME MOUNTS
+# ==============================================================================
+AORTA_WORKSPACE=$AORTA_WORKSPACE
+RCCL_PATH=$RCCL_PATH
+
+EOF
+
+# Add extra mounts if any
+if [ -n "$EXTRA_MOUNTS" ]; then
+    echo "# Additional volume mounts" >> "$ENV_FILE"
+    echo "$EXTRA_MOUNTS" >> "$ENV_FILE"
+fi
+
+# Add driver variant if set
+cat >> "$ENV_FILE" << EOF
+# ==============================================================================
+# ENVIRONMENT VARIABLES
+# ==============================================================================
+AMDGPU_DRIVER_VARIANT=$AMDGPU_DRIVER_VARIANT
+EOF
+
+echo -e "${GREEN}✓ Successfully created .env file at: $ENV_FILE${NC}"
+echo ""
+echo -e "${BLUE}========================================${NC}"
+echo -e "${GREEN}Setup Complete!${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo ""
+echo "You can now run Docker Compose with:"
+echo -e "  ${YELLOW}cd ${SCRIPT_DIR}${NC}"
+echo -e "  ${YELLOW}docker compose -f docker-compose.build.yaml up${NC}"
+echo ""
+echo "To view your configuration:"
+echo -e "  ${YELLOW}cat ${ENV_FILE}${NC}"
+echo ""
+echo "To modify settings later, edit the .env file directly or re-run this script."

@@ -1,23 +1,23 @@
-# ==============================================================================
-# DEPRECATED: This file is deprecated and will be removed in a future update.
+# Unified Docker Compose Configuration
 # 
-# Please use the unified docker-compose.build.yaml with .env configuration:
+# This file replaces docker-compose.rocm70_9-1.yaml and docker-compose.rocm70_9-1-shampoo.yaml
+# 
+# Usage:
 #   1. Copy .env.example to .env
-#   2. Set DOCKERFILE=Dockerfile.rocm70_9-1 in your .env file
+#   2. Edit .env to set your Dockerfile, container name, and volume paths
 #   3. Run: docker compose -f docker-compose.build.yaml up
 #
-# Or use the interactive setup script:
+# Or use the setup script:
 #   bash setup-env.sh
-#
-# See docker/README.md for more information.
-# ==============================================================================
+#   docker compose -f docker-compose.build.yaml up
 
 services:
-  torchenv-rocm70:
-    container_name: training-overlap-bugs-rocm70_9-1
+  torchenv:
+    container_name: ${CONTAINER_NAME:-training-overlap-bugs-default}
     build:
       context: .
-      dockerfile: Dockerfile.rocm70_9-1
+      dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}
+      network: host
     user: root
     privileged: true
     network_mode: host
@@ -43,6 +43,9 @@ services:
       # Mount custom RCCL build (optional - set RCCL_PATH env var)
       # Example: RCCL_PATH=/path/to/rccl docker compose up
       - ${RCCL_PATH:-/tmp/rccl_placeholder}:/rccl
+      # Optional: Additional user-specific mounts (uncomment in .env if needed)
+      # - ${EXTRA_MOUNT_SRC_1}:${EXTRA_MOUNT_DST_1}
+      # Example: - /home/username:/home/username
     devices:
       - /dev/kfd
       - /dev/dri
