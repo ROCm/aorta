@@ -1,6 +1,6 @@
 # ==============================================================================
 # DEPRECATED: This file is deprecated and will be removed in a future update.
-# 
+#
 # Please use the unified docker-compose.build.yaml with .env configuration:
 #   1. Copy .env.example to .env
 #   2. Set DOCKERFILE=Dockerfile.rocm70_9-1-shampoo in your .env file

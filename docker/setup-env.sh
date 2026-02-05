@@ -131,10 +131,10 @@ if [[ "$add_mounts" =~ ^[Yy]$ ]]; then
         if [ -z "$mount_dst" ]; then
             break
         fi
-        
+
         EXTRA_MOUNTS+="EXTRA_MOUNT_SRC_${mount_count}=${mount_src}"$'\n'
         EXTRA_MOUNTS+="EXTRA_MOUNT_DST_${mount_count}=${mount_dst}"$'\n'
-        
+
         mount_count=$((mount_count + 1))
         read -p "Add another mount? (y/N): " add_another
         if [[ ! "$add_another" =~ ^[Yy]$ ]]; then
