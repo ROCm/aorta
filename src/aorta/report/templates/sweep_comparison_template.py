@@ -4,7 +4,11 @@ Currently optimized for pairwise (2-sweep) comparison with side-by-side layout.
 """
 
 
-def get_comparison_template(label1, label2, sweep1_path, sweep2_path, image_data):
+from typing import Dict
+from pathlib import Path
+
+
+def get_comparison_template(label1: str, label2: str, sweep1_path: Path, sweep2_path: Path, image_data: Dict[str, str]) -> str:
     """
     Generate HTML content for sweep comparison report.
 
