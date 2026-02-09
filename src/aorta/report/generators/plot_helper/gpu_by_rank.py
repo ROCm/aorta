@@ -18,16 +18,26 @@ def plot_gpu_metrics_by_rank(
     labels: List[str],
     metrics: Optional[List[str]] = None,
     dpi: int = DEFAULT_DPI,
+    single_config_mode: bool = False,
 ) -> List[Path]:
     """
     Create line plots for GPU metrics across ranks.
 
-    Reads GPU_ByRank_Cmp sheet, creates one plot per metric type.
-    Each plot shows baseline vs test values across all ranks.
+    Handles both comparison and single-config modes:
+    - Comparison mode: Reads GPU_ByRank_Cmp sheet with {label}_time_ms columns
+    - Single-config mode: Reads All_Ranks_Combined sheet with 'time ms' column
 
     Returns list of generated file paths.
     """
-    df = pd.read_excel(excel_path, sheet_name="GPU_ByRank_Cmp")
+    if single_config_mode:
+        # Single-config: Read All_Ranks_Combined sheet, rename column to match expected format
+        df = pd.read_excel(excel_path, sheet_name="All_Ranks_Combined")
+        label = labels[0]
+        df = df.rename(columns={"time ms": f"{label}_time_ms"})
+    else:
+        # Comparison: Read GPU_ByRank_Cmp sheet
+        df = pd.read_excel(excel_path, sheet_name="GPU_ByRank_Cmp")
+
     metrics = metrics or METRICS_TO_PLOT
 
     output_files = []
@@ -47,10 +57,10 @@ def plot_gpu_metrics_by_rank(
                 ax.plot(
                     metric_df["rank"],
                     metric_df[col_name],
-                    marker=markers[i],
+                    marker=markers[i % len(markers)],
                     linewidth=2,
                     markersize=8,
-                    color=colors[i],
+                    color=colors[i % len(colors)],
                     label=label,
                 )
 
@@ -59,12 +69,21 @@ def plot_gpu_metrics_by_rank(
 
         ax.set_xlabel("Rank", fontsize=12)
         ax.set_ylabel("Time (ms)", fontsize=12)
-        ax.set_title(
-            f"{metric} Comparison across all ranks",
-            fontsize=14,
-            fontweight="bold",
-        )
-        ax.legend()
+
+        # Adjust title based on mode
+        if single_config_mode:
+            ax.set_title(
+                f"{metric} across all ranks",
+                fontsize=14,
+                fontweight="bold",
+            )
+        else:
+            ax.set_title(
+                f"{metric} Comparison across all ranks",
+                fontsize=14,
+                fontweight="bold",
+            )
+            ax.legend()
 
         plt.tight_layout()
         output_path = save_figure(fig, output_dir / f"{metric}_by_rank.png", dpi)

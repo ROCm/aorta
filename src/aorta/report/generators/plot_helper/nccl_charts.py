@@ -41,15 +41,29 @@ def plot_nccl_comparison(
     output_dir: Path,
     labels: List[str],
     dpi: int = DEFAULT_DPI,
+    single_config_mode: bool = False,
 ) -> List[Path]:
     """
-    Create NCCL metric comparison bar charts.
+    Create NCCL metric bar charts.
 
-    Reads NCCL_ImplicitSyncCmp sheet, creates grouped bar charts
-    for each metric (latency, bandwidth).
+    Handles both comparison and single-config modes:
+    - Comparison mode: Reads NCCL_ImplicitSyncCmp sheet with {label}_ prefix
+    - Single-config mode: Reads nccl_summary_implicit_sync sheet
     """
     try:
-        df = pd.read_excel(excel_path, sheet_name="NCCL_ImplicitSyncCmp")
+        if single_config_mode:
+            # Single-config: Read nccl_summary_implicit_sync sheet
+            df = pd.read_excel(excel_path, sheet_name="nccl_summary_implicit_sync")
+            # Rename columns to match expected format
+            label = labels[0]
+            rename_map = {}
+            for config in NCCL_METRICS.values():
+                if config["y_col"] in df.columns:
+                    rename_map[config["y_col"]] = f"{label}_{config['y_col']}"
+            df = df.rename(columns=rename_map)
+        else:
+            # Comparison: Read NCCL_ImplicitSyncCmp sheet
+            df = pd.read_excel(excel_path, sheet_name="NCCL_ImplicitSyncCmp")
     except ValueError:
         # Sheet might not exist
         return []
@@ -57,7 +71,8 @@ def plot_nccl_comparison(
     df["label"] = df["Collective name"] + "\n" + df["In msg nelems"].astype(str)
 
     x = np.arange(len(df))
-    width = 0.35
+    # Adjust bar width based on mode
+    width = 0.6 if single_config_mode else 0.35
     colors = [COLORS["baseline"], COLORS["test"]]
     output_files = []
 
@@ -68,8 +83,12 @@ def plot_nccl_comparison(
         for i, label in enumerate(labels):
             col_name = f"{label}_{config['y_col']}"
             if col_name in df.columns:
-                offset = (i - len(labels) / 2 + 0.5) * width
-                ax.bar(x + offset, df[col_name], width, label=label, color=colors[i])
+                # Center single bar, offset for comparison
+                if single_config_mode:
+                    offset = 0
+                else:
+                    offset = (i - len(labels) / 2 + 0.5) * width
+                ax.bar(x + offset, df[col_name], width, label=label, color=colors[i % len(colors)])
                 has_data = True
 
         if not has_data:
@@ -82,8 +101,13 @@ def plot_nccl_comparison(
         ax.set_xticklabels(df["label"], rotation=45, ha="right", fontsize=8)
         ax.set_xlabel("Collective Operation (Message Size)", fontsize=12)
         ax.set_ylabel(config["y_label"], fontsize=12)
-        ax.set_title(f"{title} Comparison", fontsize=14, fontweight="bold")
-        ax.legend()
+
+        # Adjust title based on mode
+        if single_config_mode:
+            ax.set_title(f"{title}", fontsize=14, fontweight="bold")
+        else:
+            ax.set_title(f"{title} Comparison", fontsize=14, fontweight="bold")
+            ax.legend()
 
         plt.tight_layout()
         filename = f'{title.replace(" ", "_")}_comparison.png'
