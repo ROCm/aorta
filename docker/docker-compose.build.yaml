@@ -16,24 +16,24 @@ services:
     container_name: ${CONTAINER_NAME:-training-overlap-bugs-default}
     build:
       context: .
-      dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}    
+      dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}
     # Security Configuration (Elevated Privileges Required)
-    # 
+    #
     # WARNING: This container runs with elevated privileges for AMD GPU access and debugging.
-    # These settings have significant security implications, especially in shared/multi-user 
+    # These settings have significant security implications, especially in shared/multi-user
     # environments. Only use this configuration in trusted environments.
     #
     # - user: root
-    #   Required for: Installing packages, modifying system configuration, and ensuring 
+    #   Required for: Installing packages, modifying system configuration, and ensuring
     #   consistent file permissions when mounting host volumes with different user IDs.
     #
     # - privileged: true
     #   Required for: Full access to AMD GPU devices (/dev/kfd, /dev/dri) and ROCm runtime.
-    #   This grants the container nearly all capabilities of the host, including access to 
+    #   This grants the container nearly all capabilities of the host, including access to
     #   all devices and the ability to modify kernel parameters.
     #
     # - security_opt: seccomp=unconfined
-    #   Required for: Debugging with ptrace (SYS_PTRACE capability) and ensuring ROCm 
+    #   Required for: Debugging with ptrace (SYS_PTRACE capability) and ensuring ROCm
     #   kernel drivers can make all necessary system calls without seccomp restrictions.
     #   This disables the default seccomp profile that filters system calls.
     #
@@ -41,7 +41,7 @@ services:
     # - Container processes can access all host devices and perform privileged operations
     # - Potential for container escape if vulnerabilities exist in ROCm drivers or kernel
     # - File system modifications in mounted volumes will be owned by root
-    # - In production or shared environments, consider using rootless containers with 
+    # - In production or shared environments, consider using rootless containers with
     #   device cgroups or kata containers for better isolation
     #
     user: root
