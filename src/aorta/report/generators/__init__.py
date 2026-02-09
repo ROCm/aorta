@@ -2,7 +2,12 @@
 
 from .html_generator import generate_html, image_to_base64
 from .excel_report import create_final_excel_report
-from .plot_generator import generate_plots, generate_summary_plots, generate_gemm_plots
+from .plot_generator import (
+    generate_plots,
+    generate_summary_plots,
+    generate_gemm_plots,
+    generate_single_config_plots,
+)
 
 __all__ = [
     "generate_html",
@@ -11,4 +16,5 @@ __all__ = [
     "generate_plots",
     "generate_summary_plots",
     "generate_gemm_plots",
+    "generate_single_config_plots",
 ]
