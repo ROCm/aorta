@@ -120,6 +120,15 @@ RUN pip3 install --no-cache-dir \
 # - BUILD_TEST=0 (skip building C++ tests, set to 1 to enable)
 # - USE_DISTRIBUTED=1 (enable distributed training support)
 # - USE_NCCL=1 (enable RCCL for AMD GPUs, equivalent to NCCL for NVIDIA)
+#
+# NOTE: Building PyTorch from source is a resource-intensive and time-consuming step.
+# - Expected build time: 1–2+ hours depending on CPU and network speed.
+# - Recommended resources: at least 8 GB RAM (16 GB+ preferred) and multiple CPU cores.
+# - When building inside Docker Desktop or similar environments, ensure the Docker daemon
+#   has sufficient memory and CPU allocated (e.g., increase the memory limit) or the build
+#   may fail with out-of-memory errors or take an excessively long time.
+# - If builds repeatedly fail due to resource constraints, consider using prebuilt PyTorch
+#   ROCm images or wheels instead of building from source.
 RUN cd pytorch && python3.10 setup.py develop
 
 
