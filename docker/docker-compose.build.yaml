@@ -16,8 +16,7 @@ services:
     container_name: ${CONTAINER_NAME:-training-overlap-bugs-default}
     build:
       context: .
-      dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}
-    
+      dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}    
     # Security Configuration (Elevated Privileges Required)
     # 
     # WARNING: This container runs with elevated privileges for AMD GPU access and debugging.
