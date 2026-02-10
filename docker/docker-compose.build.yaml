@@ -17,6 +17,8 @@ services:
     build:
       context: .
       dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}
+      # Required for build: apt/npm access during docker compose build
+      network: host
     # Security Configuration (Elevated Privileges Required)
     #
     # WARNING: This container runs with elevated privileges for AMD GPU access and debugging.
@@ -55,8 +57,9 @@ services:
     security_opt:
       - seccomp=unconfined
     environment:
+      # RCCL: use image default. For custom RCCL, use override: -f docker-compose.rccl.yaml and set RCCL_PATH
       - RCCL_FOLDER=/rccl
-      - LD_LIBRARY_PATH=/rccl/build/release:${LD_LIBRARY_PATH:-}
+      - LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
       - TORCH_NCCL_HIGH_PRIORITY=1
       # Set driver variant for environment_info.json (since host /usr/src isn't visible)
       # Example values: "patched", "base", "mqd_vram", "default"
@@ -66,12 +69,13 @@ services:
       # Mount parent directory (aorta/) to /workspace/aorta
       # Use AORTA_WORKSPACE env var if set, otherwise default to parent dir (..)
       - ${AORTA_WORKSPACE:-..}:/workspace/aorta
-      # Mount custom RCCL build (optional - set RCCL_PATH env var)
-      # Example: RCCL_PATH=/path/to/rccl docker compose up
-      - ${RCCL_PATH:-/tmp/rccl_placeholder}:/rccl
-      # Optional: Additional user-specific mounts (uncomment in .env if needed)
-      # - ${EXTRA_MOUNT_SRC_1}:${EXTRA_MOUNT_DST_1}
-      # Example: - /home/username:/home/username
+      # Custom RCCL: optional. To use a host RCCL build, run with override:
+      #   docker compose -f docker-compose.build.yaml -f docker-compose.rccl.yaml up
+      #   and set RCCL_PATH in .env to your RCCL directory. Do not add a volume here.
+      # Optional: additional mounts. Set EXTRA_MOUNT_SRC_* and EXTRA_MOUNT_DST_* in .env
+      # (when unset, defaults mount /tmp to /tmp as a no-op)
+      - ${EXTRA_MOUNT_SRC_1:-/tmp}:${EXTRA_MOUNT_DST_1:-/tmp}
+      - ${EXTRA_MOUNT_SRC_2:-/tmp}:${EXTRA_MOUNT_DST_2:-/tmp}
     devices:
       - /dev/kfd
       - /dev/dri

@@ -1,0 +1,19 @@
+# Optional override: mount custom RCCL build and set RCCL env vars.
+#
+# Use only when you have a custom RCCL build on the host. Without this override,
+# the container uses the RCCL bundled in the image (no YAML edit needed).
+#
+# Usage:
+#   Set RCCL_PATH in .env to your RCCL build directory (e.g. /path/to/rccl).
+#   RCCL_PATH must be set when using this file.
+#   Run:
+#     docker compose -f docker-compose.build.yaml -f docker-compose.rccl.yaml up
+#
+# Do not use this file if you do not need custom RCCL; omit -f docker-compose.rccl.yaml.
+
+services:
+  torchenv:
+    environment:
+      - LD_LIBRARY_PATH=/rccl/build/release:${LD_LIBRARY_PATH:-}
+    volumes:
+      - ${RCCL_PATH}:/rccl

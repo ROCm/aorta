@@ -52,7 +52,7 @@ docker compose -f docker-compose.build.yaml up -d
 ### Volume Mounts
 
 - **`AORTA_WORKSPACE`**: Path to aorta workspace (default: `..`)
-- **`RCCL_PATH`**: Path to custom RCCL build (default: `/tmp/rccl_placeholder`)
+- **`RCCL_PATH`**: Optional. Leave unset to use the image's RCCL (no YAML edit needed). To use a custom RCCL build, set this and run with `-f docker-compose.rccl.yaml` (see [Using custom RCCL](#using-custom-rccl)).
 
 ### Optional
 
@@ -61,14 +61,14 @@ docker compose -f docker-compose.build.yaml up -d
 
 ## Example Configurations
 
-### Example 1: Standard Development
+### Example 1: Standard Development (image RCCL)
 
 ```bash
 # .env
 DOCKERFILE=Dockerfile.rocm70_9-1
 CONTAINER_NAME=myuser-dev-20260205
 AORTA_WORKSPACE=..
-RCCL_PATH=/tmp/rccl_placeholder
+# RCCL_PATH unset = use image RCCL
 ```
 
 Run: `docker compose -f docker-compose.build.yaml up -d`
@@ -83,6 +83,8 @@ AORTA_WORKSPACE=/apps/username/aorta_work/aorta_1
 RCCL_PATH=/apps/username/rccl
 ```
 
+Run: `docker compose -f docker-compose.build.yaml -f docker-compose.rccl.yaml up -d`
+
 ### Example 3: NaN Debugging
 
 ```bash
@@ -90,15 +92,30 @@ RCCL_PATH=/apps/username/rccl
 DOCKERFILE=Dockerfile.rocm70_2-ubuntu-nan
 CONTAINER_NAME=debug-nan-issue
 AORTA_WORKSPACE=..
-RCCL_PATH=/tmp/rccl_placeholder
 AMDGPU_DRIVER_VARIANT=patched
 ```
+
+## Using custom RCCL
+
+By default, the container uses the RCCL bundled in the image. You do not need to set or remove any RCCL path in the YAML.
+
+To use a custom RCCL build:
+
+1. Set `RCCL_PATH` in your `.env` to your RCCL build directory.
+2. Run with the RCCL override file:
+
+   ```bash
+   docker compose -f docker-compose.build.yaml -f docker-compose.rccl.yaml up -d
+   ```
+
+The override file adds the RCCL volume and RCCL-related environment variables only when you use it.
 
 ## File Structure
 
 ```
 docker/
 ├── docker-compose.build.yaml     # Unified compose file (use this!)
+├── docker-compose.rccl.yaml      # Optional: use with -f when RCCL_PATH is set
 ├── docker-compose.yaml           # Image-based compose (alternative)
 ├── .env.example                  # Template for your .env
 ├── .env                          # Your personal config (git-ignored)
