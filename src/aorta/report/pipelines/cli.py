@@ -24,16 +24,18 @@ def pipeline(ctx):
 
 @pipeline.command("summary")
 @click.option(
-    "-b", "--baseline", required=True, type=click.Path(exists=True), help="Baseline trace directory"
+    "-b", "--baseline", required=False, type=click.Path(exists=True),
+    help="Baseline trace directory (optional - omit for single-config mode)"
 )
 @click.option(
-    "-t", "--test", required=True, type=click.Path(exists=True), help="Test trace directory"
+    "-t", "--test", required=True, type=click.Path(exists=True),
+    help="Test trace directory (or single config in single-config mode)"
 )
 @click.option(
     "-o", "--output", required=True, type=click.Path(), help="Output directory for results"
 )
 @click.option("--baseline-label", default=None, help="Label for baseline (default: directory name)")
-@click.option("--test-label", default=None, help="Label for test (default: directory name)")
+@click.option("--test-label", default=None, help="Label for test/config (default: directory name)")
 @click.option("--skip-tracelens", is_flag=True, help="Skip TraceLens analysis (if already done)")
 @click.option(
     "--gpu-timeline/--no-gpu-timeline", default=True, help="Enable/disable GPU timeline comparison"
@@ -96,14 +98,14 @@ def pipeline_summary(
     quiet = ctx.obj.get("quiet", False)
 
     # Resolve paths to absolute to ensure all outputs go to correct location
-    baseline_path = Path(baseline).resolve()
+    baseline_path = Path(baseline).resolve() if baseline else None
     test_path = Path(test).resolve()
     output_path = Path(output).resolve()
 
     config = SummaryPipelineConfig(
-        baseline_path=baseline_path,
         test_path=test_path,
         output_dir=output_path,
+        baseline_path=baseline_path,
         baseline_label=baseline_label,
         test_label=test_label,
         skip_tracelens=skip_tracelens,
@@ -115,14 +117,23 @@ def pipeline_summary(
         verbose=verbose,
     )
 
+    is_comparison = baseline is not None
+
     if not quiet:
         click.echo("=" * 60)
-        click.echo("SUMMARY ANALYSIS PIPELINE")
+        if is_comparison:
+            click.echo("SUMMARY ANALYSIS PIPELINE (Comparison Mode)")
+        else:
+            click.echo("SUMMARY ANALYSIS PIPELINE (Single-Config Mode)")
         click.echo("=" * 60)
-        click.echo(f"Baseline: {baseline}")
-        click.echo(f"Test: {test}")
+        if is_comparison:
+            click.echo(f"Baseline: {baseline}")
+            click.echo(f"Test: {test}")
+            click.echo(f"Labels: {baseline_label or '(auto)'} vs {test_label or '(auto)'}")
+        else:
+            click.echo(f"Config: {test}")
+            click.echo(f"Label: {test_label or '(auto)'}")
         click.echo(f"Output: {output}")
-        click.echo(f"Labels: {baseline_label or '(auto)'} vs {test_label or '(auto)'}")
         click.echo(f"Options: skip_tracelens={skip_tracelens}, gpu_timeline={gpu_timeline}")
         click.echo(f"         collective={collective}, final_report={final_report}")
         click.echo(f"         plots={plots}, html={html}")

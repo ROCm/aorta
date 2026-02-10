@@ -31,15 +31,17 @@ from .plot_helper import (
 def generate_summary_plots(
     excel_path: Path,
     output_dir: Path,
+    labels: Optional[List[str]] = None,
     dpi: int = 150,
     verbose: bool = False,
 ) -> List[Path]:
     """
-    Generate all summary plots from Excel report.
+    Generate all summary plots from Excel report (comparison mode).
 
     Args:
         excel_path: Path to final Excel report
         output_dir: Output directory for PNG files
+        labels: Optional list of labels [baseline, test]. If None, extracted from Excel.
         dpi: DPI for output images
         verbose: Print progress
 
@@ -52,9 +54,13 @@ def generate_summary_plots(
     if verbose:
         print(f"\nGenerating summary plots from: {excel_path}")
 
-    labels = get_labels_from_excel(excel_path)
+    # Use provided labels or extract from Excel
+    if labels is None:
+        labels = get_labels_from_excel(excel_path)
     if verbose:
         print(f"  Labels: {labels}")
+
+    configure_style()
 
     # Dashboard plots
     if verbose:
@@ -66,7 +72,7 @@ def generate_summary_plots(
     if verbose:
         print("  Creating GPU plots...")
     output_files.extend(
-        plot_gpu_metrics_by_rank(excel_path, output_dir, labels, dpi=dpi)
+        plot_gpu_metrics_by_rank(excel_path, output_dir, labels, dpi=dpi, single_config_mode=False)
     )
     output_files.append(plot_gpu_percent_change_grid(excel_path, output_dir, dpi))
     output_files.append(plot_gpu_heatmap(excel_path, output_dir, dpi))
@@ -74,7 +80,7 @@ def generate_summary_plots(
     # NCCL plots
     if verbose:
         print("  Creating NCCL plots...")
-    nccl_files = plot_nccl_comparison(excel_path, output_dir, labels, dpi)
+    nccl_files = plot_nccl_comparison(excel_path, output_dir, labels, dpi, single_config_mode=False)
     output_files.extend(nccl_files)
 
     nccl_pct_file = plot_nccl_percent_change(excel_path, output_dir, dpi)
@@ -83,6 +89,94 @@ def generate_summary_plots(
 
     if verbose:
         print(f"  Generated {len(output_files)} summary plots")
+
+    return output_files
+
+
+def generate_single_config_plots(
+    gpu_excel_path: Path,
+    output_dir: Path,
+    label: str,
+    coll_excel_path: Optional[Path] = None,
+    dpi: int = 150,
+    verbose: bool = False,
+) -> List[Path]:
+    """
+    Generate plots for single configuration (no comparison).
+
+    Reuses existing plot functions with single-element labels list.
+    Skips percentage change plots (require comparison).
+    Skips GPU heatmap.
+
+    Args:
+        gpu_excel_path: Path to GPU timeline summary Excel
+        output_dir: Output directory for PNG files
+        label: Configuration label
+        coll_excel_path: Optional path to collective Excel (for NCCL plots)
+        dpi: DPI for output images
+        verbose: Print progress
+
+    Returns:
+        List of generated file paths.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_files: List[Path] = []
+    labels = [label]  # Single-element list
+
+    if verbose:
+        print(f"\nGenerating single-config plots")
+        print(f"  Config: {label}")
+        print(f"  GPU data: {gpu_excel_path}")
+
+    configure_style()
+
+    # GPU Summary Bar Chart (single bar per metric)
+    if verbose:
+        print("  Creating GPU summary bar chart...")
+    try:
+        output_files.append(
+            plot_abs_time_comparison(
+                gpu_excel_path, output_dir, labels, dpi, single_config_mode=True
+            )
+        )
+    except Exception as e:
+        if verbose:
+            print(f"    Skipped (error: {e})")
+
+    # GPU By Rank Line Plots (single line per metric)
+    if verbose:
+        print("  Creating GPU by rank plots...")
+    try:
+        output_files.extend(
+            plot_gpu_metrics_by_rank(
+                gpu_excel_path, output_dir, labels, dpi=dpi, single_config_mode=True
+            )
+        )
+    except Exception as e:
+        if verbose:
+            print(f"    Skipped (error: {e})")
+
+    # SKIP: GPU Heatmap (requires percent_change)
+    # SKIP: GPU Percent Change Grid (requires comparison)
+    # SKIP: Improvement Chart (requires comparison)
+
+    # NCCL Charts (single bars)
+    if coll_excel_path and coll_excel_path.exists():
+        if verbose:
+            print("  Creating NCCL charts...")
+        try:
+            nccl_files = plot_nccl_comparison(
+                coll_excel_path, output_dir, labels, dpi, single_config_mode=True
+            )
+            output_files.extend(nccl_files)
+        except Exception as e:
+            if verbose:
+                print(f"    Skipped (error: {e})")
+
+    # SKIP: NCCL Percent Change (requires comparison)
+
+    if verbose:
+        print(f"  Generated {len(output_files)} plots")
 
     return output_files
 
