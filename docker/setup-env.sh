@@ -194,8 +194,10 @@ echo -e "${GREEN}✓ Successfully created .env file at: $ENV_FILE${NC}"
 echo ""
 if [[ -n "$EXTRA_MOUNTS" ]]; then
     echo -e "${YELLOW}You configured extra volume mounts.${NC}"
-    echo -e "${YELLOW}Uncomment the corresponding volume line(s) in docker-compose.build.yaml${NC}"
-    echo -e "${YELLOW}(search for EXTRA_MOUNT_SRC_1 / EXTRA_MOUNT_DST_1 and optionally _2).${NC}"
+    echo -e "${YELLOW}docker-compose.build.yaml currently supports up to two extra mounts via${NC}"
+    echo -e "${YELLOW}EXTRA_MOUNT_SRC_1 / EXTRA_MOUNT_DST_1 and OPTIONAL EXTRA_MOUNT_SRC_2 / EXTRA_MOUNT_DST_2.${NC}"
+    echo -e "${YELLOW}If you configured more than two extra mounts, you will need to manually${NC}"
+    echo -e "${YELLOW}extend docker-compose.build.yaml to use EXTRA_MOUNT_SRC_3 / DST_3, etc.${NC}"
     echo ""
 fi
 echo -e "${BLUE}========================================${NC}"
