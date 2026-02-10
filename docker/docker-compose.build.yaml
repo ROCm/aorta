@@ -71,10 +71,11 @@ services:
       # Custom RCCL: optional. To use a host RCCL build, run with override:
       #   docker compose -f docker-compose.build.yaml -f docker-compose.rccl.yaml up
       #   and set RCCL_PATH in .env to your RCCL directory. Do not add a volume here.
-      # Optional: additional mounts. Set EXTRA_MOUNT_SRC_* and EXTRA_MOUNT_DST_* in .env
-      # (when unset, defaults mount /tmp to /tmp as a no-op)
-      - ${EXTRA_MOUNT_SRC_1:-/tmp}:${EXTRA_MOUNT_DST_1:-/tmp}
-      - ${EXTRA_MOUNT_SRC_2:-/tmp}:${EXTRA_MOUNT_DST_2:-/tmp}
+      # Optional: additional mounts. If you set EXTRA_MOUNT_SRC_* / EXTRA_MOUNT_DST_*
+      # in .env, uncomment the line(s) below (both SRC and DST required per mount).
+      # No extra mount when commented = no side effects.
+      # - ${EXTRA_MOUNT_SRC_1}:${EXTRA_MOUNT_DST_1}
+      # - ${EXTRA_MOUNT_SRC_2}:${EXTRA_MOUNT_DST_2}
     devices:
       - /dev/kfd
       - /dev/dri

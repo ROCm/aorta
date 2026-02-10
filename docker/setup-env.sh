@@ -192,6 +192,12 @@ EOF
 
 echo -e "${GREEN}✓ Successfully created .env file at: $ENV_FILE${NC}"
 echo ""
+if [[ -n "$EXTRA_MOUNTS" ]]; then
+    echo -e "${YELLOW}You configured extra volume mounts.${NC}"
+    echo -e "${YELLOW}Uncomment the corresponding volume line(s) in docker-compose.build.yaml${NC}"
+    echo -e "${YELLOW}(search for EXTRA_MOUNT_SRC_1 / EXTRA_MOUNT_DST_1 and optionally _2).${NC}"
+    echo ""
+fi
 echo -e "${BLUE}========================================${NC}"
 echo -e "${GREEN}Setup Complete!${NC}"
 echo -e "${BLUE}========================================${NC}"
