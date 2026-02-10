@@ -43,6 +43,10 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             ;;
+        -*)
+            echo "Unknown option: $1"
+            usage
+            ;;
         *)
             break
             ;;
