@@ -10,7 +10,7 @@ MACHINE_IP_FILE="$SCRIPT_DIR/node_ip_list.txt"  # Contains hostnames or IPs
 
 # Default values
 DEFAULT_DOCKER_COMPOSE_FILE="docker/docker-compose.build.yaml"
-DEFAULT_DOCKER_CONTAINER="training-overlap-bugs-rocm70_9-1"
+DEFAULT_DOCKER_CONTAINER="training-overlap-bugs-default"
 
 usage() {
     echo "Usage: $0 [OPTIONS] [DOCKER_COMPOSE_FILE] [CONTAINER_NAME]"
