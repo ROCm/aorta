@@ -329,4 +329,3 @@ aorta-report pipeline summary \
     --output ./comparison/ \
     --skip-tracelens
 ```
-
