@@ -8,6 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AORTA_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MACHINE_IP_FILE="$SCRIPT_DIR/node_ip_list.txt"  # Contains hostnames or IPs
 
+# Default values
+DEFAULT_DOCKER_COMPOSE_FILE="docker/docker-compose.build.yaml"
+DEFAULT_DOCKER_CONTAINER="training-overlap-bugs-default"
+
 usage() {
     echo "Usage: $0 [OPTIONS] [DOCKER_COMPOSE_FILE] [CONTAINER_NAME]"
     echo ""
@@ -18,9 +22,9 @@ usage() {
     echo ""
     echo "Arguments (optional, order-dependent):"
     echo "  DOCKER_COMPOSE_FILE  Path to docker-compose file (relative to repo root)."
-    echo "                      Default: docker/docker-compose.rocm70_9-1.yaml"
+    echo "                      Default: $DEFAULT_DOCKER_COMPOSE_FILE"
     echo "  CONTAINER_NAME      Expected container name after compose up."
-    echo "                      Default: training-overlap-bugs-rocm70_9-1"
+    echo "                      Default: $DEFAULT_DOCKER_CONTAINER"
     echo ""
     echo "Options:"
     echo "  -h, --help          Show this help message and exit"
@@ -54,8 +58,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Allow custom docker-compose file and container name via arguments
-DOCKER_COMPOSE_FILE="${1:-docker/docker-compose.rocm70_9-1.yaml}"
-DOCKER_CONTAINER="${2:-training-overlap-bugs-rocm70_9-1}"
+DOCKER_COMPOSE_FILE="${1:-$DEFAULT_DOCKER_COMPOSE_FILE}"
+DOCKER_CONTAINER="${2:-$DEFAULT_DOCKER_CONTAINER}"
 
 if [[ ! -f "$MACHINE_IP_FILE" ]]; then
     echo "Error: $MACHINE_IP_FILE not found"
