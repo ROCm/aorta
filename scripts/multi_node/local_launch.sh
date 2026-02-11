@@ -1,6 +1,9 @@
 #!/bin/bash
 # Multi-node local launch script for GEMM training
 # Runs on each node with single channel/thread configuration
+#
+# NCCL/RCCL environment variables are sourced from set_env_variables.sh
+# Edit that file to change NCCL configuration - no need to modify this script.
 
 if [[ $# -lt 11 ]]; then
   echo "Usage: $0 <NODE_RANK> <NODE_IP> <MASTER_IP> <MASTER_PORT> <NNODES> <WORLD_SIZE> <EXPERIMENT_DIR> <CONFIG_FILE> <NPROC_PER_NODE> <CHANNELS> <THREADS> [ENABLE_ROCPROF] [ROCPROF_STATS] [ROCPROF_INPUT] [DOCKER_CONTAINER]"
@@ -23,6 +26,20 @@ ROCPROF_STATS="${13:-false}"
 ROCPROF_INPUT="${14:-}"
 DOCKER_CONTAINER="${15:-training-overlap-bugs-rocm70_9-1}"
 
+# Source environment variables (should already be sourced by config_node.sh, but ensure it's loaded)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/set_env_variables.sh" ]]; then
+    source "$SCRIPT_DIR/set_env_variables.sh"
+fi
+
+# Override channel/thread settings from command line arguments
+export NCCL_MAX_NCHANNELS="${CHANNELS}"
+export RCCL_THREADS_PER_BLOCK="${THREADS}"
+
+# Set AMD_LOG_LEVEL_FILE to experiment directory (will be converted to Docker path later)
+# This ensures AMD logs go to the experiment folder instead of current directory
+export AMD_LOG_LEVEL_FILE="${EXPERIMENT_DIR}/${THREADS}thread_${CHANNELS}channels/trace_amd_node${NODE_RANK}.log"
+
 echo "=========================================="
 echo "Local Launch Configuration"
 echo "=========================================="
@@ -37,7 +54,6 @@ echo "Experiment Dir: $EXPERIMENT_DIR"
 echo "Config File: $CONFIG_FILE"
 echo "Channels: $CHANNELS"
 echo "Threads: $THREADS"
-echo "Docker Container: $DOCKER_CONTAINER"
 echo "rocprof enabled: $ENABLE_ROCPROF"
 echo "=========================================="
 echo ""
@@ -60,25 +76,25 @@ else
     CONFIG_FILE_DOCKER="$CONFIG_FILE"
 fi
 
-# Log file
-LOG_FILE="${OUTPUT_DIR}/node_${NODE_RANK}_output.log"
+# Convert AMD_LOG_LEVEL_FILE to Docker path
+export AMD_LOG_LEVEL_FILE=$(echo "$AMD_LOG_LEVEL_FILE" | sed "s|^${AORTA_ROOT_FROM_EXP}|/workspace/aorta|")
 
 # Function to log with timestamp
 log() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[${timestamp}] [Node ${NODE_RANK}] ${message}" | tee -a "${LOG_FILE}"
+    echo "[${timestamp}] [Node ${NODE_RANK}] ${message}"
 }
 
 # Cleanup function
 cleanup() {
     echo ""
-    echo "=== Caught interrupt signal ===" | tee -a "${LOG_FILE}"
+    echo "=== Caught interrupt signal ==="
     log "Cleaning up training processes on node ${NODE_RANK}..."
 
     # Try to kill processes inside Docker container
-    docker exec "$DOCKER_CONTAINER" pkill -9 -f "train.py" 2>/dev/null || true
-    docker exec "$DOCKER_CONTAINER" pkill -9 -f "torchrun" 2>/dev/null || true
+    docker exec "${DOCKER_CONTAINER}" pkill -9 -f "train.py" 2>/dev/null || true
+    docker exec "${DOCKER_CONTAINER}" pkill -9 -f "torchrun" 2>/dev/null || true
 
     # Also try on host (in case anything leaked)
     sudo pkill -9 -f "train.py" 2>/dev/null || true
@@ -109,14 +125,18 @@ BASE_CMD="torchrun --nnodes ${NNODES} --node_rank ${NODE_RANK} --nproc_per_node 
 BASE_OVERRIDES="--override profiling.tensorboard=false"
 
 # Build docker exec prefix with environment variables
-DOCKER_EXEC="docker exec \
-    -e RCCL_THREADS_PER_BLOCK=${THREADS} \
-    -e NCCL_MAX_NCHANNELS=${CHANNELS} \
-    -e HSA_ENABLE_SDMA=0 \
-    -e PYTORCH_ROCM_PROFILER_ENABLE_TRACING=1 \
-    ${DOCKER_CONTAINER}"
+# All NCCL/RCCL variables are defined in set_env_variables.sh
+DOCKER_ENV_FLAGS=$(build_docker_env_flags)
+DOCKER_EXEC="docker exec ${DOCKER_ENV_FLAGS} ${DOCKER_CONTAINER}"
+
+# Log which env vars are being passed
+log "Docker environment variables:"
+for var in "${DOCKER_ENV_VARS[@]}"; do
+    log "  ${var}=${!var}"
+done
 
 # Run with or without rocprofv3
+# Note: Output is already captured by master_launch.sh's redirection, no need for tee
 if [ "${ENABLE_ROCPROF}" = "true" ]; then
     ROCPROF_DIR="${OUTPUT_DIR}/rocprof_traces/node_${NODE_RANK}"
     mkdir -p "${ROCPROF_DIR}"
@@ -125,8 +145,7 @@ if [ "${ENABLE_ROCPROF}" = "true" ]; then
         log "Using rocprofv3 input file: ${ROCPROF_INPUT}"
         ${DOCKER_EXEC} bash -c "rocprofv3 -i ${ROCPROF_INPUT} -d ${ROCPROF_DIR} -- \
             ${BASE_CMD} ${BASE_OVERRIDES} \
-            --override training.output_dir=${OUTPUT_DIR_DOCKER}" \
-            2>&1 | tee -a "${LOG_FILE}"
+            --override training.output_dir=${OUTPUT_DIR_DOCKER}" 2>&1
     else
         ROCPROF_ARGS="--kernel-trace"
         if [ "${ROCPROF_STATS}" = "true" ]; then
@@ -136,18 +155,16 @@ if [ "${ENABLE_ROCPROF}" = "true" ]; then
         log "Running with rocprofv3 kernel tracing inside Docker"
         ${DOCKER_EXEC} bash -c "rocprofv3 ${ROCPROF_ARGS} -d ${ROCPROF_DIR} -- \
             ${BASE_CMD} ${BASE_OVERRIDES} \
-            --override training.output_dir=${OUTPUT_DIR_DOCKER}" \
-            2>&1 | tee -a "${LOG_FILE}"
+            --override training.output_dir=${OUTPUT_DIR_DOCKER}" 2>&1
     fi
 else
     log "Running inside Docker container"
     log "Command: ${BASE_CMD} ${BASE_OVERRIDES} --override training.output_dir=${OUTPUT_DIR_DOCKER}"
     ${DOCKER_EXEC} bash -c "${BASE_CMD} ${BASE_OVERRIDES} \
-        --override training.output_dir=${OUTPUT_DIR_DOCKER}" \
-        2>&1 | tee -a "${LOG_FILE}"
+        --override training.output_dir=${OUTPUT_DIR_DOCKER}" 2>&1
 fi
 
-EXIT_CODE=${PIPESTATUS[0]}
+EXIT_CODE=$?
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 

@@ -56,6 +56,12 @@ fsdp:
   forward_prefetch: true
   sync_module_states: true
   param_init_device: meta
+  # RCCL warmup settings to avoid race conditions during FSDP init
+  rccl_warmup_iterations: 5
+  skip_rccl_warmup: false
+  # Training warmup: forward/backward/optimizer steps before main loop
+  training_warmup_steps: 1
+  skip_training_warmup: false
 
 distributed:
   backend: nccl
@@ -94,7 +100,7 @@ dataloader:
   pin_memory: true
 
 profiling:
-  enabled: true
+  enabled: false
   wait: 2
   warmup: 2
   active: 6

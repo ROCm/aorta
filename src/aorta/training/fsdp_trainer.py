@@ -10,6 +10,7 @@ import os
 import signal
 import subprocess
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Optional
 from functools import partial
@@ -27,7 +28,17 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from aorta.data import SyntheticDatasetConfig, create_dataloader
 from aorta.models import ModelConfig, RankingTransformerModel
 from aorta.profiling.stream_profiler import StreamProfiler
-from aorta.utils import detect_accelerator, get_device, get_distributed_backend, load_config, merge_cli_overrides, setup_logging
+from aorta.utils import (
+    detect_accelerator,
+    get_device,
+    get_distributed_backend,
+    load_config,
+    manual_sync_params,
+    merge_cli_overrides,
+    setup_logging,
+    warmup_rccl_communicators,
+    warmup_training_collectives,
+)
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +84,17 @@ class FSDPConfig:
     # For HYBRID_SHARD: GPUs per node (None = auto-detect from LOCAL_WORLD_SIZE env var)
     # Only set this if auto-detection fails or you want to override
     hybrid_shard_gpus_per_node: Optional[int] = None
+    # Number of warmup operations to perform on RCCL communicators before FSDP init
+    # This helps avoid race conditions in inter-node RDMA setup
+    # Higher values provide more stability but increase startup time
+    rccl_warmup_iterations: int = 10
+    # Skip RCCL warmup entirely (for testing race conditions)
+    skip_rccl_warmup: bool = False
+    # Number of training warmup steps (forward/backward/optimizer) before main loop
+    # This exercises all collectives to ensure RCCL is fully established
+    training_warmup_steps: int = 1
+    # Skip training warmup entirely
+    skip_training_warmup: bool = False
 
 
 @dataclass
@@ -206,7 +228,9 @@ def dataclass_fields(cls) -> Iterable[Any]:
 
 def init_distributed(training_cfg: TrainingConfig, log_level: str) -> Dict[str, Any]:
     backend = get_distributed_backend()
-    dist.init_process_group(backend=backend)
+    # Use timeout from environment variable (set in set_env_variables.sh)
+    timeout_seconds = int(os.environ.get("TORCH_DIST_INIT_TIMEOUT", "600"))
+    dist.init_process_group(backend=backend, timeout=timedelta(seconds=timeout_seconds))
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
@@ -250,10 +274,47 @@ def build_fsdp_model(
 
     # Create process groups for hybrid_shard strategy
     process_group = None
+    shard_group = None
+    replicate_group = None
+
     if sharding == ShardingStrategy.HYBRID_SHARD:
-        process_group = _create_hybrid_shard_process_groups(fsdp_cfg.hybrid_shard_gpus_per_node)
-        if process_group is not None:
+        result = _create_hybrid_shard_process_groups(fsdp_cfg.hybrid_shard_gpus_per_node)
+        if result is not None:
+            shard_group, replicate_group = result
+            process_group = (shard_group, replicate_group)
+
+            # Warmup RCCL communicators BEFORE FSDP initialization
+            # This ensures inter-node communicators are fully established before
+            # the _sync_params_and_buffers broadcasts that can cause hangs
+            if fsdp_cfg.skip_rccl_warmup:
+                log.warning("SKIPPING RCCL warmup (skip_rccl_warmup=True) - may cause hangs or race conditions")
+            else:
+                warmup_rccl_communicators(
+                    shard_group,
+                    replicate_group,
+                    device,
+                    num_warmup_ops=fsdp_cfg.rccl_warmup_iterations,
+                )
             log.info("Created custom process groups for HYBRID_SHARD strategy")
+
+    # Ensure GPU operations are complete before FSDP wrapping
+    # This helps prevent race conditions with inter-node communicators
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    # For HYBRID_SHARD with sync_module_states, we disable automatic sync and do it
+    # manually with explicit barriers to avoid RCCL race conditions
+    use_sync_module_states = fsdp_cfg.sync_module_states
+    needs_manual_sync = False
+
+    if sharding == ShardingStrategy.HYBRID_SHARD and fsdp_cfg.sync_module_states:
+        use_sync_module_states = False
+        needs_manual_sync = True
+        log.info(
+            "Disabling sync_module_states for HYBRID_SHARD - will sync manually after wrapping"
+        )
+
+    log.info("Starting FSDP model wrapping with sync_module_states=%s", use_sync_module_states)
 
     fsdp_model = FSDP(
         model.to(device),
@@ -265,8 +326,13 @@ def build_fsdp_model(
         limit_all_gathers=fsdp_cfg.limit_all_gathers,
         forward_prefetch=fsdp_cfg.forward_prefetch,
         device_id=torch.cuda.current_device(),
-        sync_module_states=fsdp_cfg.sync_module_states,
+        sync_module_states=use_sync_module_states,
     )
+
+    # Manual parameter synchronization for HYBRID_SHARD
+    if needs_manual_sync and replicate_group is not None:
+        manual_sync_params(fsdp_model, replicate_group)
+
     if compile_cfg.enabled:
         fsdp_model = _maybe_compile(fsdp_model, compile_cfg)
     return fsdp_model
@@ -289,6 +355,10 @@ def _create_hybrid_shard_process_groups(gpus_per_node: Optional[int] = None):
     world_size = dist.get_world_size()
     rank = dist.get_rank()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+    # Get timeout from environment - same as init_process_group
+    timeout_seconds = int(os.environ.get("TORCH_DIST_INIT_TIMEOUT", "600"))
+    group_timeout = timedelta(seconds=timeout_seconds)
 
     # Auto-detect GPUs per node from environment if not provided
     if gpus_per_node is None:
@@ -320,21 +390,21 @@ def _create_hybrid_shard_process_groups(gpus_per_node: Optional[int] = None):
         return None
 
     log.info(
-        "Creating HYBRID_SHARD process groups | rank=%d world_size=%d num_nodes=%d gpus_per_node=%d node_id=%d",
-        rank, world_size, num_nodes, gpus_per_node, node_id
+        "Creating HYBRID_SHARD process groups | rank=%d world_size=%d num_nodes=%d gpus_per_node=%d node_id=%d timeout=%ds",
+        rank, world_size, num_nodes, gpus_per_node, node_id, timeout_seconds
     )
 
     # Intra-node groups: shard within each node
     for i in range(num_nodes):
         ranks_in_node = list(range(i * gpus_per_node, (i + 1) * gpus_per_node))
-        group = dist.new_group(ranks=ranks_in_node)
+        group = dist.new_group(ranks=ranks_in_node, timeout=group_timeout)
         if i == node_id:
             my_shard_group = group
 
     # Inter-node groups: replicate across nodes (same local_rank)
     for local_r in range(gpus_per_node):
         ranks_across_nodes = [node * gpus_per_node + local_r for node in range(num_nodes)]
-        group = dist.new_group(ranks=ranks_across_nodes)
+        group = dist.new_group(ranks=ranks_across_nodes, timeout=group_timeout)
         if local_r == local_rank:
             my_replicate_group = group
 
@@ -501,6 +571,10 @@ def training_loop(
                             scaler.scale(loss).backward()
                         else:
                             loss.backward()
+
+                    # Synchronize before gradient clipping to ensure backward is complete
+                    # This prevents race conditions between FSDP gradient reduction and clipping
+                    torch.cuda.synchronize()
 
                     grad_norm = None
                     if training_cfg.grad_clip_norm is not None and training_cfg.grad_clip_norm > 0:
@@ -845,6 +919,33 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
 
     profiler = StreamProfiler(env["device"])
 
+    # Training warmup: run a few forward/backward/optimizer steps to warm up collectives
+    if not fsdp_cfg.skip_training_warmup and fsdp_cfg.training_warmup_steps > 0:
+        log.info("Starting training warmup with %d steps...", fsdp_cfg.training_warmup_steps)
+        # Determine autocast dtype for warmup
+        mp_mode = training_cfg.mixed_precision.lower()
+        if mp_mode == "fp16":
+            warmup_autocast_dtype = torch.float16
+            warmup_scaler = torch.cuda.amp.GradScaler()
+        elif mp_mode == "bf16":
+            warmup_autocast_dtype = torch.bfloat16
+            warmup_scaler = None
+        else:
+            warmup_autocast_dtype = None
+            warmup_scaler = None
+
+        warmup_training_collectives(
+            model=model,
+            optimizer=optimizer,
+            dataloader=dataloader,
+            device=env["device"],
+            autocast_dtype=warmup_autocast_dtype,
+            scaler=warmup_scaler,
+            loss_fn=compute_loss,
+            num_warmup_steps=fsdp_cfg.training_warmup_steps,
+        )
+        log.info("Training warmup complete")
+
     try:
         training_loop(
             model,
@@ -858,8 +959,15 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
             profiler_cfg,
         )
     finally:
-        dist.barrier()
-        dist.destroy_process_group()
+        if dist.is_initialized():
+            try:
+                dist.barrier()
+            except Exception as e:
+                log.warning("Barrier failed during cleanup: %s", e)
+            try:
+                dist.destroy_process_group()
+            except Exception as e:
+                log.warning("destroy_process_group failed: %s", e)
 
 
 __all__ = ["main", "main_cli"]

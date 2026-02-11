@@ -6,6 +6,7 @@ This module provides shared utilities for:
 - GPU timing utilities
 - Configuration loading
 - Logging setup
+- Distributed training warmup
 """
 
 from .config import load_config, merge_cli_overrides
@@ -50,6 +51,11 @@ from .timing import (
     StreamTimer,
     TimingContext,
 )
+from .warmup import (
+    manual_sync_params,
+    warmup_rccl_communicators,
+    warmup_training_collectives,
+)
 
 __all__ = [
     # Config
@@ -92,4 +98,8 @@ __all__ = [
     "TimingContext",
     "StreamTimer",
     "CPUTimer",
+    # Warmup
+    "warmup_rccl_communicators",
+    "manual_sync_params",
+    "warmup_training_collectives",
 ]
