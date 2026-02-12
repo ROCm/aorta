@@ -347,14 +347,35 @@ def _run_comparison_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipelineRe
         else:
             result.steps_skipped.append("excel (disabled)")
 
-        # Step 3: Generate Plots (placeholder for Phase 6)
+        # Step 3: Generate Comparison Plots
         if config.plots:
             if config.verbose:
                 print("\n" + "=" * 60)
                 print("STEP 3: Generate Comparison Plots")
                 print("=" * 60)
-                print("  (Not yet implemented - Phase 6)")
-            result.steps_skipped.append("plots (not implemented)")
+
+            try:
+                from ..generators.hwqueue_plots import generate_comparison_plots
+
+                plots_dir = config.output_dir / "plots"
+                plot_files = generate_comparison_plots(
+                    baseline_data=baseline_data,
+                    test_data=test_data,
+                    common_workloads=common,
+                    output_dir=plots_dir,
+                    baseline_label=baseline_label,
+                    test_label=test_label,
+                    threshold=config.threshold,
+                    verbose=config.verbose,
+                )
+                result.files_generated["plots"] = plot_files
+                result.steps_completed.append("plots")
+
+                if config.verbose:
+                    print(f"  ✓ Generated {len(plot_files)} comparison plot(s)")
+            except Exception as e:
+                result.warnings.append(f"Failed to generate plots: {e}")
+                result.steps_skipped.append("plots (failed)")
         else:
             result.steps_skipped.append("plots (disabled)")
 

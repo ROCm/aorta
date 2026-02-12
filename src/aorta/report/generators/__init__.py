@@ -18,6 +18,7 @@ from .hwqueue_plots import (
     generate_hwqueue_plots,
     generate_single_run_plots,
     generate_sweep_plots,
+    generate_comparison_plots,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "generate_hwqueue_plots",
     "generate_single_run_plots",
     "generate_sweep_plots",
+    "generate_comparison_plots",
 ]
