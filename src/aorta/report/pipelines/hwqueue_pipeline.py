@@ -212,14 +212,29 @@ def _run_single_input_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipeline
         else:
             result.steps_skipped.append("plots (disabled)")
 
-        # Step 4: Generate HTML (placeholder for Phase 7)
+        # Step 4: Generate HTML Report
         if config.html:
             if config.verbose:
                 print("\n" + "=" * 60)
                 print("STEP 4: Generate HTML Report")
                 print("=" * 60)
-                print("  (Not yet implemented - Phase 7)")
-            result.steps_skipped.append("html (not implemented)")
+
+            try:
+                from ..generators.hwqueue_html import generate_hwqueue_html
+
+                plots_dir = config.output_dir / "plots"
+                html_filename = f"hwqueue_{data.workload_name}_report.html"
+                html_path = config.output_dir / html_filename
+
+                output_file = generate_hwqueue_html(data, plots_dir, html_path, verbose=config.verbose)
+                result.files_generated["html"] = output_file
+                result.steps_completed.append("html")
+
+                if config.verbose:
+                    print(f"  ✓ Generated: {output_file.name}")
+            except Exception as e:
+                result.warnings.append(f"Failed to generate HTML: {e}")
+                result.steps_skipped.append("html (failed)")
         else:
             result.steps_skipped.append("html (disabled)")
 
@@ -379,14 +394,42 @@ def _run_comparison_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipelineRe
         else:
             result.steps_skipped.append("plots (disabled)")
 
-        # Step 4: Generate HTML (placeholder for Phase 7)
+        # Step 4: Generate HTML Report
         if config.html:
             if config.verbose:
                 print("\n" + "=" * 60)
                 print("STEP 4: Generate HTML Report")
                 print("=" * 60)
-                print("  (Not yet implemented - Phase 7)")
-            result.steps_skipped.append("html (not implemented)")
+
+            try:
+                from ..generators.hwqueue_html import generate_comparison_html
+
+                plots_dir = config.output_dir / "plots"
+                html_path = config.output_dir / "hwqueue_comparison_report.html"
+
+                output_file = generate_comparison_html(
+                    baseline_data=baseline_data,
+                    test_data=test_data,
+                    common_workloads=common,
+                    baseline_only=baseline_only,
+                    test_only=test_only,
+                    regressions=result.regressions,
+                    improvements=result.improvements,
+                    plots_dir=plots_dir,
+                    output_path=html_path,
+                    baseline_label=baseline_label,
+                    test_label=test_label,
+                    threshold=config.threshold,
+                    verbose=config.verbose,
+                )
+                result.files_generated["html"] = output_file
+                result.steps_completed.append("html")
+
+                if config.verbose:
+                    print(f"  ✓ Generated: {output_file.name}")
+            except Exception as e:
+                result.warnings.append(f"Failed to generate HTML: {e}")
+                result.steps_skipped.append("html (failed)")
         else:
             result.steps_skipped.append("html (disabled)")
 

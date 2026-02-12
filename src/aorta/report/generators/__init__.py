@@ -20,6 +20,12 @@ from .hwqueue_plots import (
     generate_sweep_plots,
     generate_comparison_plots,
 )
+from .hwqueue_html import (
+    generate_hwqueue_html,
+    generate_single_run_html,
+    generate_sweep_html,
+    generate_comparison_html,
+)
 
 __all__ = [
     "generate_html",
@@ -37,4 +43,8 @@ __all__ = [
     "generate_single_run_plots",
     "generate_sweep_plots",
     "generate_comparison_plots",
+    "generate_hwqueue_html",
+    "generate_single_run_html",
+    "generate_sweep_html",
+    "generate_comparison_html",
 ]
