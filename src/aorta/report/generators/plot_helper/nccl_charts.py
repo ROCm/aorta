@@ -68,7 +68,13 @@ def plot_nccl_comparison(
         # Sheet might not exist
         return []
 
-    df["label"] = df["Collective name"] + "\n" + df["In msg nelems"].astype(str)
+    # Required columns for labels (cross-timestamp may have empty sheet when baseline/test don't match)
+    name_col = "Collective name" if "Collective name" in df.columns else None
+    nelems_col = "In msg nelems" if "In msg nelems" in df.columns else None
+    if not name_col or not nelems_col or len(df) == 0:
+        return []
+
+    df["label"] = df[name_col].astype(str) + "\n" + df[nelems_col].astype(str)
 
     x = np.arange(len(df))
     # Adjust bar width based on mode
@@ -128,6 +134,10 @@ def plot_nccl_percent_change(
         df = pd.read_excel(excel_path, sheet_name="NCCL_ImplicitSyncCmp")
     except ValueError:
         # Sheet might not exist
+        return None
+
+    # Cross-timestamp may have empty sheet when baseline/test collective data don't match
+    if "In msg nelems" not in df.columns or len(df) == 0:
         return None
 
     fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(14, 6))

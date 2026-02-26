@@ -849,6 +849,18 @@ output/
    - Ensure `openpyxl` is installed
    - Hidden sheets can be revealed: Right-click sheet tab → Unhide
 
+5. **Empty collective comparison (especially cross-timestamp)**
+   - **Root cause:** The comparison matches rows by `(Collective name, dtype, In msg nelems)`. If baseline and test runs have different values for any of these keys, no rows match and the comparison is empty.
+   - **Data that can differ between baseline and test:**
+     | Key               | Source                  | What can differ                         |
+     |-------------------|-------------------------|----------------------------------------|
+     | Collective name   | Trace/tracelens output  | Different op names (e.g. AllReduce vs all_reduce) |
+     | dtype             | Trace output            | String variation (float32 vs fp32)      |
+     | In msg nelems     | Workload config         | Different batch/model → different sizes |
+   - **Typical causes in cross-timestamp:** Different workload, batch size, or model config between baseline (older run) and test (current run).
+   - **Diagnostic:** Run with `-v` or `--verbose` on the pipeline summary command; when the comparison is empty, it prints how many keys exist only in baseline, only in test, and in both, plus sample values. Example: `aorta-report pipeline summary -b <baseline> -t <test> -o <output> -v`
+   - **Fix:** Ensure both runs use the same workload/config, or compare runs from the same experiment (pairwise mode) instead.
+
 ### Getting Help
 
 ```bash

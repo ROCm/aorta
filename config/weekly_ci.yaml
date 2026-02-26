@@ -1,0 +1,83 @@
+# Weekly CI Kickoff Configuration
+# ================================
+# This file contains default settings for the RCCL Warp Speed Performance Analysis.
+# All values can be overridden via command-line arguments.
+
+# RCCL Build Configuration
+rccl:
+  branch: "warp_speed_v1"
+  gpu_target: "gfx950"
+
+# Test Configuration
+test:
+  # Space-separated CU,threads pairs
+  config_pairs: "56,256 37,384 32,512"
+  # Baseline configuration for comparisons
+  baseline: "56,256"
+  # Training configuration YAML path
+  training_config: "config/single_node/gemm_overlap_comm.yaml"
+
+# Docker Configuration
+docker:
+  compose_file: "docker/docker-compose.rocm70_9-1.yaml"
+  container_name: "training-overlap-bugs-rocm70_9-1"
+  # Registry credentials (for pulling private base images)
+  # Password can also be set via DOCKER_PASSWORD environment variable
+  registry_user: "rocmshared"
+  registry_password: ""  # Set via env var DOCKER_PASSWORD or --docker-password CLI arg
+  # Skip docker compose build by default (use --docker-build to enable)
+  skip_build: true
+  # If false, reuse running container; if true, always stop and restart (use --force-restart)
+  force_restart: false
+
+# Stage Skip Configuration
+# Set to true to skip a stage, false to run it
+skip:
+  docker_setup: false
+  rccl_build: true
+  install_deps: false
+  performance_tests: true
+  single_config_analysis: false
+  pairwise_comparison: false
+  compare_all_analysis: true   # Skipped by default (expensive)
+  checkout_aorta_report: false
+  cross_timestamp_comparison: false
+  convert_html_to_md: false     # Skip HTML-to-MD conversion (set true to skip this stage)
+  push_results: false           # Skipped by default (avoid accidental pushes)
+  cleanup: true                # Skipped by default (keep container running)
+
+# Test Configuration (additional options)
+# Uncomment to use explicit experiment directory instead of auto-detect
+# experiment_dir: "experiments/rccl_warp_speed_20260220_100000"
+
+# Cross-Timestamp Comparison Configuration
+cross_timestamp:
+  # Leave empty to auto-detect second-most-recent experiment
+  baseline_experiment: ""
+  # Date directory in aorta-report for baseline (e.g., "2026-02-19")
+  # If set, will look in aorta-report/{baseline_date}/rccl-warp-speed/
+  baseline_date: ""
+  # Path to aorta-report repository (relative to repo root)
+  # Using .aorta-report inside the repo makes it accessible inside Docker container
+  aorta_report_path: ".aorta-report"
+
+# Analysis Configuration (labels for aorta-report commands)
+analysis:
+  # Labels for reports (leave empty to use defaults)
+  baseline_label: ""  # e.g., "baseline", "v1.0", "2026-02-19"
+  test_label: ""      # e.g., "test", "v1.1", "2026-02-20"
+  # Override for aorta-report directory and dashboard entry (default: date from experiment dir)
+  report_label: ""    # e.g., "2026-02-24", "v1.2.3", "release-candidate"
+
+# Git Configuration (for pushing results to aorta-report)
+git:
+  user_name: "Weekly CI Bot"
+  user_email: "weekly-ci@aorta.local"
+  # GitHub token for authentication (can also use AORTA_REPORT_GITHUB_TOKEN env var)
+  github_token: ""
+
+# Output Configuration
+output:
+  log_dir: "logs"
+  log_level: "INFO"
+
