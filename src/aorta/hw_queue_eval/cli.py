@@ -105,9 +105,14 @@ def cli():
 @click.option("--quiet", "-q", is_flag=True, help="Minimal output")
 @click.option("--profile", "-p", is_flag=True, help="Enable PyTorch profiler (generates Chrome trace and TensorBoard logs)")
 @click.option("--profile-dir", default="profiles", help="Output directory for profiler traces")
+@click.option("--lock-clocks", type=int, default=None,
+              help="Lock GPU clock level (AMD: 0-7) via Magpie for deterministic results")
+@click.option("--power-limit", type=int, default=None,
+              help="Set GPU power limit in watts via Magpie")
 def run(workload: str, streams: int, iterations: int, warmup: int,
         output: Optional[str], device: str, sync_mode: str, quiet: bool,
-        profile: bool, profile_dir: str):
+        profile: bool, profile_dir: str, lock_clocks: Optional[int],
+        power_limit: Optional[int]):
     """Run a single workload evaluation.
 
     WORKLOAD: Name of the workload to run (e.g., hetero_kernels, fsdp_tp)
@@ -115,6 +120,15 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
     from aorta.hw_queue_eval.core.harness import HarnessConfig, StreamHarness
     from aorta.hw_queue_eval.core.torch_profiler import TorchProfilerWrapper, generate_profile_summary
     from aorta.hw_queue_eval.workloads.registry import WorkloadRegistry
+    from aorta.utils.gpu_control import GPUControlConfig
+
+    # Build GPU control config from CLI flags
+    gpu_ctl_enabled = lock_clocks is not None or power_limit is not None
+    gpu_control = GPUControlConfig(
+        enabled=gpu_ctl_enabled,
+        gpu_clock_level=lock_clocks,
+        power_limit_watts=power_limit,
+    ) if gpu_ctl_enabled else None
 
     try:
         # Get workload
@@ -160,8 +174,17 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
             measurement_iterations=iterations,
             sync_mode=sync_mode,
             device=device,
+            gpu_control=gpu_control,
         )
         harness = StreamHarness(config)
+
+        if gpu_ctl_enabled:
+            click.echo("GPU CONTROL (via Magpie):")
+            if lock_clocks is not None:
+                click.echo(f"  Clock level locked to: {lock_clocks}")
+            if power_limit is not None:
+                click.echo(f"  Power limit set to:    {power_limit} W")
+            click.echo()
 
         # Run workload (with optional profiling)
         profile_result = None
@@ -401,8 +424,13 @@ def _print_interpretation(workload: str, info, result, streams: int) -> None:
 @click.option("--warmup", "-w", default=10, help="Warmup iterations")
 @click.option("--output", "-o", default=None, help="Output JSON file")
 @click.option("--device", "-d", default="cuda:0", help="Target device")
+@click.option("--lock-clocks", type=int, default=None,
+              help="Lock GPU clock level (AMD: 0-7) via Magpie for deterministic results")
+@click.option("--power-limit", type=int, default=None,
+              help="Set GPU power limit in watts via Magpie")
 def sweep(workload: str, streams: str, iterations: int, warmup: int,
-          output: Optional[str], device: str):
+          output: Optional[str], device: str, lock_clocks: Optional[int],
+          power_limit: Optional[int]):
     """Run workload across multiple stream counts.
 
     WORKLOAD: Name of the workload to sweep
@@ -411,12 +439,23 @@ def sweep(workload: str, streams: str, iterations: int, warmup: int,
         HarnessConfig, StreamHarness, analyze_sweep_results,
         format_results_table, save_sweep_results
     )
+    from aorta.utils.gpu_control import GPUControlConfig
+
+    # Build GPU control config from CLI flags
+    gpu_ctl_enabled = lock_clocks is not None or power_limit is not None
+    gpu_control = GPUControlConfig(
+        enabled=gpu_ctl_enabled,
+        gpu_clock_level=lock_clocks,
+        power_limit_watts=power_limit,
+    ) if gpu_ctl_enabled else None
 
     # Parse stream counts
     stream_counts = [int(s.strip()) for s in streams.split(",")]
 
     click.echo(f"Sweeping workload: {workload}")
     click.echo(f"  Stream counts: {stream_counts}")
+    if gpu_ctl_enabled:
+        click.echo(f"  GPU control: clock_level={lock_clocks}, power_limit={power_limit}W")
     click.echo()
 
     try:
@@ -442,6 +481,7 @@ def sweep(workload: str, streams: str, iterations: int, warmup: int,
                 warmup_iterations=warmup,
                 measurement_iterations=iterations,
                 device=device,
+                gpu_control=gpu_control,
             )
             harness = StreamHarness(config)
             result = harness.run_workload(wl)

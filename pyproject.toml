@@ -64,6 +64,11 @@ hw-queue-profiling = [
     "seaborn>=0.12.0",
 ]
 
+# Magpie integration (GPU hardware control, kernel evaluation)
+magpie = [
+    "magpie-eval",
+]
+
 # Development dependencies
 dev = [
     "pytest>=8.0.0",
@@ -83,6 +88,7 @@ all = [
     "aorta[report]",
     "aorta[hw-queue]",
     "aorta[hw-queue-profiling]",
+    "aorta[magpie]",
     "aorta[dev]",
 ]
 

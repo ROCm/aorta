@@ -73,6 +73,147 @@ cli.add_command(pipeline)
 
 
 # =============================================================================
+# Magpie Integration Commands
+# =============================================================================
+
+@cli.group()
+@click.pass_context
+def magpie(ctx):
+    """Magpie benchmark integration commands.
+
+    \b
+    Import and analyze Magpie benchmark workspaces:
+      list      - List Magpie benchmark workspaces
+      show      - Show details of a Magpie benchmark run
+      import    - Import a Magpie workspace for aorta analysis
+      compare   - Quick comparison of two Magpie benchmark runs
+    """
+    pass
+
+
+@magpie.command("list")
+@click.argument("results_dir", default="./results")
+@click.pass_context
+def magpie_list(ctx, results_dir):
+    """List Magpie benchmark workspaces in RESULTS_DIR."""
+    from .magpie_adapter import locate_magpie_workspaces, read_magpie_report
+
+    workspaces = locate_magpie_workspaces(results_dir)
+    if not workspaces:
+        click.echo(f"No Magpie workspaces found in {results_dir}")
+        return
+
+    click.echo(f"Found {len(workspaces)} Magpie benchmark workspace(s):\n")
+    for ws in workspaces:
+        report = read_magpie_report(ws)
+        status = "OK" if report.get("success") else "FAIL"
+        fw = report.get("framework", "?")
+        model = report.get("model", "?")
+        tp = report.get("throughput") or {}
+        req_tp = tp.get("request_throughput", 0)
+        tl = "Y" if report.get("has_tracelens") else "N"
+
+        click.echo(
+            f"  {ws.name}  [{status}] {fw} {model}  "
+            f"{req_tp:.1f} req/s  TraceLens={tl}"
+        )
+
+
+@magpie.command("show")
+@click.argument("workspace")
+@click.pass_context
+def magpie_show(ctx, workspace):
+    """Show details of a Magpie benchmark workspace."""
+    import json as _json
+    from .magpie_adapter import read_magpie_report
+
+    report = read_magpie_report(workspace)
+    click.echo(_json.dumps(report, indent=2))
+
+
+@magpie.command("import")
+@click.argument("workspace")
+@click.option("-o", "--output", required=True, help="Output directory for aorta-format data")
+@click.option("--run-tracelens", is_flag=True,
+              help="Run TraceLens analysis on torch traces if not already present")
+@click.option("--num-ranks", default=8, help="Number of ranks for multi-rank analysis")
+@click.pass_context
+def magpie_import(ctx, workspace, output, run_tracelens, num_ranks):
+    """Import a Magpie workspace into aorta-report format.
+
+    Copies TraceLens output and torch traces so aorta-report commands
+    (analyze, compare, generate) can operate on them.
+    """
+    from .magpie_adapter import import_magpie_workspace
+
+    result = import_magpie_workspace(
+        workspace=workspace,
+        output_dir=output,
+        run_tracelens=run_tracelens,
+        num_ranks=num_ranks,
+    )
+
+    click.echo(f"Imported {len(result.get('imported_files', []))} items to {output}")
+    for f in result.get("imported_files", []):
+        click.echo(f"  {f}")
+
+    if result.get("tracelens_ran"):
+        click.echo("TraceLens analysis completed.")
+    elif result.get("tracelens_error"):
+        click.echo(f"TraceLens error: {result['tracelens_error']}", err=True)
+
+
+@magpie.command("compare")
+@click.option("-b", "--baseline", required=True, help="Baseline Magpie workspace directory")
+@click.option("-t", "--test", required=True, help="Test Magpie workspace directory")
+@click.option("-o", "--output", default=None, help="Output JSON file for comparison")
+@click.pass_context
+def magpie_compare(ctx, baseline, test, output):
+    """Quick comparison of two Magpie benchmark runs.
+
+    Computes throughput and latency deltas.
+
+    \b
+    Example:
+      aorta-report magpie compare \\
+          -b results/benchmark_vllm_20260301_120000 \\
+          -t results/benchmark_vllm_20260301_140000
+    """
+    import json as _json
+    from .magpie_adapter import compare_magpie_reports
+
+    comparison = compare_magpie_reports(baseline, test)
+
+    if "error" in comparison:
+        click.echo(f"Error: {comparison['error']}", err=True)
+        return
+
+    # Print summary
+    summary = comparison.get("summary", {})
+    overall = summary.get("overall", "unknown")
+    click.echo(f"Overall: {overall.upper()}\n")
+
+    click.echo("Throughput:")
+    for key, val in comparison.get("throughput", {}).items():
+        click.echo(
+            f"  {key}: {val['baseline']:.2f} -> {val['test']:.2f} "
+            f"({val['percent_change']:+.1f}%) [{val['status']}]"
+        )
+
+    click.echo("\nLatency:")
+    for key, val in comparison.get("latency", {}).items():
+        click.echo(
+            f"  {key}: {val['baseline']:.2f} -> {val['test']:.2f} ms "
+            f"({val['percent_change']:+.1f}%) [{val['status']}]"
+        )
+
+    if output:
+        with open(output, "w") as f:
+            _json.dump(comparison, f, indent=2)
+        click.echo(f"\nComparison saved to: {output}")
+
+
+# =============================================================================
 # Entry Point
 # =============================================================================
 

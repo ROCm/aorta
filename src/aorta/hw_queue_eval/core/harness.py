@@ -27,6 +27,8 @@ from aorta.hw_queue_eval.core.metrics import (
     ThroughputMetrics,
 )
 from aorta.utils import (
+    GPUControlConfig,
+    GPUControlManager,
     create_multi_gpu_streams,
     create_streams,
     get_available_devices,
@@ -58,6 +60,7 @@ class HarnessConfig:
     reset_memory_stats_before_run: bool = True
     use_multi_gpu: bool = True  # If True, distribute streams across all available GPUs
     devices: Optional[List[str]] = None  # Explicit list of devices (auto-detected if None)
+    gpu_control: Optional[GPUControlConfig] = None  # GPU power/frequency control via Magpie
 
     def __post_init__(self):
         if self.stream_count < 1:
@@ -194,6 +197,9 @@ class StreamHarness:
         self.devices: List[str] = []  # List of devices in use
         self._initialized = False
         self._metrics_collector: Optional[MetricsCollector] = None
+        self._gpu_control = GPUControlManager(
+            config.gpu_control or GPUControlConfig()
+        )
 
     def _initialize(self) -> None:
         """Initialize streams and prepare for run."""
@@ -268,6 +274,9 @@ class StreamHarness:
             HarnessResult with timing and metrics
         """
         self._initialize()
+
+        # Apply GPU hardware control (lock clocks, set power) before benchmark
+        gpu_hw_snapshot = self._gpu_control.apply()
 
         collector = self._metrics_collector
         collector.clear()
@@ -345,6 +354,8 @@ class StreamHarness:
                 "stream_to_device": self.stream_to_device,
             },
         }
+        if gpu_hw_snapshot:
+            metadata.update(gpu_hw_snapshot)
         if extra_metadata:
             metadata.update(extra_metadata)
 
@@ -359,6 +370,8 @@ class StreamHarness:
             extra_metadata=metadata,
         )
 
+        # Reset GPU settings after benchmark
+        self._gpu_control.reset()
         self._cleanup()
         return result
 
@@ -378,6 +391,9 @@ class StreamHarness:
             HarnessResult with timing and metrics
         """
         self._initialize()
+
+        # Apply GPU hardware control (lock clocks, set power) before benchmark
+        gpu_hw_snapshot = self._gpu_control.apply()
 
         # Setup workload
         workload.setup(self.config.stream_count, self.config.device)
@@ -456,6 +472,8 @@ class StreamHarness:
                 "stream_to_device": self.stream_to_device,
             },
         }
+        if gpu_hw_snapshot:
+            metadata.update(gpu_hw_snapshot)
         if extra_metadata:
             metadata.update(extra_metadata)
 
@@ -470,8 +488,9 @@ class StreamHarness:
             extra_metadata=metadata,
         )
 
-        # Cleanup workload
+        # Cleanup workload, reset GPU settings, then cleanup harness
         workload.cleanup()
+        self._gpu_control.reset()
         self._cleanup()
 
         return result
