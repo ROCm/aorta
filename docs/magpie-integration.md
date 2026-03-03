@@ -9,12 +9,26 @@ Magpie is a **read-only, optional dependency**. All integration code lives in th
 
 ## Installation
 
+Magpie is pulled directly from GitHub (the same pattern used for TraceLens):
+
 ```bash
 # Install aorta with Magpie support
 pip install -e ".[magpie]"
 
 # Or install everything
 pip install -e ".[all]"
+```
+
+This resolves `magpie-eval` via `git+https://github.com/AMD-AGI/Magpie.git` as declared in `pyproject.toml`.
+
+**Using a local Magpie checkout instead:** If you are developing Magpie locally, install it in editable mode first and then install aorta without the magpie extra so pip does not overwrite your local version:
+
+```bash
+# Install your local Magpie checkout
+pip install -e /path/to/Magpie
+
+# Then install aorta (skip the magpie extra since it is already satisfied)
+pip install -e ".[hw-queue,report]"
 ```
 
 When Magpie is not installed, aorta continues to work normally. GPU control flags are silently ignored (with a warning), and the report adapter operates on Magpie's file-based output without importing any Magpie modules.
