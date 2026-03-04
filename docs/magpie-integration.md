@@ -31,6 +31,8 @@ pip install -e /path/to/Magpie
 pip install -e ".[hw-queue,report]"
 ```
 
+**Docker:** The `rocm70_9-1` Docker images (`docker/Dockerfile.rocm70_9-1`, `docker/Dockerfile.rocm70_9-1-shampoo`, `docker/rccl_test/Dockerfile.rocm70_9-1`) include Magpie pre-installed alongside TraceLens. No additional install step is needed inside these containers.
+
 When Magpie is not installed, aorta continues to work normally. GPU control flags are silently ignored (with a warning), and the report adapter operates on Magpie's file-based output without importing any Magpie modules.
 
 ## GPU Hardware Control

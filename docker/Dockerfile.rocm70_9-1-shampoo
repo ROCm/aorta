@@ -29,6 +29,7 @@ RUN yum update -y --skip-broken \
 
 # Install TraceLens and additional Python packages
 RUN python3.10 -m pip install git+https://github.com/AMD-AGI/TraceLens.git || echo "TraceLens install failed, continuing..."
+RUN python3.10 -m pip install git+https://github.com/AMD-AGI/Magpie.git || echo "Magpie install failed, continuing..."
 RUN python3.10 -m pip install openpyxl seaborn pandas matplotlib pyyaml tqdm tensorboard
 
 # Download and install rocprof-trace-decoder to enable `--att` flag in rocprofv3

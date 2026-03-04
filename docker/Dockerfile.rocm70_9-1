@@ -7,6 +7,7 @@ USER root
 
 # Install additional Python packages
 RUN pip install git+https://github.com/AMD-AGI/TraceLens.git || true
+RUN pip install git+https://github.com/AMD-AGI/Magpie.git || true
 RUN pip install openpyxl seaborn
 
 # Update environment variables to ensure ROCm is used
