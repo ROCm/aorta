@@ -47,6 +47,7 @@ python -m aorta.hw_queue_eval profile hetero_kernels --streams 8
 
 | Workload | Description |
 | --- | --- |
+| `comms_compute_overlap` | Configurable comms-compute overlap with GEMM and collectives |
 | `fsdp_tp` | FSDP + Tensor Parallelism (3D parallelism) with actual collectives |
 | `moe` | Mixture of Experts with 8-16 parallel expert streams |
 | `activation_ckpt` | Activation checkpointing with recomputation patterns |
@@ -99,6 +100,48 @@ Each run collects:
 
 # Output
 --output results.json
+
+# Profiling
+--profile --profile-dir traces/
+```
+
+### Comms-Compute Overlap Options
+
+These options apply to the `comms_compute_overlap` workload:
+
+```bash
+# Workload mode
+--mode comms_compute        # or: compute_only, comms_only
+
+# GEMM configuration
+--mm-dim 2048,2048,2048     # M,N,K dimensions (single value for square)
+--num-compute 10            # GEMMs per iteration per compute stream
+--comp-dtype bfloat16       # float32, float16, bfloat16
+
+# Communication configuration
+--comm-size 128M            # supports K/M/G suffix
+--num-coll 1                # collectives per iteration
+--comm-dtype bfloat16       # float32, float16, bfloat16
+
+# Stream control
+--compute-streams 2         # independent of --streams
+
+# Distributed mode (requires torchrun)
+--real-collectives          # use real NCCL/RCCL collectives
+--async-op                  # non-blocking collectives
+--backend nccl              # nccl or gloo
+--process-groups "[0,1,2,3],[4,5,6,7]"
+```
+
+Example with all options:
+
+```bash
+torchrun --nproc_per_node=8 -m aorta.hw_queue_eval run comms_compute_overlap \
+    --streams 4 --real-collectives --async-op --backend nccl \
+    --process-groups "[0,1,2,3,4,5,6,7]" \
+    --compute-streams 2 --comp-dtype bfloat16 --comm-dtype bfloat16 \
+    --mm-dim 4096,4096,4096 --num-compute 10 --comm-size 128M \
+    --profile --profile-dir traces/
 ```
 
 ## Analysis
@@ -120,17 +163,21 @@ bash scripts/hw_queue/profile_queues.sh hetero_kernels 8
 ## Architecture
 
 ```
-src/aorta/hw_queue_eval/
-├── core/
-│   ├── harness.py        # Execution harness
-│   ├── metrics.py        # Metrics collection
-│   └── torch_profiler.py # Profiler integration
-├── workloads/
-│   ├── base.py           # Base workload classes
-│   ├── registry.py       # Workload discovery
-│   ├── distributed/      # FSDP, MoE, etc.
-│   ├── inference/        # Speculative decode, RAG, etc.
-│   ├── pipeline/         # Async dataload, ZeRO, etc.
-│   └── latency_sensitive/ # Hetero kernels, tiny kernels
-└── cli.py                # Command-line interface
+src/aorta/
+├── utils/
+│   ├── distributed.py       # torch.distributed init, process groups
+│   └── ...
+└── hw_queue_eval/
+    ├── core/
+    │   ├── harness.py        # Execution harness
+    │   ├── metrics.py        # Metrics collection
+    │   └── torch_profiler.py # Profiler integration (rank-aware traces)
+    ├── workloads/
+    │   ├── base.py           # Base workload classes
+    │   ├── registry.py       # Workload discovery
+    │   ├── distributed/      # FSDP, MoE, comm-compute overlap, etc.
+    │   ├── inference/        # Speculative decode, RAG, etc.
+    │   ├── pipeline/         # Async dataload, ZeRO, etc.
+    │   └── latency_sensitive/ # Hetero kernels, tiny kernels
+    └── cli.py                # Command-line interface
 ```

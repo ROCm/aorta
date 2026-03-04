@@ -1,0 +1,159 @@
+# Environment Variables Reference
+#
+# This file documents all environment variables tested
+# during the NaN race condition investigation.
+
+# =============================================================================
+# VARIABLES THAT EXPOSE THE BUG
+# =============================================================================
+
+GPU_MAX_HW_QUEUES:
+  value: 4
+  effect: "Exposes bug (true parallelism between streams)"
+  notes: |
+    With 4+ HW queues, each stream gets its own queue.
+    This enables true parallel execution, which exposes the race condition.
+
+    Usage: GPU_MAX_HW_QUEUES=4 torchrun ...
+
+# =============================================================================
+# VARIABLES THAT MASK/FIX THE BUG
+# =============================================================================
+
+GPU_MAX_HW_QUEUES_WORKAROUND:
+  value: 2
+  effect: "Masks bug (implicit serialization)"
+  notes: |
+    With only 2 HW queues, streams must share queues.
+    This causes implicit serialization that masks the race condition.
+    This is the recommended workaround.
+
+    Usage: GPU_MAX_HW_QUEUES=2 torchrun ...
+
+NCCL_LAUNCH_ORDER_IMPLICIT:
+  value: 1
+  effect: "No NaN, but very slow"
+  notes: |
+    Forces NCCL/RCCL to serialize operations internally.
+    This prevents the race by avoiding the problematic code path entirely.
+    However, it significantly reduces performance.
+
+    Usage: NCCL_LAUNCH_ORDER_IMPLICIT=1 torchrun ...
+
+# =============================================================================
+# VARIABLES THAT DON'T HELP (STILL NaN)
+# These experiments help rule out potential causes.
+# =============================================================================
+
+ROC_SIGNAL_POOL_SIZE:
+  value: 16384
+  effect: "Still NaN"
+  rules_out: "HSA signal pool exhaustion"
+  notes: |
+    Default is 64. Increasing to 16384 didn't help.
+    This rules out signal pool exhaustion as the cause.
+
+    Usage: ROC_SIGNAL_POOL_SIZE=16384 torchrun ...
+
+DEBUG_CLR_BATCH_CPU_SYNC_SIZE:
+  value: 0
+  effect: "Still NaN"
+  rules_out: "CLR CPU batching issue"
+  notes: |
+    Disables CPU-side batching in the CLR (Compute Language Runtime).
+    Didn't help, ruling out CPU batching as the cause.
+
+    Usage: DEBUG_CLR_BATCH_CPU_SYNC_SIZE=0 torchrun ...
+
+HSA_ENABLE_SDMA:
+  value: 0
+  effect: "Still NaN"
+  rules_out: "SDMA engine issue"
+  notes: |
+    Disables SDMA (System DMA) engine, forcing shader-based copies.
+    Didn't help, ruling out SDMA-specific issues.
+
+    Usage: HSA_ENABLE_SDMA=0 torchrun ...
+
+GPU_FORCE_BLIT_COPY_SIZE:
+  value: 128
+  effect: "Still NaN"
+  rules_out: "Blit copy threshold issue"
+  notes: |
+    Forces runtime to use blit for copies under 128KB.
+    Didn't help, ruling out blit copy threshold issues.
+
+    Usage: GPU_FORCE_BLIT_COPY_SIZE=128 torchrun ...
+
+RCCL_GFX9_CHEAP_FENCE_OFF:
+  value: 1
+  effect: "Still NaN (when used alone)"
+  rules_out: "This specific fence optimization"
+  notes: |
+    Disables the cheap fence optimization in RCCL for gfx9 GPUs.
+    Didn't help when used alone.
+    Combined with NCCL_LAUNCH_ORDER_IMPLICIT=1, no NaN but slow.
+
+    Usage: RCCL_GFX9_CHEAP_FENCE_OFF=1 torchrun ...
+
+RCCL_GFX942_CHEAP_FENCE_OFF:
+  value: 1
+  effect: "Still NaN (when used alone)"
+  rules_out: "This specific fence optimization"
+  notes: |
+    Same as above but specifically for gfx942 (MI300).
+
+    Usage: RCCL_GFX942_CHEAP_FENCE_OFF=1 torchrun ...
+
+# =============================================================================
+# STREAM CONFIGURATION EXPERIMENTS
+# =============================================================================
+
+stream_experiments:
+  experiment_1:
+    description: "cudaStreamDefault instead of cudaStreamNonBlocking"
+    result: "No NaN, but slow"
+    notes: "PyTorch patch in c10/cuda/CUDAStream.cpp"
+
+  experiment_2:
+    description: "Memcpy on default stream"
+    result: "No NaN, 5% faster than sync workaround"
+    notes: "BEST WORKAROUND - fastest solution"
+
+  experiment_3:
+    description: "Datadist on default stream"
+    result: "No NaN"
+
+  experiment_4:
+    description: "H2D + datadist on same NEW stream"
+    result: "STILL NaN"
+    notes: |
+      CRITICAL EVIDENCE!
+      Operations on same stream are GUARANTEED ordered.
+      Yet NaN still occurs → Bug is in RCCL/HIP runtime.
+
+  experiment_5:
+    description: "TorchRec base class instead of datadist"
+    result: "No NaN (as expected)"
+
+# =============================================================================
+# RECOMMENDED TEST MATRIX
+# =============================================================================
+
+test_matrix:
+  - name: "Baseline (exposes bug)"
+    env: "GPU_MAX_HW_QUEUES=4"
+    expected: "May see corruption"
+
+  - name: "Workaround (masks bug)"
+    env: "GPU_MAX_HW_QUEUES=2"
+    expected: "No corruption"
+
+  - name: "Same stream (definitive test)"
+    env: "GPU_MAX_HW_QUEUES=4"
+    flags: "--same-stream"
+    expected: "If corruption → RUNTIME BUG"
+
+  - name: "NCCL serialize (slow workaround)"
+    env: "GPU_MAX_HW_QUEUES=4 NCCL_LAUNCH_ORDER_IMPLICIT=1"
+    expected: "No corruption, but slow"

@@ -9,6 +9,16 @@ This module provides shared utilities for:
 """
 
 from .config import load_config, merge_cli_overrides
+from .distributed import (
+    cleanup_distributed,
+    create_process_groups,
+    get_local_rank,
+    get_rank,
+    get_world_size,
+    init_distributed,
+    is_distributed,
+    parse_process_groups,
+)
 from .device import (
     # Constants
     BACKEND_NAME,
@@ -56,6 +66,15 @@ __all__ = [
     # Config
     "load_config",
     "merge_cli_overrides",
+    # Distributed
+    "init_distributed",
+    "cleanup_distributed",
+    "is_distributed",
+    "get_rank",
+    "get_world_size",
+    "get_local_rank",
+    "parse_process_groups",
+    "create_process_groups",
     # Logging
     "setup_logging",
     # Device - constants

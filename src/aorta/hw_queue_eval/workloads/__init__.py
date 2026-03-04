@@ -2,7 +2,7 @@
 Workload implementations for hardware queue evaluation.
 
 Workload categories:
-- distributed: FSDP, TP, MoE, gradient accumulation patterns
+- distributed: Comm-compute overlap, FSDP, TP, MoE, gradient accumulation
 - inference: Speculative decoding, continuous batching, RAG pipelines
 - pipeline: Async data loading, ZeRO offload, torch.compile patterns
 - latency_sensitive: Heterogeneous kernels, graph subgraph execution

@@ -27,6 +27,14 @@ bash scripts/launch_rocm.sh config/default.yaml
 python -m aorta.hw_queue_eval list                          # List workloads
 python -m aorta.hw_queue_eval run hetero_kernels --streams 8
 python -m aorta.hw_queue_eval sweep hetero_kernels --streams 1,2,4,8,16
+
+# Comm-compute overlap (simulated collectives)
+python -m aorta.hw_queue_eval run comms_compute_overlap --streams 4 --profile
+
+# Comm-compute overlap (real NCCL collectives via torchrun)
+torchrun --nproc_per_node=8 -m aorta.hw_queue_eval run comms_compute_overlap \
+    --streams 4 --real-collectives --async-op --backend nccl \
+    --process-groups "[0,1,2,3,4,5,6,7]" --profile --profile-dir traces/
 ```
 
 ## Example Analysis

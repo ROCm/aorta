@@ -151,8 +151,11 @@ class TorchProfilerWrapper:
         Returns:
             ProfilerResult with paths to generated traces
         """
+        from aorta.utils.distributed import get_rank, is_distributed
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"{name}_{timestamp}"
+        rank_prefix = f"rank{get_rank()}_" if is_distributed() else ""
+        run_name = f"{rank_prefix}{name}_{timestamp}"
 
         result = ProfilerResult()
 
@@ -301,8 +304,11 @@ class TorchProfilerWrapper:
         Returns:
             ProfilerResult after context exits
         """
+        from aorta.utils.distributed import get_rank, is_distributed
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"{name}_{timestamp}"
+        rank_prefix = f"rank{get_rank()}_" if is_distributed() else ""
+        run_name = f"{rank_prefix}{name}_{timestamp}"
 
         with profile(
             activities=self.config.get_activities(),

@@ -1,0 +1,101 @@
+# Minimal RCCL Race Condition Reproducer Configuration
+#
+# This config is tuned to maximize the chance of reproducing the runtime bug.
+#
+# Usage:
+#   GPU_MAX_HW_QUEUES=4 torchrun --nproc_per_node=8 -m aorta.race \
+#       --config config/race/minimal_reproducer.yaml
+#
+# See also: config/race/env_vars_reference.yaml for env var documentation
+
+# =============================================================================
+# Iteration Settings
+# =============================================================================
+warmup_iterations: 100
+# Number of iterations WITHOUT verification.
+# Builds up RCCL/runtime state before checking for corruption.
+# The bug typically manifests after ~100 steps.
+
+verify_iterations: 10000
+# Number of iterations WITH verification.
+# Uses known-pattern data to detect ANY corruption (not just NaN).
+
+stop_on_first_corruption: true
+# Stop immediately when corruption is detected.
+
+log_interval: 100
+# Log progress every N iterations.
+
+# =============================================================================
+# Tensor Sizes (Stress Factors)
+# =============================================================================
+h2d_tensor_size: 1000000
+# H2D tensor size (1M elements = ~2MB in bfloat16).
+# Larger = longer DMA = more overlap opportunity.
+
+alltoall_tensor_size: 100000
+# all_to_all tensor size per rank (100K elements).
+# Total transfer = alltoall_tensor_size * world_size.
+
+allreduce_tensor_size: 100000
+# all_reduce tensor size (100K elements).
+# Simulates FSDP gradient synchronization.
+
+dtype: bfloat16
+# Data type. bfloat16 matches typical training workloads.
+
+# =============================================================================
+# Compute Simulation (Match Training Timing)
+# =============================================================================
+simulate_compute: true
+# Add compute work between collectives.
+# Without this, reproducer runs ~100x faster than real training.
+
+compute_type: gemm
+# Options: gemm, transformer
+
+# --- GEMM settings (used when compute_type: gemm) ---
+gemm_size: 5120
+# GEMM matrix size (5120x5120).
+# ~14ms per GEMM on MI300X (1.95x compute vs 4096).
+
+gemm_layers: 26
+# Number of GEMM layers (26 × 14ms = ~364ms per phase).
+# With forward + backward: ~500ms/step (matches typical training profile).
+
+# --- Transformer settings (used when compute_type: transformer) ---
+model_dim: 2048
+# Hidden dimension (d_model). Attention heads = model_dim / 128.
+# FFN intermediate size = model_dim * 4.
+
+num_layers: 4
+# Number of transformer encoder layers.
+# 4 layers at model_dim=2048 gives ~300ms/step on MI350X.
+
+include_backward_compute: true
+# Also simulate backward pass.
+
+# =============================================================================
+# Buffer Management
+# =============================================================================
+reuse_buffers: true
+# Reuse tensor buffers across iterations.
+# Real training reuses buffers; fresh allocations may change timing.
+
+pin_memory: true
+# Use pinned memory for H2D source tensors.
+
+# =============================================================================
+# Stream Configuration
+# =============================================================================
+same_stream_mode: false
+# Set to true to run H2D + datadist on SAME new stream.
+# If corruption occurs in this mode, it's DEFINITIVE proof of runtime bug.
+
+# =============================================================================
+# Hardware Settings
+# =============================================================================
+gpu_max_hw_queues: 4
+# GPU_MAX_HW_QUEUES setting.
+# - 4: Exposes bug (true parallelism)
+# - 2: Masks bug (serialization) - known workaround

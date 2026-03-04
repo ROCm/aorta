@@ -9,6 +9,11 @@ Example usage:
     python -m aorta.hw_queue_eval run hetero_kernels --streams 8 --profile
     python -m aorta.hw_queue_eval run moe --streams 16 --profile --profile-dir traces/
 
+    # Run with real distributed collectives (requires torchrun)
+    torchrun --nproc_per_node=4 -m aorta.hw_queue_eval run comms_compute_overlap \\
+        --streams 4 --real-collectives --async-op --backend nccl \\
+        --process-groups "[0,1,2,3]" --profile --profile-dir traces/
+
     # Run stream count sweep
     python -m aorta.hw_queue_eval sweep hetero_kernels --streams 1,2,4,8,16,32
 
@@ -64,6 +69,31 @@ PRIORITY_WORKLOADS = {
 }
 
 
+def _parse_size(value: str) -> int:
+    """Parse a size string with optional K/M/G suffix into bytes."""
+    original = value
+    value = value.strip().upper()
+    multipliers = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}
+    try:
+        result: int
+        for suffix, mult in multipliers.items():
+            if value.endswith(suffix):
+                result = int(float(value[:-1]) * mult)
+                break
+        else:
+            result = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Invalid size value '{original}'. "
+            "Expected an integer or a number with K/M/G suffix, e.g. '128M' or '1024'."
+        ) from None
+    if result < 0:
+        raise ValueError(
+            f"Invalid size value '{original}'. Size must be non-negative."
+        )
+    return result
+
+
 def get_workload_instance(name: str, **kwargs):
     """Get a workload instance by name."""
     from aorta.hw_queue_eval.workloads.registry import get_workload
@@ -105,18 +135,58 @@ def cli():
 @click.option("--quiet", "-q", is_flag=True, help="Minimal output")
 @click.option("--profile", "-p", is_flag=True, help="Enable PyTorch profiler (generates Chrome trace and TensorBoard logs)")
 @click.option("--profile-dir", default="profiles", help="Output directory for profiler traces")
+@click.option("--real-collectives", is_flag=True,
+              help="Use real torch.distributed collectives (requires torchrun)")
+@click.option("--async-op", is_flag=True,
+              help="Issue non-blocking collectives (only with --real-collectives)")
+@click.option("--backend", type=click.Choice(["nccl", "gloo"]), default="nccl",
+              help="Distributed backend (only with --real-collectives)")
+@click.option("--process-groups", default=None,
+              help='Process group spec, e.g. "[0,1,2,3],[4,5,6,7]"')
+@click.option("--mode", "wl_mode", default=None,
+              type=click.Choice(["compute_only", "comms_only", "comms_compute"]),
+              help="Workload mode (comms_compute_overlap only)")
+@click.option("--mm-dim", default=None,
+              help="GEMM dimensions M,N,K e.g. 2048,2048,2048")
+@click.option("--num-compute", default=None, type=int,
+              help="Number of GEMM ops per iteration per compute stream")
+@click.option("--num-coll", default=None, type=int,
+              help="Number of collective ops per iteration")
+@click.option("--comm-size", default=None, type=str,
+              help="Communication tensor size in bytes (supports M/G suffix, e.g. 128M)")
+@click.option("--compute-streams", default=None, type=int,
+              help="Number of compute streams (independent of --streams)")
+@click.option("--comp-dtype", default=None,
+              type=click.Choice(["float32", "float16", "bfloat16"]),
+              help="Data type for compute (GEMM) tensors")
+@click.option("--comm-dtype", default=None,
+              type=click.Choice(["float32", "float16", "bfloat16"]),
+              help="Data type for communication tensors")
 @click.option("--lock-clocks", type=int, default=None,
               help="Lock GPU clock level (AMD: 0-7) via Magpie for deterministic results")
 @click.option("--power-limit", type=int, default=None,
               help="Set GPU power limit in watts via Magpie")
 def run(workload: str, streams: int, iterations: int, warmup: int,
         output: Optional[str], device: str, sync_mode: str, quiet: bool,
-        profile: bool, profile_dir: str, lock_clocks: Optional[int],
-        power_limit: Optional[int]):
+        profile: bool, profile_dir: str,
+        real_collectives: bool, async_op: bool, backend: str,
+        process_groups: Optional[str],
+        wl_mode: Optional[str], mm_dim: Optional[str],
+        num_compute: Optional[int], num_coll: Optional[int],
+        comm_size: Optional[str], compute_streams: Optional[int],
+        comp_dtype: Optional[str], comm_dtype: Optional[str],
+        lock_clocks: Optional[int], power_limit: Optional[int]):
     """Run a single workload evaluation.
 
     WORKLOAD: Name of the workload to run (e.g., hetero_kernels, fsdp_tp)
+
+    For distributed mode (real NCCL/RCCL collectives), launch via torchrun:
+
+        torchrun --nproc_per_node=4 -m aorta.hw_queue_eval run comms_compute_overlap
+            --streams 4 --real-collectives --backend nccl
     """
+    import os
+
     from aorta.hw_queue_eval.core.harness import HarnessConfig, StreamHarness
     from aorta.hw_queue_eval.core.torch_profiler import TorchProfilerWrapper, generate_profile_summary
     from aorta.hw_queue_eval.workloads.registry import WorkloadRegistry
@@ -130,9 +200,89 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
         power_limit_watts=power_limit,
     ) if gpu_ctl_enabled else None
 
+    # --- Distributed device auto-detection ---
+    # When --real-collectives is set, override device to cuda:{LOCAL_RANK}
+    # so that each torchrun process uses its own GPU.
+    dist_rank = 0
+    if real_collectives:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        dist_rank = int(os.environ.get("RANK", "0"))
+        device = f"cuda:{local_rank}"
+
+    # Only rank 0 prints verbose output in distributed mode
+    is_main = dist_rank == 0
+
     try:
-        # Get workload
-        wl = get_workload_instance(workload)
+        # Get workload -- pass applicable kwargs
+        kwargs = {}
+        if real_collectives:
+            kwargs.update(
+                simulate_collectives=False,
+                async_op=async_op,
+                backend=backend,
+                process_groups=process_groups,
+            )
+
+        # Workload-specific parameters (comms_compute_overlap only)
+        _overlap_opts = (
+            wl_mode, mm_dim, num_compute, num_coll,
+            comm_size, compute_streams, comp_dtype, comm_dtype,
+        )
+        if any(v is not None for v in _overlap_opts):
+            if workload != "comms_compute_overlap":
+                click.echo(
+                    f"Error: Options --mode, --mm-dim, --num-compute, --num-coll, "
+                    f"--comm-size, --compute-streams, --comp-dtype, --comm-dtype "
+                    f"are only valid for the comms_compute_overlap workload, "
+                    f"not '{workload}'.",
+                    err=True,
+                )
+                sys.exit(1)
+
+            if wl_mode is not None:
+                kwargs["mode"] = wl_mode
+            if mm_dim is not None:
+                try:
+                    parts = [int(x.strip()) for x in mm_dim.split(",")]
+                except ValueError:
+                    click.echo(
+                        "Error: --mm-dim must contain integers, e.g. '2048,2048,2048'",
+                        err=True,
+                    )
+                    sys.exit(1)
+                if len(parts) == 1:
+                    kwargs["mm_dim"] = (parts[0], parts[0], parts[0])
+                elif len(parts) == 3:
+                    kwargs["mm_dim"] = tuple(parts)
+                else:
+                    click.echo("Error: --mm-dim must be M,N,K or a single value", err=True)
+                    sys.exit(1)
+                if any(d <= 0 for d in kwargs["mm_dim"]):
+                    click.echo("Error: --mm-dim dimensions must be positive integers", err=True)
+                    sys.exit(1)
+            if num_compute is not None:
+                if num_compute <= 0:
+                    click.echo("Error: --num-compute must be a positive integer", err=True)
+                    sys.exit(1)
+                kwargs["num_compute_per_iter"] = num_compute
+            if num_coll is not None:
+                if num_coll <= 0:
+                    click.echo("Error: --num-coll must be a positive integer", err=True)
+                    sys.exit(1)
+                kwargs["num_coll_per_iter"] = num_coll
+            if comm_size is not None:
+                kwargs["comm_size_bytes"] = _parse_size(comm_size)
+            if compute_streams is not None:
+                if compute_streams <= 0:
+                    click.echo("Error: --compute-streams must be a positive integer", err=True)
+                    sys.exit(1)
+                kwargs["compute_streams"] = compute_streams
+            if comp_dtype is not None:
+                kwargs["comp_data_type"] = comp_dtype
+            if comm_dtype is not None:
+                kwargs["comm_data_type"] = comm_dtype
+
+        wl = get_workload_instance(workload, **kwargs)
         info = WorkloadRegistry.get_info(workload)
 
         # Check stream count compatibility
@@ -143,29 +293,36 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
             )
             sys.exit(1)
 
-        # Print header with workload info
-        click.echo("=" * 70)
-        click.echo("GPU HARDWARE QUEUE EVALUATION")
-        click.echo("=" * 70)
-        click.echo()
-        click.echo(f"WORKLOAD: {workload}")
-        click.echo(f"  {info.description}")
-        click.echo()
-        click.echo("PURPOSE:")
-        _print_workload_purpose(workload, info)
-        click.echo()
-        click.echo("TEST CONFIGURATION:")
-        click.echo(f"  Concurrent streams:     {streams} (recommended: {info.recommended_streams})")
-        click.echo(f"  Measurement iterations: {iterations}")
-        click.echo(f"  Warmup iterations:      {warmup}")
-        click.echo(f"  Device:                 {device}")
-        click.echo(f"  Switch sensitivity:     {info.switch_latency_sensitivity}")
-        click.echo()
-        click.echo("-" * 70)
-        click.echo("Running workload...")
-        if profile:
-            click.echo("  (Profiling enabled - will generate Chrome trace and TensorBoard logs)")
-        click.echo()
+        # Print header with workload info (rank 0 only in distributed mode)
+        if is_main:
+            click.echo("=" * 70)
+            click.echo("GPU HARDWARE QUEUE EVALUATION")
+            click.echo("=" * 70)
+            click.echo()
+            click.echo(f"WORKLOAD: {workload}")
+            click.echo(f"  {info.description}")
+            click.echo()
+            click.echo("PURPOSE:")
+            _print_workload_purpose(workload, info)
+            click.echo()
+            click.echo("TEST CONFIGURATION:")
+            click.echo(f"  Concurrent streams:     {streams} (recommended: {info.recommended_streams})")
+            click.echo(f"  Measurement iterations: {iterations}")
+            click.echo(f"  Warmup iterations:      {warmup}")
+            click.echo(f"  Device:                 {device}")
+            click.echo(f"  Switch sensitivity:     {info.switch_latency_sensitivity}")
+            if real_collectives:
+                world_size = int(os.environ.get("WORLD_SIZE", "1"))
+                click.echo(f"  Distributed:            yes (backend={backend}, world_size={world_size})")
+                click.echo(f"  Async collectives:      {async_op}")
+                if process_groups:
+                    click.echo(f"  Process groups:         {process_groups}")
+            click.echo()
+            click.echo("-" * 70)
+            click.echo("Running workload...")
+            if profile:
+                click.echo("  (Profiling enabled - will generate Chrome trace and TensorBoard logs)")
+            click.echo()
 
         # Create harness
         config = HarnessConfig(
@@ -214,94 +371,95 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
         # Run regular benchmark (always, for metrics)
         result = harness.run_workload(wl)
 
-        # Print results with interpretation
-        click.echo("-" * 70)
-        click.echo("RESULTS")
-        click.echo("-" * 70)
-        click.echo()
+        # Print results with interpretation (rank 0 only)
+        if is_main:
+            click.echo("-" * 70)
+            click.echo("RESULTS")
+            click.echo("-" * 70)
+            click.echo()
 
-        click.echo("THROUGHPUT:")
-        click.echo(f"  {result.throughput:,.2f} {result.throughput_unit}")
-        click.echo(f"  (Higher is better - measures how much work completed per second)")
-        click.echo()
+            click.echo("THROUGHPUT:")
+            click.echo(f"  {result.throughput:,.2f} {result.throughput_unit}")
+            click.echo(f"  (Higher is better - measures how much work completed per second)")
+            click.echo()
 
-        click.echo("LATENCY (per iteration):")
-        click.echo(f"  Mean:  {result.latency_ms['mean']:.3f} ms")
-        click.echo(f"  P50:   {result.latency_ms['p50']:.3f} ms  (median - 50% of iterations faster than this)")
-        click.echo(f"  P95:   {result.latency_ms['p95']:.3f} ms  (95% of iterations faster than this)")
-        click.echo(f"  P99:   {result.latency_ms['p99']:.3f} ms  (99% of iterations faster than this)")
-        click.echo(f"  (Lower is better - time to complete one iteration across all {streams} streams)")
-        click.echo()
+            click.echo("LATENCY (per iteration):")
+            click.echo(f"  Mean:  {result.latency_ms['mean']:.3f} ms")
+            click.echo(f"  P50:   {result.latency_ms['p50']:.3f} ms  (median - 50% of iterations faster than this)")
+            click.echo(f"  P95:   {result.latency_ms['p95']:.3f} ms  (95% of iterations faster than this)")
+            click.echo(f"  P99:   {result.latency_ms['p99']:.3f} ms  (99% of iterations faster than this)")
+            click.echo(f"  (Lower is better - time to complete one iteration across all {streams} streams)")
+            click.echo()
 
-        # Latency variance analysis
-        latency_ratio = result.latency_ms['p99'] / result.latency_ms['p50'] if result.latency_ms['p50'] > 0 else 1
-        if latency_ratio > 2.0:
-            click.echo(f"  WARNING: High latency variance (P99/P50 = {latency_ratio:.1f}x)")
-            click.echo(f"    This may indicate queue contention or scheduling issues")
-        elif latency_ratio > 1.5:
-            click.echo(f"  Note: Moderate latency variance (P99/P50 = {latency_ratio:.1f}x)")
-        click.echo()
+            # Latency variance analysis
+            latency_ratio = result.latency_ms['p99'] / result.latency_ms['p50'] if result.latency_ms['p50'] > 0 else 1
+            if latency_ratio > 2.0:
+                click.echo(f"  WARNING: High latency variance (P99/P50 = {latency_ratio:.1f}x)")
+                click.echo(f"    This may indicate queue contention or scheduling issues")
+            elif latency_ratio > 1.5:
+                click.echo(f"  Note: Moderate latency variance (P99/P50 = {latency_ratio:.1f}x)")
+            click.echo()
 
-        click.echo("QUEUE SWITCH ANALYSIS:")
-        if result.switch_latency:
-            switch_overhead = result.switch_latency['estimated_switch_overhead_ms']
-            inter_gap = result.switch_latency['inter_stream_gap_ms']
-            intra_gap = result.switch_latency['intra_stream_gap_ms']
+            click.echo("QUEUE SWITCH ANALYSIS:")
+            if result.switch_latency:
+                switch_overhead = result.switch_latency['estimated_switch_overhead_ms']
+                inter_gap = result.switch_latency['inter_stream_gap_ms']
+                intra_gap = result.switch_latency['intra_stream_gap_ms']
 
-            click.echo(f"  Inter-stream gap: {inter_gap:.3f} ms (avg gap between kernels on DIFFERENT streams)")
-            click.echo(f"  Intra-stream gap: {intra_gap:.3f} ms (avg gap between kernels on SAME stream)")
-            click.echo(f"  Est. switch overhead: {switch_overhead:.3f} ms")
+                click.echo(f"  Inter-stream gap: {inter_gap:.3f} ms (avg gap between kernels on DIFFERENT streams)")
+                click.echo(f"  Intra-stream gap: {intra_gap:.3f} ms (avg gap between kernels on SAME stream)")
+                click.echo(f"  Est. switch overhead: {switch_overhead:.3f} ms")
 
-            if switch_overhead > 0.1:
-                click.echo(f"  Significant queue switch overhead detected")
-                click.echo(f"    This suggests hardware queue contention at {streams} streams")
-            elif switch_overhead > 0.01:
-                click.echo(f"  Moderate queue switch overhead")
+                if switch_overhead > 0.1:
+                    click.echo(f"  Significant queue switch overhead detected")
+                    click.echo(f"    This suggests hardware queue contention at {streams} streams")
+                elif switch_overhead > 0.01:
+                    click.echo(f"  Moderate queue switch overhead")
+                else:
+                    click.echo(f"  Minimal queue switch overhead")
             else:
-                click.echo(f"  Minimal queue switch overhead")
-        else:
-            click.echo(f"  (Not enough data to estimate switch overhead)")
-        click.echo()
-
-        click.echo("TIMING:")
-        click.echo(f"  Total measurement time: {result.total_time_ms:.2f} ms ({result.total_time_ms/1000:.2f} sec)")
-        click.echo()
-
-        # Summary
-        click.echo("-" * 70)
-        click.echo("INTERPRETATION")
-        click.echo("-" * 70)
-        _print_interpretation(workload, info, result, streams)
-
-        # Print profile results if profiling was enabled
-        if profile and profile_result:
+                click.echo(f"  (Not enough data to estimate switch overhead)")
             click.echo()
+
+            click.echo("TIMING:")
+            click.echo(f"  Total measurement time: {result.total_time_ms:.2f} ms ({result.total_time_ms/1000:.2f} sec)")
+            click.echo()
+
+            # Summary
             click.echo("-" * 70)
-            click.echo("PROFILER OUTPUT")
+            click.echo("INTERPRETATION")
             click.echo("-" * 70)
-            click.echo()
-            click.echo(generate_profile_summary(profile_result))
+            _print_interpretation(workload, info, result, streams)
 
-        # Save to file if requested
-        if output:
-            result.to_json(output)
-            click.echo()
-            click.echo(f"Results saved to: {output}")
+            # Print profile results if profiling was enabled
+            if profile and profile_result:
+                click.echo()
+                click.echo("-" * 70)
+                click.echo("PROFILER OUTPUT")
+                click.echo("-" * 70)
+                click.echo()
+                click.echo(generate_profile_summary(profile_result))
 
-        click.echo()
-        click.echo("=" * 70)
-        click.echo("To compare with different stream counts, run:")
-        click.echo(f"  python -m aorta.hw_queue_eval sweep {workload} --streams 1,2,4,8,16,32")
-        if profile:
+            # Save to file if requested
+            if output:
+                result.to_json(output)
+                click.echo()
+                click.echo(f"Results saved to: {output}")
+
             click.echo()
-            click.echo("Profile traces saved to:")
-            if profile_result and profile_result.chrome_trace_path:
-                click.echo(f"  Chrome trace: {profile_result.chrome_trace_path}")
-                click.echo(f"    View: Open chrome://tracing and load the JSON file")
-            if profile_result and profile_result.tensorboard_dir:
-                click.echo(f"  TensorBoard: {profile_result.tensorboard_dir}")
-                click.echo(f"    View: tensorboard --logdir={profile_result.tensorboard_dir}")
-        click.echo("=" * 70)
+            click.echo("=" * 70)
+            click.echo("To compare with different stream counts, run:")
+            click.echo(f"  python -m aorta.hw_queue_eval sweep {workload} --streams 1,2,4,8,16,32")
+            if profile:
+                click.echo()
+                click.echo("Profile traces saved to:")
+                if profile_result and profile_result.chrome_trace_path:
+                    click.echo(f"  Chrome trace: {profile_result.chrome_trace_path}")
+                    click.echo(f"    View: Open chrome://tracing and load the JSON file")
+                if profile_result and profile_result.tensorboard_dir:
+                    click.echo(f"  TensorBoard: {profile_result.tensorboard_dir}")
+                    click.echo(f"    View: tensorboard --logdir={profile_result.tensorboard_dir}")
+            click.echo("=" * 70)
 
     except KeyError as e:
         click.echo(f"Error: Workload not found: {e}", err=True)
@@ -375,6 +533,12 @@ def _print_workload_purpose(workload: str, info) -> None:
         "torch_compile": (
             "  Multi-region torch.compile execution. Tests interaction between\n"
             "  compiled code and manual stream management."
+        ),
+        "comms_compute_overlap": (
+            "  Synthetic comm-compute overlap benchmark. Runs GEMM compute on\n"
+            "  dedicated streams while collective communication runs on a separate\n"
+            "  stream. Supports simulated or real NCCL/RCCL collectives, async ops,\n"
+            "  and configurable process groups."
         ),
     }
     click.echo(purposes.get(workload, f"  Tests {info.category} patterns with {info.switch_latency_sensitivity} switch sensitivity."))

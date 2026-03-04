@@ -225,6 +225,303 @@ class TestGraphSubgraphsWorkload:
         assert result.throughput > 0
 
 
+class TestCommsComputeOverlapWorkload:
+    """Tests for the comms_compute_overlap workload (simulated collectives)."""
+
+    # Tests for real collectives (simulate_collectives=False) are not
+    # included here because they require multi-process launch via torchrun
+    # (torch.distributed.init_process_group needs RANK, WORLD_SIZE, etc.
+    # env vars).  The existing test suite runs as a single pytest process.
+
+    @pytest.mark.parametrize("stream_count", [2, 4, 8])
+    def test_runs_at_various_stream_counts(self, stream_count):
+        """Test workload runs without error at different stream counts."""
+        from aorta.hw_queue_eval.core.harness import HarnessConfig, StreamHarness
+
+        workload = get_workload(
+            "comms_compute_overlap",
+            mm_dim=(512, 512, 512),
+            num_compute_per_iter=2,
+            comm_size_bytes=1 * 1024 * 1024,
+        )
+
+        config = HarnessConfig(
+            stream_count=stream_count,
+            warmup_iterations=2,
+            measurement_iterations=5,
+        )
+        harness = StreamHarness(config)
+        result = harness.run_workload(workload)
+
+        assert result.throughput > 0
+        assert result.stream_count == stream_count
+
+    @pytest.mark.parametrize("mode", ["compute_only", "comms_only", "comms_compute"])
+    def test_all_modes(self, mode):
+        """Test all three workload modes run without error."""
+        from aorta.hw_queue_eval.core.harness import HarnessConfig, StreamHarness
+
+        workload = get_workload(
+            "comms_compute_overlap",
+            mode=mode,
+            mm_dim=(512, 512, 512),
+            num_compute_per_iter=2,
+            comm_size_bytes=1 * 1024 * 1024,
+        )
+
+        config = HarnessConfig(
+            stream_count=4,
+            warmup_iterations=2,
+            measurement_iterations=5,
+        )
+        harness = StreamHarness(config)
+        result = harness.run_workload(workload)
+
+        assert result.throughput > 0
+
+    def test_produces_valid_metrics(self):
+        """Test that metrics are valid."""
+        from aorta.hw_queue_eval.core.harness import HarnessConfig, StreamHarness
+
+        workload = get_workload(
+            "comms_compute_overlap",
+            mm_dim=(512, 512, 512),
+            num_compute_per_iter=2,
+            comm_size_bytes=1 * 1024 * 1024,
+        )
+
+        config = HarnessConfig(
+            stream_count=4,
+            warmup_iterations=2,
+            measurement_iterations=10,
+        )
+        harness = StreamHarness(config)
+        result = harness.run_workload(workload)
+
+        assert result.latency_ms["mean"] > 0
+        assert result.latency_ms["p50"] > 0
+        assert result.latency_ms["p99"] >= result.latency_ms["p50"]
+        assert result.throughput_unit == "TFLOPS"
+
+    def test_comms_only_throughput_unit(self):
+        """Test comms_only mode reports GB/s."""
+        from aorta.hw_queue_eval.core.harness import HarnessConfig, StreamHarness
+
+        workload = get_workload(
+            "comms_compute_overlap",
+            mode="comms_only",
+            comm_size_bytes=1 * 1024 * 1024,
+        )
+
+        config = HarnessConfig(
+            stream_count=4,
+            warmup_iterations=2,
+            measurement_iterations=5,
+        )
+        harness = StreamHarness(config)
+        result = harness.run_workload(workload)
+
+        assert result.throughput_unit == "GB/s"
+
+    def test_correctness_validation(self):
+        """Test correctness validation passes."""
+        workload = get_workload(
+            "comms_compute_overlap",
+            mm_dim=(512, 512, 512),
+            num_compute_per_iter=2,
+            comm_size_bytes=1 * 1024 * 1024,
+        )
+        workload.setup(stream_count=4, device="cuda:0")
+
+        is_correct, message = workload.validate_correctness(None, None)
+
+        assert is_correct
+        workload.cleanup()
+
+    @pytest.mark.parametrize("compute_streams", [1, 2, 4])
+    def test_explicit_compute_streams(self, compute_streams):
+        """Test decoupled compute stream count."""
+        from aorta.hw_queue_eval.core.harness import HarnessConfig, StreamHarness
+
+        workload = get_workload(
+            "comms_compute_overlap",
+            mm_dim=(512, 512, 512),
+            num_compute_per_iter=2,
+            compute_streams=compute_streams,
+            comm_size_bytes=1 * 1024 * 1024,
+        )
+
+        config = HarnessConfig(
+            stream_count=8,
+            warmup_iterations=2,
+            measurement_iterations=5,
+        )
+        harness = StreamHarness(config)
+        result = harness.run_workload(workload)
+
+        assert result.throughput > 0
+
+    @pytest.mark.parametrize("comp_dt,comm_dt", [
+        ("float32", "float32"),
+        ("bfloat16", "bfloat16"),
+        ("float16", "float32"),
+    ])
+    def test_data_types(self, comp_dt, comm_dt):
+        """Test various compute and comm data type combinations."""
+        from aorta.hw_queue_eval.core.harness import HarnessConfig, StreamHarness
+
+        workload = get_workload(
+            "comms_compute_overlap",
+            mm_dim=(512, 512, 512),
+            num_compute_per_iter=2,
+            comp_data_type=comp_dt,
+            comm_data_type=comm_dt,
+            comm_size_bytes=1 * 1024 * 1024,
+        )
+
+        config = HarnessConfig(
+            stream_count=4,
+            warmup_iterations=2,
+            measurement_iterations=5,
+        )
+        harness = StreamHarness(config)
+        result = harness.run_workload(workload)
+
+        assert result.throughput > 0
+
+    def test_get_config(self):
+        """Test that get_config returns expected keys."""
+        workload = get_workload(
+            "comms_compute_overlap",
+            mm_dim=(1024, 1024, 1024),
+            compute_streams=2,
+            comp_data_type="bfloat16",
+            comm_data_type="float16",
+        )
+        workload.setup(stream_count=4, device="cuda:0")
+
+        config = workload.get_config()
+
+        assert config["name"] == "comms_compute_overlap"
+        assert config["mm_dim"] == (1024, 1024, 1024)
+        assert config["num_compute_streams"] == 2
+        assert "bfloat16" in config["comp_data_type"]
+        assert "float16" in config["comm_data_type"]
+        workload.cleanup()
+
+
+class TestParseProcessGroups:
+    """Tests for the process-group spec parser."""
+
+    def test_single_group(self):
+        from aorta.utils.distributed import parse_process_groups
+        assert parse_process_groups("[0,1,2,3]") == {0: [0, 1, 2, 3]}
+
+    def test_two_groups(self):
+        from aorta.utils.distributed import parse_process_groups
+        assert parse_process_groups("[0,1],[2,3]") == {0: [0, 1], 1: [2, 3]}
+
+    def test_four_groups(self):
+        from aorta.utils.distributed import parse_process_groups
+        result = parse_process_groups("[0,1],[2,3],[4,5],[6,7]")
+        assert result == {0: [0, 1], 1: [2, 3], 2: [4, 5], 3: [6, 7]}
+
+    def test_single_rank_groups(self):
+        from aorta.utils.distributed import parse_process_groups
+        assert parse_process_groups("[0],[1],[2]") == {0: [0], 1: [1], 2: [2]}
+
+    def test_whitespace_handling(self):
+        from aorta.utils.distributed import parse_process_groups
+        assert parse_process_groups(" [ 0 , 1 ] , [ 2 , 3 ] ") == {0: [0, 1], 1: [2, 3]}
+
+    def test_empty_string_raises(self):
+        from aorta.utils.distributed import parse_process_groups
+        with pytest.raises(ValueError, match="non-empty"):
+            parse_process_groups("")
+
+    def test_whitespace_only_raises(self):
+        from aorta.utils.distributed import parse_process_groups
+        with pytest.raises(ValueError, match="non-empty"):
+            parse_process_groups("   ")
+
+    def test_empty_brackets_raises(self):
+        from aorta.utils.distributed import parse_process_groups
+        with pytest.raises(ValueError, match="does not contain any ranks"):
+            parse_process_groups("[]")
+
+    def test_empty_group_in_list_raises(self):
+        from aorta.utils.distributed import parse_process_groups
+        with pytest.raises(ValueError, match="Empty process group"):
+            parse_process_groups("[0,1],[],[2,3]")
+
+    def test_non_integer_rank_raises(self):
+        from aorta.utils.distributed import parse_process_groups
+        with pytest.raises(ValueError, match="Non-integer"):
+            parse_process_groups("[0,abc,2]")
+
+    def test_float_rank_raises(self):
+        from aorta.utils.distributed import parse_process_groups
+        with pytest.raises(ValueError, match="Non-integer"):
+            parse_process_groups("[0,1.5,2]")
+
+    def test_negative_rank_raises(self):
+        from aorta.utils.distributed import parse_process_groups
+        with pytest.raises(ValueError, match="Negative rank"):
+            parse_process_groups("[0,-1,2]")
+
+    def test_large_ranks(self):
+        from aorta.utils.distributed import parse_process_groups
+        assert parse_process_groups("[100,200,300]") == {0: [100, 200, 300]}
+
+    def test_preserves_order(self):
+        from aorta.utils.distributed import parse_process_groups
+        assert parse_process_groups("[3,1,2,0]") == {0: [3, 1, 2, 0]}
+
+
+class TestParseSize:
+    """Tests for the CLI _parse_size helper."""
+
+    def test_plain_integer(self):
+        from aorta.hw_queue_eval.cli import _parse_size
+        assert _parse_size("1024") == 1024
+
+    def test_megabytes(self):
+        from aorta.hw_queue_eval.cli import _parse_size
+        assert _parse_size("128M") == 128 * 1024 * 1024
+
+    def test_gigabytes(self):
+        from aorta.hw_queue_eval.cli import _parse_size
+        assert _parse_size("1G") == 1024 ** 3
+
+    def test_lowercase_suffix(self):
+        from aorta.hw_queue_eval.cli import _parse_size
+        assert _parse_size("64m") == 64 * 1024 * 1024
+
+    def test_fractional_with_suffix(self):
+        from aorta.hw_queue_eval.cli import _parse_size
+        assert _parse_size("1.5G") == int(1.5 * 1024 ** 3)
+
+    def test_invalid_string_raises(self):
+        from aorta.hw_queue_eval.cli import _parse_size
+        with pytest.raises(ValueError, match="Invalid size"):
+            _parse_size("abc")
+
+    def test_empty_string_raises(self):
+        from aorta.hw_queue_eval.cli import _parse_size
+        with pytest.raises(ValueError, match="Invalid size"):
+            _parse_size("")
+
+    def test_suffix_only_raises(self):
+        from aorta.hw_queue_eval.cli import _parse_size
+        with pytest.raises(ValueError, match="Invalid size"):
+            _parse_size("M")
+
+    def test_negative_value_raises(self):
+        from aorta.hw_queue_eval.cli import _parse_size
+        with pytest.raises(ValueError, match="non-negative"):
+            _parse_size("-10M")
+
+
 class TestWorkloadRegistry:
     """Tests for workload registry."""
 

@@ -25,6 +25,7 @@ class SummaryPipelineConfig:
     baseline_label: Optional[str] = None
     test_label: Optional[str] = None
     skip_tracelens: bool = False
+    skip_baseline_gpu_processing: bool = False  # Skip baseline GPU processing (use existing file)
     gpu_timeline: bool = True
     collective: bool = True
     final_report: bool = True
@@ -188,13 +189,27 @@ def _step_process_gpu_timelines(config: SummaryPipelineConfig, result: PipelineR
         print("STEP 2: Process GPU Timelines")
         print("=" * 60)
 
-    # Process baseline (if provided)
-    if config.is_comparison_mode:
+    # Process baseline (if provided, and not skipped)
+    if config.is_comparison_mode and not config.skip_baseline_gpu_processing:
         baseline_reports = config.baseline_path / "tracelens_analysis" / "individual_reports"
         if config.verbose:
             print(f"\nProcessing baseline: {baseline_reports}")
         process_single_config(baseline_reports, verbose=config.verbose)
+    elif config.is_comparison_mode and config.skip_baseline_gpu_processing:
+        if config.verbose:
+            print("\nSkipping baseline GPU processing (--skip-baseline-gpu-processing)")
+        result.steps_skipped.append("process_baseline_gpu_timelines")
 
+        baseline_gpu_timeline = config.baseline_path / "gpu_timeline_summary_mean.xlsx"
+        if not baseline_gpu_timeline.is_file():
+            msg = (
+                "Baseline GPU timeline file not found. Cannot use "
+                "--skip-baseline-gpu-processing without existing "
+                "gpu_timeline_summary_mean.xlsx."
+            )
+            if config.verbose:
+                print(msg)
+            raise FileNotFoundError(msg)
     # Process test/single config
     test_reports = config.test_path / "tracelens_analysis" / "individual_reports"
     if config.verbose:

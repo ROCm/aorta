@@ -90,6 +90,7 @@ def add_collective_comparison(
             baseline_label,
             test_label,
             verbose,
+            sheet_name=sheet_name,
         )
 
         # Sheet name: nccl_summary_implicit_sync → nccl_implicit_sync_cmp
@@ -102,6 +103,39 @@ def add_collective_comparison(
     return result
 
 
+def _log_grouping_key_mismatch(
+    baseline_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    group_cols: List[str],
+    sheet_name: str,
+    actual_baseline: str,
+    actual_test: str,
+) -> None:
+    """Log unique grouping keys from baseline vs test to help diagnose empty comparisons."""
+    base_keys = baseline_df[group_cols].drop_duplicates()
+    test_keys = test_df[group_cols].drop_duplicates()
+
+    # Find keys only in baseline, only in test, and in both
+    base_tuples = set(tuple(r) for r in base_keys.values)
+    test_tuples = set(tuple(r) for r in test_keys.values)
+    only_baseline = base_tuples - test_tuples
+    only_test = test_tuples - base_tuples
+    in_both = base_tuples & test_tuples
+
+    print(f"    [{sheet_name}] Cross-timestamp grouping key comparison:")
+    print(f"      Keys in both (matched): {len(in_both)}")
+    print(f"      Keys only in baseline ({actual_baseline}): {len(only_baseline)}")
+    print(f"      Keys only in test ({actual_test}): {len(only_test)}")
+    if only_baseline:
+        sample = list(only_baseline)[:5]
+        for t in sample:
+            print(f"        baseline-only: {dict(zip(group_cols, t))}")
+    if only_test:
+        sample = list(only_test)[:5]
+        for t in sample:
+            print(f"        test-only: {dict(zip(group_cols, t))}")
+
+
 def _create_collective_comparison(
     df: pd.DataFrame,
     actual_baseline: str,
@@ -109,6 +143,7 @@ def _create_collective_comparison(
     baseline_label: str,
     test_label: str,
     verbose: bool,
+    sheet_name: str = "",
 ) -> pd.DataFrame:
     """Create comparison DataFrame for a single NCCL summary sheet."""
     baseline_df = df[df["source"] == actual_baseline].copy()
@@ -166,7 +201,17 @@ def _create_collective_comparison(
 
         rows.append(comp_row)
 
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    if verbose and len(result) == 0 and len(baseline_df) > 0 and len(test_df) > 0:
+        _log_grouping_key_mismatch(
+            baseline_df,
+            test_df,
+            group_cols,
+            sheet_name or "nccl_summary",
+            actual_baseline,
+            actual_test,
+        )
+    return result
 
 
 def _get_available_group_cols(df: pd.DataFrame) -> List[str]:
