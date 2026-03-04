@@ -320,23 +320,44 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
         )
         harness = StreamHarness(config)
 
-        # Run workload (with optional profiling)
+        # PHASE 1: Profiling (with multi-GPU streams matching harness behavior)
+        # Note: Profiling runs separately from benchmarking because profiler overhead
+        # would affect timing metrics. Both phases now use identical stream distribution.
         profile_result = None
         if profile:
             import torch
-            from aorta.utils import create_streams
+            from aorta.utils import create_streams, create_multi_gpu_streams, get_available_devices
 
             # Setup profiler
             profiler_wrapper = TorchProfilerWrapper(output_dir=profile_dir)
 
-            # Setup workload and streams
+            # Setup workload
             wl.setup(streams, device)
-            cuda_streams = create_streams(streams, device)
+
+            # Create streams with same multi-GPU logic as harness
+            # This fixes the bug where profiling used single-GPU streams
+            available_devices = get_available_devices()
+            if available_devices and len(available_devices) > 1:
+                cuda_streams, stream_to_device = create_multi_gpu_streams(
+                    total_stream_count=streams,
+                    devices=available_devices,
+                )
+                click.echo(f"  (Profiling with multi-GPU: {len(available_devices)} GPUs)")
+                # Show stream distribution
+                for dev in available_devices:
+                    dev_streams = [i for i, d in stream_to_device.items() if d == dev]
+                    click.echo(f"    {dev}: streams {dev_streams}")
+            else:
+                cuda_streams = create_streams(streams, device)
+                stream_to_device = {i: device for i in range(streams)}
+                click.echo(f"  (Profiling with single GPU: {device})")
 
             # Profile the workload
             def run_iteration():
                 wl.run_iteration(cuda_streams)
-                torch.cuda.synchronize()
+                # Sync ALL devices, not just default - important for multi-GPU
+                for dev in set(stream_to_device.values()):
+                    torch.cuda.synchronize(dev)
 
             profile_result = profiler_wrapper.profile_workload(
                 run_iteration,
@@ -345,7 +366,14 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
                 warmup=warmup,
             )
 
-        # Run regular benchmark (always, for metrics)
+            # Clean up resources from profiling before starting the benchmark phase.
+            wl.cleanup()
+
+        # PHASE 2: Benchmark (clean timing without profiler overhead)
+        # Note: workload.cleanup() has been called after profiling, and
+        # workload.setup() is called again inside harness.run_workload(),
+        # ensuring a clean state for timing measurements.
+        # The harness uses the same multi-GPU stream distribution as profiling above.
         result = harness.run_workload(wl)
 
         # Print results with interpretation (rank 0 only)
