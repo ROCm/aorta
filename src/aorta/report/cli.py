@@ -92,7 +92,7 @@ def magpie(ctx):
 
 
 @magpie.command("list")
-@click.argument("results_dir", default="./results")
+@click.argument("results_dir", required=False, default="./results")
 @click.pass_context
 def magpie_list(ctx, results_dir):
     """List Magpie benchmark workspaces in RESULTS_DIR."""
