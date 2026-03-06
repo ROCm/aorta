@@ -7,6 +7,7 @@ Generates self-contained HTML reports with embedded plots (base64) for:
 - Multi-workload comparison (Mode C)
 """
 
+import html
 from pathlib import Path
 from typing import List, Dict, Optional, Any, TYPE_CHECKING
 from datetime import datetime
@@ -122,6 +123,11 @@ def _generate_comparison_verdict_html(
     test_label: str,
 ) -> str:
     """Generate HTML for comparison verdict box."""
+    safe_baseline = html.escape(baseline_label)
+    safe_test = html.escape(test_label)
+    safe_verdict = html.escape(summary.verdict)
+    safe_verdict_class = html.escape(summary.verdict_class)
+
     # Build stats section
     stats_html = f"""
     <div class="verdict-stats">
@@ -134,17 +140,19 @@ def _generate_comparison_verdict_html(
     # Build summary table
     table_rows = ""
     if summary.top_improvement:
+        safe_top_improvement = html.escape(summary.top_improvement[0])
         table_rows += f"""
         <tr class="improved">
             <td>✓ Top Improvement</td>
-            <td>{summary.top_improvement[0]}</td>
+            <td>{safe_top_improvement}</td>
             <td>+{summary.top_improvement[1]:.1f}%</td>
         </tr>"""
     if summary.top_regression:
+        safe_top_regression = html.escape(summary.top_regression[0])
         table_rows += f"""
         <tr class="degraded">
             <td>✗ Top Regression</td>
-            <td>{summary.top_regression[0]}</td>
+            <td>{safe_top_regression}</td>
             <td>{summary.top_regression[1]:.1f}%</td>
         </tr>"""
 
@@ -167,9 +175,9 @@ def _generate_comparison_verdict_html(
 """
 
     return f"""
-<div class="verdict-box verdict-{summary.verdict_class}">
-    <h2>📊 Comparison Summary: {baseline_label} → {test_label}</h2>
-    <div class="verdict-headline {summary.verdict_class}">{summary.verdict}</div>
+<div class="verdict-box verdict-{safe_verdict_class}">
+    <h2>📊 Comparison Summary: {safe_baseline} → {safe_test}</h2>
+    <div class="verdict-headline {safe_verdict_class}">{safe_verdict}</div>
     {stats_html}
     {summary_table}
 </div>
@@ -478,13 +486,15 @@ def generate_comparison_html(
         verdict_html = _generate_comparison_verdict_html(summary, baseline_label, test_label)
 
     # Build HTML content
+    safe_baseline_label = html.escape(baseline_label)
+    safe_test_label = html.escape(test_label)
     body = f"""
 <body>
 
 <h1>HW Queue Eval - Comparison Report</h1>
 
 <p style="color: #666;">
-    Comparing <strong>{baseline_label}</strong> (baseline) vs <strong>{test_label}</strong> (test)
+    Comparing <strong>{safe_baseline_label}</strong> (baseline) vs <strong>{safe_test_label}</strong> (test)
     <br>
     Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 </p>
