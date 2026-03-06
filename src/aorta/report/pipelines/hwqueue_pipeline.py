@@ -274,7 +274,7 @@ def _run_comparison_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipelineRe
         if config.verbose:
             print(f"\n  Loaded {len(baseline_data)} baseline workloads")
             print(f"  Loaded {len(test_data)} test workloads")
-            for wl_name in common:
+            for wl_name in baseline_data.keys() & test_data.keys():
                 b = baseline_data[wl_name]
                 t = test_data[wl_name]
                 b_best_s, b_best_t = b.get_best_throughput()
