@@ -43,11 +43,13 @@ class SweepSummary:
     latency_ratio: float  # P99 at peak / P99 at 1 stream
 
     # Normalized status fields used for logic/CSS: "good", "warning", "poor"
-    scaling_status: str = "good"
-    latency_status: str = "good"
+    # Default to None so __post_init__ always infers from verdict text unless
+    # an explicit valid status is provided by the caller.
+    scaling_status: Optional[str] = None
+    latency_status: Optional[str] = None
 
     def __post_init__(self) -> None:
-        """Normalize status fields based on verdicts if not explicitly set."""
+        """Infer status fields from verdict text unless an explicit valid status was given."""
         valid_statuses = {"good", "warning", "poor"}
 
         if self.scaling_status not in valid_statuses:
