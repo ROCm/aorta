@@ -8,7 +8,7 @@ Generates self-contained HTML reports with embedded plots (base64) for:
 """
 
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, TYPE_CHECKING
 from datetime import datetime
 
 from ..templates.hwqueue_report_template import (
@@ -20,6 +20,9 @@ from ..templates.hwqueue_report_template import (
 )
 from ..processing.hwqueue_loader import SingleRunData, SweepData
 from .html_generator import image_to_base64
+
+if TYPE_CHECKING:
+    from ..pipelines.hwqueue_pipeline import SweepSummary, ComparisonSummary
 
 
 # =============================================================================
@@ -70,6 +73,107 @@ def _get_status_badge(change_pct: float, threshold: float = 5.0) -> str:
         return '<span class="badge badge-improved">✓ IMPROVED</span>'
     else:
         return '<span class="badge badge-ok">OK</span>'
+
+
+def _generate_sweep_verdict_html(summary: "SweepSummary") -> str:
+    """Generate HTML for sweep verdict box."""
+    status_class = summary.get_overall_status()
+
+    # Determine CSS class for each verdict
+    def get_css_class(verdict_str: str) -> str:
+        if "✗" in verdict_str:
+            return "poor"
+        elif "⚠" in verdict_str:
+            return "warning"
+        else:
+            return "good"
+
+    scaling_class = get_css_class(summary.scaling_verdict[0])
+    latency_class = get_css_class(summary.latency_verdict[0])
+
+    return f"""
+<div class="verdict-box verdict-{status_class}">
+    <h2>📊 Analysis Summary</h2>
+    <table class="verdict-table">
+        <tr>
+            <td>Peak Performance</td>
+            <td class="good">✓ {summary.peak_throughput:.0f} {summary.throughput_unit} at {summary.peak_streams} streams</td>
+        </tr>
+        <tr>
+            <td>Scaling Efficiency</td>
+            <td class="{scaling_class}">{summary.scaling_verdict[0]} ({summary.peak_efficiency*100:.0f}% efficiency at peak)</td>
+        </tr>
+        <tr>
+            <td>Latency Trend</td>
+            <td class="{latency_class}">{summary.latency_verdict[0]} - {summary.latency_verdict[1]}</td>
+        </tr>
+        <tr>
+            <td>Recommendation</td>
+            <td>→ Use <strong>{summary.optimal_streams} streams</strong> for best throughput/efficiency balance</td>
+        </tr>
+    </table>
+</div>
+"""
+
+
+def _generate_comparison_verdict_html(
+    summary: "ComparisonSummary",
+    baseline_label: str,
+    test_label: str,
+) -> str:
+    """Generate HTML for comparison verdict box."""
+    # Build stats section
+    stats_html = f"""
+    <div class="verdict-stats">
+        <span class="stat improved">✓ {summary.num_improved} improved{f" (avg +{summary.avg_improved_change:.1f}%)" if summary.avg_improved_change else ""}</span>
+        <span class="stat degraded">✗ {summary.num_degraded} degraded{f" (avg {summary.avg_degraded_change:.1f}%)" if summary.avg_degraded_change else ""}</span>
+        <span class="stat unchanged">─ {summary.num_unchanged} unchanged</span>
+    </div>
+"""
+
+    # Build summary table
+    table_rows = ""
+    if summary.top_improvement:
+        table_rows += f"""
+        <tr class="improved">
+            <td>✓ Top Improvement</td>
+            <td>{summary.top_improvement[0]}</td>
+            <td>+{summary.top_improvement[1]:.1f}%</td>
+        </tr>"""
+    if summary.top_regression:
+        table_rows += f"""
+        <tr class="degraded">
+            <td>✗ Top Regression</td>
+            <td>{summary.top_regression[0]}</td>
+            <td>{summary.top_regression[1]:.1f}%</td>
+        </tr>"""
+
+    summary_table = ""
+    if table_rows:
+        summary_table = f"""
+    <table class="verdict-summary-table">
+        <tr>
+            <th>Category</th>
+            <th>Workload</th>
+            <th>Change</th>
+        </tr>
+        {table_rows}
+        <tr class="total">
+            <td>Overall Average</td>
+            <td>{summary.total_workloads} workloads</td>
+            <td>{summary.avg_change:+.1f}%</td>
+        </tr>
+    </table>
+"""
+
+    return f"""
+<div class="verdict-box verdict-{summary.verdict_class}">
+    <h2>📊 Comparison Summary: {baseline_label} → {test_label}</h2>
+    <div class="verdict-headline {summary.verdict_class}">{summary.verdict}</div>
+    {stats_html}
+    {summary_table}
+</div>
+"""
 
 
 # =============================================================================
@@ -187,6 +291,7 @@ def generate_sweep_html(
     data: SweepData,
     plots_dir: Path,
     output_path: Path,
+    summary: Optional["SweepSummary"] = None,
     verbose: bool = False,
 ) -> Path:
     """
@@ -196,6 +301,7 @@ def generate_sweep_html(
         data: SweepData object
         plots_dir: Directory containing generated plots
         output_path: Output HTML file path
+        summary: Optional SweepSummary for verdict box
         verbose: Print progress
 
     Returns:
@@ -209,11 +315,18 @@ def generate_sweep_html(
 
     best_streams, best_throughput = data.get_best_throughput()
 
+    # Build verdict box if summary provided
+    verdict_html = ""
+    if summary:
+        verdict_html = _generate_sweep_verdict_html(summary)
+
     # Build HTML content
     body = f"""
 <body>
 
 <h1>HW Queue Eval - Sweep Analysis</h1>
+
+{verdict_html}
 
 <div class="summary-box">
     <h3>Sweep Summary</h3>
@@ -322,6 +435,7 @@ def generate_comparison_html(
     baseline_label: str = "Baseline",
     test_label: str = "Test",
     threshold: float = 0.05,
+    summary: Optional["ComparisonSummary"] = None,
     verbose: bool = False,
 ) -> Path:
     """
@@ -340,6 +454,7 @@ def generate_comparison_html(
         baseline_label: Label for baseline
         test_label: Label for test
         threshold: Regression threshold (fraction)
+        summary: Optional ComparisonSummary for verdict box
         verbose: Print progress
 
     Returns:
@@ -357,6 +472,11 @@ def generate_comparison_html(
     regression_count = len(regressions)
     improvement_count = len(improvements)
 
+    # Build verdict box if summary provided
+    verdict_html = ""
+    if summary:
+        verdict_html = _generate_comparison_verdict_html(summary, baseline_label, test_label)
+
     # Build HTML content
     body = f"""
 <body>
@@ -369,8 +489,10 @@ def generate_comparison_html(
     Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 </p>
 
+{verdict_html}
+
 <div class="summary-box">
-    <h3>Comparison Summary</h3>
+    <h3>Detailed Metrics</h3>
     <div class="metric-grid">
         <div class="metric-card">
             <div class="label">Common Workloads</div>
@@ -530,6 +652,7 @@ def generate_hwqueue_html(
     data: SingleRunData | SweepData,
     plots_dir: Path,
     output_path: Path,
+    summary: Optional["SweepSummary"] = None,
     verbose: bool = False,
 ) -> Path:
     """
@@ -541,14 +664,15 @@ def generate_hwqueue_html(
         data: SingleRunData or SweepData object
         plots_dir: Directory containing generated plots
         output_path: Output HTML file path
+        summary: Optional SweepSummary for verdict box (sweep mode only)
         verbose: Print progress
 
     Returns:
         Path to generated HTML file
     """
     if isinstance(data, SweepData):
-        return generate_sweep_html(data, plots_dir, output_path, verbose)
+        return generate_sweep_html(data, plots_dir, output_path, summary=summary, verbose=verbose)
     elif isinstance(data, SingleRunData):
-        return generate_single_run_html(data, plots_dir, output_path, verbose)
+        return generate_single_run_html(data, plots_dir, output_path, verbose=verbose)
     else:
         raise ValueError(f"Unknown data type: {type(data)}")

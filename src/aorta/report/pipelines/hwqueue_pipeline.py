@@ -13,8 +13,310 @@ Steps:
 """
 
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
+
+
+# =============================================================================
+# Summary Data Classes
+# =============================================================================
+
+
+@dataclass
+class SweepSummary:
+    """Quick verdict for sweep analysis."""
+
+    # Peak performance
+    peak_throughput: float
+    peak_streams: int
+    peak_efficiency: float
+    throughput_unit: str
+
+    # Optimal config
+    optimal_streams: int
+
+    # Verdicts (status, explanation)
+    scaling_verdict: Tuple[str, str]
+    latency_verdict: Tuple[str, str]
+
+    # Raw values for detailed display
+    latency_ratio: float  # P99 at peak / P99 at 1 stream
+
+    # Normalized status fields used for logic/CSS: "good", "warning", "poor"
+    scaling_status: str = "good"
+    latency_status: str = "good"
+
+    def __post_init__(self) -> None:
+        """Normalize status fields based on verdicts if not explicitly set."""
+        valid_statuses = {"good", "warning", "poor"}
+
+        if self.scaling_status not in valid_statuses:
+            self.scaling_status = self._infer_status_from_verdict_text(
+                self.scaling_verdict[0]
+            )
+
+        if self.latency_status not in valid_statuses:
+            self.latency_status = self._infer_status_from_verdict_text(
+                self.latency_verdict[0]
+            )
+
+    @staticmethod
+    def _infer_status_from_verdict_text(verdict_text: str) -> str:
+        """Best-effort mapping from legacy verdict text to normalized status."""
+        # Preserve existing behavior: treat "✗" as poor, "⚠" as warning, else good.
+        if "✗" in verdict_text:
+            return "poor"
+        if "⚠" in verdict_text:
+            return "warning"
+        return "good"
+
+    def get_overall_status(self) -> str:
+        """Get CSS class for overall status based on normalized statuses."""
+        if self.scaling_status == "poor" or self.latency_status == "poor":
+            return "poor"
+        if self.scaling_status == "warning" or self.latency_status == "warning":
+            return "warning"
+        return "good"
+
+
+@dataclass
+class ComparisonSummary:
+    """Quick verdict for comparison analysis."""
+
+    # Overall verdict
+    verdict: str
+    verdict_class: str  # CSS class: "improved", "degraded", "mixed", "unchanged"
+
+    # Counts
+    total_workloads: int
+    num_improved: int
+    num_degraded: int
+    num_unchanged: int
+
+    # Average change
+    avg_change: float
+
+    # Top performers
+    top_improvement: Optional[Tuple[str, float]] = None  # (workload, change%)
+    top_regression: Optional[Tuple[str, float]] = None  # (workload, change%)
+
+    # Average changes by category
+    avg_improved_change: float = 0.0
+    avg_degraded_change: float = 0.0
+
+
+# =============================================================================
+# Summary Generation Functions
+# =============================================================================
+
+
+def generate_sweep_summary(data: "SweepData") -> SweepSummary:
+    """
+    Generate quick verdict for sweep analysis.
+
+    Args:
+        data: SweepData object with results
+
+    Returns:
+        SweepSummary with verdict information
+    """
+    # Get throughputs and efficiencies from analysis or compute
+    if hasattr(data, "analysis") and data.analysis and data.analysis.throughputs:
+        # Access dataclass attributes directly (not a dict)
+        throughputs = data.analysis.throughputs
+        efficiencies = data.analysis.efficiencies
+        stream_counts = data.analysis.stream_counts
+    else:
+        # Compute from results
+        throughputs = [r.throughput for r in data.results]
+        stream_counts = [r.stream_count for r in data.results]
+        # Compute efficiency (actual / ideal where ideal uses normalized single-stream throughput)
+        base_throughput = throughputs[0] if throughputs else 1
+        baseline_streams = stream_counts[0] if stream_counts else 1
+        if base_throughput > 0 and baseline_streams > 0:
+            single_stream_throughput = base_throughput / baseline_streams
+        else:
+            single_stream_throughput = 0
+        efficiencies = [
+            (t / (single_stream_throughput * s)) if single_stream_throughput > 0 and s > 0 else 0
+            for t, s in zip(throughputs, stream_counts)
+        ]
+
+    # Find peak
+    if not throughputs:
+        # Return empty summary
+        return SweepSummary(
+            peak_throughput=0,
+            peak_streams=0,
+            peak_efficiency=0,
+            throughput_unit="ops/sec",
+            optimal_streams=0,
+            scaling_verdict=("⚠ Unknown", "No data available"),
+            latency_verdict=("⚠ Unknown", "No data available"),
+            latency_ratio=1.0,
+        )
+
+    peak_idx = throughputs.index(max(throughputs))
+    peak_throughput = throughputs[peak_idx]
+    peak_streams = stream_counts[peak_idx]
+    peak_efficiency = efficiencies[peak_idx] if peak_idx < len(efficiencies) else 0
+
+    # Get throughput unit
+    throughput_unit = data.results[0].throughput_unit if data.results else "ops/sec"
+
+    # Find optimal (highest stream count with efficiency >= 70% AND throughput >= 80% of peak)
+    optimal_idx = 0
+    for i, (eff, tput, sc) in enumerate(zip(efficiencies, throughputs, stream_counts)):
+        if eff >= 0.70 and tput >= 0.80 * peak_throughput:
+            optimal_idx = i
+    optimal_streams = stream_counts[optimal_idx] if stream_counts else peak_streams
+
+    # Check latency trend (P99 at peak vs P99 at lowest stream count)
+    sorted_results = sorted(data.results, key=lambda r: r.stream_count)
+    if sorted_results:
+        p99_at_1 = sorted_results[0].latency.p99
+        # Find the result corresponding to the peak stream count to get correct peak latency
+        peak_result = next(
+            (r for r in sorted_results if r.stream_count == peak_streams),
+            sorted_results[-1],
+        )
+        p99_at_peak = peak_result.latency.p99
+        latency_ratio = p99_at_peak / p99_at_1 if p99_at_1 > 0 else 1.0
+    else:
+        latency_ratio = 1.0
+
+    # Determine scaling verdict
+    if peak_efficiency >= 0.80:
+        scaling_verdict = ("✓ Excellent", "Near-linear scaling")
+    elif peak_efficiency >= 0.60:
+        scaling_verdict = ("✓ Good", "Good scaling with some overhead")
+    elif peak_efficiency >= 0.40:
+        scaling_verdict = ("⚠ Fair", "Significant overhead at high stream counts")
+    else:
+        scaling_verdict = ("✗ Poor", "Severe diminishing returns")
+
+    # Determine latency verdict
+    if latency_ratio <= 1.5:
+        latency_verdict = ("✓ Stable", "Latency remains controlled")
+    elif latency_ratio <= 2.5:
+        latency_verdict = ("⚠ Increasing", f"P99 latency {latency_ratio:.1f}x higher at peak")
+    else:
+        latency_verdict = ("✗ Degraded", f"P99 latency {latency_ratio:.1f}x higher - investigate")
+
+    return SweepSummary(
+        peak_throughput=peak_throughput,
+        peak_streams=peak_streams,
+        peak_efficiency=peak_efficiency,
+        throughput_unit=throughput_unit,
+        optimal_streams=optimal_streams,
+        scaling_verdict=scaling_verdict,
+        latency_verdict=latency_verdict,
+        latency_ratio=latency_ratio,
+    )
+
+
+def generate_comparison_summary(
+    baseline_data: Dict[str, "SweepData"],
+    test_data: Dict[str, "SweepData"],
+    common_workloads: List[str],
+    regressions: List[Dict],
+    improvements: List[Dict],
+    threshold: float = 0.05,
+) -> ComparisonSummary:
+    """
+    Generate quick verdict for comparison analysis.
+
+    Args:
+        baseline_data: Dict of workload_name -> SweepData for baseline
+        test_data: Dict of workload_name -> SweepData for test
+        common_workloads: List of workloads in both baseline and test
+        regressions: List of regression dicts
+        improvements: List of improvement dicts
+        threshold: Regression threshold (fraction)
+
+    Returns:
+        ComparisonSummary with verdict information
+    """
+    total = len(common_workloads)
+
+    # Count unique workloads with regressions/improvements
+    workloads_with_regression = set(r["Workload"] for r in regressions)
+    workloads_with_improvement = set(i["Workload"] for i in improvements)
+
+    num_improved = len(workloads_with_improvement - workloads_with_regression)
+    num_degraded = len(workloads_with_regression - workloads_with_improvement)
+    # Workloads with both are counted as mixed - we'll count them as degraded for simplicity
+    num_mixed = len(workloads_with_regression & workloads_with_improvement)
+    num_degraded += num_mixed
+    num_unchanged = total - num_improved - num_degraded
+
+    # Calculate throughput changes for each workload
+    changes = []
+    improved_changes = []
+    degraded_changes = []
+
+    threshold_pct = threshold * 100
+
+    for workload in common_workloads:
+        b_best_s, b_best_t = baseline_data[workload].get_best_throughput()
+        t_best_s, t_best_t = test_data[workload].get_best_throughput()
+        change_pct = ((t_best_t - b_best_t) / b_best_t * 100) if b_best_t > 0 else 0
+        changes.append((workload, change_pct))
+
+        if change_pct > threshold_pct:
+            improved_changes.append(change_pct)
+        elif change_pct < -threshold_pct:
+            degraded_changes.append(change_pct)
+
+    avg_change = sum(c[1] for c in changes) / len(changes) if changes else 0
+    avg_improved_change = sum(improved_changes) / len(improved_changes) if improved_changes else 0
+    avg_degraded_change = sum(degraded_changes) / len(degraded_changes) if degraded_changes else 0
+
+    # Find top improvement and regression
+    improvements_sorted = sorted(changes, key=lambda x: x[1], reverse=True)
+    regressions_sorted = sorted(changes, key=lambda x: x[1])
+
+    top_improvement = None
+    if improvements_sorted and improvements_sorted[0][1] > threshold_pct:
+        top_improvement = improvements_sorted[0]
+
+    top_regression = None
+    if regressions_sorted and regressions_sorted[0][1] < -threshold_pct:
+        top_regression = regressions_sorted[0]
+
+    # Determine overall verdict
+    if num_degraded == 0 and num_improved > 0:
+        verdict = "✓ ALL IMPROVED"
+        verdict_class = "improved"
+    elif num_improved == 0 and num_degraded > 0:
+        verdict = "✗ ALL DEGRADED"
+        verdict_class = "degraded"
+    elif num_improved > num_degraded * 2:
+        verdict = "✓ MOSTLY IMPROVED"
+        verdict_class = "improved"
+    elif num_degraded > num_improved * 2:
+        verdict = "⚠ MOSTLY DEGRADED"
+        verdict_class = "degraded"
+    elif num_improved > 0 or num_degraded > 0:
+        verdict = "⚠ MIXED RESULTS"
+        verdict_class = "mixed"
+    else:
+        verdict = "─ NO SIGNIFICANT CHANGE"
+        verdict_class = "unchanged"
+
+    return ComparisonSummary(
+        verdict=verdict,
+        verdict_class=verdict_class,
+        total_workloads=total,
+        num_improved=num_improved,
+        num_degraded=num_degraded,
+        num_unchanged=num_unchanged,
+        avg_change=avg_change,
+        top_improvement=top_improvement,
+        top_regression=top_regression,
+        avg_improved_change=avg_improved_change,
+        avg_degraded_change=avg_degraded_change,
+    )
 
 
 @dataclass
@@ -226,7 +528,16 @@ def _run_single_input_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipeline
                 html_filename = f"hwqueue_{data.workload_name}_report.html"
                 html_path = config.output_dir / html_filename
 
-                output_file = generate_hwqueue_html(data, plots_dir, html_path, verbose=config.verbose)
+                # Generate summary for sweep data
+                summary = None
+                if format_type == "sweep":
+                    summary = generate_sweep_summary(data)
+                    if config.verbose:
+                        print(f"  Summary: {summary.scaling_verdict[0]}, {summary.latency_verdict[0]}")
+
+                output_file = generate_hwqueue_html(
+                    data, plots_dir, html_path, summary=summary, verbose=config.verbose
+                )
                 result.files_generated["html"] = output_file
                 result.steps_completed.append("html")
 
@@ -407,6 +718,23 @@ def _run_comparison_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipelineRe
                 plots_dir = config.output_dir / "plots"
                 html_path = config.output_dir / "hwqueue_comparison_report.html"
 
+                # Generate comparison summary
+                summary = generate_comparison_summary(
+                    baseline_data=baseline_data,
+                    test_data=test_data,
+                    common_workloads=common,
+                    regressions=result.regressions,
+                    improvements=result.improvements,
+                    threshold=config.threshold,
+                )
+
+                if config.verbose:
+                    print(f"  Summary: {summary.verdict}")
+                    if summary.top_improvement:
+                        print(f"    Top improvement: {summary.top_improvement[0]} (+{summary.top_improvement[1]:.1f}%)")
+                    if summary.top_regression:
+                        print(f"    Top regression: {summary.top_regression[0]} ({summary.top_regression[1]:.1f}%)")
+
                 output_file = generate_comparison_html(
                     baseline_data=baseline_data,
                     test_data=test_data,
@@ -420,6 +748,7 @@ def _run_comparison_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipelineRe
                     baseline_label=baseline_label,
                     test_label=test_label,
                     threshold=config.threshold,
+                    summary=summary,
                     verbose=config.verbose,
                 )
                 result.files_generated["html"] = output_file
