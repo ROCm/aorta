@@ -3,6 +3,7 @@
 This module provides the 'pipeline' command group with subcommands:
   - summary: Run complete summary analysis pipeline (GPU + NCCL)
   - gemm: Run GEMM variance analysis pipeline
+  - hwqueue: Run HW Queue Eval analysis pipeline
 """
 
 import click
@@ -18,6 +19,7 @@ def pipeline(ctx):
     Commands:
       summary  - Run complete summary analysis pipeline (GPU + NCCL)
       gemm     - Run GEMM variance analysis pipeline
+      hwqueue  - Run HW Queue Eval analysis pipeline
     """
     pass
 
@@ -322,6 +324,183 @@ def pipeline_gemm(ctx, sweep_dir, output, skip_tracelens, short_kernel_threshold
             click.echo(f"  - {result.plots_dir}/ (5 plots)")
         if result.html_path:
             click.echo(f"  - {result.html_path}")
+
+    if not result.success:
+        raise click.ClickException("Pipeline failed")
+
+
+@pipeline.command("hwqueue")
+@click.option(
+    "-i", "--input", "input_path", type=click.Path(exists=True),
+    help="Single JSON file (run or sweep result)"
+)
+@click.option(
+    "--baseline-dir", type=click.Path(exists=True),
+    help="Baseline results directory (for comparison mode)"
+)
+@click.option(
+    "--test-dir", type=click.Path(exists=True),
+    help="Test results directory (for comparison mode)"
+)
+@click.option(
+    "-o", "--output", required=True, type=click.Path(),
+    help="Output directory for results"
+)
+@click.option(
+    "--baseline-label", default=None,
+    help="Label for baseline in reports (default: directory name)"
+)
+@click.option(
+    "--test-label", default=None,
+    help="Label for test in reports (default: directory name)"
+)
+@click.option(
+    "--threshold", default=0.05, type=float,
+    help="Regression threshold as fraction (default: 0.05 = 5%%)"
+)
+@click.option("--excel/--no-excel", default=True, help="Generate Excel report (default: True)")
+@click.option("--plots/--no-plots", default=True, help="Generate plots (default: True)")
+@click.option("--html/--no-html", default=True, help="Generate HTML report (default: True)")
+@click.pass_context
+def pipeline_hwqueue(
+    ctx,
+    input_path,
+    baseline_dir,
+    test_dir,
+    output,
+    baseline_label,
+    test_label,
+    threshold,
+    excel,
+    plots,
+    html,
+):
+    """Run HW Queue Eval analysis pipeline.
+
+    Analyzes JSON output from hw_queue_eval and generates reports.
+
+    \b
+    Modes:
+      - Single input: Provide --input for single run or sweep analysis
+      - Comparison: Provide --baseline-dir and --test-dir for multi-workload comparison
+
+    \b
+    Examples:
+      # Single workload sweep analysis
+      aorta-report pipeline hwqueue \\
+          --input ./results/hetero_kernels_results.json \\
+          --output ./hwqueue_report/
+
+      # Multi-workload comparison (Mode C)
+      aorta-report pipeline hwqueue \\
+          --baseline-dir ./results_baseline/ \\
+          --test-dir ./results_test/ \\
+          --baseline-label "ROCm 6.0" \\
+          --test-label "ROCm 6.1" \\
+          --output ./comparison_report/
+
+      # Comparison with custom threshold
+      aorta-report pipeline hwqueue \\
+          --baseline-dir ./baseline/ \\
+          --test-dir ./test/ \\
+          --threshold 0.10 \\
+          --output ./comparison/
+    """
+    from . import run_hwqueue_pipeline, HWQueuePipelineConfig
+
+    verbose = ctx.obj.get("verbose", False)
+    quiet = ctx.obj.get("quiet", False)
+
+    # Resolve paths
+    input_file = Path(input_path).resolve() if input_path else None
+    baseline_path = Path(baseline_dir).resolve() if baseline_dir else None
+    test_path = Path(test_dir).resolve() if test_dir else None
+    output_path = Path(output).resolve()
+
+    config = HWQueuePipelineConfig(
+        output_dir=output_path,
+        input_path=input_file,
+        baseline_dir=baseline_path,
+        test_dir=test_path,
+        baseline_label=baseline_label,
+        test_label=test_label,
+        threshold=threshold,
+        excel=excel,
+        plots=plots,
+        html=html,
+        verbose=verbose,
+    )
+
+    # Determine mode for display
+    if baseline_dir and test_dir:
+        mode_str = "Comparison Mode"
+    elif input_path:
+        mode_str = "Single Input Mode"
+    else:
+        mode_str = "Unknown Mode"
+
+    if not quiet:
+        click.echo("=" * 60)
+        click.echo(f"HW QUEUE EVAL PIPELINE ({mode_str})")
+        click.echo("=" * 60)
+
+        if input_path:
+            click.echo(f"Input: {input_path}")
+        else:
+            click.echo(f"Baseline: {baseline_dir}")
+            click.echo(f"Test: {test_dir}")
+            click.echo(f"Labels: {baseline_label or '(auto)'} vs {test_label or '(auto)'}")
+
+        click.echo(f"Output: {output}")
+        click.echo(f"Threshold: {threshold * 100:.1f}%")
+        click.echo(f"Options: excel={excel}, plots={plots}, html={html}")
+
+    result = run_hwqueue_pipeline(config)
+
+    if not quiet:
+        click.echo("\n" + "=" * 60)
+        click.echo("PIPELINE COMPLETE!" if result.success else "PIPELINE FAILED!")
+        click.echo("=" * 60)
+
+        click.echo(f"\nMode: {result.mode}")
+
+        # Show workload summary for comparison mode
+        if result.mode == "comparison":
+            click.echo(f"\nWorkload Summary:")
+            click.echo(f"  Common workloads: {len(result.common_workloads)}")
+            if result.common_workloads:
+                click.echo(f"    {result.common_workloads}")
+            if result.missing_from_test:
+                click.echo(f"  ⚠ Missing from test: {result.missing_from_test}")
+            if result.missing_from_baseline:
+                click.echo(f"  ⚠ Missing from baseline: {result.missing_from_baseline}")
+
+        if result.steps_completed:
+            click.echo("\nSteps completed:")
+            for step in result.steps_completed:
+                click.echo(f"  ✓ {step}")
+
+        if result.steps_skipped:
+            click.echo("\nSteps skipped:")
+            for step in result.steps_skipped:
+                click.echo(f"  - {step}")
+
+        if result.warnings:
+            click.echo("\nWarnings:")
+            for warn in result.warnings:
+                click.echo(f"  ⚠ {warn}")
+
+        if result.errors:
+            click.echo("\nErrors:")
+            for err in result.errors:
+                click.echo(f"  ✗ {err}")
+
+        if result.files_generated:
+            click.echo(f"\nOutput directory: {result.output_dir}")
+            click.echo("\nGenerated files:")
+            for name, path in result.files_generated.items():
+                if isinstance(path, Path):
+                    click.echo(f"  - {path}")
 
     if not result.success:
         raise click.ClickException("Pipeline failed")

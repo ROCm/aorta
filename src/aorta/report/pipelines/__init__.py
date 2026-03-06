@@ -2,6 +2,7 @@
 
 from .summary_pipeline import run_summary_pipeline, SummaryPipelineConfig, PipelineResult
 from .gemm_pipeline import run_gemm_pipeline, GemmPipelineConfig, GemmPipelineResult
+from .hwqueue_pipeline import run_hwqueue_pipeline, HWQueuePipelineConfig, HWQueuePipelineResult
 
 __all__ = [
     "run_summary_pipeline",
@@ -10,4 +11,7 @@ __all__ = [
     "run_gemm_pipeline",
     "GemmPipelineConfig",
     "GemmPipelineResult",
+    "run_hwqueue_pipeline",
+    "HWQueuePipelineConfig",
+    "HWQueuePipelineResult",
 ]
