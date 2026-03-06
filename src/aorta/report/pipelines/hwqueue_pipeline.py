@@ -138,6 +138,7 @@ def run_hwqueue_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipelineResult
 def _run_single_input_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipelineResult:
     """Run pipeline for single input file (Mode A or Mode B)."""
     from ..processing.hwqueue_loader import HWQueueLoader, HWQueueLoaderError
+    from ..generators.hwqueue_excel import generate_hwqueue_excel
 
     result = HWQueuePipelineResult(
         success=True,
@@ -170,14 +171,25 @@ def _run_single_input_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipeline
 
         result.steps_completed.append("load_data")
 
-        # Step 2: Generate Excel (placeholder for Phase 3)
+        # Step 2: Generate Excel
         if config.excel:
             if config.verbose:
                 print("\n" + "=" * 60)
                 print("STEP 2: Generate Excel Report")
                 print("=" * 60)
-                print("  (Not yet implemented - Phase 3)")
-            result.steps_skipped.append("excel (not implemented)")
+
+            excel_filename = f"hwqueue_{data.workload_name}_analysis.xlsx"
+            excel_path = config.output_dir / excel_filename
+
+            try:
+                output_file = generate_hwqueue_excel(data, excel_path, verbose=config.verbose)
+                result.files_generated["excel"] = output_file
+                result.steps_completed.append("excel")
+                if config.verbose:
+                    print(f"  ✓ Generated: {output_file.name}")
+            except Exception as e:
+                result.warnings.append(f"Failed to generate Excel: {e}")
+                result.steps_skipped.append("excel (failed)")
         else:
             result.steps_skipped.append("excel (disabled)")
 

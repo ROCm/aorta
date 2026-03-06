@@ -8,6 +8,11 @@ from .plot_generator import (
     generate_gemm_plots,
     generate_single_config_plots,
 )
+from .hwqueue_excel import (
+    generate_hwqueue_excel,
+    generate_single_run_excel,
+    generate_sweep_excel,
+)
 
 __all__ = [
     "generate_html",
@@ -17,4 +22,7 @@ __all__ = [
     "generate_summary_plots",
     "generate_gemm_plots",
     "generate_single_config_plots",
+    "generate_hwqueue_excel",
+    "generate_single_run_excel",
+    "generate_sweep_excel",
 ]
