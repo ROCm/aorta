@@ -592,6 +592,8 @@ def _build_latency_by_streams_sheet(
             b_val = b_by_streams.get(sc)
             t_val = t_by_streams.get(sc)
 
+            # TODO: Use `is not None` checks instead of truthiness checks so that
+            # legitimate 0.0 P99 values are preserved and Δ% is computed correctly.
             row[f"{sc}_Base"] = round(b_val, 3) if b_val else None
             row[f"{sc}_Test"] = round(t_val, 3) if t_val else None
 
