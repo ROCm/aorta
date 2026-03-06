@@ -12,6 +12,7 @@ from .hwqueue_excel import (
     generate_hwqueue_excel,
     generate_single_run_excel,
     generate_sweep_excel,
+    generate_comparison_excel,
 )
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "generate_hwqueue_excel",
     "generate_single_run_excel",
     "generate_sweep_excel",
+    "generate_comparison_excel",
 ]

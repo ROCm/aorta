@@ -224,6 +224,7 @@ def _run_single_input_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipeline
 def _run_comparison_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipelineResult:
     """Run pipeline for comparison mode (Mode C)."""
     from ..processing.hwqueue_loader import HWQueueLoader, HWQueueLoaderError
+    from ..generators.hwqueue_excel import generate_comparison_excel
 
     result = HWQueuePipelineResult(
         success=True,
@@ -294,14 +295,43 @@ def _run_comparison_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipelineRe
             print(f"\n  Labels: {baseline_label} vs {test_label}")
             print(f"  Threshold: {config.threshold * 100:.1f}%")
 
-        # Step 2: Generate Excel (placeholder for Phase 4)
+        # Step 2: Generate Comparison Excel
         if config.excel:
             if config.verbose:
                 print("\n" + "=" * 60)
                 print("STEP 2: Generate Comparison Excel")
                 print("=" * 60)
-                print("  (Not yet implemented - Phase 4)")
-            result.steps_skipped.append("excel (not implemented)")
+
+            excel_path = config.output_dir / "all_workloads_comparison.xlsx"
+
+            try:
+                output_file, regressions, improvements = generate_comparison_excel(
+                    baseline_data=baseline_data,
+                    test_data=test_data,
+                    common_workloads=common,
+                    baseline_only=baseline_only,
+                    test_only=test_only,
+                    output_path=excel_path,
+                    baseline_label=baseline_label,
+                    test_label=test_label,
+                    threshold=config.threshold,
+                    verbose=config.verbose,
+                )
+                result.files_generated["excel"] = output_file
+                result.regressions = regressions
+                result.improvements = improvements
+                result.steps_completed.append("excel")
+
+                if config.verbose:
+                    print(f"  ✓ Generated: {output_file.name}")
+                    if regressions:
+                        print(f"  ⚠ Regressions: {len(regressions)}")
+                    if improvements:
+                        print(f"  ✓ Improvements: {len(improvements)}")
+
+            except Exception as e:
+                result.warnings.append(f"Failed to generate Excel: {e}")
+                result.steps_skipped.append("excel (failed)")
         else:
             result.steps_skipped.append("excel (disabled)")
 
