@@ -6,13 +6,11 @@ These tests do NOT require PyTorch -- gpu_control.py is loaded directly
 by file path so the torch-dependent aorta.utils.__init__ is bypassed.
 """
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 import importlib.util
 import os
 import subprocess
 import sys
-
-import pytest
 
 # Load gpu_control.py directly to avoid the torch-dependent aorta.utils init chain
 _GPU_CTRL_PATH = os.path.join(
@@ -34,8 +32,6 @@ MultiGPUConfig = _gpu_control.MultiGPUConfig
 MultiGPUController = _gpu_control.MultiGPUController
 detect_gpu = _gpu_control.detect_gpu
 get_gpu_count = _gpu_control.get_gpu_count
-
-MODULE_PATH = "gpu_control"
 
 
 # ---------------------------------------------------------------------------
