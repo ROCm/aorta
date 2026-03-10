@@ -285,6 +285,16 @@ class MetricsCollector:
             Tuple[int, torch.cuda.Event, torch.cuda.Event, Optional[str]]
         ] = []
 
+        # Deferred iteration event pairs awaiting sync before elapsed_time
+        self._deferred_iterations: List[
+            Tuple[
+                torch.cuda.Event,  # start
+                torch.cuda.Event,  # end
+                torch.cuda.Event,  # baseline
+                List[Tuple[int, torch.cuda.Event, torch.cuda.Event, Optional[str]]],
+            ]
+        ] = []
+
     def start_iteration(self) -> None:
         """Mark the start of an iteration."""
         self._current_iteration_kernels = []
@@ -320,42 +330,63 @@ class MetricsCollector:
         Mark the end of an iteration and process timings.
 
         Args:
-            sync: If True, synchronize device before processing timings
+            sync: If True, synchronize device before processing timings.
+                  When False, timing computation is deferred until the next
+                  sync or until results are queried.
         """
         self._iteration_end_event = torch.cuda.Event(enable_timing=True)
         self._iteration_end_event.record()
 
+        # Store events for this iteration; actual elapsed_time calls require
+        # the events to have completed, so we defer until after a sync.
+        self._deferred_iterations.append((
+            self._iteration_start_event,
+            self._iteration_end_event,
+            self._baseline_event,
+            list(self._pending_events),
+        ))
+
         if sync:
             torch.cuda.synchronize(self.device)
+            self._flush_deferred()
 
-        # Process pending kernel timings
-        for stream_id, start_event, end_event, kernel_name in self._pending_events:
-            # Get times relative to baseline
-            start_ms = self._baseline_event.elapsed_time(start_event)
-            end_ms = self._baseline_event.elapsed_time(end_event)
-            duration_ms = start_event.elapsed_time(end_event)
+    def _flush_deferred(self) -> None:
+        """Resolve deferred event pairs into concrete timing data.
 
-            timing = KernelTiming(
-                stream_id=stream_id,
-                kernel_name=kernel_name,
-                start_ms=start_ms,
-                end_ms=end_ms,
-                duration_ms=duration_ms,
-            )
-            self._current_iteration_kernels.append(timing)
+        Synchronizes the device if there are pending iterations, since
+        ``elapsed_time`` requires events to have completed.
+        """
+        if not self._deferred_iterations:
+            return
 
-        self._kernel_timings.append(self._current_iteration_kernels)
+        torch.cuda.synchronize(self.device)
 
-        # Record iteration time
-        iteration_time = self._iteration_start_event.elapsed_time(self._iteration_end_event)
-        self._iteration_times_ms.append(iteration_time)
+        for start_ev, end_ev, baseline_ev, pending in self._deferred_iterations:
+            iteration_kernels: List[KernelTiming] = []
+            for stream_id, k_start, k_end, kernel_name in pending:
+                start_ms = baseline_ev.elapsed_time(k_start)
+                end_ms = baseline_ev.elapsed_time(k_end)
+                duration_ms = k_start.elapsed_time(k_end)
+                iteration_kernels.append(KernelTiming(
+                    stream_id=stream_id,
+                    kernel_name=kernel_name,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    duration_ms=duration_ms,
+                ))
 
-        # Compute per-stream times for this iteration
-        stream_times = [0.0] * self.num_streams
-        for kt in self._current_iteration_kernels:
-            if 0 <= kt.stream_id < self.num_streams:
-                stream_times[kt.stream_id] += kt.duration_ms
-        self._per_stream_times_ms.append(stream_times)
+            self._kernel_timings.append(iteration_kernels)
+
+            iteration_time = start_ev.elapsed_time(end_ev)
+            self._iteration_times_ms.append(iteration_time)
+
+            stream_times = [0.0] * self.num_streams
+            for kt in iteration_kernels:
+                if 0 <= kt.stream_id < self.num_streams:
+                    stream_times[kt.stream_id] += kt.duration_ms
+            self._per_stream_times_ms.append(stream_times)
+
+        self._deferred_iterations.clear()
 
     def compute_latency_metrics(self) -> LatencyMetrics:
         """
@@ -364,6 +395,7 @@ class MetricsCollector:
         Returns:
             LatencyMetrics object with computed statistics
         """
+        self._flush_deferred()
         return LatencyMetrics.from_samples(self._iteration_times_ms)
 
     def compute_switch_latency(self) -> SwitchLatencyMetrics:
@@ -376,6 +408,7 @@ class MetricsCollector:
         Returns:
             SwitchLatencyMetrics object with computed values
         """
+        self._flush_deferred()
         # Flatten all kernel timings from all iterations
         all_timings = []
         for iteration_kernels in self._kernel_timings:
@@ -404,18 +437,22 @@ class MetricsCollector:
 
     def get_per_stream_times(self) -> List[List[float]]:
         """Get per-stream times for each iteration."""
+        self._flush_deferred()
         return self._per_stream_times_ms
 
     def get_iteration_times(self) -> List[float]:
         """Get per-iteration times in milliseconds."""
+        self._flush_deferred()
         return self._iteration_times_ms
 
     def get_total_time_ms(self) -> float:
         """Get total time across all iterations in milliseconds."""
+        self._flush_deferred()
         return sum(self._iteration_times_ms)
 
     def get_kernel_timings(self) -> List[List[KernelTiming]]:
         """Get all recorded kernel timings by iteration."""
+        self._flush_deferred()
         return self._kernel_timings
 
     def clear(self) -> None:
@@ -425,6 +462,7 @@ class MetricsCollector:
         self._per_stream_times_ms = []
         self._current_iteration_kernels = []
         self._pending_events = []
+        self._deferred_iterations = []
 
     def get_summary(self) -> Dict[str, Any]:
         """

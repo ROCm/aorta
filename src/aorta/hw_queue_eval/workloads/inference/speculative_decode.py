@@ -219,38 +219,42 @@ class SpeculativeDecodeWorkload(MultiGPUMixin, InferenceWorkload):
 
             self._draft_tokens = torch.cat(draft_tokens, dim=1)
 
+        # Determine device for each phase
+        verify_device = self._get_device_for_stream(self._verify_streams[0])
+        accept_device = self._get_device_for_stream(self._accept_stream)
+        cache_device = self._get_device_for_stream(self._cache_stream)
+
         # Step 2: Main model verifies all K tokens in parallel
         verify_stream.wait_stream(draft_stream)
 
         with torch.cuda.stream(verify_stream):
-            # Verify all draft tokens in one forward pass
-            verify_input = torch.cat([context, self._draft_tokens], dim=1)
+            # Move tensors to verify device if they live on a different GPU
+            ctx_v = context.to(verify_device, non_blocking=True)
+            draft_v = self._draft_tokens.to(verify_device, non_blocking=True)
+
+            verify_input = torch.cat([ctx_v, draft_v], dim=1)
             main_logits = self._main_model(verify_input)
 
-            # Get logits at draft positions
-            draft_start = context.size(1)
+            draft_start = ctx_v.size(1)
             verify_logits = main_logits[:, draft_start - 1:-1, :]
 
         # Step 3: Accept/reject logic
         accept_stream.wait_stream(verify_stream)
 
         with torch.cuda.stream(accept_stream):
-            # Simplified accept/reject: compare main vs draft predictions
-            main_preds = verify_logits.argmax(dim=-1)
+            main_preds = verify_logits.to(accept_device, non_blocking=True).argmax(dim=-1)
+            draft_a = self._draft_tokens.to(accept_device, non_blocking=True)
 
-            # Find first mismatch
-            matches = (main_preds == self._draft_tokens)
-            # Count accepted tokens (all matching up to first mismatch)
-            # For simplicity, just compute the mask
+            matches = (main_preds == draft_a)
             accept_mask = matches.cumprod(dim=1)
 
         # Step 4: Update KV cache (simulated)
         cache_stream.wait_stream(accept_stream)
 
         with torch.cuda.stream(cache_stream):
-            # In real implementation, this would update KV cache
-            # Here we just do some computation to simulate cache ops
-            cache_update = self._draft_tokens * accept_mask.long()
+            draft_c = self._draft_tokens.to(cache_device, non_blocking=True)
+            mask_c = accept_mask.to(cache_device, non_blocking=True).long()
+            cache_update = draft_c * mask_c
 
     def get_throughput_unit(self) -> str:
         return "tokens/sec"
