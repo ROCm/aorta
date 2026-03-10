@@ -239,13 +239,14 @@ class SpeculativeDecodeWorkload(MultiGPUMixin, InferenceWorkload):
 
             draft_start = ctx_v.size(1)
             verify_logits = main_logits[:, draft_start - 1:-1, :]
+            # Reduce on verify_stream so argmax is ordered after the forward pass
+            main_preds = verify_logits.argmax(dim=-1)
 
         # Step 3: Accept/reject logic
         accept_stream.wait_stream(verify_stream)
 
         with torch.cuda.stream(accept_stream):
-            # argmax on verify device first to avoid transferring full [B, K, vocab] tensor
-            main_preds = verify_logits.argmax(dim=-1).to(accept_device, non_blocking=True)
+            main_preds = main_preds.to(accept_device, non_blocking=True)
             draft_a = self._draft_tokens.to(accept_device, non_blocking=True)
 
             matches = (main_preds == draft_a)
