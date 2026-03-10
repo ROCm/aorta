@@ -347,7 +347,6 @@ class MetricsCollector:
         ))
 
         if sync:
-            torch.cuda.synchronize(self.device)
             self._flush_deferred()
 
     def _flush_deferred(self) -> None:
@@ -430,6 +429,7 @@ class MetricsCollector:
         Returns:
             ThroughputMetrics object
         """
+        self._flush_deferred()
         total_count = count_per_iteration * len(self._iteration_times_ms)
         total_time_sec = sum(self._iteration_times_ms) / 1000.0
 

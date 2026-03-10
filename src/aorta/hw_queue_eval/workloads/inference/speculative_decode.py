@@ -149,9 +149,13 @@ class SpeculativeDecodeWorkload(MultiGPUMixin, InferenceWorkload):
         if not self._verify_streams:
             self._verify_streams = [0]
 
-        # Use draft stream's device for draft model
+        # Cache per-phase devices (fixed after setup, avoids repeated lookups)
         draft_device = self._get_device_for_stream(self._draft_streams[0])
         verify_device = self._get_device_for_stream(self._verify_streams[0])
+        self._draft_device = draft_device
+        self._verify_device = verify_device
+        self._accept_device = self._get_device_for_stream(self._accept_stream)
+        self._cache_device = self._get_device_for_stream(self._cache_stream)
 
         # Create models
         self._draft_model = SimpleLM(
@@ -219,16 +223,14 @@ class SpeculativeDecodeWorkload(MultiGPUMixin, InferenceWorkload):
 
             self._draft_tokens = torch.cat(draft_tokens, dim=1)
 
-        # Determine device for each phase
-        verify_device = self._get_device_for_stream(self._verify_streams[0])
-        accept_device = self._get_device_for_stream(self._accept_stream)
-        cache_device = self._get_device_for_stream(self._cache_stream)
+        verify_device = self._verify_device
+        accept_device = self._accept_device
+        cache_device = self._cache_device
 
         # Step 2: Main model verifies all K tokens in parallel
         verify_stream.wait_stream(draft_stream)
 
         with torch.cuda.stream(verify_stream):
-            # Move tensors to verify device if they live on a different GPU
             ctx_v = context.to(verify_device, non_blocking=True)
             draft_v = self._draft_tokens.to(verify_device, non_blocking=True)
 
@@ -242,7 +244,8 @@ class SpeculativeDecodeWorkload(MultiGPUMixin, InferenceWorkload):
         accept_stream.wait_stream(verify_stream)
 
         with torch.cuda.stream(accept_stream):
-            main_preds = verify_logits.to(accept_device, non_blocking=True).argmax(dim=-1)
+            # argmax on verify device first to avoid transferring full [B, K, vocab] tensor
+            main_preds = verify_logits.argmax(dim=-1).to(accept_device, non_blocking=True)
             draft_a = self._draft_tokens.to(accept_device, non_blocking=True)
 
             matches = (main_preds == draft_a)
