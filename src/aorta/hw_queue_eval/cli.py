@@ -166,6 +166,10 @@ def cli():
               help="Lock GPU clock level (AMD: 0-7) for deterministic results")
 @click.option("--power-limit", type=int, default=None,
               help="Set GPU power limit in watts")
+@click.option("--ebpf-trace", is_flag=True, default=False,
+              help="Enable eBPF queue tracing (requires bpftrace + root)")
+@click.option("--ebpf-memory-trace", is_flag=True, default=False,
+              help="Enable eBPF memory tracing for page faults/migrations")
 def run(workload: str, streams: int, iterations: int, warmup: int,
         output: Optional[str], device: str, sync_mode: str, quiet: bool,
         profile: bool, profile_dir: str,
@@ -175,7 +179,8 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
         num_compute: Optional[int], num_coll: Optional[int],
         comm_size: Optional[str], compute_streams: Optional[int],
         comp_dtype: Optional[str], comm_dtype: Optional[str],
-        lock_clocks: Optional[int], power_limit: Optional[int]):
+        lock_clocks: Optional[int], power_limit: Optional[int],
+        ebpf_trace: bool, ebpf_memory_trace: bool):
     """Run a single workload evaluation.
 
     WORKLOAD: Name of the workload to run (e.g., hetero_kernels, fsdp_tp)
@@ -332,6 +337,8 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
             sync_mode=sync_mode,
             device=device,
             gpu_control=gpu_control,
+            ebpf_tracing=ebpf_trace,
+            ebpf_memory_tracing=ebpf_memory_trace,
         )
         harness = StreamHarness(config)
 
@@ -341,6 +348,14 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
                 click.echo(f"  Clock level locked to: {lock_clocks}")
             if power_limit is not None:
                 click.echo(f"  Power limit set to:    {power_limit} W")
+            click.echo()
+
+        if ebpf_trace or ebpf_memory_trace:
+            click.echo("eBPF TRACING:")
+            if ebpf_trace:
+                click.echo("  Queue tracing: enabled")
+            if ebpf_memory_trace:
+                click.echo("  Memory tracing: enabled")
             click.echo()
 
         # Run workload (with optional profiling)
@@ -424,6 +439,36 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
             click.echo("TIMING:")
             click.echo(f"  Total measurement time: {result.total_time_ms:.2f} ms ({result.total_time_ms/1000:.2f} sec)")
             click.echo()
+
+            # eBPF driver-level metrics
+            if result.ebpf_queue_metrics:
+                click.echo("eBPF DRIVER-LEVEL QUEUE METRICS:")
+                eqm = result.ebpf_queue_metrics
+                click.echo(f"  Total submissions:  {eqm.get('total_submissions', 0)}")
+                click.echo(f"  Total dispatches:   {eqm.get('total_dispatches', 0)}")
+                click.echo(f"  HW rings used:      {eqm.get('rings_used', [])}")
+                avg_us = eqm.get("avg_submit_to_dispatch_us", 0.0)
+                p99_us = eqm.get("p99_submit_to_dispatch_us", 0.0)
+                click.echo(f"  Submit→dispatch avg:  {avg_us:.1f} us")
+                click.echo(f"  Submit→dispatch P99:  {p99_us:.1f} us")
+                click.echo()
+
+            if result.ebpf_vs_cuda:
+                click.echo("eBPF vs CUDA COMPARISON:")
+                cmp = result.ebpf_vs_cuda
+                click.echo(f"  eBPF submit→dispatch:  {cmp.get('ebpf_avg_submit_to_dispatch_ms', 0):.3f} ms")
+                click.echo(f"  CUDA switch overhead:  {cmp.get('cuda_estimated_switch_overhead_ms', 0):.3f} ms")
+                click.echo(f"  Measurement accuracy:  {cmp.get('accuracy_pct', 0):.1f}%")
+                click.echo()
+
+            if result.ebpf_memory_metrics:
+                click.echo("eBPF MEMORY METRICS:")
+                emm = result.ebpf_memory_metrics
+                click.echo(f"  Page faults:      {emm.get('total_faults', 0)}")
+                click.echo(f"  Fault rate:        {emm.get('fault_rate_per_sec', 0):.1f} /sec")
+                click.echo(f"  Avg fault latency: {emm.get('avg_fault_latency_us', 0):.1f} us")
+                click.echo(f"  Migration bytes:   {emm.get('migration_bytes', 0)}")
+                click.echo()
 
             # Summary
             click.echo("-" * 70)
@@ -592,9 +637,13 @@ def _print_interpretation(workload: str, info, result, streams: int) -> None:
               help="Lock GPU clock level (AMD: 0-7) for deterministic results")
 @click.option("--power-limit", type=int, default=None,
               help="Set GPU power limit in watts")
+@click.option("--ebpf-trace", is_flag=True, default=False,
+              help="Enable eBPF queue tracing (requires bpftrace + root)")
+@click.option("--ebpf-memory-trace", is_flag=True, default=False,
+              help="Enable eBPF memory tracing for page faults/migrations")
 def sweep(workload: str, streams: str, iterations: int, warmup: int,
           output: Optional[str], device: str, lock_clocks: Optional[int],
-          power_limit: Optional[int]):
+          power_limit: Optional[int], ebpf_trace: bool, ebpf_memory_trace: bool):
     """Run workload across multiple stream counts.
 
     WORKLOAD: Name of the workload to sweep
@@ -646,6 +695,8 @@ def sweep(workload: str, streams: str, iterations: int, warmup: int,
                 measurement_iterations=iterations,
                 device=device,
                 gpu_control=gpu_control,
+                ebpf_tracing=ebpf_trace,
+                ebpf_memory_tracing=ebpf_memory_trace,
             )
             harness = StreamHarness(config)
             result = harness.run_workload(wl)
@@ -1015,6 +1066,117 @@ def info():
                 click.echo(f"  [{i}] {props.name}")
                 click.echo(f"      Memory: {props.total_memory_gb:.1f} GB")
                 click.echo(f"      Compute Units: {props.multi_processor_count}")
+
+    # eBPF info
+    click.echo()
+    click.echo("eBPF:")
+    try:
+        from aorta.hw_queue_eval.core.ebpf_tracer import check_ebpf_capabilities
+
+        caps = check_ebpf_capabilities()
+        click.echo(f"  bpftrace: {caps.bpftrace_version or 'not installed'}")
+        click.echo(f"  amdgpu tracepoints: {'yes' if caps.has_amdgpu_tracepoints else 'no'}")
+        click.echo(f"  amdkfd tracepoints: {'yes' if caps.has_amdkfd_tracepoints else 'no'}")
+        click.echo(f"  Available: {'yes' if caps.available else 'no'}")
+    except Exception:
+        click.echo("  (detection failed)")
+
+
+@cli.command("policy-sweep")
+@click.argument("workload")
+@click.option("--streams", "-s", default=4, help="Number of streams")
+@click.option("--iterations", "-i", default=100, help="Measurement iterations per policy")
+@click.option("--warmup", "-w", default=10, help="Warmup iterations")
+@click.option("--policies", "-p", default=None,
+              help="Comma-separated policy names (default: baseline,priority_lc,priority_be)")
+@click.option("--output", "-o", default=None, help="Output JSON file")
+@click.option("--device", "-d", default="cuda:0", help="Target device")
+def policy_sweep(workload: str, streams: int, iterations: int, warmup: int,
+                 policies: Optional[str], output: Optional[str], device: str):
+    """Evaluate a workload across different scheduling/memory policies.
+
+    WORKLOAD: Name of the workload to evaluate
+
+    Available built-in policies:
+      baseline, priority_lc, priority_be, multi_tenant_fair,
+      high_queue, default_uvm, xnack_off
+    """
+    from aorta.hw_queue_eval.core.harness import HarnessConfig
+    from aorta.hw_queue_eval.core.policy_evaluator import (
+        BUILTIN_POLICIES,
+        PolicyEvaluator,
+    )
+
+    policy_names = (
+        [p.strip() for p in policies.split(",")]
+        if policies
+        else ["baseline", "priority_lc", "priority_be"]
+    )
+
+    click.echo(f"Policy sweep: {workload}")
+    click.echo(f"  Streams:  {streams}")
+    click.echo(f"  Policies: {policy_names}")
+    click.echo()
+
+    try:
+        wl = get_workload_instance(workload)
+
+        base_config = HarnessConfig(
+            stream_count=streams,
+            warmup_iterations=warmup,
+            measurement_iterations=iterations,
+            device=device,
+        )
+
+        evaluator = PolicyEvaluator(base_config, wl)
+        comparison = evaluator.evaluate(policy_names=policy_names)
+
+        click.echo(comparison.summary_table())
+
+        if output:
+            comparison.save(output)
+            click.echo(f"\nResults saved to: {output}")
+
+    except (KeyError, ValueError) as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@cli.command("ebpf-info")
+def ebpf_info():
+    """Show eBPF capabilities and available tracepoints."""
+    from aorta.hw_queue_eval.core.ebpf_tracer import check_ebpf_capabilities
+
+    caps = check_ebpf_capabilities()
+
+    click.echo("eBPF Capabilities")
+    click.echo("=" * 50)
+    click.echo()
+    click.echo(f"Kernel version:    {caps.kernel_version}")
+    click.echo(f"bpftrace:          {caps.bpftrace_version or 'not installed'}")
+    click.echo(f"Root/CAP_BPF:      {'yes' if caps.has_root_or_cap else 'no'}")
+    click.echo(f"Overall available: {'yes' if caps.available else 'no'}")
+    click.echo()
+
+    click.echo("amdgpu tracepoints:")
+    if caps.has_amdgpu_tracepoints:
+        for tp in caps.amdgpu_tracepoints:
+            click.echo(f"  - {tp}")
+    else:
+        click.echo("  (not accessible -- mount debugfs or run as root)")
+
+    click.echo()
+    click.echo("amdkfd tracepoints:")
+    if caps.has_amdkfd_tracepoints:
+        for tp in caps.amdkfd_tracepoints:
+            click.echo(f"  - {tp}")
+    else:
+        click.echo("  (not accessible -- mount debugfs or run as root)")
 
 
 def main():

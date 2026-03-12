@@ -25,6 +25,7 @@ from aorta.hw_queue_eval.core.metrics import (
     ScalingAnalysis,
     SwitchLatencyMetrics,
     ThroughputMetrics,
+    compare_ebpf_vs_cuda,
 )
 from aorta.utils import (
     GPUControlConfig,
@@ -61,6 +62,8 @@ class HarnessConfig:
     use_multi_gpu: bool = True  # If True, distribute streams across all available GPUs
     devices: Optional[List[str]] = None  # Explicit list of devices (auto-detected if None)
     gpu_control: Optional[GPUControlConfig] = None  # GPU power/frequency control
+    ebpf_tracing: bool = False  # Attach eBPF tracer for driver-level queue metrics
+    ebpf_memory_tracing: bool = False  # Attach eBPF memory tracer
 
     def __post_init__(self):
         if self.stream_count < 1:
@@ -92,6 +95,11 @@ class HarnessResult:
     iteration_times_ms: List[float]
     switch_latency: Optional[Dict[str, float]] = None
     memory: Optional[Dict[str, float]] = None
+
+    # eBPF driver-level metrics (optional)
+    ebpf_queue_metrics: Optional[Dict[str, Any]] = None
+    ebpf_memory_metrics: Optional[Dict[str, Any]] = None
+    ebpf_vs_cuda: Optional[Dict[str, Any]] = None
 
     # Metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -200,6 +208,8 @@ class StreamHarness:
         self._gpu_control = GPUControlManager(
             config.gpu_control or GPUControlConfig()
         )
+        self._ebpf_queue_tracer = None
+        self._ebpf_memory_tracer = None
 
     def _initialize(self) -> None:
         """Initialize streams and prepare for run."""
@@ -237,6 +247,59 @@ class StreamHarness:
                 reset_memory_stats(device)
 
         self._initialized = True
+
+    def _start_ebpf_tracers(self) -> None:
+        """Start eBPF tracers if configured."""
+        import os
+
+        if self.config.ebpf_tracing:
+            try:
+                from aorta.hw_queue_eval.core.ebpf_tracer import BPFQueueTracer
+
+                self._ebpf_queue_tracer = BPFQueueTracer(
+                    target_pid=os.getpid()
+                )
+                self._ebpf_queue_tracer.start()
+            except (ImportError, RuntimeError) as exc:
+                import warnings
+                warnings.warn(f"eBPF queue tracing unavailable: {exc}")
+                self._ebpf_queue_tracer = None
+
+        if self.config.ebpf_memory_tracing:
+            try:
+                from aorta.hw_queue_eval.core.ebpf_memory_tracer import BPFMemoryTracer
+
+                self._ebpf_memory_tracer = BPFMemoryTracer(
+                    target_pid=os.getpid()
+                )
+                self._ebpf_memory_tracer.start()
+            except (ImportError, RuntimeError) as exc:
+                import warnings
+                warnings.warn(f"eBPF memory tracing unavailable: {exc}")
+                self._ebpf_memory_tracer = None
+
+    def _stop_ebpf_tracers(self):
+        """Stop eBPF tracers and return their metrics dicts (or None)."""
+        ebpf_queue_metrics = None
+        ebpf_memory_metrics = None
+
+        if self._ebpf_queue_tracer is not None:
+            try:
+                qm = self._ebpf_queue_tracer.stop()
+                ebpf_queue_metrics = qm.to_dict()
+            except Exception:
+                pass
+            self._ebpf_queue_tracer = None
+
+        if self._ebpf_memory_tracer is not None:
+            try:
+                mm = self._ebpf_memory_tracer.stop()
+                ebpf_memory_metrics = mm.to_dict()
+            except Exception:
+                pass
+            self._ebpf_memory_tracer = None
+
+        return ebpf_queue_metrics, ebpf_memory_metrics
 
     def _cleanup(self) -> None:
         """Cleanup after run."""
@@ -297,6 +360,9 @@ class StreamHarness:
             for device in self.devices:
                 reset_memory_stats(device)
 
+        # Start eBPF tracers if requested
+        self._start_ebpf_tracers()
+
         # Measurement phase
         for _ in range(self.config.measurement_iterations):
             collector.start_iteration()
@@ -314,10 +380,20 @@ class StreamHarness:
             for device in self.devices:
                 torch.cuda.synchronize(device)
 
+        # Stop eBPF tracers and collect metrics
+        ebpf_queue_metrics, ebpf_memory_metrics = self._stop_ebpf_tracers()
+
         # Compute metrics (capture from primary device, but note multi-GPU in metadata)
         latency_metrics = collector.compute_latency_metrics()
         switch_metrics = collector.compute_switch_latency()
         memory_metrics = MemoryMetrics.capture(self.config.device)
+
+        # Compare eBPF vs CUDA measurements if both are available
+        ebpf_comparison = None
+        if ebpf_queue_metrics and switch_metrics:
+            ebpf_comparison = compare_ebpf_vs_cuda(
+                ebpf_queue_metrics, switch_metrics.to_dict()
+            )
 
         # Compute throughput
         total_time_sec = collector.get_total_time_ms() / 1000.0
@@ -369,6 +445,9 @@ class StreamHarness:
             switch_metrics=switch_metrics,
             extra_metadata=metadata,
         )
+        result.ebpf_queue_metrics = ebpf_queue_metrics
+        result.ebpf_memory_metrics = ebpf_memory_metrics
+        result.ebpf_vs_cuda = ebpf_comparison
 
         # Reset GPU settings after benchmark
         self._gpu_control.reset()
@@ -417,6 +496,9 @@ class StreamHarness:
             for device in self.devices:
                 reset_memory_stats(device)
 
+        # Start eBPF tracers if requested
+        self._start_ebpf_tracers()
+
         # Measurement phase
         for _ in range(self.config.measurement_iterations):
             collector.start_iteration()
@@ -434,10 +516,20 @@ class StreamHarness:
             for device in self.devices:
                 torch.cuda.synchronize(device)
 
+        # Stop eBPF tracers and collect metrics
+        ebpf_queue_metrics, ebpf_memory_metrics = self._stop_ebpf_tracers()
+
         # Compute metrics
         latency_metrics = collector.compute_latency_metrics()
         switch_metrics = collector.compute_switch_latency()
         memory_metrics = MemoryMetrics.capture(self.config.device)
+
+        # Compare eBPF vs CUDA measurements if both are available
+        ebpf_comparison = None
+        if ebpf_queue_metrics and switch_metrics:
+            ebpf_comparison = compare_ebpf_vs_cuda(
+                ebpf_queue_metrics, switch_metrics.to_dict()
+            )
 
         # Compute throughput using workload's method
         total_time_sec = collector.get_total_time_ms() / 1000.0
@@ -487,6 +579,9 @@ class StreamHarness:
             switch_metrics=switch_metrics,
             extra_metadata=metadata,
         )
+        result.ebpf_queue_metrics = ebpf_queue_metrics
+        result.ebpf_memory_metrics = ebpf_memory_metrics
+        result.ebpf_vs_cuda = ebpf_comparison
 
         # Cleanup workload, reset GPU settings, then cleanup harness
         workload.cleanup()
