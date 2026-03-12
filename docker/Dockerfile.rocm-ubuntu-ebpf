@@ -1,0 +1,84 @@
+# Start from the existing PyTorch ROCm image (same as working Dockerfile)
+FROM ubuntu:24.04
+#FROM rocm/pytorch-private:20251030_rocm_e2e_phantom_mi350_genai_nightly
+
+# Switch to root to install packages
+USER root
+
+# Basic system setup
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg2 \
+    software-properties-common \
+    apt-utils \
+    ca-certificates \
+    curl \
+    git \
+    vim \
+    build-essential \
+    pkg-config \
+    python3.12 \
+    python3.12-dev \
+    python3.12-venv \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install amdgpu-install package for debian
+RUN wget https://artifactory-cdn.amd.com:8443/artifactory/list/amdgpu-deb/amdgpu-install-internal_7.2.0.1-24.04-1_all.deb
+RUN apt-get update && \
+    apt-get install -y ca-certificates gnupg lsb-release sudo && \
+    apt-get install -y ./amdgpu-install-internal_7.2.0.1-24.04-1_all.deb
+
+# Update amdgpu-repo with specific builds (ROCm 7.0 Build #19, Jan 20, 2026)
+RUN amdgpu-repo --amdgpu-build=2281818 --rocm-build=compute-rocm-rel-7.2.0.1/5
+RUN apt-get update && apt-get install -y \
+    rocm-hip-sdk \
+    rocm-libs \
+    rocblas \
+    hipblaslt \
+    rocm-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV ROCM_HOME=/opt/rocm
+ENV PATH=$ROCM_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$LD_LIBRARY_PATH
+
+# Ubuntu 24.04 uses PEP 668 externally-managed Python; use a venv for all pip packages
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN pip install --upgrade pip setuptools wheel
+
+# Install PyTorch with ROCm 7.2 support
+RUN pip install --pre \
+    torch \
+    torchvision \
+    torchaudio \
+    --index-url https://download.pytorch.org/whl/nightly/rocm7.2/
+
+# Verify installations
+RUN python -c "import torch; print(f'PyTorch version: {torch.__version__}')" && \
+    python -c "import torch; print(f'ROCm available: {torch.cuda.is_available()}')" && \
+    python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
+
+# ---------------------------------------------------------------------------
+# eBPF tooling: bpftrace, bcc-tools, linux-tools for kernel tracepoint access
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bpftrace \
+    bpfcc-tools \
+    libbpfcc-dev \
+    linux-tools-common \
+    linux-tools-generic \
+    libelf-dev \
+    zlib1g-dev \
+    clang \
+    llvm \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install click
+
+# Set up work directory
+WORKDIR /workspace/aorta
+
+CMD ["/bin/bash"]
