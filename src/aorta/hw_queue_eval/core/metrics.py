@@ -487,14 +487,23 @@ class MetricsCollector:
             else [],
         }
 
-    def export_to_json(self, filepath: str | Path) -> None:
+    def export_to_json(
+        self,
+        filepath: str | Path,
+        ebpf_queue_metrics: Optional[Dict[str, Any]] = None,
+        ebpf_memory_metrics: Optional[Dict[str, Any]] = None,
+        ebpf_vs_cuda: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """
         Export collected metrics to JSON file.
 
         Args:
             filepath: Path to output JSON file
+            ebpf_queue_metrics: Optional eBPF driver queue metrics dict
+            ebpf_memory_metrics: Optional eBPF memory trace metrics dict
+            ebpf_vs_cuda: Optional eBPF-vs-CUDA comparison dict
         """
-        data = {
+        data: Dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),
             "num_streams": self.num_streams,
             "device": self.device,
@@ -515,6 +524,13 @@ class MetricsCollector:
                 for iteration_kernels in self._kernel_timings
             ],
         }
+
+        if ebpf_queue_metrics:
+            data["ebpf_queue_metrics"] = ebpf_queue_metrics
+        if ebpf_memory_metrics:
+            data["ebpf_memory_metrics"] = ebpf_memory_metrics
+        if ebpf_vs_cuda:
+            data["ebpf_vs_cuda_comparison"] = ebpf_vs_cuda
 
         with open(filepath, "w") as f:
             json.dump(data, f, indent=2)
@@ -669,3 +685,44 @@ def compare_results(
     )
 
     return comparison
+
+
+def compare_ebpf_vs_cuda(
+    ebpf_metrics: Dict[str, Any],
+    cuda_switch_metrics: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Compare eBPF driver-level metrics with CUDA-event-based switch latency.
+
+    This helps validate user-space timing accuracy by comparing
+    driver-reported submission-to-dispatch latency against CUDA event gaps.
+
+    Args:
+        ebpf_metrics: Output of DriverQueueMetrics.to_dict()
+        cuda_switch_metrics: Output of SwitchLatencyMetrics.to_dict()
+
+    Returns:
+        Dictionary with comparison data and accuracy assessment
+    """
+    ebpf_avg_us = ebpf_metrics.get("avg_submit_to_dispatch_us", 0.0)
+    ebpf_avg_ms = ebpf_avg_us / 1000.0
+
+    cuda_inter_ms = cuda_switch_metrics.get("inter_stream_gap_ms", 0.0)
+    cuda_switch_ms = cuda_switch_metrics.get("estimated_switch_overhead_ms", 0.0)
+
+    delta_ms = abs(ebpf_avg_ms - cuda_switch_ms) if cuda_switch_ms > 0 else 0.0
+    accuracy_pct = (
+        (1.0 - delta_ms / cuda_switch_ms) * 100.0
+        if cuda_switch_ms > 0
+        else 0.0
+    )
+
+    return {
+        "ebpf_avg_submit_to_dispatch_ms": ebpf_avg_ms,
+        "cuda_inter_stream_gap_ms": cuda_inter_ms,
+        "cuda_estimated_switch_overhead_ms": cuda_switch_ms,
+        "delta_ms": delta_ms,
+        "accuracy_pct": max(0.0, accuracy_pct),
+        "ebpf_rings_used": ebpf_metrics.get("rings_used", []),
+        "ebpf_total_submissions": ebpf_metrics.get("total_submissions", 0),
+    }
