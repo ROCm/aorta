@@ -56,6 +56,7 @@ docker compose -f docker-compose.build.yaml up -d
 - `Dockerfile.rocm70_9-1-shampoo` - ROCm 7.0.9.1 with Shampoo optimizer
 - `Dockerfile.rocm70_2-ubuntu-pytorch` - ROCm 7.0.2 Ubuntu PyTorch build
 - `Dockerfile.rocm70_2-ubuntu-nan` - ROCm 7.0.2 with NaN debugging tools
+- `Dockerfile.rocm-ubuntu-ebpf` - ROCm 7.2 with eBPF tracing tools (bpftrace, bcc)
 
 **Example `.env` configurations:**
 
@@ -155,3 +156,4 @@ pre-commit install
 
 - [Running the Benchmark](running-benchmark.md) - Launch your first training run
 - [Configuration Guide](configuration.md) - Customize model and training parameters
+- [eBPF Usage Guide](ebpf-usage-guide.md) - Kernel-level GPU queue and memory tracing

@@ -104,5 +104,6 @@ For deeper inspection, combine these scripts with `nsys`, `rocprof`, or PyTorch 
 
 ## Next Steps
 
+- [eBPF Usage Guide](ebpf-usage-guide.md) - Kernel-level GPU queue and memory tracing with eBPF
 - [Troubleshooting](troubleshooting.md) - Common issues and solutions
 - [Configuration Guide](configuration.md) - Tune parameters for better overlap

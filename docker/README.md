@@ -41,6 +41,7 @@ docker compose -f docker-compose.build.yaml up -d
 | `Dockerfile.rocm70_9-1-shampoo` | ROCm 7.0.9.1 + Shampoo optimizer | Shampoo optimizer experiments |
 | `Dockerfile.rocm70_2-ubuntu-pytorch` | ROCm 7.0.2 Ubuntu PyTorch | Legacy ROCm 7.0.2 support |
 | `Dockerfile.rocm70_2-ubuntu-nan` | ROCm 7.0.2 + NaN debugging | Debugging NaN issues |
+| `Dockerfile.rocm-ubuntu-ebpf` | ROCm 7.2 + eBPF tracing (bpftrace, bcc) | eBPF-based GPU queue/memory tracing |
 
 ## Configuration Variables
 
@@ -95,6 +96,18 @@ AORTA_WORKSPACE=..
 AMDGPU_DRIVER_VARIANT=patched
 ```
 
+### Example 4: eBPF GPU Tracing
+
+```bash
+# .env
+DOCKERFILE=Dockerfile.rocm-ubuntu-ebpf
+CONTAINER_NAME=myuser-ebpf-tracing
+AORTA_WORKSPACE=..
+```
+
+Inside the container, verify eBPF readiness with `aorta ebpf-info`, then run
+workloads with `--ebpf-trace` and/or `--ebpf-memory-trace` flags.
+
 ## Using custom RCCL
 
 By default, the container uses the RCCL bundled in the image. You do not need to set or remove any RCCL path in the YAML.
@@ -123,6 +136,7 @@ docker/
 ├── Dockerfile.rocm70_9-1         # Standard ROCm build
 ├── Dockerfile.rocm70_9-1-shampoo # Shampoo variant
 ├── Dockerfile.rocm70_2-ubuntu-*  # Legacy ROCm 7.0.2 builds
+├── Dockerfile.rocm-ubuntu-ebpf   # ROCm 7.2 + eBPF tracing tools
 └── rccl_test/                    # Separate RCCL testing setup
 ```
 
