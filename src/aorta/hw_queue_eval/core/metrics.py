@@ -694,8 +694,9 @@ def compare_ebpf_vs_cuda(
     """
     Compare eBPF driver-level metrics with CUDA-event-based switch latency.
 
-    This helps validate user-space timing accuracy by comparing
-    driver-reported submission-to-dispatch latency against CUDA event gaps.
+    When submit events are available (DRM path), uses submit-to-dispatch
+    latency.  On ROCm/KFD where ``amdgpu_cs_ioctl`` does not fire, falls
+    back to inter-dispatch gap as the comparable metric.
 
     Args:
         ebpf_metrics: Output of DriverQueueMetrics.to_dict()
@@ -704,7 +705,12 @@ def compare_ebpf_vs_cuda(
     Returns:
         Dictionary with comparison data and accuracy assessment
     """
-    ebpf_avg_us = ebpf_metrics.get("avg_submit_to_dispatch_us", 0.0)
+    has_submits = ebpf_metrics.get("total_submissions", 0) > 0
+
+    if has_submits:
+        ebpf_avg_us = ebpf_metrics.get("avg_submit_to_dispatch_us", 0.0)
+    else:
+        ebpf_avg_us = ebpf_metrics.get("avg_inter_dispatch_gap_us", 0.0)
     ebpf_avg_ms = ebpf_avg_us / 1000.0
 
     cuda_inter_ms = cuda_switch_metrics.get("inter_stream_gap_ms", 0.0)
@@ -717,12 +723,18 @@ def compare_ebpf_vs_cuda(
         else 0.0
     )
 
-    return {
-        "ebpf_avg_submit_to_dispatch_ms": ebpf_avg_ms,
+    result: Dict[str, Any] = {
         "cuda_inter_stream_gap_ms": cuda_inter_ms,
         "cuda_estimated_switch_overhead_ms": cuda_switch_ms,
         "delta_ms": delta_ms,
         "accuracy_pct": max(0.0, accuracy_pct),
         "ebpf_rings_used": ebpf_metrics.get("rings_used", []),
+        "ebpf_total_dispatches": ebpf_metrics.get("total_dispatches", 0),
         "ebpf_total_submissions": ebpf_metrics.get("total_submissions", 0),
+        "ebpf_dispatch_rate_per_sec": ebpf_metrics.get("dispatch_rate_per_sec", 0.0),
     }
+    if has_submits:
+        result["ebpf_avg_submit_to_dispatch_ms"] = ebpf_avg_ms
+    else:
+        result["ebpf_avg_dispatch_gap_ms"] = ebpf_avg_ms
+    return result

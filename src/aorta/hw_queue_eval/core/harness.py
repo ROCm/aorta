@@ -248,38 +248,93 @@ class StreamHarness:
 
         self._initialized = True
 
+    def _start_ebpf_memory_tracer(self) -> None:
+        """Start the eBPF memory tracer early (before workload setup).
+
+        Memory tracepoints (amdgpu_bo_move, amdgpu_vm_bo_map) fire during
+        tensor allocation, so the tracer must start before workload.setup().
+        """
+        if not self.config.ebpf_memory_tracing:
+            return
+        import os
+
+        try:
+            from aorta.hw_queue_eval.core.ebpf_memory_tracer import BPFMemoryTracer
+
+            self._ebpf_memory_tracer = BPFMemoryTracer(
+                target_pid=os.getpid()
+            )
+            self._ebpf_memory_tracer.start()
+        except (ImportError, RuntimeError) as exc:
+            import warnings
+            warnings.warn(f"eBPF memory tracing unavailable: {exc}")
+            self._ebpf_memory_tracer = None
+
     def _start_ebpf_tracers(self) -> None:
-        """Start eBPF tracers if configured."""
+        """Start eBPF queue tracer (called at measurement boundary).
+
+        The memory tracer is started separately via
+        ``_start_ebpf_memory_tracer()`` before workload setup.
+        """
         import os
 
         if self.config.ebpf_tracing:
+            # #region agent log
+            from pathlib import Path as _P
+            _DBG_LOG_PATH = str(_P(__file__).resolve().parents[4] / ".cursor" / "debug-8e5cb7.log")
+            import json as _j, time as _t
+            def _hdbg(msg, data):
+                try:
+                    _P(_DBG_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
+                    with open(_DBG_LOG_PATH, "a") as _f:
+                        _f.write(_j.dumps({"sessionId": "8e5cb7", "location": "harness.py:_start_ebpf_tracers", "message": msg, "data": data, "timestamp": int(_t.time()*1000), "hypothesisId": "H5", "runId": "run1"}) + "\n")
+                except Exception:
+                    pass
+            # #endregion
             try:
                 from aorta.hw_queue_eval.core.ebpf_tracer import BPFQueueTracer
 
+                # #region agent log
+                _hdbg("creating_tracer", {"pid": os.getpid()})
+                # #endregion
                 self._ebpf_queue_tracer = BPFQueueTracer(
                     target_pid=os.getpid()
                 )
                 self._ebpf_queue_tracer.start()
+                # #region agent log
+                _hdbg("tracer_started_ok", {"is_running": self._ebpf_queue_tracer.is_running})
+                # #endregion
             except (ImportError, RuntimeError) as exc:
                 import warnings
+                # #region agent log
+                _hdbg("tracer_start_FAILED", {"error": str(exc), "type": type(exc).__name__})
+                # #endregion
                 warnings.warn(f"eBPF queue tracing unavailable: {exc}")
                 self._ebpf_queue_tracer = None
 
-        if self.config.ebpf_memory_tracing:
-            try:
-                from aorta.hw_queue_eval.core.ebpf_memory_tracer import BPFMemoryTracer
-
-                self._ebpf_memory_tracer = BPFMemoryTracer(
-                    target_pid=os.getpid()
-                )
-                self._ebpf_memory_tracer.start()
-            except (ImportError, RuntimeError) as exc:
-                import warnings
-                warnings.warn(f"eBPF memory tracing unavailable: {exc}")
-                self._ebpf_memory_tracer = None
+        # Also start memory tracer here if not already running (e.g., in
+        # the run() path where there is no workload.setup() call).
+        if self.config.ebpf_memory_tracing and self._ebpf_memory_tracer is None:
+            self._start_ebpf_memory_tracer()
 
     def _stop_ebpf_tracers(self):
         """Stop eBPF tracers and return their metrics dicts (or None)."""
+        import warnings
+
+        # #region agent log
+        from pathlib import Path as _P2
+        _DBG_LOG_PATH2 = str(_P2(__file__).resolve().parents[4] / ".cursor" / "debug-8e5cb7.log")
+        import json as _j, time as _t
+        def _hsdbg(msg, data):
+            try:
+                _P2(_DBG_LOG_PATH2).parent.mkdir(parents=True, exist_ok=True)
+                with open(_DBG_LOG_PATH2, "a") as _f:
+                    _f.write(_j.dumps({"sessionId": "8e5cb7", "location": "harness.py:_stop_ebpf_tracers", "message": msg, "data": data, "timestamp": int(_t.time()*1000), "hypothesisId": "H5", "runId": "run1"}) + "\n")
+            except Exception:
+                pass
+        _hsdbg("stop_called", {"has_queue_tracer": self._ebpf_queue_tracer is not None, "has_memory_tracer": self._ebpf_memory_tracer is not None})
+        # #endregion
+
         ebpf_queue_metrics = None
         ebpf_memory_metrics = None
 
@@ -287,16 +342,24 @@ class StreamHarness:
             try:
                 qm = self._ebpf_queue_tracer.stop()
                 ebpf_queue_metrics = qm.to_dict()
-            except Exception:
-                pass
+                # #region agent log
+                _hsdbg("queue_metrics", {"total_dispatches": qm.total_dispatches, "total_submissions": qm.total_submissions, "num_events": len(qm.events)})
+                # #endregion
+            except Exception as exc:
+                # #region agent log
+                _hsdbg("queue_stop_FAILED", {"error": str(exc)})
+                # #endregion
+                warnings.warn(f"eBPF queue tracer stop failed: {exc}")
             self._ebpf_queue_tracer = None
 
         if self._ebpf_memory_tracer is not None:
             try:
                 mm = self._ebpf_memory_tracer.stop()
                 ebpf_memory_metrics = mm.to_dict()
-            except Exception:
-                pass
+                if mm.bpftrace_stderr:
+                    warnings.warn(f"bpftrace (memory) stderr: {mm.bpftrace_stderr}")
+            except Exception as exc:
+                warnings.warn(f"eBPF memory tracer stop failed: {exc}")
             self._ebpf_memory_tracer = None
 
         return ebpf_queue_metrics, ebpf_memory_metrics
@@ -474,6 +537,9 @@ class StreamHarness:
         # Apply GPU hardware control (lock clocks, set power) before benchmark
         gpu_hw_snapshot = self._gpu_control.apply()
 
+        # Start memory tracer BEFORE setup so it captures BO allocations
+        self._start_ebpf_memory_tracer()
+
         # Setup workload
         workload.setup(self.config.stream_count, self.config.device)
 
@@ -496,7 +562,7 @@ class StreamHarness:
             for device in self.devices:
                 reset_memory_stats(device)
 
-        # Start eBPF tracers if requested
+        # Start eBPF queue tracer at measurement boundary
         self._start_ebpf_tracers()
 
         # Measurement phase

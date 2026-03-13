@@ -15,6 +15,7 @@ Key tracepoints:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -24,7 +25,10 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
+
 
 
 @dataclass
@@ -65,7 +69,7 @@ class DriverQueueEvent:
     """A single driver-level queue event captured via eBPF."""
 
     timestamp_ns: int
-    event_type: str  # "submit", "dispatch", "complete"
+    event_type: str  # "submit", "dispatch", "complete", "irq"
     pid: int
     comm: str  # process name
     ring: int = 0  # HW ring / queue index
@@ -79,11 +83,22 @@ class DriverQueueEvent:
 
 @dataclass
 class DriverQueueMetrics:
-    """Aggregated driver-level queue metrics from eBPF tracing."""
+    """Aggregated driver-level queue metrics from eBPF tracing.
+
+    On modern AMD GPUs with MES (MI200/MI300), the MES firmware handles
+    job dispatch.  In that case, ``dispatch`` events come from MES
+    kprobes and ``complete`` events mark MES round-trip completion.
+    ``submission_to_dispatch_us`` then represents MES round-trip latency.
+
+    On older GPUs or the DRM/graphics path, ``submit`` events come
+    from ``amdgpu_cs_ioctl`` and ``dispatch`` from
+    ``amdgpu_sched_run_job``.
+    """
 
     total_submissions: int = 0
     total_dispatches: int = 0
     submission_to_dispatch_us: List[float] = field(default_factory=list)
+    inter_dispatch_gap_us: List[float] = field(default_factory=list)
     per_ring_submissions: Dict[int, int] = field(default_factory=dict)
     per_ring_dispatches: Dict[int, int] = field(default_factory=dict)
     trace_duration_ms: float = 0.0
@@ -104,6 +119,26 @@ class DriverQueueMetrics:
         return sorted_vals[min(idx, len(sorted_vals) - 1)]
 
     @property
+    def avg_inter_dispatch_gap_us(self) -> float:
+        if not self.inter_dispatch_gap_us:
+            return 0.0
+        return sum(self.inter_dispatch_gap_us) / len(self.inter_dispatch_gap_us)
+
+    @property
+    def p99_inter_dispatch_gap_us(self) -> float:
+        if not self.inter_dispatch_gap_us:
+            return 0.0
+        sorted_vals = sorted(self.inter_dispatch_gap_us)
+        idx = int(len(sorted_vals) * 0.99)
+        return sorted_vals[min(idx, len(sorted_vals) - 1)]
+
+    @property
+    def dispatch_rate_per_sec(self) -> float:
+        if self.trace_duration_ms <= 0:
+            return 0.0
+        return self.total_dispatches / (self.trace_duration_ms / 1000.0)
+
+    @property
     def rings_used(self) -> List[int]:
         all_rings = set(self.per_ring_submissions.keys()) | set(
             self.per_ring_dispatches.keys()
@@ -116,6 +151,9 @@ class DriverQueueMetrics:
             "total_dispatches": self.total_dispatches,
             "avg_submit_to_dispatch_us": self.avg_submit_to_dispatch_us,
             "p99_submit_to_dispatch_us": self.p99_submit_to_dispatch_us,
+            "avg_inter_dispatch_gap_us": self.avg_inter_dispatch_gap_us,
+            "p99_inter_dispatch_gap_us": self.p99_inter_dispatch_gap_us,
+            "dispatch_rate_per_sec": self.dispatch_rate_per_sec,
             "per_ring_submissions": self.per_ring_submissions,
             "per_ring_dispatches": self.per_ring_dispatches,
             "rings_used": self.rings_used,
@@ -124,48 +162,170 @@ class DriverQueueMetrics:
 
 
 # ---------------------------------------------------------------------------
-# bpftrace script templates
+# Tracepoint format probing
 # ---------------------------------------------------------------------------
 
-_QUEUE_TRACE_SCRIPT = """\
+def _probe_tracepoint_fields(tp_category: str, tp_name: str) -> Optional[Set[str]]:
+    """Read available field names from the debugfs format file.
+
+    Returns a set of field names, or ``None`` if the format file cannot be
+    read (e.g. no debugfs access, tracepoint does not exist).
+    """
+    fmt_path = Path(
+        f"/sys/kernel/debug/tracing/events/{tp_category}/{tp_name}/format"
+    )
+    try:
+        content = fmt_path.read_text()
+        return set(re.findall(r"field:[^;]*\s(\w+);", content))
+    except (PermissionError, OSError, FileNotFoundError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# MES (Micro Engine Scheduler) detection
+# ---------------------------------------------------------------------------
+
+def _detect_mes_kprobe(bpftrace_path: str) -> Optional[str]:
+    """Find an available MES submit kprobe on this kernel.
+
+    Modern AMD GPUs (MI200/MI300) use MES firmware for job dispatch,
+    bypassing the kernel DRM scheduler entirely.  Returns the kprobe
+    symbol name (e.g. ``mes_v12_0_submit_pkt_and_poll_completion``) or
+    ``None`` if MES kprobes are not available.
+    """
+    for ver in ("v12_0", "v11_0"):
+        sym = f"mes_{ver}_submit_pkt_and_poll_completion"
+        try:
+            r = subprocess.run(
+                [bpftrace_path, "-l", f"kprobe:{sym}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.stdout.strip():
+                return sym
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# bpftrace script generation
+# ---------------------------------------------------------------------------
+
+def _build_queue_trace_script(
+    target_pid: Optional[int] = None,
+    bpftrace_path: Optional[str] = None,
+) -> str:
+    """Build a bpftrace script that traces amdgpu queue events.
+
+    The function auto-detects which probing strategy works on the
+    running kernel:
+
+    1. **MES mode** (modern MI200/MI300 GPUs): Uses kprobes on the MES
+       firmware submit function plus ``amdgpu_iv`` interrupts.  The
+       kernel DRM scheduler is bypassed on these GPUs, so the
+       ``amdgpu_sched_run_job`` tracepoint never fires.
+
+    2. **Legacy DRM-scheduler mode**: Uses ``amdgpu_cs_ioctl`` and
+       ``amdgpu_sched_run_job`` tracepoints (older GPUs / graphics path).
+
+    Field names in tracepoints vary across kernel versions; the function
+    probes debugfs format files and falls back to ``0`` constants.
+    """
+    mes_sym = None
+    if bpftrace_path:
+        mes_sym = _detect_mes_kprobe(bpftrace_path)
+
+    if mes_sym is not None:
+        return _build_mes_trace_script(mes_sym, target_pid)
+    return _build_legacy_trace_script(target_pid)
+
+
+def _build_mes_trace_script(
+    mes_symbol: str,
+    target_pid: Optional[int] = None,
+) -> str:
+    """Build a bpftrace script for MES-based GPUs (MI200/MI300).
+
+    On MES GPUs, steady-state compute dispatch goes through user-space
+    doorbell writes directly to GPU firmware -- the kernel is not on
+    the data path.  We trace GPU interrupts (``amdgpu_iv``) as
+    completion signals and register writes (``amdgpu_device_wreg``) as
+    a proxy for kernel-mediated GPU operations.
+    """
+    return f"""\
 #!/usr/bin/env bpftrace
 /*
- * Trace amdgpu command submission and dispatch for a target PID.
- * Output is machine-parseable: TYPE|TIMESTAMP_NS|PID|COMM|RING|FENCE
+ * Trace AMD GPU queue events on MES-based GPUs (MI200/MI300).
+ *
+ * HIP compute dispatches via user-space doorbells, so kernel probes
+ * cannot capture individual kernel launches.  Instead we trace:
+ *   - amdgpu_iv:           GPU interrupt completions
+ *   - amdgpu_device_wreg:  kernel-side register writes (management ops)
+ *
+ * Output: TYPE|TIMESTAMP_NS|PID|COMM|RING|FENCE
  */
 
-tracepoint:amdgpu:amdgpu_cs_ioctl
-/pid == {pid}/
+tracepoint:amdgpu:amdgpu_iv
 {{
-    printf("SUBMIT|%llu|%d|%s|%d|%d\\n",
-           nsecs, pid, comm, args->ring, args->num_chunks);
+    printf("IRQ|%llu|%d|%s|%d|%d\\n",
+           nsecs, pid, comm, args->ring_id, args->src_id);
 }}
 
-tracepoint:amdgpu:amdgpu_sched_run_job
-/pid == {pid}/
+tracepoint:amdgpu:amdgpu_device_wreg
 {{
-    printf("DISPATCH|%llu|%d|%s|%d|%d\\n",
-           nsecs, pid, comm, args->ring, args->seqno);
+    printf("WREG|%llu|%d|%s|%d|%d\\n",
+           nsecs, pid, comm, args->reg, args->did);
 }}
 """
 
-_QUEUE_TRACE_SCRIPT_ALL_PIDS = """\
+
+def _build_legacy_trace_script(
+    target_pid: Optional[int] = None,
+) -> str:
+    """Build a bpftrace script using DRM-scheduler tracepoints (legacy)."""
+    cs_fields = _probe_tracepoint_fields("amdgpu", "amdgpu_cs_ioctl")
+    if cs_fields is not None:
+        cs_ring = "args->ring" if "ring" in cs_fields else "0"
+        cs_fence = (
+            "args->num_ibs"
+            if "num_ibs" in cs_fields
+            else ("args->num_chunks" if "num_chunks" in cs_fields else "0")
+        )
+    else:
+        cs_ring = "0"
+        cs_fence = "0"
+
+    sched_fields = _probe_tracepoint_fields("amdgpu", "amdgpu_sched_run_job")
+    if sched_fields is not None:
+        sched_ring = "args->ring" if "ring" in sched_fields else "0"
+        sched_seqno = (
+            "args->seqno"
+            if "seqno" in sched_fields
+            else ("args->sched_job_id" if "sched_job_id" in sched_fields else "0")
+        )
+    else:
+        sched_ring = "0"
+        sched_seqno = "0"
+
+    pid_filter = f"\n/pid == {target_pid}/" if target_pid is not None else ""
+
+    return f"""\
 #!/usr/bin/env bpftrace
 /*
- * Trace amdgpu command submission and dispatch for all PIDs.
- * Output is machine-parseable: TYPE|TIMESTAMP_NS|PID|COMM|RING|FENCE
+ * Trace amdgpu command submission and dispatch (legacy DRM-scheduler path).
+ * Output: TYPE|TIMESTAMP_NS|PID|COMM|RING|FENCE
  */
 
-tracepoint:amdgpu:amdgpu_cs_ioctl
+tracepoint:amdgpu:amdgpu_cs_ioctl{pid_filter}
 {{
     printf("SUBMIT|%llu|%d|%s|%d|%d\\n",
-           nsecs, pid, comm, args->ring, args->num_chunks);
+           nsecs, pid, comm, {cs_ring}, {cs_fence});
 }}
 
 tracepoint:amdgpu:amdgpu_sched_run_job
 {{
     printf("DISPATCH|%llu|%d|%s|%d|%d\\n",
-           nsecs, pid, comm, args->ring, args->seqno);
+           nsecs, pid, comm, {sched_ring}, {sched_seqno});
 }}
 """
 
@@ -269,13 +429,12 @@ class BPFQueueTracer:
     # Script generation
     # ------------------------------------------------------------------
 
-    def _generate_script(self) -> Path:
+    def _generate_script(self, bpftrace_path: Optional[str] = None) -> Path:
         """Generate the bpftrace script and write it to a temp file."""
-        if self._target_pid is not None:
-            script = _QUEUE_TRACE_SCRIPT.format(pid=self._target_pid)
-        else:
-            script = _QUEUE_TRACE_SCRIPT_ALL_PIDS
-
+        script = _build_queue_trace_script(
+            target_pid=self._target_pid,
+            bpftrace_path=bpftrace_path,
+        )
         script_path = self._output_dir / "queue_trace.bt"
         script_path.write_text(script)
         return script_path
@@ -296,7 +455,7 @@ class BPFQueueTracer:
                 "apt-get install bpftrace (Ubuntu) or dnf install bpftrace (RHEL)"
             )
 
-        self._script_path = self._generate_script()
+        self._script_path = self._generate_script(bpftrace_path=caps.bpftrace_path)
         self._output_path = self._output_dir / "queue_trace.log"
 
         cmd: List[str] = []
@@ -313,8 +472,21 @@ class BPFQueueTracer:
             )
 
         self._start_time_ns = time.monotonic_ns()
-        # Give bpftrace time to attach probes
         time.sleep(0.5)
+
+        rc = self._process.poll()
+        if rc is not None:
+            stderr_text = ""
+            try:
+                stderr_text = self._process.stderr.read()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            self._process = None
+            msg = f"bpftrace exited immediately (rc={rc})"
+            if stderr_text:
+                msg += f": {stderr_text.strip()}"
+            logger.warning(msg)
+            raise RuntimeError(msg)
 
     def stop(self) -> DriverQueueMetrics:
         """Stop the tracer and return parsed metrics."""
@@ -335,13 +507,18 @@ class BPFQueueTracer:
         except (subprocess.SubprocessError, ProcessLookupError):
             pass
 
+        stderr_text = ""
         try:
-            self._process.wait(timeout=10)
+            _, stderr_text = self._process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             self._process.kill()
-            self._process.wait(timeout=5)
+            _, stderr_text = self._process.communicate(timeout=5)
 
         self._process = None
+
+        if stderr_text and stderr_text.strip():
+            import warnings
+            warnings.warn(f"bpftrace stderr: {stderr_text.strip()}")
 
         events = self._parse_output()
         return self._compute_metrics(events, elapsed_ns)
@@ -357,8 +534,16 @@ class BPFQueueTracer:
     # ------------------------------------------------------------------
 
     _LINE_RE = re.compile(
-        r"^(SUBMIT|DISPATCH)\|(\d+)\|(\d+)\|([^|]+)\|(\d+)\|(\d+)$"
+        r"^(SUBMIT|DISPATCH|COMPLETE|IRQ|WREG)\|(\d+)\|(\d+)\|([^|]+)\|(\d+)\|(\d+)$"
     )
+
+    _EVENT_TYPE_MAP = {
+        "SUBMIT": "submit",
+        "DISPATCH": "dispatch",
+        "COMPLETE": "complete",
+        "IRQ": "irq",
+        "WREG": "wreg",
+    }
 
     def _parse_output(self) -> List[DriverQueueEvent]:
         """Parse the bpftrace output log into structured events."""
@@ -374,7 +559,7 @@ class BPFQueueTracer:
                     continue
 
                 event_type_raw, ts, pid, comm, ring, fence = m.groups()
-                event_type = "submit" if event_type_raw == "SUBMIT" else "dispatch"
+                event_type = self._EVENT_TYPE_MAP.get(event_type_raw, event_type_raw.lower())
 
                 events.append(
                     DriverQueueEvent(
@@ -394,6 +579,27 @@ class BPFQueueTracer:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _group_irq_completions(
+        irq_events: List[DriverQueueEvent],
+        window_us: float = 500.0,
+    ) -> List[DriverQueueEvent]:
+        """Group nearby IRQ events into single completion events.
+
+        GPU completions often deliver multiple interrupts within a small
+        window (one per CPU/node).  This deduplicates them, keeping the
+        earliest timestamp from each group as the canonical completion time.
+        """
+        if not irq_events:
+            return []
+        sorted_irqs = sorted(irq_events, key=lambda e: e.timestamp_ns)
+        groups: List[DriverQueueEvent] = [sorted_irqs[0]]
+        for ev in sorted_irqs[1:]:
+            gap_ns = ev.timestamp_ns - groups[-1].timestamp_ns
+            if gap_ns > window_us * 1_000:
+                groups.append(ev)
+        return groups
+
+    @staticmethod
     def _compute_metrics(
         events: List[DriverQueueEvent],
         elapsed_ns: int,
@@ -409,6 +615,8 @@ class BPFQueueTracer:
 
         submit_by_ring: Dict[int, List[DriverQueueEvent]] = {}
         dispatch_by_ring: Dict[int, List[DriverQueueEvent]] = {}
+        complete_events: List[DriverQueueEvent] = []
+        irq_events: List[DriverQueueEvent] = []
 
         for ev in events:
             if ev.event_type == "submit":
@@ -423,16 +631,59 @@ class BPFQueueTracer:
                     metrics.per_ring_dispatches.get(ev.ring, 0) + 1
                 )
                 dispatch_by_ring.setdefault(ev.ring, []).append(ev)
+            elif ev.event_type == "complete":
+                complete_events.append(ev)
+            elif ev.event_type == "irq":
+                irq_events.append(ev)
 
-        # Pair submit→dispatch by ring to estimate submission-to-dispatch latency.
-        # Within each ring, events are chronologically ordered; we pair them
-        # positionally (first submit → first dispatch, etc.).
+        # --- Legacy mode: pair submit->dispatch ---
         for ring, submits in submit_by_ring.items():
             dispatches = dispatch_by_ring.get(ring, [])
             for sub, disp in zip(submits, dispatches):
                 delta_us = (disp.timestamp_ns - sub.timestamp_ns) / 1_000
                 if delta_us >= 0:
                     metrics.submission_to_dispatch_us.append(delta_us)
+
+        # --- MES mode: pair dispatch->complete for round-trip latency ---
+        if complete_events and not submit_by_ring:
+            all_dispatches = sorted(
+                (ev for evs in dispatch_by_ring.values() for ev in evs),
+                key=lambda e: e.timestamp_ns,
+            )
+            for disp, comp in zip(all_dispatches, complete_events):
+                delta_us = (comp.timestamp_ns - disp.timestamp_ns) / 1_000
+                if delta_us >= 0:
+                    metrics.submission_to_dispatch_us.append(delta_us)
+
+        # --- Inter-dispatch gaps (legacy / explicit dispatch events) ---
+        if dispatch_by_ring and not submit_by_ring:
+            all_dispatches_sorted = sorted(
+                (ev for evs in dispatch_by_ring.values() for ev in evs),
+                key=lambda e: e.timestamp_ns,
+            )
+            for i in range(1, len(all_dispatches_sorted)):
+                gap_us = (
+                    all_dispatches_sorted[i].timestamp_ns
+                    - all_dispatches_sorted[i - 1].timestamp_ns
+                ) / 1_000
+                if gap_us >= 0:
+                    metrics.inter_dispatch_gap_us.append(gap_us)
+
+        # --- IRQ-based completion metrics (MES/doorbell systems) ---
+        # When no dispatch/submit events exist, IRQ completions are the
+        # only signal.  Group nearby IRQs and treat each group as one
+        # GPU completion event.
+        if irq_events and not dispatch_by_ring and not submit_by_ring:
+            completion_groups = BPFQueueTracer._group_irq_completions(irq_events)
+            metrics.total_dispatches = len(completion_groups)
+            metrics.per_ring_dispatches[0] = len(completion_groups)
+            for i in range(1, len(completion_groups)):
+                gap_us = (
+                    completion_groups[i].timestamp_ns
+                    - completion_groups[i - 1].timestamp_ns
+                ) / 1_000
+                if gap_us >= 0:
+                    metrics.inter_dispatch_gap_us.append(gap_us)
 
         return metrics
 
