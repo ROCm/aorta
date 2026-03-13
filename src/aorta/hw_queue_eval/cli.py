@@ -444,19 +444,30 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
             if result.ebpf_queue_metrics:
                 click.echo("eBPF DRIVER-LEVEL QUEUE METRICS:")
                 eqm = result.ebpf_queue_metrics
-                click.echo(f"  Total submissions:  {eqm.get('total_submissions', 0)}")
-                click.echo(f"  Total dispatches:   {eqm.get('total_dispatches', 0)}")
+                total_sub = eqm.get('total_submissions', 0)
+                total_disp = eqm.get('total_dispatches', 0)
+                click.echo(f"  Total dispatches:   {total_disp}")
                 click.echo(f"  HW rings used:      {eqm.get('rings_used', [])}")
-                avg_us = eqm.get("avg_submit_to_dispatch_us", 0.0)
-                p99_us = eqm.get("p99_submit_to_dispatch_us", 0.0)
-                click.echo(f"  Submit→dispatch avg:  {avg_us:.1f} us")
-                click.echo(f"  Submit→dispatch P99:  {p99_us:.1f} us")
+                click.echo(f"  Dispatch rate:      {eqm.get('dispatch_rate_per_sec', 0):.0f} /sec")
+
+                if total_sub > 0:
+                    click.echo(f"  Total submissions:  {total_sub}")
+                    avg_us = eqm.get("avg_submit_to_dispatch_us", 0.0)
+                    p99_us = eqm.get("p99_submit_to_dispatch_us", 0.0)
+                    click.echo(f"  Submit→dispatch avg:  {avg_us:.1f} us")
+                    click.echo(f"  Submit→dispatch P99:  {p99_us:.1f} us")
+                else:
+                    avg_gap = eqm.get("avg_inter_dispatch_gap_us", 0.0)
+                    p99_gap = eqm.get("p99_inter_dispatch_gap_us", 0.0)
+                    click.echo(f"  Inter-dispatch gap avg: {avg_gap:.1f} us")
+                    click.echo(f"  Inter-dispatch gap P99: {p99_gap:.1f} us")
+                    click.echo(f"  (ROCm/KFD path -- submit events not visible via amdgpu_cs_ioctl)")
                 click.echo()
 
             if result.ebpf_vs_cuda:
                 click.echo("eBPF vs CUDA COMPARISON:")
                 cmp = result.ebpf_vs_cuda
-                click.echo(f"  eBPF submit→dispatch:  {cmp.get('ebpf_avg_submit_to_dispatch_ms', 0):.3f} ms")
+                click.echo(f"  eBPF dispatch gap avg: {cmp.get('ebpf_avg_dispatch_gap_ms', cmp.get('ebpf_avg_submit_to_dispatch_ms', 0)):.3f} ms")
                 click.echo(f"  CUDA switch overhead:  {cmp.get('cuda_estimated_switch_overhead_ms', 0):.3f} ms")
                 click.echo(f"  Measurement accuracy:  {cmp.get('accuracy_pct', 0):.1f}%")
                 click.echo()
@@ -464,10 +475,27 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
             if result.ebpf_memory_metrics:
                 click.echo("eBPF MEMORY METRICS:")
                 emm = result.ebpf_memory_metrics
-                click.echo(f"  Page faults:      {emm.get('total_faults', 0)}")
-                click.echo(f"  Fault rate:        {emm.get('fault_rate_per_sec', 0):.1f} /sec")
-                click.echo(f"  Avg fault latency: {emm.get('avg_fault_latency_us', 0):.1f} us")
-                click.echo(f"  Migration bytes:   {emm.get('migration_bytes', 0)}")
+                bo_moves = emm.get('total_bo_moves', 0)
+                bo_maps = emm.get('total_bo_maps', 0)
+                bo_unmaps = emm.get('total_bo_unmaps', 0)
+                evictions = emm.get('total_evictions', 0)
+                migration = emm.get('migration_bytes', 0)
+
+                click.echo(f"  BO moves (migrations): {bo_moves}  ({emm.get('bo_move_rate_per_sec', 0):.0f} /sec)")
+                if migration > 0:
+                    if migration >= 1024 * 1024:
+                        click.echo(f"  Migration volume:      {migration / (1024*1024):.1f} MB")
+                    else:
+                        click.echo(f"  Migration volume:      {migration} bytes")
+                click.echo(f"  BO maps / unmaps:      {bo_maps} / {bo_unmaps}")
+                click.echo(f"  Evictions / restores:  {evictions} / {emm.get('total_restores', 0)}")
+                if evictions > 0:
+                    click.echo(f"  Eviction rate:         {emm.get('fault_rate_per_sec', 0):.1f} /sec")
+                    click.echo(f"  Avg evict latency:     {emm.get('avg_fault_latency_us', 0):.1f} us")
+                if bo_moves == 0 and bo_maps == 0 and evictions == 0:
+                    click.echo(f"  (No memory events captured -- workload may not trigger")
+                    click.echo(f"   migrations. Try a memory-intensive workload or check")
+                    click.echo(f"   tracepoint availability with: aorta ebpf-info)")
                 click.echo()
 
             # Summary
