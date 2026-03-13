@@ -14,7 +14,6 @@ Key tracepoints:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -25,7 +24,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
