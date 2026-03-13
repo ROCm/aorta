@@ -3,8 +3,14 @@ eBPF-based GPU memory profiler for AMD GPUs.
 
 Traces buffer object migrations, memory mappings, and process
 eviction/restore events at the kernel driver level via amdkfd and amdgpu
-tracepoints.  This provides driver-level visibility into memory behaviour
+tracepoints. This provides driver-level visibility into memory behaviour
 that user-space tools (torch.cuda.max_memory_allocated) cannot capture.
+
+Note: this module currently does **not** attach to GPU UVM page fault
+tracepoints. Any higher-level metric that is derived from these events and
+reported as "page faults" should be interpreted as eviction/restore cycles
+and related driver-level memory pressure signals, not literal GPU page
+faults.
 
 Key tracepoints:
 - amdgpu:amdgpu_bo_move          -- buffer migration between memory domains
