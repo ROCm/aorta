@@ -28,8 +28,12 @@ RUN apt-get update && \
     apt-get install -y ca-certificates gnupg lsb-release sudo && \
     apt-get install -y ./amdgpu-install-internal_7.0.2.1-22.04-1_all.deb
 
-# Update amdgpu-repo with specific builds (ROCm 7.0 Build #19, Jan 20, 2026)
-RUN amdgpu-repo --amdgpu-build=2281818 --rocm-build=compute-rocm-rel-7.0-meta/19
+## Configure amdgpu-repo with specific builds (ROCm 7.0.2.1 Build #17)
+
+# Point repos at Build #17 (amdgpu-build=2299626, rocm-build=compute-rocm-rel-7.0.2.1/17)
+RUN amdgpu-repo --amdgpu-build=2299626 --rocm-build=compute-rocm-rel-7.0.2.1/17
+
+
 RUN apt-get update && apt-get install -y \
     rocm-hip-sdk \
     rocm-libs \
@@ -62,7 +66,7 @@ ENV _GLIBCXX_USE_CXX11_ABI=1
 # - Compatibility: Some CK kernels may not support all input shapes/dtypes
 # - Stability: Use more mature fallback implementations
 # Set to 1 to enable CK optimized attention kernels for better transformer performance.
-ENV USE_ROCM_CK_SDPA=0
+ENV USE_ROCM_CK_SDPA=1
 
 # PYTORCH_ROCM_ARCH=gfx950
 # Specify target GPU architecture for ROCm compilation. This tells PyTorch to
@@ -71,6 +75,27 @@ ENV USE_ROCM_CK_SDPA=0
 # Multiple architectures can be specified with semicolons: gfx90a;gfx940;gfx950
 # Matching the exact architecture improves performance but increases build time.
 ENV PYTORCH_ROCM_ARCH=gfx950
+
+ENV USE_ROCM=1
+ENV USE_FLASH_ATTENTION=1
+ENV USE_MEM_EFF_ATTENTION=1
+ENV DISABLE_AOTRITON=1
+ENV CK_TILE_FMHA_FWD_FAST_EXP2=1
+ENV FLASH_NAMESPACE=pytorch_flash
+
+# =============================================================================
+# Client runtime environment flags
+# =============================================================================
+ENV NCCL_MAX_NCHANNELS=48
+ENV HSA_KERNARG_POOL_SIZE=4194304
+ENV HSA_NO_SCRATCH_RECLAIM=1
+ENV AMDGCN_USE_BUFFER_OPS=1
+ENV TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE=1
+ENV FBGEMM_NO_JK=1
+ENV FBGEMM_TBE_V2=1
+ENV FBGEMM_TBE_ROCM_HIP_BACKWARD_KERNEL=1
+ENV FBGEMM_BOUNDS_CHECK_INDICES_V2=1
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Clone PyTorch source repository
 RUN git clone https://github.com/pytorch/pytorch.git
