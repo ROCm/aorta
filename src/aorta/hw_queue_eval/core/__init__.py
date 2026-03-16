@@ -35,6 +35,10 @@ from aorta.hw_queue_eval.core.policy_evaluator import (
     PolicyEvaluator,
 )
 from aorta.hw_queue_eval.core.device_ebpf import DeviceEBPFConfig, DeviceEBPFProfiler
+from aorta.hw_queue_eval.core.ebpf_race_detector import BPFRaceDetector, RaceDetectionMetrics
+from aorta.hw_queue_eval.core.ebpf_dma_tracer import BPFDMATracer, DMATraceMetrics
+from aorta.hw_queue_eval.core.ebpf_rccl_tracer import BPFRCCLTracer, RCCLTraceMetrics
+from aorta.hw_queue_eval.core.ebpf_nan_correlator import NaNCorrelator, NaNDetection
 from aorta.utils import (
     create_streams,
     get_device_properties,
@@ -70,6 +74,15 @@ __all__ = [
     # Device eBPF (stub)
     "DeviceEBPFConfig",
     "DeviceEBPFProfiler",
+    # NaN debugging eBPF
+    "BPFRaceDetector",
+    "RaceDetectionMetrics",
+    "BPFDMATracer",
+    "DMATraceMetrics",
+    "BPFRCCLTracer",
+    "RCCLTraceMetrics",
+    "NaNCorrelator",
+    "NaNDetection",
     # Utilities
     "create_streams",
     "get_device_properties",

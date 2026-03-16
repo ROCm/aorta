@@ -1207,6 +1207,353 @@ def ebpf_info():
         click.echo("  (not accessible -- mount debugfs or run as root)")
 
 
+@cli.command("ebpf-attach")
+@click.option("--pid", "-p", type=int, default=None,
+              help="PID of the running training process to attach to")
+@click.option("--duration", "-d", default="60s",
+              help="Tracing duration (e.g. 30s, 2m, 120s)")
+@click.option("--output", "-o", default=None,
+              help="Output JSON file for the diagnostic report")
+@click.option("--tracers", "-t", default="queue,memory,race,dma,rccl",
+              help="Comma-separated tracers to run (queue,memory,race,dma,rccl)")
+@click.option("--nan-log", default=None,
+              help="Path to sanitizer log file for NaN correlation")
+@click.option("--race-window", default=100.0, type=float,
+              help="Race detection window in microseconds")
+@click.option("--dma-window", default=500.0, type=float,
+              help="DMA overlap detection window in microseconds")
+@click.option("--rccl-window", default=500.0, type=float,
+              help="RCCL collective race detection window in microseconds")
+def ebpf_attach(pid: Optional[int], duration: str, output: Optional[str],
+                tracers: str, nan_log: Optional[str],
+                race_window: float, dma_window: float, rccl_window: float):
+    """Attach eBPF tracers to a running training process for NaN debugging.
+
+    This command attaches kernel-level tracers to a live process without
+    requiring a restart.  It collects queue dispatch, memory migration,
+    stream race, DMA overlap, and RCCL collective data, then produces a
+    diagnostic report.
+
+    Requires bpftrace and root/CAP_BPF privileges.
+
+    Examples:
+
+        \b
+        # Attach to PID 12345 for 60 seconds with all tracers
+        python -m aorta.hw_queue_eval ebpf-attach --pid 12345
+
+        \b
+        # Quick 30-second capture with queue and race tracers only
+        python -m aorta.hw_queue_eval ebpf-attach --pid 12345 -d 30s -t queue,race
+
+        \b
+        # Full capture with NaN log correlation
+        python -m aorta.hw_queue_eval ebpf-attach --pid 12345 -d 120s \\
+            --nan-log /path/to/training.log -o nan_diagnosis.json
+    """
+    import time as _time
+
+    from aorta.hw_queue_eval.core.ebpf_tracer import check_ebpf_capabilities
+
+    # Parse duration
+    duration_sec = _parse_duration(duration)
+
+    # Check capabilities
+    caps = check_ebpf_capabilities()
+    if not caps.available:
+        click.echo("Error: eBPF is not available on this system.", err=True)
+        if caps.bpftrace_path is None:
+            click.echo("  bpftrace is not installed.", err=True)
+        if not caps.has_root_or_cap:
+            click.echo("  Root/CAP_BPF privileges are required.", err=True)
+        sys.exit(1)
+
+    tracer_names = [t.strip() for t in tracers.split(",")]
+    valid_tracers = {"queue", "memory", "race", "dma", "rccl"}
+    invalid = set(tracer_names) - valid_tracers
+    if invalid:
+        click.echo(f"Error: Unknown tracers: {invalid}", err=True)
+        click.echo(f"Valid tracers: {', '.join(sorted(valid_tracers))}", err=True)
+        sys.exit(1)
+
+    click.echo("=" * 70)
+    click.echo("eBPF LIVE ATTACH - NaN Debugging")
+    click.echo("=" * 70)
+    click.echo()
+    click.echo(f"  Target PID:   {pid or 'all processes'}")
+    click.echo(f"  Duration:     {duration_sec}s")
+    click.echo(f"  Tracers:      {', '.join(tracer_names)}")
+    if nan_log:
+        click.echo(f"  NaN log:      {nan_log}")
+    click.echo()
+
+    # Instantiate tracers
+    active_tracers: dict[str, Any] = {}
+
+    try:
+        if "queue" in tracer_names:
+            from aorta.hw_queue_eval.core.ebpf_tracer import BPFQueueTracer
+            active_tracers["queue"] = BPFQueueTracer(target_pid=pid)
+
+        if "memory" in tracer_names:
+            from aorta.hw_queue_eval.core.ebpf_memory_tracer import BPFMemoryTracer
+            active_tracers["memory"] = BPFMemoryTracer(target_pid=pid)
+
+        if "race" in tracer_names:
+            from aorta.hw_queue_eval.core.ebpf_race_detector import BPFRaceDetector
+            active_tracers["race"] = BPFRaceDetector(
+                target_pid=pid, race_window_us=race_window,
+            )
+
+        if "dma" in tracer_names:
+            from aorta.hw_queue_eval.core.ebpf_dma_tracer import BPFDMATracer
+            active_tracers["dma"] = BPFDMATracer(
+                target_pid=pid, overlap_window_us=dma_window,
+            )
+
+        if "rccl" in tracer_names:
+            from aorta.hw_queue_eval.core.ebpf_rccl_tracer import BPFRCCLTracer
+            active_tracers["rccl"] = BPFRCCLTracer(
+                target_pid=pid, race_window_us=rccl_window,
+            )
+
+        # Start all tracers
+        click.echo("Starting tracers...")
+        started: List[str] = []
+        for name, tracer in active_tracers.items():
+            try:
+                tracer.start()
+                started.append(name)
+                click.echo(f"  [{name}] started")
+            except RuntimeError as e:
+                click.echo(f"  [{name}] failed: {e}", err=True)
+
+        if not started:
+            click.echo("Error: No tracers started successfully.", err=True)
+            sys.exit(1)
+
+        click.echo()
+        click.echo(f"Collecting data for {duration_sec} seconds...")
+        click.echo("  (Press Ctrl+C to stop early)")
+        click.echo()
+
+        try:
+            _time.sleep(duration_sec)
+        except KeyboardInterrupt:
+            click.echo()
+            click.echo("Interrupted -- stopping tracers...")
+
+        # Stop all tracers and collect results
+        click.echo()
+        click.echo("Stopping tracers and parsing results...")
+        results: dict[str, Any] = {}
+        for name in started:
+            tracer = active_tracers[name]
+            try:
+                metric = tracer.stop()
+                results[name] = metric
+                click.echo(f"  [{name}] stopped")
+            except Exception as e:
+                click.echo(f"  [{name}] stop failed: {e}", err=True)
+
+        # Print results
+        click.echo()
+        click.echo("-" * 70)
+        click.echo("DIAGNOSTIC RESULTS")
+        click.echo("-" * 70)
+        click.echo()
+
+        _print_attach_results(results)
+
+        # NaN correlation
+        nan_reports = None
+        if nan_log or any(
+            name in results and _has_issues(name, results[name])
+            for name in started
+        ):
+            nan_reports = _run_nan_correlation(results, nan_log)
+
+        # Export to JSON
+        if output:
+            _export_attach_results(results, nan_reports, output)
+            click.echo(f"\nDiagnostic report saved to: {output}")
+
+        click.echo()
+        click.echo("=" * 70)
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        for tracer in active_tracers.values():
+            try:
+                tracer.cleanup()
+            except Exception:
+                pass
+        sys.exit(1)
+
+
+def _parse_duration(duration: str) -> float:
+    """Parse a duration string like '30s', '2m', '120s' into seconds."""
+    duration = duration.strip().lower()
+    if duration.endswith("m"):
+        return float(duration[:-1]) * 60
+    if duration.endswith("s"):
+        return float(duration[:-1])
+    return float(duration)
+
+
+def _has_issues(name: str, metric: Any) -> bool:
+    """Check if a tracer's metrics indicate potential issues."""
+    if name == "race":
+        return getattr(metric, "races_detected", 0) > 0
+    if name == "dma":
+        return getattr(metric, "overlaps_detected", 0) > 0
+    if name == "rccl":
+        return getattr(metric, "races_detected", 0) > 0
+    if name == "memory":
+        return getattr(metric, "total_evictions", 0) > 0
+    return False
+
+
+def _print_attach_results(results: dict) -> None:
+    """Print diagnostic results from all tracers."""
+    if "queue" in results:
+        m = results["queue"]
+        click.echo("QUEUE TRACER:")
+        d = m.to_dict()
+        click.echo(f"  Dispatches:    {d.get('total_dispatches', 0)}")
+        click.echo(f"  Rings used:    {d.get('rings_used', [])}")
+        click.echo(f"  Dispatch rate: {d.get('dispatch_rate_per_sec', 0):.0f} /sec")
+        avg_gap = d.get("avg_inter_dispatch_gap_us", 0.0)
+        p99_gap = d.get("p99_inter_dispatch_gap_us", 0.0)
+        if avg_gap > 0:
+            click.echo(f"  Avg dispatch gap: {avg_gap:.1f} us")
+            click.echo(f"  P99 dispatch gap: {p99_gap:.1f} us")
+        click.echo()
+
+    if "memory" in results:
+        m = results["memory"]
+        d = m.to_dict()
+        click.echo("MEMORY TRACER:")
+        click.echo(f"  BO moves:      {d.get('total_bo_moves', 0)}")
+        click.echo(f"  Evictions:     {d.get('total_evictions', 0)}")
+        click.echo(f"  Restores:      {d.get('total_restores', 0)}")
+        migration = d.get("migration_bytes", 0)
+        if migration > 0:
+            click.echo(f"  Migration:     {migration / (1024*1024):.1f} MB")
+        if d.get("total_evictions", 0) > 0:
+            click.echo(f"  WARNING: Evictions detected -- memory pressure may cause NaN")
+        click.echo()
+
+    if "race" in results:
+        m = results["race"]
+        d = m.to_dict()
+        click.echo("RACE DETECTOR:")
+        click.echo(f"  Submissions:   {d.get('total_submissions', 0)}")
+        click.echo(f"  Races found:   {d.get('races_detected', 0)}")
+        if d.get("races_detected", 0) > 0:
+            click.echo(f"  Affected rings: {d.get('rings_with_races', [])}")
+            click.echo(f"  ALERT: Stream races detected -- likely cause of NaN!")
+            for i, rev in enumerate(d.get("race_events", [])[:5]):
+                click.echo(f"    Race #{i+1}: ring={rev.get('ring')} "
+                           f"gap={rev.get('gap_us', 0):.1f}us "
+                           f"fence_gap={rev.get('fence_gap', 0)}")
+        else:
+            click.echo(f"  No races detected")
+        click.echo()
+
+    if "dma" in results:
+        m = results["dma"]
+        d = m.to_dict()
+        click.echo("DMA/H2D TRACER:")
+        click.echo(f"  BO moves:      {d.get('total_bo_moves', 0)}")
+        click.echo(f"  Compute subs:  {d.get('total_compute_submits', 0)}")
+        click.echo(f"  Overlaps:      {d.get('overlaps_detected', 0)}")
+        if d.get("overlaps_detected", 0) > 0:
+            click.echo(f"  Max overlap:   {d.get('max_overlap_us', 0):.1f} us")
+            click.echo(f"  ALERT: H2D DMA-compute overlaps detected!")
+        click.echo()
+
+    if "rccl" in results:
+        m = results["rccl"]
+        d = m.to_dict()
+        click.echo("RCCL TRACER:")
+        click.echo(f"  Collective submissions: {d.get('collective_submissions', 0)}")
+        click.echo(f"  Compute submissions:    {d.get('compute_submissions', 0)}")
+        click.echo(f"  Collective rings:       {d.get('collective_rings', [])}")
+        click.echo(f"  Compute rings:          {d.get('compute_rings', [])}")
+        click.echo(f"  Races detected:         {d.get('races_detected', 0)}")
+        if d.get("races_detected", 0) > 0:
+            click.echo(f"  ALERT: Collective-compute races detected!")
+        click.echo()
+
+
+def _run_nan_correlation(results: dict, nan_log: Optional[str]) -> Optional[list]:
+    """Run NaN correlation if a log is provided or issues were found."""
+    from aorta.hw_queue_eval.core.ebpf_nan_correlator import NaNCorrelator, NaNDetection
+
+    correlator = NaNCorrelator(window_ms=100.0)
+
+    if nan_log:
+        count = correlator.add_nan_events_from_log(nan_log)
+        if count > 0:
+            click.echo(f"NaN CORRELATION: Parsed {count} NaN events from log")
+        else:
+            click.echo(f"NaN CORRELATION: No NaN events found in {nan_log}")
+            return None
+    else:
+        return None
+
+    if "queue" in results:
+        correlator.set_queue_events(results["queue"].events)
+    if "memory" in results:
+        correlator.set_memory_events(results["memory"].events)
+    if "race" in results:
+        correlator.set_race_events(results["race"].race_events)
+    if "dma" in results:
+        correlator.set_dma_overlaps(results["dma"].overlap_events)
+    if "rccl" in results:
+        correlator.set_collective_races(results["rccl"].race_events)
+
+    reports = correlator.correlate()
+
+    if reports:
+        click.echo()
+        click.echo("NaN CORRELATION RESULTS:")
+        for i, r in enumerate(reports[:10]):
+            d = r.to_dict()
+            click.echo(f"  NaN #{i+1} (step={d['nan_step']}, rank={d['nan_rank']}):")
+            click.echo(f"    Diagnosis:  {d['diagnosis']}")
+            click.echo(f"    Confidence: {d['confidence']}")
+            ke = d["kernel_events"]
+            if ke["race_events"] > 0:
+                click.echo(f"    Stream races in window: {ke['race_events']}")
+            if ke["dma_overlaps"] > 0:
+                click.echo(f"    DMA overlaps in window: {ke['dma_overlaps']}")
+            if ke["collective_races"] > 0:
+                click.echo(f"    Collective races:       {ke['collective_races']}")
+            if ke["evictions"] > 0:
+                click.echo(f"    Evictions in window:    {ke['evictions']}")
+
+    return [r.to_dict() for r in reports]
+
+
+def _export_attach_results(results: dict, nan_reports: Optional[list],
+                           filepath: str) -> None:
+    """Export all diagnostic results to a JSON file."""
+    data: dict[str, Any] = {}
+
+    for name, metric in results.items():
+        data[f"{name}_metrics"] = metric.to_dict()
+
+    if nan_reports:
+        data["nan_correlation"] = nan_reports
+
+    with open(filepath, "w") as f:
+        json.dump(data, f, indent=2)
+
+
 def main():
     """Entry point for the CLI."""
     cli()
