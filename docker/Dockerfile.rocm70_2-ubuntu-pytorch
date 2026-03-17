@@ -127,7 +127,7 @@ ENV FBGEMM_BOUNDS_CHECK_INDICES_V2=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Clone PyTorch source repository
-RUN git clone https://github.com/pytorch/pytorch.git -b v2.11.0-rc2
+RUN git clone --branch v2.11.0-rc2 --single-branch https://github.com/pytorch/pytorch.git
 
 # Build PyTorch for AMD/ROCm
 # The build_amd.py script applies ROCm-specific patches and prepares the source
