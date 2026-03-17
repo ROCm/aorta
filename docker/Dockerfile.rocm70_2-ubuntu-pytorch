@@ -66,7 +66,7 @@ ENV _GLIBCXX_USE_CXX11_ABI=1
 # - Compatibility: Some CK kernels may not support all input shapes/dtypes
 # - Stability: Use more mature fallback implementations
 # Set to 1 to enable CK optimized attention kernels for better transformer performance.
-ENV USE_ROCM_CK_SDPA=0
+ENV USE_ROCM_CK_SDPA=1
 
 # PYTORCH_ROCM_ARCH=gfx950
 # Specify target GPU architecture for ROCm compilation. This tells PyTorch to
@@ -127,7 +127,7 @@ ENV FBGEMM_BOUNDS_CHECK_INDICES_V2=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Clone PyTorch source repository
-RUN git clone https://github.com/pytorch/pytorch.git
+RUN git clone https://github.com/pytorch/pytorch.git -b v2.11.0-rc2
 
 # Build PyTorch for AMD/ROCm
 # The build_amd.py script applies ROCm-specific patches and prepares the source
@@ -138,7 +138,6 @@ RUN git clone https://github.com/pytorch/pytorch.git
 RUN cd pytorch && \
     git submodule update --init --recursive && \
     python3.10 tools/amd_build/build_amd.py
-
 
 # Install modern CMake (required by PyTorch)
 RUN wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc | gpg --dearmor -o /usr/share/keyrings/kitware.gpg && \
