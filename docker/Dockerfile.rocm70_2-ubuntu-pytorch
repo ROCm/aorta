@@ -58,14 +58,14 @@ RUN python3 -m pip install --upgrade pip setuptools wheel
 # Set to 0 for old ABI compatibility with legacy libraries.
 ENV _GLIBCXX_USE_CXX11_ABI=1
 
-# USE_ROCM_CK_SDPA=0
-# Disable ROCm Composable Kernel (CK) backend for Scaled Dot Product Attention (SDPA).
-# When set to 0, PyTorch will use generic/fallback implementations for attention layers
-# instead of CK-optimized kernels. This may be needed for:
+# USE_ROCM_CK_SDPA=1
+# Enable ROCm Composable Kernel (CK) backend for Scaled Dot Product Attention (SDPA).
+# When set to 1 (the default here), PyTorch will use CK-optimized kernels for attention
+# layers to improve transformer performance on supported shapes/dtypes.
+# Set to 0 to disable CK SDPA and fall back to generic implementations. This may be
+# useful for:
 # - Debugging: Isolate issues related to CK kernels
-# - Compatibility: Some CK kernels may not support all input shapes/dtypes
-# - Stability: Use more mature fallback implementations
-# Set to 1 to enable CK optimized attention kernels for better transformer performance.
+# - Compatibility/Stability: When CK kernels do not yet support all input shapes/dtypes
 ENV USE_ROCM_CK_SDPA=1
 
 # PYTORCH_ROCM_ARCH=gfx950
