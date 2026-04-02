@@ -431,13 +431,18 @@ def pipeline_hwqueue(
         verbose=verbose,
     )
 
+    # Validate mode: require either --input or both --baseline-dir and --test-dir
+    if not input_path and not (baseline_dir and test_dir):
+        raise click.UsageError(
+            "Must provide either --input for single input mode, "
+            "or both --baseline-dir and --test-dir for comparison mode."
+        )
+
     # Determine mode for display
     if baseline_dir and test_dir:
         mode_str = "Comparison Mode"
-    elif input_path:
-        mode_str = "Single Input Mode"
     else:
-        mode_str = "Unknown Mode"
+        mode_str = "Single Input Mode"
 
     if not quiet:
         click.echo("=" * 60)
