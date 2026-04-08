@@ -189,14 +189,26 @@ def _run_single_input_pipeline(config: HWQueuePipelineConfig) -> HWQueuePipeline
         else:
             result.steps_skipped.append("excel (disabled)")
 
-        # Step 3: Generate Plots (placeholder for Phase 5)
+        # Step 3: Generate Plots
         if config.plots:
             if config.verbose:
                 print("\n" + "=" * 60)
                 print("STEP 3: Generate Plots")
                 print("=" * 60)
-                print("  (Not yet implemented - Phase 5)")
-            result.steps_skipped.append("plots (not implemented)")
+
+            try:
+                from ..generators.hwqueue_plots import generate_hwqueue_plots
+
+                plots_dir = config.output_dir / "plots"
+                plot_files = generate_hwqueue_plots(data, plots_dir, verbose=config.verbose)
+                result.files_generated["plots"] = plot_files
+                result.steps_completed.append("plots")
+
+                if config.verbose:
+                    print(f"  ✓ Generated {len(plot_files)} plot(s)")
+            except Exception as e:
+                result.warnings.append(f"Failed to generate plots: {e}")
+                result.steps_skipped.append("plots (failed)")
         else:
             result.steps_skipped.append("plots (disabled)")
 

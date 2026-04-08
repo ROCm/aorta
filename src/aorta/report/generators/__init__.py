@@ -14,6 +14,11 @@ from .hwqueue_excel import (
     generate_sweep_excel,
     generate_comparison_excel,
 )
+from .hwqueue_plots import (
+    generate_hwqueue_plots,
+    generate_single_run_plots,
+    generate_sweep_plots,
+)
 
 __all__ = [
     "generate_html",
@@ -27,4 +32,7 @@ __all__ = [
     "generate_single_run_excel",
     "generate_sweep_excel",
     "generate_comparison_excel",
+    "generate_hwqueue_plots",
+    "generate_single_run_plots",
+    "generate_sweep_plots",
 ]
