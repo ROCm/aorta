@@ -40,14 +40,15 @@ fi
 # Step 1: Select Dockerfile
 echo -e "${GREEN}Step 1: Select Dockerfile${NC}"
 echo "Available Dockerfiles:"
-echo "  1) Dockerfile.rocm70_9-1              - Standard ROCm 7.0.9.1 build"
-echo "  2) Dockerfile.rocm70_9-1-shampoo      - ROCm 7.0.9.1 with Shampoo optimizer"
-echo "  3) Dockerfile.rocm70_2-ubuntu-pytorch - ROCm 7.0.2 Ubuntu PyTorch build"
-echo "  4) Dockerfile.rocm70_2-ubuntu-nan     - ROCm 7.0.2 with NaN debugging tools"
+echo "  1) Dockerfile.rocm70_9-1                    - Standard ROCm 7.0.9.1 build"
+echo "  2) Dockerfile.rocm70_9-1-shampoo            - ROCm 7.0.9.1 with Shampoo optimizer"
+echo "  3) Dockerfile.rocm70_2-ubuntu-pytorch       - ROCm 7.0.2 Ubuntu PyTorch build"
+echo "  4) Dockerfile.rocm70_2-ubuntu-nan           - ROCm 7.0.2 with NaN debugging tools"
+echo "  5) Dockerfile.therock-host-asan-pytorch     - TheRock HOST_ASAN HIP runtime + PyTorch"
 echo ""
 
 while true; do
-    read -p "Enter choice [1-4]: " dockerfile_choice
+    read -p "Enter choice [1-5]: " dockerfile_choice
     case $dockerfile_choice in
         1)
             DOCKERFILE="Dockerfile.rocm70_9-1"
@@ -69,8 +70,13 @@ while true; do
             VARIANT="rocm70_2-ubuntu-nan"
             break
             ;;
+        5)
+            DOCKERFILE="Dockerfile.therock-host-asan-pytorch"
+            VARIANT="therock-host-asan-pytorch"
+            break
+            ;;
         *)
-            echo -e "${RED}Invalid choice. Please enter 1-4.${NC}"
+            echo -e "${RED}Invalid choice. Please enter 1-5.${NC}"
             ;;
     esac
 done

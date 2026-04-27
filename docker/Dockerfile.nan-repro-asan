@@ -1,0 +1,280 @@
+# =============================================================================
+# ASAN HIP Runtime Overlay for NaN Repro Base Images
+# =============================================================================
+#
+# Architecture
+# ~~~~~~~~~~~~
+# Builds ASAN-instrumented HIP runtime libraries from individual ROCm repos
+# (ROCR-Runtime + clr) at the exact rocm-7.2.0 tag, matching the base image's
+# apt-installed ROCm 7.2.0 stack for guaranteed ABI compatibility.
+#
+# The instrumented libamdhip64.so and libhsa-runtime64.so are placed in
+# /opt/rocm-asan/lib and shadow the normal libs via LD_LIBRARY_PATH.
+# All HIP API calls go through the ASAN-instrumented libraries while
+# everything else (rocblas, miopen, rccl, Python, etc.) runs at native speed.
+#
+# Base images (both ROCm 7.2.0, Ubuntu 24.04, gfx950):
+#   rocm/pytorch-private:nan-repro                  — PyTorch 2.12.0a0
+#   rocm/pytorch-private:nan-repro-hipblaslt-develop — hipBLASLt develop build
+#
+# This differs from Dockerfile.therock-host-asan-pytorch in two ways:
+#   1. Uses pre-built base images (no ROCm/PyTorch build from scratch)
+#   2. Builds ASAN overlay from individual ROCm repos (not TheRock) for
+#      exact ABI match with ROCm 7.2.0
+#
+# NOTE: LD_PRELOAD is NOT used.  The ASAN runtime loads as a NEEDED
+# dependency of the instrumented libs.  LD_PRELOAD breaks HIP's internal
+# dynamic loading of libhsa-runtime64.so (SEGV in amd::Device::init).
+# verify_asan_link_order=0 suppresses ASAN's check that it must load first.
+#
+# Build
+# ~~~~~
+#   # With nan-repro base (PyTorch 2.12)
+#   docker build \
+#     --build-arg BASE_IMAGE=rocm/pytorch-private:nan-repro \
+#     --progress=plain \
+#     -f docker/Dockerfile.nan-repro-asan \
+#     -t nan-repro-asan:latest . 2>&1 | tee build.log
+#
+#   # With hipblaslt-develop base
+#   docker build \
+#     --build-arg BASE_IMAGE=rocm/pytorch-private:nan-repro-hipblaslt-develop \
+#     --progress=plain \
+#     -f docker/Dockerfile.nan-repro-asan \
+#     -t nan-repro-hipblaslt-asan:latest . 2>&1 | tee build.log
+#
+#   # Or via docker-compose:
+#   cp docker/.env.nan-repro-asan docker/.env
+#   docker compose -f docker/docker-compose.build.yaml \
+#     build --progress=plain 2>&1 | tee build.log
+#
+# Run
+# ~~~
+#   docker run -it --rm \
+#     --device=/dev/kfd --device=/dev/dri \
+#     --ipc=host --group-add=video --group-add=render \
+#     nan-repro-asan:latest
+#
+#   ASAN is enabled automatically.  Override options at runtime:
+#     -e ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:log_path=/workspace/asan.log"
+#
+#   Disable the ASAN overlay at runtime:
+#     -e LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/llvm/lib
+#
+# =============================================================================
+
+ARG BASE_IMAGE=rocm/pytorch-private:nan-repro
+FROM ${BASE_IMAGE}
+
+USER root
+
+# ---------------------------------------------------------------------------
+# Build arguments
+# ---------------------------------------------------------------------------
+
+ARG ROCM_VERSION_TAG=rocm-7.2.0
+ARG AMDGPU_TARGET=gfx950
+ARG ROCM_INSTALL_PREFIX=/opt/rocm
+
+# ---------------------------------------------------------------------------
+# 1. Build dependencies for compiling ROCm components from source
+# ---------------------------------------------------------------------------
+# The base images have cmake, git, ninja, g++, python3 (conda) but may
+# lack development headers required by ROCR-Runtime and clr.
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# The hipblaslt-develop base image ships a custom hipblaslt (1.2.2) that
+# conflicts with the rocm-libs metapackage (expects 1.2.1).  Remove the
+# metapackage to unblock apt — actual ROCm libraries remain installed.
+RUN dpkg --remove --force-depends rocm-libs 2>/dev/null || true && \
+    apt-get update && apt-get install -y --fix-broken \
+    build-essential \
+    pkg-config \
+    libdrm-dev \
+    libelf-dev \
+    libnuma-dev \
+    xxd \
+    patchelf \
+    ccache \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install CppHeaderParser
+
+# ---------------------------------------------------------------------------
+# 2. Clone ROCm source repos at the exact version matching the base image
+# ---------------------------------------------------------------------------
+# Three repos are needed:
+#   ROCR-Runtime — builds libhsa-runtime64.so (HSA runtime) and libhsakmt.so
+#   clr          — builds libamdhip64.so (HIP runtime)
+#   HIP          — HIP API headers consumed by the clr build
+#
+# Pinning to ROCM_VERSION_TAG ensures ABI compatibility with the base
+# image's apt-installed ROCm 7.2.0 libraries.
+
+WORKDIR /build/rocm-asan-src
+
+RUN git clone --branch ${ROCM_VERSION_TAG} --single-branch --depth 1 \
+        https://github.com/ROCm/ROCR-Runtime.git && \
+    git clone --branch ${ROCM_VERSION_TAG} --single-branch --depth 1 \
+        https://github.com/ROCm/clr.git && \
+    git clone --branch ${ROCM_VERSION_TAG} --single-branch --depth 1 \
+        https://github.com/ROCm/HIP.git
+
+# ---------------------------------------------------------------------------
+# 3. Build ROCR-Runtime with ASAN
+# ---------------------------------------------------------------------------
+# Produces ASAN-instrumented libhsa-runtime64.so and libhsakmt.so.
+# Uses ROCm's own clang (at /opt/rocm/llvm/bin/clang) which includes the
+# ASAN runtime (libclang_rt.asan-x86_64.so).
+#
+# -shared-libsan ensures the ASAN runtime is linked as a shared dependency
+# (NEEDED) rather than statically, so it resolves via LD_LIBRARY_PATH.
+#
+# IMAGE_SUPPORT=OFF skips the image runtime to reduce dependencies.
+#
+# The cmake source dir check handles both repo layouts: CMakeLists.txt at
+# root (ROCm 6.x+) or in src/ (older versions).
+
+ENV CCACHE_DIR=/build/ccache
+ENV CCACHE_MAXSIZE=10G
+
+RUN --mount=type=cache,target=/build/ccache \
+    cd ROCR-Runtime && \
+    if [ -f CMakeLists.txt ]; then \
+        CMAKE_SRC_DIR="."; \
+    elif [ -f src/CMakeLists.txt ]; then \
+        CMAKE_SRC_DIR="src"; \
+    else \
+        echo "ERROR: Cannot find CMakeLists.txt in ROCR-Runtime" && exit 1; \
+    fi && \
+    echo "Using ROCR-Runtime cmake source: ${CMAKE_SRC_DIR}" && \
+    cmake -S ${CMAKE_SRC_DIR} -B build \
+        -GNinja \
+        -DCMAKE_C_COMPILER=${ROCM_INSTALL_PREFIX}/llvm/bin/clang \
+        -DCMAKE_CXX_COMPILER=${ROCM_INSTALL_PREFIX}/llvm/bin/clang++ \
+        -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+        -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+        -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address -shared-libsan" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DIMAGE_SUPPORT=OFF \
+        -DCMAKE_PREFIX_PATH=${ROCM_INSTALL_PREFIX} \
+        -DCMAKE_INSTALL_PREFIX=/tmp/rocm-asan-full \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache && \
+    cmake --build build -j$(nproc) && \
+    cmake --install build
+
+# ---------------------------------------------------------------------------
+# 4. Build clr (HIP runtime) with ASAN
+# ---------------------------------------------------------------------------
+# Produces ASAN-instrumented libamdhip64.so.
+#
+# Links against the ASAN-built ROCR-Runtime (/tmp/rocm-asan-full) and the
+# existing comgr + device-libs from /opt/rocm.  Only HIP/HSA runtime is
+# instrumented — comgr runs at native speed since the NaN race condition
+# is in the HIP/HSA layer.
+#
+# /tmp/rocm-asan-full is listed BEFORE /opt/rocm in CMAKE_PREFIX_PATH so
+# cmake finds the ASAN-built hsa-runtime64 instead of the normal one.
+
+RUN --mount=type=cache,target=/build/ccache \
+    cd clr && \
+    cmake -S . -B build \
+        -GNinja \
+        -DCMAKE_C_COMPILER=${ROCM_INSTALL_PREFIX}/llvm/bin/clang \
+        -DCMAKE_CXX_COMPILER=${ROCM_INSTALL_PREFIX}/llvm/bin/clang++ \
+        -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+        -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+        -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address -shared-libsan" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCLR_BUILD_HIP=ON \
+        -DCLR_BUILD_OCL=OFF \
+        -DHIP_COMMON_DIR=/build/rocm-asan-src/HIP \
+        -DHIP_PLATFORM=amd \
+        -DCMAKE_PREFIX_PATH="/tmp/rocm-asan-full;${ROCM_INSTALL_PREFIX}" \
+        -DCMAKE_INSTALL_PREFIX=/tmp/rocm-asan-full \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache && \
+    cmake --build build -j$(nproc) && \
+    cmake --install build
+
+# ---------------------------------------------------------------------------
+# 5. Extract and validate the ASAN overlay libraries
+# ---------------------------------------------------------------------------
+# Copy ONLY the shared libs we want to shadow at runtime.  This avoids
+# polluting the image with duplicate binaries, headers, cmake configs, etc.
+
+RUN mkdir -p /opt/rocm-asan/lib && \
+    for lib in libamdhip64 libhsa-runtime64 libhsakmt; do \
+        find /tmp/rocm-asan-full/lib -name "${lib}.so*" -exec cp -a {} /opt/rocm-asan/lib/ \; ; \
+    done && \
+    rm -rf /tmp/rocm-asan-full
+
+RUN echo "=== ASAN overlay libs ===" && \
+    ls -la /opt/rocm-asan/lib/ && \
+    if nm -D /opt/rocm-asan/lib/libamdhip64.so 2>/dev/null | grep -q '__asan_'; then \
+        echo "PASS: libamdhip64.so contains ASAN instrumentation"; \
+    else \
+        echo "FAIL: libamdhip64.so is NOT ASAN-instrumented — check build config" && exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+# 6. Create stable ASAN runtime symlink
+# ---------------------------------------------------------------------------
+# The ASAN runtime lives under a versioned clang directory:
+#   /opt/rocm/llvm/lib/clang/22/lib/linux/libclang_rt.asan-x86_64.so
+# A stable symlink at /opt/rocm-asan/rt/ avoids hardcoding the clang
+# version number in ENV directives.
+
+RUN ASAN_RT=$(find ${ROCM_INSTALL_PREFIX}/llvm/lib/clang -name "libclang_rt.asan-x86_64.so" 2>/dev/null | head -1) && \
+    if [ -z "$ASAN_RT" ]; then \
+        echo "ERROR: ASAN runtime not found under ${ROCM_INSTALL_PREFIX}/llvm/lib/clang/" && exit 1; \
+    fi && \
+    mkdir -p /opt/rocm-asan/rt && \
+    ln -sf "$ASAN_RT" /opt/rocm-asan/rt/libclang_rt.asan-x86_64.so && \
+    echo "ASAN runtime symlink: /opt/rocm-asan/rt/ -> $(dirname $ASAN_RT)" && \
+    ls -la /opt/rocm-asan/rt/
+
+# ---------------------------------------------------------------------------
+# 7. Cleanup build tree
+# ---------------------------------------------------------------------------
+
+RUN du -sh /build/rocm-asan-src 2>/dev/null || true && \
+    rm -rf /build/rocm-asan-src && \
+    echo "Cleaned ASAN source tree"
+
+# ---------------------------------------------------------------------------
+# 8. ASAN overlay environment
+# ---------------------------------------------------------------------------
+# /opt/rocm-asan/lib comes first so ASAN-instrumented libamdhip64.so
+# shadows the normal one from /opt/rocm/lib.
+# /opt/rocm-asan/rt contains the ASAN runtime symlink.
+#
+# We use ldconfig to register all ROCm library directories (including
+# subdirectories like rocm_sysdeps/lib where libfmt.so lives).  The ASAN
+# overlay dir is listed first so the linker finds the instrumented libs
+# before the normal ones.
+#
+# To disable ASAN at runtime:
+#   export LD_LIBRARY_PATH=/opt/rocm/lib
+
+RUN echo "/opt/rocm-asan/lib" > /etc/ld.so.conf.d/00-rocm-asan.conf && \
+    echo "/opt/rocm-asan/rt"  >> /etc/ld.so.conf.d/00-rocm-asan.conf && \
+    { find /opt/rocm -type d -name "lib" -o -type d -name "lib64" 2>/dev/null; \
+      find /opt/conda -maxdepth 2 -type d -name "lib" 2>/dev/null; \
+    } | sort -u >> /etc/ld.so.conf.d/01-rocm-all.conf && \
+    ldconfig && \
+    echo "=== ldconfig registered ===" && \
+    cat /etc/ld.so.conf.d/00-rocm-asan.conf && \
+    cat /etc/ld.so.conf.d/01-rocm-all.conf && \
+    echo "=== libfmt check ===" && \
+    ldconfig -p | grep libfmt
+
+ENV LD_LIBRARY_PATH=/opt/rocm-asan/lib:/opt/rocm-asan/rt:/opt/rocm/lib:/opt/rocm/llvm/lib:/opt/conda/lib
+ENV ASAN_OVERLAY_ACTIVE=1
+ENV ASAN_SYMBOLIZER_PATH=${ROCM_INSTALL_PREFIX}/llvm/bin/llvm-symbolizer
+ENV ASAN_OPTIONS="detect_leaks=0:halt_on_error=0:symbolize=1:verify_asan_link_order=0"
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

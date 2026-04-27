@@ -18,6 +18,8 @@ services:
     build:
       context: .
       dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}
+      args:
+        - BASE_IMAGE=${BASE_IMAGE:-}
       # Required for build: apt/npm access during docker compose build
       network: host
     # Security Configuration (Elevated Privileges Required)
