@@ -540,24 +540,25 @@ class StreamHarness:
         # Start memory tracer BEFORE setup so it captures BO allocations
         self._start_ebpf_memory_tracer()
 
-        # Setup workload
-        workload.setup(self.config.stream_count, self.config.device)
+        try:
+            # Setup workload
+            workload.setup(self.config.stream_count, self.config.device)
 
-        collector = self._metrics_collector
-        collector.clear()
+            collector = self._metrics_collector
+            collector.clear()
 
-        # Warmup phase
-        for _ in range(self.config.warmup_iterations):
-            workload.run_iteration(self.streams)
-            if self.config.sync_mode == "per_iteration":
-                sync_all_streams(self.streams)
+            # Warmup phase
+            for _ in range(self.config.warmup_iterations):
+                workload.run_iteration(self.streams)
+                if self.config.sync_mode == "per_iteration":
+                    sync_all_streams(self.streams)
 
-        # Sync after warmup (all devices)
-        sync_all_streams(self.streams)
-        for device in self.devices:
-            torch.cuda.synchronize(device)
+            # Sync after warmup (all devices)
+            sync_all_streams(self.streams)
+            for device in self.devices:
+                torch.cuda.synchronize(device)
 
-        # Reset memory stats after warmup (all devices)
+            # Reset memory stats after warmup (all devices)
         if self.config.reset_memory_stats_before_run:
             for device in self.devices:
                 reset_memory_stats(device)
