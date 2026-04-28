@@ -1,0 +1,154 @@
+#!/usr/bin/env bpftrace
+/*
+ * GPU memory corruption detector for Shampoo NaN debugging.
+ * Probes verified on this kernel (6.9.0-fbk6).
+ *
+ * Hypothesis: NaN in Shampoo preconditioner is caused by lower-level
+ * memory corruption — page eviction, BO moves, or KFD queue eviction
+ * racing with active GPU compute.
+ *
+ * Usage:
+ *   sudo bpftrace gpu_cont.bt $PID
+ */
+
+/* ===== IOCTL ENTER/EXIT ===== */
+
+tracepoint:syscalls:sys_enter_ioctl
+/pid == $1/
+{
+    @ioctl_start[tid] = nsecs;
+    @ioctl_cmd[tid] = args->cmd;
+}
+
+tracepoint:syscalls:sys_exit_ioctl
+/pid == $1 && @ioctl_start[tid] > 0/
+{
+    $dur = (nsecs - @ioctl_start[tid]) / 1000;
+
+    if (args->ret != 0) {
+        printf("%llu IOCTL_ERROR cmd=0x%llx ret=%d dur=%dus\n",
+               nsecs, @ioctl_cmd[tid], args->ret, $dur);
+    } else if ($dur > 1000) {
+        printf("%llu LONG_IOCTL cmd=0x%llx dur=%dus\n",
+               nsecs, @ioctl_cmd[tid], $dur);
+    }
+
+    delete(@ioctl_start[tid]);
+    delete(@ioctl_cmd[tid]);
+}
+
+/* ===== MEMORY OPS (process-filtered) ===== */
+
+tracepoint:syscalls:sys_enter_mmap
+/pid == $1/
+{
+    printf("%llu MMAP len=%llu prot=0x%llx flags=0x%llx\n",
+           nsecs, args->len, args->prot, args->flags);
+}
+
+tracepoint:syscalls:sys_enter_munmap
+/pid == $1/
+{
+    printf("%llu MUNMAP addr=0x%llx len=%llu\n",
+           nsecs, args->addr, args->len);
+}
+
+/* ===== KFD QUEUE EVICTION / RESTORE =====
+ *
+ * Smoking gun probes: KFD evicts compute queues under memory pressure,
+ * then restores them. If restore races with active GPU work, the
+ * preconditioner's factor matrices can see stale/zeroed VRAM.
+ */
+
+kprobe:kfd_process_evict_queues
+{
+    printf("%llu *** KFD_EVICT_QUEUES pid=%d comm=%s ***\n", nsecs, pid, comm);
+}
+
+kprobe:kfd_process_restore_queues
+{
+    printf("%llu *** KFD_RESTORE_QUEUES pid=%d comm=%s ***\n", nsecs, pid, comm);
+}
+
+/* ===== SVM BO EVICTION WORKER =====
+ *
+ * SVM range eviction worker — GPU pages being moved/evicted.
+ */
+
+kprobe:svm_range_evict_svm_bo_worker
+{
+    printf("%llu *** SVM_RANGE_EVICT_WORKER pid=%d comm=%s ***\n", nsecs, pid, comm);
+}
+
+/* ===== AMDGPU BO MOVE (tracepoint — has placement info) =====
+ *
+ * TTM manages VRAM <-> GTT movement. A BO move while the GPU
+ * is reading factor matrices would produce NaN/garbage.
+ * old/new placement: 0=VRAM, 1=GTT, 2=SYSTEM
+ */
+
+tracepoint:amdgpu:amdgpu_bo_move
+{
+    printf("%llu *** AMDGPU_BO_MOVE size=%llu old=%u new=%u ***\n",
+           nsecs, args->bo_size, args->old_placement, args->new_placement);
+}
+
+/* ===== AMDGPU VM OPERATIONS ===== */
+
+/* VM_BO_UNMAP and VM_UPDATE_PTES are very high-frequency. Count them
+ * in 1-second windows instead of logging every one. */
+
+tracepoint:amdgpu:amdgpu_vm_bo_unmap
+{
+    @vm_unmap_count++;
+}
+
+tracepoint:amdgpu:amdgpu_vm_update_ptes
+{
+    @vm_pte_update_count++;
+}
+
+tracepoint:amdgpu:amdgpu_vm_flush
+{
+    printf("%llu AMDGPU_VM_FLUSH vmid=%u hub=%u pd_addr=0x%llx\n",
+           nsecs, args->vmid, args->vm_hub, args->pd_addr);
+}
+
+interval:s:1
+{
+    if (@vm_unmap_count > 0) {
+        printf("%llu VM_UNMAP_COUNT=%lld VM_PTE_UPDATE_COUNT=%lld (1s window)\n",
+               nsecs, @vm_unmap_count, @vm_pte_update_count);
+    }
+    @vm_unmap_count = 0;
+    @vm_pte_update_count = 0;
+}
+
+/* ===== GPU PAGE TABLE HANDLE MOVED ===== */
+
+kprobe:amdgpu_vm_handle_moved
+{
+    printf("%llu AMDGPU_VM_HANDLE_MOVED pid=%d\n", nsecs, pid);
+}
+
+/* ===== KFD INTERRUPT (GPU interrupts) ===== */
+
+kprobe:kfd_signal_event_interrupt
+{
+    printf("%llu KFD_INTERRUPT pid=%d\n", nsecs, pid);
+}
+
+/* ===== SIGNALS (process-filtered) ===== */
+
+tracepoint:signal:signal_deliver
+/pid == $1/
+{
+    printf("%llu SIGNAL sig=%d\n", nsecs, args->sig);
+}
+
+/* ===== HEARTBEAT ===== */
+
+interval:s:5
+{
+    printf("%llu HEARTBEAT alive\n", nsecs);
+}

@@ -25,7 +25,9 @@ from torch.optim import AdamW
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from aorta.data import SyntheticDatasetConfig, create_dataloader
+from aorta.ebpf import BpftraceScriptVariant
 from aorta.models import ModelConfig, RankingTransformerModel
+from aorta.profiling.kernel_profiler import KernelTraceConfig, KernelTraceProfiler
 from aorta.profiling.stream_profiler import StreamProfiler
 from aorta.utils import detect_accelerator, get_device, get_distributed_backend, load_config, merge_cli_overrides, setup_logging
 
@@ -107,6 +109,18 @@ class ProfilerConfig:
     tensorboard: bool = False
     chrome_trace: bool = True
     trace_filename: str = "trace.json"
+
+
+@dataclass
+class KernelTracingConfig:
+    """Per-trainer flags that translate to ``KernelTraceConfig``."""
+
+    enabled: bool = False
+    variant: str = "tp_only"
+    use_sudo: bool = True
+    keep_raw_events: bool = False
+    skip_if_unavailable: bool = True
+    bpftrace_path: Optional[str] = None
 
 
 def _parse_config(args: argparse.Namespace) -> Dict[str, Any]:
@@ -198,6 +212,25 @@ def _build_profiler_config(raw: Dict[str, Any]) -> ProfilerConfig:
         if field.name in section:
             setattr(cfg, field.name, section[field.name])
     return cfg
+
+
+def _build_kernel_tracing_config(raw: Dict[str, Any]) -> KernelTracingConfig:
+    section = raw.get("kernel_tracing", {})
+    cfg = KernelTracingConfig()
+    for field in dataclass_fields(KernelTracingConfig):
+        if field.name in section:
+            setattr(cfg, field.name, section[field.name])
+    return cfg
+
+
+def _resolve_kernel_trace_variant(name: str) -> BpftraceScriptVariant:
+    try:
+        return BpftraceScriptVariant[name.upper()]
+    except KeyError as exc:
+        valid = ", ".join(v.name.lower() for v in BpftraceScriptVariant)
+        raise ValueError(
+            f"Unknown kernel-tracing variant '{name}'. Valid options: {valid}"
+        ) from exc
 
 
 def dataclass_fields(cls) -> Iterable[Any]:
@@ -443,6 +476,7 @@ def training_loop(
     profiler: StreamProfiler,
     enable_rocm_metrics: bool,
     profiler_cfg: ProfilerConfig,
+    kernel_profiler: Optional[KernelTraceProfiler] = None,
 ) -> None:
     rank = environment["rank"]
     world_size = environment["world_size"]
@@ -479,6 +513,8 @@ def training_loop(
 
                 for step, cpu_batch in enumerate(dataloader):
                     profiler.start_iteration(global_step)
+                    if kernel_profiler is not None:
+                        kernel_profiler.start_iteration(global_step)
 
                     with profiler.range("aux", f"epoch{epoch}_step{step}_prefetch"):
                         batch = move_batch_to_device(cpu_batch, device)
@@ -578,6 +614,9 @@ def training_loop(
                     profiler.record_marker("compute", f"epoch{epoch}_step{step}_end")
 
                     iteration_profile = profiler.end_iteration()
+                    kernel_trace_record: Optional[Dict[str, Any]] = None
+                    if kernel_profiler is not None:
+                        kernel_trace_record = kernel_profiler.end_iteration()
 
                     iteration_payload = {
                         "rank": rank,
@@ -590,6 +629,8 @@ def training_loop(
                         "lr": optimizer.param_groups[0]["lr"],
                         "profile": iteration_profile,
                     }
+                    if kernel_trace_record is not None:
+                        iteration_payload["kernel_trace"] = kernel_trace_record
 
                     iteration_payload.update(collect_rocm_metrics(enable_rocm_metrics))
                     metrics_logger.log(iteration_payload)
@@ -790,11 +831,35 @@ def main_cli() -> None:  # pragma: no cover - CLI entry
         help="Configuration overrides as dotted key=value entries",
     )
     parser.add_argument("--enable-rocm-metrics", action="store_true", help="Collect rocm-smi metrics")
+    parser.add_argument(
+        "--enable-kernel-trace",
+        action="store_true",
+        help="Attach a bpftrace-based kernel-event profiler to this process. "
+             "Requires bpftrace and CAP_BPF/CAP_PERFMON or sudo on the host.",
+    )
+    parser.add_argument(
+        "--kernel-trace-variant",
+        type=str,
+        default=None,
+        help="Override the bpftrace script variant (full, light, tp_only, "
+             "one_kprobe, unrelated_kprobe). Defaults to tp_only.",
+    )
     args = parser.parse_args()
-    main(args, enable_rocm_metrics=args.enable_rocm_metrics)
+    main(
+        args,
+        enable_rocm_metrics=args.enable_rocm_metrics,
+        enable_kernel_trace=args.enable_kernel_trace,
+        kernel_trace_variant=args.kernel_trace_variant,
+    )
 
 
-def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool = False) -> None:
+def main(
+    args: Optional[argparse.Namespace] = None,
+    *,
+    enable_rocm_metrics: bool = False,
+    enable_kernel_trace: bool = False,
+    kernel_trace_variant: Optional[str] = None,
+) -> None:
     if args is None:
         parser = argparse.ArgumentParser()
         parser.add_argument("--config", type=str, required=True)
@@ -813,6 +878,11 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
     ddp_cfg = _build_ddp_config(config)
     compile_cfg = _build_compile_config(config)
     profiler_cfg = _build_profiler_config(config)
+    kernel_tracing_cfg = _build_kernel_tracing_config(config)
+    if enable_kernel_trace:
+        kernel_tracing_cfg.enabled = True
+    if kernel_trace_variant is not None:
+        kernel_tracing_cfg.variant = kernel_trace_variant
 
     log_level = config.get("logging", {}).get("level", "INFO")
     env = init_distributed(training_cfg, log_level)
@@ -845,6 +915,25 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
 
     profiler = StreamProfiler(env["device"])
 
+    kernel_profiler: Optional[KernelTraceProfiler] = None
+    if kernel_tracing_cfg.enabled:
+        try:
+            variant = _resolve_kernel_trace_variant(kernel_tracing_cfg.variant)
+        except ValueError as exc:
+            log.error("%s", exc)
+            raise
+        kernel_profiler = KernelTraceProfiler(
+            KernelTraceConfig(
+                enabled=True,
+                variant=variant,
+                use_sudo=kernel_tracing_cfg.use_sudo,
+                bpftrace_path=kernel_tracing_cfg.bpftrace_path,
+                keep_raw_events=kernel_tracing_cfg.keep_raw_events,
+                skip_if_unavailable=kernel_tracing_cfg.skip_if_unavailable,
+            )
+        )
+        kernel_profiler.start()
+
     try:
         training_loop(
             model,
@@ -856,8 +945,11 @@ def main(args: Optional[argparse.Namespace] = None, *, enable_rocm_metrics: bool
             profiler,
             enable_rocm_metrics,
             profiler_cfg,
+            kernel_profiler=kernel_profiler,
         )
     finally:
+        if kernel_profiler is not None:
+            kernel_profiler.stop()
         dist.barrier()
         dist.destroy_process_group()
 

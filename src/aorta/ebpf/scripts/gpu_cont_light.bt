@@ -1,0 +1,75 @@
+#!/usr/bin/env bpftrace
+/*
+ * LIGHTWEIGHT GPU memory corruption detector.
+ *
+ * The full gpu_cont.bt (with amdgpu_bo_move, vm_flush, etc.) adds enough
+ * global tracepoint overhead to suppress the NaN race condition — the same
+ * Heisenberg effect seen with gradient hooks and frequent syncs.
+ *
+ * This version only traces:
+ *   - KFD queue eviction/restore (low volume, ~200/run)
+ *   - SVM BO eviction worker (low volume)
+ *   - ioctl errors on the target PID only
+ *   - Signals on the target PID
+ *
+ * Usage:
+ *   sudo bpftrace gpu_cont_light.bt $PID
+ */
+
+/* ===== KFD QUEUE EVICTION / RESTORE ===== */
+
+kprobe:kfd_process_evict_queues
+{
+    printf("%llu *** KFD_EVICT_QUEUES pid=%d comm=%s ***\n", nsecs, pid, comm);
+}
+
+kprobe:kfd_process_restore_queues
+{
+    printf("%llu *** KFD_RESTORE_QUEUES pid=%d comm=%s ***\n", nsecs, pid, comm);
+}
+
+/* ===== SVM BO EVICTION WORKER ===== */
+
+kprobe:svm_range_evict_svm_bo_worker
+{
+    printf("%llu *** SVM_RANGE_EVICT_WORKER pid=%d comm=%s ***\n", nsecs, pid, comm);
+}
+
+/* ===== IOCTL ERRORS ONLY (PID-filtered) ===== */
+
+tracepoint:syscalls:sys_enter_ioctl
+/pid == $1/
+{
+    @ioctl_start[tid] = nsecs;
+    @ioctl_cmd[tid] = args->cmd;
+}
+
+tracepoint:syscalls:sys_exit_ioctl
+/pid == $1 && @ioctl_start[tid] > 0/
+{
+    $dur = (nsecs - @ioctl_start[tid]) / 1000;
+
+    /* Only log real GPU ioctl errors (skip 0x5401 TCGETS terminal checks) */
+    if (args->ret != 0 && @ioctl_cmd[tid] != 0x5401) {
+        printf("%llu IOCTL_ERROR cmd=0x%llx ret=%d dur=%dus\n",
+               nsecs, @ioctl_cmd[tid], args->ret, $dur);
+    }
+
+    delete(@ioctl_start[tid]);
+    delete(@ioctl_cmd[tid]);
+}
+
+/* ===== SIGNALS ===== */
+
+tracepoint:signal:signal_deliver
+/pid == $1/
+{
+    printf("%llu SIGNAL sig=%d\n", nsecs, args->sig);
+}
+
+/* ===== HEARTBEAT ===== */
+
+interval:s:10
+{
+    printf("%llu HEARTBEAT alive\n", nsecs);
+}

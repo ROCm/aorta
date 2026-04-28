@@ -1,0 +1,50 @@
+#!/usr/bin/env bpftrace
+/*
+ * Experiment 3b: kprobe on UNRELATED function + all tracepoints.
+ * Tests whether ANY kprobe overhead suppresses NaN, or only KFD-path kprobes.
+ * Uses do_sys_openat2 (file open syscall) - completely unrelated to GPU.
+ */
+
+/* THE UNRELATED KPROBE */
+kprobe:do_sys_openat2
+/pid == $1/
+{
+    @openat_count++;
+}
+
+/* === tracepoints (same as gpu_cont_tp_only.bt) === */
+
+tracepoint:amdgpu:amdgpu_bo_move
+{
+    printf("%llu BO_MOVE size=%llu old=%u new=%u\n",
+           nsecs, args->bo_size, args->old_placement, args->new_placement);
+}
+
+tracepoint:amdgpu:amdgpu_vm_flush
+{
+    printf("%llu VM_FLUSH vmid=%u hub=%u\n",
+           nsecs, args->vmid, args->vm_hub);
+}
+
+tracepoint:amdgpu:amdgpu_vm_bo_unmap { @unmap_count++; }
+tracepoint:amdgpu:amdgpu_vm_update_ptes { @pte_count++; }
+
+tracepoint:syscalls:sys_exit_ioctl
+/pid == $1 && args->ret != 0 && args->ret != -25/
+{
+    printf("%llu IOCTL_ERR ret=%d\n", nsecs, args->ret);
+}
+
+tracepoint:signal:signal_deliver
+/pid == $1/
+{
+    printf("%llu SIG=%d\n", nsecs, args->sig);
+}
+
+interval:s:5
+{
+    printf("%llu TICK unmaps=%lld ptes=%lld openats=%lld\n", nsecs, @unmap_count, @pte_count, @openat_count);
+    @unmap_count = 0;
+    @pte_count = 0;
+    @openat_count = 0;
+}

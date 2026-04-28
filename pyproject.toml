@@ -71,6 +71,11 @@ hw-queue-profiling = [
     "seaborn>=0.12.0",
 ]
 
+# For aorta.ebpf kernel tracing module.
+# The runtime requirements are the bpftrace binary and CAP_BPF/CAP_PERFMON
+# (or sudo); no Python deps beyond the base.
+ebpf = []
+
 # Development dependencies
 dev = [
     "pytest>=8.0.0",
@@ -103,7 +108,7 @@ where = ["src"]
 include = ["aorta*"]
 
 [tool.setuptools.package-data]
-aorta = ["py.typed"]
+aorta = ["py.typed", "ebpf/scripts/*.bt", "ebpf/scripts/PROVENANCE.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

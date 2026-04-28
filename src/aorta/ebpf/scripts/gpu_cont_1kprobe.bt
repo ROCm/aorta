@@ -1,0 +1,47 @@
+#!/usr/bin/env bpftrace
+/*
+ * Experiment 3a: SINGLE kprobe on kfd_process_evict_queues + all tracepoints.
+ * Tests whether serializing just the eviction entry point suppresses NaN.
+ */
+
+/* THE ONE KPROBE */
+kprobe:kfd_process_evict_queues
+{
+    printf("%llu *** KFD_EVICT_QUEUES pid=%d ***\n", nsecs, pid);
+}
+
+/* === tracepoints (same as gpu_cont_tp_only.bt) === */
+
+tracepoint:amdgpu:amdgpu_bo_move
+{
+    printf("%llu BO_MOVE size=%llu old=%u new=%u\n",
+           nsecs, args->bo_size, args->old_placement, args->new_placement);
+}
+
+tracepoint:amdgpu:amdgpu_vm_flush
+{
+    printf("%llu VM_FLUSH vmid=%u hub=%u\n",
+           nsecs, args->vmid, args->vm_hub);
+}
+
+tracepoint:amdgpu:amdgpu_vm_bo_unmap { @unmap_count++; }
+tracepoint:amdgpu:amdgpu_vm_update_ptes { @pte_count++; }
+
+tracepoint:syscalls:sys_exit_ioctl
+/pid == $1 && args->ret != 0 && args->ret != -25/
+{
+    printf("%llu IOCTL_ERR ret=%d\n", nsecs, args->ret);
+}
+
+tracepoint:signal:signal_deliver
+/pid == $1/
+{
+    printf("%llu SIG=%d\n", nsecs, args->sig);
+}
+
+interval:s:5
+{
+    printf("%llu TICK unmaps=%lld ptes=%lld\n", nsecs, @unmap_count, @pte_count);
+    @unmap_count = 0;
+    @pte_count = 0;
+}
