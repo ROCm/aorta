@@ -282,10 +282,19 @@ def _run_rdhc(reasons: list[str]) -> dict | None:
         reasons.append(msg)
         return None
 
-    with tempfile.NamedTemporaryFile(
-        suffix=".json", prefix="rdhc_quick_", delete=False
-    ) as tmp:
-        tmp_path = Path(tmp.name)
+    # Tempfile creation is part of the never-raises surface: a read-only or
+    # full /tmp would otherwise abort collect_env(). Treat as "rdhc
+    # unavailable" with a clear reason.
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=".json", prefix="rdhc_quick_", delete=False
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+    except OSError as exc:
+        msg = f"system_health: failed to create rdhc temp file ({exc})"
+        log.info(msg)
+        reasons.append(msg)
+        return None
 
     try:
         cmd = ["sudo", "-n", "-E", rdhc, "--quick", "--json", str(tmp_path)]
@@ -360,11 +369,22 @@ def _capture_rocm_version_files(reasons: list[str]) -> dict[str, str | None]:
 
 
 def _read_text_file(path: Path) -> str | None:
-    """Read a small text file; return its stripped contents or ``None``."""
+    """Read a small text file; return its stripped contents or ``None``.
+
+    Part of the ``never raises`` surface: catches everything that can come
+    out of ``Path.read_text``, including ``UnicodeDecodeError`` from files
+    with non-UTF8 bytes (e.g. a corrupt ``/sys/module/amdgpu/version``
+    or a locale-mismatched ``/opt/rocm/.info/*``). Returns ``None`` for
+    every error path so the caller can record a partial reason instead of
+    crashing.
+    """
     try:
         text = path.read_text(encoding="utf-8").strip()
         return text or None
     except (FileNotFoundError, PermissionError, IsADirectoryError):
+        return None
+    except UnicodeDecodeError as exc:
+        log.debug("non-utf8 contents in %s: %s", path, exc)
         return None
     except OSError as exc:
         log.debug("read failed for %s: %s", path, exc)
@@ -467,15 +487,34 @@ def _capture_hipblaslt(reasons: list[str]) -> dict[str, Any]:
         "tensile_yaml_revision": tensile_yaml_revision,
         "applied_prs": {},
     }
+    # Distinguish "header file unreadable" from "header readable but the
+    # specific define is missing/unparseable" so partial_reasons points
+    # callers at the right thing to investigate.
+    header_unreadable = header_text is None
     if commit is None:
-        reasons.append(f"hipblaslt.commit: {HIPBLASLT_VERSION_HEADER} not readable")
+        if header_unreadable:
+            reasons.append(
+                f"hipblaslt.commit: {HIPBLASLT_VERSION_HEADER} not readable"
+            )
+        else:
+            reasons.append(
+                f"hipblaslt.commit: {HIPBLASLT_VERSION_HEADER} did not "
+                "contain a readable HIPBLASLT_VERSION_TWEAK define"
+            )
     if package_version is None:
-        reasons.append(
-            f"hipblaslt.package_version: {HIPBLASLT_VERSION_HEADER} did not "
-            "contain MAJOR/MINOR/PATCH defines"
-        )
+        if header_unreadable:
+            reasons.append(
+                f"hipblaslt.package_version: {HIPBLASLT_VERSION_HEADER} not readable"
+            )
+        else:
+            reasons.append(
+                f"hipblaslt.package_version: {HIPBLASLT_VERSION_HEADER} did not "
+                "contain MAJOR/MINOR/PATCH defines"
+            )
     if lib_hash is None:
-        reasons.append(f"hipblaslt.lib_hash: {HIPBLASLT_LIB_DIR}/libhipblaslt.so not readable")
+        reasons.append(
+            f"hipblaslt.lib_hash: {HIPBLASLT_LIB_DIR}/libhipblaslt.so not readable"
+        )
     if tensile_yaml_revision is None:
         reasons.append(
             f"hipblaslt.tensile_yaml_revision: no kernel files under "

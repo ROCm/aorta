@@ -166,7 +166,9 @@ class TestSchemaCompleteness:
         """``partial`` and ``partial_reasons`` must be present in the on-disk JSON."""
         snapshot = collect_env()
         out = tmp_path / "env.json"
-        out.write_text(json.dumps(snapshot.to_dict(), default=str))
+        # Deliberately no default=str -- the schema is supposed to be
+        # JSON-native. If anything sneaks in this should fail loudly.
+        out.write_text(json.dumps(snapshot.to_dict()))
         on_disk = json.loads(out.read_text())
         assert "partial" in on_disk
         assert "partial_reasons" in on_disk
@@ -240,7 +242,7 @@ class TestEnvSnapshot:
     def test_round_trip_via_json(self):
         """B1/B2 path: serialise via JSON, embed in a result, deserialise back."""
         original = _example_snapshot()
-        as_json = json.dumps(original.to_dict(), default=str)
+        as_json = json.dumps(original.to_dict())
         rebuilt = EnvSnapshot.from_dict(json.loads(as_json))
         assert rebuilt == original
 
@@ -476,7 +478,7 @@ class TestB1B2Integration:
             "env": snapshot.to_dict(),
         }
         out = tmp_path / "trial_result.json"
-        out.write_text(json.dumps(trial_result, default=str, indent=2))
+        out.write_text(json.dumps(trial_result, indent=2))
 
         loaded = json.loads(out.read_text())
         assert loaded["trial_id"] == "exp1-trial0"
@@ -488,7 +490,7 @@ class TestB1B2Integration:
         """B2 writes host_env.json once at matrix start."""
         snapshot = collect_env()
         host_env_path = tmp_path / "host_env.json"
-        host_env_path.write_text(json.dumps(snapshot.to_dict(), default=str))
+        host_env_path.write_text(json.dumps(snapshot.to_dict()))
 
         loaded = EnvSnapshot.from_dict(json.loads(host_env_path.read_text()))
         assert loaded == snapshot
@@ -532,6 +534,56 @@ class TestCliIsThinWrapper:
         """Sanity check: the CLI references the library function."""
         text = cli_path.read_text()
         assert "collect_env" in text
+
+    def test_cli_creates_missing_parent_directory(self, all_disabled, tmp_path: Path):
+        """Regression guard: ``-o newdir/env.json`` must work for a non-existent
+        parent. With ``click.Path(writable=True)`` Click would reject that
+        before our ``mkdir`` ran.
+        """
+        from click.testing import CliRunner
+
+        # Import the CLI symbol the same way the entrypoint does
+        cli_path = Path(env_mod.__file__).parent.parent / "cli" / "env.py"
+        spec = importlib.util.spec_from_file_location("aorta.cli.env", cli_path)
+        cli_mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cli_mod
+        spec.loader.exec_module(cli_mod)
+
+        out_path = tmp_path / "deeply" / "nested" / "new" / "env.json"
+        assert not out_path.parent.exists()
+        runner = CliRunner()
+        result = runner.invoke(cli_mod.env, ["probe", "-o", str(out_path)])
+        assert result.exit_code == 0, result.output
+        assert out_path.exists()
+        # And the JSON is loadable
+        json.loads(out_path.read_text())
+
+    def test_cli_emits_json_native_output_no_default_str(
+        self, all_disabled
+    ):
+        """Regression guard: the CLI does not pass ``default=str`` to json.dumps.
+
+        Stringifying non-JSON types would mask schema regressions (Path,
+        datetime, etc. accidentally leaking into EnvSnapshot fields).
+        Verified by:
+        1. Confirming ``collect_env()``'s output is json.dumps-able with
+           the strict default (no ``default=`` argument).
+        2. Scanning the CLI source for the *call-site* pattern -- not the
+           bare token, which appears in our explanatory comment.
+        """
+        snapshot = collect_env()
+        # Must succeed without any default= fallback
+        json.dumps(snapshot.to_dict())
+
+        cli_path = Path(env_mod.__file__).parent.parent / "cli" / "env.py"
+        text = cli_path.read_text()
+        # Match the call-site pattern (',' + space + key=val + ')') so we
+        # don't false-positive on the comment that documents this very
+        # invariant.
+        assert ", default=str)" not in text, (
+            "cli/env.py json.dumps call uses default=str -- this masks "
+            "non-JSON types in the schema. Remove it so the failure is loud."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +682,23 @@ class TestRdhcWrapper:
         assert "path" in captured
         assert not captured["path"].exists()
 
+    def test_rdhc_handles_tempfile_oserror(self, isolated_env, monkeypatch):
+        """Regression guard: a read-only or full /tmp must not break collect_env.
+
+        Without the try/except around tempfile.NamedTemporaryFile, OSError
+        would bubble up and break the never-raises contract.
+        """
+        monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
+
+        def boom(*a, **kw):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(env_mod.tempfile, "NamedTemporaryFile", boom)
+        reasons: list[str] = []
+        # Must not raise; must record a system_health: reason
+        assert env_mod._run_rdhc(reasons) is None
+        assert any("temp file" in r for r in reasons)
+
 
 # ---------------------------------------------------------------------------
 # ROCm version files
@@ -692,6 +761,24 @@ class TestRocmVersionFiles:
         reasons: list[str] = []
         result = env_mod._capture_rocm_version_files(reasons)
         assert result["version_dev"] is None
+
+    def test_non_utf8_file_returns_none_no_raise(self, tmp_path: Path, monkeypatch):
+        """Regression guard: a corrupt/non-UTF8 version file must not raise.
+
+        Without the UnicodeDecodeError catch in _read_text_file, a single
+        rogue byte in /sys/module/amdgpu/version (or a locale-mismatched
+        file) would abort the whole env probe and break the never-raises
+        contract.
+        """
+        bad = tmp_path / "non_utf8"
+        bad.write_bytes(b"\xff\xfe\x80not-utf8")  # invalid UTF-8 lead bytes
+        monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", bad)
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", tmp_path / "nope")
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", tmp_path / "nope")
+        reasons: list[str] = []
+        # Must not raise, must return None for the bad file
+        result = env_mod._capture_rocm_version_files(reasons)
+        assert result["kmd_version"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -864,6 +951,43 @@ class TestHipblasltBlockShape:
         reasons: list[str] = []
         env_mod._capture_hipblaslt(reasons)
         assert all(r.startswith("hipblaslt.") for r in reasons)
+
+    def test_reason_when_header_unreadable(self, all_disabled):
+        """Header file missing -> reason should say 'not readable'."""
+        reasons: list[str] = []
+        env_mod._capture_hipblaslt(reasons)
+        commit_reason = next(r for r in reasons if r.startswith("hipblaslt.commit"))
+        assert "not readable" in commit_reason
+
+    def test_reason_when_header_present_but_tweak_missing(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        """Header readable but no TWEAK define -> reason names that explicitly.
+
+        Regression guard: prior to this fix, both failure modes used the
+        same "not readable" reason -- misleading when the header *was*
+        readable but missing the specific define.
+        """
+        header = tmp_path / "hipblaslt-version.h"
+        header.write_text(
+            "#define HIPBLASLT_VERSION_MAJOR 1\n"
+            "#define HIPBLASLT_VERSION_MINOR 2\n"
+            "#define HIPBLASLT_VERSION_PATCH 0\n"
+            # Note: no HIPBLASLT_VERSION_TWEAK -- a real-world case where a
+            # build config emits MAJOR/MINOR/PATCH only.
+        )
+        monkeypatch.setattr(env_mod, "HIPBLASLT_VERSION_HEADER", header)
+        monkeypatch.setattr(env_mod, "HIPBLASLT_LIB_DIR", tmp_path / "no_libs")
+        monkeypatch.setattr(env_mod, "HIPBLASLT_TENSILE_DIR", tmp_path / "no_tensile")
+
+        reasons: list[str] = []
+        block = env_mod._capture_hipblaslt(reasons)
+        # commit failed but package_version succeeded
+        assert block["commit"] is None
+        assert block["package_version"] == "1.2.0"
+        commit_reason = next(r for r in reasons if r.startswith("hipblaslt.commit"))
+        assert "not readable" not in commit_reason
+        assert "HIPBLASLT_VERSION_TWEAK" in commit_reason
 
 
 # ---------------------------------------------------------------------------
@@ -1113,9 +1237,13 @@ class TestNoGpuCompute:
     """
 
     def test_torch_cuda_never_called(self, all_disabled):
-        if "torch" not in sys.modules:
+        # Try to actually import torch (rather than sniffing sys.modules):
+        # we want to skip ONLY when torch is genuinely unavailable, not
+        # whenever it merely hasn't been imported yet by the test runner.
+        try:
+            import torch
+        except ImportError:
             pytest.skip("torch not available; trivially passes")
-        torch = sys.modules["torch"]
         with patch.object(torch.cuda, "is_available") as is_avail, patch.object(
             torch.cuda, "device_count"
         ) as dev_count:

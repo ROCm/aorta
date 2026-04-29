@@ -24,7 +24,11 @@ def env() -> None:
 @click.option(
     "--output",
     "-o",
-    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    # NOTE: deliberately not setting ``writable=True`` -- Click validates
+    # that during arg parsing, which fails for ``-o newdir/env.json``
+    # *before* we get a chance to ``mkdir`` the parent. We create the
+    # parent ourselves and let the actual write surface any I/O error.
+    type=click.Path(dir_okay=False, path_type=Path),
     default=Path("env.json"),
     show_default=True,
     help="Path to write env.json.",
@@ -36,7 +40,11 @@ def probe(output: Path) -> None:
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     snapshot = collect_env()
-    output.write_text(json.dumps(snapshot.to_dict(), indent=2, default=str))
+    # NOTE: deliberately not passing ``default=str`` -- the snapshot is
+    # supposed to be JSON-native (str/int/bool/None/list/dict). If a
+    # non-serializable type sneaks in (e.g. a Path or datetime), we want
+    # the failure to be loud rather than silently stringified.
+    output.write_text(json.dumps(snapshot.to_dict(), indent=2))
     partial = " [PARTIAL]" if snapshot.partial else ""
     click.echo(
         f"Wrote env probe to {output} "
