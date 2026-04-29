@@ -177,7 +177,14 @@ class EnvSnapshot:
         rocm = self.rocm or {}
         hip = self.hip or {}
         hipblaslt = self.hipblaslt or {}
-        sysh = "present" if self.system_health else "unavailable (system_health=null)"
+        # Use ``is not None`` -- RDHC may return an empty dict on a healthy
+        # host with nothing to report, which is still a successful capture
+        # and must NOT be summarised as "unavailable".
+        sysh = (
+            "present"
+            if self.system_health is not None
+            else "unavailable (system_health=null)"
+        )
         partial_marker = (
             f" [PARTIAL, {len(self.partial_reasons)} reason(s)]"
             if self.partial
@@ -652,9 +659,12 @@ def _detect_container_type() -> str:
     cgroup = _read_text_file(CGROUP_FILE)
     if cgroup:
         # cgroup lines look like '12:freezer:/docker/<id>' or
-        # '0::/system.slice/docker-<id>.scope'. Detect the first runtime
-        # name that appears. Limited to schema-documented values.
-        for runtime in ("docker", "podman", "singularity"):
+        # '0::/system.slice/docker-<id>.scope'. Apply the documented
+        # precedence: singularity wins over docker/podman so a
+        # Singularity environment that happens to inherit a docker-shaped
+        # cgroup path is not misclassified. Limited to schema-documented
+        # values.
+        for runtime in ("singularity", "docker", "podman"):
             if runtime in cgroup:
                 return runtime
     return "baremetal"

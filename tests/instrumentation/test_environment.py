@@ -266,6 +266,24 @@ class TestEnvSnapshot:
         assert "PARTIAL" in partial_snap.summary()
         assert "PARTIAL" not in clean_snap.summary()
 
+    def test_summary_treats_empty_system_health_as_present(self):
+        """Regression guard: RDHC may legitimately return an empty dict
+        ``{}`` (subprocess succeeded, nothing to report). The earlier
+        truthiness check ``if self.system_health`` would summarise that as
+        unavailable -- ``is not None`` is the right check.
+        """
+        snap_empty = _example_snapshot(system_health={})
+        snap_null = _example_snapshot(system_health=None)
+        snap_populated = _example_snapshot(system_health={"rdhc_version": "1.4.0"})
+
+        # Empty dict and populated dict should both render as 'present'
+        assert "present" in snap_empty.summary()
+        assert "unavailable" not in snap_empty.summary()
+        assert "present" in snap_populated.summary()
+        # Only None should render as 'unavailable'
+        assert "unavailable" in snap_null.summary()
+        assert "present" not in snap_null.summary()
+
     def test_summary_is_multiline_human_readable(self):
         snap = _example_snapshot()
         s = snap.summary()
@@ -1042,6 +1060,35 @@ class TestRuntimeContext:
         all_disabled.setattr(env_mod, "DOCKERENV_MARKER", marker)
         all_disabled.setattr(env_mod, "CGROUP_FILE", cgroup)
         assert env_mod._detect_container_type() == "docker"
+
+    def test_singularity_wins_over_docker_in_cgroup_fallback(
+        self, all_disabled, tmp_path: Path
+    ):
+        """Regression guard: when /proc/1/cgroup mentions both 'singularity'
+        and 'docker' (e.g. a Singularity instance whose underlying cgroup
+        was created by a docker-shim), the documented precedence says
+        Singularity wins. Earlier code iterated docker first and would
+        misclassify.
+        """
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text(
+            "12:freezer:/docker/abc123\n"
+            "0::/singularity/instance-xyz\n"
+        )
+        all_disabled.setattr(env_mod, "CGROUP_FILE", cgroup)
+        assert env_mod._detect_container_type() == "singularity"
+
+    def test_singularity_wins_over_podman_in_cgroup_fallback(
+        self, all_disabled, tmp_path: Path
+    ):
+        """Same precedence rule against podman tokens."""
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text(
+            "0::/machine.slice/libpod-podman-xxx.scope\n"
+            "0::/singularity/instance-xyz\n"
+        )
+        all_disabled.setattr(env_mod, "CGROUP_FILE", cgroup)
+        assert env_mod._detect_container_type() == "singularity"
 
     def test_python_env_venv(self, isolated_env, monkeypatch):
         monkeypatch.setattr(sys, "base_prefix", "/usr")
