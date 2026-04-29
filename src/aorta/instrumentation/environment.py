@@ -210,44 +210,112 @@ class EnvSnapshot:
 def collect_env() -> EnvSnapshot:
     """Capture the current process environment as an :class:`EnvSnapshot`.
 
-    NEVER raises. On any probe failure (rdhc unavailable, no sudo,
-    /opt/rocm missing, hipconfig not on PATH, hipBLASLt header missing,
-    torch absent, etc.), the corresponding fields are set to ``None`` and
-    ``partial=True`` with a human-readable reason appended to
-    ``partial_reasons``.
+    NEVER raises. The promise is enforced two ways:
 
-    Callers (B1 dispatcher, B2 matrix runner, CLI) treat the snapshot as
-    always-valid and never as a failure path -- they may surface a warning
-    when ``partial=True`` but the run continues.
+    * Every probe is individually fail-soft (returns None or a shaped
+      dict; appends a human-readable reason to a shared list on fallback).
+    * The orchestrator body is wrapped in a top-level ``try / except
+      Exception``. If anything genuinely unexpected raises (a stdlib call
+      misbehaves, a probe is buggy, etc.), the disaster-recovery helper
+      :func:`_disaster_snapshot` constructs a minimally-shaped
+      :class:`EnvSnapshot` with ``partial=True`` and the original
+      exception captured in ``partial_reasons``. Callers (B1 dispatcher,
+      B2 matrix runner, CLI) always get back a valid object.
 
-    No GPU compute. No tensor allocations. The optional ``import torch`` for
-    the version probe does NOT initialise CUDA / HIP context.
+    No GPU compute. No tensor allocations. The optional ``import torch``
+    for the version probe does NOT initialise CUDA / HIP context.
     """
     reasons: list[str] = []
+    try:
+        runtime_context = _detect_runtime_context()  # never partial; always populates
+        system_health = _run_rdhc(reasons)
+        rocm = _capture_rocm_version_files(reasons)
+        hip = _capture_hip_toolchain(reasons)
+        hipblaslt = _capture_hipblaslt(reasons)
+        docker = _capture_docker_metadata(runtime_context, reasons)
+        env_vars = _capture_env_vars()  # individual nulls are documented, not partial
+        pytorch_version = _capture_pytorch_version(reasons)
 
-    runtime_context = _detect_runtime_context()  # never partial; always populates
-    system_health = _run_rdhc(reasons)
-    rocm = _capture_rocm_version_files(reasons)
-    hip = _capture_hip_toolchain(reasons)
-    hipblaslt = _capture_hipblaslt(reasons)
-    docker = _capture_docker_metadata(runtime_context, reasons)
-    env_vars = _capture_env_vars()  # individual nulls are documented, not partial
-    pytorch_version = _capture_pytorch_version(reasons)
+        return EnvSnapshot(
+            schema_version=SCHEMA_VERSION,
+            captured_at=_utc_now_iso(),
+            system_health=system_health,
+            rocm=rocm,
+            hip=hip,
+            hipblaslt=hipblaslt,
+            runtime_context=runtime_context,
+            docker=docker,
+            env_vars=env_vars,
+            python_version=platform.python_version(),
+            pytorch_version=pytorch_version,
+            partial=bool(reasons),
+            partial_reasons=reasons,
+        )
+    except Exception as exc:  # noqa: BLE001 -- this is the never-raises gate
+        log.info("collect_env() hit unexpected exception", exc_info=True)
+        return _disaster_snapshot(
+            preceding_reasons=reasons,
+            unexpected_reason=(
+                f"collect_env: unexpected failure "
+                f"({type(exc).__name__}: {exc})"
+            ),
+        )
+
+
+def _disaster_snapshot(
+    preceding_reasons: list[str], unexpected_reason: str
+) -> EnvSnapshot:
+    """Return a minimally-shaped EnvSnapshot when collect_env crashes.
+
+    Used by the never-raises top-level guard. Every field gets a sane
+    null/empty default so downstream consumers (B1, B2, jq pipelines)
+    still see the schema they expect, with ``partial=True`` and the
+    triggering exception in ``partial_reasons``.
+
+    Even helpers used here are guarded -- if ``_utc_now_iso`` or
+    ``platform.python_version`` themselves raise, we fall back to empty
+    strings rather than re-throw.
+    """
+    try:
+        captured_at = _utc_now_iso()
+    except Exception:  # noqa: BLE001
+        captured_at = ""
+    try:
+        python_version = platform.python_version()
+    except Exception:  # noqa: BLE001
+        python_version = ""
 
     return EnvSnapshot(
         schema_version=SCHEMA_VERSION,
-        captured_at=_utc_now_iso(),
-        system_health=system_health,
-        rocm=rocm,
-        hip=hip,
-        hipblaslt=hipblaslt,
-        runtime_context=runtime_context,
-        docker=docker,
-        env_vars=env_vars,
-        python_version=platform.python_version(),
-        pytorch_version=pytorch_version,
-        partial=bool(reasons),
-        partial_reasons=reasons,
+        captured_at=captured_at,
+        system_health=None,
+        rocm={"version": None, "version_dev": None, "kmd_version": None},
+        hip={
+            "version": None,
+            "platform": None,
+            "compiler": None,
+            "runtime": None,
+            "cpp_config": None,
+        },
+        hipblaslt={
+            "commit": None,
+            "package_version": None,
+            "lib_hash": None,
+            "tensile_yaml_revision": None,
+            "applied_prs": {},
+        },
+        runtime_context={
+            "type": "baremetal",
+            "python_env": "system",
+            "venv_path": None,
+            "conda_env_name": None,
+        },
+        docker=None,
+        env_vars=dict.fromkeys(CANONICAL_ENV_VARS),
+        python_version=python_version,
+        pytorch_version=None,
+        partial=True,
+        partial_reasons=[*preceding_reasons, unexpected_reason],
     )
 
 
@@ -325,9 +393,21 @@ def _run_rdhc(reasons: list[str]) -> dict | None:
             return None
 
         if result.returncode != 0:
+            # Pull the last non-empty line of stderr; truncate to keep
+            # partial_reasons readable in CLI output and JSON. Falls back
+            # to "(no stderr; likely sudo-n unavailable)" when the child
+            # printed nothing -- which is what the no-password case does.
+            stderr_lines = (result.stderr or "").splitlines()
+            stderr_tail = next(
+                (line.strip() for line in reversed(stderr_lines) if line.strip()),
+                "",
+            )
+            if stderr_tail:
+                detail = f"stderr: {stderr_tail[:200]}"
+            else:
+                detail = "no stderr; likely sudo-n unavailable"
             msg = (
-                f"system_health: rdhc exited {result.returncode} "
-                "(likely sudo-n unavailable)"
+                f"system_health: rdhc exited {result.returncode} ({detail})"
             )
             log.info(msg)
             reasons.append(msg)
@@ -369,9 +449,14 @@ def _capture_rocm_version_files(reasons: list[str]) -> dict[str, str | None]:
         "version_dev": ROCM_VERSION_DEV_FILE,
         "kmd_version": KMD_VERSION_FILE,
     }
+    # Note: _read_text_file returns None for missing, empty, permission
+    # denied, AND non-utf8 cases. Reason wording covers all four so the
+    # operator does not assume "missing" when the file is just empty.
     for key, value in block.items():
         if value is None:
-            reasons.append(f"rocm.{key}: {paths[key]} not readable")
+            reasons.append(
+                f"rocm.{key}: {paths[key]} missing, empty, or unreadable"
+            )
     return block
 
 
@@ -520,12 +605,16 @@ def _capture_hipblaslt(reasons: list[str]) -> dict[str, Any]:
             )
     if lib_hash is None:
         reasons.append(
-            f"hipblaslt.lib_hash: {HIPBLASLT_LIB_DIR}/libhipblaslt.so not readable"
+            f"hipblaslt.lib_hash: {HIPBLASLT_LIB_DIR}/libhipblaslt.so "
+            "missing or unreadable"
         )
     if tensile_yaml_revision is None:
+        # _tensile_fingerprint returns None for both "directory missing /
+        # unlistable" AND "directory present but no kernel files" --
+        # the wording covers both so partial_reasons is honest.
         reasons.append(
-            f"hipblaslt.tensile_yaml_revision: no kernel files under "
-            f"{HIPBLASLT_TENSILE_DIR}"
+            "hipblaslt.tensile_yaml_revision: directory missing/unreadable "
+            f"or no kernel files under {HIPBLASLT_TENSILE_DIR}"
         )
     return block
 

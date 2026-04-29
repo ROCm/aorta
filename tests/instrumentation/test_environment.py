@@ -460,6 +460,52 @@ class TestCollectEnvContract:
             f"runtime_context fields should never trigger partial; got: {runtime_reasons}"
         )
 
+    def test_collect_env_returns_snapshot_when_probe_unexpectedly_raises(
+        self, all_disabled, monkeypatch
+    ):
+        """Hard never-raises guarantee: a probe that raises an unexpected
+        exception (i.e. not handled internally) MUST NOT propagate.
+
+        Sabotage `_capture_hipblaslt` to raise. Without the top-level
+        try/except in collect_env, this would bubble up and break B1/B2.
+        With the guard, we get a fully-shaped EnvSnapshot back, marked
+        partial, with the exception captured in partial_reasons.
+        """
+
+        def boom(reasons: list[str]) -> dict:
+            raise RuntimeError("simulated probe failure")
+
+        monkeypatch.setattr(env_mod, "_capture_hipblaslt", boom)
+
+        snapshot = collect_env()  # must not raise
+        assert isinstance(snapshot, EnvSnapshot)
+        assert snapshot.partial is True
+        # The unexpected-failure reason is appended to whatever earlier
+        # probes already recorded. Find the recovery one specifically.
+        recovery_reasons = [
+            r for r in snapshot.partial_reasons if r.startswith("collect_env:")
+        ]
+        assert len(recovery_reasons) == 1
+        assert "RuntimeError" in recovery_reasons[0]
+        assert "simulated probe failure" in recovery_reasons[0]
+        # Schema must still be complete -- callers should not see missing keys
+        assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
+
+    def test_disaster_snapshot_emits_complete_schema(self):
+        """The disaster path must still produce a full env.json shape."""
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=["earlier: thing"],
+            unexpected_reason="collect_env: boom",
+        )
+        d = snap.to_dict()
+        assert set(d.keys()) == REQUIRED_TOP_KEYS
+        assert snap.partial is True
+        # Both the earlier reasons and the new disaster reason are present
+        assert "earlier: thing" in snap.partial_reasons
+        assert "collect_env: boom" in snap.partial_reasons
+        # JSON-native check (no default=str needed)
+        json.dumps(d)
+
 
 # ---------------------------------------------------------------------------
 # B1 / B2 integration-style: snapshot embeds in a fake trial result
@@ -629,6 +675,52 @@ class TestRdhcWrapper:
         reasons: list[str] = []
         assert env_mod._run_rdhc(reasons) is None
         assert any("sudo" in r.lower() or "exited 1" in r for r in reasons)
+
+    def test_rdhc_nonzero_exit_includes_stderr_in_reason(
+        self, isolated_env, monkeypatch
+    ):
+        """Regression guard: when rdhc fails for a reason OTHER than
+        sudo-n-needs-password, the partial_reason must surface the actual
+        stderr so operators can debug. The earlier hardcoded
+        "(likely sudo-n unavailable)" was misleading.
+        """
+        monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=2,
+                stdout="",
+                stderr="rdhc: ERROR: amdgpu kernel module not loaded\n",
+            )
+
+        monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
+        reasons: list[str] = []
+        assert env_mod._run_rdhc(reasons) is None
+        rdhc_reason = next(r for r in reasons if "system_health" in r)
+        assert "exited 2" in rdhc_reason
+        assert "amdgpu kernel module not loaded" in rdhc_reason
+        # And the misleading boilerplate should NOT be present when stderr was given
+        assert "likely sudo-n unavailable" not in rdhc_reason
+
+    def test_rdhc_nonzero_exit_no_stderr_keeps_sudo_hint(
+        self, isolated_env, monkeypatch
+    ):
+        """When rdhc prints nothing to stderr (the typical sudo-n no-password
+        case), the reason still names sudo-n as the likely cause."""
+        monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
+        reasons: list[str] = []
+        assert env_mod._run_rdhc(reasons) is None
+        rdhc_reason = next(r for r in reasons if "system_health" in r)
+        assert "no stderr" in rdhc_reason
+        assert "sudo-n" in rdhc_reason
 
     def test_rdhc_timeout_returns_none(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
