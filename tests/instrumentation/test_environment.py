@@ -15,10 +15,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
 
 # -- Direct module load (avoid torch via aorta.utils) -------------------------
 
@@ -152,13 +151,12 @@ class TestSchemaCompleteness:
 
 
 class TestRdhcWrapper:
-    def test_rdhc_unavailable_returns_none(self, all_disabled, tmp_path: Path):
+    def test_rdhc_unavailable_returns_none(self, all_disabled):
         # all_disabled already stubs shutil.which to return None
-        result = env_mod._run_rdhc(tmp_path / "rdhc_out.json")
-        assert result is None
+        assert env_mod._run_rdhc() is None
 
     def test_rdhc_present_but_sudo_n_fails_returns_none(
-        self, isolated_env, tmp_path: Path, monkeypatch
+        self, isolated_env, monkeypatch
     ):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
 
@@ -169,24 +167,19 @@ class TestRdhcWrapper:
             )
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        assert env_mod._run_rdhc(tmp_path / "rdhc_out.json") is None
+        assert env_mod._run_rdhc() is None
 
-    def test_rdhc_timeout_returns_none(
-        self, isolated_env, tmp_path: Path, monkeypatch
-    ):
+    def test_rdhc_timeout_returns_none(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
 
         def fake_run(cmd, **kwargs):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        assert env_mod._run_rdhc(tmp_path / "rdhc_out.json") is None
+        assert env_mod._run_rdhc() is None
 
-    def test_rdhc_happy_path_returns_parsed_json(
-        self, isolated_env, tmp_path: Path, monkeypatch
-    ):
+    def test_rdhc_happy_path_returns_parsed_json(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
-        out = tmp_path / "rdhc_out.json"
 
         rdhc_payload = {
             "rdhc_version": "1.4.0",
@@ -196,32 +189,56 @@ class TestRdhcWrapper:
             "firmware": [],
         }
 
+        captured: dict[str, Path] = {}
+
         def fake_run(cmd, **kwargs):
             assert cmd[0] == "sudo"
             assert "-n" in cmd
             assert "--quick" in cmd
             assert "--json" in cmd
-            out.write_text(json.dumps(rdhc_payload))
+            # The last arg is the output path (managed by tempfile now)
+            out_path = Path(cmd[-1])
+            captured["path"] = out_path
+            out_path.write_text(json.dumps(rdhc_payload))
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0, stdout="", stderr=""
             )
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        result = env_mod._run_rdhc(out)
+        result = env_mod._run_rdhc()
         assert result == rdhc_payload
+        # Confirm the temp file was cleaned up after parsing -- no
+        # sidecar artifact left behind.
+        assert "path" in captured
+        assert not captured["path"].exists()
 
-    def test_rdhc_malformed_json_returns_none(
-        self, isolated_env, tmp_path: Path, monkeypatch
-    ):
+    def test_rdhc_malformed_json_returns_none(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
-        out = tmp_path / "rdhc_out.json"
 
         def fake_run(cmd, **kwargs):
-            out.write_text("not valid json {{{")
+            Path(cmd[-1]).write_text("not valid json {{{")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        assert env_mod._run_rdhc(out) is None
+        assert env_mod._run_rdhc() is None
+
+    def test_rdhc_temp_file_cleaned_up_on_failure(
+        self, isolated_env, monkeypatch
+    ):
+        """The tempfile is removed even when the subprocess fails."""
+        monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
+        captured: dict[str, Path] = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["path"] = Path(cmd[-1])
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr="boom"
+            )
+
+        monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
+        assert env_mod._run_rdhc() is None
+        assert "path" in captured
+        assert not captured["path"].exists()
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +608,7 @@ class TestEnvVars:
         for var in CANONICAL_ENV_VARS:
             assert result[var] is None, f"{var} should be None when unset"
 
-    def test_workload_config_vars_NOT_captured(self, isolated_env):
+    def test_workload_config_vars_are_not_captured(self, isolated_env):
         # Per acceptance criteria, these are workload state, not env probe state
         isolated_env.setenv("AMP_DTYPE", "bf16")
         isolated_env.setenv("MODEL_DTYPE", "fp32")
@@ -640,6 +657,33 @@ class TestPytorchVersion:
 
         with patch.object(builtins, "__import__", side_effect=fake_import):
             assert env_mod._capture_pytorch_version() is None
+
+    def test_torch_present_without_version_returns_none_not_string(
+        self, isolated_env
+    ):
+        """Regression guard: never emit the string "None" as the version.
+
+        Some torch builds (or stubs) lack ``__version__``. Earlier code did
+        ``str(getattr(torch, '__version__', None))`` which yielded the
+        string "None" -- breaking consumers doing ``jq '.pytorch_version
+        == null'``. Confirm we return Python ``None`` instead.
+        """
+        import builtins
+        import types
+
+        real_import = builtins.__import__
+        fake_torch = types.SimpleNamespace()  # no __version__ attr
+
+        def fake_import(name, *args, **kwargs):
+            if name == "torch":
+                return fake_torch
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", side_effect=fake_import):
+            result = env_mod._capture_pytorch_version()
+        assert result is None
+        # Belt-and-suspenders: not the string "None"
+        assert result != "None"
 
 
 class TestNoGpuCompute:

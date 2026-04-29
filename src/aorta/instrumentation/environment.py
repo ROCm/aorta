@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +109,7 @@ def capture_environment(output_path: str | os.PathLike[str] = "env.json") -> dic
     snapshot: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "captured_at": _utc_now_iso(),
-        "system_health": _run_rdhc(output_path.parent / ".rdhc_quick.json"),
+        "system_health": _run_rdhc(),
         "rocm": _capture_rocm_version_files(),
         "hip": _capture_hip_toolchain(),
         "hipblaslt": _capture_hipblaslt(),
@@ -141,8 +142,11 @@ def _utc_now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _run_rdhc(out_path: Path) -> dict | None:
-    """Run ``sudo -n -E rdhc --quick --json <path>`` and return parsed dict.
+def _run_rdhc() -> dict | None:
+    """Run ``sudo -n -E rdhc --quick --json <tmp>`` and return parsed dict.
+
+    Manages its own temp file via :mod:`tempfile` -- nothing leaks into
+    the env probe's output directory.
 
     Returns None on any of:
     * RDHC not installed (``shutil.which`` returns nothing for ``rdhc.py``
@@ -159,35 +163,50 @@ def _run_rdhc(out_path: Path) -> dict | None:
         log.info("system_health=null: rdhc not on PATH")
         return None
 
-    cmd = ["sudo", "-n", "-E", rdhc, "--quick", "--json", str(out_path)]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=RDHC_TIMEOUT_SEC,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        log.info("system_health=null: rdhc exceeded %.0fs timeout", RDHC_TIMEOUT_SEC)
-        return None
-    except (FileNotFoundError, OSError) as exc:
-        log.info("system_health=null: failed to invoke rdhc (%s)", exc)
-        return None
-
-    if result.returncode != 0:
-        # Most common cause: sudo -n requires a password.
-        log.info(
-            "system_health=null: rdhc exited %s (likely sudo-n unavailable)",
-            result.returncode,
-        )
-        return None
+    # NamedTemporaryFile with delete=False so we control cleanup ourselves
+    # in the finally block (sudo'd subprocess writes to this path; the
+    # default delete=True closes the fd before subprocess can use it on
+    # some platforms).
+    with tempfile.NamedTemporaryFile(
+        suffix=".json", prefix="rdhc_quick_", delete=False
+    ) as tmp:
+        tmp_path = Path(tmp.name)
 
     try:
-        return json.loads(out_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
-        log.info("system_health=null: rdhc output not parseable (%s)", exc)
-        return None
+        cmd = ["sudo", "-n", "-E", rdhc, "--quick", "--json", str(tmp_path)]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=RDHC_TIMEOUT_SEC,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            log.info("system_health=null: rdhc exceeded %.0fs timeout", RDHC_TIMEOUT_SEC)
+            return None
+        except (FileNotFoundError, OSError) as exc:
+            log.info("system_health=null: failed to invoke rdhc (%s)", exc)
+            return None
+
+        if result.returncode != 0:
+            # Most common cause: sudo -n requires a password.
+            log.info(
+                "system_health=null: rdhc exited %s (likely sudo-n unavailable)",
+                result.returncode,
+            )
+            return None
+
+        try:
+            return json.loads(tmp_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+            log.info("system_health=null: rdhc output not parseable (%s)", exc)
+            return None
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -390,13 +409,20 @@ def _tensile_fingerprint() -> str | None:
 def _detect_runtime_context() -> dict[str, str | None]:
     """Detect container runtime + Python environment.
 
+    The schema's allowed values for ``runtime_context.type`` are
+    ``docker | podman | singularity | baremetal`` (per #147). To keep
+    strict consumers safe, this function only ever returns one of those
+    four; runtimes outside the documented set (e.g. containerd-managed
+    Kubernetes pods) currently fall through to ``baremetal``. Adding new
+    values is a schema change and would bump ``schema_version``.
+
     Container precedence (first match wins):
         1. ``/.dockerenv`` -> docker
         2. ``/run/.containerenv`` -> podman
         3. ``SINGULARITY_NAME`` env var or ``singularity`` in
            ``/proc/1/cgroup`` -> singularity
-        4. ``docker`` / ``podman`` / ``containerd`` token in
-           ``/proc/1/cgroup`` -> matched runtime (cgroup fallback)
+        4. ``docker`` / ``podman`` token in ``/proc/1/cgroup``
+           -> matched runtime (cgroup fallback for stripped containers)
         5. otherwise -> baremetal
 
     Python env precedence:
@@ -429,8 +455,8 @@ def _detect_container_type() -> str:
     if cgroup:
         # cgroup lines look like '12:freezer:/docker/<id>' or
         # '0::/system.slice/docker-<id>.scope'. Detect the first runtime
-        # name that appears.
-        for runtime in ("docker", "podman", "singularity", "containerd"):
+        # name that appears. Limited to schema-documented values.
+        for runtime in ("docker", "podman", "singularity"):
             if runtime in cgroup:
                 return runtime
     return "baremetal"
@@ -509,13 +535,21 @@ def _capture_pytorch_version() -> str | None:
     ``import torch`` does NOT initialise CUDA / HIP context; it only
     populates Python objects. Acceptance criterion "no GPU compute" is
     preserved.
+
+    Returns the version as a string when available, or ``None`` when torch
+    is not installed OR is installed without a ``__version__`` attribute.
+    Never returns the string ``"None"`` -- that would break consumers
+    doing strict null checks against the JSON.
     """
     try:
         import torch  # type: ignore[import-not-found]
-
-        return str(getattr(torch, "__version__", None))
     except ImportError:
         return None
     except Exception as exc:  # noqa: BLE001 -- defensive; never let env probe fail
-        log.debug("torch version probe failed: %s", exc)
+        log.debug("torch import for version probe failed: %s", exc)
         return None
+
+    version = getattr(torch, "__version__", None)
+    if version is None:
+        return None
+    return str(version)
