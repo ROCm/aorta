@@ -1,6 +1,14 @@
 """``aorta env probe`` implementation (issue #147).
 
-Captures a versioned, schema-stable snapshot of the trial environment:
+Library-first per the updated A1 spec: the primary deliverable is
+
+* ``collect_env() -> EnvSnapshot``
+
+which B1 (per-trial runner) and B2 (matrix runner) call **in-process** so
+every trial / matrix run records its environment without shelling out.
+``aorta env probe`` (CLI) is a thin wrapper around it.
+
+Captured blocks:
 
 * ``system_health`` -- verbatim ``rdhc --quick --json`` output (or null).
 * ``rocm`` -- explicit reads of ``/opt/rocm/.info/version{,_dev}`` and
@@ -12,6 +20,12 @@ Captures a versioned, schema-stable snapshot of the trial environment:
 * ``docker`` -- image + digest when in a container.
 * ``env_vars`` -- canonical list of HSA / RCCL / FBGEMM / PyTorch vars.
 * ``python_version``, ``pytorch_version``.
+
+Fail-soft contract: ``collect_env()`` NEVER raises. Every probe that falls
+back to ``None`` appends a human-readable reason to ``partial_reasons``;
+the snapshot is then marked ``partial=True``. This keeps a triage matrix
+running when the probe hits something missing (no rdhc, no sudo,
+restricted dmesg) instead of aborting the whole run.
 
 No GPU compute. No tensor allocations. Target wall time: <15 s with rdhc
 present, <5 s without. Every capture function returns a fully-shaped dict
@@ -32,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -88,43 +103,145 @@ CGROUP_FILE = Path("/proc/1/cgroup")
 
 
 # ---------------------------------------------------------------------------
-# Top-level orchestrator
+# EnvSnapshot dataclass -- the public typed object B1/B2/CLI consume
 # ---------------------------------------------------------------------------
 
 
-def capture_environment(output_path: str | os.PathLike[str] = "env.json") -> dict[str, Any]:
-    """Capture the env probe snapshot and write it to ``output_path``.
+@dataclass(frozen=True)
+class EnvSnapshot:
+    """Wraps the env.json schema as a typed object.
 
-    Args:
-        output_path: File to write the JSON snapshot to. Parent dirs
-            created.
+    Attributes mirror the env.json keys 1-to-1; ``to_dict()`` / ``from_dict()``
+    round-trip losslessly. Dataclass is frozen so callers can safely embed it
+    in trial / matrix results without worrying about mutation.
 
-    Returns:
-        The same dict that was written to disk.
+    The two fail-soft fields make the snapshot honest about partial captures:
+
+    * ``partial`` -- True if at least one probe fell back to None when it was
+      expected to populate. False on a clean probe.
+    * ``partial_reasons`` -- one human-readable string per fallback. The list
+      is empty when ``partial`` is False. Each entry names the field plus a
+      short cause (e.g. ``"system_health: rdhc not on PATH"``).
+
+    "Documented absences" do NOT trigger partial:
+
+    * ``docker == None`` on baremetal (no container, nothing to record)
+    * ``env_vars[X] == None`` for an unset env var (the documented contract)
+    * ``runtime_context.venv_path == None`` outside a venv
+
+    "Probe fell back" cases that DO trigger partial:
+
+    * ``system_health == None`` (rdhc unavailable / no sudo / timeout)
+    * any field in ``rocm`` / ``hip`` / ``hipblaslt`` is None
+    * ``pytorch_version == None`` (torch not installed)
+    * ``docker.image`` / ``docker.digest`` is None when inside a container
     """
-    output_path = Path(output_path).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    runtime_context = _detect_runtime_context()
-    snapshot: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "captured_at": _utc_now_iso(),
-        "system_health": _run_rdhc(),
-        "rocm": _capture_rocm_version_files(),
-        "hip": _capture_hip_toolchain(),
-        "hipblaslt": _capture_hipblaslt(),
-        "runtime_context": runtime_context,
-        "docker": _capture_docker_metadata(runtime_context),
-        "env_vars": _capture_env_vars(),
-        "python_version": platform.python_version(),
-        "pytorch_version": _capture_pytorch_version(),
-    }
+    schema_version: str
+    captured_at: str
+    system_health: dict | None
+    rocm: dict
+    hip: dict
+    hipblaslt: dict
+    runtime_context: dict
+    docker: dict | None
+    env_vars: dict[str, str | None]
+    python_version: str
+    pytorch_version: str | None
+    partial: bool
+    partial_reasons: list[str] = field(default_factory=list)
 
-    with output_path.open("w", encoding="utf-8") as f:
-        json.dump(snapshot, f, indent=2, default=str, sort_keys=False)
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to the env.json shape. Round-trip pair with from_dict."""
+        return {f.name: getattr(self, f.name) for f in fields(self)}
 
-    log.info("Wrote env probe to %s (schema_version=%s)", output_path, SCHEMA_VERSION)
-    return snapshot
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> EnvSnapshot:
+        """Reconstruct from a previously serialised env.json dict.
+
+        Tolerates extra unknown keys (forward-compat) and missing optional
+        ``partial_reasons`` (defaults to empty list).
+        """
+        known = {f.name for f in fields(cls)}
+        kwargs = {k: v for k, v in d.items() if k in known}
+        kwargs.setdefault("partial_reasons", [])
+        return cls(**kwargs)
+
+    def summary(self) -> str:
+        """Human-friendly multi-line summary for CLI / logs.
+
+        Six lines, fixed width labels. Used by ``aorta env probe`` to print
+        a brief after writing the JSON.
+        """
+        rt = self.runtime_context or {}
+        rocm = self.rocm or {}
+        hip = self.hip or {}
+        hipblaslt = self.hipblaslt or {}
+        sysh = "present" if self.system_health else "unavailable (system_health=null)"
+        partial_marker = (
+            f" [PARTIAL, {len(self.partial_reasons)} reason(s)]"
+            if self.partial
+            else ""
+        )
+        return "\n".join(
+            (
+                f"  runtime:  {rt.get('type', '?')} / python={rt.get('python_env', '?')}{partial_marker}",
+                f"  rocm:     {rocm.get('version', '?')} (dev: {rocm.get('version_dev', '?')})",
+                f"  hip:      {hip.get('version', '?')} ({hip.get('platform', '?')})",
+                f"  hipblaslt: commit={hipblaslt.get('commit', '?')}",
+                f"  rdhc:     {sysh}",
+                f"  python:   {self.python_version} | pytorch: {self.pytorch_version}",
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# collect_env -- the public entrypoint B1 / B2 / CLI all call
+# ---------------------------------------------------------------------------
+
+
+def collect_env() -> EnvSnapshot:
+    """Capture the current process environment as an :class:`EnvSnapshot`.
+
+    NEVER raises. On any probe failure (rdhc unavailable, no sudo,
+    /opt/rocm missing, hipconfig not on PATH, hipBLASLt header missing,
+    torch absent, etc.), the corresponding fields are set to ``None`` and
+    ``partial=True`` with a human-readable reason appended to
+    ``partial_reasons``.
+
+    Callers (B1 dispatcher, B2 matrix runner, CLI) treat the snapshot as
+    always-valid and never as a failure path -- they may surface a warning
+    when ``partial=True`` but the run continues.
+
+    No GPU compute. No tensor allocations. The optional ``import torch`` for
+    the version probe does NOT initialise CUDA / HIP context.
+    """
+    reasons: list[str] = []
+
+    runtime_context = _detect_runtime_context()  # never partial; always populates
+    system_health = _run_rdhc(reasons)
+    rocm = _capture_rocm_version_files(reasons)
+    hip = _capture_hip_toolchain(reasons)
+    hipblaslt = _capture_hipblaslt(reasons)
+    docker = _capture_docker_metadata(runtime_context, reasons)
+    env_vars = _capture_env_vars()  # individual nulls are documented, not partial
+    pytorch_version = _capture_pytorch_version(reasons)
+
+    return EnvSnapshot(
+        schema_version=SCHEMA_VERSION,
+        captured_at=_utc_now_iso(),
+        system_health=system_health,
+        rocm=rocm,
+        hip=hip,
+        hipblaslt=hipblaslt,
+        runtime_context=runtime_context,
+        docker=docker,
+        env_vars=env_vars,
+        python_version=platform.python_version(),
+        pytorch_version=pytorch_version,
+        partial=bool(reasons),
+        partial_reasons=reasons,
+    )
 
 
 def _utc_now_iso() -> str:
@@ -142,31 +259,29 @@ def _utc_now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _run_rdhc() -> dict | None:
+def _run_rdhc(reasons: list[str]) -> dict | None:
     """Run ``sudo -n -E rdhc --quick --json <tmp>`` and return parsed dict.
 
     Manages its own temp file via :mod:`tempfile` -- nothing leaks into
     the env probe's output directory.
 
-    Returns None on any of:
+    Returns ``None`` on any of:
     * RDHC not installed (``shutil.which`` returns nothing for ``rdhc.py``
       *and* ``rdhc``).
     * ``sudo -n`` would prompt for a password (return code != 0).
     * RDHC takes longer than ``RDHC_TIMEOUT_SEC``.
     * RDHC exits non-zero or produces malformed JSON.
 
-    All failure modes log a single INFO line so users understand why
-    ``system_health`` is null. Never raises.
+    Each failure mode appends one human-readable entry to ``reasons`` AND
+    logs a single INFO line. Never raises.
     """
     rdhc = shutil.which("rdhc.py") or shutil.which("rdhc")
     if rdhc is None:
-        log.info("system_health=null: rdhc not on PATH")
+        msg = "system_health: rdhc not on PATH"
+        log.info(msg)
+        reasons.append(msg)
         return None
 
-    # NamedTemporaryFile with delete=False so we control cleanup ourselves
-    # in the finally block (sudo'd subprocess writes to this path; the
-    # default delete=True closes the fd before subprocess can use it on
-    # some platforms).
     with tempfile.NamedTemporaryFile(
         suffix=".json", prefix="rdhc_quick_", delete=False
     ) as tmp:
@@ -183,24 +298,31 @@ def _run_rdhc() -> dict | None:
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            log.info("system_health=null: rdhc exceeded %.0fs timeout", RDHC_TIMEOUT_SEC)
+            msg = f"system_health: rdhc exceeded {RDHC_TIMEOUT_SEC:.0f}s timeout"
+            log.info(msg)
+            reasons.append(msg)
             return None
         except (FileNotFoundError, OSError) as exc:
-            log.info("system_health=null: failed to invoke rdhc (%s)", exc)
+            msg = f"system_health: failed to invoke rdhc ({exc})"
+            log.info(msg)
+            reasons.append(msg)
             return None
 
         if result.returncode != 0:
-            # Most common cause: sudo -n requires a password.
-            log.info(
-                "system_health=null: rdhc exited %s (likely sudo-n unavailable)",
-                result.returncode,
+            msg = (
+                f"system_health: rdhc exited {result.returncode} "
+                "(likely sudo-n unavailable)"
             )
+            log.info(msg)
+            reasons.append(msg)
             return None
 
         try:
             return json.loads(tmp_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
-            log.info("system_health=null: rdhc output not parseable (%s)", exc)
+            msg = f"system_health: rdhc output not parseable ({exc})"
+            log.info(msg)
+            reasons.append(msg)
             return None
     finally:
         try:
@@ -214,18 +336,27 @@ def _run_rdhc() -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def _capture_rocm_version_files() -> dict[str, str | None]:
+def _capture_rocm_version_files(reasons: list[str]) -> dict[str, str | None]:
     """Read ROCm version markers directly from disk.
 
     These are explicit reads (not via RDHC) so that ``rocm.version`` is
     populated even when RDHC is unavailable. All three keys are always
-    present; missing files yield ``None``.
+    present; missing files yield ``None`` and append a reason.
     """
-    return {
+    block = {
         "version": _read_text_file(ROCM_VERSION_FILE),
         "version_dev": _read_text_file(ROCM_VERSION_DEV_FILE),
         "kmd_version": _read_text_file(KMD_VERSION_FILE),
     }
+    paths = {
+        "version": ROCM_VERSION_FILE,
+        "version_dev": ROCM_VERSION_DEV_FILE,
+        "kmd_version": KMD_VERSION_FILE,
+    }
+    for key, value in block.items():
+        if value is None:
+            reasons.append(f"rocm.{key}: {paths[key]} not readable")
+    return block
 
 
 def _read_text_file(path: Path) -> str | None:
@@ -245,7 +376,7 @@ def _read_text_file(path: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _capture_hip_toolchain() -> dict[str, str | None]:
+def _capture_hip_toolchain(reasons: list[str]) -> dict[str, str | None]:
     """Run ``hipconfig --<flag>`` for each toolchain field.
 
     Issued as separate invocations because hipconfig prints results
@@ -254,7 +385,9 @@ def _capture_hip_toolchain() -> dict[str, str | None]:
     which is unparseable. Five short subprocesses still finish in <100 ms.
     """
     if shutil.which("hipconfig") is None:
-        log.info("hip block: hipconfig not on PATH; all hip.* fields = null")
+        msg = "hip: hipconfig not on PATH; all hip.* fields = null"
+        log.info(msg)
+        reasons.append(msg)
         return {
             "version": None,
             "platform": None,
@@ -263,13 +396,17 @@ def _capture_hip_toolchain() -> dict[str, str | None]:
             "cpp_config": None,
         }
 
-    return {
+    block = {
         "version": _hipconfig("--version"),
         "platform": _hipconfig("--platform"),
         "compiler": _hipconfig("--compiler"),
         "runtime": _hipconfig("--runtime"),
         "cpp_config": _hipconfig("--cpp_config"),
     }
+    for key, value in block.items():
+        if value is None:
+            reasons.append(f"hip.{key}: hipconfig --{key} returned no usable value")
+    return block
 
 
 def _hipconfig(flag: str) -> str | None:
@@ -305,7 +442,7 @@ _HIPBLASLT_VERSION_RE = re.compile(
 )
 
 
-def _capture_hipblaslt() -> dict[str, Any]:
+def _capture_hipblaslt(reasons: list[str]) -> dict[str, Any]:
     """Capture hipBLASLt build identity.
 
     Goal: catch GEMM kernel library drift across docker images / conda
@@ -320,13 +457,31 @@ def _capture_hipblaslt() -> dict[str, Any]:
     """
     header_text = _read_text_file(HIPBLASLT_VERSION_HEADER)
     commit, package_version = _parse_hipblaslt_header(header_text)
-    return {
+    lib_hash = _hash_hipblaslt_library()
+    tensile_yaml_revision = _tensile_fingerprint()
+
+    block: dict[str, Any] = {
         "commit": commit,
         "package_version": package_version,
-        "lib_hash": _hash_hipblaslt_library(),
-        "tensile_yaml_revision": _tensile_fingerprint(),
-        "applied_prs": {},  # filled in once specific PRs are configured
+        "lib_hash": lib_hash,
+        "tensile_yaml_revision": tensile_yaml_revision,
+        "applied_prs": {},
     }
+    if commit is None:
+        reasons.append(f"hipblaslt.commit: {HIPBLASLT_VERSION_HEADER} not readable")
+    if package_version is None:
+        reasons.append(
+            f"hipblaslt.package_version: {HIPBLASLT_VERSION_HEADER} did not "
+            "contain MAJOR/MINOR/PATCH defines"
+        )
+    if lib_hash is None:
+        reasons.append(f"hipblaslt.lib_hash: {HIPBLASLT_LIB_DIR}/libhipblaslt.so not readable")
+    if tensile_yaml_revision is None:
+        reasons.append(
+            f"hipblaslt.tensile_yaml_revision: no kernel files under "
+            f"{HIPBLASLT_TENSILE_DIR}"
+        )
+    return block
 
 
 def _parse_hipblaslt_header(text: str | None) -> tuple[str | None, str | None]:
@@ -429,6 +584,10 @@ def _detect_runtime_context() -> dict[str, str | None]:
         1. ``$CONDA_DEFAULT_ENV`` -> conda
         2. ``sys.prefix != sys.base_prefix`` -> venv
         3. otherwise -> system
+
+    Never partial: every field is either populated or has a documented
+    null reason (e.g. ``venv_path`` is null outside a venv -- that is the
+    contract, not a fallback).
     """
     container_type = _detect_container_type()
     python_env = _detect_python_env()
@@ -479,10 +638,13 @@ def _detect_python_env() -> str:
 
 def _capture_docker_metadata(
     runtime_context: dict[str, str | None],
+    reasons: list[str],
 ) -> dict[str, str | None] | None:
     """Capture image + digest when running inside a container.
 
-    Returns ``None`` for baremetal -- there is no image to record.
+    Returns ``None`` for baremetal -- there is no image to record. This
+    documented absence does NOT trigger ``partial=True``.
+
     For containerised runs we emit the block with best-effort values; the
     aorta-side launcher can populate them via the env vars below before
     invoking ``aorta env probe`` (which is the only reliable way to know
@@ -493,15 +655,28 @@ def _capture_docker_metadata(
 
     Always also emits ``container_id`` parsed from ``/proc/self/cgroup``,
     which is recoverable from inside the container.
+
+    When inside a container but the launcher did not set the env vars,
+    appends a reason -- the snapshot can still be useful but cross-image
+    comparison loses fidelity.
     """
     if runtime_context.get("type") == "baremetal":
         return None
 
-    return {
+    block = {
         "image": os.environ.get("AORTA_DOCKER_IMAGE"),
         "digest": os.environ.get("AORTA_DOCKER_DIGEST"),
         "container_id": _read_container_id(),
     }
+    if block["image"] is None:
+        reasons.append(
+            "docker.image: AORTA_DOCKER_IMAGE env var not set by the launcher"
+        )
+    if block["digest"] is None:
+        reasons.append(
+            "docker.digest: AORTA_DOCKER_DIGEST env var not set by the launcher"
+        )
+    return block
 
 
 _CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
@@ -525,11 +700,15 @@ def _read_container_id() -> str | None:
 
 
 def _capture_env_vars() -> dict[str, str | None]:
-    """Capture canonical env vars (explicit list, not prefix matching)."""
+    """Capture canonical env vars (explicit list, not prefix matching).
+
+    Individual ``None`` values are the documented contract (env var unset)
+    and DO NOT trigger ``partial=True``.
+    """
     return {name: os.environ.get(name) for name in CANONICAL_ENV_VARS}
 
 
-def _capture_pytorch_version() -> str | None:
+def _capture_pytorch_version(reasons: list[str]) -> str | None:
     """Best-effort import of torch to read its version. No GPU touched.
 
     ``import torch`` does NOT initialise CUDA / HIP context; it only
@@ -538,18 +717,22 @@ def _capture_pytorch_version() -> str | None:
 
     Returns the version as a string when available, or ``None`` when torch
     is not installed OR is installed without a ``__version__`` attribute.
-    Never returns the string ``"None"`` -- that would break consumers
-    doing strict null checks against the JSON.
+    Either fallback path appends a reason. Never returns the string
+    ``"None"`` -- that would break consumers doing strict null checks
+    against the JSON.
     """
     try:
         import torch  # type: ignore[import-not-found]
     except ImportError:
+        reasons.append("pytorch_version: torch not importable")
         return None
     except Exception as exc:  # noqa: BLE001 -- defensive; never let env probe fail
         log.debug("torch import for version probe failed: %s", exc)
+        reasons.append(f"pytorch_version: torch import raised ({type(exc).__name__})")
         return None
 
     version = getattr(torch, "__version__", None)
     if version is None:
+        reasons.append("pytorch_version: torch lacks __version__ attribute")
         return None
     return str(version)

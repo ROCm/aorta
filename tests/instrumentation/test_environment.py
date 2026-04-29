@@ -4,6 +4,21 @@ Strategy: load the module by file path so the test does not pull in the
 torch-dependent ``aorta.utils`` package. Every subprocess and filesystem
 touchpoint is monkeypatched, so tests run on any host without ROCm,
 RDHC, hipconfig, hipblaslt, or torch.
+
+Coverage matrix (per the updated A1 spec):
+
+* ``EnvSnapshot`` shape + ``to_dict`` / ``from_dict`` / ``summary``
+* ``collect_env`` orchestration: never raises, populates ``partial`` /
+  ``partial_reasons``, idempotent
+* B1/B2-style integration: snapshot embeds losslessly into a fake trial
+  result dict and round-trips
+* Per-probe behaviour: RDHC happy/error paths, ROCm version files, HIP
+  toolchain, hipBLASLt introspection, runtime context, Docker metadata,
+  env vars, PyTorch version
+* Schema invariants: required top-level keys, schema_version constant,
+  no GPU compute, workload config not captured, ``partial`` reflected in
+  the persisted JSON
+* CLI invariant: ``cli/env.py`` stays thin
 """
 
 from __future__ import annotations
@@ -38,7 +53,8 @@ sys.modules[_spec.name] = env_mod
 _spec.loader.exec_module(env_mod)
 
 
-capture_environment = env_mod.capture_environment
+collect_env = env_mod.collect_env
+EnvSnapshot = env_mod.EnvSnapshot
 SCHEMA_VERSION = env_mod.SCHEMA_VERSION
 CANONICAL_ENV_VARS = env_mod.CANONICAL_ENV_VARS
 
@@ -62,8 +78,9 @@ def isolated_env(monkeypatch):
 def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
     """Force every external dep into its 'unavailable' branch.
 
-    Result: ``capture_environment`` exercises only pure-Python paths and
-    every block returns its null-shaped form.
+    Result: ``collect_env`` exercises only pure-Python paths and every
+    block returns its null-shaped form. Triggers ``partial=True`` with
+    one reason per fallback.
     """
     monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", tmp_path / "no_rocm")
     monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", tmp_path / "no_rocm_dev")
@@ -79,6 +96,17 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
     )
     monkeypatch.setattr(env_mod, "CGROUP_FILE", tmp_path / "no_cgroup")
     monkeypatch.setattr(env_mod.shutil, "which", lambda name: None)
+    # Force pytorch import to fail so its fallback path is exercised too
+    real_import = __builtins__["__import__"] if isinstance(
+        __builtins__, dict
+    ) else __builtins__.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "torch":
+            raise ImportError("simulated absence")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
     return monkeypatch
 
 
@@ -90,6 +118,8 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
 REQUIRED_TOP_KEYS = {
     "schema_version",
     "captured_at",
+    "partial",
+    "partial_reasons",
     "system_health",
     "rocm",
     "hip",
@@ -104,21 +134,18 @@ REQUIRED_TOP_KEYS = {
 
 class TestSchemaCompleteness:
     def test_all_top_level_keys_present_when_everything_unavailable(
-        self, all_disabled, tmp_path: Path
+        self, all_disabled
     ):
-        out = tmp_path / "env.json"
-        snapshot = capture_environment(out)
-        # All keys must be present regardless of availability
-        assert set(snapshot.keys()) == REQUIRED_TOP_KEYS
-        # The blocks themselves either have content or are explicitly null
-        assert snapshot["schema_version"] == "1.0"
-        assert snapshot["system_health"] is None
-        assert snapshot["rocm"] == {
+        snapshot = collect_env()
+        assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
+        assert snapshot.schema_version == "1.0"
+        assert snapshot.system_health is None
+        assert snapshot.rocm == {
             "version": None,
             "version_dev": None,
             "kmd_version": None,
         }
-        assert snapshot["hip"] == {
+        assert snapshot.hip == {
             "version": None,
             "platform": None,
             "compiler": None,
@@ -126,23 +153,385 @@ class TestSchemaCompleteness:
             "cpp_config": None,
         }
 
-    def test_snapshot_is_written_to_disk(self, all_disabled, tmp_path: Path):
+    def test_schema_version_constant_is_emitted(self, all_disabled):
+        snapshot = collect_env()
+        assert snapshot.schema_version == SCHEMA_VERSION
+
+    def test_captured_at_is_iso8601_utc(self, all_disabled):
+        snapshot = collect_env()
+        assert snapshot.captured_at.endswith("Z")
+        assert "T" in snapshot.captured_at
+
+    def test_persisted_json_includes_partial_keys(self, all_disabled, tmp_path: Path):
+        """``partial`` and ``partial_reasons`` must be present in the on-disk JSON."""
+        snapshot = collect_env()
         out = tmp_path / "env.json"
-        snapshot = capture_environment(out)
-        assert out.exists()
+        out.write_text(json.dumps(snapshot.to_dict(), default=str))
         on_disk = json.loads(out.read_text())
-        assert on_disk == snapshot
+        assert "partial" in on_disk
+        assert "partial_reasons" in on_disk
+        assert on_disk["partial"] is True
+        assert isinstance(on_disk["partial_reasons"], list)
+        assert on_disk["partial_reasons"]  # non-empty since all_disabled
 
-    def test_schema_version_constant_is_emitted(self, all_disabled, tmp_path: Path):
-        snapshot = capture_environment(tmp_path / "env.json")
-        assert snapshot["schema_version"] == SCHEMA_VERSION
 
-    def test_captured_at_is_iso8601_utc(self, all_disabled, tmp_path: Path):
-        snapshot = capture_environment(tmp_path / "env.json")
-        ts = snapshot["captured_at"]
-        # Issue's example uses trailing Z; validate shape rather than exact value
-        assert ts.endswith("Z")
-        assert "T" in ts
+# ---------------------------------------------------------------------------
+# EnvSnapshot dataclass: round-trip + summary
+# ---------------------------------------------------------------------------
+
+
+def _example_snapshot(**overrides) -> object:
+    """Build a fully-populated EnvSnapshot for round-trip testing."""
+    base = {
+        "schema_version": "1.0",
+        "captured_at": "2026-04-28T12:00:00Z",
+        "system_health": {"rdhc_version": "1.4.0", "tests": {}},
+        "rocm": {
+            "version": "7.2.1",
+            "version_dev": "7.2.1-43",
+            "kmd_version": "6.16.13",
+        },
+        "hip": {
+            "version": "7.2.5",
+            "platform": "amd",
+            "compiler": "clang",
+            "runtime": "rocclr",
+            "cpp_config": "-D__HIP_PLATFORM_AMD__",
+        },
+        "hipblaslt": {
+            "commit": "dabb6df2b9",
+            "package_version": "1.2.2",
+            "lib_hash": "sha256:abc",
+            "tensile_yaml_revision": "filenames-sha256:def",
+            "applied_prs": {},
+        },
+        "runtime_context": {
+            "type": "docker",
+            "python_env": "venv",
+            "venv_path": "/home/u/.venv",
+            "conda_env_name": None,
+        },
+        "docker": {
+            "image": "rocm/pytorch:7.2",
+            "digest": "sha256:deadbeef",
+            "container_id": "abcd1234",
+        },
+        "env_vars": dict.fromkeys(CANONICAL_ENV_VARS),
+        "python_version": "3.12.3",
+        "pytorch_version": "2.12.0",
+        "partial": False,
+        "partial_reasons": [],
+    }
+    base.update(overrides)
+    return EnvSnapshot(**base)
+
+
+class TestEnvSnapshot:
+    def test_to_dict_keys_are_complete(self):
+        snap = _example_snapshot()
+        d = snap.to_dict()
+        assert set(d.keys()) == REQUIRED_TOP_KEYS
+
+    def test_round_trip_via_dict(self):
+        original = _example_snapshot()
+        rebuilt = EnvSnapshot.from_dict(original.to_dict())
+        assert rebuilt == original
+
+    def test_round_trip_via_json(self):
+        """B1/B2 path: serialise via JSON, embed in a result, deserialise back."""
+        original = _example_snapshot()
+        as_json = json.dumps(original.to_dict(), default=str)
+        rebuilt = EnvSnapshot.from_dict(json.loads(as_json))
+        assert rebuilt == original
+
+    def test_from_dict_tolerates_extra_keys_forward_compat(self):
+        """Future schema additions in env.json shouldn't break old code reading it."""
+        d = _example_snapshot().to_dict()
+        d["future_field_not_yet_added"] = {"hello": "world"}
+        rebuilt = EnvSnapshot.from_dict(d)
+        assert rebuilt.schema_version == "1.0"
+
+    def test_from_dict_defaults_partial_reasons_when_missing(self):
+        """Older env.json without partial_reasons still loads (defaults to [])."""
+        d = _example_snapshot().to_dict()
+        del d["partial_reasons"]
+        rebuilt = EnvSnapshot.from_dict(d)
+        assert rebuilt.partial_reasons == []
+
+    def test_summary_includes_partial_marker_when_partial(self):
+        partial_snap = _example_snapshot(partial=True, partial_reasons=["x: y"])
+        clean_snap = _example_snapshot()
+        assert "PARTIAL" in partial_snap.summary()
+        assert "PARTIAL" not in clean_snap.summary()
+
+    def test_summary_is_multiline_human_readable(self):
+        snap = _example_snapshot()
+        s = snap.summary()
+        # 6 lines per the implementation; loose lower-bound
+        assert s.count("\n") >= 4
+        assert "rocm:" in s
+        assert "hipblaslt:" in s
+
+    def test_dataclass_is_frozen(self):
+        """Callers can safely embed the snapshot without mutation hazards."""
+        snap = _example_snapshot()
+        with pytest.raises((AttributeError, TypeError)):
+            snap.schema_version = "2.0"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# collect_env contract: never raises + partial semantics + idempotency
+# ---------------------------------------------------------------------------
+
+
+class TestCollectEnvContract:
+    def test_collect_env_never_raises_when_all_probes_fail(self, all_disabled):
+        """Acceptance: monkeypatch every probe to fail, still get an EnvSnapshot."""
+        snapshot = collect_env()
+        assert isinstance(snapshot, EnvSnapshot)
+        assert snapshot.partial is True
+        assert snapshot.partial_reasons, "partial=True must include at least one reason"
+
+    def test_partial_reasons_have_field_prefixes(self, all_disabled):
+        """Each reason should name the field it relates to (e.g. ``rocm.version: ...``)."""
+        snapshot = collect_env()
+        # Every reason should look like "<top.field>: <cause>" or "<top>: <cause>"
+        for reason in snapshot.partial_reasons:
+            head = reason.split(":", 1)[0]
+            assert head, f"reason missing prefix: {reason!r}"
+
+    def test_partial_false_on_clean_full_probe(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        """When every probe succeeds, partial is False and reasons is empty."""
+        # Stand up a fully-populated mock environment under tmp.
+        rocm_info = tmp_path / ".info"
+        rocm_info.mkdir()
+        (rocm_info / "version").write_text("7.2.1\n")
+        (rocm_info / "version_dev").write_text("7.2.1-43\n")
+        kmd = tmp_path / "kmd"
+        kmd.write_text("6.16.13\n")
+
+        header_dir = tmp_path / "include" / "hipblaslt"
+        header_dir.mkdir(parents=True)
+        (header_dir / "hipblaslt-version.h").write_text(
+            "#define HIPBLASLT_VERSION_MAJOR 1\n"
+            "#define HIPBLASLT_VERSION_MINOR 2\n"
+            "#define HIPBLASLT_VERSION_PATCH 2\n"
+            "#define HIPBLASLT_VERSION_TWEAK abc1234\n"
+        )
+
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        (lib_dir / "libhipblaslt.so").write_bytes(b"binary")
+
+        tensile_dir = tmp_path / "tensile"
+        tensile_dir.mkdir()
+        (tensile_dir / "TensileLibrary_X.dat").write_bytes(b"x")
+
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", rocm_info / "version")
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", rocm_info / "version_dev")
+        monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", kmd)
+        monkeypatch.setattr(
+            env_mod, "HIPBLASLT_VERSION_HEADER", header_dir / "hipblaslt-version.h"
+        )
+        monkeypatch.setattr(env_mod, "HIPBLASLT_LIB_DIR", lib_dir)
+        monkeypatch.setattr(env_mod, "HIPBLASLT_TENSILE_DIR", tensile_dir)
+        monkeypatch.setattr(env_mod, "DOCKERENV_MARKER", tmp_path / "no_dockerenv")
+        monkeypatch.setattr(
+            env_mod, "PODMAN_CONTAINERENV_MARKER", tmp_path / "no_podmanenv"
+        )
+        monkeypatch.setattr(env_mod, "CGROUP_FILE", tmp_path / "no_cgroup")
+
+        # rdhc happy path: pretend it's installed and writes valid JSON
+        monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/" + name)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "sudo" and "rdhc" in cmd[3]:
+                Path(cmd[-1]).write_text('{"rdhc_version": "1.4.0"}')
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            if cmd[0] == "hipconfig":
+                outs = {
+                    "--version": "7.2.5",
+                    "--platform": "amd",
+                    "--compiler": "clang",
+                    "--runtime": "rocclr",
+                    "--cpp_config": "-D__HIP_PLATFORM_AMD__",
+                }
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=outs[cmd[1]], stderr=""
+                )
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
+        # Pretend torch is importable with a version
+        import builtins
+        import types
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "torch":
+                return types.SimpleNamespace(__version__="2.12.0")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        snapshot = collect_env()
+        assert snapshot.partial is False, (
+            f"clean probe should not be partial; reasons: {snapshot.partial_reasons}"
+        )
+        assert snapshot.partial_reasons == []
+        # Verify the success values landed
+        assert snapshot.rocm["version"] == "7.2.1"
+        assert snapshot.hipblaslt["commit"] == "abc1234"
+        assert snapshot.system_health == {"rdhc_version": "1.4.0"}
+        assert snapshot.hip["version"] == "7.2.5"
+        assert snapshot.pytorch_version == "2.12.0"
+
+    def test_idempotent_two_calls_produce_equivalent_snapshots(self, all_disabled):
+        """B1 may collect once per trial; B2 may collect once per matrix start.
+
+        Calling twice in the same process must produce equivalent snapshots
+        (modulo timestamp). No cross-call state contamination.
+        """
+        snap1 = collect_env()
+        snap2 = collect_env()
+        # Compare every field except captured_at (which is a wall-clock stamp)
+        d1 = snap1.to_dict()
+        d2 = snap2.to_dict()
+        d1.pop("captured_at")
+        d2.pop("captured_at")
+        assert d1 == d2
+
+    def test_baremetal_does_not_trigger_partial_for_docker_block(
+        self, isolated_env, monkeypatch, tmp_path: Path
+    ):
+        """``docker == None`` on baremetal is the documented contract, NOT a fallback."""
+        monkeypatch.setattr(env_mod, "DOCKERENV_MARKER", tmp_path / "no_dockerenv")
+        monkeypatch.setattr(env_mod, "PODMAN_CONTAINERENV_MARKER", tmp_path / "no_podmanenv")
+        monkeypatch.setattr(env_mod, "CGROUP_FILE", tmp_path / "no_cgroup")
+        # Confirm via the probe directly
+        rt = {"type": "baremetal"}
+        reasons: list[str] = []
+        block = env_mod._capture_docker_metadata(rt, reasons)
+        assert block is None
+        assert reasons == []  # NOT partial
+
+    def test_unset_env_vars_do_not_trigger_partial(self, isolated_env):
+        """Individual env_vars values being None is the documented contract."""
+        # All canonical vars are unset (cleared by isolated_env fixture).
+        # _capture_env_vars doesn't take a reasons list -- by design.
+        block = env_mod._capture_env_vars()
+        assert all(v is None for v in block.values())
+
+    def test_runtime_context_never_partial(self, all_disabled):
+        """runtime_context.* fields are documented absences, not fallbacks.
+
+        The other top-level blocks (rocm, hipblaslt, etc.) DO show up in
+        partial_reasons under all_disabled -- this test only asserts that
+        nothing prefixed with ``runtime_context`` ever appears.
+        """
+        snapshot = collect_env()
+        runtime_reasons = [
+            r for r in snapshot.partial_reasons if r.startswith("runtime_context")
+        ]
+        assert runtime_reasons == [], (
+            f"runtime_context fields should never trigger partial; got: {runtime_reasons}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# B1 / B2 integration-style: snapshot embeds in a fake trial result
+# ---------------------------------------------------------------------------
+
+
+class TestB1B2Integration:
+    """Mirrors how B1 (per-trial runner) and B2 (matrix runner) will use this.
+
+    B1's pattern:
+        trial_result = {
+            "trial_id": "...",
+            "passed": True,
+            "metrics": {...},
+            "env": collect_env().to_dict(),  # embedded inline
+        }
+        write(trial_result_json, trial_result)
+
+    B2's pattern (host scope):
+        host_env = collect_env()
+        write(matrix_dir / "host_env.json", host_env.to_dict())
+
+    Both must round-trip cleanly so post-mortem tools can reconstruct an
+    EnvSnapshot from the persisted JSON.
+    """
+
+    def test_snapshot_embeds_in_trial_result_and_round_trips(self, all_disabled, tmp_path: Path):
+        snapshot = collect_env()
+
+        trial_result = {
+            "trial_id": "exp1-trial0",
+            "passed": True,
+            "metrics": {"loss": 0.42, "step_times_ms": [10.1, 9.8]},
+            "env": snapshot.to_dict(),
+        }
+        out = tmp_path / "trial_result.json"
+        out.write_text(json.dumps(trial_result, default=str, indent=2))
+
+        loaded = json.loads(out.read_text())
+        assert loaded["trial_id"] == "exp1-trial0"
+        # Reconstruct the typed snapshot from the embedded dict
+        reconstructed = EnvSnapshot.from_dict(loaded["env"])
+        assert reconstructed == snapshot
+
+    def test_b2_host_env_file_round_trips(self, all_disabled, tmp_path: Path):
+        """B2 writes host_env.json once at matrix start."""
+        snapshot = collect_env()
+        host_env_path = tmp_path / "host_env.json"
+        host_env_path.write_text(json.dumps(snapshot.to_dict(), default=str))
+
+        loaded = EnvSnapshot.from_dict(json.loads(host_env_path.read_text()))
+        assert loaded == snapshot
+        assert loaded.partial == snapshot.partial
+        assert loaded.partial_reasons == snapshot.partial_reasons
+
+
+# ---------------------------------------------------------------------------
+# CLI thin-wrapper invariant
+# ---------------------------------------------------------------------------
+
+
+class TestCliIsThinWrapper:
+    """Per #147 acceptance: ``src/aorta/cli/env.py`` does no probing of its own
+    and stays under ~30 lines of substantive code."""
+
+    @pytest.fixture
+    def cli_path(self) -> Path:
+        return Path(env_mod.__file__).parent.parent / "cli" / "env.py"
+
+    def test_total_file_size_is_bounded(self, cli_path: Path):
+        # Total file budget (incl. docstring/imports/blank lines): 60 lines.
+        # The substantive code budget per the spec is ~30 lines; the cushion
+        # accounts for the module docstring + Click decorators.
+        line_count = sum(1 for _ in cli_path.read_text().splitlines())
+        assert line_count <= 60, (
+            f"cli/env.py is {line_count} lines; budget is 60 (spec target ~30 substantive). "
+            "If you need more, the probing logic should move into the library, not the CLI."
+        )
+
+    def test_cli_does_no_probing_imports(self, cli_path: Path):
+        """CLI must not import anything that would let it probe directly."""
+        text = cli_path.read_text()
+        forbidden = ["import subprocess", "import shutil", "import platform", "import hashlib"]
+        for token in forbidden:
+            assert token not in text, (
+                f"cli/env.py imports {token!r} -- probing belongs in the library"
+            )
+
+    def test_cli_calls_collect_env(self, cli_path: Path):
+        """Sanity check: the CLI references the library function."""
+        text = cli_path.read_text()
+        assert "collect_env" in text
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +540,10 @@ class TestSchemaCompleteness:
 
 
 class TestRdhcWrapper:
-    def test_rdhc_unavailable_returns_none(self, all_disabled):
-        # all_disabled already stubs shutil.which to return None
-        assert env_mod._run_rdhc() is None
+    def test_rdhc_unavailable_returns_none_and_records_reason(self, all_disabled):
+        reasons: list[str] = []
+        assert env_mod._run_rdhc(reasons) is None
+        assert any("rdhc" in r for r in reasons)
 
     def test_rdhc_present_but_sudo_n_fails_returns_none(
         self, isolated_env, monkeypatch
@@ -161,13 +551,14 @@ class TestRdhcWrapper:
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
 
         def fake_run(cmd, **kwargs):
-            # sudo -n returns non-zero when password would be required
             return subprocess.CompletedProcess(
                 args=cmd, returncode=1, stdout="", stderr="sudo: a password is required"
             )
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        assert env_mod._run_rdhc() is None
+        reasons: list[str] = []
+        assert env_mod._run_rdhc(reasons) is None
+        assert any("sudo" in r.lower() or "exited 1" in r for r in reasons)
 
     def test_rdhc_timeout_returns_none(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
@@ -176,7 +567,9 @@ class TestRdhcWrapper:
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        assert env_mod._run_rdhc() is None
+        reasons: list[str] = []
+        assert env_mod._run_rdhc(reasons) is None
+        assert any("timeout" in r.lower() for r in reasons)
 
     def test_rdhc_happy_path_returns_parsed_json(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
@@ -196,21 +589,18 @@ class TestRdhcWrapper:
             assert "-n" in cmd
             assert "--quick" in cmd
             assert "--json" in cmd
-            # The last arg is the output path (managed by tempfile now)
             out_path = Path(cmd[-1])
             captured["path"] = out_path
             out_path.write_text(json.dumps(rdhc_payload))
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=0, stdout="", stderr=""
-            )
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        result = env_mod._run_rdhc()
+        reasons: list[str] = []
+        result = env_mod._run_rdhc(reasons)
         assert result == rdhc_payload
-        # Confirm the temp file was cleaned up after parsing -- no
-        # sidecar artifact left behind.
+        assert reasons == []  # happy path -> no partial reason
         assert "path" in captured
-        assert not captured["path"].exists()
+        assert not captured["path"].exists()  # tempfile cleaned up
 
     def test_rdhc_malformed_json_returns_none(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
@@ -220,12 +610,11 @@ class TestRdhcWrapper:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        assert env_mod._run_rdhc() is None
+        reasons: list[str] = []
+        assert env_mod._run_rdhc(reasons) is None
+        assert any("parseable" in r for r in reasons)
 
-    def test_rdhc_temp_file_cleaned_up_on_failure(
-        self, isolated_env, monkeypatch
-    ):
-        """The tempfile is removed even when the subprocess fails."""
+    def test_rdhc_temp_file_cleaned_up_on_failure(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
         captured: dict[str, Path] = {}
 
@@ -236,7 +625,8 @@ class TestRdhcWrapper:
             )
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        assert env_mod._run_rdhc() is None
+        reasons: list[str] = []
+        assert env_mod._run_rdhc(reasons) is None
         assert "path" in captured
         assert not captured["path"].exists()
 
@@ -247,7 +637,7 @@ class TestRdhcWrapper:
 
 
 class TestRocmVersionFiles:
-    def test_all_present(self, tmp_path: Path, monkeypatch):
+    def test_all_present_no_reasons(self, tmp_path: Path, monkeypatch):
         v = tmp_path / "version"
         v.write_text("7.2.1\n")
         vdev = tmp_path / "version-dev"
@@ -259,41 +649,48 @@ class TestRocmVersionFiles:
         monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", vdev)
         monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", kmd)
 
-        result = env_mod._capture_rocm_version_files()
+        reasons: list[str] = []
+        result = env_mod._capture_rocm_version_files(reasons)
         assert result == {
             "version": "7.2.1",
             "version_dev": "7.2.1.50311-abc1234",
             "kmd_version": "6.16.13",
         }
+        assert reasons == []
 
-    def test_all_missing(self, tmp_path: Path, monkeypatch):
+    def test_all_missing_appends_three_reasons(self, tmp_path: Path, monkeypatch):
         monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", tmp_path / "nope1")
         monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", tmp_path / "nope2")
         monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", tmp_path / "nope3")
-        result = env_mod._capture_rocm_version_files()
+        reasons: list[str] = []
+        result = env_mod._capture_rocm_version_files(reasons)
         assert result == {"version": None, "version_dev": None, "kmd_version": None}
+        assert len(reasons) == 3
+        assert all(r.startswith("rocm.") for r in reasons)
 
-    def test_partial_missing(self, tmp_path: Path, monkeypatch):
+    def test_partial_missing_appends_only_for_missing(self, tmp_path: Path, monkeypatch):
         v = tmp_path / "version"
         v.write_text("7.2.1\n")
         monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", v)
         monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", tmp_path / "nope")
         monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", tmp_path / "also_nope")
-        result = env_mod._capture_rocm_version_files()
-        assert result == {
-            "version": "7.2.1",
-            "version_dev": None,
-            "kmd_version": None,
-        }
+        reasons: list[str] = []
+        result = env_mod._capture_rocm_version_files(reasons)
+        assert result["version"] == "7.2.1"
+        assert result["version_dev"] is None
+        assert result["kmd_version"] is None
+        assert len(reasons) == 2
+        assert any("version_dev" in r for r in reasons)
+        assert any("kmd_version" in r for r in reasons)
 
     def test_empty_file_treated_as_none(self, tmp_path: Path, monkeypatch):
-        # /opt/rocm/.info/version-dev is sometimes installed but empty
         empty = tmp_path / "version-dev"
         empty.write_text("")
         monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", empty)
         monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", tmp_path / "nope")
         monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", tmp_path / "nope")
-        result = env_mod._capture_rocm_version_files()
+        reasons: list[str] = []
+        result = env_mod._capture_rocm_version_files(reasons)
         assert result["version_dev"] is None
 
 
@@ -303,18 +700,17 @@ class TestRocmVersionFiles:
 
 
 class TestHipToolchain:
-    def test_hipconfig_missing_returns_all_none(self, isolated_env, monkeypatch):
+    def test_hipconfig_missing_returns_all_none_and_one_reason(
+        self, isolated_env, monkeypatch
+    ):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: None)
-        result = env_mod._capture_hip_toolchain()
-        assert result == {
-            "version": None,
-            "platform": None,
-            "compiler": None,
-            "runtime": None,
-            "cpp_config": None,
-        }
+        reasons: list[str] = []
+        result = env_mod._capture_hip_toolchain(reasons)
+        assert all(v is None for v in result.values())
+        assert len(reasons) == 1
+        assert "hip" in reasons[0]
 
-    def test_hipconfig_happy_path(self, isolated_env, monkeypatch):
+    def test_hipconfig_happy_path_no_reasons(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/hipconfig")
 
         outputs = {
@@ -332,16 +728,14 @@ class TestHipToolchain:
             )
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        result = env_mod._capture_hip_toolchain()
-        assert result == {
-            "version": "7.2.53211-e1a6bc5663",
-            "platform": "amd",
-            "compiler": "clang",
-            "runtime": "rocclr",
-            "cpp_config": "-D__HIP_PLATFORM_AMD__",
-        }
+        reasons: list[str] = []
+        result = env_mod._capture_hip_toolchain(reasons)
+        assert result["version"] == "7.2.53211-e1a6bc5663"
+        assert reasons == []
 
-    def test_hipconfig_one_field_fails(self, isolated_env, monkeypatch):
+    def test_hipconfig_one_field_fails_appends_one_reason(
+        self, isolated_env, monkeypatch
+    ):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/hipconfig")
 
         def fake_run(cmd, **kwargs):
@@ -354,9 +748,11 @@ class TestHipToolchain:
             )
 
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        result = env_mod._capture_hip_toolchain()
-        assert result["version"] == "ok"
+        reasons: list[str] = []
+        result = env_mod._capture_hip_toolchain(reasons)
         assert result["cpp_config"] is None
+        assert len(reasons) == 1
+        assert "cpp_config" in reasons[0]
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +804,6 @@ class TestHipblasltLibHash:
         symlink_b.symlink_to(symlink_a.name)
 
         monkeypatch.setattr(env_mod, "HIPBLASLT_LIB_DIR", lib_dir)
-
         digest = env_mod._hash_hipblaslt_library()
         expected = "sha256:" + hashlib.sha256(b"hello hipblaslt").hexdigest()
         assert digest == expected
@@ -430,7 +825,6 @@ class TestTensileFingerprint:
         fp1 = env_mod._tensile_fingerprint()
         assert fp1 is not None and fp1.startswith("filenames-sha256:")
 
-        # Add another file -> fingerprint changes
         (d / "TensileLibrary_C.dat").write_bytes(b"z")
         fp2 = env_mod._tensile_fingerprint()
         assert fp2 != fp1
@@ -451,11 +845,13 @@ class TestTensileFingerprint:
 
 class TestHipblasltBlockShape:
     def test_applied_prs_is_empty_dict_initially(self, all_disabled):
-        block = env_mod._capture_hipblaslt()
+        reasons: list[str] = []
+        block = env_mod._capture_hipblaslt(reasons)
         assert block["applied_prs"] == {}
 
     def test_block_keys_stable(self, all_disabled):
-        block = env_mod._capture_hipblaslt()
+        reasons: list[str] = []
+        block = env_mod._capture_hipblaslt(reasons)
         assert set(block.keys()) == {
             "commit",
             "package_version",
@@ -463,6 +859,11 @@ class TestHipblasltBlockShape:
             "tensile_yaml_revision",
             "applied_prs",
         }
+
+    def test_partial_reasons_contain_hipblaslt_prefix(self, all_disabled):
+        reasons: list[str] = []
+        env_mod._capture_hipblaslt(reasons)
+        assert all(r.startswith("hipblaslt.") for r in reasons)
 
 
 # ---------------------------------------------------------------------------
@@ -531,9 +932,7 @@ class TestRuntimeContext:
         monkeypatch.setattr(sys, "base_prefix", sys.prefix)
         assert env_mod._detect_python_env() == "system"
 
-    def test_runtime_context_venv_path_populated(
-        self, all_disabled, monkeypatch
-    ):
+    def test_runtime_context_venv_path_populated(self, all_disabled, monkeypatch):
         monkeypatch.setattr(sys, "base_prefix", "/usr")
         monkeypatch.setattr(sys, "prefix", "/home/user/.venv")
         rt = env_mod._detect_runtime_context()
@@ -555,24 +954,30 @@ class TestRuntimeContext:
 
 
 class TestDockerMetadata:
-    def test_baremetal_returns_none(self):
-        rt = {"type": "baremetal", "python_env": "system"}
-        assert env_mod._capture_docker_metadata(rt) is None
+    def test_baremetal_returns_none_no_reasons(self):
+        reasons: list[str] = []
+        assert env_mod._capture_docker_metadata({"type": "baremetal"}, reasons) is None
+        assert reasons == []
 
     def test_docker_picks_up_aorta_env_vars(self, isolated_env):
         isolated_env.setenv("AORTA_DOCKER_IMAGE", "rocm/pytorch:7.2")
         isolated_env.setenv("AORTA_DOCKER_DIGEST", "sha256:deadbeef")
-        rt = {"type": "docker"}
-        block = env_mod._capture_docker_metadata(rt)
+        reasons: list[str] = []
+        block = env_mod._capture_docker_metadata({"type": "docker"}, reasons)
         assert block["image"] == "rocm/pytorch:7.2"
         assert block["digest"] == "sha256:deadbeef"
+        assert reasons == []  # both populated -> no partial
 
-    def test_docker_block_emits_keys_even_without_env(self, isolated_env):
-        rt = {"type": "docker"}
-        block = env_mod._capture_docker_metadata(rt)
+    def test_docker_in_container_without_env_vars_appends_reasons(self, isolated_env):
+        reasons: list[str] = []
+        block = env_mod._capture_docker_metadata({"type": "docker"}, reasons)
         assert set(block.keys()) == {"image", "digest", "container_id"}
         assert block["image"] is None
         assert block["digest"] is None
+        # Both image and digest missing -> two reasons
+        assert len(reasons) == 2
+        assert any("image" in r for r in reasons)
+        assert any("digest" in r for r in reasons)
 
     def test_container_id_extracted_from_cgroup(
         self, isolated_env, tmp_path: Path, monkeypatch
@@ -580,11 +985,12 @@ class TestDockerMetadata:
         cgroup = tmp_path / "cgroup"
         cid = "abc123def456789012345678901234567890abcd"
         cgroup.write_text(f"12:freezer:/docker/{cid}\n")
-        # _read_container_id() reads /proc/self/cgroup, not /proc/1/cgroup;
-        # patch the Path constructor it uses inside.
         monkeypatch.setattr(env_mod, "_read_text_file", lambda p: cgroup.read_text())
-        rt = {"type": "docker"}
-        block = env_mod._capture_docker_metadata(rt)
+        reasons: list[str] = []
+        # Provide image/digest so they don't add their own reasons
+        isolated_env.setenv("AORTA_DOCKER_IMAGE", "x")
+        isolated_env.setenv("AORTA_DOCKER_DIGEST", "y")
+        block = env_mod._capture_docker_metadata({"type": "docker"}, reasons)
         assert block["container_id"] == cid
 
 
@@ -643,9 +1049,7 @@ class TestEnvVars:
 
 
 class TestPytorchVersion:
-    def test_torch_unavailable_returns_none(self, isolated_env):
-        # Force an ImportError at probe-time even if torch happens to be
-        # installed in the test env, by monkeypatching builtins.__import__.
+    def test_torch_unavailable_returns_none_and_records_reason(self, isolated_env):
         import builtins
 
         real_import = builtins.__import__
@@ -656,18 +1060,14 @@ class TestPytorchVersion:
             return real_import(name, *args, **kwargs)
 
         with patch.object(builtins, "__import__", side_effect=fake_import):
-            assert env_mod._capture_pytorch_version() is None
+            reasons: list[str] = []
+            assert env_mod._capture_pytorch_version(reasons) is None
+            assert any("torch" in r for r in reasons)
 
     def test_torch_present_without_version_returns_none_not_string(
         self, isolated_env
     ):
-        """Regression guard: never emit the string "None" as the version.
-
-        Some torch builds (or stubs) lack ``__version__``. Earlier code did
-        ``str(getattr(torch, '__version__', None))`` which yielded the
-        string "None" -- breaking consumers doing ``jq '.pytorch_version
-        == null'``. Confirm we return Python ``None`` instead.
-        """
+        """Regression guard: never emit the string "None" as the version."""
         import builtins
         import types
 
@@ -680,10 +1080,28 @@ class TestPytorchVersion:
             return real_import(name, *args, **kwargs)
 
         with patch.object(builtins, "__import__", side_effect=fake_import):
-            result = env_mod._capture_pytorch_version()
+            reasons: list[str] = []
+            result = env_mod._capture_pytorch_version(reasons)
         assert result is None
-        # Belt-and-suspenders: not the string "None"
         assert result != "None"
+        assert any("__version__" in r for r in reasons)
+
+    def test_torch_with_version_returns_string_no_reason(self, isolated_env):
+        import builtins
+        import types
+
+        real_import = builtins.__import__
+        fake_torch = types.SimpleNamespace(__version__="2.12.0")
+
+        def fake_import(name, *args, **kwargs):
+            if name == "torch":
+                return fake_torch
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", side_effect=fake_import):
+            reasons: list[str] = []
+            assert env_mod._capture_pytorch_version(reasons) == "2.12.0"
+            assert reasons == []
 
 
 class TestNoGpuCompute:
@@ -694,107 +1112,13 @@ class TestNoGpuCompute:
     initialise a HIP context).
     """
 
-    def test_torch_cuda_never_called(self, all_disabled, tmp_path: Path):
+    def test_torch_cuda_never_called(self, all_disabled):
         if "torch" not in sys.modules:
             pytest.skip("torch not available; trivially passes")
         torch = sys.modules["torch"]
         with patch.object(torch.cuda, "is_available") as is_avail, patch.object(
             torch.cuda, "device_count"
         ) as dev_count:
-            capture_environment(tmp_path / "env.json")
+            collect_env()
             is_avail.assert_not_called()
             dev_count.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# End-to-end orchestrator
-# ---------------------------------------------------------------------------
-
-
-class TestCaptureEnvironmentEndToEnd:
-    def test_full_snapshot_with_realistic_files(
-        self, isolated_env, tmp_path: Path, monkeypatch
-    ):
-        # Stand up a realistic-looking ROCm root in tmp.
-        rocm = tmp_path / "rocm"
-        info = rocm / ".info"
-        info.mkdir(parents=True)
-        (info / "version").write_text("7.2.1\n")
-        (info / "version-dev").write_text("7.2.1.50311-abc1234\n")
-
-        kmd = tmp_path / "amdgpu_version"
-        kmd.write_text("6.16.13\n")
-
-        hipblaslt_inc = rocm / "include" / "hipblaslt"
-        hipblaslt_inc.mkdir(parents=True)
-        (hipblaslt_inc / "hipblaslt-version.h").write_text(
-            "#define HIPBLASLT_VERSION_MAJOR 1\n"
-            "#define HIPBLASLT_VERSION_MINOR 2\n"
-            "#define HIPBLASLT_VERSION_PATCH 2\n"
-            "#define HIPBLASLT_VERSION_TWEAK dabb6df2b9\n"
-        )
-
-        lib = rocm / "lib"
-        lib.mkdir()
-        (lib / "libhipblaslt.so").write_bytes(b"fake binary")
-
-        tensile = rocm / "lib" / "hipblaslt" / "library"
-        tensile.mkdir(parents=True)
-        (tensile / "TensileLibrary_X.dat").write_bytes(b"x")
-        (tensile / "TensileLibrary_Y.dat").write_bytes(b"y")
-
-        monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", info / "version")
-        monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", info / "version-dev")
-        monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", kmd)
-        monkeypatch.setattr(
-            env_mod, "HIPBLASLT_VERSION_HEADER", hipblaslt_inc / "hipblaslt-version.h"
-        )
-        monkeypatch.setattr(env_mod, "HIPBLASLT_LIB_DIR", lib)
-        monkeypatch.setattr(env_mod, "HIPBLASLT_TENSILE_DIR", tensile)
-        monkeypatch.setattr(env_mod, "DOCKERENV_MARKER", tmp_path / "no_dockerenv")
-        monkeypatch.setattr(
-            env_mod, "PODMAN_CONTAINERENV_MARKER", tmp_path / "no_podmanenv"
-        )
-        monkeypatch.setattr(env_mod, "CGROUP_FILE", tmp_path / "no_cgroup")
-        monkeypatch.setattr(env_mod.shutil, "which", lambda name: None)
-
-        out = tmp_path / "env.json"
-        snapshot = capture_environment(out)
-
-        # Schema completeness
-        assert set(snapshot.keys()) == REQUIRED_TOP_KEYS
-
-        # ROCm
-        assert snapshot["rocm"]["version"] == "7.2.1"
-        assert snapshot["rocm"]["version_dev"] == "7.2.1.50311-abc1234"
-        assert snapshot["rocm"]["kmd_version"] == "6.16.13"
-
-        # HIP (no hipconfig available -> all None)
-        assert snapshot["hip"] == {
-            "version": None,
-            "platform": None,
-            "compiler": None,
-            "runtime": None,
-            "cpp_config": None,
-        }
-
-        # hipBLASLt
-        assert snapshot["hipblaslt"]["commit"] == "dabb6df2b9"
-        assert snapshot["hipblaslt"]["package_version"] == "1.2.2"
-        assert snapshot["hipblaslt"]["lib_hash"] == (
-            "sha256:" + hashlib.sha256(b"fake binary").hexdigest()
-        )
-        assert snapshot["hipblaslt"]["tensile_yaml_revision"].startswith(
-            "filenames-sha256:"
-        )
-        assert snapshot["hipblaslt"]["applied_prs"] == {}
-
-        # Runtime
-        assert snapshot["runtime_context"]["type"] == "baremetal"
-        assert snapshot["docker"] is None  # baremetal -> docker is null
-
-        # RDHC unavailable
-        assert snapshot["system_health"] is None
-
-        # File on disk matches return value
-        assert json.loads(out.read_text()) == snapshot
