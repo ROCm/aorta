@@ -6,18 +6,23 @@ eviction/restore events at the kernel driver level via amdkfd and amdgpu
 tracepoints. This provides driver-level visibility into memory behaviour
 that user-space tools (torch.cuda.max_memory_allocated) cannot capture.
 
-Note: this module currently does **not** attach to GPU UVM page fault
-tracepoints. Any higher-level metric that is derived from these events and
-reported as "page faults" should be interpreted as eviction/restore cycles
-and related driver-level memory pressure signals, not literal GPU page
-faults.
+Note: this module does **not** attach to GPU UVM page fault tracepoints.
+The metrics here describe BO map/unmap activity and eviction/restore
+cycles that signal driver-level memory pressure -- not literal GPU page
+faults.  ``MemoryTraceMetrics.total_faults`` (and the associated
+``avg_fault_latency_us``) counts evict -> restore round trips and is more
+accurately thought of as ``eviction_restore_pairs``; the legacy name is
+kept for backward compatibility with existing dashboards/JSON consumers.
 
-Key tracepoints:
-- amdgpu:amdgpu_bo_move          -- buffer migration between memory domains
-- amdgpu:amdgpu_vm_bo_map        -- buffer object mapped into VM
-- amdgpu:amdgpu_vm_bo_unmap      -- buffer object unmapped from VM
-- amdkfd:kfd_evict_process       -- process evicted from GPU (memory pressure)
-- amdkfd:kfd_restore_process     -- process restored after eviction
+Key tracepoints (the actual symbols probed at runtime; older docs may
+refer to ``kfd_evict_process``/``kfd_restore_process``):
+
+- amdgpu:amdgpu_bo_move                       -- BO migration between memory domains
+- amdgpu:amdgpu_vm_bo_map                     -- BO mapped into VM
+- amdgpu:amdgpu_vm_bo_unmap                   -- BO unmapped from VM
+- amdkfd:kfd_evict_process_worker_start       -- process evicted from GPU (memory pressure)
+- amdkfd:kfd_restore_process_worker_start     -- process restored after eviction
+- amdkfd:kfd_map_memory_to_gpu_start/_end     -- KFD compute path memory mapping
 """
 
 from __future__ import annotations
@@ -29,27 +34,13 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
-
-# #region agent log
-_DBG_LOG_PATH = str(Path(__file__).resolve().parents[4] / ".cursor" / "debug-8e5cb7.log")
-def _mdbg(location, message, data=None, hypothesis=None):
-    import json as _j, time as _t
-    entry = {"sessionId": "8e5cb7", "location": location, "message": message,
-             "data": data or {}, "timestamp": int(_t.time() * 1000),
-             "hypothesisId": hypothesis or "", "runId": "run1"}
-    try:
-        Path(_DBG_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
-        with open(_DBG_LOG_PATH, "a") as _f:
-            _f.write(_j.dumps(entry) + "\n")
-    except Exception:
-        pass
-# #endregion
 
 
 @dataclass
@@ -73,22 +64,67 @@ class MemoryTraceEvent:
 
 @dataclass
 class MemoryTraceMetrics:
-    """Aggregated memory trace metrics from eBPF tracing."""
+    """Aggregated memory trace metrics from eBPF tracing.
+
+    Field semantics:
+
+    - ``total_bo_moves`` / ``total_bo_maps`` / ``total_bo_unmaps``: counts
+      of ``amdgpu_bo_move`` / ``amdgpu_vm_bo_map`` / ``amdgpu_vm_bo_unmap``
+      tracepoint hits.
+    - ``total_evictions`` / ``total_restores``: counts of KFD process
+      eviction/restore worker invocations.  These signal driver-level
+      memory pressure (the GPU ran out of room, so the process was
+      paged out and brought back).
+    - ``total_eviction_restore_pairs`` (alias ``total_faults``): number of
+      matched evict -> restore pairs observed during the trace.  This is
+      *not* a count of GPU UVM page faults; the legacy ``total_faults``
+      / ``fault_rate_per_sec`` / ``avg_fault_latency_us`` names are kept
+      for backward compatibility with existing dashboards but the
+      ``eviction_restore_*`` aliases are preferred for new code.
+    """
 
     total_bo_moves: int = 0
     total_bo_maps: int = 0
     total_bo_unmaps: int = 0
     total_evictions: int = 0
     total_restores: int = 0
-    total_faults: int = 0
-    fault_rate_per_sec: float = 0.0
-    avg_fault_latency_us: float = 0.0
+    total_eviction_restore_pairs: int = 0
+    eviction_restore_rate_per_sec: float = 0.0
+    avg_eviction_restore_latency_us: float = 0.0
     migration_bytes: int = 0
     bo_move_rate_per_sec: float = 0.0
     pages_prefetched: int = 0
     trace_duration_ms: float = 0.0
     bpftrace_stderr: str = ""
     events: List[MemoryTraceEvent] = field(default_factory=list)
+
+    # ----- Backward-compatible aliases (deprecated names) -----
+    @property
+    def total_faults(self) -> int:
+        """Deprecated alias for ``total_eviction_restore_pairs``."""
+        return self.total_eviction_restore_pairs
+
+    @total_faults.setter
+    def total_faults(self, value: int) -> None:
+        self.total_eviction_restore_pairs = value
+
+    @property
+    def fault_rate_per_sec(self) -> float:
+        """Deprecated alias for ``eviction_restore_rate_per_sec``."""
+        return self.eviction_restore_rate_per_sec
+
+    @fault_rate_per_sec.setter
+    def fault_rate_per_sec(self, value: float) -> None:
+        self.eviction_restore_rate_per_sec = value
+
+    @property
+    def avg_fault_latency_us(self) -> float:
+        """Deprecated alias for ``avg_eviction_restore_latency_us``."""
+        return self.avg_eviction_restore_latency_us
+
+    @avg_fault_latency_us.setter
+    def avg_fault_latency_us(self, value: float) -> None:
+        self.avg_eviction_restore_latency_us = value
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -97,9 +133,13 @@ class MemoryTraceMetrics:
             "total_bo_unmaps": self.total_bo_unmaps,
             "total_evictions": self.total_evictions,
             "total_restores": self.total_restores,
-            "total_faults": self.total_faults,
-            "fault_rate_per_sec": self.fault_rate_per_sec,
-            "avg_fault_latency_us": self.avg_fault_latency_us,
+            "total_eviction_restore_pairs": self.total_eviction_restore_pairs,
+            "eviction_restore_rate_per_sec": self.eviction_restore_rate_per_sec,
+            "avg_eviction_restore_latency_us": self.avg_eviction_restore_latency_us,
+            # --- legacy aliases preserved for dashboard / JSON consumers ---
+            "total_faults": self.total_eviction_restore_pairs,
+            "fault_rate_per_sec": self.eviction_restore_rate_per_sec,
+            "avg_fault_latency_us": self.avg_eviction_restore_latency_us,
             "migration_bytes": self.migration_bytes,
             "bo_move_rate_per_sec": self.bo_move_rate_per_sec,
             "pages_prefetched": self.pages_prefetched,
@@ -149,7 +189,7 @@ def _check_tracepoint_exists(tp_category: str, tp_name: str) -> bool:
 # bpftrace script generation for memory tracing
 # ---------------------------------------------------------------------------
 
-def _build_memory_trace_script() -> str:
+def _build_memory_trace_script(target_pid: Optional[int] = None) -> str:
     """Build a bpftrace script that traces amdgpu memory events.
 
     Field names vary across kernel versions (e.g. ``bo_size`` may not
@@ -161,6 +201,15 @@ def _build_memory_trace_script() -> str:
     On MES-based GPUs, ``amdgpu_vm_bo_map``/``unmap`` may not fire for
     KFD compute.  KFD memory mapping tracepoints
     (``kfd_map_memory_to_gpu_start``/``end``) are used instead.
+
+    When ``target_pid`` is provided we attach a ``/pid == N/`` predicate
+    to every tracepoint that the kernel fires from the originating user
+    task -- BO map/unmap, KFD memory mapping, and the eviction/restore
+    worker start probes.  ``amdgpu_bo_move`` and the KFD worker bodies
+    can fire from kernel threads on behalf of the process, so we filter
+    them as well: the eviction/restore *_worker_start probes carry the
+    original task's PID via the work item's ``mm`` reference, which is
+    the closest stable signal we have for "owned by this process".
     """
     # --- amdgpu_bo_move fields ---
     bo_move_fields = _probe_tracepoint_fields("amdgpu", "amdgpu_bo_move")
@@ -173,72 +222,73 @@ def _build_memory_trace_script() -> str:
     else:
         bo_size_expr = "0"
 
+    pid_filter = f" /pid == {target_pid}/" if target_pid is not None else ""
+
     sections: List[str] = []
 
     sections.append(f"""\
-tracepoint:amdgpu:amdgpu_bo_move
+tracepoint:amdgpu:amdgpu_bo_move{pid_filter}
 {{
     printf("BO_MOVE|%llu|%d|%s|%d\\n",
            nsecs, pid, comm, {bo_size_expr});
 }}""")
 
-    sections.append("""\
-tracepoint:amdgpu:amdgpu_vm_bo_map
-{
+    sections.append(f"""\
+tracepoint:amdgpu:amdgpu_vm_bo_map{pid_filter}
+{{
     printf("BO_MAP|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
-}""")
+}}""")
 
-    sections.append("""\
-tracepoint:amdgpu:amdgpu_vm_bo_unmap
-{
+    sections.append(f"""\
+tracepoint:amdgpu:amdgpu_vm_bo_unmap{pid_filter}
+{{
     printf("BO_UNMAP|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
-}""")
+}}""")
 
-    # KFD tracepoints -- use correct names (with _worker_ suffix)
     if _check_tracepoint_exists("amdkfd", "kfd_evict_process_worker_start"):
-        sections.append("""\
-tracepoint:amdkfd:kfd_evict_process_worker_start
-{
+        sections.append(f"""\
+tracepoint:amdkfd:kfd_evict_process_worker_start{pid_filter}
+{{
     printf("EVICT|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
-}""")
+}}""")
 
     if _check_tracepoint_exists("amdkfd", "kfd_restore_process_worker_start"):
-        sections.append("""\
-tracepoint:amdkfd:kfd_restore_process_worker_start
-{
+        sections.append(f"""\
+tracepoint:amdkfd:kfd_restore_process_worker_start{pid_filter}
+{{
     printf("RESTORE|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
-}""")
+}}""")
 
     # KFD memory mapping tracepoints (fire for compute workloads on MES GPUs)
     if _check_tracepoint_exists("amdkfd", "kfd_map_memory_to_gpu_start"):
-        sections.append("""\
-tracepoint:amdkfd:kfd_map_memory_to_gpu_start
-{
+        sections.append(f"""\
+tracepoint:amdkfd:kfd_map_memory_to_gpu_start{pid_filter}
+{{
     printf("KFD_MAP_START|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
-}""")
+}}""")
 
     if _check_tracepoint_exists("amdkfd", "kfd_map_memory_to_gpu_end"):
-        sections.append("""\
-tracepoint:amdkfd:kfd_map_memory_to_gpu_end
-{
+        sections.append(f"""\
+tracepoint:amdkfd:kfd_map_memory_to_gpu_end{pid_filter}
+{{
     printf("KFD_MAP_END|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
-}""")
+}}""")
 
-    header = """\
-#!/usr/bin/env bpftrace
-/*
- * Trace AMD GPU memory events (BO moves, map/unmap, evictions).
- * Output: TYPE|TIMESTAMP_NS|PID|COMM|SIZE_BYTES
- *
- * No PID filters: these tracepoints fire from kernel threads.
- */
-"""
+    header = (
+        "#!/usr/bin/env bpftrace\n"
+        "/*\n"
+        " * Trace AMD GPU memory events (BO moves, map/unmap, evictions).\n"
+        " * Output: TYPE|TIMESTAMP_NS|PID|COMM|SIZE_BYTES\n"
+    )
+    if target_pid is not None:
+        header += f" *\n * Scoped to PID {target_pid}.\n"
+    header += " */\n"
     return header + "\n".join(sections) + "\n"
 
 
@@ -264,6 +314,12 @@ class BPFMemoryTracer:
         print(metrics.to_dict())
     """
 
+    # Time we wait after spawning bpftrace before considering attach
+    # complete.  Used to (a) detect immediate crashes and (b) advance
+    # ``_start_time_ns`` past the probe-attach window so that
+    # duration-derived rates measure the actual tracing window only.
+    _ATTACH_DELAY_SEC: float = 0.5
+
     def __init__(
         self,
         target_pid: Optional[int] = None,
@@ -278,13 +334,45 @@ class BPFMemoryTracer:
         self._process: Optional[subprocess.Popen] = None
         self._script_path: Optional[Path] = None
         self._output_path: Optional[Path] = None
+        self._stderr_path: Optional[Path] = None
+        self._stderr_file = None
+        self._stderr_thread: Optional[threading.Thread] = None
+        self._stderr_chunks: List[str] = []
         self._start_time_ns: Optional[int] = None
 
     def _generate_script(self) -> Path:
-        script = _build_memory_trace_script()
+        script = _build_memory_trace_script(target_pid=self._target_pid)
         script_path = self._output_dir / "memory_trace.bt"
         script_path.write_text(script)
         return script_path
+
+    def _drain_stderr(self) -> None:
+        """Continuously read stderr to keep the pipe from filling up.
+
+        bpftrace can emit several lines per second when probes mismatch;
+        leaving stderr unread can stall the subprocess.  We tee everything
+        to a file in ``output_dir`` and also keep the last few KiB in
+        memory so ``stop()`` can surface it via ``MemoryTraceMetrics.bpftrace_stderr``.
+        """
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in iter(proc.stderr.readline, ""):
+                if not line:
+                    break
+                self._stderr_chunks.append(line)
+                # Cap in-memory buffer at ~16 KiB
+                if sum(len(c) for c in self._stderr_chunks) > 16384:
+                    self._stderr_chunks = self._stderr_chunks[-256:]
+                if self._stderr_file is not None:
+                    try:
+                        self._stderr_file.write(line)
+                        self._stderr_file.flush()
+                    except Exception:
+                        pass
+        except (ValueError, OSError):
+            pass
 
     def start(self) -> None:
         """Start the memory tracer in the background."""
@@ -300,54 +388,60 @@ class BPFMemoryTracer:
 
         self._script_path = self._generate_script()
         self._output_path = self._output_dir / "memory_trace.log"
-
-        # #region agent log
-        _mdbg("ebpf_memory_tracer.py:start", "generated_script", {
-            "script_path": str(self._script_path),
-            "script_content": self._script_path.read_text()[:2000],
-        }, hypothesis="MEM1")
-        # #endregion
+        self._stderr_path = self._output_dir / "memory_trace.stderr.log"
 
         cmd: List[str] = []
         if self._sudo and os.geteuid() != 0:
             cmd.append("sudo")
         cmd.extend([bpftrace_path, str(self._script_path)])
 
+        self._stderr_file = open(self._stderr_path, "w")  # noqa: SIM115
         with open(self._output_path, "w") as out_f:
             self._process = subprocess.Popen(
                 cmd,
                 stdout=out_f,
                 stderr=subprocess.PIPE,
                 text=True,
+                bufsize=1,
             )
 
-        self._start_time_ns = time.monotonic_ns()
-        time.sleep(0.5)
+        # Start a background thread that drains stderr so the pipe never
+        # fills up and blocks bpftrace.
+        self._stderr_chunks = []
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, name="bpftrace-mem-stderr", daemon=True,
+        )
+        self._stderr_thread.start()
+
+        time.sleep(self._ATTACH_DELAY_SEC)
 
         rc = self._process.poll()
-        # #region agent log
-        _mdbg("ebpf_memory_tracer.py:start", "health_check", {
-            "poll_rc": rc,
-            "pid": self._process.pid if self._process else None,
-        }, hypothesis="MEM1")
-        # #endregion
         if rc is not None:
-            stderr_text = ""
-            try:
-                stderr_text = self._process.stderr.read()  # type: ignore[union-attr]
-            except Exception:
-                pass
+            # Wait briefly for the drain thread to flush whatever stderr
+            # the dying process produced before snapshotting it.
+            if self._stderr_thread is not None:
+                self._stderr_thread.join(timeout=1.0)
+            stderr_text = "".join(self._stderr_chunks)
+            self._cleanup_stderr_capture()
             self._process = None
             msg = f"bpftrace (memory) exited immediately (rc={rc})"
             if stderr_text:
                 msg += f": {stderr_text.strip()}"
-            # #region agent log
-            _mdbg("ebpf_memory_tracer.py:start", "health_check_FAILED", {
-                "rc": rc, "stderr": stderr_text[:500],
-            }, hypothesis="MEM1")
-            # #endregion
             logger.warning(msg)
             raise RuntimeError(msg)
+
+        # Capture start time AFTER attach completes so that the reported
+        # ``trace_duration_ms`` is the actual measurement window, not
+        # measurement window + arbitrary attach delay.
+        self._start_time_ns = time.monotonic_ns()
+
+    def _cleanup_stderr_capture(self) -> None:
+        if self._stderr_file is not None:
+            try:
+                self._stderr_file.close()
+            except Exception:
+                pass
+            self._stderr_file = None
 
     def stop(self) -> MemoryTraceMetrics:
         """Stop the memory tracer and return parsed metrics."""
@@ -367,40 +461,25 @@ class BPFMemoryTracer:
         except (subprocess.SubprocessError, ProcessLookupError):
             pass
 
-        stderr_text = ""
         try:
-            _, stderr_text = self._process.communicate(timeout=10)
+            self._process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self._process.kill()
-            _, stderr_text = self._process.communicate(timeout=5)
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2.0)
+            self._stderr_thread = None
+
+        stderr_text = "".join(self._stderr_chunks)
+        self._cleanup_stderr_capture()
         self._process = None
-
-        # #region agent log
-        post_size = self._output_path.stat().st_size if self._output_path and self._output_path.exists() else -1
-        raw_content = ""
-        if self._output_path and self._output_path.exists() and post_size > 0:
-            raw_content = self._output_path.read_text()[:2000]
-        _mdbg("ebpf_memory_tracer.py:stop", "post_stop_state", {
-            "stderr": (stderr_text or "")[:500],
-            "output_file_size_bytes": post_size,
-            "raw_output_first_2k": raw_content,
-        }, hypothesis="MEM1")
-        # #endregion
 
         events = self._parse_output()
         metrics = self._compute_metrics(events, elapsed_ns)
-        # #region agent log
-        _mdbg("ebpf_memory_tracer.py:stop", "parsed_metrics", {
-            "num_events": len(events),
-            "bo_moves": metrics.total_bo_moves,
-            "bo_maps": metrics.total_bo_maps,
-            "bo_unmaps": metrics.total_bo_unmaps,
-            "evictions": metrics.total_evictions,
-            "restores": metrics.total_restores,
-            "migration_bytes": metrics.migration_bytes,
-        }, hypothesis="MEM1")
-        # #endregion
         if stderr_text:
             metrics.bpftrace_stderr = stderr_text.strip()
         return metrics
@@ -480,22 +559,25 @@ class BPFMemoryTracer:
                 metrics.total_restores += 1
                 if evict_timestamps:
                     latency_ns = ev.timestamp_ns - evict_timestamps.pop(0)
-                    metrics.total_faults += 1
+                    metrics.total_eviction_restore_pairs += 1
                     ev.latency_ns = latency_ns
 
         trace_sec = trace_duration_ms / 1000.0
         if trace_sec > 0:
-            metrics.fault_rate_per_sec = metrics.total_evictions / trace_sec
+            metrics.eviction_restore_rate_per_sec = (
+                metrics.total_evictions / trace_sec
+            )
             metrics.bo_move_rate_per_sec = metrics.total_bo_moves / trace_sec
 
-        # Average fault latency from evict->restore pairs
         latencies_us = [
             ev.latency_ns / 1000.0
             for ev in events
             if ev.event_type == "restore" and ev.latency_ns > 0
         ]
         if latencies_us:
-            metrics.avg_fault_latency_us = sum(latencies_us) / len(latencies_us)
+            metrics.avg_eviction_restore_latency_us = (
+                sum(latencies_us) / len(latencies_us)
+            )
 
         return metrics
 

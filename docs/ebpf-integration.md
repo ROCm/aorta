@@ -121,12 +121,17 @@ Available built-in policies:
 │  └─ MetricsCollector        │  └─ comparison reports        │
 ├──────────────┴──────────────┴───────────────────────────────┤
 │  Kernel: amdgpu tracepoints    amdkfd tracepoints           │
-│  ├─ amdgpu_cs_ioctl            ├─ kfd_evict_process         │
-│  ├─ amdgpu_sched_run_job       └─ kfd_restore_process       │
-│  ├─ amdgpu_vm_bo_map                                        │
-│  └─ amdgpu_vm_bo_unmap                                      │
+│  ├─ amdgpu_cs_ioctl            ├─ kfd_evict_process_worker_start  │
+│  ├─ amdgpu_sched_run_job       ├─ kfd_restore_process_worker_start│
+│  ├─ amdgpu_vm_bo_map           ├─ kfd_map_memory_to_gpu_start     │
+│  └─ amdgpu_vm_bo_unmap         └─ kfd_map_memory_to_gpu_end       │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> On older kernels the eviction/restore tracepoints are exposed as
+> ``kfd_evict_process`` / ``kfd_restore_process`` (without the
+> ``_worker_start`` suffix).  The tracer auto-detects which variant is
+> available at startup.
 
 ## Module Reference
 
@@ -139,8 +144,16 @@ Available built-in policies:
 
 ### `ebpf_memory_tracer.py`
 
-- `BPFMemoryTracer` -- attach to `amdgpu_vm_bo_map/unmap` and `kfd_evict/restore`
-- `MemoryTraceMetrics` -- fault counts, eviction/restore rates, migration bytes
+- `BPFMemoryTracer` -- attach to `amdgpu_vm_bo_map/unmap`, `amdgpu_bo_move`,
+  and the KFD `kfd_evict_process_worker_start` /
+  `kfd_restore_process_worker_start` /
+  `kfd_map_memory_to_gpu_start`/`_end` tracepoints.  Older kernels expose
+  the eviction probes without the `_worker_start` suffix; the tracer
+  auto-detects which is available.
+- `MemoryTraceMetrics` -- BO move/map/unmap counts, evict/restore rates,
+  migration bytes.  Note: ``total_faults`` and friends are deprecated
+  aliases for ``total_eviction_restore_pairs``; they count process
+  eviction cycles, *not* GPU UVM page faults.
 
 ### `policy_evaluator.py`
 

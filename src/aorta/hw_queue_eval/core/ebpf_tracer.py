@@ -21,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,10 +46,19 @@ class EBPFCapabilities:
 
     @property
     def available(self) -> bool:
-        """Whether eBPF tracing is usable on this system."""
+        """Whether eBPF tracing is usable on this system.
+
+        bpftrace must be installed, at least one of the amdgpu/amdkfd
+        tracepoint trees must be visible, *and* the current process must
+        have privileges to attach (root or CAP_BPF/CAP_PERFMON).  We do
+        not auto-trigger ``sudo`` here: callers that report
+        ``available=True`` should be able to start the tracer without an
+        interactive password prompt.
+        """
         return (
             self.bpftrace_path is not None
             and (self.has_amdgpu_tracepoints or self.has_amdkfd_tracepoints)
+            and self.has_root_or_cap
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -59,6 +69,7 @@ class EBPFCapabilities:
             "has_amdkfd_tracepoints": self.has_amdkfd_tracepoints,
             "amdgpu_tracepoints": self.amdgpu_tracepoints,
             "amdkfd_tracepoints": self.amdkfd_tracepoints,
+            "has_root_or_cap": self.has_root_or_cap,
             "available": self.available,
         }
 
@@ -247,35 +258,64 @@ def _build_mes_trace_script(
 
     On MES GPUs, steady-state compute dispatch goes through user-space
     doorbell writes directly to GPU firmware -- the kernel is not on
-    the data path.  We trace GPU interrupts (``amdgpu_iv``) as
-    completion signals and register writes (``amdgpu_device_wreg``) as
-    a proxy for kernel-mediated GPU operations.
-    """
-    return f"""\
-#!/usr/bin/env bpftrace
-/*
- * Trace AMD GPU queue events on MES-based GPUs (MI200/MI300).
- *
- * HIP compute dispatches via user-space doorbells, so kernel probes
- * cannot capture individual kernel launches.  Instead we trace:
- *   - amdgpu_iv:           GPU interrupt completions
- *   - amdgpu_device_wreg:  kernel-side register writes (management ops)
- *
- * Output: TYPE|TIMESTAMP_NS|PID|COMM|RING|FENCE
- */
+    the data path.  We attach to:
 
-tracepoint:amdgpu:amdgpu_iv
+    - ``kprobe:<mes_symbol>``: kernel-mediated MES submissions
+      (e.g. ``mes_v12_0_submit_pkt_and_poll_completion``).  This catches
+      management/control packets, not steady-state compute, but lets
+      the tracer correlate kernel side and IRQ side timings.
+    - ``amdgpu_iv``: GPU interrupt completions
+    - ``amdgpu_device_wreg``: kernel-side register writes (management ops)
+
+    Output: ``TYPE|TIMESTAMP_NS|PID|COMM|RING|FENCE``
+    """
+    pid_filter = f" /pid == {target_pid}/" if target_pid is not None else ""
+    sections: List[str] = []
+
+    if mes_symbol:
+        sections.append(f"""\
+kprobe:{mes_symbol}{pid_filter}
 {{
+    @mes_in[tid] = nsecs;
+    printf("SUBMIT|%llu|%d|%s|0|0\\n", nsecs, pid, comm);
+}}
+
+kretprobe:{mes_symbol}{pid_filter}
+{{
+    $start = @mes_in[tid];
+    if ($start) {{
+        printf("COMPLETE|%llu|%d|%s|0|0\\n", nsecs, pid, comm);
+        delete(@mes_in[tid]);
+    }}
+}}""")
+
+    sections.append("""\
+tracepoint:amdgpu:amdgpu_iv
+{
     printf("IRQ|%llu|%d|%s|%d|%d\\n",
            nsecs, pid, comm, args->ring_id, args->src_id);
-}}
+}""")
 
+    sections.append("""\
 tracepoint:amdgpu:amdgpu_device_wreg
-{{
+{
     printf("WREG|%llu|%d|%s|%d|%d\\n",
            nsecs, pid, comm, args->reg, args->did);
-}}
-"""
+}""")
+
+    header = (
+        "#!/usr/bin/env bpftrace\n"
+        "/*\n"
+        " * Trace AMD GPU queue events on MES-based GPUs (MI200/MI300).\n"
+        " *\n"
+        " * Output: TYPE|TIMESTAMP_NS|PID|COMM|RING|FENCE\n"
+    )
+    if mes_symbol:
+        header += f" * MES kprobe attached: {mes_symbol}\n"
+    if target_pid is not None:
+        header += f" * Scoped to PID {target_pid}.\n"
+    header += " */\n"
+    return header + "\n".join(sections) + "\n"
 
 
 def _build_legacy_trace_script(
@@ -379,10 +419,48 @@ def check_ebpf_capabilities() -> EBPFCapabilities:
     except (PermissionError, OSError):
         pass
 
-    # Root / CAP_BPF check
-    caps.has_root_or_cap = os.geteuid() == 0
+    # Root / CAP_BPF / CAP_PERFMON check.  bpftrace requires either
+    # uid 0 or one of the modern eBPF-attach capabilities.  The
+    # capability bits live in /proc/self/status under "CapEff".
+    caps.has_root_or_cap = _check_ebpf_privilege()
 
     return caps
+
+
+# Capability bit offsets defined in <linux/capability.h>.
+_CAP_SYS_ADMIN = 21
+_CAP_BPF = 39
+_CAP_PERFMON = 38
+
+
+def _check_ebpf_privilege() -> bool:
+    """Return True if the current process can attach eBPF probes.
+
+    Either uid 0 or one of {CAP_SYS_ADMIN, CAP_BPF, CAP_PERFMON} in the
+    effective capability set qualifies.  Errors reading
+    ``/proc/self/status`` (e.g. on non-Linux platforms) fall back to the
+    uid check only.
+    """
+    try:
+        if os.geteuid() == 0:
+            return True
+    except AttributeError:
+        return False
+
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("CapEff:"):
+                    cap_eff = int(line.split()[1], 16)
+                    needed = (
+                        (1 << _CAP_SYS_ADMIN)
+                        | (1 << _CAP_BPF)
+                        | (1 << _CAP_PERFMON)
+                    )
+                    return bool(cap_eff & needed)
+    except (OSError, ValueError):
+        pass
+    return False
 
 
 class BPFQueueTracer:
@@ -408,6 +486,12 @@ class BPFQueueTracer:
         print(metrics.to_dict())
     """
 
+    # Time we wait after spawning bpftrace before considering attach
+    # complete.  Used to (a) detect immediate crashes and (b) advance
+    # ``_start_time_ns`` past the probe-attach window so that
+    # duration-derived rates measure the actual tracing window only.
+    _ATTACH_DELAY_SEC: float = 0.5
+
     def __init__(
         self,
         target_pid: Optional[int] = None,
@@ -422,7 +506,47 @@ class BPFQueueTracer:
         self._process: Optional[subprocess.Popen] = None
         self._script_path: Optional[Path] = None
         self._output_path: Optional[Path] = None
+        self._stderr_path: Optional[Path] = None
+        self._stderr_file = None
+        self._stderr_thread: Optional[threading.Thread] = None
+        self._stderr_chunks: List[str] = []
         self._start_time_ns: Optional[int] = None
+
+    def _drain_stderr(self) -> None:
+        """Continuously read stderr to keep the pipe from filling up.
+
+        bpftrace may emit warnings or per-probe diagnostics throughout
+        the run; if we never read the pipe, the kernel buffer fills up
+        and the subprocess can stall indefinitely.  We tee everything to
+        ``self._stderr_path`` and keep a bounded in-memory buffer so
+        ``stop()`` can surface the recent stderr to the caller.
+        """
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in iter(proc.stderr.readline, ""):
+                if not line:
+                    break
+                self._stderr_chunks.append(line)
+                if sum(len(c) for c in self._stderr_chunks) > 16384:
+                    self._stderr_chunks = self._stderr_chunks[-256:]
+                if self._stderr_file is not None:
+                    try:
+                        self._stderr_file.write(line)
+                        self._stderr_file.flush()
+                    except Exception:
+                        pass
+        except (ValueError, OSError):
+            pass
+
+    def _cleanup_stderr_capture(self) -> None:
+        if self._stderr_file is not None:
+            try:
+                self._stderr_file.close()
+            except Exception:
+                pass
+            self._stderr_file = None
 
     # ------------------------------------------------------------------
     # Script generation
@@ -456,36 +580,48 @@ class BPFQueueTracer:
 
         self._script_path = self._generate_script(bpftrace_path=caps.bpftrace_path)
         self._output_path = self._output_dir / "queue_trace.log"
+        self._stderr_path = self._output_dir / "queue_trace.stderr.log"
 
         cmd: List[str] = []
         if self._sudo and os.geteuid() != 0:
             cmd.append("sudo")
         cmd.extend([caps.bpftrace_path, str(self._script_path)])
 
+        self._stderr_file = open(self._stderr_path, "w")  # noqa: SIM115
         with open(self._output_path, "w") as out_f:
             self._process = subprocess.Popen(
                 cmd,
                 stdout=out_f,
                 stderr=subprocess.PIPE,
                 text=True,
+                bufsize=1,
             )
 
-        self._start_time_ns = time.monotonic_ns()
-        time.sleep(0.5)
+        self._stderr_chunks = []
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, name="bpftrace-queue-stderr", daemon=True,
+        )
+        self._stderr_thread.start()
+
+        time.sleep(self._ATTACH_DELAY_SEC)
 
         rc = self._process.poll()
         if rc is not None:
-            stderr_text = ""
-            try:
-                stderr_text = self._process.stderr.read()  # type: ignore[union-attr]
-            except Exception:
-                pass
+            if self._stderr_thread is not None:
+                self._stderr_thread.join(timeout=1.0)
+            stderr_text = "".join(self._stderr_chunks)
+            self._cleanup_stderr_capture()
             self._process = None
             msg = f"bpftrace exited immediately (rc={rc})"
             if stderr_text:
                 msg += f": {stderr_text.strip()}"
             logger.warning(msg)
             raise RuntimeError(msg)
+
+        # Capture start time AFTER attach completes so that the reported
+        # ``trace_duration_ms`` reflects the actual tracing window, not
+        # the probe-attach delay.
+        self._start_time_ns = time.monotonic_ns()
 
     def stop(self) -> DriverQueueMetrics:
         """Stop the tracer and return parsed metrics."""
@@ -506,16 +642,24 @@ class BPFQueueTracer:
         except (subprocess.SubprocessError, ProcessLookupError):
             pass
 
-        stderr_text = ""
         try:
-            _, stderr_text = self._process.communicate(timeout=10)
+            self._process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self._process.kill()
-            _, stderr_text = self._process.communicate(timeout=5)
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2.0)
+            self._stderr_thread = None
+
+        stderr_text = "".join(self._stderr_chunks)
+        self._cleanup_stderr_capture()
         self._process = None
 
-        if stderr_text and stderr_text.strip():
+        if stderr_text.strip():
             import warnings
             warnings.warn(f"bpftrace stderr: {stderr_text.strip()}")
 
@@ -586,16 +730,24 @@ class BPFQueueTracer:
 
         GPU completions often deliver multiple interrupts within a small
         window (one per CPU/node).  This deduplicates them, keeping the
-        earliest timestamp from each group as the canonical completion time.
+        earliest timestamp from each group as the canonical completion
+        time.
+
+        We compare each IRQ to the *previous* IRQ's timestamp (not the
+        group head's), so a long but evenly-spaced burst stays in one
+        group even when the burst spans more than ``window_us``.
         """
         if not irq_events:
             return []
+        window_ns = window_us * 1_000.0
         sorted_irqs = sorted(irq_events, key=lambda e: e.timestamp_ns)
         groups: List[DriverQueueEvent] = [sorted_irqs[0]]
+        last_seen_ns = sorted_irqs[0].timestamp_ns
         for ev in sorted_irqs[1:]:
-            gap_ns = ev.timestamp_ns - groups[-1].timestamp_ns
-            if gap_ns > window_us * 1_000:
+            gap_ns = ev.timestamp_ns - last_seen_ns
+            if gap_ns > window_ns:
                 groups.append(ev)
+            last_seen_ns = ev.timestamp_ns
         return groups
 
     @staticmethod

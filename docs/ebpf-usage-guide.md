@@ -91,9 +91,16 @@ amdgpu tracepoints:
   - amdgpu_vm_bo_unmap
 
 amdkfd tracepoints:
-  - kfd_evict_process
-  - kfd_restore_process
+  - kfd_evict_process_worker_start
+  - kfd_restore_process_worker_start
+  - kfd_map_memory_to_gpu_start
+  - kfd_map_memory_to_gpu_end
 ```
+
+> Older kernels exposed these as ``kfd_evict_process`` /
+> ``kfd_restore_process``; aorta's tracer auto-detects which variant is
+> available at startup.  The standalone bpftrace scripts under
+> ``ebpfaultline/bpftrace/`` use the same naming convention.
 
 If `bpftrace` shows "not installed" or tracepoints show "(not accessible)",
 see [Troubleshooting](#troubleshooting) below.
@@ -168,11 +175,19 @@ Output includes:
 
 ```
 eBPF MEMORY METRICS:
-  Page faults:      42
-  Fault rate:        350.0 /sec
-  Avg fault latency: 8.2 us
-  Migration bytes:   67108864
+  BO moves (migrations): 42  (350 /sec)
+  Migration volume:      64.0 MB
+  BO maps / unmaps:      120 / 100
+  Evictions / restores:  4 / 4
+  Eviction rate:         0.5 /sec
+  Avg evict latency:     8.2 us
 ```
+
+> Note: the historical "Page faults" terminology refers to KFD
+> eviction/restore cycles, *not* GPU UVM page faults.  This module does
+> not currently attach to UVM fault tracepoints; the eviction/restore
+> counts here signal driver-level memory pressure (the GPU OOM'd, the
+> process was paged out, then brought back).
 
 ### Combining Queue and Memory Tracing
 
@@ -190,11 +205,16 @@ to queue dispatch delays.
 
 | Metric | What It Means |
 |--------|---------------|
-| Page faults | Number of `amdgpu_vm_bo_map` events (buffer mapping into GPU VM) |
-| Fault rate | Faults per second during the measurement window |
-| Avg fault latency | Average time per fault (high values suggest VRAM pressure) |
-| Migration bytes | Total data moved between host and device |
-| Evictions (in raw data) | Process-level evictions -- if non-zero, GPU memory is oversubscribed |
+| BO moves | Buffer-object migrations between memory domains (`amdgpu_bo_move`) |
+| Migration volume | Total bytes moved by `amdgpu_bo_move` events |
+| BO maps / unmaps | Counts of `amdgpu_vm_bo_map` / `amdgpu_vm_bo_unmap` |
+| Evictions / restores | Process-level KFD eviction/restore worker invocations |
+| Eviction rate | Evictions per second -- if non-zero, GPU memory is oversubscribed |
+| Avg evict latency | Time between matched evict -> restore pairs (high values = thrash) |
+
+> The JSON output also exposes a legacy ``total_faults`` /
+> ``fault_rate_per_sec`` / ``avg_fault_latency_us`` aliases for the
+> eviction/restore-pair metric.  These are *not* GPU UVM page faults.
 
 ## Policy Sweep
 

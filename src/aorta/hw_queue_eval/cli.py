@@ -169,7 +169,8 @@ def cli():
 @click.option("--ebpf-trace", is_flag=True, default=False,
               help="Enable eBPF queue tracing (requires bpftrace + root)")
 @click.option("--ebpf-memory-trace", is_flag=True, default=False,
-              help="Enable eBPF memory tracing for page faults/migrations")
+              help="Enable eBPF memory tracing for BO migrations and process "
+                   "eviction/restore cycles (not literal GPU page faults)")
 def run(workload: str, streams: int, iterations: int, warmup: int,
         output: Optional[str], device: str, sync_mode: str, quiet: bool,
         profile: bool, profile_dir: str,
@@ -668,7 +669,8 @@ def _print_interpretation(workload: str, info, result, streams: int) -> None:
 @click.option("--ebpf-trace", is_flag=True, default=False,
               help="Enable eBPF queue tracing (requires bpftrace + root)")
 @click.option("--ebpf-memory-trace", is_flag=True, default=False,
-              help="Enable eBPF memory tracing for page faults/migrations")
+              help="Enable eBPF memory tracing for BO migrations and process "
+                   "eviction/restore cycles (not literal GPU page faults)")
 def sweep(workload: str, streams: str, iterations: int, warmup: int,
           output: Optional[str], device: str, lock_clocks: Optional[int],
           power_limit: Optional[int], ebpf_trace: bool, ebpf_memory_trace: bool):
