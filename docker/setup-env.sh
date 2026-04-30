@@ -84,8 +84,16 @@ done
 echo -e "${GREEN}Selected: $DOCKERFILE${NC}"
 echo ""
 
-# Step 2: Container Name
-echo -e "${GREEN}Step 2: Container Name${NC}"
+# Step 2: Image and Container Names
+echo -e "${GREEN}Step 2: Image Name${NC}"
+DEFAULT_IMAGE_NAME="aorta:${VARIANT}"
+echo "Suggested default: $DEFAULT_IMAGE_NAME"
+read -p "Enter image name (or press Enter to use default): " IMAGE_NAME
+IMAGE_NAME=${IMAGE_NAME:-$DEFAULT_IMAGE_NAME}
+echo -e "${GREEN}Image name: $IMAGE_NAME${NC}"
+echo ""
+
+echo -e "${GREEN}Step 3: Container Name${NC}"
 DEFAULT_CONTAINER_NAME="${USER:-default}-${VARIANT}-$(date +%Y%m%d)"
 echo "Suggested default: $DEFAULT_CONTAINER_NAME"
 read -p "Enter container name (or press Enter to use default): " CONTAINER_NAME
@@ -93,8 +101,8 @@ CONTAINER_NAME=${CONTAINER_NAME:-$DEFAULT_CONTAINER_NAME}
 echo -e "${GREEN}Container name: $CONTAINER_NAME${NC}"
 echo ""
 
-# Step 3: Aorta Workspace Path
-echo -e "${GREEN}Step 3: Aorta Workspace Path${NC}"
+# Step 4: Aorta Workspace Path
+echo -e "${GREEN}Step 4: Aorta Workspace Path${NC}"
 echo "This is the path to your aorta workspace directory."
 echo "Default: .. (parent directory - assumes you're running from docker/ subdirectory)"
 read -p "Enter path (or press Enter for default '..'): " AORTA_WORKSPACE
@@ -102,8 +110,8 @@ AORTA_WORKSPACE=${AORTA_WORKSPACE:-..}
 echo -e "${GREEN}Aorta workspace: $AORTA_WORKSPACE${NC}"
 echo ""
 
-# Step 4: RCCL Path (optional)
-echo -e "${GREEN}Step 4: Custom RCCL Build (Optional)${NC}"
+# Step 5: RCCL Path (optional)
+echo -e "${GREEN}Step 5: Custom RCCL Build (Optional)${NC}"
 echo "Path to your custom RCCL build directory."
 echo "Press Enter to use the RCCL bundled in the image (no custom build)."
 read -p "Enter path (or press Enter to skip): " RCCL_PATH
@@ -114,15 +122,15 @@ else
 fi
 echo ""
 
-# Step 5: AMD GPU Driver Variant (optional)
-echo -e "${GREEN}Step 5: AMD GPU Driver Variant (Optional)${NC}"
+# Step 6: AMD GPU Driver Variant (optional)
+echo -e "${GREEN}Step 6: AMD GPU Driver Variant (Optional)${NC}"
 echo "Set driver variant for environment_info.json"
 echo "Possible values: patched, base, mqd_vram, default, or leave empty"
 read -p "Enter variant (or press Enter to skip): " AMDGPU_DRIVER_VARIANT
 echo ""
 
-# Step 6: Additional mounts (optional)
-echo -e "${GREEN}Step 6: Additional Volume Mounts (Optional)${NC}"
+# Step 7: Additional mounts (optional)
+echo -e "${GREEN}Step 7: Additional Volume Mounts (Optional)${NC}"
 echo "Do you need any additional volume mounts?"
 read -p "Add extra mounts? (y/N): " add_mounts
 
@@ -164,6 +172,11 @@ cat > "$ENV_FILE" << EOF
 # DOCKERFILE SELECTION
 # ==============================================================================
 DOCKERFILE=$DOCKERFILE
+
+# ==============================================================================
+# IMAGE NAME
+# ==============================================================================
+IMAGE_NAME=$IMAGE_NAME
 
 # ==============================================================================
 # CONTAINER NAME

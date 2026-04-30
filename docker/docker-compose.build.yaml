@@ -14,6 +14,7 @@
 services:
   torchenv:
     container_name: ${CONTAINER_NAME:-training-overlap-bugs-default}
+    image: ${IMAGE_NAME:-aorta:latest}
     build:
       context: .
       dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}

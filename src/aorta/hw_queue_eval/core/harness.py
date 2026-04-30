@@ -10,6 +10,7 @@ This module provides:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 from aorta.hw_queue_eval.core.metrics import (
     LatencyMetrics,
@@ -279,36 +282,13 @@ class StreamHarness:
         import os
 
         if self.config.ebpf_tracing:
-            # #region agent log
-            from pathlib import Path as _P
-            _DBG_LOG_PATH = str(_P(__file__).resolve().parents[4] / ".cursor" / "debug-8e5cb7.log")
-            import json as _j, time as _t
-            def _hdbg(msg, data):
-                try:
-                    _P(_DBG_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
-                    with open(_DBG_LOG_PATH, "a") as _f:
-                        _f.write(_j.dumps({"sessionId": "8e5cb7", "location": "harness.py:_start_ebpf_tracers", "message": msg, "data": data, "timestamp": int(_t.time()*1000), "hypothesisId": "H5", "runId": "run1"}) + "\n")
-                except Exception:
-                    pass
-            # #endregion
             try:
                 from aorta.hw_queue_eval.core.ebpf_tracer import BPFQueueTracer
 
-                # #region agent log
-                _hdbg("creating_tracer", {"pid": os.getpid()})
-                # #endregion
-                self._ebpf_queue_tracer = BPFQueueTracer(
-                    target_pid=os.getpid()
-                )
+                self._ebpf_queue_tracer = BPFQueueTracer(target_pid=os.getpid())
                 self._ebpf_queue_tracer.start()
-                # #region agent log
-                _hdbg("tracer_started_ok", {"is_running": self._ebpf_queue_tracer.is_running})
-                # #endregion
             except (ImportError, RuntimeError) as exc:
                 import warnings
-                # #region agent log
-                _hdbg("tracer_start_FAILED", {"error": str(exc), "type": type(exc).__name__})
-                # #endregion
                 warnings.warn(f"eBPF queue tracing unavailable: {exc}")
                 self._ebpf_queue_tracer = None
 
@@ -318,22 +298,14 @@ class StreamHarness:
             self._start_ebpf_memory_tracer()
 
     def _stop_ebpf_tracers(self):
-        """Stop eBPF tracers and return their metrics dicts (or None)."""
-        import warnings
+        """Stop eBPF tracers and return their metrics dicts (or None).
 
-        # #region agent log
-        from pathlib import Path as _P2
-        _DBG_LOG_PATH2 = str(_P2(__file__).resolve().parents[4] / ".cursor" / "debug-8e5cb7.log")
-        import json as _j, time as _t
-        def _hsdbg(msg, data):
-            try:
-                _P2(_DBG_LOG_PATH2).parent.mkdir(parents=True, exist_ok=True)
-                with open(_DBG_LOG_PATH2, "a") as _f:
-                    _f.write(_j.dumps({"sessionId": "8e5cb7", "location": "harness.py:_stop_ebpf_tracers", "message": msg, "data": data, "timestamp": int(_t.time()*1000), "hypothesisId": "H5", "runId": "run1"}) + "\n")
-            except Exception:
-                pass
-        _hsdbg("stop_called", {"has_queue_tracer": self._ebpf_queue_tracer is not None, "has_memory_tracer": self._ebpf_memory_tracer is not None})
-        # #endregion
+        Failures to stop or parse a tracer are surfaced via
+        ``warnings.warn`` (and ``logger.warning`` with traceback) so callers
+        can tell when reported eBPF metrics are missing or partial instead
+        of silently getting ``None``.
+        """
+        import warnings
 
         ebpf_queue_metrics = None
         ebpf_memory_metrics = None
@@ -342,14 +314,11 @@ class StreamHarness:
             try:
                 qm = self._ebpf_queue_tracer.stop()
                 ebpf_queue_metrics = qm.to_dict()
-                # #region agent log
-                _hsdbg("queue_metrics", {"total_dispatches": qm.total_dispatches, "total_submissions": qm.total_submissions, "num_events": len(qm.events)})
-                # #endregion
             except Exception as exc:
-                # #region agent log
-                _hsdbg("queue_stop_FAILED", {"error": str(exc)})
-                # #endregion
-                warnings.warn(f"eBPF queue tracer stop failed: {exc}")
+                logger.warning("eBPF queue tracer stop failed", exc_info=True)
+                warnings.warn(
+                    f"eBPF queue tracer stop failed; queue metrics missing: {exc}"
+                )
             self._ebpf_queue_tracer = None
 
         if self._ebpf_memory_tracer is not None:
@@ -359,7 +328,10 @@ class StreamHarness:
                 if mm.bpftrace_stderr:
                     warnings.warn(f"bpftrace (memory) stderr: {mm.bpftrace_stderr}")
             except Exception as exc:
-                warnings.warn(f"eBPF memory tracer stop failed: {exc}")
+                logger.warning("eBPF memory tracer stop failed", exc_info=True)
+                warnings.warn(
+                    f"eBPF memory tracer stop failed; memory metrics missing: {exc}"
+                )
             self._ebpf_memory_tracer = None
 
         return ebpf_queue_metrics, ebpf_memory_metrics
@@ -404,118 +376,127 @@ class StreamHarness:
         # Apply GPU hardware control (lock clocks, set power) before benchmark
         gpu_hw_snapshot = self._gpu_control.apply()
 
-        collector = self._metrics_collector
-        collector.clear()
+        try:
+            collector = self._metrics_collector
+            collector.clear()
 
-        # Warmup phase
-        for _ in range(self.config.warmup_iterations):
-            workload_fn(self.streams)
-            if self.config.sync_mode == "per_iteration":
-                sync_all_streams(self.streams)
+            # Warmup phase
+            for _ in range(self.config.warmup_iterations):
+                workload_fn(self.streams)
+                if self.config.sync_mode == "per_iteration":
+                    sync_all_streams(self.streams)
 
-        # Sync after warmup (all devices)
-        sync_all_streams(self.streams)
-        for device in self.devices:
-            torch.cuda.synchronize(device)
-
-        # Reset memory stats after warmup (all devices)
-        if self.config.reset_memory_stats_before_run:
-            for device in self.devices:
-                reset_memory_stats(device)
-
-        # Start eBPF tracers if requested
-        self._start_ebpf_tracers()
-
-        # Measurement phase
-        for _ in range(self.config.measurement_iterations):
-            collector.start_iteration()
-
-            workload_fn(self.streams)
-
-            if self.config.sync_mode == "per_iteration":
-                sync_all_streams(self.streams)
-
-            collector.end_iteration(sync=(self.config.sync_mode == "per_iteration"))
-
-        # Final sync if using end_only mode (all devices)
-        if self.config.sync_mode in ("end_only", "none"):
+            # Sync after warmup (all devices)
             sync_all_streams(self.streams)
             for device in self.devices:
                 torch.cuda.synchronize(device)
 
-        # Stop eBPF tracers and collect metrics
-        ebpf_queue_metrics, ebpf_memory_metrics = self._stop_ebpf_tracers()
+            # Reset memory stats after warmup (all devices)
+            if self.config.reset_memory_stats_before_run:
+                for device in self.devices:
+                    reset_memory_stats(device)
 
-        # Compute metrics (capture from primary device, but note multi-GPU in metadata)
-        latency_metrics = collector.compute_latency_metrics()
-        switch_metrics = collector.compute_switch_latency()
-        memory_metrics = MemoryMetrics.capture(self.config.device)
+            # Start eBPF tracers if requested
+            self._start_ebpf_tracers()
 
-        # Compare eBPF vs CUDA measurements if both are available
-        ebpf_comparison = None
-        if ebpf_queue_metrics and switch_metrics:
-            ebpf_comparison = compare_ebpf_vs_cuda(
-                ebpf_queue_metrics, switch_metrics.to_dict()
+            # Measurement phase
+            for _ in range(self.config.measurement_iterations):
+                collector.start_iteration()
+
+                workload_fn(self.streams)
+
+                if self.config.sync_mode == "per_iteration":
+                    sync_all_streams(self.streams)
+
+                collector.end_iteration(sync=(self.config.sync_mode == "per_iteration"))
+
+            # Final sync if using end_only mode (all devices)
+            if self.config.sync_mode in ("end_only", "none"):
+                sync_all_streams(self.streams)
+                for device in self.devices:
+                    torch.cuda.synchronize(device)
+
+            # Stop eBPF tracers and collect metrics
+            ebpf_queue_metrics, ebpf_memory_metrics = self._stop_ebpf_tracers()
+
+            # Compute metrics (capture from primary device, but note multi-GPU in metadata)
+            latency_metrics = collector.compute_latency_metrics()
+            switch_metrics = collector.compute_switch_latency()
+            memory_metrics = MemoryMetrics.capture(self.config.device)
+
+            # Compare eBPF vs CUDA measurements if both are available
+            ebpf_comparison = None
+            if ebpf_queue_metrics and switch_metrics:
+                ebpf_comparison = compare_ebpf_vs_cuda(
+                    ebpf_queue_metrics, switch_metrics.to_dict()
+                )
+
+            # Compute throughput
+            total_time_sec = collector.get_total_time_ms() / 1000.0
+            if throughput_fn:
+                throughput_value = throughput_fn(
+                    self.config.measurement_iterations, total_time_sec
+                )
+            else:
+                throughput_value = self.config.measurement_iterations / total_time_sec
+
+            throughput_metrics = ThroughputMetrics(
+                value=throughput_value,
+                unit=throughput_unit,
+                raw_count=self.config.measurement_iterations,
+                duration_sec=total_time_sec,
             )
 
-        # Compute throughput
-        total_time_sec = collector.get_total_time_ms() / 1000.0
-        if throughput_fn:
-            throughput_value = throughput_fn(
-                self.config.measurement_iterations, total_time_sec
+            # Build result with comprehensive system info
+            system_info = get_system_info()
+            metadata = {
+                "config": self.config.to_dict(),
+                "device_info": get_device_properties(self.config.device).__dict__,
+                "rocm_info": get_rocm_env_info(),
+                "driver_info": get_driver_info(),
+                "system_info": {
+                    "hostname": system_info.get("hostname"),
+                    "kernel": system_info.get("driver", {}).get("kernel"),
+                    "driver_type": system_info.get("driver", {}).get("driver_type"),
+                },
+                "multi_gpu": {
+                    "enabled": self.config.use_multi_gpu,
+                    "devices": self.devices,
+                    "num_gpus": len(self.devices),
+                    "stream_to_device": self.stream_to_device,
+                },
+            }
+            if gpu_hw_snapshot:
+                metadata.update(gpu_hw_snapshot)
+            if extra_metadata:
+                metadata.update(extra_metadata)
+
+            result = HarnessResult.from_metrics(
+                throughput_metrics=throughput_metrics,
+                latency_metrics=latency_metrics,
+                collector=collector,
+                stream_count=self.config.stream_count,
+                workload_name=workload_name,
+                memory_metrics=memory_metrics,
+                switch_metrics=switch_metrics,
+                extra_metadata=metadata,
             )
-        else:
-            throughput_value = self.config.measurement_iterations / total_time_sec
-
-        throughput_metrics = ThroughputMetrics(
-            value=throughput_value,
-            unit=throughput_unit,
-            raw_count=self.config.measurement_iterations,
-            duration_sec=total_time_sec,
-        )
-
-        # Build result with comprehensive system info
-        system_info = get_system_info()
-        metadata = {
-            "config": self.config.to_dict(),
-            "device_info": get_device_properties(self.config.device).__dict__,
-            "rocm_info": get_rocm_env_info(),
-            "driver_info": get_driver_info(),
-            "system_info": {
-                "hostname": system_info.get("hostname"),
-                "kernel": system_info.get("driver", {}).get("kernel"),
-                "driver_type": system_info.get("driver", {}).get("driver_type"),
-            },
-            "multi_gpu": {
-                "enabled": self.config.use_multi_gpu,
-                "devices": self.devices,
-                "num_gpus": len(self.devices),
-                "stream_to_device": self.stream_to_device,
-            },
-        }
-        if gpu_hw_snapshot:
-            metadata.update(gpu_hw_snapshot)
-        if extra_metadata:
-            metadata.update(extra_metadata)
-
-        result = HarnessResult.from_metrics(
-            throughput_metrics=throughput_metrics,
-            latency_metrics=latency_metrics,
-            collector=collector,
-            stream_count=self.config.stream_count,
-            workload_name=workload_name,
-            memory_metrics=memory_metrics,
-            switch_metrics=switch_metrics,
-            extra_metadata=metadata,
-        )
-        result.ebpf_queue_metrics = ebpf_queue_metrics
-        result.ebpf_memory_metrics = ebpf_memory_metrics
-        result.ebpf_vs_cuda = ebpf_comparison
-
-        # Reset GPU settings after benchmark
-        self._gpu_control.reset()
-        self._cleanup()
-        return result
+            result.ebpf_queue_metrics = ebpf_queue_metrics
+            result.ebpf_memory_metrics = ebpf_memory_metrics
+            result.ebpf_vs_cuda = ebpf_comparison
+            return result
+        finally:
+            # Always stop tracers (no-op if already stopped), reset GPU
+            # control, and tear down streams. This guarantees we don't
+            # leak privileged bpftrace processes or leave the GPU in a
+            # locked clock state on exception.
+            if (
+                self._ebpf_queue_tracer is not None
+                or self._ebpf_memory_tracer is not None
+            ):
+                self._stop_ebpf_tracers()
+            self._gpu_control.reset()
+            self._cleanup()
 
     def run_workload(
         self,
@@ -540,121 +521,133 @@ class StreamHarness:
         # Start memory tracer BEFORE setup so it captures BO allocations
         self._start_ebpf_memory_tracer()
 
-        # Setup workload
-        workload.setup(self.config.stream_count, self.config.device)
+        try:
+            # Setup workload
+            workload.setup(self.config.stream_count, self.config.device)
 
-        collector = self._metrics_collector
-        collector.clear()
+            collector = self._metrics_collector
+            collector.clear()
 
-        # Warmup phase
-        for _ in range(self.config.warmup_iterations):
-            workload.run_iteration(self.streams)
-            if self.config.sync_mode == "per_iteration":
-                sync_all_streams(self.streams)
+            # Warmup phase
+            for _ in range(self.config.warmup_iterations):
+                workload.run_iteration(self.streams)
+                if self.config.sync_mode == "per_iteration":
+                    sync_all_streams(self.streams)
 
-        # Sync after warmup (all devices)
-        sync_all_streams(self.streams)
-        for device in self.devices:
-            torch.cuda.synchronize(device)
-
-        # Reset memory stats after warmup (all devices)
-        if self.config.reset_memory_stats_before_run:
-            for device in self.devices:
-                reset_memory_stats(device)
-
-        # Start eBPF queue tracer at measurement boundary
-        self._start_ebpf_tracers()
-
-        # Measurement phase
-        for _ in range(self.config.measurement_iterations):
-            collector.start_iteration()
-
-            workload.run_iteration(self.streams)
-
-            if self.config.sync_mode == "per_iteration":
-                sync_all_streams(self.streams)
-
-            collector.end_iteration(sync=(self.config.sync_mode == "per_iteration"))
-
-        # Final sync (all devices)
-        if self.config.sync_mode in ("end_only", "none"):
+            # Sync after warmup (all devices)
             sync_all_streams(self.streams)
             for device in self.devices:
                 torch.cuda.synchronize(device)
 
-        # Stop eBPF tracers and collect metrics
-        ebpf_queue_metrics, ebpf_memory_metrics = self._stop_ebpf_tracers()
+            # Reset memory stats after warmup (all devices)
+            if self.config.reset_memory_stats_before_run:
+                for device in self.devices:
+                    reset_memory_stats(device)
 
-        # Compute metrics
-        latency_metrics = collector.compute_latency_metrics()
-        switch_metrics = collector.compute_switch_latency()
-        memory_metrics = MemoryMetrics.capture(self.config.device)
+            # Start eBPF queue tracer at measurement boundary
+            self._start_ebpf_tracers()
 
-        # Compare eBPF vs CUDA measurements if both are available
-        ebpf_comparison = None
-        if ebpf_queue_metrics and switch_metrics:
-            ebpf_comparison = compare_ebpf_vs_cuda(
-                ebpf_queue_metrics, switch_metrics.to_dict()
+            # Measurement phase
+            for _ in range(self.config.measurement_iterations):
+                collector.start_iteration()
+
+                workload.run_iteration(self.streams)
+
+                if self.config.sync_mode == "per_iteration":
+                    sync_all_streams(self.streams)
+
+                collector.end_iteration(sync=(self.config.sync_mode == "per_iteration"))
+
+            # Final sync (all devices)
+            if self.config.sync_mode in ("end_only", "none"):
+                sync_all_streams(self.streams)
+                for device in self.devices:
+                    torch.cuda.synchronize(device)
+
+            # Stop eBPF tracers and collect metrics
+            ebpf_queue_metrics, ebpf_memory_metrics = self._stop_ebpf_tracers()
+
+            # Compute metrics
+            latency_metrics = collector.compute_latency_metrics()
+            switch_metrics = collector.compute_switch_latency()
+            memory_metrics = MemoryMetrics.capture(self.config.device)
+
+            # Compare eBPF vs CUDA measurements if both are available
+            ebpf_comparison = None
+            if ebpf_queue_metrics and switch_metrics:
+                ebpf_comparison = compare_ebpf_vs_cuda(
+                    ebpf_queue_metrics, switch_metrics.to_dict()
+                )
+
+            # Compute throughput using workload's method
+            total_time_sec = collector.get_total_time_ms() / 1000.0
+            throughput_value = workload.compute_throughput(
+                self.config.measurement_iterations, total_time_sec
             )
 
-        # Compute throughput using workload's method
-        total_time_sec = collector.get_total_time_ms() / 1000.0
-        throughput_value = workload.compute_throughput(
-            self.config.measurement_iterations, total_time_sec
-        )
+            throughput_metrics = ThroughputMetrics(
+                value=throughput_value,
+                unit=workload.get_throughput_unit(),
+                raw_count=self.config.measurement_iterations,
+                duration_sec=total_time_sec,
+            )
 
-        throughput_metrics = ThroughputMetrics(
-            value=throughput_value,
-            unit=workload.get_throughput_unit(),
-            raw_count=self.config.measurement_iterations,
-            duration_sec=total_time_sec,
-        )
+            # Build result with comprehensive system info
+            system_info = get_system_info()
+            metadata = {
+                "config": self.config.to_dict(),
+                "device_info": get_device_properties(self.config.device).__dict__,
+                "rocm_info": get_rocm_env_info(),
+                "driver_info": get_driver_info(),
+                "system_info": {
+                    "hostname": system_info.get("hostname"),
+                    "kernel": system_info.get("driver", {}).get("kernel"),
+                    "driver_type": system_info.get("driver", {}).get("driver_type"),
+                },
+                "workload_config": workload.get_config() if hasattr(workload, "get_config") else {},
+                "multi_gpu": {
+                    "enabled": self.config.use_multi_gpu,
+                    "devices": self.devices,
+                    "num_gpus": len(self.devices),
+                    "stream_to_device": self.stream_to_device,
+                },
+            }
+            if gpu_hw_snapshot:
+                metadata.update(gpu_hw_snapshot)
+            if extra_metadata:
+                metadata.update(extra_metadata)
 
-        # Build result with comprehensive system info
-        system_info = get_system_info()
-        metadata = {
-            "config": self.config.to_dict(),
-            "device_info": get_device_properties(self.config.device).__dict__,
-            "rocm_info": get_rocm_env_info(),
-            "driver_info": get_driver_info(),
-            "system_info": {
-                "hostname": system_info.get("hostname"),
-                "kernel": system_info.get("driver", {}).get("kernel"),
-                "driver_type": system_info.get("driver", {}).get("driver_type"),
-            },
-            "workload_config": workload.get_config() if hasattr(workload, "get_config") else {},
-            "multi_gpu": {
-                "enabled": self.config.use_multi_gpu,
-                "devices": self.devices,
-                "num_gpus": len(self.devices),
-                "stream_to_device": self.stream_to_device,
-            },
-        }
-        if gpu_hw_snapshot:
-            metadata.update(gpu_hw_snapshot)
-        if extra_metadata:
-            metadata.update(extra_metadata)
+            result = HarnessResult.from_metrics(
+                throughput_metrics=throughput_metrics,
+                latency_metrics=latency_metrics,
+                collector=collector,
+                stream_count=self.config.stream_count,
+                workload_name=workload.name,
+                memory_metrics=memory_metrics,
+                switch_metrics=switch_metrics,
+                extra_metadata=metadata,
+            )
+            result.ebpf_queue_metrics = ebpf_queue_metrics
+            result.ebpf_memory_metrics = ebpf_memory_metrics
+            result.ebpf_vs_cuda = ebpf_comparison
 
-        result = HarnessResult.from_metrics(
-            throughput_metrics=throughput_metrics,
-            latency_metrics=latency_metrics,
-            collector=collector,
-            stream_count=self.config.stream_count,
-            workload_name=workload.name,
-            memory_metrics=memory_metrics,
-            switch_metrics=switch_metrics,
-            extra_metadata=metadata,
-        )
-        result.ebpf_queue_metrics = ebpf_queue_metrics
-        result.ebpf_memory_metrics = ebpf_memory_metrics
-        result.ebpf_vs_cuda = ebpf_comparison
-
-        # Cleanup workload, reset GPU settings, then cleanup harness
-        workload.cleanup()
-        self._gpu_control.reset()
-        self._cleanup()
-
-        return result
+            return result
+        finally:
+            # Guarantee tracers are stopped, GPU settings restored, and
+            # workload state torn down even if setup() / run_iteration() /
+            # metrics computation raises.  Each step is itself guarded so
+            # one failure does not mask another.
+            if (
+                self._ebpf_queue_tracer is not None
+                or self._ebpf_memory_tracer is not None
+            ):
+                self._stop_ebpf_tracers()
+            try:
+                workload.cleanup()
+            except Exception:
+                logger.warning("workload.cleanup() failed", exc_info=True)
+            self._gpu_control.reset()
+            self._cleanup()
 
     def sweep(
         self,

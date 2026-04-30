@@ -39,8 +39,29 @@ _ebpf_tracer = _load_module("ebpf_tracer", "ebpf_tracer.py")
 _ebpf_memory_tracer = _load_module("ebpf_memory_tracer", "ebpf_memory_tracer.py")
 _device_ebpf = _load_module("device_ebpf", "device_ebpf.py")
 
-# Metrics module needs torch -- load compare_ebpf_vs_cuda separately
-# since it only uses stdlib.  We'll define a local version for this test.
+
+def _load_compare_ebpf_vs_cuda():
+    """Load ``compare_ebpf_vs_cuda`` without dragging in torch.
+
+    ``aorta.hw_queue_eval.core.metrics`` imports torch at module top
+    level, but ``compare_ebpf_vs_cuda`` itself only depends on stdlib.
+    We strip the file down to that function and exec it in an isolated
+    namespace so the comparison helper can be unit tested without a GPU.
+    """
+    metrics_path = os.path.join(_CORE_DIR, "metrics.py")
+    src = open(metrics_path).read()
+    marker = "def compare_ebpf_vs_cuda("
+    idx = src.index(marker)
+    end_marker = "\ndef "
+    end_idx = src.find(end_marker, idx + len(marker))
+    snippet = src[idx:] if end_idx == -1 else src[idx:end_idx]
+    snippet = "from typing import Any, Dict\n" + snippet
+    ns: dict = {}
+    exec(compile(snippet, metrics_path, "exec"), ns)  # noqa: S102
+    return ns["compare_ebpf_vs_cuda"]
+
+
+compare_ebpf_vs_cuda = _load_compare_ebpf_vs_cuda()
 
 
 BPFQueueTracer = _ebpf_tracer.BPFQueueTracer
@@ -64,19 +85,32 @@ DeviceEBPFProfiler = _device_ebpf.DeviceEBPFProfiler
 
 class TestEBPFCapabilities:
 
-    def test_available_when_bpftrace_and_tracepoints(self):
+    def test_available_when_bpftrace_and_tracepoints_and_privilege(self):
         caps = EBPFCapabilities(
             bpftrace_path="/usr/bin/bpftrace",
             has_amdgpu_tracepoints=True,
+            has_root_or_cap=True,
         )
         assert caps.available is True
 
     def test_not_available_without_bpftrace(self):
-        caps = EBPFCapabilities(has_amdgpu_tracepoints=True)
+        caps = EBPFCapabilities(
+            has_amdgpu_tracepoints=True, has_root_or_cap=True,
+        )
         assert caps.available is False
 
     def test_not_available_without_tracepoints(self):
-        caps = EBPFCapabilities(bpftrace_path="/usr/bin/bpftrace")
+        caps = EBPFCapabilities(
+            bpftrace_path="/usr/bin/bpftrace", has_root_or_cap=True,
+        )
+        assert caps.available is False
+
+    def test_not_available_without_privilege(self):
+        caps = EBPFCapabilities(
+            bpftrace_path="/usr/bin/bpftrace",
+            has_amdgpu_tracepoints=True,
+            has_root_or_cap=False,
+        )
         assert caps.available is False
 
     def test_to_dict(self):
@@ -97,9 +131,42 @@ class TestEBPFCapabilities:
 
         # Patch Path.is_dir to return False (no debugfs access)
         with patch.object(_ebpf_tracer.Path, "is_dir", return_value=False):
-            caps = check_ebpf_capabilities()
+            with patch.object(_ebpf_tracer, "_check_ebpf_privilege", return_value=False):
+                caps = check_ebpf_capabilities()
 
         assert caps.bpftrace_path == "/usr/bin/bpftrace"
+        assert caps.has_root_or_cap is False
+        # available must be False without privileges, even if bpftrace exists
+        assert caps.available is False
+
+    def test_available_requires_privilege(self):
+        caps = EBPFCapabilities(
+            bpftrace_path="/usr/bin/bpftrace",
+            has_amdgpu_tracepoints=True,
+            has_root_or_cap=False,
+        )
+        assert caps.available is False
+        caps.has_root_or_cap = True
+        assert caps.available is True
+
+    def test_check_ebpf_privilege_root(self):
+        with patch.object(_ebpf_tracer.os, "geteuid", return_value=0):
+            assert _ebpf_tracer._check_ebpf_privilege() is True
+
+    def test_check_ebpf_privilege_unprivileged(self):
+        # Non-root with no eBPF capabilities in CapEff
+        fake_status = "CapEff:\t0000000000000000\n"
+        with patch.object(_ebpf_tracer.os, "geteuid", return_value=1000):
+            with patch("builtins.open", lambda *a, **k: __import__("io").StringIO(fake_status)):
+                assert _ebpf_tracer._check_ebpf_privilege() is False
+
+    def test_check_ebpf_privilege_with_cap_bpf(self):
+        # CAP_BPF (bit 39) set -> privileged
+        cap_eff = 1 << 39
+        fake_status = f"CapEff:\t{cap_eff:016x}\n"
+        with patch.object(_ebpf_tracer.os, "geteuid", return_value=1000):
+            with patch("builtins.open", lambda *a, **k: __import__("io").StringIO(fake_status)):
+                assert _ebpf_tracer._check_ebpf_privilege() is True
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +312,13 @@ class TestBPFQueueTracer:
         assert metrics.trace_duration_ms == pytest.approx(1000.0)
 
     def test_compute_metrics_dispatch_only(self):
-        """ROCm/KFD path: only dispatch events, no submit events."""
+        """ROCm/KFD path: only dispatch events, no submit events.
+
+        Inter-dispatch gaps are computed globally across all rings (the
+        intended interpretation is "how often does *any* ring fire?"),
+        not per-ring.  With four dispatches at 0/50/80/150 us we get
+        three gaps: 50us, 30us, 70us -> avg 50us.
+        """
         events = [
             DriverQueueEvent(1000000000, "dispatch", 99, "amdgpu_sched", ring=0, fence=1),
             DriverQueueEvent(1000050000, "dispatch", 99, "amdgpu_sched", ring=0, fence=2),
@@ -257,9 +330,8 @@ class TestBPFQueueTracer:
         assert metrics.total_dispatches == 4
         assert metrics.per_ring_dispatches == {0: 3, 1: 1}
         assert len(metrics.submission_to_dispatch_us) == 0
-        # Inter-dispatch gaps: ring 0 has gaps 50us and 100us; ring 1 has only 1 event
-        assert len(metrics.inter_dispatch_gap_us) == 2
-        assert metrics.avg_inter_dispatch_gap_us == pytest.approx(75.0)
+        assert metrics.inter_dispatch_gap_us == pytest.approx([50.0, 30.0, 70.0])
+        assert metrics.avg_inter_dispatch_gap_us == pytest.approx(50.0)
         assert metrics.dispatch_rate_per_sec == pytest.approx(4.0)
 
     def test_compute_metrics_empty(self):
@@ -283,12 +355,12 @@ class TestBPFQueueTracer:
         self, mock_shutil, mock_subprocess, mock_time, _mock_probe
     ):
         """Health check detects bpftrace crash (e.g. bad field names)."""
+        import io
         mock_shutil.which.return_value = "/usr/bin/bpftrace"
         mock_proc = MagicMock()
         mock_proc.poll.return_value = 1  # exited with error
-        mock_proc.stderr.read.return_value = (
-            "ERROR: tracepoint:amdgpu:amdgpu_sched_run_job: "
-            "no field named 'ring'"
+        mock_proc.stderr = io.StringIO(
+            "ERROR: tracepoint:amdgpu:amdgpu_sched_run_job: no field named 'ring'\n"
         )
         mock_subprocess.Popen.return_value = mock_proc
         mock_subprocess.SubprocessError = Exception
@@ -311,6 +383,144 @@ class TestBPFQueueTracer:
     def test_event_timestamp_ms(self):
         ev = DriverQueueEvent(5_000_000, "submit", 1, "test")
         assert ev.timestamp_ms == pytest.approx(5.0)
+
+
+class TestGroupIrqCompletions:
+    """Regression tests for ``BPFQueueTracer._group_irq_completions``.
+
+    The previous implementation compared each IRQ to the *group head*'s
+    timestamp, which would split a long but evenly spaced burst into
+    multiple groups even when consecutive gaps were always small.  The
+    fixed implementation compares to the *previous* IRQ instead.
+    """
+
+    @staticmethod
+    def _ev(ts_ns: int) -> "DriverQueueEvent":
+        return DriverQueueEvent(ts_ns, "irq", 1, "test")
+
+    def test_close_irqs_collapse_to_one_group(self):
+        # Three IRQs within 100us each
+        irqs = [self._ev(0), self._ev(100_000), self._ev(200_000)]
+        groups = BPFQueueTracer._group_irq_completions(irqs, window_us=500.0)
+        assert len(groups) == 1
+        assert groups[0].timestamp_ns == 0  # earliest is canonical
+
+    def test_distant_irqs_form_separate_groups(self):
+        # Each IRQ separated by 1ms (>> 500us window)
+        irqs = [self._ev(i * 1_000_000) for i in range(4)]
+        groups = BPFQueueTracer._group_irq_completions(irqs, window_us=500.0)
+        assert len(groups) == 4
+
+    def test_long_evenly_spaced_burst_stays_one_group(self):
+        """Regression for the group-head bug.
+
+        20 IRQs spaced 100us apart span 1.9ms (>> 500us) but each
+        consecutive gap is only 100us.  The fix tracks the last-seen IRQ
+        rather than the group head, so all 20 should collapse into a
+        single completion event.
+        """
+        irqs = [self._ev(i * 100_000) for i in range(20)]
+        groups = BPFQueueTracer._group_irq_completions(irqs, window_us=500.0)
+        assert len(groups) == 1
+        assert groups[0].timestamp_ns == 0
+
+    def test_burst_then_gap_then_burst(self):
+        irqs = [
+            self._ev(0), self._ev(100_000), self._ev(200_000),  # burst 1
+            self._ev(2_000_000),                                  # gap > window
+            self._ev(2_100_000), self._ev(2_200_000),             # burst 2
+        ]
+        groups = BPFQueueTracer._group_irq_completions(irqs, window_us=500.0)
+        assert len(groups) == 2
+
+    def test_empty_input(self):
+        assert BPFQueueTracer._group_irq_completions([]) == []
+
+
+class TestCompareEbpfVsCuda:
+    """Unit tests for ``compare_ebpf_vs_cuda`` (covers #10, #30).
+
+    Exercises both the submit-path (DRM scheduler) and the
+    dispatch-gap fallback (ROCm/KFD path) plus the accuracy clamp.
+    """
+
+    def test_submit_path_used_when_submissions_present(self):
+        ebpf = {
+            "total_submissions": 100,
+            "total_dispatches": 100,
+            "avg_submit_to_dispatch_us": 12.0,
+            "avg_inter_dispatch_gap_us": 999.0,
+            "rings_used": [0, 1],
+            "dispatch_rate_per_sec": 100.0,
+        }
+        cuda = {
+            "inter_stream_gap_ms": 0.020,
+            "estimated_switch_overhead_ms": 0.015,
+        }
+        out = compare_ebpf_vs_cuda(ebpf, cuda)
+        # 12us == 0.012ms should drive the comparison, NOT 999us
+        assert out["ebpf_avg_submit_to_dispatch_ms"] == pytest.approx(0.012)
+        assert "ebpf_avg_dispatch_gap_ms" not in out
+        # |0.012 - 0.015| = 0.003; accuracy = (1 - 0.003/0.015)*100 = 80%
+        assert out["accuracy_pct"] == pytest.approx(80.0)
+        assert out["delta_ms"] == pytest.approx(0.003)
+        assert out["ebpf_total_submissions"] == 100
+
+    def test_dispatch_gap_fallback_when_no_submissions(self):
+        ebpf = {
+            "total_submissions": 0,
+            "total_dispatches": 200,
+            "avg_submit_to_dispatch_us": 0.0,
+            "avg_inter_dispatch_gap_us": 25.0,
+            "rings_used": [0],
+            "dispatch_rate_per_sec": 200.0,
+        }
+        cuda = {
+            "inter_stream_gap_ms": 0.030,
+            "estimated_switch_overhead_ms": 0.020,
+        }
+        out = compare_ebpf_vs_cuda(ebpf, cuda)
+        # ROCm/KFD path: dispatch gap (0.025ms) is the comparable metric
+        assert out["ebpf_avg_dispatch_gap_ms"] == pytest.approx(0.025)
+        assert "ebpf_avg_submit_to_dispatch_ms" not in out
+        # |0.025 - 0.020| = 0.005; accuracy = (1 - 0.005/0.020)*100 = 75%
+        assert out["accuracy_pct"] == pytest.approx(75.0)
+
+    def test_accuracy_clamped_to_zero_for_huge_delta(self):
+        # eBPF reports much larger value than CUDA -> accuracy could go
+        # negative without the max(0.0, ...) clamp.
+        ebpf = {"total_submissions": 1, "avg_submit_to_dispatch_us": 1000.0}
+        cuda = {"inter_stream_gap_ms": 0.1, "estimated_switch_overhead_ms": 0.1}
+        out = compare_ebpf_vs_cuda(ebpf, cuda)
+        # 1000us == 1.0ms vs 0.1ms -> 9x off, raw accuracy = -800%, clamped 0
+        assert out["accuracy_pct"] == 0.0
+        assert out["delta_ms"] == pytest.approx(0.9)
+
+    def test_zero_cuda_overhead_avoids_divzero(self):
+        ebpf = {"total_submissions": 5, "avg_submit_to_dispatch_us": 10.0}
+        cuda = {"inter_stream_gap_ms": 0.0, "estimated_switch_overhead_ms": 0.0}
+        out = compare_ebpf_vs_cuda(ebpf, cuda)
+        # No reference -> accuracy is 0.0 and delta is 0.0
+        assert out["accuracy_pct"] == 0.0
+        assert out["delta_ms"] == 0.0
+        assert out["cuda_estimated_switch_overhead_ms"] == 0.0
+
+    def test_missing_keys_defaults_to_zero(self):
+        out = compare_ebpf_vs_cuda({}, {})
+        # No keys at all -> all zeros, dispatch-gap path taken
+        assert out["ebpf_avg_dispatch_gap_ms"] == 0.0
+        assert out["accuracy_pct"] == 0.0
+        assert out["ebpf_total_submissions"] == 0
+        assert out["ebpf_total_dispatches"] == 0
+        assert out["ebpf_rings_used"] == []
+
+    def test_partial_match_within_tolerance(self):
+        # eBPF and CUDA agree within ~5%
+        ebpf = {"total_submissions": 50, "avg_submit_to_dispatch_us": 19.0}
+        cuda = {"inter_stream_gap_ms": 0.025, "estimated_switch_overhead_ms": 0.020}
+        out = compare_ebpf_vs_cuda(ebpf, cuda)
+        # |0.019 - 0.020| / 0.020 = 5% -> accuracy 95%
+        assert out["accuracy_pct"] == pytest.approx(95.0)
 
 
 # ---------------------------------------------------------------------------
@@ -349,10 +559,22 @@ class TestBPFMemoryTracer:
             tracer = BPFMemoryTracer(target_pid=99, output_dir=Path(tmpdir))
             script_path = tracer._generate_script()
             content = script_path.read_text()
-            assert "pid ==" not in content
+            # PID filter must be applied to ALL probes (BO + KFD evict/restore)
+            assert "pid == 99" in content
+            assert content.count("/pid == 99/") >= 5
             assert "BO_MOVE" in content
             assert "BO_MAP" in content
             assert "EVICT" in content
+            assert "RESTORE" in content
+            # The eviction/restore worker tracepoints must also be PID-scoped
+            assert (
+                "tracepoint:amdkfd:kfd_evict_process_worker_start /pid == 99/"
+                in content
+            )
+            assert (
+                "tracepoint:amdkfd:kfd_restore_process_worker_start /pid == 99/"
+                in content
+            )
             # Without format probing, bo_size field should not be accessed
             assert "args->bo_size" not in content
 
@@ -414,12 +636,29 @@ class TestBPFMemoryTracer:
         assert metrics.total_bo_maps == 1
         assert metrics.total_evictions == 1
         assert metrics.total_restores == 1
+        assert metrics.total_eviction_restore_pairs == 1
         assert metrics.migration_bytes == 4096
+        assert metrics.avg_eviction_restore_latency_us == pytest.approx(100.0)
+        # legacy alias still works
         assert metrics.avg_fault_latency_us == pytest.approx(100.0)
         assert metrics.bo_move_rate_per_sec == pytest.approx(1.0)
 
+    def test_legacy_alias_setters(self):
+        m = MemoryTraceMetrics()
+        m.total_faults = 7
+        assert m.total_eviction_restore_pairs == 7
+        m.fault_rate_per_sec = 1.5
+        assert m.eviction_restore_rate_per_sec == pytest.approx(1.5)
+        m.avg_fault_latency_us = 42.0
+        assert m.avg_eviction_restore_latency_us == pytest.approx(42.0)
+        d = m.to_dict()
+        assert d["total_faults"] == 7
+        assert d["total_eviction_restore_pairs"] == 7
+        assert d["fault_rate_per_sec"] == pytest.approx(1.5)
+
     def test_compute_metrics_empty(self):
         metrics = BPFMemoryTracer._compute_metrics([], 500_000_000)
+        assert metrics.total_eviction_restore_pairs == 0
         assert metrics.total_faults == 0
         assert metrics.trace_duration_ms == pytest.approx(500.0)
 
@@ -439,10 +678,13 @@ class TestBPFMemoryTracer:
         self, mock_shutil, mock_subprocess, mock_time, _mock_build
     ):
         """Health check detects bpftrace crash."""
+        import io
         mock_shutil.which.return_value = "/usr/bin/bpftrace"
         mock_proc = MagicMock()
         mock_proc.poll.return_value = 1
-        mock_proc.stderr.read.return_value = "ERROR: tracepoint not found"
+        # The stderr drain thread iterates over readline() until empty;
+        # supply a real iterator that emits one error line then EOF.
+        mock_proc.stderr = io.StringIO("ERROR: tracepoint not found\n")
         mock_subprocess.Popen.return_value = mock_proc
         mock_subprocess.SubprocessError = Exception
 

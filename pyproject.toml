@@ -28,11 +28,18 @@ keywords = ["gpu", "rocm", "amd", "pytorch", "cuda", "benchmark", "fsdp", "distr
 # Base dependencies (PyTorch installed separately - see requirements.txt)
 dependencies = [
     "pyyaml>=6.0",
-    "click>=8.0.0",  # For aorta-report CLI
+    "click>=8.0.0",  # For aorta CLI
 ]
 
 [project.scripts]
-aorta-report = "aorta.report:main"
+aorta = "aorta.cli:main"
+
+# Plugin discovery: workloads register here via aorta.workloads entry-point group.
+# Engineer task A2 adds the first one (fsdp). Private workloads
+# (meta_recom_repro, precision_swaitcnt_test) register from aorta-internal's
+# pyproject.toml under the same group, separate package.
+[project.entry-points."aorta.workloads"]
+fsdp = "aorta.workloads.fsdp:FsdpWorkload"
 
 [project.optional-dependencies]
 # For analysis/visualization scripts

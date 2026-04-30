@@ -28,8 +28,10 @@ RUN apt-get update && \
     apt-get install -y ca-certificates gnupg lsb-release sudo && \
     apt-get install -y ./amdgpu-install-internal_7.0.2.1-22.04-1_all.deb
 
-# Update amdgpu-repo with specific builds (ROCm 7.0 Build #19, Jan 20, 2026)
-RUN amdgpu-repo --amdgpu-build=2281818 --rocm-build=compute-rocm-rel-7.0-meta/19
+# Configure amdgpu-repo with specific builds (ROCm 7.0.2.1 Build #17)
+# Point repos at Build #17 (amdgpu-build=2299626, rocm-build=compute-rocm-rel-7.0.2.1/17)
+RUN amdgpu-repo --amdgpu-build=2299626 --rocm-build=compute-rocm-rel-7.0.2.1/17
+
 RUN apt-get update && apt-get install -y \
     rocm-hip-sdk \
     rocm-libs \

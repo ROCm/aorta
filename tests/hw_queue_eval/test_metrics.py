@@ -280,3 +280,74 @@ class TestCompareResults:
 
         assert not comparison["has_regressions"]
         assert len(comparison["improvements"]) > 0
+
+
+class TestCompareEbpfVsCuda:
+    """Focused tests for ``compare_ebpf_vs_cuda`` (PR #140 review #10/#30).
+
+    Covers the submit-path vs dispatch-gap fallback and the accuracy
+    clamp.  See also ``tests/hw_queue_eval/test_ebpf_tracer.py`` for the
+    same suite executed without a torch dependency.
+    """
+
+    def test_submit_path_used_when_submissions_present(self):
+        from aorta.hw_queue_eval.core.metrics import compare_ebpf_vs_cuda
+
+        ebpf = {
+            "total_submissions": 100,
+            "total_dispatches": 100,
+            "avg_submit_to_dispatch_us": 12.0,
+            "avg_inter_dispatch_gap_us": 999.0,
+            "rings_used": [0, 1],
+            "dispatch_rate_per_sec": 100.0,
+        }
+        cuda = {
+            "inter_stream_gap_ms": 0.020,
+            "estimated_switch_overhead_ms": 0.015,
+        }
+        out = compare_ebpf_vs_cuda(ebpf, cuda)
+        assert out["ebpf_avg_submit_to_dispatch_ms"] == pytest.approx(0.012)
+        assert "ebpf_avg_dispatch_gap_ms" not in out
+        assert out["accuracy_pct"] == pytest.approx(80.0)
+
+    def test_dispatch_gap_fallback_when_no_submissions(self):
+        from aorta.hw_queue_eval.core.metrics import compare_ebpf_vs_cuda
+
+        ebpf = {
+            "total_submissions": 0,
+            "total_dispatches": 200,
+            "avg_inter_dispatch_gap_us": 25.0,
+        }
+        cuda = {
+            "estimated_switch_overhead_ms": 0.020,
+        }
+        out = compare_ebpf_vs_cuda(ebpf, cuda)
+        assert out["ebpf_avg_dispatch_gap_ms"] == pytest.approx(0.025)
+        assert "ebpf_avg_submit_to_dispatch_ms" not in out
+        assert out["accuracy_pct"] == pytest.approx(75.0)
+
+    def test_accuracy_clamped_to_zero_for_huge_delta(self):
+        from aorta.hw_queue_eval.core.metrics import compare_ebpf_vs_cuda
+
+        ebpf = {"total_submissions": 1, "avg_submit_to_dispatch_us": 1000.0}
+        cuda = {"estimated_switch_overhead_ms": 0.1}
+        out = compare_ebpf_vs_cuda(ebpf, cuda)
+        assert out["accuracy_pct"] == 0.0
+
+    def test_zero_cuda_overhead_avoids_divzero(self):
+        from aorta.hw_queue_eval.core.metrics import compare_ebpf_vs_cuda
+
+        ebpf = {"total_submissions": 5, "avg_submit_to_dispatch_us": 10.0}
+        cuda = {"estimated_switch_overhead_ms": 0.0}
+        out = compare_ebpf_vs_cuda(ebpf, cuda)
+        assert out["accuracy_pct"] == 0.0
+        assert out["delta_ms"] == 0.0
+
+    def test_missing_keys_defaults_to_zero(self):
+        from aorta.hw_queue_eval.core.metrics import compare_ebpf_vs_cuda
+
+        out = compare_ebpf_vs_cuda({}, {})
+        assert out["ebpf_avg_dispatch_gap_ms"] == 0.0
+        assert out["accuracy_pct"] == 0.0
+        assert out["ebpf_total_submissions"] == 0
+        assert out["ebpf_rings_used"] == []

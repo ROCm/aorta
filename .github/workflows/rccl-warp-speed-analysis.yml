@@ -32,6 +32,11 @@ env:
   DOCKER_COMPOSE_FILE: docker/rccl_test/docker-compose.rocm70_9-1.yaml
   CONTAINER_NAME: training-overlap-bugs-rocm70_9-1
 
+# Security: Explicitly set minimal permissions
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   rccl-warp-speed-test:
     name: Run RCCL Warp Speed Performance Tests and Analysis
@@ -45,6 +50,52 @@ jobs:
           repository: ROCm/aorta
           ref: ${{ github.ref }}
           path: aorta
+
+      # Security: Validate and sanitize all user inputs
+      - name: Validate inputs
+        id: validate
+        run: |
+          # Validate config_pairs format (CU,threads space-separated pairs)
+          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
+          if ! echo "$CONFIG_PAIRS" | grep -qE '^[0-9]+,[0-9]+( [0-9]+,[0-9]+)*$'; then
+            echo "Error: Invalid config_pairs format. Must be space-separated CU,threads pairs"
+            exit 1
+          fi
+
+          # Validate baseline_config format (CU,threads)
+          BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
+          if ! echo "$BASELINE_CONFIG" | grep -qE '^[0-9]+,[0-9]+$'; then
+            echo "Error: Invalid baseline_config format. Must be CU,threads"
+            exit 1
+          fi
+
+          # Validate training_config path (prevent path traversal)
+          TRAINING_CONFIG="${{ github.event.inputs.training_config || 'config/single_node/gemm_overlap_comm.yaml' }}"
+          if echo "$TRAINING_CONFIG" | grep -qE '(\.\.\/|^\/|\$|`|\||;|&)'; then
+            echo "Error: Invalid training_config path"
+            exit 1
+          fi
+
+          # Validate gpu_target (alphanumeric only)
+          GPU_TARGET="${{ github.event.inputs.gpu_target || 'gfx950' }}"
+          if ! echo "$GPU_TARGET" | grep -qE '^[a-zA-Z0-9]+$'; then
+            echo "Error: Invalid gpu_target. Must be alphanumeric"
+            exit 1
+          fi
+
+          # Validate rccl_branch (alphanumeric, dashes, underscores only)
+          RCCL_BRANCH="${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}"
+          if ! echo "$RCCL_BRANCH" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+            echo "Error: Invalid rccl_branch name"
+            exit 1
+          fi
+
+          # Export sanitized values for use in subsequent steps
+          echo "config_pairs=$CONFIG_PAIRS" >> $GITHUB_OUTPUT
+          echo "baseline_config=$BASELINE_CONFIG" >> $GITHUB_OUTPUT
+          echo "training_config=$TRAINING_CONFIG" >> $GITHUB_OUTPUT
+          echo "gpu_target=$GPU_TARGET" >> $GITHUB_OUTPUT
+          echo "rccl_branch=$RCCL_BRANCH" >> $GITHUB_OUTPUT
 
       - name: Cleanup existing container
         working-directory: aorta
@@ -63,30 +114,34 @@ jobs:
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} build
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} up -d
 
+      # Security: Use validated inputs from environment variables instead of direct interpolation
       - name: Clone and build RCCL warp_speed branch
         working-directory: aorta
+        env:
+          RCCL_BRANCH: ${{ steps.validate.outputs.rccl_branch }}
+          GPU_TARGET: ${{ steps.validate.outputs.gpu_target }}
         run: |
-          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+          docker exec ${{ env.CONTAINER_NAME }} bash -c '
             mkdir -p /rccl && cd /rccl
 
-            if [ -d 'rccl' ]; then
+            if [ -d "rccl" ]; then
               cd rccl
               git fetch origin
-              git checkout ${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}
+              git checkout "$RCCL_BRANCH"
               git pull
             else
               git clone --recursive https://github.com/mustafabar/rccl.git
               cd rccl
-              git checkout ${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}
+              git checkout "$RCCL_BRANCH"
             fi
 
-            echo 'Building RCCL with GPU target: ${{ github.event.inputs.gpu_target || 'gfx950' }}'
-            ./install.sh -l --amdgpu_targets=${{ github.event.inputs.gpu_target || 'gfx950' }}
+            echo "Building RCCL with GPU target: $GPU_TARGET"
+            ./install.sh -l --amdgpu_targets="$GPU_TARGET"
 
             # Verify build
-            echo 'RCCL build completed. Library location:'
-            ls -la /rccl/rccl/build/release/ || echo 'Build directory not found'
-          "
+            echo "RCCL build completed. Library location:"
+            ls -la /rccl/rccl/build/release/ || echo "Build directory not found"
+          '
 
       - name: Install Python dependencies
         working-directory: aorta
@@ -96,21 +151,22 @@ jobs:
             pip install pandas openpyxl matplotlib seaborn numpy
           "
 
+      # Security: Pass validated inputs as environment variables
       - name: Run RCCL warp speed comparison tests
         working-directory: aorta
+        env:
+          CONFIG_PAIRS: ${{ steps.validate.outputs.config_pairs }}
+          TRAINING_CONFIG: ${{ steps.validate.outputs.training_config }}
         run: |
-          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
-          TRAINING_CONFIG="${{ github.event.inputs.training_config || 'config/single_node/gemm_overlap_comm.yaml' }}"
-
-          docker exec ${{ env.CONTAINER_NAME }} bash -c "
+          docker exec -e CONFIG_PAIRS -e TRAINING_CONFIG ${{ env.CONTAINER_NAME }} bash -c '
             # Set RCCL library path
-            export LD_LIBRARY_PATH=/rccl/rccl/build/release:\$LD_LIBRARY_PATH
+            export LD_LIBRARY_PATH=/rccl/rccl/build/release:$LD_LIBRARY_PATH
 
             # Run the RCCL warp speed comparison script
             bash ./scripts/tracelens_single_config/run_rccl_warp_speed_comparison.sh \
-              -p \"$CONFIG_PAIRS\" \
-              -c $TRAINING_CONFIG
-          "
+              -p "$CONFIG_PAIRS" \
+              -c "$TRAINING_CONFIG"
+          '
 
       - name: Find experiment directory
         id: find_experiment
@@ -125,64 +181,71 @@ jobs:
           echo "Found experiment directory: $EXPERIMENT_DIR"
           echo "experiment_dir=$EXPERIMENT_DIR" >> $GITHUB_OUTPUT
 
+      # Security: Use environment variables for all user inputs
       - name: Run pairwise comparison analysis
         working-directory: aorta
+        env:
+          BASELINE_CONFIG: ${{ steps.validate.outputs.baseline_config }}
+          CONFIG_PAIRS: ${{ steps.validate.outputs.config_pairs }}
+          EXPERIMENT_DIR: ${{ steps.find_experiment.outputs.experiment_dir }}
         run: |
-          BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
-          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
-          EXPERIMENT_DIR="${{ steps.find_experiment.outputs.experiment_dir }}"
-
           # Parse baseline
-          BASELINE_CU=$(echo $BASELINE_CONFIG | cut -d',' -f1)
-          BASELINE_THREADS=$(echo $BASELINE_CONFIG | cut -d',' -f2)
+          BASELINE_CU=$(echo "$BASELINE_CONFIG" | cut -d',' -f1)
+          BASELINE_THREADS=$(echo "$BASELINE_CONFIG" | cut -d',' -f2)
           BASELINE_DIR="${EXPERIMENT_DIR}/${BASELINE_CU}cu_${BASELINE_THREADS}threads"
 
-          docker exec ${{ env.CONTAINER_NAME }} bash -c "
-            OUTPUT_DIR=\"${EXPERIMENT_DIR}/comparison_results\"
-            mkdir -p \"\$OUTPUT_DIR\"
+          docker exec \
+            -e BASELINE_CU \
+            -e BASELINE_THREADS \
+            -e BASELINE_DIR \
+            -e CONFIG_PAIRS \
+            -e EXPERIMENT_DIR \
+            ${{ env.CONTAINER_NAME }} bash -c '
+            OUTPUT_DIR="${EXPERIMENT_DIR}/comparison_results"
+            mkdir -p "$OUTPUT_DIR"
 
             # Run comparison for each non-baseline configuration
             for pair in $CONFIG_PAIRS; do
-              CU_COUNT=\$(echo \$pair | cut -d',' -f1)
-              THREADS=\$(echo \$pair | cut -d',' -f2)
+              CU_COUNT=$(echo "$pair" | cut -d"," -f1)
+              THREADS=$(echo "$pair" | cut -d"," -f2)
 
               # Skip if this is the baseline
-              if [ \"\$CU_COUNT\" = \"$BASELINE_CU\" ] && [ \"\$THREADS\" = \"$BASELINE_THREADS\" ]; then
+              if [ "$CU_COUNT" = "$BASELINE_CU" ] && [ "$THREADS" = "$BASELINE_THREADS" ]; then
                 continue
               fi
 
-              TEST_DIR=\"${EXPERIMENT_DIR}/\${CU_COUNT}cu_\${THREADS}threads\"
-              COMPARISON_OUTPUT=\"\$OUTPUT_DIR/baseline_vs_\${CU_COUNT}cu_\${THREADS}threads\"
+              TEST_DIR="${EXPERIMENT_DIR}/${CU_COUNT}cu_${THREADS}threads"
+              COMPARISON_OUTPUT="$OUTPUT_DIR/baseline_vs_${CU_COUNT}cu_${THREADS}threads"
 
-              echo '========================================'
-              echo \"Comparing baseline ($BASELINE_CU cu, $BASELINE_THREADS threads) vs test (\$CU_COUNT cu, \$THREADS threads)\"
-              echo '========================================'
+              echo "========================================"
+              echo "Comparing baseline ($BASELINE_CU cu, $BASELINE_THREADS threads) vs test ($CU_COUNT cu, $THREADS threads)"
+              echo "========================================"
 
               python scripts/tracelens_single_config/run_full_analysis.py \
-                --baseline \"$BASELINE_DIR\" \
-                --test \"\$TEST_DIR\" \
-                --output \"\$COMPARISON_OUTPUT\" \
+                --baseline "$BASELINE_DIR" \
+                --test "$TEST_DIR" \
+                --output "$COMPARISON_OUTPUT" \
                 --all
             done
-          "
+          '
 
       - name: Run compare-all-runs analysis
         working-directory: aorta
+        env:
+          BASELINE_CONFIG: ${{ steps.validate.outputs.baseline_config }}
+          CONFIG_PAIRS: ${{ steps.validate.outputs.config_pairs }}
+          EXPERIMENT_DIR: ${{ steps.find_experiment.outputs.experiment_dir }}
         run: |
-          BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
-          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
-          EXPERIMENT_DIR="${{ steps.find_experiment.outputs.experiment_dir }}"
-
           # Parse baseline
-          BASELINE_CU=$(echo $BASELINE_CONFIG | cut -d',' -f1)
-          BASELINE_THREADS=$(echo $BASELINE_CONFIG | cut -d',' -f2)
+          BASELINE_CU=$(echo "$BASELINE_CONFIG" | cut -d',' -f1)
+          BASELINE_THREADS=$(echo "$BASELINE_CONFIG" | cut -d',' -f2)
           BASELINE_DIR="${EXPERIMENT_DIR}/${BASELINE_CU}cu_${BASELINE_THREADS}threads"
 
           # Build list of all test directories (excluding baseline)
           TEST_DIRS=""
           for pair in $CONFIG_PAIRS; do
-            CU_COUNT=$(echo $pair | cut -d',' -f1)
-            THREADS=$(echo $pair | cut -d',' -f2)
+            CU_COUNT=$(echo "$pair" | cut -d',' -f1)
+            THREADS=$(echo "$pair" | cut -d',' -f2)
 
             # Skip if this is the baseline
             if [ "$CU_COUNT" = "$BASELINE_CU" ] && [ "$THREADS" = "$BASELINE_THREADS" ]; then
@@ -198,36 +261,42 @@ jobs:
           echo "  Test directories: $TEST_DIRS"
           echo "========================================"
 
-          docker exec ${{ env.CONTAINER_NAME }} bash -c "
-            OUTPUT_DIR=\"${EXPERIMENT_DIR}/compare_all_runs\"
-            mkdir -p \"\$OUTPUT_DIR\"
+          docker exec \
+            -e BASELINE_DIR \
+            -e TEST_DIRS \
+            -e EXPERIMENT_DIR \
+            ${{ env.CONTAINER_NAME }} bash -c '
+            OUTPUT_DIR="${EXPERIMENT_DIR}/compare_all_runs"
+            mkdir -p "$OUTPUT_DIR"
 
             python scripts/tracelens_single_config/run_full_analysis.py \
-              --baseline \"$BASELINE_DIR\" \
+              --baseline "$BASELINE_DIR" \
               --test $TEST_DIRS \
-              --output \"\$OUTPUT_DIR\" \
+              --output "$OUTPUT_DIR" \
               --skip-tracelens \
               --compare-all-runs
-          "
+          '
 
       - name: Generate GitHub Step Summary
+        env:
+          BASELINE_CONFIG: ${{ steps.validate.outputs.baseline_config }}
+          CONFIG_PAIRS: ${{ steps.validate.outputs.config_pairs }}
+          EXPERIMENT_DIR: ${{ steps.find_experiment.outputs.experiment_dir }}
+          RCCL_BRANCH: ${{ steps.validate.outputs.rccl_branch }}
+          GPU_TARGET: ${{ steps.validate.outputs.gpu_target }}
         run: |
-          BASELINE_CONFIG="${{ github.event.inputs.baseline_config || '56,256' }}"
-          CONFIG_PAIRS="${{ github.event.inputs.config_pairs || '56,256 37,384 32,512' }}"
-          EXPERIMENT_DIR="${{ steps.find_experiment.outputs.experiment_dir }}"
-
           echo "## RCCL Warp Speed Performance Analysis Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Configuration" >> $GITHUB_STEP_SUMMARY
           echo "- **Experiment Directory**: $EXPERIMENT_DIR" >> $GITHUB_STEP_SUMMARY
           echo "- **Baseline**: $BASELINE_CONFIG (CU,Threads)" >> $GITHUB_STEP_SUMMARY
-          echo "- **RCCL Branch**: ${{ github.event.inputs.rccl_branch || 'warp_speed_v1' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **GPU Target**: ${{ github.event.inputs.gpu_target || 'gfx950' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **RCCL Branch**: $RCCL_BRANCH" >> $GITHUB_STEP_SUMMARY
+          echo "- **GPU Target**: $GPU_TARGET" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Tested Configurations" >> $GITHUB_STEP_SUMMARY
           for pair in $CONFIG_PAIRS; do
-            CU=$(echo $pair | cut -d',' -f1)
-            THREADS=$(echo $pair | cut -d',' -f2)
+            CU=$(echo "$pair" | cut -d',' -f1)
+            THREADS=$(echo "$pair" | cut -d',' -f2)
             echo "- CU=$CU, Threads=$THREADS" >> $GITHUB_STEP_SUMMARY
           done
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -271,6 +340,21 @@ jobs:
         run: |
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} down || true
 
+  publish-results:
+    name: Publish Results to aorta-report
+    needs: rccl-warp-speed-test
+    runs-on: ubuntu-latest
+    # Security: Separate job with minimal permissions for publishing
+    permissions:
+      contents: write  # Only for aorta-report repository
+
+    steps:
+      - name: Download experiment results
+        uses: actions/download-artifact@v4
+        with:
+          name: rccl-final-report
+          path: results
+
       - name: Checkout aorta-report repository
         uses: actions/checkout@v4
         with:
@@ -282,16 +366,16 @@ jobs:
       - name: Create date directory and copy experiment results
         run: |
           date=$(date '+%Y-%m-%d')
-          mkdir -p aorta-report/${date}/rccl-warp-speed
-          cp -r aorta/${{ steps.find_experiment.outputs.experiment_dir }}/* aorta-report/${date}/rccl-warp-speed/
+          mkdir -p "aorta-report/${date}/rccl-warp-speed"
+          cp -r results/* "aorta-report/${date}/rccl-warp-speed/"
 
       - name: Push results to aorta-report
         working-directory: aorta-report
         run: |
           git config user.name "GitHub Actions Bot"
-          git config user.email "<>"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin main
           date=$(date '+%Y-%m-%d')
-          git add ${date}
+          git add "${date}"
           git commit -m "Add RCCL warp speed results for ${date}"
           git push origin main

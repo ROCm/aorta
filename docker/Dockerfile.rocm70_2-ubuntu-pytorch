@@ -28,8 +28,12 @@ RUN apt-get update && \
     apt-get install -y ca-certificates gnupg lsb-release sudo && \
     apt-get install -y ./amdgpu-install-internal_7.0.2.1-22.04-1_all.deb
 
-# Update amdgpu-repo with specific builds (ROCm 7.0 Build #19, Jan 20, 2026)
-RUN amdgpu-repo --amdgpu-build=2281818 --rocm-build=compute-rocm-rel-7.0-meta/19
+## Configure amdgpu-repo with specific builds (ROCm 7.0.2.1 Build #17)
+
+# Point repos at Build #17 (amdgpu-build=2299626, rocm-build=compute-rocm-rel-7.0.2.1/17)
+RUN amdgpu-repo --amdgpu-build=2299626 --rocm-build=compute-rocm-rel-7.0.2.1/17
+
+
 RUN apt-get update && apt-get install -y \
     rocm-hip-sdk \
     rocm-libs \
@@ -54,15 +58,15 @@ RUN python3 -m pip install --upgrade pip setuptools wheel
 # Set to 0 for old ABI compatibility with legacy libraries.
 ENV _GLIBCXX_USE_CXX11_ABI=1
 
-# USE_ROCM_CK_SDPA=0
-# Disable ROCm Composable Kernel (CK) backend for Scaled Dot Product Attention (SDPA).
-# When set to 0, PyTorch will use generic/fallback implementations for attention layers
-# instead of CK-optimized kernels. This may be needed for:
+# USE_ROCM_CK_SDPA=1
+# Enable ROCm Composable Kernel (CK) backend for Scaled Dot Product Attention (SDPA).
+# When set to 1 (the default here), PyTorch will use CK-optimized kernels for attention
+# layers to improve transformer performance on supported shapes/dtypes.
+# Set to 0 to disable CK SDPA and fall back to generic implementations. This may be
+# useful for:
 # - Debugging: Isolate issues related to CK kernels
-# - Compatibility: Some CK kernels may not support all input shapes/dtypes
-# - Stability: Use more mature fallback implementations
-# Set to 1 to enable CK optimized attention kernels for better transformer performance.
-ENV USE_ROCM_CK_SDPA=0
+# - Compatibility/Stability: When CK kernels do not yet support all input shapes/dtypes
+ENV USE_ROCM_CK_SDPA=1
 
 # PYTORCH_ROCM_ARCH=gfx950
 # Specify target GPU architecture for ROCm compilation. This tells PyTorch to
@@ -72,8 +76,58 @@ ENV USE_ROCM_CK_SDPA=0
 # Matching the exact architecture improves performance but increases build time.
 ENV PYTORCH_ROCM_ARCH=gfx950
 
+# USE_ROCM=1
+# Enable building and using the ROCm backend in PyTorch. This must be set for
+# HIP/ROCm builds so that PyTorch compiles ROCm-specific kernels and links
+# against ROCm libraries instead of CUDA or CPU-only backends.
+ENV USE_ROCM=1
+
+# USE_FLASH_ATTENTION=1
+# Enable flash-attention style fused attention kernels in PyTorch. These provide
+# high-performance scaled dot-product attention for transformer models when
+# supported by the backend (here, ROCm) and are recommended for training speed.
+ENV USE_FLASH_ATTENTION=1
+
+# USE_MEM_EFF_ATTENTION=1
+# Enable memory-efficient attention kernels in PyTorch. These implementations
+# reduce peak memory usage for large sequence lengths and are complementary to
+# flash attention; enabling both allows PyTorch to pick the best kernel per case.
+ENV USE_MEM_EFF_ATTENTION=1
+
+# DISABLE_AOTRITON=1
+# Disable Ahead-Of-Time (AOT) compiled Triton kernels. On some ROCm stacks,
+# AOT Triton is not yet fully compatible or may cause build/runtime issues, so
+# we turn it off to force use of non-AOT or alternative kernels instead.
+ENV DISABLE_AOTRITON=1
+
+# CK_TILE_FMHA_FWD_FAST_EXP2=1
+# Enable Composable Kernel tiled fused multi-head attention (FMHA) forward path
+# that uses a fast exp2-based approximation. This improves FMHA performance on
+# supported ROCm GPUs at the cost of a small loss in numerical precision.
+ENV CK_TILE_FMHA_FWD_FAST_EXP2=1
+
+# FLASH_NAMESPACE=pytorch_flash
+# Select the C++ namespace used for flash-attention kernels. This must match
+# the namespace expected by the PyTorch build to avoid symbol clashes and to
+# ensure the correct flash-attention implementation is linked.
+ENV FLASH_NAMESPACE=pytorch_flash
+
+# =============================================================================
+# Client runtime environment flags
+# =============================================================================
+ENV NCCL_MAX_NCHANNELS=48
+ENV HSA_KERNARG_POOL_SIZE=4194304
+ENV HSA_NO_SCRATCH_RECLAIM=1
+ENV AMDGCN_USE_BUFFER_OPS=1
+ENV TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE=1
+ENV FBGEMM_NO_JK=1
+ENV FBGEMM_TBE_V2=1
+ENV FBGEMM_TBE_ROCM_HIP_BACKWARD_KERNEL=1
+ENV FBGEMM_BOUNDS_CHECK_INDICES_V2=1
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # Clone PyTorch source repository
-RUN git clone https://github.com/pytorch/pytorch.git
+RUN git clone --branch v2.11.0-rc2 --single-branch https://github.com/pytorch/pytorch.git
 
 # Build PyTorch for AMD/ROCm
 # The build_amd.py script applies ROCm-specific patches and prepares the source
@@ -84,7 +138,6 @@ RUN git clone https://github.com/pytorch/pytorch.git
 RUN cd pytorch && \
     git submodule update --init --recursive && \
     python3.10 tools/amd_build/build_amd.py
-
 
 # Install modern CMake (required by PyTorch)
 RUN wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc | gpg --dearmor -o /usr/share/keyrings/kitware.gpg && \
