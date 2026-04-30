@@ -441,6 +441,12 @@ class BPFRCCLTracer:
                 if gap_ns < 0 or gap_ns > window_ns:
                     continue
 
+                # System-wide traces (target_pid=None) can interleave
+                # collectives from process A with computes from process
+                # B; pairing them across PIDs would invent races.
+                if coll.pid != comp.pid:
+                    continue
+
                 same_ring = coll.ring == comp.ring
 
                 race = CollectiveRaceEvent(

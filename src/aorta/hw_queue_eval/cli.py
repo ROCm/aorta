@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import click
 
@@ -1380,12 +1380,12 @@ def ebpf_attach(pid: Optional[int], duration: str, output: Optional[str],
 
         _print_attach_results(results)
 
-        # NaN correlation
+        # NaN correlation -- only run when the user supplied a log;
+        # ``_run_nan_correlation`` short-circuits on a falsy ``nan_log``
+        # anyway, so the previous ``any(_has_issues(...))`` half of this
+        # condition was dead code.
         nan_reports = None
-        if nan_log or any(
-            name in results and _has_issues(name, results[name])
-            for name in started
-        ):
+        if nan_log:
             nan_reports = _run_nan_correlation(results, nan_log)
 
         # Export to JSON

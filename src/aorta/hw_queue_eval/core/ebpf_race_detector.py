@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -404,20 +404,26 @@ class BPFRaceDetector:
             race_window_threshold_us=self._race_window_us,
         )
 
-        submits_by_ring: Dict[int, List[_RawEvent]] = {}
+        # Bucket submissions by ``(pid, ring)`` rather than ``ring`` alone.
+        # When ``target_pid=None`` (system-wide trace), submissions from
+        # different processes that happen to land on the same HW ring are
+        # not actually racing -- they are isolated by the kernel's
+        # per-process queues -- and pairing them across PIDs would
+        # manufacture phantom races.
+        submits_by_pid_ring: Dict[Tuple[int, int], List[_RawEvent]] = {}
         for ev in events:
             if ev.event_type == "submit":
                 metrics.total_submissions += 1
                 metrics.per_ring_submissions[ev.ring] = (
                     metrics.per_ring_submissions.get(ev.ring, 0) + 1
                 )
-                submits_by_ring.setdefault(ev.ring, []).append(ev)
+                submits_by_pid_ring.setdefault((ev.pid, ev.ring), []).append(ev)
             elif ev.event_type == "dispatch":
                 metrics.total_dispatches += 1
 
         race_rings: set[int] = set()
 
-        for ring, submits in submits_by_ring.items():
+        for (_pid, ring), submits in submits_by_pid_ring.items():
             submits.sort(key=lambda e: e.timestamp_ns)
 
             for i in range(1, len(submits)):

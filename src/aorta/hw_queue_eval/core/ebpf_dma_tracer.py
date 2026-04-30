@@ -133,7 +133,7 @@ def _build_dma_trace_script(target_pid: Optional[int] = None) -> str:
  * Output: TYPE|TIMESTAMP_NS|PID|COMM|RING_OR_SIZE
  */
 
-tracepoint:amdgpu:amdgpu_bo_move
+tracepoint:amdgpu:amdgpu_bo_move{pid_filter}
 {{
     printf("DMA_MOVE|%llu|%d|%s|%d\\n",
            nsecs, pid, comm, {bo_size_expr});
@@ -406,6 +406,13 @@ class BPFDMATracer:
 
                 gap_ns = cs.timestamp_ns - mv.timestamp_ns
                 if gap_ns < 0 or gap_ns > window_ns:
+                    continue
+
+                # When tracing system-wide (target_pid=None), the same time
+                # window can contain a BO move from one process and a
+                # compute submission from another.  Those are not real
+                # overlaps -- only same-PID pairs are.
+                if mv.pid != cs.pid:
                     continue
 
                 overlap_us = gap_ns / 1_000.0
