@@ -30,8 +30,11 @@ print(snapshot.summary())
 ```
 
 `EnvSnapshot` is a `@dataclass(frozen=True)` mirroring the env.json
-schema 1-to-1. Instances are safe to embed in trial / matrix results
-without worrying about mutation.
+schema 1-to-1. `frozen=True` prevents attribute rebinding on the
+snapshot itself (`snap.rocm = ...` raises), but does NOT deep-freeze
+the nested `dict` / `list` containers -- treat embedded snapshots as
+read-only and `deepcopy(snap.to_dict())` before mutating if you need
+to.
 
 ### CLI (thin wrapper over `collect_env()`)
 

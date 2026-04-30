@@ -146,8 +146,13 @@ class EnvSnapshot:
     """Wraps the env.json schema as a typed object.
 
     Attributes mirror the env.json keys 1-to-1; ``to_dict()`` / ``from_dict()``
-    round-trip losslessly. Dataclass is frozen so callers can safely embed it
-    in trial / matrix results without worrying about mutation.
+    round-trip losslessly. The dataclass is ``frozen=True``, which prevents
+    *attribute rebinding* on the snapshot itself (``snap.rocm = ...`` raises),
+    but it does NOT deep-freeze the nested ``dict`` / ``list`` containers --
+    callers can still mutate ``snap.rocm["version"] = ...`` or
+    ``snap.partial_reasons.append(...)`` in place. Treat embedded snapshots
+    as read-only; if you need to modify, deep-copy first via
+    ``EnvSnapshot.from_dict(copy.deepcopy(snap.to_dict()))``.
 
     The two fail-soft fields make the snapshot honest about partial captures:
 

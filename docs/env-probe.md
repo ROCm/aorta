@@ -128,8 +128,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `python_version` | `str` | `platform.python_version()` | always populated |
 | `pytorch_version` | `str \| null` | optional `import torch` (no CUDA/HIP context init) | `null` when torch absent |
 
-`runtime_context.type` is one of `"docker" | "podman" | "singularity"
-| "baremetal"`. Adding values is a schema change.
+`runtime_context.type` is one of `"docker" | "podman" | "singularity" | "baremetal"`. Adding values is a schema change.
 
 `runtime_context.python_env` is one of `"venv" | "conda" | "system"`.
 

@@ -688,13 +688,19 @@ class TestCliIsThinWrapper:
         return Path(env_mod.__file__).parent.parent / "cli" / "env.py"
 
     def test_total_file_size_is_bounded(self, cli_path: Path):
-        # Total file budget (incl. docstring/imports/blank lines): 60 lines.
-        # The substantive code budget per the spec is ~30 lines; the cushion
-        # accounts for the module docstring + Click decorators.
+        # Total file budget (incl. docstring/imports/blank lines/error handling).
+        # The spec target is ~30 lines of substantive code; the cushion
+        # accommodates the module docstring, Click decorators, and the
+        # try/except blocks that surface filesystem errors as
+        # ``click.ClickException`` (per Copilot review). The real
+        # "no-probing-in-CLI" guard is `test_cli_does_no_probing_imports`
+        # below -- this one is a soft canary against the file ballooning.
         line_count = sum(1 for _ in cli_path.read_text().splitlines())
-        assert line_count <= 60, (
-            f"cli/env.py is {line_count} lines; budget is 60 (spec target ~30 substantive). "
-            "If you need more, the probing logic should move into the library, not the CLI."
+        assert line_count <= 80, (
+            f"cli/env.py is {line_count} lines; soft budget is 80. "
+            "If you need more, check that the new code is genuinely "
+            "wiring/error-handling and not probing -- "
+            "test_cli_does_no_probing_imports is the strict guard."
         )
 
     def test_cli_does_no_probing_imports(self, cli_path: Path):
@@ -733,6 +739,58 @@ class TestCliIsThinWrapper:
         assert out_path.exists()
         # And the JSON is loadable
         json.loads(out_path.read_text())
+
+    def test_cli_surfaces_filesystem_errors_as_click_exception(
+        self, all_disabled, tmp_path: Path
+    ):
+        """Regression guard: an unwritable output path must surface as a
+        clean ``click.ClickException``, not a Python traceback.
+
+        Two scenarios: (a) parent ``mkdir`` fails (read-only mount); (b)
+        the write itself fails (e.g. parent exists but is not writable).
+        Both should yield a non-zero CLI exit + a one-line error
+        starting with ``Error:``.
+        """
+        from click.testing import CliRunner
+
+        cli_path = Path(env_mod.__file__).parent.parent / "cli" / "env.py"
+        spec = importlib.util.spec_from_file_location("aorta.cli.env", cli_path)
+        cli_mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cli_mod
+        spec.loader.exec_module(cli_mod)
+        runner = CliRunner()
+
+        # Scenario (a): parent mkdir blows up. Achieve by sabotaging mkdir.
+        target = tmp_path / "no_perm" / "env.json"
+
+        original_mkdir = Path.mkdir
+
+        def fake_mkdir(self, *args, **kwargs):
+            if "no_perm" in str(self):
+                raise PermissionError(13, "Permission denied")
+            return original_mkdir(self, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", fake_mkdir):
+            result = runner.invoke(cli_mod.env, ["probe", "-o", str(target)])
+        assert result.exit_code != 0
+        assert "Failed to create parent directory" in result.output
+        # Belt-and-suspenders: no Python traceback header in the output
+        assert "Traceback" not in result.output
+
+        # Scenario (b): write itself fails.
+        target_b = tmp_path / "env_b.json"
+        original_write_text = Path.write_text
+
+        def fake_write_text(self, *args, **kwargs):
+            if str(self) == str(target_b.resolve()):
+                raise OSError(28, "No space left on device")
+            return original_write_text(self, *args, **kwargs)
+
+        with patch.object(Path, "write_text", fake_write_text):
+            result = runner.invoke(cli_mod.env, ["probe", "-o", str(target_b)])
+        assert result.exit_code != 0
+        assert "Failed to write env probe" in result.output
+        assert "Traceback" not in result.output
 
     def test_cli_emits_json_native_output_no_default_str(
         self, all_disabled

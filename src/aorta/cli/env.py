@@ -38,13 +38,30 @@ def probe(output: Path) -> None:
     from aorta.instrumentation.environment import collect_env
 
     output = output.expanduser().resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    # Wrap the two filesystem ops so common operator errors (unwritable
+    # parent, read-only mount, full disk, etc.) surface as a clean
+    # one-line Click error instead of a Python traceback. collect_env()
+    # itself never raises, so it stays outside the try blocks.
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise click.ClickException(
+            f"Failed to create parent directory for {output}: {exc}"
+        ) from exc
+
     snapshot = collect_env()
+
     # NOTE: deliberately not passing ``default=str`` -- the snapshot is
     # supposed to be JSON-native (str/int/bool/None/list/dict). If a
     # non-serializable type sneaks in (e.g. a Path or datetime), we want
     # the failure to be loud rather than silently stringified.
-    output.write_text(json.dumps(snapshot.to_dict(), indent=2))
+    try:
+        output.write_text(json.dumps(snapshot.to_dict(), indent=2))
+    except OSError as exc:
+        raise click.ClickException(
+            f"Failed to write env probe to {output}: {exc}"
+        ) from exc
+
     partial = " [PARTIAL]" if snapshot.partial else ""
     click.echo(
         f"Wrote env probe to {output} "
