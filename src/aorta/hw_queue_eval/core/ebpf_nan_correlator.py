@@ -18,11 +18,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from aorta.hw_queue_eval.core.ebpf_tracer import DriverQueueEvent
-    from aorta.hw_queue_eval.core.ebpf_memory_tracer import MemoryTraceEvent
+    pass
 
 
 @dataclass
@@ -128,11 +127,28 @@ class NaNCorrelator:
     def add_nan_event(self, event: NaNDetection) -> None:
         self._nan_events.append(event)
 
-    def add_nan_events_from_log(self, log_path: str | Path) -> int:
+    def add_nan_events_from_log(
+        self,
+        log_path: str | Path,
+        include_pre: bool = False,
+    ) -> int:
         """Parse NaN detection events from a sanitizer log file.
 
-        Looks for lines matching the stream sanitizer format:
-        ``[NaN POST-<op>] rank=<r> step=<s>: nan=<count>``
+        Looks for lines matching the stream sanitizer format::
+
+            [NaN POST-<op>] rank=<r> step=<s>: nan=<count>
+            [NaN PRE-<op>]  rank=<r> step=<s>: nan=<count>
+            [NaN DATADIST-<op>] rank=<r> step=<s>: nan=<count>
+
+        By default only ``POST-*`` and ``DATADIST-*`` detections are
+        recorded.  ``PRE-*`` markers indicate NaN values that already
+        existed before the operation ran (i.e. they originated upstream)
+        and are typically noise when correlating against kernel events
+        for the *current* op, so they are skipped.
+
+        Pass ``include_pre=True`` to also record ``PRE-*`` events when
+        you want to correlate against the upstream operation that
+        produced them.
 
         Returns the number of events parsed.
         """
@@ -145,11 +161,15 @@ class NaNCorrelator:
         if not path.exists():
             return 0
 
+        accepted_kinds = {"POST", "DATADIST"}
+        if include_pre:
+            accepted_kinds.add("PRE")
+
         count = 0
         with open(path) as f:
             for line in f:
                 m = pattern.search(line)
-                if m and m.group(1) in ("POST", "DATADIST"):
+                if m and m.group(1) in accepted_kinds:
                     rank = int(m.group(3))
                     step = int(m.group(4))
                     source = f"{m.group(1)}-{m.group(2)}"

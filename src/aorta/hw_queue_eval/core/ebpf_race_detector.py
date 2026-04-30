@@ -136,25 +136,21 @@ def _build_race_detection_script(
         cs_ring = "0"
         cs_fence = "0"
 
-    sched_fields = _probe_tracepoint_fields("amdgpu", "amdgpu_sched_run_job")
-    if sched_fields is not None:
-        sched_ring = "args->ring" if "ring" in sched_fields else "0"
-        sched_seqno = (
-            "args->seqno"
-            if "seqno" in sched_fields
-            else ("args->sched_job_id" if "sched_job_id" in sched_fields else "0")
-        )
-    else:
-        sched_ring = "0"
-        sched_seqno = "0"
-
     pid_filter = f"\n/pid == {target_pid}/" if target_pid is not None else ""
 
+    # NOTE: An earlier version of this script also attached
+    # ``tracepoint:amdgpu:amdgpu_sched_run_job`` and emitted RACE_DISPATCH
+    # events.  The Python-side race heuristic only looks at submissions,
+    # so those dispatch events added overhead and log volume without
+    # affecting results.  They were removed; if a dispatch-based race
+    # signal is added later, re-introduce the tracepoint together with
+    # the analysis that consumes it (and update the docstring on
+    # ``BPFRaceDetector``).
     return f"""\
 #!/usr/bin/env bpftrace
 /*
- * Race detection script: captures submission and dispatch events with
- * thread IDs for cross-stream race correlation.
+ * Race detection script: captures submission events with thread IDs
+ * for cross-stream race correlation.
  * Output: TYPE|TIMESTAMP_NS|PID|TID|COMM|RING|FENCE
  */
 
@@ -162,12 +158,6 @@ tracepoint:amdgpu:amdgpu_cs_ioctl{pid_filter}
 {{
     printf("RACE_SUBMIT|%llu|%d|%d|%s|%d|%d\\n",
            nsecs, pid, tid, comm, {cs_ring}, {cs_fence});
-}}
-
-tracepoint:amdgpu:amdgpu_sched_run_job
-{{
-    printf("RACE_DISPATCH|%llu|%d|%d|%s|%d|%d\\n",
-           nsecs, pid, tid, comm, {sched_ring}, {sched_seqno});
 }}
 """
 

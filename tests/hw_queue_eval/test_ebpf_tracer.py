@@ -25,12 +25,19 @@ _CORE_DIR = os.path.join(
     "src", "aorta", "hw_queue_eval", "core",
 )
 
+# Test-file-specific module name prefix.  ``test_ebpf_nan_debugging.py``
+# loads several of the same source files via importlib; without
+# disjoint prefixes both files would fight over the same
+# ``sys.modules`` entries and make the suite order-dependent.
+_NAME_PREFIX = "_qtracer__"
+
 
 def _load_module(name: str, filename: str):
+    qualified = _NAME_PREFIX + name
     filepath = os.path.join(_CORE_DIR, filename)
-    spec = importlib.util.spec_from_file_location(name, filepath)
+    spec = importlib.util.spec_from_file_location(qualified, filepath)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
+    sys.modules[qualified] = mod
     spec.loader.exec_module(mod)
     return mod
 

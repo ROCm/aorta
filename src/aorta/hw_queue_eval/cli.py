@@ -105,7 +105,14 @@ def list_available_workloads():
     from aorta.hw_queue_eval.workloads.registry import WorkloadRegistry
 
     try:
-        from aorta.hw_queue_eval.workloads import distributed, inference, latency_sensitive, pipeline
+        # Import for side effect (registry self-registration); not all
+        # workload modules are guaranteed to be importable on every host.
+        from aorta.hw_queue_eval.workloads import (  # noqa: F401
+            distributed,
+            inference,
+            latency_sensitive,
+            pipeline,
+        )
     except ImportError:
         pass
 
@@ -396,7 +403,7 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
 
             click.echo("THROUGHPUT:")
             click.echo(f"  {result.throughput:,.2f} {result.throughput_unit}")
-            click.echo(f"  (Higher is better - measures how much work completed per second)")
+            click.echo("  (Higher is better - measures how much work completed per second)")
             click.echo()
 
             click.echo("LATENCY (per iteration):")
@@ -411,7 +418,7 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
             latency_ratio = result.latency_ms['p99'] / result.latency_ms['p50'] if result.latency_ms['p50'] > 0 else 1
             if latency_ratio > 2.0:
                 click.echo(f"  WARNING: High latency variance (P99/P50 = {latency_ratio:.1f}x)")
-                click.echo(f"    This may indicate queue contention or scheduling issues")
+                click.echo("    This may indicate queue contention or scheduling issues")
             elif latency_ratio > 1.5:
                 click.echo(f"  Note: Moderate latency variance (P99/P50 = {latency_ratio:.1f}x)")
             click.echo()
@@ -427,14 +434,14 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
                 click.echo(f"  Est. switch overhead: {switch_overhead:.3f} ms")
 
                 if switch_overhead > 0.1:
-                    click.echo(f"  Significant queue switch overhead detected")
+                    click.echo("  Significant queue switch overhead detected")
                     click.echo(f"    This suggests hardware queue contention at {streams} streams")
                 elif switch_overhead > 0.01:
-                    click.echo(f"  Moderate queue switch overhead")
+                    click.echo("  Moderate queue switch overhead")
                 else:
-                    click.echo(f"  Minimal queue switch overhead")
+                    click.echo("  Minimal queue switch overhead")
             else:
-                click.echo(f"  (Not enough data to estimate switch overhead)")
+                click.echo("  (Not enough data to estimate switch overhead)")
             click.echo()
 
             click.echo("TIMING:")
@@ -462,7 +469,7 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
                     p99_gap = eqm.get("p99_inter_dispatch_gap_us", 0.0)
                     click.echo(f"  Inter-dispatch gap avg: {avg_gap:.1f} us")
                     click.echo(f"  Inter-dispatch gap P99: {p99_gap:.1f} us")
-                    click.echo(f"  (ROCm/KFD path -- submit events not visible via amdgpu_cs_ioctl)")
+                    click.echo("  (ROCm/KFD path -- submit events not visible via amdgpu_cs_ioctl)")
                 click.echo()
 
             if result.ebpf_vs_cuda:
@@ -494,9 +501,9 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
                     click.echo(f"  Eviction rate:         {emm.get('fault_rate_per_sec', 0):.1f} /sec")
                     click.echo(f"  Avg evict latency:     {emm.get('avg_fault_latency_us', 0):.1f} us")
                 if bo_moves == 0 and bo_maps == 0 and evictions == 0:
-                    click.echo(f"  (No memory events captured -- workload may not trigger")
-                    click.echo(f"   migrations. Try a memory-intensive workload or check")
-                    click.echo(f"   tracepoint availability with: aorta ebpf-info)")
+                    click.echo("  (No memory events captured -- workload may not trigger")
+                    click.echo("   migrations. Try a memory-intensive workload or check")
+                    click.echo("   tracepoint availability with: aorta ebpf-info)")
                 click.echo()
 
             # Summary
@@ -529,7 +536,7 @@ def run(workload: str, streams: int, iterations: int, warmup: int,
                 click.echo("Profile traces saved to:")
                 if profile_result and profile_result.chrome_trace_path:
                     click.echo(f"  Chrome trace: {profile_result.chrome_trace_path}")
-                    click.echo(f"    View: Open chrome://tracing and load the JSON file")
+                    click.echo("    View: Open chrome://tracing and load the JSON file")
                 if profile_result and profile_result.tensorboard_dir:
                     click.echo(f"  TensorBoard: {profile_result.tensorboard_dir}")
                     click.echo(f"    View: tensorboard --logdir={profile_result.tensorboard_dir}")
@@ -648,10 +655,10 @@ def _print_interpretation(workload: str, info, result, streams: int) -> None:
 
     click.echo()
     click.echo("NEXT STEPS:")
-    click.echo(f"  1. Run a sweep to find the optimal stream count:")
+    click.echo("  1. Run a sweep to find the optimal stream count:")
     click.echo(f"     python -m aorta.hw_queue_eval sweep {workload} -s 1,2,4,8,16,32")
-    click.echo(f"  2. Compare results before/after runtime changes:")
-    click.echo(f"     python -m aorta.hw_queue_eval compare -b baseline.json -t test.json")
+    click.echo("  2. Compare results before/after runtime changes:")
+    click.echo("     python -m aorta.hw_queue_eval compare -b baseline.json -t test.json")
 
 
 @cli.command()
@@ -798,8 +805,10 @@ def run_priority(priority: str, streams: str, iterations: int,
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Log comprehensive environment info (also saves to output_dir/environment_info.json)
-    env_info = log_environment_info(
+    # Log comprehensive environment info (also saves to output_dir/environment_info.json).
+    # Return value is intentionally unused; the side effect (disk write + log)
+    # is the goal.
+    log_environment_info(
         stream_counts=stream_counts,
         iterations=iterations,
         output_dir=output_dir,
@@ -831,7 +840,7 @@ def run_priority(priority: str, streams: str, iterations: int,
             valid_counts = [c for c in stream_counts if wl.supports_stream_count(c)]
 
             if not valid_counts:
-                click.echo(f"  Skipped (no valid stream counts)")
+                click.echo("  Skipped (no valid stream counts)")
                 continue
 
             results = []
@@ -955,9 +964,14 @@ def list_workloads(category: Optional[str], verbose: bool):
     """List available workloads."""
     from aorta.hw_queue_eval.workloads.registry import WorkloadRegistry
 
-    # Import workload modules to register them
+    # Import workload modules to register them (side-effect imports).
     try:
-        from aorta.hw_queue_eval.workloads import distributed, inference, latency_sensitive, pipeline
+        from aorta.hw_queue_eval.workloads import (  # noqa: F401
+            distributed,
+            inference,
+            latency_sensitive,
+            pipeline,
+        )
     except ImportError as e:
         click.echo(f"Warning: Could not import all workloads: {e}", err=True)
 
@@ -1132,10 +1146,7 @@ def policy_sweep(workload: str, streams: int, iterations: int, warmup: int,
       high_queue, default_uvm, xnack_off
     """
     from aorta.hw_queue_eval.core.harness import HarnessConfig
-    from aorta.hw_queue_eval.core.policy_evaluator import (
-        BUILTIN_POLICIES,
-        PolicyEvaluator,
-    )
+    from aorta.hw_queue_eval.core.policy_evaluator import PolicyEvaluator
 
     policy_names = (
         [p.strip() for p in policies.split(",")]
@@ -1189,7 +1200,12 @@ def ebpf_info():
     click.echo()
     click.echo(f"Kernel version:    {caps.kernel_version}")
     click.echo(f"bpftrace:          {caps.bpftrace_version or 'not installed'}")
-    click.echo(f"Root/CAP_BPF:      {'yes' if caps.has_root_or_cap else 'no'}")
+    # The check accepts uid 0 *or* CAP_SYS_ADMIN / CAP_BPF / CAP_PERFMON in
+    # the effective capability set (parsed from /proc/self/status CapEff).
+    click.echo(
+        f"eBPF privilege:    {'yes' if caps.has_root_or_cap else 'no'} "
+        "(root or CAP_BPF / CAP_PERFMON / CAP_SYS_ADMIN)"
+    )
     click.echo(f"Overall available: {'yes' if caps.available else 'no'}")
     click.echo()
 
@@ -1458,7 +1474,7 @@ def _print_attach_results(results: dict) -> None:
         if migration > 0:
             click.echo(f"  Migration:     {migration / (1024*1024):.1f} MB")
         if d.get("total_evictions", 0) > 0:
-            click.echo(f"  WARNING: Evictions detected -- memory pressure may cause NaN")
+            click.echo("  WARNING: Evictions detected -- memory pressure may cause NaN")
         click.echo()
 
     if "race" in results:
@@ -1469,13 +1485,13 @@ def _print_attach_results(results: dict) -> None:
         click.echo(f"  Races found:   {d.get('races_detected', 0)}")
         if d.get("races_detected", 0) > 0:
             click.echo(f"  Affected rings: {d.get('rings_with_races', [])}")
-            click.echo(f"  ALERT: Stream races detected -- likely cause of NaN!")
+            click.echo("  ALERT: Stream races detected -- likely cause of NaN!")
             for i, rev in enumerate(d.get("race_events", [])[:5]):
                 click.echo(f"    Race #{i+1}: ring={rev.get('ring')} "
                            f"gap={rev.get('gap_us', 0):.1f}us "
                            f"fence_gap={rev.get('fence_gap', 0)}")
         else:
-            click.echo(f"  No races detected")
+            click.echo("  No races detected")
         click.echo()
 
     if "dma" in results:
@@ -1487,7 +1503,7 @@ def _print_attach_results(results: dict) -> None:
         click.echo(f"  Overlaps:      {d.get('overlaps_detected', 0)}")
         if d.get("overlaps_detected", 0) > 0:
             click.echo(f"  Max overlap:   {d.get('max_overlap_us', 0):.1f} us")
-            click.echo(f"  ALERT: H2D DMA-compute overlaps detected!")
+            click.echo("  ALERT: H2D DMA-compute overlaps detected!")
         click.echo()
 
     if "rccl" in results:
@@ -1506,24 +1522,34 @@ def _print_attach_results(results: dict) -> None:
                 "(within window but on different rings; not confirmed races)"
             )
         if d.get("races_detected", 0) > 0:
-            click.echo(f"  ALERT: Collective-compute races detected!")
+            click.echo("  ALERT: Collective-compute races detected!")
         click.echo()
 
 
 def _run_nan_correlation(results: dict, nan_log: Optional[str]) -> Optional[list]:
-    """Run NaN correlation if a log is provided or issues were found."""
+    """Run NaN correlation against the supplied sanitizer log.
+
+    Requires ``nan_log`` to be set; if it is falsy this function returns
+    ``None`` without doing any correlation.  An earlier "issues were
+    found" auto-trigger was removed because the ``NaNCorrelator`` API
+    needs explicit NaN events (timestamp + rank + step) to anchor the
+    correlation window, and tracer-level "issues" alone don't provide
+    that anchor.
+
+    Returns a list of per-NaN correlation reports, or ``None`` when no
+    NaN events were available to correlate.
+    """
     from aorta.hw_queue_eval.core.ebpf_nan_correlator import NaNCorrelator
 
-    correlator = NaNCorrelator(window_ms=100.0)
+    if not nan_log:
+        return None
 
-    if nan_log:
-        count = correlator.add_nan_events_from_log(nan_log)
-        if count > 0:
-            click.echo(f"NaN CORRELATION: Parsed {count} NaN events from log")
-        else:
-            click.echo(f"NaN CORRELATION: No NaN events found in {nan_log}")
-            return None
+    correlator = NaNCorrelator(window_ms=100.0)
+    count = correlator.add_nan_events_from_log(nan_log)
+    if count > 0:
+        click.echo(f"NaN CORRELATION: Parsed {count} NaN events from log")
     else:
+        click.echo(f"NaN CORRELATION: No NaN events found in {nan_log}")
         return None
 
     if "queue" in results:

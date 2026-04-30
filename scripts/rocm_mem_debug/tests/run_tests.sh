@@ -121,20 +121,36 @@ run_test() {
 
     echo -n "  Running $name ($expect) ... "
 
-    # Start the debug script in background
+    # Launch the test binary first, in the background, so we have a real
+    # PID to scope the debugger to.  Without --pid the debugger would
+    # trace system-wide GPU activity, which on shared machines causes
+    # noise in positive tests and false positives in negative tests.
+    #
+    # We exec the binary inside a subshell so $! is the binary's PID
+    # (not a wrapper such as ``timeout``); we enforce the timeout via a
+    # separate watchdog so the PID we capture stays valid.
+    bash -c 'exec "$1" > "$2" 2>&1' _ "$binary" "$stdout_log" &
+    local test_pid=$!
+
+    (
+        sleep "$test_timeout"
+        if kill -0 "$test_pid" 2>/dev/null; then
+            kill "$test_pid" 2>/dev/null || true
+        fi
+    ) &
+    local watchdog_pid=$!
+
+    # Start the debug script, scoped to the test process only.
     timeout "$test_timeout" python3 "$DEBUG_SCRIPT" \
+        --pid "$test_pid" \
         --duration "$duration" \
         --output "$report" \
         > "$debug_log" 2>&1 &
     local dbg_pid=$!
 
-    # Let bpftrace attach
-    sleep 2
-
-    # Run the test binary
-    timeout "$test_timeout" "$binary" > "$stdout_log" 2>&1 || true
-
-    # Wait for the debug script to finish
+    # Wait for the test binary first, then the debugger.
+    wait "$test_pid" 2>/dev/null || true
+    kill "$watchdog_pid" 2>/dev/null || true
     wait "$dbg_pid" 2>/dev/null || true
 
     # Evaluate results

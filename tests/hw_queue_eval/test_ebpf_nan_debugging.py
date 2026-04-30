@@ -27,12 +27,29 @@ _CORE_DIR = os.path.join(
     "src", "aorta", "hw_queue_eval", "core",
 )
 
+# Test-file-specific module name prefix.  Both this file and
+# ``test_ebpf_tracer.py`` load the same source files via importlib;
+# using bare names like ``ebpf_tracer`` would cause whichever test
+# imports first to overwrite the other's module objects in
+# ``sys.modules``, making the suite order-dependent.  Prefixing with
+# ``_nandbg__`` keeps the two test files' module namespaces disjoint.
+_NAME_PREFIX = "_nandbg__"
+
 
 def _load_module(name: str, filename: str):
+    """Load a core module under a test-file-specific sys.modules name.
+
+    Note: any cross-module imports done via ``from X import ...`` inside
+    the loaded files still resolve through normal package machinery, so
+    there's no need to also register the bare ``name`` in ``sys.modules``
+    here -- doing so is exactly what caused the collision with
+    ``test_ebpf_tracer.py``.
+    """
+    qualified = _NAME_PREFIX + name
     filepath = os.path.join(_CORE_DIR, filename)
-    spec = importlib.util.spec_from_file_location(name, filepath)
+    spec = importlib.util.spec_from_file_location(qualified, filepath)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
+    sys.modules[qualified] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -141,7 +158,11 @@ class TestBPFRaceDetector:
             path = det._generate_script()
             content = path.read_text()
             assert "RACE_SUBMIT" in content
-            assert "RACE_DISPATCH" in content
+            # RACE_DISPATCH was removed: the Python heuristic only uses
+            # submissions, so emitting dispatch events from
+            # ``amdgpu_sched_run_job`` was pure overhead.
+            assert "RACE_DISPATCH" not in content
+            assert "amdgpu_sched_run_job" not in content
             assert "pid == 99" in content
 
     @patch.object(_race_detector, "_probe_tracepoint_fields", return_value=None)

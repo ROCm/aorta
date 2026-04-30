@@ -37,7 +37,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -275,8 +275,28 @@ def _probe_fields(category: str, name: str) -> Optional[Set[str]]:
 # ---------------------------------------------------------------------------
 
 def build_bpftrace_script(target_pid: Optional[int] = None) -> str:
-    """Generate a bpftrace script that traces all available memory-related tracepoints."""
+    """Generate a bpftrace script that traces all available memory-related tracepoints.
+
+    When ``target_pid`` is provided, every tracepoint that fires from a
+    user-space context is gated by a ``/pid == <target_pid>/`` predicate
+    so only events from that process are emitted.  Without this filter
+    the resulting log mixes activity from every process on the host,
+    polluting downstream correlation and inflating false-positive rates
+    on shared machines.
+
+    Two tracepoint families are intentionally left unfiltered:
+
+    * ``amdgpu_iv`` fires from the IRQ handler, so ``pid`` reflects
+      whichever task happened to be on-CPU when the interrupt arrived
+      and not the GPU client that triggered it.
+    * KFD eviction / restore worker tracepoints run in kthread context;
+      ``pid`` is the kthread PID, not the affected process.
+
+    Filtering on ``pid`` for either of those would silently drop events
+    that actually belong to the target process.
+    """
     sections: List[str] = []
+    pid_filter = f"\n/pid == {target_pid}/" if target_pid is not None else ""
 
     # --- amdgpu_bo_move ---
     bo_fields = _probe_fields("amdgpu", "amdgpu_bo_move")
@@ -287,37 +307,38 @@ def build_bpftrace_script(target_pid: Optional[int] = None) -> str:
         bo_size = "0"
 
     sections.append(f"""\
-tracepoint:amdgpu:amdgpu_bo_move
+tracepoint:amdgpu:amdgpu_bo_move{pid_filter}
 {{
     printf("BO_MOVE|%llu|%d|%s|%d\\n",
            nsecs, pid, comm, {bo_size});
 }}""")
 
     # --- amdgpu_vm_bo_map / unmap ---
-    sections.append("""\
-tracepoint:amdgpu:amdgpu_vm_bo_map
-{
+    sections.append(f"""\
+tracepoint:amdgpu:amdgpu_vm_bo_map{pid_filter}
+{{
     printf("VM_MAP|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
-}""")
+}}""")
 
-    sections.append("""\
-tracepoint:amdgpu:amdgpu_vm_bo_unmap
-{
+    sections.append(f"""\
+tracepoint:amdgpu:amdgpu_vm_bo_unmap{pid_filter}
+{{
     printf("VM_UNMAP|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
-}""")
+}}""")
 
     # --- amdgpu_vm_set_ptes (if available) ---
     if _check_tp("amdgpu", "amdgpu_vm_set_ptes"):
-        sections.append("""\
-tracepoint:amdgpu:amdgpu_vm_set_ptes
-{
+        sections.append(f"""\
+tracepoint:amdgpu:amdgpu_vm_set_ptes{pid_filter}
+{{
     printf("VM_PTE|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
-}""")
+}}""")
 
-    # --- amdgpu_iv (GPU interrupts) ---
+    # --- amdgpu_iv (GPU interrupts) -- intentionally NOT pid-filtered.
+    # See the function docstring for the rationale.
     if _check_tp("amdgpu", "amdgpu_iv"):
         iv_fields = _probe_fields("amdgpu", "amdgpu_iv")
         if iv_fields and "src_id" in iv_fields:
@@ -331,7 +352,7 @@ tracepoint:amdgpu:amdgpu_iv
            nsecs, pid, comm, {iv_extra});
 }}""")
 
-    # --- KFD eviction / restore ---
+    # --- KFD eviction / restore -- intentionally NOT pid-filtered (kthread).
     for tp_name, label in [
         ("kfd_evict_process_worker_start", "EVICT"),
         ("kfd_restore_process_worker_start", "RESTORE"),
@@ -344,14 +365,14 @@ tracepoint:amdkfd:{tp_name}
            nsecs, pid, comm);
 }}""")
 
-    # --- KFD memory mapping ---
+    # --- KFD memory mapping -- runs in process context, safe to pid-filter.
     for tp_name, label in [
         ("kfd_map_memory_to_gpu_start", "KFD_MAP_START"),
         ("kfd_map_memory_to_gpu_end", "KFD_MAP_END"),
     ]:
         if _check_tp("amdkfd", tp_name):
             sections.append(f"""\
-tracepoint:amdkfd:{tp_name}
+tracepoint:amdkfd:{tp_name}{pid_filter}
 {{
     printf("{label}|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
@@ -700,6 +721,10 @@ class GPUMemoryDebugger:
         self._correlator = FaultCorrelator()
         self._stop_event = threading.Event()
         self._bpf_output_path: Optional[Path] = None
+        self._bpf_stderr_path: Optional[Path] = None
+        self._bpf_stderr_file = None
+        self._bpf_stderr_thread: Optional[threading.Thread] = None
+        self._bpf_stderr_chunks: List[str] = []
         self._sys_info: Dict[str, Any] = {}
 
     def run(self) -> Dict[str, Any]:
@@ -726,6 +751,11 @@ class GPUMemoryDebugger:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
+        # Initialize ``start`` before the try-block so that an exception in
+        # ``_start_bpftrace()`` doesn't leave it unbound and mask the
+        # original error with an ``UnboundLocalError`` when computing
+        # ``actual_duration`` after ``finally``.
+        start = time.monotonic()
         try:
             self._start_bpftrace()
             self._start_dmesg_monitor()
@@ -736,9 +766,9 @@ class GPUMemoryDebugger:
             print("  Press Ctrl+C to stop early")
             print()
 
-            start = time.time()
+            start = time.monotonic()
             while not self._stop_event.is_set():
-                elapsed = time.time() - start
+                elapsed = time.monotonic() - start
                 if elapsed >= self._duration_s:
                     break
                 self._stop_event.wait(timeout=1.0)
@@ -753,7 +783,7 @@ class GPUMemoryDebugger:
             signal.signal(signal.SIGINT, original_sigint)
             signal.signal(signal.SIGTERM, original_sigterm)
 
-        actual_duration = time.time() - start
+        actual_duration = time.monotonic() - start
         report = self._correlator.generate_report(self._sys_info, actual_duration)
         self._print_report(report)
 
@@ -768,32 +798,71 @@ class GPUMemoryDebugger:
         print("\n\nStopping capture...")
         self._stop_event.set()
 
+    def _drain_bpf_stderr(self) -> None:
+        """Continuously read bpftrace stderr to keep the pipe from filling.
+
+        Without this, long-running traces can deadlock once the kernel
+        stderr pipe buffer fills.  Mirrors the pattern used by the
+        ``hw_queue_eval`` tracers (BPFQueueTracer, BPFDMATracer, ...):
+        tee everything to ``self._bpf_stderr_path`` and keep a bounded
+        in-memory tail for diagnostics.
+        """
+        proc = self._bpf_proc
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in iter(proc.stderr.readline, ""):
+                if not line:
+                    break
+                self._bpf_stderr_chunks.append(line)
+                if sum(len(c) for c in self._bpf_stderr_chunks) > 16384:
+                    self._bpf_stderr_chunks = self._bpf_stderr_chunks[-256:]
+                if self._bpf_stderr_file is not None:
+                    try:
+                        self._bpf_stderr_file.write(line)
+                        self._bpf_stderr_file.flush()
+                    except Exception:
+                        pass
+        except (ValueError, OSError):
+            pass
+
     def _start_bpftrace(self) -> None:
         script = build_bpftrace_script(self._target_pid)
         script_path = Path(self._tmpdir) / "mem_debug.bt"
         script_path.write_text(script)
 
         self._bpf_output_path = Path(self._tmpdir) / "bpf_output.log"
+        self._bpf_stderr_path = Path(self._tmpdir) / "bpf_stderr.log"
 
         bp = self._sys_info["bpftrace_path"]
         cmd = [bp, str(script_path)]
 
         self._bpf_outfile = open(self._bpf_output_path, "w")
+        self._bpf_stderr_file = open(self._bpf_stderr_path, "w")
         self._bpf_proc = subprocess.Popen(
             cmd,
             stdout=self._bpf_outfile,
             stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,
         )
+
+        self._bpf_stderr_chunks = []
+        self._bpf_stderr_thread = threading.Thread(
+            target=self._drain_bpf_stderr,
+            name="bpftrace-mem-debug-stderr",
+            daemon=True,
+        )
+        self._bpf_stderr_thread.start()
 
         time.sleep(0.5)
         rc = self._bpf_proc.poll()
         if rc is not None:
-            stderr = ""
-            try:
-                stderr = self._bpf_proc.stderr.read()
-            except Exception:
-                pass
+            # Give the drain thread a moment to flush whatever stderr
+            # bpftrace produced before exiting so we can surface it.
+            if self._bpf_stderr_thread is not None:
+                self._bpf_stderr_thread.join(timeout=1.0)
+            stderr = "".join(self._bpf_stderr_chunks)
             print(_red(f"bpftrace failed to start (rc={rc})"))
             if stderr:
                 print(_red(f"  stderr: {stderr.strip()[:500]}"))
@@ -819,7 +888,7 @@ class GPUMemoryDebugger:
             fl = fcntl.fcntl(fd, fcntl.F_GETFL)
             fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
             print(_green("  dmesg monitor started"))
-        except Exception as e:
+        except Exception:
             # Fall back to plain --follow if --since is not supported
             try:
                 self._dmesg_proc = subprocess.Popen(
@@ -870,7 +939,6 @@ class GPUMemoryDebugger:
     def _print_status_line(self, elapsed: float) -> None:
         c = self._correlator.counters
         faults = len(self._correlator.faults)
-        remaining = max(0, self._duration_s - elapsed)
         parts = [
             f"[{elapsed:.0f}s / {self._duration_s:.0f}s]",
             f"BO_MOVE={c['BO_MOVE']}",
@@ -901,6 +969,20 @@ class GPUMemoryDebugger:
                 self._bpf_outfile.close()
             except Exception:
                 pass
+
+        # Wait for the stderr drain thread to flush anything still in
+        # flight, then close the tee file.
+        if self._bpf_stderr_thread is not None:
+            try:
+                self._bpf_stderr_thread.join(timeout=2.0)
+            except Exception:
+                pass
+        if self._bpf_stderr_file is not None:
+            try:
+                self._bpf_stderr_file.close()
+            except Exception:
+                pass
+            self._bpf_stderr_file = None
 
         if self._dmesg_proc and self._dmesg_proc.poll() is None:
             try:
@@ -976,7 +1058,7 @@ class GPUMemoryDebugger:
         if latencies:
             avg = sum(latencies) / len(latencies)
             mx = max(latencies)
-            print(f"  EVICTION LATENCIES:")
+            print("  EVICTION LATENCIES:")
             print(f"    Count: {len(latencies)}")
             print(f"    Avg:   {avg:.1f} us")
             print(f"    Max:   {mx:.1f} us")
