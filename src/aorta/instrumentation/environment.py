@@ -89,14 +89,42 @@ CANONICAL_ENV_VARS: tuple[str, ...] = (
 )
 
 # Filesystem locations -- collected here so tests can monkeypatch them.
-ROCM_VERSION_FILE = Path("/opt/rocm/.info/version")
-ROCM_VERSION_DEV_FILE = Path("/opt/rocm/.info/version-dev")
-KMD_VERSION_FILE = Path("/sys/module/amdgpu/version")
+# Each constant is paired with a short note on the source so future
+# editors don't have to rediscover where the data comes from.
+#
+# All paths verified against:
+#   - host: ROCm 7.2.1 baremetal install
+#   - rocm/pytorch:7.2.0 docker image
+#   - rocm/pytorch:7.0.2.1 docker image (`version_dev` legitimately absent)
+# Each path is absolute; the structural test in
+# tests/instrumentation/test_environment.py::TestPathConstants
+# enforces this so a future relative-path typo fails fast.
 
-HIPBLASLT_VERSION_HEADER = Path("/opt/rocm/include/hipblaslt/hipblaslt-version.h")
-HIPBLASLT_LIB_DIR = Path("/opt/rocm/lib")
-HIPBLASLT_TENSILE_DIR = Path("/opt/rocm/lib/hipblaslt/library")
+# Per #147 schema: "Explicit ROCm version files".
+# /opt/rocm is conventionally a symlink to the active versioned install
+# (e.g., /opt/rocm-7.2.1), so /opt/rocm/.info/version always points at the
+# active release.
+ROCM_VERSION_FILE = Path("/opt/rocm/.info/version")            # release tag, e.g. "7.2.1"
+ROCM_VERSION_DEV_FILE = Path("/opt/rocm/.info/version-dev")    # full build, e.g. "7.2.1-43"
+# Linux kernel-side AMDGPU module version (KMD = kernel-mode driver).
+# Provided by the kernel since the amdgpu module exposes a sysfs `version`.
+KMD_VERSION_FILE = Path("/sys/module/amdgpu/version")          # e.g. "6.16.13"
 
+# hipBLASLt build identity sources. The version header ships in the
+# hipblaslt-dev package; on hosts without it, _capture_hipblaslt's commit
+# / package_version fields fall back to None with a recorded reason.
+HIPBLASLT_VERSION_HEADER = Path(
+    "/opt/rocm/include/hipblaslt/hipblaslt-version.h"
+)
+HIPBLASLT_LIB_DIR = Path("/opt/rocm/lib")  # libhipblaslt.so* lives here
+HIPBLASLT_TENSILE_DIR = Path(
+    "/opt/rocm/lib/hipblaslt/library"
+)  # Tensile kernel database (.dat on modern builds, .yaml on older)
+
+# Container runtime detection markers.
+# /.dockerenv -- created by Docker since the early days.
+# /run/.containerenv -- created by Podman.
+# /proc/1/cgroup -- last-resort cgroup token sniff (per OCI conventions).
 DOCKERENV_MARKER = Path("/.dockerenv")
 PODMAN_CONTAINERENV_MARKER = Path("/run/.containerenv")
 CGROUP_FILE = Path("/proc/1/cgroup")

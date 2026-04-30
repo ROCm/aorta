@@ -30,7 +30,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -113,6 +113,64 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Schema completeness + versioning
 # ---------------------------------------------------------------------------
+
+
+class TestPathConstants:
+    """Structural guard for the filesystem path constants.
+
+    Catches accidental typos / relative-path mistakes; does NOT verify
+    that the paths exist on the test host (they are host-state and are
+    monkeypatched by every test that uses them).
+    """
+
+    @pytest.mark.parametrize(
+        "constant_name",
+        [
+            "ROCM_VERSION_FILE",
+            "ROCM_VERSION_DEV_FILE",
+            "KMD_VERSION_FILE",
+            "HIPBLASLT_VERSION_HEADER",
+            "HIPBLASLT_LIB_DIR",
+            "HIPBLASLT_TENSILE_DIR",
+            "DOCKERENV_MARKER",
+            "PODMAN_CONTAINERENV_MARKER",
+            "CGROUP_FILE",
+        ],
+    )
+    def test_path_is_absolute(self, constant_name: str):
+        path = getattr(env_mod, constant_name)
+        assert isinstance(path, Path), f"{constant_name} must be a Path"
+        assert path.is_absolute(), (
+            f"{constant_name} = {path!r} is not absolute. The probe "
+            "looks at well-known system locations; relative paths would "
+            "be resolved against pytest's CWD and produce nonsense."
+        )
+
+    def test_known_constant_set_is_stable(self):
+        """Reasoned guard: adding/removing a path constant is a schema
+        change that should also touch the structural test above and the
+        provenance comments in environment.py.
+        """
+        path_attrs = {
+            name for name in dir(env_mod)
+            if isinstance(getattr(env_mod, name, None), Path)
+            and not name.startswith("_")
+        }
+        assert path_attrs == {
+            "ROCM_VERSION_FILE",
+            "ROCM_VERSION_DEV_FILE",
+            "KMD_VERSION_FILE",
+            "HIPBLASLT_VERSION_HEADER",
+            "HIPBLASLT_LIB_DIR",
+            "HIPBLASLT_TENSILE_DIR",
+            "DOCKERENV_MARKER",
+            "PODMAN_CONTAINERENV_MARKER",
+            "CGROUP_FILE",
+        }, (
+            "FS path constants set drifted; update test_path_is_absolute "
+            "parametrize list AND the provenance comments in "
+            "src/aorta/instrumentation/environment.py."
+        )
 
 
 REQUIRED_TOP_KEYS = {
@@ -505,6 +563,60 @@ class TestCollectEnvContract:
         assert "collect_env: boom" in snap.partial_reasons
         # JSON-native check (no default=str needed)
         json.dumps(d)
+
+    def test_disaster_snapshot_populates_every_envsnapshot_field(self):
+        """Hard guard against a future PR adding a field to EnvSnapshot
+        without updating _disaster_snapshot.
+
+        If a field is added to the dataclass and _disaster_snapshot is not
+        updated, the missing-arg ``TypeError`` would fire from inside
+        collect_env's ``except`` block, get caught silently, and we'd be
+        stuck with a half-broken safety net. This test enumerates the
+        dataclass fields and asserts every one is present in the disaster
+        snapshot's ``to_dict()`` output.
+        """
+        from dataclasses import fields as dc_fields
+
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=[], unexpected_reason="test: dummy"
+        )
+        snap_dict = snap.to_dict()
+        expected_fields = {f.name for f in dc_fields(EnvSnapshot)}
+        missing = expected_fields - set(snap_dict.keys())
+        assert not missing, (
+            f"_disaster_snapshot did not populate fields {missing}. "
+            "If you added a field to EnvSnapshot, update _disaster_snapshot "
+            "in src/aorta/instrumentation/environment.py to give it a sane "
+            "default."
+        )
+
+    def test_disaster_snapshot_constructs_when_collect_env_helpers_raise(
+        self, monkeypatch
+    ):
+        """Even the disaster path must not crash if its own helpers blow up.
+
+        Sabotage both ``_utc_now_iso`` and ``platform.python_version`` so
+        the disaster fallback's defensive ``try/except`` fires twice.
+        Both fields fall back to empty strings; the snapshot is still
+        constructible.
+        """
+        monkeypatch.setattr(
+            env_mod, "_utc_now_iso", lambda: (_ for _ in ()).throw(RuntimeError("no time"))
+        )
+        monkeypatch.setattr(
+            env_mod.platform, "python_version",
+            lambda: (_ for _ in ()).throw(RuntimeError("no python"))
+        )
+
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=[], unexpected_reason="test: chained failure"
+        )
+        assert snap.captured_at == ""
+        assert snap.python_version == ""
+        assert snap.partial is True
+        # Schema completeness preserved
+        from dataclasses import fields as dc_fields
+        assert set(snap.to_dict().keys()) == {f.name for f in dc_fields(EnvSnapshot)}
 
 
 # ---------------------------------------------------------------------------
@@ -1375,17 +1487,44 @@ class TestNoGpuCompute:
     initialise a HIP context).
     """
 
-    def test_torch_cuda_never_called(self, all_disabled):
-        # Try to actually import torch (rather than sniffing sys.modules):
-        # we want to skip ONLY when torch is genuinely unavailable, not
-        # whenever it merely hasn't been imported yet by the test runner.
-        try:
-            import torch
-        except ImportError:
-            pytest.skip("torch not available; trivially passes")
-        with patch.object(torch.cuda, "is_available") as is_avail, patch.object(
-            torch.cuda, "device_count"
-        ) as dev_count:
-            collect_env()
-            is_avail.assert_not_called()
-            dev_count.assert_not_called()
+    def test_torch_cuda_never_called(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        """Inject a fake torch into ``sys.modules`` so the test runs even
+        when the host venv has no torch installed (the previous
+        sys.modules-sniff version always skipped, defeating the guard).
+
+        Then exercise the full ``collect_env()`` orchestration with all
+        external probes disabled, and assert that ``torch.cuda.is_available``
+        and ``torch.cuda.device_count`` were never called.
+        """
+        import types
+
+        fake_cuda = types.SimpleNamespace(
+            is_available=MagicMock(name="is_available"),
+            device_count=MagicMock(name="device_count"),
+        )
+        fake_torch = types.SimpleNamespace(__version__="2.12.0", cuda=fake_cuda)
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        # Disable external probes (rdhc, hipconfig, rocm files, hipblaslt,
+        # container markers) so the test is fast and host-independent.
+        # Deliberately NOT using the `all_disabled` fixture here -- that
+        # one sabotages `import torch` and would defeat the whole test.
+        for attr in (
+            "ROCM_VERSION_FILE", "ROCM_VERSION_DEV_FILE", "KMD_VERSION_FILE",
+            "HIPBLASLT_VERSION_HEADER", "HIPBLASLT_LIB_DIR",
+            "HIPBLASLT_TENSILE_DIR", "DOCKERENV_MARKER",
+            "PODMAN_CONTAINERENV_MARKER", "CGROUP_FILE",
+        ):
+            monkeypatch.setattr(env_mod, attr, tmp_path / f"no_{attr.lower()}")
+        monkeypatch.setattr(env_mod.shutil, "which", lambda name: None)
+
+        snapshot = collect_env()
+
+        # Sanity: probe ran, picked up our fake torch's version
+        assert snapshot.pytorch_version == "2.12.0"
+
+        # The actual guard
+        fake_cuda.is_available.assert_not_called()
+        fake_cuda.device_count.assert_not_called()
