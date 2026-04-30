@@ -773,6 +773,17 @@ class TestRdhcWrapper:
         assert env_mod._run_rdhc(reasons) is None
         assert any("rdhc" in r for r in reasons)
 
+    def test_rdhc_unavailable_reason_includes_install_hint(self, all_disabled):
+        """Operator-facing affordance: the rdhc-not-on-PATH reason must point
+        at the install docs so users hitting `system_health: null` for the
+        first time know how to fix it without reading source.
+        """
+        reasons: list[str] = []
+        env_mod._run_rdhc(reasons)
+        assert any(
+            "docs/env-probe.md#installing-rdhc" in r for r in reasons
+        ), f"install hint missing from reasons: {reasons}"
+
     def test_rdhc_present_but_sudo_n_fails_returns_none(
         self, isolated_env, monkeypatch
     ):
@@ -814,12 +825,16 @@ class TestRdhcWrapper:
         assert "amdgpu kernel module not loaded" in rdhc_reason
         # And the misleading boilerplate should NOT be present when stderr was given
         assert "likely sudo-n unavailable" not in rdhc_reason
+        # The install hint is also NOT appended when there's actionable stderr
+        # -- we don't want to bury a real diagnostic under a generic link.
+        assert "docs/env-probe.md#installing-rdhc" not in rdhc_reason
 
     def test_rdhc_nonzero_exit_no_stderr_keeps_sudo_hint(
         self, isolated_env, monkeypatch
     ):
         """When rdhc prints nothing to stderr (the typical sudo-n no-password
-        case), the reason still names sudo-n as the likely cause."""
+        case), the reason names sudo-n AND points at the install/sudo
+        recipe in the docs."""
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")
 
         def fake_run(cmd, **kwargs):
@@ -833,6 +848,7 @@ class TestRdhcWrapper:
         rdhc_reason = next(r for r in reasons if "system_health" in r)
         assert "no stderr" in rdhc_reason
         assert "sudo-n" in rdhc_reason
+        assert "docs/env-probe.md#installing-rdhc" in rdhc_reason
 
     def test_rdhc_timeout_returns_none(self, isolated_env, monkeypatch):
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/rdhc")

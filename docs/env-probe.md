@@ -133,6 +133,108 @@ unexpected failure. Callers always get back a valid, fully-shaped
 
 `runtime_context.python_env` is one of `"venv" | "conda" | "system"`.
 
+## Installing RDHC
+
+RDHC (ROCm Deployment Health Check) is a system-level tool maintained by
+the ROCm team. Aorta wraps it but does **not** vendor it -- if it is
+absent the env probe still produces a complete snapshot, just with
+`system_health: null` and a `partial_reasons` entry pointing here.
+
+### Why it isn't a Python `requirements.txt` dependency
+
+`rdhc` is **not a PyPI package** -- it ships as part of the
+[`rocm-systems`](https://github.com/ROCm/rocm-systems/tree/main/projects/rocm-core/rdhc)
+repository, installed alongside the ROCm platform via system package
+managers. Even if it were available on PyPI, hard-pinning it would
+break aorta on:
+
+* non-ROCm hosts (NVIDIA, CPU-only CI runners)
+* ROCm docker images that strip `rocm-systems` to keep the image small
+* Apple silicon laptops used for analysis-only work
+
+The fail-soft contract (`partial=True` + a clear reason) is therefore
+the design, not a workaround. This page is the canonical install path
+for operators who want full `system_health` coverage.
+
+### Install on Ubuntu / Debian
+
+If you already have the ROCm apt repo configured (the standard install
+path documented at <https://rocm.docs.amd.com/projects/install-on-linux>):
+
+```bash
+sudo apt install rocm-core rocm-systems
+which rdhc        # /opt/rocm/bin/rdhc or /usr/bin/rdhc
+sudo -n rdhc --quick --json /tmp/rdhc.json && jq '.rdhc_version' /tmp/rdhc.json
+```
+
+### Install on RHEL / CentOS / Rocky / SLES
+
+```bash
+sudo dnf install rocm-core rocm-systems    # or `zypper` on SLES
+which rdhc
+```
+
+### Install from source (any distro, including stripped containers)
+
+```bash
+git clone https://github.com/ROCm/rocm-systems
+cd rocm-systems/projects/rocm-core/rdhc
+# Follow the project's README for build + install. Typically:
+sudo make install
+```
+
+### Configure passwordless sudo for `rdhc`
+
+`aorta env probe` runs `sudo -n -E rdhc --quick --json <tmp>`. The `-n`
+flag means **never prompt** -- if sudo would require a password, the
+probe records `system_health: rdhc exited 1 (no stderr; likely sudo-n
+unavailable)` and continues with `partial=True`. Two ways to fix:
+
+1. **Recommended (per-tool sudoers entry).** Drop a file in
+   `/etc/sudoers.d/` so only `rdhc` is passwordless, not all of sudo:
+
+   ```bash
+   sudo visudo -f /etc/sudoers.d/aorta-rdhc
+   ```
+
+   Contents:
+
+   ```text
+   # Allow members of the `aorta-users` group to run rdhc without a
+   # password. Adjust the group / user and the binary path to match
+   # your install.
+   %aorta-users ALL=(ALL) NOPASSWD: /opt/rocm/bin/rdhc, /opt/rocm/bin/rdhc.py, /usr/bin/rdhc, /usr/bin/rdhc.py
+   ```
+
+   Then `sudo usermod -aG aorta-users $USER` (and re-login). Verify:
+
+   ```bash
+   sudo -n -E rdhc --quick --json /tmp/check.json && echo OK
+   ```
+
+2. **Inside docker images you build yourself.** Add `rdhc` to the
+   image and configure passwordless sudo as part of the build:
+
+   ```dockerfile
+   RUN apt-get update && apt-get install -y rocm-core rocm-systems sudo \
+    && echo "%aorta-users ALL=(ALL) NOPASSWD: /opt/rocm/bin/rdhc, /usr/bin/rdhc" \
+       > /etc/sudoers.d/aorta-rdhc \
+    && groupadd aorta-users
+   ```
+
+### Verify the env probe picks it up
+
+```bash
+aorta env probe -o /tmp/env.json
+jq '.system_health.rdhc_version' /tmp/env.json   # expect: a version string, NOT null
+jq '.partial_reasons[]' /tmp/env.json | grep -i rdhc   # expect: nothing
+```
+
+If `partial_reasons` still contains an `rdhc` entry, the message is the
+ground truth -- it tells you exactly what failed (PATH, sudo-n,
+timeout, malformed JSON). The `(see docs/env-probe.md#installing-rdhc)`
+hint at the end of those reasons points back at this page.
+
 ## Fail-soft contract
 
 `collect_env()` never raises. When something can't be captured:

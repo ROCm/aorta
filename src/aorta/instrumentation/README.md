@@ -47,6 +47,27 @@ After the run, `cat env.json` reveals the same dict that
 `snapshot.to_dict()` returns. The CLI also prints a six-line summary to
 stdout.
 
+### Installing RDHC for full `system_health` coverage
+
+`rdhc` (ROCm Deployment Health Check) is a system tool from the
+[`rocm-systems`](https://github.com/ROCm/rocm-systems/tree/main/projects/rocm-core/rdhc)
+repo, NOT a Python package. Aorta wraps it but does not vendor it -- if
+absent, the env probe still produces a complete snapshot with
+`system_health: null` and a `partial_reasons` entry pointing at the
+install path.
+
+It is not in `requirements.txt` because:
+
+* `rdhc` is not on PyPI.
+* Hard-pinning would break aorta on non-ROCm hosts, stripped ROCm
+  docker images, and CPU-only CI runners.
+* The fail-soft contract is the design: every snapshot is honest about
+  what it could and could not capture, the run continues either way.
+
+For the install commands (Ubuntu / RHEL / SLES / source), the
+passwordless-sudo recipe, and verification steps, see the user-facing
+guide: [`docs/env-probe.md`](../../../docs/env-probe.md#installing-rdhc).
+
 ### Fail-soft contract (`partial` / `partial_reasons`)
 
 `collect_env()` is documented as **never raises**. Two layers enforce

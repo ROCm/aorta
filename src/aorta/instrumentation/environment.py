@@ -59,6 +59,12 @@ SCHEMA_VERSION = "1.0"
 # inside the 30 s worst-case env probe budget.
 RDHC_TIMEOUT_SEC = 30.0
 
+# Pointer appended to install-related rdhc partial_reasons so operators
+# who hit ``system_health: null`` find the install + sudo recipe right
+# away. Not appended to timeout / parse-failure reasons -- those are
+# rdhc-side runtime issues, not install issues.
+_RDHC_INSTALL_HINT = "see docs/env-probe.md#installing-rdhc"
+
 # Generic per-subprocess budget for hipconfig, dpkg, etc. None of these
 # should take more than a second on a healthy host.
 SHORT_TIMEOUT_SEC = 5.0
@@ -380,7 +386,7 @@ def _run_rdhc(reasons: list[str]) -> dict | None:
     """
     rdhc = shutil.which("rdhc.py") or shutil.which("rdhc")
     if rdhc is None:
-        msg = "system_health: rdhc not on PATH"
+        msg = f"system_health: rdhc not on PATH ({_RDHC_INSTALL_HINT})"
         log.info(msg)
         reasons.append(msg)
         return None
@@ -415,7 +421,13 @@ def _run_rdhc(reasons: list[str]) -> dict | None:
             reasons.append(msg)
             return None
         except (FileNotFoundError, OSError) as exc:
-            msg = f"system_health: failed to invoke rdhc ({exc})"
+            # Same actionable hint as the not-on-PATH branch -- if exec
+            # itself fails (e.g. broken interpreter shebang in a stripped
+            # image), reinstalling rocm-systems is usually the fix.
+            msg = (
+                f"system_health: failed to invoke rdhc ({exc}) "
+                f"({_RDHC_INSTALL_HINT})"
+            )
             log.info(msg)
             reasons.append(msg)
             return None
@@ -425,6 +437,10 @@ def _run_rdhc(reasons: list[str]) -> dict | None:
             # partial_reasons readable in CLI output and JSON. Falls back
             # to "(no stderr; likely sudo-n unavailable)" when the child
             # printed nothing -- which is what the no-password case does.
+            # The install hint is only appended for the no-stderr case
+            # (where sudo config is the likely fix); when rdhc DOES print
+            # to stderr the operator should debug from that, not from a
+            # generic install link.
             stderr_lines = (result.stderr or "").splitlines()
             stderr_tail = next(
                 (line.strip() for line in reversed(stderr_lines) if line.strip()),
@@ -433,7 +449,9 @@ def _run_rdhc(reasons: list[str]) -> dict | None:
             if stderr_tail:
                 detail = f"stderr: {stderr_tail[:200]}"
             else:
-                detail = "no stderr; likely sudo-n unavailable"
+                detail = (
+                    f"no stderr; likely sudo-n unavailable ({_RDHC_INSTALL_HINT})"
+                )
             msg = (
                 f"system_health: rdhc exited {result.returncode} ({detail})"
             )
