@@ -1260,15 +1260,28 @@ def ebpf_attach(pid: Optional[int], duration: str, output: Optional[str],
     # Parse duration
     duration_sec = _parse_duration(duration)
 
-    # Check capabilities
+    # Check prerequisites.  We do not require the current CLI process to
+    # already have root/CAP_BPF here because the tracers default to
+    # ``sudo=True`` and may elevate themselves.  Hard-fail only on the
+    # things that no amount of sudo can fix (missing bpftrace or no
+    # tracepoints), and downgrade the privilege check to a warning.
     caps = check_ebpf_capabilities()
-    if not caps.available:
-        click.echo("Error: eBPF is not available on this system.", err=True)
-        if caps.bpftrace_path is None:
-            click.echo("  bpftrace is not installed.", err=True)
-        if not caps.has_root_or_cap:
-            click.echo("  Root/CAP_BPF privileges are required.", err=True)
+    if caps.bpftrace_path is None:
+        click.echo("Error: bpftrace is not installed.", err=True)
         sys.exit(1)
+    if not (caps.has_amdgpu_tracepoints or caps.has_amdkfd_tracepoints):
+        click.echo(
+            "Error: no amdgpu/amdkfd tracepoints found "
+            "(is debugfs mounted and the amdgpu driver loaded?).",
+            err=True,
+        )
+        sys.exit(1)
+    if not caps.has_root_or_cap:
+        click.echo(
+            "Note: current process lacks root/CAP_BPF; "
+            "tracer startup will use sudo to elevate.",
+            err=True,
+        )
 
     tracer_names = [t.strip() for t in tracers.split(",")]
     valid_tracers = {"queue", "memory", "race", "dma", "rccl"}
@@ -1486,6 +1499,12 @@ def _print_attach_results(results: dict) -> None:
         click.echo(f"  Collective rings:       {d.get('collective_rings', [])}")
         click.echo(f"  Compute rings:          {d.get('compute_rings', [])}")
         click.echo(f"  Races detected:         {d.get('races_detected', 0)}")
+        cross = d.get("cross_ring_observations", 0)
+        if cross:
+            click.echo(
+                f"  Cross-ring observations: {cross} "
+                "(within window but on different rings; not confirmed races)"
+            )
         if d.get("races_detected", 0) > 0:
             click.echo(f"  ALERT: Collective-compute races detected!")
         click.echo()
@@ -1493,7 +1512,7 @@ def _print_attach_results(results: dict) -> None:
 
 def _run_nan_correlation(results: dict, nan_log: Optional[str]) -> Optional[list]:
     """Run NaN correlation if a log is provided or issues were found."""
-    from aorta.hw_queue_eval.core.ebpf_nan_correlator import NaNCorrelator, NaNDetection
+    from aorta.hw_queue_eval.core.ebpf_nan_correlator import NaNCorrelator
 
     correlator = NaNCorrelator(window_ms=100.0)
 

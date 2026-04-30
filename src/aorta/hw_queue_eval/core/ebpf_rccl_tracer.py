@@ -6,13 +6,12 @@ by their process/comm name to detect when collective output buffers
 are read before the collective has completed -- the driver-level
 signature of collective-compute races that produce NaN.
 
-Key tracepoints:
+Key tracepoint:
 - amdgpu:amdgpu_cs_ioctl       -- command submission with ring ID
-- amdgpu:amdgpu_sched_run_job  -- job dispatched to HW queue
 
-RCCL kernels are identified by the submitting thread's comm name
-(typically containing ``nccl`` or ``rccl`` prefixes) or by ring
-assignment patterns.
+RCCL kernels are identified from the submitting thread's comm name
+(typically containing ``nccl`` or ``rccl`` prefixes) together with
+the submitted ring ID observed at command submission time.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,7 +83,15 @@ class RCCLTraceMetrics:
     compute_submissions: int = 0
     collective_rings: List[int] = field(default_factory=list)
     compute_rings: List[int] = field(default_factory=list)
+    # ``races_detected`` counts unambiguous same-ring data hazards: a
+    # compute submission on the same HW ring as a collective within
+    # ``race_window_us``.  Cross-ring observations live in
+    # ``cross_ring_observations`` because reasoning about WAR hazards
+    # there requires fence/barrier inspection that this tracer does not
+    # do today.  ``race_events`` retains every observation (both kinds)
+    # for downstream inspection; consumers can filter by ``same_ring``.
     races_detected: int = 0
+    cross_ring_observations: int = 0
     race_events: List[CollectiveRaceEvent] = field(default_factory=list)
     trace_duration_ms: float = 0.0
     race_window_us: float = 500.0
@@ -96,6 +104,7 @@ class RCCLTraceMetrics:
             "collective_rings": self.collective_rings,
             "compute_rings": self.compute_rings,
             "races_detected": self.races_detected,
+            "cross_ring_observations": self.cross_ring_observations,
             "trace_duration_ms": self.trace_duration_ms,
             "race_window_us": self.race_window_us,
             "race_events": [e.to_dict() for e in self.race_events],
@@ -197,6 +206,10 @@ class BPFRCCLTracer:
         self._process: Optional[subprocess.Popen] = None
         self._script_path: Optional[Path] = None
         self._output_path: Optional[Path] = None
+        self._stderr_path: Optional[Path] = None
+        self._stderr_file = None
+        self._stderr_thread: Optional[threading.Thread] = None
+        self._stderr_chunks: List[str] = []
         self._start_time_ns: Optional[int] = None
 
     def _generate_script(self) -> Path:
@@ -204,6 +217,40 @@ class BPFRCCLTracer:
         script_path = self._output_dir / "rccl_trace.bt"
         script_path.write_text(script)
         return script_path
+
+    def _drain_stderr(self) -> None:
+        """Continuously read bpftrace stderr to keep the pipe from filling.
+
+        Without this, long-running traces can deadlock once the kernel
+        stderr pipe buffer fills.  We tee everything to ``stderr_path``
+        and keep a bounded in-memory tail for diagnostics.
+        """
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in iter(proc.stderr.readline, ""):
+                if not line:
+                    break
+                self._stderr_chunks.append(line)
+                if sum(len(c) for c in self._stderr_chunks) > 16384:
+                    self._stderr_chunks = self._stderr_chunks[-256:]
+                if self._stderr_file is not None:
+                    try:
+                        self._stderr_file.write(line)
+                        self._stderr_file.flush()
+                    except Exception:
+                        pass
+        except (ValueError, OSError):
+            pass
+
+    def _cleanup_stderr_capture(self) -> None:
+        if self._stderr_file is not None:
+            try:
+                self._stderr_file.close()
+            except Exception:
+                pass
+            self._stderr_file = None
 
     def start(self) -> None:
         """Start the RCCL collective tracer."""
@@ -219,30 +266,38 @@ class BPFRCCLTracer:
 
         self._script_path = self._generate_script()
         self._output_path = self._output_dir / "rccl_trace.log"
+        self._stderr_path = self._output_dir / "rccl_trace.stderr.log"
 
         cmd: List[str] = []
         if self._sudo and os.geteuid() != 0:
             cmd.append("sudo")
         cmd.extend([bpftrace_path, str(self._script_path)])
 
+        self._stderr_file = open(self._stderr_path, "w")  # noqa: SIM115
         with open(self._output_path, "w") as out_f:
             self._process = subprocess.Popen(
                 cmd,
                 stdout=out_f,
                 stderr=subprocess.PIPE,
                 text=True,
+                bufsize=1,
             )
+
+        self._stderr_chunks = []
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, name="bpftrace-rccl-stderr", daemon=True,
+        )
+        self._stderr_thread.start()
 
         self._start_time_ns = time.monotonic_ns()
         time.sleep(0.5)
 
         rc = self._process.poll()
         if rc is not None:
-            stderr_text = ""
-            try:
-                stderr_text = self._process.stderr.read()  # type: ignore[union-attr]
-            except Exception:
-                pass
+            if self._stderr_thread is not None:
+                self._stderr_thread.join(timeout=1.0)
+            stderr_text = "".join(self._stderr_chunks)
+            self._cleanup_stderr_capture()
             self._process = None
             msg = f"bpftrace (RCCL tracer) exited immediately (rc={rc})"
             if stderr_text:
@@ -269,11 +324,18 @@ class BPFRCCLTracer:
             pass
 
         try:
-            self._process.communicate(timeout=10)
+            self._process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self._process.kill()
-            self._process.communicate(timeout=5)
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2.0)
+            self._stderr_thread = None
+        self._cleanup_stderr_capture()
         self._process = None
 
         events = self._parse_output()
@@ -323,10 +385,17 @@ class BPFRCCLTracer:
     ) -> RCCLTraceMetrics:
         """Detect compute submissions that follow a collective within the race window.
 
-        A race is flagged when a compute submission appears within
-        ``race_window_us`` after a collective submission and either:
-        - shares the same ring (direct data hazard), or
-        - is on a different ring with no intervening fence (WAR hazard)
+        Two outcomes are recorded:
+
+        * **Race (same ring)** -- a compute submission lands on the same
+          HW ring as a collective inside ``race_window_us``.  This is an
+          unambiguous data hazard and increments ``races_detected``.
+        * **Cross-ring observation** -- compute lands on a different ring
+          inside the same window.  Whether this is actually a WAR hazard
+          depends on fence / barrier state that this tracer does not
+          currently inspect, so it is recorded in
+          ``cross_ring_observations`` (and added to ``race_events`` with
+          ``same_ring=False``) without inflating ``races_detected``.
         """
         metrics = RCCLTraceMetrics(
             trace_duration_ms=elapsed_ns / 1_000_000,
@@ -388,7 +457,10 @@ class BPFRCCLTracer:
                     same_ring=same_ring,
                 )
                 metrics.race_events.append(race)
-                metrics.races_detected += 1
+                if same_ring:
+                    metrics.races_detected += 1
+                else:
+                    metrics.cross_ring_observations += 1
 
         return metrics
 

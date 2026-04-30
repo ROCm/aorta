@@ -407,8 +407,11 @@ class TestBPFRCCLTracer:
             assert events[1].is_collective is False
             assert events[2].is_collective is True
 
-    def test_detect_collective_compute_race(self):
-        """Compute submit within window after collective submit."""
+    def test_detect_cross_ring_collective_observation(self):
+        """Compute submit on a *different* ring inside the window is recorded
+        as a cross-ring observation, not a confirmed race -- cross-ring WAR
+        hazards depend on fence/barrier state that this tracer does not yet
+        inspect."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tracer = BPFRCCLTracer(output_dir=Path(tmpdir), race_window_us=200.0)
             events = [
@@ -420,7 +423,8 @@ class TestBPFRCCLTracer:
                 ),
             ]
             metrics = tracer._detect_races(events, 1_000_000_000)
-            assert metrics.races_detected == 1
+            assert metrics.races_detected == 0
+            assert metrics.cross_ring_observations == 1
             assert metrics.race_events[0].same_ring is False
             assert metrics.race_events[0].gap_us == pytest.approx(100.0)
 

@@ -20,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -217,6 +218,10 @@ class BPFRaceDetector:
         self._process: Optional[subprocess.Popen] = None
         self._script_path: Optional[Path] = None
         self._output_path: Optional[Path] = None
+        self._stderr_path: Optional[Path] = None
+        self._stderr_file = None
+        self._stderr_thread: Optional[threading.Thread] = None
+        self._stderr_chunks: List[str] = []
         self._start_time_ns: Optional[int] = None
 
     def _generate_script(self) -> Path:
@@ -224,6 +229,40 @@ class BPFRaceDetector:
         script_path = self._output_dir / "race_detect.bt"
         script_path.write_text(script)
         return script_path
+
+    def _drain_stderr(self) -> None:
+        """Continuously read bpftrace stderr to keep the pipe from filling.
+
+        Without this, long-running traces can deadlock once the kernel
+        stderr pipe buffer fills.  We tee everything to ``stderr_path``
+        and keep a bounded in-memory tail for diagnostics.
+        """
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in iter(proc.stderr.readline, ""):
+                if not line:
+                    break
+                self._stderr_chunks.append(line)
+                if sum(len(c) for c in self._stderr_chunks) > 16384:
+                    self._stderr_chunks = self._stderr_chunks[-256:]
+                if self._stderr_file is not None:
+                    try:
+                        self._stderr_file.write(line)
+                        self._stderr_file.flush()
+                    except Exception:
+                        pass
+        except (ValueError, OSError):
+            pass
+
+    def _cleanup_stderr_capture(self) -> None:
+        if self._stderr_file is not None:
+            try:
+                self._stderr_file.close()
+            except Exception:
+                pass
+            self._stderr_file = None
 
     def start(self) -> None:
         """Start the race detection tracer."""
@@ -239,30 +278,38 @@ class BPFRaceDetector:
 
         self._script_path = self._generate_script()
         self._output_path = self._output_dir / "race_detect.log"
+        self._stderr_path = self._output_dir / "race_detect.stderr.log"
 
         cmd: List[str] = []
         if self._sudo and os.geteuid() != 0:
             cmd.append("sudo")
         cmd.extend([bpftrace_path, str(self._script_path)])
 
+        self._stderr_file = open(self._stderr_path, "w")  # noqa: SIM115
         with open(self._output_path, "w") as out_f:
             self._process = subprocess.Popen(
                 cmd,
                 stdout=out_f,
                 stderr=subprocess.PIPE,
                 text=True,
+                bufsize=1,
             )
+
+        self._stderr_chunks = []
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, name="bpftrace-race-stderr", daemon=True,
+        )
+        self._stderr_thread.start()
 
         self._start_time_ns = time.monotonic_ns()
         time.sleep(0.5)
 
         rc = self._process.poll()
         if rc is not None:
-            stderr_text = ""
-            try:
-                stderr_text = self._process.stderr.read()  # type: ignore[union-attr]
-            except Exception:
-                pass
+            if self._stderr_thread is not None:
+                self._stderr_thread.join(timeout=1.0)
+            stderr_text = "".join(self._stderr_chunks)
+            self._cleanup_stderr_capture()
             self._process = None
             msg = f"bpftrace (race detector) exited immediately (rc={rc})"
             if stderr_text:
@@ -289,11 +336,18 @@ class BPFRaceDetector:
             pass
 
         try:
-            self._process.communicate(timeout=10)
+            self._process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self._process.kill()
-            self._process.communicate(timeout=5)
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2.0)
+            self._stderr_thread = None
+        self._cleanup_stderr_capture()
         self._process = None
 
         events = self._parse_output()

@@ -213,21 +213,32 @@ class NaNCorrelator:
         use_timestamp_filter = ts > 0
 
         # --- Queue events ---
+        # ``dispatch_gap_*`` is meant to capture how often dispatches fire,
+        # so only consider dispatch events when computing gaps -- mixing in
+        # submits would let submit cadence skew or trigger the spike
+        # heuristic.  ``queue_events_in_window`` and ``concurrent_rings``
+        # still reflect every queue event in the window.
         dispatch_gaps: List[float] = []
         ring_set: set[int] = set()
         q_in_window = []
+        dispatches_in_window: List[Any] = []
         for ev in self._queue_events:
             if use_timestamp_filter and not (lo <= ev.timestamp_ns <= hi):
                 continue
             q_in_window.append(ev)
             ring_set.add(ev.ring)
+            if getattr(ev, "event_type", None) == "dispatch":
+                dispatches_in_window.append(ev)
 
         report.queue_events_in_window = len(q_in_window)
         report.concurrent_rings = sorted(ring_set)
 
-        q_in_window.sort(key=lambda e: e.timestamp_ns)
-        for i in range(1, len(q_in_window)):
-            gap_us = (q_in_window[i].timestamp_ns - q_in_window[i - 1].timestamp_ns) / 1_000.0
+        dispatches_in_window.sort(key=lambda e: e.timestamp_ns)
+        for i in range(1, len(dispatches_in_window)):
+            gap_us = (
+                dispatches_in_window[i].timestamp_ns
+                - dispatches_in_window[i - 1].timestamp_ns
+            ) / 1_000.0
             dispatch_gaps.append(gap_us)
 
         if dispatch_gaps:
