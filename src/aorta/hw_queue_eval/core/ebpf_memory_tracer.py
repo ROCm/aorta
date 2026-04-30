@@ -6,18 +6,23 @@ eviction/restore events at the kernel driver level via amdkfd and amdgpu
 tracepoints. This provides driver-level visibility into memory behaviour
 that user-space tools (torch.cuda.max_memory_allocated) cannot capture.
 
-Note: this module currently does **not** attach to GPU UVM page fault
-tracepoints. Any higher-level metric that is derived from these events and
-reported as "page faults" should be interpreted as eviction/restore cycles
-and related driver-level memory pressure signals, not literal GPU page
-faults.
+Note: this module does **not** attach to GPU UVM page fault tracepoints.
+The metrics here describe BO map/unmap activity and eviction/restore
+cycles that signal driver-level memory pressure -- not literal GPU page
+faults.  ``MemoryTraceMetrics.total_faults`` (and the associated
+``avg_fault_latency_us``) counts evict -> restore round trips and is more
+accurately thought of as ``eviction_restore_pairs``; the legacy name is
+kept for backward compatibility with existing dashboards/JSON consumers.
 
-Key tracepoints:
-- amdgpu:amdgpu_bo_move          -- buffer migration between memory domains
-- amdgpu:amdgpu_vm_bo_map        -- buffer object mapped into VM
-- amdgpu:amdgpu_vm_bo_unmap      -- buffer object unmapped from VM
-- amdkfd:kfd_evict_process       -- process evicted from GPU (memory pressure)
-- amdkfd:kfd_restore_process     -- process restored after eviction
+Key tracepoints (the actual symbols probed at runtime; older docs may
+refer to ``kfd_evict_process``/``kfd_restore_process``):
+
+- amdgpu:amdgpu_bo_move                       -- BO migration between memory domains
+- amdgpu:amdgpu_vm_bo_map                     -- BO mapped into VM
+- amdgpu:amdgpu_vm_bo_unmap                   -- BO unmapped from VM
+- amdkfd:kfd_evict_process_worker_start       -- process evicted from GPU (memory pressure)
+- amdkfd:kfd_restore_process_worker_start     -- process restored after eviction
+- amdkfd:kfd_map_memory_to_gpu_start/_end     -- KFD compute path memory mapping
 """
 
 from __future__ import annotations

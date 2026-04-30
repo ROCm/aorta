@@ -82,7 +82,7 @@ RUN pip install click
 WORKDIR /workspace/aorta
 
 # Entrypoint: mount debugfs at container start so eBPF tracepoints are visible.
-# The script lives in the mounted aorta directory at scripts/rocm_mem_debug/ebpf-entrypoint.sh
+# The script lives in the mounted aorta directory at /workspace/aorta/scripts/ebpf-entrypoint.sh
 # Requires: --privileged or --cap-add=SYS_ADMIN --cap-add=BPF --cap-add=PERFMON
 ENTRYPOINT ["/workspace/aorta/scripts/ebpf-entrypoint.sh"]
 CMD ["/bin/bash"]
