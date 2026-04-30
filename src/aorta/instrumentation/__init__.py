@@ -1,6 +1,7 @@
-"""Platform-level instrumentation: env probe, NaN/numerics detector, drift watcher.
+"""Platform-level instrumentation: env probe (issue #147) and friends.
 
-Engineer task A1 adds environment.py (env probe).
-Detector and watch_lite are deferred to P1 per D11 (MVP only needs env probe
-to support `aorta run` and `aorta triage --mode matrix`).
+Submodules:
+
+* :mod:`aorta.instrumentation.environment` - ``aorta env probe``: trial
+  reproducibility snapshot (RDHC + hipBLASLt + runtime context + env vars).
 """
