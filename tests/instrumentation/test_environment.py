@@ -95,6 +95,7 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
         env_mod, "PODMAN_CONTAINERENV_MARKER", tmp_path / "no_podmanenv"
     )
     monkeypatch.setattr(env_mod, "CGROUP_FILE", tmp_path / "no_cgroup")
+    monkeypatch.setattr(env_mod, "SELF_CGROUP_FILE", tmp_path / "no_self_cgroup")
     monkeypatch.setattr(env_mod.shutil, "which", lambda name: None)
     # Force pytorch import to fail so its fallback path is exercised too
     real_import = __builtins__["__import__"] if isinstance(
@@ -135,6 +136,7 @@ class TestPathConstants:
             "DOCKERENV_MARKER",
             "PODMAN_CONTAINERENV_MARKER",
             "CGROUP_FILE",
+            "SELF_CGROUP_FILE",
         ],
     )
     def test_path_is_absolute(self, constant_name: str):
@@ -166,11 +168,26 @@ class TestPathConstants:
             "DOCKERENV_MARKER",
             "PODMAN_CONTAINERENV_MARKER",
             "CGROUP_FILE",
+            "SELF_CGROUP_FILE",
         }, (
             "FS path constants set drifted; update test_path_is_absolute "
             "parametrize list AND the provenance comments in "
             "src/aorta/instrumentation/environment.py."
         )
+
+    def test_self_cgroup_distinct_from_init_cgroup(self):
+        """Regression guard: the two cgroup files are different on purpose.
+
+        ``CGROUP_FILE`` (``/proc/1/cgroup``) is the init process's cgroup
+        and is sniffed for the runtime *type* (docker/podman/singularity).
+        ``SELF_CGROUP_FILE`` (``/proc/self/cgroup``) is the current
+        process's cgroup and is parsed for the container *ID*. Conflating
+        them would either misclassify the runtime or fail to extract
+        an ID inside k8s pods where /proc/1 belongs to the host.
+        """
+        assert env_mod.CGROUP_FILE != env_mod.SELF_CGROUP_FILE
+        assert "1" in env_mod.CGROUP_FILE.parts
+        assert "self" in env_mod.SELF_CGROUP_FILE.parts
 
 
 REQUIRED_TOP_KEYS = {
@@ -1431,16 +1448,27 @@ class TestDockerMetadata:
     def test_container_id_extracted_from_cgroup(
         self, isolated_env, tmp_path: Path, monkeypatch
     ):
-        cgroup = tmp_path / "cgroup"
+        # Cleaner now: monkeypatch SELF_CGROUP_FILE directly instead of
+        # the global _read_text_file helper. Exercises the same
+        # constant the production code reads.
+        cgroup = tmp_path / "self_cgroup"
         cid = "abc123def456789012345678901234567890abcd"
         cgroup.write_text(f"12:freezer:/docker/{cid}\n")
-        monkeypatch.setattr(env_mod, "_read_text_file", lambda p: cgroup.read_text())
+        monkeypatch.setattr(env_mod, "SELF_CGROUP_FILE", cgroup)
         reasons: list[str] = []
         # Provide image/digest so they don't add their own reasons
         isolated_env.setenv("AORTA_DOCKER_IMAGE", "x")
         isolated_env.setenv("AORTA_DOCKER_DIGEST", "y")
         block = env_mod._capture_docker_metadata({"type": "docker"}, reasons)
         assert block["container_id"] == cid
+
+    def test_container_id_returns_none_when_self_cgroup_missing(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        """If /proc/self/cgroup isn't readable (e.g. heavily sandboxed
+        container), container_id is None but the function does not raise."""
+        monkeypatch.setattr(env_mod, "SELF_CGROUP_FILE", tmp_path / "no_self_cgroup")
+        assert env_mod._read_container_id() is None
 
 
 # ---------------------------------------------------------------------------
@@ -1589,7 +1617,7 @@ class TestNoGpuCompute:
             "ROCM_VERSION_FILE", "ROCM_VERSION_DEV_FILE", "KMD_VERSION_FILE",
             "HIPBLASLT_VERSION_HEADER", "HIPBLASLT_LIB_DIR",
             "HIPBLASLT_TENSILE_DIR", "DOCKERENV_MARKER",
-            "PODMAN_CONTAINERENV_MARKER", "CGROUP_FILE",
+            "PODMAN_CONTAINERENV_MARKER", "CGROUP_FILE", "SELF_CGROUP_FILE",
         ):
             monkeypatch.setattr(env_mod, attr, tmp_path / f"no_{attr.lower()}")
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: None)

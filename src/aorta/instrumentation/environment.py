@@ -130,10 +130,17 @@ HIPBLASLT_TENSILE_DIR = Path(
 # Container runtime detection markers.
 # /.dockerenv -- created by Docker since the early days.
 # /run/.containerenv -- created by Podman.
-# /proc/1/cgroup -- last-resort cgroup token sniff (per OCI conventions).
+# /proc/1/cgroup -- the init process's cgroup; last-resort cgroup token
+#   sniff for the runtime *type* (docker / podman / singularity), per
+#   OCI conventions.
+# /proc/self/cgroup -- the current process's cgroup, parsed for the
+#   container *ID* (a 12-64 hex SHA segment). Distinct file, distinct
+#   purpose -- both go in the constants block so tests can monkeypatch
+#   either without touching the real /proc.
 DOCKERENV_MARKER = Path("/.dockerenv")
 PODMAN_CONTAINERENV_MARKER = Path("/run/.containerenv")
 CGROUP_FILE = Path("/proc/1/cgroup")
+SELF_CGROUP_FILE = Path("/proc/self/cgroup")
 
 
 # ---------------------------------------------------------------------------
@@ -872,8 +879,13 @@ _CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
 
 
 def _read_container_id() -> str | None:
-    """Pull the container ID out of ``/proc/self/cgroup`` if present."""
-    text = _read_text_file(Path("/proc/self/cgroup"))
+    """Pull the container ID out of ``SELF_CGROUP_FILE`` if present.
+
+    Reads the *current* process's cgroup (not init's) -- the container
+    ID lives there as a 12-64 hex segment (e.g. ``/docker/<id>/`` or
+    ``/system.slice/docker-<id>.scope``).
+    """
+    text = _read_text_file(SELF_CGROUP_FILE)
     if not text:
         return None
     for line in text.splitlines():
