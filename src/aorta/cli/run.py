@@ -1,8 +1,17 @@
-"""`aorta run` - universal workload runner."""
+"""`aorta run` - universal workload runner.
+
+CLI entry point for running workloads across trials, environments, and mitigations.
+This is a thin wrapper around the library API in aorta.run.dispatcher.
+"""
+
+from pathlib import Path
 
 from pathlib import Path
 
 import click
+
+from aorta.run.collectors import KNOWN_RECIPES
+from aorta.run.dispatcher import RunRequest, run_trials
 
 
 @click.command()
@@ -16,17 +25,19 @@ import click
     type=int,
     default=1,
     show_default=True,
-    help="Number of trials per (docker, mitigation) cell.",
+    help="Number of trials to run.",
 )
 @click.option(
-    "--dockers",
-    default="",
-    help="Comma-separated docker image names. Empty = current environment.",
+    "--environment",
+    default="local",
+    show_default=True,
+    help="Registered environment name.",
 )
 @click.option(
     "--mitigations",
-    default="",
-    help="Comma-separated mitigation names from aorta_internal.mitigations.",
+    default="none",
+    show_default=True,
+    help="Comma-separated mitigation names.",
 )
 @click.option(
     "--mitigations-file",
@@ -51,17 +62,110 @@ import click
     show_default=True,
     help="Directory to write per-trial JSON.",
 )
+@click.option(
+    "--collect",
+    default="",
+    help="Comma-separated collector recipe names (rocprof, numerics, amd_log). MVP: no-op.",
+)
+@click.option(
+    "--extra-env",
+    default="",
+    help="Comma-separated KEY=VAL pairs for one-off env overrides (applied after mitigations).",
+)
 def run(
     workload: str,
     trials: int,
-    dockers: str,
+    environment: str,
     mitigations: str,
     mitigation_files: tuple[Path, ...],
     steps: int | None,
     results_dir: str,
+    collect: str,
+    extra_env: str,
 ) -> None:
-    """Run a workload across trials x dockers x mitigations.
+    """Run a workload across trials with optional mitigations.
 
-    Implemented by task B1 (cli/run.py + run/dispatcher.py).
+    Examples:
+
+        # Simple run with default settings
+        aorta run --workload fsdp --trials 1
+
+        # Multiple trials with mitigation
+        aorta run --workload fsdp --trials 3 --mitigations tf32_off
+
+        # With collector recipes (MVP: validated but no-op)
+        aorta run --workload fsdp --collect rocprof,numerics
+
+        # With extra environment variables
+        aorta run --workload fsdp --extra-env DEBUG=1,VERBOSE=true
     """
-    raise click.ClickException("aorta run - not yet implemented (task B1)")
+    # Parse comma-separated mitigations
+    mitigation_list = tuple(m.strip() for m in mitigations.split(",") if m.strip())
+    if not mitigation_list:
+        mitigation_list = ("none",)
+
+    # Parse comma-separated collectors
+    collect_list = tuple(c.strip() for c in collect.split(",") if c.strip())
+
+    # Validate collector names
+    invalid = set(collect_list) - KNOWN_RECIPES
+    if invalid:
+        raise click.ClickException(
+            f"Unknown collector recipes: {sorted(invalid)}. "
+            f"Valid: {sorted(KNOWN_RECIPES)}"
+        )
+
+    # Parse extra_env (format: KEY=VAL,KEY2=VAL2)
+    extra_env_dict: dict[str, str] = {}
+    if extra_env:
+        for pair in extra_env.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                raise click.ClickException(
+                    f"Invalid extra-env format: '{pair}'. Expected KEY=VALUE."
+                )
+            k, v = pair.split("=", 1)
+            extra_env_dict[k.strip()] = v.strip()
+
+    # Build config overrides
+    config_overrides: dict = {}
+    if steps is not None:
+        config_overrides["steps"] = steps
+
+    # Build request
+    req = RunRequest(
+        workload=workload,
+        trials=trials,
+        environment=environment,
+        mitigations=mitigation_list,
+        steps=steps,
+        config_overrides=config_overrides,
+        results_dir=Path(results_dir),
+        collect=collect_list,
+        extra_env=extra_env_dict,
+    )
+
+    # Call dispatcher
+    try:
+        results = run_trials(req)
+    except ValueError as e:
+        # Workload/environment/mitigation not found
+        raise click.ClickException(str(e))
+    except RuntimeError as e:
+        # Launch mode validation failed
+        raise click.ClickException(str(e))
+
+    # Report results
+    total = len(results)
+    passed = sum(1 for r in results if r.exit_status == "ok")
+    failed = total - passed
+
+    if failed > 0:
+        # List failed trials
+        failed_trials = [r.trial_id for r in results if r.exit_status != "ok"]
+        click.echo(f"Failed trials: {failed_trials}")
+        raise click.ClickException(f"{failed}/{total} trials failed")
+
+    click.echo(f"All {total} trial(s) passed. Results in: {req.results_dir / workload}")
