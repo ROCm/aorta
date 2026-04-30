@@ -371,7 +371,19 @@ class BPFDMATracer:
         (there is no ``bo_move_end``), so we use a configurable time
         window: any compute submission within ``overlap_window_us`` after
         a BO move start is flagged as a potential overlap.
+
+        Implementation: walk both event streams in chronological order
+        with a sliding deque of currently-active moves (those whose
+        timestamp is within ``window_ns`` of the latest event).  Expired
+        moves are popped from the front of the deque in O(1).  For each
+        compute event we then scan only the active set, so the total
+        cost is O(N + sum_of_active_set_sizes), bounded by the time
+        window rather than the full move count.  The previous index-
+        based form had the same intent but the inner ``for`` loop was
+        easy to misread as O(N*M).
         """
+        from collections import deque
+
         metrics = DMATraceMetrics(
             trace_duration_ms=elapsed_ns / 1_000_000,
         )
@@ -394,29 +406,37 @@ class BPFDMATracer:
         window_ns = int(self._overlap_window_us * 1_000)
         overlap_us_values: List[float] = []
 
-        move_idx = 0
+        active: "deque[_RawDMAEvent]" = deque()
+        move_iter = iter(moves)
+        next_move: Optional[_RawDMAEvent] = next(move_iter, None)
+
         for cs in computes:
-            while move_idx < len(moves) and moves[move_idx].timestamp_ns < cs.timestamp_ns - window_ns:
-                move_idx += 1
+            # 1. Admit any moves that started at or before this compute
+            #    event's timestamp.  Moves later than ``cs`` cannot be
+            #    in-flight when ``cs`` was submitted.
+            while next_move is not None and next_move.timestamp_ns <= cs.timestamp_ns:
+                active.append(next_move)
+                next_move = next(move_iter, None)
 
-            for mi in range(move_idx, len(moves)):
-                mv = moves[mi]
-                if mv.timestamp_ns > cs.timestamp_ns:
-                    break
+            # 2. Evict moves that started more than ``window_ns`` ago --
+            #    by definition they are no longer considered in-flight
+            #    for this compute event.  Both lists are sorted, so once
+            #    a move ages out for ``cs`` it stays aged out for every
+            #    later compute event too; pop from the front in O(1).
+            cutoff_ns = cs.timestamp_ns - window_ns
+            while active and active[0].timestamp_ns < cutoff_ns:
+                active.popleft()
 
-                gap_ns = cs.timestamp_ns - mv.timestamp_ns
-                if gap_ns < 0 or gap_ns > window_ns:
-                    continue
-
-                # When tracing system-wide (target_pid=None), the same time
-                # window can contain a BO move from one process and a
-                # compute submission from another.  Those are not real
-                # overlaps -- only same-PID pairs are.
+            # 3. Inspect the active set.  When tracing system-wide
+            #    (``target_pid=None``) the same window can contain a BO
+            #    move from one process and a compute submission from
+            #    another -- those are not real overlaps, only same-PID
+            #    pairs are.
+            for mv in active:
                 if mv.pid != cs.pid:
                     continue
-
-                overlap_us = gap_ns / 1_000.0
-                overlap_ev = DMAOverlapEvent(
+                overlap_us = (cs.timestamp_ns - mv.timestamp_ns) / 1_000.0
+                metrics.overlap_events.append(DMAOverlapEvent(
                     timestamp_ns=cs.timestamp_ns,
                     bo_move_start_ns=mv.timestamp_ns,
                     compute_submit_ns=cs.timestamp_ns,
@@ -427,8 +447,7 @@ class BPFDMATracer:
                     compute_pid=cs.pid,
                     compute_comm=cs.comm,
                     compute_ring=cs.value,
-                )
-                metrics.overlap_events.append(overlap_ev)
+                ))
                 metrics.overlaps_detected += 1
                 overlap_us_values.append(overlap_us)
 

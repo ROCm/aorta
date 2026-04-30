@@ -1398,7 +1398,21 @@ def ebpf_attach(pid: Optional[int], duration: str, output: Optional[str],
                 results[name] = metric
                 click.echo(f"  [{name}] stopped")
             except Exception as e:
+                # If ``stop()`` raises, the tracer's bpftrace subprocess
+                # may still be attached; without an explicit cleanup it
+                # would keep running and writing to the temp log after
+                # the CLI exits.  Best-effort release.
                 click.echo(f"  [{name}] stop failed: {e}", err=True)
+                cleanup = getattr(tracer, "cleanup", None)
+                if callable(cleanup):
+                    try:
+                        cleanup()
+                        click.echo(f"  [{name}] cleanup completed")
+                    except Exception as cleanup_error:
+                        click.echo(
+                            f"  [{name}] cleanup failed: {cleanup_error}",
+                            err=True,
+                        )
 
         # Print results
         click.echo()

@@ -109,6 +109,17 @@ run_test() {
     local duration=10
     local test_timeout=30
 
+    # Per-test overrides: some workloads spend significant time
+    # allocating / initializing / verifying very large buffers and the
+    # default 30s watchdog kills them mid-run, producing flaky results
+    # that look like "no detection" or "no events captured".
+    case "$name" in
+        06_large_alloc_copy|04_large_clean_alloc)
+            test_timeout=180
+            duration=60
+            ;;
+    esac
+
     if [ ! -x "$binary" ]; then
         echo "  SKIP $name (binary not found or not executable)"
         ((SKIP++))

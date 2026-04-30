@@ -330,30 +330,39 @@ def build_bpftrace_script(target_pid: Optional[int] = None) -> str:
     sections: List[str] = []
     pid_filter = f"\n/pid == {target_pid}/" if target_pid is not None else ""
 
-    # --- amdgpu_bo_move ---
-    bo_fields = _probe_fields("amdgpu", "amdgpu_bo_move")
-    if bo_fields is not None:
-        bo_size = ("args->bo_size" if "bo_size" in bo_fields
-                   else ("args->size" if "size" in bo_fields else "0"))
-    else:
-        bo_size = "0"
+    # Every tracepoint section below is gated on ``_check_tp`` so that
+    # a kernel that is missing any one of them (e.g. an older amdgpu
+    # build, or a partially-mounted debugfs that has the category but
+    # not every probe) doesn't take the whole debugger down.  bpftrace
+    # refuses to load a script that references a non-existent
+    # tracepoint, so an unconditional ``tracepoint:amdgpu:foo`` would
+    # abort startup even when the rest of the script would have worked.
 
-    sections.append(f"""\
+    if _check_tp("amdgpu", "amdgpu_bo_move"):
+        bo_fields = _probe_fields("amdgpu", "amdgpu_bo_move")
+        if bo_fields is not None:
+            bo_size = ("args->bo_size" if "bo_size" in bo_fields
+                       else ("args->size" if "size" in bo_fields else "0"))
+        else:
+            bo_size = "0"
+
+        sections.append(f"""\
 tracepoint:amdgpu:amdgpu_bo_move{pid_filter}
 {{
     printf("BO_MOVE|%llu|%d|%s|%d\\n",
            nsecs, pid, comm, {bo_size});
 }}""")
 
-    # --- amdgpu_vm_bo_map / unmap ---
-    sections.append(f"""\
+    if _check_tp("amdgpu", "amdgpu_vm_bo_map"):
+        sections.append(f"""\
 tracepoint:amdgpu:amdgpu_vm_bo_map{pid_filter}
 {{
     printf("VM_MAP|%llu|%d|%s|0\\n",
            nsecs, pid, comm);
 }}""")
 
-    sections.append(f"""\
+    if _check_tp("amdgpu", "amdgpu_vm_bo_unmap"):
+        sections.append(f"""\
 tracepoint:amdgpu:amdgpu_vm_bo_unmap{pid_filter}
 {{
     printf("VM_UNMAP|%llu|%d|%s|0\\n",
@@ -775,6 +784,20 @@ class GPUMemoryDebugger:
             print(_red(
                 "Cannot proceed: need root or CAP_BPF/CAP_PERFMON/"
                 "CAP_SYS_ADMIN to attach eBPF probes."
+            ))
+            sys.exit(1)
+        # Fail early when neither tracepoint family is visible.  Otherwise
+        # ``_start_bpftrace`` would launch a script with no probes (or
+        # with probes for tracepoints the kernel doesn't expose) and exit
+        # with an opaque ``rc=...`` error.  Catching this here gives a
+        # deterministic, actionable message.
+        if (not self._sys_info.get("has_amdgpu_tracepoints", False) and
+                not self._sys_info.get("has_amdkfd_tracepoints", False)):
+            print(_red(
+                "Cannot proceed: no amdgpu or amdkfd tracepoints are "
+                "visible. Ensure the AMD GPU drivers are loaded and "
+                "debugfs is mounted, e.g.:\n"
+                "    sudo mount -t debugfs none /sys/kernel/debug"
             ))
             sys.exit(1)
 
