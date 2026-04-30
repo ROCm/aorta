@@ -16,10 +16,14 @@ positive: $(POSITIVE_BINS)
 
 negative: $(NEGATIVE_BINS)
 
-build/%: positive/%.cpp | build
+# Static pattern rules: each binary list is bound to its own source
+# directory. Plain pattern rules with the same `build/%` target would
+# override each other under GNU Make, silently breaking one of the two
+# build sets.
+$(POSITIVE_BINS): build/%: positive/%.cpp | build
 	$(HIPCC) $(HIPFLAGS) -o $@ $<
 
-build/%: negative/%.cpp | build
+$(NEGATIVE_BINS): build/%: negative/%.cpp | build
 	$(HIPCC) $(HIPFLAGS) -o $@ $<
 
 build:

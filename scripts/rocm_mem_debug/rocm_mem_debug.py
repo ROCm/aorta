@@ -251,14 +251,46 @@ def _list_tracepoints(category: str) -> List[str]:
 
 
 def _check_tp(category: str, name: str) -> bool:
+    """Return True if a tracepoint should be included in the bpftrace script.
+
+    There are three cases we have to distinguish:
+
+    1. The category directory genuinely does not exist (debugfs is not
+       mounted, or the kernel was built without that subsystem). In
+       that case the tracepoint cannot exist either, and emitting a
+       probe for it would make ``bpftrace`` fail at attach time, so we
+       must return ``False``.
+    2. We can see the category directory but the specific tracepoint
+       sub-directory is missing -- treat as unavailable (``False``).
+    3. We can't even ``stat`` the path because of a permission error.
+       We can't determine availability from this process (the caller
+       may later re-exec bpftrace under sudo where it would succeed),
+       so we optimistically return ``True``.
+
+    ``Path.is_dir()`` collapses ENOENT and EACCES into the same
+    ``False`` result, so we have to use ``stat()`` directly to
+    distinguish them.
+    """
     cat_dir = Path(f"/sys/kernel/debug/tracing/events/{category}")
+    try:
+        cat_dir.stat()
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+
     tp_dir = cat_dir / name
     try:
-        if not cat_dir.is_dir():
-            return True
-        return tp_dir.is_dir()
-    except (PermissionError, OSError):
+        tp_dir.stat()
+    except FileNotFoundError:
+        return False
+    except PermissionError:
         return True
+    except OSError:
+        return True
+    return True
 
 
 def _probe_fields(category: str, name: str) -> Optional[Set[str]]:
@@ -462,14 +494,17 @@ def parse_dmesg_line(line: str) -> Optional[DmesgFault]:
     if _DMESG_FALSE_POSITIVE.search(line):
         return None
     ts_match = _DMESG_TS_RE.search(line)
-    ts = 0.0
-    if ts_match:
-        try:
-            ts = float(ts_match.group(1).strip())
-        except ValueError:
-            ts = time.time()
-    else:
-        ts = time.time()
+    if ts_match is None:
+        return None
+    try:
+        ts = float(ts_match.group(1).strip())
+    except ValueError:
+        # The bracketed value isn't seconds-since-boot (e.g. ``dmesg``
+        # was run with ``-T``).  We can't safely correlate this fault
+        # against ``MemEvent.timestamp_s`` (also seconds-since-boot)
+        # without the matching time base, so drop it rather than mix
+        # wall-clock and monotonic clocks in the same window.
+        return None
 
     fault_type = "unknown"
     lower = line.lower()
@@ -871,10 +906,16 @@ class GPUMemoryDebugger:
         print(_green("  bpftrace started"))
 
     def _start_dmesg_monitor(self) -> None:
-        # Use --since to skip historical boot messages and only capture
-        # new kernel messages from now onwards.
+        # IMPORTANT: do NOT pass ``-T``.  The bpftrace probes emit a
+        # kernel monotonic-since-boot timestamp (``nsecs``), and
+        # ``parse_dmesg_line`` parses ``[<float>] ...`` as
+        # seconds-since-boot. ``-T`` would render the dmesg timestamps
+        # as wall-clock strings, which the parser cannot read; the
+        # fallback path then poisoned them with ``time.time()`` (epoch
+        # seconds) and silently broke the fault->event correlation
+        # window because the two time bases are ~50 years apart.
         since_ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-        cmd = ["dmesg", "--follow", "-T", "--since", since_ts]
+        cmd = ["dmesg", "--follow", "--since", since_ts]
         try:
             self._dmesg_proc = subprocess.Popen(
                 cmd,
@@ -882,17 +923,15 @@ class GPUMemoryDebugger:
                 stderr=subprocess.DEVNULL,
                 text=True,
             )
-            # Make stdout non-blocking
             import fcntl
             fd = self._dmesg_proc.stdout.fileno()
             fl = fcntl.fcntl(fd, fcntl.F_GETFL)
             fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
             print(_green("  dmesg monitor started"))
         except Exception:
-            # Fall back to plain --follow if --since is not supported
             try:
                 self._dmesg_proc = subprocess.Popen(
-                    ["dmesg", "--follow", "-T"],
+                    ["dmesg", "--follow"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     text=True,

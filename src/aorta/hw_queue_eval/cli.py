@@ -1279,19 +1279,32 @@ def ebpf_attach(pid: Optional[int], duration: str, output: Optional[str],
     # Check prerequisites.  We do not require the current CLI process to
     # already have root/CAP_BPF here because the tracers default to
     # ``sudo=True`` and may elevate themselves.  Hard-fail only on the
-    # things that no amount of sudo can fix (missing bpftrace or no
-    # tracepoints), and downgrade the privilege check to a warning.
+    # things that no amount of sudo can fix.
+    #
+    # Missing tracepoints can be a *false negative* for an unprivileged
+    # caller because debugfs is often unreadable without elevated
+    # privileges, so the signal is only authoritative when we already
+    # have root/CAP_BPF.  Otherwise downgrade to a warning and let the
+    # tracers' own sudo-elevation try.
     caps = check_ebpf_capabilities()
     if caps.bpftrace_path is None:
         click.echo("Error: bpftrace is not installed.", err=True)
         sys.exit(1)
     if not (caps.has_amdgpu_tracepoints or caps.has_amdkfd_tracepoints):
+        if caps.has_root_or_cap:
+            click.echo(
+                "Error: no amdgpu/amdkfd tracepoints found "
+                "(is debugfs mounted and the amdgpu driver loaded?).",
+                err=True,
+            )
+            sys.exit(1)
         click.echo(
-            "Error: no amdgpu/amdkfd tracepoints found "
-            "(is debugfs mounted and the amdgpu driver loaded?).",
+            "Warning: no amdgpu/amdkfd tracepoints were visible to the "
+            "current process. This may be a false negative if debugfs "
+            "is unreadable without elevated privileges; tracer startup "
+            "will still attempt sudo-based elevation.",
             err=True,
         )
-        sys.exit(1)
     if not caps.has_root_or_cap:
         click.echo(
             "Note: current process lacks root/CAP_BPF; "

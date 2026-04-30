@@ -6,9 +6,17 @@ kernel driver level.  This catches the root cause of NaN issues in
 distributed training: two GPU streams submitting work to the same HW
 ring without synchronization, leading to data corruption.
 
-Key tracepoints:
+Tracepoints attached:
 - amdgpu:amdgpu_cs_ioctl        -- command submission (ring, fence seqno)
-- amdgpu:amdgpu_sched_run_job   -- job dispatched to HW queue (ring, seqno)
+
+The race heuristic is purely submission-based: it inspects pairs of
+submissions on the same ``(pid, ring)`` from different threads within
+``race_window_us`` and flags them when their fence sequence numbers
+diverge by more than 1.  An earlier draft of this module also attached
+``amdgpu:amdgpu_sched_run_job`` to track dispatches, but that signal
+was unused by the analysis and was removed; the ``total_dispatches``
+field on :class:`RaceDetectionMetrics` is preserved for JSON-schema
+back-compat and will always be ``0`` here.
 """
 
 from __future__ import annotations
@@ -120,9 +128,12 @@ def _build_race_detection_script(
 ) -> str:
     """Build a bpftrace script that captures per-submission detail for race analysis.
 
-    Traces both submit and dispatch events with PID, thread ID, ring, and
-    fence sequence numbers so that the user-space correlator can detect
+    Attaches a single tracepoint -- ``amdgpu:amdgpu_cs_ioctl`` -- and
+    emits ``RACE_SUBMIT`` lines carrying PID, thread ID, ring, and
+    fence sequence number so that the user-space correlator can detect
     interleaved submissions from different threads on the same ring.
+    The dispatch tracepoint (``amdgpu:amdgpu_sched_run_job``) is
+    intentionally not attached; see the module docstring for context.
     """
     cs_fields = _probe_tracepoint_fields("amdgpu", "amdgpu_cs_ioctl")
     if cs_fields is not None:
@@ -177,10 +188,13 @@ class BPFRaceDetector:
     """
     Detect stream races at the kernel driver level via bpftrace.
 
-    Traces amdgpu command submissions and dispatches, then analyses
-    the event stream for concurrent same-ring submissions from
-    different threads without sequential fence numbers -- the kernel-
-    level signature of a missing stream synchronization.
+    Traces amdgpu command submissions only (``amdgpu_cs_ioctl``) and
+    analyses the event stream for concurrent same-``(pid, ring)``
+    submissions from different threads without sequential fence
+    numbers -- the kernel-level signature of a missing stream
+    synchronization.  Dispatch-side tracing was removed because the
+    Python-side heuristic never consumed it; ``total_dispatches`` on
+    the returned metrics is therefore always ``0`` for this detector.
 
     Usage::
 
