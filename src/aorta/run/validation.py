@@ -38,6 +38,19 @@ def validate_launch_mode(workload_cls: type[Workload]) -> None:
             f"Invalid WORLD_SIZE={raw_world_size!r}: expected an integer "
             "(launchers should set WORLD_SIZE to the rank count)."
         ) from e
+
+    # WORLD_SIZE is the rank count -- zero or negative is structurally
+    # invalid for both launch modes, regardless of what the workload
+    # declares.  Reject it up-front with a clear message instead of
+    # silently treating ``WORLD_SIZE=0`` like ``WORLD_SIZE=1`` (the
+    # default branch of the ``> 1`` / ``< min`` checks below).
+    if world_size < 1:
+        raise RuntimeError(
+            f"Invalid WORLD_SIZE={world_size}: must be >= 1 "
+            "(launchers set this to the rank count, which is always "
+            "at least 1)."
+        )
+
     launch_mode = workload_cls.launch_mode
     min_world_size = workload_cls.min_world_size
 

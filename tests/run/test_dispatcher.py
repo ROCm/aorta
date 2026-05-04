@@ -116,6 +116,33 @@ class TestRunRequest:
         with pytest.raises(FrozenInstanceError):
             req.workload = "modified"  # type: ignore[misc]
 
+    def test_mutable_fields_are_defensively_copied(self):
+        """Mutating the dicts passed in must not affect the stored request.
+
+        ``frozen=True`` only blocks attribute reassignment.  The dict
+        fields would otherwise still be mutable through the original
+        reference, letting a caller change an in-flight request after
+        ``run_trials`` has read its config.
+        """
+        extra_env_in = {"FOO": "1"}
+        config_in = {"steps": 10, "nested": {"k": "v"}}
+
+        req = RunRequest(
+            workload="w",
+            trials=1,
+            extra_env=extra_env_in,
+            config_overrides=config_in,
+        )
+
+        extra_env_in["FOO"] = "999"
+        extra_env_in["NEW"] = "added"
+        config_in["steps"] = 999
+        config_in["nested"]["k"] = "modified"
+
+        assert req.extra_env == {"FOO": "1"}
+        assert req.config_overrides["steps"] == 10
+        assert req.config_overrides["nested"]["k"] == "v"
+
 
 class TestRunTrials:
     """Tests for run_trials function."""
@@ -191,10 +218,7 @@ class TestRunTrials:
         assert results[0].exit_status == "ok"
         # But the cleanup failure was logged with type + trial_id.
         msgs = [r.getMessage() for r in caplog.records]
-        assert any(
-            "cleanup()" in m and "RuntimeError" in m and "leaky_t0" in m
-            for m in msgs
-        )
+        assert any("cleanup()" in m and "RuntimeError" in m and "leaky_t0" in m for m in msgs)
 
     def test_non_integer_rank_falls_back_to_zero(self, tmp_path, caplog):
         """A non-integer RANK env var must not crash the run."""
@@ -679,6 +703,57 @@ class TestConfigOverrides:
 
 class TestEnvironmentRestoration:
     """Tests for environment variable restoration after trials."""
+
+    def test_environment_restore_does_not_use_global_clear(self, tmp_path):
+        """``run_trials`` must not call ``os.environ.clear()``.
+
+        ``run_trials`` is a public library API, so a global wipe-and-
+        repopulate would, for an instant, blank the entire environment
+        for every other thread reading ``os.environ`` in the process.
+        Use a diff-based restore instead.
+        """
+        clear_calls = [0]
+        original_clear = os.environ.clear
+
+        def tracking_clear():
+            clear_calls[0] += 1
+            original_clear()
+
+        class Trivial(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                pass
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "trivial"
+        mock_ep.load.return_value = Trivial
+
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            with patch.object(os.environ, "clear", tracking_clear):
+                req = RunRequest(
+                    workload="trivial",
+                    trials=2,
+                    mitigations=("tf32_off",),
+                    extra_env={"AORTA_TEST_TS_GUARD": "1"},
+                    results_dir=tmp_path,
+                )
+                run_trials(req)
+
+        assert clear_calls[0] == 0, (
+            "run_trials must restore the environment by diff, "
+            "not via os.environ.clear() + repopulate"
+        )
 
     def test_environment_restored_after_trial(self, tmp_path):
         """Environment is restored after each trial."""

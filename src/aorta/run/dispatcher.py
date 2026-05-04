@@ -8,6 +8,7 @@ The dispatcher is the core of `aorta run`. It:
 5. Persists results as JSON (rank 0 only for distributed)
 """
 
+import copy
 import json
 import logging
 import os
@@ -38,6 +39,13 @@ _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 class RunRequest:
     """Configuration for a run_trials() invocation.
 
+    The dataclass is ``frozen=True`` to prevent attribute reassignment,
+    but ``extra_env`` and ``config_overrides`` are dicts -- ``frozen``
+    does not stop callers from mutating those nested structures.
+    ``__post_init__`` therefore stores deep copies, so an in-flight
+    request can never be mutated out from under the dispatcher.  This
+    mirrors the same defensive pattern used by :class:`TrialResult`.
+
     Attributes:
         workload: Name of the workload to run (from entry-point group).
         trials: Number of trials to execute.
@@ -66,6 +74,13 @@ class RunRequest:
     results_dir: Path = field(default_factory=lambda: Path("results"))
     collect: tuple[str, ...] = field(default_factory=tuple)
     sidecar_files: tuple[Path, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        # Defensively deep-copy mutable dict fields.  ``frozen=True``
+        # blocks attribute reassignment, so we use
+        # ``object.__setattr__`` to install the copies.
+        for field_name in ("extra_env", "config_overrides"):
+            object.__setattr__(self, field_name, copy.deepcopy(getattr(self, field_name)))
 
 
 def run_trials(request: RunRequest) -> list[TrialResult]:
@@ -211,8 +226,10 @@ def _run_single_trial(
     if request.steps is not None:
         config["steps"] = request.steps
 
-    # Save original environment for restoration
-    original_env = dict(os.environ)
+    # Snapshot the env BEFORE applying mitigation / extra_env so the
+    # ``finally`` block can restore both the dispatcher's overlay and
+    # any workload-side mutations introduced by ``setup()`` / ``run()``.
+    pre_trial_env = dict(os.environ)
 
     # Apply mitigation env + extra_env BEFORE the env snapshot.  The
     # snapshot is supposed to describe the actual environment the
@@ -271,9 +288,26 @@ def _run_single_trial(
                     trial_id,
                     exc_info=True,
                 )
-        # Restore original environment
-        os.environ.clear()
-        os.environ.update(original_env)
+        # Restore environment by diff against the pre-trial snapshot.
+        # We deliberately do NOT use ``os.environ.clear() +
+        # os.environ.update(snapshot)`` -- ``run_trials`` is a public
+        # library API and ``clear()`` would, for an instant, blank the
+        # entire environment for every other thread in the process.
+        # The diff approach has no such window: each key transitions
+        # at most once, directly to its target value.
+        current_keys = set(os.environ)
+        saved_keys = set(pre_trial_env)
+        for key in current_keys - saved_keys:
+            # Added during the trial (mitigation / extra_env / workload
+            # setup) -- remove.
+            del os.environ[key]
+        for key, value in pre_trial_env.items():
+            # Restore both the keys we overwrote and any workload-side
+            # mutations to pre-existing keys.  ``os.environ.get`` is
+            # cheap; this skip avoids a redundant write when the value
+            # is already correct.
+            if os.environ.get(key) != value:
+                os.environ[key] = value
 
     wall_clock = time.perf_counter() - start_time
 

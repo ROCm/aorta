@@ -22,17 +22,39 @@ class TestDiscoverWorkloads:
     """Tests for discover_workloads function."""
 
     def test_returns_dict(self):
-        """discover_workloads returns a dict."""
-        workloads = discover_workloads()
+        """discover_workloads returns a dict.
+
+        Use a patched empty entry-point set so the test result is not
+        sensitive to whatever plugins happen to be installed in the
+        ambient environment (which could pollute the dict and trigger
+        warning logs unrelated to this assertion).
+        """
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = []
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            workloads = discover_workloads()
         assert isinstance(workloads, dict)
+        assert workloads == {}
 
     def test_registered_workloads_are_found(self):
-        """Entry-point registered workloads are discovered."""
-        # Note: fsdp is registered in pyproject.toml but the class
-        # doesn't exist yet. This test verifies discovery attempts to load.
-        workloads = discover_workloads()
-        # The dict exists even if loading fails
-        assert isinstance(workloads, dict)
+        """A registered entry-point is found and resolved to its class.
+
+        Patch ``entry_points`` to a deterministic single-entry fixture
+        so the test does not depend on whether ``aorta`` is installed
+        in editable mode (entry-points present) vs. non-editable mode
+        (entry-points missing) in the current environment.
+        """
+        mock_ep = MagicMock()
+        mock_ep.name = "registered_one"
+        mock_ep.load.return_value = MockWorkload
+
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            workloads = discover_workloads()
+
+        assert workloads == {"registered_one": MockWorkload}
 
     def test_handles_load_failure_gracefully(self, caplog):
         """Failed workload loads are logged but don't crash discovery."""
@@ -57,10 +79,18 @@ class TestDiscoverWorkloads:
         assert "mock_good" in workloads
         assert workloads["mock_good"] == MockWorkload
 
-        # Bad workload logged a warning via the module logger
-        assert any(
-            "mock_bad" in record.getMessage() and record.levelno == logging.WARNING
-            for record in caplog.records
+        # Bad workload logged a warning via the module logger,
+        # WITH exc_info attached (otherwise plugin load failures are
+        # essentially undiagnosable -- the most common cause is an
+        # ImportError chain inside the plugin module).
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "mock_bad" in r.getMessage()
+        ]
+        assert warnings, "expected a warning naming the failed entry point"
+        assert any(r.exc_info is not None and r.exc_info[0] is ImportError for r in warnings), (
+            "warning must carry exc_info so the traceback survives"
         )
 
     def test_skips_non_workload_subclass(self, caplog):

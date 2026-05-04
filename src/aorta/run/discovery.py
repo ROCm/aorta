@@ -33,11 +33,14 @@ def discover_workloads() -> dict[str, type[Workload]]:
     for ep in group:
         try:
             cls = ep.load()
-        except Exception as e:
+        except Exception:
             # Log but don't crash - allow other workloads to load.  Use
             # a logger (not print) so library callers can control
-            # verbosity and filter/redirect normally.
-            logger.warning("Failed to load workload '%s': %s", ep.name, e)
+            # verbosity and filter/redirect normally.  ``exc_info=True``
+            # keeps the full traceback on the warning record so plugin
+            # load failures (most often ImportError chains) are
+            # actually diagnosable.
+            logger.warning("Failed to load workload '%s'", ep.name, exc_info=True)
             continue
 
         # Validate that the entry point actually points at a Workload

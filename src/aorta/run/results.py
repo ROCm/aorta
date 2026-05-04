@@ -27,10 +27,21 @@ class TrialResult:
         schema_version: Version of the result schema (for future migration).
         trial_id: Unique identifier for this trial (e.g., "fsdp_t0").
         workload: Name of the workload that was executed.
-        execution_env: Environment descriptor as dict (kind, name, image, etc.).
+        execution_env: Environment descriptor as dict.  Mirrors the
+            :class:`aorta.registry.Environment` shape:
+            ``{"name": str, "docker": str | None, "venv": str | None,
+            "source_package": str}``.  ROCm version, runtime kind, and
+            container image digest are NOT part of this block -- they
+            live inside ``env`` (A1's ``EnvSnapshot``: ``rocm``,
+            ``runtime_context.type``, ``docker.digest``) so that the
+            descriptor stays a static recipe and the snapshot stays a
+            runtime observation.
         mitigations_applied: Tuple of mitigation names that were applied.
         config: Configuration dict passed to the workload.
-        env: Environment snapshot as dict (from A1's collect_env).
+        env: Environment snapshot as dict (from A1's
+            ``collect_env`` -- includes ``rocm``, ``hip``,
+            ``runtime_context``, ``docker``, ``env_vars``,
+            ``partial`` / ``partial_reasons``, etc.).
         result: WorkloadResult serialized to dict.
         wall_clock_sec: Total wall clock time for the trial.
         exit_status: Outcome of the trial execution.

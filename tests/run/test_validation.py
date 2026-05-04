@@ -138,6 +138,32 @@ class TestDistributedValidation:
             validate_launch_mode(DistributedWorkload4)
 
 
+class TestInvalidWorldSize:
+    """Tests for structurally-invalid WORLD_SIZE values.
+
+    WORLD_SIZE is the rank count, so values < 1 are nonsensical
+    regardless of what the workload declares -- reject them up-front
+    with a clear message instead of silently treating ``WORLD_SIZE=0``
+    like the ``> 1`` / ``< min`` branches don't fire.
+    """
+
+    def test_world_size_zero_raises(self):
+        """WORLD_SIZE=0 is structurally invalid."""
+        with patch.dict(os.environ, {"WORLD_SIZE": "0"}, clear=False):
+            with pytest.raises(RuntimeError) as exc_info:
+                validate_launch_mode(SingleProcessWorkload)
+            assert "WORLD_SIZE=0" in str(exc_info.value)
+            assert "must be >= 1" in str(exc_info.value)
+
+    def test_world_size_negative_raises(self):
+        """Negative WORLD_SIZE is structurally invalid."""
+        with patch.dict(os.environ, {"WORLD_SIZE": "-1"}, clear=False):
+            with pytest.raises(RuntimeError) as exc_info:
+                validate_launch_mode(DistributedWorkload)
+            assert "WORLD_SIZE=-1" in str(exc_info.value)
+            assert "must be >= 1" in str(exc_info.value)
+
+
 class TestErrorMessages:
     """Tests for error message quality."""
 

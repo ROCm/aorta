@@ -150,10 +150,11 @@ def run(
                 )
             extra_env_dict[k] = v.strip()
 
-    # Build config overrides
+    # Build config overrides.  ``steps`` is carried by the dedicated
+    # ``RunRequest.steps`` field; do NOT also stuff it into
+    # ``config_overrides`` -- that would create two copies of the same
+    # value, ambiguous if a future caller ever writes only one of them.
     config_overrides: dict = {}
-    if steps is not None:
-        config_overrides["steps"] = steps
 
     # Build request
     req = RunRequest(
