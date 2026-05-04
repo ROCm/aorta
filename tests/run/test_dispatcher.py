@@ -8,7 +8,6 @@ from unittest.mock import patch, MagicMock
 
 from aorta.run.dispatcher import RunRequest, run_trials, _run_single_trial
 from aorta.run.results import TrialResult
-from aorta.run._stubs import Environment
 from aorta.workloads import Workload, WorkloadResult
 
 
@@ -385,6 +384,54 @@ class TestMitigationUnion:
             run_trials(req)
 
         assert captured_env.get("DISABLE_TF32") == "1"
+
+    def test_env_snapshot_reflects_mitigation_env(self, tmp_path):
+        """``env_snapshot`` must be captured AFTER mitigations apply.
+
+        The persisted snapshot is supposed to describe the *actual*
+        environment the workload ran under.  ``tf32_off`` sets
+        ``DISABLE_TF32=1``, which is in A1's canonical env-var list, so
+        it should appear in the trial result's ``env.env_vars``.
+        Capturing pre-application would silently lose this signal.
+        """
+        class TrivialWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                pass
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "trivial"
+        mock_ep.load.return_value = TrivialWorkload
+
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        original = os.environ.pop("DISABLE_TF32", None)
+        try:
+            with patch("importlib.metadata.entry_points", return_value=mock_eps):
+                req = RunRequest(
+                    workload="trivial",
+                    trials=1,
+                    mitigations=("tf32_off",),
+                    results_dir=tmp_path,
+                )
+                results = run_trials(req)
+        finally:
+            if original is not None:
+                os.environ["DISABLE_TF32"] = original
+
+        env_vars = results[0].env.get("env_vars", {})
+        assert env_vars.get("DISABLE_TF32") == "1", (
+            "snapshot must reflect the mitigation env -- order bug if missing"
+        )
 
     def test_extra_env_overrides_mitigations(self, tmp_path):
         """extra_env overrides mitigation env vars."""

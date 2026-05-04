@@ -101,6 +101,26 @@ class TestCliParsing:
         assert result.exit_code != 0
         assert "Invalid extra-env key" in result.output
 
+    def test_default_results_dir_does_not_require_existing_path(self, tmp_path):
+        """``--results-dir`` must accept a non-existent path.
+
+        Click's ``writable=True`` validation rejects paths that do not
+        already exist, which broke the default ``results`` on a fresh
+        checkout.  Letting the dispatcher's ``mkdir`` handle creation
+        keeps the failure mode consistent with ``aorta env probe``.
+        """
+        runner = CliRunner()
+        target = tmp_path / "does" / "not" / "exist"
+        # ``--workload nonexistent`` ensures we fail at workload
+        # discovery, not at Click's path validation.
+        result = runner.invoke(run, [
+            "--workload", "nonexistent",
+            "--results-dir", str(target),
+        ])
+        # Click should NOT have rejected the path before invoking the
+        # callback -- if it had, we'd see "Invalid value for '--results-dir'".
+        assert "Invalid value for '--results-dir'" not in result.output
+
     def test_steps_option(self):
         """--steps is passed as integer."""
         runner = CliRunner()

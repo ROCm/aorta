@@ -128,7 +128,7 @@ class TestEndToEndDispatcher:
         assert data["mitigations_applied"] == ["tf32_off"]
 
     def test_execution_env_populated(self, tmp_path, mock_workload):
-        """Execution environment metadata is populated."""
+        """Execution environment metadata mirrors the registry Environment."""
         req = RunRequest(
             workload="integration_test",
             trials=1,
@@ -139,11 +139,16 @@ class TestEndToEndDispatcher:
         results = run_trials(req)
 
         exec_env = results[0].execution_env
-        assert exec_env["kind"] == "local"
+        # Schema mirrors aorta.registry.Environment: name + docker +
+        # venv + source_package.  The built-in "local" has no docker /
+        # venv (current process) and is sourced from the aorta package.
         assert exec_env["name"] == "local"
+        assert exec_env["docker"] is None
+        assert exec_env["venv"] is None
+        assert exec_env["source_package"] == "aorta"
 
     def test_env_snapshot_captured(self, tmp_path, mock_workload):
-        """Environment snapshot is captured for each trial."""
+        """Environment snapshot from aorta.instrumentation is captured."""
         req = RunRequest(
             workload="integration_test",
             trials=1,
@@ -152,9 +157,15 @@ class TestEndToEndDispatcher:
 
         results = run_trials(req)
 
+        # A1 EnvSnapshot schema -- spot-check stable, always-present fields.
         env = results[0].env
-        assert "hostname" in env
+        assert "schema_version" in env
         assert "python_version" in env
+        assert "env_vars" in env
+        # ``partial`` is always populated (True/False); ``partial_reasons``
+        # is always a list.  Together they form A1's fail-soft contract.
+        assert isinstance(env.get("partial"), bool)
+        assert isinstance(env.get("partial_reasons"), list)
 
     def test_wall_clock_measured(self, tmp_path, mock_workload):
         """Wall clock time is measured for each trial."""
@@ -314,27 +325,33 @@ class TestErrorScenarios:
         assert "not found" in result.output.lower()
 
     def test_unknown_environment_error(self, mock_workload):
-        """Unknown environment raises clear error."""
+        """Unknown environment raises a clear registry error."""
+        from aorta.registry import UnknownEnvironmentError
+
         req = RunRequest(
             workload="integration_test",
             trials=1,
             environment="nonexistent_env",
         )
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(UnknownEnvironmentError) as exc_info:
             run_trials(req)
 
-        assert "Unknown environment" in str(exc_info.value)
+        assert "unknown environment" in str(exc_info.value).lower()
+        assert "nonexistent_env" in str(exc_info.value)
 
     def test_unknown_mitigation_error(self, mock_workload):
-        """Unknown mitigation raises clear error."""
+        """Unknown mitigation raises a clear registry error."""
+        from aorta.registry import UnknownMitigationError
+
         req = RunRequest(
             workload="integration_test",
             trials=1,
             mitigations=("nonexistent_mitigation",),
         )
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(UnknownMitigationError) as exc_info:
             run_trials(req)
 
-        assert "Unknown mitigation" in str(exc_info.value)
+        assert "unknown mitigation" in str(exc_info.value).lower()
+        assert "nonexistent_mitigation" in str(exc_info.value)

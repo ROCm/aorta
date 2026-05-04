@@ -16,21 +16,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
-from aorta.workloads import Workload, WorkloadResult
+from aorta.instrumentation.environment import collect_env
+from aorta.registry import Environment, get_environment, get_mitigation
 from aorta.run.collectors import KNOWN_RECIPES
 from aorta.run.discovery import get_workload_class
-from aorta.run.validation import validate_launch_mode
 from aorta.run.results import TrialResult
+from aorta.run.validation import validate_launch_mode
+from aorta.workloads import Workload, WorkloadResult
 
-# Import from stubs (replace when A1/B3 land)
-from aorta.run._stubs import (
-    collect_env,
-    get_environment,
-    get_mitigation,
-    Environment,
-)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -78,9 +72,12 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
 
     Raises:
         ValueError: If ``trials`` is not positive, an unknown collector
-            recipe is requested, or workload/environment/mitigation is
-            not found.
-        RuntimeError: If launch mode validation fails.
+            recipe is requested, or the workload is not found.
+        UnknownEnvironmentError / UnknownMitigationError: If the
+            requested environment or mitigation is not in the registry
+            (both subclass ``KeyError`` -- callers can also catch
+            ``LookupError`` to handle either).
+        RuntimeError: If launch-mode validation fails.
     """
     # 1. Validate trial count.  ``trials <= 0`` would silently no-op,
     #    which is almost never what either the CLI or a library caller
@@ -110,11 +107,12 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     # 5. Resolve environment
     env_descriptor = get_environment(request.environment)
 
-    # 6. Resolve and union mitigations
+    # 6. Resolve and union mitigations.  ``aorta.registry.get_mitigation``
+    #    returns a defensive ``dict[str, str]`` per-call, so later
+    #    mitigations naturally win over earlier ones in the union.
     mitigation_env: dict[str, str] = {}
     for name in request.mitigations:
-        mitigation = get_mitigation(name)
-        mitigation_env.update(mitigation.env_vars)
+        mitigation_env.update(get_mitigation(name))
 
     # 7. Determine if we should write (rank 0 only for distributed).
     #    Only rank 0 needs the output directory; creating it on every
@@ -181,9 +179,6 @@ def _run_single_trial(
     # which would corrupt ``wall_clock_sec``.
     start_time = time.perf_counter()
 
-    # Capture environment snapshot (using stub, replace with A1 when available)
-    env_snapshot = collect_env()
-
     # Build config
     config: dict[str, Any] = {**request.config_overrides}
     if request.steps is not None:
@@ -192,9 +187,18 @@ def _run_single_trial(
     # Save original environment for restoration
     original_env = dict(os.environ)
 
-    # Apply mitigation env + extra_env
+    # Apply mitigation env + extra_env BEFORE the env snapshot.  The
+    # snapshot is supposed to describe the actual environment the
+    # workload ran under -- including operator overrides like
+    # ``HSA_XNACK=1`` from a mitigation or one-off ``DISABLE_TF32=1``
+    # from ``--extra-env``.  Capturing pre-override loses that signal
+    # for reproducibility / debugging.
     os.environ.update(mitigation_env)
     os.environ.update(request.extra_env)
+
+    # Capture environment snapshot AFTER env-var application.
+    # ``collect_env`` is fail-soft and never raises (see A1 docs).
+    env_snapshot = collect_env()
 
     # Instantiate and run workload
     exit_status: str = "ok"
@@ -237,14 +241,15 @@ def _run_single_trial(
 
     wall_clock = time.perf_counter() - start_time
 
-    # Build execution_env block
+    # Build execution_env block.  Mirrors the public
+    # ``aorta.registry.Environment`` shape (no ``kind`` / ``rocm`` --
+    # those were stub-isms; ROCm version now lives inside
+    # ``env_snapshot.rocm`` and the runtime kind in
+    # ``env_snapshot.runtime_context.type``).
     execution_env = {
-        "kind": env_descriptor.kind,
         "name": env_descriptor.name,
-        "image": env_descriptor.docker,
-        "digest": None,  # Best-effort, would need docker inspect
+        "docker": env_descriptor.docker,
         "venv": env_descriptor.venv,
-        "rocm": env_descriptor.rocm,
         "source_package": env_descriptor.source_package,
     }
 

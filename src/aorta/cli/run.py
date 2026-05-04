@@ -56,8 +56,13 @@ from aorta.run.dispatcher import RunRequest, run_trials
 )
 @click.option(
     "--results-dir",
-    type=click.Path(file_okay=False, writable=True),
-    default="results",
+    # NOTE: do NOT pass ``writable=True`` -- Click's writable check
+    # rejects paths that don't exist yet (the default ``results`` on a
+    # fresh checkout), and the dispatcher creates the directory itself.
+    # Letting the dispatcher's ``mkdir`` surface real I/O errors keeps
+    # the failure mode consistent with ``aorta env probe``.
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("results"),
     show_default=True,
     help="Directory to write per-trial JSON.",
 )
@@ -78,7 +83,7 @@ def run(
     mitigations: str,
     mitigation_files: tuple[Path, ...],
     steps: int | None,
-    results_dir: str,
+    results_dir: Path,
     collect: str,
     extra_env: str,
 ) -> None:
@@ -156,19 +161,25 @@ def run(
         mitigations=mitigation_list,
         steps=steps,
         config_overrides=config_overrides,
-        results_dir=Path(results_dir),
+        results_dir=results_dir,
         collect=collect_list,
         extra_env=extra_env_dict,
     )
 
-    # Call dispatcher
+    # Call dispatcher.  Bridge known library exceptions to ClickException
+    # so the CLI prints a clean error instead of a Python traceback:
+    #
+    # * ``ValueError``  -- bad ``trials`` / unknown workload / unknown
+    #                      collector recipe.
+    # * ``LookupError`` -- ``UnknownEnvironmentError`` /
+    #                      ``UnknownMitigationError`` from the registry
+    #                      (both subclass ``KeyError``).
+    # * ``RuntimeError``-- launch-mode validation failure.
     try:
         results = run_trials(req)
-    except ValueError as e:
-        # Workload/environment/mitigation not found
+    except (ValueError, LookupError) as e:
         raise click.ClickException(str(e))
     except RuntimeError as e:
-        # Launch mode validation failed
         raise click.ClickException(str(e))
 
     # Report results
