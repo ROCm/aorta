@@ -4,6 +4,7 @@ The TrialResult wraps WorkloadResult with additional metadata about
 the execution environment, configuration, and timing.
 """
 
+import copy
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -13,6 +14,14 @@ class TrialResult:
     """Per-trial result wrapper around WorkloadResult.
 
     Schema version 0.1 (unstable until external consumers pin it).
+
+    The dataclass is ``frozen=True`` to prevent attribute reassignment,
+    but ``execution_env`` / ``config`` / ``env`` / ``result`` are dicts
+    -- ``frozen`` does not stop callers from mutating those nested
+    structures.  ``__post_init__`` and ``from_dict`` therefore store
+    deep copies, so a ``TrialResult`` is effectively immutable from
+    construction time and an in-memory result can never silently drift
+    from its persisted JSON form.
 
     Attributes:
         schema_version: Version of the result schema (for future migration).
@@ -38,24 +47,43 @@ class TrialResult:
     exit_status: Literal["ok", "workload_failed", "infrastructure_failed", "timeout"]
     schema_version: str = "0.1"
 
+    def __post_init__(self) -> None:
+        # Defensively deep-copy the mutable dict fields so the caller
+        # cannot mutate them out from under us after construction.
+        # ``frozen=True`` blocks attribute reassignment, so we use
+        # ``object.__setattr__`` to install the copies.
+        for field_name in ("execution_env", "config", "env", "result"):
+            object.__setattr__(
+                self, field_name, copy.deepcopy(getattr(self, field_name))
+            )
+
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to JSON-compatible dict."""
+        """Serialize to JSON-compatible dict.
+
+        Returns deep copies of the mutable dict fields so callers cannot
+        mutate the result's internal state by editing the serialized
+        view.
+        """
         return {
             "schema_version": self.schema_version,
             "trial_id": self.trial_id,
             "workload": self.workload,
-            "execution_env": self.execution_env,
+            "execution_env": copy.deepcopy(self.execution_env),
             "mitigations_applied": list(self.mitigations_applied),
-            "config": self.config,
-            "env": self.env,
-            "result": self.result,
+            "config": copy.deepcopy(self.config),
+            "env": copy.deepcopy(self.env),
+            "result": copy.deepcopy(self.result),
             "wall_clock_sec": self.wall_clock_sec,
             "exit_status": self.exit_status,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TrialResult":
-        """Deserialize from dict."""
+        """Deserialize from dict.
+
+        ``__post_init__`` deep-copies the mutable fields, so subsequent
+        mutation of ``data`` cannot affect the constructed instance.
+        """
         return cls(
             schema_version=data.get("schema_version", "0.1"),
             trial_id=data["trial_id"],

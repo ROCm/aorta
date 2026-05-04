@@ -6,9 +6,12 @@ Both public workloads (in aorta.workloads.*) and private workloads
 """
 
 import importlib.metadata
+import logging
 from typing import Type
 
 from aorta.workloads import Workload
+
+logger = logging.getLogger(__name__)
 
 
 def discover_workloads() -> dict[str, Type[Workload]]:
@@ -18,8 +21,9 @@ def discover_workloads() -> dict[str, Type[Workload]]:
         Dict mapping workload names to their classes.
 
     Note:
-        Failed imports are logged but don't crash discovery, allowing
-        other workloads to still be available.
+        Failed imports and entries that don't resolve to a ``Workload``
+        subclass are logged via the ``aorta.run.discovery`` logger but
+        do not crash discovery -- other workloads remain available.
     """
     workloads: dict[str, Type[Workload]] = {}
     # The project requires Python >= 3.10 (see pyproject.toml), so the
@@ -30,10 +34,27 @@ def discover_workloads() -> dict[str, Type[Workload]]:
     for ep in group:
         try:
             cls = ep.load()
-            workloads[ep.name] = cls
         except Exception as e:
-            # Log but don't crash - allow other workloads to load
-            print(f"Warning: Failed to load workload '{ep.name}': {e}")
+            # Log but don't crash - allow other workloads to load.  Use
+            # a logger (not print) so library callers can control
+            # verbosity and filter/redirect normally.
+            logger.warning("Failed to load workload '%s': %s", ep.name, e)
+            continue
+
+        # Validate that the entry point actually points at a Workload
+        # subclass.  Mis-registered plugins (returning a function, an
+        # instance, or an unrelated class) would otherwise be returned
+        # here and fail much later with a confusing AttributeError /
+        # TypeError inside the dispatcher.
+        if not isinstance(cls, type) or not issubclass(cls, Workload):
+            logger.warning(
+                "Entry point '%s' = %r is not a Workload subclass; skipping.",
+                ep.name,
+                cls,
+            )
+            continue
+
+        workloads[ep.name] = cls
 
     return workloads
 

@@ -123,3 +123,49 @@ class TestTrialResult:
                 exit_status=status,  # type: ignore[arg-type]
             )
             assert result.exit_status == status
+
+    def test_mutable_fields_are_defensively_copied(self):
+        """Mutating the dict passed in must not affect the stored value."""
+        config = {"steps": 10, "nested": {"k": "v"}}
+        env = {"HOST": "h"}
+        result = TrialResult(
+            trial_id="t",
+            workload="w",
+            execution_env={"kind": "local"},
+            mitigations_applied=(),
+            config=config,
+            env=env,
+            result={"passed": True},
+            wall_clock_sec=1.0,
+            exit_status="ok",
+        )
+
+        # Outer-level mutation
+        config["steps"] = 999
+        # Nested mutation
+        config["nested"]["k"] = "modified"
+        env["HOST"] = "mutated"
+
+        assert result.config["steps"] == 10
+        assert result.config["nested"]["k"] == "v"
+        assert result.env["HOST"] == "h"
+
+    def test_to_dict_returns_independent_copies(self):
+        """Mutating to_dict() output must not affect the TrialResult."""
+        result = TrialResult(
+            trial_id="t",
+            workload="w",
+            execution_env={"kind": "local"},
+            mitigations_applied=(),
+            config={"steps": 10},
+            env={"HOST": "h"},
+            result={"passed": True},
+            wall_clock_sec=1.0,
+            exit_status="ok",
+        )
+        data = result.to_dict()
+        data["config"]["steps"] = 999
+        data["env"]["HOST"] = "mutated"
+
+        assert result.config["steps"] == 10
+        assert result.env["HOST"] == "h"

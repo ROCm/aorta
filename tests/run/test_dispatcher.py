@@ -127,6 +127,42 @@ class TestRunTrials:
         PassingWorkload.cleanup_called = False
         yield
 
+    def test_rejects_non_positive_trials(self, tmp_path):
+        """run_trials raises ValueError when trials < 1."""
+        for bad in (0, -1, -100):
+            req = RunRequest(workload="anything", trials=bad, results_dir=tmp_path)
+            with pytest.raises(ValueError, match="trials must be >= 1"):
+                run_trials(req)
+
+    def test_non_integer_rank_falls_back_to_zero(self, tmp_path, caplog):
+        """A non-integer RANK env var must not crash the run."""
+        import logging
+
+        mock_ep = MagicMock()
+        mock_ep.name = "passing"
+        mock_ep.load.return_value = PassingWorkload
+
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with caplog.at_level(logging.WARNING, logger="aorta.run.dispatcher"):
+            with patch("importlib.metadata.entry_points", return_value=mock_eps):
+                with patch.dict(os.environ, {"RANK": "not-a-number"}):
+                    req = RunRequest(
+                        workload="passing", trials=1, results_dir=tmp_path,
+                    )
+                    results = run_trials(req)
+
+        assert len(results) == 1
+        assert results[0].exit_status == "ok"
+        # Rank parsing fell back to 0, so the JSON file *was* written.
+        assert (tmp_path / "passing" / "trial_0.json").exists()
+        # And we logged a warning about the bad value.
+        assert any(
+            "RANK" in record.getMessage() and record.levelno == logging.WARNING
+            for record in caplog.records
+        )
+
     def test_runs_workload_lifecycle(self, tmp_path):
         """Dispatcher calls setup, run, cleanup in order."""
         mock_ep = MagicMock()

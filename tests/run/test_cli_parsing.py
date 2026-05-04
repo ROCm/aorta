@@ -81,6 +81,26 @@ class TestCliParsing:
         assert result.exit_code != 0
         assert "Invalid extra-env format" in result.output
 
+    def test_extra_env_empty_key_rejected(self):
+        """``=VALUE`` (empty key) is rejected with a clear error."""
+        runner = CliRunner()
+        result = runner.invoke(run, [
+            "--workload", "fsdp",
+            "--extra-env", "=somevalue",
+        ])
+        assert result.exit_code != 0
+        assert "key is empty" in result.output
+
+    def test_extra_env_invalid_key_rejected(self):
+        """Keys that don't match the env-var name pattern are rejected."""
+        runner = CliRunner()
+        result = runner.invoke(run, [
+            "--workload", "fsdp",
+            "--extra-env", "1BAD=value",
+        ])
+        assert result.exit_code != 0
+        assert "Invalid extra-env key" in result.output
+
     def test_steps_option(self):
         """--steps is passed as integer."""
         runner = CliRunner()

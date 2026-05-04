@@ -9,11 +9,14 @@ The dispatcher is the core of `aorta run`. It:
 """
 
 import json
+import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from aorta.workloads import Workload, WorkloadResult
 from aorta.run.collectors import KNOWN_RECIPES
@@ -74,10 +77,20 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
         List of TrialResult objects, one per trial.
 
     Raises:
-        ValueError: If workload or environment/mitigation not found.
+        ValueError: If ``trials`` is not positive, an unknown collector
+            recipe is requested, or workload/environment/mitigation is
+            not found.
         RuntimeError: If launch mode validation fails.
     """
-    # 1. Validate collector recipe names.  The CLI also validates this
+    # 1. Validate trial count.  ``trials <= 0`` would silently no-op,
+    #    which is almost never what either the CLI or a library caller
+    #    intended.
+    if request.trials < 1:
+        raise ValueError(
+            f"trials must be >= 1 (got {request.trials})"
+        )
+
+    # 2. Validate collector recipe names.  The CLI also validates this
     #    against KNOWN_RECIPES, but ``run_trials`` is a public library
     #    API consumed by B2 (triage matrix runner) -- programmatic
     #    callers deserve the same protection.
@@ -88,26 +101,35 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             f"Valid: {sorted(KNOWN_RECIPES)}"
         )
 
-    # 2. Discover workload
+    # 3. Discover workload
     workload_cls = get_workload_class(request.workload)
 
-    # 3. Validate launch mode BEFORE setup()
+    # 4. Validate launch mode BEFORE setup()
     validate_launch_mode(workload_cls)
 
-    # 4. Resolve environment
+    # 5. Resolve environment
     env_descriptor = get_environment(request.environment)
 
-    # 5. Resolve and union mitigations
+    # 6. Resolve and union mitigations
     mitigation_env: dict[str, str] = {}
     for name in request.mitigations:
         mitigation = get_mitigation(name)
         mitigation_env.update(mitigation.env_vars)
 
-    # 6. Determine if we should write (rank 0 only for distributed).
+    # 7. Determine if we should write (rank 0 only for distributed).
     #    Only rank 0 needs the output directory; creating it on every
     #    rank causes shared-FS contention and weakens the rank-0-only
-    #    write guarantee.
-    rank = int(os.environ.get("RANK", "0"))
+    #    write guarantee.  Parse RANK defensively -- a misconfigured
+    #    launcher passing a non-integer should not crash the run.
+    raw_rank = os.environ.get("RANK", "0")
+    try:
+        rank = int(raw_rank)
+    except ValueError:
+        logger.warning(
+            "Ignoring non-integer RANK=%r; treating this process as rank 0.",
+            raw_rank,
+        )
+        rank = 0
     should_write = rank == 0
     results_dir = request.results_dir / request.workload
     if should_write:

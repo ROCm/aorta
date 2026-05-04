@@ -33,9 +33,10 @@ class TestDiscoverWorkloads:
         # The dict exists even if loading fails
         assert isinstance(workloads, dict)
 
-    def test_handles_load_failure_gracefully(self, capsys):
+    def test_handles_load_failure_gracefully(self, caplog):
         """Failed workload loads are logged but don't crash discovery."""
-        # Mock entry points to include a failing one
+        import logging
+
         mock_ep_good = MagicMock()
         mock_ep_good.name = "mock_good"
         mock_ep_good.load.return_value = MockWorkload
@@ -47,17 +48,58 @@ class TestDiscoverWorkloads:
         mock_eps = MagicMock()
         mock_eps.select.return_value = [mock_ep_good, mock_ep_bad]
 
-        with patch("importlib.metadata.entry_points", return_value=mock_eps):
-            workloads = discover_workloads()
+        with caplog.at_level(logging.WARNING, logger="aorta.run.discovery"):
+            with patch("importlib.metadata.entry_points", return_value=mock_eps):
+                workloads = discover_workloads()
 
         # Good workload should still be loaded
         assert "mock_good" in workloads
         assert workloads["mock_good"] == MockWorkload
 
-        # Bad workload logged warning
-        captured = capsys.readouterr()
-        assert "mock_bad" in captured.out
-        assert "Warning" in captured.out
+        # Bad workload logged a warning via the module logger
+        assert any(
+            "mock_bad" in record.getMessage() and record.levelno == logging.WARNING
+            for record in caplog.records
+        )
+
+    def test_skips_non_workload_subclass(self, caplog):
+        """Entry points that don't resolve to a Workload subclass are skipped."""
+        import logging
+
+        # A plain function -- not a class at all.
+        def not_a_class():
+            return "nope"
+
+        # A class, but not a Workload subclass.
+        class NotAWorkload:
+            pass
+
+        ep_func = MagicMock()
+        ep_func.name = "bad_func"
+        ep_func.load.return_value = not_a_class
+
+        ep_class = MagicMock()
+        ep_class.name = "bad_class"
+        ep_class.load.return_value = NotAWorkload
+
+        ep_good = MagicMock()
+        ep_good.name = "good"
+        ep_good.load.return_value = MockWorkload
+
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [ep_func, ep_class, ep_good]
+
+        with caplog.at_level(logging.WARNING, logger="aorta.run.discovery"):
+            with patch("importlib.metadata.entry_points", return_value=mock_eps):
+                workloads = discover_workloads()
+
+        assert "good" in workloads
+        assert "bad_func" not in workloads
+        assert "bad_class" not in workloads
+        # Both invalid entries logged a warning.
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("bad_func" in m for m in msgs)
+        assert any("bad_class" in m for m in msgs)
 
     def test_discovery_with_multiple_workloads(self):
         """Multiple workloads can be discovered."""

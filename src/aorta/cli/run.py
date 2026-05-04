@@ -4,8 +4,7 @@ CLI entry point for running workloads across trials, environments, and mitigatio
 This is a thin wrapper around the library API in aorta.run.dispatcher.
 """
 
-from pathlib import Path
-
+import re
 from pathlib import Path
 
 import click
@@ -115,7 +114,12 @@ def run(
             f"Valid: {sorted(KNOWN_RECIPES)}"
         )
 
-    # Parse extra_env (format: KEY=VAL,KEY2=VAL2)
+    # Parse extra_env (format: KEY=VAL,KEY2=VAL2).  We validate that
+    # the key is a plausible environment variable name -- otherwise the
+    # actual ``os.environ.update`` would raise the much less friendly
+    # ``ValueError: illegal environment variable name`` deep inside the
+    # dispatcher.
+    _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     extra_env_dict: dict[str, str] = {}
     if extra_env:
         for pair in extra_env.split(","):
@@ -127,7 +131,17 @@ def run(
                     f"Invalid extra-env format: '{pair}'. Expected KEY=VALUE."
                 )
             k, v = pair.split("=", 1)
-            extra_env_dict[k.strip()] = v.strip()
+            k = k.strip()
+            if not k:
+                raise click.ClickException(
+                    f"Invalid extra-env entry '{pair}': key is empty."
+                )
+            if not _ENV_KEY_RE.match(k):
+                raise click.ClickException(
+                    f"Invalid extra-env key '{k}': must match "
+                    "[A-Za-z_][A-Za-z0-9_]*."
+                )
+            extra_env_dict[k] = v.strip()
 
     # Build config overrides
     config_overrides: dict = {}
