@@ -10,11 +10,13 @@ Supported recipes:
     amd_log: AMD internal logging collector
 """
 
-KNOWN_RECIPES: frozenset[str] = frozenset({
-    "rocprof",
-    "numerics",
-    "amd_log",
-})
+KNOWN_RECIPES: frozenset[str] = frozenset(
+    {
+        "rocprof",
+        "numerics",
+        "amd_log",
+    }
+)
 
 
 __all__ = ["KNOWN_RECIPES"]

@@ -6,12 +6,11 @@ misconfiguration errors early with clear error messages.
 """
 
 import os
-from typing import Type
 
 from aorta.workloads import Workload
 
 
-def validate_launch_mode(workload_cls: Type[Workload]) -> None:
+def validate_launch_mode(workload_cls: type[Workload]) -> None:
     """Validate WORLD_SIZE matches workload's launch_mode declaration.
 
     This validation runs before setup() to catch misconfiguration early.

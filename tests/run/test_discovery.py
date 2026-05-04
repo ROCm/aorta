@@ -1,7 +1,8 @@
 """Tests for workload discovery via entry-points."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 from aorta.run.discovery import discover_workloads, get_workload_class
 from aorta.workloads import Workload, WorkloadResult

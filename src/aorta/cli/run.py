@@ -9,8 +9,13 @@ from pathlib import Path
 
 import click
 
+from aorta.registry import RegistryError
 from aorta.run.collectors import KNOWN_RECIPES
 from aorta.run.dispatcher import RunRequest, run_trials
+
+# Module-level so the regex is compiled once and the function-local
+# binding doesn't trip ruff's N806 (uppercase-name-in-function).
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @click.command()
@@ -44,8 +49,10 @@ from aorta.run.dispatcher import RunRequest, run_trials
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     multiple=True,
     help=(
-        "JSON file with ad-hoc mitigations and/or environments (repeatable). "
-        "Click verifies the file exists; JSON parsing + consumption land with task B1."
+        "JSON sidecar file with ad-hoc mitigations and/or environments "
+        "(repeatable).  Forwarded to the registry; sidecar entries are "
+        "merged with built-ins and entry-point plugins, with the same "
+        "name-collision rules (B3.1)."
     ),
 )
 @click.option(
@@ -115,8 +122,7 @@ def run(
     invalid = set(collect_list) - KNOWN_RECIPES
     if invalid:
         raise click.ClickException(
-            f"Unknown collector recipes: {sorted(invalid)}. "
-            f"Valid: {sorted(KNOWN_RECIPES)}"
+            f"Unknown collector recipes: {sorted(invalid)}. Valid: {sorted(KNOWN_RECIPES)}"
         )
 
     # Parse extra_env (format: KEY=VAL,KEY2=VAL2).  We validate that
@@ -124,7 +130,6 @@ def run(
     # actual ``os.environ.update`` would raise the much less friendly
     # ``ValueError: illegal environment variable name`` deep inside the
     # dispatcher.
-    _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     extra_env_dict: dict[str, str] = {}
     if extra_env:
         for pair in extra_env.split(","):
@@ -138,13 +143,10 @@ def run(
             k, v = pair.split("=", 1)
             k = k.strip()
             if not k:
-                raise click.ClickException(
-                    f"Invalid extra-env entry '{pair}': key is empty."
-                )
+                raise click.ClickException(f"Invalid extra-env entry '{pair}': key is empty.")
             if not _ENV_KEY_RE.match(k):
                 raise click.ClickException(
-                    f"Invalid extra-env key '{k}': must match "
-                    "[A-Za-z_][A-Za-z0-9_]*."
+                    f"Invalid extra-env key '{k}': must match [A-Za-z_][A-Za-z0-9_]*."
                 )
             extra_env_dict[k] = v.strip()
 
@@ -164,23 +166,26 @@ def run(
         results_dir=results_dir,
         collect=collect_list,
         extra_env=extra_env_dict,
+        sidecar_files=tuple(mitigation_files),
     )
 
     # Call dispatcher.  Bridge known library exceptions to ClickException
     # so the CLI prints a clean error instead of a Python traceback:
     #
-    # * ``ValueError``  -- bad ``trials`` / unknown workload / unknown
-    #                      collector recipe.
-    # * ``LookupError`` -- ``UnknownEnvironmentError`` /
-    #                      ``UnknownMitigationError`` from the registry
-    #                      (both subclass ``KeyError``).
-    # * ``RuntimeError``-- launch-mode validation failure.
+    # * ``ValueError``    -- bad ``trials`` / unknown workload / unknown
+    #                        collector recipe / invalid extra_env key.
+    # * ``LookupError``   -- ``UnknownEnvironmentError`` /
+    #                        ``UnknownMitigationError`` from the registry
+    #                        (both subclass ``KeyError``).
+    # * ``RegistryError`` -- malformed sidecar / collision between
+    #                        sidecar entries and built-ins / plugins.
+    # * ``RuntimeError``  -- launch-mode validation failure.
     try:
         results = run_trials(req)
-    except (ValueError, LookupError) as e:
-        raise click.ClickException(str(e))
+    except (ValueError, LookupError, RegistryError) as e:
+        raise click.ClickException(str(e)) from e
     except RuntimeError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
 
     # Report results
     total = len(results)

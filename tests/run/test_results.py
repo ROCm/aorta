@@ -1,6 +1,7 @@
 """Tests for TrialResult dataclass."""
 
 import pytest
+
 from aorta.run.results import TrialResult
 
 
@@ -94,6 +95,8 @@ class TestTrialResult:
 
     def test_trial_result_is_frozen(self):
         """TrialResult is immutable."""
+        from dataclasses import FrozenInstanceError
+
         result = TrialResult(
             trial_id="test_0",
             workload="fsdp",
@@ -105,7 +108,7 @@ class TestTrialResult:
             wall_clock_sec=1.0,
             exit_status="ok",
         )
-        with pytest.raises(Exception):  # FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
             result.trial_id = "modified"  # type: ignore[misc]
 
     def test_exit_status_values(self):

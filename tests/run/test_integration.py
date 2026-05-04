@@ -1,16 +1,13 @@
 """End-to-end integration tests for aorta run."""
 
 import json
-import os
-import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from aorta.cli.run import run as run_cmd
 from aorta.run.dispatcher import RunRequest, run_trials
-from aorta.run.results import TrialResult
 from aorta.workloads import Workload, WorkloadResult
 
 
@@ -186,11 +183,17 @@ class TestEndToEndCli:
     def test_cli_success_message(self, tmp_path, mock_workload):
         """CLI shows success message on passing trials."""
         runner = CliRunner()
-        result = runner.invoke(run_cmd, [
-            "--workload", "integration_test",
-            "--trials", "1",
-            "--results-dir", str(tmp_path),
-        ])
+        result = runner.invoke(
+            run_cmd,
+            [
+                "--workload",
+                "integration_test",
+                "--trials",
+                "1",
+                "--results-dir",
+                str(tmp_path),
+            ],
+        )
 
         assert result.exit_code == 0
         assert "passed" in result.output.lower()
@@ -199,11 +202,17 @@ class TestEndToEndCli:
     def test_cli_writes_json(self, tmp_path, mock_workload):
         """CLI writes JSON files to results directory."""
         runner = CliRunner()
-        runner.invoke(run_cmd, [
-            "--workload", "integration_test",
-            "--trials", "2",
-            "--results-dir", str(tmp_path),
-        ])
+        runner.invoke(
+            run_cmd,
+            [
+                "--workload",
+                "integration_test",
+                "--trials",
+                "2",
+                "--results-dir",
+                str(tmp_path),
+            ],
+        )
 
         assert (tmp_path / "integration_test" / "trial_0.json").exists()
         assert (tmp_path / "integration_test" / "trial_1.json").exists()
@@ -211,12 +220,19 @@ class TestEndToEndCli:
     def test_cli_with_steps(self, tmp_path, mock_workload):
         """CLI --steps option is passed to workload."""
         runner = CliRunner()
-        runner.invoke(run_cmd, [
-            "--workload", "integration_test",
-            "--trials", "1",
-            "--steps", "75",
-            "--results-dir", str(tmp_path),
-        ])
+        runner.invoke(
+            run_cmd,
+            [
+                "--workload",
+                "integration_test",
+                "--trials",
+                "1",
+                "--steps",
+                "75",
+                "--results-dir",
+                str(tmp_path),
+            ],
+        )
 
         json_path = tmp_path / "integration_test" / "trial_0.json"
         with open(json_path) as f:
@@ -227,12 +243,19 @@ class TestEndToEndCli:
     def test_cli_with_mitigations(self, tmp_path, mock_workload):
         """CLI --mitigations option is recorded."""
         runner = CliRunner()
-        runner.invoke(run_cmd, [
-            "--workload", "integration_test",
-            "--trials", "1",
-            "--mitigations", "tf32_off",
-            "--results-dir", str(tmp_path),
-        ])
+        runner.invoke(
+            run_cmd,
+            [
+                "--workload",
+                "integration_test",
+                "--trials",
+                "1",
+                "--mitigations",
+                "tf32_off",
+                "--results-dir",
+                str(tmp_path),
+            ],
+        )
 
         json_path = tmp_path / "integration_test" / "trial_0.json"
         with open(json_path) as f:
@@ -317,9 +340,13 @@ class TestErrorScenarios:
     def test_unknown_workload_error_cli(self):
         """CLI reports clear error for unknown workload."""
         runner = CliRunner()
-        result = runner.invoke(run_cmd, [
-            "--workload", "definitely_nonexistent_workload_xyz",
-        ])
+        result = runner.invoke(
+            run_cmd,
+            [
+                "--workload",
+                "definitely_nonexistent_workload_xyz",
+            ],
+        )
 
         assert result.exit_code != 0
         assert "not found" in result.output.lower()

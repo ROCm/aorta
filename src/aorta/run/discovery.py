@@ -7,14 +7,13 @@ Both public workloads (in aorta.workloads.*) and private workloads
 
 import importlib.metadata
 import logging
-from typing import Type
 
 from aorta.workloads import Workload
 
 logger = logging.getLogger(__name__)
 
 
-def discover_workloads() -> dict[str, Type[Workload]]:
+def discover_workloads() -> dict[str, type[Workload]]:
     """Discover all workloads registered under aorta.workloads entry-point group.
 
     Returns:
@@ -25,7 +24,7 @@ def discover_workloads() -> dict[str, Type[Workload]]:
         subclass are logged via the ``aorta.run.discovery`` logger but
         do not crash discovery -- other workloads remain available.
     """
-    workloads: dict[str, Type[Workload]] = {}
+    workloads: dict[str, type[Workload]] = {}
     # The project requires Python >= 3.10 (see pyproject.toml), so the
     # ``EntryPoints.select`` API is always available; the older 3.9
     # ``entry_points().get(...)`` form is intentionally not supported.
@@ -59,7 +58,7 @@ def discover_workloads() -> dict[str, Type[Workload]]:
     return workloads
 
 
-def get_workload_class(name: str) -> Type[Workload]:
+def get_workload_class(name: str) -> type[Workload]:
     """Get workload class by name.
 
     Args:

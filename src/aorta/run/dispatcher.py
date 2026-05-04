@@ -11,6 +11,7 @@ The dispatcher is the core of `aorta run`. It:
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -25,6 +26,12 @@ from aorta.run.validation import validate_launch_mode
 from aorta.workloads import Workload, WorkloadResult
 
 logger = logging.getLogger(__name__)
+
+# Conservative POSIX env-var name shape: must start with a letter or
+# underscore and contain only [A-Za-z0-9_].  The CLI also enforces this
+# at parse time; library callers pass ``extra_env`` directly so we
+# re-validate here for parity.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -41,6 +48,12 @@ class RunRequest:
         config_overrides: Additional workload configuration.
         results_dir: Directory to write per-trial JSON files.
         collect: Collector recipe names (MVP: validated but no-op).
+        sidecar_files: JSON sidecar files describing ad-hoc mitigations
+            and/or environments (B3.1).  Forwarded to
+            ``aorta.registry.get_mitigation`` /
+            ``aorta.registry.get_environment`` so that names declared in
+            the sidecar resolve in the same call as built-ins and
+            entry-point plugins.
     """
 
     workload: str
@@ -52,6 +65,7 @@ class RunRequest:
     config_overrides: dict[str, Any] = field(default_factory=dict)
     results_dir: Path = field(default_factory=lambda: Path("results"))
     collect: tuple[str, ...] = field(default_factory=tuple)
+    sidecar_files: tuple[Path, ...] = field(default_factory=tuple)
 
 
 def run_trials(request: RunRequest) -> list[TrialResult]:
@@ -83,9 +97,7 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     #    which is almost never what either the CLI or a library caller
     #    intended.
     if request.trials < 1:
-        raise ValueError(
-            f"trials must be >= 1 (got {request.trials})"
-        )
+        raise ValueError(f"trials must be >= 1 (got {request.trials})")
 
     # 2. Validate collector recipe names.  The CLI also validates this
     #    against KNOWN_RECIPES, but ``run_trials`` is a public library
@@ -98,23 +110,38 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             f"Valid: {sorted(KNOWN_RECIPES)}"
         )
 
-    # 3. Discover workload
+    # 3. Validate ``extra_env`` keys.  The CLI validates this at parse
+    #    time, but library callers (B2, future programmatic users) pass
+    #    ``extra_env`` directly -- without parity here, a bad key would
+    #    only fail mid-trial inside ``os.environ.update`` with the much
+    #    less friendly ``ValueError: illegal environment variable name``.
+    bad_keys = [k for k in request.extra_env if not _ENV_KEY_RE.match(k)]
+    if bad_keys:
+        raise ValueError(
+            f"Invalid extra_env keys {bad_keys}: each key must match "
+            "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
+        )
+
+    # 4. Discover workload
     workload_cls = get_workload_class(request.workload)
 
-    # 4. Validate launch mode BEFORE setup()
+    # 5. Validate launch mode BEFORE setup()
     validate_launch_mode(workload_cls)
 
-    # 5. Resolve environment
-    env_descriptor = get_environment(request.environment)
+    # 6. Resolve environment.  Forward ``sidecar_files`` so any
+    #    operator-supplied JSON sidecars (B3.1) are merged with
+    #    built-ins and entry-point plugins.
+    sidecar_files = list(request.sidecar_files) or None
+    env_descriptor = get_environment(request.environment, extra_files=sidecar_files)
 
-    # 6. Resolve and union mitigations.  ``aorta.registry.get_mitigation``
+    # 7. Resolve and union mitigations.  ``aorta.registry.get_mitigation``
     #    returns a defensive ``dict[str, str]`` per-call, so later
     #    mitigations naturally win over earlier ones in the union.
     mitigation_env: dict[str, str] = {}
     for name in request.mitigations:
-        mitigation_env.update(get_mitigation(name))
+        mitigation_env.update(get_mitigation(name, extra_files=sidecar_files))
 
-    # 7. Determine if we should write (rank 0 only for distributed).
+    # 8. Determine if we should write (rank 0 only for distributed).
     #    Only rank 0 needs the output directory; creating it on every
     #    rank causes shared-FS contention and weakens the rank-0-only
     #    write guarantee.  Parse RANK defensively -- a misconfigured
@@ -133,7 +160,7 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     if should_write:
         results_dir.mkdir(parents=True, exist_ok=True)
 
-    # 7. Run trials
+    # 9. Run trials
     results: list[TrialResult] = []
     for trial_idx in range(request.trials):
         result = _run_single_trial(
@@ -233,8 +260,17 @@ def _run_single_trial(
         if workload is not None:
             try:
                 workload.cleanup()
-            except Exception:
-                pass
+            except Exception as cleanup_exc:
+                # Log -- silently swallowing makes leaked GPU memory /
+                # process groups invisible to the operator.  Use
+                # ``exc_info=True`` so the original traceback survives.
+                logger.warning(
+                    "workload.cleanup() raised %s during trial '%s'; "
+                    "continuing so the original outcome is preserved.",
+                    type(cleanup_exc).__name__,
+                    trial_id,
+                    exc_info=True,
+                )
         # Restore original environment
         os.environ.clear()
         os.environ.update(original_env)

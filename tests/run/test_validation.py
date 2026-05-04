@@ -1,8 +1,9 @@
 """Tests for launch mode validation."""
 
 import os
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 from aorta.run.validation import validate_launch_mode
 from aorta.workloads import Workload, WorkloadResult

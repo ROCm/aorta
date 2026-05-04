@@ -2,12 +2,12 @@
 
 import json
 import os
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from aorta.run.dispatcher import RunRequest, run_trials, _run_single_trial
-from aorta.run.results import TrialResult
+import pytest
+
+from aorta.run.dispatcher import RunRequest, run_trials
 from aorta.workloads import Workload, WorkloadResult
 
 
@@ -110,8 +110,10 @@ class TestRunRequest:
 
     def test_is_frozen(self):
         """RunRequest is immutable."""
+        from dataclasses import FrozenInstanceError
+
         req = RunRequest(workload="test", trials=1)
-        with pytest.raises(Exception):  # FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
             req.workload = "modified"  # type: ignore[misc]
 
 
@@ -133,6 +135,67 @@ class TestRunTrials:
             with pytest.raises(ValueError, match="trials must be >= 1"):
                 run_trials(req)
 
+    def test_rejects_invalid_extra_env_keys(self, tmp_path):
+        """``extra_env`` validation must mirror the CLI's parse-time check.
+
+        Library callers (B2 triage matrix, programmatic users) pass
+        ``extra_env`` directly without going through CLI parsing.
+        Without this check, a bad key would only surface mid-trial
+        inside ``os.environ.update`` with a much less friendly error.
+        """
+        for bad in ({"": "v"}, {"1BAD": "v"}, {"with space": "v"}, {"=foo": "v"}):
+            req = RunRequest(
+                workload="anything",
+                trials=1,
+                extra_env=bad,
+                results_dir=tmp_path,
+            )
+            with pytest.raises(ValueError, match="Invalid extra_env keys"):
+                run_trials(req)
+
+    def test_cleanup_error_is_logged_not_swallowed(self, tmp_path, caplog):
+        """A failing ``cleanup()`` is logged so leaked resources are visible."""
+        import logging
+
+        class CleanupExplodes(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                pass
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                raise RuntimeError("simulated GPU teardown failure")
+
+        mock_ep = MagicMock()
+        mock_ep.name = "leaky"
+        mock_ep.load.return_value = CleanupExplodes
+
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with caplog.at_level(logging.WARNING, logger="aorta.run.dispatcher"):
+            with patch("importlib.metadata.entry_points", return_value=mock_eps):
+                req = RunRequest(
+                    workload="leaky",
+                    trials=1,
+                    results_dir=tmp_path,
+                )
+                results = run_trials(req)
+
+        # The trial itself still passed -- cleanup failure must NOT
+        # mask the original outcome.
+        assert results[0].exit_status == "ok"
+        # But the cleanup failure was logged with type + trial_id.
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "cleanup()" in m and "RuntimeError" in m and "leaky_t0" in m
+            for m in msgs
+        )
+
     def test_non_integer_rank_falls_back_to_zero(self, tmp_path, caplog):
         """A non-integer RANK env var must not crash the run."""
         import logging
@@ -148,7 +211,9 @@ class TestRunTrials:
             with patch("importlib.metadata.entry_points", return_value=mock_eps):
                 with patch.dict(os.environ, {"RANK": "not-a-number"}):
                     req = RunRequest(
-                        workload="passing", trials=1, results_dir=tmp_path,
+                        workload="passing",
+                        trials=1,
+                        results_dir=tmp_path,
                     )
                     results = run_trials(req)
 
@@ -385,6 +450,62 @@ class TestMitigationUnion:
 
         assert captured_env.get("DISABLE_TF32") == "1"
 
+    def test_sidecar_files_are_forwarded_to_registry(self, tmp_path):
+        """``--mitigations-file`` (sidecar_files) must reach the registry.
+
+        Pin the wiring with a real B3.1 sidecar JSON: declare a custom
+        mitigation, drive a trial through it, and confirm the env-var
+        actually appears in the live ``os.environ`` during ``setup()``.
+        Regression guard: previously the CLI parsed the option and
+        dropped it on the floor.
+        """
+        captured: dict[str, str] = {}
+
+        class CaptureWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured.update(os.environ)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        sidecar = tmp_path / "site_mitigations.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "mitigations": {
+                        "sidecar_only_mit": {"AORTA_TEST_SIDECAR": "yes"},
+                    },
+                }
+            )
+        )
+
+        mock_ep = MagicMock()
+        mock_ep.name = "capture"
+        mock_ep.load.return_value = CaptureWorkload
+
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="capture",
+                trials=1,
+                mitigations=("sidecar_only_mit",),
+                results_dir=tmp_path,
+                sidecar_files=(sidecar,),
+            )
+            results = run_trials(req)
+
+        assert results[0].exit_status == "ok"
+        assert captured.get("AORTA_TEST_SIDECAR") == "yes"
+
     def test_env_snapshot_reflects_mitigation_env(self, tmp_path):
         """``env_snapshot`` must be captured AFTER mitigations apply.
 
@@ -394,6 +515,7 @@ class TestMitigationUnion:
         it should appear in the trial result's ``env.env_vars``.
         Capturing pre-application would silently lose this signal.
         """
+
         class TrivialWorkload(Workload):
             launch_mode = "single_process"
             min_world_size = 1

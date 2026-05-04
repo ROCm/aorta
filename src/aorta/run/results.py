@@ -53,9 +53,7 @@ class TrialResult:
         # ``frozen=True`` blocks attribute reassignment, so we use
         # ``object.__setattr__`` to install the copies.
         for field_name in ("execution_env", "config", "env", "result"):
-            object.__setattr__(
-                self, field_name, copy.deepcopy(getattr(self, field_name))
-            )
+            object.__setattr__(self, field_name, copy.deepcopy(getattr(self, field_name)))
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict.
