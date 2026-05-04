@@ -143,21 +143,3 @@ class TestGetWorkloadClass:
         alpha_pos = error_msg.find("alpha")
         zeta_pos = error_msg.find("zeta")
         assert alpha_pos < zeta_pos
-
-
-class TestPython39Compatibility:
-    """Tests for Python 3.9 API compatibility."""
-
-    def test_uses_get_api_when_select_not_available(self):
-        """Falls back to .get() API for Python 3.9."""
-        mock_ep = MagicMock()
-        mock_ep.name = "fallback_workload"
-        mock_ep.load.return_value = MockWorkload
-
-        # Mock entry_points without select method (Python 3.9 API)
-        mock_eps = {"aorta.workloads": [mock_ep]}
-
-        with patch("importlib.metadata.entry_points", return_value=mock_eps):
-            workloads = discover_workloads()
-
-        assert "fallback_workload" in workloads

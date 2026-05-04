@@ -31,7 +31,14 @@ def validate_launch_mode(workload_cls: Type[Workload]) -> None:
         RuntimeError: Workload 'FsdpWorkload' requires WORLD_SIZE >= 2
             (got 1); launch with: torchrun --nproc_per_node=2 -m aorta run ...
     """
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    raw_world_size = os.environ.get("WORLD_SIZE", "1")
+    try:
+        world_size = int(raw_world_size)
+    except ValueError as e:
+        raise RuntimeError(
+            f"Invalid WORLD_SIZE={raw_world_size!r}: expected an integer "
+            "(launchers should set WORLD_SIZE to the rank count)."
+        ) from e
     launch_mode = workload_cls.launch_mode
     min_world_size = workload_cls.min_world_size
 

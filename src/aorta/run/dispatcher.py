@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from aorta.workloads import Workload, WorkloadResult
+from aorta.run.collectors import KNOWN_RECIPES
 from aorta.run.discovery import get_workload_class
 from aorta.run.validation import validate_launch_mode
 from aorta.run.results import TrialResult
@@ -76,28 +77,41 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
         ValueError: If workload or environment/mitigation not found.
         RuntimeError: If launch mode validation fails.
     """
-    # 1. Discover workload
+    # 1. Validate collector recipe names.  The CLI also validates this
+    #    against KNOWN_RECIPES, but ``run_trials`` is a public library
+    #    API consumed by B2 (triage matrix runner) -- programmatic
+    #    callers deserve the same protection.
+    invalid_collectors = set(request.collect) - KNOWN_RECIPES
+    if invalid_collectors:
+        raise ValueError(
+            f"Unknown collector recipes: {sorted(invalid_collectors)}. "
+            f"Valid: {sorted(KNOWN_RECIPES)}"
+        )
+
+    # 2. Discover workload
     workload_cls = get_workload_class(request.workload)
 
-    # 2. Validate launch mode BEFORE setup()
+    # 3. Validate launch mode BEFORE setup()
     validate_launch_mode(workload_cls)
 
-    # 3. Resolve environment
+    # 4. Resolve environment
     env_descriptor = get_environment(request.environment)
 
-    # 4. Resolve and union mitigations
+    # 5. Resolve and union mitigations
     mitigation_env: dict[str, str] = {}
     for name in request.mitigations:
         mitigation = get_mitigation(name)
         mitigation_env.update(mitigation.env_vars)
 
-    # 5. Create results directory
-    results_dir = request.results_dir / request.workload
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    # 6. Determine if we should write (rank 0 only for distributed)
+    # 6. Determine if we should write (rank 0 only for distributed).
+    #    Only rank 0 needs the output directory; creating it on every
+    #    rank causes shared-FS contention and weakens the rank-0-only
+    #    write guarantee.
     rank = int(os.environ.get("RANK", "0"))
     should_write = rank == 0
+    results_dir = request.results_dir / request.workload
+    if should_write:
+        results_dir.mkdir(parents=True, exist_ok=True)
 
     # 7. Run trials
     results: list[TrialResult] = []
@@ -140,7 +154,10 @@ def _run_single_trial(
         TrialResult with execution outcome.
     """
     trial_id = f"{request.workload}_t{trial_idx}"
-    start_time = time.time()
+    # ``perf_counter`` is monotonic; ``time.time()`` can jump backward
+    # or forward when the system clock is adjusted (NTP, suspend/resume),
+    # which would corrupt ``wall_clock_sec``.
+    start_time = time.perf_counter()
 
     # Capture environment snapshot (using stub, replace with A1 when available)
     env_snapshot = collect_env()
@@ -160,12 +177,15 @@ def _run_single_trial(
     # Instantiate and run workload
     exit_status: str = "ok"
     workload_result: WorkloadResult
+    workload: Workload | None = None
 
     try:
-        workload = workload_cls(config=config)
+        # Construct positionally to match the documented Workload(config)
+        # contract -- third-party plugins are free to name their first
+        # parameter something other than ``config``.
+        workload = workload_cls(config)
         workload.setup()
         workload_result = workload.run()
-        workload.cleanup()
 
         if not workload_result.passed:
             exit_status = "workload_failed"
@@ -180,11 +200,20 @@ def _run_single_trial(
         )
 
     finally:
+        # Always attempt cleanup if the workload was constructed, even
+        # when setup()/run() raised -- otherwise we leak GPU memory,
+        # process groups, file handles, etc.  Cleanup failures are not
+        # allowed to mask the original exception/exit_status.
+        if workload is not None:
+            try:
+                workload.cleanup()
+            except Exception:
+                pass
         # Restore original environment
         os.environ.clear()
         os.environ.update(original_env)
 
-    wall_clock = time.time() - start_time
+    wall_clock = time.perf_counter() - start_time
 
     # Build execution_env block
     execution_env = {

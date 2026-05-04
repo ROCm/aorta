@@ -22,13 +22,10 @@ def discover_workloads() -> dict[str, Type[Workload]]:
         other workloads to still be available.
     """
     workloads: dict[str, Type[Workload]] = {}
-    eps = importlib.metadata.entry_points()
-
-    # Handle both Python 3.10+ (select) and 3.9 (get) APIs
-    if hasattr(eps, "select"):
-        group = eps.select(group="aorta.workloads")
-    else:
-        group = eps.get("aorta.workloads", [])
+    # The project requires Python >= 3.10 (see pyproject.toml), so the
+    # ``EntryPoints.select`` API is always available; the older 3.9
+    # ``entry_points().get(...)`` form is intentionally not supported.
+    group = importlib.metadata.entry_points().select(group="aorta.workloads")
 
     for ep in group:
         try:
