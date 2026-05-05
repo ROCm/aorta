@@ -98,7 +98,7 @@ failure is localisable without reading the loader source.
 <output-dir>/
   <ticket or _no_ticket_>/
     <workload>/
-      <timestamp>/                              # e.g. 2026-04-28T14-12-03
+      <timestamp>[-N]/                          # e.g. 2026-04-28T14-12-03; -2, -3 ... on same-second collisions
         matrix.md
         matrix.json
         recipe.resolved.yaml                    # post-resolution snapshot

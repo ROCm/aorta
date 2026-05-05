@@ -485,6 +485,140 @@ def test_operator_sidecars_copied_into_run_dir_for_replay(
     assert archived.read_text() == sidecar.read_text()
 
 
+# ---- Class D: same-second collision -> -N suffix, never overwrite -------
+
+
+def test_resolve_run_dir_appends_suffix_on_same_timestamp(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Two runs in the same wall-clock second must NOT overwrite each other.
+
+    Pre-fix: ``mkdir(exist_ok=True)`` silently reused the directory and the
+    second run clobbered the first run's matrix.{md,json}, contradicting the
+    "never overwrites" docstring guarantee. Easy to hit in CI loops.
+    """
+    r = _simple_recipe(ticket="T-1")
+    ts = "2026-02-03T04-05-06"
+    first = runner.run_recipe(r, output_dir=tmp_path, timestamp=ts)
+    second = runner.run_recipe(r, output_dir=tmp_path, timestamp=ts)
+    assert first != second
+    assert first.exists() and second.exists()
+    # Disambiguator is the documented "-N" suffix on the leaf only.
+    assert first.name == ts
+    assert second.name == f"{ts}-2"
+    # Both runs produced their own artifacts (no clobber).
+    assert (first / "matrix.md").exists()
+    assert (second / "matrix.md").exists()
+
+
+def test_resolve_run_dir_handles_many_collisions(tmp_path, patched_env, patched_run_trials):
+    """Suffix counter advances past -2 when -2 also exists."""
+    r = _simple_recipe(ticket="T-1")
+    ts = "2026-02-03T04-05-06"
+    dirs = [runner.run_recipe(r, output_dir=tmp_path, timestamp=ts) for _ in range(5)]
+    names = [d.name for d in dirs]
+    assert names == [ts, f"{ts}-2", f"{ts}-3", f"{ts}-4", f"{ts}-5"]
+    # No two paths collide.
+    assert len(set(dirs)) == len(dirs)
+
+
+# ---- Class B: dry-run runs the same preflight as real run ----------------
+
+
+def test_dry_run_rejects_unresolvable_baseline():
+    """Pre-fix: dry-run printed a clean summary for recipes a real run rejected.
+
+    Pin the new contract: anything that ``run_recipe(..., dry_run=False)``
+    rejects at preflight must also be rejected by ``--dry-run``, so CI
+    pre-submit checks are honest.
+    """
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, RecipeCellError
+
+    # Multi-cell recipe with no auto-resolvable baseline (no `baseline-*`
+    # name, no `mitigations: [none]`, and no explicit baseline_cell).
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(
+            Cell(name="a-local", mitigations=("tf32_off",), environment="local"),
+            Cell(name="b-local", mitigations=("xnack",), environment="local"),
+        ),
+        ticket="T-1",
+        confound=ConfoundCfg(),
+        inline_environments=(),
+    )
+    with pytest.raises(RecipeCellError, match="cannot resolve baseline cell"):
+        runner.run_recipe(r, output_dir="ignored", dry_run=True)
+
+
+def test_dry_run_rejects_env_slug_collision(tmp_path):
+    """Dry-run must surface env-slug collisions before printing the summary."""
+    from aorta.registry import RegistryError as _RegErr
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(
+            Cell(name="c1", mitigations=("none",), environment="a/b"),
+            Cell(name="c2", mitigations=("none",), environment="a:b"),
+        ),
+        ticket="T-1",
+        confound=ConfoundCfg(),
+        inline_environments=(),
+    )
+    with pytest.raises(_RegErr, match="filesystem component"):
+        runner.run_recipe(r, output_dir="ignored", dry_run=True)
+
+
+def test_dry_run_does_not_create_run_dir_on_validation_failure(tmp_path):
+    """Preflight runs BEFORE resolve_run_dir, so a failed dry-run must not
+    leave breadcrumbs on the filesystem."""
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, RecipeCellError
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(
+            Cell(name="a-local", mitigations=("tf32_off",), environment="local"),
+            Cell(name="b-local", mitigations=("xnack",), environment="local"),
+        ),
+        ticket="T-1",
+        confound=ConfoundCfg(),
+        inline_environments=(),
+    )
+    with pytest.raises(RecipeCellError):
+        runner.run_recipe(r, output_dir=tmp_path, dry_run=True)
+    # No T-1/ subtree should have been created.
+    assert not (tmp_path / "T-1").exists()
+
+
+# ---- Class C: matrix.md reproducibility wording matches README -----------
+
+
+def test_matrix_md_does_not_overpromise_reproducibility(tmp_path, patched_env, patched_run_trials):
+    """The Notes footer used to claim recipe.resolved.yaml 'captures the
+    registry state at run time', which is false: named mitigations and
+    environments are not expanded, so a registry change between runs
+    silently changes behaviour. Pin the corrected wording.
+    """
+    r = _simple_recipe()
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    md = (run_dir / "matrix.md").read_text()
+    # Old, overpromising sentence must be gone.
+    assert "captures the registry state at run time" not in md
+    # New wording explicitly flags the inline-vs-named asymmetry and points
+    # operators at matrix.json::cells[*].resolved_env_vars for drift detection.
+    assert "NOT expanded" in md
+    assert "resolved_env_vars" in md
+
+
 def test_isolated_env_check_honors_sidecar_files(
     tmp_path, patched_env, patched_run_trials, monkeypatch
 ):

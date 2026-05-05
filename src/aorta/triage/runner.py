@@ -342,6 +342,32 @@ def _run_one_cell(
     return trials, None, resolved_env_vars, trial_paths
 
 
+def _preflight_validate(recipe: Recipe) -> None:
+    """Run every fail-fast check that does NOT need the filesystem.
+
+    Centralised so dry-run and real-run share the same validation surface:
+    a recipe that ``--dry-run`` accepts must always be acceptable to
+    ``run_recipe(..., dry_run=False)``. Previously dry-run skipped these
+    checks and printed a clean summary for recipes that the real run then
+    rejected -- exactly the kind of "validation-only execution" footgun
+    the dry-run flag is supposed to prevent.
+
+    Currently this covers:
+
+    * environment-name slug collisions across cells (would otherwise raise
+      mid-run, after the host_env probe + sidecar copies have already
+      written to disk).
+    * baseline resolution (the configured / auto-resolved baseline must
+      exist; an unresolvable baseline turns ``classify_all`` into a
+      ``RecipeCellError`` deep inside the run loop).
+
+    Any callable added here MUST be pure (no FS / network / subprocess
+    side-effects) so dry-run truly stays read-only on the host.
+    """
+    _check_env_slug_collisions(recipe.cells)
+    resolve_baseline(recipe.cells, recipe.confound.baseline_cell)
+
+
 def _print_dry_run(recipe: Recipe) -> None:
     """Write the resolved cell list to stdout without touching the filesystem."""
     click.echo(f"Dry run: {recipe.workload} / ticket={recipe.ticket or '(none)'}")
@@ -386,6 +412,12 @@ def run_recipe(
     Returns:
         The run directory path (``<output-dir>/<ticket>/<workload>/<timestamp>``).
     """
+    # Preflight first, BEFORE the dry-run early-return: dry-run is documented
+    # as "validation without execution", so it must reject everything the
+    # real run would reject. Otherwise CI / pre-submit checks happily pass on
+    # recipes that fail the moment they actually run.
+    _preflight_validate(recipe)
+
     if dry_run:
         _print_dry_run(recipe)
         return Path(".")
@@ -418,12 +450,9 @@ def run_recipe(
 
     env_dir = run_dir / "environments"
 
-    # Detect environment names whose safe_slug collapses to the same dir
-    # component BEFORE we start writing env.json snapshots. Without this,
-    # distinct registered names like "a/b" and "a:b" both slug to "a_b" and
-    # the second probe would silently overwrite the first (matrix.json keeps
-    # them as distinct envs, which would mismatch the on-disk artifact).
-    _check_env_slug_collisions(recipe.cells)
+    # Env-slug collision + baseline resolution were already enforced by
+    # _preflight_validate at the very top of run_recipe (so dry-run sees the
+    # same errors). No need to re-check here.
 
     cell_stats: list[CellStats] = []
     for cell in recipe.cells:

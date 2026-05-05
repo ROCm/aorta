@@ -489,3 +489,45 @@ def test_cli_list_environments_wraps_registry_error_in_click_exception(tmp_path)
     assert result.exit_code != 0
     assert "Error:" in result.output
     assert "Traceback" not in result.output
+
+
+def test_cli_run_wraps_run_recipe_errors_in_click_exception(tmp_path, patched_env):
+    """Recipe-level errors raised from run_recipe (NOT load_recipe) must also
+    surface as a one-line ClickException, matching ``aorta run`` and the
+    list subcommands.
+
+    Pre-fix: ``triage run`` only wrapped ``load_recipe`` /
+    ``build_recipe_from_flags``, so anything raised later -- baseline
+    resolution, env-slug collisions, etc. -- escaped as a Python traceback.
+    The two flavours of error were the same shape but exited the CLI
+    differently depending on which validator caught them.
+    """
+    recipe = tmp_path / "bad.yaml"
+    # Multi-cell recipe with no auto-resolvable baseline -- load_recipe
+    # accepts it (baseline resolution is run-time, by design), but
+    # _preflight_validate inside run_recipe rejects it.
+    recipe.write_text(
+        """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 5
+cells:
+  - name: a-local
+    mitigations: [tf32_off]
+    environment: local
+  - name: b-local
+    mitigations: [xnack]
+    environment: local
+""",
+        encoding="utf-8",
+    )
+    cli = CliRunner()
+    result = cli.invoke(
+        triage,
+        ["run", "--recipe", str(recipe), "--output-dir", str(tmp_path / "out")],
+    )
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert "baseline" in result.output.lower()
+    assert "Traceback" not in result.output

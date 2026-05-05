@@ -200,12 +200,22 @@ def triage_run(
         except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
             raise click.ClickException(str(exc)) from exc
 
-    run_dir = run_recipe(
-        r,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        extra_sidecar_files=mitigation_files,
-    )
+    # Errors from run_recipe (preflight env-slug collisions, baseline
+    # resolution failures, sidecar / mitigation lookups inside _run_one_cell
+    # are already swallowed per-cell -- but recipe-level rejections are not)
+    # must surface as the same one-line ClickException shape as the load
+    # path. Without this wrapper they escape as raw Python tracebacks even
+    # though the recipe-loader path one-lines them: same kind of error,
+    # different exit shape, depending on which validator catches it.
+    try:
+        run_dir = run_recipe(
+            r,
+            output_dir=output_dir,
+            dry_run=dry_run,
+            extra_sidecar_files=mitigation_files,
+        )
+    except (RegistryError, RecipeCellError, RecipeSchemaError) as exc:
+        raise click.ClickException(str(exc)) from exc
     if not dry_run:
         click.echo(f"Wrote matrix to {run_dir}")
 

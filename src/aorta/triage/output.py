@@ -78,18 +78,41 @@ def resolve_run_dir(
     recipe: Recipe,
     timestamp: str | None = None,
 ) -> Path:
-    """Return ``<output-dir>/<ticket>/<workload>/<timestamp>/``.
+    """Return ``<output-dir>/<ticket>/<workload>/<timestamp>[-N]/``.
 
-    Creates parents as needed. Never overwrites: the timestamp component is
-    unique per invocation, so re-running against the same ticket always
-    produces a fresh directory.
+    Creates parents as needed. **Never overwrites an existing directory.**
+    The base candidate is ``<timestamp>``; if that already exists (two runs
+    in the same wall-clock second for the same ``(ticket, workload)`` --
+    common in CI loops or concurrent jobs), a numeric suffix ``-2``, ``-3``,
+    ... is appended until ``mkdir(exist_ok=False)`` succeeds. The race
+    between two parallel processes is resolved by ``mkdir`` itself: only one
+    can win for a given suffix, the loser bumps and retries.
+
+    The base directory ``<output_dir>/<ticket>/<workload>/`` IS created with
+    ``exist_ok=True`` -- it's a shared parent across runs and the
+    "no-overwrite" guarantee only applies to the per-run leaf.
     """
     ticket_slug = safe_slug(recipe.ticket) if recipe.ticket else NO_TICKET_SLUG
     workload_slug = safe_slug(recipe.workload)
     ts = timestamp or format_timestamp()
-    run_dir = Path(output_dir) / ticket_slug / workload_slug / ts
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+    parent = Path(output_dir) / ticket_slug / workload_slug
+    parent.mkdir(parents=True, exist_ok=True)
+
+    # Try the bare timestamp first, then -2, -3, ... -- bounded so a buggy
+    # caller can't spin forever. The cap is generous (10k runs in the same
+    # second-bucket would already imply something is very wrong upstream)
+    # but finite so failures surface as a clean error rather than a hang.
+    for suffix in range(1, 10_001):
+        candidate = parent / (ts if suffix == 1 else f"{ts}-{suffix}")
+        try:
+            candidate.mkdir(exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(
+        f"resolve_run_dir: exhausted 10000 suffixes for {parent / ts!r}; "
+        "something is wedged upstream (clock not advancing? runaway loop?)"
+    )
 
 
 def _format_mitigations(mitigations: Iterable[str]) -> str:
@@ -226,8 +249,11 @@ def write_matrix_md(
         "per-trial JSON paths are in `matrix.json`."
     )
     lines.append(
-        "- `recipe.resolved.yaml` (alongside this file) captures the registry state "
-        "at run time -- re-run it to reproduce."
+        "- `recipe.resolved.yaml` (alongside this file) is a strict, reloadable "
+        "recipe: inline-docker cells are pinned via `{docker: <ref>}`, but named "
+        "mitigations / environments are NOT expanded -- a later registry change "
+        "can produce a different run. Compare `matrix.json::cells[*].resolved_env_vars` "
+        "between runs to detect drift. See `recipes/README.md` for full replay caveats."
     )
     lines.append("")
 
