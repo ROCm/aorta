@@ -112,9 +112,12 @@ def triage() -> None:
 @click.option(
     "--confound-threshold",
     type=float,
-    default=1.15,
-    show_default=True,
-    help="cell_step_time / baseline_step_time above this -> 'speed (+N%)' flag.",
+    default=None,
+    help=(
+        "cell_step_time / baseline_step_time above this -> 'speed (+N%)' flag. "
+        "Flag-mode default is 1.15. Recipe mode takes this from the file's "
+        "'confound.threshold' key; passing this flag together with --recipe is rejected."
+    ),
 )
 @click.option(
     "--output-dir",
@@ -146,7 +149,7 @@ def triage_run(
     steps: int | None,
     ticket: str | None,
     baseline_cell: str | None,
-    confound_threshold: float,
+    confound_threshold: float | None,
     output_dir: Path,
     mitigation_files: tuple[Path, ...],
 ) -> None:
@@ -157,7 +160,10 @@ def triage_run(
             mitigation_axis=mitigation_axis,
             environment_axis=environment_axis,
             trials=trials,
+            steps=steps,
+            ticket=ticket,
             baseline_cell=baseline_cell,
+            confound_threshold=confound_threshold,
         )
         try:
             r = load_recipe(recipe, sidecar_files=mitigation_files or None)
@@ -177,7 +183,7 @@ def triage_run(
         ]
         if missing:
             raise click.UsageError(
-                f"Flag mode requires: {', '.join(missing)}. " "Alternatively, pass --recipe <file>."
+                f"Flag mode requires: {', '.join(missing)}. Alternatively, pass --recipe <file>."
             )
         try:
             r = build_recipe_from_flags(
@@ -188,7 +194,7 @@ def triage_run(
                 steps=steps,
                 ticket=ticket,
                 baseline_cell=baseline_cell,
-                confound_threshold=confound_threshold,
+                confound_threshold=1.15 if confound_threshold is None else confound_threshold,
                 sidecar_files=mitigation_files or None,
             )
         except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
@@ -210,21 +216,31 @@ def _reject_flag_mode_args(
     mitigation_axis: str | None,
     environment_axis: str | None,
     trials: int | None,
+    steps: int | None,
+    ticket: str | None,
     baseline_cell: str | None,
+    confound_threshold: float | None,
 ) -> None:
-    """Surface a clear error if a user mixes --recipe with flag-mode flags.
+    """Surface a clear error if a user mixes --recipe with any flag-mode knob.
 
-    Recipe-mode takes every matrix knob from the file; silently ignoring the
-    flag would mask a misconfiguration (e.g. the user thought --workload
-    would override the recipe). Explicit rejection is friendlier than silent
-    precedence.
+    Recipe-mode takes every matrix parameter from the file; silently ignoring
+    a flag would mask a misconfiguration (e.g. the user thought
+    ``--confound-threshold`` would override the recipe). Every flag that
+    affects the resolved Recipe -- workload, both axes, trials, steps,
+    ticket, baseline cell, and the confound threshold -- is checked here.
+    ``--mode``, ``--output-dir``, ``--dry-run``, and ``--mitigations-file``
+    are intentionally NOT in the list: they configure the runner, not the
+    recipe content, so passing them with ``--recipe`` is meaningful.
     """
     conflicts = {
         "--workload": workload,
         "--mitigation-axis": mitigation_axis,
         "--environment-axis": environment_axis,
         "--trials": trials,
+        "--steps": steps,
+        "--ticket": ticket,
         "--baseline-cell": baseline_cell,
+        "--confound-threshold": confound_threshold,
     }
     set_flags = [k for k, v in conflicts.items() if v not in (None, "")]
     if set_flags:
@@ -268,9 +284,7 @@ def list_environments(files: tuple[Path, ...]) -> None:
     name_w = max(len("NAME"), *(len(n) for n in registry))
     src_w = max(len("SOURCE"), *(len(e.source_package) for e in registry.values()))
     docker_w = max(len("DOCKER"), *(len(e.docker or "-") for e in registry.values()))
-    click.echo(
-        f"{'NAME'.ljust(name_w)}  {'SOURCE'.ljust(src_w)}  " f"{'DOCKER'.ljust(docker_w)}  VENV"
-    )
+    click.echo(f"{'NAME'.ljust(name_w)}  {'SOURCE'.ljust(src_w)}  {'DOCKER'.ljust(docker_w)}  VENV")
     for name in sorted(registry):
         e = registry[name]
         click.echo(

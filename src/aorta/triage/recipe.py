@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,15 @@ _VALID_TOP_LEVEL = frozenset(
 _VALID_CONFOUND_KEYS = frozenset({"threshold", "baseline_cell"})
 _VALID_CELL_KEYS = frozenset({"name", "mitigations", "environment", "extra_env", "trials", "steps"})
 _VALID_INLINE_ENV_KEYS = frozenset({"docker"})
+
+# Cell names become directory components under cells/<name>/ in the run output
+# tree.  Reject characters that would let a recipe escape its own cells/
+# directory (path traversal) or collide with sibling artifacts written by the
+# runner (matrix.md, host_env.json, etc).  Keeping the allowed character set
+# tight here means the runner can use the cell name as a path component
+# without an extra layer of slugging that would silently rename cells.
+_CELL_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
+_RESERVED_CELL_NAMES = frozenset({".", "..", "matrix.md", "matrix.json"})
 
 
 class RecipeSchemaError(ValueError):
@@ -82,17 +92,20 @@ class Cell:
             label and the cells/<name>/ directory name).
         mitigations: Names to resolve through ``aorta.registry.get_mitigation``.
             Each name contributes an env-var bundle; bundles are unioned in
-            list order (later names win on collision WITHIN a cell only -- the
-            runner re-detects cross-mitigation collisions at env-application
-            time and raises :class:`RecipeCellError` if two bundles disagree
-            on the same key).
+            list order. Cross-mitigation collisions (two bundles setting the
+            same key to *different* values) are rejected at recipe-construction
+            time by :func:`_validate_no_mitigation_collisions` -- no
+            ``dict.update`` silent-wins. Use ``extra_env`` if you intentionally
+            want to override a mitigation's value.
         environment: Either a registered environment name OR an inline-docker
             auto-name ``_inline_<hash>``. The recipe loader normalizes the
             ``{docker: <ref>}`` mapping shorthand into the auto-name and
             records the mapping on the parent :class:`Recipe`.
         extra_env: Ad-hoc env-var overrides applied AFTER the mitigation bundle
             (so this cell can override a registered mitigation for one-off
-            experiments without polluting the registry).
+            experiments without polluting the registry). ``extra_env`` overrides
+            are intentional and stay silent; only mitigation-vs-mitigation
+            disagreements are flagged as errors.
         trials: Optional per-cell override of the recipe-level ``trials``.
         steps: Optional per-cell override of the recipe-level ``steps``.
     """
@@ -188,13 +201,12 @@ def _parse_confound(path_hint: str, raw: Any) -> ConfoundCfg:
     threshold = raw.get("threshold", 1.15)
     if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
         raise RecipeSchemaError(
-            f"{path_hint}.confound.threshold: must be a number, got " f"{type(threshold).__name__}"
+            f"{path_hint}.confound.threshold: must be a number, got {type(threshold).__name__}"
         )
     baseline = raw.get("baseline_cell")
     if baseline is not None and not isinstance(baseline, str):
         raise RecipeSchemaError(
-            f"{path_hint}.confound.baseline_cell: must be a string, got "
-            f"{type(baseline).__name__}"
+            f"{path_hint}.confound.baseline_cell: must be a string, got {type(baseline).__name__}"
         )
     return ConfoundCfg(threshold=float(threshold), baseline_cell=baseline)
 
@@ -223,7 +235,7 @@ def _parse_environment(path_hint: str, raw: Any, inline_envs: dict[str, InlineEn
         )
     if "docker" not in raw:
         raise RecipeSchemaError(
-            f"{path_hint}.environment: inline-docker mapping missing required " f"key 'docker'"
+            f"{path_hint}.environment: inline-docker mapping missing required key 'docker'"
         )
     ref = raw["docker"]
     if not isinstance(ref, str) or not ref:
@@ -251,7 +263,7 @@ def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
     unknown = set(raw) - _VALID_CELL_KEYS
     if unknown:
         raise RecipeSchemaError(
-            f"{path_hint}: unknown keys {sorted(unknown)}; " f"allowed: {sorted(_VALID_CELL_KEYS)}"
+            f"{path_hint}: unknown keys {sorted(unknown)}; allowed: {sorted(_VALID_CELL_KEYS)}"
         )
     for required in ("name", "mitigations", "environment"):
         if required not in raw:
@@ -259,8 +271,7 @@ def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
 
     name = raw["name"]
     _ensure_type(path_hint, name, str, "name")
-    if not name:
-        raise RecipeSchemaError(f"{path_hint}.name: must be non-empty")
+    _validate_cell_name(path_hint, name)
 
     mitigations = raw["mitigations"]
     if not isinstance(mitigations, list) or not all(isinstance(m, str) for m in mitigations):
@@ -320,19 +331,43 @@ def _validate_top_level(data: Any) -> None:
     unknown = set(data) - _VALID_TOP_LEVEL
     if unknown:
         raise RecipeSchemaError(
-            f"recipe: unknown top-level keys {sorted(unknown)}; "
-            f"allowed: {sorted(_VALID_TOP_LEVEL)}"
+            f"recipe: unknown top-level keys {sorted(unknown)}; allowed: {sorted(_VALID_TOP_LEVEL)}"
         )
     version = data["schema_version"]
     if not isinstance(version, int) or isinstance(version, bool):
         raise RecipeSchemaError(
-            f"recipe.schema_version: must be an integer, got "
-            f"{type(version).__name__} ({version!r})"
+            f"recipe.schema_version: must be an integer, got {type(version).__name__} ({version!r})"
         )
     if version != SCHEMA_VERSION:
         raise RecipeSchemaError(
             f"recipe.schema_version: unsupported version {version}; "
             f"this build understands version {SCHEMA_VERSION}"
+        )
+
+
+def _validate_cell_name(path_hint: str, name: str) -> None:
+    """Reject cell names that are unsafe as filesystem path components.
+
+    Cell names land in the run-output tree as ``cells/<name>/``. Without this
+    check, a recipe with ``name: ../foo`` or ``name: a/b`` could write its
+    trial JSONs outside its own cell directory or clobber sibling artifacts
+    like ``matrix.md``. Reject up-front so the runner can use ``cell.name``
+    as a path component without an extra slugging layer that would silently
+    rename cells (and, by renaming, break the unique-name contract too).
+    """
+    if not name:
+        raise RecipeSchemaError(f"{path_hint}.name: must be non-empty")
+    if name in _RESERVED_CELL_NAMES:
+        raise RecipeCellError(
+            f"{path_hint}.name {name!r}: reserved name (would clobber a sibling "
+            "matrix artifact or escape the cell directory)"
+        )
+    if not _CELL_NAME_RE.match(name):
+        raise RecipeCellError(
+            f"{path_hint}.name {name!r}: must match {_CELL_NAME_RE.pattern} "
+            "(used directly as the cells/<name>/ directory component; path "
+            "separators, '..', leading '-', etc. are rejected to keep the run "
+            "directory layout safe)"
         )
 
 
@@ -373,6 +408,50 @@ def _validate_names_resolve(
             continue
         get_environment(cell.environment, extra_files=extra)
         seen_environments.add(cell.environment)
+
+
+def _validate_no_mitigation_collisions(
+    cells: tuple[Cell, ...],
+    sidecar_files: tuple[Path, ...] | None,
+) -> None:
+    """Reject cells whose stacked mitigations disagree on the same env-var key.
+
+    Per the Cell docstring, stacked mitigations are unioned in list order.
+    Silently letting the later one win (``dict.update`` semantics) makes the
+    cell's effective configuration order-dependent on the recipe author's
+    typing -- that's exactly the kind of foot-gun the recipe contract is
+    supposed to forbid. Flag it up front with the conflicting cell, key, and
+    bundles so the recipe author either reorders, drops one, or pins the
+    intended value via ``extra_env`` (which is documented as the override
+    knob; its precedence over mitigations is intentional and stays silent).
+
+    Sidecar resolution is performed once per unique mitigation name so an
+    expensive sidecar isn't re-parsed per cell.
+    """
+    extra = list(sidecar_files) if sidecar_files else None
+    bundle_cache: dict[str, dict[str, str]] = {}
+
+    def _bundle(name: str) -> dict[str, str]:
+        if name not in bundle_cache:
+            bundle_cache[name] = dict(get_mitigation(name, extra_files=extra))
+        return bundle_cache[name]
+
+    for cell in cells:
+        if len(cell.mitigations) < 2:
+            continue
+        applied: dict[str, tuple[str, str]] = {}  # key -> (value, source mitigation)
+        for mit_name in cell.mitigations:
+            for env_key, env_val in _bundle(mit_name).items():
+                prior = applied.get(env_key)
+                if prior is not None and prior[0] != env_val:
+                    raise RecipeCellError(
+                        f"cell {cell.name!r}: mitigation {mit_name!r} sets "
+                        f"{env_key}={env_val!r}, but mitigation {prior[1]!r} "
+                        f"already set {env_key}={prior[0]!r}. Stacked mitigations "
+                        "must agree on overlapping keys; reorder, drop one, or "
+                        "use extra_env to pin the intended value."
+                    )
+                applied[env_key] = (env_val, mit_name)
 
 
 def _sha256_bytes(text: str) -> str:
@@ -451,7 +530,7 @@ def _build_recipe(
     ticket = data.get("ticket")
     if ticket is not None and not isinstance(ticket, str):
         raise RecipeSchemaError(
-            f"recipe.ticket: must be a string or absent, got " f"{type(ticket).__name__}"
+            f"recipe.ticket: must be a string or absent, got {type(ticket).__name__}"
         )
 
     confound = _parse_confound("recipe", data.get("confound"))
@@ -466,6 +545,7 @@ def _build_recipe(
     cells_tuple = tuple(cells)
 
     _validate_names_resolve(cells_tuple, inline_envs, sidecar_files)
+    _validate_no_mitigation_collisions(cells_tuple, sidecar_files)
 
     if confound.baseline_cell is not None:
         names = {c.name for c in cells_tuple}
@@ -517,17 +597,37 @@ def build_recipe_from_flags(
     * Anything else -> registered environment name (resolved against the
       registry at validation time).
 
-    Steps is optional at CLI (per the flag spec), so when ``steps is None``
-    we still require a positive int for the Recipe (default 1 makes the
-    schema happy; per-cell overrides aren't used in flag mode so the
-    effective value flows through unchanged).
+    Every primitive is validated up-front to the same standard as
+    :func:`load_recipe` (positive trials/steps, non-empty workload, sane
+    confound threshold) so flag mode and recipe mode reject the same set of
+    invalid inputs.
     """
-    mitigations = _split_axis(mitigation_axis, name="--mitigation-axis")
-    raw_envs = _split_axis(environment_axis, name="--environment-axis")
+    if not isinstance(workload, str) or not workload:
+        raise RecipeSchemaError(f"--workload: must be a non-empty string, got {workload!r}")
+    if not isinstance(trials, int) or isinstance(trials, bool) or trials < 1:
+        raise RecipeSchemaError(f"--trials: must be a positive int, got {trials!r}")
     if steps is None:
         raise RecipeSchemaError(
-            "--steps is required in flag mode (ditto recipe mode). " "Pass --steps N explicitly."
+            "--steps is required in flag mode (ditto recipe mode). Pass --steps N explicitly."
         )
+    if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
+        raise RecipeSchemaError(f"--steps: must be a positive int, got {steps!r}")
+    if not isinstance(confound_threshold, (int, float)) or isinstance(confound_threshold, bool):
+        raise RecipeSchemaError(
+            f"--confound-threshold: must be a number, got {type(confound_threshold).__name__}"
+        )
+    if confound_threshold <= 0:
+        raise RecipeSchemaError(
+            f"--confound-threshold: must be > 0, got {confound_threshold!r} "
+            "(threshold is a step-time ratio; values <= 0 would flag every cell)"
+        )
+    if ticket is not None and (not isinstance(ticket, str) or not ticket):
+        raise RecipeSchemaError(
+            f"--ticket: must be a non-empty string when provided, got {ticket!r}"
+        )
+
+    mitigations = _split_axis(mitigation_axis, name="--mitigation-axis")
+    raw_envs = _split_axis(environment_axis, name="--environment-axis")
 
     inline_envs: dict[str, InlineEnv] = {}
     env_cell_names: list[tuple[str, str]] = []
@@ -536,7 +636,7 @@ def build_recipe_from_flags(
             ref = raw[len("image:") :]
             if not ref:
                 raise RecipeSchemaError(
-                    "--environment-axis item 'image:' requires a ref after " "the colon"
+                    "--environment-axis item 'image:' requires a ref after the colon"
                 )
             auto = inline_env_name(ref)
             inline_envs.setdefault(auto, InlineEnv(name=auto, docker=ref))
@@ -547,9 +647,13 @@ def build_recipe_from_flags(
     cells: list[Cell] = []
     for m in mitigations:
         for env_name, display in env_cell_names:
+            cell_name = f"{m}-{display}"
+            _validate_cell_name(
+                f"--mitigation-axis x --environment-axis ({m!r}, {display!r})", cell_name
+            )
             cells.append(
                 Cell(
-                    name=f"{m}-{display}",
+                    name=cell_name,
                     mitigations=(m,),
                     environment=env_name,
                 )
@@ -559,13 +663,13 @@ def build_recipe_from_flags(
 
     inline_envs_tuple = tuple(inline_envs.values())
     _validate_names_resolve(cells_tuple, inline_envs, sidecar_files)
+    _validate_no_mitigation_collisions(cells_tuple, sidecar_files)
 
     if baseline_cell is not None:
         names = {c.name for c in cells_tuple}
         if baseline_cell not in names:
             raise RecipeCellError(
-                f"--baseline-cell {baseline_cell!r} does not match any cell; "
-                f"cells: {sorted(names)}"
+                f"--baseline-cell {baseline_cell!r} does not match any cell; cells: {sorted(names)}"
             )
 
     return Recipe(

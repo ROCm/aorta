@@ -32,7 +32,7 @@ from typing import Any
 
 import yaml
 
-from aorta.registry import get_environment, get_mitigation
+from aorta.registry import get_environment
 from aorta.triage.confound import ConfoundTag
 from aorta.triage.matrix import CellStats
 from aorta.triage.recipe import Recipe
@@ -43,12 +43,23 @@ NO_TICKET_SLUG = "_no_ticket_"
 # Ticket IDs like "PROJ-123" pass through unchanged; spaces, slashes, ':'
 # etc. get sanitised so we never create surprise subdirectories.
 _SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]")
+# Even after character-class scrubbing, "." and ".." are still meaningful path
+# components on every filesystem we care about.  Keep them out of the output
+# tree so a ticket like ".." can't move the run directory up a level.
+_RESERVED_SLUGS = frozenset({".", ".."})
 
 
 def safe_slug(value: str) -> str:
-    """Turn a ticket / workload / env name into a safe directory component."""
+    """Turn a ticket / workload / env name into a safe directory component.
+
+    Replaces anything outside ``[A-Za-z0-9_.-]`` with ``_`` and rewrites the
+    reserved ``.`` / ``..`` components so the result can never refer to the
+    current or parent directory. Empty input also rewrites to ``_``.
+    """
     cleaned = _SAFE_RE.sub("_", value)
-    return cleaned or "_"
+    if not cleaned or cleaned in _RESERVED_SLUGS:
+        return "_"
+    return cleaned
 
 
 def format_timestamp(now: _dt.datetime | None = None) -> str:
@@ -224,8 +235,17 @@ def write_matrix_json(
     confound_tags: dict[str, tuple[ConfoundTag, float | None]],
     run_timestamp: str,
     warnings: list[str],
+    sidecar_files: tuple[Path, ...] | None = None,
 ) -> None:
-    """Serialise the full per-cell matrix as JSON."""
+    """Serialise the full per-cell matrix as JSON.
+
+    Each cell entry carries (a) the aggregated stats from
+    :class:`aorta.triage.matrix.CellStats`, (b) the resolved
+    :class:`aorta.registry.Environment` descriptor (formerly written into
+    ``recipe.resolved.yaml`` -- moved here so that file can stay schema-valid
+    and re-loadable by :func:`aorta.triage.recipe.load_recipe`), and (c) the
+    confound tag + step-time ratio.
+    """
     doc: dict[str, Any] = {
         "schema_version": 1,
         "workload": recipe.workload,
@@ -251,6 +271,17 @@ def write_matrix_json(
         entry["nan_rate"] = cell.nan_rate
         entry["confound"] = tag
         entry["step_time_ratio"] = ratio
+        try:
+            entry["resolved_environment"] = resolved_cell_environment(
+                cell.environment,
+                inline_environments=recipe.inline_environments,
+                sidecar_files=sidecar_files,
+            )
+        except Exception as exc:  # pragma: no cover - belt-and-suspenders
+            entry["resolved_environment"] = {
+                "name": cell.environment,
+                "_resolution_error": f"{type(exc).__name__}: {exc}",
+            }
         doc["cells"].append(entry)
 
     path.write_text(json.dumps(doc, indent=2, sort_keys=False), encoding="utf-8")
@@ -261,86 +292,99 @@ def write_resolved_recipe(
     recipe: Recipe,
     sidecar_files: tuple[Path, ...] | None = None,
 ) -> None:
-    """Write recipe.resolved.yaml with every registry name expanded.
+    """Write a schema-valid ``recipe.resolved.yaml`` that can be re-loaded as-is.
 
-    Expansion rules:
+    The output is a strict :func:`aorta.triage.recipe.load_recipe` input -- no
+    debug-only fields, no per-cell ``resolved_mitigation_env`` block, no
+    top-level ``inline_environments`` key. The "resolved" property comes from
+    inline-docker cells being re-emitted in the ``{docker: <ref>}`` shorthand
+    form (so re-loading on another machine reproduces the same
+    ``_inline_<hash>`` env without needing a sidecar JSON next to the file).
 
-    * Each cell gets a ``resolved_mitigation_env`` block containing the
-      unioned env-var bundle from its mitigations (same order semantics as
-      the runner uses at execution time) plus the cell's ``extra_env``
-      overlay -- this is the exact env-var set applied to the trials.
-    * Each cell gets a ``resolved_environment`` block containing the
-      registry :class:`Environment` descriptor (or, for inline docker, the
-      ``{name, docker}`` pair the auto-registration produced).
-    * The top-level ``schema_version`` is preserved so a reader can tell
-      this is a triage recipe snapshot, not an arbitrary YAML file.
+    Per-cell debug expansions (the ``Environment`` descriptor and the unioned
+    mitigation env-var bundle) live in ``matrix.json`` instead, where they
+    belong as run-time state. ``sidecar_files`` is intentionally unused at
+    write time -- B3 already resolved everything by the time we got here --
+    but the parameter is preserved so the runner can keep its single
+    "everything-needed-for-replay" call site.
     """
-    extra = list(sidecar_files) if sidecar_files else None
+    del sidecar_files  # see docstring; kept for caller-stable signature
 
-    inline_envs = {e.name: e.docker for e in recipe.inline_environments}
+    inline_docker = {e.name: e.docker for e in recipe.inline_environments}
 
     resolved_cells: list[dict[str, Any]] = []
     for cell in recipe.cells:
-        mit_union: dict[str, str] = {}
-        mit_contributions: list[dict[str, Any]] = []
-        for name in cell.mitigations:
-            bundle = get_mitigation(name, extra_files=extra)
-            mit_contributions.append({"name": name, "env": dict(bundle)})
-            mit_union.update(bundle)
-        mit_union.update(cell.extra_env)
-
-        if cell.environment in inline_envs:
-            resolved_env: dict[str, Any] = {
-                "name": cell.environment,
-                "docker": inline_envs[cell.environment],
-                "inline": True,
-            }
+        if cell.environment in inline_docker:
+            cell_env: Any = {"docker": inline_docker[cell.environment]}
         else:
-            env_desc = get_environment(cell.environment, extra_files=extra)
-            resolved_env = {
-                "name": env_desc.name,
-                "docker": env_desc.docker,
-                "venv": env_desc.venv,
-                "source_package": env_desc.source_package,
-                "inline": False,
-            }
+            cell_env = cell.environment
+        cell_doc: dict[str, Any] = {
+            "name": cell.name,
+            "mitigations": list(cell.mitigations),
+            "environment": cell_env,
+        }
+        if cell.extra_env:
+            cell_doc["extra_env"] = dict(cell.extra_env)
+        if cell.trials is not None:
+            cell_doc["trials"] = cell.trials
+        if cell.steps is not None:
+            cell_doc["steps"] = cell.steps
+        resolved_cells.append(cell_doc)
 
-        resolved_cells.append(
-            {
-                "name": cell.name,
-                "mitigations": list(cell.mitigations),
-                "mitigation_contributions": mit_contributions,
-                "environment": cell.environment,
-                "resolved_environment": resolved_env,
-                "extra_env": dict(cell.extra_env),
-                "resolved_mitigation_env": mit_union,
-                "trials": cell.effective_trials(recipe.trials),
-                "steps": cell.effective_steps(recipe.steps),
-            }
-        )
-
-    doc = {
+    doc: dict[str, Any] = {
         "schema_version": recipe.schema_version,
-        "ticket": recipe.ticket,
         "workload": recipe.workload,
         "trials": recipe.trials,
         "steps": recipe.steps,
-        "confound": {
-            "threshold": recipe.confound.threshold,
-            "baseline_cell": recipe.confound.baseline_cell,
-        },
-        "inline_environments": [
-            {"name": e.name, "docker": e.docker} for e in recipe.inline_environments
-        ],
-        "cells": resolved_cells,
     }
+    if recipe.ticket is not None:
+        doc["ticket"] = recipe.ticket
+    doc["confound"] = {
+        "threshold": recipe.confound.threshold,
+        "baseline_cell": recipe.confound.baseline_cell,
+    }
+    doc["cells"] = resolved_cells
+
     path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
+def resolved_cell_environment(
+    cell_environment: str,
+    inline_environments: tuple,
+    sidecar_files: tuple[Path, ...] | None = None,
+) -> dict[str, Any]:
+    """Return the resolved environment descriptor for a cell.
+
+    Centralised so both ``write_matrix_json`` and any future audit / debug
+    tooling agree on the shape: registered envs project their full
+    :class:`aorta.registry.Environment` descriptor; inline-docker cells emit
+    the shorthand needed to re-derive the same ``_inline_<hash>``.
+    """
+    extra = list(sidecar_files) if sidecar_files else None
+    inline_docker = {e.name: e.docker for e in inline_environments}
+    if cell_environment in inline_docker:
+        return {
+            "name": cell_environment,
+            "docker": inline_docker[cell_environment],
+            "venv": None,
+            "source_package": "_inline_",
+            "inline": True,
+        }
+    env_desc = get_environment(cell_environment, extra_files=extra)
+    return {
+        "name": env_desc.name,
+        "docker": env_desc.docker,
+        "venv": env_desc.venv,
+        "source_package": env_desc.source_package,
+        "inline": False,
+    }
 
 
 __all__ = [
     "NO_TICKET_SLUG",
     "format_timestamp",
     "resolve_run_dir",
+    "resolved_cell_environment",
     "safe_slug",
     "write_matrix_json",
     "write_matrix_md",

@@ -88,12 +88,15 @@ def test_load_minimal_json(tmp_path):
 
 
 def test_load_with_ticket_and_confound(tmp_path):
-    text = _MINIMAL_YAML + """\
+    text = (
+        _MINIMAL_YAML
+        + """\
 ticket: EXAMPLE-1
 confound:
   threshold: 1.25
   baseline_cell: baseline-local
 """
+    )
     r = load_recipe(_write_yaml(tmp_path, text))
     assert r.ticket == "EXAMPLE-1"
     assert r.confound.threshold == 1.25
@@ -101,13 +104,16 @@ confound:
 
 
 def test_load_per_cell_overrides(tmp_path):
-    text = _MINIMAL_YAML + """\
+    text = (
+        _MINIMAL_YAML
+        + """\
   - name: heavier
     mitigations: [tf32_off]
     environment: local
     trials: 4
     steps: 500
 """
+    )
     r = load_recipe(_write_yaml(tmp_path, text))
     assert r.cells[1].trials == 4
     assert r.cells[1].steps == 500
@@ -144,11 +150,14 @@ def test_empty_mitigations_rejected(tmp_path):
 
 
 def test_duplicate_cell_name_rejected(tmp_path):
-    text = _MINIMAL_YAML + """\
+    text = (
+        _MINIMAL_YAML
+        + """\
   - name: baseline-local
     mitigations: [tf32_off]
     environment: local
 """
+    )
     with pytest.raises(RecipeCellError, match="duplicate cell name"):
         load_recipe(_write_yaml(tmp_path, text))
 
@@ -181,6 +190,109 @@ def test_baseline_cell_must_exist(tmp_path):
     text = _MINIMAL_YAML + "confound:\n  baseline_cell: not_a_cell\n"
     with pytest.raises(RecipeCellError, match="does not match any cell name"):
         load_recipe(_write_yaml(tmp_path, text))
+
+
+# ---- Cell-name path safety (issue #160 review, comment 5) -----------------
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "../escape",
+        "a/b",
+        "a\\b",
+        "..",
+        ".",
+        "matrix.md",  # would clobber sibling artifact
+        "-leading-dash",  # leading character must be alphanum or _
+        "with space",
+        "tab\there",
+    ],
+)
+def test_cell_name_path_unsafe_rejected(tmp_path, bad_name):
+    text = _MINIMAL_YAML.replace("baseline-local", bad_name)
+    with pytest.raises((RecipeCellError, RecipeSchemaError)):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_cell_name_safe_chars_accepted(tmp_path):
+    """Allowed: [A-Za-z0-9_] start, then [A-Za-z0-9_.-] -- covers tickets like 'PROJ-1.fix'."""
+    text = _MINIMAL_YAML.replace("baseline-local", "PROJ_1.fix-cell")
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.cells[0].name == "PROJ_1.fix-cell"
+
+
+# ---- Mitigation env-var collision detection (issue #160 review, comment 4)
+
+
+def _stacked_mitigations_recipe_text(mitigations: list[str]) -> str:
+    return f"""\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: stacked
+    mitigations: {mitigations}
+    environment: local
+"""
+
+
+def test_stacked_mitigations_with_disagreeing_keys_rejected(tmp_path, monkeypatch):
+    """Two mitigations setting the same env-var to different values is an error."""
+    bundles = {"mitA": {"FOO": "1"}, "mitB": {"FOO": "2"}}
+    monkeypatch.setattr(
+        "aorta.triage.recipe.get_mitigation",
+        lambda name, extra_files=None: bundles[name],
+    )
+    text = _stacked_mitigations_recipe_text(["mitA", "mitB"])
+    with pytest.raises(RecipeCellError, match="must agree on overlapping keys"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_stacked_mitigations_with_agreeing_keys_accepted(tmp_path, monkeypatch):
+    """Two mitigations setting the same env-var to the SAME value is fine."""
+    bundles = {"mitA": {"FOO": "1", "BAR": "1"}, "mitB": {"FOO": "1"}}
+    monkeypatch.setattr(
+        "aorta.triage.recipe.get_mitigation",
+        lambda name, extra_files=None: bundles[name],
+    )
+    r = load_recipe(_write_yaml(tmp_path, _stacked_mitigations_recipe_text(["mitA", "mitB"])))
+    assert r.cells[0].mitigations == ("mitA", "mitB")
+
+
+def test_collision_error_names_the_cell_and_keys(tmp_path, monkeypatch):
+    """The error message must point the user at WHICH cell and WHICH keys disagree."""
+    bundles = {"mitA": {"FOO": "1"}, "mitB": {"FOO": "2"}}
+    monkeypatch.setattr(
+        "aorta.triage.recipe.get_mitigation",
+        lambda name, extra_files=None: bundles[name],
+    )
+    text = _stacked_mitigations_recipe_text(["mitA", "mitB"])
+    with pytest.raises(RecipeCellError) as exc_info:
+        load_recipe(_write_yaml(tmp_path, text))
+    msg = str(exc_info.value)
+    assert "stacked" in msg  # cell name
+    assert "FOO" in msg  # the conflicting key
+    assert "mitA" in msg and "mitB" in msg  # both contributors
+
+
+def test_extra_env_overrides_mitigation_silently(tmp_path):
+    """extra_env is documented as the override knob; collision with a mitigation is intentional."""
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: override-tf32
+    mitigations: [tf32_off]
+    environment: local
+    extra_env:
+      DISABLE_TF32: "0"  # explicitly contradicts tf32_off's bundle
+"""
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.cells[0].extra_env == {"DISABLE_TF32": "0"}
 
 
 # ---- Inline docker --------------------------------------------------------
@@ -379,6 +491,69 @@ def test_build_recipe_from_flags_requires_steps():
             environment_axis="local",
             trials=1,
             steps=None,
+        )
+
+
+# ---- Flag-mode boundary validation (issue #160 review, comment 6) ---------
+
+
+@pytest.mark.parametrize("trials", [0, -1])
+def test_build_recipe_from_flags_rejects_non_positive_trials(trials):
+    with pytest.raises(RecipeSchemaError, match="--trials"):
+        build_recipe_from_flags(
+            workload="fsdp",
+            mitigation_axis="none",
+            environment_axis="local",
+            trials=trials,
+            steps=10,
+        )
+
+
+@pytest.mark.parametrize("steps", [0, -5])
+def test_build_recipe_from_flags_rejects_non_positive_steps(steps):
+    with pytest.raises(RecipeSchemaError, match="--steps"):
+        build_recipe_from_flags(
+            workload="fsdp",
+            mitigation_axis="none",
+            environment_axis="local",
+            trials=1,
+            steps=steps,
+        )
+
+
+def test_build_recipe_from_flags_rejects_empty_workload():
+    with pytest.raises(RecipeSchemaError, match="--workload"):
+        build_recipe_from_flags(
+            workload="",
+            mitigation_axis="none",
+            environment_axis="local",
+            trials=1,
+            steps=10,
+        )
+
+
+@pytest.mark.parametrize("threshold", [0.0, -1.0, -0.5])
+def test_build_recipe_from_flags_rejects_non_positive_threshold(threshold):
+    with pytest.raises(RecipeSchemaError, match="confound-threshold"):
+        build_recipe_from_flags(
+            workload="fsdp",
+            mitigation_axis="none",
+            environment_axis="local",
+            trials=1,
+            steps=10,
+            confound_threshold=threshold,
+        )
+
+
+def test_build_recipe_from_flags_rejects_empty_ticket():
+    with pytest.raises(RecipeSchemaError, match="--ticket"):
+        build_recipe_from_flags(
+            workload="fsdp",
+            mitigation_axis="none",
+            environment_axis="local",
+            trials=1,
+            steps=10,
+            ticket="",
         )
 
 

@@ -97,6 +97,12 @@ def test_safe_slug_replaces_unsafe_chars():
     assert safe_slug("") == "_"
 
 
+def test_safe_slug_rejects_dot_components():
+    """`.` and `..` are filesystem-meaningful even after char-class scrubbing."""
+    assert safe_slug(".") == "_"
+    assert safe_slug("..") == "_"
+
+
 def test_resolve_run_dir_with_ticket(tmp_path):
     r = _simple_recipe(ticket="PROJ-1")
     run_dir = resolve_run_dir(tmp_path, r, timestamp="2026-01-01T00-00-00")
@@ -128,7 +134,13 @@ def test_run_recipe_writes_expected_files(tmp_path, patched_env, patched_run_tri
 
 
 def test_host_env_collected_exactly_once(tmp_path, patched_env, patched_run_trials):
-    # Recipe with 4 cells across 2 unique environments (local, inline-docker).
+    """Probe is captured for the runner's host scope and any *non-isolated* env.
+
+    Per the issue-3 fix: docker / venv envs (incl. inline-docker) skip the
+    runner-process probe because B1 currently runs in-process and the probe
+    would record host state under a docker label. So with one local env and
+    one inline-docker env we expect: 1 host probe + 1 local-env probe = 2.
+    """
     r = build_recipe_from_flags(
         workload="fsdp",
         mitigation_axis="none,tf32_off",
@@ -137,8 +149,35 @@ def test_host_env_collected_exactly_once(tmp_path, patched_env, patched_run_tria
         steps=10,
     )
     runner.run_recipe(r, output_dir=tmp_path)
-    # 1 host probe + 2 per-env probes (local + _inline_*) = 3 total.
-    assert patched_env.call_count == 3
+    assert patched_env.call_count == 2
+
+
+def test_isolated_env_writes_placeholder_not_runner_snapshot(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Docker / inline envs skip the runner-process probe and write a placeholder.
+
+    Pinning the issue-3 fix: a runner-time `collect_env()` for an isolated
+    env would record host state under the docker label and silently mislead
+    anyone reading `environments/<name>/env.json`.
+    """
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    inline_name = r.cells[0].environment
+    env_json = run_dir / "environments" / inline_name / "env.json"
+    assert env_json.exists()
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["snapshot_captured"] is False
+    assert "B1" in placeholder["skip_reason"]
+    assert placeholder["descriptor"]["docker"] == "rocm/pytorch:nightly"
+    md = (run_dir / "matrix.md").read_text()
+    assert "skipped" in md.lower()
 
 
 def test_per_env_probe_once_per_unique_env(tmp_path, patched_env, patched_run_trials):
@@ -210,16 +249,66 @@ def test_matrix_md_includes_headers(tmp_path, patched_env, patched_run_trials):
     assert "tf32_off-local" in md
 
 
-def test_resolved_recipe_contains_expanded_mitigations(tmp_path, patched_env, patched_run_trials):
+def test_resolved_recipe_is_loadable_by_load_recipe(tmp_path, patched_env, patched_run_trials):
+    """`recipe.resolved.yaml` must round-trip through load_recipe() -- no debug fields."""
+    from aorta.triage.recipe import load_recipe
+
     r = _simple_recipe()
     run_dir = runner.run_recipe(r, output_dir=tmp_path)
-    doc = yaml.safe_load((run_dir / "recipe.resolved.yaml").read_text())
+    resolved_path = run_dir / "recipe.resolved.yaml"
+    doc = yaml.safe_load(resolved_path.read_text())
     assert doc["workload"] == "fsdp"
-    cell_names = {c["name"] for c in doc["cells"]}
-    assert cell_names == {"none-local", "tf32_off-local"}
+    assert {c["name"] for c in doc["cells"]} == {"none-local", "tf32_off-local"}
+    # Strict schema: no debug fields leaked into the rerunnable artifact.
+    assert "inline_environments" not in doc
+    for cell in doc["cells"]:
+        assert "mitigation_contributions" not in cell
+        assert "resolved_environment" not in cell
+        assert "resolved_mitigation_env" not in cell
+    # The whole point: load_recipe() accepts it.
+    reloaded = load_recipe(resolved_path)
+    assert reloaded.workload == r.workload
+    assert {c.name for c in reloaded.cells} == {c.name for c in r.cells}
+
+
+def test_resolved_recipe_inline_envs_emit_docker_shorthand(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Inline cells re-emit `{docker: <ref>}` so reload re-derives the same _inline_<hash>."""
+    from aorta.triage.recipe import load_recipe
+
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    resolved_path = run_dir / "recipe.resolved.yaml"
+    doc = yaml.safe_load(resolved_path.read_text())
+    cell_env = doc["cells"][0]["environment"]
+    assert isinstance(cell_env, dict)
+    assert cell_env == {"docker": "rocm/pytorch:nightly"}
+    reloaded = load_recipe(resolved_path)
+    # Auto-name is reproducible from the ref, so a sidecar JSON isn't needed.
+    assert reloaded.cells[0].environment == r.cells[0].environment
+
+
+def test_matrix_json_records_resolved_environment_per_cell(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Per-cell debug expansion lives in matrix.json (moved out of recipe.resolved.yaml)."""
+    r = _simple_recipe()
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    doc = json.loads((run_dir / "matrix.json").read_text())
+    for cell in doc["cells"]:
+        assert "resolved_environment" in cell
+        env = cell["resolved_environment"]
+        assert env["name"] == cell["environment"]
+        # tf32_off cell still records its applied env vars via stats.resolved_env_vars
     tf32_cell = next(c for c in doc["cells"] if c["name"] == "tf32_off-local")
-    # tf32_off mitigation bundle is DISABLE_TF32=1
-    assert tf32_cell["resolved_mitigation_env"] == {"DISABLE_TF32": "1"}
+    assert tf32_cell["resolved_env_vars"] == {"DISABLE_TF32": "1"}
 
 
 # ---- Fail-soft behaviour --------------------------------------------------

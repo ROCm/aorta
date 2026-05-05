@@ -30,11 +30,13 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import click
 
 from aorta.instrumentation.environment import EnvSnapshot, collect_env
-from aorta.registry import get_mitigation
+from aorta.registry import get_environment, get_mitigation
+from aorta.registry.errors import RegistryError
 from aorta.run import RunRequest, TrialResult, run_trials
 from aorta.triage.confound import (
     classify_all,
@@ -44,6 +46,7 @@ from aorta.triage.matrix import CellStats, aggregate_cell
 from aorta.triage.output import (
     format_timestamp,
     resolve_run_dir,
+    safe_slug,
     write_matrix_json,
     write_matrix_md,
     write_resolved_recipe,
@@ -94,6 +97,81 @@ def _capture_env(
             "See the scope's env.json for details."
         )
     return snapshot
+
+
+def _is_isolated_environment(env_name: str, inline_envs: tuple[InlineEnv, ...]) -> bool:
+    """Return True iff the env would isolate the trial from the runner process.
+
+    Inline-docker envs always count as isolated (the cell shorthand
+    explicitly declares a docker ref). Registered envs count as isolated if
+    their :class:`aorta.registry.Environment` descriptor sets ``docker`` or
+    ``venv`` -- in either case, a runner-process ``collect_env()`` call would
+    record the host's state, not the trial's, and therefore the resulting
+    ``environments/<name>/env.json`` would be misleading. B1 doesn't actually
+    perform docker / venv isolation today (in-process execution); the fix
+    when it does is to capture inside the isolated env. Until then, gate the
+    runner-process probe on this predicate.
+
+    Lookup failures fall back to "treat as local" so probe behaviour is
+    unchanged for envs we genuinely don't know anything about; the
+    pre-flight :func:`_validate_names_resolve` would already have failed if
+    the name were truly unknown.
+    """
+    if any(env_name == e.name for e in inline_envs):
+        return True
+    try:
+        descriptor = get_environment(env_name)
+    except RegistryError:
+        return False
+    return bool(descriptor.docker or descriptor.venv)
+
+
+def _write_isolated_env_placeholder(
+    target: Path,
+    env_name: str,
+    inline_envs: tuple[InlineEnv, ...],
+    warnings: list[str],
+) -> None:
+    """Write a non-misleading placeholder for envs the runner cannot probe.
+
+    For docker / venv environments the only honest thing we can record is the
+    descriptor itself plus a note explaining why no live snapshot is captured.
+    Pretending otherwise (calling ``collect_env`` in the runner process) would
+    log host state under a docker label and silently mislead anyone reading
+    the artifact.
+    """
+    inline_match = next((e for e in inline_envs if e.name == env_name), None)
+    descriptor: dict[str, Any] = {"name": env_name}
+    if inline_match is not None:
+        descriptor["docker"] = inline_match.docker
+        descriptor["source"] = "inline"
+    else:
+        try:
+            env_desc = get_environment(env_name)
+            descriptor["docker"] = env_desc.docker
+            descriptor["venv"] = env_desc.venv
+            descriptor["source_package"] = env_desc.source_package
+        except RegistryError as exc:  # pragma: no cover - guarded by predicate
+            descriptor["_lookup_error"] = f"{type(exc).__name__}: {exc}"
+    skip_reason = (
+        "B1 currently runs trials in the runner process, so a runner-time "
+        "collect_env() snapshot would record the host's state instead of the "
+        "isolated docker/venv environment the descriptor advertises. The "
+        "snapshot is intentionally skipped to avoid a misleading artifact; "
+        "host_env.json next to this file captures the runner's view."
+    )
+    placeholder = {
+        "name": env_name,
+        "snapshot_captured": False,
+        "skip_reason": skip_reason,
+        "descriptor": descriptor,
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(placeholder, indent=2), encoding="utf-8")
+    warnings.append(
+        f"environment {env_name!r}: per-env probe skipped (isolated env, B1 in-process). "
+        "See the env's env.json for the descriptor and the host-level snapshot in host_env.json."
+    )
 
 
 def _resolve_cell_env_vars(
@@ -153,7 +231,7 @@ def _run_one_cell(
     logged at WARNING so operators can diagnose, but the returned ``error``
     string stays short -- it's the text shown in matrix.md.
     """
-    cell_dir = _cells_dir(run_dir) / cell.name
+    cell_dir = _cells_dir(run_dir) / safe_slug(cell.name)
     cell_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_env_vars = _resolve_cell_env_vars(cell.mitigations, cell.extra_env, sidecar_files)
@@ -195,9 +273,7 @@ def _print_dry_run(recipe: Recipe) -> None:
         click.echo("Inline docker environments:")
         for env in recipe.inline_environments:
             click.echo(f"  - {env.name} -> {env.docker}")
-    click.echo(
-        f"Baseline rule: " f"{recipe.confound.baseline_cell or '(auto-resolve at run time)'}"
-    )
+    click.echo(f"Baseline rule: {recipe.confound.baseline_cell or '(auto-resolve at run time)'}")
     click.echo(f"Confound threshold: {recipe.confound.threshold}")
 
 
@@ -253,11 +329,20 @@ def run_recipe(
     cell_stats: list[CellStats] = []
     for cell in recipe.cells:
         if cell.environment not in seen_envs:
-            _capture_env(
-                env_dir / cell.environment / "env.json",
-                scope=f"environment:{cell.environment}",
-                warnings=warnings,
-            )
+            env_json_path = env_dir / safe_slug(cell.environment) / "env.json"
+            if _is_isolated_environment(cell.environment, recipe.inline_environments):
+                _write_isolated_env_placeholder(
+                    env_json_path,
+                    cell.environment,
+                    recipe.inline_environments,
+                    warnings,
+                )
+            else:
+                _capture_env(
+                    env_json_path,
+                    scope=f"environment:{cell.environment}",
+                    warnings=warnings,
+                )
             seen_envs.add(cell.environment)
 
         trials, error, resolved_env_vars, trial_paths = _run_one_cell(
@@ -305,6 +390,7 @@ def run_recipe(
         confound_tags=confound_tags,
         run_timestamp=ts,
         warnings=warnings,
+        sidecar_files=sidecar_files,
     )
     write_resolved_recipe(
         run_dir / "recipe.resolved.yaml",

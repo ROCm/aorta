@@ -73,9 +73,9 @@ def test_triage_package_has_no_subprocess_import():
     assert triage_dir.is_dir()
     for py in triage_dir.rglob("*.py"):
         text = py.read_text(encoding="utf-8")
-        assert (
-            "import subprocess" not in text
-        ), f"{py} imports subprocess; B2 must drive B1 via the Python API only."
+        assert "import subprocess" not in text, (
+            f"{py} imports subprocess; B2 must drive B1 via the Python API only."
+        )
         assert "from subprocess" not in text, f"{py} imports from subprocess."
 
 
@@ -313,6 +313,109 @@ cells:
     )
     assert result.exit_code != 0
     assert "conflicts" in result.output
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--workload", "other"],
+        ["--mitigation-axis", "tf32_off"],
+        ["--environment-axis", "local"],
+        ["--trials", "5"],
+        ["--steps", "200"],
+        ["--ticket", "OTHER-1"],
+        ["--baseline-cell", "different-cell"],
+        ["--confound-threshold", "1.5"],
+    ],
+    ids=[
+        "workload",
+        "mitigation-axis",
+        "environment-axis",
+        "trials",
+        "steps",
+        "ticket",
+        "baseline-cell",
+        "confound-threshold",
+    ],
+)
+def test_cli_recipe_mode_rejects_every_flag_mode_knob(tmp_path, extra_args):
+    """All flags that affect recipe content must be rejected in recipe mode (issue #160 c1)."""
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 5
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+""",
+        encoding="utf-8",
+    )
+    cli = CliRunner()
+    result = cli.invoke(triage, ["run", "--recipe", str(recipe), *extra_args])
+    assert result.exit_code != 0
+    assert "conflicts" in result.output
+    assert extra_args[0] in result.output
+
+
+def test_cli_recipe_mode_allows_runner_only_flags(tmp_path, patched_env, patched_run_trials):
+    """--output-dir, --dry-run, --mode, --mitigations-file are runner-level, not recipe content."""
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 5
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+""",
+        encoding="utf-8",
+    )
+    cli = CliRunner()
+    result = cli.invoke(
+        triage,
+        [
+            "run",
+            "--recipe",
+            str(recipe),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Dry run" in result.output
+
+
+def test_cli_flag_mode_rejects_non_positive_trials(tmp_path):
+    """Flag-mode trials=0 rejected at recipe build, not deep in run_trials (issue #160 c6)."""
+    cli = CliRunner()
+    result = cli.invoke(
+        triage,
+        [
+            "run",
+            "--mode",
+            "matrix",
+            "--workload",
+            "fsdp",
+            "--mitigation-axis",
+            "none",
+            "--environment-axis",
+            "local",
+            "--trials",
+            "0",
+            "--steps",
+            "10",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "trials" in result.output.lower()
 
 
 def test_cli_flag_mode_requires_workload(tmp_path):

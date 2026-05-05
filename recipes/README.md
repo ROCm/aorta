@@ -32,7 +32,7 @@ cells:
     mitigations: [tf32_off]
     environment: local
 
-  - name: stack-tf32+xnack-local     # mitigation stacking (env vars unioned in list order)
+  - name: stack-tf32-xnack-local     # mitigation stacking (env vars unioned in list order)
     mitigations: [tf32_off, xnack]
     environment: local
     trials: 16                       # optional per-cell override
@@ -66,11 +66,17 @@ cells:
   `mitigations == ["none"]`; (3) single-cell recipes default to that cell;
   (4) error.
 - **`cells[*].name`** -- required string, unique within the recipe. Used as
-  the `matrix.md` row label and the `cells/<name>/` directory name.
+  the `matrix.md` row label and the `cells/<name>/` directory name. Must
+  match `^[A-Za-z0-9_][A-Za-z0-9_.\-]*$` (no path separators, no leading
+  `-`, no `.` / `..`); reserved names like `matrix.md` / `matrix.json` are
+  also rejected so a cell can't clobber a sibling artifact.
 - **`cells[*].mitigations`** -- required `list[str]`. Each name resolved
   through `aorta.registry.get_mitigation()`. Empty list rejected (use
   `["none"]` for the explicit baseline). Multiple names union their
-  env-var bundles in list order.
+  env-var bundles in list order. **Stacked mitigations must agree on
+  overlapping keys**: if two bundles set the same env var to different
+  values the recipe is rejected at load time. Use `extra_env` to
+  intentionally override.
 - **`cells[*].environment`** -- required. Either:
   - a registered environment name (resolved via `aorta.registry.get_environment()`), OR
   - a mapping `{ docker: "<image-ref>" }` -- inline docker shorthand.
@@ -112,10 +118,26 @@ real paths; a future B1 follow-up can drop this level of nesting via a
 
 ## Re-running a past matrix
 
-Every run writes `recipe.resolved.yaml` alongside the matrix. Registry
-names are expanded to env-var bundles and docker refs in that file, so
-re-running it on a different machine reproduces the same matrix even if
-the registries drift in the meantime.
+Every run writes `recipe.resolved.yaml` alongside the matrix. The file is
+**a strict, schema-valid recipe** -- you can pass it back to
+`aorta triage run --recipe ...` directly. Inline-docker cells are
+re-emitted in the `{ docker: <ref> }` shorthand so the same
+`_inline_<hash>` is re-derived without needing to ship a sidecar JSON
+next to the file.
+
+The per-cell mitigation env-var bundles AS APPLIED, plus the resolved
+`Environment` descriptor for each cell, live in `matrix.json` (under
+each cell's `resolved_env_vars` and `resolved_environment` keys) -- not
+in `recipe.resolved.yaml` -- so the rerun artifact stays loadable while
+audit data is still preserved next to the run.
+
+> [!NOTE]
+> "Reproducing the same matrix" is up to the registries available at
+> rerun time. If a sidecar mitigation's env-var bundle drifts between
+> runs the rerun will use the new bundle. Inline-docker cells are
+> immune (the docker ref is in the recipe text itself), but registry
+> drift on named entries is currently not pinned. Compare each run's
+> `matrix.json::cells[*].resolved_env_vars` to detect drift.
 
 ## Flag mode (escape hatch)
 
