@@ -1,0 +1,156 @@
+"""Tests for src/aorta/triage/matrix.py: CellStats + aggregate_cell."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from aorta.triage.matrix import CellStats, aggregate_cell
+
+
+def _trial(
+    passed: bool = True,
+    exit_status: str = "ok",
+    step_times_ms: list[float] | None = None,
+    total_iterations: int | None = None,
+    elapsed_sec: float | None = None,
+    wall_clock_sec: float = 1.0,
+):
+    """Build a TrialResult-shaped stand-in. aggregate_cell uses duck typing."""
+    result: dict = {"passed": passed}
+    if step_times_ms is not None:
+        result["step_times_ms"] = step_times_ms
+    if total_iterations is not None:
+        result["total_iterations"] = total_iterations
+    if elapsed_sec is not None:
+        result["elapsed_sec"] = elapsed_sec
+    return SimpleNamespace(
+        exit_status=exit_status,
+        wall_clock_sec=wall_clock_sec,
+        result=result,
+    )
+
+
+def _default_call(**overrides):
+    kwargs = {
+        "name": "cell",
+        "mitigations": ("none",),
+        "environment": "local",
+        "extra_env": {},
+        "resolved_env_vars": {},
+        "trials": [],
+        "effective_steps": 100,
+    }
+    kwargs.update(overrides)
+    return aggregate_cell(**kwargs)
+
+
+def test_all_pass_no_failures():
+    trials = [_trial(passed=True) for _ in range(4)]
+    stats = _default_call(trials=trials)
+    assert stats.trials == 4
+    assert stats.passed_count == 4
+    assert stats.failed_count == 0
+    assert stats.nan_rate == 0.0
+    assert stats.error is None
+
+
+def test_mixed_pass_fail_counts_correctly():
+    trials = [_trial(passed=True), _trial(passed=False), _trial(passed=True)]
+    stats = _default_call(trials=trials)
+    assert stats.passed_count == 2
+    assert stats.failed_count == 1
+    assert abs(stats.nan_rate - (1 / 3)) < 1e-9
+
+
+def test_infrastructure_failed_exit_status_counts_as_failure():
+    trials = [
+        _trial(passed=True, exit_status="ok"),
+        _trial(passed=True, exit_status="infrastructure_failed"),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.passed_count == 1
+    assert stats.failed_count == 1
+
+
+def test_step_times_preferred_over_fallback():
+    trials = [_trial(step_times_ms=[100.0, 200.0, 300.0], wall_clock_sec=10.0)]
+    stats = _default_call(trials=trials)
+    assert stats.mean_step_time_ms == 200.0
+    assert stats.p50_step_time_ms == 200.0
+    # p99 at n=3 interpolates between idx 1 and idx 2 -> close to 300
+    assert 290.0 < stats.p99_step_time_ms <= 300.0
+    assert stats.std_step_time_ms > 0
+
+
+def test_step_times_fallback_to_total_iterations_and_elapsed():
+    trials = [_trial(total_iterations=10, elapsed_sec=1.0)]
+    stats = _default_call(trials=trials)
+    # 1.0s / 10 iters = 100ms/iter
+    assert abs(stats.mean_step_time_ms - 100.0) < 1e-9
+
+
+def test_step_times_fallback_to_wall_clock_over_steps():
+    # No step_times_ms, no total_iterations/elapsed -> wall_clock / effective_steps
+    trials = [_trial(wall_clock_sec=2.0)]
+    stats = _default_call(trials=trials, effective_steps=100)
+    # 2.0s / 100 steps = 20ms/step
+    assert abs(stats.mean_step_time_ms - 20.0) < 1e-9
+
+
+def test_no_timing_data_produces_zero():
+    trials = [_trial(wall_clock_sec=0.0)]
+    stats = _default_call(trials=trials)
+    assert stats.mean_step_time_ms == 0.0
+    assert stats.p50_step_time_ms == 0.0
+
+
+def test_error_cell_preserves_row():
+    stats = _default_call(
+        trials=[],
+        error="docker pull failed: image not found",
+    )
+    assert isinstance(stats, CellStats)
+    assert stats.error is not None
+    assert stats.passed_count == 0
+    assert stats.failed_count == 0  # len(trials) == 0
+    assert stats.trials == 0
+
+
+def test_error_cell_zeroes_all_numeric_stats():
+    stats = _default_call(
+        trials=[_trial()],  # even with trials present
+        error="whole cell failed to start",
+    )
+    assert stats.mean_step_time_ms == 0.0
+    assert stats.std_step_time_ms == 0.0
+    assert stats.p50_step_time_ms == 0.0
+    assert stats.p99_step_time_ms == 0.0
+    assert stats.mean_wall_clock_sec == 0.0
+
+
+def test_resolved_env_vars_and_extra_env_recorded():
+    stats = _default_call(
+        extra_env={"X": "1"},
+        resolved_env_vars={"HSA_XNACK": "1", "X": "1"},
+        trials=[_trial()],
+    )
+    assert stats.extra_env == {"X": "1"}
+    assert stats.resolved_env_vars == {"HSA_XNACK": "1", "X": "1"}
+
+
+def test_trial_paths_recorded():
+    paths = ["/tmp/cell/trial_0.json", "/tmp/cell/trial_1.json"]
+    stats = _default_call(trials=[_trial(), _trial()], trial_paths=paths)
+    assert stats.trial_paths == paths
+
+
+def test_step_time_percentile_series():
+    """With >1 step-time samples across trials we get a real p50/p99 computation."""
+    trials = [
+        _trial(step_times_ms=[100.0, 200.0]),
+        _trial(step_times_ms=[300.0, 400.0]),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.mean_step_time_ms == 250.0
+    assert stats.step_times_ms == [100.0, 200.0, 300.0, 400.0]
+    assert stats.std_step_time_ms > 0

@@ -1,0 +1,37 @@
+# Smoke-test recipe for `aorta triage run --mode matrix`.
+#
+# Matches the invocation in issue #151 §"How to test":
+#   aorta triage run --recipe recipes/example-fsdp-smoke.yaml --dry-run
+#   aorta triage run --recipe recipes/example-fsdp-smoke.yaml
+#
+# Resolution happens at load time (schema validation + registry lookups for
+# every mitigation / environment name below). If the public `aorta` build
+# hasn't yet bundled the `fsdp` workload class under the `aorta.workloads`
+# entry-point group, the recipe still validates -- B1's runner surfaces
+# `UnknownWorkloadError` at cell execution time, which this runner catches
+# and reports as a cell-level error without aborting the whole matrix.
+schema_version: 1
+
+ticket: EXAMPLE-151
+workload: fsdp
+
+trials: 2
+steps: 100
+
+confound:
+  threshold: 1.15
+  # Left unset so the baseline auto-resolves to `baseline-local` via the
+  # "first cell starting with baseline-" rule.
+
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+
+  - name: tf32_off-local
+    mitigations: [tf32_off]
+    environment: local
+
+  - name: xnack-local
+    mitigations: [xnack]
+    environment: local
