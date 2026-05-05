@@ -97,10 +97,10 @@ def _format_mitigations(mitigations: Iterable[str]) -> str:
     return ", ".join(items) if items else "-"
 
 
-def _format_nan_rate(cell: CellStats) -> str:
+def _format_failure_rate(cell: CellStats) -> str:
     if cell.error is not None:
         return "n/a"
-    pct = int(round(cell.nan_rate * 100))
+    pct = int(round(cell.failure_rate * 100))
     return f"{pct}%"
 
 
@@ -165,7 +165,7 @@ def write_matrix_md(
         "Cell",
         "Mitigations",
         "Environment",
-        "NaN rate",
+        "Failure rate",
         "Trials",
         "Mean step (ms)",
         "Confound",
@@ -178,7 +178,7 @@ def write_matrix_md(
                 cell.name,
                 _format_mitigations(cell.mitigations),
                 cell.environment,
-                _format_nan_rate(cell),
+                _format_failure_rate(cell),
                 _format_fail_count(cell),
                 _format_step_ms(cell),
                 _format_confound(tag),
@@ -215,8 +215,15 @@ def write_matrix_md(
     )
     lines.append("  - `error` -- the whole cell failed; row preserved so the matrix is complete.")
     lines.append(
-        "- Only `mean step (ms)` is shown here. Per-cell `std`, `p50`, `p99`, raw "
-        "step-time arrays, and per-trial JSON paths are in `matrix.json`."
+        "- `Failure rate` counts every trial whose `exit_status != ok` or whose "
+        "`WorkloadResult.passed` is False; it is *not* a NaN-specific rate. Use "
+        "`matrix.json::cells[*].exit_status_counts` to break failures down by mode "
+        "(`workload_failed` vs `infrastructure_failed` vs `unknown`, etc.)."
+    )
+    lines.append(
+        "- Only `mean step (ms)` is shown here. Per-cell `std`, `min`, `max`, "
+        "`p50`, `p90`, `p99`, raw step-time arrays, exit-status histogram, and "
+        "per-trial JSON paths are in `matrix.json`."
     )
     lines.append(
         "- `recipe.resolved.yaml` (alongside this file) captures the registry state "
@@ -268,7 +275,7 @@ def write_matrix_json(
     for cell in cell_stats:
         tag, ratio = confound_tags.get(cell.name, ("-", None))
         entry = asdict(cell)
-        entry["nan_rate"] = cell.nan_rate
+        entry["failure_rate"] = cell.failure_rate
         entry["confound"] = tag
         entry["step_time_ratio"] = ratio
         try:
@@ -303,9 +310,23 @@ def write_resolved_recipe(
 
     Per-cell debug expansions (the ``Environment`` descriptor and the unioned
     mitigation env-var bundle) live in ``matrix.json`` instead, where they
-    belong as run-time state. ``sidecar_files`` is intentionally unused at
-    write time -- B3 already resolved everything by the time we got here --
-    but the parameter is preserved so the runner can keep its single
+    belong as run-time state.
+
+    For runs that used ``--mitigations-file``, the resolved YAML still
+    references those mitigation/environment names by name -- it is **not**
+    self-contained on its own. The runner snapshots the operator-supplied
+    sidecars into ``<run_dir>/sidecars/<basename>`` (see
+    :func:`aorta.triage.runner._copy_operator_sidecars`) so the rerun
+    command is::
+
+        aorta triage run --recipe recipe.resolved.yaml \\
+            --mitigations-file sidecars/<basename>  # repeat per sidecar
+
+    The resolved YAML schema is intentionally kept strict (no metadata
+    namespace) -- the README documents the replay command, and the runner
+    echoes a one-line "to rerun:" hint on stdout when sidecars are present.
+    ``sidecar_files`` is intentionally unused at write time; it is preserved
+    on the signature so the runner can keep its single
     "everything-needed-for-replay" call site.
     """
     del sidecar_files  # see docstring; kept for caller-stable signature

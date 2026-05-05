@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,32 @@ from aorta.triage.recipe import InlineEnv, Recipe
 log = logging.getLogger(__name__)
 
 _INLINE_SIDECAR_NAME = "inline_environments.sidecar.json"
+_OPERATOR_SIDECAR_DIR = "sidecars"
+
+
+def _copy_operator_sidecars(run_dir: Path, sidecar_files: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Snapshot operator-supplied sidecars into the run dir for replay.
+
+    ``recipe.resolved.yaml`` advertises itself as the rerun artifact, but it
+    intentionally references mitigation / environment names by *name* -- so a
+    recipe whose names only resolve via a ``--mitigations-file`` would be
+    unreplayable from the resolved YAML alone. Copy each sidecar into
+    ``<run_dir>/sidecars/<basename>`` (B3 already enforces unique basenames
+    via :func:`aorta.registry.sidecar.check_sidecar_basenames`, so the
+    target paths cannot collide). The README documents the replay command:
+    ``aorta triage run --recipe recipe.resolved.yaml --mitigations-file
+    sidecars/<basename>``.
+    """
+    if not sidecar_files:
+        return ()
+    target_dir = run_dir / _OPERATOR_SIDECAR_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    for src in sidecar_files:
+        dst = target_dir / src.name
+        shutil.copy2(src, dst)
+        copied.append(dst)
+    return tuple(copied)
 
 
 def _write_inline_sidecar(run_dir: Path, inline_envs: tuple[InlineEnv, ...]) -> Path | None:
@@ -99,7 +126,37 @@ def _capture_env(
     return snapshot
 
 
-def _is_isolated_environment(env_name: str, inline_envs: tuple[InlineEnv, ...]) -> bool:
+def _check_env_slug_collisions(cells: tuple) -> None:
+    """Reject recipes whose distinct env names slug to the same dir component.
+
+    ``environments/<safe_slug(name)>/env.json`` would silently overwrite when
+    two different registered names slug-collapse to the same string (e.g.
+    ``"a/b"`` and ``"a:b"`` both become ``"a_b"``). Callers treat them as
+    separate envs in memory, so the on-disk artifact would contradict the
+    in-memory state. Cell-name collisions are already prevented by the
+    cell-name regex in :mod:`aorta.triage.recipe`; environment names come
+    from the registry and are not constrained, so we enforce the parallel
+    invariant at run setup time and raise with the offending pair so the
+    operator can fix it.
+    """
+    seen: dict[str, str] = {}
+    for cell in cells:
+        slug = safe_slug(cell.environment)
+        prev = seen.get(slug)
+        if prev is not None and prev != cell.environment:
+            raise RegistryError(
+                f"environment names {prev!r} and {cell.environment!r} both map "
+                f"to filesystem component {slug!r}; rename one in the registry "
+                "/ sidecar so per-environment artifacts can be distinguished"
+            )
+        seen[slug] = cell.environment
+
+
+def _is_isolated_environment(
+    env_name: str,
+    inline_envs: tuple[InlineEnv, ...],
+    sidecar_files: tuple[Path, ...] = (),
+) -> bool:
     """Return True iff the env would isolate the trial from the runner process.
 
     Inline-docker envs always count as isolated (the cell shorthand
@@ -112,15 +169,20 @@ def _is_isolated_environment(env_name: str, inline_envs: tuple[InlineEnv, ...]) 
     when it does is to capture inside the isolated env. Until then, gate the
     runner-process probe on this predicate.
 
-    Lookup failures fall back to "treat as local" so probe behaviour is
-    unchanged for envs we genuinely don't know anything about; the
-    pre-flight :func:`_validate_names_resolve` would already have failed if
-    the name were truly unknown.
+    ``sidecar_files`` MUST be threaded through so envs defined only in a
+    ``--mitigations-file`` JSON are visible to the registry resolver. Without
+    it, sidecar-defined docker/venv envs would mis-classify as "local" and
+    pick up a misleading host-state snapshot under their name. Lookup
+    failures still fall back to "treat as local" so probe behaviour is
+    unchanged for envs we genuinely don't know about; the pre-flight
+    :func:`_validate_names_resolve` would already have failed if the name
+    were truly unknown.
     """
     if any(env_name == e.name for e in inline_envs):
         return True
+    extra = list(sidecar_files) if sidecar_files else None
     try:
-        descriptor = get_environment(env_name)
+        descriptor = get_environment(env_name, extra_files=extra)
     except RegistryError:
         return False
     return bool(descriptor.docker or descriptor.venv)
@@ -131,6 +193,7 @@ def _write_isolated_env_placeholder(
     env_name: str,
     inline_envs: tuple[InlineEnv, ...],
     warnings: list[str],
+    sidecar_files: tuple[Path, ...] = (),
 ) -> None:
     """Write a non-misleading placeholder for envs the runner cannot probe.
 
@@ -139,6 +202,10 @@ def _write_isolated_env_placeholder(
     Pretending otherwise (calling ``collect_env`` in the runner process) would
     log host state under a docker label and silently mislead anyone reading
     the artifact.
+
+    ``sidecar_files`` is forwarded to the registry lookup so the descriptor
+    written here matches the env that B1 will actually use, even when the env
+    only exists in an operator-supplied ``--mitigations-file``.
     """
     inline_match = next((e for e in inline_envs if e.name == env_name), None)
     descriptor: dict[str, Any] = {"name": env_name}
@@ -146,8 +213,9 @@ def _write_isolated_env_placeholder(
         descriptor["docker"] = inline_match.docker
         descriptor["source"] = "inline"
     else:
+        extra = list(sidecar_files) if sidecar_files else None
         try:
-            env_desc = get_environment(env_name)
+            env_desc = get_environment(env_name, extra_files=extra)
             descriptor["docker"] = env_desc.docker
             descriptor["venv"] = env_desc.venv
             descriptor["source_package"] = env_desc.source_package
@@ -207,12 +275,29 @@ def _collect_trial_paths(results_dir: Path) -> list[str]:
     (the dispatcher appends the workload subdir; that's a B1 contract B2
     currently honours without surgery). We glob the workload subdir so the
     matrix.json ``trial_paths`` field matches reality on disk.
+
+    Sort by the integer ``N`` extracted from the filename, NOT
+    lexicographically -- a lex sort would put ``trial_10.json`` before
+    ``trial_2.json`` and the recorded order would diverge from execution
+    order once a cell has 10+ trials. Files whose names don't parse as
+    ``trial_<int>.json`` sort last (alphabetically), which keeps any future
+    sibling artifacts visible without breaking the contract for the common
+    case.
     """
     if not results_dir.exists():
         return []
-    found: list[Path] = []
-    for candidate in sorted(results_dir.rglob("trial_*.json")):
-        found.append(candidate)
+
+    def _key(path: Path) -> tuple[int, str]:
+        stem = path.stem  # "trial_3"
+        if stem.startswith("trial_"):
+            try:
+                return (int(stem[len("trial_") :]), "")
+            except ValueError:
+                pass
+        # Sentinel: push non-conforming names after every trial_N entry.
+        return (10**12, str(path))
+
+    found = sorted(results_dir.rglob("trial_*.json"), key=_key)
     return [str(p) for p in found]
 
 
@@ -308,8 +393,15 @@ def run_recipe(
     ts = timestamp or format_timestamp()
     run_dir = resolve_run_dir(output_dir, recipe, timestamp=ts)
 
+    # Snapshot operator-supplied sidecars (--mitigations-file) into run_dir
+    # FIRST so the recipe.resolved.yaml + the copies form a self-contained
+    # replay bundle. Use the in-run-dir copies as the resolver's source of
+    # truth from here on, so what gets executed and what gets archived for
+    # replay are byte-identical.
+    operator_sidecar_paths = _copy_operator_sidecars(run_dir, tuple(extra_sidecar_files))
+
     inline_sidecar_path = _write_inline_sidecar(run_dir, recipe.inline_environments)
-    sidecar_files: tuple[Path, ...] = tuple(extra_sidecar_files)
+    sidecar_files: tuple[Path, ...] = operator_sidecar_paths
     if inline_sidecar_path is not None:
         sidecar_files = sidecar_files + (inline_sidecar_path,)
 
@@ -326,16 +418,26 @@ def run_recipe(
 
     env_dir = run_dir / "environments"
 
+    # Detect environment names whose safe_slug collapses to the same dir
+    # component BEFORE we start writing env.json snapshots. Without this,
+    # distinct registered names like "a/b" and "a:b" both slug to "a_b" and
+    # the second probe would silently overwrite the first (matrix.json keeps
+    # them as distinct envs, which would mismatch the on-disk artifact).
+    _check_env_slug_collisions(recipe.cells)
+
     cell_stats: list[CellStats] = []
     for cell in recipe.cells:
         if cell.environment not in seen_envs:
             env_json_path = env_dir / safe_slug(cell.environment) / "env.json"
-            if _is_isolated_environment(cell.environment, recipe.inline_environments):
+            if _is_isolated_environment(
+                cell.environment, recipe.inline_environments, sidecar_files
+            ):
                 _write_isolated_env_placeholder(
                     env_json_path,
                     cell.environment,
                     recipe.inline_environments,
                     warnings,
+                    sidecar_files,
                 )
             else:
                 _capture_env(
@@ -397,6 +499,19 @@ def run_recipe(
         recipe=recipe,
         sidecar_files=sidecar_files,
     )
+
+    if operator_sidecar_paths:
+        # Operator-supplied sidecars were snapshotted into the run dir so the
+        # archived recipe.resolved.yaml + sidecar copies form a self-contained
+        # replay bundle. Print the exact rerun command so the operator does
+        # not have to reconstruct the --mitigations-file flags by hand.
+        flags = " ".join(
+            f"--mitigations-file {Path(_OPERATOR_SIDECAR_DIR) / p.name}"
+            for p in operator_sidecar_paths
+        )
+        click.echo(
+            f"to rerun: cd {run_dir} && aorta triage run --recipe recipe.resolved.yaml {flags}"
+        )
 
     return run_dir
 

@@ -172,13 +172,21 @@ def test_extra_sidecar_files_threaded_to_run_trials(tmp_path, patched_env, patch
         steps=10,
         ticket="X-1",
     )
-    runner.run_recipe(
+    run_dir = runner.run_recipe(
         r,
         output_dir=tmp_path,
         extra_sidecar_files=(extra,),
     )
     req: RunRequest = patched_run_trials.call_args_list[0].args[0]
-    assert extra in req.sidecar_files
+    # The runner snapshots operator sidecars into <run_dir>/sidecars/<basename>
+    # FIRST and uses that copy as the resolver source -- so what's executed and
+    # what's archived for replay are byte-identical. Pin both halves of that
+    # contract: the snapshot exists, and run_trials sees the snapshot path
+    # (not the original).
+    archived = run_dir / "sidecars" / "custom.json"
+    assert archived.exists()
+    assert archived in req.sidecar_files
+    assert extra not in req.sidecar_files
 
 
 def test_dry_run_does_not_call_run_trials(tmp_path, patched_env, patched_run_trials):
@@ -453,3 +461,31 @@ def test_cli_list_environments():
     result = cli.invoke(triage, ["list-environments"])
     assert result.exit_code == 0, result.output
     assert "local" in result.output
+
+
+def test_cli_list_mitigations_wraps_registry_error_in_click_exception(tmp_path):
+    """Malformed --mitigations-file -> clean ClickException, not a Python traceback.
+
+    Regression for PR #160 second-round Copilot comment: `triage list-mitigations`
+    let `RegistryError` escape uncaught, breaking the one-line-error CLI contract
+    that `triage run` and `aorta run` already followed.
+    """
+    bad = tmp_path / "broken.sidecar.json"
+    bad.write_text("not valid json {{{", encoding="utf-8")
+    cli = CliRunner()
+    result = cli.invoke(triage, ["list-mitigations", "--mitigations-file", str(bad)])
+    assert result.exit_code != 0
+    # Click renders ClickException as "Error: <msg>" -- pin that shape.
+    assert "Error:" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_list_environments_wraps_registry_error_in_click_exception(tmp_path):
+    """Same fail-fast contract as list-mitigations."""
+    bad = tmp_path / "broken.sidecar.json"
+    bad.write_text("not valid json {{{", encoding="utf-8")
+    cli = CliRunner()
+    result = cli.invoke(triage, ["list-environments", "--mitigations-file", str(bad)])
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert "Traceback" not in result.output

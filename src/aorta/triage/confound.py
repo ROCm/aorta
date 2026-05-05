@@ -134,7 +134,7 @@ def classify(
     # At this point the cell is NOT speed-confounded. Decide between
     # "-" (faster or equal-speed, with a measurable failure-rate drop) and
     # "no effect" (failure rate didn't drop AND no speed cost).
-    if cell.nan_rate >= baseline.nan_rate:
+    if cell.failure_rate >= baseline.failure_rate:
         return CONFOUND_NO_EFFECT, ratio
     return CONFOUND_NEUTRAL, ratio
 

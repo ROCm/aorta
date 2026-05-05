@@ -50,7 +50,7 @@ def test_all_pass_no_failures():
     assert stats.trials == 4
     assert stats.passed_count == 4
     assert stats.failed_count == 0
-    assert stats.nan_rate == 0.0
+    assert stats.failure_rate == 0.0
     assert stats.error is None
 
 
@@ -59,7 +59,7 @@ def test_mixed_pass_fail_counts_correctly():
     stats = _default_call(trials=trials)
     assert stats.passed_count == 2
     assert stats.failed_count == 1
-    assert abs(stats.nan_rate - (1 / 3)) < 1e-9
+    assert abs(stats.failure_rate - (1 / 3)) < 1e-9
 
 
 def test_infrastructure_failed_exit_status_counts_as_failure():
@@ -123,9 +123,13 @@ def test_error_cell_zeroes_all_numeric_stats():
     )
     assert stats.mean_step_time_ms == 0.0
     assert stats.std_step_time_ms == 0.0
+    assert stats.min_step_time_ms == 0.0
+    assert stats.max_step_time_ms == 0.0
     assert stats.p50_step_time_ms == 0.0
+    assert stats.p90_step_time_ms == 0.0
     assert stats.p99_step_time_ms == 0.0
     assert stats.mean_wall_clock_sec == 0.0
+    assert stats.exit_status_counts == {}
 
 
 def test_resolved_env_vars_and_extra_env_recorded():
@@ -154,3 +158,52 @@ def test_step_time_percentile_series():
     assert stats.mean_step_time_ms == 250.0
     assert stats.step_times_ms == [100.0, 200.0, 300.0, 400.0]
     assert stats.std_step_time_ms > 0
+
+
+def test_min_max_p90_step_times_populated():
+    """Pinning the new min/max/p90 fields requested in PR review."""
+    trials = [
+        _trial(
+            step_times_ms=[100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0, 1000.0]
+        )
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.min_step_time_ms == 100.0
+    assert stats.max_step_time_ms == 1000.0
+    # p90 of 10 evenly-spaced samples interpolates between idx 8 (900) and 9 (1000)
+    assert 900.0 <= stats.p90_step_time_ms <= 1000.0
+    # p99 should be even closer to the max
+    assert stats.p99_step_time_ms >= stats.p90_step_time_ms
+
+
+def test_exit_status_histogram_distinguishes_failure_modes():
+    """Pin the new exit_status_counts field. Failure rate alone is generic;
+    callers triaging a cell need to tell workload_failed from infrastructure_failed.
+    """
+    trials = [
+        _trial(passed=True, exit_status="ok"),
+        _trial(passed=True, exit_status="ok"),
+        _trial(passed=False, exit_status="workload_failed"),
+        _trial(passed=False, exit_status="infrastructure_failed"),
+        _trial(passed=False, exit_status="infrastructure_failed"),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.exit_status_counts == {
+        "ok": 2,
+        "workload_failed": 1,
+        "infrastructure_failed": 2,
+    }
+    # Histogram total must equal trial count, by construction.
+    assert sum(stats.exit_status_counts.values()) == stats.trials
+    # And the failure_rate is consistent with the histogram (3 of 5 not "ok").
+    assert abs(stats.failure_rate - 0.6) < 1e-9
+
+
+def test_failure_rate_docstring_is_general_not_nan_specific():
+    """Regression: the property must NOT be called nan_rate.
+
+    Prior naming claimed "NaN rate" but counted every non-ok exit. Pin the
+    new name so future renames don't silently re-introduce the misnomer.
+    """
+    assert hasattr(CellStats, "failure_rate")
+    assert not hasattr(CellStats, "nan_rate")

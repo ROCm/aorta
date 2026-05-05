@@ -545,6 +545,24 @@ def test_build_recipe_from_flags_rejects_non_positive_threshold(threshold):
         )
 
 
+@pytest.mark.parametrize("threshold", [0, 0.0, -0.5, -1])
+def test_load_recipe_rejects_non_positive_confound_threshold(tmp_path, threshold):
+    """Recipe-mode parity with build_recipe_from_flags: threshold must be > 0.
+
+    Without this check the loader accepted thresholds like 0 or -1, which
+    make `classify` flag every non-baseline cell as a speed confound.
+    """
+    text = (
+        _MINIMAL_YAML
+        + f"""\
+confound:
+  threshold: {threshold}
+"""
+    )
+    with pytest.raises(RecipeSchemaError, match="confound.threshold"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
 def test_build_recipe_from_flags_rejects_empty_ticket():
     with pytest.raises(RecipeSchemaError, match="--ticket"):
         build_recipe_from_flags(

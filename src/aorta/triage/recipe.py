@@ -203,6 +203,13 @@ def _parse_confound(path_hint: str, raw: Any) -> ConfoundCfg:
         raise RecipeSchemaError(
             f"{path_hint}.confound.threshold: must be a number, got {type(threshold).__name__}"
         )
+    if threshold <= 0:
+        # Match flag-mode validation in `build_recipe_from_flags`. A non-positive
+        # threshold makes ``classify_all`` flag every non-baseline cell as a
+        # speed confound (any positive ratio >= threshold), which is never the
+        # intent. Reject at load time so the two entry points agree on what
+        # constitutes a valid recipe.
+        raise RecipeSchemaError(f"{path_hint}.confound.threshold: must be > 0, got {threshold}")
     baseline = raw.get("baseline_cell")
     if baseline is not None and not isinstance(baseline, str):
         raise RecipeSchemaError(

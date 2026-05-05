@@ -105,8 +105,29 @@ failure is localisable without reading the loader source.
         host_env.json                           # collect_env() once per run
         environments/<env-name>/env.json        # once per unique environment
         inline_environments.sidecar.json        # only when inline docker is used
+        sidecars/<basename>                     # one copy per --mitigations-file
         cells/<cell-name>/<workload>/trial_*.json
 ```
+
+`matrix.json` per-cell shape (the canonical machine-readable record):
+
+- `failure_rate` -- fraction of trials with `exit_status != ok` OR
+  `WorkloadResult.passed == False`. NOT a NaN-specific rate; see
+  `exit_status_counts` to disambiguate failure modes.
+- `exit_status_counts` -- histogram keyed by `TrialResult.exit_status`
+  (`"ok"`, `"workload_failed"`, `"infrastructure_failed"`, ...). Total
+  equals the cell's trial count.
+- `min_step_time_ms`, `max_step_time_ms`, `p50_step_time_ms`,
+  `p90_step_time_ms`, `p99_step_time_ms` -- summary stats over the
+  concatenated per-trial step-time series.
+- `mean_step_time_ms`, `std_step_time_ms`, `mean_wall_clock_sec` --
+  unchanged; still the headline timing fields.
+- `step_times_ms` -- raw concatenated series for downstream re-analysis.
+- `resolved_env_vars` -- the env-var bundle as actually applied (mitigation
+  union + `extra_env`).
+- `resolved_environment` -- the resolved `Environment` descriptor.
+- `trial_paths` -- per-trial JSON paths, sorted by trial index (NOT
+  lexicographically, so `trial_2.json` precedes `trial_10.json`).
 
 **Note on the trailing `<workload>/` directory inside each cell.** B1's
 runner (`aorta.run.run_trials`) appends `/<workload>` to the output
@@ -125,6 +146,17 @@ re-emitted in the `{ docker: <ref> }` shorthand so the same
 `_inline_<hash>` is re-derived without needing to ship a sidecar JSON
 next to the file.
 
+For runs that used `--mitigations-file`, the resolved YAML still
+references those mitigation / environment names by name. The runner
+snapshots each operator-supplied sidecar into `<run_dir>/sidecars/<basename>`
+so the run directory is self-contained for replay. The runner also prints
+the exact rerun command on stdout when sidecars are involved, e.g.:
+
+```
+cd <run_dir> && aorta triage run --recipe recipe.resolved.yaml \
+  --mitigations-file sidecars/foo.json
+```
+
 The per-cell mitigation env-var bundles AS APPLIED, plus the resolved
 `Environment` descriptor for each cell, live in `matrix.json` (under
 each cell's `resolved_env_vars` and `resolved_environment` keys) -- not
@@ -134,10 +166,11 @@ audit data is still preserved next to the run.
 > [!NOTE]
 > "Reproducing the same matrix" is up to the registries available at
 > rerun time. If a sidecar mitigation's env-var bundle drifts between
-> runs the rerun will use the new bundle. Inline-docker cells are
-> immune (the docker ref is in the recipe text itself), but registry
-> drift on named entries is currently not pinned. Compare each run's
-> `matrix.json::cells[*].resolved_env_vars` to detect drift.
+> runs the rerun will use the new bundle (snapshotting the *file* doesn't
+> pin its *contents* once the operator edits it later). Inline-docker
+> cells are immune (the docker ref is in the recipe text itself), but
+> registry drift on named entries is currently not pinned. Compare each
+> run's `matrix.json::cells[*].resolved_env_vars` to detect drift.
 
 ## Flag mode (escape hatch)
 

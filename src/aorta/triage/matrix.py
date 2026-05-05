@@ -17,12 +17,18 @@ Step-time source order (per cell, per trial):
 
 A trial is counted as a failure (``failed_count += 1``) if either its
 ``exit_status != "ok"`` OR the wrapped ``WorkloadResult.passed`` is False.
+The aggregator does NOT inspect *why* a trial failed (NaN vs corruption vs
+divergence vs infrastructure crash); that's :class:`WorkloadResult` /
+``exit_status`` territory and is preserved separately via the
+``exit_status_counts`` histogram so callers can distinguish e.g.
+``workload_failed`` from ``infrastructure_failed`` when triaging.
 """
 
 from __future__ import annotations
 
 import math
 import statistics
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,11 +39,18 @@ class CellStats:
 
     ``error`` is non-None when the whole cell failed (docker pull failure,
     environment resolve error, etc.) -- the matrix row is preserved so the
-    matrix is complete but all numeric fields are zero/NaN.
+    matrix is complete but all numeric fields are zero / NaN.
 
     ``step_times_ms`` is the concatenation of every trial's step-time
     samples. Kept on the dataclass so matrix.json can embed the raw series
-    for downstream analysis; matrix.md shows only the mean.
+    for downstream analysis; matrix.md shows only the mean. The min / max /
+    p50 / p90 / p99 fields summarise this series for the matrix.json
+    consumer without forcing them to recompute.
+
+    ``exit_status_counts`` is a histogram keyed by ``TrialResult.exit_status``
+    (``"ok"``, ``"workload_failed"``, ``"infrastructure_failed"``, ...). It
+    lets matrix.json consumers distinguish failure modes that ``failure_rate``
+    alone collapses into a single number.
     """
 
     name: str
@@ -50,16 +63,28 @@ class CellStats:
     failed_count: int
     mean_step_time_ms: float
     std_step_time_ms: float
+    min_step_time_ms: float
+    max_step_time_ms: float
     p50_step_time_ms: float
+    p90_step_time_ms: float
     p99_step_time_ms: float
     mean_wall_clock_sec: float
+    exit_status_counts: dict[str, int] = field(default_factory=dict)
     step_times_ms: list[float] = field(default_factory=list)
     trial_paths: list[str] = field(default_factory=list)
     error: str | None = None
 
     @property
-    def nan_rate(self) -> float:
-        """Fraction of trials that failed. 0.0 for an empty cell."""
+    def failure_rate(self) -> float:
+        """Fraction of trials that failed for ANY reason. 0.0 for an empty cell.
+
+        Counts every trial whose ``exit_status != "ok"`` or whose wrapped
+        ``WorkloadResult.passed`` is False. This is *not* a NaN-specific
+        rate -- :class:`aorta.run.WorkloadResult.failure_count` is generic
+        (NaN / corruption / divergence / infrastructure crash) and the
+        aggregator does not try to disambiguate. Callers that need to
+        distinguish failure modes should read ``exit_status_counts``.
+        """
         if self.trials == 0:
             return 0.0
         return self.failed_count / self.trials
@@ -162,9 +187,13 @@ def aggregate_cell(
             failed_count=len(trials),
             mean_step_time_ms=0.0,
             std_step_time_ms=0.0,
+            min_step_time_ms=0.0,
+            max_step_time_ms=0.0,
             p50_step_time_ms=0.0,
+            p90_step_time_ms=0.0,
             p99_step_time_ms=0.0,
             mean_wall_clock_sec=0.0,
+            exit_status_counts={},
             step_times_ms=[],
             trial_paths=list(trial_paths or []),
             error=error,
@@ -176,18 +205,29 @@ def aggregate_cell(
 
     all_step_times: list[float] = []
     wall_clocks: list[float] = []
+    status_counter: Counter[str] = Counter()
     for trial in trials:
         all_step_times.extend(_step_times_from_trial(trial, effective_steps))
         wall = getattr(trial, "wall_clock_sec", 0.0) or 0.0
         wall_clocks.append(float(wall))
+        # Histogram by raw exit_status so callers can distinguish e.g.
+        # "workload_failed" (the workload returned a failed WorkloadResult)
+        # from "infrastructure_failed" (run_trials never got a result back).
+        # Falling back to "unknown" keeps the histogram total == trial_count
+        # even for stand-in trial objects that omit the attribute.
+        status = getattr(trial, "exit_status", None) or "unknown"
+        status_counter[str(status)] += 1
 
     if all_step_times:
         mean_step = float(statistics.fmean(all_step_times))
         std_step = float(statistics.pstdev(all_step_times)) if len(all_step_times) > 1 else 0.0
+        min_step = float(min(all_step_times))
+        max_step = float(max(all_step_times))
         p50 = _percentile(all_step_times, 0.50)
+        p90 = _percentile(all_step_times, 0.90)
         p99 = _percentile(all_step_times, 0.99)
     else:
-        mean_step = std_step = p50 = p99 = 0.0
+        mean_step = std_step = min_step = max_step = p50 = p90 = p99 = 0.0
 
     mean_wall = float(statistics.fmean(wall_clocks)) if wall_clocks else 0.0
 
@@ -202,9 +242,13 @@ def aggregate_cell(
         failed_count=failed,
         mean_step_time_ms=mean_step,
         std_step_time_ms=std_step,
+        min_step_time_ms=min_step,
+        max_step_time_ms=max_step,
         p50_step_time_ms=p50,
+        p90_step_time_ms=p90,
         p99_step_time_ms=p99,
         mean_wall_clock_sec=mean_wall,
+        exit_status_counts=dict(status_counter),
         step_times_ms=all_step_times,
         trial_paths=list(trial_paths or []),
         error=None,

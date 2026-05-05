@@ -245,6 +245,10 @@ def test_matrix_md_includes_headers(tmp_path, patched_env, patched_run_trials):
     assert "**Ticket**: T-1" in md
     assert "**Baseline cell**: none-local" in md
     assert "Cell" in md and "Confound" in md
+    # Renamed column: was "NaN rate", now "Failure rate" (rate counts every
+    # non-ok exit, not just NaNs).
+    assert "Failure rate" in md
+    assert "NaN rate" not in md
     assert "none-local" in md
     assert "tf32_off-local" in md
 
@@ -360,3 +364,164 @@ def test_baseline_cell_error_produces_top_of_file_warning(tmp_path, patched_env,
     run_dir = runner.run_recipe(r, output_dir=tmp_path)
     md = (run_dir / "matrix.md").read_text()
     assert "baseline" in md.lower() and "errored" in md.lower()
+
+
+# ---- Class D: matrix.json carries new aggregation fields -----------------
+
+
+def test_matrix_json_records_min_max_p90_and_exit_status_histogram(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Pin the new CellStats fields requested in PR review (min/max/p90 + histogram).
+
+    These were promised in the PR description but missing from the original
+    aggregation model; without them callers cannot tell `workload_failed`
+    from `infrastructure_failed` when triaging a cell.
+    """
+    r = _simple_recipe()
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    doc = json.loads((run_dir / "matrix.json").read_text())
+    for cell in doc["cells"]:
+        assert "min_step_time_ms" in cell
+        assert "max_step_time_ms" in cell
+        assert "p90_step_time_ms" in cell
+        assert "exit_status_counts" in cell
+        # Old field name must NOT have leaked back in.
+        assert "nan_rate" not in cell
+    # Failure rate is still surfaced under its new name.
+    assert all("failure_rate" in c for c in doc["cells"])
+
+
+# ---- Class C: env-name slug collision detection --------------------------
+
+
+def test_runner_rejects_env_names_whose_slugs_collide(tmp_path, patched_env, patched_run_trials):
+    """Distinct env names like 'a/b' and 'a:b' both slug to 'a_b'; reject early.
+
+    Without this check, the second environment's env.json would silently
+    overwrite the first while matrix.json kept them as distinct envs --
+    on-disk artifacts would contradict the in-memory cell list.
+    """
+    from aorta.registry import RegistryError as _RegErr
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    cells = (
+        Cell(name="c1", mitigations=("none",), environment="a/b"),
+        Cell(name="c2", mitigations=("none",), environment="a:b"),
+    )
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=cells,
+        ticket="T-1",
+        confound=ConfoundCfg(),
+        inline_environments=(),
+    )
+    with pytest.raises(_RegErr, match="filesystem component"):
+        runner.run_recipe(r, output_dir=tmp_path)
+
+
+# ---- Class E: natural sort of trial_*.json by trial index ----------------
+
+
+def test_collect_trial_paths_sorts_numerically_not_lexicographically(tmp_path):
+    """`trial_10.json` must come AFTER `trial_2.json`, not before.
+
+    Pin the natural-sort fix; with lex sort the recorded order diverges from
+    execution order once a cell has 10+ trials.
+    """
+    cell_dir = tmp_path / "cell"
+    work_dir = cell_dir / "fsdp"
+    work_dir.mkdir(parents=True)
+    for i in [0, 1, 2, 3, 9, 10, 11, 100]:
+        (work_dir / f"trial_{i}.json").write_text("{}")
+
+    paths = runner._collect_trial_paths(cell_dir)
+    indices = [int(p.rsplit("trial_", 1)[1].rsplit(".", 1)[0]) for p in paths]
+    assert indices == [0, 1, 2, 3, 9, 10, 11, 100]
+
+
+# ---- Class B: --mitigations-file (sidecar) lifecycle ---------------------
+
+
+def _write_sidecar(path: pytest.TempPathFactory | object, mitigations: dict) -> None:
+    """Helper: write a minimal sidecar JSON with the given mitigation map."""
+    path.write_text(  # type: ignore[attr-defined]
+        json.dumps({"version": 1, "mitigations": mitigations}),
+        encoding="utf-8",
+    )
+
+
+def test_operator_sidecars_copied_into_run_dir_for_replay(
+    tmp_path, patched_env, patched_run_trials
+):
+    """--mitigations-file content must be archived alongside recipe.resolved.yaml.
+
+    Without this, the resolved YAML references mitigation names by name and
+    a rerun on a fresh checkout of the run dir would fail to resolve them.
+    """
+    sidecar = tmp_path / "ops.sidecar.json"
+    _write_sidecar(sidecar, {"my_local_mit": {"FOO": "BAR"}})
+
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none,my_local_mit",
+        environment_axis="local",
+        trials=1,
+        steps=10,
+        sidecar_files=(sidecar,),
+    )
+    output_dir = tmp_path / "out"
+    run_dir = runner.run_recipe(
+        r,
+        output_dir=output_dir,
+        extra_sidecar_files=(sidecar,),
+    )
+    archived = run_dir / "sidecars" / "ops.sidecar.json"
+    assert archived.exists()
+    # Byte-identical: the snapshot is the file the operator passed in.
+    assert archived.read_text() == sidecar.read_text()
+
+
+def test_isolated_env_check_honors_sidecar_files(
+    tmp_path, patched_env, patched_run_trials, monkeypatch
+):
+    """Sidecar-defined docker envs must classify as isolated, not local.
+
+    Regression: `_is_isolated_environment` previously called `get_environment`
+    without `extra_files`, so a sidecar-only docker env fell through to the
+    "treat as local" branch and got a misleading host-state snapshot.
+    """
+    sidecar = tmp_path / "envs.sidecar.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "environments": {"sidecar_docker": {"docker": "rocm/pytorch:nightly"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(Cell(name="c1", mitigations=("none",), environment="sidecar_docker"),),
+        ticket="T-1",
+        confound=ConfoundCfg(),
+        inline_environments=(),
+    )
+    output_dir = tmp_path / "out"
+    run_dir = runner.run_recipe(r, output_dir=output_dir, extra_sidecar_files=(sidecar,))
+
+    env_json = run_dir / "environments" / "sidecar_docker" / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    # The honest placeholder, NOT a misleading collect_env() snapshot.
+    assert placeholder["snapshot_captured"] is False
+    assert placeholder["descriptor"]["docker"] == "rocm/pytorch:nightly"

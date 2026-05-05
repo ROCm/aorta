@@ -260,7 +260,13 @@ def _reject_flag_mode_args(
 )
 def list_mitigations(files: tuple[Path, ...]) -> None:
     """List every registered mitigation with its source_package and env-var bundle."""
-    registry = load_mitigations(extra_files=list(files) or None)
+    # Wrap RegistryError the same way `triage run` and `aorta run` do: a
+    # malformed or colliding --mitigations-file should surface as a one-line
+    # ClickException, not a Python traceback.
+    try:
+        registry = load_mitigations(extra_files=list(files) or None)
+    except RegistryError as exc:
+        raise click.ClickException(str(exc)) from exc
     name_w = max(len("NAME"), *(len(n) for n in registry))
     src_w = max(len("SOURCE"), *(len(m.source_package) for m in registry.values()))
     click.echo(f"{'NAME'.ljust(name_w)}  {'SOURCE'.ljust(src_w)}  ENV")
@@ -280,7 +286,10 @@ def list_mitigations(files: tuple[Path, ...]) -> None:
 )
 def list_environments(files: tuple[Path, ...]) -> None:
     """List every registered environment with its source_package and docker/venv."""
-    registry = load_environments(extra_files=list(files) or None)
+    try:
+        registry = load_environments(extra_files=list(files) or None)
+    except RegistryError as exc:
+        raise click.ClickException(str(exc)) from exc
     name_w = max(len("NAME"), *(len(n) for n in registry))
     src_w = max(len("SOURCE"), *(len(e.source_package) for e in registry.values()))
     docker_w = max(len("DOCKER"), *(len(e.docker or "-") for e in registry.values()))

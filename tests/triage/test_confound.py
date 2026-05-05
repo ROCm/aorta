@@ -35,9 +35,13 @@ def _stats(
         failed_count=trials - passed_count,
         mean_step_time_ms=mean_step_time_ms,
         std_step_time_ms=0.0,
+        min_step_time_ms=mean_step_time_ms,
+        max_step_time_ms=mean_step_time_ms,
         p50_step_time_ms=mean_step_time_ms,
+        p90_step_time_ms=mean_step_time_ms,
         p99_step_time_ms=mean_step_time_ms,
         mean_wall_clock_sec=1.0,
+        exit_status_counts={},
         step_times_ms=[mean_step_time_ms],
         trial_paths=[],
         error=error,
@@ -104,24 +108,24 @@ def test_classify_baseline():
 
 
 def test_classify_speed_confound_plus_25_percent():
-    base = _stats("b", mean_step_time_ms=400.0, passed_count=4)  # nan_rate=0.5
-    slow = _stats("tf32-local", mean_step_time_ms=500.0, passed_count=8)  # nan_rate=0
+    base = _stats("b", mean_step_time_ms=400.0, passed_count=4)  # failure_rate=0.5
+    slow = _stats("tf32-local", mean_step_time_ms=500.0, passed_count=8)  # failure_rate=0
     tag, ratio = classify(slow, base, threshold=1.15)
     assert tag == "speed (+25%)"
     assert ratio is not None and abs(ratio - 1.25) < 1e-9
 
 
-def test_classify_neutral_when_ratio_one_and_nan_rate_drops():
-    base = _stats("b", mean_step_time_ms=100.0, passed_count=0)  # nan_rate 1.0
-    cell = _stats("c", mean_step_time_ms=100.0, passed_count=8)  # nan_rate 0.0
+def test_classify_neutral_when_ratio_one_and_failure_rate_drops():
+    base = _stats("b", mean_step_time_ms=100.0, passed_count=0)  # failure_rate 1.0
+    cell = _stats("c", mean_step_time_ms=100.0, passed_count=8)  # failure_rate 0.0
     tag, ratio = classify(cell, base, threshold=1.15)
     assert tag == CONFOUND_NEUTRAL
     assert ratio == 1.0
 
 
-def test_classify_no_effect_when_nan_rate_unchanged_and_no_slowdown():
-    base = _stats("b", mean_step_time_ms=100.0, passed_count=0)  # nan_rate 1.0
-    cell = _stats("c", mean_step_time_ms=105.0, passed_count=0)  # ratio 1.05, nan_rate 1.0
+def test_classify_no_effect_when_failure_rate_unchanged_and_no_slowdown():
+    base = _stats("b", mean_step_time_ms=100.0, passed_count=0)  # failure_rate 1.0
+    cell = _stats("c", mean_step_time_ms=105.0, passed_count=0)  # ratio 1.05, failure_rate 1.0
     tag, ratio = classify(cell, base, threshold=1.15)
     assert tag == CONFOUND_NO_EFFECT
     assert ratio == 1.05
