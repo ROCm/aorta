@@ -958,7 +958,13 @@ def main(
         )
     finally:
         if kernel_profiler is not None:
-            kernel_profiler.stop()
+            try:
+                kernel_profiler.stop()
+            except BaseException:
+                log.exception(
+                    "Failed to stop kernel profiler during distributed "
+                    "cleanup; continuing with process-group teardown"
+                )
         dist.barrier()
         dist.destroy_process_group()
 

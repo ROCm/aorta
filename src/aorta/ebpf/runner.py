@@ -136,7 +136,18 @@ class BpftraceRunner:
         return shutil.which("bpftrace") is not None
 
     def _build_command(self) -> list[str]:
-        bpftrace_bin = self.config.bpftrace_path or shutil.which("bpftrace")
+        if self.config.bpftrace_path:
+            if not Path(self.config.bpftrace_path).is_file():
+                raise BpftraceUnavailableError(
+                    "BpftraceConfig.bpftrace_path was set to "
+                    f"{self.config.bpftrace_path!r} but no regular file "
+                    "exists at that path; install bpftrace there or "
+                    "leave bpftrace_path unset to fall back to PATH lookup"
+                )
+            bpftrace_bin: str | None = self.config.bpftrace_path
+        else:
+            bpftrace_bin = shutil.which("bpftrace")
+
         if not bpftrace_bin:
             raise BpftraceUnavailableError(
                 "bpftrace binary not found on PATH; install bpftrace or set "
@@ -297,28 +308,38 @@ class BpftraceRunner:
     def stop(self, timeout_sec: float = 5.0) -> list[KernelEvent]:
         """Terminate the bpftrace process and return all collected events.
 
-        If the reader thread crashed mid-run the captured exception is
-        logged here -- ``stop()`` never re-raises so callers can rely on
-        this being safe to put in a ``finally`` block.
+        Contract: ``stop()`` never re-raises. Callers (notably the FSDP
+        trainer's distributed cleanup ``finally`` block) rely on this so
+        that an early-exited bpftrace, a sudo-killed subprocess, or a
+        ``ProcessLookupError`` race between ``poll()`` and ``terminate()``
+        cannot leak the rendezvous backend on every other rank.
+
+        Errors hit during shutdown are logged and swallowed, including
+        the previously surfaced ``_reader_exception`` from a crashed
+        reader thread.
         """
         if not self._running or self._proc is None:
             return []
 
         log.info("Stopping bpftrace (pid=%s)", self._proc.pid)
         try:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=timeout_sec)
-            except subprocess.TimeoutExpired:
-                log.warning("bpftrace did not terminate in %.1fs; killing", timeout_sec)
-                self._proc.kill()
-                self._proc.wait(timeout=timeout_sec)
+            self._terminate_proc(timeout_sec)
+        except BaseException:
+            # Belt-and-braces: ``_terminate_proc`` already swallows the
+            # documented races, but if anything else slips through we
+            # still must not propagate -- the docstring promises this
+            # method is finally-block-safe. Log with full traceback so
+            # the failure is observable.
+            log.exception("BpftraceRunner.stop() swallowed unexpected error")
         finally:
             self._running = False
-            if self._reader_thread is not None:
-                self._reader_thread.join(timeout=timeout_sec)
-            if self._stderr_thread is not None:
-                self._stderr_thread.join(timeout=timeout_sec)
+            try:
+                if self._reader_thread is not None:
+                    self._reader_thread.join(timeout=timeout_sec)
+                if self._stderr_thread is not None:
+                    self._stderr_thread.join(timeout=timeout_sec)
+            except BaseException:
+                log.exception("BpftraceRunner.stop() swallowed thread-join error")
 
         if self._reader_exception is not None:
             log.warning(
@@ -329,6 +350,50 @@ class BpftraceRunner:
 
         with self._events_lock:
             return list(self._events)
+
+    def _terminate_proc(self, timeout_sec: float) -> None:
+        """Best-effort ``terminate()`` -> ``wait()`` -> ``kill()`` sequence.
+
+        Each ``Popen`` call is guarded against ``ProcessLookupError``
+        because the kernel can reap the bpftrace child between our
+        ``poll()`` short-circuit (below) and the actual signal -- e.g.
+        sudo's bpftrace exits as soon as the traced PID dies.
+        """
+        assert self._proc is not None  # narrowed by caller
+
+        # ``poll()`` short-circuit: if bpftrace already exited we have
+        # nothing to terminate. This also avoids a guaranteed
+        # ``ProcessLookupError`` from ``terminate()`` on the post-exit
+        # PID-reuse-window OSes that send the signal eagerly.
+        if self._proc.poll() is not None:
+            return
+
+        try:
+            self._proc.terminate()
+        except ProcessLookupError:
+            return
+
+        try:
+            self._proc.wait(timeout=timeout_sec)
+            return
+        except subprocess.TimeoutExpired:
+            log.warning(
+                "bpftrace did not terminate in %.1fs; killing",
+                timeout_sec,
+            )
+
+        try:
+            self._proc.kill()
+        except ProcessLookupError:
+            return
+        try:
+            self._proc.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            log.error(
+                "bpftrace did not exit even after SIGKILL within %.1fs; "
+                "leaving the subprocess to the OS reaper",
+                timeout_sec,
+            )
 
     def snapshot_events(self) -> list[KernelEvent]:
         """Return a copy of events collected so far without stopping."""

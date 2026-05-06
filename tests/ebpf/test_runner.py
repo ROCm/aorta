@@ -57,6 +57,9 @@ class FakePopen:
         script_lines=(),
         stderr_lines=(),
         startup_rc=None,
+        terminate_raises=None,
+        kill_raises=None,
+        wait_raises=None,
     ):
         self._stdout_q: list[str] = list(script_lines)
         self._stderr_q: list[str] = list(stderr_lines)
@@ -72,6 +75,12 @@ class FakePopen:
         self._returncode = startup_rc
         self.pid = 12345
         self.cmd = cmd
+        # PR #162 round 2 (C3): exercise the ProcessLookupError race that
+        # the real ``Popen`` exposes when the child has already been
+        # reaped between ``poll()`` and ``terminate()`` / ``kill()``.
+        self._terminate_raises = terminate_raises
+        self._kill_raises = kill_raises
+        self._wait_raises = wait_raises
 
         self.stdout = _BlockingLines(self._stdout_q, self._stdout_event, lambda: self._stdout_done)
         self.stderr = _BlockingLines(self._stderr_q, self._stderr_event, lambda: self._stderr_done)
@@ -80,7 +89,8 @@ class FakePopen:
         return self._returncode
 
     def terminate(self):
-        # Close both streams so reader threads can exit their for-loop.
+        if self._terminate_raises is not None:
+            raise self._terminate_raises
         self._stdout_done = True
         self._stderr_done = True
         self._stdout_event.set()
@@ -89,9 +99,18 @@ class FakePopen:
             self._returncode = 0
 
     def kill(self):
-        self.terminate()
+        if self._kill_raises is not None:
+            raise self._kill_raises
+        self._stdout_done = True
+        self._stderr_done = True
+        self._stdout_event.set()
+        self._stderr_event.set()
+        if self._returncode is None:
+            self._returncode = 0
 
     def wait(self, timeout=None):
+        if self._wait_raises is not None:
+            raise self._wait_raises
         return self._returncode if self._returncode is not None else 0
 
     def feed_stdout(self, line: str) -> None:
@@ -508,6 +527,186 @@ class TestLifecycle:
         # raised; the runner must keep going on user-callback errors.
         assert len(events) == 2
         assert seen == ["HEARTBEAT", "HEARTBEAT"]
+
+
+# ---------------------------------------------------------------------------
+# PR #162 round 2 (C3): ``stop()`` honours its "never re-raises" docstring.
+# ---------------------------------------------------------------------------
+
+
+class TestStopNeverReRaises:
+    """Pin the ``finally``-block-safe contract.
+
+    Pre-fix, ``BpftraceRunner.stop()`` would propagate
+    ``ProcessLookupError`` from ``Popen.terminate()`` / ``Popen.kill()``
+    on a race where the bpftrace child had already been reaped (e.g.
+    sudo's bpftrace exits the moment the traced PID dies). That broke
+    distributed cleanup in ``fsdp_trainer.py`` because
+    ``dist.destroy_process_group()`` would never run on the failing
+    rank, leaking the rendezvous backend and hanging every other rank.
+    """
+
+    def _start_runner(self, fake_kwargs):
+        captured: dict = {}
+
+        def factory(*args, **kwargs):
+            popen_only = {
+                k: v for k, v in kwargs.items() if k in ("stdout", "stderr", "text", "bufsize")
+            }
+            captured["popen"] = FakePopen(args[0], **popen_only, **fake_kwargs)
+            return captured["popen"]
+
+        runner = _make_runner()
+        ctx = _patch_popen(factory)
+        ctx.__enter__()
+        runner.start()
+        return runner, captured["popen"], ctx
+
+    def test_stop_swallows_terminate_process_lookup_error(self, caplog):
+        runner, _fake, ctx = self._start_runner(
+            {
+                "script_lines": [],
+                "terminate_raises": ProcessLookupError(3, "No such process"),
+            }
+        )
+        try:
+            import logging
+
+            with caplog.at_level(logging.DEBUG, logger="aorta.ebpf.runner"):
+                events = runner.stop()
+        finally:
+            ctx.__exit__(None, None, None)
+        # No exception propagated, return type is still the events list.
+        assert isinstance(events, list)
+        assert runner.is_running is False
+
+    def test_stop_swallows_kill_process_lookup_error(self):
+        # ``terminate()`` succeeds, but ``wait()`` times out so the code
+        # path falls through to ``kill()``, which races. Pre-fix this
+        # would re-raise ``ProcessLookupError`` from ``stop()``.
+        import subprocess as _sp
+
+        runner, _fake, ctx = self._start_runner(
+            {
+                "script_lines": [],
+                "wait_raises": _sp.TimeoutExpired(cmd="bpftrace", timeout=0.1),
+                "kill_raises": ProcessLookupError(3, "No such process"),
+            }
+        )
+        try:
+            events = runner.stop()
+        finally:
+            ctx.__exit__(None, None, None)
+        assert isinstance(events, list)
+
+    def test_stop_short_circuits_on_already_exited(self):
+        # If the child already exited (poll() returns an rc), we must
+        # not even attempt to terminate -- doing so was the original
+        # source of the ProcessLookupError race.
+        captured: dict = {}
+
+        def factory(*args, **kwargs):
+            popen_only = {
+                k: v for k, v in kwargs.items() if k in ("stdout", "stderr", "text", "bufsize")
+            }
+            captured["popen"] = FakePopen(
+                args[0],
+                **popen_only,
+                script_lines=["1 HEARTBEAT alive\n"],
+            )
+            return captured["popen"]
+
+        runner = _make_runner()
+        with _patch_popen(factory):
+            runner.start()
+            # Simulate child exit between start() and stop().
+            captured["popen"]._returncode = 0
+            captured["popen"]._stdout_done = True
+            captured["popen"]._stderr_done = True
+            captured["popen"]._stdout_event.set()
+            captured["popen"]._stderr_event.set()
+            # Make terminate() blow up to prove we never call it.
+            captured["popen"]._terminate_raises = AssertionError(
+                "terminate() must not be called after poll() reports exit"
+            )
+            captured["popen"]._kill_raises = AssertionError(
+                "kill() must not be called after poll() reports exit"
+            )
+            events = runner.stop()
+        assert isinstance(events, list)
+
+    def test_stop_swallows_unexpected_exception(self, caplog):
+        # Defensive: any unexpected exception type must still be
+        # logged-and-swallowed, not propagated. The docstring promises
+        # this without qualifying on exception class.
+        runner, _fake, ctx = self._start_runner(
+            {
+                "script_lines": [],
+                "terminate_raises": OSError(1, "Operation not permitted"),
+            }
+        )
+        try:
+            import logging
+
+            with caplog.at_level(logging.ERROR, logger="aorta.ebpf.runner"):
+                events = runner.stop()
+        finally:
+            ctx.__exit__(None, None, None)
+        assert isinstance(events, list)
+
+
+# ---------------------------------------------------------------------------
+# PR #162 round 2 (C4): explicit ``bpftrace_path`` is validated up-front.
+# ---------------------------------------------------------------------------
+
+
+class TestExplicitBpftracePathValidation:
+    """``BpftraceConfig.bpftrace_path`` must point at a real file.
+
+    Pre-fix, a typo or stale absolute path would surface as a generic
+    ``FileNotFoundError`` from ``subprocess.Popen`` deep inside
+    ``start()`` -- callers (CLI, trainer) could not distinguish that
+    from "binary missing entirely on PATH" without parsing the
+    ``errno``. We now raise ``BpftraceUnavailableError`` synchronously
+    from ``_build_command()`` with a self-explanatory message.
+    """
+
+    def test_explicit_path_to_missing_file_raises_unavailable(self, tmp_path: Path):
+        cfg = BpftraceConfig(
+            target_pid=1,
+            use_sudo=False,
+            bpftrace_path=str(tmp_path / "definitely-not-here"),
+        )
+        runner = BpftraceRunner(cfg)
+        with pytest.raises(BpftraceUnavailableError) as excinfo:
+            runner._build_command()
+        msg = str(excinfo.value)
+        assert "definitely-not-here" in msg
+        assert "bpftrace_path" in msg
+
+    def test_explicit_path_to_directory_raises_unavailable(self, tmp_path: Path):
+        # Pointing at a directory was the same shape of bug; the
+        # validation must use ``is_file()``, not just ``exists()``.
+        cfg = BpftraceConfig(
+            target_pid=1,
+            use_sudo=False,
+            bpftrace_path=str(tmp_path),
+        )
+        runner = BpftraceRunner(cfg)
+        with pytest.raises(BpftraceUnavailableError):
+            runner._build_command()
+
+    def test_explicit_path_to_existing_file_is_accepted(self, tmp_path: Path):
+        binary = tmp_path / "fake_bpftrace"
+        binary.touch()
+        cfg = BpftraceConfig(
+            target_pid=1,
+            use_sudo=False,
+            bpftrace_path=str(binary),
+        )
+        runner = BpftraceRunner(cfg)
+        cmd = runner._build_command()
+        assert cmd[0] == str(binary)
 
 
 # ---------------------------------------------------------------------------

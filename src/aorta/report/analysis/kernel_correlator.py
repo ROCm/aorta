@@ -129,30 +129,74 @@ class KernelEventCorrelator:
         }
 
 
+def _coerce_int(value: Any, default: int = 0) -> int:
+    """Best-effort ``int()`` that survives explicit JSON ``null`` values.
+
+    ``dict.get(key, default)`` only returns ``default`` when the key is
+    absent; if the key is present with a JSON ``null``, ``.get()``
+    returns ``None`` and ``int(None)`` raises ``TypeError``. Older or
+    partial trainer schemas can emit explicit nulls, so coerce
+    defensively rather than dropping the whole row.
+    """
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    """``_coerce_int`` counterpart for floats; same null-safety rationale."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_int_dict(raw: Any) -> dict[str, int]:
+    """Coerce a ``{name: count}`` dict, dropping any non-coercible value.
+
+    A JSON ``"foo": null`` for a kernel-event count is treated as zero
+    so the rest of the row is still usable.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): _coerce_int(v) for k, v in raw.items()}
+
+
+def _coerce_float_dict(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): _coerce_float(v, 0.0) for k, v in raw.items()}
+
+
 def _payload_to_record(payload: dict[str, Any]) -> IterationRecord:
     profile = payload.get("profile") or {}
     overlap = profile.get("overlap") or {}
     kernel_trace = payload.get("kernel_trace") or {}
     summary = kernel_trace.get("summary") or {}
 
-    loss_raw = payload.get("loss")
-    try:
-        loss = float(loss_raw) if loss_raw is not None else float("nan")
-    except (TypeError, ValueError):
-        loss = float("nan")
+    # ``kernel_trace.get("event_count")`` may be an explicit ``null``
+    # (older/partial schema), in which case ``dict.get`` returns
+    # ``None`` rather than the fallback. Compute the fallback length
+    # eagerly so it is also used on the null branch.
+    raw_event_count = kernel_trace.get("event_count")
+    events_field = kernel_trace.get("events")
+    fallback_event_count = len(events_field) if isinstance(events_field, list) else 0
 
     return IterationRecord(
-        rank=int(payload.get("rank", 0)),
-        global_step=int(payload.get("global_step", 0)),
-        epoch=int(payload.get("epoch", 0)),
-        step=int(payload.get("step", 0)),
-        loss=loss,
-        overlap_ms={k: float(v) for k, v in (overlap.get("overlap_ms") or {}).items()},
-        per_stream_ms={k: float(v) for k, v in (overlap.get("per_stream_ms") or {}).items()},
-        kernel_summary={k: int(v) for k, v in summary.items()},
-        kernel_event_count=int(
-            kernel_trace.get("event_count", len(kernel_trace.get("events", [])))
-        ),
+        rank=_coerce_int(payload.get("rank")),
+        global_step=_coerce_int(payload.get("global_step")),
+        epoch=_coerce_int(payload.get("epoch")),
+        step=_coerce_int(payload.get("step")),
+        loss=_coerce_float(payload.get("loss"), float("nan")),
+        overlap_ms=_coerce_float_dict(overlap.get("overlap_ms")),
+        per_stream_ms=_coerce_float_dict(overlap.get("per_stream_ms")),
+        kernel_summary=_coerce_int_dict(summary),
+        kernel_event_count=_coerce_int(raw_event_count, fallback_event_count),
         raw=payload,
     )
 

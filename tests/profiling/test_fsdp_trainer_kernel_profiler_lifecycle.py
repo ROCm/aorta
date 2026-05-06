@@ -14,16 +14,13 @@ process group and hang the rendezvous on every other rank.
 from __future__ import annotations
 
 import ast
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 _TRAINER_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "aorta"
-    / "training"
-    / "fsdp_trainer.py"
+    Path(__file__).resolve().parents[2] / "src" / "aorta" / "training" / "fsdp_trainer.py"
 )
 
 
@@ -61,7 +58,7 @@ def _is_dist_destroy_call(node: ast.AST) -> bool:
     )
 
 
-def _walk_calls(nodes: list[ast.AST], attr: str) -> list[ast.Call]:
+def _walk_calls(nodes: Sequence[ast.AST], attr: str) -> list[ast.Call]:
     """Collect all ``X.attr(...)`` calls anywhere under ``nodes``."""
     found: list[ast.Call] = []
     for stmt in nodes:
@@ -141,3 +138,81 @@ class TestKernelProfilerStartIsInsideCleanupTry:
             "kernel_profiler.stop() must run from the cleanup finally so "
             "bpftrace is reaped on training crash"
         )
+
+
+class TestKernelProfilerStopIsGuardedInFinally:
+    """PR #162 round 2 (C2): defense-in-depth around ``stop()``.
+
+    Even though ``BpftraceRunner.stop()`` now honours its
+    "never re-raises" contract, the trainer must still wrap
+    ``kernel_profiler.stop()`` in a ``try``/``except`` *inside*
+    the cleanup ``finally``. Otherwise a future regression in the
+    runner -- or a third-party kernel-trace backend wired in via the
+    same interface -- would propagate out of the ``finally`` block
+    and prevent ``dist.destroy_process_group()`` from running, leaking
+    the rendezvous backend on every other rank. Belt-and-braces.
+    """
+
+    def test_kernel_profiler_stop_is_wrapped_in_try_inside_finally(self, main_fn: ast.FunctionDef):
+        cleanup_try_blocks = [
+            node
+            for node in ast.walk(main_fn)
+            if isinstance(node, ast.Try)
+            and any(_is_dist_destroy_call(stmt) for stmt in node.finalbody)
+        ]
+        assert cleanup_try_blocks, "no cleanup try/finally found"
+        cleanup_try = cleanup_try_blocks[0]
+
+        # Walk the finally body looking for an inner Try whose body
+        # contains ``kernel_profiler.stop()``. We cannot assert the
+        # outer ``Try`` is the wrapper because ``main_fn`` already has
+        # an outer ``try/finally``; we want to find a *nested* one
+        # specifically for the stop() call.
+        nested_try_wraps_stop = False
+        for stmt in cleanup_try.finalbody:
+            for sub in ast.walk(stmt):
+                if not isinstance(sub, ast.Try):
+                    continue
+                # A try inside the cleanup finally that has at least
+                # one ``except`` and whose body contains
+                # kernel_profiler.stop() is exactly the shape we want.
+                if not sub.handlers:
+                    continue
+                stops_in_body = _walk_calls(sub.body, "stop")
+                if any(
+                    isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "kernel_profiler"
+                    for call in stops_in_body
+                ):
+                    nested_try_wraps_stop = True
+                    break
+            if nested_try_wraps_stop:
+                break
+
+        assert nested_try_wraps_stop, (
+            "kernel_profiler.stop() in the cleanup finally must be guarded "
+            "by an inner try/except so dist.destroy_process_group() always "
+            "runs even if stop() raises (Copilot review on PR #162 round 2)"
+        )
+
+    def test_dist_destroy_process_group_runs_after_stop_guard(self, main_fn: ast.FunctionDef):
+        # ``dist.destroy_process_group()`` must remain in the cleanup
+        # finalbody, *after* the stop() guard, so that even a thrown
+        # stop() does not bypass it. This is implicitly true if the
+        # AST has dist.destroy_process_group in the finalbody (which is
+        # already enforced by the previous test), but double-check the
+        # statement-level ordering.
+        cleanup_try_blocks = [
+            node
+            for node in ast.walk(main_fn)
+            if isinstance(node, ast.Try)
+            and any(_is_dist_destroy_call(stmt) for stmt in node.finalbody)
+        ]
+        cleanup_try = cleanup_try_blocks[0]
+
+        destroy_indices: list[int] = []
+        for idx, stmt in enumerate(cleanup_try.finalbody):
+            if _is_dist_destroy_call(stmt):
+                destroy_indices.append(idx)
+        assert destroy_indices, "dist.destroy_process_group() not in finalbody"
