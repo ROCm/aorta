@@ -97,7 +97,9 @@ def triage() -> None:
     default=None,
     help=(
         "Ticket ID for output-dir grouping "
-        "(triage_results/<ticket>/<workload>/<timestamp>/). Absence routes to '_no_ticket_'."
+        "(triage_results/<ticket>/<workload>/<timestamp>/). Absence routes to '_no_ticket_'. "
+        "Recipe mode takes this from the file's 'ticket' key; passing this flag "
+        "together with --recipe is rejected."
     ),
 )
 @click.option(
@@ -106,7 +108,9 @@ def triage() -> None:
     help=(
         "Override the auto-resolved baseline cell. Must match a cell name "
         "(flag mode: '<mitigation>-<environment>' or "
-        "'<mitigation>-_inline_<hash>' for inline docker)."
+        "'<mitigation>-_inline_<hash>' for inline docker). Recipe mode takes "
+        "this from the file's 'confound.baseline_cell' key; passing this flag "
+        "together with --recipe is rejected."
     ),
 )
 @click.option(
@@ -154,6 +158,12 @@ def triage_run(
     mitigation_files: tuple[Path, ...],
 ) -> None:
     """Run the triage matrix: sweep mitigations x environments x trials, write matrix.md + matrix.json."""
+    # Defence-in-depth: Click's ``Choice(["matrix"])`` already enforces this,
+    # but the CLI advertises ``--mode optimize`` as a future P1 addition (per
+    # D11) and the dispatch site for that branch does not exist yet. Assert
+    # here so whoever wires the new value can't silently slip past every
+    # downstream code path that assumes "matrix is the only mode".
+    assert mode == "matrix", f"unexpected --mode {mode!r}; only 'matrix' is implemented"
     if recipe is not None:
         _reject_flag_mode_args(
             workload=workload,
@@ -200,19 +210,20 @@ def triage_run(
         except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
             raise click.ClickException(str(exc)) from exc
 
-    # Errors from run_recipe (preflight env-slug collisions, baseline
-    # resolution failures, sidecar / mitigation lookups inside _run_one_cell
-    # are already swallowed per-cell -- but recipe-level rejections are not)
-    # must surface as the same one-line ClickException shape as the load
-    # path. Without this wrapper they escape as raw Python tracebacks even
-    # though the recipe-loader path one-lines them: same kind of error,
-    # different exit shape, depending on which validator catches it.
+    # ``run_recipe`` runs ``_preflight_validate`` (env-slug collisions and
+    # baseline resolution) before the per-cell ``try/except`` in
+    # ``_run_one_cell`` swallows anything, so those errors bubble out here.
+    # Wrap them to match the one-line ``ClickException`` shape the load path
+    # produces, so the exit shape doesn't depend on which validator caught
+    # the error. ``mitigation_files`` is NOT re-passed via
+    # ``extra_sidecar_files``: ``load_recipe`` / ``build_recipe_from_flags``
+    # already wrote it to ``r.sidecar_files`` and the runner picks it up
+    # from there.
     try:
         run_dir = run_recipe(
             r,
             output_dir=output_dir,
             dry_run=dry_run,
-            extra_sidecar_files=mitigation_files,
         )
     except (RegistryError, RecipeCellError, RecipeSchemaError) as exc:
         raise click.ClickException(str(exc)) from exc

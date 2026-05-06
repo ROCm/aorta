@@ -12,6 +12,11 @@ matrix.md captures exactly that distinction:
   causal conclusions.
 * ``no effect`` -- neither the failure rate nor the iteration time moved.
   The mitigation likely doesn't apply to this workload.
+* ``n/a`` -- the baseline cell errored or produced no usable timing data,
+  so no step-time ratio could be computed for *any* non-baseline cell.
+  Distinct from ``-`` (which advertises a trustworthy cell): re-using the
+  neutral tag here would mislead readers of matrix.md into trusting cells
+  that were never compared against anything.
 * ``error`` -- the whole cell failed. Row preserved so the matrix is
   complete; classification is skipped.
 
@@ -34,8 +39,13 @@ CONFOUND_BASELINE = "(baseline)"
 CONFOUND_NEUTRAL = "-"
 CONFOUND_NO_EFFECT = "no effect"
 CONFOUND_ERROR = "error"
+# Distinct from CONFOUND_NEUTRAL: the cell could not be classified at all
+# because the baseline didn't produce a usable step-time ratio. Sharing the
+# neutral tag would let "ratio could not be computed" cells render as
+# "mitigation works without a speed cost" in matrix.md.
+CONFOUND_NA = "n/a"
 
-ConfoundTag = Literal["(baseline)", "-", "no effect", "error"] | str
+ConfoundTag = Literal["(baseline)", "-", "no effect", "error", "n/a"] | str
 
 
 def resolve_baseline(
@@ -118,10 +128,13 @@ def classify(
         return CONFOUND_BASELINE, None
 
     if baseline.error is not None or baseline.mean_step_time_ms <= 0:
-        # Baseline unusable: we can't compute a ratio, so surface None and
-        # let the renderer emit "n/a". The runner also writes a top-of-file
-        # warning in matrix.md so readers see why.
-        return CONFOUND_NEUTRAL, None
+        # Baseline unusable: we can't compute a ratio against anything, so
+        # the cell is unclassifiable -- NOT trustworthy. Use CONFOUND_NA so
+        # matrix.md renders "n/a" in the Confound column instead of the
+        # neutral "-" tag (which advertises "mitigation works without speed
+        # cost"). The runner additionally writes a top-of-file warning so
+        # readers see why every non-baseline row collapsed to n/a.
+        return CONFOUND_NA, None
 
     ratio = cell.mean_step_time_ms / baseline.mean_step_time_ms
 
@@ -164,6 +177,7 @@ def classify_all(
 __all__ = [
     "CONFOUND_BASELINE",
     "CONFOUND_ERROR",
+    "CONFOUND_NA",
     "CONFOUND_NEUTRAL",
     "CONFOUND_NO_EFFECT",
     "ConfoundTag",

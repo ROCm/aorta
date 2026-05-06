@@ -249,8 +249,34 @@ def test_matrix_md_includes_headers(tmp_path, patched_env, patched_run_trials):
     # non-ok exit, not just NaNs).
     assert "Failure rate" in md
     assert "NaN rate" not in md
+    # Round-6 rename: column was labelled "Trials" but rendered
+    # `failed_count / trial_count` underneath, so readers parsed "3 / 8"
+    # as a trial count rather than failures-out-of-trials. The header is
+    # now "Failures"; pin both halves so a later edit can't drift them
+    # apart again.
+    assert "| Failures " in md  # header column with surrounding pipes
+    assert "| Trials " not in md  # the misleading old header must not return
     assert "none-local" in md
     assert "tf32_off-local" in md
+
+
+def test_matrix_md_failures_column_renders_failed_over_total(tmp_path, patched_env, monkeypatch):
+    """Pin the `failed_count / trial_count` rendering under the new header.
+
+    With the trials stub returning two passing trials, the cell row should
+    read ``0 / 2`` under "Failures" -- zero failures out of two trials.
+    Confirms the value semantics didn't drift along with the rename.
+    """
+    monkeypatch.setattr(
+        runner, "run_trials", MagicMock(return_value=[_fake_trial(), _fake_trial()])
+    )
+    r = _simple_recipe(ticket="T-1")
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    md = (run_dir / "matrix.md").read_text()
+    # The baseline row's numeric cell: 0 failures of 2 trials.
+    assert "0 / 2" in md
+    # Legend line documents what "Failures" means.
+    assert "`Failures` is `failed_count / trial_count`" in md
 
 
 def test_resolved_recipe_is_loadable_by_load_recipe(tmp_path, patched_env, patched_run_trials):
@@ -364,6 +390,38 @@ def test_baseline_cell_error_produces_top_of_file_warning(tmp_path, patched_env,
     run_dir = runner.run_recipe(r, output_dir=tmp_path)
     md = (run_dir / "matrix.md").read_text()
     assert "baseline" in md.lower() and "errored" in md.lower()
+
+
+def test_baseline_error_marks_other_cells_unclassified_not_neutral(
+    tmp_path, patched_env, monkeypatch
+):
+    """Round-6 fix: baseline error -> non-baseline rows render `n/a`, not `-`.
+
+    Pre-fix, ``classify`` returned ``CONFOUND_NEUTRAL`` ('-') whenever the
+    baseline had no usable timing, which made matrix.md silently advertise
+    every other cell as 'mitigation works without a speed cost'. Pin the
+    distinct ``n/a`` rendering and the matrix.json carry-through.
+    """
+
+    def broken_baseline(request):
+        if request.mitigations == ("none",):
+            raise RuntimeError("baseline crashed")
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", broken_baseline)
+    r = _simple_recipe()
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    doc = json.loads((run_dir / "matrix.json").read_text())
+    tf32 = next(c for c in doc["cells"] if c["name"] == "tf32_off-local")
+    assert tf32["confound"] == "n/a", (
+        "non-baseline cell must surface as unclassified, not as the success "
+        "tag '-' (which is 'mitigation works without a speed cost')."
+    )
+    assert tf32["step_time_ratio"] is None
+    md = (run_dir / "matrix.md").read_text()
+    # The legend explains the new tag, so any future renderer change that
+    # emits the wrong glyph here will fail this assertion.
+    assert "`n/a` -- the baseline cell errored" in md
 
 
 # ---- Class D: matrix.json carries new aggregation fields -----------------
@@ -483,6 +541,99 @@ def test_operator_sidecars_copied_into_run_dir_for_replay(
     assert archived.exists()
     # Byte-identical: the snapshot is the file the operator passed in.
     assert archived.read_text() == sidecar.read_text()
+
+
+def test_recipe_carries_sidecar_files_for_programmatic_run_recipe(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Round-6 fix: programmatic ``load_recipe -> run_recipe`` works without
+    re-passing ``sidecar_files`` at the runner.
+
+    Pre-fix, ``Recipe`` discarded the sidecar list ``load_recipe`` /
+    ``build_recipe_from_flags`` validated against, so a caller that passed
+    ``sidecar_files=(s,)`` to the loader and then called ``run_recipe(r)``
+    (no ``extra_sidecar_files``) would hit unknown-mitigation errors at
+    execute time -- despite the recipe being advertised as pre-validated.
+    Pin (a) the recipe carries the list, and (b) the runner uses it.
+    """
+    sidecar = tmp_path / "ops.sidecar.json"
+    _write_sidecar(sidecar, {"my_local_mit": {"FOO": "BAR"}})
+
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none,my_local_mit",
+        environment_axis="local",
+        trials=1,
+        steps=10,
+        sidecar_files=(sidecar,),
+    )
+    assert r.sidecar_files == (sidecar,), "Recipe must remember the sidecar list."
+
+    output_dir = tmp_path / "out"
+    # Crucially: NO extra_sidecar_files=. The recipe alone must drive
+    # everything the runner needs (mitigation resolution + replay archive).
+    run_dir = runner.run_recipe(r, output_dir=output_dir)
+    archived = run_dir / "sidecars" / "ops.sidecar.json"
+    assert archived.exists(), "operator sidecar must be archived for replay."
+    assert archived.read_text() == sidecar.read_text()
+    # And run_trials saw the archived copy in its sidecar_files so cells
+    # using sidecar-only mitigations resolve.
+    req = patched_run_trials.call_args_list[1].args[0]  # the my_local_mit cell
+    assert archived in req.sidecar_files
+
+
+def test_run_recipe_dedupes_recipe_and_extra_sidecar_files(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Belt-and-suspenders: passing the same sidecar via both layers must not
+    double-copy or double-archive.
+
+    The CLI used to pass ``--mitigations-file`` to both the loader and to
+    ``run_recipe`` as ``extra_sidecar_files``. After the round-6 fix it only
+    passes them through the recipe, but third-party callers may still
+    duplicate -- pin that the runner deduplicates by resolved path.
+    """
+    sidecar = tmp_path / "ops.sidecar.json"
+    _write_sidecar(sidecar, {"my_local_mit": {"FOO": "BAR"}})
+
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none,my_local_mit",
+        environment_axis="local",
+        trials=1,
+        steps=10,
+        sidecar_files=(sidecar,),
+    )
+    output_dir = tmp_path / "out"
+    run_dir = runner.run_recipe(
+        r,
+        output_dir=output_dir,
+        extra_sidecar_files=(sidecar,),  # same file as recipe.sidecar_files
+    )
+    sidecars_dir = run_dir / "sidecars"
+    archived = list(sidecars_dir.iterdir())
+    assert len(archived) == 1, f"expected one archived sidecar, got {archived}"
+    assert archived[0].name == "ops.sidecar.json"
+
+
+def test_output_module_docstring_does_not_overpromise_resolved_yaml():
+    """Class A guard: the module docstring used to claim recipe.resolved.yaml
+    expanded every registry name into env-var bundles + docker refs and was
+    therefore drift-immune.
+
+    The implementation deliberately does NOT expand named entries (so the
+    file stays loadable as a strict recipe). Pin the corrected wording so
+    the next docstring rewrite can't reintroduce the false claim.
+    """
+    import aorta.triage.output as output_mod
+
+    doc = output_mod.__doc__ or ""
+    # Old, overpromising sentences must be gone.
+    assert "every registry name expanded" not in doc
+    assert "even if the registries drift" not in doc
+    # New wording explicitly flags the inline-vs-named asymmetry.
+    assert "NOT expanded" in doc
+    assert "resolved_env_vars" in doc
 
 
 # ---- Class D: same-second collision -> -N suffix, never overwrite -------

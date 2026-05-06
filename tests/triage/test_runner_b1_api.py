@@ -189,6 +189,36 @@ def test_extra_sidecar_files_threaded_to_run_trials(tmp_path, patched_env, patch
     assert extra not in req.sidecar_files
 
 
+def test_recipe_sidecar_files_alone_drives_run_trials(tmp_path, patched_env, patched_run_trials):
+    """Programmatic ``load_recipe(... sidecar_files=...) -> run_recipe(recipe)``
+    must reach run_trials with the sidecar plumbed in -- no need to also
+    pass ``extra_sidecar_files`` at the runner.
+
+    Pin the round-6 fix from the runner side: the per-cell ``RunRequest``
+    that B1 receives carries the archived sidecar even when the runner was
+    called with no ``extra_sidecar_files=``.
+    """
+    sidecar = tmp_path / "ops.sidecar.json"
+    sidecar.write_text(
+        '{"version": 1, "mitigations": {"my_local_mit": {"FOO": "BAR"}}}',
+        encoding="utf-8",
+    )
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="my_local_mit",
+        environment_axis="local",
+        trials=1,
+        steps=10,
+        ticket="X-1",
+        sidecar_files=(sidecar,),
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    req: RunRequest = patched_run_trials.call_args_list[0].args[0]
+    archived = run_dir / "sidecars" / "ops.sidecar.json"
+    assert archived.exists()
+    assert archived in req.sidecar_files
+
+
 def test_dry_run_does_not_call_run_trials(tmp_path, patched_env, patched_run_trials):
     r = build_recipe_from_flags(
         workload="fsdp",
@@ -489,6 +519,39 @@ def test_cli_list_environments_wraps_registry_error_in_click_exception(tmp_path)
     assert result.exit_code != 0
     assert "Error:" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    "flag_name",
+    [
+        "--ticket",
+        "--baseline-cell",
+        "--confound-threshold",
+    ],
+)
+def test_cli_run_help_documents_recipe_mode_rejection(flag_name):
+    """Class-wide UX fix: every flag rejected in recipe mode must say so in help.
+
+    Pre-fix only ``--confound-threshold`` mentioned the rejection in its
+    help text. ``--ticket`` and ``--baseline-cell`` were also in the
+    conflict set -- and ``--baseline-cell`` was the most confusing of the
+    three because its summary line ("Override the auto-resolved baseline
+    cell") reads like it should override the recipe's
+    ``confound.baseline_cell`` too. Pin that every conflicting flag
+    advertises the rejection so a user reading ``--help`` doesn't have to
+    discover it by trial and error.
+    """
+    cli = CliRunner()
+    result = cli.invoke(triage, ["run", "--help"])
+    assert result.exit_code == 0, result.output
+    # Find the flag's help block. Click wraps lines, so search by flag name
+    # and assert the rejection sentence appears within a reasonable window.
+    idx = result.output.find(flag_name)
+    assert idx >= 0, f"{flag_name} missing from --help"
+    window = result.output[idx : idx + 600]
+    assert "rejected" in window, (
+        f"{flag_name} help does not advertise the recipe-mode rejection; window was:\n{window!r}"
+    )
 
 
 def test_cli_run_wraps_run_recipe_errors_in_click_exception(tmp_path, patched_env):

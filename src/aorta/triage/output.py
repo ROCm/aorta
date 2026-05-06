@@ -5,12 +5,19 @@ Three artifacts per run, all in the same ``<output-dir>/<ticket>/<workload>/
 
 * ``matrix.md`` -- human-readable table matching the §"matrix.md target
   format" block in issue #151.
-* ``matrix.json`` -- full machine-readable per-cell data (step-time arrays,
-  env-var bundles, trial JSON paths, cell-level errors, etc.).
-* ``recipe.resolved.yaml`` -- the recipe AS EXECUTED, with every registry
-  name expanded to its underlying env-var bundle + docker ref. This is the
-  reproducibility artifact: re-running it on a different machine produces
-  the same matrix even if the registries drift in the interim.
+* ``matrix.json`` -- full machine-readable per-cell data: step-time stats,
+  the env-var bundle as actually applied (``resolved_env_vars``), the
+  resolved :class:`aorta.registry.Environment` descriptor
+  (``resolved_environment``), trial JSON paths, exit-status histogram, and
+  cell-level errors.
+* ``recipe.resolved.yaml`` -- a strict, reloadable recipe snapshot. **Named
+  mitigations and environments are deliberately NOT expanded** -- the file
+  is the rerunnable artifact, not a drift-pinning artifact. Inline-docker
+  cells are re-emitted as ``{docker: <ref>}`` so the same ``_inline_<hash>``
+  is re-derived without a sidecar; named registry entries stay by name.
+  See :func:`write_resolved_recipe` for the rationale and ``recipes/README.md``
+  for replay caveats. To detect registry drift across runs, compare each
+  run's ``matrix.json::cells[*].resolved_env_vars``.
 
 Sibling files / directories (written by :mod:`aorta.triage.runner`):
 
@@ -18,6 +25,8 @@ Sibling files / directories (written by :mod:`aorta.triage.runner`):
 * ``environments/<env-name>/env.json`` -- one collect_env() snapshot per
   unique environment, captured right before that env's first cell runs.
 * ``cells/<cell-name>/`` -- B1's per-trial JSON output for that cell.
+* ``sidecars/<basename>`` -- byte-identical copy of every operator-supplied
+  ``--mitigations-file`` so the run dir is self-contained for replay.
 """
 
 from __future__ import annotations
@@ -127,7 +136,14 @@ def _format_failure_rate(cell: CellStats) -> str:
     return f"{pct}%"
 
 
-def _format_fail_count(cell: CellStats) -> str:
+def _format_failures(cell: CellStats) -> str:
+    """Render the Failures column as ``failed / trials`` (e.g. ``3 / 8``).
+
+    Both numerator and denominator are spelled out so the column header
+    ("Failures") and the value together read as "3 failures out of 8 trials"
+    -- the previous "Trials" header on this same value confused readers
+    into reading 3/8 as a trial-count column (issue #160 review round 6).
+    """
     if cell.error is not None:
         return "n/a"
     return f"{cell.failed_count} / {cell.trials}"
@@ -189,7 +205,7 @@ def write_matrix_md(
         "Mitigations",
         "Environment",
         "Failure rate",
-        "Trials",
+        "Failures",
         "Mean step (ms)",
         "Confound",
     )
@@ -202,7 +218,7 @@ def write_matrix_md(
                 _format_mitigations(cell.mitigations),
                 cell.environment,
                 _format_failure_rate(cell),
-                _format_fail_count(cell),
+                _format_failures(cell),
                 _format_step_ms(cell),
                 _format_confound(tag),
             )
@@ -236,12 +252,20 @@ def write_matrix_md(
         "  - `no effect` -- the mitigation neither changed the failure rate nor slowed "
         "iteration; it likely doesn't apply to this workload."
     )
+    lines.append(
+        "  - `n/a` -- the baseline cell errored or produced no usable timing, so no "
+        "step-time ratio could be computed. Distinct from `-`: these cells are "
+        "**unclassified**, not trustworthy. See the run-level warning above for the "
+        "underlying baseline failure."
+    )
     lines.append("  - `error` -- the whole cell failed; row preserved so the matrix is complete.")
     lines.append(
-        "- `Failure rate` counts every trial whose `exit_status != ok` or whose "
-        "`WorkloadResult.passed` is False; it is *not* a NaN-specific rate. Use "
-        "`matrix.json::cells[*].exit_status_counts` to break failures down by mode "
-        "(`workload_failed` vs `infrastructure_failed` vs `unknown`, etc.)."
+        "- `Failures` is `failed_count / trial_count` (e.g. `3 / 8` = three failed out "
+        "of eight). `Failure rate` is the same data as a percentage and counts every "
+        "trial whose `exit_status != ok` or whose `WorkloadResult.passed` is False; "
+        "neither is NaN-specific. Use `matrix.json::cells[*].exit_status_counts` to "
+        "break failures down by mode (`workload_failed` vs `infrastructure_failed` "
+        "vs `unknown`, etc.)."
     )
     lines.append(
         "- Only `mean step (ms)` is shown here. Per-cell `std`, `min`, `max`, "

@@ -60,6 +60,35 @@ _INLINE_SIDECAR_NAME = "inline_environments.sidecar.json"
 _OPERATOR_SIDECAR_DIR = "sidecars"
 
 
+def _merge_sidecar_files(
+    recipe_files: tuple[Path, ...],
+    extra: tuple[Path, ...],
+) -> tuple[Path, ...]:
+    """Union ``recipe.sidecar_files`` with caller-supplied extras, deduped.
+
+    ``Recipe`` carries the sidecars that ``load_recipe`` /
+    ``build_recipe_from_flags`` validated against, so a programmatic
+    ``load_recipe(path, sidecar_files=...) -> run_recipe(recipe)`` flow
+    Just Works without re-passing them. ``extra_sidecar_files`` stays as a
+    runner-level escape hatch (tests construct a ``Recipe`` directly and
+    add sidecars at execute time). Dedup by resolved path so the CLI's
+    ``load_recipe(... sidecar_files=files) + run_recipe(... extra_sidecar_files=files)``
+    pattern doesn't double-copy the same files into ``<run_dir>/sidecars``.
+    """
+    seen: set[Path] = set()
+    merged: list[Path] = []
+    for p in (*recipe_files, *extra):
+        # ``resolve(strict=False)`` so missing files still dedup (Click's
+        # ``exists=True`` validates the CLI path; programmatic callers may
+        # legitimately pass an absolute path that hasn't been touched).
+        key = Path(p).resolve(strict=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(p)
+    return tuple(merged)
+
+
 def _copy_operator_sidecars(run_dir: Path, sidecar_files: tuple[Path, ...]) -> tuple[Path, ...]:
     """Snapshot operator-supplied sidecars into the run dir for replay.
 
@@ -399,14 +428,21 @@ def run_recipe(
 
     Args:
         recipe: Pre-validated recipe (from :func:`aorta.triage.recipe.load_recipe`
-            or :func:`aorta.triage.recipe.build_recipe_from_flags`).
+            or :func:`aorta.triage.recipe.build_recipe_from_flags`). Any
+            sidecar files passed to those constructors are carried on
+            ``recipe.sidecar_files`` and used here automatically -- callers
+            do **not** need to re-pass them via ``extra_sidecar_files``.
         output_dir: Top-level output directory (the CLI's ``--output-dir``).
         dry_run: When True, validates and prints the resolved cell list to
             stdout without touching the filesystem and returns a sentinel
             ``Path(".")``.
-        extra_sidecar_files: Operator-supplied sidecar JSONs (from
-            ``--mitigations-file``). These are threaded through to B1's
-            registry resolver alongside the runner-generated inline sidecar.
+        extra_sidecar_files: Additional sidecar JSONs to thread to B1's
+            registry resolver and snapshot into ``<run_dir>/sidecars/``.
+            Unioned with ``recipe.sidecar_files`` (deduped by resolved
+            path), so it's safe -- though redundant -- for the CLI to pass
+            the same files here too. The arg exists for runner-level
+            callers that build a ``Recipe`` directly (tests, in-process
+            embedders) and want to add sidecars at execute time.
         timestamp: Override for the run-dir timestamp component (test hook).
 
     Returns:
@@ -425,12 +461,20 @@ def run_recipe(
     ts = timestamp or format_timestamp()
     run_dir = resolve_run_dir(output_dir, recipe, timestamp=ts)
 
+    # Operator sidecars come from two places: ones the Recipe was built
+    # against (``recipe.sidecar_files``, populated by ``load_recipe`` /
+    # ``build_recipe_from_flags``) and ones the caller hands in directly at
+    # execute time (``extra_sidecar_files``). Merge with dedup so the CLI's
+    # belt-and-suspenders pattern of passing the same files at both layers
+    # doesn't produce duplicate <run_dir>/sidecars/ copies.
+    all_operator_sidecars = _merge_sidecar_files(recipe.sidecar_files, tuple(extra_sidecar_files))
+
     # Snapshot operator-supplied sidecars (--mitigations-file) into run_dir
     # FIRST so the recipe.resolved.yaml + the copies form a self-contained
     # replay bundle. Use the in-run-dir copies as the resolver's source of
     # truth from here on, so what gets executed and what gets archived for
     # replay are byte-identical.
-    operator_sidecar_paths = _copy_operator_sidecars(run_dir, tuple(extra_sidecar_files))
+    operator_sidecar_paths = _copy_operator_sidecars(run_dir, all_operator_sidecars)
 
     inline_sidecar_path = _write_inline_sidecar(run_dir, recipe.inline_environments)
     sidecar_files: tuple[Path, ...] = operator_sidecar_paths

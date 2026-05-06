@@ -605,3 +605,83 @@ def test_cell_effective_override():
     cell = Cell(name="x", mitigations=("none",), environment="local", trials=3, steps=10)
     assert cell.effective_trials(8) == 3
     assert cell.effective_steps(5000) == 10
+
+
+# ---- Recipe.sidecar_files (round-6 fix) -----------------------------------
+
+
+def test_load_recipe_records_sidecar_files(tmp_path):
+    """Round-6 fix: the loader's ``sidecar_files=`` argument is preserved on
+    the returned ``Recipe`` so a programmatic ``run_recipe(recipe)`` call
+    works without re-passing the same files.
+
+    Pre-fix, ``Recipe`` discarded that list and any caller that didn't
+    redundantly pass ``extra_sidecar_files=`` to the runner hit
+    ``UnknownMitigationError`` at execute time.
+    """
+    sidecar = tmp_path / "ops.sidecar.json"
+    sidecar.write_text(
+        '{"version": 1, "mitigations": {"my_local_mit": {"FOO": "BAR"}}}',
+        encoding="utf-8",
+    )
+    path = tmp_path / "recipe.yaml"
+    path.write_text(
+        """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 5
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+  - name: sidecar-local
+    mitigations: [my_local_mit]
+    environment: local
+""",
+        encoding="utf-8",
+    )
+    r = load_recipe(path, sidecar_files=(sidecar,))
+    assert r.sidecar_files == (sidecar,)
+
+
+def test_build_recipe_from_flags_records_sidecar_files(tmp_path):
+    """Same contract as ``load_recipe``: the flag-mode builder must surface
+    ``sidecar_files`` on the resulting ``Recipe``.
+    """
+    sidecar = tmp_path / "ops.sidecar.json"
+    sidecar.write_text(
+        '{"version": 1, "mitigations": {"my_local_mit": {"FOO": "BAR"}}}',
+        encoding="utf-8",
+    )
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="my_local_mit",
+        environment_axis="local",
+        trials=1,
+        steps=10,
+        sidecar_files=(sidecar,),
+    )
+    assert r.sidecar_files == (sidecar,)
+
+
+def test_load_recipe_no_sidecar_files_means_empty_tuple(tmp_path):
+    """Default carries a stable empty tuple, not ``None`` -- callers can
+    iterate without a None-guard.
+    """
+    path = tmp_path / "recipe.yaml"
+    path.write_text(
+        """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 5
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+""",
+        encoding="utf-8",
+    )
+    r = load_recipe(path)
+    assert r.sidecar_files == ()

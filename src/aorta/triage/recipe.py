@@ -148,6 +148,14 @@ class Recipe:
         inline_environments: Auto-registered inline envs referenced by cells.
             The runner writes a temporary sidecar JSON containing these so
             B1's ``get_environment`` resolves the auto-names.
+        sidecar_files: Operator-supplied ``--mitigations-file`` paths that
+            were used to validate this recipe's names. Carried on the
+            ``Recipe`` so a programmatic ``load_recipe(path,
+            sidecar_files=...) -> run_recipe(recipe)`` flow works without
+            the caller threading sidecars through twice. The runner unions
+            this with its own ``extra_sidecar_files`` argument and also
+            snapshots each path into ``<run_dir>/sidecars/<basename>`` for
+            replay. Empty tuple when no sidecars were supplied.
         source_path: Path of the source file if loaded from disk (None for
             flag-mode). Surfaced in ``matrix.md``.
         source_sha256: SHA-256 of the source file text (None for flag-mode).
@@ -162,6 +170,7 @@ class Recipe:
     ticket: str | None = None
     confound: ConfoundCfg = field(default_factory=ConfoundCfg)
     inline_environments: tuple[InlineEnv, ...] = ()
+    sidecar_files: tuple[Path, ...] = ()
     source_path: Path | None = None
     source_sha256: str | None = None
 
@@ -571,6 +580,7 @@ def _build_recipe(
         ticket=ticket,
         confound=confound,
         inline_environments=tuple(inline_envs.values()),
+        sidecar_files=tuple(sidecar_files) if sidecar_files else (),
         source_path=source_path,
         source_sha256=source_sha256,
     )
@@ -688,6 +698,7 @@ def build_recipe_from_flags(
         ticket=ticket,
         confound=ConfoundCfg(threshold=confound_threshold, baseline_cell=baseline_cell),
         inline_environments=inline_envs_tuple,
+        sidecar_files=tuple(sidecar_files) if sidecar_files else (),
         source_path=None,
         source_sha256=None,
     )

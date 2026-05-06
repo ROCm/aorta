@@ -7,6 +7,7 @@ import pytest
 from aorta.triage.confound import (
     CONFOUND_BASELINE,
     CONFOUND_ERROR,
+    CONFOUND_NA,
     CONFOUND_NEUTRAL,
     CONFOUND_NO_EFFECT,
     classify,
@@ -140,18 +141,46 @@ def test_classify_error_cell_tag():
 
 
 def test_classify_baseline_errored_forces_no_ratio():
+    """Baseline crashed -> non-baseline cells must NOT get the trustworthy '-' tag.
+
+    Pin the round-6 fix: previously this returned ``CONFOUND_NEUTRAL`` (the
+    "mitigation works without speed cost" tag), which silently labelled
+    every other cell as trustworthy even though no comparison was possible.
+    The distinct ``CONFOUND_NA`` tag exists to keep that case visible.
+    """
     base = _stats("b", mean_step_time_ms=0.0, error="baseline crashed")
     cell = _stats("c", mean_step_time_ms=100.0, passed_count=8)
     tag, ratio = classify(cell, base, threshold=1.15)
-    assert tag == CONFOUND_NEUTRAL
+    assert tag == CONFOUND_NA
+    assert tag != CONFOUND_NEUTRAL  # cosmetically equal? no: distinct contract.
     assert ratio is None
 
 
 def test_classify_baseline_zero_step_time_forces_no_ratio():
+    """Baseline with no usable timing -> non-baseline cells get CONFOUND_NA.
+
+    Same contract as the errored-baseline case: zero step-time means the
+    workload didn't emit timing, so a step-time ratio cannot be computed
+    against this baseline. Pin that the tag is NOT the neutral '-'.
+    """
     base = _stats("b", mean_step_time_ms=0.0)
     cell = _stats("c", mean_step_time_ms=100.0, passed_count=8)
     tag, ratio = classify(cell, base, threshold=1.15)
+    assert tag == CONFOUND_NA
     assert ratio is None
+
+
+def test_confound_na_is_distinct_from_neutral():
+    """Schema-level pin: the two tags must render to distinct strings.
+
+    Reusing CONFOUND_NEUTRAL for the unclassifiable case would let
+    matrix.md readers parse 'no comparison possible' as 'mitigation works
+    without speed cost'. The distinctness is enforced at the constant
+    level so any future renderer change can't reintroduce the conflation.
+    """
+    assert CONFOUND_NA != CONFOUND_NEUTRAL
+    assert CONFOUND_NA == "n/a"
+    assert CONFOUND_NEUTRAL == "-"
 
 
 # ---- classify_all ---------------------------------------------------------
