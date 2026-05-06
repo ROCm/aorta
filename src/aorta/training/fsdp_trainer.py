@@ -932,9 +932,18 @@ def main(
                 skip_if_unavailable=kernel_tracing_cfg.skip_if_unavailable,
             )
         )
-        kernel_profiler.start()
 
+    # ``kernel_profiler.start()`` is inside this ``try`` (rather than next
+    # to the construction above) so that ``finally`` always tears down the
+    # process group even when the profiler crashes during startup -- e.g.
+    # ``skip_if_unavailable=False`` with bpftrace missing, or the new
+    # ``BpftraceRunner._await_startup()`` raising on a permission failure.
+    # Without this, distributed launches could leak the rendezvous backend
+    # and hang every other rank on barrier. Flagged by Copilot review on
+    # PR #162.
     try:
+        if kernel_profiler is not None:
+            kernel_profiler.start()
         training_loop(
             model,
             optimizer,

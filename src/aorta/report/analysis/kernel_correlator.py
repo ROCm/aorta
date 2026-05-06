@@ -22,9 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator, List, Optional
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ class CorrelationFinding:
     """One iteration of interest plus the kernel events preceding it."""
 
     target: IterationRecord
-    preceding_window: List[IterationRecord]
+    preceding_window: list[IterationRecord]
     kernel_event_total: dict[str, int]
 
 
@@ -64,9 +65,9 @@ class KernelEventCorrelator:
     def __init__(self, lookback_iterations: int = 5) -> None:
         self.lookback_iterations = lookback_iterations
 
-    def load_metrics(self, path: Path) -> List[IterationRecord]:
+    def load_metrics(self, path: Path) -> list[IterationRecord]:
         """Parse a single ``rank_XX_metrics.jsonl`` file."""
-        records: List[IterationRecord] = []
+        records: list[IterationRecord] = []
         with path.open("r", encoding="utf-8") as fh:
             for line_no, raw_line in enumerate(fh, start=1):
                 raw_line = raw_line.strip()
@@ -80,22 +81,24 @@ class KernelEventCorrelator:
                 records.append(_payload_to_record(payload))
         return records
 
-    def load_metrics_glob(self, directory: Path, pattern: str = "rank_*_metrics.jsonl") -> List[IterationRecord]:
+    def load_metrics_glob(
+        self, directory: Path, pattern: str = "rank_*_metrics.jsonl"
+    ) -> list[IterationRecord]:
         """Load and concatenate every metrics file matching ``pattern``."""
-        all_records: List[IterationRecord] = []
+        all_records: list[IterationRecord] = []
         for path in sorted(directory.glob(pattern)):
             all_records.extend(self.load_metrics(path))
         all_records.sort(key=lambda r: (r.global_step, r.rank))
         return all_records
 
-    def find_failures(self, records: Iterable[IterationRecord]) -> List[CorrelationFinding]:
+    def find_failures(self, records: Iterable[IterationRecord]) -> list[CorrelationFinding]:
         """Return findings for each NaN iteration with preceding context."""
         sorted_records = sorted(records, key=lambda r: (r.rank, r.global_step))
-        per_rank: dict[int, List[IterationRecord]] = {}
+        per_rank: dict[int, list[IterationRecord]] = {}
         for record in sorted_records:
             per_rank.setdefault(record.rank, []).append(record)
 
-        findings: List[CorrelationFinding] = []
+        findings: list[CorrelationFinding] = []
         for rank, rank_records in per_rank.items():
             for idx, record in enumerate(rank_records):
                 if not record.is_nan:
@@ -147,7 +150,9 @@ def _payload_to_record(payload: dict[str, Any]) -> IterationRecord:
         overlap_ms={k: float(v) for k, v in (overlap.get("overlap_ms") or {}).items()},
         per_stream_ms={k: float(v) for k, v in (overlap.get("per_stream_ms") or {}).items()},
         kernel_summary={k: int(v) for k, v in summary.items()},
-        kernel_event_count=int(kernel_trace.get("event_count", len(kernel_trace.get("events", [])))),
+        kernel_event_count=int(
+            kernel_trace.get("event_count", len(kernel_trace.get("events", [])))
+        ),
         raw=payload,
     )
 

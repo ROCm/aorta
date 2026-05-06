@@ -33,7 +33,8 @@ SCRIPTS_DIR = Path(__file__).parent / "scripts"
 class BpftraceScriptVariant(enum.Enum):
     """Vendored bpftrace script variants.
 
-    Trade-offs (from ebpfaultline README and PIPELINE_ANALYSIS):
+    Trade-offs (see ``scripts/PROVENANCE.md`` for the per-variant
+    Heisenberg-risk table this list summarises):
       - ``FULL`` -- maximum visibility, but kprobes can serialize the kernel
         path enough to suppress non-deterministic GPU memory races.
       - ``LIGHT`` -- only the three KFD/SVM kprobes plus ioctl errors and

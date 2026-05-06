@@ -19,11 +19,11 @@ probe symbols may need adjustment for non-tested kernel versions.
 from .events import KernelEvent, KernelEventType
 from .parser import BpftraceLogParser
 from .runner import (
+    SCRIPTS_DIR,
     BpftraceConfig,
     BpftraceRunner,
     BpftraceScriptVariant,
     BpftraceUnavailableError,
-    SCRIPTS_DIR,
 )
 
 __all__ = [

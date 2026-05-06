@@ -6,8 +6,9 @@ This module provides the 'generate' command group with subcommands:
   - plots: Generate visualization plots
 """
 
-import click
 from pathlib import Path
+
+import click
 
 
 @click.group()
@@ -337,7 +338,12 @@ def generate_kernel_trace(ctx, metrics_dir, output_dir, lookback_iterations, pat
             -i artifacts/run_2026_04_27/ \\
             -o artifacts/run_2026_04_27/kernel_report/
     """
-    from . import generate_kernel_report
+    # Import the leaf module rather than the ``generators`` package: the
+    # package ``__init__`` eagerly imports ``excel_report`` / ``plot_generator``
+    # / ``html_generator`` (pandas / openpyxl / matplotlib), which would
+    # defeat this subcommand's "runnable on the base install with no
+    # report extras" promise. Caught by Copilot review on PR #162.
+    from .kernel_report import generate_kernel_report
 
     quiet = ctx.obj.get("quiet", False)
     artifacts = generate_kernel_report(

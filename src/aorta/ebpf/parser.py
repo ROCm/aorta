@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
 
 from .events import KernelEvent, KernelEventType
 
@@ -34,9 +33,7 @@ _PATTERNS: list[tuple[re.Pattern[str], KernelEventType, list[str]]] = [
         ["pid"],
     ),
     (
-        re.compile(
-            rf"^{_TS} \*\*\* AMDGPU_BO_MOVE size=(\d+) old=(\d+) new=(\d+) \*\*\*"
-        ),
+        re.compile(rf"^{_TS} \*\*\* AMDGPU_BO_MOVE size=(\d+) old=(\d+) new=(\d+) \*\*\*"),
         KernelEventType.BO_MOVE,
         ["size", "old_placement", "new_placement"],
     ),
@@ -46,9 +43,7 @@ _PATTERNS: list[tuple[re.Pattern[str], KernelEventType, list[str]]] = [
         ["size", "old_placement", "new_placement"],
     ),
     (
-        re.compile(
-            rf"^{_TS} AMDGPU_VM_FLUSH vmid=(\d+) hub=(\d+) pd_addr=(0x[0-9a-fA-F]+)"
-        ),
+        re.compile(rf"^{_TS} AMDGPU_VM_FLUSH vmid=(\d+) hub=(\d+) pd_addr=(0x[0-9a-fA-F]+)"),
         KernelEventType.VM_FLUSH,
         ["vmid", "hub", "pd_addr"],
     ),
@@ -73,9 +68,7 @@ _PATTERNS: list[tuple[re.Pattern[str], KernelEventType, list[str]]] = [
         ["unmaps", "ptes"],
     ),
     (
-        re.compile(
-            rf"^{_TS} IOCTL_ERROR cmd=(0x[0-9a-fA-F]+) ret=(-?\d+) dur=(\d+)us"
-        ),
+        re.compile(rf"^{_TS} IOCTL_ERROR cmd=(0x[0-9a-fA-F]+) ret=(-?\d+) dur=(\d+)us"),
         KernelEventType.IOCTL_ERROR,
         ["cmd", "ret", "dur_us"],
     ),
@@ -90,9 +83,7 @@ _PATTERNS: list[tuple[re.Pattern[str], KernelEventType, list[str]]] = [
         ["cmd", "dur_us"],
     ),
     (
-        re.compile(
-            rf"^{_TS} MMAP len=(\d+) prot=(0x[0-9a-fA-F]+) flags=(0x[0-9a-fA-F]+)"
-        ),
+        re.compile(rf"^{_TS} MMAP len=(\d+) prot=(0x[0-9a-fA-F]+) flags=(0x[0-9a-fA-F]+)"),
         KernelEventType.MMAP,
         ["len", "prot", "flags"],
     ),
@@ -136,7 +127,7 @@ class BpftraceLogParser:
     unrelated_kprobe) by trying patterns in priority order.
     """
 
-    def parse_line(self, line: str) -> Optional[KernelEvent]:
+    def parse_line(self, line: str) -> KernelEvent | None:
         """Parse a single bpftrace output line.
 
         Returns a ``KernelEvent`` if the line matches a known pattern,

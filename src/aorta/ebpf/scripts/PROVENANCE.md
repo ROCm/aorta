@@ -1,13 +1,17 @@
 # Vendored bpftrace scripts
 
-These `.bt` scripts are vendored verbatim from the [ebpfaultline](https://github.com/) project
-and are kept here so AORTA can ship them as part of its `aorta.ebpf` module without a
-runtime dependency on that repository.
+These `.bt` scripts are vendored verbatim from the `ebpfaultline` project
+(the `bpftrace/` subtree of the AMD-internal `ebpfaultline-main`
+distribution; not yet open-sourced as of this PR) and are kept here so
+AORTA can ship them as part of its `aorta.ebpf` module without a
+runtime dependency on that source tree.
 
 ## Source
 
-- Upstream: `ebpfaultline-main/bpftrace/`
-- License: MIT (see upstream `README.md`)
+- Upstream subtree: `ebpfaultline-main/bpftrace/` (AMD internal; replace
+  this entry with the canonical URL once the upstream project is
+  published).
+- License: MIT (see upstream `README.md`).
 
 ## Files
 

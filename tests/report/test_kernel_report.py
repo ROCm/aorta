@@ -153,7 +153,7 @@ class TestGenerateKernelReport:
         # Source line is rendered escaped.
         assert str(metrics) in html
 
-    def test_no_findings_writes_empty_csv_with_header_only(self, tmp_path: Path):
+    def test_no_findings_writes_header_matching_with_findings_path(self, tmp_path: Path):
         metrics = tmp_path / "metrics"
         metrics.mkdir()
         _write(
@@ -162,10 +162,54 @@ class TestGenerateKernelReport:
         )
         out = tmp_path / "report"
         artifacts = generate_kernel_report(metrics, out)
-        # No NaN -> findings CSV is the placeholder header line.
-        assert artifacts["findings_csv"].read_text().strip() == "rank,global_step,loss"
-        # And HTML reports "No NaN iterations detected".
+        # The empty-findings CSV must carry the same static-column
+        # prefix that ``iter_findings_table`` always emits, so a
+        # downstream tool can count on these columns being present
+        # regardless of whether NaNs were detected. Pre-fix this row
+        # said only "rank,global_step,loss" -- inconsistent with the
+        # populated path -- and Copilot flagged it on PR #162.
+        assert artifacts["findings_csv"].read_text().strip() == (
+            "rank,global_step,loss,lookback_iterations"
+        )
         assert "No NaN iterations detected" in artifacts["html_report"].read_text()
+
+
+class TestCsvColumnOrderIsStable:
+    """B3: column order is documented contract.
+
+    Pre-fix the populated path used ``sorted(...)`` on every key in
+    every row, which mixed static and dynamic columns alphabetically
+    (``global_step, kernel_bo_move, kernel_kfd_evict, lookback_iterations,
+    loss, rank``). Post-fix the order is fixed: static prefix in source
+    order, then sorted ``kernel_*`` columns.
+    """
+
+    def test_static_columns_come_first_in_documented_order(self, tmp_path: Path):
+        metrics = tmp_path / "metrics"
+        metrics.mkdir()
+        _write(
+            metrics / "rank_0_metrics.jsonl",
+            [
+                _payload(rank=0, global_step=0, loss=1.0, kernel_summary={"bo_move": 1}),
+                _payload(
+                    rank=0,
+                    global_step=1,
+                    loss=float("nan"),
+                    kernel_summary={"bo_move": 2, "kfd_evict": 1},
+                ),
+            ],
+        )
+        out = tmp_path / "report"
+        artifacts = generate_kernel_report(metrics, out)
+        header = artifacts["findings_csv"].read_text().splitlines()[0].split(",")
+        assert header[:4] == ["rank", "global_step", "loss", "lookback_iterations"]
+        # Dynamic kernel columns are sorted alphabetically and only
+        # appear after the static prefix.
+        dynamic = header[4:]
+        assert dynamic == sorted(dynamic)
+        assert all(name.startswith("kernel_") for name in dynamic)
+        assert "kernel_bo_move" in dynamic
+        assert "kernel_kfd_evict" in dynamic
 
     def test_creates_output_dir_if_missing(self, tmp_path: Path):
         metrics = tmp_path / "metrics"

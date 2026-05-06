@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import csv
 import html
+import io
 import json
 import logging
-from dataclasses import asdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable, List
+from typing import Any
 
 from ..analysis.kernel_correlator import (
     CorrelationFinding,
@@ -77,16 +78,7 @@ def generate_kernel_report(
     )
 
     csv_path = output_dir / "kernel_trace_findings.csv"
-    rows = list(iter_findings_table(findings))
-    if rows:
-        fieldnames = sorted({key for row in rows for key in row})
-        with csv_path.open("w", encoding="utf-8", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
-    else:
-        csv_path.write_text("rank,global_step,loss\n", encoding="utf-8")
+    csv_path.write_text(_render_findings_csv(findings), encoding="utf-8")
 
     html_path = output_dir / "kernel_trace_report.html"
     html_path.write_text(
@@ -106,6 +98,56 @@ def generate_kernel_report(
         "findings_csv": csv_path,
         "html_report": html_path,
     }
+
+
+# Static columns that ``iter_findings_table`` always emits, in the
+# order downstream consumers (humans + spreadsheet pivots + the HTML
+# table further below) expect to see them. Keeping this in one place
+# ensures the with-findings header agrees with the no-findings
+# placeholder. Issue raised by Copilot on PR #162: previously the
+# populated path used ``sorted(...)`` of all keys, which produced a
+# different column order than the placeholder header
+# ``"rank,global_step,loss\n"`` and surprised CSV consumers.
+_FINDINGS_STATIC_COLUMNS: tuple[str, ...] = (
+    "rank",
+    "global_step",
+    "loss",
+    "lookback_iterations",
+)
+
+
+def _findings_csv_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    """Static columns first, then sorted dynamic ``kernel_*`` columns.
+
+    All dynamic columns are guaranteed to be ``kernel_<event>`` strings
+    by ``iter_findings_table``; sort them so the column ordering is
+    deterministic across runs even if the underlying event-type set
+    changes between versions.
+    """
+    dynamic_cols = sorted(
+        {key for row in rows for key in row if key not in _FINDINGS_STATIC_COLUMNS}
+    )
+    return list(_FINDINGS_STATIC_COLUMNS) + dynamic_cols
+
+
+def _render_findings_csv(findings: Iterable[CorrelationFinding]) -> str:
+    """Serialise findings as CSV with a stable column order.
+
+    Always writes a header row whose static-column prefix matches
+    ``_FINDINGS_STATIC_COLUMNS`` -- including the no-findings case --
+    so a downstream pipeline can rely on ``rank,global_step,loss,
+    lookback_iterations`` being the leading columns regardless of
+    whether any NaN iterations were detected.
+    """
+    rows = list(iter_findings_table(findings))
+    fieldnames = _findings_csv_fieldnames(rows)
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return buffer.getvalue()
 
 
 def _finding_to_dict(finding: CorrelationFinding) -> dict[str, Any]:
@@ -154,7 +196,7 @@ def _render_html(
     *,
     metrics_dir: Path,
     summary: dict[str, Any],
-    findings: List[CorrelationFinding],
+    findings: list[CorrelationFinding],
 ) -> str:
     parts: list[str] = [_HTML_HEAD]
     parts.append("<h1>Kernel Trace Report</h1>")

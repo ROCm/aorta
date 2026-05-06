@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aorta.ebpf import (
     BpftraceConfig,
@@ -75,10 +75,10 @@ class KernelTraceConfig:
     """
 
     enabled: bool = False
-    target_pid: Optional[int] = None
+    target_pid: int | None = None
     variant: BpftraceScriptVariant = BpftraceScriptVariant.TP_ONLY
     use_sudo: bool = True
-    bpftrace_path: Optional[str] = None
+    bpftrace_path: str | None = None
     keep_raw_events: bool = False
     skip_if_unavailable: bool = True
 
@@ -87,10 +87,10 @@ class KernelTraceConfig:
 class _IterationState:
     index: int
     start_ns: int
-    events: List[KernelEvent] = field(default_factory=list)
+    events: list[KernelEvent] = field(default_factory=list)
 
 
-_SUMMARY_COUNTER_TYPES: Dict[str, KernelEventType] = {
+_SUMMARY_COUNTER_TYPES: dict[str, KernelEventType] = {
     "kfd_evict": KernelEventType.KFD_EVICT,
     "kfd_restore": KernelEventType.KFD_RESTORE,
     "svm_evict": KernelEventType.SVM_EVICT,
@@ -121,10 +121,10 @@ class KernelTraceProfiler:
 
     def __init__(self, config: KernelTraceConfig) -> None:
         self.config = config
-        self._runner: Optional[BpftraceRunner] = None
-        self._iteration: Optional[_IterationState] = None
+        self._runner: BpftraceRunner | None = None
+        self._iteration: _IterationState | None = None
         self._started = False
-        self._all_events: List[KernelEvent] = []
+        self._all_events: list[KernelEvent] = []
 
     @property
     def enabled(self) -> bool:
@@ -171,7 +171,7 @@ class KernelTraceProfiler:
             self.config.variant.name,
         )
 
-    def stop(self) -> List[KernelEvent]:
+    def stop(self) -> list[KernelEvent]:
         """Stop the bpftrace process and return any remaining events."""
         if self._runner is None:
             return []
@@ -192,7 +192,7 @@ class KernelTraceProfiler:
         self._runner.drain_events()
         self._iteration = _IterationState(index=index, start_ns=time.monotonic_ns())
 
-    def end_iteration(self) -> Optional[Dict[str, Any]]:
+    def end_iteration(self) -> dict[str, Any] | None:
         if not self.enabled or self._iteration is None:
             self._iteration = None
             return None
@@ -207,10 +207,8 @@ class KernelTraceProfiler:
         self._iteration = None
         return record
 
-    def _serialize_iteration(
-        self, state: _IterationState, end_ns: int
-    ) -> Dict[str, Any]:
-        summary: Dict[str, int] = {key: 0 for key in _SUMMARY_COUNTER_TYPES}
+    def _serialize_iteration(self, state: _IterationState, end_ns: int) -> dict[str, Any]:
+        summary: dict[str, int] = dict.fromkeys(_SUMMARY_COUNTER_TYPES, 0)
         summary["pte_updates"] = 0
         summary["vm_unmaps"] = 0
 
@@ -224,17 +222,13 @@ class KernelTraceProfiler:
                 KernelEventType.VM_UNMAP_TICK,
             ):
                 summary["pte_updates"] += int(
-                    event.payload.get("ptes")
-                    or event.payload.get("pte_count")
-                    or 0
+                    event.payload.get("ptes") or event.payload.get("pte_count") or 0
                 )
                 summary["vm_unmaps"] += int(
-                    event.payload.get("unmaps")
-                    or event.payload.get("unmap_count")
-                    or 0
+                    event.payload.get("unmaps") or event.payload.get("unmap_count") or 0
                 )
 
-        record: Dict[str, Any] = {
+        record: dict[str, Any] = {
             "index": state.index,
             "elapsed_ns": end_ns - state.start_ns,
             "summary": summary,
@@ -245,11 +239,11 @@ class KernelTraceProfiler:
             record["event_count"] = len(state.events)
         return record
 
-    def all_events(self) -> List[KernelEvent]:
+    def all_events(self) -> list[KernelEvent]:
         """Return a copy of every event observed across the profiler's life."""
         return list(self._all_events)
 
-    def __enter__(self) -> "KernelTraceProfiler":
+    def __enter__(self) -> KernelTraceProfiler:
         self.start()
         return self
 
@@ -257,7 +251,7 @@ class KernelTraceProfiler:
         self.stop()
 
 
-def _event_to_dict(event: KernelEvent) -> Dict[str, Any]:
+def _event_to_dict(event: KernelEvent) -> dict[str, Any]:
     data = asdict(event)
     data["event_type"] = event.event_type.value
     return data
