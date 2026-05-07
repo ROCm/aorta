@@ -117,9 +117,12 @@ def classify(
 
     Returns:
         ``(tag, ratio)`` where ``tag`` is the matrix.md cell text and
-        ``ratio`` is ``None`` for the baseline row or when the baseline's
-        step-time is unusable (baseline errored, or step-time is 0 because
-        no trial produced timing data).
+        ``ratio`` is ``None`` for the baseline row or whenever a meaningful
+        ratio could not be computed (baseline errored, baseline has no
+        usable timing, the cell itself has no usable timing, or the cell
+        and baseline derived their step-time from different fallback
+        branches -- comparing per-step workload clocks against
+        wall-clock-divided-by-step-count would be apples to oranges).
     """
     if cell.error is not None:
         return CONFOUND_ERROR, None
@@ -134,6 +137,22 @@ def classify(
         # neutral "-" tag (which advertises "mitigation works without speed
         # cost"). The runner additionally writes a top-of-file warning so
         # readers see why every non-baseline row collapsed to n/a.
+        return CONFOUND_NA, None
+
+    if cell.mean_step_time_ms <= 0 or cell.step_time_source == "missing":
+        # Cell has no usable timing of its own -- the ratio would either be
+        # zero (meaningless) or undefined. CONFOUND_NA preserves the row
+        # without claiming the mitigation is trustworthy.
+        return CONFOUND_NA, None
+
+    if cell.step_time_source != baseline.step_time_source:
+        # Mixing fidelity tiers (e.g. baseline ran a workload that emits
+        # per-step times, this cell ran one that only exposes wall-clock)
+        # produces a ratio between fundamentally different signals: the
+        # baseline's number is iteration time only, the cell's number folds
+        # setup / teardown. Refuse to label that comparison; matrix.json
+        # keeps both cells' ``step_time_source`` so reviewers can see why
+        # the row landed on n/a (issue #160 / Sonbol's review on PR #160).
         return CONFOUND_NA, None
 
     ratio = cell.mean_step_time_ms / baseline.mean_step_time_ms

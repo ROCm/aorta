@@ -24,7 +24,15 @@ def _stats(
     passed_count: int = 0,
     trials: int = 8,
     error: str | None = None,
+    step_time_source: str = "per_step",
 ) -> CellStats:
+    """Build a synthetic CellStats for classify() unit tests.
+
+    ``step_time_source`` defaults to ``"per_step"`` -- the realistic value
+    for a workload that emits its own per-iteration clocks. Tests that
+    exercise the new mixed-source path pass an explicit value so the
+    mismatch surfaces.
+    """
     return CellStats(
         name=name,
         mitigations=("none",),
@@ -46,6 +54,7 @@ def _stats(
         step_times_ms=[mean_step_time_ms],
         trial_paths=[],
         error=error,
+        step_time_source=step_time_source,  # type: ignore[arg-type]
     )
 
 
@@ -181,6 +190,59 @@ def test_confound_na_is_distinct_from_neutral():
     assert CONFOUND_NA != CONFOUND_NEUTRAL
     assert CONFOUND_NA == "n/a"
     assert CONFOUND_NEUTRAL == "-"
+
+
+# ---- step_time_source mismatch -------------------------------------------
+#
+# Sonbol's review on PR #160 flagged that comparing a cell whose timing came
+# from per-step workload clocks against one whose timing came from
+# wall-clock-divided-by-step-count is an apples-to-oranges ratio: the latter
+# folds setup + teardown into the "step time". The classifier must refuse
+# such ratios with CONFOUND_NA so matrix.md doesn't claim a meaningful
+# comparison happened.
+
+
+def test_classify_returns_na_when_step_time_source_differs():
+    base = _stats("b", mean_step_time_ms=100.0, step_time_source="per_step", passed_count=0)
+    cell = _stats("c", mean_step_time_ms=120.0, step_time_source="wall_clock_total", passed_count=8)
+    tag, ratio = classify(cell, base, threshold=1.15)
+    assert tag == CONFOUND_NA
+    assert ratio is None
+
+
+def test_classify_returns_na_when_only_baseline_has_per_step():
+    """Asymmetric case: baseline measured cleanly, cell only has wall-clock.
+    The ratio would be (setup+steps)/steps, which is meaningless."""
+    base = _stats("b", mean_step_time_ms=100.0, step_time_source="per_step")
+    cell = _stats("c", mean_step_time_ms=110.0, step_time_source="elapsed_per_iter")
+    tag, ratio = classify(cell, base, threshold=1.15)
+    assert tag == CONFOUND_NA
+    assert ratio is None
+
+
+def test_classify_computes_ratio_when_sources_match():
+    """Sanity check: matching sources still go through the normal classifier."""
+    base = _stats("b", mean_step_time_ms=400.0, step_time_source="wall_clock_total", passed_count=4)
+    slow = _stats(
+        "tf32-local",
+        mean_step_time_ms=500.0,
+        step_time_source="wall_clock_total",
+        passed_count=8,
+    )
+    tag, ratio = classify(slow, base, threshold=1.15)
+    assert tag == "speed (+25%)"
+    assert ratio is not None and abs(ratio - 1.25) < 1e-9
+
+
+def test_classify_returns_na_when_cell_has_missing_timing():
+    """A cell with no usable timing (source='missing') can't anchor a ratio
+    even if the baseline measured cleanly. matrix.md must mark it n/a, not
+    coast through to a divide-by-non-comparable comparison."""
+    base = _stats("b", mean_step_time_ms=100.0, step_time_source="per_step")
+    cell = _stats("c", mean_step_time_ms=0.0, step_time_source="missing", passed_count=8)
+    tag, ratio = classify(cell, base, threshold=1.15)
+    assert tag == CONFOUND_NA
+    assert ratio is None
 
 
 # ---- classify_all ---------------------------------------------------------

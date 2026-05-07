@@ -207,3 +207,85 @@ def test_failure_rate_docstring_is_general_not_nan_specific():
     """
     assert hasattr(CellStats, "failure_rate")
     assert not hasattr(CellStats, "nan_rate")
+
+
+# ---- step_time_source lineage --------------------------------------------
+#
+# Sonbol's review on PR #160 flagged that ``_step_times_from_trial`` falls
+# through three different timing signals -- per-step, elapsed/iter, and
+# wall-clock-total -- and that comparing a cell that landed on branch 1
+# against one that only reached branch 3 silently mixes iteration time with
+# setup-and-teardown time. The cell-level ``step_time_source`` field labels
+# which branch the cell actually used so confound detection can refuse the
+# bad comparison instead of pretending the ratio is meaningful.
+
+
+def test_step_time_source_per_step_when_step_times_ms_present():
+    """Branch 1: workload reports per-step times -> source is 'per_step'."""
+    trials = [_trial(step_times_ms=[100.0, 200.0])]
+    stats = _default_call(trials=trials)
+    assert stats.step_time_source == "per_step"
+
+
+def test_step_time_source_elapsed_per_iter_fallback():
+    """Branch 2: no step_times_ms but elapsed/iters available."""
+    trials = [_trial(total_iterations=10, elapsed_sec=1.0)]
+    stats = _default_call(trials=trials)
+    assert stats.step_time_source == "elapsed_per_iter"
+
+
+def test_step_time_source_wall_clock_total_fallback():
+    """Branch 3: only wall_clock_sec available; folds setup + teardown in."""
+    trials = [_trial(wall_clock_sec=2.0)]
+    stats = _default_call(trials=trials, effective_steps=100)
+    assert stats.step_time_source == "wall_clock_total"
+
+
+def test_step_time_source_missing_when_no_timing_data():
+    """No samples produced -> source must be 'missing', not a default lie."""
+    trials = [_trial(wall_clock_sec=0.0)]
+    stats = _default_call(trials=trials)
+    assert stats.step_time_source == "missing"
+    assert stats.mean_step_time_ms == 0.0
+
+
+def test_step_time_source_is_worst_across_mixed_trials():
+    """If any contributing trial fell back to a lower-fidelity branch the
+    cell-level source must reflect that.
+
+    The cell's mean folds together one trial of true per-step samples and
+    one trial of wall-clock-divided-by-step-count -- the latter includes
+    setup and teardown. We can't honestly claim per-step fidelity for the
+    aggregate, so the cell labels itself by the worst source any contributing
+    trial used.
+    """
+    trials = [
+        _trial(step_times_ms=[100.0, 200.0]),
+        _trial(wall_clock_sec=1.5),  # branch 3
+    ]
+    stats = _default_call(trials=trials, effective_steps=100)
+    assert stats.step_time_source == "wall_clock_total"
+
+
+def test_step_time_source_ignores_missing_trials_when_others_have_data():
+    """A single setup-crashing trial (no timing at all) must not poison the
+    cell's source label when the rest of the cell measured cleanly.
+
+    'missing' is a per-trial honest report ("this trial produced nothing"),
+    not a fidelity tier; a cell with three per-step trials and one missing
+    trial is still a per-step cell.
+    """
+    trials = [
+        _trial(step_times_ms=[100.0]),
+        _trial(step_times_ms=[110.0]),
+        _trial(wall_clock_sec=0.0),  # produced nothing
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.step_time_source == "per_step"
+
+
+def test_step_time_source_for_error_cell_is_missing():
+    """Error cells short-circuit aggregation; the source must report 'missing'
+    rather than a stale default that implies real timing exists."""
+    stats = _default_call(trials=[], error="docker pull failed")
+    assert stats.step_time_source == "missing"

@@ -123,6 +123,15 @@ failure is localisable without reading the loader source.
 - `mean_step_time_ms`, `std_step_time_ms`, `mean_wall_clock_sec` --
   unchanged; still the headline timing fields.
 - `step_times_ms` -- raw concatenated series for downstream re-analysis.
+- `step_time_source` -- which branch of the fallback ladder produced the
+  cell's step-times: `"per_step"` (workload's own `step_times_ms`),
+  `"elapsed_per_iter"` (`elapsed_sec / total_iterations`),
+  `"wall_clock_total"` (`wall_clock_sec / steps`, folds in setup /
+  teardown), or `"missing"` (no usable timing). Confound classification
+  refuses to compute a ratio between cells whose sources differ -- those
+  rows are marked `n/a` in `matrix.md` -- so a workload that only exposes
+  wall-clock can't be silently compared against one that emits per-step
+  timing.
 - `resolved_env_vars` -- the env-var bundle as actually applied (mitigation
   union + `extra_env`).
 - `resolved_environment` -- the resolved `Environment` descriptor.

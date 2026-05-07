@@ -442,7 +442,9 @@ def test_baseline_error_marks_other_cells_unclassified_not_neutral(
     md = (run_dir / "matrix.md").read_text()
     # The legend explains the new tag, so any future renderer change that
     # emits the wrong glyph here will fail this assertion.
-    assert "`n/a` -- the baseline cell errored" in md
+    assert "`n/a`" in md
+    assert "the baseline errored" in md
+    assert "**unclassified**, not trustworthy" in md
 
 
 # ---- Class D: matrix.json carries new aggregation fields -----------------
@@ -465,6 +467,17 @@ def test_matrix_json_records_min_max_p90_and_exit_status_histogram(
         assert "max_step_time_ms" in cell
         assert "p90_step_time_ms" in cell
         assert "exit_status_counts" in cell
+        # Pin step_time_source so downstream tooling can detect when a cell
+        # came from a different fallback branch than the baseline; this is
+        # the lineage signal the confound classifier uses to refuse
+        # apples-to-oranges ratios. Surfaced per Sonbol's review on #160.
+        assert "step_time_source" in cell
+        assert cell["step_time_source"] in {
+            "per_step",
+            "elapsed_per_iter",
+            "wall_clock_total",
+            "missing",
+        }
         # Old field name must NOT have leaked back in.
         assert "nan_rate" not in cell
     # Failure rate is still surfaced under its new name.
