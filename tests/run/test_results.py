@@ -112,8 +112,14 @@ class TestTrialResult:
             result.trial_id = "modified"  # type: ignore[misc]
 
     def test_exit_status_values(self):
-        """All valid exit_status values are accepted."""
-        for status in ["ok", "workload_failed", "infrastructure_failed", "timeout"]:
+        """All valid exit_status values are accepted.
+
+        ``"timeout"`` is deliberately NOT in the literal: B1 ships no
+        ``--timeout`` flag and no watchdog so no code path can produce
+        it.  Re-add it (and this test entry) in the same commit that
+        adds a producer.
+        """
+        for status in ["ok", "workload_failed", "infrastructure_failed"]:
             result = TrialResult(
                 trial_id="test",
                 workload="test",

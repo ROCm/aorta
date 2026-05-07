@@ -1,47 +1,45 @@
-"""`aorta run` - universal workload runner.
+"""``aorta run`` -- universal workload runner CLI shim.
 
-CLI entry point for running workloads across trials, environments, and mitigations.
-This is a thin wrapper around the library API in aorta.run.dispatcher.
+Per B1 spec (issue #148, "Python API contract"):
+
+    The Click handler in cli/run.py becomes a thin shell: parse CLI
+    args -> build RunRequest -> call run_trials() -> derive exit
+    code from results.  All orchestration logic lives in
+    run_trials().  No business logic in the Click handler.
+
+Anything more than that lives in:
+
+* ``aorta.run.dispatcher`` -- ``run_trials`` and all validation /
+  workload lifecycle / persistence,
+* ``aorta.run.cli_helpers`` -- pure parsers (``parse_extra_env``,
+  ``parse_mitigations``) and result aggregation
+  (``summarize_results``) that B2 also reuses.
+
+This file is exception-bridging + I/O only.
 """
 
-import re
 from pathlib import Path
 
 import click
 
 from aorta.registry import RegistryError
-from aorta.run.collectors import KNOWN_RECIPES
+from aorta.run.cli_helpers import (
+    parse_csv,
+    parse_extra_env,
+    parse_mitigations,
+    summarize_results,
+)
 from aorta.run.dispatcher import RunRequest, run_trials
-
-# Module-level so the regex is compiled once and the function-local
-# binding doesn't trip ruff's N806 (uppercase-name-in-function).
-_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @click.command()
+@click.option("--workload", required=True, help="Workload name (aorta.workloads entry-point).")
+@click.option("--trials", type=int, default=1, show_default=True, help="Number of trials.")
 @click.option(
-    "--workload",
-    required=True,
-    help="Workload name (from aorta.workloads entry-point group).",
+    "--environment", default="local", show_default=True, help="Registered environment name."
 )
 @click.option(
-    "--trials",
-    type=int,
-    default=1,
-    show_default=True,
-    help="Number of trials to run.",
-)
-@click.option(
-    "--environment",
-    default="local",
-    show_default=True,
-    help="Registered environment name.",
-)
-@click.option(
-    "--mitigations",
-    default="none",
-    show_default=True,
-    help="Comma-separated mitigation names.",
+    "--mitigations", default="none", show_default=True, help="Comma-separated mitigation names."
 )
 @click.option(
     "--mitigations-file",
@@ -49,39 +47,26 @@ _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     multiple=True,
     help=(
-        "JSON sidecar file with ad-hoc mitigations and/or environments "
-        "(repeatable).  Forwarded to the registry; sidecar entries are "
-        "merged with built-ins and entry-point plugins, with the same "
-        "name-collision rules (B3.1)."
+        "JSON sidecar file with ad-hoc mitigations / environments "
+        "(repeatable; merged with built-ins per B3.1)."
     ),
 )
-@click.option(
-    "--steps",
-    type=int,
-    default=None,
-    help="Steps per trial (workload-specific; passes through to workload config).",
-)
+@click.option("--steps", type=int, default=None, help="Steps per trial (workload-specific).")
 @click.option(
     "--results-dir",
-    # NOTE: do NOT pass ``writable=True`` -- Click's writable check
-    # rejects paths that don't exist yet (the default ``results`` on a
-    # fresh checkout), and the dispatcher creates the directory itself.
-    # Letting the dispatcher's ``mkdir`` surface real I/O errors keeps
-    # the failure mode consistent with ``aorta env probe``.
+    # NOTE: do NOT pass ``writable=True`` -- Click's writable check rejects
+    # paths that don't exist yet (the default ``results`` on a fresh checkout)
+    # and the dispatcher creates the directory itself.
     type=click.Path(file_okay=False, path_type=Path),
     default=Path("results"),
     show_default=True,
     help="Directory to write per-trial JSON.",
 )
 @click.option(
-    "--collect",
-    default="",
-    help="Comma-separated collector recipe names (rocprof, numerics, amd_log). MVP: no-op.",
+    "--collect", default="", help="Comma-separated collector recipes (MVP: validated, no-op)."
 )
 @click.option(
-    "--extra-env",
-    default="",
-    help="Comma-separated KEY=VAL pairs for one-off env overrides (applied after mitigations).",
+    "--extra-env", default="", help="Comma-separated KEY=VAL pairs (applied after mitigations)."
 )
 def run(
     workload: str,
@@ -94,109 +79,35 @@ def run(
     collect: str,
     extra_env: str,
 ) -> None:
-    """Run a workload across trials with optional mitigations.
+    """Run a workload across N trials with optional mitigations.
 
-    Examples:
-
-        # Simple run with default settings
-        aorta run --workload fsdp --trials 1
-
-        # Multiple trials with mitigation
-        aorta run --workload fsdp --trials 3 --mitigations tf32_off
-
-        # With collector recipes (MVP: validated but no-op)
-        aorta run --workload fsdp --collect rocprof,numerics
-
-        # With extra environment variables
-        aorta run --workload fsdp --extra-env DEBUG=1,VERBOSE=true
+    Parses CLI args, builds a ``RunRequest``, hands off to
+    ``run_trials``, and maps the outcome to an exit code.  No
+    orchestration logic lives here -- see ``aorta.run.dispatcher``
+    and ``aorta.run.cli_helpers``.
     """
-    # Parse comma-separated mitigations
-    mitigation_list = tuple(m.strip() for m in mitigations.split(",") if m.strip())
-    if not mitigation_list:
-        mitigation_list = ("none",)
-
-    # Parse comma-separated collectors
-    collect_list = tuple(c.strip() for c in collect.split(",") if c.strip())
-
-    # Validate collector names
-    invalid = set(collect_list) - KNOWN_RECIPES
-    if invalid:
-        raise click.ClickException(
-            f"Unknown collector recipes: {sorted(invalid)}. Valid: {sorted(KNOWN_RECIPES)}"
-        )
-
-    # Parse extra_env (format: KEY=VAL,KEY2=VAL2).  We validate that
-    # the key is a plausible environment variable name -- otherwise the
-    # actual ``os.environ.update`` would raise the much less friendly
-    # ``ValueError: illegal environment variable name`` deep inside the
-    # dispatcher.
-    extra_env_dict: dict[str, str] = {}
-    if extra_env:
-        for pair in extra_env.split(","):
-            pair = pair.strip()
-            if not pair:
-                continue
-            if "=" not in pair:
-                raise click.ClickException(
-                    f"Invalid extra-env format: '{pair}'. Expected KEY=VALUE."
-                )
-            k, v = pair.split("=", 1)
-            k = k.strip()
-            if not k:
-                raise click.ClickException(f"Invalid extra-env entry '{pair}': key is empty.")
-            if not _ENV_KEY_RE.match(k):
-                raise click.ClickException(
-                    f"Invalid extra-env key '{k}': must match [A-Za-z_][A-Za-z0-9_]*."
-                )
-            extra_env_dict[k] = v.strip()
-
-    # Build config overrides.  ``steps`` is carried by the dedicated
-    # ``RunRequest.steps`` field; do NOT also stuff it into
-    # ``config_overrides`` -- that would create two copies of the same
-    # value, ambiguous if a future caller ever writes only one of them.
-    config_overrides: dict = {}
-
-    # Build request
-    req = RunRequest(
-        workload=workload,
-        trials=trials,
-        environment=environment,
-        mitigations=mitigation_list,
-        steps=steps,
-        config_overrides=config_overrides,
-        results_dir=results_dir,
-        collect=collect_list,
-        extra_env=extra_env_dict,
-        sidecar_files=tuple(mitigation_files),
-    )
-
-    # Call dispatcher.  Bridge known library exceptions to ClickException
-    # so the CLI prints a clean error instead of a Python traceback:
-    #
-    # * ``ValueError``    -- bad ``trials`` / unknown workload / unknown
-    #                        collector recipe / invalid extra_env key.
-    # * ``LookupError``   -- ``UnknownEnvironmentError`` /
-    #                        ``UnknownMitigationError`` from the registry
-    #                        (both subclass ``KeyError``).
-    # * ``RegistryError`` -- malformed sidecar / collision between
-    #                        sidecar entries and built-ins / plugins.
-    # * ``RuntimeError``  -- launch-mode validation failure.
     try:
+        req = RunRequest(
+            workload=workload,
+            trials=trials,
+            environment=environment,
+            mitigations=parse_mitigations(mitigations),
+            extra_env=parse_extra_env(extra_env),
+            steps=steps,
+            results_dir=results_dir,
+            collect=parse_csv(collect),
+            sidecar_files=tuple(mitigation_files),
+        )
         results = run_trials(req)
-    except (ValueError, LookupError, RegistryError) as e:
+    except (ValueError, LookupError, RegistryError, RuntimeError) as e:
+        # ValueError    -- bad trials / unknown collector recipe / invalid extra_env key.
+        # LookupError   -- UnknownEnvironmentError / UnknownMitigationError (KeyError subclasses).
+        # RegistryError -- malformed sidecar / collision with built-ins or plugins.
+        # RuntimeError  -- launch-mode validation failure.
         raise click.ClickException(str(e)) from e
-    except RuntimeError as e:
-        raise click.ClickException(str(e)) from e
 
-    # Report results
-    total = len(results)
-    passed = sum(1 for r in results if r.exit_status == "ok")
-    failed = total - passed
-
-    if failed > 0:
-        # List failed trials
-        failed_trials = [r.trial_id for r in results if r.exit_status != "ok"]
-        click.echo(f"Failed trials: {failed_trials}")
-        raise click.ClickException(f"{failed}/{total} trials failed")
-
-    click.echo(f"All {total} trial(s) passed. Results in: {req.results_dir / workload}")
+    summary = summarize_results(results)
+    if summary.failed:
+        click.echo(f"Failed trials: {list(summary.failed_trial_ids)}")
+        raise click.ClickException(f"{summary.failed}/{summary.total} trials failed")
+    click.echo(f"All {summary.total} trial(s) passed. Results in: {req.results_dir / workload}")

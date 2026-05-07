@@ -217,8 +217,9 @@ class TestRunTrials:
         # mask the original outcome.
         assert results[0].exit_status == "ok"
         # But the cleanup failure was logged with type + trial_id.
+        # trial_id format is ``<workload>_d<n>_m<n>_t<n>`` (B1 spec).
         msgs = [r.getMessage() for r in caplog.records]
-        assert any("cleanup()" in m and "RuntimeError" in m and "leaky_t0" in m for m in msgs)
+        assert any("cleanup()" in m and "RuntimeError" in m and "leaky_d0_m0_t0" in m for m in msgs)
 
     def test_non_integer_rank_falls_back_to_zero(self, tmp_path, caplog):
         """A non-integer RANK env var must not crash the run."""
@@ -244,7 +245,8 @@ class TestRunTrials:
         assert len(results) == 1
         assert results[0].exit_status == "ok"
         # Rank parsing fell back to 0, so the JSON file *was* written.
-        assert (tmp_path / "passing" / "trial_0.json").exists()
+        # Filename mirrors the cell-coordinate trial_id (d/m/t).
+        assert (tmp_path / "passing" / "trial_d0_m0_t0.json").exists()
         # And we logged a warning about the bad value.
         assert any(
             "RANK" in record.getMessage() and record.levelno == logging.WARNING
@@ -293,7 +295,12 @@ class TestRunTrials:
 
         assert len(results) == 3
         assert all(r.exit_status == "ok" for r in results)
-        assert [r.trial_id for r in results] == ["passing_t0", "passing_t1", "passing_t2"]
+        # Spec: trial_id encodes <workload>_d<dataset>_m<mitigation>_t<trial>.
+        assert [r.trial_id for r in results] == [
+            "passing_d0_m0_t0",
+            "passing_d0_m0_t1",
+            "passing_d0_m0_t2",
+        ]
 
     def test_failing_workload_sets_exit_status(self, tmp_path):
         """Failed workload sets exit_status to workload_failed."""
@@ -395,16 +402,16 @@ class TestRunTrials:
             )
             run_trials(req)
 
-        # Check JSON files exist
-        json_0 = tmp_path / "passing" / "trial_0.json"
-        json_1 = tmp_path / "passing" / "trial_1.json"
+        # Check JSON files exist (filename mirrors trial_id's d/m/t).
+        json_0 = tmp_path / "passing" / "trial_d0_m0_t0.json"
+        json_1 = tmp_path / "passing" / "trial_d0_m0_t1.json"
         assert json_0.exists()
         assert json_1.exists()
 
         # Check JSON content is valid
         with open(json_0) as f:
             data = json.load(f)
-        assert data["trial_id"] == "passing_t0"
+        assert data["trial_id"] == "passing_d0_m0_t0"
         assert data["workload"] == "passing"
         assert data["exit_status"] == "ok"
 
@@ -432,7 +439,7 @@ class TestRunTrials:
         assert results[0].exit_status == "ok"
 
         # But should not write JSON
-        json_0 = tmp_path / "passing" / "trial_0.json"
+        json_0 = tmp_path / "passing" / "trial_d0_m0_t0.json"
         assert not json_0.exists()
 
 
@@ -754,6 +761,47 @@ class TestEnvironmentRestoration:
             "run_trials must restore the environment by diff, "
             "not via os.environ.clear() + repopulate"
         )
+
+    def test_dataset_and_mitigation_index_in_trial_id_and_filename(self, tmp_path):
+        """``trial_id`` and the JSON filename must encode cell coordinates.
+
+        Spec format: ``<workload>_d<dataset>_m<mitigation>_t<trial>``
+        (issue #148 schema example: ``"fsdp_d0_m0_t0"``).  ``aorta
+        run`` is one cell, but ``aorta triage`` (B2) calls
+        ``run_trials`` once per cell with distinct
+        ``dataset_index`` / ``mitigation_index`` values, so artifacts
+        from different cells must not collide on disk.
+
+        Pin both the in-memory ``trial_id`` and the on-disk filename
+        for a non-zero (d, m) so a regression to ``trial_<idx>.json``
+        would be caught.
+        """
+        mock_ep = MagicMock()
+        mock_ep.name = "passing"
+        mock_ep.load.return_value = PassingWorkload
+
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="passing",
+                trials=2,
+                results_dir=tmp_path,
+                dataset_index=3,
+                mitigation_index=7,
+            )
+            results = run_trials(req)
+
+        assert [r.trial_id for r in results] == [
+            "passing_d3_m7_t0",
+            "passing_d3_m7_t1",
+        ]
+        assert (tmp_path / "passing" / "trial_d3_m7_t0.json").exists()
+        assert (tmp_path / "passing" / "trial_d3_m7_t1.json").exists()
+        # Old format must not appear.
+        assert not (tmp_path / "passing" / "trial_0.json").exists()
+        assert not (tmp_path / "passing" / "trial_1.json").exists()
 
     def test_environment_restored_after_trial(self, tmp_path):
         """Environment is restored after each trial."""

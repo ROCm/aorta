@@ -62,6 +62,17 @@ class RunRequest:
             ``aorta.registry.get_environment`` so that names declared in
             the sidecar resolve in the same call as built-ins and
             entry-point plugins.
+        dataset_index: Cell coordinate on the dataset / environment axis,
+            used in ``trial_id`` and the per-trial JSON filename.
+            ``aorta run`` is one cell, so the default ``0`` is correct
+            for direct CLI use; ``aorta triage`` (B2) calls
+            ``run_trials`` once per cell and varies this index across
+            its environment axis so cells in the matrix don't collide
+            on disk.
+        mitigation_index: Cell coordinate on the mitigation axis (same
+            rationale as ``dataset_index``).  ``aorta triage`` varies
+            this across its mitigation axis; ``aorta run`` always emits
+            ``m0``.
     """
 
     workload: str
@@ -74,6 +85,8 @@ class RunRequest:
     results_dir: Path = field(default_factory=lambda: Path("results"))
     collect: tuple[str, ...] = field(default_factory=tuple)
     sidecar_files: tuple[Path, ...] = field(default_factory=tuple)
+    dataset_index: int = 0
+    mitigation_index: int = 0
 
     def __post_init__(self) -> None:
         # Defensively deep-copy mutable dict fields.  ``frozen=True``
@@ -215,7 +228,14 @@ def _run_single_trial(
     Returns:
         TrialResult with execution outcome.
     """
-    trial_id = f"{request.workload}_t{trial_idx}"
+    # Spec format: ``<workload>_d<dataset>_m<mitigation>_t<trial>`` so
+    # ``aorta triage`` (B2) can fan out across the dataset/mitigation
+    # axes without per-cell trial files colliding.  ``aorta run`` is
+    # one cell, so ``d``/``m`` default to 0 here; B2 sets them per
+    # cell when it calls ``run_trials`` directly.
+    trial_id = (
+        f"{request.workload}_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
+    )
     # ``perf_counter`` is monotonic; ``time.time()`` can jump backward
     # or forward when the system clock is adjusted (NTP, suspend/resume),
     # which would corrupt ``wall_clock_sec``.
@@ -336,9 +356,14 @@ def _run_single_trial(
         exit_status=exit_status,  # type: ignore[arg-type]
     )
 
-    # Write JSON (rank 0 only)
+    # Write JSON (rank 0 only).  Filename mirrors ``trial_id`` so the
+    # cell coordinates (``d`` / ``m`` / ``t``) are visible on disk
+    # without parsing the JSON -- B2's matrix collator can slice by
+    # axis from the filename alone.
     if should_write:
-        output_path = results_dir / f"trial_{trial_idx}.json"
+        output_path = results_dir / (
+            f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}.json"
+        )
         with open(output_path, "w") as f:
             json.dump(trial_result.to_dict(), f, indent=2)
 

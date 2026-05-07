@@ -71,14 +71,14 @@ class TestEndToEndDispatcher:
         assert result.workload == "integration_test"
         assert result.exit_status == "ok"
 
-        # Verify JSON file
-        json_path = tmp_path / "integration_test" / "trial_0.json"
+        # Verify JSON file (filename encodes cell coordinates per spec).
+        json_path = tmp_path / "integration_test" / "trial_d0_m0_t0.json"
         assert json_path.exists()
 
         with open(json_path) as f:
             data = json.load(f)
 
-        assert data["trial_id"] == "integration_test_t0"
+        assert data["trial_id"] == "integration_test_d0_m0_t0"
         assert data["workload"] == "integration_test"
         assert data["exit_status"] == "ok"
         assert data["config"]["steps"] == 50
@@ -97,13 +97,13 @@ class TestEndToEndDispatcher:
         assert len(results) == 3
 
         for i in range(3):
-            json_path = tmp_path / "integration_test" / f"trial_{i}.json"
-            assert json_path.exists(), f"Missing trial_{i}.json"
+            json_path = tmp_path / "integration_test" / f"trial_d0_m0_t{i}.json"
+            assert json_path.exists(), f"Missing trial_d0_m0_t{i}.json"
 
             with open(json_path) as f:
                 data = json.load(f)
 
-            assert data["trial_id"] == f"integration_test_t{i}"
+            assert data["trial_id"] == f"integration_test_d0_m0_t{i}"
 
     def test_mitigations_recorded_in_result(self, tmp_path, mock_workload):
         """Mitigations are recorded in trial result."""
@@ -119,7 +119,7 @@ class TestEndToEndDispatcher:
         assert results[0].mitigations_applied == ("tf32_off",)
 
         # Also check JSON
-        json_path = tmp_path / "integration_test" / "trial_0.json"
+        json_path = tmp_path / "integration_test" / "trial_d0_m0_t0.json"
         with open(json_path) as f:
             data = json.load(f)
         assert data["mitigations_applied"] == ["tf32_off"]
@@ -214,8 +214,8 @@ class TestEndToEndCli:
             ],
         )
 
-        assert (tmp_path / "integration_test" / "trial_0.json").exists()
-        assert (tmp_path / "integration_test" / "trial_1.json").exists()
+        assert (tmp_path / "integration_test" / "trial_d0_m0_t0.json").exists()
+        assert (tmp_path / "integration_test" / "trial_d0_m0_t1.json").exists()
 
     def test_cli_with_steps(self, tmp_path, mock_workload):
         """CLI --steps option is passed to workload."""
@@ -234,7 +234,7 @@ class TestEndToEndCli:
             ],
         )
 
-        json_path = tmp_path / "integration_test" / "trial_0.json"
+        json_path = tmp_path / "integration_test" / "trial_d0_m0_t0.json"
         with open(json_path) as f:
             data = json.load(f)
 
@@ -257,7 +257,7 @@ class TestEndToEndCli:
             ],
         )
 
-        json_path = tmp_path / "integration_test" / "trial_0.json"
+        json_path = tmp_path / "integration_test" / "trial_d0_m0_t0.json"
         with open(json_path) as f:
             data = json.load(f)
 
@@ -277,7 +277,7 @@ class TestJsonSchema:
 
         run_trials(req)
 
-        json_path = tmp_path / "integration_test" / "trial_0.json"
+        json_path = tmp_path / "integration_test" / "trial_d0_m0_t0.json"
         with open(json_path) as f:
             data = json.load(f)
 
@@ -294,7 +294,7 @@ class TestJsonSchema:
 
         run_trials(req)
 
-        json_path = tmp_path / "integration_test" / "trial_0.json"
+        json_path = tmp_path / "integration_test" / "trial_d0_m0_t0.json"
         with open(json_path) as f:
             data = json.load(f)
 
@@ -324,7 +324,7 @@ class TestJsonSchema:
 
         run_trials(req)
 
-        json_path = tmp_path / "integration_test" / "trial_0.json"
+        json_path = tmp_path / "integration_test" / "trial_d0_m0_t0.json"
         with open(json_path) as f:
             data = json.load(f)
 

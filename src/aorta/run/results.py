@@ -25,7 +25,12 @@ class TrialResult:
 
     Attributes:
         schema_version: Version of the result schema (for future migration).
-        trial_id: Unique identifier for this trial (e.g., "fsdp_t0").
+        trial_id: Unique identifier for this trial.  Encodes the cell
+            coordinates so artifacts from different cells in a triage
+            matrix don't collide: ``<workload>_d<dataset_index>_m<mitigation_index>_t<trial_index>``
+            (e.g. ``"fsdp_d0_m0_t0"``).  ``aorta run`` is one cell so
+            ``d`` and ``m`` are always ``0``; ``aorta triage`` (B2)
+            varies them across the matrix.
         workload: Name of the workload that was executed.
         execution_env: Environment descriptor as dict.  Mirrors the
             :class:`aorta.registry.Environment` shape:
@@ -44,7 +49,11 @@ class TrialResult:
             ``partial`` / ``partial_reasons``, etc.).
         result: WorkloadResult serialized to dict.
         wall_clock_sec: Total wall clock time for the trial.
-        exit_status: Outcome of the trial execution.
+        exit_status: Outcome of the trial execution.  ``"timeout"`` is
+            deliberately NOT in the literal: B1 ships no ``--timeout``
+            flag and no watchdog, so no code path can produce it.
+            Re-add the value in the same commit that adds a producer
+            (e.g. when a ``--timeout`` watchdog lands).
     """
 
     trial_id: str
@@ -55,7 +64,7 @@ class TrialResult:
     env: dict[str, Any]
     result: dict[str, Any]
     wall_clock_sec: float
-    exit_status: Literal["ok", "workload_failed", "infrastructure_failed", "timeout"]
+    exit_status: Literal["ok", "workload_failed", "infrastructure_failed"]
     schema_version: str = "0.1"
 
     def __post_init__(self) -> None:

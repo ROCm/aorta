@@ -1,8 +1,70 @@
 """Tests for CLI argument parsing."""
 
+import ast
+import inspect
+
 from click.testing import CliRunner
 
 from aorta.cli.run import run
+
+
+class TestCliHandlerIsThinShell:
+    """B1 spec hard rule: the Click handler is a ~30-line shim.
+
+    Issue #148, "Python API contract" section: *"the Click handler in
+    cli/run.py is under ~30 lines and contains no `for trial in
+    range(...)` loop"*.  Anything beyond parse-args / build-request /
+    call-run_trials / map-exit-code lives in
+    ``aorta.run.dispatcher`` or ``aorta.run.cli_helpers``.
+
+    These tests pin that contract so the handler can't silently grow
+    business logic again (the round-5 review caught a ~120-line
+    handler doing collector validation, extra-env parsing, and
+    pass/fail aggregation -- all now in the library).
+    """
+
+    def _handler_function(self):
+        # ``run`` is a Click command; the underlying Python function
+        # is on its ``callback`` attribute.
+        return run.callback
+
+    def test_body_is_short(self):
+        """Handler body is the documented ~30 lines (give or take comments)."""
+        fn = self._handler_function()
+        source = inspect.getsource(fn)
+        tree = ast.parse(source)
+        func_def = tree.body[0]
+        assert isinstance(func_def, ast.FunctionDef)
+        body_start = func_def.body[0].lineno
+        body_end = func_def.end_lineno
+        assert body_end is not None
+        body_lines = body_end - body_start + 1
+        # Spec says "~30 lines".  Allow a small cushion for inline
+        # comments and the docstring; reject anything that's actually
+        # carrying business logic (the previous regression was 80+).
+        assert body_lines <= 45, (
+            f"Click handler body has grown to {body_lines} lines -- "
+            "move logic into aorta.run.dispatcher or aorta.run.cli_helpers"
+        )
+
+    def test_no_per_trial_loop(self):
+        """Spec literal: no ``for trial in range(...)`` inside the handler."""
+        fn = self._handler_function()
+        source = inspect.getsource(fn)
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.For):
+                # ``for trial ... in range(...)`` is the disallowed
+                # pattern -- per-trial iteration is run_trials' job.
+                if (
+                    isinstance(node.iter, ast.Call)
+                    and isinstance(node.iter.func, ast.Name)
+                    and node.iter.func.id == "range"
+                ):
+                    raise AssertionError(
+                        "Click handler contains a `for ... in range(...)` "
+                        "loop; per-trial iteration belongs in run_trials()."
+                    )
 
 
 class TestCliParsing:
@@ -127,7 +189,14 @@ class TestCliParsing:
         assert "key is empty" in result.output
 
     def test_extra_env_invalid_key_rejected(self):
-        """Keys that don't match the env-var name pattern are rejected."""
+        """Keys that don't match the env-var name pattern are rejected.
+
+        Validation lives in ``run_trials`` (library entry-point) so
+        programmatic callers that bypass the CLI parser get the same
+        protection; the CLI bridges the resulting ``ValueError`` to
+        a ``ClickException``.  The error names the offending key and
+        the POSIX env-var pattern.
+        """
         runner = CliRunner()
         result = runner.invoke(
             run,
@@ -139,7 +208,8 @@ class TestCliParsing:
             ],
         )
         assert result.exit_code != 0
-        assert "Invalid extra-env key" in result.output
+        assert "1BAD" in result.output
+        assert "must match" in result.output
 
     def test_default_results_dir_does_not_require_existing_path(self, tmp_path):
         """``--results-dir`` must accept a non-existent path.
