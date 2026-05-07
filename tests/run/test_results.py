@@ -9,11 +9,22 @@ class TestTrialResult:
     """Tests for TrialResult serialization and deserialization."""
 
     def test_trial_result_roundtrip(self):
-        """TrialResult serializes/deserializes losslessly."""
+        """TrialResult serializes/deserializes losslessly.
+
+        ``execution_env`` mirrors :class:`aorta.registry.Environment`
+        (``name``/``docker``/``venv``/``source_package``); ROCm
+        version, runtime kind, and image digest live inside ``env``
+        (A1's ``EnvSnapshot``) -- see the ``TrialResult`` docstring.
+        """
         result = TrialResult(
-            trial_id="test_0",
+            trial_id="fsdp_d0_m0_t0",
             workload="fsdp",
-            execution_env={"kind": "local", "name": "local"},
+            execution_env={
+                "name": "local",
+                "docker": None,
+                "venv": None,
+                "source_package": "aorta",
+            },
             mitigations_applied=("none",),
             config={},
             env={},
@@ -26,27 +37,36 @@ class TestTrialResult:
         assert restored == result
 
     def test_trial_result_roundtrip_with_all_fields(self):
-        """TrialResult handles complex nested data."""
+        """TrialResult handles complex nested data.
+
+        Schema discipline: the static descriptor (``execution_env``)
+        carries only the registry-level recipe
+        (``name``/``docker``/``venv``/``source_package``).  Runtime
+        observations -- ROCm version, image digest, hostname,
+        env_vars -- live in ``env`` (the A1 ``EnvSnapshot`` dict).
+        Mixing them was a stub-ism that round 3 cleaned up in the
+        production code; this fixture now reflects the same split.
+        """
         result = TrialResult(
-            trial_id="complex_t2",
+            trial_id="custom_workload_d2_m4_t6",
             workload="custom_workload",
             execution_env={
-                "kind": "docker",
                 "name": "ci_env",
-                "image": "aorta:latest",
-                "digest": "sha256:abc123",
+                "docker": "aorta:latest",
                 "venv": "/opt/venv",
-                "rocm": "6.0.0",
                 "source_package": "aorta-internal",
             },
             mitigations_applied=("tf32_off", "custom_mitigation"),
             config={"steps": 100, "batch_size": 32, "nested": {"key": "value"}},
             env={
-                "hostname": "testhost",
+                "schema_version": "1.1",
                 "python_version": "3.10.0",
                 "pytorch_version": "2.0.0",
-                "rocm_version": "6.0.0",
+                "rocm": {"version": "6.0.0"},
+                "docker": {"digest": "sha256:abc123"},
                 "env_vars": {"ROCM_PATH": "/opt/rocm"},
+                "partial": False,
+                "partial_reasons": [],
             },
             result={
                 "passed": False,
@@ -140,7 +160,7 @@ class TestTrialResult:
         result = TrialResult(
             trial_id="t",
             workload="w",
-            execution_env={"kind": "local"},
+            execution_env={"name": "local"},
             mitigations_applied=(),
             config=config,
             env=env,
@@ -164,7 +184,7 @@ class TestTrialResult:
         result = TrialResult(
             trial_id="t",
             workload="w",
-            execution_env={"kind": "local"},
+            execution_env={"name": "local"},
             mitigations_applied=(),
             config={"steps": 10},
             env={"HOST": "h"},
