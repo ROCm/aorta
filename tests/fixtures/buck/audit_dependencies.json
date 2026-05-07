@@ -1,0 +1,12 @@
+{
+  "//myproj:training_main": [
+    "//third-party/rocm:hipblaslt_lib",
+    "//third-party/rocm:rccl_lib",
+    "//third-party/rocm:hip_runtime",
+    "//third-party/pytorch:torch",
+    "//third-party/pytorch:torch_hip",
+    "//myproj/util:logging",
+    "//myproj/util:metrics",
+    "//some/other:unrelated_target"
+  ]
+}

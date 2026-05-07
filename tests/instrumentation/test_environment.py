@@ -259,6 +259,8 @@ REQUIRED_TOP_KEYS = {
     "pytorch_version",
     "pytorch_build",
     "build_system",
+    "library_introspection",
+    "library_introspection_alternates",
 }
 
 
@@ -268,7 +270,7 @@ class TestSchemaCompleteness:
     ):
         snapshot = collect_env()
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
-        assert snapshot.schema_version == "1.3"
+        assert snapshot.schema_version == "1.4"
         assert snapshot.system_health is None
         assert snapshot.rocm == {
             "version": None,
@@ -315,7 +317,7 @@ class TestSchemaCompleteness:
 def _example_snapshot(**overrides) -> object:
     """Build a fully-populated EnvSnapshot for round-trip testing."""
     base = {
-        "schema_version": "1.3",
+        "schema_version": "1.4",
         "captured_at": "2026-04-28T12:00:00Z",
         "system_health": {"rdhc_version": "1.4.0", "tests": {}},
         "rocm": {
@@ -442,6 +444,8 @@ def _example_snapshot(**overrides) -> object:
         "build_system": {"kind": "none"},
         "partial": False,
         "partial_reasons": [],
+        "library_introspection": [],
+        "library_introspection_alternates": [],
     }
     base.update(overrides)
     return EnvSnapshot(**base)
@@ -470,7 +474,7 @@ class TestEnvSnapshot:
         d = _example_snapshot().to_dict()
         d["future_field_not_yet_added"] = {"hello": "world"}
         rebuilt = EnvSnapshot.from_dict(d)
-        assert rebuilt.schema_version == "1.3"
+        assert rebuilt.schema_version == "1.4"
 
     def test_from_dict_defaults_partial_reasons_when_missing(self):
         """Older env.json without partial_reasons still loads (defaults to [])."""
@@ -1041,8 +1045,8 @@ class TestCliIsThinWrapper:
         # `test_cli_does_no_probing_imports` below -- this one is a
         # soft canary against the file ballooning.
         line_count = sum(1 for _ in cli_path.read_text().splitlines())
-        assert line_count <= 120, (
-            f"cli/env.py is {line_count} lines; soft budget is 120. "
+        assert line_count <= 140, (
+            f"cli/env.py is {line_count} lines; soft budget is 140. "
             "If you need more, check that the new code is genuinely "
             "wiring/error-handling and not probing -- "
             "test_cli_does_no_probing_imports is the strict guard."

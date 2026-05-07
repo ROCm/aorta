@@ -611,8 +611,13 @@ class TestSnapshotIntegration:
         rebuilt = env_mod.EnvSnapshot.from_dict(d)
         assert rebuilt.build_system == d["build_system"]
 
-    def test_schema_version_bumped_to_1_3(self):
-        assert env_mod.SCHEMA_VERSION == "1.3"
+    def test_schema_version_includes_build_system_bump(self):
+        # A1.2a bumped 1.2 -> 1.3 to add ``build_system``. Subsequent
+        # A1.2 phases keep bumping (A1.2b -> 1.4 with
+        # ``library_introspection``), so this assertion pins the floor
+        # rather than the exact value: ``build_system`` must be present
+        # in the current schema version's required key set.
+        assert tuple(int(p) for p in env_mod.SCHEMA_VERSION.split(".")) >= (1, 3)
 
     def test_from_dict_defaults_missing_build_system_to_none_kind(
         self, all_disabled

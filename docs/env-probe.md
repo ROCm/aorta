@@ -69,7 +69,7 @@ operator can act on them without `jq`'ing the JSON. A closing
 end-of-output. Sample:
 
 ```text
-Wrote env probe to /tmp/env.json (schema_version=1.3) [PARTIAL]
+Wrote env probe to /tmp/env.json (schema_version=1.4) [PARTIAL]
   runtime:   baremetal / python=venv
   rocm:      7.2.1 (dev: None)
   hip:       7.2.53211-e1a6bc5663 (amd)
@@ -145,7 +145,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.3"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.4"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
@@ -171,6 +171,8 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `pytorch_version` | `str \| null` | optional `import torch` (no CUDA/HIP context init) | `null` when torch absent |
 | `pytorch_build` | `dict` | `torch.version.{git_version,hip,cuda,debug}` + install-kind detection + optional `git -C <src>/third_party/<sub> rev-parse HEAD` + parse of `torch.__config__.show()` + `nm -D libtorch_hip.so \| c++filt` symbol grep + scan of `<torch>/lib/` | `git_commit` is the linchpin -- pins every vendored submodule deterministically. Sub-blocks: `flags` (raw `build_settings`, `cxx_defines`, `cxx_flags_raw`, `cuda_flags_raw`, `gpu_arch_list`), `build_flags` (issue #170 stable 17-key parsed bool/str/None subset, with `CAFFE2_USE_MIOPEN` aliased to `USE_MIOPEN`), `binary_introspection` (`libtorch_hip_symbol_counts`, `torch_lib_bundled`, `cxx_flags_use_defines` -- pure facts, no ON/OFF inference). See "PyTorch source-tree submodule probing" below. |
 | `build_system` | `dict` | `buck2 --version` + `buck2 root` + `hg id -i` / `git rev-parse HEAD` | Always present. `{"kind": "buck2", "buck2_version": str, "repo_root": str, "revision": str \| null}` when buck2 is on PATH AND we are demonstrably inside a Buck checkout (both `buck2 --version` and `buck2 root` succeed); `buck2_version` and `repo_root` are guaranteed populated, only `revision` may be `null`. `{"kind": "none"}` in every other case, including the dominant "buck2 is installed but cwd is not inside a Buck checkout" scenario. Added in schema 1.3 for issue #163 (A1.2a) so consumers can branch on Buck2 vs. system-package environments. See "Running inside a Buck environment" below. |
+| `library_introspection` | `list[dict]` | `buck2 audit dependencies <target> --transitive --json` (only when `--buck-target` is supplied) | Always present. Empty `[]` outside Buck mode. In Buck mode, one entry per matched library: `{"name", "source": "buck", "revision", "target"}`. The matched library set lives in `KNOWN_LIBRARY_PATTERNS` in `src/aorta/instrumentation/buck_introspect.py`. Added in schema 1.4 for issue #163 (A1.2b). |
+| `library_introspection_alternates` | `list[dict]` | synthesised from A1's per-library blocks when a Buck match overlaps | Always present. Empty `[]` outside Buck mode and when no Buck-matched library is also captured by A1. Each entry mirrors the unified shape with `source: "package"` and pulls `revision` / `package_version` / `lib_hash` from the matching A1 block (e.g. `hipblaslt`). Added in schema 1.4 for issue #163 (A1.2b). |
 
 `runtime_context.type` is one of `"docker" | "podman" | "singularity" | "baremetal"`. Adding values is a schema change.
 
@@ -333,7 +335,32 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.3` (current)
+### `1.4` (current)
+
+Additive change (issue #163, A1.2b):
+
+* New top-level `library_introspection` (list[dict], default `[]`)
+  and `library_introspection_alternates` (list[dict], default `[]`).
+  Both always present. Populated only when `collect_env(buck_target=...)`
+  is invoked (or `aorta env probe --buck-target ...`); each transitive
+  dep label of the Buck target that matches one of the patterns in
+  `KNOWN_LIBRARY_PATTERNS` (see `src/aorta/instrumentation/buck_introspect.py`)
+  yields one entry of shape `{"name", "source": "buck", "revision",
+  "target"}`. When a library matched via Buck is also captured by
+  A1's existing per-library blocks (`hipblaslt`, `rocblas`, `miopen`,
+  `rccl`), the A1-side identifiers are synthesised into a parallel
+  entry placed in `library_introspection_alternates` so consumers can
+  compare the buck label vs. the system-package version/lib_hash.
+  Outside Buck mode both lists stay empty; A1's existing per-library
+  top-level blocks remain authoritative.
+
+Schema 1.4 is forward- and backward-compatible: an env.json produced
+by 1.4 contains every 1.3 key unchanged. Loading a 1.1 / 1.2 / 1.3
+env.json into the 1.4 `EnvSnapshot.from_dict()` succeeds because all
+new fields default to empty (lists or `{"kind": "none"}` per their
+type).
+
+### `1.3`
 
 Additive change (issue #163, A1.2a):
 
@@ -683,11 +710,11 @@ Short version: edit `CANONICAL_ENV_VARS`, update
 
 As of schema 1.3 (issue #163, A1.2a), the env probe detects whether
 it's running inside a [Buck2](https://buck2.build/) build environment
-and records the result in the top-level `build_system` block. This is
-the metadata signal -- A1.2b will add Buck-aware library introspection
-(`--buck-target`) and A1.2c will add a recipe emitter (`aorta env
-recipe --format buck env.json`); both will extend this section when
-they land.
+and records the result in the top-level `build_system` block. As of
+schema 1.4 (issue #163, A1.2b), it can additionally introspect a
+target's transitive deps to populate the `library_introspection`
+list. A1.2c will add a recipe emitter (`aorta env recipe --format
+buck env.json`).
 
 Quick check:
 
@@ -718,6 +745,41 @@ therefore reports `{"kind": "none"}`, and the revision lookup never
 runs against an unrelated working directory. If only the revision
 lookup fails (no VCS at the Buck root), the dict is still populated
 with `revision: null`.
+
+### Buck-aware library introspection (`--buck-target`)
+
+```bash
+# Outside Buck mode the two introspection lists stay empty.
+aorta env probe -o /tmp/env.json
+jq '.library_introspection' /tmp/env.json              # -> []
+jq '.library_introspection_alternates' /tmp/env.json   # -> []
+
+# Inside a Buck checkout, point the probe at a top-level target. We
+# wrap `buck2 audit dependencies <target> --transitive --json` and
+# match each transitive dep label against KNOWN_LIBRARY_PATTERNS.
+aorta env probe --buck-target //myproj:training_main -o /tmp/env.json
+jq '.library_introspection' /tmp/env.json
+# -> [
+#   {"name":"hipblaslt","source":"buck","revision":"<repo-sha>","target":"//.../hipblaslt_lib"},
+#   {"name":"rccl","source":"buck","revision":"<repo-sha>","target":"//.../rccl_lib"},
+#   {"name":"pytorch","source":"buck","revision":"<repo-sha>","target":"//pytorch:torch"},
+#   ...
+# ]
+
+# When a Buck-matched library is also captured by an A1 per-library
+# block (hipblaslt, rocblas, miopen, rccl), an alternate entry is
+# synthesised from the A1 block so consumers can compare the buck
+# label against the system-package version/lib_hash:
+jq '.library_introspection_alternates[] | select(.name=="hipblaslt")' /tmp/env.json
+# -> {"name":"hipblaslt","source":"package","revision":"...","package_version":"...","lib_hash":"..."}
+```
+
+`--buck-timeout` (default 10 s) caps the audit subprocess. A timeout,
+non-zero exit, or unparseable JSON degrades gracefully: both lists are
+returned empty and the failure is recorded in `partial_reasons`. The
+match patterns currently cover `hipblaslt`, `rccl`, `pytorch`, and
+`rocm` runtime; new libraries are added by appending to
+`KNOWN_LIBRARY_PATTERNS` in `src/aorta/instrumentation/buck_introspect.py`.
 
 ## Testing the probe locally
 

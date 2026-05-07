@@ -62,8 +62,23 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.3"
-# 1.2 -> 1.3 (this commit, issue #163 / A1.2a):
+SCHEMA_VERSION = "1.4"
+# 1.3 -> 1.4 (this commit, issue #163 / A1.2b):
+#   - Added top-level `library_introspection` (list[dict], default `[]`)
+#     and `library_introspection_alternates` (list[dict], default `[]`).
+#     Both always present. Populated only when collect_env() is called
+#     with `buck_target=...` AND buck2 is functional; in that mode each
+#     transitive dep label matched against
+#     buck_introspect.KNOWN_LIBRARY_PATTERNS yields an entry of the
+#     form ``{"name", "source": "buck", "revision", "target"}``. When
+#     a library matched via Buck is also captured by A1's existing
+#     per-library blocks (hipblaslt, rocblas, ...), the A1-side
+#     identifiers are synthesised into a parallel entry placed in
+#     `library_introspection_alternates`. Outside buck mode both lists
+#     are empty; A1's existing per-library top-level blocks remain
+#     unchanged and authoritative.
+#
+# 1.2 -> 1.3 (issue #163 / A1.2a):
 #   - Added top-level `build_system` block (always present). Populated
 #     by aorta.instrumentation.build_system.detect_build_system(); the
 #     value is `{"kind": "buck2", "buck2_version": str, "repo_root":
@@ -539,19 +554,34 @@ class EnvSnapshot:
     partial_reasons: list[str] = field(default_factory=list)
     # build_system: A1.2a (issue #163). Always present; ``{"kind": "none"}``
     # when buck2 isn't on PATH. Populated by detect_build_system() in
-    # collect_env() / _disaster_snapshot(). Kept as the last field
-    # with a ``default_factory`` so existing direct callers --
-    # internal triage test fixtures, downstream tools that pin to an
-    # older schema, etc. -- can still construct an ``EnvSnapshot(...)``
-    # without supplying this 1.3 addition. Mirrors the
-    # ``partial_reasons`` pattern: additive schema fields don't break
-    # constructors. The serialised JSON-key order is now ...
-    # pytorch_build, partial, partial_reasons, build_system; the
-    # schema is order-insensitive (consumers parse by key) so this
-    # is purely a serialisation cosmetic.
+    # collect_env() / _disaster_snapshot(). Kept with a ``default_factory``
+    # so existing direct callers -- internal triage test fixtures,
+    # downstream tools that pin to an older schema, etc. -- can still
+    # construct an ``EnvSnapshot(...)`` without supplying this 1.3
+    # addition. Mirrors the ``partial_reasons`` pattern: additive schema
+    # fields don't break constructors. The serialised JSON-key order is
+    # ... pytorch_build, partial, partial_reasons, build_system,
+    # library_introspection, library_introspection_alternates; the
+    # schema is order-insensitive (consumers parse by key) so this is
+    # purely a serialisation cosmetic.
     build_system: dict = field(
         default_factory=lambda: {"kind": "none"}
     )
+    # library_introspection: A1.2b (issue #163). Always present. Empty
+    # list outside buck mode. In buck mode, one entry per matched
+    # transitive dep, shape ``{"name", "source": "buck", "revision",
+    # "target"}``. See `aorta.instrumentation.buck_introspect` for the
+    # match patterns and the `--buck-target` CLI flag for the entry
+    # point.
+    library_introspection: list[dict] = field(default_factory=list)
+    # library_introspection_alternates: A1.2b. Empty outside buck mode.
+    # In buck mode, holds the synthesised A1-block-derived alternate
+    # entry for each library that buck *also* matched -- so a consumer
+    # can compare the buck label/revision against the system-package
+    # version/lib_hash. Same name appearing in both lists is the
+    # by-design overlap; the primary entry (buck) wins for downstream
+    # identity comparisons.
+    library_introspection_alternates: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to the env.json shape. Round-trip pair with from_dict."""
@@ -563,12 +593,18 @@ class EnvSnapshot:
 
         Tolerates extra unknown keys (forward-compat) and back-fills
         defaults for additive top-level fields that older snapshots
-        predate, so a 1.3 reader can still load a 1.1 / 1.2 env.json:
+        predate, so a 1.4 reader can still load a 1.1 / 1.2 / 1.3
+        env.json:
 
         * ``partial_reasons`` -> ``[]`` (always optional).
         * ``build_system`` -> ``{"kind": "none"}`` (added in schema 1.3;
           equivalent to "we did not detect Buck2", which is the only
           honest answer when the producer did not even run the probe).
+        * ``library_introspection`` -> ``[]`` (added in schema 1.4;
+          empty list means "no buck-aware introspection was run").
+        * ``library_introspection_alternates`` -> ``[]`` (added in
+          schema 1.4; empty list means "nothing was dropped in the
+          Buck-vs-A1 merge").
 
         Strictly-required older fields (the schema-1.0/1.1 set) are NOT
         defaulted -- a missing ``rocm`` or ``hipblaslt`` key still
@@ -579,6 +615,8 @@ class EnvSnapshot:
         kwargs = {k: v for k, v in d.items() if k in known}
         kwargs.setdefault("partial_reasons", [])
         kwargs.setdefault("build_system", {"kind": "none"})
+        kwargs.setdefault("library_introspection", [])
+        kwargs.setdefault("library_introspection_alternates", [])
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -965,7 +1003,10 @@ class EnvSnapshot:
 # ---------------------------------------------------------------------------
 
 
-def collect_env() -> EnvSnapshot:
+def collect_env(
+    buck_target: str | None = None,
+    buck_timeout: int = 10,
+) -> EnvSnapshot:
     """Capture the current process environment as an :class:`EnvSnapshot`.
 
     NEVER raises. The promise is enforced two ways:
@@ -982,6 +1023,16 @@ def collect_env() -> EnvSnapshot:
 
     No GPU compute. No tensor allocations. The optional ``import torch``
     for the version probe does NOT initialise CUDA / HIP context.
+
+    Buck mode (``buck_target=...``) opts into the A1.2b path: the
+    function additionally runs ``buck2 audit dependencies <target>
+    --transitive --json``, matches transitive deps against
+    ``buck_introspect.KNOWN_LIBRARY_PATTERNS``, and populates
+    ``library_introspection`` (plus ``library_introspection_alternates``
+    when an A1 per-library block also captured the same name). Outside
+    buck mode both lists stay empty and the existing per-library
+    top-level blocks remain authoritative. ``buck_timeout`` caps the
+    audit subprocess (seconds; default 10).
     """
     reasons: list[str] = []
     try:
@@ -1019,6 +1070,22 @@ def collect_env() -> EnvSnapshot:
         )
         build_system = _detect_build_system_safe()
 
+        a1_blocks_by_lib = {
+            "hipblaslt": hipblaslt,
+            "rocblas": rocblas,
+            "miopen": miopen,
+            "rccl": rccl,
+        }
+        library_introspection, library_introspection_alternates = (
+            _run_buck_introspection_safe(
+                buck_target=buck_target,
+                buck_timeout=buck_timeout,
+                build_system=build_system,
+                a1_blocks_by_lib=a1_blocks_by_lib,
+                reasons=reasons,
+            )
+        )
+
         return EnvSnapshot(
             schema_version=SCHEMA_VERSION,
             captured_at=_utc_now_iso(),
@@ -1046,6 +1113,8 @@ def collect_env() -> EnvSnapshot:
             build_system=build_system,
             partial=bool(reasons),
             partial_reasons=reasons,
+            library_introspection=library_introspection,
+            library_introspection_alternates=library_introspection_alternates,
         )
     except Exception as exc:  # noqa: BLE001 -- this is the never-raises gate
         log.info("collect_env() hit unexpected exception", exc_info=True)
@@ -1194,6 +1263,8 @@ def _disaster_snapshot(
         build_system={"kind": "none"},
         partial=True,
         partial_reasons=[*preceding_reasons, unexpected_reason],
+        library_introspection=[],
+        library_introspection_alternates=[],
     )
 
 
@@ -1213,6 +1284,94 @@ def _detect_build_system_safe() -> dict:
     except Exception as exc:  # noqa: BLE001 -- never-raises gate
         log.info("build_system: detect_build_system raised (%s)", exc, exc_info=True)
         return {"kind": "none"}
+
+
+def _run_buck_introspection_safe(
+    buck_target: str | None,
+    buck_timeout: int,
+    build_system: dict,
+    a1_blocks_by_lib: dict[str, dict],
+    reasons: list[str],
+) -> tuple[list[dict], list[dict]]:
+    """Run the A1.2b buck-aware library introspection if requested.
+
+    Returns ``(library_introspection, library_introspection_alternates)``.
+    Both are ``[]`` when ``buck_target is None``. When a target is
+    supplied but ``build_system["kind"] != "buck2"``, we still attempt
+    the audit (so an operator can force-run from a non-Buck cwd) but
+    record a partial reason so the disconnect is visible.
+
+    Per the env-probe never-raises contract: any unexpected exception
+    is swallowed and surfaced via ``reasons``; both lists are returned
+    empty.
+    """
+    if buck_target is None:
+        return [], []
+    try:
+        from aorta.instrumentation.buck_introspect import (
+            introspect_libraries_via_buck,
+        )
+
+        repo_revision = build_system.get("revision") if isinstance(build_system, dict) else None
+        cwd = build_system.get("repo_root") if isinstance(build_system, dict) else None
+        if isinstance(build_system, dict) and build_system.get("kind") != "buck2":
+            reasons.append(
+                f"library_introspection: --buck-target {buck_target} supplied but "
+                f"build_system.kind={build_system.get('kind')!r}; running anyway"
+            )
+        entries, buck_reasons = introspect_libraries_via_buck(
+            target=buck_target,
+            repo_revision=repo_revision,
+            timeout=buck_timeout,
+            cwd=cwd,
+        )
+        reasons.extend(buck_reasons)
+        alternates = _synthesise_library_alternates(entries, a1_blocks_by_lib)
+        return entries, alternates
+    except Exception as exc:  # noqa: BLE001 -- never-raises gate
+        log.info(
+            "library_introspection: buck introspection raised (%s)", exc, exc_info=True
+        )
+        reasons.append(
+            f"library_introspection: buck introspection raised "
+            f"({type(exc).__name__}: {exc})"
+        )
+        return [], []
+
+
+def _synthesise_library_alternates(
+    buck_entries: list[dict], a1_blocks_by_lib: dict[str, dict]
+) -> list[dict]:
+    """Build the parallel A1-derived alternates list for buck matches.
+
+    For each buck entry whose library name has a matching A1 per-library
+    block, emit a single shape-aligned alternate entry pulling the
+    library's identifying fields out of the existing block. Libraries
+    A1 doesn't capture (e.g. ``pytorch``, ``rocm`` runtime) get no
+    alternate -- the buck entry is the only signal in that case.
+
+    The alternate's ``source`` is ``"package"`` for the rocm-release
+    kernel libs (which A1 captures via header + pkg-config + lib hash)
+    -- i.e. matches the existing per-library block's provenance.
+    """
+    alternates: list[dict] = []
+    for entry in buck_entries:
+        name = entry.get("name")
+        block = a1_blocks_by_lib.get(name) if name else None
+        if not block:
+            continue
+        alternates.append(
+            {
+                "name": name,
+                "source": "package",
+                "revision": block.get("rocm_release_tweak")
+                or block.get("version"),
+                "package_version": block.get("package_version")
+                or block.get("version"),
+                "lib_hash": block.get("lib_hash"),
+            }
+        )
+    return alternates
 
 
 def _utc_now_iso() -> str:

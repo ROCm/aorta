@@ -10,6 +10,7 @@ will live here too.
 | --- | --- | --- |
 | [`environment`](environment.py) | ROCm + ML stack version snapshot + container/python env detection. See block list below. | `collect_env() -> EnvSnapshot` |
 | [`build_system`](build_system.py) | Detects Buck2 build environments (issue #163, A1.2a). Wrapped by `collect_env()` and surfaced as the `build_system` field of `EnvSnapshot`. | `detect_build_system() -> dict` |
+| [`buck_introspect`](buck_introspect.py) | Buck-aware library introspection via `buck2 audit dependencies <target> --transitive --json` (issue #163, A1.2b). Triggered by `collect_env(buck_target=...)` (or `aorta env probe --buck-target ...`); populates the `library_introspection` and `library_introspection_alternates` fields of `EnvSnapshot`. | `introspect_libraries_via_buck(target, repo_revision, ...) -> (entries, reasons)` |
 
 **`environment` blocks** (every snapshot includes all of these; missing
 values become `None` plus a `partial_reasons` line):
@@ -33,6 +34,13 @@ values become `None` plus a `partial_reasons` line):
 * Build system: `build_system` (always present; `{"kind": "buck2",
   ...}` when Buck2 is on PATH and functional, `{"kind": "none"}`
   otherwise). Populated by `aorta.instrumentation.build_system.detect_build_system()`.
+* Library introspection (Buck mode only): `library_introspection` and
+  `library_introspection_alternates` (always present; both `[]`
+  outside Buck mode). Populated only when `collect_env(buck_target=...)`
+  is invoked (or `aorta env probe --buck-target ...`); see
+  [`buck_introspect.py`](buck_introspect.py) for the matched library
+  set. Outside Buck mode the existing per-library blocks
+  (`hipblaslt`, `rocblas`, `miopen`, `rccl`, ...) remain authoritative.
 
 ## env probe quick reference
 
@@ -69,6 +77,11 @@ aorta env probe
 
 # Custom path; parent dirs are created if missing
 aorta env probe -o runs/exp1/env.json
+
+# Buck mode: also runs `buck2 audit dependencies <target> --transitive
+# --json` and populates library_introspection. The default
+# `--buck-timeout` is 10 s.
+aorta env probe --buck-target //myproj:training_main
 ```
 
 After the run, `cat env.json` reveals the same dict that
@@ -135,7 +148,8 @@ tensile           triton            fbgemm          aiter
 aotriton          gpu_arch          host
 runtime_context   docker            env_vars
 python_version    pytorch_version   pytorch_build
-build_system
+build_system      library_introspection
+library_introspection_alternates
 ```
 
 For the per-version field history (renames, env-var additions /

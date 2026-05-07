@@ -39,7 +39,27 @@ def env() -> None:
     is_flag=True,
     help="After the brief, also print the full snapshot JSON to stdout.",
 )
-def probe(output: Path, verbose: bool) -> None:
+@click.option(
+    "--buck-target",
+    type=str,
+    default=None,
+    help=(
+        "Buck2 label to introspect for library identity (issue #163, "
+        "A1.2b). When given, the snapshot's library_introspection list "
+        "is populated from `buck2 audit dependencies <label> --transitive "
+        "--json`. Ignored if buck2 isn't on PATH."
+    ),
+)
+@click.option(
+    "--buck-timeout",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Per-call timeout (seconds) for `buck2 audit dependencies`.",
+)
+def probe(
+    output: Path, verbose: bool, buck_target: str | None, buck_timeout: int
+) -> None:
     """Capture trial-environment state to env.json (issue #147)."""
     from aorta.instrumentation.environment import collect_env
 
@@ -55,7 +75,7 @@ def probe(output: Path, verbose: bool) -> None:
             f"Failed to create parent directory for {output}: {exc}"
         ) from exc
 
-    snapshot = collect_env()
+    snapshot = collect_env(buck_target=buck_target, buck_timeout=buck_timeout)
 
     # NOTE: deliberately not passing ``default=str`` -- the snapshot is
     # supposed to be JSON-native (str/int/bool/None/list/dict). If a
