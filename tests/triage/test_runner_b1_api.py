@@ -35,18 +35,40 @@ class _FakeTrial:
 
 
 def _clean_snapshot() -> EnvSnapshot:
+    """Minimal non-partial EnvSnapshot for test isolation.
+
+    Keep this in sync with the ``EnvSnapshot`` dataclass in
+    ``aorta.instrumentation.environment``: env-probe v1.1 (PR #161)
+    expanded the schema with rocblas / composable_kernel / tensile /
+    triton / fbgemm / aiter / aotriton / miopen / rccl / gpu_arch /
+    host / pytorch_build blocks.  We zero them out here so the
+    triage runner sees a well-formed snapshot without tying the
+    fixture to any host state.
+    """
     return EnvSnapshot(
-        schema_version="1.0",
+        schema_version="1.1",
         captured_at="2026-04-28T14:12:03Z",
         system_health=None,
         rocm={},
         hip={},
         hipblaslt={},
+        rocblas={},
+        composable_kernel={},
+        tensile={},
+        triton={},
+        fbgemm={},
+        aiter={},
+        aotriton={},
+        miopen={},
+        rccl={},
+        gpu_arch={},
         runtime_context={},
+        host={},
         docker=None,
         env_vars={},
         python_version="3.11.0",
         pytorch_version=None,
+        pytorch_build={},
         partial=False,
         partial_reasons=[],
     )
