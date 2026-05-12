@@ -34,12 +34,21 @@ dependencies = [
 [project.scripts]
 aorta = "aorta.cli:main"
 
-# Plugin discovery: workloads register here via aorta.workloads entry-point group.
-# Engineer task A2 adds the first one (fsdp). Private workloads
-# (meta_recom_repro, precision_swaitcnt_test) register from aorta-internal's
-# pyproject.toml under the same group, separate package.
-[project.entry-points."aorta.workloads"]
-fsdp = "aorta.workloads.fsdp:FsdpWorkload"
+# Plugin discovery: workloads register here via the aorta.workloads
+# entry-point group once they actually exist. The first public one is
+# tracked by https://github.com/ROCm/aorta/issues/149 (A2: FSDP Workload)
+# -- registering it preemptively as
+# `fsdp = "aorta.workloads.fsdp:FsdpWorkload"` breaks `aorta run` /
+# `aorta triage` for any user with a recipe that touches discovery,
+# because `discover_workloads()` tries to load every registered entry
+# and the unresolved module path raises `ModuleNotFoundError`. No
+# in-tree workload entry-points are defined here until #149 lands;
+# the A2 PR re-adds a `[project.entry-points."aorta.workloads"]` table
+# together with the implementation.
+#
+# Private workloads (e.g. recom_repro from aorta-internal) register
+# against this same group from their own pyproject.toml, separate
+# package; they are unaffected by anything in this file.
 
 [project.optional-dependencies]
 # For analysis/visualization scripts
