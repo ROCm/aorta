@@ -3,8 +3,16 @@
 The library function in :mod:`aorta.instrumentation.environment` does all
 the probing; this module only handles arg parsing and writing the JSON
 snapshot to disk. Per #147 acceptance: this file does no probing of its
-own and stays under ~30 lines of substantive code (excluding the
-docstring above).
+own and stays under ~30 lines of substantive code per subcommand
+(excluding the docstring above).
+
+Subcommands:
+
+* ``probe``  -- capture trial-environment state to env.json (#147,
+  extended by A1.2a/b for Buck2 environments).
+* ``recipe`` -- emit a best-effort build-recipe fragment from an
+  existing env.json (#163, A1.2c). Currently supports
+  ``--format buck``; ``--format dockerfile`` is a placeholder.
 """
 
 from __future__ import annotations
@@ -119,3 +127,82 @@ def probe(
         )
     else:
         click.echo("\n[OK]")
+
+
+# Supported --format values for ``aorta env recipe``. ``buck`` is the
+# A1.2c deliverable; ``dockerfile`` is a placeholder so the CLI surface
+# doesn't lock us in (per the issue spec's acceptance criterion).
+# Future formats slot in here and below in ``recipe()``.
+_RECIPE_FORMATS = ("buck", "dockerfile")
+
+
+@env.command()
+@click.argument(
+    "env_json",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--format",
+    "fmt",  # ``format`` is a builtin; rename to dodge shadowing in the body.
+    type=click.Choice(_RECIPE_FORMATS),
+    required=True,
+    help=(
+        "Output format. `buck` emits a BUCK file fragment (#163, A1.2c). "
+        "`dockerfile` is a placeholder -- see help text for `--format "
+        "dockerfile` for the current status."
+    ),
+)
+def recipe(env_json: Path, fmt: str) -> None:
+    """Emit a best-effort build-recipe fragment from an env.json snapshot.
+
+    Reads ``ENV_JSON`` produced by ``aorta env probe`` and writes the
+    emitted fragment to stdout. Output is BEST-EFFORT, NOT EXACT --
+    env.json captures observed state, not a complete build recipe.
+
+    Per the A1.2c acceptance criteria (issue #163):
+
+    * Output for ``--format buck`` starts with a loud "BEST-EFFORT, NOT
+      EXACT" header comment block.
+    * Each ``library_introspection`` entry with ``source == "buck"``
+      becomes one ``prebuilt_cxx_library(...)`` rule pinning the
+      captured revision.
+    * ``--format dockerfile`` exits with a clear "not yet implemented"
+      error message (placeholder so the CLI surface doesn't lock us in
+      to a Buck-only world).
+    """
+    try:
+        env_dict = json.loads(env_json.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        # Wrap both filesystem and JSON-parse errors as a single
+        # Click error so the operator sees a clean one-liner instead
+        # of a Python traceback.
+        raise click.ClickException(
+            f"Failed to read env.json from {env_json}: {exc}"
+        ) from exc
+
+    if not isinstance(env_dict, dict):
+        raise click.ClickException(
+            f"{env_json} is not a JSON object (parsed as "
+            f"{type(env_dict).__name__}); expected an env.json snapshot."
+        )
+
+    if fmt == "buck":
+        from aorta.instrumentation.recipes import emit_buck_recipe
+
+        click.echo(emit_buck_recipe(env_dict), nl=False)
+        return
+
+    if fmt == "dockerfile":
+        # Placeholder per the acceptance criterion. Tracked separately;
+        # don't generate something half-shaped that locks the surface.
+        raise click.ClickException(
+            "--format dockerfile is not yet implemented. The CLI surface "
+            "is reserved for it; file a follow-up issue if you need it."
+        )
+
+    # ``click.Choice`` should make this unreachable; the explicit raise
+    # is a defence-in-depth against the choice list and the dispatch
+    # block drifting out of sync.
+    raise click.ClickException(  # pragma: no cover -- click.Choice guards
+        f"Unknown --format {fmt!r}; expected one of {_RECIPE_FORMATS}."
+    )

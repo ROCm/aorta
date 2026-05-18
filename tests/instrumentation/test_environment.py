@@ -1036,17 +1036,16 @@ class TestCliIsThinWrapper:
 
     def test_total_file_size_is_bounded(self, cli_path: Path):
         # Total file budget (incl. docstring/imports/blank lines/error handling).
-        # The spec target is ~30 lines of substantive code; the cushion
-        # accommodates the module docstring, Click decorators, the
-        # try/except blocks that surface filesystem errors as
-        # ``click.ClickException`` (per Copilot review), the --verbose
-        # flag wiring, and the inline partial_reasons echo + closing
-        # status marker. The real "no-probing-in-CLI" guard is
+        # The original #147 spec target was ~30 lines of substantive code
+        # for the single ``probe`` subcommand; A1.2c added a second
+        # subcommand (``recipe``) with its own click decorators,
+        # --format dispatch block, and error-handling envelope, so the
+        # budget grew. The real "no-probing-in-CLI" guard is
         # `test_cli_does_no_probing_imports` below -- this one is a
-        # soft canary against the file ballooning.
+        # soft canary against the file ballooning beyond pure wiring.
         line_count = sum(1 for _ in cli_path.read_text().splitlines())
-        assert line_count <= 140, (
-            f"cli/env.py is {line_count} lines; soft budget is 140. "
+        assert line_count <= 220, (
+            f"cli/env.py is {line_count} lines; soft budget is 220. "
             "If you need more, check that the new code is genuinely "
             "wiring/error-handling and not probing -- "
             "test_cli_does_no_probing_imports is the strict guard."
