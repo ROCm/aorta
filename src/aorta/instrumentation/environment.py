@@ -62,8 +62,25 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.2"
-# 1.1 -> 1.2 (this commit):
+SCHEMA_VERSION = "1.3"
+# 1.2 -> 1.3 (this commit, issue #163 / A1.2a):
+#   - Added top-level `build_system` block (always present). Populated
+#     by aorta.instrumentation.build_system.detect_build_system(); the
+#     value is `{"kind": "buck2", "buck2_version": str, "repo_root":
+#     str, "revision": str | None}` when buck2 is on PATH AND both
+#     `buck2 --version` and `buck2 root` succeed (i.e. we are
+#     demonstrably inside a Buck checkout), or `{"kind": "none"}` in
+#     every other case -- including the common "buck2 is installed
+#     but cwd is not inside a Buck repo" branch where `buck2 root`
+#     exits non-zero. The buck2 shape's `buck2_version` and
+#     `repo_root` are guaranteed populated; only `revision` may be
+#     None. Existing system-package / pkg-config / Docker-digest
+#     blocks are unchanged.
+#   - `EnvSnapshot.from_dict()` defaults a missing `build_system` key
+#     to `{"kind": "none"}`, so a 1.3 reader can still load a 1.1 /
+#     1.2 env.json. Mirrors the existing `partial_reasons` tolerance.
+#
+# 1.1 -> 1.2:
 #   - Added `pytorch_build.flags` (build_settings, cxx_defines,
 #     cxx_flags_raw, cuda_flags_raw, gpu_arch_list) -- structured raw
 #     introspection from `torch.__config__.show()`.
@@ -520,6 +537,21 @@ class EnvSnapshot:
     pytorch_build: dict
     partial: bool
     partial_reasons: list[str] = field(default_factory=list)
+    # build_system: A1.2a (issue #163). Always present; ``{"kind": "none"}``
+    # when buck2 isn't on PATH. Populated by detect_build_system() in
+    # collect_env() / _disaster_snapshot(). Kept as the last field
+    # with a ``default_factory`` so existing direct callers --
+    # internal triage test fixtures, downstream tools that pin to an
+    # older schema, etc. -- can still construct an ``EnvSnapshot(...)``
+    # without supplying this 1.3 addition. Mirrors the
+    # ``partial_reasons`` pattern: additive schema fields don't break
+    # constructors. The serialised JSON-key order is now ...
+    # pytorch_build, partial, partial_reasons, build_system; the
+    # schema is order-insensitive (consumers parse by key) so this
+    # is purely a serialisation cosmetic.
+    build_system: dict = field(
+        default_factory=lambda: {"kind": "none"}
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to the env.json shape. Round-trip pair with from_dict."""
@@ -529,12 +561,24 @@ class EnvSnapshot:
     def from_dict(cls, d: dict[str, Any]) -> EnvSnapshot:
         """Reconstruct from a previously serialised env.json dict.
 
-        Tolerates extra unknown keys (forward-compat) and missing optional
-        ``partial_reasons`` (defaults to empty list).
+        Tolerates extra unknown keys (forward-compat) and back-fills
+        defaults for additive top-level fields that older snapshots
+        predate, so a 1.3 reader can still load a 1.1 / 1.2 env.json:
+
+        * ``partial_reasons`` -> ``[]`` (always optional).
+        * ``build_system`` -> ``{"kind": "none"}`` (added in schema 1.3;
+          equivalent to "we did not detect Buck2", which is the only
+          honest answer when the producer did not even run the probe).
+
+        Strictly-required older fields (the schema-1.0/1.1 set) are NOT
+        defaulted -- a missing ``rocm`` or ``hipblaslt`` key still
+        raises ``TypeError``, because that indicates a malformed dict
+        rather than a forward-version mismatch.
         """
         known = {f.name for f in fields(cls)}
         kwargs = {k: v for k, v in d.items() if k in known}
         kwargs.setdefault("partial_reasons", [])
+        kwargs.setdefault("build_system", {"kind": "none"})
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -550,6 +594,7 @@ class EnvSnapshot:
         for line-width; the full values live in the JSON.
         """
         rt = self.runtime_context or {}
+        bs = self.build_system or {"kind": "none"}
         rocm = self.rocm or {}
         hip = self.hip or {}
         hipblaslt = self.hipblaslt or {}
@@ -603,6 +648,7 @@ class EnvSnapshot:
         return "\n".join(
             (
                 f"  runtime:   {rt.get('type', '?')} / python={rt.get('python_env', '?')}",
+                f"  build_sys: {self._summary_build_system_line(bs)}",
                 f"  rocm:      {rocm.get('version', '?')} (dev: {rocm.get('version_dev', '?')})",
                 f"  hip:       {hip.get('version', '?')} ({hip.get('platform', '?')})",
                 # ROCm release tweak (HIPBLASLT_VERSION_TWEAK et al.)
@@ -690,6 +736,23 @@ class EnvSnapshot:
         if dist:
             bits.append(f"pip dist={dist}")
         return " ".join(bits)
+
+    def _summary_build_system_line(self, bs: dict) -> str:
+        """One-line build_system rendering for the CLI brief.
+
+        ``{"kind": "none"}`` becomes a literal ``none`` so an operator
+        sees the field is honest about absence (matches the
+        ``(not installed)`` convention used elsewhere in the brief).
+        Buck2 hosts get the version + repo root + short revision.
+        """
+        kind = bs.get("kind") or "?"
+        if kind != "buck2":
+            return kind
+        version = bs.get("buck2_version") or "?"
+        repo_root = bs.get("repo_root") or "?"
+        rev = bs.get("revision")
+        rev_short = rev[:8] if rev else "?"
+        return f"buck2={version} repo_root={repo_root} rev={rev_short}"
 
     def _summary_pytorch_build_line(self) -> str:
         """Single-line summary of the structured pytorch_build block."""
@@ -954,6 +1017,7 @@ def collect_env() -> EnvSnapshot:
         pytorch_build = _capture_pytorch_build(
             reasons, hip_symbol_cache=hip_symbol_cache
         )
+        build_system = _detect_build_system_safe()
 
         return EnvSnapshot(
             schema_version=SCHEMA_VERSION,
@@ -979,6 +1043,7 @@ def collect_env() -> EnvSnapshot:
             python_version=platform.python_version(),
             pytorch_version=pytorch_version,
             pytorch_build=pytorch_build,
+            build_system=build_system,
             partial=bool(reasons),
             partial_reasons=reasons,
         )
@@ -1126,9 +1191,28 @@ def _disaster_snapshot(
             },
             "build_flags": {name: None for name in PYTORCH_BUILD_FLAG_NAMES},
         },
+        build_system={"kind": "none"},
         partial=True,
         partial_reasons=[*preceding_reasons, unexpected_reason],
     )
+
+
+def _detect_build_system_safe() -> dict:
+    """Wrapper that guarantees the never-raises contract.
+
+    ``detect_build_system`` already catches every documented failure
+    mode (missing buck2, subprocess errors, timeouts), but the env
+    probe's contract is that even unexpected failures (``ImportError``,
+    a future regression) cannot bring down ``collect_env``. This
+    belt-and-braces wrapper ensures the field is always populated.
+    """
+    try:
+        from aorta.instrumentation.build_system import detect_build_system
+
+        return detect_build_system()
+    except Exception as exc:  # noqa: BLE001 -- never-raises gate
+        log.info("build_system: detect_build_system raised (%s)", exc, exc_info=True)
+        return {"kind": "none"}
 
 
 def _utc_now_iso() -> str:

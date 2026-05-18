@@ -258,6 +258,7 @@ REQUIRED_TOP_KEYS = {
     "python_version",
     "pytorch_version",
     "pytorch_build",
+    "build_system",
 }
 
 
@@ -267,7 +268,7 @@ class TestSchemaCompleteness:
     ):
         snapshot = collect_env()
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
-        assert snapshot.schema_version == "1.2"
+        assert snapshot.schema_version == "1.3"
         assert snapshot.system_health is None
         assert snapshot.rocm == {
             "version": None,
@@ -314,7 +315,7 @@ class TestSchemaCompleteness:
 def _example_snapshot(**overrides) -> object:
     """Build a fully-populated EnvSnapshot for round-trip testing."""
     base = {
-        "schema_version": "1.2",
+        "schema_version": "1.3",
         "captured_at": "2026-04-28T12:00:00Z",
         "system_health": {"rdhc_version": "1.4.0", "tests": {}},
         "rocm": {
@@ -438,6 +439,7 @@ def _example_snapshot(**overrides) -> object:
                 name: None for name in env_mod.PYTORCH_BUILD_FLAG_NAMES
             },
         },
+        "build_system": {"kind": "none"},
         "partial": False,
         "partial_reasons": [],
     }
@@ -468,7 +470,7 @@ class TestEnvSnapshot:
         d = _example_snapshot().to_dict()
         d["future_field_not_yet_added"] = {"hello": "world"}
         rebuilt = EnvSnapshot.from_dict(d)
-        assert rebuilt.schema_version == "1.2"
+        assert rebuilt.schema_version == "1.3"
 
     def test_from_dict_defaults_partial_reasons_when_missing(self):
         """Older env.json without partial_reasons still loads (defaults to [])."""

@@ -69,7 +69,7 @@ operator can act on them without `jq`'ing the JSON. A closing
 end-of-output. Sample:
 
 ```text
-Wrote env probe to /tmp/env.json (schema_version=1.2) [PARTIAL]
+Wrote env probe to /tmp/env.json (schema_version=1.3) [PARTIAL]
   runtime:   baremetal / python=venv
   rocm:      7.2.1 (dev: None)
   hip:       7.2.53211-e1a6bc5663 (amd)
@@ -145,7 +145,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.2"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.3"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
@@ -170,6 +170,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `python_version` | `str` | `platform.python_version()` | always populated |
 | `pytorch_version` | `str \| null` | optional `import torch` (no CUDA/HIP context init) | `null` when torch absent |
 | `pytorch_build` | `dict` | `torch.version.{git_version,hip,cuda,debug}` + install-kind detection + optional `git -C <src>/third_party/<sub> rev-parse HEAD` + parse of `torch.__config__.show()` + `nm -D libtorch_hip.so \| c++filt` symbol grep + scan of `<torch>/lib/` | `git_commit` is the linchpin -- pins every vendored submodule deterministically. Sub-blocks: `flags` (raw `build_settings`, `cxx_defines`, `cxx_flags_raw`, `cuda_flags_raw`, `gpu_arch_list`), `build_flags` (issue #170 stable 17-key parsed bool/str/None subset, with `CAFFE2_USE_MIOPEN` aliased to `USE_MIOPEN`), `binary_introspection` (`libtorch_hip_symbol_counts`, `torch_lib_bundled`, `cxx_flags_use_defines` -- pure facts, no ON/OFF inference). See "PyTorch source-tree submodule probing" below. |
+| `build_system` | `dict` | `buck2 --version` + `buck2 root` + `hg id -i` / `git rev-parse HEAD` | Always present. `{"kind": "buck2", "buck2_version": str, "repo_root": str, "revision": str \| null}` when buck2 is on PATH AND we are demonstrably inside a Buck checkout (both `buck2 --version` and `buck2 root` succeed); `buck2_version` and `repo_root` are guaranteed populated, only `revision` may be `null`. `{"kind": "none"}` in every other case, including the dominant "buck2 is installed but cwd is not inside a Buck checkout" scenario. Added in schema 1.3 for issue #163 (A1.2a) so consumers can branch on Buck2 vs. system-package environments. See "Running inside a Buck environment" below. |
 
 `runtime_context.type` is one of `"docker" | "podman" | "singularity" | "baremetal"`. Adding values is a schema change.
 
@@ -332,7 +333,32 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.2` (current)
+### `1.3` (current)
+
+Additive change (issue #163, A1.2a):
+
+* New top-level `build_system` block, always present. Captures Buck2
+  presence + `buck2 --version` + `buck2 root` + source revision (`hg
+  id -i`, falling back to `git rev-parse HEAD`). The detector is
+  strict about what counts as `kind=buck2`: both `buck2 --version`
+  AND `buck2 root` must succeed, so the buck2 shape's `buck2_version`
+  and `repo_root` are guaranteed populated (only `revision` may be
+  `null`). Every other case -- buck2 absent, buck2 broken, or "buck2
+  is installed but cwd is not inside a Buck checkout" (where `buck2
+  root` exits non-zero) -- collapses to `{"kind": "none"}`. The bump
+  from 1.2 -> 1.3 isn't strictly required for an additive field, but
+  it makes the new key easy to detect in consumer pipelines.
+
+Schema 1.3 is forward- AND backward-compatible:
+
+* An env.json produced by 1.3 contains every 1.2 key unchanged.
+* Loading a 1.1 / 1.2 env.json (no `build_system` key) into the 1.3
+  `EnvSnapshot.from_dict()` succeeds: the missing field is back-filled
+  with `{"kind": "none"}` (the only honest default -- the producer
+  did not run the build_system probe at all). This mirrors the
+  existing tolerance for missing `partial_reasons`.
+
+### `1.2`
 
 Top-level-key-additive -- every new field lives under existing
 top-level dicts (`pytorch_build`, `aiter`), so 1.1 readers loading
@@ -652,6 +678,46 @@ is stable.
 See [the module README](../src/aorta/instrumentation/README.md#how-to-add-a-new-env-var-to-canonical_env_vars).
 Short version: edit `CANONICAL_ENV_VARS`, update
 `test_canonical_var_names_stable`, document why in your PR.
+
+## Running inside a Buck environment
+
+As of schema 1.3 (issue #163, A1.2a), the env probe detects whether
+it's running inside a [Buck2](https://buck2.build/) build environment
+and records the result in the top-level `build_system` block. This is
+the metadata signal -- A1.2b will add Buck-aware library introspection
+(`--buck-target`) and A1.2c will add a recipe emitter (`aorta env
+recipe --format buck env.json`); both will extend this section when
+they land.
+
+Quick check:
+
+```bash
+# Outside any Buck repo
+aorta env probe -o /tmp/env.json
+jq '.build_system' /tmp/env.json
+# -> {"kind": "none"}
+
+# Inside a Buck2 checkout (e.g., the open-source examples at
+#  https://github.com/facebook/buck2/tree/main/examples)
+cd ~/buck2-examples/python/hello_world
+aorta env probe -o /tmp/env.json
+jq '.build_system' /tmp/env.json
+# -> {"kind": "buck2", "buck2_version": "buck2 ...",
+#     "repo_root": "/.../hello_world", "revision": "<sha>"}
+```
+
+The detector wraps `buck2 --version`, `buck2 root`, and a revision
+lookup (`hg id -i` then `git rev-parse HEAD`); none of these
+subprocesses are vendored. The `kind=buck2` shape is only emitted
+when both `buck2 --version` and `buck2 root` succeed -- so the field
+unambiguously means "we are demonstrably running inside a functional
+Buck2 checkout", not merely "the `buck2` binary happens to be
+installed somewhere on PATH". The dominant non-Buck case
+(developer laptop with vendored buck2 but cwd outside any Buck repo)
+therefore reports `{"kind": "none"}`, and the revision lookup never
+runs against an unrelated working directory. If only the revision
+lookup fails (no VCS at the Buck root), the dict is still populated
+with `revision: null`.
 
 ## Testing the probe locally
 

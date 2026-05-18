@@ -9,6 +9,7 @@ will live here too.
 | Submodule | Purpose | Public API |
 | --- | --- | --- |
 | [`environment`](environment.py) | ROCm + ML stack version snapshot + container/python env detection. See block list below. | `collect_env() -> EnvSnapshot` |
+| [`build_system`](build_system.py) | Detects Buck2 build environments (issue #163, A1.2a). Wrapped by `collect_env()` and surfaced as the `build_system` field of `EnvSnapshot`. | `detect_build_system() -> dict` |
 
 **`environment` blocks** (every snapshot includes all of these; missing
 values become `None` plus a `partial_reasons` line):
@@ -29,6 +30,9 @@ values become `None` plus a `partial_reasons` line):
   from `git -C <src>/third_party/<sub> rev-parse HEAD` when
   `AORTA_PYTORCH_SRC` points at a source tree, otherwise GitHub URL
   template for manual lookup).
+* Build system: `build_system` (always present; `{"kind": "buck2",
+  ...}` when Buck2 is on PATH and functional, `{"kind": "none"}`
+  otherwise). Populated by `aorta.instrumentation.build_system.detect_build_system()`.
 
 ## env probe quick reference
 
@@ -131,6 +135,7 @@ tensile           triton            fbgemm          aiter
 aotriton          gpu_arch          host
 runtime_context   docker            env_vars
 python_version    pytorch_version   pytorch_build
+build_system
 ```
 
 For the per-version field history (renames, env-var additions /
