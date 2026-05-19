@@ -4,8 +4,9 @@ Two small registries that ship with aorta:
 
 - **Mitigations** (`name → env vars`) — process-level flags applied just before
   the workload subprocess launches. Examples: `tf32_off`, `xnack`.
-- **Environments** (`name → docker / venv recipe`) — baseline state of the
-  process or container the workload runs in. Examples: `local`, `default`.
+- **Environments** (`name → docker / venv / buck_target recipe`) — baseline
+  state of the process, container, or Buck-built binary the workload runs in.
+  Examples: `local`, `default`.
 
 Both follow the same shape: built-ins ship from this package; external
 contributions arrive via Python entry-points and are merged at runtime.
@@ -198,10 +199,51 @@ workloads via the `aorta.workloads` entry-point group.
 ## Adding an environment
 
 Same two paths, with `aorta.environments` as the entry-point group. Plugin
-payloads must use only the keys `docker` and `venv`; anything else (e.g.
-`rocm`) raises `RegistryError` at load time. ROCm version is implicit in
-the docker image digest or in the host the venv runs on — capture it from
-`aorta env probe` at runtime, not via static declaration.
+payloads must use only the keys `docker`, `venv`, or `buck_target`; anything
+else (e.g. `rocm`) raises `RegistryError` at load time. ROCm version is
+implicit in the docker image digest, the host the venv runs on, or the Buck
+checkout's captured revision — capture it from `aorta env probe` at runtime,
+not via static declaration.
+
+### Tier hints: how the workload consumes the resolved environment
+
+The dispatcher threads the resolved `Environment` dataclass into each
+workload's config under the reserved key `_aorta_environment`:
+
+```python
+config["_aorta_environment"] = {
+    "name": "...",
+    "docker": "...",         # or None
+    "venv": "...",           # or None
+    "buck_target": "...",    # or None
+    "source_package": "...",
+}
+```
+
+Workloads that can isolate themselves read this dict and branch their
+subprocess invocation accordingly. The platform itself launches no docker
+images, activates no venvs, and invokes no `buck2 run` — it threads the
+metadata; the wrapper decides. Today's `recom_repro` wrapper consumes
+`docker`; a Buck-aware wrapper consumes `buck_target` with the same
+pattern:
+
+```python
+# Inside a workload's run() method:
+env = self.config.get("_aorta_environment") or {}
+buck_target = env.get("buck_target")
+image = env.get("docker")
+
+if buck_target:
+    argv = ["buck2", "run", buck_target, "--", *script_args]
+elif image:
+    argv = ["docker", "run", ..., image, "python", ...]
+else:
+    argv = [sys.executable, str(entry)]
+```
+
+Adding a fourth tier later (e.g. Bazel) follows the same pattern: extend
+`Environment`, extend `_VALID_ENV_KEYS`, document the read pattern here.
+The dispatcher round-trips the field for free (`asdict(env_descriptor)`).
 
 ## Collisions
 

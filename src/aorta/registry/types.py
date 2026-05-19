@@ -21,13 +21,22 @@ class Mitigation:
 class Environment:
     """A baseline process / container recipe for a workload run.
 
-    `docker` and `venv` are independent ways of describing the baseline; either,
-    both, or neither may be set (built-in `local` has neither — current process).
-    No `rocm` field: ROCm version is implicit in the docker image digest or in
-    the host the venv runs on; capture it from `aorta env probe` at runtime.
+    `docker`, `venv`, and `buck_target` are independent ways of describing the
+    baseline; any combination (or none) may be set — built-in `local` has none
+    (current process). No `rocm` field: ROCm version is implicit in the docker
+    image digest, the host the venv runs on, or the captured `revision` of the
+    Buck checkout; capture it from `aorta env probe` at runtime.
+
+    `buck_target` is a Buck2 target label (e.g. `"//workloads/recom_repro:recom_repro"`).
+    Interpreted by Buck-aware workload wrappers analogous to how `docker` is
+    interpreted by docker-aware wrappers: the platform threads the field; the
+    wrapper decides to shell out to `buck2 run <label>`. The platform itself
+    does not invoke Buck (mirrors the no-docker-launching-in-platform policy
+    documented in `aorta-internal#14`).
     """
 
     name: str
     docker: str | None = None
     venv: str | None = None
+    buck_target: str | None = None
     source_package: str = "aorta"

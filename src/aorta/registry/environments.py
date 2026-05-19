@@ -1,13 +1,14 @@
 """Environments registry: built-ins + entry-point discovery + collision detection.
 
 Mirrors the mitigations registry. Plugin payloads are validated against
-`_VALID_ENV_KEYS` — only `docker` and `venv` are accepted. ROCm version is
-intentionally not a valid key (see `Environment` docstring).
+`_VALID_ENV_KEYS` — `docker`, `venv`, and `buck_target` are accepted. ROCm
+version is intentionally not a valid key (see `Environment` docstring).
 
 Plugin authors register one entry-point per environment in their `pyproject.toml`
 under the `aorta.environments` group. The entry-point name IS the environment
-name; the loaded object is the recipe (`dict[str, str | None]` with keys
-`docker` and/or `venv`). Mirrors the `aorta.workloads` extension-point pattern.
+name; the loaded object is the recipe (`dict[str, str | None]` with any of the
+keys `docker`, `venv`, `buck_target`). Mirrors the `aorta.workloads`
+extension-point pattern.
 """
 
 from importlib.metadata import entry_points
@@ -22,7 +23,9 @@ from aorta.registry.sidecar import check_sidecar_basenames, load_sidecar_environ
 from aorta.registry.types import Environment
 
 _GROUP = "aorta.environments"
-_VALID_ENV_KEYS = frozenset({"docker", "venv"})
+# `buck_target` joins `docker` / `venv` as a peer baseline-recipe key (#182).
+# Order in the frozenset is irrelevant; spelled this way for grep-ability.
+_VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target"})
 
 # Built-in environments. `local` and `default` are both "current process, no
 # overrides" — `default` is reserved as a site-configurable alias. Customer
@@ -56,6 +59,7 @@ def load_environments(
             name=name,
             docker=spec.get("docker"),
             venv=spec.get("venv"),
+            buck_target=spec.get("buck_target"),
             source_package="aorta",
         )
         for name, spec in BUILTIN_ENVIRONMENTS.items()
@@ -99,6 +103,7 @@ def load_environments(
             name=ep.name,
             docker=spec.get("docker"),
             venv=spec.get("venv"),
+            buck_target=spec.get("buck_target"),
             source_package=plugin_name,
         )
 

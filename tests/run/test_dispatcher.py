@@ -785,12 +785,12 @@ class TestConfigOverrides:
         assert env_block["source_package"] == "aorta"
 
     def test_non_none_docker_env_round_trips_to_both_sites(self, tmp_path):
-        """Built-in ``local`` env has ``docker=venv=None``, so the other
-        env tests don't exercise the non-``None`` branch of the
+        """Built-in ``local`` env has ``docker=venv=buck_target=None``, so the
+        other env tests don't exercise the non-``None`` branch of the
         ``asdict(env_descriptor)`` serialization at the two call sites
         (``config["_aorta_environment"]`` and ``TrialResult.execution_env``).
         A regression that drops a field from either dict would slip
-        through.  Pin all four fields at both sites with a docker-set env.
+        through.  Pin all five fields at both sites with a docker-set env.
         """
         from aorta.registry import Environment
 
@@ -840,6 +840,72 @@ class TestConfigOverrides:
             "name": "docker-test",
             "docker": "img@sha256:deadbeef",
             "venv": None,
+            "buck_target": None,
+            "source_package": "test",
+        }
+        assert captured_config["_aorta_environment"] == expected
+        assert results[0].execution_env == expected
+
+    def test_non_none_buck_target_env_round_trips_to_both_sites(self, tmp_path):
+        """#182: peer of the docker-set round-trip test above, but for the
+        ``buck_target`` field. Pins that the dispatcher threads a Buck-tier
+        environment all the way through to ``config["_aorta_environment"]``
+        and ``TrialResult.execution_env`` without losing the field.
+
+        This is the contract aorta-internal#36 (recom_repro Buck pilot) and
+        aorta-internal#37 (regression-gate Buck tier) will rely on -- a
+        regression here breaks both downstream workstreams silently.
+        """
+        from aorta.registry import Environment
+
+        captured_config: dict = {}
+
+        class EnvCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def __init__(self, config):
+                super().__init__(config)
+                captured_config.update(config)
+
+            def setup(self):
+                pass
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        env = Environment(
+            name="buck-test",
+            docker=None,
+            venv=None,
+            buck_target="//workloads/recom_repro:recom_repro",
+            source_package="test",
+        )
+
+        mock_ep = MagicMock()
+        mock_ep.name = "envcapture"
+        mock_ep.load.return_value = EnvCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            with patch("aorta.run.dispatcher.get_environment", return_value=env):
+                req = RunRequest(
+                    workload="envcapture",
+                    trials=1,
+                    environment="buck-test",
+                    results_dir=tmp_path,
+                )
+                results = run_trials(req)
+
+        expected = {
+            "name": "buck-test",
+            "docker": None,
+            "venv": None,
+            "buck_target": "//workloads/recom_repro:recom_repro",
             "source_package": "test",
         }
         assert captured_config["_aorta_environment"] == expected

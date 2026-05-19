@@ -291,8 +291,13 @@ def _run_single_trial(
     # Thread the resolved Environment descriptor into the workload's
     # config under a reserved underscore-prefixed key.  Workloads that
     # can isolate themselves (e.g., the recom_repro wrapper invoking
-    # ``docker run`` instead of ``python``) read this to pick the
-    # right image / venv; workloads that don't ignore the key.
+    # ``docker run`` instead of ``python``, or a buck-aware wrapper
+    # invoking ``buck2 run <label>``) read this to pick the right
+    # image / venv / buck target; workloads that don't ignore the key.
+    # Recognized tier hints today: ``docker`` (image digest), ``venv``
+    # (path), ``buck_target`` (#182 -- Buck2 target label).  The platform
+    # itself launches none of these -- it threads metadata, the wrapper
+    # decides.
     #
     # This is the dispatcher's way of telling the workload *which*
     # environment was selected for this cell -- the ``--environment``

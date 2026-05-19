@@ -20,7 +20,10 @@ from aorta.registry.types import Environment, Mitigation
 
 SCHEMA_VERSION = 1
 _VALID_TOP_LEVEL = frozenset({"version", "mitigations", "environments"})
-_VALID_ENV_KEYS = frozenset({"docker", "venv"})
+# Keep in sync with `aorta.registry.environments._VALID_ENV_KEYS`; the two
+# allow-lists are intentionally identical so sidecar payloads and entry-point
+# payloads accept the same schema. `buck_target` peers `docker` / `venv` per #182.
+_VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target"})
 
 
 def _source_tag(path: Path) -> str:
@@ -196,6 +199,7 @@ def load_sidecar_environments(path: Path) -> dict[str, Environment]:
             name=name,
             docker=spec.get("docker"),
             venv=spec.get("venv"),
+            buck_target=spec.get("buck_target"),
             source_package=src,
         )
     return out

@@ -148,6 +148,26 @@ def test_sidecar_environment_invalid_key(tmp_sidecar, fake_env_eps):
         load_environments(extra_files=[p])
 
 
+def test_sidecar_environment_with_buck_target_round_trips(
+    tmp_sidecar, fake_env_eps
+):
+    # #182: `buck_target` is a peer of `docker` / `venv` in the sidecar
+    # allow-list. Pin the round-trip so the sidecar payload and the
+    # plugin payload accept the same schema (the two `_VALID_ENV_KEYS`
+    # allow-lists are intentionally identical -- see sidecar.py).
+    fake_env_eps([])
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "buck-env": {"buck_target": "//workloads/recom_repro:recom_repro"},
+        },
+    })
+    envs = load_environments(extra_files=[p])
+    assert envs["buck-env"].buck_target == "//workloads/recom_repro:recom_repro"
+    assert envs["buck-env"].docker is None
+    assert envs["buck-env"].source_package == f"sidecar:{p.name}"
+
+
 # ---------- partial files (only one of mitigations / environments) ----------
 
 
