@@ -69,7 +69,24 @@ def emit_buck_recipe(env: dict[str, Any]) -> str:
     """
     out: list[str] = [RECIPE_HEADER]
 
-    build_system = env.get("build_system") or {"kind": "unknown"}
+    # Guard against env.json that carries a non-dict ``build_system``
+    # (hand-edited file, schema regression, future-version field with
+    # an unexpected shape). The emitter's "never raises" contract means
+    # we surface the violation as a recipe-visible warning rather than
+    # letting ``.get(...)`` raise AttributeError. Per Copilot review on
+    # PR #178.
+    raw_build_system = env.get("build_system")
+    if raw_build_system is None:
+        build_system: dict[str, Any] = {"kind": "unknown"}
+    elif isinstance(raw_build_system, dict):
+        build_system = raw_build_system
+    else:
+        out.append(
+            f"# warning: build_system has unexpected type "
+            f"{type(raw_build_system).__name__}; expected dict. "
+            f"Treating as kind=unknown."
+        )
+        build_system = {"kind": "unknown"}
     out.append(_build_system_comment(build_system))
 
     introspection = env.get("library_introspection") or []

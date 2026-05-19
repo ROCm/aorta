@@ -138,6 +138,21 @@ class TestInputValidation:
         assert "invalid value" in result.output.lower() or \
                "ninja" in result.output.lower()
 
+    def test_non_utf8_file_surfaces_as_click_error(self, runner, tmp_path):
+        """A file existing on disk but holding bytes that aren't valid
+        UTF-8 (snapshot copied from a stricter-locale host, or a
+        truncated transfer) must surface as a clean ClickException
+        rather than a ``UnicodeDecodeError`` traceback. Per Copilot
+        review on PR #178.
+        """
+        bad = tmp_path / "non-utf8.json"
+        # 0xff / 0xfe / 0xfd are invalid as a UTF-8 start byte sequence.
+        bad.write_bytes(b"\xff\xfe\xfd not utf-8")
+        result = runner.invoke(env, ["recipe", str(bad), "--format", "buck"])
+        assert result.exit_code != 0
+        assert "failed to read" in result.output.lower()
+        assert "Traceback" not in result.output
+
 
 class TestHelpSurface:
     def test_recipe_help_advertises_supported_formats(self, runner):

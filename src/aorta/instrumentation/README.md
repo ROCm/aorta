@@ -8,7 +8,7 @@ will live here too.
 
 | Submodule | Purpose | Public API |
 | --- | --- | --- |
-| [`environment`](environment.py) | ROCm + ML stack version snapshot + container/python env detection. See block list below. | `collect_env() -> EnvSnapshot` |
+| [`environment`](environment.py) | ROCm + ML stack version snapshot + container/python env detection. See block list below. | `collect_env(buck_target: str \| None = None, buck_timeout: int = 10) -> EnvSnapshot` |
 | [`build_system`](build_system.py) | Detects Buck2 build environments (issue #163, A1.2a). Wrapped by `collect_env()` and surfaced as the `build_system` field of `EnvSnapshot`. | `detect_build_system() -> dict` |
 | [`buck_introspect`](buck_introspect.py) | Buck-aware library introspection via `buck2 audit dependencies <target> --transitive --json` (issue #163, A1.2b). Triggered by `collect_env(buck_target=...)` (or `aorta env probe --buck-target ...`); populates the `library_introspection` and `library_introspection_alternates` fields of `EnvSnapshot`. | `introspect_libraries_via_buck(target, repo_revision, ...) -> (entries, reasons)` |
 | [`recipes/buck`](recipes/buck.py) | BUCK file-fragment emitter for `aorta env recipe --format buck` (issue #163, A1.2c). Reads `build_system` + `library_introspection` from a captured env.json dict and emits one `prebuilt_cxx_library` per `source == "buck"` entry, prefixed with a loud "BEST-EFFORT, NOT EXACT" header. Pure text generation -- never invokes `buck2 build`, never vendors Buck rules. | `emit_buck_recipe(env: dict) -> str` |

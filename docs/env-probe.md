@@ -94,6 +94,7 @@ end-of-output. Sample:
 ```text
 Wrote env probe to /tmp/env.json (schema_version=1.5) [PARTIAL]
   runtime:   baremetal / python=venv
+  build_sys: none
   rocm:      7.2.1 (dev: None)
   hip:       7.2.53211-e1a6bc5663 (amd)
   hipblaslt: 1.2.2 rocm_release_tweak=dabb6df2b9

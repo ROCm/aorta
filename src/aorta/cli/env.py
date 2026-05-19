@@ -78,15 +78,21 @@ def env() -> None:
         "Buck2 label to introspect for library identity (issue #163, "
         "A1.2b). When given, the snapshot's library_introspection list "
         "is populated from `buck2 audit dependencies <label> --transitive "
-        "--json`. Ignored if buck2 isn't on PATH."
+        "--json`. If buck2 isn't on PATH (or `buck2 audit` otherwise "
+        "fails), the library_introspection list stays empty and a "
+        "human-readable reason is recorded in `partial_reasons`."
     ),
 )
 @click.option(
     "--buck-timeout",
-    type=int,
+    # ``IntRange(min=1)`` rejects 0 / negative values at arg-parse time
+    # rather than letting them flow into ``subprocess.run(timeout=...)``
+    # where they raise ``ValueError`` and confuse the never-raises
+    # fallback path. Per Copilot review on PR #165.
+    type=click.IntRange(min=1),
     default=10,
     show_default=True,
-    help="Per-call timeout (seconds) for `buck2 audit dependencies`.",
+    help="Per-call timeout (seconds, must be >= 1) for `buck2 audit dependencies`.",
 )
 def probe(
     output: Path,
@@ -279,9 +285,14 @@ def recipe(env_json: Path, fmt: str) -> None:
       to a Buck-only world).
     """
     try:
-        env_dict = json.loads(env_json.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        # Wrap both filesystem and JSON-parse errors as a single
+        # ``read_text()`` defaults to the platform encoding (usually
+        # UTF-8 on Linux). A snapshot written on a host with a stricter
+        # encoding (or a hand-edited file with stray bytes) can raise
+        # ``UnicodeDecodeError`` -- catch that alongside the obvious
+        # OSError/JSONDecodeError. Per Copilot review on PR #178.
+        env_dict = json.loads(env_json.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # Wrap filesystem, decode, and JSON-parse errors as a single
         # Click error so the operator sees a clean one-liner instead
         # of a Python traceback.
         raise click.ClickException(

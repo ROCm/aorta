@@ -1467,6 +1467,64 @@ class TestCliSummaryAndFieldFlags:
         assert payload["schema_version"] == env_mod.SCHEMA_VERSION
 
 
+class TestProbeBuckTimeoutValidation:
+    """Per Copilot review on PR #165: ``--buck-timeout`` must reject
+    values <= 0 at arg-parse time. ``subprocess.run(timeout=...)``
+    raises ``ValueError`` on a non-positive timeout, which would
+    short-circuit the buck audit into the never-raises fallback path
+    instead of failing loudly. Catching it in Click means the operator
+    sees the typo, not a silent "no introspection done".
+    """
+
+    @staticmethod
+    def _cli_mod():
+        cli_path = Path(env_mod.__file__).parent.parent / "cli" / "env.py"
+        spec = importlib.util.spec_from_file_location(
+            "aorta.cli.env", cli_path,
+        )
+        cli_mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cli_mod
+        spec.loader.exec_module(cli_mod)
+        return cli_mod
+
+    @pytest.mark.parametrize("bad_value", ["0", "-1", "-100"])
+    def test_buck_timeout_non_positive_rejected_by_click(
+        self, bad_value, all_disabled, tmp_path: Path,
+    ):
+        from click.testing import CliRunner
+        cli_mod = self._cli_mod()
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(
+                cli_mod.env,
+                ["probe", "--buck-timeout", bad_value, "--summary"],
+            )
+            assert result.exit_code != 0
+            # Click's IntRange formatting names the option and the
+            # offending value; assert on stable text.
+            lower = result.output.lower()
+            assert "buck-timeout" in lower
+            assert "invalid value" in lower or "not in the range" in lower
+            # No Python traceback should leak.
+            assert "Traceback" not in result.output
+
+    def test_buck_timeout_positive_value_accepted(
+        self, all_disabled, tmp_path: Path,
+    ):
+        """Sanity: any value >= 1 still parses (no regression on the
+        documented default of 10 or any other reasonable override).
+        """
+        from click.testing import CliRunner
+        cli_mod = self._cli_mod()
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(
+                cli_mod.env,
+                ["probe", "--buck-timeout", "5", "--summary"],
+            )
+            assert result.exit_code == 0, result.output
+
+
 # ---------------------------------------------------------------------------
 # RDHC wrapper
 # ---------------------------------------------------------------------------

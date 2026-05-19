@@ -278,6 +278,32 @@ class TestEmptyAndDegradedShapes:
         assert out.startswith(RECIPE_HEADER)
         assert "prebuilt_cxx_library(" not in out
 
+    @pytest.mark.parametrize(
+        "bad_build_system",
+        ["string-not-dict", 42, ["list", "not", "dict"], True],
+        ids=["str", "int", "list", "bool"],
+    )
+    def test_non_dict_build_system_does_not_raise(self, bad_build_system):
+        """A hand-edited env.json that puts a non-dict in ``build_system``
+        must not blow up the emitter via ``.get("kind")`` on a non-dict.
+        Per Copilot review on PR #178: surface as a recipe-visible
+        warning + degrade to ``kind=unknown``. Regression guard for the
+        never-raises contract.
+        """
+        env = {
+            "build_system": bad_build_system,
+            "library_introspection": [],
+            "library_introspection_alternates": [],
+        }
+        out = emit_buck_recipe(env)
+        assert out.startswith(RECIPE_HEADER)
+        assert "warning" in out
+        assert "build_system" in out
+        assert "unexpected type" in out
+        # Degraded path produces the kind=unknown provenance line.
+        assert "kind=unknown" in out
+        assert "prebuilt_cxx_library(" not in out
+
 
 class TestAlternates:
     def test_alternates_render_as_comment_block_only(self):
