@@ -160,8 +160,18 @@ def probe(
     # supposed to be JSON-native (str/int/bool/None/list/dict). If a
     # non-serializable type sneaks in (e.g. a Path or datetime), we want
     # the failure to be loud rather than silently stringified.
+    #
+    # ``encoding="utf-8"`` is set explicitly to stay symmetric with the
+    # ``recipe`` reader (which also forces utf-8). Without it,
+    # ``write_text`` would use the platform default (e.g. cp1252 on
+    # some Windows locales / containers), which could produce a file
+    # that ``aorta env recipe`` later refuses to decode. Per Copilot
+    # round-1 review on PR #181.
     try:
-        output.write_text(json.dumps(snapshot_dict, indent=2))
+        output.write_text(
+            json.dumps(snapshot_dict, indent=2),
+            encoding="utf-8",
+        )
     except OSError as exc:
         raise click.ClickException(
             f"Failed to write env probe to {output}: {exc}"
