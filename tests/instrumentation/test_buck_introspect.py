@@ -256,16 +256,74 @@ class TestBuck2FailureModes:
         assert any("non-JSON output" in r for r in reasons)
 
     def test_unexpected_json_shape_returns_reason(self):
+        """Both ``list`` (modern cquery output) and ``dict`` (legacy
+        audit-dependencies output) are accepted shapes. Anything else
+        (scalar, null) trips the unexpected-shape reason."""
         with patch.object(
             bi_mod.subprocess,
             "run",
-            return_value=_make_completed(stdout=json.dumps(["//a", "//b"])),
+            return_value=_make_completed(stdout=json.dumps(42)),
         ):
             entries, reasons = bi_mod.introspect_libraries_via_buck(
                 target="//foo", repo_revision="r"
             )
         assert entries == []
         assert any("unexpected JSON shape" in r for r in reasons)
+
+
+class TestBuck2CqueryShape:
+    """Modern ``buck2 cquery 'deps(...)' --json`` returns a flat list
+    of stringified labels, each suffixed with a parenthesised
+    configuration descriptor. Verifies the loader handles both that
+    shape and the per-label suffix stripping the matcher relies on."""
+
+    def setup_method(self):
+        self._patch = patch.object(bi_mod.shutil, "which", lambda _name: "/usr/bin/buck2")
+        self._patch.start()
+
+    def teardown_method(self):
+        self._patch.stop()
+
+    def test_cquery_list_shape_yields_matches(self):
+        """The modern cquery shape (flat list of labels) round-trips
+        through the loader and the matcher just like the legacy dict
+        shape did."""
+        payload = [
+            "//third-party/rocm:hipblaslt_lib (prelude//platforms:default#abc)",
+            "//third-party/pytorch:torch (prelude//platforms:default#abc)",
+            "//util:logging (prelude//platforms:default#abc)",
+        ]
+        with patch.object(
+            bi_mod.subprocess,
+            "run",
+            return_value=_make_completed(stdout=json.dumps(payload)),
+        ):
+            entries, reasons = bi_mod.introspect_libraries_via_buck(
+                target="//foo", repo_revision="r"
+            )
+        assert reasons == []
+        names = sorted(e["name"] for e in entries)
+        assert names == ["hipblaslt", "pytorch"]
+
+    def test_config_suffix_stripped_before_pattern_match(self):
+        """The cquery suffix ``(prelude//platforms:default#hash)`` is a
+        configuration tag, not part of the target label. ``_match_library``
+        strips it so KNOWN_LIBRARY_PATTERNS authors don't have to bake
+        the suffix into every regex."""
+        suffixed = "//third-party/rocm:hipblaslt-lib (prelude//platforms:default#abc123)"
+        assert bi_mod._match_library(suffixed) == "hipblaslt"
+        # _strip_config_suffix is the unit doing the work; pin its
+        # behaviour directly so a future change there can't silently
+        # break label matching.
+        assert bi_mod._strip_config_suffix(suffixed) == (
+            "//third-party/rocm:hipblaslt-lib"
+        )
+
+    def test_config_suffix_absent_match_unaffected(self):
+        """A label without the suffix (older buck2 audit output, or
+        the unit-test fixture which pre-dates the cquery migration)
+        still matches identically -- the strip is a no-op there."""
+        assert bi_mod._match_library("//third-party/rocm:hipblaslt-lib") == "hipblaslt"
 
 
 # ---------------------------------------------------------------------------
