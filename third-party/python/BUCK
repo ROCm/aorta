@@ -1,0 +1,50 @@
+# Pinned third-party Python wheels for the Buck-buildable AORTA CLI.
+#
+# Wheels are fetched at build time from PyPI by digest; nothing is
+# checked into the repo (the wheels themselves do not live in git).
+# Regeneration when bumping a pin:
+#   1. Find the new wheel URL on PyPI's "Download files" tab for the
+#      package. For pure-Python deps any platform's wheel works
+#      (py3-none-any). For C-extension deps (pyyaml), the wheel must
+#      match the toolchain's Python version (cp313, today) AND a
+#      platform-agnostic-enough manylinux tag.
+#   2. `curl -fsSL <wheel-url> | sha256sum` to capture the digest.
+#   3. Update the two values below.
+#
+# A future maintenance follow-up should script this with `pip download
+# --no-deps`; for the bootstrap PR a manual update is fine because the
+# AORTA CLI has only TWO base runtime deps (pyyaml + click).
+#
+# Today's toolchain pin: CPython 3.13 (provided by
+# `system_demo_toolchains()` in //toolchains:BUCK).
+
+http_file(
+    name = "click-wheel",
+    urls = [
+        "https://files.pythonhosted.org/packages/ee/ae/8e92f8058baf87f6c7d86ee7e457668690195cc77efedb8d3797a06e3940/click-8.4.0-py3-none-any.whl",
+    ],
+    sha256 = "40c50b7c6c6adac2823d411041ec84f3f103f1b280d5e9ce0d7f998995832f81",
+)
+
+prebuilt_python_library(
+    name = "click",
+    binary_src = ":click-wheel",
+    visibility = ["PUBLIC"],
+)
+
+http_file(
+    name = "pyyaml-wheel",
+    urls = [
+        # cp313 manylinux x86_64 wheel; if the toolchain Python bumps
+        # to 3.14 this URL + sha256 + filename must be re-pinned to
+        # the matching cp314 wheel.
+        "https://files.pythonhosted.org/packages/74/27/e5b8f34d02d9995b80abcef563ea1f8b56d20134d8f4e5e81733b1feceb2/pyyaml-6.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+    ],
+    sha256 = "0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6",
+)
+
+prebuilt_python_library(
+    name = "pyyaml",
+    binary_src = ":pyyaml-wheel",
+    visibility = ["PUBLIC"],
+)

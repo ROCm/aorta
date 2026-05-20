@@ -90,3 +90,9 @@ node_ip_list.txt
 
 # Experiment results
 results/
+
+# Buck2 build artifacts (issue #183 - Buck-buildable CLI).
+# `buck-out/` is buck2's per-project output dir; can hit hundreds of MB.
+# `.buckd/` is buck2's local daemon state.
+buck-out/
+.buckd/
