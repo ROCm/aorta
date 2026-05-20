@@ -6,17 +6,33 @@
 #   1. Find the new wheel URL on PyPI's "Download files" tab for the
 #      package. For pure-Python deps any platform's wheel works
 #      (py3-none-any). For C-extension deps (pyyaml), the wheel must
-#      match the toolchain's Python version (cp313, today) AND a
-#      platform-agnostic-enough manylinux tag.
+#      match the host Python's interpreter ABI AND a platform tag the
+#      host can load.
 #   2. `curl -fsSL <wheel-url> | sha256sum` to capture the digest.
-#   3. Update the two values below.
+#   3. Update the URL + sha256 below.
 #
-# A future maintenance follow-up should script this with `pip download
-# --no-deps`; for the bootstrap PR a manual update is fine because the
-# AORTA CLI has only TWO base runtime deps (pyyaml + click).
+# Known bootstrap limitation -- platform/ABI coupling (issue #183
+# follow-up):
 #
-# Today's toolchain pin: CPython 3.13 (provided by
-# `system_demo_toolchains()` in //toolchains:BUCK).
+# //toolchains:BUCK uses `system_demo_toolchains()`, which does NOT
+# pin the Python version -- it picks up whatever `python3` the host
+# resolves. The pure-Python `click` wheel below is `py3-none-any`
+# and works under any CPython 3.x. The `pyyaml` wheel, however, is
+# a C extension and is currently pinned to a single
+# (interpreter ABI, OS, libc, arch) combination: cp313 + manylinux
+# 2.17/2.28 + x86_64. On any host where the resolved python3 is not
+# CPython 3.13, or the OS is not glibc-Linux, or the arch is not
+# x86_64, the prebuilt_python_library below will fail to load
+# pyyaml at runtime.
+#
+# This is acceptable for the bootstrap PR because (a) the AORTA CLI's
+# primary deploy target is the same Linux-x86_64 ROCm environment the
+# rest of the project targets, and (b) the dogfood test that
+# motivated #183 runs in that same environment. Broadening to other
+# (Python version, OS, arch) tuples lives in a follow-up: either
+# pin //toolchains to a specific CPython interpreter, or replace the
+# single pyyaml http_file with a `select()` over platform-specific
+# wheel URLs. Tracked separately so the bootstrap can land.
 
 http_file(
     name = "click-wheel",
@@ -35,9 +51,11 @@ prebuilt_python_library(
 http_file(
     name = "pyyaml-wheel",
     urls = [
-        # cp313 manylinux x86_64 wheel; if the toolchain Python bumps
-        # to 3.14 this URL + sha256 + filename must be re-pinned to
-        # the matching cp314 wheel.
+        # cp313 manylinux x86_64 wheel. See the header block at the
+        # top of this file for the known platform-coupling limitation;
+        # if the host Python bumps to a different cp3xx ABI, or the
+        # host is not glibc-Linux-x86_64, this URL + sha256 + filename
+        # must be re-pinned (or this rule split via `select()`).
         "https://files.pythonhosted.org/packages/74/27/e5b8f34d02d9995b80abcef563ea1f8b56d20134d8f4e5e81733b1feceb2/pyyaml-6.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
     ],
     sha256 = "0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6",
