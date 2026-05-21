@@ -79,9 +79,8 @@ aorta env probe
 # Custom path; parent dirs are created if missing
 aorta env probe -o runs/exp1/env.json
 
-# Buck mode: also runs `buck2 audit dependencies <target> --transitive
-# --json` and populates library_introspection. The default
-# `--buck-timeout` is 10 s.
+# Buck mode: also runs `buck2 cquery 'deps(<target>)' --json` and
+# populates library_introspection. The default `--buck-timeout` is 10 s.
 aorta env probe --buck-target //myproj:training_main
 ```
 

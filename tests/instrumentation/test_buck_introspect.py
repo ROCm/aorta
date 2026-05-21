@@ -325,6 +325,54 @@ class TestBuck2CqueryShape:
         still matches identically -- the strip is a no-op there."""
         assert bi_mod._match_library("//third-party/rocm:hipblaslt-lib") == "hipblaslt"
 
+    def test_entry_stores_canonical_and_configured_target(self):
+        """Schema 1.6 (PR #187 review): each entry carries BOTH the
+        canonical Buck label (``target``, suitable for re-querying
+        buck2) and the raw cquery output (``configured_target``,
+        preserves the per-run config suffix for forensics). Storing
+        only the suffixed form (as the schema-1.4 draft did) made
+        env.json diffs unstable across repeat probes because the
+        suffix hash changes between buck2 daemon restarts."""
+        suffixed = (
+            "//third-party/rocm:hipblaslt_lib "
+            "(prelude//platforms:default#abc123)"
+        )
+        payload = [suffixed]
+        with patch.object(
+            bi_mod.subprocess,
+            "run",
+            return_value=_make_completed(stdout=json.dumps(payload)),
+        ):
+            entries, reasons = bi_mod.introspect_libraries_via_buck(
+                target="//foo", repo_revision="r"
+            )
+        assert reasons == []
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["target"] == "//third-party/rocm:hipblaslt_lib"
+        assert entry["configured_target"] == suffixed
+        # The canonical form must be re-strippable to itself (idempotent).
+        assert bi_mod._strip_config_suffix(entry["target"]) == entry["target"]
+
+    def test_no_suffix_collapses_target_and_configured_target(self):
+        """When buck2 emits a label *without* a configuration suffix
+        (legacy audit-dependencies output, or a future cquery flag
+        that omits it), ``target`` and ``configured_target`` are
+        equal -- the schema contract still holds, the strip is just
+        a no-op."""
+        unsuffixed = "//third-party/rocm:hipblaslt_lib"
+        payload = [unsuffixed]
+        with patch.object(
+            bi_mod.subprocess,
+            "run",
+            return_value=_make_completed(stdout=json.dumps(payload)),
+        ):
+            entries, _ = bi_mod.introspect_libraries_via_buck(
+                target="//foo", repo_revision="r"
+            )
+        assert entries[0]["target"] == unsuffixed
+        assert entries[0]["configured_target"] == unsuffixed
+
 
 # ---------------------------------------------------------------------------
 # collect_env() integration: kwargs path + alternates synthesis + round trip

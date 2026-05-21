@@ -197,12 +197,25 @@ def introspect_libraries_via_buck(
             # label would be lost; record nothing.
             continue
         seen_names.add(match)
+        # Store both the canonical (stripped) Buck label and the raw
+        # cquery output. ``target`` is the form that round-trips into
+        # another ``buck2 query`` / ``buck2 build`` invocation without
+        # the per-run configuration hash changing between probes;
+        # ``configured_target`` preserves the configuration suffix
+        # (``(prelude//platforms:default#<hash>)``) for forensics when
+        # someone is debugging why two probes against the same source
+        # tree yielded different configured graphs. Schema 1.6 (#187
+        # review): keeping only ``configured_target`` -- as the
+        # original a1.2b draft did -- destabilises env.json diffs
+        # because the hash changes across buck2 daemon restarts.
+        canonical = _strip_config_suffix(label)
         entries.append(
             {
                 "name": match,
                 "source": "buck",
                 "revision": repo_revision,
-                "target": label,
+                "target": canonical,
+                "configured_target": label,
             }
         )
 

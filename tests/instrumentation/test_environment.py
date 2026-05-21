@@ -271,7 +271,7 @@ class TestSchemaCompleteness:
     ):
         snapshot = collect_env()
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
-        assert snapshot.schema_version == "1.5"
+        assert snapshot.schema_version == "1.6"
         assert snapshot.system_health is None
         assert snapshot.rocm == {
             "version": None,

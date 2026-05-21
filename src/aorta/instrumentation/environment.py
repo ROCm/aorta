@@ -63,8 +63,28 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.5"
-# 1.4 -> 1.5 (this commit, PR #177 / issue #176):
+SCHEMA_VERSION = "1.6"
+# 1.5 -> 1.6 (PR #187 review):
+#   - Each ``library_introspection`` entry now carries TWO Buck-label
+#     fields instead of one: ``target`` (canonical Buck label,
+#     suitable for re-querying buck2; was previously the raw cquery
+#     output) and ``configured_target`` (the raw cquery output
+#     including the per-run configuration suffix
+#     ``(prelude//platforms:default#<hash>)``). The motivation is
+#     that the configuration hash changes between buck2 daemon
+#     restarts even for the same source tree; storing only the
+#     suffixed form (as A1.2b's first draft did, schema 1.4) made
+#     env.json diffs unstable across repeat probes. ``target`` is
+#     now the stable identifier; ``configured_target`` is kept for
+#     forensics when reconciling two probes that diverged on the
+#     same source. Backwards-compat: 1.5 readers loading a 1.6
+#     snapshot see ``configured_target`` as an unknown nested key
+#     and silently ignore it (entries are plain dicts, not dataclasses);
+#     1.6 readers loading a 1.5 snapshot get entries without
+#     ``configured_target`` and must guard with ``.get(...)`` if
+#     they want it.
+#
+# 1.4 -> 1.5 (PR #177 / issue #176):
 #   This entry collapses what was originally two separate version
 #   bumps on the PR #177 branch (1.2 -> 1.3 source-introspection plus
 #   1.3 -> 1.4 legacy-FindHIP fallback) because main shipped its own
@@ -130,7 +150,9 @@ SCHEMA_VERSION = "1.5"
 #     with `buck_target=...` AND buck2 is functional; in that mode each
 #     transitive dep label matched against
 #     buck_introspect.KNOWN_LIBRARY_PATTERNS yields an entry of the
-#     form ``{"name", "source": "buck", "revision", "target"}``. When
+#     form ``{"name", "source": "buck", "revision", "target"}``
+#     (schema 1.6 also adds ``"configured_target"``; see the 1.5 ->
+#     1.6 history block above). When
 #     a library matched via Buck is also captured by A1's existing
 #     per-library blocks (hipblaslt, rocblas, ...), the A1-side
 #     identifiers are synthesised into a parallel entry placed in
@@ -628,12 +650,16 @@ class EnvSnapshot:
     build_system: dict = field(
         default_factory=lambda: {"kind": "none"}
     )
-    # library_introspection: A1.2b (issue #163, schema 1.4). Always
-    # present. Empty list outside buck mode. In buck mode, one entry
-    # per matched transitive dep, shape ``{"name", "source": "buck",
-    # "revision", "target"}``. See `aorta.instrumentation.buck_introspect`
-    # for the match patterns and the `--buck-target` CLI flag for the
-    # entry point.
+    # library_introspection: A1.2b (issue #163, schema 1.4; field
+    # ``configured_target`` added in schema 1.6 / PR #187 review).
+    # Always present. Empty list outside buck mode. In buck mode, one
+    # entry per matched transitive dep, shape ``{"name", "source":
+    # "buck", "revision", "target", "configured_target"}`` where
+    # ``target`` is the canonical Buck label (stable across probes)
+    # and ``configured_target`` is the raw cquery output including
+    # the per-run configuration suffix. See
+    # `aorta.instrumentation.buck_introspect` for the match patterns
+    # and the `--buck-target` CLI flag for the entry point.
     library_introspection: list[dict] = field(default_factory=list)
     # library_introspection_alternates: A1.2b. Empty outside buck mode.
     # In buck mode, holds the synthesised A1-block-derived alternate
