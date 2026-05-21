@@ -1,2 +1,13 @@
+# Bundled-prelude default toolchains.
+#
+# Note on Python: despite the name, `system_demo_toolchains()` does
+# NOT use the host's `python3`. It calls
+# `prelude//toolchains:python.bzl%remote_python_toolchain()` which
+# downloads a pinned standalone CPython 3.13.6 build from
+# python-build-standalone (per OS+arch via select()). That makes the
+# Buck-built `aorta` interpreter deterministic and host-independent,
+# which is what //third-party/python:BUCK relies on when it pins
+# cp313 wheels for `pyyaml`.
 load("@prelude//toolchains:demo.bzl", "system_demo_toolchains")
+
 system_demo_toolchains()

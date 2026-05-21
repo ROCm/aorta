@@ -2,37 +2,36 @@
 #
 # Wheels are fetched at build time from PyPI by digest; nothing is
 # checked into the repo (the wheels themselves do not live in git).
+#
+# Toolchain context:
+#
+#   //toolchains:BUCK uses `system_demo_toolchains()` from the bundled
+#   prelude, which in turn calls `remote_python_toolchain()`. That
+#   downloads a pinned CPython 3.13.6 standalone build from the
+#   python-build-standalone project, with per-platform select() over
+#   {linux, macos, windows} x {x86_64, arm64}. The interpreter the
+#   Buck-built `aorta` binary runs under is therefore deterministic
+#   and host-independent: cp313 across all supported platforms.
+#
+#   That fixes the interpreter ABI (cp313) at config time, but each
+#   platform still needs a wheel built for its own (OS, libc, arch).
+#   `click` is pure-Python (`py3-none-any`) and works everywhere; the
+#   PyYAML wheel is a C extension and must be selected per platform.
+#
 # Regeneration when bumping a pin:
-#   1. Find the new wheel URL on PyPI's "Download files" tab for the
-#      package. For pure-Python deps any platform's wheel works
-#      (py3-none-any). For C-extension deps (pyyaml), the wheel must
-#      match the host Python's interpreter ABI AND a platform tag the
-#      host can load.
-#   2. `curl -fsSL <wheel-url> | sha256sum` to capture the digest.
-#   3. Update the URL + sha256 below.
+#   1. Find the matching cp313 wheel URLs on PyPI's "Download files"
+#      tab for the package. The interpreter ABI segment must stay
+#      `cp313` so it matches the toolchain.
+#   2. `curl -fsSL <wheel-url> | sha256sum` to capture each digest.
+#   3. Update the URL + sha256 in the select() arms below.
 #
-# Known bootstrap limitation -- platform/ABI coupling (issue #183
-# follow-up):
-#
-# //toolchains:BUCK uses `system_demo_toolchains()`, which does NOT
-# pin the Python version -- it picks up whatever `python3` the host
-# resolves. The pure-Python `click` wheel below is `py3-none-any`
-# and works under any CPython 3.x. The `pyyaml` wheel, however, is
-# a C extension and is currently pinned to a single
-# (interpreter ABI, OS, libc, arch) combination: cp313 + manylinux
-# 2.17/2.28 + x86_64. On any host where the resolved python3 is not
-# CPython 3.13, or the OS is not glibc-Linux, or the arch is not
-# x86_64, the prebuilt_python_library below will fail to load
-# pyyaml at runtime.
-#
-# This is acceptable for the bootstrap PR because (a) the AORTA CLI's
-# primary deploy target is the same Linux-x86_64 ROCm environment the
-# rest of the project targets, and (b) the dogfood test that
-# motivated #183 runs in that same environment. Broadening to other
-# (Python version, OS, arch) tuples lives in a follow-up: either
-# pin //toolchains to a specific CPython interpreter, or replace the
-# single pyyaml http_file with a `select()` over platform-specific
-# wheel URLs. Tracked separately so the bootstrap can land.
+# Coverage today: the four (OS, arch) combinations the bundled
+# remote_python_toolchain ships a CPython 3.13 build for and where
+# PyPI hosts a cp313 PyYAML wheel: linux-{x86_64,aarch64},
+# macos-{x86_64,arm64}, windows-x86_64. Hosts outside that matrix
+# (e.g. windows-arm64, musl-linux on aarch64) will fail at select()
+# resolution with a clear "no matching select arm" error rather than
+# at runtime with a less obvious ELF/Mach-O mismatch.
 
 http_file(
     name = "click-wheel",
@@ -48,17 +47,40 @@ prebuilt_python_library(
     visibility = ["PUBLIC"],
 )
 
+# PyYAML 6.0.3 cp313 wheels, one per (OS, arch) the bundled CPython
+# toolchain supports. Nested select(): outer arm on OS, inner arm on
+# CPU, matching the pattern remote_python_toolchain() uses for its
+# own CPython downloads (see prelude/toolchains/python.bzl).
 http_file(
     name = "pyyaml-wheel",
     urls = [
-        # cp313 manylinux x86_64 wheel. See the header block at the
-        # top of this file for the known platform-coupling limitation;
-        # if the host Python bumps to a different cp3xx ABI, or the
-        # host is not glibc-Linux-x86_64, this URL + sha256 + filename
-        # must be re-pinned (or this rule split via `select()`).
-        "https://files.pythonhosted.org/packages/74/27/e5b8f34d02d9995b80abcef563ea1f8b56d20134d8f4e5e81733b1feceb2/pyyaml-6.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        select({
+            "prelude//os:linux": select({
+                "prelude//cpu:x86_64": "https://files.pythonhosted.org/packages/74/27/e5b8f34d02d9995b80abcef563ea1f8b56d20134d8f4e5e81733b1feceb2/pyyaml-6.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+                "prelude//cpu:arm64": "https://files.pythonhosted.org/packages/50/31/b20f376d3f810b9b2371e72ef5adb33879b25edb7a6d072cb7ca0c486398/pyyaml-6.0.3-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+            }),
+            "prelude//os:macos": select({
+                "prelude//cpu:x86_64": "https://files.pythonhosted.org/packages/d1/11/0fd08f8192109f7169db964b5707a2f1e8b745d4e239b784a5a1dd80d1db/pyyaml-6.0.3-cp313-cp313-macosx_10_13_x86_64.whl",
+                "prelude//cpu:arm64": "https://files.pythonhosted.org/packages/b1/16/95309993f1d3748cd644e02e38b75d50cbc0d9561d21f390a76242ce073f/pyyaml-6.0.3-cp313-cp313-macosx_11_0_arm64.whl",
+            }),
+            "prelude//os:windows": select({
+                "prelude//cpu:x86_64": "https://files.pythonhosted.org/packages/97/c9/39d5b874e8b28845e4ec2202b5da735d0199dbe5b8fb85f91398814a9a46/pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+            }),
+        }),
     ],
-    sha256 = "0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6",
+    sha256 = select({
+        "prelude//os:linux": select({
+            "prelude//cpu:x86_64": "0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6",
+            "prelude//cpu:arm64": "ee2922902c45ae8ccada2c5b501ab86c36525b883eff4255313a253a3160861c",
+        }),
+        "prelude//os:macos": select({
+            "prelude//cpu:x86_64": "8da9669d359f02c0b91ccc01cac4a67f16afec0dac22c2ad09f46bee0697eba8",
+            "prelude//cpu:arm64": "2283a07e2c21a2aa78d9c4442724ec1eb15f5e42a723b99cb3d822d48f5f7ad1",
+        }),
+        "prelude//os:windows": select({
+            "prelude//cpu:x86_64": "79005a0d97d5ddabfeeea4cf676af11e647e41d81c9a7722a193022accdb6b7c",
+        }),
+    }),
 )
 
 prebuilt_python_library(
