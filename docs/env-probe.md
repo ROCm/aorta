@@ -95,7 +95,7 @@ operator can act on them without `jq`'ing the JSON. A closing
 end-of-output. Sample:
 
 ```text
-Wrote env probe to /tmp/env.json (schema_version=1.5) [PARTIAL]
+Wrote env probe to /tmp/env.json (schema_version=1.6) [PARTIAL]
   runtime:   baremetal / python=venv
   build_sys: none
   rocm:      7.2.1 (dev: None)
@@ -184,7 +184,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.5"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.6"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
@@ -375,7 +375,41 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.5` (current)
+### `1.6` (current)
+
+Additive change to `library_introspection` (PR #187, issue #183):
+
+* Each `library_introspection[*]` entry now carries two Buck-label
+  fields instead of one. `target` is the canonical Buck label with
+  the cquery configuration suffix stripped -- stable across daemon
+  restarts and the form that round-trips into another
+  `buck2 query` / `buck2 build`. `configured_target` preserves the
+  raw `buck2 cquery` output including its per-run configuration
+  suffix (`(prelude//platforms:default#<hash>)`) for forensics when
+  reconciling two probes that diverged on the same source tree.
+
+Bundled with the cquery migration: A1.2b's original implementation
+called `buck2 audit dependencies --transitive --json`, which was
+removed from open-source buck2 before A1.2b ever ran end-to-end.
+PR #187 swapped it for `buck2 cquery 'deps(<target>)' --json`
+(buck2 docs' recommended replacement; same configured-graph
+semantics as the deprecated `audit dependencies --transitive`).
+This is a runtime-behaviour change, not a schema change -- the
+emitted `library_introspection` entries take the same shape
+either way, but the new `configured_target` field is what motivated
+the schema bump.
+
+Backwards-compat:
+
+* 1.5 readers loading a 1.6 snapshot see `configured_target` as an
+  unknown nested key inside each entry and silently ignore it
+  (entries are plain dicts, not dataclasses, so `from_dict` doesn't
+  trip on the new key).
+* 1.6 readers loading a 1.5 snapshot get entries without
+  `configured_target` and must guard with `.get("configured_target")`
+  if they want it.
+
+### `1.5`
 
 Adds source/editable-install build introspection plus a runtime SDPA
 backend probe (PR #177, issue #176). This entry collapses what was
