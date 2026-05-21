@@ -316,9 +316,16 @@ class TestSchemaCompleteness:
 
 
 def _example_snapshot(**overrides) -> object:
-    """Build a fully-populated EnvSnapshot for round-trip testing."""
+    """Build a fully-populated EnvSnapshot for round-trip testing.
+
+    The ``schema_version`` field uses the live ``SCHEMA_VERSION`` constant
+    rather than a hard-coded string so this fixture (and every round-trip
+    test that depends on it) keeps working whenever the schema version is
+    bumped in ``environment.py``. The schema-version-change tests live
+    elsewhere in this module and pin the literal version intentionally.
+    """
     base = {
-        "schema_version": "1.5",
+        "schema_version": SCHEMA_VERSION,
         "captured_at": "2026-04-28T12:00:00Z",
         "system_health": {"rdhc_version": "1.4.0", "tests": {}},
         "rocm": {
@@ -487,7 +494,7 @@ class TestEnvSnapshot:
         d = _example_snapshot().to_dict()
         d["future_field_not_yet_added"] = {"hello": "world"}
         rebuilt = EnvSnapshot.from_dict(d)
-        assert rebuilt.schema_version == "1.5"
+        assert rebuilt.schema_version == SCHEMA_VERSION
 
     def test_from_dict_defaults_partial_reasons_when_missing(self):
         """Older env.json without partial_reasons still loads (defaults to [])."""
