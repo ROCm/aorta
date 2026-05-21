@@ -96,11 +96,18 @@ def introspect_libraries_via_buck(
 
     * ``entries`` -- one dict per matched library, in the unified
       ``library_introspection`` shape: ``{name, source: "buck",
-      revision, target}``. Empty when no matches or when the cquery
-      fails. ``revision`` is set to ``repo_revision`` (the build-system-
-      wide revision captured by ``detect_build_system``); per-target
-      revisions can be derived from a follow-up ``buck2 audit
-      providers`` call but are out of scope for A1.2b.
+      revision, target, configured_target}`` (schema 1.6). ``target``
+      is the canonical Buck label with the cquery configuration
+      suffix stripped (round-trips cleanly into another
+      ``buck2 query`` / ``buck2 build`` without depending on which
+      daemon configured the graph). ``configured_target`` preserves
+      the raw cquery output -- ``//pkg:lib (prelude//platforms:default#<hash>)``
+      -- for forensics when reconciling two probes that diverged on
+      the same source tree. Empty list when no matches or when the
+      cquery fails. ``revision`` is set to ``repo_revision`` (the
+      build-system-wide revision captured by ``detect_build_system``);
+      per-target revisions can be derived from a follow-up
+      ``buck2 audit providers`` call but are out of scope for A1.2b.
     * ``reasons`` -- one human-readable string per documented failure
       (buck2 absent, target not found, cquery timeout, JSON parse
       error). Suitable for appending to ``partial_reasons``. Empty on

@@ -77,10 +77,12 @@ def env() -> None:
     help=(
         "Buck2 label to introspect for library identity (issue #163, "
         "A1.2b). When given, the snapshot's library_introspection list "
-        "is populated from `buck2 audit dependencies <label> --transitive "
-        "--json`. If buck2 isn't on PATH (or `buck2 audit` otherwise "
-        "fails), the library_introspection list stays empty and a "
-        "human-readable reason is recorded in `partial_reasons`."
+        "is populated from `buck2 cquery 'deps(<label>)' --json` (each "
+        "matched entry carries both a stripped `target` and the raw "
+        "`configured_target`, schema 1.6). If buck2 isn't on PATH (or "
+        "the cquery otherwise fails), the library_introspection list "
+        "stays empty and a human-readable reason is recorded in "
+        "`partial_reasons`."
     ),
 )
 @click.option(
@@ -92,7 +94,7 @@ def env() -> None:
     type=click.IntRange(min=1),
     default=10,
     show_default=True,
-    help="Per-call timeout (seconds, must be >= 1) for `buck2 audit dependencies`.",
+    help="Per-call timeout (seconds, must be >= 1) for `buck2 cquery 'deps(...)'`.",
 )
 def probe(
     output: Path,

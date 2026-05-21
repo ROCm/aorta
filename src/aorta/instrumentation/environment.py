@@ -1210,14 +1210,18 @@ def collect_env(
     for the version probe does NOT initialise CUDA / HIP context.
 
     Buck mode (``buck_target=...``) opts into the A1.2b path: the
-    function additionally runs ``buck2 audit dependencies <target>
-    --transitive --json``, matches transitive deps against
+    function additionally runs ``buck2 cquery 'deps(<target>)' --json``,
+    matches transitive deps against
     ``buck_introspect.KNOWN_LIBRARY_PATTERNS``, and populates
     ``library_introspection`` (plus ``library_introspection_alternates``
-    when an A1 per-library block also captured the same name). Outside
-    buck mode both lists stay empty and the existing per-library
-    top-level blocks remain authoritative. ``buck_timeout`` caps the
-    audit subprocess (seconds; default 10).
+    when an A1 per-library block also captured the same name). Each
+    ``library_introspection`` entry carries both a canonical
+    ``target`` (stripped Buck label, stable across daemon restarts)
+    and a ``configured_target`` (raw cquery output including the
+    per-run configuration suffix) per schema 1.6. Outside buck mode
+    both lists stay empty and the existing per-library top-level
+    blocks remain authoritative. ``buck_timeout`` caps the cquery
+    subprocess (seconds; default 10).
     """
     reasons: list[str] = []
     try:
