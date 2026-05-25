@@ -153,6 +153,29 @@ class RunRequest:
             different capture mechanism -- this mirrors the same
             single-caller assumption the env-restore block on this
             function relies on.
+        subprocess_argv: Opaque ``argv`` forwarded byte-for-byte to a
+            subprocess-shaped workload. The dispatcher injects this
+            tuple into the workload config as the reserved
+            ``_aorta_subprocess_argv`` key after ``config_overrides``
+            is merged, so user-supplied ``config_overrides`` cannot
+            collide (the reserved-prefix rejection at the top of
+            ``run_trials`` enforces this). Only consumed today by
+            :class:`aorta.workloads._subprocess.SubprocessWorkload`,
+            which ``aorta probe`` wires up; other workloads ignore
+            the key. ``None`` (the default) leaves the key unset so
+            existing single-process workloads round-trip exactly as
+            before. Carrying ``argv`` here -- rather than letting it
+            leak into ``config_overrides`` -- preserves the "no
+            user-supplied ``_aorta_*`` keys" invariant and makes the
+            data-flow visible in the dataclass surface.
+        probe_extras: Opaque probe-mode metadata bundle injected into
+            the workload config as the reserved ``_aorta_probe_extras``
+            key, post-``config_overrides`` merge. Consumed only by
+            :class:`aorta.workloads._subprocess.SubprocessWorkload`
+            (Phase 1) to know its cell name, the requested
+            ``env_passthrough_mode``, the per-trial timeout, and the
+            resolved cell env-var bundle. ``None`` (default) leaves
+            the key unset so non-probe workloads see no change.
     """
 
     workload: str
@@ -223,6 +246,8 @@ class RunRequest:
     dataset_index: int = 0
     mitigation_index: int = 0
     save_logs: bool = False
+    subprocess_argv: tuple[str, ...] | None = None
+    probe_extras: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         # Defensively deep-copy mutable dict fields.  ``frozen=True``
@@ -230,6 +255,13 @@ class RunRequest:
         # ``object.__setattr__`` to install the copies.
         for field_name in ("extra_env", "config_overrides"):
             object.__setattr__(self, field_name, copy.deepcopy(getattr(self, field_name)))
+        # ``probe_extras`` is the same pattern as the two dict fields
+        # above -- frozen blocks attribute reassignment but does not
+        # stop the caller from mutating the nested dict. Deep-copy on
+        # construction so an in-flight request can never be mutated
+        # out from under the dispatcher. ``None`` short-circuits.
+        if self.probe_extras is not None:
+            object.__setattr__(self, "probe_extras", copy.deepcopy(self.probe_extras))
 
 
 def run_trials(request: RunRequest) -> list[TrialResult]:
@@ -476,6 +508,31 @@ def _run_single_trial(
     # in ``config_overrides`` so this assignment can't silently clobber
     # a caller-supplied value.
     config["_aorta_environment"] = asdict(env_descriptor)
+
+    # Subprocess-shaped workloads (currently SubprocessWorkload, wired
+    # by ``aorta probe``) receive their opaque user argv via a typed
+    # ``RunRequest.subprocess_argv`` field rather than via
+    # ``config_overrides`` -- the ``_aorta_*`` prefix is reserved and
+    # the dispatcher rejects user-supplied keys carrying it.  Inject
+    # AFTER the ``config_overrides`` spread so the same reserved-key
+    # rejection at the top of ``run_trials`` continues to guard the
+    # slot from accidental smuggling, then convert to a list so the
+    # JSON-serialised ``TrialResult.config`` is round-trippable
+    # (tuples are not JSON types).  When ``subprocess_argv`` is None
+    # (every existing caller pre-#188), the key stays absent and
+    # ``SubprocessWorkload.setup()`` raises a clear error if it ends
+    # up running without one.
+    if request.subprocess_argv is not None:
+        config["_aorta_subprocess_argv"] = list(request.subprocess_argv)
+
+    # ``probe_extras`` follows the same pattern: a typed RunRequest
+    # field is the only legal channel; the dispatcher copies it into
+    # the reserved ``_aorta_probe_extras`` slot post-merge.
+    # ``SubprocessWorkload`` reads cell name / env-passthrough mode /
+    # timeout / cell-env-bundle from this dict; non-probe workloads
+    # ignore it.
+    if request.probe_extras is not None:
+        config["_aorta_probe_extras"] = dict(request.probe_extras)
 
     # Snapshot the env BEFORE applying mitigation / extra_env so the
     # ``finally`` block can restore both the dispatcher's overlay and

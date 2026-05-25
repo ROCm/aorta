@@ -222,6 +222,136 @@ class TestRunTrials:
         with pytest.raises(ValueError, match=r"reserved '_aorta_' prefix"):
             run_trials(req)
 
+    def test_user_supplied_aorta_subprocess_argv_rejected(self, tmp_path):
+        """``RunRequest.subprocess_argv`` is the only legal channel.
+
+        Per issue #188 FR 1.11: users must not be able to smuggle argv
+        via ``config_overrides`` -- the reserved-prefix guard at the
+        top of ``run_trials`` blocks ``_aorta_subprocess_argv`` exactly
+        like every other ``_aorta_*`` key.
+        """
+        req = RunRequest(
+            workload="anything",
+            trials=1,
+            config_overrides={"_aorta_subprocess_argv": ["echo", "pwn"]},
+            results_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match=r"reserved '_aorta_' prefix"):
+            run_trials(req)
+
+    def test_subprocess_argv_injected_into_config(self, tmp_path):
+        """``RunRequest.subprocess_argv`` lands at ``config['_aorta_subprocess_argv']``.
+
+        Verifies the dispatcher injects the typed field AFTER
+        ``config_overrides`` is merged (per issue #188 FR 1.11), so a
+        user-supplied ``config_overrides`` cannot clobber the slot.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "argv_capturing"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="argv_capturing",
+                trials=1,
+                results_dir=tmp_path,
+                subprocess_argv=("echo", "hi"),
+            )
+            run_trials(req)
+        assert captured_config["_aorta_subprocess_argv"] == ["echo", "hi"]
+
+    def test_subprocess_argv_absent_when_none(self, tmp_path):
+        """No ``_aorta_subprocess_argv`` key when ``RunRequest.subprocess_argv`` is None.
+
+        Otherwise every existing workload's ``config`` would gain a
+        spurious ``None`` slot and the JSON-serialised trial result
+        would diverge from today's shape.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "noargv"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(workload="noargv", trials=1, results_dir=tmp_path)
+            run_trials(req)
+        assert "_aorta_subprocess_argv" not in captured_config
+
+    def test_probe_extras_injected_into_config(self, tmp_path):
+        """``RunRequest.probe_extras`` lands at ``config['_aorta_probe_extras']``.
+
+        The probe-mode runner builds this dict per cell so
+        ``SubprocessWorkload`` can pick up cell name / env-passthrough
+        mode / timeout / cell-env-bundle without parsing the recipe
+        itself.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "extras_capturing"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="extras_capturing",
+                trials=1,
+                results_dir=tmp_path,
+                probe_extras={"cell_name": "none-none", "timeout_per_trial": None},
+            )
+            run_trials(req)
+        assert captured_config["_aorta_probe_extras"] == {
+            "cell_name": "none-none",
+            "timeout_per_trial": None,
+        }
+
     def test_cleanup_error_is_logged_not_swallowed(self, tmp_path, caplog):
         """A failing ``cleanup()`` is logged so leaked resources are visible."""
         import logging
