@@ -2,7 +2,7 @@
 
 import click
 
-from aorta.cli import env, environments, mitigations, run, triage
+from aorta.cli import env, environments, mitigations, probe, run, triage
 
 
 @click.group()
@@ -14,6 +14,7 @@ def main() -> None:
 main.add_command(env.env)
 main.add_command(environments.environments)
 main.add_command(mitigations.mitigations)
+main.add_command(probe.probe)
 main.add_command(run.run)
 main.add_command(triage.triage)
 
