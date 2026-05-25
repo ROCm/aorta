@@ -134,3 +134,122 @@ def test_invalid_env_passthrough_mode():
     )
     assert result.exit_code != 0
     assert "bogus" in result.output or "Invalid value" in result.output
+
+
+# ---- FR 1.18 defensive parsing (post-bug-report from real-world misuse) --
+
+
+def test_flag_shaped_value_for_output_rejected(tmp_path):
+    """``--output --ticket X`` (i.e. $TMPDIR unset) is refused, not silently accepted.
+
+    Real-world bug: shell expands ``--output $TMPDIR --ticket SMOKE-1``
+    to ``--output --ticket SMOKE-1`` when TMPDIR is unset. Click would
+    otherwise pass ``--ticket`` as the value of ``--output``, silently
+    creating a directory literally named ``--ticket`` and dropping the
+    real ``--ticket`` flag entirely.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_minimal.yaml"),
+            "--output",
+            "--ticket",
+            "SMOKE-1",
+            "--",
+            "bash",
+            "-c",
+            "echo hi",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "looks like another flag" in result.output
+
+
+def test_flag_shaped_value_for_recipe_rejected():
+    """``--recipe --ticket X`` is refused (either by exists= or our callback).
+
+    For ``--recipe``, Click's ``Path(exists=True)`` validator fires before
+    the post-conversion callback, so the user sees "File '--ticket' does
+    not exist" -- which is also a clear, non-zero-exit error pointing
+    them at the misparse. Either message is acceptable; the contract is
+    that the bug isn't silently accepted.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        ["--recipe", "--ticket", "X", "--", "echo", "hi"],
+    )
+    assert result.exit_code != 0
+    assert "looks like another flag" in result.output or "does not exist" in result.output
+
+
+def test_flag_shaped_value_for_ticket_rejected(tmp_path):
+    """``--ticket --output X`` (transposed flags) is refused."""
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_minimal.yaml"),
+            "--ticket",
+            "--output",
+            str(tmp_path),
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "looks like another flag" in result.output
+
+
+def test_missing_double_dash_separator_rejected(tmp_path):
+    """Without ``--`` in raw argv, the CLI refuses to silently sweep positionals.
+
+    Real-world bug: a stray positional (e.g. ``SMOKE-1``) before any
+    ``--`` got swept into the user command argv as the executable name,
+    producing an exit-127 "fail" trial that was actually a CLI misparse.
+    The double-dash separator is mandatory.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_minimal.yaml"),
+            "--output",
+            str(tmp_path),
+            "SMOKE-1",
+            "bash",
+            "-c",
+            "echo hi",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "missing '--' separator" in result.output
+
+
+def test_user_command_starting_with_dash_rejected(tmp_path):
+    """A user command whose first token starts with ``-`` is refused.
+
+    Catches the residual case where ``--`` was present but a leftover
+    aorta-shaped flag (e.g. ``-v``) still leaked into ``argv[0]``.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_minimal.yaml"),
+            "--output",
+            str(tmp_path),
+            "--",
+            "-v",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "looks like a flag" in result.output

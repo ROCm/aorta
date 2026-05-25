@@ -27,6 +27,8 @@ import click
 from aorta.probe.cli_helpers import (
     ProbeUsageError,
     parse_env_passthrough_mode,
+    reject_flag_shaped_value,
+    require_double_dash_separator,
     validate_trailing_argv,
 )
 from aorta.probe.recipe_builder import ProbeExtras
@@ -40,14 +42,54 @@ from aorta.triage.recipe import (
 from aorta.triage.runner import run_recipe
 
 
+def _reject_flag_shaped_callback(
+    ctx: click.Context, param: click.Parameter, value: object
+) -> object:
+    """Click callback wiring :func:`reject_flag_shaped_value` onto string options.
+
+    Translates :class:`ProbeUsageError` into :class:`click.BadParameter`
+    so the standard Click usage rendering kicks in (with the option name
+    + usage hint).
+    """
+    if value is None or not isinstance(value, (str, Path)):
+        return value
+    option_name = f"--{param.name.replace('_', '-')}" if param.name else "<option>"
+    try:
+        reject_flag_shaped_value(option_name, str(value))
+    except ProbeUsageError as exc:
+        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
+    return value
+
+
+class _ProbeCommand(click.Command):
+    """``probe`` command that requires an explicit ``--`` separator in raw argv.
+
+    Implemented as a ``parse_args`` override so the check sees the same
+    argv that Click sees -- whether that's ``sys.argv[1:]`` from the real
+    entry point or the ``args=[...]`` list from ``CliRunner.invoke`` in
+    tests. ``--help`` short-circuits via ``ctx.resilient_parsing`` so the
+    help text still renders without requiring ``--``.
+    """
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if not ctx.resilient_parsing and "--help" not in args and "-h" not in args:
+            try:
+                require_double_dash_separator(args)
+            except ProbeUsageError as exc:
+                raise click.UsageError(str(exc), ctx=ctx) from exc
+        return super().parse_args(ctx, args)
+
+
 @click.command(
     name="probe",
+    cls=_ProbeCommand,
     context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False},
 )
 @click.option(
     "--recipe",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     required=True,
+    callback=_reject_flag_shaped_callback,
     help="Path to a 'mode: probe' YAML or JSON recipe file.",
 )
 @click.option(
@@ -55,11 +97,13 @@ from aorta.triage.runner import run_recipe
     type=click.Path(file_okay=False, path_type=Path),
     default=Path("probe_results"),
     show_default=True,
+    callback=_reject_flag_shaped_callback,
     help="Top-level output directory; <output>/<ticket>/<cell>/trial_<n>/ artifacts land here.",
 )
 @click.option(
     "--ticket",
     default=None,
+    callback=_reject_flag_shaped_callback,
     help=(
         "Ticket ID for output-dir grouping. When omitted, output is grouped "
         "under '_no_ticket_/'. Required for 'aorta bundle' downstream (Phase 3)."
@@ -121,9 +165,7 @@ def probe(
             r = dataclasses.replace(r, ticket=ticket)
         r = dataclasses.replace(
             r,
-            probe_extras=dataclasses.replace(
-                probe_extras, env_passthrough_mode=passthrough_mode
-            ),
+            probe_extras=dataclasses.replace(probe_extras, env_passthrough_mode=passthrough_mode),
         )
     except ProbeUsageError as exc:
         raise click.ClickException(str(exc)) from exc

@@ -8,6 +8,7 @@ no subprocess.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 VALID_ENV_PASSTHROUGH_MODES: tuple[Literal["inherit", "file"], ...] = ("inherit", "file")
@@ -21,6 +22,54 @@ class ProbeUsageError(ValueError):
     consumers -- don't need to depend on Click to catch it. The Click
     handler bridges this into a ``ClickException`` at the CLI boundary.
     """
+
+
+def reject_flag_shaped_value(option_name: str, value: str | None) -> None:
+    """Reject option values that look like another flag.
+
+    Defends against the classic ``--output $TMPDIR --ticket X`` bug where
+    ``$TMPDIR`` is unset: the shell collapses two spaces into one, Click
+    sees ``--output --ticket`` and silently accepts ``--ticket`` as the
+    *value* of ``--output``. The user's run then writes to a directory
+    literally named ``--ticket`` and ``--ticket X`` is lost. ``X`` and
+    everything after gets swept into the trailing argv.
+
+    Only the leading ``--`` is treated as suspicious. A single ``-foo`` or
+    a path that genuinely starts with ``-`` (rare but legal) is allowed
+    through; the user can quote or use ``./-foo`` to disambiguate if
+    needed. The leading-``--`` check covers ~all real-world recurrences
+    of the bug without false-positive risk on legitimate paths.
+    """
+    if value is None:
+        return
+    if value.startswith("--"):
+        raise ProbeUsageError(
+            f"{option_name}: value {value!r} looks like another flag. "
+            "Did you forget to set the variable or to quote the value? "
+            f"(common cause: '{option_name} $VAR ...' where $VAR is unset)"
+        )
+
+
+def require_double_dash_separator(raw_argv: Sequence[str]) -> None:
+    """Require an explicit ``--`` separator in the raw process argv.
+
+    Without ``--``, Click cheerfully sweeps any leftover positional
+    arguments into the trailing-argv list, masking flag-misparse bugs
+    (e.g. a stray ``SMOKE-1`` becoming the user-command executable name).
+    Requiring ``--`` makes the boundary explicit: aorta options on the
+    left, opaque user command on the right.
+
+    ``raw_argv`` is the full process argv (``sys.argv[1:]`` or the equivalent
+    for a tested CLI invocation). The check passes as long as ``--`` appears
+    somewhere; the trailing-argv emptiness check is a separate concern
+    handled by :func:`validate_trailing_argv`.
+    """
+    if "--" not in raw_argv:
+        raise ProbeUsageError(
+            "missing '--' separator. The user command must come after a "
+            "literal '--' so aorta knows where its own flags end. "
+            "Usage: aorta probe [options] -- <command> [args...]"
+        )
 
 
 def parse_env_passthrough_mode(value: str) -> Literal["inherit", "file"]:
@@ -42,17 +91,28 @@ def parse_env_passthrough_mode(value: str) -> Literal["inherit", "file"]:
 
 
 def validate_trailing_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
-    """Reject an empty trailing-argv list.
+    """Reject an empty / clearly-misparsed trailing-argv list.
 
     ``aorta probe -- <argv>`` is the only legal channel for the user
     command; ``aorta probe`` without a trailing ``--`` (or with ``--``
     followed by nothing) is a usage error. The "no parsing" invariant
     means we don't otherwise inspect ``argv`` -- it's forwarded
     byte-for-byte to :class:`SubprocessWorkload`.
+
+    A second guard rejects ``argv[0]`` that starts with ``-``: a real user
+    command's executable name is essentially never dash-prefixed, but a
+    leaked aorta option (e.g. ``-v`` smuggled past Click) is. Catching
+    this here turns a 127 exit-code "fail" trial into a clear usage error.
     """
     if not argv:
         raise ProbeUsageError(
             "no trailing argv supplied. Usage: aorta probe [options] -- <command> [args...]"
+        )
+    if argv[0].startswith("-"):
+        raise ProbeUsageError(
+            f"user command starts with {argv[0]!r}, which looks like a flag. "
+            "Place all aorta options before '--' and the user command after. "
+            "Usage: aorta probe [options] -- <command> [args...]"
         )
     return argv
 
@@ -77,5 +137,7 @@ __all__ = [
     "ProbeUsageError",
     "format_dry_run_line",
     "parse_env_passthrough_mode",
+    "reject_flag_shaped_value",
+    "require_double_dash_separator",
     "validate_trailing_argv",
 ]
