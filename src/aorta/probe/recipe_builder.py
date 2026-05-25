@@ -17,6 +17,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from aorta.probe.classifier.tier2_hang import (
+    DEFAULT_HANG_GRACE_SEC,
+    DEFAULT_HANG_WINDOW_SEC,
+)
+from aorta.probe.classifier.tier5_custom import (
+    CompiledPattern,
+    validate_custom_patterns,
+)
 from aorta.registry import get_mitigation
 from aorta.registry.errors import UnknownMitigationError
 from aorta.triage.recipe import (
@@ -95,6 +103,15 @@ class ProbeExtras:
     # only. ``dict`` rather than ``frozendict`` to keep the dataclass
     # JSON-serialisable for matrix.json.
     cell_envs: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Phase 2 additions (issue #188): compiled custom_patterns +
+    # hang knobs threaded onto the recipe so the runner can attach
+    # them to each cell's ``RunRequest.probe_extras`` without
+    # re-parsing the YAML. ``custom_patterns`` is empty by default
+    # so probe recipes that don't set the block round-trip exactly
+    # as Phase 1 produced them.
+    custom_patterns: tuple[CompiledPattern, ...] = ()
+    hang_window_sec: float = DEFAULT_HANG_WINDOW_SEC
+    hang_grace_period_at_start: float = DEFAULT_HANG_GRACE_SEC
 
 
 def _ensure_str_list(path_hint: str, raw: Any, *, allow_empty: bool = False) -> list[str]:
@@ -196,6 +213,22 @@ def _validate_env_passthrough_mode(raw: Any) -> Literal["inherit", "file"]:
     return "file" if raw == "file" else "inherit"
 
 
+def _validate_positive_seconds(path_hint: str, raw: Any, *, default: float) -> float:
+    """Validate a positive-seconds Phase-2 knob (hang_window_sec, etc.).
+
+    Returns ``default`` when ``raw`` is None / missing; otherwise
+    coerces to ``float`` after rejecting bools (which would pass
+    ``isinstance(int)`` checks) and non-positive numbers.
+    """
+    if raw is None:
+        return float(default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise RecipeSchemaError(f"{path_hint}: must be a number, got {type(raw).__name__}")
+    if raw <= 0:
+        raise RecipeSchemaError(f"{path_hint}: must be > 0 when set, got {raw}")
+    return float(raw)
+
+
 def build_probe_recipe_from_dict(
     data: dict,
     sidecar_files: tuple[Path, ...] | None,
@@ -236,6 +269,17 @@ def build_probe_recipe_from_dict(
     collect_paths = _validate_collect_paths(data.get("collect_paths"))
     timeout_per_trial = _validate_timeout_per_trial(data.get("timeout_per_trial"))
     env_passthrough_mode = _validate_env_passthrough_mode(data.get("env_passthrough_mode"))
+    custom_patterns = validate_custom_patterns(data.get("custom_patterns"))
+    hang_window_sec = _validate_positive_seconds(
+        "recipe.hang_window_sec",
+        data.get("hang_window_sec"),
+        default=DEFAULT_HANG_WINDOW_SEC,
+    )
+    hang_grace_period_at_start = _validate_positive_seconds(
+        "recipe.hang_grace_period_at_start",
+        data.get("hang_grace_period_at_start"),
+        default=DEFAULT_HANG_GRACE_SEC,
+    )
 
     # confound block is permitted (already in _PROBE_TOP_LEVEL) but
     # not meaningful for Tier-1-only Phase 1 -- pass it through with
@@ -355,6 +399,9 @@ def build_probe_recipe_from_dict(
         mitigation_axis=tuple(mitigation_axis),
         diagnostic_axis=tuple(diagnostic_axis),
         cell_envs=cell_envs,
+        custom_patterns=custom_patterns,
+        hang_window_sec=hang_window_sec,
+        hang_grace_period_at_start=hang_grace_period_at_start,
     )
 
     return Recipe(

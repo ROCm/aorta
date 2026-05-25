@@ -68,17 +68,28 @@ _PROBE_TOP_LEVEL = frozenset(
         "timeout_per_trial",
         "env_passthrough_mode",
         "confound",
+        # Phase 2 additions (issue #188): custom_patterns runs after
+        # the built-in classifier, hang knobs tune the Tier 2 monitor.
+        # Accepted only in mode: probe (the triage-mode check below
+        # rejects them when mode != "probe"); a top-level ``condition``
+        # key OUTSIDE a custom_patterns[*] entry is still Phase 3 and
+        # rejected via _PHASE_3_KEYS.
+        "custom_patterns",
+        "hang_window_sec",
+        "hang_grace_period_at_start",
     }
 )
-# Phase 2/3 keys -- intercepted at load time BEFORE the unknown-keys
-# rejection so the operator sees a clear "deferred to Phase 2/3"
-# pointer (see FR 1.19) instead of a generic "unknown key" message.
-# Without the explicit interception a Phase 1 recipe that copy-pasted
-# a future-tense ``custom_patterns:`` block from the design doc would
-# silently fall into the generic-unknown path and the operator would
-# have no signal that the key WILL be valid once Phase 2 ships.
-_PHASE_2_KEYS = frozenset({"custom_patterns", "condition"})
-_PHASE_3_KEYS = frozenset({"redaction"})
+# Phase 3 keys -- intercepted at load time BEFORE the unknown-keys
+# rejection so the operator sees a clear "deferred to Phase 3"
+# pointer instead of a generic "unknown key" message. Phase 2 keys
+# (custom_patterns, hang knobs) are now in _PROBE_TOP_LEVEL and
+# parsed normally when mode == "probe".
+#
+# A top-level ``condition:`` (outside a ``custom_patterns[*].match.condition``)
+# is reserved for a future Phase 3-style "fail-the-trial-by-condition"
+# block; rejected here so a typo'd indent of a custom_patterns
+# condition can't fall through to a silent no-op.
+_PHASE_3_KEYS = frozenset({"redaction", "condition"})
 # Union of valid keys -- used for the unknown-key rejection. Phase 2/3
 # keys are NOT in this set; they take a special-cased path so the
 # error message identifies the phase, not just "you misspelled it".
@@ -482,31 +493,24 @@ def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
 
 
 def _reject_phase_2_3_keys(data: dict) -> None:
-    """Intercept Phase 2/3 keys with a "deferred to phase N" pointer.
+    """Intercept Phase 3 keys with a "deferred to phase N" pointer.
 
-    Phase 1 (issue #188) intentionally ships only Tier 1 exit-code
-    verdicts; ``custom_patterns`` and ``condition`` need the sandbox
-    (Phase 2) and ``redaction`` needs the bundle integration (Phase 3).
-    Without this interception, a copy-pasted-from-the-design-doc
-    recipe carrying any of those keys would silently fall into the
-    generic "unknown top-level key" path and the operator would have
-    no signal that the key WILL be valid once the later phases ship.
+    Phase 2 (issue #188) accepts ``custom_patterns`` /
+    ``hang_window_sec`` / ``hang_grace_period_at_start`` in
+    ``mode: probe`` recipes (validated downstream); ``redaction``
+    and a top-level ``condition`` are deferred to Phase 3. Without
+    this interception, a copy-pasted-from-the-design-doc recipe
+    carrying ``redaction:`` would silently fall into the generic
+    "unknown top-level key" path and the operator would have no
+    signal that the key WILL be valid once Phase 3 ships.
     """
-    phase2 = set(data) & _PHASE_2_KEYS
-    if phase2:
-        raise RecipeSchemaError(
-            f"recipe: keys {sorted(phase2)} are deferred to Phase 2 "
-            "(built-in classifier + sandboxed custom_patterns); see "
-            "docs/plans/aorta-probe-188-rubric.md §PHASE 2. Remove these "
-            "keys from your Phase 1 probe recipe."
-        )
     phase3 = set(data) & _PHASE_3_KEYS
     if phase3:
         raise RecipeSchemaError(
             f"recipe: keys {sorted(phase3)} are deferred to Phase 3 "
             "(bundle integration + redaction + handout templates); see "
             "docs/plans/aorta-probe-188-rubric.md §PHASE 3. Remove these "
-            "keys from your Phase 1 probe recipe."
+            "keys from your recipe."
         )
 
 
@@ -523,9 +527,7 @@ def _validate_top_level(data: Any) -> None:
 
     mode = data.get("mode", "triage")
     if mode not in ("triage", "probe"):
-        raise RecipeSchemaError(
-            f"recipe.mode: must be 'triage' or 'probe', got {mode!r}"
-        )
+        raise RecipeSchemaError(f"recipe.mode: must be 'triage' or 'probe', got {mode!r}")
 
     unknown = set(data) - _VALID_TOP_LEVEL
     if unknown:
@@ -560,9 +562,7 @@ def _validate_top_level(data: Any) -> None:
             )
         for required in ("schema_version", "trials", "mitigation_axis", "diagnostic_axis"):
             if required not in data:
-                raise RecipeSchemaError(
-                    f"recipe (mode: probe): missing required key '{required}'"
-                )
+                raise RecipeSchemaError(f"recipe (mode: probe): missing required key '{required}'")
 
     version = data["schema_version"]
     if not isinstance(version, int) or isinstance(version, bool):

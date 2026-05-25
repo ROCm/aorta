@@ -128,23 +128,41 @@ diagnostic_axis: [none]
 # ---- FR 1.19 (Phase 2/3 rejection with pointer) --------------------------
 
 
-def test_phase_2_3_keys_rejected_with_pointer(tmp_path):
-    """Phase 2 keys raise with a 'deferred to Phase 2' pointer to the rubric."""
+def test_custom_patterns_accepted_in_probe_mode(tmp_path):
+    """Phase 2: ``custom_patterns`` loads in probe-mode (rubric §2.C)."""
     text = (
         _PROBE_MINIMAL
         + """\
 custom_patterns:
   - id: hip_oom
     match:
-      regex: "hipErrorOutOfMemory"
+      regex: "hipError_OutOfMemory"
 """
     )
-    with pytest.raises(RecipeSchemaError) as exc:
+    recipe = load_recipe(_write_yaml(tmp_path, text))
+    assert recipe.probe_extras is not None
+    assert len(recipe.probe_extras.custom_patterns) == 1
+    assert recipe.probe_extras.custom_patterns[0].detector_id == "custom:hip_oom"
+
+
+def test_custom_patterns_rejected_in_triage_mode(tmp_path):
+    """``custom_patterns`` is probe-mode-only; triage-mode rejects it."""
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 1
+cells:
+  - name: c
+    mitigations: [none]
+    environment: local
+custom_patterns:
+  - id: hip_oom
+    match:
+      regex: "hipError_OutOfMemory"
+"""
+    with pytest.raises(RecipeSchemaError, match="probe-mode only"):
         load_recipe(_write_yaml(tmp_path, text))
-    msg = str(exc.value)
-    assert "Phase 2" in msg
-    assert "custom_patterns" in msg
-    assert "aorta-probe-188-rubric.md" in msg
 
 
 def test_phase_3_keys_rejected_with_pointer(tmp_path):
@@ -162,7 +180,8 @@ redaction:
     assert "redaction" in msg
 
 
-def test_condition_key_rejected_with_pointer(tmp_path):
+def test_top_level_condition_rejected_as_phase_3(tmp_path):
+    """Top-level ``condition:`` (outside custom_patterns[*].match) is Phase 3."""
     text = (
         _PROBE_MINIMAL
         + """\
@@ -170,7 +189,7 @@ condition:
   - "exit_code != 0"
 """
     )
-    with pytest.raises(RecipeSchemaError, match="Phase 2"):
+    with pytest.raises(RecipeSchemaError, match="Phase 3"):
         load_recipe(_write_yaml(tmp_path, text))
 
 
@@ -301,6 +320,8 @@ def test_minimal_fixture_loads():
     assert len(r.cells) == 1
 
 
-def test_phase_2_fixture_rejected():
-    with pytest.raises(RecipeSchemaError, match="Phase 2"):
-        load_recipe(FIXTURES / "probe_with_phase_2_keys.yaml")
+def test_phase_2_fixture_loads_in_probe_mode():
+    """Phase 2: ``custom_patterns`` recipe loads cleanly (rubric §2.B FR 2.6)."""
+    recipe = load_recipe(FIXTURES / "probe_with_phase_2_keys.yaml")
+    assert recipe.probe_extras is not None
+    assert len(recipe.probe_extras.custom_patterns) == 1
