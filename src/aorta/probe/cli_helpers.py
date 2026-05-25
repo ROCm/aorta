@@ -50,12 +50,19 @@ def reject_flag_shaped_value(option_name: str, value: str | None) -> None:
         )
 
 
-def help_token_in_option_zone(args: Sequence[str], value_taking_options: frozenset[str]) -> bool:
-    """True iff ``--help`` / ``-h`` appears in the aorta-option zone.
+_DEFAULT_BYPASS_TOKENS: frozenset[str] = frozenset({"--help", "-h"})
+
+
+def help_token_in_option_zone(
+    args: Sequence[str],
+    value_taking_options: frozenset[str],
+    bypass_tokens: frozenset[str] = _DEFAULT_BYPASS_TOKENS,
+) -> bool:
+    """True iff a bypass token (default ``--help``/``-h``) appears in the aorta-option zone.
 
     The "aorta-option zone" is the prefix of ``args`` that comes BEFORE
     either the explicit ``--`` separator or the first non-option
-    positional argument (the user-command executable). Help tokens
+    positional argument (the user-command executable). Bypass tokens
     appearing AFTER the user command (``aorta probe --recipe r -- echo
     --help`` or ``aorta probe --recipe r echo --help`` with
     ``allow_interspersed_args=False``) are part of the user command and
@@ -67,8 +74,13 @@ def help_token_in_option_zone(args: Sequence[str], value_taking_options: frozens
     ``params``). ``--opt=value`` is consumed as a single token. Flag
     options (``-v``, ``--dry-run``) are single tokens. The first token
     that doesn't start with ``-`` (and isn't an option value) marks
-    the user-command boundary; ``--help`` at or after that boundary is
-    user-command content.
+    the user-command boundary; a bypass token at or after that boundary
+    is user-command content.
+
+    ``bypass_tokens`` defaults to ``{"--help", "-h"}`` for callers that
+    only need the help short-circuit. Phase 2 callers pass an extended
+    set to also include ``--list-patterns`` (a flag that prints the
+    Tier-4 catalogue and exits without consuming a user command).
 
     Defends against the bot-flagged misparse where ``aorta probe
     --recipe r --output o echo --help`` would silently skip the
@@ -77,7 +89,7 @@ def help_token_in_option_zone(args: Sequence[str], value_taking_options: frozens
     i = 0
     while i < len(args):
         token = args[i]
-        if token in ("--help", "-h"):
+        if token in bypass_tokens:
             return True
         if token == "--":
             return False

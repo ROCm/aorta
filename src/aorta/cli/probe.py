@@ -18,6 +18,17 @@ orchestration). The CLI's whole job is:
 The shared-engine test in ``tests/probe/test_shared_engine.py`` mocks
 ``run_recipe`` and invokes both ``aorta probe`` and ``aorta triage
 run`` -- both must reach the mock.
+
+Phase 2 adds two short-circuit flags:
+
+* ``--list-patterns`` -- print the built-in Tier-4 pattern catalogue
+  and exit 0 without loading any recipe. This is the rubric's
+  ``aorta probe list-patterns`` subcommand expressed as a flag so the
+  Phase 1 CLI surface (``aorta probe -- <argv>``) stays
+  byte-equivalent. See the PR description for the rationale.
+* ``--version`` (paired with ``--list-patterns``) -- print
+  ``aorta probe pattern library v<N> (aorta <pkg-version>)`` and
+  exit.
 """
 
 from __future__ import annotations
@@ -27,6 +38,10 @@ from pathlib import Path
 
 import click
 
+from aorta.probe.classifier.tier4_patterns import (
+    BUILTIN_PATTERN_VERSION,
+    all_patterns,
+)
 from aorta.probe.cli_helpers import (
     ProbeUsageError,
     help_token_in_option_zone,
@@ -45,6 +60,47 @@ from aorta.triage.recipe import (
     load_recipe,
 )
 from aorta.triage.runner import run_recipe
+
+
+def _aorta_package_version() -> str:
+    """Return the installed ``aorta`` package version (best-effort).
+
+    ``importlib.metadata.version`` is the supported API; falls back
+    to ``"unknown"`` only when the package metadata is missing
+    (editable install on a Python that doesn't expose dist-info,
+    very rare).
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("aorta")
+    except PackageNotFoundError:
+        return "unknown"
+    except Exception:  # pragma: no cover - defensive
+        return "unknown"
+
+
+def _print_list_patterns(show_version: bool) -> None:
+    """Render the Tier-4 catalogue or the version banner (rubric FR 2.5).
+
+    Plain stdout writes (no JSON) so the output is greppable from a
+    shell. Each pattern emits a stable three-line entry: ID,
+    description, sample regex match line.
+    """
+    if show_version:
+        click.echo(
+            f"aorta probe pattern library v{BUILTIN_PATTERN_VERSION} "
+            f"(aorta {_aorta_package_version()})"
+        )
+        return
+    click.echo(f"aorta probe built-in pattern library (v{BUILTIN_PATTERN_VERSION})")
+    click.echo("")
+    for pattern in all_patterns():
+        click.echo(f"  {pattern.detector_id}")
+        click.echo(f"      description: {pattern.description}")
+        click.echo(f"      regex     : {pattern.regex.pattern}")
+        click.echo(f"      sample    : {pattern.sample}")
+        click.echo("")
 
 
 def _reject_flag_shaped_callback(
@@ -72,18 +128,25 @@ class _ProbeCommand(click.Command):
     Implemented as a ``parse_args`` override so the check sees the same
     argv that Click sees -- whether that's ``sys.argv[1:]`` from the real
     entry point or the ``args=[...]`` list from ``CliRunner.invoke`` in
-    tests. ``--help``/``-h`` short-circuits the check, but ONLY when the
-    help token sits in the aorta-option zone (before the user-command
-    boundary). A naive ``"--help" in args`` bypass is wrong because
-    ``aorta probe --recipe r --output o echo --help`` would silently
-    skip the separator check -- ``--help`` is the user-command's flag
-    there, not aorta's. See :func:`help_token_in_option_zone` for the
-    scoping rule.
+    tests. ``--help``/``-h`` and ``--list-patterns`` short-circuit the
+    check, but ONLY when the bypass token sits in the aorta-option
+    zone (before the user-command boundary). A naive ``"--help" in
+    args`` bypass is wrong because ``aorta probe --recipe r --output o
+    echo --help`` would silently skip the separator check -- ``--help``
+    is the user-command's flag there, not aorta's. See
+    :func:`help_token_in_option_zone` for the scoping rule.
+
+    ``--list-patterns`` is grouped with the help bypass because it
+    also prints info and exits without consuming a user command --
+    the rubric's ``aorta probe list-patterns`` shape, expressed as
+    a flag to preserve the Phase 1 CLI byte-equivalently.
     """
+
+    _BYPASS_TOKENS: frozenset[str] = frozenset({"--help", "-h", "--list-patterns"})
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         if not ctx.resilient_parsing and not help_token_in_option_zone(
-            args, self._value_taking_option_tokens()
+            args, self._value_taking_option_tokens(), self._BYPASS_TOKENS
         ):
             try:
                 require_double_dash_separator(args)
@@ -118,9 +181,28 @@ class _ProbeCommand(click.Command):
     context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False},
 )
 @click.option(
+    "--list-patterns",
+    "list_patterns",
+    is_flag=True,
+    help=(
+        "Print the built-in Tier-4 pattern catalogue and exit. "
+        "Combines with --version to print the pattern-library version "
+        "and the aorta package version."
+    ),
+)
+@click.option(
+    "--version",
+    "show_version",
+    is_flag=True,
+    help=(
+        "With --list-patterns: print 'aorta probe pattern library "
+        "v<N> (aorta <pkg-version>)' and exit. Ignored without --list-patterns."
+    ),
+)
+@click.option(
     "--recipe",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
+    required=False,
     callback=_reject_flag_shaped_callback,
     help="Path to a 'mode: probe' YAML or JSON recipe file.",
 )
@@ -170,7 +252,9 @@ class _ProbeCommand(click.Command):
 )
 @click.argument("argv", nargs=-1, type=click.UNPROCESSED)
 def probe(
-    recipe: Path,
+    list_patterns: bool,
+    show_version: bool,
+    recipe: Path | None,
     output: Path,
     ticket: str | None,
     dry_run: bool,
@@ -184,7 +268,16 @@ def probe(
     command. Aorta never parses them; the only "boundary" is the
     optional ``probe.env`` file written under ``--env-passthrough-mode file``.
     """
+    if list_patterns:
+        _print_list_patterns(show_version=show_version)
+        return
+
     configure_verbose_logging(verbose)
+    if recipe is None:
+        raise click.UsageError(
+            "Missing option '--recipe'. Pass --recipe <path>, or run "
+            "with --list-patterns to print the built-in pattern catalogue."
+        )
     try:
         # ``--env-passthrough-mode`` defaults to None so the handler can
         # distinguish "user passed the flag" from "user omitted it". Per
