@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +110,22 @@ class RunRequest:
     workload: str
     trials: int
     environment: str = "local"
+    # Runtime override for the resolved :class:`Environment`'s
+    # ``buck_target`` field (#182 made it a first-class peer of
+    # ``docker`` / ``venv``). When set, takes effect AFTER
+    # :func:`get_environment` resolves ``environment``, so the named
+    # environment's other fields (``docker``, ``venv``,
+    # ``source_package``) are preserved. ``None`` means "leave the
+    # resolved environment's ``buck_target`` untouched" -- a named env
+    # that already declares ``buck_target`` keeps its value. This is
+    # the symmetric peer of how ``aorta env probe --buck-target``
+    # enriches the env snapshot; here it overlays the runtime recipe
+    # the workload's ``run()`` reads via
+    # ``config["_aorta_environment"]["buck_target"]``. Enables the
+    # BUCK_ONLY / BUCK_IN_DOCKER tiers of the aorta-internal regression-
+    # gate dispatcher (aorta-internal #42) without forcing operators
+    # to register a one-shot named environment per gate.
+    buck_target: str | None = None
     mitigations: tuple[str, ...] = ("none",)
     extra_env: dict[str, str] = field(default_factory=dict)
     steps: int | None = None
@@ -208,6 +224,18 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     #    built-ins and entry-point plugins.
     sidecar_files = list(request.sidecar_files) or None
     env_descriptor = get_environment(request.environment, extra_files=sidecar_files)
+
+    # 7a. Apply the ``buck_target`` runtime override (if any) AFTER
+    #     resolving the named environment, so the named env's
+    #     ``docker`` / ``venv`` / ``source_package`` fields are
+    #     preserved.  ``None`` means "no override" -- a named env that
+    #     already declares ``buck_target`` keeps its value.  This is
+    #     the dispatcher side of the ``--buck-target`` CLI flag
+    #     symmetric to ``aorta env probe --buck-target``; see the
+    #     ``RunRequest.buck_target`` docstring for the cross-repo
+    #     motivation (aorta-internal #42).
+    if request.buck_target is not None:
+        env_descriptor = replace(env_descriptor, buck_target=request.buck_target)
 
     # 8. Resolve and union mitigations.  ``aorta.registry.get_mitigation``
     #    returns a defensive ``dict[str, str]`` per-call, so later

@@ -40,6 +40,28 @@ from aorta.run.dispatcher import RunRequest, run_trials
     "--environment", default="local", show_default=True, help="Registered environment name."
 )
 @click.option(
+    "--buck-target",
+    type=str,
+    default=None,
+    help=(
+        "Buck2 target label (e.g. '//workloads/recom_repro:recom_repro') "
+        "to overlay onto the resolved environment's ``buck_target`` "
+        "field at run time (#182). Peer of the docker / venv tier hints: "
+        "the platform threads it, Buck-aware workload wrappers consume "
+        "it via ``config['_aorta_environment']['buck_target']`` and "
+        "decide whether to shell out via ``buck2 run <label>`` (see "
+        "registry/README.md). Other fields of the named --environment "
+        "(docker, venv, source_package) are preserved -- the override "
+        "is a pin on the Buck axis only. When omitted, the named "
+        "environment's existing ``buck_target`` (if any) is used as-is. "
+        "Symmetric to ``aorta env probe --buck-target`` (#163, A1.2b), "
+        "which enriches the env snapshot via ``buck2 cquery``; this "
+        "flag instead pins the runtime recipe so the workload can act "
+        "on it. Required by aorta-internal #42's BUCK_ONLY and "
+        "BUCK_IN_DOCKER regression-gate tiers."
+    ),
+)
+@click.option(
     "--mitigations", default="none", show_default=True, help="Comma-separated mitigation names."
 )
 @click.option(
@@ -86,6 +108,7 @@ def run(
     workload: str,
     trials: int,
     environment: str,
+    buck_target: str | None,
     mitigations: str,
     mitigation_files: tuple[Path, ...],
     steps: int | None,
@@ -107,6 +130,7 @@ def run(
             workload=workload,
             trials=trials,
             environment=environment,
+            buck_target=buck_target,
             mitigations=parse_mitigations(mitigations),
             extra_env=parse_extra_env(extra_env),
             steps=steps,

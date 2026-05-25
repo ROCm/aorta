@@ -344,3 +344,95 @@ class TestCliErrorHandling:
         assert result.exit_code != 0
         # Should fail on workload discovery first
         assert "not found" in result.output.lower()
+
+
+class TestBuckTargetOption:
+    """``--buck-target`` is the runtime Buck-tier override (#182 peer) that
+    enables aorta-internal #42's BUCK_ONLY / BUCK_IN_DOCKER dispatch.
+
+    Symmetric to ``aorta env probe --buck-target`` but on the run path:
+    overlays the resolved environment's ``buck_target`` field rather than
+    enriching a snapshot via ``buck2 cquery``.
+    """
+
+    def test_buck_target_option_exists(self):
+        """``aorta run --help`` advertises ``--buck-target``.
+
+        Pins the CLI surface so a regression that drops the option (or
+        renames it without bumping the cross-repo contract with
+        aorta-internal #42) trips here at help-render time rather than
+        at gate-dispatch time -- which is the original failure-mode
+        regression this whole change addresses.
+        """
+        runner = CliRunner()
+        result = runner.invoke(run, ["--help"])
+        assert result.exit_code == 0, result.output
+        assert "--buck-target" in result.output
+
+    def test_buck_target_default_is_none(self):
+        """Omitting ``--buck-target`` must not change pre-existing behavior.
+
+        Backward-compat guard: the named ``--environment`` resolves
+        exactly as it did before this flag existed, and any
+        ``buck_target`` it declares stays in effect. Tested by
+        confirming the CLI accepts an invocation that omits the new
+        flag and fails at the same point (workload discovery) it did
+        before.
+        """
+        runner = CliRunner()
+        result = runner.invoke(run, ["--workload", "nonexistent_workload"])
+        assert "Unknown option" not in result.output
+        assert "not found" in result.output.lower()
+
+    def test_buck_target_accepts_canonical_label(self):
+        """A canonical Buck label parses cleanly. Workload discovery
+        still fails (and that's fine -- this test pins click-parse
+        success, not end-to-end execution)."""
+        runner = CliRunner()
+        result = runner.invoke(
+            run,
+            [
+                "--workload",
+                "nonexistent_workload",
+                "--buck-target",
+                "//workloads/recom_repro:recom_repro",
+            ],
+        )
+        # The flag itself must not be the failure cause.
+        assert "Unknown option" not in result.output
+        assert "No such option" not in result.output
+        # Failure is the expected workload-discovery one.
+        assert "not found" in result.output.lower()
+
+    def test_buck_target_accepts_root_package_label(self):
+        """``//:aorta``-shaped labels parse (root package, no path).
+        This is the exact label PR aorta-internal#42's BUCK_ONLY
+        scaffold gate produces."""
+        runner = CliRunner()
+        result = runner.invoke(
+            run,
+            [
+                "--workload",
+                "nonexistent_workload",
+                "--buck-target",
+                "//:aorta",
+            ],
+        )
+        assert "Unknown option" not in result.output
+        assert "No such option" not in result.output
+
+    def test_buck_target_no_argument_value_is_error(self):
+        """``--buck-target`` requires a value. Pins this so a future
+        ``is_flag=True`` mistake (which would make the flag silently
+        accept no value and pass ``True`` as the buck_target, blowing
+        up later in ``replace(env, buck_target=True)``) is caught
+        here."""
+        runner = CliRunner()
+        result = runner.invoke(run, ["--workload", "x", "--buck-target"])
+        # Click raises a usage error when a value-bearing option has
+        # nothing after it.
+        assert result.exit_code != 0
+        assert (
+            "requires an argument" in result.output.lower()
+            or "expected" in result.output.lower()
+        )
