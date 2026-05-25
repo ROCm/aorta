@@ -513,7 +513,18 @@ class TestImageOption:
         parses too. The aorta-internal gate validator accepts both
         the bare and reference forms (see
         ``aorta_internal/gates/schema.py``); the CLI must accept
-        whatever the gate validator accepts."""
+        whatever the gate validator accepts.
+
+        Asserts the *positive* failure mode (workload-discovery)
+        rather than only the *negative* ("not rejected at parse")
+        signal: if the invocation false-paths into a usage error
+        or traceback that happens not to contain "Unknown option",
+        the negative-only check would silently pass. Mirrors the
+        belt-and-suspenders shape of
+        ``test_image_accepts_bare_sha256_digest`` above (and of
+        the equivalent ``TestBuckTargetOption`` tests on the buck
+        axis after PR #191's round-2 review fix).
+        """
         runner = CliRunner()
         result = runner.invoke(
             run,
@@ -524,8 +535,14 @@ class TestImageOption:
                 "rocm/pytorch@sha256:" + "c" * 64,
             ],
         )
+        # Flag itself must not be the failure cause.
         assert "Unknown option" not in result.output
         assert "No such option" not in result.output
+        # The expected workload-discovery failure path was reached
+        # (positive signal that arg-parse + the rest of the CLI
+        # plumbing actually ran).
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
 
     def test_image_no_argument_value_is_error(self):
         """``--image`` requires a value. Same trap-guard as the
