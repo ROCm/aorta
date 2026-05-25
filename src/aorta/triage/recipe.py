@@ -36,7 +36,13 @@ from aorta.registry import (
 
 SCHEMA_VERSION = 1
 
-_VALID_TOP_LEVEL = frozenset(
+# Top-level keys accepted by the recipe loader regardless of ``mode``.
+# Two banks: triage-mode keys (the historical set, also accepted in
+# probe-mode as a strict subset where they overlap) and probe-mode keys
+# (issue #188) which are ONLY accepted when ``mode == "probe"``. The
+# loader uses the union for unknown-key rejection and re-checks the
+# subset per mode below.
+_TRIAGE_TOP_LEVEL = frozenset(
     {
         "schema_version",
         "ticket",
@@ -49,6 +55,34 @@ _VALID_TOP_LEVEL = frozenset(
         "save_logs",
     }
 )
+_PROBE_TOP_LEVEL = frozenset(
+    {
+        "schema_version",
+        "ticket",
+        "mode",
+        "trials",
+        "mitigation_axis",
+        "diagnostic_axis",
+        "step_time_regex",
+        "collect_paths",
+        "timeout_per_trial",
+        "env_passthrough_mode",
+        "confound",
+    }
+)
+# Phase 2/3 keys -- intercepted at load time BEFORE the unknown-keys
+# rejection so the operator sees a clear "deferred to Phase 2/3"
+# pointer (see FR 1.19) instead of a generic "unknown key" message.
+# Without the explicit interception a Phase 1 recipe that copy-pasted
+# a future-tense ``custom_patterns:`` block from the design doc would
+# silently fall into the generic-unknown path and the operator would
+# have no signal that the key WILL be valid once Phase 2 ships.
+_PHASE_2_KEYS = frozenset({"custom_patterns", "condition"})
+_PHASE_3_KEYS = frozenset({"redaction"})
+# Union of valid keys -- used for the unknown-key rejection. Phase 2/3
+# keys are NOT in this set; they take a special-cased path so the
+# error message identifies the phase, not just "you misspelled it".
+_VALID_TOP_LEVEL = _TRIAGE_TOP_LEVEL | _PROBE_TOP_LEVEL | {"mode"}
 _VALID_CONFOUND_KEYS = frozenset({"threshold", "baseline_cell"})
 _VALID_CELL_KEYS = frozenset(
     {"name", "mitigations", "environment", "extra_env", "trials", "steps", "workload_config"}
@@ -232,6 +266,13 @@ class Recipe:
     source_sha256: str | None = None
     workload_config: dict[str, Any] = field(default_factory=dict)
     save_logs: bool = False
+    # Probe-mode (issue #188) extras attached to the recipe so the
+    # runner can branch on layout / resume / env-passthrough without
+    # re-parsing the YAML. ``None`` for every triage-mode recipe;
+    # populated only by :func:`aorta.probe.recipe_builder.build_probe_recipe_from_dict`.
+    # Typed as ``Any`` to keep this module's import graph cycle-free --
+    # the actual dataclass is :class:`aorta.probe.recipe_builder.ProbeExtras`.
+    probe_extras: Any | None = None
 
 
 def inline_env_name(docker_ref: str) -> str:
@@ -440,17 +481,89 @@ def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
     )
 
 
+def _reject_phase_2_3_keys(data: dict) -> None:
+    """Intercept Phase 2/3 keys with a "deferred to phase N" pointer.
+
+    Phase 1 (issue #188) intentionally ships only Tier 1 exit-code
+    verdicts; ``custom_patterns`` and ``condition`` need the sandbox
+    (Phase 2) and ``redaction`` needs the bundle integration (Phase 3).
+    Without this interception, a copy-pasted-from-the-design-doc
+    recipe carrying any of those keys would silently fall into the
+    generic "unknown top-level key" path and the operator would have
+    no signal that the key WILL be valid once the later phases ship.
+    """
+    phase2 = set(data) & _PHASE_2_KEYS
+    if phase2:
+        raise RecipeSchemaError(
+            f"recipe: keys {sorted(phase2)} are deferred to Phase 2 "
+            "(built-in classifier + sandboxed custom_patterns); see "
+            "docs/plans/aorta-probe-188-rubric.md §PHASE 2. Remove these "
+            "keys from your Phase 1 probe recipe."
+        )
+    phase3 = set(data) & _PHASE_3_KEYS
+    if phase3:
+        raise RecipeSchemaError(
+            f"recipe: keys {sorted(phase3)} are deferred to Phase 3 "
+            "(bundle integration + redaction + handout templates); see "
+            "docs/plans/aorta-probe-188-rubric.md §PHASE 3. Remove these "
+            "keys from your Phase 1 probe recipe."
+        )
+
+
 def _validate_top_level(data: Any) -> None:
     if not isinstance(data, dict):
         raise RecipeSchemaError(f"recipe top-level must be a mapping, got {type(data).__name__}")
-    for required in ("schema_version", "workload", "trials", "steps", "cells"):
-        if required not in data:
-            raise RecipeSchemaError(f"recipe: missing required key '{required}'")
+
+    # Phase 2/3 keys are intercepted BEFORE either the unknown-key or
+    # the per-mode required-key checks. A recipe with both a Phase 2
+    # key AND a typo'd top-level key should surface the Phase 2 error
+    # first because that's the one the operator can act on without
+    # changing their intent.
+    _reject_phase_2_3_keys(data)
+
+    mode = data.get("mode", "triage")
+    if mode not in ("triage", "probe"):
+        raise RecipeSchemaError(
+            f"recipe.mode: must be 'triage' or 'probe', got {mode!r}"
+        )
+
     unknown = set(data) - _VALID_TOP_LEVEL
     if unknown:
         raise RecipeSchemaError(
             f"recipe: unknown top-level keys {sorted(unknown)}; allowed: {sorted(_VALID_TOP_LEVEL)}"
         )
+
+    # Per-mode bank check: each mode has its own subset of valid keys.
+    # Probe-mode keys (mitigation_axis, diagnostic_axis, step_time_regex,
+    # collect_paths, timeout_per_trial, env_passthrough_mode) only make
+    # sense when ``mode == 'probe'`` -- in triage mode they would be
+    # silently ignored, which is exactly the silent-no-op footgun the
+    # strict-unknown-key policy is supposed to forbid.
+    if mode == "triage":
+        misplaced = set(data) & (_PROBE_TOP_LEVEL - _TRIAGE_TOP_LEVEL - {"mode"})
+        if misplaced:
+            raise RecipeSchemaError(
+                f"recipe: keys {sorted(misplaced)} are probe-mode only; "
+                "set 'mode: probe' at the recipe top level or remove these keys"
+            )
+        for required in ("schema_version", "workload", "trials", "steps", "cells"):
+            if required not in data:
+                raise RecipeSchemaError(f"recipe: missing required key '{required}'")
+    else:  # mode == "probe"
+        misplaced = set(data) & (_TRIAGE_TOP_LEVEL - _PROBE_TOP_LEVEL - {"mode"})
+        if misplaced:
+            raise RecipeSchemaError(
+                f"recipe: keys {sorted(misplaced)} are triage-mode only and "
+                "are not valid in a 'mode: probe' recipe (probe-mode synthesises "
+                "cells from mitigation_axis x diagnostic_axis and fixes the "
+                "workload internally). Remove these keys."
+            )
+        for required in ("schema_version", "trials", "mitigation_axis", "diagnostic_axis"):
+            if required not in data:
+                raise RecipeSchemaError(
+                    f"recipe (mode: probe): missing required key '{required}'"
+                )
+
     version = data["schema_version"]
     if not isinstance(version, int) or isinstance(version, bool):
         raise RecipeSchemaError(
@@ -631,6 +744,21 @@ def _build_recipe(
     source_sha256: str | None,
 ) -> Recipe:
     _validate_top_level(data)
+
+    # Probe-mode recipes go through a separate builder so the
+    # triage-mode path here stays byte-equivalent to today's loader.
+    # The import is local because aorta.probe.recipe_builder imports
+    # back into aorta.triage.recipe for Recipe / Cell / ConfoundCfg --
+    # a top-level import would be a cycle.
+    if data.get("mode", "triage") == "probe":
+        from aorta.probe.recipe_builder import build_probe_recipe_from_dict
+
+        return build_probe_recipe_from_dict(
+            data,
+            sidecar_files=sidecar_files,
+            source_path=source_path,
+            source_sha256=source_sha256,
+        )
 
     workload = data["workload"]
     _ensure_type("recipe", workload, str, "workload")
