@@ -175,6 +175,44 @@ def test_resolve_run_dir_without_ticket_routes_to_no_ticket(tmp_path):
     assert run_dir.parts[-3] == NO_TICKET_SLUG
 
 
+# ---- layout="flat_resume" (issue #188 FR 1.13) ---------------------------
+
+
+def test_flat_resume_layout(tmp_path):
+    """`layout="flat_resume"` returns <output>/<ticket>/ (no timestamp, no workload)."""
+    r = _simple_recipe(ticket="PROBE-1")
+    run_dir = resolve_run_dir(tmp_path, r, layout="flat_resume")
+    assert run_dir == tmp_path / "PROBE-1"
+    assert run_dir.is_dir()
+
+
+def test_flat_resume_layout_is_idempotent(tmp_path):
+    """Re-invoking with the same args returns the same path (resume model)."""
+    r = _simple_recipe(ticket="PROBE-1")
+    a = resolve_run_dir(tmp_path, r, layout="flat_resume")
+    b = resolve_run_dir(tmp_path, r, layout="flat_resume")
+    assert a == b
+
+
+def test_flat_resume_layout_no_ticket(tmp_path):
+    r = _simple_recipe(ticket=None)
+    run_dir = resolve_run_dir(tmp_path, r, layout="flat_resume")
+    assert run_dir == tmp_path / NO_TICKET_SLUG
+
+
+def test_default_layout_is_byte_equivalent_to_timestamped(tmp_path):
+    """Existing callers see no behaviour change -- the default is 'timestamped'."""
+    r = _simple_recipe(ticket="PROJ-1")
+    a = resolve_run_dir(tmp_path, r, timestamp="2026-01-01T00-00-00")
+    # Same call with explicit layout="timestamped" produces a sibling
+    # timestamped dir (a -2 suffix appended because parent path matches).
+    assert a == tmp_path / "PROJ-1" / "fsdp" / "2026-01-01T00-00-00"
+    b = resolve_run_dir(
+        tmp_path, r, timestamp="2026-01-01T00-00-00", layout="timestamped"
+    )
+    assert b == tmp_path / "PROJ-1" / "fsdp" / "2026-01-01T00-00-00-2"
+
+
 # ---- End-to-end via run_recipe -------------------------------------------
 
 

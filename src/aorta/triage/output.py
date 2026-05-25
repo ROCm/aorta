@@ -37,7 +37,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -86,22 +86,53 @@ def resolve_run_dir(
     output_dir: Path,
     recipe: Recipe,
     timestamp: str | None = None,
+    layout: Literal["timestamped", "flat_resume"] = "timestamped",
 ) -> Path:
-    """Return ``<output-dir>/<ticket>/<workload>/<timestamp>[-N]/``.
+    """Return the per-run output directory for the given layout.
 
-    Creates parents as needed. **Never overwrites an existing directory.**
-    The base candidate is ``<timestamp>``; if that already exists (two runs
-    in the same wall-clock second for the same ``(ticket, workload)`` --
-    common in CI loops or concurrent jobs), a numeric suffix ``-2``, ``-3``,
-    ... is appended until ``mkdir(exist_ok=False)`` succeeds. The race
-    between two parallel processes is resolved by ``mkdir`` itself: only one
-    can win for a given suffix, the loser bumps and retries.
+    Two layouts are supported:
 
-    The base directory ``<output_dir>/<ticket>/<workload>/`` IS created with
-    ``exist_ok=True`` -- it's a shared parent across runs and the
-    "no-overwrite" guarantee only applies to the per-run leaf.
+    * ``"timestamped"`` (default) -- preserves ``aorta triage run``
+      behaviour byte-equivalently. Returns
+      ``<output-dir>/<ticket>/<workload>/<timestamp>[-N]/``. Creates
+      parents as needed and **never overwrites an existing directory**:
+      the base candidate is ``<timestamp>``; if that already exists
+      (two runs in the same wall-clock second for the same
+      ``(ticket, workload)`` -- common in CI loops or concurrent
+      jobs), a numeric suffix ``-2``, ``-3``, ... is appended until
+      ``mkdir(exist_ok=False)`` succeeds. The race between two
+      parallel processes is resolved by ``mkdir`` itself: only one
+      can win for a given suffix, the loser bumps and retries. The
+      base directory ``<output_dir>/<ticket>/<workload>/`` IS created
+      with ``exist_ok=True`` -- it's a shared parent across runs and
+      the "no-overwrite" guarantee only applies to the per-run leaf.
+
+    * ``"flat_resume"`` -- the layout ``aorta probe`` (issue #188)
+      passes. Returns ``<output-dir>/<safe_slug(ticket)>/`` (or
+      ``<output-dir>/_no_ticket_/`` when ``ticket`` is ``None``) with
+      ``mkdir(parents=True, exist_ok=True)``. NO timestamp segment, NO
+      ``<workload>`` segment -- those would defeat the resume model
+      (re-running the same probe with the same ``--output`` and
+      ``--ticket`` must land in the same directory so per-cell
+      ``trial_<n>/result.json`` files can be detected as
+      "already complete"). The ``timestamp`` argument is ignored in
+      this branch but kept on the signature so callers don't need to
+      know which layout they're invoking.
     """
     ticket_slug = safe_slug(recipe.ticket) if recipe.ticket else NO_TICKET_SLUG
+
+    if layout == "flat_resume":
+        # Idempotent: the same (output_dir, ticket) tuple always yields
+        # the same leaf so re-runs can detect already-complete trials
+        # via ``aorta.probe.resume.is_trial_complete``. No timestamp
+        # segment because that would force a fresh leaf on every
+        # invocation -- which is exactly what ``aorta triage run``'s
+        # "timestamped" layout does and exactly what probe-mode is
+        # explicitly opting out of.
+        run_dir = Path(output_dir) / ticket_slug
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir
+
     workload_slug = safe_slug(recipe.workload)
     ts = timestamp or format_timestamp()
     parent = Path(output_dir) / ticket_slug / workload_slug
