@@ -1,9 +1,14 @@
-# `aorta probe` — Phase 1 Usage Walkthrough (issue #188)
+# `aorta probe` — Usage Walkthrough (issue #188, Phases 1+2)
 
-> Tier 1 only: verdict is `exit_code == 0 ? "pass" : "fail"`. No
-> pattern-matching, hang detection, dmesg scraping, sandboxing, or
-> bundling in this phase — see §2 / §3 of the rubric for what is
-> coming next.
+> **Phase 1 (Tier 1 only)**: verdict is `exit_code == 0 ? "pass" : "fail"`.
+> **Phase 2 (this walkthrough)**: five-tier classifier (`tier1:` process,
+> `tier2:` hang, `tier3:` kernel + GPU, `tier4:` built-in pattern library,
+> `custom:` user patterns), plus a sandboxed `condition:` evaluator for
+> custom patterns and a `--list-patterns` flag. No bundling /
+> redaction in this phase — see §3 of the rubric.
+>
+> See [classifier.md](classifier.md) for the full detector-ID reference
+> and [sandbox.md](sandbox.md) for the `condition` whitelist.
 
 `aorta probe` runs an **opaque user launch command** across the
 cartesian product of a **mitigation axis × diagnostic axis**, in an
@@ -68,8 +73,22 @@ timeout_per_trial: 1800           # seconds; null = no timeout
 env_passthrough_mode: inherit     # 'inherit' | 'file' — overridden by --env-passthrough-mode when that flag is passed
 ```
 
-Phase 2/3 keys (`custom_patterns`, `condition`, `redaction`) are
-**rejected at load time** with a "deferred to Phase 2/3" error message.
+Phase 2 keys accepted in `mode: probe` recipes (rubric §2.C):
+
+```yaml
+hang_window_sec: 30                # how long each hang signal must hold
+hang_grace_period_at_start: 60     # wait before Tier 2 fires
+custom_patterns:                   # Tier 5 user-defined patterns
+  - id: oom_killer
+    match:
+      regex: "out of memory \\(oom_kill"
+      condition: "exit_code == 137"   # optional; sandboxed at load
+    on_match: fail                    # 'fail' | 'warn' | 'info'
+    required_for_pass: false          # only valid with on_match: fail
+```
+
+Phase 3 keys (`redaction`, top-level `condition`) are still **rejected
+at load time** with a "deferred to Phase 3" error message.
 
 **Registered mitigation / diagnostic names.** The built-in registry
 (see `src/aorta/registry/mitigations.py`) currently ships only `none`,
@@ -139,31 +158,59 @@ of the three built-ins above) when copy-pasting this template.
 * Any flag not in the table above must come from the recipe; the CLI is
   intentionally **thin** (see `tests/probe/test_cli_parsing.py`).
 
-## 6. What the verdict means in Phase 1
+## 6. What the verdict means in Phase 2
+
+A Phase-2 `result.json` looks like (Phase 1 keys are a subset):
 
 Phase-1 `result.json` shape (exact keys written by
 `SubprocessWorkload.run()`):
 
 ```json
 {
-  "verdict": "pass",
-  "exit_code": 0,
+  "verdict": "fail",
+  "exit_code": 137,
   "walltime_sec": 12.345,
+  "peak_vram_mib": null,
   "argv": ["python3", "my_repro.py", "--steps", "100"],
   "cell_name": "none-none",
   "trial_index": 0,
+  "failure_detectors_fired": ["tier1:exit_nonzero", "tier4:hip_error"],
+  "warn_detectors_fired": ["custom:slow_iter"],
+  "capture": {"loss": "nan"},
+  "tier_durations_ms": {"tier1": 0.4, "tier2": 0.1, "tier3": 12.1, "tier4": 1.8, "tier5": 0.3},
   "env_passthrough_mode": "inherit",
   "timed_out": false
 }
 ```
 
-`verdict` is **exactly** `exit_code == 0 and not timed_out ? "pass" : "fail"`.
-Pattern matching, hang detection, and per-step time analysis are
-deferred to Phase 2 — Phase 2 extends this document by ADDING keys
-(never by removing), so any tool reading the Phase-1 keys above keeps
-working when Phase 2 ships.
+The verdict comes from `aorta.probe.classifier`:
 
-## 7. Shared engine guarantee
+1. Any `tier1:*` / `tier2:*` / `tier3:*` / `tier4:*` detector fires
+   OR any `custom_patterns[*]` with `on_match: fail` fires →
+   `verdict = "fail"`.
+2. `required_for_pass: true` patterns that don't fire add
+   `meta:missing_pass_signal` and flip the verdict.
+3. Otherwise → `verdict = "pass"`.
+
+Full ordering rules + per-tier detector IDs:
+[classifier.md](classifier.md). `condition:` expression whitelist:
+[sandbox.md](sandbox.md).
+
+## 7. `--list-patterns` (Phase 2 deviation)
+
+The rubric's `aorta probe list-patterns` subcommand is implemented as
+a **flag** on the existing `aorta probe` command:
+
+```bash
+aorta probe --list-patterns          # full Tier 4 catalogue (one entry per pattern)
+aorta probe --list-patterns --version  # 'aorta probe pattern library v1 (aorta <pkg>)'
+```
+
+This deviation preserves the Phase-1 CLI surface byte-equivalently —
+`aorta probe -- <argv>` still works without a subcommand prefix. The
+flag short-circuits before recipe loading.
+
+## 8. Shared engine guarantee
 
 `aorta probe` and `aorta triage run` both reach
 `aorta.triage.runner.run_recipe` — there is no parallel runner. The
