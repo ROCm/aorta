@@ -1,0 +1,156 @@
+"""Tests for the verdict-precedence resolver (FR 2.8)."""
+
+from __future__ import annotations
+
+import re
+
+import pytest
+
+from aorta.probe.classifier.tier5_custom import CompiledPattern, CustomScanResult
+from aorta.probe.classifier.verdict import (
+    DETECTOR_MISSING_PASS_SIGNAL,
+    VerdictInputs,
+    resolve,
+)
+
+
+def _required_pattern(raw_id: str) -> CompiledPattern:
+    return CompiledPattern(
+        detector_id=f"custom:{raw_id}",
+        regex=re.compile("x"),
+        condition_code=None,
+        condition_source=None,
+        on_match="fail",
+        required_for_pass=True,
+    )
+
+
+def _inputs(**kw) -> VerdictInputs:
+    base = {
+        "tier1": [],
+        "tier2": [],
+        "tier3": [],
+        "tier4": [],
+        "custom_result": CustomScanResult(),
+        "custom_required_patterns": (),
+    }
+    base.update(kw)
+    return VerdictInputs(**base)
+
+
+def test_pass_when_nothing_fired():
+    verdict = resolve(_inputs())
+    assert verdict.verdict == "pass"
+    assert verdict.failure_detectors_fired == []
+    assert verdict.warn_detectors_fired == []
+
+
+def test_tier1_fail_alone_is_enough():
+    verdict = resolve(_inputs(tier1=["tier1:sigsegv"]))
+    assert verdict.verdict == "fail"
+    assert verdict.failure_detectors_fired == ["tier1:sigsegv"]
+
+
+@pytest.mark.parametrize(
+    "kw,expected",
+    [
+        ({"tier1": ["tier1:exit_nonzero"]}, "tier1:exit_nonzero"),
+        ({"tier2": ["tier2:hang"]}, "tier2:hang"),
+        ({"tier3": ["tier3:amdgpu_reset"]}, "tier3:amdgpu_reset"),
+        ({"tier4": ["tier4:hip_error"]}, "tier4:hip_error"),
+    ],
+)
+def test_any_tier_failure_is_a_fail(kw, expected):
+    verdict = resolve(_inputs(**kw))
+    assert verdict.verdict == "fail"
+    assert expected in verdict.failure_detectors_fired
+
+
+def test_custom_fail_pattern_is_a_fail():
+    custom = CustomScanResult(fail_detectors=["custom:my_pattern"])
+    verdict = resolve(_inputs(custom_result=custom))
+    assert verdict.verdict == "fail"
+    assert "custom:my_pattern" in verdict.failure_detectors_fired
+
+
+def test_warn_alone_is_pass():
+    custom = CustomScanResult(warn_detectors=["custom:slow_iter"])
+    verdict = resolve(_inputs(custom_result=custom))
+    assert verdict.verdict == "pass"
+    assert verdict.failure_detectors_fired == []
+    assert verdict.warn_detectors_fired == ["custom:slow_iter"]
+
+
+def test_info_match_populates_capture_only():
+    """Info-only patterns populate ``capture`` but never the verdict lists."""
+    custom = CustomScanResult(capture={"bw": "240"})
+    verdict = resolve(_inputs(custom_result=custom))
+    assert verdict.verdict == "pass"
+    assert verdict.capture == {"bw": "240"}
+
+
+def test_encounter_order_preserved_across_tiers():
+    """All tiers contribute in T1->T2->T3->T4->custom-fail order."""
+    custom = CustomScanResult(fail_detectors=["custom:p"])
+    verdict = resolve(
+        _inputs(
+            tier1=["tier1:exit_nonzero"],
+            tier2=["tier2:hang"],
+            tier3=["tier3:amdgpu_reset"],
+            tier4=["tier4:hip_error", "tier4:nan_signature"],
+            custom_result=custom,
+        )
+    )
+    assert verdict.failure_detectors_fired == [
+        "tier1:exit_nonzero",
+        "tier2:hang",
+        "tier3:amdgpu_reset",
+        "tier4:hip_error",
+        "tier4:nan_signature",
+        "custom:p",
+    ]
+
+
+def test_required_for_pass_missing_marks_fail():
+    """``required_for_pass`` not fired -> ``meta:missing_pass_signal``."""
+    required = _required_pattern("benchmark_ok")
+    custom = CustomScanResult()  # nothing fired
+    verdict = resolve(
+        _inputs(
+            custom_result=custom,
+            custom_required_patterns=(required,),
+        )
+    )
+    assert verdict.verdict == "fail"
+    assert DETECTOR_MISSING_PASS_SIGNAL in verdict.failure_detectors_fired
+
+
+def test_required_for_pass_satisfied_no_meta():
+    """When every required pattern fired, ``meta:missing_pass_signal`` is NOT injected."""
+    required = _required_pattern("benchmark_ok")
+    custom = CustomScanResult(
+        fail_detectors=["custom:benchmark_ok"],
+        fired_required_ids={"custom:benchmark_ok"},
+    )
+    verdict = resolve(
+        _inputs(
+            custom_result=custom,
+            custom_required_patterns=(required,),
+        )
+    )
+    assert DETECTOR_MISSING_PASS_SIGNAL not in verdict.failure_detectors_fired
+
+
+def test_required_for_pass_no_required_patterns_no_meta():
+    """When the recipe declares no required patterns, meta detector is never injected."""
+    verdict = resolve(_inputs())
+    assert DETECTOR_MISSING_PASS_SIGNAL not in verdict.failure_detectors_fired
+
+
+def test_returned_lists_are_fresh_copies():
+    """Caller mutating verdict.failure_detectors_fired should not poison resolver state."""
+    verdict = resolve(_inputs(tier1=["tier1:exit_nonzero"]))
+    verdict.failure_detectors_fired.append("mutated")
+    # The second resolve must NOT see "mutated"; the resolver builds a new list each call.
+    verdict2 = resolve(_inputs(tier1=["tier1:exit_nonzero"]))
+    assert "mutated" not in verdict2.failure_detectors_fired

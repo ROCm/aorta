@@ -1,0 +1,150 @@
+"""Five-tier classifier for ``aorta probe`` (issue #188 Phase 2).
+
+Single entry point :func:`classify_trial` consumed by
+:class:`aorta.workloads._subprocess.SubprocessWorkload.run` post-exit.
+The tiers are individually importable for unit tests and the
+``aorta probe --list-patterns`` subcommand.
+
+The classifier intentionally lives OUTSIDE the workload module so
+the workload stays small and testable: the workload owns the
+subprocess; the classifier owns the verdict. Cross-tier ordering
+(``failure_detectors_fired`` reflects Tier 1 → Tier 2 → Tier 3 →
+Tier 4 → Tier 5) lives in :mod:`aorta.probe.classifier.verdict`.
+
+This package is the only module in :mod:`aorta.probe` whose name
+contains "classifier"; per the rubric's engine-reuse gate, no
+file under :mod:`aorta.probe` may include "runner" or "dispatcher"
+in its name (the shared-engine test enforces this — the classifier
+hangs off ``SubprocessWorkload.run()`` post-exit, never replaces
+the dispatcher).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from aorta.probe.classifier import (
+    tier1_process,
+    tier3_kernel,
+    tier4_patterns,
+    tier5_custom,
+)
+from aorta.probe.classifier.tier1_process import Tier1Context
+from aorta.probe.classifier.tier2_hang import DETECTOR_HANG
+from aorta.probe.classifier.tier3_kernel import AmdSmiSnapshot, Tier3State
+from aorta.probe.classifier.tier5_custom import CompiledPattern
+from aorta.probe.classifier.verdict import Verdict, VerdictInputs, resolve
+
+
+@dataclass(frozen=True)
+class TrialContext:
+    """Inputs to :func:`classify_trial`.
+
+    ``hang_detected`` is the post-monitor flag captured by
+    :class:`aorta.probe.classifier.tier2_hang.HangMonitor`. Pure
+    bool so the workload doesn't have to hold a live ``HangMonitor``
+    reference after stopping it.
+
+    ``tier3_state`` carries the "tier3 disabled" warning latch so
+    the classifier can scan dmesg / amd-smi without double-logging
+    across cells/trials (rubric §2.B FR 2.11). The runner owns
+    one instance per ``aorta probe`` invocation.
+
+    ``amd_smi_pre`` / ``amd_smi_post`` are the snapshots polled
+    before and after the trial; either being None disables Tier 3
+    GPU counters (fail-soft per FR 2.3).
+    """
+
+    exit_code: int
+    timed_out: bool
+    walltime_sec: float
+    trial_dir: Path
+    log_text: str
+    custom_patterns: tuple[CompiledPattern, ...] = ()
+    hang_detected: bool = False
+    peak_vram_mib: int | None = None
+    dmesg_text: str | None = None
+    tier3_state: Tier3State | None = None
+    amd_smi_pre: AmdSmiSnapshot | None = None
+    amd_smi_post: AmdSmiSnapshot | None = None
+
+
+def classify_trial(ctx: TrialContext) -> tuple[Verdict, dict[str, float]]:
+    """Run all five tiers and resolve the trial's verdict.
+
+    Returns ``(verdict, tier_durations_ms)`` where the second value
+    is the wall-clock time spent in each tier (logged to
+    ``result.json::tier_durations_ms`` for budget audits).
+
+    Tier 3 is fail-soft on missing binaries; passing a None
+    ``tier3_state`` skips Tier 3 entirely (rubric §2.B FR 2.3 +
+    FR 2.11). Tier 5 is skipped when ``custom_patterns`` is empty.
+    """
+    import time
+
+    tier_durations_ms: dict[str, float] = {}
+
+    t0 = time.perf_counter()
+    tier1 = tier1_process.detect(
+        Tier1Context(
+            exit_code=ctx.exit_code,
+            timed_out=ctx.timed_out,
+            trial_dir=ctx.trial_dir,
+        )
+    )
+    tier_durations_ms["tier1"] = (time.perf_counter() - t0) * 1000.0
+
+    t0 = time.perf_counter()
+    tier2 = [DETECTOR_HANG] if ctx.hang_detected else []
+    tier_durations_ms["tier2"] = (time.perf_counter() - t0) * 1000.0
+
+    t0 = time.perf_counter()
+    tier3: list[str] = []
+    if ctx.tier3_state is not None:
+        if ctx.dmesg_text is not None:
+            tier3.extend(tier3_kernel.scan_dmesg_text(ctx.dmesg_text))
+        if ctx.amd_smi_pre is not None and ctx.amd_smi_post is not None:
+            tier3.extend(
+                tier3_kernel.scan_amd_smi(ctx.tier3_state, ctx.amd_smi_pre, ctx.amd_smi_post)
+            )
+    tier_durations_ms["tier3"] = (time.perf_counter() - t0) * 1000.0
+
+    t0 = time.perf_counter()
+    tier4 = tier4_patterns.scan(ctx.log_text)
+    tier_durations_ms["tier4"] = (time.perf_counter() - t0) * 1000.0
+
+    t0 = time.perf_counter()
+    custom_result = tier5_custom.scan(
+        ctx.log_text,
+        ctx.custom_patterns,
+        exit_code=ctx.exit_code,
+        walltime_sec=ctx.walltime_sec,
+        peak_vram_mib=ctx.peak_vram_mib,
+    )
+    tier_durations_ms["tier5"] = (time.perf_counter() - t0) * 1000.0
+
+    verdict = resolve(
+        VerdictInputs(
+            tier1=tier1,
+            tier2=tier2,
+            tier3=tier3,
+            tier4=tier4,
+            custom_result=custom_result,
+            custom_required_patterns=ctx.custom_patterns,
+        )
+    )
+    return verdict, tier_durations_ms
+
+
+__all__ = [
+    "TrialContext",
+    "Verdict",
+    "VerdictInputs",
+    "classify_trial",
+    "resolve",
+    "tier1_process",
+    "tier3_kernel",
+    "tier4_patterns",
+    "tier5_custom",
+]
