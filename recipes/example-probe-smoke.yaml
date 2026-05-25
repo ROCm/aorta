@@ -1,0 +1,42 @@
+# Smoke-test recipe for `aorta probe` (issue #188).
+#
+# Tier-1, opaque user launch command:
+#
+#   aorta probe \
+#       --recipe recipes/example-probe-smoke.yaml \
+#       --output ./probe_results \
+#       --ticket PROBE-188 \
+#       -- \
+#       bash -c 'echo hi'
+#
+# Verdict is exit-code only ("pass" if zero else "fail"). Per-cell stdout
+# and stderr land in `<output>/<ticket>/<cell>/trial_<n>/`.
+#
+# Mitigation / diagnostic names below must resolve in the B3 registry --
+# only `none`, `tf32_off`, `xnack`, and `hsa_no_scratch_reclaim` are
+# guaranteed in the current public build. Swap in `none` for any name
+# you have not registered locally.
+schema_version: 1
+mode: probe
+
+ticket: PROBE-188-SMOKE
+
+trials: 2
+
+mitigation_axis:
+  - none
+  - tf32_off
+
+diagnostic_axis:
+  - none
+
+# Phase-1 stubs -- parsed and validated, but currently ignored by the
+# Tier-1 verdict path. Will become live in Phase 2 (classifier).
+step_time_regex: null
+collect_paths: []
+timeout_per_trial: 1800
+
+# 'inherit' = stamp mitigations on os.environ in-process; child Popen
+# inherits via env=os.environ.copy(). Switch to 'file' for an extra
+# chmod-0600 probe.env file + AORTA_ENV_FILE exported into the child.
+env_passthrough_mode: inherit
