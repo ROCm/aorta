@@ -165,6 +165,14 @@ class CellStats:
     configured_iters: int | None = None
     iters_display: str = "—"
     workload_config: dict[str, Any] = field(default_factory=dict)
+    # Phase 2 (issue #188): the highest-frequency Tier 4 / custom
+    # detector IDs across the cell's trials. ``None`` when no trial
+    # in the cell fired anything (or when ``result.json`` doesn't
+    # have the Phase-2 keys, e.g. triage-mode cells). The matrix.md
+    # renderer hides the ``Top failure`` / ``Top warn`` columns when
+    # NO cell carries data — so triage-mode runs stay byte-equivalent.
+    top_failure_detector_id: str | None = None
+    top_warn_detector_id: str | None = None
 
     @property
     def failure_rate(self) -> float:
@@ -536,6 +544,8 @@ def aggregate_cell(
             configured_iters=None,
             iters_display="—",
             workload_config=workload_config,
+            top_failure_detector_id=None,
+            top_warn_detector_id=None,
         )
 
     trial_count = len(trials)
@@ -579,6 +589,7 @@ def aggregate_cell(
 
     cell_source = _reduce_step_time_sources(trial_sources)
     exec_min, exec_max, configured_iters, iters_display = _aggregate_iter_counts(trials)
+    top_failure_id, top_warn_id = _aggregate_top_detector_ids(trials, trial_paths or [])
 
     if all_step_times:
         mean_step = float(statistics.fmean(all_step_times))
@@ -622,7 +633,91 @@ def aggregate_cell(
         configured_iters=configured_iters,
         iters_display=iters_display,
         workload_config=workload_config,
+        top_failure_detector_id=top_failure_id,
+        top_warn_detector_id=top_warn_id,
     )
+
+
+def _aggregate_top_detector_ids(
+    trials: list[Any],
+    trial_paths: list[str],
+) -> tuple[str | None, str | None]:
+    """Pick the highest-frequency detector ID from a cell's probe trials.
+
+    Reads ``failure_detectors_fired`` / ``warn_detectors_fired``
+    from each trial's ``result.json`` (the Phase-2 probe artifact
+    layout). Triage-mode trials never set these keys; the function
+    returns ``(None, None)`` and the matrix.md renderer hides the
+    columns.
+
+    Two source orders, in priority:
+
+    1. **In-memory** -- ``trial.result`` already carries the
+       per-trial WorkloadResult.metrics with the Phase-2 detector
+       lists (the SubprocessWorkload populates them in
+       ``metrics``). Cheapest path, no FS.
+    2. **On-disk fallback** -- when in-memory data isn't present
+       (e.g. resumed runs that load ``trial_*.json`` from a prior
+       invocation), the trial_paths entries point to the
+       dispatcher-written per-trial JSON; we'd need to walk to the
+       sibling probe-mode ``result.json`` to find the fired
+       detectors, which is too invasive for what's a presentation
+       layer. Phase 2 defers that fallback — the in-memory path
+       covers the live-run case (rubric §2.B FR 2.10).
+
+    "Highest frequency" is fire-count across the cell's trials, NOT
+    earliest-fired. Ties resolve by encounter order so the result
+    is stable across runs.
+    """
+    del trial_paths  # see docstring; on-disk fallback deferred
+    fail_counter: Counter[str] = Counter()
+    warn_counter: Counter[str] = Counter()
+    fail_order: list[str] = []
+    warn_order: list[str] = []
+    for trial in trials:
+        result = getattr(trial, "result", None)
+        if not isinstance(result, dict):
+            continue
+        # Two source shapes:
+        #   - SubprocessWorkload.run() routes the detector lists
+        #     through WorkloadResult.metrics. The dispatcher then
+        #     serialises WorkloadResult-as-dict into trial.result,
+        #     so result["metrics"]["failure_detectors_fired"] is
+        #     the in-memory channel.
+        #   - Some test trials populate ``result`` directly. Accept
+        #     either shape.
+        metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+        for source in (metrics, result):
+            for entry in source.get("failure_detectors_fired", []) or []:
+                if not isinstance(entry, str):
+                    continue
+                if entry not in fail_counter:
+                    fail_order.append(entry)
+                fail_counter[entry] += 1
+            for entry in source.get("warn_detectors_fired", []) or []:
+                if not isinstance(entry, str):
+                    continue
+                if entry not in warn_counter:
+                    warn_order.append(entry)
+                warn_counter[entry] += 1
+
+    top_fail = _pick_top(fail_counter, fail_order)
+    top_warn = _pick_top(warn_counter, warn_order)
+    return top_fail, top_warn
+
+
+def _pick_top(counter: Counter[str], order: list[str]) -> str | None:
+    """Return the most-fired detector ID, ties broken by encounter order."""
+    if not counter:
+        return None
+    best: str | None = None
+    best_count = -1
+    for detector_id in order:
+        count = counter[detector_id]
+        if count > best_count:
+            best = detector_id
+            best_count = count
+    return best
 
 
 __all__ = [

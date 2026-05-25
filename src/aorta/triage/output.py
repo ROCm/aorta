@@ -570,6 +570,13 @@ def write_matrix_md(
     # not a new confound tag.
     varying_config_keys = _varying_workload_config_keys(cell_stats)
     show_config = bool(varying_config_keys)
+    # Phase 2 (issue #188): Top failure / Top warn columns appear
+    # immediately after Failures when at least one cell in the
+    # matrix populates the corresponding field. Triage-mode runs
+    # never set them, so the columns stay hidden and the legacy
+    # matrix.md layout is byte-equivalent.
+    show_top_failure = any(c.top_failure_detector_id for c in cell_stats)
+    show_top_warn = any(c.top_warn_detector_id for c in cell_stats)
     header_cells: list[str] = [
         "Cell",
         "Mitigations",
@@ -578,6 +585,10 @@ def write_matrix_md(
     if show_config:
         header_cells.append("Config")
     header_cells.extend(["Failure rate", "Failures"])
+    if show_top_failure:
+        header_cells.append("Top failure")
+    if show_top_warn:
+        header_cells.append("Top warn")
     if show_iters:
         header_cells.append("Iters")
     header_cells.extend(["Mean step (ms)", "Confound"])
@@ -593,6 +604,10 @@ def write_matrix_md(
         if show_config:
             row.append(_format_workload_config(cell, varying_config_keys))
         row.extend([_format_failure_rate(cell), _format_failures(cell)])
+        if show_top_failure:
+            row.append(cell.top_failure_detector_id or "—")
+        if show_top_warn:
+            row.append(cell.top_warn_detector_id or "—")
         if show_iters:
             row.append(cell.iters_display)
         row.extend([_format_step_ms(cell), _format_confound(tag)])
@@ -662,6 +677,13 @@ def write_matrix_md(
             "on the configured count (defensive; should not happen under a single recipe). "
             "`—` = workload didn't track iterations. The column is hidden entirely "
             "when no cell in the matrix populates the new field."
+        )
+    if show_top_failure or show_top_warn:
+        lines.append(
+            "- `Top failure` / `Top warn` -- the most-frequently fired detector ID "
+            "(probe-mode Phase 2; issue #188) across the cell's trials. Built-in "
+            "(`tier1:`, `tier2:`, `tier3:`, `tier4:`) and user (`custom:`) IDs "
+            "are listed as peers. The columns are hidden in triage-mode runs."
         )
     if show_config:
         lines.append(
