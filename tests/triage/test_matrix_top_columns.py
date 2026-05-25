@@ -181,7 +181,9 @@ def test_empty_cells_render_em_dash_in_visible_columns(tmp_path: Path):
 
 
 def _trial_with_detectors(
-    *, failures: list[str] = None, warns: list[str] = None
+    *,
+    failures: list[str] | None = None,
+    warns: list[str] | None = None,
 ) -> SimpleNamespace:
     """A minimal trial-shaped object matching what the aggregator reads."""
     return SimpleNamespace(

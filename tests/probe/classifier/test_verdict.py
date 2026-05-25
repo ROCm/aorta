@@ -25,8 +25,8 @@ def _required_pattern(raw_id: str) -> CompiledPattern:
     )
 
 
-def _inputs(**kw) -> VerdictInputs:
-    base = {
+def _inputs(**kw: object) -> VerdictInputs:
+    base: dict[str, object] = {
         "tier1": [],
         "tier2": [],
         "tier3": [],
@@ -35,7 +35,7 @@ def _inputs(**kw) -> VerdictInputs:
         "custom_required_patterns": (),
     }
     base.update(kw)
-    return VerdictInputs(**base)
+    return VerdictInputs(**base)  # type: ignore[arg-type]
 
 
 def test_pass_when_nothing_fired():
