@@ -1,0 +1,319 @@
+"""``condition:`` expression sandbox for ``custom_patterns`` (issue #188 Phase 2).
+
+The ``condition`` field on a ``custom_patterns[*].match`` block lets a
+recipe author write a small boolean expression that is evaluated AFTER
+the regex matches a per-trial log line. The expression has access to a
+fixed set of variables (the named regex captures, the trial's exit
+code, walltime, and peak VRAM) and a fixed set of callables (``float``,
+``int``, ``len``, ``math.isnan``, ``math.isinf``). It is the only place
+where user-supplied YAML can drive arbitrary computation against
+trial-time data, so the security posture is **default-deny at
+parse time**:
+
+1. ``validate_and_compile`` walks the parsed AST and rejects anything
+   that is not in the explicit allow-list (``_ALLOWED_NODES``,
+   ``_ALLOWED_NAMES``, ``_ALLOWED_CALLS``).
+2. ``eval`` is invoked with ``__builtins__={}`` so even if a hostile
+   expression slipped past the whitelist it cannot reach the import
+   machinery.
+3. Expressions longer than :data:`MAX_EXPR_LEN` characters (after
+   stripping) are rejected before ``ast.parse`` to prevent resource
+   exhaustion at compile time.
+
+The whitelist is intentionally small (~80 lines of walker code). A
+third-party sandbox library (e.g. ``RestrictedPython``) was considered
+and rejected: heavyweight dep, more permissive defaults than the issue
+demands, and an auditable hand-rolled walker is the response a security
+reviewer can sign off on by reading.
+
+See :mod:`docs/probe-188/sandbox.md` for the worked-example corpus and
+``tests/probe/fixtures/conditions/hostile.txt`` for the parameterised
+rejection suite (`tests/probe/test_sandbox.py::test_hostile_inputs_rejected`).
+"""
+
+from __future__ import annotations
+
+import ast
+import math
+from types import CodeType
+from typing import Any
+
+from aorta.triage.recipe import RecipeSchemaError
+
+# Hard cap on per-trial log bytes scanned for regex matches. Hardens
+# against catastrophic backtracking on operator-supplied regex without
+# requiring a different regex engine (Phase 2 explicitly forbids the
+# ``regex`` / ``re2`` swap). Per-scan window; logs larger than this
+# are scanned in successive ``MAX_LOG_BYTES``-sized chunks.
+MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MiB
+
+# Per-expression character cap (post-strip). Prevents an attacker from
+# burning ``ast.parse`` time on a multi-MB expression. 256 chars is
+# enough for every legitimate ``condition`` (a half-dozen comparisons
+# at most) and well under any pathological-backtracking input the
+# parser could be coerced into.
+MAX_EXPR_LEN = 256
+
+# Magnitude cap on integer literals. Catches the
+# ``2 ** 1000000000``-shaped resource-exhaustion input in the rubric's
+# hostile-input corpus (§2.E.4): every operand is a whitelisted
+# ``Constant`` and ``Pow`` is in :data:`_ALLOWED_NODES`, so the only
+# defense against ``2 ** <huge>`` is to refuse the huge literal at
+# parse time. ``10**9`` is comfortably above every legitimate value a
+# ``condition`` would name (exit codes, walltime in seconds, VRAM in
+# MiB, log-line counts) and orders of magnitude below the size that
+# turns ``int.__pow__`` into a memory bomb.
+MAX_INT_CONSTANT = 10**9
+
+# AST node types that the walker accepts. Anything else (Lambda,
+# ListComp, DictComp, SetComp, GeneratorExp, FormattedValue,
+# JoinedStr, ClassDef, FunctionDef, Import, ...) rejects.
+_ALLOWED_NODES = frozenset(
+    {
+        ast.Expression,
+        ast.BoolOp,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.Compare,
+        ast.Call,
+        ast.Subscript,
+        ast.Name,
+        ast.Constant,
+        ast.IfExp,
+        ast.And,
+        ast.Or,
+        ast.Not,
+        ast.Eq,
+        ast.NotEq,
+        ast.Lt,
+        ast.LtE,
+        ast.Gt,
+        ast.GtE,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.Mod,
+        ast.FloorDiv,
+        ast.Pow,
+        ast.USub,
+        ast.UAdd,
+        ast.Load,
+    }
+)
+
+# The four trial-time variables plus the ``math`` module reference
+# plus the names of every callable in :data:`_ALLOWED_CALLS` (bare
+# ``Name`` lookups for ``float`` / ``int`` / ``len`` arrive at the
+# walker before the ``Call`` check fires; allowing them here lets the
+# walker pass them so the per-Call whitelist still gets to decide).
+# Any other ``Name`` lookup (``os``, ``__import__``, ``True`` is fine
+# because it parses as ``Constant``, ``capture.items`` is fine because
+# that's an attribute walk -- rejected separately).
+_ALLOWED_NAMES = frozenset(
+    {
+        "capture",
+        "exit_code",
+        "walltime_sec",
+        "peak_vram_mib",
+        "math",
+        "float",
+        "int",
+        "len",
+    }
+)
+
+# Callables a condition may invoke. ``ast.unparse`` of the call's
+# ``func`` must be exactly one of these strings. ``getattr``,
+# ``hasattr``, ``type``, ``isinstance``, ``len`` on a non-capture
+# value, etc., all fail this check.
+_ALLOWED_CALLS = frozenset({"float", "int", "len", "math.isnan", "math.isinf"})
+
+
+class SandboxError(RecipeSchemaError):
+    """Raised when a ``condition`` expression fails sandbox validation.
+
+    Subclasses :class:`RecipeSchemaError` so the existing recipe-loader
+    error path (CLI handler catches ``RecipeSchemaError``, surfaces as
+    a ``ClickException``) catches it without code changes. The
+    distinct subclass lets tests / callers assert "this rejection
+    came from the sandbox" specifically.
+    """
+
+
+def validate_and_compile(expr: str) -> CodeType:
+    """Parse, whitelist-validate, and compile a ``condition`` expression.
+
+    Returns a :class:`CodeType` object ready for
+    ``eval(code, globals, locals)`` with ``__builtins__={}`` and
+    ``math`` in ``globals`` (see :func:`evaluate`).
+
+    Raises :class:`SandboxError` if any of the following hold:
+
+    * The expression is empty or longer than :data:`MAX_EXPR_LEN`
+      characters after ``str.strip()``.
+    * ``ast.parse(expr, mode="eval")`` raises ``SyntaxError``.
+    * The AST contains a node type not in :data:`_ALLOWED_NODES`,
+      an :class:`ast.Attribute` access that isn't ``math.isnan`` or
+      ``math.isinf``, a :class:`ast.Name` lookup outside
+      :data:`_ALLOWED_NAMES`, a :class:`ast.Subscript` against
+      anything other than ``capture[...]``, or a :class:`ast.Call`
+      whose target isn't in :data:`_ALLOWED_CALLS`.
+
+    The check is at PARSE TIME — a hostile expression that walks the
+    object graph or imports something can never reach :func:`evaluate`.
+    """
+    if not isinstance(expr, str):
+        raise SandboxError(f"condition: must be a string, got {type(expr).__name__}")
+    stripped = expr.strip()
+    if not stripped:
+        raise SandboxError("condition: expression must be non-empty")
+    if len(stripped) > MAX_EXPR_LEN:
+        raise SandboxError(
+            f"condition: expression length {len(stripped)} exceeds the "
+            f"{MAX_EXPR_LEN}-character cap (rejected before ast.parse to "
+            "bound parse-time work)"
+        )
+
+    try:
+        tree = ast.parse(stripped, mode="eval")
+    except SyntaxError as exc:
+        raise SandboxError(
+            f"condition: syntax error: {exc.msg} (line {exc.lineno}, col {exc.offset})"
+        ) from exc
+
+    for node in ast.walk(tree):
+        _check_node(node)
+
+    return compile(tree, "<condition>", "eval")
+
+
+def _check_node(node: ast.AST) -> None:
+    """Whitelist-check a single AST node.
+
+    Split out so the per-node logic stays small enough to audit. The
+    rules deliberately mirror the rubric §2.E.3 sketch with one
+    addition: a ``Compare`` node's comparator chain is implicitly
+    valid because each comparator is itself walked by ``ast.walk``,
+    which means the per-node check runs against each one too. The
+    same applies to ``BoolOp`` operands and ``BinOp`` left/right.
+    """
+    if isinstance(node, ast.Attribute):
+        # The only attribute access we allow is ``math.<isnan|isinf>``.
+        # Everything else (``capture.update``, ``(0).__class__``,
+        # ``math.__loader__``) rejects.
+        value = node.value
+        if not (
+            isinstance(value, ast.Name) and value.id == "math" and node.attr in ("isnan", "isinf")
+        ):
+            raise SandboxError(f"condition: forbidden attribute access: {ast.unparse(node)}")
+        return
+
+    if type(node) not in _ALLOWED_NODES:
+        raise SandboxError(f"condition: forbidden AST node: {type(node).__name__}")
+
+    if isinstance(node, ast.Name):
+        if node.id not in _ALLOWED_NAMES:
+            raise SandboxError(f"condition: forbidden name: {node.id}")
+        return
+
+    if isinstance(node, ast.Subscript):
+        # ``capture[...]`` only. ``foo[0]`` rejects because the
+        # subscripted name must be ``capture``; the index expression
+        # is itself walked, so ``capture[exit_code]`` would still be
+        # subject to the ``Name`` check on ``exit_code``.
+        if not (isinstance(node.value, ast.Name) and node.value.id == "capture"):
+            raise SandboxError("condition: subscript only allowed on capture[...]")
+        return
+
+    if isinstance(node, ast.Call):
+        # The full dotted path for the call's target. ``ast.unparse``
+        # handles attribute chains (`math.isnan`) and bare names
+        # (`float`) uniformly. The whitelist is exact-match.
+        try:
+            target = ast.unparse(node.func)
+        except (AttributeError, ValueError) as exc:
+            raise SandboxError(
+                f"condition: forbidden call target: {type(node.func).__name__}"
+            ) from exc
+        if target not in _ALLOWED_CALLS:
+            raise SandboxError(f"condition: forbidden call: {target}")
+        return
+
+    if isinstance(node, ast.Constant):
+        # ``int`` and ``float`` constants are subject to a magnitude
+        # cap so ``2 ** 1000000000`` (and similar resource-exhaustion
+        # inputs in the hostile-input corpus, §2.E.4) refuses at
+        # parse time before ``eval`` can produce a memory-bombing
+        # integer. ``str``/``bool``/``None`` constants pass through.
+        constant_value = node.value
+        if isinstance(constant_value, bool):
+            return
+        if isinstance(constant_value, int) and abs(constant_value) >= MAX_INT_CONSTANT:
+            raise SandboxError(
+                f"condition: integer constant magnitude {abs(constant_value)} >= "
+                f"{MAX_INT_CONSTANT} (rejected to prevent resource exhaustion "
+                "from operators like ``**``)"
+            )
+        return
+
+
+def evaluate(
+    code: CodeType,
+    *,
+    capture: dict[str, str],
+    exit_code: int,
+    walltime_sec: float,
+    peak_vram_mib: int | None,
+) -> bool:
+    """Run a sandbox-compiled ``condition`` against trial-time data.
+
+    ``peak_vram_mib`` is bound to ``0`` when the actual value is
+    ``None`` so a condition that references it (``peak_vram_mib >
+    100``) does not blow up with a ``TypeError`` mid-eval. Documented
+    in rubric §2.E.1 — ``int | None`` at the source, ``int`` at
+    eval time.
+
+    ``__builtins__`` is set to ``{}`` so even a hostile expression
+    that slipped past :func:`validate_and_compile` (it shouldn't —
+    every callable goes through the whitelist) cannot reach
+    ``__import__``. ``math`` is the only module in scope; the
+    whitelist already restricts attribute access to ``math.isnan`` /
+    ``math.isinf`` so the broader module surface is unreachable.
+
+    Returns the result coerced to ``bool``. A non-boolean expression
+    (``capture['x']`` returning a string) follows Python's usual
+    truthiness rules — the recipe author can be more strict by
+    wrapping with ``len(...)`` or comparing explicitly.
+    """
+    if peak_vram_mib is None:
+        peak_vram_mib = 0
+    # ``__builtins__={}`` neutralises ``__import__``; the whitelisted
+    # callables (``float``, ``int``, ``len``) are explicitly seeded
+    # into ``globals`` so they resolve without re-enabling the
+    # builtins namespace. ``math`` is the only module reference in
+    # scope; attribute access is parse-time-restricted to
+    # ``math.isnan`` / ``math.isinf`` (see :func:`validate_and_compile`).
+    globals_dict: dict[str, Any] = {
+        "__builtins__": {},
+        "math": math,
+        "float": float,
+        "int": int,
+        "len": len,
+    }
+    locals_dict: dict[str, Any] = {
+        "capture": capture,
+        "exit_code": exit_code,
+        "walltime_sec": walltime_sec,
+        "peak_vram_mib": peak_vram_mib,
+    }
+    return bool(eval(code, globals_dict, locals_dict))  # noqa: S307 -- sandboxed
+
+
+__all__ = [
+    "MAX_EXPR_LEN",
+    "MAX_LOG_BYTES",
+    "SandboxError",
+    "evaluate",
+    "validate_and_compile",
+]

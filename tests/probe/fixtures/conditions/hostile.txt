@@ -1,0 +1,15 @@
+__import__('os').system('rm -rf /')
+(0).__class__.__bases__[0].__subclasses__()
+().__class__.__mro__[-1]
+open('/etc/passwd').read()
+exec("import os; os.system('id')")
+eval("1+1")
+lambda x: x
+[x for x in range(10)]
+{k: v for k, v in capture.items()}
+capture.update({'pwn': '1'})
+type(capture)
+getattr(capture, 'pop')('eval_loss')
+capture['x'].__class__
+math.__loader__.load_module('os')
+2 ** 1000000000  # length-restricted: reject expressions > 256 chars
