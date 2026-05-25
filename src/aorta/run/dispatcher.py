@@ -51,6 +51,24 @@ class RunRequest:
         workload: Name of the workload to run (from entry-point group).
         trials: Number of trials to execute.
         environment: Environment name (default: local).
+        buck_target: Optional runtime overlay for the resolved
+            :class:`Environment`'s ``buck_target`` field (#182). When
+            set, takes effect AFTER :func:`get_environment` resolves
+            ``environment``, so the named environment's other fields
+            (``docker`` / ``venv`` / ``source_package``) are
+            preserved -- the override is a pin on the Buck axis only.
+            ``None`` (the default) means "no override": a named env
+            that already declares ``buck_target`` keeps its value,
+            and every pre-existing ``RunRequest`` invocation behaves
+            unchanged. Symmetric peer of ``aorta env probe
+            --buck-target`` (#163). Threaded into
+            ``config['_aorta_environment']['buck_target']`` for the
+            workload's wrapper to consume. **Keyword-only**: this
+            field is declared with ``kw_only=True`` so adding it
+            before existing positional fields like ``mitigations``
+            does NOT shift the positional ``__init__`` signature
+            (positional callers continue to interpret the 4th arg as
+            ``mitigations``).
         mitigations: Tuple of mitigation names to apply.
         extra_env: Additional environment variables (override mitigations).
         steps: Number of steps per trial (workload-specific).
@@ -125,7 +143,20 @@ class RunRequest:
     # BUCK_ONLY / BUCK_IN_DOCKER tiers of the aorta-internal regression-
     # gate dispatcher (aorta-internal #42) without forcing operators
     # to register a one-shot named environment per gate.
-    buck_target: str | None = None
+    #
+    # ``kw_only=True`` is the backward-compat guard: declaring this
+    # field BEFORE ``mitigations`` (so the docstring "Attributes:"
+    # order matches the conceptual "env-tier overlay then mitigations"
+    # grouping) would otherwise shift ``mitigations`` from the 4th
+    # positional slot to the 5th, silently breaking any external
+    # caller that constructed a ``RunRequest`` positionally. With
+    # ``kw_only=True``, Python places ``buck_target`` last in
+    # ``__init__``'s signature regardless of class-body order, so
+    # positional callers continue to receive ``mitigations`` at slot
+    # 4. (Caught at review on the symmetric --image PR; applied here
+    # too for symmetry and to address the same principle at its
+    # root.)
+    buck_target: str | None = field(default=None, kw_only=True)
     mitigations: tuple[str, ...] = ("none",)
     extra_env: dict[str, str] = field(default_factory=dict)
     steps: int | None = None

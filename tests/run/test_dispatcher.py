@@ -970,6 +970,79 @@ class TestConfigOverrides:
         assert results[0].execution_env == expected
 
 
+class TestBuckTargetIsKeywordOnly:
+    """``RunRequest.buck_target`` MUST be keyword-only.
+
+    Pins the backward-compat guarantee that adding ``buck_target``
+    to ``RunRequest`` does not shift the positional ``__init__``
+    signature. The field is declared BEFORE ``mitigations`` in the
+    source so the docstring "Attributes:" order matches the
+    conceptual grouping (env-tier overlay first, then mitigation
+    set); without ``kw_only=True`` that ordering would silently
+    move ``mitigations`` from positional slot 4 to slot 5, breaking
+    every external caller that constructed a ``RunRequest``
+    positionally as ``RunRequest("wl", 1, "env", ("mit",))``.
+
+    Single-purpose class -- if this trips, the regression is one
+    bit (the ``kw_only=True`` got dropped from the field()) and
+    the fix is one bit too.
+    """
+
+    def test_buck_target_signature_is_keyword_only(self):
+        """Inspect the dataclass's __init__ signature directly and
+        assert ``buck_target``'s ``kind`` is ``KEYWORD_ONLY``.
+
+        Direct signature inspection (rather than a "construct with
+        positional and expect TypeError" probe) is the right shape
+        of assertion here because ``RunRequest`` has many positional
+        fields AFTER ``buck_target``'s source position
+        (``extra_env``, ``steps``, ``config_overrides``, ...).
+        Removing ``buck_target`` from the positional list just
+        slides those down -- a string passed as the 5th positional
+        would land in ``extra_env`` and silently typecheck
+        (``deepcopy('a string')`` is fine), so a "construct +
+        TypeError" probe would false-pass.
+
+        Inspecting ``Parameter.kind`` is the single bit of truth:
+        if ``kw_only=True`` is dropped from the field(), this
+        assertion trips with a clear "POSITIONAL_OR_KEYWORD vs
+        KEYWORD_ONLY" diff in the failure message.
+        """
+        import inspect
+        sig = inspect.signature(RunRequest)
+        assert sig.parameters["buck_target"].kind == inspect.Parameter.KEYWORD_ONLY, (
+            f"buck_target must be KEYWORD_ONLY (so adding it before "
+            f"existing positional fields like ``mitigations`` doesn't "
+            f"shift those fields' positional slots and break external "
+            f"positional callers of ``RunRequest``). Got "
+            f"{sig.parameters['buck_target'].kind}."
+        )
+
+    def test_mitigations_is_still_positional_at_slot_4(self):
+        """Sanity: ``mitigations`` remains positionally addressable
+        as the 4th argument despite ``buck_target`` being declared
+        before it in the source. The whole point of ``kw_only=True``
+        on ``buck_target`` is to keep this true.
+
+        Pre-PR-#191 behavior: ``RunRequest("wl", 1, "env",
+        ("none",))`` constructed with ``mitigations=("none",)``.
+        Post-PR-#191 behavior MUST be identical.
+        """
+        req = RunRequest("wl", 1, "env", ("none",))
+        assert req.mitigations == ("none",)
+        assert req.buck_target is None
+
+    def test_buck_target_works_as_keyword(self):
+        """Companion positive case: kwarg form is the only accepted
+        spelling, and it sets the field correctly. Cheap belt-and-
+        suspenders pin so a future ``kw_only=True`` typo can't pass
+        the failure-path test by simply rejecting both spellings.
+        """
+        req = RunRequest("wl", 1, "env", buck_target="//foo:bar")
+        assert req.buck_target == "//foo:bar"
+        assert req.mitigations == ("none",)
+
+
 class TestBuckTargetOverride:
     """RunRequest.buck_target overlays the resolved environment's Buck pin.
 
@@ -1101,7 +1174,7 @@ class TestBuckTargetOverride:
         relied on a named env's declared ``buck_target`` must
         continue to see that value flow into
         ``_aorta_environment``. Otherwise this CLI addition would
-        silently broken every existing buck-aware named env.
+        silently break every existing buck-aware named env.
         """
         from aorta.registry import Environment
 
