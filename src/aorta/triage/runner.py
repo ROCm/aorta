@@ -32,7 +32,7 @@ import logging
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 
@@ -539,6 +539,10 @@ def _run_one_cell(
     recipe: Recipe,
     run_dir: Path,
     sidecar_files: tuple[Path, ...],
+    *,
+    layout: Literal["timestamped", "flat_resume"] = "timestamped",
+    resume_existing: bool = False,
+    subprocess_argv: tuple[str, ...] | None = None,
 ) -> tuple[list[TrialResult], str | None, dict[str, str], list[str]]:
     """Execute a single cell through B1 and return (trials, error, env_vars, trial_paths).
 
@@ -548,11 +552,55 @@ def _run_one_cell(
     errored without bringing down the whole matrix. The full traceback is
     logged at WARNING so operators can diagnose, but the returned ``error``
     string stays short -- it's the text shown in matrix.md.
+
+    ``layout`` / ``resume_existing`` / ``subprocess_argv`` activate the
+    ``aorta probe`` (issue #188) code paths:
+
+    * ``layout="flat_resume"`` puts the cell artifacts at
+      ``<run_dir>/<safe_slug(cell.name)>/`` (NO ``cells/`` segment) so
+      the artifact tree matches the rubric's
+      ``<output>/<ticket>/<cell>/trial_<n>/...`` layout exactly.
+    * ``resume_existing=True`` consults
+      :func:`aorta.probe.resume.is_trial_complete` for every trial
+      directory under the cell BEFORE invoking the dispatcher. When
+      every trial is complete, the dispatcher call is skipped and the
+      trial JSONs the dispatcher had written previously are surfaced
+      as the cell's trials.
+    * ``subprocess_argv`` (not None) flips the request to
+      ``save_logs=True`` and routes the opaque user argv to the
+      reserved ``_aorta_subprocess_argv`` slot -- the only legal
+      channel for delivering argv to :class:`SubprocessWorkload`.
     """
-    cell_dir = _cells_dir(run_dir) / safe_slug(cell.name)
+    if layout == "flat_resume":
+        cell_dir = run_dir / safe_slug(cell.name)
+    else:
+        cell_dir = _cells_dir(run_dir) / safe_slug(cell.name)
     cell_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_env_vars = _resolve_cell_env_vars(cell.mitigations, cell.extra_env, sidecar_files)
+    effective_trials = cell.effective_trials(recipe.trials)
+
+    # Resume short-circuit: if every trial directory under this cell
+    # carries a valid result.json + non-empty verdict, the cell is
+    # already done. Surface its existing dispatcher-written JSONs as
+    # the cell's trials (so matrix.json continues to record them) and
+    # skip the dispatcher call entirely.
+    if resume_existing and layout == "flat_resume":
+        from aorta.probe.resume import is_trial_complete
+
+        completed = sum(
+            1
+            for i in range(effective_trials)
+            if is_trial_complete(cell_dir / f"trial_{i}")
+        )
+        if completed >= effective_trials:
+            log.info(
+                "cell %r: all %d trial(s) already complete -- skipping per resume mode",
+                cell.name,
+                effective_trials,
+            )
+            trial_paths = _collect_trial_paths(cell_dir)
+            return [], None, resolved_env_vars, trial_paths
 
     # Recipe-scope workload_config is the base; cell-scope merges over it so
     # the cell wins on key collision and non-collision keys union. Empty
@@ -561,9 +609,31 @@ def _run_one_cell(
     # workload_config from the recipe stays byte-equivalent to today.
     merged_workload_config = {**recipe.workload_config, **cell.workload_config}
 
+    # Probe-mode extras delivered to ``SubprocessWorkload`` via the
+    # typed ``RunRequest.probe_extras`` field. The runner is the only
+    # producer of this dict; ``SubprocessWorkload`` reads it from the
+    # ``_aorta_probe_extras`` slot the dispatcher injects.
+    probe_extras_payload: dict[str, Any] | None = None
+    probe_extras = recipe.probe_extras
+    if subprocess_argv is not None and probe_extras is not None:
+        probe_extras_payload = {
+            "cell_name": cell.name,
+            "env_passthrough_mode": probe_extras.env_passthrough_mode,
+            "timeout_per_trial": probe_extras.timeout_per_trial,
+            "cell_env_vars": dict(resolved_env_vars),
+            "step_time_regex": probe_extras.step_time_regex,
+            "collect_paths": list(probe_extras.collect_paths),
+        }
+
+    # save_logs is forced True for probe-mode cells because
+    # SubprocessWorkload reads ``_aorta_log_prefix`` to derive its
+    # per-trial directory; the dispatcher only injects that key when
+    # save_logs=True.
+    save_logs = recipe.save_logs or (subprocess_argv is not None)
+
     request = RunRequest(
         workload=recipe.workload,
-        trials=cell.effective_trials(recipe.trials),
+        trials=effective_trials,
         environment=cell.environment,
         mitigations=tuple(cell.mitigations),
         extra_env=dict(cell.extra_env),
@@ -571,7 +641,9 @@ def _run_one_cell(
         config_overrides=merged_workload_config,
         results_dir=cell_dir,
         sidecar_files=sidecar_files,
-        save_logs=recipe.save_logs,
+        save_logs=save_logs,
+        subprocess_argv=subprocess_argv,
+        probe_extras=probe_extras_payload,
     )
 
     try:
@@ -610,8 +682,39 @@ def _preflight_validate(recipe: Recipe) -> None:
     resolve_baseline(recipe.cells, recipe.confound.baseline_cell)
 
 
-def _print_dry_run(recipe: Recipe) -> None:
-    """Write the resolved cell list to stdout without touching the filesystem."""
+def _print_dry_run(
+    recipe: Recipe,
+    subprocess_argv: tuple[str, ...] | None = None,
+) -> None:
+    """Write the resolved cell list to stdout without touching the filesystem.
+
+    For probe-mode (``recipe.probe_extras is not None``), each line shows
+    the cell's planned env-var bundle and the literal trailing argv -- the
+    rubric's FR 1.2 contract. Triage-mode dry-run shows the existing
+    cell summary (mitigations / environment / trials / steps) for back-compat.
+    """
+    if recipe.probe_extras is not None:
+        # Probe-mode dry-run: cell name, resolved env bundle, literal argv.
+        # No FS writes, no execution -- matches FR 1.2 byte-for-byte.
+        argv_display = list(subprocess_argv) if subprocess_argv is not None else []
+        click.echo(
+            f"Dry run (probe): ticket={recipe.ticket or '(none)'} "
+            f"cells={len(recipe.cells)} trials/cell={recipe.trials}"
+        )
+        click.echo(f"Argv (forwarded byte-for-byte): {argv_display}")
+        click.echo(
+            f"Env-passthrough mode: {recipe.probe_extras.env_passthrough_mode}"
+        )
+        for cell in recipe.cells:
+            env_bundle = recipe.probe_extras.cell_envs.get(cell.name, {})
+            env_str = (
+                " ".join(f"{k}={v}" for k, v in sorted(env_bundle.items())) or "(no env)"
+            )
+            click.echo(
+                f"  {cell.name}: env=[{env_str}] argv={argv_display}"
+            )
+        return
+
     click.echo(f"Dry run: {recipe.workload} / ticket={recipe.ticket or '(none)'}")
     if recipe.workload_config:
         click.echo(f"Recipe workload_config: {recipe.workload_config}")
@@ -647,6 +750,10 @@ def run_recipe(
     dry_run: bool = False,
     extra_sidecar_files: tuple[Path, ...] = (),
     timestamp: str | None = None,
+    *,
+    layout: Literal["timestamped", "flat_resume"] = "timestamped",
+    resume_existing: bool = False,
+    subprocess_argv: tuple[str, ...] | None = None,
 ) -> Path:
     """Execute a recipe and write matrix.md / matrix.json / recipe.resolved.yaml.
 
@@ -668,9 +775,22 @@ def run_recipe(
             callers that build a ``Recipe`` directly (tests, in-process
             embedders) and want to add sidecars at execute time.
         timestamp: Override for the run-dir timestamp component (test hook).
+        layout: Output-tree layout (issue #188). ``"timestamped"`` (default)
+            preserves byte-equivalence with ``aorta triage run``;
+            ``"flat_resume"`` produces ``<output_dir>/<ticket>/`` (no
+            timestamp, no ``<workload>`` segment) for ``aorta probe``'s
+            resume semantics.
+        resume_existing: When True (probe-mode only), per-cell
+            invocations consult :func:`aorta.probe.resume.is_trial_complete`
+            and skip cells whose every trial is already complete.
+        subprocess_argv: Opaque argv forwarded byte-for-byte to every
+            cell's :class:`SubprocessWorkload` via the typed
+            ``RunRequest.subprocess_argv`` field. Required for probe-mode;
+            ignored in triage-mode.
 
     Returns:
-        The run directory path (``<output-dir>/<ticket>/<workload>/<timestamp>``).
+        The run directory path (``<output-dir>/<ticket>/<workload>/<timestamp>``
+        for triage-mode, ``<output-dir>/<ticket>/`` for probe-mode).
     """
     # Preflight first, BEFORE the dry-run early-return: dry-run is documented
     # as "validation without execution", so it must reject everything the
@@ -679,11 +799,11 @@ def run_recipe(
     _preflight_validate(recipe)
 
     if dry_run:
-        _print_dry_run(recipe)
+        _print_dry_run(recipe, subprocess_argv=subprocess_argv)
         return Path(".")
 
     ts = timestamp or format_timestamp()
-    run_dir = resolve_run_dir(output_dir, recipe, timestamp=ts)
+    run_dir = resolve_run_dir(output_dir, recipe, timestamp=ts, layout=layout)
 
     # Operator sidecars come from two places: ones the Recipe was built
     # against (``recipe.sidecar_files``, populated by ``load_recipe`` /
@@ -765,7 +885,13 @@ def run_recipe(
         )
         cell_t0 = time.perf_counter()
         trials, error, resolved_env_vars, trial_paths = _run_one_cell(
-            cell, recipe, run_dir, sidecar_files
+            cell,
+            recipe,
+            run_dir,
+            sidecar_files,
+            layout=layout,
+            resume_existing=resume_existing,
+            subprocess_argv=subprocess_argv,
         )
         cell_elapsed = time.perf_counter() - cell_t0
         if error is not None:
