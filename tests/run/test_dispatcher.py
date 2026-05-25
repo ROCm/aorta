@@ -1024,9 +1024,13 @@ class TestBuckTargetIsKeywordOnly:
         before it in the source. The whole point of ``kw_only=True``
         on ``buck_target`` is to keep this true.
 
-        Pre-PR-#191 behavior: ``RunRequest("wl", 1, "env",
-        ("none",))`` constructed with ``mitigations=("none",)``.
-        Post-PR-#191 behavior MUST be identical.
+        Behavior before the ``buck_target`` field was added:
+        ``RunRequest("wl", 1, "env", ("none",))`` constructed with
+        ``mitigations=("none",)``. Behavior after this field was
+        added (this PR, the #182 follow-up that introduced the
+        ``--buck-target`` overlay) MUST be identical; that's the
+        backward-compat contract ``kw_only=True`` exists to
+        enforce.
         """
         req = RunRequest("wl", 1, "env", ("none",))
         assert req.mitigations == ("none",)

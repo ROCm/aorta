@@ -407,7 +407,16 @@ class TestBuckTargetOption:
     def test_buck_target_accepts_root_package_label(self):
         """``//:aorta``-shaped labels parse (root package, no path).
         This is the exact label PR aorta-internal#42's BUCK_ONLY
-        scaffold gate produces."""
+        scaffold gate produces.
+
+        Asserts the *positive* failure mode (workload-discovery)
+        rather than only the *negative* ("not rejected at parse")
+        signal: if the invocation false-paths into a usage error
+        or a traceback that happens not to contain "Unknown option",
+        the negative-only check would silently pass. Mirrors the
+        belt-and-suspenders shape of
+        ``test_buck_target_accepts_canonical_label`` above.
+        """
         runner = CliRunner()
         result = runner.invoke(
             run,
@@ -418,8 +427,14 @@ class TestBuckTargetOption:
                 "//:aorta",
             ],
         )
+        # Flag itself must not be the failure cause.
         assert "Unknown option" not in result.output
         assert "No such option" not in result.output
+        # The expected workload-discovery failure path was reached
+        # (positive signal that arg-parse + the rest of the CLI
+        # plumbing actually ran).
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
 
     def test_buck_target_no_argument_value_is_error(self):
         """``--buck-target`` requires a value. Pins this so a future
