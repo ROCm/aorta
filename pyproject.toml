@@ -38,11 +38,15 @@ aorta = "aorta.cli:main"
 # Public workloads (when they land) register here; private workloads
 # register from downstream packages' pyproject.toml under the same group.
 #
-# No public workloads are wired up yet -- the prior `fsdp` entry pointed at
-# `aorta.workloads.fsdp:FsdpWorkload`, which was never created, so `aorta run`
-# would log a noisy "Failed to load workload 'fsdp'" warning on every
-# invocation. Removed until a real public workload lands.
-# [project.entry-points."aorta.workloads"]
+# ``_subprocess`` is platform-internal: it wraps an opaque user launch
+# command for ``aorta probe`` (issue #188). The leading underscore both
+# (a) prevents collision with user-facing workload names and (b) marks
+# the entry as visibly platform-internal in ``aorta triage list-workloads``
+# when that command lands. Direct ``aorta run --workload _subprocess``
+# invocations fail at ``SubprocessWorkload.setup()`` because the
+# reserved argv config key is only injected by ``aorta probe``.
+[project.entry-points."aorta.workloads"]
+_subprocess = "aorta.workloads._subprocess:SubprocessWorkload"
 
 [project.optional-dependencies]
 # For analysis/visualization scripts
