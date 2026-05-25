@@ -1300,6 +1300,70 @@ class TestBuckTargetOverride:
         assert results[0].execution_env == expected
 
 
+class TestImageIsKeywordOnly:
+    """``RunRequest.image`` MUST be keyword-only.
+
+    Mirror of :class:`TestBuckTargetIsKeywordOnly` on the docker
+    axis. Same backward-compat reasoning: declaring ``image``
+    BEFORE ``mitigations`` in the source (to keep the docstring
+    "Attributes:" grouping of env-tier overlays together) would
+    otherwise shift ``mitigations`` from positional slot 4, silently
+    breaking any external caller that constructed a ``RunRequest``
+    positionally.
+
+    Three-test structure mirrors ``TestBuckTargetIsKeywordOnly``
+    exactly so a regression in one axis is locatable from the
+    test-class name alone.
+    """
+
+    def test_image_signature_is_keyword_only(self):
+        """Direct ``inspect.signature`` check on the ``image``
+        parameter's ``kind``. Single bit of truth: if
+        ``kw_only=True`` is dropped from the field() in a future
+        refactor, this trips with a clear "POSITIONAL_OR_KEYWORD vs
+        KEYWORD_ONLY" diff. See
+        ``TestBuckTargetIsKeywordOnly::test_buck_target_signature_is_keyword_only``
+        for why signature inspection beats a positional+TypeError
+        probe here (same reasoning: many positional fields after
+        ``image``'s source position).
+        """
+        import inspect
+        sig = inspect.signature(RunRequest)
+        assert sig.parameters["image"].kind == inspect.Parameter.KEYWORD_ONLY, (
+            f"image must be KEYWORD_ONLY (so adding it before "
+            f"existing positional fields like ``mitigations`` doesn't "
+            f"shift those fields' positional slots and break external "
+            f"positional callers of ``RunRequest``). Got "
+            f"{sig.parameters['image'].kind}."
+        )
+
+    def test_mitigations_is_still_positional_with_both_overlays_declared(self):
+        """Sanity: with BOTH ``image`` and ``buck_target`` declared
+        before ``mitigations`` (the post-#193 source order), the
+        pre-PR-#191 invocation ``RunRequest("wl", 1, "env",
+        ("none",))`` STILL binds ``mitigations`` correctly.
+
+        Stronger version of the matching test in
+        ``TestBuckTargetIsKeywordOnly`` because here we're checking
+        the composite: two kw_only fields declared before
+        ``mitigations``. If either field accidentally loses its
+        ``kw_only=True``, this test trips.
+        """
+        req = RunRequest("wl", 1, "env", ("none",))
+        assert req.mitigations == ("none",)
+        assert req.image is None
+        assert req.buck_target is None
+
+    def test_image_works_as_keyword(self):
+        """Belt-and-suspenders positive case (matches the structure
+        of ``TestBuckTargetIsKeywordOnly``). Catches a typo on
+        ``kw_only=True`` that would make the negative test
+        false-pass by rejecting both spellings."""
+        req = RunRequest("wl", 1, "env", image="sha256:" + "a" * 64)
+        assert req.image == "sha256:" + "a" * 64
+        assert req.mitigations == ("none",)
+
+
 class TestImageOverride:
     """RunRequest.image overlays the resolved environment's docker pin.
 

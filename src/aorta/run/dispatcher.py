@@ -60,6 +60,27 @@ class RunRequest:
         workload: Name of the workload to run (from entry-point group).
         trials: Number of trials to execute.
         environment: Environment name (default: local).
+        image: Optional runtime overlay for the resolved
+            :class:`Environment`'s ``docker`` field. Symmetric peer
+            of ``buck_target`` below: each overlays one axis of the
+            named environment's recipe at run time and preserves the
+            other axes (a single-axis pin). When set, takes effect
+            AFTER :func:`get_environment` resolves ``environment``;
+            ``None`` (the default) means "no override" so every
+            pre-existing ``RunRequest`` invocation behaves unchanged.
+            **Naming asymmetry**: the FIELD overlays
+            ``Environment.docker`` (the recipe slot's name, peer of
+            ``venv`` / ``buck_target``); the FIELD itself is named
+            ``image`` (after the VALUE the operator provides -- an
+            OCI image reference, typically a digest pin like
+            ``sha256:<64-hex>`` or ``<repo>@sha256:<digest>``). Same
+            convention as the CLI flag (``--image``). Threaded into
+            ``config['_aorta_environment']['docker']`` for the
+            workload's wrapper to consume. **Keyword-only**: same
+            ``kw_only=True`` rationale as ``buck_target`` -- adding
+            this field before existing positional fields like
+            ``mitigations`` would otherwise shift their positional
+            slots and silently break external positional callers.
         buck_target: Optional runtime overlay for the resolved
             :class:`Environment`'s ``buck_target`` field (#182). When
             set, takes effect AFTER :func:`get_environment` resolves
@@ -152,7 +173,17 @@ class RunRequest:
     # ``None`` means "leave the resolved environment's ``docker``
     # untouched" -- a named env that already declares ``docker``
     # keeps its value.
-    image: str | None = None
+    #
+    # ``kw_only=True`` is the backward-compat guard: same rationale
+    # as ``buck_target`` below -- declaring this BEFORE
+    # ``mitigations`` in the source (to keep the docstring
+    # "Attributes:" grouping of env-tier overlays together) would
+    # otherwise shift ``mitigations``'s positional slot and break
+    # external positional callers. With kw_only, Python places this
+    # field last in ``__init__``'s signature regardless of class-
+    # body order. (Caught at PR #193 review; pinned by
+    # ``tests/run/test_dispatcher.py::TestImageIsKeywordOnly``.)
+    image: str | None = field(default=None, kw_only=True)
     # Runtime override for the resolved :class:`Environment`'s
     # ``buck_target`` field (#182 made it a first-class peer of
     # ``docker`` / ``venv``). When set, takes effect AFTER
