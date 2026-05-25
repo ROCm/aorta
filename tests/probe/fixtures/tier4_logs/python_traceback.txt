@@ -1,0 +1,7 @@
+Some preamble line.
+Traceback (most recent call last):
+  File "train.py", line 42, in <module>
+    main()
+  File "train.py", line 31, in main
+    model.train()
+RuntimeError: CUDA out of memory

@@ -1,0 +1,2 @@
+[rank3]: Watchdog caught collective operation timeout: WorkNCCL(SeqNum=42)
+[rank3]: terminating worker

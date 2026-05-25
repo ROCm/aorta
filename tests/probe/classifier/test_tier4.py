@@ -23,13 +23,13 @@ FIXTURES = Path(__file__).parent.parent / "fixtures" / "tier4_logs"
 @pytest.mark.parametrize(
     "fixture_name,detector_id",
     [
-        ("python_traceback.log", tier4_patterns.DETECTOR_PYTHON_TRACEBACK),
-        ("hip_error.log", tier4_patterns.DETECTOR_HIP_ERROR),
-        ("cuda_error.log", tier4_patterns.DETECTOR_CUDA_ERROR),
-        ("rocm_error.log", tier4_patterns.DETECTOR_ROCM_ERROR),
-        ("nccl_rccl_error.log", tier4_patterns.DETECTOR_NCCL_RCCL_ERROR),
-        ("collective_timeout.log", tier4_patterns.DETECTOR_COLLECTIVE_TIMEOUT),
-        ("nan_signature.log", tier4_patterns.DETECTOR_NAN_SIGNATURE),
+        ("python_traceback.txt", tier4_patterns.DETECTOR_PYTHON_TRACEBACK),
+        ("hip_error.txt", tier4_patterns.DETECTOR_HIP_ERROR),
+        ("cuda_error.txt", tier4_patterns.DETECTOR_CUDA_ERROR),
+        ("rocm_error.txt", tier4_patterns.DETECTOR_ROCM_ERROR),
+        ("nccl_rccl_error.txt", tier4_patterns.DETECTOR_NCCL_RCCL_ERROR),
+        ("collective_timeout.txt", tier4_patterns.DETECTOR_COLLECTIVE_TIMEOUT),
+        ("nan_signature.txt", tier4_patterns.DETECTOR_NAN_SIGNATURE),
     ],
 )
 def test_each_fixture_fires_its_detector(fixture_name, detector_id):

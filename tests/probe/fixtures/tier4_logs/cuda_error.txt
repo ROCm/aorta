@@ -1,0 +1,3 @@
+opening tensor
+operator returned cudaErrorIllegalAddress at kernel.cu:120
+aborting

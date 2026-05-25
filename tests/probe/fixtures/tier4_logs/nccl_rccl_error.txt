@@ -1,0 +1,3 @@
+[rank0]: starting collective
+[rank0]: NCCL error: unhandled system error (run with NCCL_DEBUG=INFO)
+[rank0]: shutting down
