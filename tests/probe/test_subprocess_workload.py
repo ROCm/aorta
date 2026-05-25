@@ -296,3 +296,53 @@ def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
     assert doc["timed_out"] is True
     assert doc["exit_code"] == -1
     assert result.passed is False
+
+
+# ---- FR 2.9 (Phase 2 result.json shape) ----------------------------------
+
+
+def test_result_json_phase_2_shape(tmp_path):
+    """Phase 2 ``result.json`` carries the rubric §2.B FR 2.9 fields.
+
+    The Phase 1 minimum shape is a subset; both shapes coexist (the
+    Phase 1 test above continues to pass). Phase 2 adds:
+
+    * ``failure_detectors_fired: list[str]``
+    * ``warn_detectors_fired: list[str]``
+    * ``capture: dict``
+    * ``tier_durations_ms: dict``
+    * ``peak_vram_mib: int | null``
+    """
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    # Phase 2 keys present on every trial.
+    assert isinstance(doc["failure_detectors_fired"], list)
+    assert isinstance(doc["warn_detectors_fired"], list)
+    assert isinstance(doc["capture"], dict)
+    assert isinstance(doc["tier_durations_ms"], dict)
+    # peak_vram_mib is int | null (null in env-less smoke runs).
+    assert doc["peak_vram_mib"] is None or isinstance(doc["peak_vram_mib"], int)
+    # tier_durations_ms records each tier's wall-clock contribution.
+    for tier_key in ("tier1", "tier2", "tier3", "tier4", "tier5"):
+        assert tier_key in doc["tier_durations_ms"]
+
+
+def test_phase_2_failure_path_lists_tier1_detector(tmp_path):
+    """A non-zero exit fires ``tier1:exit_nonzero`` in failure_detectors_fired."""
+    wl = _make_workload(tmp_path, ["false"])
+    wl.setup()
+    wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert "tier1:exit_nonzero" in doc["failure_detectors_fired"]
+
+
+def test_phase_1_shape_still_present_in_phase_2_doc(tmp_path):
+    """Phase 1's minimum-shape keys remain (rubric §2.B FR 2.9 'subset' clause)."""
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    for key in ("verdict", "exit_code", "walltime_sec", "argv", "cell_name", "trial_index"):
+        assert key in doc

@@ -44,6 +44,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from aorta.probe.classifier import TrialContext, classify_trial
+from aorta.probe.classifier.tier2_hang import (
+    DEFAULT_HANG_GRACE_SEC,
+    DEFAULT_HANG_WINDOW_SEC,
+    HangMonitor,
+)
+from aorta.probe.classifier.tier3_kernel import Tier3State
 from aorta.workloads._base import Workload, WorkloadResult
 
 # Config key the dispatcher uses to deliver the opaque user argv. The
@@ -153,7 +160,18 @@ class SubprocessWorkload(Workload):
         self._trial_dir.mkdir(parents=True, exist_ok=True)
 
     def run(self) -> WorkloadResult:
-        """Fork the user command and write the Tier-1 ``result.json``."""
+        """Fork the user command and write the Phase-2 ``result.json``.
+
+        Phase 2 hangs the five-tier classifier off this method
+        post-exit. The Tier 1 verdict (Phase 1 contract) is a
+        subset of the Phase 2 verdict — a trial that exits 0 with
+        no Tier 2/3/4/5 detector firing still resolves to
+        ``verdict = "pass"``, matching Phase 1 byte-for-byte. The
+        Phase 1 minimum-shape test in
+        ``tests/probe/test_subprocess_workload.py`` continues to
+        pass without modification because Phase 2 only ADDS keys
+        to ``result.json``.
+        """
         if self._argv is None or self._trial_dir is None or self._trial_index is None:
             raise RuntimeError("SubprocessWorkload.run() called before setup()")
 
@@ -166,6 +184,11 @@ class SubprocessWorkload(Workload):
         probe_extras = self.config.get(CONFIG_KEY_PROBE_EXTRAS) or {}
         env_mode = probe_extras.get("env_passthrough_mode", "inherit")
         timeout = probe_extras.get("timeout_per_trial")
+        custom_patterns = tuple(probe_extras.get("custom_patterns") or ())
+        hang_window_sec = float(probe_extras.get("hang_window_sec") or DEFAULT_HANG_WINDOW_SEC)
+        hang_grace_sec = float(
+            probe_extras.get("hang_grace_period_at_start") or DEFAULT_HANG_GRACE_SEC
+        )
 
         # ``inherit`` mode: the dispatcher has already stamped the
         # cell's mitigation + diagnostic env vars onto os.environ in
@@ -242,6 +265,7 @@ class SubprocessWorkload(Workload):
         # below for the propagation into ``main_work_started`` /
         # ``executed_iterations``.
         launched = False
+        hang_monitor: HangMonitor | None = None
         try:
             with open(stdout_path, "wb") as out_fh, open(stderr_path, "wb") as err_fh:
                 proc = subprocess.Popen(
@@ -251,6 +275,13 @@ class SubprocessWorkload(Workload):
                     env=child_env,
                 )
                 launched = True
+                hang_monitor = HangMonitor(
+                    pid=proc.pid,
+                    stdout_path=stdout_path,
+                    hang_window_sec=hang_window_sec,
+                    hang_grace_period_at_start=hang_grace_sec,
+                )
+                hang_monitor.start()
                 try:
                     exit_code = proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
@@ -276,6 +307,9 @@ class SubprocessWorkload(Workload):
                     except ProcessLookupError:
                         pass
                     exit_code = -1
+                finally:
+                    if hang_monitor is not None:
+                        hang_monitor.stop()
         except (FileNotFoundError, PermissionError, OSError) as exc:
             # Exec-time ``Popen`` failures all become Tier-1 fails with
             # the artifact tree intact (stderr.log + result.json). The
@@ -311,15 +345,49 @@ class SubprocessWorkload(Workload):
                 pass
         walltime_sec = time.perf_counter() - t0
 
-        verdict = "pass" if exit_code == 0 and not timed_out else "fail"
+        # Tier 2-5 classifier post-exit. Reads the captured logs
+        # back from disk -- the file handles above are closed by
+        # the ``with`` block. Errors here MUST NOT propagate (the
+        # workload already succeeded or failed; classifier crashes
+        # are bugs, not trial outcomes).
+        log_text = _read_log_text(stdout_path, stderr_path)
+        hang_detected = bool(hang_monitor and hang_monitor.hang_detected)
+
+        verdict_obj, tier_durations_ms = classify_trial(
+            TrialContext(
+                exit_code=exit_code,
+                timed_out=timed_out,
+                walltime_sec=walltime_sec,
+                trial_dir=trial_dir,
+                log_text=log_text,
+                custom_patterns=custom_patterns,
+                hang_detected=hang_detected,
+                peak_vram_mib=None,
+                # Tier 3 dmesg/amd-smi disabled when no runner-level
+                # state is plumbed through; the runner can pass one
+                # in via probe_extras in a future enhancement.
+                tier3_state=Tier3State(),
+            )
+        )
 
         result_doc: dict[str, Any] = {
-            "verdict": verdict,
+            "verdict": verdict_obj.verdict,
             "exit_code": exit_code,
             "walltime_sec": walltime_sec,
+            "peak_vram_mib": None,
             "argv": list(argv),
             "cell_name": probe_extras.get("cell_name", "_unknown_"),
             "trial_index": self._trial_index,
+            "failure_detectors_fired": list(verdict_obj.failure_detectors_fired),
+            "warn_detectors_fired": list(verdict_obj.warn_detectors_fired),
+            "capture": dict(verdict_obj.capture),
+            "tier_durations_ms": dict(tier_durations_ms),
+            # Phase 1 keys preserved for back-compat with any
+            # downstream tool that already parses them. The Phase 1
+            # minimum-shape test in tests/probe/test_subprocess_workload.py
+            # asserts these continue to exist; the Phase 2 shape
+            # extends the doc by ADDING keys, never by removing
+            # them (rubric §2.B FR 2.9).
             "env_passthrough_mode": env_mode,
             "timed_out": timed_out,
         }
@@ -338,12 +406,13 @@ class SubprocessWorkload(Workload):
         # ``result.json`` is still written either way -- the artifact
         # contract from PR #194 round 4 is independent of the
         # matrix-side semantic.
+        passed = verdict_obj.verdict == "pass"
         return WorkloadResult(
-            passed=(verdict == "pass"),
-            failure_count=0 if verdict == "pass" else 1,
+            passed=passed,
+            failure_count=0 if passed else 1,
             failure_details=(
                 []
-                if verdict == "pass"
+                if passed
                 else [
                     {
                         "exit_code": exit_code,
@@ -351,6 +420,7 @@ class SubprocessWorkload(Workload):
                         "type": (
                             "subprocess_nonzero_exit" if launched else "subprocess_exec_failed"
                         ),
+                        "failure_detectors_fired": list(verdict_obj.failure_detectors_fired),
                     }
                 ]
             ),
@@ -359,9 +429,11 @@ class SubprocessWorkload(Workload):
             configured_iterations=1,
             elapsed_sec=walltime_sec,
             metrics={
-                "verdict": verdict,
+                "verdict": verdict_obj.verdict,
                 "exit_code": exit_code,
                 "result_json_path": str(result_path),
+                "failure_detectors_fired": list(verdict_obj.failure_detectors_fired),
+                "warn_detectors_fired": list(verdict_obj.warn_detectors_fired),
             },
         )
 
@@ -498,6 +570,30 @@ def _validate_env_file_entries(env: dict[str, str]) -> None:
                 "probe.env uses bare KEY=VALUE format and cannot "
                 "encode multi-line values"
             )
+
+
+def _read_log_text(stdout_path: Path, stderr_path: Path) -> str:
+    """Read stdout + stderr back as a single text blob for the classifier.
+
+    Reads are bounded to twice
+    :data:`aorta.probe.sandbox.MAX_LOG_BYTES` so a runaway log
+    can't OOM the classifier; the per-tier scanners further bound
+    individual ``re.search`` invocations. Errors decoded with
+    ``backslashreplace`` so a binary blob doesn't blow up the
+    text channel.
+    """
+    from aorta.probe.sandbox import MAX_LOG_BYTES
+
+    parts: list[str] = []
+    for path in (stdout_path, stderr_path):
+        try:
+            data = path.read_bytes()[:MAX_LOG_BYTES]
+            parts.append(data.decode("utf-8", errors="backslashreplace"))
+        except FileNotFoundError:
+            parts.append("")
+        except OSError:
+            parts.append("")
+    return "\n".join(parts)
 
 
 def _write_env_file(path: Path, env: dict[str, str]) -> None:
