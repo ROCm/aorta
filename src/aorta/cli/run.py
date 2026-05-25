@@ -40,6 +40,29 @@ from aorta.run.dispatcher import RunRequest, run_trials
     "--environment", default="local", show_default=True, help="Registered environment name."
 )
 @click.option(
+    "--image",
+    type=str,
+    default=None,
+    help=(
+        "OCI image reference (typically digest-pinned, e.g. "
+        "'sha256:<64-hex>' or '<repo>@sha256:<digest>') to overlay onto "
+        "the resolved environment's ``docker`` field at run time. Peer "
+        "of --buck-target / --venv (future): the platform threads it, "
+        "docker-aware workload wrappers consume it via "
+        "``config['_aorta_environment']['docker']`` and decide whether "
+        "to shell out via ``docker run <image>`` (see "
+        "registry/README.md). Other fields of the named --environment "
+        "(buck_target, venv, source_package) are preserved -- the "
+        "override is a pin on the docker axis only. When omitted, the "
+        "named environment's existing ``docker`` (if any) is used "
+        "as-is. The field name on :class:`Environment` is ``docker`` "
+        "(the recipe slot name); the CLI flag is named ``--image`` "
+        "(after the value the operator provides). Required by "
+        "aorta-internal #42's DOCKER_ONLY and BUCK_IN_DOCKER "
+        "regression-gate tiers."
+    ),
+)
+@click.option(
     "--buck-target",
     type=str,
     default=None,
@@ -97,6 +120,7 @@ def run(
     workload: str,
     trials: int,
     environment: str,
+    image: str | None,
     buck_target: str | None,
     mitigations: str,
     mitigation_files: tuple[Path, ...],
@@ -119,6 +143,7 @@ def run(
             workload=workload,
             trials=trials,
             environment=environment,
+            image=image,
             buck_target=buck_target,
             mitigations=parse_mitigations(mitigations),
             extra_env=parse_extra_env(extra_env),

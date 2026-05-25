@@ -138,6 +138,22 @@ class RunRequest:
     trials: int
     environment: str = "local"
     # Runtime override for the resolved :class:`Environment`'s
+    # ``docker`` field. Symmetric peer of ``buck_target`` below
+    # (both overlay one axis of the named environment's recipe at
+    # run time, both preserve the other axes). The NAME asymmetry
+    # ``image`` (here) vs ``docker`` (the Environment field) is
+    # intentional: the FIELD names the recipe slot (peer of ``venv``
+    # / ``buck_target``); the OVERLAY VALUE names what the operator
+    # provides -- an OCI image reference (typically a digest pin
+    # like ``sha256:<64-hex>`` or ``<repo>@sha256:<digest>``). Same
+    # naming used by the CLI flag (``--image``) and by the
+    # aorta-internal #42 regression-gate dispatcher (which emits
+    # ``--image <digest>`` for DOCKER_ONLY and BUCK_IN_DOCKER tiers).
+    # ``None`` means "leave the resolved environment's ``docker``
+    # untouched" -- a named env that already declares ``docker``
+    # keeps its value.
+    image: str | None = None
+    # Runtime override for the resolved :class:`Environment`'s
     # ``buck_target`` field (#182 made it a first-class peer of
     # ``docker`` / ``venv``). When set, takes effect AFTER
     # :func:`get_environment` resolves ``environment``, so the named
@@ -265,20 +281,32 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     sidecar_files = list(request.sidecar_files) or None
     env_descriptor = get_environment(request.environment, extra_files=sidecar_files)
 
-    # 7a. Apply the ``buck_target`` runtime override (if any) AFTER
-    #     resolving the named environment, so the named env's
-    #     ``docker`` / ``venv`` / ``source_package`` fields are
-    #     preserved.  Falsy values (``None`` -- the default -- and
-    #     ``""``) mean "no override": a named env that already
-    #     declares ``buck_target`` keeps its value.  Empty string is
-    #     never a valid Buck2 label, so treating it as a no-op rather
-    #     than silently overlaying ``buck_target=""`` onto the
-    #     resolved env avoids a downstream ``buck2 run ""`` style
-    #     failure that would be hard to attribute back to the flag.
-    #     This is the dispatcher side of the ``--buck-target`` CLI
-    #     flag symmetric to ``aorta env probe --buck-target``; see the
-    #     ``RunRequest.buck_target`` docstring for the cross-repo
-    #     motivation (downstream regression-gate dispatchers).
+    # 7a. Apply the per-axis runtime overrides (if any) AFTER
+    #     resolving the named environment, so the named env's other
+    #     fields (``venv`` / ``source_package`` / the axes not being
+    #     overridden) are preserved.  Each override is independent:
+    #     a BUCK_IN_DOCKER gate pins BOTH ``image`` and
+    #     ``buck_target`` and expects them BOTH to flow through.
+    #
+    #     Falsy values (``None`` -- the default -- and ``""``) mean
+    #     "no override": a named env that already declares the
+    #     field keeps its value.  Empty string is never a valid
+    #     value for either flag (no Buck2 label is empty; an OCI
+    #     image reference of ``""`` is not a reference), so treating
+    #     it as a no-op rather than silently overlaying ``""`` onto
+    #     the resolved env avoids a downstream ``buck2 run ""`` /
+    #     ``docker run ""``-style failure that's hard to attribute
+    #     back to the flag.  This makes the new flags backward-
+    #     compat with every pre-existing run.
+    #
+    #     ``image`` overlays the ``docker`` field of
+    #     :class:`Environment` (the recipe slot's name -- ``image``
+    #     names the value the operator provides). ``buck_target``
+    #     overlays the like-named field. See the ``RunRequest``
+    #     docstring for the cross-repo motivation (downstream
+    #     regression-gate dispatchers).
+    if request.image:
+        env_descriptor = replace(env_descriptor, docker=request.image)
     if request.buck_target:
         env_descriptor = replace(env_descriptor, buck_target=request.buck_target)
 
