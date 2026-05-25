@@ -1,0 +1,11 @@
+schema_version: 1
+mode: probe
+trials: 1
+mitigation_axis:
+  - none
+diagnostic_axis:
+  - none
+custom_patterns:
+  - id: hip_oom
+    match:
+      regex: "hipErrorOutOfMemory"

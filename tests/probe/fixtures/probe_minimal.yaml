@@ -1,0 +1,8 @@
+schema_version: 1
+mode: probe
+ticket: PROBE-188-SMOKE
+trials: 1
+mitigation_axis:
+  - none
+diagnostic_axis:
+  - none
