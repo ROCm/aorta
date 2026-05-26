@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -787,6 +788,55 @@ def test_collect_trial_paths_sorts_numerically_not_lexicographically(tmp_path):
     paths = runner._collect_trial_paths(cell_dir)
     indices = [int(p.rsplit("trial_", 1)[1].rsplit(".", 1)[0]) for p in paths]
     assert indices == [0, 1, 2, 3, 9, 10, 11, 100]
+
+
+def test_collect_trial_paths_sorts_dispatcher_naming_by_trial_index(tmp_path):
+    """Regression for PR #194 review: dispatcher writes
+    ``trial_d<dataset>_m<mitigation>_t<trial>.json`` and the sort key
+    must extract ``<trial>`` so ``..._t10.json`` doesn't lex-sort
+    before ``..._t2.json``. Previously the helper only matched
+    ``trial_<N>.json`` and fell into the alphabetical sentinel branch
+    for dispatcher-shape files, mis-ordering hydration for any
+    cell with >= 10 trials.
+    """
+    cell_dir = tmp_path / "cell"
+    work_dir = cell_dir / "_subprocess"
+    work_dir.mkdir(parents=True)
+    for i in [0, 1, 2, 3, 9, 10, 11, 100]:
+        (work_dir / f"trial_d0_m0_t{i}.json").write_text("{}")
+
+    paths = runner._collect_trial_paths(cell_dir)
+
+    def _t_index(p: str) -> int:
+        # 'trial_d0_m0_t10' -> '10'
+        return int(p.rsplit("_t", 1)[1].rsplit(".", 1)[0])
+
+    indices = [_t_index(p) for p in paths]
+    assert indices == [0, 1, 2, 3, 9, 10, 11, 100]
+
+
+def test_collect_trial_paths_mixed_naming_keeps_each_shape_natural_sorted(tmp_path):
+    """A directory that contains BOTH legacy ``trial_<N>.json`` and
+    dispatcher ``trial_d<d>_m<m>_t<N>.json`` files should sort by the
+    integer trial index across both, so resume-hydration order matches
+    execution order regardless of how the file was written.
+    """
+    cell_dir = tmp_path / "cell"
+    work_dir = cell_dir / "_subprocess"
+    work_dir.mkdir(parents=True)
+    (work_dir / "trial_d0_m0_t10.json").write_text("{}")
+    (work_dir / "trial_2.json").write_text("{}")
+    (work_dir / "trial_d0_m0_t1.json").write_text("{}")
+    (work_dir / "trial_11.json").write_text("{}")
+
+    paths = runner._collect_trial_paths(cell_dir)
+    # By integer trial index: 1, 2, 10, 11.
+    assert [Path(p).stem for p in paths] == [
+        "trial_d0_m0_t1",
+        "trial_2",
+        "trial_d0_m0_t10",
+        "trial_11",
+    ]
 
 
 # ---- Class B: --mitigations-file (sidecar) lifecycle ---------------------

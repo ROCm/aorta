@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -323,32 +324,40 @@ def _cells_dir(run_dir: Path) -> Path:
     return d
 
 
-def _collect_trial_paths(results_dir: Path) -> list[str]:
-    """Return the trial_*.json paths B1 wrote, sorted by trial index.
+_DISPATCHER_TRIAL_RE = re.compile(r"^trial_d\d+_m\d+_t(\d+)$")
+_LEGACY_TRIAL_RE = re.compile(r"^trial_(\d+)$")
 
-    B1's dispatcher writes to ``<results_dir>/<workload>/trial_<N>.json``
-    (the dispatcher appends the workload subdir; that's a B1 contract B2
-    currently honours without surgery). We glob the workload subdir so the
-    matrix.json ``trial_paths`` field matches reality on disk.
+
+def _collect_trial_paths(results_dir: Path) -> list[str]:
+    """Return the per-trial JSON paths the dispatcher wrote, sorted by trial index.
+
+    The dispatcher writes to
+    ``<results_dir>/<workload>/trial_d<dataset>_m<mitigation>_t<trial>.json``
+    (the dispatcher appends the workload subdir; that's a B1 contract
+    B2 currently honours without surgery). Older fixtures and tests
+    use the simpler ``trial_<N>.json`` shape; both are supported here
+    so this helper is the single sorting authority across the matrix /
+    resume code paths.
 
     Sort by the integer ``N`` extracted from the filename, NOT
-    lexicographically -- a lex sort would put ``trial_10.json`` before
-    ``trial_2.json`` and the recorded order would diverge from execution
-    order once a cell has 10+ trials. Files whose names don't parse as
-    ``trial_<int>.json`` sort last (alphabetically), which keeps any future
-    sibling artifacts visible without breaking the contract for the common
+    lexicographically -- a lex sort would put ``..._t10.json`` before
+    ``..._t2.json`` and the recorded order would diverge from
+    execution order once a cell has 10+ trials. This silently broke
+    the resume short-circuit's hydration order for any
+    trials >= 10 because ``_hydrate_trials_from_paths`` walks the
+    list in order. Files whose names don't parse under either regex
+    sort last (alphabetically), which keeps any future sibling
+    artifacts visible without breaking the contract for the common
     case.
     """
     if not results_dir.exists():
         return []
 
     def _key(path: Path) -> tuple[int, str]:
-        stem = path.stem  # "trial_3"
-        if stem.startswith("trial_"):
-            try:
-                return (int(stem[len("trial_") :]), "")
-            except ValueError:
-                pass
+        stem = path.stem
+        m = _DISPATCHER_TRIAL_RE.match(stem) or _LEGACY_TRIAL_RE.match(stem)
+        if m is not None:
+            return (int(m.group(1)), "")
         # Sentinel: push non-conforming names after every trial_N entry.
         return (10**12, str(path))
 
