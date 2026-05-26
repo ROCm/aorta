@@ -54,20 +54,32 @@ MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MiB
 # parser could be coerced into.
 MAX_EXPR_LEN = 256
 
-# Magnitude cap on integer literals. Catches the
-# ``2 ** 1000000000``-shaped resource-exhaustion input in the rubric's
-# hostile-input corpus (§2.E.4): every operand is a whitelisted
-# ``Constant`` and ``Pow`` is in :data:`_ALLOWED_NODES`, so the only
-# defense against ``2 ** <huge>`` is to refuse the huge literal at
-# parse time. ``10**9`` is comfortably above every legitimate value a
-# ``condition`` would name (exit codes, walltime in seconds, VRAM in
-# MiB, log-line counts) and orders of magnitude below the size that
-# turns ``int.__pow__`` into a memory bomb.
+# Magnitude cap on integer literals. Catches OOM-bait constants like
+# ``exit_code == 1000000000`` from ever reaching ``eval`` -- a literal
+# that survives parse-time validation can still be evaluated, and there
+# is no runtime numeric guard once the expression is compiled. ``10**9``
+# is comfortably above every legitimate value a ``condition`` would
+# name (exit codes, walltime in seconds, VRAM in MiB, log-line counts)
+# and orders of magnitude below the size that turns ``int.__mul__``
+# into a memory bomb.
+#
+# Exponentiation (``**``) is NOT in the allow-list (see
+# :data:`_ALLOWED_NODES`) so the magnitude cap is no longer the last
+# line of defence against ``2 ** capture['n']``-style attacks: any Pow
+# expression rejects at parse time before either operand is considered.
 MAX_INT_CONSTANT = 10**9
 
 # AST node types that the walker accepts. Anything else (Lambda,
 # ListComp, DictComp, SetComp, GeneratorExp, FormattedValue,
 # JoinedStr, ClassDef, FunctionDef, Import, ...) rejects.
+#
+# ``ast.Pow`` is deliberately EXCLUDED. The :data:`MAX_INT_CONSTANT`
+# magnitude cap only restricts literal constants -- it cannot stop
+# ``2 ** int(capture['exp'])`` from allocating a giant Python int from
+# untrusted regex-capture text. Legitimate ``condition`` expressions
+# are simple boolean checks (``exit_code == 137``,
+# ``walltime_sec > 60``); none of them need exponentiation, so dropping
+# ``**`` entirely is a free safety win.
 _ALLOWED_NODES = frozenset(
     {
         ast.Expression,
@@ -95,7 +107,6 @@ _ALLOWED_NODES = frozenset(
         ast.Div,
         ast.Mod,
         ast.FloorDiv,
-        ast.Pow,
         ast.USub,
         ast.UAdd,
         ast.Load,
@@ -242,18 +253,21 @@ def _check_node(node: ast.AST) -> None:
 
     if isinstance(node, ast.Constant):
         # ``int`` and ``float`` constants are subject to a magnitude
-        # cap so ``2 ** 1000000000`` (and similar resource-exhaustion
-        # inputs in the hostile-input corpus, §2.E.4) refuses at
-        # parse time before ``eval`` can produce a memory-bombing
-        # integer. ``str``/``bool``/``None`` constants pass through.
+        # cap so a literal like ``exit_code == 1000000000`` (and
+        # similar resource-exhaustion inputs in the hostile-input
+        # corpus, §2.E.4) refuses at parse time before ``eval`` can
+        # construct a large arbitrary-precision integer at compile
+        # time. ``str``/``bool``/``None`` constants pass through.
+        # ``**`` is no longer in the allow-list (see
+        # :data:`_ALLOWED_NODES`), so Pow-based ints from non-literal
+        # exponents are stopped one layer up.
         constant_value = node.value
         if isinstance(constant_value, bool):
             return
         if isinstance(constant_value, int) and abs(constant_value) >= MAX_INT_CONSTANT:
             raise SandboxError(
                 f"condition: integer constant magnitude {abs(constant_value)} >= "
-                f"{MAX_INT_CONSTANT} (rejected to prevent resource exhaustion "
-                "from operators like ``**``)"
+                f"{MAX_INT_CONSTANT} (rejected to prevent resource exhaustion)"
             )
         return
 

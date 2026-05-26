@@ -178,8 +178,24 @@ def test_int_constant_below_cap_allowed() -> None:
 
 
 def test_int_constant_at_cap_rejected() -> None:
+    # ``**`` is no longer in the allow-list -- exercise the magnitude
+    # cap via a comparison literal instead, which is the realistic
+    # shape an operator would write.
     with pytest.raises(SandboxError, match="integer constant magnitude"):
-        validate_and_compile(f"2 ** {MAX_INT_CONSTANT}")
+        validate_and_compile(f"exit_code == {MAX_INT_CONSTANT}")
+
+
+def test_pow_operator_rejected() -> None:
+    """Regression for PR #197 review: dropping ``ast.Pow`` from the
+    allow-list closes the ``2 ** int(capture['exp'])`` resource-
+    exhaustion path -- the magnitude cap only restricts literal
+    constants, so an exponent derived from regex-capture text would
+    otherwise let an attacker allocate an enormous Python int at
+    eval time.
+    """
+    for hostile in ("2 ** 31", "10 ** int(capture['exp'])", "2 ** exit_code"):
+        with pytest.raises(SandboxError, match="forbidden AST node"):
+            validate_and_compile(hostile)
 
 
 def test_empty_builtins_neutralises_eval() -> None:

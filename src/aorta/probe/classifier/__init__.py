@@ -68,6 +68,14 @@ class TrialContext:
     tier3_state: Tier3State | None = None
     amd_smi_pre: AmdSmiSnapshot | None = None
     amd_smi_post: AmdSmiSnapshot | None = None
+    # Tier 3 detector IDs the caller has already collected (e.g. the
+    # workload pre-invoked ``scan_dmesg`` with a known ``--since``
+    # window and prefers not to round-trip through ``dmesg_text``).
+    # Merged with the in-classifier scan results; empty tuple is the
+    # legacy-equivalent no-op. Distinct from ``dmesg_text`` so callers
+    # can supply IDs without the source text and the classifier can
+    # supply the source text without the IDs -- the two paths union.
+    tier3_extra: tuple[str, ...] = ()
 
 
 def classify_trial(ctx: TrialContext) -> tuple[Verdict, dict[str, float]]:
@@ -102,7 +110,15 @@ def classify_trial(ctx: TrialContext) -> tuple[Verdict, dict[str, float]]:
     t0 = time.perf_counter()
     tier3: list[str] = []
     if ctx.tier3_state is not None:
-        if ctx.dmesg_text is not None:
+        # Caller-pre-collected IDs come first so the call order in
+        # ``failure_detectors_fired`` matches the chronological order
+        # of detection (workload polls dmesg before classify_trial
+        # runs; in-classifier scans run after).
+        tier3.extend(ctx.tier3_extra)
+        if ctx.dmesg_text:
+            # Only call scan_dmesg_text when there's actual content --
+            # an empty string is the workload's "no new dmesg lines"
+            # signal and shouldn't redundantly re-run the regex set.
             tier3.extend(tier3_kernel.scan_dmesg_text(ctx.dmesg_text))
         if ctx.amd_smi_pre is not None and ctx.amd_smi_post is not None:
             tier3.extend(

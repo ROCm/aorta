@@ -96,12 +96,15 @@ Version: `BUILTIN_PATTERN_VERSION = "1"` (exposed by
 | `tier4:collective_timeout` | Torch distributed watchdog timeout | `Watchdog caught collective operation timeout` |
 | `tier4:nan_signature` | Training-loss NaN signature | `loss is NaN` |
 
-Each pattern ships a sibling fixture log under
-`tests/probe/fixtures/tier4_logs/<id>.log`. Adding a new pattern
-requires:
+Each pattern ships a sibling fixture log at
+`tests/probe/fixtures/tier4_logs/<detector-suffix>.txt` -- `.txt`
+rather than `.log` so the project's `.gitignore` `*.log` rule never
+silently swallows a new fixture, and the basename is the detector ID
+with the `tier4:` prefix stripped (e.g. `cuda_error.txt` for
+`tier4:cuda_error`). Adding a new pattern requires:
 
 1. Add to `_BUILTIN_PATTERNS` in `tier4_patterns.py`.
-2. Add fixture under `tests/probe/fixtures/tier4_logs/`.
+2. Add fixture under `tests/probe/fixtures/tier4_logs/<suffix>.txt`.
 3. Bump `BUILTIN_PATTERN_VERSION`.
 4. Update this document.
 

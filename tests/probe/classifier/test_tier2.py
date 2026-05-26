@@ -108,3 +108,45 @@ def test_monitor_no_hang_during_grace(tmp_path: Path):
 def test_module_detector_id():
     """Detector ID is the rubric-mandated ``tier2:hang``."""
     assert tier2_hang.DETECTOR_HANG == "tier2:hang"
+
+
+def test_monitor_cannot_fire_when_io_source_is_missing(tmp_path: Path, monkeypatch):
+    """Regression for PR #197 review: an unreadable ``/proc/<pid>/io`` used
+    to look like a stable I/O counter (``_io_total`` returned 0 on the
+    error path), which would flip ``io_idle=True`` after ``hang_window_sec``
+    on hosts with ptrace_scope/permission restrictions. The monitor must
+    treat "I/O availability unknown" as ``io_idle=False`` so the detector
+    cannot fire from the I/O leg alone.
+    """
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text("hello\n", encoding="utf-8")
+    mon = HangMonitor(
+        pid=1,
+        stdout_path=stdout,
+        hang_window_sec=0.01,
+        hang_grace_period_at_start=0.0,
+        poll_interval_sec=0.01,
+    )
+    monkeypatch.setattr(mon, "_io_total", lambda: None)
+    monkeypatch.setattr(mon, "_stdout_mtime", lambda: stdout.stat().st_mtime)
+    mon.start()
+    time.sleep(0.1)
+    mon.stop()
+    assert mon.hang_detected is False, (
+        "tier2 fired with the I/O source unreadable; the only signals that "
+        "could have voted True are stdout_silent (gpu_idle defaults to "
+        "False), so two-of-three is impossible -- the unavailability of "
+        "I/O is being misread as a stable counter"
+    )
+
+
+def test_io_total_returns_none_for_unreadable_pid():
+    """``_io_total`` distinguishes ``0 bytes done`` from ``unreadable``.
+
+    PID ``-1`` cannot exist (kernel reserves negative PIDs as TIDs for
+    threads, never as process IDs the user can spawn), so
+    ``/proc/-1/io`` is guaranteed absent and the helper must return
+    None rather than 0.
+    """
+    mon = HangMonitor(pid=-1, stdout_path=Path("/dev/null"))
+    assert mon._io_total() is None

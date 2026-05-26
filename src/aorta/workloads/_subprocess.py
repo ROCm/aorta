@@ -50,8 +50,30 @@ from aorta.probe.classifier.tier2_hang import (
     DEFAULT_HANG_WINDOW_SEC,
     HangMonitor,
 )
-from aorta.probe.classifier.tier3_kernel import Tier3State
+from aorta.probe.classifier.tier3_kernel import (
+    Tier3State,
+    poll_amd_smi,
+    scan_dmesg,
+)
 from aorta.workloads._base import Workload, WorkloadResult
+
+# Process-wide Tier 3 state. Shared across every SubprocessWorkload
+# instance the dispatcher constructs over one ``aorta probe`` invocation
+# so the rubric's "tier3 disabled: <reason>" warning is logged at most
+# ONCE per invocation (FR 2.11), regardless of how many cells x trials
+# the matrix produces. ``Tier3State`` is mutable and the dispatcher's
+# deep-copy semantics for ``probe_extras`` would defeat that guarantee
+# if we tried to plumb it through the config dict -- a module-level
+# singleton is the smallest correct alternative and lives only for the
+# lifetime of the ``aorta probe`` process (probe-mode is single-process
+# by design; the rubric forbids subprocess-launched workloads).
+_TIER3_STATE = Tier3State()
+
+# Pad added to the dmesg ``--since`` window to cover the small wall-
+# clock drift between ``time.perf_counter`` and the kernel's monotonic
+# clock and to catch messages logged a few seconds after the child
+# crashed (e.g. amdgpu reset messages often arrive on the next tick).
+_DMESG_SINCE_PAD_SEC = 5.0
 
 # Config key the dispatcher uses to deliver the opaque user argv. The
 # leading ``_aorta_`` prefix is reserved by the dispatcher and rejected
@@ -252,6 +274,13 @@ class SubprocessWorkload(Workload):
             # contents.
             env_file_path.unlink(missing_ok=True)
 
+        # Tier 3 pre-snapshot. Fail-soft: returns None when ``amd-smi``
+        # is missing or polling fails; ``scan_amd_smi`` then accepts
+        # ``None`` and contributes nothing without aborting the trial.
+        # The shared ``_TIER3_STATE`` ensures the "amd-smi disabled"
+        # log fires at most once across the full probe invocation.
+        amd_smi_pre = poll_amd_smi(_TIER3_STATE)
+
         t0 = time.perf_counter()
         exit_code: int
         timed_out = False
@@ -353,6 +382,30 @@ class SubprocessWorkload(Workload):
         log_text = _read_log_text(stdout_path, stderr_path)
         hang_detected = bool(hang_monitor and hang_monitor.hang_detected)
 
+        # Tier 3 post-snapshot + dmesg scan. ``since_seconds`` covers
+        # the trial walltime plus a small pad so kernel messages
+        # logged shortly after the child crashed (amdgpu reset etc.)
+        # still land in the window. Both helpers are fail-soft and
+        # share ``_TIER3_STATE`` with the pre-snapshot above so the
+        # one-warning-per-invocation contract holds.
+        amd_smi_post = poll_amd_smi(_TIER3_STATE)
+        dmesg_text: str | None
+        try:
+            fired_kernel_ids = scan_dmesg(
+                _TIER3_STATE,
+                since_seconds=walltime_sec + _DMESG_SINCE_PAD_SEC,
+            )
+            # ``scan_dmesg`` returns the fired detector IDs directly;
+            # rebuild a synthetic text blob so the classifier's
+            # ``scan_dmesg_text`` second pass is a no-op (it would
+            # otherwise re-scan ``None`` and emit []). The empty
+            # string here keeps Tier 3's text path inert; the
+            # already-fired IDs are surfaced via ``tier3_extra``.
+            dmesg_text = "" if fired_kernel_ids else None
+        except Exception:
+            fired_kernel_ids = []
+            dmesg_text = None
+
         verdict_obj, tier_durations_ms = classify_trial(
             TrialContext(
                 exit_code=exit_code,
@@ -363,10 +416,11 @@ class SubprocessWorkload(Workload):
                 custom_patterns=custom_patterns,
                 hang_detected=hang_detected,
                 peak_vram_mib=None,
-                # Tier 3 dmesg/amd-smi disabled when no runner-level
-                # state is plumbed through; the runner can pass one
-                # in via probe_extras in a future enhancement.
-                tier3_state=Tier3State(),
+                dmesg_text=dmesg_text,
+                amd_smi_pre=amd_smi_pre,
+                amd_smi_post=amd_smi_post,
+                tier3_extra=tuple(fired_kernel_ids),
+                tier3_state=_TIER3_STATE,
             )
         )
 

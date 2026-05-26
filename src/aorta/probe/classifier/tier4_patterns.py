@@ -15,9 +15,12 @@ Version bump policy (rubric §X.1 row 5):
   downstream user reading the old ID.
 
 Each pattern ships a sibling fixture log under
-``tests/probe/fixtures/tier4_logs/<id>.log``; the parametrised
-Tier 4 test reads each fixture and asserts the corresponding ID
-fires.
+``tests/probe/fixtures/tier4_logs/<detector-suffix>.txt`` (``.txt``
+keeps the fixtures out of the project's ``.gitignore`` ``*.log``
+rule; the basename is the detector ID with the ``tier4:`` prefix
+stripped, e.g. ``cuda_error.txt`` for ``tier4:cuda_error``). The
+parametrised Tier 4 test reads each fixture and asserts the
+corresponding ID fires.
 
 The detectors run AGAINST a 10-MiB-capped window of the trial's
 stdout/stderr concatenation (see :data:`MAX_LOG_BYTES` in

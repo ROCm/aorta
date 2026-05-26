@@ -170,13 +170,24 @@ class HangMonitor:
             if current_mtime != last_stdout_mtime:
                 last_stdout_mtime = current_mtime
                 last_stdout_seen_at = now
+
+            # ``_io_total`` returns None when /proc/<pid>/io can't be
+            # read. "Unknown" must NOT vote io_idle=True -- if we
+            # treated None as a value, two consecutive Nones would
+            # look like a stable I/O counter and the io_idle window
+            # would tick over on its own. Skip the staleness check on
+            # missing-source iterations and bind io_idle=False so the
+            # detector can never fire from the I/O leg alone.
             current_io = self._io_total()
-            if current_io != last_io_total:
-                last_io_total = current_io
-                last_io_seen_at = now
+            if current_io is None:
+                io_idle = False
+            else:
+                if current_io != last_io_total:
+                    last_io_total = current_io
+                    last_io_seen_at = now
+                io_idle = (now - last_io_seen_at) >= self.hang_window_sec
 
             stdout_silent = (now - last_stdout_seen_at) >= self.hang_window_sec
-            io_idle = (now - last_io_seen_at) >= self.hang_window_sec
             gpu_idle = bool(self.gpu_idle_probe()) if self.gpu_idle_probe else False
 
             signals = HangSignals(
@@ -213,14 +224,19 @@ class HangMonitor:
         except OSError:
             return 0.0
 
-    def _io_total(self) -> int:
+    def _io_total(self) -> int | None:
         """``rchar + wchar`` from ``/proc/<pid>/io``.
 
-        Returns ``0`` when the file is unreadable (process already
-        exited, permission denied). The monitor degrades to "io
-        idle unknown" in that case, which contributes False to the
-        two-of-three (so a single missing-signal source can't fire
-        the detector alone).
+        Returns ``None`` when the file is unreadable (process already
+        exited, permission denied, ``ptrace_scope`` restricted, NFS
+        with no proc visibility). The monitor's ``_run`` loop treats
+        ``None`` as "I/O availability unknown" and contributes
+        ``io_idle=False`` to the predicate -- without this distinction,
+        an unreadable ``/proc/<pid>/io`` would look like a permanently
+        stable I/O counter (``current == last`` because both are
+        ``0``) and could flip ``io_idle=True`` after
+        ``hang_window_sec``, false-firing ``tier2:hang`` on hosts where
+        I/O telemetry simply isn't readable.
         """
         try:
             with open(f"/proc/{self.pid}/io", encoding="utf-8") as fh:
@@ -232,7 +248,7 @@ class HangMonitor:
                         wchar = int(line.split(":", 1)[1].strip())
                 return rchar + wchar
         except (FileNotFoundError, PermissionError, OSError, ValueError):
-            return 0
+            return None
 
 
 def read_proc_io_total(pid: int) -> int | None:

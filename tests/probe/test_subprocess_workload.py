@@ -346,3 +346,49 @@ def test_phase_1_shape_still_present_in_phase_2_doc(tmp_path):
     doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
     for key in ("verdict", "exit_code", "walltime_sec", "argv", "cell_name", "trial_index"):
         assert key in doc
+
+
+def test_tier3_actually_runs_per_trial(tmp_path, monkeypatch):
+    """Regression for PR #197 review: Tier 3 used to be unreachable because
+    SubprocessWorkload constructed a fresh Tier3State per trial and hard-
+    coded ``dmesg_text=None`` + ``amd_smi_*=None``. Now the workload
+    invokes ``poll_amd_smi`` and ``scan_dmesg`` through the module-level
+    shared state, so a fake amd-smi snapshot is enough to make Tier 3
+    surface its detector ID end-to-end.
+    """
+    from aorta.probe.classifier.tier3_kernel import DETECTOR_VRAM_GROWTH
+    from aorta.workloads import _subprocess as workload_mod
+
+    monkeypatch.setenv("AORTA_PROBE_AMDSMI_FAKE", "vram=0,throttle=0")
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    pre_calls: dict[str, int] = {"n": 0}
+
+    real_poll = workload_mod.poll_amd_smi
+
+    def _toggle_snapshot(state):
+        # First call (pre) returns the env-supplied snapshot; the
+        # second call (post) returns a snapshot with VRAM jumped past
+        # the rubric's growth threshold so scan_amd_smi will fire.
+        from aorta.probe.classifier.tier3_kernel import (
+            VRAM_GROWTH_THRESHOLD_MIB,
+            AmdSmiSnapshot,
+        )
+
+        pre_calls["n"] += 1
+        if pre_calls["n"] == 1:
+            return real_poll(state)
+        return AmdSmiSnapshot(
+            vram_used_mib=VRAM_GROWTH_THRESHOLD_MIB + 1,
+            thermal_throttle_count=0,
+        )
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", _toggle_snapshot)
+    wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    fired = set(doc["failure_detectors_fired"]) | set(doc["warn_detectors_fired"])
+    assert DETECTOR_VRAM_GROWTH in fired, (
+        "Tier 3 vram-growth detector did not fire even though the workload "
+        "supplied pre/post snapshots crossing the growth threshold; the "
+        "SubprocessWorkload Tier-3 wiring is silently disabled"
+    )

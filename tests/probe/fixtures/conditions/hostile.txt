@@ -12,4 +12,4 @@ type(capture)
 getattr(capture, 'pop')('eval_loss')
 capture['x'].__class__
 math.__loader__.load_module('os')
-2 ** 1000000000  # length-restricted: reject expressions > 256 chars
+2 ** 1000000000  # forbidden-node: ast.Pow is no longer in the allow-list (would otherwise build a huge int via int.__pow__)

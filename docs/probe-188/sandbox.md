@@ -24,8 +24,12 @@ For every `custom_patterns[*]` entry with a `match.condition`:
    - Walks the AST and rejects every node, name, attribute, subscript,
      and call target outside the whitelist (see below).
    - Rejects integer literals whose magnitude is `>= 10^9`
-     (`MAX_INT_CONSTANT`) — prevents `2 ** 1000000000`-shaped resource
-     exhaustion at eval time.
+     (`MAX_INT_CONSTANT`) — prevents bare resource-exhaustion
+     literals like `exit_code == 1000000000` from ever reaching
+     `eval`. Exponentiation (`**`) is rejected one layer up because
+     it is not in the AST allow-list; the magnitude cap is no
+     longer the only defence against `2 ** capture['n']`-style
+     attacks where the exponent comes from non-literal text.
    - Returns a compiled `CodeType` cached on the `CompiledPattern`.
 2. At **trial post-exit**, if the pattern's regex matched, the runner
    calls `evaluate(code, capture=..., exit_code=..., walltime_sec=...,
@@ -63,10 +67,17 @@ ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
 ast.Call, ast.Subscript, ast.Name, ast.Constant, ast.IfExp,
 ast.And, ast.Or, ast.Not, ast.Eq, ast.NotEq, ast.Lt, ast.LtE,
 ast.Gt, ast.GtE, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod,
-ast.FloorDiv, ast.Pow, ast.USub, ast.UAdd, ast.Load,
+ast.FloorDiv, ast.USub, ast.UAdd, ast.Load,
 ```
 
 Plus `ast.Attribute` ONLY when it spells `math.isnan` or `math.isinf`.
+
+`ast.Pow` (`**`) is deliberately omitted. The integer-literal
+magnitude cap only restricts literal constants; with `Pow` allowed,
+an expression like `2 ** int(capture['exp'])` could allocate a huge
+Python int from regex-capture text at eval time. Legitimate
+`condition:` expressions are boolean checks (`exit_code == 137`,
+`walltime_sec > 60`) and never need exponentiation.
 
 ## Allowed Names
 
@@ -125,7 +136,7 @@ type(capture)
 getattr(capture, 'pop')('eval_loss')
 capture['x'].__class__
 math.__loader__.load_module('os')
-2 ** 1000000000  # rejected by the 256-char length cap
+2 ** 1000000000  # rejected because ast.Pow is not in the allow-list
 ```
 
 Each line covers a distinct exploit class:
@@ -139,7 +150,13 @@ Each line covers a distinct exploit class:
 - Function literals (`lambda`).
 - Comprehensions (`ListComp`, `DictComp`).
 - Forbidden builtins (`type`, `getattr`).
-- Resource-exhaustion integer literals.
+- Resource-exhaustion exponentiation (`**`) — rejected at the AST
+  level rather than relying on the integer-literal magnitude cap,
+  because the exponent can be derived from non-literal expressions
+  like `int(capture['exp'])` that the magnitude cap does not see.
+- Resource-exhaustion integer literals
+  (`exit_code == 1000000000`-style) — rejected by
+  `MAX_INT_CONSTANT = 10**9`.
 
 ---
 
