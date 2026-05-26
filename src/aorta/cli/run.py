@@ -45,22 +45,11 @@ from aorta.run.dispatcher import RunRequest, run_trials
     default=None,
     help=(
         "OCI image reference (typically digest-pinned, e.g. "
-        "'sha256:<64-hex>' or '<repo>@sha256:<digest>') to overlay onto "
-        "the resolved environment's ``docker`` field at run time. Peer "
-        "of the buck-target / venv tier hints: the platform threads it, "
-        "docker-aware workload wrappers consume it via "
-        "``config['_aorta_environment']['docker']`` and decide whether "
-        "to shell out via ``docker run <image>`` (see "
-        "``src/aorta/registry/README.md`` in the source tree). Other "
-        "fields of the named --environment "
-        "(buck_target, venv, source_package) are preserved -- the "
-        "override is a pin on the docker axis only. When omitted, the "
-        "named environment's existing ``docker`` (if any) is used "
-        "as-is. The field name on :class:`Environment` is ``docker`` "
-        "(the recipe slot name); the CLI flag is named ``--image`` "
-        "(after the value the operator provides). Required by "
-        "aorta-internal #42's DOCKER_ONLY and BUCK_IN_DOCKER "
-        "regression-gate tiers."
+        "'sha256:<64-hex>' or '<repo>@sha256:<digest>') to overlay "
+        "onto the resolved environment's docker field. Other axes "
+        "(buck_target, venv, source_package) of the named "
+        "--environment are preserved. When omitted, the named "
+        "environment's existing docker value (if any) is used as-is."
     ),
 )
 @click.option(

@@ -459,7 +459,7 @@ class TestImageOption:
 
     Same overlay contract as ``--buck-target``: pin one axis of the
     resolved environment, preserve everything else. Together the two
-    flags unblock aorta-internal#42's full dispatch matrix
+    flags unblock the full downstream regression-gate dispatch matrix
     (DOCKER_ONLY, BUCK_ONLY, BUCK_IN_DOCKER). Naming asymmetry --
     flag ``--image`` overlays field ``Environment.docker`` -- is
     deliberate: the field names the recipe slot, the flag names
@@ -492,8 +492,8 @@ class TestImageOption:
         assert "not found" in result.output.lower()
 
     def test_image_accepts_bare_sha256_digest(self):
-        """A bare digest pin parses cleanly. This is the form the
-        aorta-internal#42 DOCKER_ONLY tier emits."""
+        """A bare digest pin parses cleanly. This is the form
+        downstream DOCKER_ONLY regression gates emit."""
         runner = CliRunner()
         result = runner.invoke(
             run,
@@ -510,10 +510,9 @@ class TestImageOption:
 
     def test_image_accepts_repo_at_digest_reference(self):
         """The reference-with-digest form ('<repo>@sha256:<hex>')
-        parses too. The aorta-internal gate validator accepts both
-        the bare and reference forms (see
-        ``aorta_internal/gates/schema.py``); the CLI must accept
-        whatever the gate validator accepts.
+        parses too. Downstream gate validators accept both the
+        bare and reference forms; the CLI must accept whatever
+        the gate validator accepts.
 
         Asserts the *positive* failure mode (workload-discovery)
         rather than only the *negative* ("not rejected at parse")

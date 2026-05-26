@@ -1376,8 +1376,8 @@ class TestImageOverride:
     class, so the fix is locatable from the test name alone.
 
     Together these tests + :class:`TestBuckTargetOverride` pin the
-    full dispatch matrix that aorta-internal#42's regression-gate
-    runner relies on: DOCKER_ONLY (image only), BUCK_ONLY (buck only),
+    full dispatch matrix that downstream regression-gate runners
+    rely on: DOCKER_ONLY (image only), BUCK_ONLY (buck only),
     BUCK_IN_DOCKER (both, exercising the independence guarantee).
     """
 
@@ -1515,6 +1515,47 @@ class TestImageOverride:
         assert captured_config["_aorta_environment"]["docker"] == existing
         assert results[0].execution_env["docker"] == existing
 
+    def test_empty_string_image_preserves_named_env_docker(self, tmp_path):
+        """``image=""`` is treated as "no override" -- same as ``None``.
+
+        Empty string is never a valid OCI image reference, so an
+        explicit ``--image ""`` (or a library caller passing ``""``)
+        should NOT silently overlay ``docker=""`` onto the resolved
+        env. The dispatcher uses a truthy check so both ``None``
+        (the default) and ``""`` flow through without touching the
+        named env's existing docker -- otherwise an operator who
+        accidentally produced an empty value (shell variable
+        expansion, dispatcher emitting an unset environment override)
+        would land in a ``docker run ""``-style failure that's hard
+        to attribute back to the flag. Mirrors the equivalent test
+        on the buck axis (``test_empty_string_override_preserves_
+        named_env_buck_target``).
+        """
+        from aorta.registry import Environment
+
+        captured_config: dict = {}
+        workload_cls = self._build_capture_workload(captured_config)
+        existing = "rocm/pytorch@sha256:" + "0" * 64
+        env = Environment(
+            name="docker-base",
+            docker=existing, venv=None, buck_target=None,
+            source_package="aorta",
+        )
+        with patch("importlib.metadata.entry_points",
+                   return_value=self._mock_workload_discovery(workload_cls)):
+            with patch("aorta.run.dispatcher.get_environment", return_value=env):
+                req = RunRequest(
+                    workload="envcapture",
+                    trials=1,
+                    environment="docker-base",
+                    image="",
+                    results_dir=tmp_path,
+                )
+                results = run_trials(req)
+
+        assert captured_config["_aorta_environment"]["docker"] == existing
+        assert results[0].execution_env["docker"] == existing
+
     def test_override_preserves_other_env_fields(self, tmp_path):
         """Override is a single-axis pin, not a wholesale env
         replacement.
@@ -1570,9 +1611,9 @@ class TestImageOverride:
 
         Asserts the two ``replace(...)`` calls in the dispatcher
         compose: neither overlay clobbers the other. This is the
-        exact runtime shape aorta-internal#42's BUCK_IN_DOCKER tier
-        produces (an operator pin on BOTH the docker image AND the
-        buck target, for highest-assurance gates).
+        exact runtime shape a downstream BUCK_IN_DOCKER regression-
+        gate tier produces (an operator pin on BOTH the docker
+        image AND the buck target, for highest-assurance gates).
         """
         from aorta.registry import Environment
 

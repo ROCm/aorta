@@ -167,9 +167,9 @@ class RunRequest:
     # / ``buck_target``); the OVERLAY VALUE names what the operator
     # provides -- an OCI image reference (typically a digest pin
     # like ``sha256:<64-hex>`` or ``<repo>@sha256:<digest>``). Same
-    # naming used by the CLI flag (``--image``) and by the
-    # aorta-internal #42 regression-gate dispatcher (which emits
-    # ``--image <digest>`` for DOCKER_ONLY and BUCK_IN_DOCKER tiers).
+    # naming used by the CLI flag (``--image``) and by downstream
+    # regression-gate dispatchers (which emit ``--image <digest>``
+    # for DOCKER_ONLY and BUCK_IN_DOCKER tiers).
     # ``None`` means "leave the resolved environment's ``docker``
     # untouched" -- a named env that already declares ``docker``
     # keeps its value.
