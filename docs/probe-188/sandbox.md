@@ -26,10 +26,14 @@ For every `custom_patterns[*]` entry with a `match.condition`:
    - Rejects integer literals whose magnitude is `>= 10^9`
      (`MAX_INT_CONSTANT`) — prevents bare resource-exhaustion
      literals like `exit_code == 1000000000` from ever reaching
-     `eval`. Exponentiation (`**`) is rejected one layer up because
-     it is not in the AST allow-list; the magnitude cap is no
-     longer the only defence against `2 ** capture['n']`-style
-     attacks where the exponent comes from non-literal text.
+     `eval`. Three resource-exhaustion operators (`**`, `*`, `%`)
+     are also rejected one layer up because they are not in the
+     AST allow-list, closing the variants that operate on
+     non-literal operands: `2 ** capture['n']` (huge int),
+     `'a' * 999999998` (huge string), `'%999999998s' % capture['x']`
+     (huge printf buffer). The magnitude cap and the operator
+     allow-list together cover both the literal and the
+     name-derived attack shapes.
    - Returns a compiled `CodeType` cached on the `CompiledPattern`.
 2. At **trial post-exit**, if the pattern's regex matched, the runner
    calls `evaluate(code, capture=..., exit_code=..., walltime_sec=...,
@@ -66,18 +70,23 @@ error path catches it without code changes.
 ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
 ast.Call, ast.Subscript, ast.Name, ast.Constant, ast.IfExp,
 ast.And, ast.Or, ast.Not, ast.Eq, ast.NotEq, ast.Lt, ast.LtE,
-ast.Gt, ast.GtE, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod,
+ast.Gt, ast.GtE, ast.Add, ast.Sub, ast.Div,
 ast.FloorDiv, ast.USub, ast.UAdd, ast.Load,
 ```
 
 Plus `ast.Attribute` ONLY when it spells `math.isnan` or `math.isinf`.
 
-`ast.Pow` (`**`) is deliberately omitted. The integer-literal
-magnitude cap only restricts literal constants; with `Pow` allowed,
-an expression like `2 ** int(capture['exp'])` could allocate a huge
-Python int from regex-capture text at eval time. Legitimate
+`ast.Pow` (`**`), `ast.Mult` (`*`), and `ast.Mod` (`%`) are
+deliberately omitted. The integer-literal magnitude cap only
+restricts *literal* constants, and Python's `*` / `%` / `**`
+operators all overload on non-numeric operands (strings repeat,
+tuples repeat, printf-formatting allocates), so the walker can't
+distinguish "numeric arithmetic" from "resource-exhaustion bomb"
+at parse time without knowing the operand types. The simplest
+correct defence is to forbid all three operators. Legitimate
 `condition:` expressions are boolean checks (`exit_code == 137`,
-`walltime_sec > 60`) and never need exponentiation.
+`walltime_sec > 60`, `peak_vram_mib > 100`) and never need
+exponentiation, multiplication, or modulo.
 
 ## Allowed Names
 
@@ -106,15 +115,23 @@ condition: "math.isnan(float(capture['loss']))"
 # Slow iteration only counts on a real GPU host.
 condition: "walltime_sec > 60 and peak_vram_mib > 0"
 
-# Exit code 137 (OOM-kill) only when the user log mentions oom.
-condition: "exit_code == 137 and 'oom' in capture['msg']"
-# NOTE: the above uses ``in`` on a string -- works because ast.Compare
-# with ast.In is a planned future addition. Today, prefer:
+# Exit code 137 (OOM-kill) plus a non-empty captured message
+# (we can't substring-search the message today; ``ast.In`` is
+# rejected by the walker, so use a presence check instead).
 condition: "exit_code == 137 and len(capture['msg']) > 0"
 
 # Specific value check (Tier-3 OOM-killer signature).
 condition: "int(capture['code']) == 137"
 ```
+
+> **`in` is currently rejected.** `ast.Compare` with the `ast.In`
+> operator is **not** in the allow-list today, so a condition like
+> `'oom' in capture['msg']` raises `SandboxError` at recipe-load
+> time. If you need substring matching, do it in the
+> `custom_patterns[*].match.regex` field (where it belongs) and
+> use `condition:` for the boolean glue. Membership-test support
+> is tracked as a planned future addition; until then the
+> "Rejected" section below pins the current behaviour.
 
 ## Worked Examples — Rejected
 
@@ -137,6 +154,9 @@ getattr(capture, 'pop')('eval_loss')
 capture['x'].__class__
 math.__loader__.load_module('os')
 2 ** 1000000000  # rejected because ast.Pow is not in the allow-list
+'a' * 999999998  # rejected because ast.Mult is not in the allow-list (string repeat -> ~1 GiB alloc)
+'%999999998s' % capture['x']  # rejected because ast.Mod is not in the allow-list (printf-style formatting -> same billion-byte buffer)
+'oom' in capture['msg']  # rejected because ast.In is not in the allow-list (no membership tests today; use the regex for substring matching)
 ```
 
 Each line covers a distinct exploit class:

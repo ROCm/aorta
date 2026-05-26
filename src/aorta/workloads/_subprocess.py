@@ -45,6 +45,8 @@ from pathlib import Path
 from typing import Any
 
 from aorta.probe.classifier import TrialContext, classify_trial
+from aorta.probe.classifier.tier1_process import Tier1Context
+from aorta.probe.classifier.tier1_process import detect as tier1_detect
 from aorta.probe.classifier.tier2_hang import (
     DEFAULT_HANG_GRACE_SEC,
     DEFAULT_HANG_WINDOW_SEC,
@@ -56,6 +58,7 @@ from aorta.probe.classifier.tier3_kernel import (
     poll_amd_smi,
     scan_dmesg,
 )
+from aorta.probe.classifier.verdict import Verdict
 from aorta.workloads._base import Workload, WorkloadResult
 
 # Process-wide Tier 3 state. Shared across every SubprocessWorkload
@@ -418,23 +421,42 @@ class SubprocessWorkload(Workload):
             fired_kernel_ids = []
             dmesg_text = None
 
-        verdict_obj, tier_durations_ms = classify_trial(
-            TrialContext(
+        # Classifier crash containment (rubric §2.B FR 2.11 fail-soft
+        # policy applied to the classifier itself). The trial has
+        # already run end-to-end -- we have its exit_code,
+        # walltime_sec, captured logs, and Tier 1 inputs all in hand.
+        # If a tier classifier raises (regex catastrophe, schema
+        # surprise from a future refactor, anything), we MUST still
+        # write a ``result.json`` so the trial doesn't silently
+        # disappear from the matrix. Fall back to a Tier-1-only
+        # verdict derived from the same Tier 1 inputs, record the
+        # classifier exception under ``capture['classifier_error']``
+        # for the operator, and continue.
+        try:
+            verdict_obj, tier_durations_ms = classify_trial(
+                TrialContext(
+                    exit_code=exit_code,
+                    timed_out=timed_out,
+                    walltime_sec=walltime_sec,
+                    trial_dir=trial_dir,
+                    log_text=log_text,
+                    custom_patterns=custom_patterns,
+                    hang_detected=hang_detected,
+                    peak_vram_mib=None,
+                    dmesg_text=dmesg_text,
+                    amd_smi_pre=amd_smi_pre,
+                    amd_smi_post=amd_smi_post,
+                    tier3_extra=tuple(fired_kernel_ids),
+                    tier3_state=_TIER3_STATE,
+                )
+            )
+        except Exception as classifier_exc:  # noqa: BLE001 -- classifier crash containment
+            verdict_obj, tier_durations_ms = _tier1_only_fallback_verdict(
                 exit_code=exit_code,
                 timed_out=timed_out,
-                walltime_sec=walltime_sec,
                 trial_dir=trial_dir,
-                log_text=log_text,
-                custom_patterns=custom_patterns,
-                hang_detected=hang_detected,
-                peak_vram_mib=None,
-                dmesg_text=dmesg_text,
-                amd_smi_pre=amd_smi_pre,
-                amd_smi_post=amd_smi_post,
-                tier3_extra=tuple(fired_kernel_ids),
-                tier3_state=_TIER3_STATE,
+                classifier_exc=classifier_exc,
             )
-        )
 
         result_doc: dict[str, Any] = {
             "verdict": verdict_obj.verdict,
@@ -660,6 +682,60 @@ def _read_log_text(stdout_path: Path, stderr_path: Path) -> str:
         except OSError:
             parts.append("")
     return "\n".join(parts)
+
+
+def _tier1_only_fallback_verdict(
+    *,
+    exit_code: int,
+    timed_out: bool,
+    trial_dir: Path,
+    classifier_exc: BaseException,
+) -> tuple[Verdict, dict[str, float]]:
+    """Build a deterministic verdict when :func:`classify_trial` raises.
+
+    Tier 1 alone is enough to give the trial a sensible verdict: it
+    is the only tier that's a pure function of the subprocess exit
+    state and the trial dir, so it can't itself crash on regex /
+    capture / dmesg edge cases. We re-run :func:`tier1_detect`
+    here (cheap, no FS work beyond a glob in ``trial_dir``) and
+    encode the original classifier exception under
+    ``capture['classifier_error']`` so operators see WHY the full
+    classifier was bypassed instead of a silent Tier-1-only
+    result. ``tier_durations_ms`` records the fallback in
+    ``capture`` rather than the per-tier breakdown -- the other
+    four tiers genuinely did not run.
+
+    Verdict rule: any Tier 1 detector fires -> ``fail``; else
+    ``pass``. Matches the existing Phase-1 fallback shape so
+    downstream tooling that already parses ``failure_detectors_fired``
+    keeps working.
+    """
+    fired = tier1_detect(
+        Tier1Context(
+            exit_code=exit_code,
+            timed_out=timed_out,
+            trial_dir=trial_dir,
+        )
+    )
+    verdict_str = "fail" if fired else "pass"
+    capture: dict[str, str | float | int] = {
+        "classifier_error": f"{type(classifier_exc).__name__}: {classifier_exc}",
+    }
+    verdict = Verdict(
+        verdict=verdict_str,
+        failure_detectors_fired=list(fired),
+        warn_detectors_fired=[],
+        capture=capture,
+    )
+    # Per-tier durations: Tier 1 ran, everything else was skipped.
+    tier_durations_ms = {
+        "tier1": 0.0,
+        "tier2": 0.0,
+        "tier3": 0.0,
+        "tier4": 0.0,
+        "tier5": 0.0,
+    }
+    return verdict, tier_durations_ms
 
 
 def _write_env_file(path: Path, env: dict[str, str]) -> None:

@@ -198,6 +198,42 @@ def test_pow_operator_rejected() -> None:
             validate_and_compile(hostile)
 
 
+def test_mult_operator_rejected_for_string_repeat() -> None:
+    """Regression for PR #197 round-3 review: dropping ``ast.Mult``
+    from the allow-list closes the string-repetition path
+    (``'a' * 999999998`` allocates a ~1 GiB string without ever
+    crossing :data:`MAX_INT_CONSTANT`). The walker can't tell at
+    parse time whether ``*`` is a numeric multiply or a string /
+    tuple repeat, so the simplest correct defence is to forbid the
+    operator. Same reasoning as Pow.
+    """
+    for hostile in (
+        "'a' * 999999998",
+        "capture['x'] * 999999998",
+        "exit_code * 2",
+        "(1,) * 999999998",
+    ):
+        with pytest.raises(SandboxError, match="forbidden AST node"):
+            validate_and_compile(hostile)
+
+
+def test_mod_operator_rejected_for_printf_format() -> None:
+    """Regression for PR #197 round-3 review: dropping ``ast.Mod``
+    closes the printf-style string-formatting path
+    (``'%999999998s' % capture['x']`` allocates the same billion-
+    byte buffer as string-repeat). The walker can't discriminate
+    numeric modulo from string formatting at parse time, so the
+    operator goes entirely.
+    """
+    for hostile in (
+        "'%999999998s' % capture['x']",
+        "exit_code % 2",
+        "'%s' % capture['code']",
+    ):
+        with pytest.raises(SandboxError, match="forbidden AST node"):
+            validate_and_compile(hostile)
+
+
 def test_empty_builtins_neutralises_eval() -> None:
     """Defence-in-depth: even if ``eval`` were reached, ``__builtins__={}``
     means ``__import__`` is unreachable.

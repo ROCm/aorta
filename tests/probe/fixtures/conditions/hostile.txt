@@ -13,3 +13,7 @@ getattr(capture, 'pop')('eval_loss')
 capture['x'].__class__
 math.__loader__.load_module('os')
 2 ** 1000000000  # forbidden-node: ast.Pow is no longer in the allow-list (would otherwise build a huge int via int.__pow__)
+'a' * 999999998  # forbidden-node: ast.Mult is no longer in the allow-list (string repetition would allocate ~1 GiB without crossing MAX_INT_CONSTANT)
+'%999999998s' % capture['x']  # forbidden-node: ast.Mod is no longer in the allow-list (printf-style %s would allocate the same billion-byte buffer)
+capture['x'] * 999999998  # forbidden-node: ast.Mult; the multiplier dodges the integer-literal cap because it's named
+'oom' in capture['msg']  # forbidden-node: ast.In is not in the allow-list (the docs explicitly point users at the regex field for substring matching)

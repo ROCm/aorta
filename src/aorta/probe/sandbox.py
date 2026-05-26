@@ -63,23 +63,42 @@ MAX_EXPR_LEN = 256
 # and orders of magnitude below the size that turns ``int.__mul__``
 # into a memory bomb.
 #
-# Exponentiation (``**``) is NOT in the allow-list (see
-# :data:`_ALLOWED_NODES`) so the magnitude cap is no longer the last
-# line of defence against ``2 ** capture['n']``-style attacks: any Pow
-# expression rejects at parse time before either operand is considered.
+# The resource-exhaustion operators (``**``, ``*``, ``%``) are also
+# NOT in the allow-list (see :data:`_ALLOWED_NODES`), so the
+# magnitude cap is not the last line of defence against
+# ``2 ** capture['n']``, ``'a' * 999999998``, or
+# ``'%999999998s' % capture['x']``-style attacks: those expressions
+# reject at parse time before either operand is considered.
 MAX_INT_CONSTANT = 10**9
 
 # AST node types that the walker accepts. Anything else (Lambda,
 # ListComp, DictComp, SetComp, GeneratorExp, FormattedValue,
 # JoinedStr, ClassDef, FunctionDef, Import, ...) rejects.
 #
-# ``ast.Pow`` is deliberately EXCLUDED. The :data:`MAX_INT_CONSTANT`
-# magnitude cap only restricts literal constants -- it cannot stop
-# ``2 ** int(capture['exp'])`` from allocating a giant Python int from
-# untrusted regex-capture text. Legitimate ``condition`` expressions
-# are simple boolean checks (``exit_code == 137``,
-# ``walltime_sec > 60``); none of them need exponentiation, so dropping
-# ``**`` entirely is a free safety win.
+# ``ast.Pow``, ``ast.Mult``, and ``ast.Mod`` are deliberately EXCLUDED:
+#
+# * ``Pow`` -- :data:`MAX_INT_CONSTANT` only restricts literal
+#   constants. ``2 ** int(capture['exp'])`` would still allocate a
+#   giant Python int from untrusted regex-capture text. Dropping
+#   ``**`` closes that path at parse time before either operand is
+#   considered.
+# * ``Mult`` -- Python's ``*`` operator overloads on strings and
+#   tuples (``'a' * 999999998`` allocates a ~1 GiB string). The
+#   integer-literal cap is at 10**9 (just below the
+#   string-repetition pressure point), but a literal like
+#   ``999999998`` slips under the cap and detonates at eval time;
+#   the walker can't distinguish "numeric multiply" from "string
+#   repeat" because operand types are only known at runtime. The
+#   simplest correct defence is to forbid ``*`` entirely.
+# * ``Mod`` -- Python's ``%`` overloads on strings as printf-style
+#   formatting (``'%999999998s' % capture['x']`` allocates the same
+#   billion-byte buffer). Same reasoning: no walk-time type
+#   discrimination, drop the operator.
+#
+# Legitimate ``condition`` expressions are simple boolean checks
+# (``exit_code == 137``, ``walltime_sec > 60``, ``peak_vram_mib > 100``);
+# none of them need ``**``, ``*``, or ``%``, so dropping all three
+# is a free safety win.
 _ALLOWED_NODES = frozenset(
     {
         ast.Expression,
@@ -103,9 +122,7 @@ _ALLOWED_NODES = frozenset(
         ast.GtE,
         ast.Add,
         ast.Sub,
-        ast.Mult,
         ast.Div,
-        ast.Mod,
         ast.FloorDiv,
         ast.USub,
         ast.UAdd,

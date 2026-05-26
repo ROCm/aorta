@@ -21,6 +21,24 @@ def test_list_patterns_exits_zero():
     assert result.exit_code == 0, result.output
 
 
+def test_version_without_list_patterns_is_rejected_with_targeted_message():
+    """Regression for PR #197 round-3 review: ``--version`` is
+    documented as meaningful only when paired with
+    ``--list-patterns``. Used to silently fall through to the
+    ``--recipe`` check, producing a confusing "Missing option
+    '--recipe'" error. Now we reject up-front with a targeted
+    usage message so the operator sees the intended pairing.
+    """
+    runner = CliRunner()
+    result = runner.invoke(probe, ["--version"])
+    assert result.exit_code != 0
+    # click.UsageError formats messages on stderr-equivalent; in
+    # CliRunner that lands in ``output`` by default.
+    assert "--version is only meaningful with --list-patterns" in result.output
+    # Confirm we did NOT fall through to the recipe complaint.
+    assert "Missing option '--recipe'" not in result.output
+
+
 def test_list_patterns_prints_every_detector_id():
     """Every Tier 4 detector ID is in the output (rubric §2.B FR 2.5)."""
     runner = CliRunner()

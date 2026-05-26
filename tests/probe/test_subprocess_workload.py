@@ -392,3 +392,60 @@ def test_tier3_actually_runs_per_trial(tmp_path, monkeypatch):
         "supplied pre/post snapshots crossing the growth threshold; the "
         "SubprocessWorkload Tier-3 wiring is silently disabled"
     )
+
+
+def test_classifier_crash_still_writes_result_json(tmp_path, monkeypatch):
+    """Regression for PR #197 round-3 review: if ``classify_trial``
+    raises (regex catastrophe, future refactor edge case, etc.),
+    the workload MUST still write a ``result.json`` so the trial
+    doesn't silently disappear from the matrix. Falls back to a
+    Tier-1-only verdict derived from the captured exit code, and
+    records the classifier exception under
+    ``capture['classifier_error']`` so the operator sees the
+    cause.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    boom = RuntimeError("synthetic classifier crash for PR #197 review")
+
+    def _exploding_classify(_ctx):
+        raise boom
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _exploding_classify)
+
+    # Use ``false`` so Tier 1 fallback fires ``tier1:exit_nonzero``.
+    wl = _make_workload(tmp_path, ["false"])
+    wl.setup()
+    result = wl.run()
+
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "fail"
+    assert "tier1:exit_nonzero" in doc["failure_detectors_fired"]
+    assert "classifier_error" in doc["capture"]
+    assert "synthetic classifier crash" in doc["capture"]["classifier_error"]
+    # The workload result still reports the failure (not a hang) so
+    # the dispatcher records a failed trial deterministically.
+    assert result.passed is False
+
+
+def test_classifier_crash_on_passing_trial_falls_back_to_pass(tmp_path, monkeypatch):
+    """A ``true`` exit + classifier crash -> Tier-1-only verdict is
+    ``pass`` (no Tier 1 detector fires for exit_code=0), but the
+    classifier_error still gets recorded so the operator knows the
+    full classifier didn't run.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    def _exploding_classify(_ctx):
+        raise ValueError("simulated tier-4 regex catastrophe")
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _exploding_classify)
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    result = wl.run()
+
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "pass"
+    assert doc["failure_detectors_fired"] == []
+    assert "classifier_error" in doc["capture"]
+    assert result.passed is True

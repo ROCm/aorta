@@ -103,6 +103,26 @@ def _print_list_patterns(show_version: bool) -> None:
         click.echo("")
 
 
+def _reject_bare_version_flag() -> None:
+    """Raise a targeted ``click.UsageError`` for bare ``--version``.
+
+    The flag is documented as meaningful only when paired with
+    ``--list-patterns`` (it prints the built-in pattern-library
+    version next to the aorta package version). Without
+    ``--list-patterns`` it has no semantics; silently falling
+    through to the ``--recipe`` check would surface a confusing
+    "Missing option '--recipe'" error, suggesting the operator
+    needs a recipe just to see a version string. Reject up-front
+    with a targeted usage message that names the intended pairing.
+    """
+    raise click.UsageError(
+        "--version is only meaningful with --list-patterns. "
+        "Run 'aorta probe --list-patterns --version' to print the "
+        "pattern-library and package versions, or drop --version "
+        "to run a probe trial."
+    )
+
+
 def _reject_flag_shaped_callback(
     ctx: click.Context, param: click.Parameter, value: object
 ) -> object:
@@ -140,9 +160,18 @@ class _ProbeCommand(click.Command):
     also prints info and exits without consuming a user command --
     the rubric's ``aorta probe list-patterns`` shape, expressed as
     a flag to preserve the Phase 1 CLI byte-equivalently.
+
+    ``--version`` similarly short-circuits: it is documented as only
+    meaningful when paired with ``--list-patterns``, and the body
+    rejects ``--version`` alone with a targeted usage message. Without
+    this short-circuit, ``aorta probe --version`` would die at the
+    ``--`` separator check first and the operator would never see
+    the more helpful "use --list-patterns" hint.
     """
 
-    _BYPASS_TOKENS: frozenset[str] = frozenset({"--help", "-h", "--list-patterns"})
+    _BYPASS_TOKENS: frozenset[str] = frozenset(
+        {"--help", "-h", "--list-patterns", "--version"}
+    )
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         if not ctx.resilient_parsing and not help_token_in_option_zone(
@@ -271,6 +300,10 @@ def probe(
     if list_patterns:
         _print_list_patterns(show_version=show_version)
         return
+    if show_version:
+        # ``--version`` is only meaningful with ``--list-patterns``;
+        # see :func:`_reject_bare_version_flag` for the rationale.
+        _reject_bare_version_flag()
 
     configure_verbose_logging(verbose)
     if recipe is None:
