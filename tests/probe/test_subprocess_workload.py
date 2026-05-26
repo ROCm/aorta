@@ -130,3 +130,55 @@ def test_missing_executable_yields_fail(tmp_path):
     assert doc["verdict"] == "fail"
     assert doc["exit_code"] == 127
     assert result.passed is False
+
+
+def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
+    """Regression for PR #194 review: ``proc.kill()`` after a
+    ``TimeoutExpired`` must not propagate ``ProcessLookupError``
+    when the child happens to exit between the timeout firing and
+    the kill landing. The workload should record a deterministic
+    timed-out trial with ``exit_code=-1`` and a ``result.json``
+    on disk -- crashing here would mean a trial silently disappears
+    from the matrix.
+
+    We simulate the race by monkeypatching ``Popen`` so ``wait()``
+    raises ``TimeoutExpired`` and ``kill()``/``wait()`` raise
+    ``ProcessLookupError`` (matching the Linux ESRCH behaviour
+    when the child has already exited).
+    """
+    import subprocess as _subprocess
+
+    real_popen = _subprocess.Popen
+
+    class _RacingPopen:
+        def __init__(self, *args, **kwargs):
+            self._real = real_popen(["true"], **{
+                k: v for k, v in kwargs.items() if k in ("stdout", "stderr", "env")
+            })
+            self.pid = self._real.pid
+            self._wait_calls = 0
+
+        def wait(self, timeout=None):
+            self._wait_calls += 1
+            if self._wait_calls == 1:
+                # First ``proc.wait(timeout=...)`` -- pretend the
+                # child is still running so the timeout branch fires.
+                raise _subprocess.TimeoutExpired(cmd="true", timeout=timeout)
+            # Second ``proc.wait()`` after kill() -- child is gone.
+            raise ProcessLookupError(3, "No such process")
+
+        def kill(self):
+            raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(_subprocess, "Popen", _RacingPopen)
+
+    wl = _make_workload(tmp_path, ["true"], timeout_per_trial=0.01)
+    wl.setup()
+    # The crash this test is pinning: previously the unguarded
+    # proc.kill() would propagate ProcessLookupError out of run().
+    result = wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "fail"
+    assert doc["timed_out"] is True
+    assert doc["exit_code"] == -1
+    assert result.passed is False

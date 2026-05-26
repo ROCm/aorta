@@ -199,8 +199,26 @@ class SubprocessWorkload(Workload):
                     exit_code = proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     timed_out = True
-                    proc.kill()
-                    proc.wait()
+                    # Race-safe shutdown: the child can exit between
+                    # the ``wait()`` timeout and our ``kill()`` (e.g.
+                    # the workload finished while the kernel was
+                    # delivering the SIGALRM the timeout uses), which
+                    # makes ``Popen.kill()`` raise
+                    # ``ProcessLookupError`` (ESRCH) on Linux. Swallow
+                    # that one specific case so the trial deterministically
+                    # records ``timed_out=True`` and ``exit_code=-1``
+                    # rather than crashing the workload and leaving the
+                    # trial with no ``result.json``. Any other OSError
+                    # from kill() (EPERM etc.) re-raises so we don't
+                    # silently swallow a genuine bug.
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        proc.wait()
+                    except ProcessLookupError:
+                        pass
                     exit_code = -1
         except FileNotFoundError as exc:
             # ``Popen`` raises FileNotFoundError when argv[0] doesn't
@@ -287,9 +305,27 @@ def _write_env_file(path: Path, env: dict[str, str]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             for key in sorted(env):
                 # POSIX env-file shape: bare KEY=VALUE\n, no quoting.
-                # Reject newlines in values up-front -- they would
-                # corrupt the file shape and a downstream tool would
-                # silently read a truncated value.
+                # Sidecar mitigations only enforce that keys are
+                # strings, NOT that they are single-line and
+                # ``=``-free, so a hostile mitigation file could try
+                # to inject extra KEY=VALUE rows via ``\n`` or
+                # ``\r`` in a key, or smuggle a second ``=`` to
+                # rebind a later key. Reject all three explicitly
+                # (newline/CR/equals) so the file shape stays one
+                # KEY=VALUE per row and a downstream reader cannot
+                # be coerced into seeing a different binding than
+                # what the mitigation actually wrote.
+                if "\n" in key or "\r" in key or "=" in key:
+                    raise ValueError(
+                        f"env key {key!r} contains a newline, carriage "
+                        "return, or '=' character; probe.env uses bare "
+                        "KEY=VALUE format and rejects these to prevent "
+                        "row-injection via a hostile mitigation sidecar"
+                    )
+                # Reject newlines in values up-front for the same
+                # reason: a value with ``\n`` would corrupt the
+                # file shape and a downstream tool would silently
+                # read a truncated value.
                 value = env[key]
                 if "\n" in value or "\r" in value:
                     raise ValueError(

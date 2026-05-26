@@ -116,6 +116,34 @@ def test_env_file_rejects_newline_in_value(tmp_path):
         wl.run()
 
 
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        "FOO\nBAR",       # newline in key
+        "FOO\rBAR",       # carriage return in key
+        "FOO=BAR",        # embedded '=' would rebind a later key
+        "X\n=injected",   # newline-then-equals row-injection attempt
+    ],
+)
+def test_env_file_rejects_unsafe_chars_in_key(tmp_path, bad_key):
+    """Regression for PR #194 review: hostile mitigation sidecars
+    could smuggle ``\\n``, ``\\r``, or ``=`` into env *keys* to
+    inject extra KEY=VALUE rows or rebind a later key. The
+    sidecar loader only enforces ``isinstance(key, str)``, so the
+    env-file writer is the right place to catch this -- it is the
+    layer that owns the on-disk KEY=VALUE row shape.
+    """
+    wl = _make_workload(
+        tmp_path,
+        argv=["true"],
+        env_mode="file",
+        cell_env_vars={bad_key: "safe-value"},
+    )
+    wl.setup()
+    with pytest.raises(ValueError, match="env key"):
+        wl.run()
+
+
 def test_inherit_mode_passes_env_to_child(tmp_path, monkeypatch):
     """`inherit` mode's Popen env=os.environ.copy() snapshot includes our key.
 
