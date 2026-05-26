@@ -6,10 +6,16 @@ Combines the per-tier detector outputs into the final
 (a) Any Tier 1–4 detector fires OR any ``custom_patterns[*]``
     with ``on_match: fail`` fires → ``verdict = "fail"``.
 
-(b) ``result.json::failure_detectors_fired`` lists ALL fired in
-    encounter order (Tier 1 first, then Tier 3 / Tier 4 / Tier 5
-    failures in that order; Tier 2 fires from the in-flight
-    monitor at the position the workload returns it).
+(b) ``result.json::failure_detectors_fired`` lists ALL fired in a
+    fixed encounter order: Tier 1, Tier 2, Tier 3, Tier 4, then
+    Tier 5 (``custom_patterns`` failures). The order is set by
+    :func:`resolve` (and the :class:`VerdictInputs` field order it
+    iterates), independent of when each tier physically fires
+    relative to the workload exit. The in-flight Tier 2 hang monitor
+    contributes its detector IDs to ``inputs.tier2`` before
+    :func:`resolve` is called, so even though the predicate fires
+    mid-run, the IDs always land between Tier 1 and Tier 3 in the
+    serialised list.
 
 (c) Any ``custom_patterns[*]`` with ``required_for_pass: true``
     AND none of them fired → add ``meta:missing_pass_signal`` to

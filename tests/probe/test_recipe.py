@@ -325,3 +325,74 @@ def test_phase_2_fixture_loads_in_probe_mode():
     recipe = load_recipe(FIXTURES / "probe_with_phase_2_keys.yaml")
     assert recipe.probe_extras is not None
     assert len(recipe.probe_extras.custom_patterns) == 1
+
+
+def test_hang_grace_period_zero_is_accepted(tmp_path):
+    """Regression for PR #197 review: ``hang_grace_period_at_start: 0`` is
+    a documented runtime value -- ``HangMonitor`` / ``evaluate_predicate``
+    treat it as "no grace, fire as soon as the window elapses", useful
+    for short-running repros where 60s of grace swallows the trial.
+    The recipe validator used to reject it via the strict ``> 0`` check.
+    ``hang_window_sec`` keeps the strict bound because a zero window
+    would re-trip the predicate on every poll.
+    """
+    recipe_path = tmp_path / "probe_zero_grace.yaml"
+    recipe_path.write_text(
+        """\
+schema_version: 1
+mode: probe
+ticket: ZERO-GRACE
+trials: 1
+mitigation_axis: [none]
+diagnostic_axis: [none]
+hang_grace_period_at_start: 0
+""",
+        encoding="utf-8",
+    )
+    recipe = load_recipe(recipe_path)
+    assert recipe.probe_extras is not None
+    assert recipe.probe_extras.hang_grace_period_at_start == 0.0
+
+
+def test_hang_window_sec_zero_still_rejected(tmp_path):
+    """``hang_window_sec: 0`` stays rejected -- a zero window would
+    re-trip the predicate on every poll. Keeps the strict ``> 0`` bound
+    asymmetric with grace (which DOES allow 0).
+    """
+    recipe_path = tmp_path / "probe_zero_window.yaml"
+    recipe_path.write_text(
+        """\
+schema_version: 1
+mode: probe
+ticket: ZERO-WINDOW
+trials: 1
+mitigation_axis: [none]
+diagnostic_axis: [none]
+hang_window_sec: 0
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(RecipeSchemaError, match="hang_window_sec.*> 0"):
+        load_recipe(recipe_path)
+
+
+def test_hang_grace_period_negative_is_rejected(tmp_path):
+    """Even with ``allow_zero=True`` the validator still rejects
+    negative values -- the predicate would silently ignore a negative
+    grace period (clamped by ``elapsed > grace_period_sec``).
+    """
+    recipe_path = tmp_path / "probe_negative_grace.yaml"
+    recipe_path.write_text(
+        """\
+schema_version: 1
+mode: probe
+ticket: NEG-GRACE
+trials: 1
+mitigation_axis: [none]
+diagnostic_axis: [none]
+hang_grace_period_at_start: -1
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(RecipeSchemaError, match="hang_grace_period_at_start.*>= 0"):
+        load_recipe(recipe_path)

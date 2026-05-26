@@ -213,18 +213,35 @@ def _validate_env_passthrough_mode(raw: Any) -> Literal["inherit", "file"]:
     return "file" if raw == "file" else "inherit"
 
 
-def _validate_positive_seconds(path_hint: str, raw: Any, *, default: float) -> float:
+def _validate_positive_seconds(
+    path_hint: str,
+    raw: Any,
+    *,
+    default: float,
+    allow_zero: bool = False,
+) -> float:
     """Validate a positive-seconds Phase-2 knob (hang_window_sec, etc.).
 
     Returns ``default`` when ``raw`` is None / missing; otherwise
     coerces to ``float`` after rejecting bools (which would pass
     ``isinstance(int)`` checks) and non-positive numbers.
+
+    ``allow_zero`` flips the lower bound from strict (``> 0``) to
+    inclusive (``>= 0``). Used for ``hang_grace_period_at_start``,
+    which the runtime predicate explicitly supports as "no grace
+    period -- a hang can be detected immediately after the window
+    elapses" (useful for short-running repros where 60s of grace
+    swallows the trial). ``hang_window_sec`` keeps the strict bound
+    because a zero window would re-trip the predicate on every poll.
     """
     if raw is None:
         return float(default)
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         raise RecipeSchemaError(f"{path_hint}: must be a number, got {type(raw).__name__}")
-    if raw <= 0:
+    if allow_zero:
+        if raw < 0:
+            raise RecipeSchemaError(f"{path_hint}: must be >= 0 when set, got {raw}")
+    elif raw <= 0:
         raise RecipeSchemaError(f"{path_hint}: must be > 0 when set, got {raw}")
     return float(raw)
 
@@ -279,6 +296,7 @@ def build_probe_recipe_from_dict(
         "recipe.hang_grace_period_at_start",
         data.get("hang_grace_period_at_start"),
         default=DEFAULT_HANG_GRACE_SEC,
+        allow_zero=True,
     )
 
     # confound block is permitted (already in _PROBE_TOP_LEVEL) but

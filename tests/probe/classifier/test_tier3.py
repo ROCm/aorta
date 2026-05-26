@@ -10,7 +10,10 @@ import pytest
 from aorta.probe.classifier import tier3_kernel
 from aorta.probe.classifier.tier3_kernel import (
     AmdSmiSnapshot,
+    GPU_IDLE_UTILIZATION_THRESHOLD_PCT,
     Tier3State,
+    _parse_amd_smi_monitor_csv,
+    gpu_idle_probe_from_state,
     poll_amd_smi,
     scan_amd_smi,
     scan_dmesg,
@@ -146,3 +149,152 @@ def test_scan_dmesg_via_shim(monkeypatch, tmp_path):
     state = Tier3State()
     fired = scan_dmesg(state)
     assert tier3_kernel.DETECTOR_AMDGPU_RESET in fired
+
+
+# ---- Live amd-smi CSV parsing (PR #197 round-2 review) -------------------
+
+
+def test_parse_amd_smi_monitor_csv_typical_shape():
+    """The documented ``amd-smi monitor --csv --gfx --vram-usage``
+    output: a single header row + one row per GPU. The parser
+    sums VRAM_USED across GPUs and takes the max GFX%.
+    """
+    payload = (
+        "GPU,GFX%,VRAM_USED\n"
+        "0,5 %,14 MB\n"
+        "1,87 %,1024 MB\n"
+        "2,0 %,14 MB\n"
+    )
+    snap = _parse_amd_smi_monitor_csv(payload)
+    assert snap is not None
+    assert snap.vram_used_mib == 14 + 1024 + 14
+    assert snap.gpu_utilization_pct == 87  # max across GPUs
+    assert snap.thermal_throttle_count == 0  # live path leaves this at 0
+
+
+def test_parse_amd_smi_monitor_csv_handles_units_and_na():
+    """N/A cells contribute nothing; GB scales by 1024."""
+    payload = (
+        "GPU,GFX%,VRAM_USED\n"
+        "0,N/A,4 GB\n"   # 4 * 1024 MiB
+        "1,42 %,N/A\n"   # contributes util only
+    )
+    snap = _parse_amd_smi_monitor_csv(payload)
+    assert snap is not None
+    assert snap.vram_used_mib == 4 * 1024
+    assert snap.gpu_utilization_pct == 42
+
+
+def test_parse_amd_smi_monitor_csv_unknown_header_returns_none():
+    """Unknown header (e.g. an older ROCm shipping different column
+    names) returns None so the caller logs a single ``tier3
+    disabled`` warning and the live path stays fail-soft."""
+    payload = "FOO,BAR\n1,2\n"
+    assert _parse_amd_smi_monitor_csv(payload) is None
+
+
+def test_parse_amd_smi_monitor_csv_empty_returns_none():
+    """An empty payload returns None (no header to inspect)."""
+    assert _parse_amd_smi_monitor_csv("") is None
+
+
+def test_poll_amd_smi_via_shim(monkeypatch, tmp_path):
+    """End-to-end shim test: a fake ``amd-smi`` on PATH emits the
+    monitor CSV the parser expects and ``poll_amd_smi`` returns a
+    populated snapshot. Mirrors :func:`test_scan_dmesg_via_shim`
+    for the new live polling path (PR #197 round-2 review on
+    `tier3_kernel.py:277`).
+    """
+    monkeypatch.delenv("AORTA_PROBE_AMDSMI_FAKE", raising=False)
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "amd-smi"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        "GPU,GFX%,VRAM_USED\n"
+        "0,12 %,256 MB\n"
+        "1,80 %,512 MB\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    state = Tier3State()
+    snap = poll_amd_smi(state)
+    assert snap is not None
+    assert snap.vram_used_mib == 256 + 512
+    assert snap.gpu_utilization_pct == 80
+
+
+def test_poll_amd_smi_shim_failure_logs_once(monkeypatch, tmp_path, caplog):
+    """A shim that exits non-zero -> ``poll_amd_smi`` returns None and
+    logs a single ``tier3 disabled (amd-smi)`` warning (FR 2.11).
+    """
+    monkeypatch.delenv("AORTA_PROBE_AMDSMI_FAKE", raising=False)
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "amd-smi"
+    shim.write_text("#!/bin/sh\necho 'boom' >&2\nexit 1\n", encoding="utf-8")
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    state = Tier3State()
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert poll_amd_smi(state) is None
+    disabled = [
+        r for r in caplog.records
+        if "tier3 disabled" in r.getMessage() and "amd-smi" in r.getMessage()
+    ]
+    assert len(disabled) == 1
+
+
+# ---- gpu_idle_probe_from_state (PR #197 round-2 review) ------------------
+
+
+def test_gpu_idle_probe_idle_when_utilization_below_threshold(monkeypatch):
+    """``gpu_idle_probe_from_state`` returns True when amd-smi reports
+    a max-GPU utilization strictly below
+    :data:`GPU_IDLE_UTILIZATION_THRESHOLD_PCT`. Wires the third leg
+    of the two-of-three Tier 2 hang predicate.
+    """
+    idle_pct = max(0, GPU_IDLE_UTILIZATION_THRESHOLD_PCT - 1)
+    monkeypatch.setenv("AORTA_PROBE_AMDSMI_FAKE", f"vram=100,throttle=0,util={idle_pct}")
+    state = Tier3State()
+    probe = gpu_idle_probe_from_state(state)
+    assert probe() is True
+
+
+def test_gpu_idle_probe_not_idle_when_utilization_at_or_above_threshold(monkeypatch):
+    """Equal to the threshold is NOT idle (strict less-than)."""
+    monkeypatch.setenv(
+        "AORTA_PROBE_AMDSMI_FAKE",
+        f"vram=100,throttle=0,util={GPU_IDLE_UTILIZATION_THRESHOLD_PCT}",
+    )
+    state = Tier3State()
+    assert gpu_idle_probe_from_state(state)() is False
+
+
+def test_gpu_idle_probe_returns_false_when_amd_smi_unavailable(monkeypatch):
+    """No amd-smi on PATH, no fake env var -> probe returns False so
+    the GPU leg can never single-handedly trip the two-of-three
+    predicate (parity with the I/O leg's None-handling).
+    """
+    monkeypatch.delenv("AORTA_PROBE_AMDSMI_FAKE", raising=False)
+    monkeypatch.setenv("PATH", "/nonexistent-dir-that-does-not-exist")
+    state = Tier3State()
+    assert gpu_idle_probe_from_state(state)() is False
+
+
+def test_gpu_idle_probe_returns_false_when_utilization_column_missing(monkeypatch):
+    """Live snapshot with no ``gpu_utilization_pct`` (e.g. CSV had
+    only VRAM_USED) -> probe returns False, NOT True.
+    """
+    monkeypatch.delenv("AORTA_PROBE_AMDSMI_FAKE", raising=False)
+    state = Tier3State()
+
+    def fake_poll(_state):
+        return AmdSmiSnapshot(vram_used_mib=100, thermal_throttle_count=0)
+
+    monkeypatch.setattr(tier3_kernel, "poll_amd_smi", fake_poll)
+    assert gpu_idle_probe_from_state(state)() is False

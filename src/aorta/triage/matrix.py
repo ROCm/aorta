@@ -644,30 +644,35 @@ def _aggregate_top_detector_ids(
 ) -> tuple[str | None, str | None]:
     """Pick the highest-frequency detector ID from a cell's probe trials.
 
-    Reads ``failure_detectors_fired`` / ``warn_detectors_fired``
-    from each trial's ``result.json`` (the Phase-2 probe artifact
-    layout). Triage-mode trials never set these keys; the function
-    returns ``(None, None)`` and the matrix.md renderer hides the
-    columns.
+    Reads ``failure_detectors_fired`` / ``warn_detectors_fired`` from
+    each :class:`~aorta.run.TrialResult`'s **in-memory** ``trial.result``
+    payload, NOT from disk. Two source shapes are accepted (both live
+    on ``trial.result``):
 
-    Two source orders, in priority:
+    1. ``result["metrics"]["failure_detectors_fired"]`` — the channel
+       :class:`~aorta.workloads._subprocess.SubprocessWorkload` writes
+       into when it returns a :class:`WorkloadResult`. The dispatcher
+       serialises ``WorkloadResult`` into ``trial.result``, so this is
+       the live-run path.
+    2. ``result["failure_detectors_fired"]`` — a flat fallback some
+       test trials populate directly. Accepting both keeps the
+       presentation layer test-friendly.
 
-    1. **In-memory** -- ``trial.result`` already carries the
-       per-trial WorkloadResult.metrics with the Phase-2 detector
-       lists (the SubprocessWorkload populates them in
-       ``metrics``). Cheapest path, no FS.
-    2. **On-disk fallback** -- when in-memory data isn't present
-       (e.g. resumed runs that load ``trial_*.json`` from a prior
-       invocation), the trial_paths entries point to the
-       dispatcher-written per-trial JSON; we'd need to walk to the
-       sibling probe-mode ``result.json`` to find the fired
-       detectors, which is too invasive for what's a presentation
-       layer. Phase 2 defers that fallback — the in-memory path
-       covers the live-run case (rubric §2.B FR 2.10).
+    Triage-mode trials never set these keys; the function returns
+    ``(None, None)`` and the matrix.md renderer hides the columns.
+
+    **No on-disk fallback.** ``trial_paths`` is accepted for symmetry
+    with the matrix-builder call sites but explicitly discarded
+    here — see :func:`_collect_trial_paths` / resume hydration in
+    ``runner.py`` for the disk-walk path; both already load the
+    per-trial JSON back into ``trial.result`` so the in-memory shape
+    above remains correct on resumed runs. Reading ``result.json``
+    again from this presentation helper would duplicate that work and
+    couple the matrix renderer to the probe artifact layout.
 
     "Highest frequency" is fire-count across the cell's trials, NOT
-    earliest-fired. Ties resolve by encounter order so the result
-    is stable across runs.
+    earliest-fired. Ties resolve by encounter order so the result is
+    stable across runs.
     """
     del trial_paths  # see docstring; on-disk fallback deferred
     fail_counter: Counter[str] = Counter()

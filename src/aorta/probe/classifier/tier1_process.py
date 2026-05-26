@@ -13,8 +13,14 @@ exited:
   ``Popen.wait(timeout=...)`` raising ``TimeoutExpired`` after
   ``recipe.timeout_per_trial`` seconds.
 * ``tier1:coredump`` -- any file matching ``core.*`` exists in the
-  trial directory post-exit (covers the default kernel pattern
-  ``core.<pid>`` and the ``core_pattern`` template variants).
+  trial directory post-exit. This only fires when ``/proc/sys/
+  kernel/core_pattern`` writes into the trial dir; the dispatcher
+  does NOT chdir the workload (the user's ``--`` command often uses
+  relative paths and a forced ``cwd`` would silently break it), so
+  with the typical relative-path ``core`` / ``core.<pid>`` pattern
+  the core file lands in ``aorta probe``'s invocation cwd, not the
+  trial dir. Operators who care about coredump detection set an
+  absolute ``core_pattern`` that templates the trial dir in.
 
 The classifier consumes a small :class:`Tier1Context` value and
 returns an ordered list of detector IDs (in encounter order — the
@@ -59,10 +65,16 @@ class Tier1Context:
     """Inputs for :func:`detect`.
 
     ``trial_dir`` is the per-trial output directory; the coredump
-    scan looks for ``core.*`` in this dir only (NOT recursive — the
-    kernel's default pattern writes alongside the running process,
-    which the dispatcher sets to the trial dir via ``cwd``-less
-    Popen, so ``core.*`` lands one level deep at most).
+    scan looks for ``core.*`` in this dir only (NOT recursive). The
+    dispatcher does NOT pass ``cwd=trial_dir`` to ``Popen`` -- the
+    user's ``--`` command is allowed to depend on the launcher's
+    cwd, so forcing a new one would break repros that reference
+    files by relative path. As a result the detector only sees core
+    files when ``/proc/sys/kernel/core_pattern`` is configured to
+    write into the trial dir (e.g. an absolute template that
+    interpolates the trial path). With the kernel default
+    (``core`` next to the process cwd) the detector stays silent
+    even on a real segfault.
 
     ``timed_out`` flips the verdict to ``tier1:timeout`` and
     suppresses the ``exit_nonzero`` detector (a process killed by
@@ -104,12 +116,14 @@ def detect(ctx: Tier1Context) -> list[str]:
 def _has_coredump(trial_dir: Path) -> bool:
     """Return True iff a ``core.*`` file exists directly under ``trial_dir``.
 
-    Non-recursive. The Linux kernel writes core files alongside the
-    process's working directory; nested subdirectories would mean
-    the workload itself launched a child that crashed (which Tier 1
-    cannot reason about). ``trial_dir.glob`` returns an iterator;
-    short-circuit on the first match to avoid scanning the whole
-    directory for large trials.
+    Non-recursive. Tier 1 cannot reason about cores from grandchild
+    processes; nested subdirectories would also create false
+    positives if the workload itself touches a ``core/`` dir. The
+    detector relies on the operator's ``core_pattern`` writing into
+    the trial dir -- see :class:`Tier1Context` for why the
+    dispatcher does not chdir the workload. ``trial_dir.glob``
+    returns an iterator; short-circuit on the first match to avoid
+    scanning the whole directory for large trials.
     """
     if not trial_dir.is_dir():
         return False

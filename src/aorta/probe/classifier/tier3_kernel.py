@@ -42,6 +42,8 @@ branch.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import re
 import shutil
@@ -197,8 +199,16 @@ class AmdSmiSnapshot:
     ``vram_used_mib`` is the cumulative used VRAM across every GPU
     visible to ``amd-smi``; we don't try to attribute usage per
     process (a much harder problem). ``thermal_throttle_count`` is
-    the all-GPU sum of the ``thermal_throttle_count`` counter
-    amd-smi exposes via ``static`` queries on recent ROCm builds.
+    the all-GPU sum of the throttle counter -- in live polling we
+    can't compute a true monotonic counter from
+    ``amd-smi monitor`` alone (the CLI surfaces current % time in
+    violation, not a cumulative count) so the live path leaves it
+    at ``0``; the fake-shim env var keeps the diff-based
+    ``DETECTOR_THERMAL_THROTTLE`` test path working as before.
+    ``gpu_utilization_pct`` is the across-GPU max ``GFX%`` value
+    (``None`` when amd-smi doesn't expose it or the column isn't
+    in the CSV header). The hang monitor uses this as the third
+    "GPU idle" leg of the two-of-three Tier 2 predicate.
 
     Frozen so callers can keep two snapshots side-by-side (pre /
     post) without one mutating the other.
@@ -206,6 +216,21 @@ class AmdSmiSnapshot:
 
     vram_used_mib: int
     thermal_throttle_count: int
+    gpu_utilization_pct: int | None = None
+
+
+# GPU is considered idle if the max-GPU ``GFX%`` from
+# ``amd-smi monitor`` is below this threshold. A running GPU
+# workload typically pegs activity at 80-100%; a hung kernel sits at
+# 0-2% (the residual is amd-smi's own polling). 5% is well below any
+# real compute and well above the noise floor.
+GPU_IDLE_UTILIZATION_THRESHOLD_PCT = 5
+
+
+# Subprocess timeout for amd-smi monitor in the live polling path.
+# Longer than dmesg's because monitor enumerates every GPU; an
+# unresponsive driver shouldn't block the hang monitor forever.
+_AMD_SMI_TIMEOUT_SEC = 10.0
 
 
 def scan_amd_smi(
@@ -240,17 +265,32 @@ def scan_amd_smi(
 def poll_amd_smi(state: Tier3State) -> AmdSmiSnapshot | None:
     """Single ``amd-smi`` poll. Returns ``None`` when unavailable.
 
-    Reads ``amd-smi static -t product`` and ``amd-smi metric``
-    (subset). The exact arg shape varies across ROCm releases; we
-    invoke a small, stable subset and parse the human-readable
-    output defensively — any parse failure returns ``None`` and
-    counts as "amd-smi disabled" for the rest of the invocation.
+    Live path: runs ``amd-smi monitor --csv --gfx --vram-usage``
+    and parses the (stable, documented) CSV output. ``monitor`` is
+    used in preference to ``metric --json`` because the column
+    layout is documented and stable across ROCm 6.x / 7.x while
+    the ``metric --json`` shape has been observed to differ
+    between point releases (e.g. socket-vs-partition layouts on
+    MI300). The CSV path covers the two columns we actually need
+    (VRAM_USED, GFX%); ``thermal_throttle_count`` is left at 0
+    because ``monitor`` only exposes current % time in violation,
+    not a cumulative counter -- the diff-based
+    ``DETECTOR_THERMAL_THROTTLE`` continues to fire through the
+    fake-shim env var path for tests.
 
-    Tests stub this via the ``AORTA_PROBE_AMDSMI_FAKE`` env var: if
-    set to ``vram=<int>,throttle=<int>`` the value is parsed and
-    returned without spawning a subprocess. Allows the unit suite
-    to exercise the diff logic in :func:`scan_amd_smi` without a
-    real GPU.
+    Test stub: ``AORTA_PROBE_AMDSMI_FAKE`` env var. When set to
+    ``vram=<int>,throttle=<int>`` (optionally ``,util=<int>``)
+    the value is parsed and returned without spawning a
+    subprocess. Allows the unit suite to exercise the diff logic
+    in :func:`scan_amd_smi` and the gpu-idle leg of
+    :func:`tier2_hang.evaluate_predicate` without a real GPU.
+
+    Any error in the live path (missing binary, non-zero exit,
+    unparseable header, timeout) returns ``None`` and counts as
+    "amd-smi disabled" via :func:`_log_disabled_once` for the
+    rest of the invocation -- the runner sees a single
+    ``tier3 disabled (amd-smi): <reason>`` warning and Tiers
+    1+2+4 continue (rubric §2.B FR 2.11).
     """
     import os
 
@@ -262,39 +302,193 @@ def poll_amd_smi(state: Tier3State) -> AmdSmiSnapshot | None:
     if binary is None:
         _log_disabled_once(state, "amd-smi", "amd-smi not on PATH")
         return None
-    # Real polling is deferred -- the rubric's Tier 3 scoring path
-    # is exercised through the fake-shim env var in the unit
-    # suite; the production path requires a ROCm host the CI
-    # doesn't have. The function returns None (fail-soft) when
-    # the env var is unset and the runner gracefully skips Tier 3
-    # GPU counters with the standard "tier3 disabled" warning.
-    _log_disabled_once(
-        state,
-        "amd-smi",
-        "amd-smi present but live polling not implemented; "
-        "set AORTA_PROBE_AMDSMI_FAKE=vram=<MiB>,throttle=<n> for tests",
+    return _poll_amd_smi_live(binary, state)
+
+
+def _poll_amd_smi_live(binary: str, state: Tier3State) -> AmdSmiSnapshot | None:
+    """Run ``amd-smi monitor --csv --gfx --vram-usage`` and parse the result.
+
+    Split out from :func:`poll_amd_smi` so the test suite can shim
+    the binary path via PATH (same pattern as the dmesg shim
+    test). Any subprocess failure or parse failure logs a single
+    ``tier3 disabled (amd-smi): ...`` warning and returns
+    ``None``.
+    """
+    argv = [binary, "monitor", "--csv", "--gfx", "--vram-usage"]
+    try:
+        completed = subprocess.run(  # noqa: S603 -- audited argv list
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_AMD_SMI_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log_disabled_once(state, "amd-smi", f"{type(exc).__name__}: {exc}")
+        return None
+    if completed.returncode != 0:
+        reason = (completed.stderr or completed.stdout or "non-zero exit").strip()
+        _log_disabled_once(state, "amd-smi", f"non-zero exit: {reason!r}")
+        return None
+    snapshot = _parse_amd_smi_monitor_csv(completed.stdout)
+    if snapshot is None:
+        _log_disabled_once(
+            state,
+            "amd-smi",
+            f"unrecognised monitor CSV output: {completed.stdout[:200]!r}",
+        )
+    return snapshot
+
+
+# Recognised column-header aliases. Kept here so the parser can
+# absorb minor CSV header churn between ROCm releases without
+# editing the function body. All comparisons are uppercased and
+# stripped of whitespace.
+_VRAM_USED_HEADERS = frozenset({"VRAM_USED"})
+_GFX_HEADERS = frozenset({"GFX%", "GFX_ACTIVITY", "GFX"})
+
+
+def _parse_amd_smi_monitor_csv(payload: str) -> AmdSmiSnapshot | None:
+    """Parse the CSV from ``amd-smi monitor --csv --gfx --vram-usage``.
+
+    Sums ``VRAM_USED`` across rows (one row per GPU) and takes the
+    max of ``GFX%`` (the "idle" probe wants the busiest GPU; if any
+    GPU is doing real work the workload isn't hung GPU-wise).
+    ``N/A`` cells contribute nothing. Returns ``None`` when the
+    payload is empty / missing a recognised header so the caller
+    can log a single disabled warning.
+
+    Pure function (no logging, no subprocess) so unit tests can
+    exercise the parser directly with deterministic input.
+    """
+    reader = csv.reader(io.StringIO(payload))
+    try:
+        header = next(reader)
+    except StopIteration:
+        return None
+    normalised = [cell.strip().upper() for cell in header]
+    vram_idx = next((i for i, h in enumerate(normalised) if h in _VRAM_USED_HEADERS), None)
+    gfx_idx = next((i for i, h in enumerate(normalised) if h in _GFX_HEADERS), None)
+    if vram_idx is None and gfx_idx is None:
+        return None
+
+    vram_total_mib = 0
+    util_max: int | None = None
+    for row in reader:
+        if not row:
+            continue
+        if vram_idx is not None and vram_idx < len(row):
+            mib = _parse_mib(row[vram_idx])
+            if mib is not None:
+                vram_total_mib += mib
+        if gfx_idx is not None and gfx_idx < len(row):
+            pct = _parse_pct(row[gfx_idx])
+            if pct is not None:
+                util_max = pct if util_max is None else max(util_max, pct)
+    return AmdSmiSnapshot(
+        vram_used_mib=vram_total_mib,
+        thermal_throttle_count=0,
+        gpu_utilization_pct=util_max,
     )
-    return None
+
+
+# Permissive numeric-with-unit parsers. amd-smi cells look like
+# ``14 MB``, ``96432 MB``, ``0 %``, ``N/A`` -- the regex accepts an
+# optional unit suffix, ``MB``/``MiB``/``GB``/``GiB`` (case
+# insensitive), and a trailing ``%`` for percentages. Any
+# non-match returns ``None`` so the caller can skip the cell.
+_MIB_VALUE_RE = re.compile(r"^\s*(\d+)\s*(MB|MIB|GB|GIB)?\s*$", re.IGNORECASE)
+_PCT_VALUE_RE = re.compile(r"^\s*(\d+)\s*%?\s*$")
+
+
+def _parse_mib(cell: str) -> int | None:
+    """Parse a memory cell like ``'14 MB'``, returning MiB-or-None.
+
+    ``N/A`` / empty / unrecognised returns ``None``. ``GB`` /
+    ``GiB`` values are scaled by 1024; ``MB`` / ``MiB`` (the common
+    case) pass through unchanged because at the precision amd-smi
+    reports the two are interchangeable for hang-detection
+    purposes.
+    """
+    text = cell.strip()
+    if not text or text.upper() == "N/A":
+        return None
+    m = _MIB_VALUE_RE.match(text)
+    if m is None:
+        return None
+    value = int(m.group(1))
+    unit = (m.group(2) or "MB").upper()
+    if unit in ("GB", "GIB"):
+        return value * 1024
+    return value
+
+
+def _parse_pct(cell: str) -> int | None:
+    """Parse a percentage cell like ``'42 %'``, returning the integer.
+
+    ``N/A`` / empty / unrecognised returns ``None``.
+    """
+    text = cell.strip()
+    if not text or text.upper() == "N/A":
+        return None
+    m = _PCT_VALUE_RE.match(text)
+    if m is None:
+        return None
+    return int(m.group(1))
 
 
 def _parse_fake_snapshot(spec: str, state: Tier3State) -> AmdSmiSnapshot | None:
-    """Parse ``AORTA_PROBE_AMDSMI_FAKE=vram=N,throttle=M`` for tests.
+    """Parse ``AORTA_PROBE_AMDSMI_FAKE=vram=N,throttle=M[,util=U]`` for tests.
 
     Returns ``None`` on parse failure (treats it as 'amd-smi not
     available'). The test-only env var is intentionally simple so
     a unit test can wire ``vram=100,throttle=0`` for the pre-poll
     and ``vram=600,throttle=1`` for the post-poll, and assert
-    ``scan_amd_smi`` fires both detectors.
+    ``scan_amd_smi`` fires both detectors. The optional ``util``
+    field feeds the GPU-idle leg of :func:`tier2_hang.evaluate_predicate`
+    in tests that exercise the two-of-three predicate.
     """
     try:
         parts = dict(item.split("=") for item in spec.split(","))
+        util_raw = parts.get("util")
+        util = int(util_raw) if util_raw is not None else None
         return AmdSmiSnapshot(
             vram_used_mib=int(parts.get("vram", "0")),
             thermal_throttle_count=int(parts.get("throttle", "0")),
+            gpu_utilization_pct=util,
         )
     except (ValueError, KeyError, AttributeError):
         _log_disabled_once(state, "amd-smi", f"unparseable fake spec: {spec!r}")
         return None
+
+
+def gpu_idle_probe_from_state(state: Tier3State) -> "callable[[], bool]":  # noqa: UP037
+    """Return a zero-arg closure that polls amd-smi and returns "GPU idle?".
+
+    Intended to be wired into :class:`tier2_hang.HangMonitor`'s
+    ``gpu_idle_probe`` constructor argument. The closure returns
+    ``True`` iff the live amd-smi poll surfaces a max-GPU
+    ``GFX%`` below :data:`GPU_IDLE_UTILIZATION_THRESHOLD_PCT`.
+    Any None (binary missing, parse fail, utilization column
+    absent) yields ``False`` so the GPU leg can never single-
+    handedly trip the two-of-three predicate when telemetry is
+    unavailable -- consistent with the I/O leg's
+    ``current_io is None -> io_idle=False`` rule in
+    :class:`HangMonitor._run`.
+
+    Each call spawns one amd-smi subprocess; the HangMonitor polls
+    at ``poll_interval_sec`` (default 5s) so we expect ~12 calls
+    per minute under default settings, well within the budget for
+    a hang-monitoring background thread.
+    """
+
+    def _probe() -> bool:
+        snap = poll_amd_smi(state)
+        if snap is None or snap.gpu_utilization_pct is None:
+            return False
+        return snap.gpu_utilization_pct < GPU_IDLE_UTILIZATION_THRESHOLD_PCT
+
+    return _probe
 
 
 def _log_disabled_once(state: Tier3State, source: str, reason: str) -> None:
@@ -340,6 +534,7 @@ ALL_DETECTOR_IDS = (
 
 __all__ = [
     "ALL_DETECTOR_IDS",
+    "AmdSmiSnapshot",
     "DETECTOR_AMDGPU_RESET",
     "DETECTOR_PCIE_AER_FATAL",
     "DETECTOR_SDMA_TIMEOUT",
@@ -347,10 +542,11 @@ __all__ = [
     "DETECTOR_VM_L2_FAULT",
     "DETECTOR_VRAM_GROWTH",
     "DETECTOR_XGMI_LINK_ERROR",
+    "GPU_IDLE_UTILIZATION_THRESHOLD_PCT",
     "MAX_DMESG_BYTES",
-    "VRAM_GROWTH_THRESHOLD_MIB",
-    "AmdSmiSnapshot",
     "Tier3State",
+    "VRAM_GROWTH_THRESHOLD_MIB",
+    "gpu_idle_probe_from_state",
     "poll_amd_smi",
     "scan_amd_smi",
     "scan_dmesg",

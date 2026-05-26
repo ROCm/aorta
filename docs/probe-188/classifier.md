@@ -29,13 +29,27 @@ Encounter order: timeout > signal > exit_nonzero, then coredump
 appended regardless. The verdict resolver preserves this order in
 `failure_detectors_fired`.
 
+**Coredump caveat.** The dispatcher does **not** force
+`cwd=<trial_dir>` on the workload's `Popen` -- the user's `--`
+command often references files by relative path and a forced cwd
+would silently break the repro. With the kernel-default
+`core_pattern` (`core`/`core.<pid>` next to the process's cwd), core
+files therefore land in `aorta probe`'s invocation cwd, **not** the
+trial dir, and `tier1:coredump` will not fire on a real segfault.
+To wire coredump detection, set
+`/proc/sys/kernel/core_pattern` to an absolute template that
+interpolates the trial dir (e.g.
+`/path/to/run/core.%e.%p` and a sidecar collector), or set
+`ulimit -c unlimited` and have the workload write its own core
+artifact into `$AORTA_PROBE_TRIAL_DIR`.
+
 ## Tier 2 — Hang Monitor
 
 Source: `src/aorta/probe/classifier/tier2_hang.py`.
 
 | ID | Fires when |
 |---|---|
-| `tier2:hang` | Two-of-three predicate (stdout silent for `hang_window_sec`, GPU idle per `amd-smi`, `/proc/<pid>/io` rchar+wchar delta = 0) AND elapsed > `hang_grace_period_at_start` |
+| `tier2:hang` | Two-of-three predicate (stdout silent for `hang_window_sec`, GPU idle per `amd-smi monitor` GFX% < 5, `/proc/<pid>/io` rchar+wchar delta = 0) AND elapsed > `hang_grace_period_at_start`. The GPU-idle leg gracefully degrades to "always False" when `amd-smi` is missing/unparseable, so the predicate collapses to 2-of-2 (stdout + IO) on hosts without ROCm telemetry. |
 
 Defaults (overridable per recipe top-level key in `mode: probe`):
 
@@ -74,10 +88,24 @@ The single-warning rule is enforced by the per-invocation
 `Tier3State` instance — the runner owns one and threads it into each
 trial.
 
-`AORTA_PROBE_AMDSMI_FAKE=vram=<MiB>,throttle=<n>` is a test-only
-shim that bypasses the real `amd-smi` invocation; unit tests in
-`tests/probe/classifier/test_tier3.py` use it to exercise the diff
-logic without a GPU.
+**Live amd-smi polling.** `poll_amd_smi` runs
+`amd-smi monitor --csv --gfx --vram-usage` and parses the documented
+CSV columns: `VRAM_USED` (summed across GPUs) and `GFX%` (max across
+GPUs). The CSV path is preferred over `amd-smi metric --json`
+because the column layout is stable across ROCm 6.x / 7.x; the JSON
+shape has been observed to differ between point releases (e.g.
+socket-vs-partition layouts on MI300). `thermal_throttle_count` is
+NOT computed in the live path -- `monitor` only exposes current %
+time in throttle, not a cumulative counter -- so
+`tier3:thermal_throttle` fires only via the fake-shim test path
+today. A future enhancement can plumb a per-trial throttle counter
+through `amd-smi metric --violation --json`.
+
+`AORTA_PROBE_AMDSMI_FAKE=vram=<MiB>,throttle=<n>[,util=<pct>]` is a
+test-only shim that bypasses the real `amd-smi` invocation; unit
+tests in `tests/probe/classifier/test_tier3.py` use it to exercise
+the diff logic and the GPU-idle leg of the Tier 2 two-of-three
+predicate without a GPU.
 
 ## Tier 4 — Built-in Pattern Library
 

@@ -52,6 +52,7 @@ from aorta.probe.classifier.tier2_hang import (
 )
 from aorta.probe.classifier.tier3_kernel import (
     Tier3State,
+    gpu_idle_probe_from_state,
     poll_amd_smi,
     scan_dmesg,
 )
@@ -304,11 +305,22 @@ class SubprocessWorkload(Workload):
                     env=child_env,
                 )
                 launched = True
+                # Wire the third leg of the two-of-three Tier 2
+                # predicate. The closure spawns one ``amd-smi monitor``
+                # call per HangMonitor poll (~12/min at the default 5s
+                # poll cadence) and returns True iff the busiest GPU
+                # reports < GPU_IDLE_UTILIZATION_THRESHOLD_PCT. When
+                # amd-smi is missing or unparseable the closure returns
+                # False, so the predicate gracefully degrades to the
+                # 2-of-2 ``stdout_silent`` + ``io_idle`` shape that the
+                # round-1 wiring was already covering (rubric §2.B FR
+                # 2.11 fail-soft policy).
                 hang_monitor = HangMonitor(
                     pid=proc.pid,
                     stdout_path=stdout_path,
                     hang_window_sec=hang_window_sec,
                     hang_grace_period_at_start=hang_grace_sec,
+                    gpu_idle_probe=gpu_idle_probe_from_state(_TIER3_STATE),
                 )
                 hang_monitor.start()
                 try:
