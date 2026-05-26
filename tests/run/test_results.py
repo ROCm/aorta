@@ -54,7 +54,7 @@ class TestTrialResult:
                 "name": "ci_env",
                 "docker": "aorta:latest",
                 "venv": "/opt/venv",
-                "source_package": "aorta-internal",
+                "source_package": "private_workloads",
             },
             mitigations_applied=("tf32_off", "custom_mitigation"),
             config={"steps": 100, "batch_size": 32, "nested": {"key": "value"}},

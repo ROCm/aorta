@@ -150,13 +150,12 @@ def triage() -> None:
     help=(
         "Stream per-cell progress to stderr while the matrix runs. "
         "-v = INFO (matrix preamble, per-cell start/finish, timings, "
-        "trials passed). -vv = DEBUG (aorta-internal debug logs). "
+        "trials passed). -vv = DEBUG (aorta platform internals). "
         "Scope is the aorta.* logger hierarchy; workload code in "
-        "sibling packages (aorta_internal.workloads.*, etc.) is "
-        "unaffected. Default is silent: only the final 'Wrote matrix "
-        "to ...' line prints. Useful for long matrix runs (~6h for "
-        "SHAMPOO-NAN-2026-042-v2) where you'd otherwise have no "
-        "signal that anything is happening."
+        "sibling packages is unaffected. Default is silent: only "
+        "the final 'Wrote matrix to ...' line prints. Useful for "
+        "long matrix runs where you'd otherwise have no signal that "
+        "anything is happening."
     ),
 )
 def triage_run(

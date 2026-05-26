@@ -149,9 +149,9 @@ class RunRequest:
     # enriches the env snapshot; here it overlays the runtime recipe
     # the workload's ``run()`` reads via
     # ``config["_aorta_environment"]["buck_target"]``. Enables the
-    # BUCK_ONLY / BUCK_IN_DOCKER tiers of the aorta-internal regression-
-    # gate dispatcher (aorta-internal #42) without forcing operators
-    # to register a one-shot named environment per gate.
+    # BUCK_ONLY / BUCK_IN_DOCKER tiers of downstream regression-gate
+    # dispatchers without forcing operators to register a one-shot
+    # named environment per gate.
     #
     # ``kw_only=True`` is the backward-compat guard: declaring this
     # field BEFORE ``mitigations`` (so the docstring "Attributes:"
@@ -278,7 +278,7 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     #     This is the dispatcher side of the ``--buck-target`` CLI
     #     flag symmetric to ``aorta env probe --buck-target``; see the
     #     ``RunRequest.buck_target`` docstring for the cross-repo
-    #     motivation (aorta-internal #42).
+    #     motivation (downstream regression-gate dispatchers).
     if request.buck_target:
         env_descriptor = replace(env_descriptor, buck_target=request.buck_target)
 

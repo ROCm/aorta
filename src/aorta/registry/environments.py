@@ -29,8 +29,8 @@ _VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target"})
 
 # Built-in environments. `local` and `default` are both "current process, no
 # overrides" — `default` is reserved as a site-configurable alias. Customer
-# docker recipes (nan-repro, hipblaslt-develop) ship from aorta-internal via
-# the `aorta.environments` entry-point group, NOT here.
+# docker recipes ship from downstream private packages via the
+# `aorta.environments` entry-point group, NOT here.
 BUILTIN_ENVIRONMENTS: dict[str, dict[str, str | None]] = {
     "local":   {},
     "default": {},

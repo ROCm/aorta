@@ -31,8 +31,8 @@ class Environment:
     Interpreted by Buck-aware workload wrappers analogous to how `docker` is
     interpreted by docker-aware wrappers: the platform threads the field; the
     wrapper decides to shell out to `buck2 run <label>`. The platform itself
-    does not invoke Buck (mirrors the no-docker-launching-in-platform policy
-    documented in `aorta-internal#14`).
+    does not invoke Buck (mirrors the no-docker-launching-in-platform policy:
+    the platform threads tier hints, wrappers decide how to launch).
     """
 
     name: str

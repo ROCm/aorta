@@ -39,9 +39,9 @@ def configure_verbose_logging(verbose_count: int) -> None:
 
     Scope: only the ``aorta.*`` logger hierarchy. Workloads registered
     via the ``aorta.workloads`` entry-point group from sibling packages
-    (e.g. ``aorta_internal.workloads.recom_repro``) live OUTSIDE that
-    hierarchy, so their logging is unaffected -- a separate handler
-    on those packages' loggers (or the root logger) would be needed.
+    (e.g. ``<your_pkg>.workloads.<name>``) live OUTSIDE that hierarchy,
+    so their logging is unaffected -- a separate handler on those
+    packages' loggers (or the root logger) would be needed.
 
     ``verbose_count`` follows Click's ``count=True`` convention:
 
@@ -53,7 +53,7 @@ def configure_verbose_logging(verbose_count: int) -> None:
       invoking the CLI gets its state back. If no prior install exists,
       the call is a true no-op.
     * ``1`` (``-v``): INFO -- per-trial / per-cell progress.
-    * ``>=2`` (``-vv``): DEBUG -- aorta-internal debug logs.
+    * ``>=2`` (``-vv``): DEBUG -- aorta platform internals.
 
     Output goes to **stderr** so stdout stays clean for the existing
     ``click.echo`` lines (final pass/fail summary, "to rerun" hint, etc.)

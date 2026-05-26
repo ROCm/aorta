@@ -2,7 +2,7 @@
 
 Workloads are discovered from the 'aorta.workloads' entry-point group.
 Both public workloads (in aorta.workloads.*) and private workloads
-(in separate packages like aorta-internal) register against this group.
+(in separate downstream packages) register against this group.
 """
 
 import importlib.metadata

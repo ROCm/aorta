@@ -910,9 +910,9 @@ class TestConfigOverrides:
         environment all the way through to ``config["_aorta_environment"]``
         and ``TrialResult.execution_env`` without losing the field.
 
-        This is the contract aorta-internal#36 (recom_repro Buck pilot) and
-        aorta-internal#37 (regression-gate Buck tier) will rely on -- a
-        regression here breaks both downstream workstreams silently.
+        This is the contract downstream Buck-aware workloads and
+        regression-gate consumers rely on -- a regression here breaks
+        both downstream workstreams silently.
         """
         from aorta.registry import Environment
 
@@ -1050,8 +1050,8 @@ class TestBuckTargetIsKeywordOnly:
 class TestBuckTargetOverride:
     """RunRequest.buck_target overlays the resolved environment's Buck pin.
 
-    These tests pin the four behavioral guarantees that the
-    aorta-internal#42 regression-gate dispatcher relies on, all
+    These tests pin the four behavioral guarantees that
+    downstream regression-gate dispatchers rely on, all
     asserted at the place the value is actually consumed
     (``config["_aorta_environment"]["buck_target"]`` and
     ``TrialResult.execution_env["buck_target"]``):

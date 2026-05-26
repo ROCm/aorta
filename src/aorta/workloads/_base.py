@@ -70,9 +70,9 @@ class Workload(ABC):
 
     Concrete workloads live in either the public `aorta.workloads.*`
     namespace (e.g., `aorta.workloads.fsdp`) or in private plugin packages
-    (e.g., `aorta_internal.workloads.meta_recom_repro`). Both register
-    against the same entry-point group so `aorta run --workload <name>`
-    discovers them uniformly.
+    (e.g., `<your_pkg>.workloads.<name>`). Both register against the same
+    entry-point group so `aorta run --workload <name>` discovers them
+    uniformly.
 
     Lifecycle (driven by `aorta run`, once per trial):
 

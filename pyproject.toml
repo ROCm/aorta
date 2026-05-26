@@ -36,8 +36,7 @@ aorta = "aorta.cli:main"
 
 # Plugin discovery: workloads register here via aorta.workloads entry-point group.
 # Public workloads (when they land) register here; private workloads
-# (recom_repro, precision_swaitcnt_test, etc.) register from aorta-internal's
-# pyproject.toml under the same group, separate package.
+# register from downstream packages' pyproject.toml under the same group.
 #
 # No public workloads are wired up yet -- the prior `fsdp` entry pointed at
 # `aorta.workloads.fsdp:FsdpWorkload`, which was never created, so `aorta run`

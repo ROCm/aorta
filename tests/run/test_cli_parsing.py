@@ -348,7 +348,7 @@ class TestCliErrorHandling:
 
 class TestBuckTargetOption:
     """``--buck-target`` is the runtime Buck-tier override (#182 peer) that
-    enables aorta-internal #42's BUCK_ONLY / BUCK_IN_DOCKER dispatch.
+    enables downstream BUCK_ONLY / BUCK_IN_DOCKER regression-gate dispatch.
 
     Symmetric to ``aorta env probe --buck-target`` but on the run path:
     overlays the resolved environment's ``buck_target`` field rather than
@@ -360,9 +360,9 @@ class TestBuckTargetOption:
 
         Pins the CLI surface so a regression that drops the option (or
         renames it without bumping the cross-repo contract with
-        aorta-internal #42) trips here at help-render time rather than
-        at gate-dispatch time -- which is the original failure-mode
-        regression this whole change addresses.
+        downstream regression-gate consumers) trips here at help-render
+        time rather than at gate-dispatch time -- which is the original
+        failure-mode regression this whole change addresses.
         """
         runner = CliRunner()
         result = runner.invoke(run, ["--help"])
@@ -406,8 +406,8 @@ class TestBuckTargetOption:
 
     def test_buck_target_accepts_root_package_label(self):
         """``//:aorta``-shaped labels parse (root package, no path).
-        This is the exact label PR aorta-internal#42's BUCK_ONLY
-        scaffold gate produces.
+        This is the exact label downstream BUCK_ONLY scaffold gates
+        produce.
 
         Asserts the *positive* failure mode (workload-discovery)
         rather than only the *negative* ("not rejected at parse")

@@ -88,10 +88,9 @@ from aorta.run.dispatcher import RunRequest, run_trials
     help=(
         "Stream per-trial progress (rank 0 only) to stderr. -v = INFO "
         "(trial start/finish, timings, exit_status); -vv = DEBUG "
-        "(aorta-internal debug logs). Scope is the aorta.* logger "
-        "hierarchy; workload code in sibling packages "
-        "(aorta_internal.workloads.*, etc.) is unaffected. Default is "
-        "silent: only the final pass/fail summary prints."
+        "(aorta platform internals). Scope is the aorta.* logger "
+        "hierarchy; workload code in sibling packages is unaffected. "
+        "Default is silent: only the final pass/fail summary prints."
     ),
 )
 def run(
