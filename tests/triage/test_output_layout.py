@@ -200,6 +200,19 @@ def test_flat_resume_layout_no_ticket(tmp_path):
     assert run_dir == tmp_path / NO_TICKET_SLUG
 
 
+def test_resolve_run_dir_rejects_unknown_layout(tmp_path):
+    """Regression for PR #194 review: an unknown ``layout`` value used
+    to silently land in the timestamped branch (the type guard fires only
+    under mypy --strict). The runtime check must reject misspellings so
+    probe-mode callers cannot accidentally produce a timestamped tree.
+    """
+    r = _simple_recipe(ticket="PROJ-1")
+    with pytest.raises(ValueError, match="layout must be"):
+        resolve_run_dir(tmp_path, r, layout="flatresume")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="layout must be"):
+        resolve_run_dir(tmp_path, r, layout="")  # type: ignore[arg-type]
+
+
 def test_default_layout_is_byte_equivalent_to_timestamped(tmp_path):
     """Existing callers see no behaviour change -- the default is 'timestamped'."""
     r = _simple_recipe(ticket="PROJ-1")

@@ -112,6 +112,37 @@ def test_skips_completed_cell(tmp_path):
     )
 
 
+def test_skipped_cell_records_real_counts_in_matrix(tmp_path):
+    """Resume short-circuit must surface real trial counts in matrix.json.
+
+    Regression for PR #194 review: the short-circuit previously returned
+    ``trials=[]`` which made ``aggregate_cell`` record
+    ``trials=0/passed=0/failed=0`` for a skipped-but-complete cell -- a
+    silently incorrect matrix on every resumed run. The runner must
+    hydrate the dispatcher's per-trial JSONs into TrialResult objects so
+    the matrix reflects what actually ran.
+    """
+    output = tmp_path / "out"
+    rc1 = _invoke_probe(output, FIXTURES / "probe_minimal.yaml")
+    assert rc1 == 0
+    matrix_path = output / "RESUME-1" / "matrix.json"
+    first_doc = json.loads(matrix_path.read_text(encoding="utf-8"))
+    first_cells = {c["name"]: c for c in first_doc["cells"]}
+    assert first_cells["none-none"]["trials"] == 1
+    assert first_cells["none-none"]["passed_count"] == 1
+
+    rc2 = _invoke_probe(output, FIXTURES / "probe_minimal.yaml")
+    assert rc2 == 0
+    second_doc = json.loads(matrix_path.read_text(encoding="utf-8"))
+    second_cells = {c["name"]: c for c in second_doc["cells"]}
+    assert second_cells["none-none"]["trials"] == 1, (
+        "resumed cell reported trials=0; the short-circuit returned an empty "
+        "trials list to aggregate_cell instead of hydrating dispatcher JSONs"
+    )
+    assert second_cells["none-none"]["passed_count"] == 1
+    assert second_cells["none-none"]["failed_count"] == 0
+
+
 def test_reruns_truncated_result_json(tmp_path):
     """Half a `{` in result.json -> trial is re-executed."""
     output = tmp_path / "out"

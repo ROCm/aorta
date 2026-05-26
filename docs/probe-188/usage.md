@@ -35,17 +35,19 @@ probe_results/
       trial_0/
         stdout.log
         stderr.log
-        result.json               # {verdict, exit_code, duration_s, ...}
+        result.json               # see §6 for the actual field set
         probe.env                 # only with --env-passthrough-mode file
     tf32_off-none/
       trial_0/
         ...
 ```
 
-Re-running the **same command** is a no-op for completed trials: each
-trial is "complete" iff its `result.json` parses and has a non-empty
-`verdict` field. Truncated, missing, or malformed `result.json` files
-trigger a re-run of just that trial.
+Re-running the **same command** is a no-op for already-complete cells.
+A *cell* is "complete" iff every `trial_<n>/result.json` parses and has
+a non-empty `verdict` field; in that case the runner skips the cell
+entirely and re-uses the existing artifacts. If any trial under a cell
+is missing or truncated, the runner re-runs the whole cell (per-trial
+resume is tracked as a Phase 2+ enhancement).
 
 ## 2. Recipe shape (Phase 1)
 
@@ -93,10 +95,15 @@ Phase 2/3 keys (`custom_patterns`, `condition`, `redaction`) are
 * `<output>/<ticket>/` is created with `mkdir(exist_ok=True)` — no
   timestamp segment, no workload segment, so re-invocations land in the
   same directory.
-* Before each cell runs, the runner checks every `trial_<n>/result.json`
-  under that cell. If `trials` complete trials are already on disk, the
-  cell is skipped entirely. Otherwise it picks up at the next missing
-  index.
+* Before each cell runs, the runner counts how many `trial_<n>/result.json`
+  files under the cell already parse and carry a non-empty `verdict`. If
+  that count reaches the cell's `trials` setting, the cell is skipped
+  entirely and the existing per-trial JSONs are surfaced into matrix.json
+  unchanged. If even one trial is missing or malformed, the **whole cell**
+  re-runs from `trial_0` -- per-trial resume is a Phase 2+ enhancement
+  (the per-trial coordinate would have to round-trip through the dispatcher
+  and the dispatcher currently writes its own `trial_<N>.json` set
+  unconditionally).
 
 ## 5. CLI / recipe interaction
 
@@ -110,25 +117,27 @@ Phase 2/3 keys (`custom_patterns`, `condition`, `redaction`) are
 
 ## 6. What the verdict means in Phase 1
 
+Phase-1 `result.json` shape (exact keys written by
+`SubprocessWorkload.run()`):
+
 ```json
 {
-  "schema_version": 1,
   "verdict": "pass",
   "exit_code": 0,
-  "duration_s": 12.345,
-  "started_at": "2026-05-25T13:01:02Z",
-  "finished_at": "2026-05-25T13:01:14Z",
+  "walltime_sec": 12.345,
   "argv": ["python3", "my_repro.py", "--steps", "100"],
-  "mitigation": "none",
-  "diagnostic": "none",
+  "cell_name": "none-none",
+  "trial_index": 0,
   "env_passthrough_mode": "inherit",
-  "env_file": null
+  "timed_out": false
 }
 ```
 
-`verdict` is **exactly** `exit_code == 0 ? "pass" : "fail"`. Pattern
-matching, hang detection, and per-step time analysis are deferred to
-Phase 2.
+`verdict` is **exactly** `exit_code == 0 and not timed_out ? "pass" : "fail"`.
+Pattern matching, hang detection, and per-step time analysis are
+deferred to Phase 2 — Phase 2 extends this document by ADDING keys
+(never by removing), so any tool reading the Phase-1 keys above keeps
+working when Phase 2 ships.
 
 ## 7. Shared engine guarantee
 

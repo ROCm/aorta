@@ -356,6 +356,36 @@ def _collect_trial_paths(results_dir: Path) -> list[str]:
     return [str(p) for p in found]
 
 
+def _hydrate_trials_from_paths(trial_paths: list[str]) -> list[TrialResult]:
+    """Load dispatcher-written ``trial_*.json`` files into TrialResult objects.
+
+    Used by the ``aorta probe`` resume short-circuit so
+    :func:`aorta.triage.matrix.aggregate_cell` receives the real trial
+    bodies on a skipped-but-complete cell. Returning ``[]`` would force
+    matrix.md to record ``trials=0/passed=0`` for the cell -- inconsistent
+    with what actually ran.
+
+    Files that fail to parse, miss required keys, or otherwise violate
+    the :class:`TrialResult` schema are SKIPPED (logged at WARNING). The
+    caller compares the returned length against ``effective_trials`` and
+    falls back to a full re-run on a short list, so a single corrupted
+    dispatcher JSON cannot misrepresent the cell.
+    """
+    hydrated: list[TrialResult] = []
+    for raw in trial_paths:
+        path = Path(raw)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("resume: unreadable trial JSON %s (%s)", path, exc)
+            continue
+        try:
+            hydrated.append(TrialResult.from_dict(data))
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("resume: trial JSON %s violates schema (%s)", path, exc)
+    return hydrated
+
+
 def _trial_passed_for_log(trial: Any) -> bool:
     """Mirror of ``aorta.triage.matrix._trial_passed`` for the per-cell
     log line.
@@ -582,9 +612,19 @@ def _run_one_cell(
 
     # Resume short-circuit: if every trial directory under this cell
     # carries a valid result.json + non-empty verdict, the cell is
-    # already done. Surface its existing dispatcher-written JSONs as
-    # the cell's trials (so matrix.json continues to record them) and
-    # skip the dispatcher call entirely.
+    # already done. Hydrate the dispatcher's per-trial JSONs into
+    # ``TrialResult`` objects so ``aggregate_cell`` sees the real
+    # trial bodies (counts, timings, exit_status). Returning ``[]``
+    # here would make matrix.md report ``trials=0/passed=0`` for a
+    # skipped-but-complete cell -- the resume contract is "no extra
+    # work, identical artifacts".
+    #
+    # Fall through to a full re-run when hydration cannot reconstruct
+    # the full trial set (dispatcher JSON missing because the prior
+    # run was killed between writing the probe ``result.json`` and
+    # the dispatcher's ``trial_<N>.json``; or schema drift). Re-running
+    # a complete cell is wasteful but preserves matrix correctness;
+    # silently returning [] would not.
     if resume_existing and layout == "flat_resume":
         from aorta.probe.resume import is_trial_complete
 
@@ -594,13 +634,23 @@ def _run_one_cell(
             if is_trial_complete(cell_dir / f"trial_{i}")
         )
         if completed >= effective_trials:
-            log.info(
-                "cell %r: all %d trial(s) already complete -- skipping per resume mode",
-                cell.name,
-                effective_trials,
-            )
             trial_paths = _collect_trial_paths(cell_dir)
-            return [], None, resolved_env_vars, trial_paths
+            hydrated = _hydrate_trials_from_paths(trial_paths)
+            if len(hydrated) >= effective_trials:
+                log.info(
+                    "cell %r: all %d trial(s) already complete -- skipping per resume mode",
+                    cell.name,
+                    effective_trials,
+                )
+                return hydrated, None, resolved_env_vars, trial_paths
+            log.info(
+                "cell %r: result.json marks %d trial(s) complete but only %d "
+                "dispatcher JSON(s) hydrated; re-running the cell so matrix "
+                "counts stay consistent",
+                cell.name,
+                completed,
+                len(hydrated),
+            )
 
     # Recipe-scope workload_config is the base; cell-scope merges over it so
     # the cell wins on key collision and non-collision keys union. Empty

@@ -119,6 +119,17 @@ def resolve_run_dir(
       this branch but kept on the signature so callers don't need to
       know which layout they're invoking.
     """
+    # ``layout`` is a typed Literal but the type guard only fires under
+    # mypy --strict; a caller passing ``layout="flatresume"`` (typo)
+    # would otherwise silently land in the timestamped branch. Reject
+    # unknown values at runtime so probe-mode callers can't
+    # accidentally get the wrong output tree.
+    if layout not in ("timestamped", "flat_resume"):
+        raise ValueError(
+            f"resolve_run_dir: layout must be 'timestamped' or 'flat_resume', "
+            f"got {layout!r}"
+        )
+
     ticket_slug = safe_slug(recipe.ticket) if recipe.ticket else NO_TICKET_SLUG
 
     if layout == "flat_resume":

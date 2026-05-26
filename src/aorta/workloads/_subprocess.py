@@ -16,9 +16,14 @@ cannot smuggle an argv via ``config_overrides`` -- the typed
 
 Per-trial output layout (Phase 1):
 
-* ``<cell_dir>/trial_<N>/stdout.log`` -- captured stdout (utf-8,
-  backslashreplace on encode errors).
-* ``<cell_dir>/trial_<N>/stderr.log`` -- captured stderr.
+* ``<cell_dir>/trial_<N>/stdout.log`` -- captured stdout written as
+  RAW BYTES (the file handle is opened in binary ``"wb"`` mode so the
+  child process's output lands on disk byte-for-byte; no decode,
+  encoding-error handling, or line buffering is performed in the
+  parent). Downstream readers should treat the file as bytes and
+  decode lazily.
+* ``<cell_dir>/trial_<N>/stderr.log`` -- captured stderr, same raw-
+  bytes contract as stdout.log.
 * ``<cell_dir>/trial_<N>/result.json`` -- Tier-1 verdict + metadata.
 * ``<cell_dir>/trial_<N>/probe.env`` -- only when
   ``env_passthrough_mode == "file"`` (chmod 0600).
@@ -119,9 +124,16 @@ class SubprocessWorkload(Workload):
         if not isinstance(log_prefix, str) or not log_prefix:
             raise RuntimeError(
                 "SubprocessWorkload requires the platform-supplied "
-                f"{CONFIG_KEY_LOG_PREFIX!r} config key (the runner sets "
-                "save_logs=True for probe-mode cells; this is a runner bug "
-                "if it's missing)."
+                f"{CONFIG_KEY_LOG_PREFIX!r} config key. The dispatcher "
+                "only injects it on the rank-0 ('should_write') path when "
+                "save_logs=True. The most likely root causes are: (1) "
+                "the workload was invoked under a launcher with RANK!=0 "
+                "(probe-mode is single-rank by design; multi-rank wrapping "
+                "is not supported in Phase 1), (2) the runner forgot to "
+                "set save_logs=True (this is a runner bug if the cell is "
+                "probe-mode), or (3) the workload was invoked outside "
+                "'aorta probe' altogether (not supported -- this workload "
+                "is platform-internal)."
             )
         match = _LOG_PREFIX_TRIAL_RE.search(Path(log_prefix).name)
         if match is None:
