@@ -1207,6 +1207,47 @@ class TestBuckTargetOverride:
         assert (results[0].execution_env["buck_target"]
                 == "//workloads/recom_repro:recom_repro")
 
+    def test_empty_string_override_preserves_named_env_buck_target(self, tmp_path):
+        """``buck_target=""`` is treated as "no override" -- same as ``None``.
+
+        Empty string is never a valid Buck2 label, so an explicit
+        ``--buck-target ""`` (or a library caller passing ``""``)
+        should NOT silently overlay ``buck_target=""`` onto the
+        resolved env. The dispatcher uses a truthy check so both
+        ``None`` (the default) and ``""`` flow through without
+        touching the named env's existing pin -- otherwise an
+        operator who accidentally produced an empty value (shell
+        variable expansion, dispatcher emitting an unset
+        environment override) would land in a ``buck2 run ""``
+        style failure that's hard to attribute back to the flag.
+        """
+        from aorta.registry import Environment
+
+        captured_config: dict = {}
+        workload_cls = self._build_capture_workload(captured_config)
+        env = Environment(
+            name="recom-buck",
+            docker=None, venv=None,
+            buck_target="//workloads/recom_repro:recom_repro",
+            source_package="aorta",
+        )
+        with patch("importlib.metadata.entry_points",
+                   return_value=self._mock_workload_discovery(workload_cls)):
+            with patch("aorta.run.dispatcher.get_environment", return_value=env):
+                req = RunRequest(
+                    workload="envcapture",
+                    trials=1,
+                    environment="recom-buck",
+                    buck_target="",
+                    results_dir=tmp_path,
+                )
+                results = run_trials(req)
+
+        assert (captured_config["_aorta_environment"]["buck_target"]
+                == "//workloads/recom_repro:recom_repro")
+        assert (results[0].execution_env["buck_target"]
+                == "//workloads/recom_repro:recom_repro")
+
     def test_override_preserves_other_env_fields(self, tmp_path):
         """Override is a single-axis pin, not a wholesale env replacement.
 

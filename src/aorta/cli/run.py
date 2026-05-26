@@ -45,21 +45,10 @@ from aorta.run.dispatcher import RunRequest, run_trials
     default=None,
     help=(
         "Buck2 target label (e.g. '//workloads/recom_repro:recom_repro') "
-        "to overlay onto the resolved environment's ``buck_target`` "
-        "field at run time (#182). Peer of the docker / venv tier hints: "
-        "the platform threads it, Buck-aware workload wrappers consume "
-        "it via ``config['_aorta_environment']['buck_target']`` and "
-        "decide whether to shell out via ``buck2 run <label>`` (see "
-        "``src/aorta/registry/README.md`` in the source tree). Other "
-        "fields of the named --environment "
-        "(docker, venv, source_package) are preserved -- the override "
-        "is a pin on the Buck axis only. When omitted, the named "
-        "environment's existing ``buck_target`` (if any) is used as-is. "
-        "Symmetric to ``aorta env probe --buck-target`` (#163, A1.2b), "
-        "which enriches the env snapshot via ``buck2 cquery``; this "
-        "flag instead pins the runtime recipe so the workload can act "
-        "on it. Required by aorta-internal #42's BUCK_ONLY and "
-        "BUCK_IN_DOCKER regression-gate tiers."
+        "to overlay onto the resolved environment's buck_target field. "
+        "Other axes (docker, venv, source_package) of the named "
+        "--environment are preserved. When omitted, the named "
+        "environment's existing buck_target (if any) is used as-is."
     ),
 )
 @click.option(

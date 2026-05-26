@@ -47,6 +47,15 @@ class RunRequest:
     request can never be mutated out from under the dispatcher.  This
     mirrors the same defensive pattern used by :class:`TrialResult`.
 
+    Note:
+        :class:`TrialResult.execution_env` records the *effective*
+        recipe (the declared environment plus any runtime overlays
+        from CLI flags such as ``--buck-target``).  Replays should
+        read ``execution_env`` field-by-field, not re-resolve the
+        named environment, when overlays were used -- otherwise the
+        replay silently drops the overlay and runs against a
+        different recipe than the original trial.
+
     Attributes:
         workload: Name of the workload to run (from entry-point group).
         trials: Number of trials to execute.
@@ -259,13 +268,18 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     # 7a. Apply the ``buck_target`` runtime override (if any) AFTER
     #     resolving the named environment, so the named env's
     #     ``docker`` / ``venv`` / ``source_package`` fields are
-    #     preserved.  ``None`` means "no override" -- a named env that
-    #     already declares ``buck_target`` keeps its value.  This is
-    #     the dispatcher side of the ``--buck-target`` CLI flag
-    #     symmetric to ``aorta env probe --buck-target``; see the
+    #     preserved.  Falsy values (``None`` -- the default -- and
+    #     ``""``) mean "no override": a named env that already
+    #     declares ``buck_target`` keeps its value.  Empty string is
+    #     never a valid Buck2 label, so treating it as a no-op rather
+    #     than silently overlaying ``buck_target=""`` onto the
+    #     resolved env avoids a downstream ``buck2 run ""`` style
+    #     failure that would be hard to attribute back to the flag.
+    #     This is the dispatcher side of the ``--buck-target`` CLI
+    #     flag symmetric to ``aorta env probe --buck-target``; see the
     #     ``RunRequest.buck_target`` docstring for the cross-repo
     #     motivation (aorta-internal #42).
-    if request.buck_target is not None:
+    if request.buck_target:
         env_descriptor = replace(env_descriptor, buck_target=request.buck_target)
 
     # 8. Resolve and union mitigations.  ``aorta.registry.get_mitigation``
