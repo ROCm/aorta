@@ -179,10 +179,22 @@ class SubprocessWorkload(Workload):
         # See F6 in the rubric for the no-parse-argv rationale.
         cell_env_snapshot = self._capture_cell_env(probe_extras)
         child_env = os.environ.copy()
+        env_file_path = trial_dir / "probe.env"
         if env_mode == "file":
-            env_file_path = trial_dir / "probe.env"
             _write_env_file(env_file_path, cell_env_snapshot)
             child_env["AORTA_ENV_FILE"] = str(env_file_path.absolute())
+        else:
+            # ``inherit`` mode: scrub any probe.env left over from a
+            # prior run that used ``file`` mode (resume scenarios under
+            # ``flat_resume`` re-use the same ``trial_<n>/`` directory
+            # when a previous attempt's ``result.json`` was truncated).
+            # Without this cleanup the on-disk artifacts would
+            # contradict the current invocation -- the operator would
+            # see a ``probe.env`` even though the child never had
+            # ``AORTA_ENV_FILE`` exported, which is at best confusing
+            # and at worst points downstream tooling at stale env
+            # contents.
+            env_file_path.unlink(missing_ok=True)
 
         t0 = time.perf_counter()
         exit_code: int

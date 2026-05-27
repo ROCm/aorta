@@ -119,10 +119,10 @@ def test_env_file_rejects_newline_in_value(tmp_path):
 @pytest.mark.parametrize(
     "bad_key",
     [
-        "FOO\nBAR",       # newline in key
-        "FOO\rBAR",       # carriage return in key
-        "FOO=BAR",        # embedded '=' would rebind a later key
-        "X\n=injected",   # newline-then-equals row-injection attempt
+        "FOO\nBAR",  # newline in key
+        "FOO\rBAR",  # carriage return in key
+        "FOO=BAR",  # embedded '=' would rebind a later key
+        "X\n=injected",  # newline-then-equals row-injection attempt
     ],
 )
 def test_env_file_rejects_unsafe_chars_in_key(tmp_path, bad_key):
@@ -162,3 +162,58 @@ def test_inherit_mode_passes_env_to_child(tmp_path, monkeypatch):
     wl.run()
     stdout = (tmp_path / "trial_0" / "stdout.log").read_text(encoding="utf-8")
     assert "from_inherit" in stdout
+
+
+def test_inherit_mode_scrubs_stale_probe_env(tmp_path):
+    """A leftover ``probe.env`` from a prior ``file``-mode attempt is removed.
+
+    Regression for PR #194 review: in ``flat_resume`` runs the trial
+    directory is re-used when a prior attempt's ``result.json`` was
+    truncated. If the prior attempt ran in ``env_passthrough_mode=file``
+    it wrote a ``probe.env``; if the resumed attempt is in ``inherit``
+    mode the file would otherwise remain on disk, contradicting the
+    on-the-wire behaviour (no ``AORTA_ENV_FILE`` exported in the child).
+    """
+    workload_subdir = tmp_path / "_subprocess"
+    workload_subdir.mkdir(parents=True, exist_ok=True)
+    # Pre-create the trial dir + a stale probe.env from a "previous"
+    # file-mode run, then invoke the workload in inherit mode.
+    trial_dir = tmp_path / "trial_0"
+    trial_dir.mkdir()
+    stale = trial_dir / "probe.env"
+    stale.write_text("STALE_KEY=stale_value\n", encoding="utf-8")
+    assert stale.is_file()
+
+    wl = _make_workload(
+        tmp_path,
+        argv=["true"],
+        env_mode="inherit",
+        cell_env_vars={"DISABLE_TF32": "1"},
+    )
+    wl.setup()
+    wl.run()
+
+    assert not stale.exists(), "inherit mode must scrub a stale probe.env"
+    # Child must not have seen AORTA_ENV_FILE either; verify by
+    # re-running with a probe that echoes the var to stdout.
+    wl2 = _make_workload(
+        tmp_path,
+        argv=["sh", "-c", "echo AORTA_ENV_FILE=${AORTA_ENV_FILE:-unset}"],
+        env_mode="inherit",
+    )
+    wl2.setup()
+    wl2.run()
+    stdout = (trial_dir / "stdout.log").read_text(encoding="utf-8")
+    assert "AORTA_ENV_FILE=unset" in stdout
+
+
+def test_inherit_mode_with_no_prior_probe_env_is_a_noop(tmp_path):
+    """Scrubbing logic must not raise when there's no stale file to remove."""
+    wl = _make_workload(
+        tmp_path,
+        argv=["true"],
+        env_mode="inherit",
+    )
+    wl.setup()
+    wl.run()
+    assert not (tmp_path / "trial_0" / "probe.env").exists()

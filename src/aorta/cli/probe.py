@@ -6,7 +6,10 @@ orchestration). The CLI's whole job is:
 1. Validate the trailing argv and the env-passthrough mode.
 2. Load the recipe (must be ``mode: probe``).
 3. Override ``recipe.probe_extras.env_passthrough_mode`` from the CLI
-   flag (the flag wins when present, per FR 1.10).
+   flag **only when the user actually passed it** (FR 1.10: the flag
+   wins when present, otherwise the recipe's ``env_passthrough_mode:``
+   takes effect; if neither is set the recipe-builder default
+   ``"inherit"`` applies).
 4. Call :func:`aorta.triage.runner.run_recipe` with the probe-mode
    knobs (``layout="flat_resume"``, ``resume_existing=True``,
    ``subprocess_argv=...``).
@@ -117,15 +120,17 @@ class _ProbeCommand(click.Command):
 @click.option(
     "--env-passthrough-mode",
     type=click.Choice(["inherit", "file"]),
-    default="inherit",
-    show_default=True,
+    default=None,
     help=(
         "How per-cell env vars reach the user command: 'inherit' stamps "
         "them on os.environ in-process (the child Popen inherits); 'file' "
         "additionally writes a chmod-0600 probe.env file in the trial dir "
         "and exports AORTA_ENV_FILE for the user's argv to reference "
         "(e.g. 'docker run --env-file $AORTA_ENV_FILE ...'). "
-        "Aorta never modifies the user's argv."
+        "Aorta never modifies the user's argv. "
+        "When omitted, the recipe's 'env_passthrough_mode:' value is used "
+        "(falling back to 'inherit' if the recipe also omits it). When "
+        "present, this flag overrides the recipe."
     ),
 )
 @click.option(
@@ -140,7 +145,7 @@ def probe(
     output: Path,
     ticket: str | None,
     dry_run: bool,
-    env_passthrough_mode: str,
+    env_passthrough_mode: str | None,
     verbose: int,
     argv: tuple[str, ...],
 ) -> None:
@@ -152,7 +157,17 @@ def probe(
     """
     configure_verbose_logging(verbose)
     try:
-        passthrough_mode = parse_env_passthrough_mode(env_passthrough_mode)
+        # ``--env-passthrough-mode`` defaults to None so the handler can
+        # distinguish "user passed the flag" from "user omitted it". Per
+        # FR 1.10 the CLI wins only when present; otherwise the recipe's
+        # ``env_passthrough_mode:`` (set by the probe-mode recipe-builder,
+        # defaulting to "inherit") stays in effect. Validate the value
+        # only when the user actually supplied it.
+        cli_passthrough_mode = (
+            parse_env_passthrough_mode(env_passthrough_mode)
+            if env_passthrough_mode is not None
+            else None
+        )
         clean_argv = validate_trailing_argv(argv)
         r = load_recipe(recipe)
         probe_extras = r.probe_extras
@@ -163,10 +178,13 @@ def probe(
             )
         if ticket is not None:
             r = dataclasses.replace(r, ticket=ticket)
-        r = dataclasses.replace(
-            r,
-            probe_extras=dataclasses.replace(probe_extras, env_passthrough_mode=passthrough_mode),
-        )
+        if cli_passthrough_mode is not None:
+            r = dataclasses.replace(
+                r,
+                probe_extras=dataclasses.replace(
+                    probe_extras, env_passthrough_mode=cli_passthrough_mode
+                ),
+            )
     except ProbeUsageError as exc:
         raise click.ClickException(str(exc)) from exc
     except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:

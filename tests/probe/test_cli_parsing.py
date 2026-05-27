@@ -9,9 +9,11 @@ from __future__ import annotations
 import ast
 import inspect
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from click.testing import CliRunner
 
+import aorta.cli.probe as probe_cli
 from aorta.cli.probe import probe
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -253,3 +255,114 @@ def test_user_command_starting_with_dash_rejected(tmp_path):
     )
     assert result.exit_code != 0
     assert "looks like a flag" in result.output
+
+
+# ---- FR 1.10 (CLI flag precedence over recipe env_passthrough_mode) ------
+
+
+def _invoke_probe_capturing_recipe(monkeypatch, tmp_path, *, recipe_text, cli_extra):
+    """Run ``aorta probe`` against an in-memory recipe and return the
+    :class:`Recipe` the CLI handed to ``run_recipe``.
+
+    Both modules bind ``run_recipe`` at import time so patching only the
+    runner module would miss the CLI binding -- patch ``aorta.cli.probe``
+    directly. Mirrors the pattern in ``tests/probe/test_shared_engine.py``.
+    """
+    mock = MagicMock(return_value=tmp_path / "run-dir")
+    monkeypatch.setattr(probe_cli, "run_recipe", mock)
+    recipe_path = tmp_path / "r.yaml"
+    recipe_path.write_text(recipe_text, encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(recipe_path),
+            "--output",
+            str(tmp_path / "out"),
+            *cli_extra,
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock.assert_called_once()
+    args, kwargs = mock.call_args
+    recipe_arg = args[0] if args else kwargs["recipe"]
+    return recipe_arg
+
+
+_RECIPE_WITH_FILE_MODE = (
+    "schema_version: 1\n"
+    "mode: probe\n"
+    "ticket: PROBE-188-PRECEDENCE\n"
+    "trials: 1\n"
+    "mitigation_axis: [none]\n"
+    "diagnostic_axis: [none]\n"
+    "env_passthrough_mode: file\n"
+)
+
+_RECIPE_NO_MODE = (
+    "schema_version: 1\n"
+    "mode: probe\n"
+    "ticket: PROBE-188-PRECEDENCE\n"
+    "trials: 1\n"
+    "mitigation_axis: [none]\n"
+    "diagnostic_axis: [none]\n"
+)
+
+
+def test_recipe_env_passthrough_mode_honored_when_cli_omits_flag(monkeypatch, tmp_path):
+    """Recipe says ``env_passthrough_mode: file`` and CLI omits the flag -> ``file`` wins.
+
+    Regression for PR #194 review: the Click option used to default to
+    ``"inherit"`` and unconditionally overwrite ``recipe.probe_extras
+    .env_passthrough_mode``, making the recipe key impossible to honour
+    when the user didn't pass the flag. Default is now ``None`` and the
+    handler only overrides when the user actually supplied the flag.
+    """
+    recipe_arg = _invoke_probe_capturing_recipe(
+        monkeypatch,
+        tmp_path,
+        recipe_text=_RECIPE_WITH_FILE_MODE,
+        cli_extra=[],
+    )
+    assert recipe_arg.probe_extras is not None
+    assert recipe_arg.probe_extras.env_passthrough_mode == "file"
+
+
+def test_cli_env_passthrough_mode_overrides_recipe(monkeypatch, tmp_path):
+    """Recipe says ``file`` and CLI says ``inherit`` -> CLI wins (FR 1.10)."""
+    recipe_arg = _invoke_probe_capturing_recipe(
+        monkeypatch,
+        tmp_path,
+        recipe_text=_RECIPE_WITH_FILE_MODE,
+        cli_extra=["--env-passthrough-mode", "inherit"],
+    )
+    assert recipe_arg.probe_extras is not None
+    assert recipe_arg.probe_extras.env_passthrough_mode == "inherit"
+
+
+def test_default_passthrough_mode_when_neither_set(monkeypatch, tmp_path):
+    """Neither CLI nor recipe sets the mode -> recipe-builder default ``"inherit"``."""
+    recipe_arg = _invoke_probe_capturing_recipe(
+        monkeypatch,
+        tmp_path,
+        recipe_text=_RECIPE_NO_MODE,
+        cli_extra=[],
+    )
+    assert recipe_arg.probe_extras is not None
+    assert recipe_arg.probe_extras.env_passthrough_mode == "inherit"
+
+
+def test_cli_env_passthrough_mode_file_overrides_no_recipe_key(monkeypatch, tmp_path):
+    """Recipe omits the key, CLI says ``file`` -> ``file`` wins."""
+    recipe_arg = _invoke_probe_capturing_recipe(
+        monkeypatch,
+        tmp_path,
+        recipe_text=_RECIPE_NO_MODE,
+        cli_extra=["--env-passthrough-mode", "file"],
+    )
+    assert recipe_arg.probe_extras is not None
+    assert recipe_arg.probe_extras.env_passthrough_mode == "file"

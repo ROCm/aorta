@@ -12,9 +12,13 @@
 # Verdict is exit-code only ("pass" if zero else "fail"). Per-cell stdout
 # and stderr land in `<output>/<ticket>/<cell>/trial_<n>/`.
 #
-# Mitigation / diagnostic names below must resolve in the B3 registry --
-# only `none`, `tf32_off`, `xnack`, and `hsa_no_scratch_reclaim` are
-# guaranteed in the current public build. Swap in `none` for any name
+# Mitigation / diagnostic names below must resolve in the B3 registry.
+# The built-in registry (see src/aorta/registry/mitigations.py) ships
+# only `none`, `tf32_off`, and `xnack`; any other name (e.g.
+# `hsa_no_scratch_reclaim`, `fa_prefer_ck`, `hip_launch_blocking`) must
+# come from an `aorta.mitigations` entry-point plugin or a
+# `--mitigations-file` sidecar. Issue #195 tracks adding the rubric's
+# other example axes to the built-in set. Swap in `none` for any name
 # you have not registered locally.
 schema_version: 1
 mode: probe
