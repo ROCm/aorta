@@ -394,6 +394,47 @@ def test_tier3_actually_runs_per_trial(tmp_path, monkeypatch):
     )
 
 
+def test_hang_grace_zero_survives_runtime_extraction(tmp_path, monkeypatch):
+    """Regression for PR #197 review: ``probe_extras["hang_grace_period_at_start"]
+    == 0.0`` is a validated "no grace, fire as soon as the window
+    elapses" value (see ``test_hang_grace_period_zero_is_accepted``
+    in ``test_recipe.py``). The runtime extraction used to
+    short-circuit through ``... or DEFAULT_HANG_GRACE_SEC``, which
+    treats ``0.0`` as falsy and silently substitutes the default,
+    defeating the entire knob.
+
+    Pin the behavior by intercepting ``HangMonitor.__init__`` and
+    asserting it observed the configured ``0.0`` exactly.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    captured: dict[str, float] = {}
+    real_hang_monitor = workload_mod.HangMonitor
+
+    class _SpyHangMonitor(real_hang_monitor):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            captured["hang_grace_period_at_start"] = kwargs["hang_grace_period_at_start"]
+            captured["hang_window_sec"] = kwargs["hang_window_sec"]
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(workload_mod, "HangMonitor", _SpyHangMonitor)
+
+    wl = _make_workload(
+        tmp_path,
+        ["true"],
+        hang_grace_period_at_start=0.0,
+        hang_window_sec=30.0,
+    )
+    wl.setup()
+    wl.run()
+    assert captured["hang_grace_period_at_start"] == 0.0, (
+        "Configured hang_grace_period_at_start=0.0 was silently clobbered to "
+        f"{captured['hang_grace_period_at_start']!r} -- the `or DEFAULT` falsy "
+        "shortcut is back. Use an explicit `is None` check at the extraction."
+    )
+    assert captured["hang_window_sec"] == 30.0
+
+
 def test_classifier_crash_still_writes_result_json(tmp_path, monkeypatch):
     """Regression for PR #197 round-3 review: if ``classify_trial``
     raises (regex catastrophe, future refactor edge case, etc.),

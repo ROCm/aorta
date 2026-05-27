@@ -28,9 +28,14 @@ Per-trial output layout (Phase 1):
 * ``<cell_dir>/trial_<N>/probe.env`` -- only when
   ``env_passthrough_mode == "file"`` (chmod 0600).
 
-Verdict rule (Phase 1, Tier 1 only): ``exit_code == 0`` -> pass, else
-fail. Pattern matching, hang detection, dmesg scanning, and the
-``custom_patterns`` runner are deferred to Phase 2.
+Verdict (Phase 2): the five-tier classifier in
+:mod:`aorta.probe.classifier` runs post-exit. A trial whose process
+exit is non-zero, timed out, hung, hit a dmesg / amd-smi signal, hit
+a built-in Tier-4 pattern, or hit a user ``custom_patterns`` entry
+with ``on_match: fail`` resolves to ``"fail"``; otherwise ``"pass"``.
+Phase 1's exit-code-only rule remains a strict subset (``exit_code
+== 0 and no detector fires`` -> pass), so any tooling that read the
+Phase-1 minimum shape keeps working.
 """
 
 from __future__ import annotations
@@ -118,8 +123,10 @@ class SubprocessWorkload(Workload):
        under ``_subprocess/`` -- and serves as the "I-ran" marker for
        triage-mode tooling; the probe-mode ``result.json`` is the one
        resume / classifier code consults.
-    3. Verdict is Tier 1 only in Phase 1: ``exit_code == 0`` -> pass.
-       The full classifier and the sandbox land in Phase 2.
+    3. Verdict is the union of Tier 1-5 detectors (Phase 2). Phase 1's
+       ``exit_code == 0 -> pass`` rule is a strict subset: a trial
+       that exits zero AND fires no other tier still resolves to
+       ``"pass"``. See :mod:`aorta.probe.classifier`.
     """
 
     launch_mode = "single_process"
@@ -211,9 +218,17 @@ class SubprocessWorkload(Workload):
         env_mode = probe_extras.get("env_passthrough_mode", "inherit")
         timeout = probe_extras.get("timeout_per_trial")
         custom_patterns = tuple(probe_extras.get("custom_patterns") or ())
-        hang_window_sec = float(probe_extras.get("hang_window_sec") or DEFAULT_HANG_WINDOW_SEC)
-        hang_grace_sec = float(
-            probe_extras.get("hang_grace_period_at_start") or DEFAULT_HANG_GRACE_SEC
+        # ``... or DEFAULT`` collapses a recipe-configured ``0.0`` (a
+        # legitimate "disable grace" / "disable window" value validated
+        # by the recipe-builder) into the default. Use explicit ``is
+        # None`` so an opt-in zero survives the runtime extraction.
+        _hang_window_raw = probe_extras.get("hang_window_sec")
+        hang_window_sec = (
+            DEFAULT_HANG_WINDOW_SEC if _hang_window_raw is None else float(_hang_window_raw)
+        )
+        _hang_grace_raw = probe_extras.get("hang_grace_period_at_start")
+        hang_grace_sec = (
+            DEFAULT_HANG_GRACE_SEC if _hang_grace_raw is None else float(_hang_grace_raw)
         )
 
         # ``inherit`` mode: the dispatcher has already stamped the

@@ -33,7 +33,6 @@ Phase 2 adds two short-circuit flags:
 
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 
 import click
@@ -44,6 +43,7 @@ from aorta.probe.classifier.tier4_patterns import (
 )
 from aorta.probe.cli_helpers import (
     ProbeUsageError,
+    apply_recipe_overrides,
     help_token_in_option_zone,
     parse_env_passthrough_mode,
     reject_flag_shaped_value,
@@ -225,7 +225,9 @@ class _ProbeCommand(click.Command):
     is_flag=True,
     help=(
         "With --list-patterns: print 'aorta probe pattern library "
-        "v<N> (aorta <pkg-version>)' and exit. Ignored without --list-patterns."
+        "v<N> (aorta <pkg-version>)' and exit. Rejected with a usage "
+        "error when passed without --list-patterns (see "
+        "_reject_bare_version_flag for the rationale)."
     ),
 )
 @click.option(
@@ -313,11 +315,8 @@ def probe(
         )
     try:
         # ``--env-passthrough-mode`` defaults to None so the handler can
-        # distinguish "user passed the flag" from "user omitted it". Per
-        # FR 1.10 the CLI wins only when present; otherwise the recipe's
-        # ``env_passthrough_mode:`` (set by the probe-mode recipe-builder,
-        # defaulting to "inherit") stays in effect. Validate the value
-        # only when the user actually supplied it.
+        # distinguish "user passed the flag" from "user omitted it"; per
+        # FR 1.10 the CLI wins only when present (see apply_recipe_overrides).
         cli_passthrough_mode = (
             parse_env_passthrough_mode(env_passthrough_mode)
             if env_passthrough_mode is not None
@@ -325,21 +324,12 @@ def probe(
         )
         clean_argv = validate_trailing_argv(argv)
         r = load_recipe(recipe)
-        probe_extras = r.probe_extras
-        if probe_extras is None:
+        if r.probe_extras is None:
             raise ProbeUsageError(
                 f"recipe {recipe} is not a probe-mode recipe; "
                 "set 'mode: probe' at the recipe top level"
             )
-        if ticket is not None:
-            r = dataclasses.replace(r, ticket=ticket)
-        if cli_passthrough_mode is not None:
-            r = dataclasses.replace(
-                r,
-                probe_extras=dataclasses.replace(
-                    probe_extras, env_passthrough_mode=cli_passthrough_mode
-                ),
-            )
+        r = apply_recipe_overrides(r, ticket=ticket, cli_passthrough_mode=cli_passthrough_mode)
     except ProbeUsageError as exc:
         raise click.ClickException(str(exc)) from exc
     except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:

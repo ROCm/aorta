@@ -58,9 +58,9 @@ class ProbeExtras:
     Carried as a typed sidecar (rather than smuggled into
     ``workload_config``) so the runner can read them without
     re-parsing the YAML and so the triage code path stays untouched.
-    Phase 2 will extend this with classifier knobs (``hang_window_sec``,
-    ``hang_grace_period_at_start``, ``custom_patterns``); Phase 3 adds
-    the ``redaction`` block. Phase 1 ships just the four fields below.
+    Phase 2 added the classifier knobs (``hang_window_sec``,
+    ``hang_grace_period_at_start``, ``custom_patterns``) -- see the
+    fields below. Phase 3 will add the ``redaction`` block.
 
     Attributes:
         step_time_regex: Optional regex string; Phase 1 keeps this on

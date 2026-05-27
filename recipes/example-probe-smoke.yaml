@@ -1,6 +1,6 @@
 # Smoke-test recipe for `aorta probe` (issue #188).
 #
-# Tier-1, opaque user launch command:
+# Opaque user launch command:
 #
 #   aorta probe \
 #       --recipe recipes/example-probe-smoke.yaml \
@@ -9,8 +9,14 @@
 #       -- \
 #       bash -c 'echo hi'
 #
-# Verdict is exit-code only ("pass" if zero else "fail"). Per-cell stdout
-# and stderr land in `<output>/<ticket>/<cell>/trial_<n>/`.
+# Verdict comes from the Phase-2 five-tier classifier in
+# `aorta.probe.classifier`: a trial fails if any Tier 1-4 detector
+# (process exit, hang, dmesg/amd-smi, built-in pattern) fires OR any
+# `custom_patterns[*]` entry with `on_match: fail` matches; otherwise
+# it passes. Exit code is one input among several -- see
+# `docs/probe-188/classifier.md` for the full precedence rules.
+# Per-cell stdout and stderr land in
+# `<output>/<ticket>/<cell>/trial_<n>/`.
 #
 # Mitigation / diagnostic names below must resolve in the B3 registry.
 # The built-in registry (see src/aorta/registry/mitigations.py) ships
@@ -34,8 +40,11 @@ mitigation_axis:
 diagnostic_axis:
   - none
 
-# Phase-1 stubs -- parsed and validated, but currently ignored by the
-# Tier-1 verdict path. Will become live in Phase 2 (classifier).
+# Reserved for a future phase -- both keys are parsed and validated by
+# the recipe-builder (so a typo surfaces immediately) but neither is
+# consumed by the Phase-2 classifier. `step_time_regex` will feed a
+# per-step time analysis in a later phase; `collect_paths` will feed
+# `aorta bundle` (#196) in Phase 3. Leave as below for now.
 step_time_regex: null
 collect_paths: []
 timeout_per_trial: 1800

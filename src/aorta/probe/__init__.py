@@ -1,6 +1,6 @@
 """``aorta probe`` -- wrap-and-collect command for opaque user launch commands.
 
-Phase 1 (issue #188) ships an MVP that:
+Phase 1 (issue #188) shipped the MVP:
 
 * loads a ``mode: probe`` recipe;
 * synthesises cells from ``mitigation_axis x diagnostic_axis``;
@@ -12,9 +12,15 @@ Phase 1 (issue #188) ships an MVP that:
 * re-running with the same ``--output`` skips cells whose
   ``result.json`` is valid and carries a non-empty ``verdict``.
 
-Phase 2 (built-in 5-tier classifier + sandboxed ``custom_patterns``) and
+Phase 2 has shipped on top of Phase 1: the five-tier classifier lives
+in :mod:`aorta.probe.classifier` and the AST-whitelisted ``condition``
+evaluator in :mod:`aorta.probe.sandbox`. ``custom_patterns`` are
+compiled at recipe-load time and resolved post-exit by the workload;
+detector IDs land in ``result.json::failure_detectors_fired`` /
+``warn_detectors_fired``.
+
 Phase 3 (``aorta bundle`` integration + redaction + handout templates)
-are tracked separately and are NOT implemented in this module.
+is tracked separately (issue #196) and is NOT yet implemented.
 """
 
 from aorta.probe.recipe_builder import (

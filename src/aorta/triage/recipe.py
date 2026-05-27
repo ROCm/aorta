@@ -90,9 +90,12 @@ _PROBE_TOP_LEVEL = frozenset(
 # block; rejected here so a typo'd indent of a custom_patterns
 # condition can't fall through to a silent no-op.
 _PHASE_3_KEYS = frozenset({"redaction", "condition"})
-# Union of valid keys -- used for the unknown-key rejection. Phase 2/3
-# keys are NOT in this set; they take a special-cased path so the
-# error message identifies the phase, not just "you misspelled it".
+# Union of valid keys -- used for the unknown-key rejection. Phase 2 keys
+# (``custom_patterns``, ``hang_window_sec``, ``hang_grace_period_at_start``)
+# ARE included via ``_PROBE_TOP_LEVEL`` and parsed normally when
+# ``mode == "probe"``. Only Phase 3 keys (``_PHASE_3_KEYS``) are kept
+# OUT of this set; they are intercepted earlier so the operator sees
+# a "deferred to Phase 3" pointer instead of a generic "unknown key".
 _VALID_TOP_LEVEL = _TRIAGE_TOP_LEVEL | _PROBE_TOP_LEVEL | {"mode"}
 _VALID_CONFOUND_KEYS = frozenset({"threshold", "baseline_cell"})
 _VALID_CELL_KEYS = frozenset(
