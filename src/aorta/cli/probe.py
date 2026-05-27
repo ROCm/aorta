@@ -29,6 +29,7 @@ import click
 
 from aorta.probe.cli_helpers import (
     ProbeUsageError,
+    help_token_in_option_zone,
     parse_env_passthrough_mode,
     reject_flag_shaped_value,
     require_double_dash_separator,
@@ -70,17 +71,44 @@ class _ProbeCommand(click.Command):
     Implemented as a ``parse_args`` override so the check sees the same
     argv that Click sees -- whether that's ``sys.argv[1:]`` from the real
     entry point or the ``args=[...]`` list from ``CliRunner.invoke`` in
-    tests. ``--help`` short-circuits via ``ctx.resilient_parsing`` so the
-    help text still renders without requiring ``--``.
+    tests. ``--help``/``-h`` short-circuits the check, but ONLY when the
+    help token sits in the aorta-option zone (before the user-command
+    boundary). A naive ``"--help" in args`` bypass is wrong because
+    ``aorta probe --recipe r --output o echo --help`` would silently
+    skip the separator check -- ``--help`` is the user-command's flag
+    there, not aorta's. See :func:`help_token_in_option_zone` for the
+    scoping rule.
     """
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        if not ctx.resilient_parsing and "--help" not in args and "-h" not in args:
+        if not ctx.resilient_parsing and not help_token_in_option_zone(
+            args, self._value_taking_option_tokens()
+        ):
             try:
                 require_double_dash_separator(args)
             except ProbeUsageError as exc:
                 raise click.UsageError(str(exc), ctx=ctx) from exc
         return super().parse_args(ctx, args)
+
+    def _value_taking_option_tokens(self) -> frozenset[str]:
+        """Long-form option tokens (``--recipe`` etc.) that consume a value.
+
+        Derived from the Click command's own ``params`` so adding a new
+        option that takes a value (without ``is_flag``/``count``) won't
+        silently re-open the bot-flagged misparse. Boolean flags and
+        ``count`` options are excluded -- they don't consume the next
+        token.
+        """
+        tokens: set[str] = set()
+        for param in self.params:
+            if not isinstance(param, click.Option):
+                continue
+            if param.is_flag or param.count:
+                continue
+            for opt in param.opts:
+                if opt.startswith("--"):
+                    tokens.add(opt)
+        return frozenset(tokens)
 
 
 @click.command(

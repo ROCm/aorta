@@ -50,6 +50,51 @@ def reject_flag_shaped_value(option_name: str, value: str | None) -> None:
         )
 
 
+def help_token_in_option_zone(args: Sequence[str], value_taking_options: frozenset[str]) -> bool:
+    """True iff ``--help`` / ``-h`` appears in the aorta-option zone.
+
+    The "aorta-option zone" is the prefix of ``args`` that comes BEFORE
+    either the explicit ``--`` separator or the first non-option
+    positional argument (the user-command executable). Help tokens
+    appearing AFTER the user command (``aorta probe --recipe r -- echo
+    --help`` or ``aorta probe --recipe r echo --help`` with
+    ``allow_interspersed_args=False``) are part of the user command and
+    MUST NOT short-circuit the mandatory ``--`` separator check.
+
+    Walks the token list left-to-right and consumes
+    ``--opt value`` pairs for options that take a value (passed as
+    ``value_taking_options``, derived from the Click command's
+    ``params``). ``--opt=value`` is consumed as a single token. Flag
+    options (``-v``, ``--dry-run``) are single tokens. The first token
+    that doesn't start with ``-`` (and isn't an option value) marks
+    the user-command boundary; ``--help`` at or after that boundary is
+    user-command content.
+
+    Defends against the bot-flagged misparse where ``aorta probe
+    --recipe r --output o echo --help`` would silently skip the
+    separator check.
+    """
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token in ("--help", "-h"):
+            return True
+        if token == "--":
+            return False
+        if token.startswith("--"):
+            opt = token.split("=", 1)[0]
+            if "=" in token or opt not in value_taking_options:
+                i += 1
+                continue
+            i += 2  # consume the value as well
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        return False  # first user-command positional
+    return False
+
+
 def require_double_dash_separator(raw_argv: Sequence[str]) -> None:
     """Require an explicit ``--`` separator in the raw process argv.
 
@@ -136,6 +181,7 @@ __all__ = [
     "VALID_ENV_PASSTHROUGH_MODES",
     "ProbeUsageError",
     "format_dry_run_line",
+    "help_token_in_option_zone",
     "parse_env_passthrough_mode",
     "reject_flag_shaped_value",
     "require_double_dash_separator",

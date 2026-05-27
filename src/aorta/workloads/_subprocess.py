@@ -232,11 +232,35 @@ class SubprocessWorkload(Workload):
                     except ProcessLookupError:
                         pass
                     exit_code = -1
-        except FileNotFoundError as exc:
-            # ``Popen`` raises FileNotFoundError when argv[0] doesn't
-            # resolve to an executable -- record as a Tier-1 fail with
-            # the error captured in stderr.log for diagnosis.
-            exit_code = 127
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            # Exec-time ``Popen`` failures all become Tier-1 fails with
+            # the artifact tree intact (stderr.log + result.json). The
+            # error families we capture:
+            #
+            # * ``FileNotFoundError`` (ENOENT, exit 127) -- argv[0]
+            #   doesn't resolve to a binary on $PATH;
+            # * ``PermissionError`` (EACCES, exit 126) -- argv[0]
+            #   exists but isn't executable (chmod missing the +x bit);
+            # * other ``OSError`` (e.g. ENOEXEC "Exec format error"
+            #   for a shebang-less script, ELOOP for a symlink loop) --
+            #   the operator gets the diagnostic via stderr.log but
+            #   the trial still occupies its slot in the matrix.
+            #
+            # Without this guard a non-executable user command would
+            # escape to the dispatcher as ``infrastructure_failed``,
+            # leaving the per-trial directory without a
+            # ``result.json`` and breaking the documented "every probe
+            # trial leaves an artifact" contract. ``FileNotFoundError``
+            # and ``PermissionError`` are ``OSError`` subclasses so the
+            # three-way tuple is logically a single OSError catch; we
+            # name the subclasses explicitly so the exit-code mapping
+            # below stays grep-able.
+            if isinstance(exc, FileNotFoundError):
+                exit_code = 127
+            elif isinstance(exc, PermissionError):
+                exit_code = 126
+            else:
+                exit_code = 1
             try:
                 stderr_path.write_text(f"{exc}\n", encoding="utf-8")
             except OSError:

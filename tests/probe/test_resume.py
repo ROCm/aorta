@@ -143,6 +143,91 @@ def test_skipped_cell_records_real_counts_in_matrix(tmp_path):
     assert second_cells["none-none"]["failed_count"] == 0
 
 
+def test_resume_with_reduced_trial_count_slices_to_current_recipe(tmp_path):
+    """When the resumed directory has MORE completed trials than the
+    current recipe asks for, the short-circuit must slice the
+    hydrated list (and trial paths) down to ``effective_trials``.
+
+    Regression for PR #194 review: a user who re-ran with ``trials: 1``
+    after a previous ``trials: 3`` left a directory with three
+    completed trial dirs on disk. Without the slice, ``aggregate_cell``
+    saw all three and matrix.md reported the stale extra trials. We
+    only assert the count is correct here; the stale dirs on disk are
+    left in place so the operator can still inspect prior runs.
+    """
+    output = tmp_path / "out"
+
+    # First run with trials: 3.
+    recipe_3 = tmp_path / "trials_3.yaml"
+    recipe_3.write_text(
+        "schema_version: 1\n"
+        "mode: probe\n"
+        "ticket: RESUME-SLICE\n"
+        "trials: 3\n"
+        "mitigation_axis: [none]\n"
+        "diagnostic_axis: [none]\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    rc1 = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(recipe_3),
+            "--output",
+            str(output),
+            "--ticket",
+            "RESUME-SLICE",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ],
+    ).exit_code
+    assert rc1 == 0
+    cell_dir = output / "RESUME-SLICE" / "none-none"
+    # Three trial dirs landed.
+    assert (cell_dir / "trial_0" / "result.json").is_file()
+    assert (cell_dir / "trial_1" / "result.json").is_file()
+    assert (cell_dir / "trial_2" / "result.json").is_file()
+
+    # Re-run with the SAME output/ticket but trials: 1.
+    recipe_1 = tmp_path / "trials_1.yaml"
+    recipe_1.write_text(
+        "schema_version: 1\n"
+        "mode: probe\n"
+        "ticket: RESUME-SLICE\n"
+        "trials: 1\n"
+        "mitigation_axis: [none]\n"
+        "diagnostic_axis: [none]\n",
+        encoding="utf-8",
+    )
+    rc2 = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(recipe_1),
+            "--output",
+            str(output),
+            "--ticket",
+            "RESUME-SLICE",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ],
+    ).exit_code
+    assert rc2 == 0
+
+    matrix_doc = json.loads((output / "RESUME-SLICE" / "matrix.json").read_text(encoding="utf-8"))
+    cells = {c["name"]: c for c in matrix_doc["cells"]}
+    assert cells["none-none"]["trials"] == 1, (
+        f"matrix reported {cells['none-none']['trials']} trials; expected 1 "
+        "(the resume short-circuit returned stale extra trials instead of "
+        "slicing to the current recipe's effective_trials)"
+    )
+
+
 def test_reruns_truncated_result_json(tmp_path):
     """Half a `{` in result.json -> trial is re-executed."""
     output = tmp_path / "out"

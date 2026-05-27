@@ -638,14 +638,27 @@ def _run_one_cell(
         from aorta.probe.resume import is_trial_complete
 
         completed = sum(
-            1
-            for i in range(effective_trials)
-            if is_trial_complete(cell_dir / f"trial_{i}")
+            1 for i in range(effective_trials) if is_trial_complete(cell_dir / f"trial_{i}")
         )
         if completed >= effective_trials:
             trial_paths = _collect_trial_paths(cell_dir)
             hydrated = _hydrate_trials_from_paths(trial_paths)
             if len(hydrated) >= effective_trials:
+                # Slice to the CURRENT recipe's effective_trials. A user
+                # who re-runs with ``trials: 1`` after a previous
+                # ``trials: 3`` left a directory with three completed
+                # trial dirs on disk; without the slice, matrix.md
+                # would aggregate the stale extra trials instead of
+                # the requested one. Truncating both ``hydrated`` and
+                # ``trial_paths`` to ``effective_trials`` keeps the
+                # resume short-circuit's output consistent with what
+                # a fresh run would have produced. (Stale on-disk
+                # trial_<n>/ directories with n >= effective_trials
+                # are left in place so manual inspection of the prior
+                # run is still possible; downstream aggregation only
+                # sees the indices it asked for.)
+                hydrated = hydrated[:effective_trials]
+                trial_paths = trial_paths[:effective_trials]
                 log.info(
                     "cell %r: all %d trial(s) already complete -- skipping per resume mode",
                     cell.name,
@@ -761,17 +774,11 @@ def _print_dry_run(
             f"cells={len(recipe.cells)} trials/cell={recipe.trials}"
         )
         click.echo(f"Argv (forwarded byte-for-byte): {argv_display}")
-        click.echo(
-            f"Env-passthrough mode: {recipe.probe_extras.env_passthrough_mode}"
-        )
+        click.echo(f"Env-passthrough mode: {recipe.probe_extras.env_passthrough_mode}")
         for cell in recipe.cells:
             env_bundle = recipe.probe_extras.cell_envs.get(cell.name, {})
-            env_str = (
-                " ".join(f"{k}={v}" for k, v in sorted(env_bundle.items())) or "(no env)"
-            )
-            click.echo(
-                f"  {cell.name}: env=[{env_str}] argv={argv_display}"
-            )
+            env_str = " ".join(f"{k}={v}" for k, v in sorted(env_bundle.items())) or "(no env)"
+            click.echo(f"  {cell.name}: env=[{env_str}] argv={argv_display}")
         return
 
     click.echo(f"Dry run: {recipe.workload} / ticket={recipe.ticket or '(none)'}")
@@ -789,11 +796,7 @@ def _print_dry_run(
             f"trials={cell.effective_trials(recipe.trials)} "
             f"steps={cell.effective_steps(recipe.steps)}"
             + (f" extra_env={cell.extra_env}" if cell.extra_env else "")
-            + (
-                f" workload_config={effective_workload_config}"
-                if effective_workload_config
-                else ""
-            )
+            + (f" workload_config={effective_workload_config}" if effective_workload_config else "")
         )
     if recipe.inline_environments:
         click.echo("Inline docker environments:")
@@ -1043,9 +1046,7 @@ def run_recipe(
     if recipe.confound.baseline_cell is not None:
         baseline_cell = resolve_baseline(recipe.cells, recipe.confound.baseline_cell)
         if baseline_cell.name in disqualified_names:
-            baseline_stats_ref = next(
-                c for c in cell_stats if c.name == baseline_cell.name
-            )
+            baseline_stats_ref = next(c for c in cell_stats if c.name == baseline_cell.name)
             msg = (
                 f"explicit baseline_cell {baseline_cell.name!r} produced only "
                 f"did_not_run trials "
@@ -1061,17 +1062,13 @@ def run_recipe(
             incomplete_reason = msg
     else:
         try:
-            baseline_cell = resolve_baseline(
-                recipe.cells, None, skip_names=disqualified_names
-            )
+            baseline_cell = resolve_baseline(recipe.cells, None, skip_names=disqualified_names)
         except RecipeCellError:
             # Every candidate was disqualified -- fall back to the original
             # auto-resolution (without the skip set) so matrix.json still
             # records WHO would have been the baseline, then warn loudly.
             baseline_cell = resolve_baseline(recipe.cells, None)
-            baseline_stats_ref = next(
-                c for c in cell_stats if c.name == baseline_cell.name
-            )
+            baseline_stats_ref = next(c for c in cell_stats if c.name == baseline_cell.name)
             msg = (
                 f"Auto-baseline {baseline_cell.name!r} had "
                 f"{baseline_stats_ref.outcome_counts.get(OUTCOME_DID_NOT_RUN, 0)}/"

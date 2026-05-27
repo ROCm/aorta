@@ -366,3 +366,67 @@ def test_cli_env_passthrough_mode_file_overrides_no_recipe_key(monkeypatch, tmp_
     )
     assert recipe_arg.probe_extras is not None
     assert recipe_arg.probe_extras.env_passthrough_mode == "file"
+
+
+# ---- PR #194 round-3 review: --help bypass must be option-zone-scoped ------
+
+
+def test_user_command_help_does_not_bypass_separator(tmp_path):
+    """A ``--help`` token AFTER the user command must NOT bypass the
+    mandatory ``--`` separator.
+
+    Regression for PR #194 review: ``aorta probe --recipe r --output o
+    echo --help`` previously short-circuited the separator check
+    because ``"--help" in args`` is True -- but here ``--help`` is the
+    user command's flag, not aorta's. The fix scopes the bypass to
+    help tokens that sit in the aorta-option zone (before the
+    user-command boundary). See
+    :func:`aorta.probe.cli_helpers.help_token_in_option_zone`.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_minimal.yaml"),
+            "--output",
+            str(tmp_path),
+            "echo",
+            "--help",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "missing '--' separator" in result.output
+
+
+def test_aorta_help_still_works(tmp_path):
+    """``aorta probe --help`` (no user command, --help before any
+    positional) still renders help. Pins the upper bound of the
+    scoped bypass: real help invocations are not regressed.
+    """
+    runner = CliRunner()
+    result = runner.invoke(probe, ["--help"])
+    assert result.exit_code == 0
+    assert "ARGV" in result.output or "argv" in result.output
+
+
+def test_aorta_help_after_value_taking_option_still_works(tmp_path):
+    """``aorta probe --recipe r --help`` -- the help token follows
+    ``--recipe`` (a value-taking option that consumes ``r``) but stays
+    in the option zone because no user-command positional has been
+    seen yet. Must still render help, not raise the separator error.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_minimal.yaml"),
+            "--help",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "ARGV" in result.output or "argv" in result.output
+
+
+# ---- PR #194 round-3 review: exec-time errors land as Tier-1 fails ----

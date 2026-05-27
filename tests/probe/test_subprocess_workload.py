@@ -132,6 +132,70 @@ def test_missing_executable_yields_fail(tmp_path):
     assert result.passed is False
 
 
+def test_non_executable_script_yields_fail(tmp_path):
+    """A user command pointing at a file without the +x bit must land
+    as a Tier-1 fail (exit_code=126), NOT escape to the dispatcher as
+    ``infrastructure_failed``.
+
+    Regression for PR #194 review: previously only ``FileNotFoundError``
+    was caught. ``PermissionError`` (EACCES, raised by ``Popen`` when
+    argv[0] exists but isn't executable) escaped the handler, leaving
+    the per-trial directory without a ``result.json`` and breaking
+    the documented "every probe trial leaves an artifact" contract.
+    """
+    script = tmp_path / "no_exec_bit.sh"
+    script.write_text("#!/bin/bash\necho hi\n", encoding="utf-8")
+    script.chmod(0o644)  # readable, but NOT executable
+    wl = _make_workload(tmp_path, [str(script)])
+    wl.setup()
+    result = wl.run()
+    result_path = tmp_path / "trial_0" / "result.json"
+    assert result_path.exists(), (
+        "result.json missing: PermissionError escaped instead of being "
+        "captured as a Tier-1 fail (regression of PR #194 review fix)"
+    )
+    doc = json.loads(result_path.read_text(encoding="utf-8"))
+    assert doc["verdict"] == "fail"
+    assert doc["exit_code"] == 126
+    assert result.passed is False
+    # stderr.log should carry the diagnostic so the operator knows
+    # which exec-time error fired.
+    stderr_text = (tmp_path / "trial_0" / "stderr.log").read_text(encoding="utf-8")
+    assert "Permission" in stderr_text or "permitted" in stderr_text.lower()
+
+
+def test_popen_oserror_yields_fail(tmp_path, monkeypatch):
+    """A generic ``OSError`` from ``Popen`` (e.g. ENOEXEC "Exec format
+    error" for a shebang-less script) also lands as a Tier-1 fail
+    with the artifact tree intact, rather than escaping to the
+    dispatcher.
+
+    Regression for PR #194 review: only ``FileNotFoundError`` and
+    ``PermissionError`` were named explicitly in the previous handler;
+    other ``OSError`` subclasses (ENOEXEC, ELOOP, ...) leaked through.
+    """
+    import subprocess as _subprocess
+
+    def _raises_oserror(*args, **kwargs):
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr(_subprocess, "Popen", _raises_oserror)
+    wl = _make_workload(tmp_path, ["/some/path/with/bad/format"])
+    wl.setup()
+    result = wl.run()
+    result_path = tmp_path / "trial_0" / "result.json"
+    assert result_path.exists(), (
+        "result.json missing: bare OSError escaped instead of being " "captured as a Tier-1 fail"
+    )
+    doc = json.loads(result_path.read_text(encoding="utf-8"))
+    assert doc["verdict"] == "fail"
+    # Exit code falls back to 1 for non-{FileNotFound,Permission} OSError.
+    assert doc["exit_code"] == 1
+    assert result.passed is False
+    stderr_text = (tmp_path / "trial_0" / "stderr.log").read_text(encoding="utf-8")
+    assert "Exec format error" in stderr_text
+
+
 def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
     """Regression for PR #194 review: ``proc.kill()`` after a
     ``TimeoutExpired`` must not propagate ``ProcessLookupError``
@@ -152,9 +216,9 @@ def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
 
     class _RacingPopen:
         def __init__(self, *args, **kwargs):
-            self._real = real_popen(["true"], **{
-                k: v for k, v in kwargs.items() if k in ("stdout", "stderr", "env")
-            })
+            self._real = real_popen(
+                ["true"], **{k: v for k, v in kwargs.items() if k in ("stdout", "stderr", "env")}
+            )
             self.pid = self._real.pid
             self._wait_calls = 0
 

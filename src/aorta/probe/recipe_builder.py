@@ -20,6 +20,7 @@ from typing import Any, Literal
 from aorta.registry import get_mitigation
 from aorta.registry.errors import UnknownMitigationError
 from aorta.triage.recipe import (
+    _VALID_CONFOUND_KEYS,
     SCHEMA_VERSION,
     Cell,
     ConfoundCfg,
@@ -236,6 +237,20 @@ def build_probe_recipe_from_dict(
         raise RecipeSchemaError(
             f"recipe.confound: must be a mapping, got {type(confound_raw).__name__}"
         )
+    if confound_raw is not None:
+        # Mirror the triage-mode loader's strict-schema contract
+        # (:func:`aorta.triage.recipe._parse_confound`): reject typo'd
+        # keys like ``baseline_cel`` up-front instead of silently
+        # ignoring them and using the auto-discovered baseline. Sharing
+        # ``_VALID_CONFOUND_KEYS`` with the triage parser means a new
+        # confound key added there is automatically rejected here too
+        # until probe explicitly opts in.
+        unknown = set(confound_raw) - _VALID_CONFOUND_KEYS
+        if unknown:
+            raise RecipeSchemaError(
+                f"recipe.confound: unknown keys {sorted(unknown)}; "
+                f"allowed: {sorted(_VALID_CONFOUND_KEYS)}"
+            )
 
     # Synthesise the cartesian product of the two axes. Cell-name
     # collisions (two distinct (m, d) pairs that slug-collapse to the

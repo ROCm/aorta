@@ -263,6 +263,35 @@ def test_timeout_per_trial_must_be_positive(tmp_path):
         load_recipe(_write_yaml(tmp_path, text))
 
 
+# ---- PR #194 round-3 review: probe confound rejects unknown keys ---------
+
+
+def test_probe_confound_unknown_key_rejected(tmp_path):
+    """Probe-mode ``confound`` must reject typo'd keys like ``baseline_cel``.
+
+    Regression for PR #194 review: the probe-mode parser previously
+    used ``confound_raw.get("baseline_cell", default)`` which silently
+    ignored typo'd keys, leaving the auto-derived baseline in place
+    and weakening the loader's strict-schema contract that the
+    triage-mode parser (:func:`aorta.triage.recipe._parse_confound`)
+    enforces. Both parsers now share ``_VALID_CONFOUND_KEYS`` so a new
+    confound key has to be opted into both code paths explicitly.
+    """
+    text = _PROBE_MINIMAL + "confound:\n  baseline_cel: none-none\n"
+    with pytest.raises(RecipeSchemaError, match="unknown keys.*baseline_cel"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_probe_confound_known_keys_still_accepted(tmp_path):
+    """Verify the strict-schema check doesn't reject the legitimate
+    ``threshold`` / ``baseline_cell`` keys (upper bound on the fix).
+    """
+    text = _PROBE_MINIMAL + "confound:\n  threshold: 1.5\n  baseline_cell: none-none\n"
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.confound.threshold == 1.5
+    assert r.confound.baseline_cell == "none-none"
+
+
 # ---- Fixture loads -------------------------------------------------------
 
 
