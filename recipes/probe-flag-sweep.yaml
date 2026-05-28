@@ -58,6 +58,8 @@ timeout_per_trial: null
 
 env_passthrough_mode: inherit
 
-confound:
-  threshold: 1.15
-  baseline_cell: none-none
+# No explicit `confound:` block: Phase 1's verdict is exit-code only and
+# `trials: 1` carries no statistical content. The probe recipe-builder
+# auto-discovers the `none-none` cell as the baseline when `confound:` is
+# absent. Once Phase 2 lands a step-time confound classifier, bump
+# `trials:` above 1 and add the block back with an explicit threshold.
