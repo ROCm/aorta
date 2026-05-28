@@ -228,6 +228,112 @@ def test_resume_with_reduced_trial_count_slices_to_current_recipe(tmp_path):
     )
 
 
+def test_resume_falls_back_when_trial_indices_dont_cover_current_recipe(tmp_path):
+    """Resume must verify the EXACT trial-index set, not just the count.
+
+    Regression for PR #194 round-5 review: the previous
+    ``len(hydrated) >= effective_trials`` check admitted a
+    pathological state where the dispatcher JSONs on disk are
+    ``..._t1, _t2`` (e.g. ``_t0`` was hand-deleted or corrupted by a
+    crashed previous run) while ``trial_0/result.json`` is intact.
+    The count would pass with the wrong index set, and matrix.md
+    would aggregate trials carrying the wrong ``trial_index``.
+
+    The fix walks the collected paths' filenames and requires the
+    integer trial-index set to be a superset of
+    ``range(effective_trials)``. We pin the behaviour by simulating
+    the pathological state -- ``trial_0/result.json`` complete on
+    disk, but the dispatcher JSON for ``_t0`` deleted while ``_t1``
+    remains. The resume short-circuit must fall back to a full
+    re-run, which overwrites the artifacts with a fresh
+    ``_t0`` / ``_t1`` pair.
+    """
+    output = tmp_path / "out"
+
+    # First run with trials: 2 so we get a clean two-trial baseline
+    # with dispatcher JSONs ``_t0`` and ``_t1`` on disk.
+    recipe = tmp_path / "trials_2.yaml"
+    recipe.write_text(
+        "schema_version: 1\n"
+        "mode: probe\n"
+        "ticket: RESUME-INDEX\n"
+        "trials: 2\n"
+        "mitigation_axis: [none]\n"
+        "diagnostic_axis: [none]\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    rc1 = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(recipe),
+            "--output",
+            str(output),
+            "--ticket",
+            "RESUME-INDEX",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ],
+    ).exit_code
+    assert rc1 == 0
+    cell_dir = output / "RESUME-INDEX" / "none-none"
+    # Probe per-trial dirs land directly under cell_dir.
+    assert (cell_dir / "trial_0" / "result.json").is_file()
+    assert (cell_dir / "trial_1" / "result.json").is_file()
+
+    # Find the dispatcher JSONs (workload subdir under cell_dir).
+    dispatcher_jsons = sorted(cell_dir.rglob("trial_d*_m*_t*.json"))
+    assert len(dispatcher_jsons) == 2, (
+        f"first run should have produced exactly 2 dispatcher JSONs, "
+        f"got {[p.name for p in dispatcher_jsons]}"
+    )
+    # Delete the ``_t0`` dispatcher JSON to simulate corruption; keep
+    # the matching probe ``trial_0/result.json`` intact so
+    # ``is_trial_complete`` still returns True for index 0.
+    t0_dispatcher = next(p for p in dispatcher_jsons if p.stem.endswith("_t0"))
+    t0_dispatcher.unlink()
+    # Add a STALE ``_t2`` JSON copied from ``_t1`` so the count check
+    # alone would still pass (2 dispatcher JSONs on disk).
+    t1_dispatcher = next(p for p in dispatcher_jsons if p.stem.endswith("_t1"))
+    stale_t2 = t1_dispatcher.with_name(t1_dispatcher.stem[:-2] + "t2.json")
+    stale_t2.write_text(t1_dispatcher.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # Re-run with the same recipe (trials: 2). The buggy code would
+    # short-circuit on ``len(hydrated)==2`` with indices {1, 2}; the
+    # fix should detect the missing index 0 and re-run the cell.
+    rc2 = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(recipe),
+            "--output",
+            str(output),
+            "--ticket",
+            "RESUME-INDEX",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ],
+    ).exit_code
+    assert rc2 == 0
+
+    # After the re-run the dispatcher JSON for ``_t0`` must exist again
+    # AND the matrix must report exactly 2 trials (not 3 -- the stale
+    # ``_t2`` must not leak into the aggregation; the dispatcher
+    # rewrites the workload subdir on a re-run).
+    matrix_doc = json.loads((output / "RESUME-INDEX" / "matrix.json").read_text(encoding="utf-8"))
+    cells = {c["name"]: c for c in matrix_doc["cells"]}
+    assert cells["none-none"]["trials"] == 2, (
+        f"matrix reported {cells['none-none']['trials']} trials; expected 2 "
+        "(resume short-circuit should have fallen back to a full re-run "
+        "because the dispatcher index set didn't cover range(2))"
+    )
+
+
 def test_reruns_truncated_result_json(tmp_path):
     """Half a `{` in result.json -> trial is re-executed."""
     output = tmp_path / "out"

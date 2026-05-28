@@ -199,6 +199,16 @@ class SubprocessWorkload(Workload):
         t0 = time.perf_counter()
         exit_code: int
         timed_out = False
+        # ``launched`` distinguishes "subprocess ran (maybe poorly)"
+        # from "subprocess never started" (exec-time Popen failure --
+        # ENOENT / EACCES / ENOEXEC). The artifact-tree contract from
+        # PR #194 round 4 still applies (``result.json`` is written
+        # either way), but the matrix outcome classifier needs the
+        # signal to avoid counting a command-not-found as a completed
+        # 1/1 trial. See the ``return WorkloadResult(...)`` block
+        # below for the propagation into ``main_work_started`` /
+        # ``executed_iterations``.
+        launched = False
         try:
             with open(stdout_path, "wb") as out_fh, open(stderr_path, "wb") as err_fh:
                 proc = subprocess.Popen(
@@ -207,6 +217,7 @@ class SubprocessWorkload(Workload):
                     stderr=err_fh,
                     env=child_env,
                 )
+                launched = True
                 try:
                     exit_code = proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
@@ -284,6 +295,16 @@ class SubprocessWorkload(Workload):
             encoding="utf-8",
         )
 
+        # ``main_work_started`` / ``executed_iterations`` mirror
+        # whether ``Popen`` actually launched a child. A normal
+        # non-zero child exit is still ``launched=True`` (the
+        # subprocess ran and exited); exec-time ``Popen`` failures
+        # (ENOENT / EACCES / ENOEXEC) leave both fields at 0/False so
+        # the matrix outcome classifier doesn't conflate a
+        # command-not-found with a completed 1/1 trial. The
+        # ``result.json`` is still written either way -- the artifact
+        # contract from PR #194 round 4 is independent of the
+        # matrix-side semantic.
         return WorkloadResult(
             passed=(verdict == "pass"),
             failure_count=0 if verdict == "pass" else 1,
@@ -294,12 +315,14 @@ class SubprocessWorkload(Workload):
                     {
                         "exit_code": exit_code,
                         "timed_out": timed_out,
-                        "type": "subprocess_nonzero_exit",
+                        "type": (
+                            "subprocess_nonzero_exit" if launched else "subprocess_exec_failed"
+                        ),
                     }
                 ]
             ),
-            main_work_started=True,
-            executed_iterations=1,
+            main_work_started=launched,
+            executed_iterations=1 if launched else 0,
             configured_iterations=1,
             elapsed_sec=walltime_sec,
             metrics={

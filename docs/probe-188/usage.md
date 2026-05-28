@@ -81,11 +81,20 @@ Phase 2/3 keys (`custom_patterns`, `condition`, `redaction`) are
 `file`
 :   Same as above, **plus** aorta writes `<trial_dir>/probe.env`
     (POSIX `KEY=VALUE\n`, one var per line) at `chmod 0600` and exports
-    `AORTA_ENV_FILE=<absolute path>` into the child's environment. The
-    user's argv is **never modified** — pick this mode if your launch
-    command needs to forward the env file by hand
-    (`docker run --env-file "$AORTA_ENV_FILE" ...`,
-    `srun --export ALL,${AORTA_ENV_FILE_VARS} ...`, etc.).
+    `AORTA_ENV_FILE=<absolute path>` into the child's environment.
+    `AORTA_ENV_FILE` is the only variable aorta exports for this mode;
+    the user's argv is **never modified**. Pick this mode if your
+    launch command needs to forward the env file by hand:
+
+    * `docker run --env-file "$AORTA_ENV_FILE" ...` — Docker reads the
+      file directly.
+    * `srun --export=ALL,AORTA_ENV_FILE bash -c 'set -a; . "$AORTA_ENV_FILE"; set +a; exec my_repro ...'`
+      — Slurm forwards `AORTA_ENV_FILE` to the remote step, which then
+      sources the file into the launched shell.
+
+    Earlier drafts of this doc referenced `AORTA_ENV_FILE_VARS`; that
+    variable is **not** exported and never was — use `AORTA_ENV_FILE`
+    (a path to the env file) as shown above.
 
 ## 4. Resume semantics
 

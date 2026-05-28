@@ -365,6 +365,27 @@ def _collect_trial_paths(results_dir: Path) -> list[str]:
     return [str(p) for p in found]
 
 
+def _extract_trial_indices(trial_paths: list[str]) -> set[int]:
+    """Return the integer trial indices encoded in dispatcher / legacy filenames.
+
+    Mirrors the regex pair from :func:`_collect_trial_paths` so the
+    resume short-circuit can verify the on-disk index set matches the
+    current recipe's ``range(effective_trials)`` (catches the
+    ``_t0 missing, _t2 stale`` edge case where the count check alone
+    would pass with the wrong indices). Files whose stems don't parse
+    are silently ignored -- they're already shoved to the end of the
+    sorted list by ``_collect_trial_paths`` and never carry an index
+    that could overlap with a real trial.
+    """
+    indices: set[int] = set()
+    for raw in trial_paths:
+        stem = Path(raw).stem
+        m = _DISPATCHER_TRIAL_RE.match(stem) or _LEGACY_TRIAL_RE.match(stem)
+        if m is not None:
+            indices.add(int(m.group(1)))
+    return indices
+
+
 def _hydrate_trials_from_paths(trial_paths: list[str]) -> list[TrialResult]:
     """Load dispatcher-written ``trial_*.json`` files into TrialResult objects.
 
@@ -643,20 +664,36 @@ def _run_one_cell(
         if completed >= effective_trials:
             trial_paths = _collect_trial_paths(cell_dir)
             hydrated = _hydrate_trials_from_paths(trial_paths)
-            if len(hydrated) >= effective_trials:
+            # Validate the EXACT trial-index set, not just the count. A
+            # `len(hydrated) >= effective_trials` check alone admits the
+            # pathological case where a prior run wrote dispatcher
+            # JSONs ``_t1, _t2`` (e.g. ``_t0`` was hand-deleted or
+            # corrupted) while ``trial_0/result.json`` is intact: the
+            # probe per-trial dirs and the dispatcher JSONs are TWO
+            # different artifact streams that ``is_trial_complete``
+            # and ``_collect_trial_paths`` walk separately. If the
+            # index set isn't exactly ``{0..effective_trials-1}``, the
+            # hydrated bodies carry the wrong ``trial_index`` for the
+            # current recipe and the matrix would aggregate the wrong
+            # set. Fall back to a full re-run -- correctness wins over
+            # the resume-skip optimisation in this edge case.
+            required_indices = set(range(effective_trials))
+            collected_indices = _extract_trial_indices(trial_paths)
+            indices_match = required_indices.issubset(collected_indices)
+            if len(hydrated) >= effective_trials and indices_match:
                 # Slice to the CURRENT recipe's effective_trials. A user
                 # who re-runs with ``trials: 1`` after a previous
                 # ``trials: 3`` left a directory with three completed
                 # trial dirs on disk; without the slice, matrix.md
                 # would aggregate the stale extra trials instead of
-                # the requested one. Truncating both ``hydrated`` and
-                # ``trial_paths`` to ``effective_trials`` keeps the
-                # resume short-circuit's output consistent with what
-                # a fresh run would have produced. (Stale on-disk
-                # trial_<n>/ directories with n >= effective_trials
-                # are left in place so manual inspection of the prior
-                # run is still possible; downstream aggregation only
-                # sees the indices it asked for.)
+                # the requested one. ``_collect_trial_paths`` already
+                # sorts by trial index, so the first ``effective_trials``
+                # entries are exactly the indices we just validated.
+                # Stale on-disk ``trial_<n>/`` directories with
+                # ``n >= effective_trials`` are left in place so manual
+                # inspection of the prior run is still possible;
+                # downstream aggregation only sees the indices it
+                # asked for.
                 hydrated = hydrated[:effective_trials]
                 trial_paths = trial_paths[:effective_trials]
                 log.info(
@@ -665,14 +702,26 @@ def _run_one_cell(
                     effective_trials,
                 )
                 return hydrated, None, resolved_env_vars, trial_paths
-            log.info(
-                "cell %r: result.json marks %d trial(s) complete but only %d "
-                "dispatcher JSON(s) hydrated; re-running the cell so matrix "
-                "counts stay consistent",
-                cell.name,
-                completed,
-                len(hydrated),
-            )
+            if not indices_match:
+                missing = sorted(required_indices - collected_indices)
+                log.info(
+                    "cell %r: result.json marks %d trial(s) complete but "
+                    "dispatcher JSONs miss indices %s (collected %s); "
+                    "re-running the cell so matrix counts stay consistent",
+                    cell.name,
+                    completed,
+                    missing,
+                    sorted(collected_indices),
+                )
+            else:
+                log.info(
+                    "cell %r: result.json marks %d trial(s) complete but only %d "
+                    "dispatcher JSON(s) hydrated; re-running the cell so matrix "
+                    "counts stay consistent",
+                    cell.name,
+                    completed,
+                    len(hydrated),
+                )
 
     # Recipe-scope workload_config is the base; cell-scope merges over it so
     # the cell wins on key collision and non-collision keys union. Empty

@@ -65,9 +65,18 @@ class ProbeExtras:
         timeout_per_trial: Wall-clock cap per trial in seconds; None
             means no cap. Passed verbatim to ``SubprocessWorkload``.
         env_passthrough_mode: ``"inherit"`` (default) or ``"file"``.
-            Carried here so a recipe can pin the mode (the CLI flag
-            wins when present); ``aorta probe`` sets this from the
-            CLI flag unconditionally in Phase 1.
+            Carried here so a recipe can pin the mode. Precedence: the
+            CLI flag ``--env-passthrough-mode`` wins ONLY when the
+            user actually passes it; otherwise the recipe's
+            ``env_passthrough_mode:`` value (this field) is honored,
+            and if neither is set the recipe-builder default
+            ``"inherit"`` applies. The CLI handler in
+            ``aorta.cli.probe.probe`` distinguishes "user omitted the
+            flag" from "user passed the flag" by defaulting the
+            Click option to ``None`` and only overlaying when not
+            ``None``; see
+            ``tests/probe/test_cli_parsing.py::test_env_passthrough_mode_precedence_*``
+            for the pinned contract.
         mitigation_axis: The mitigation-axis names that produced the
             cells, preserved for audit + the dry-run formatter.
         diagnostic_axis: Same, for the diagnostic axis.

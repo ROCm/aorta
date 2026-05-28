@@ -132,6 +132,56 @@ def test_missing_executable_yields_fail(tmp_path):
     assert result.passed is False
 
 
+def test_exec_time_failure_flags_main_work_not_started(tmp_path):
+    """Exec-time ``Popen`` failures must report
+    ``main_work_started=False`` / ``executed_iterations=0`` so the
+    matrix outcome classifier doesn't conflate a command-not-found
+    with a completed 1/1 trial.
+
+    Regression for PR #194 round-5 review: the workload used to
+    hard-code ``main_work_started=True`` / ``executed_iterations=1``
+    even on the ``FileNotFoundError`` / ``PermissionError`` /
+    ``OSError`` exec-time-failure branch. The ``result.json`` is
+    still written (artifact contract from PR #194 round 4) but the
+    WorkloadResult now reflects "we never actually ran the child".
+    """
+    wl = _make_workload(tmp_path, ["definitely-not-a-real-binary-9d8f7s6"])
+    wl.setup()
+    result = wl.run()
+    # Artifact tree intact (round-4 contract).
+    assert (tmp_path / "trial_0" / "result.json").is_file()
+    # Round-5 contract: matrix-side semantics reflect the exec-time failure.
+    assert result.main_work_started is False, (
+        "main_work_started=True for an exec-time failure misrepresents "
+        "command-not-found as a completed trial"
+    )
+    assert result.executed_iterations == 0, (
+        "executed_iterations=1 for an exec-time failure misrepresents "
+        "command-not-found as a completed iteration"
+    )
+    assert result.failure_count == 1
+    assert result.failure_details[0]["type"] == "subprocess_exec_failed", (
+        "failure_details should distinguish exec-time failure from a "
+        "normal subprocess non-zero exit"
+    )
+
+
+def test_successful_trial_flags_main_work_started(tmp_path):
+    """Normal subprocess exits (zero OR non-zero) keep
+    ``main_work_started=True`` -- the child actually ran. Pins the
+    upper bound of the launched-flag change: the matrix outcome
+    classifier still sees a normal 1/1 trial when the user command
+    just exits with a non-zero status.
+    """
+    wl = _make_workload(tmp_path, ["false"])  # exits 1
+    wl.setup()
+    result = wl.run()
+    assert result.main_work_started is True
+    assert result.executed_iterations == 1
+    assert result.failure_count == 1
+    assert result.failure_details[0]["type"] == "subprocess_nonzero_exit"
+
+
 def test_non_executable_script_yields_fail(tmp_path):
     """A user command pointing at a file without the +x bit must land
     as a Tier-1 fail (exit_code=126), NOT escape to the dispatcher as
