@@ -594,18 +594,12 @@ def _run_single_trial(
     stdout_fh: Any = None
     stderr_fh: Any = None
     if request.save_logs and should_write:
-        log_basename = (
-            f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
-        )
+        log_basename = f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
         candidate_stdout = results_dir / f"{log_basename}.stdout.log"
         candidate_stderr = results_dir / f"{log_basename}.stderr.log"
         try:
-            stdout_fh = open(
-                candidate_stdout, "w", encoding="utf-8", errors="backslashreplace"
-            )
-            stderr_fh = open(
-                candidate_stderr, "w", encoding="utf-8", errors="backslashreplace"
-            )
+            stdout_fh = open(candidate_stdout, "w", encoding="utf-8", errors="backslashreplace")
+            stderr_fh = open(candidate_stderr, "w", encoding="utf-8", errors="backslashreplace")
         except OSError as exc:
             if stdout_fh is not None:
                 stdout_fh.close()
@@ -763,10 +757,68 @@ def _run_single_trial(
         output_path = results_dir / (
             f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}.json"
         )
+        serialized = trial_result.to_dict()
+        # ``_aorta_probe_extras.custom_patterns`` is a tuple of
+        # :class:`aorta.probe.classifier.tier5_custom.CompiledPattern`
+        # objects carrying a compiled ``re.Pattern`` and a
+        # ``CodeType`` -- neither is JSON-serializable, so leaving
+        # the tuple untouched would crash this ``json.dump`` for
+        # every probe-mode trial that configured custom patterns
+        # (#197 round-7 review). Sanitize down to a JSON-safe
+        # summary list (detector id, regex source, on_match,
+        # required_for_pass, condition source) so the on-disk
+        # ``TrialResult.config`` still tells operators which
+        # patterns the workload ran against; the compiled forms
+        # were only ever needed by ``SubprocessWorkload.run()``,
+        # which has already consumed them by the time we get here.
+        _sanitize_probe_extras_for_json(serialized.get("config"))
         with open(output_path, "w") as f:
-            json.dump(trial_result.to_dict(), f, indent=2)
+            json.dump(serialized, f, indent=2)
 
     return trial_result
+
+
+def _sanitize_probe_extras_for_json(config: Any) -> None:
+    """Replace ``_aorta_probe_extras.custom_patterns`` with a JSON-safe summary.
+
+    Mutates ``config`` in place. ``trial_result.to_dict()`` returns a
+    deep copy so mutation is local to the about-to-be-written dict
+    and does not affect the live :class:`TrialResult`.
+
+    Non-probe-mode trials (no ``_aorta_probe_extras`` key) and
+    probe-mode trials with no ``custom_patterns`` are no-ops.
+    Custom-pattern entries that are already JSON-safe (plain dicts,
+    e.g. from a future :func:`from_dict` round-trip) pass through
+    unchanged.
+    """
+    if not isinstance(config, dict):
+        return
+    extras = config.get("_aorta_probe_extras")
+    if not isinstance(extras, dict):
+        return
+    patterns = extras.get("custom_patterns")
+    if not patterns:
+        return
+    summarized: list[dict[str, Any]] = []
+    for p in patterns:
+        if isinstance(p, dict):
+            # Already JSON-safe (round-trip from disk); pass through.
+            summarized.append(p)
+            continue
+        # ``CompiledPattern`` (or any duck-type with the same field
+        # names). Surface the public attributes the operator cares
+        # about on inspection; skip the compiled regex / CodeType
+        # which are runtime-only.
+        summarized.append(
+            {
+                "detector_id": getattr(p, "detector_id", None),
+                "regex": getattr(getattr(p, "regex", None), "pattern", None),
+                "on_match": getattr(p, "on_match", None),
+                "required_for_pass": getattr(p, "required_for_pass", False),
+                "condition_source": getattr(p, "condition_source", None),
+            }
+        )
+    extras["custom_patterns"] = summarized
 
 
 __all__ = ["RunRequest", "run_trials"]

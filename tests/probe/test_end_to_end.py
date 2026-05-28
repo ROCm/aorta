@@ -48,6 +48,63 @@ def test_smoke_passes(tmp_path):
     assert "hi" in stdout
 
 
+def test_custom_patterns_recipe_does_not_break_dispatcher_json(tmp_path):
+    """Regression for PR #197 round-7 review: a probe-mode recipe with
+    ``custom_patterns`` used to crash the dispatcher's per-trial
+    JSON write because ``probe_extras_payload['custom_patterns']``
+    held :class:`CompiledPattern` objects (compiled ``re.Pattern`` +
+    ``CodeType``), neither of which is JSON-serializable. The
+    dispatcher now sanitizes the tuple down to a JSON-safe summary
+    list before ``json.dump``; this test pins the contract by
+    running a real probe through ``CliRunner`` with
+    ``custom_patterns`` present and asserting the dispatcher's
+    ``trial_d*_m*_t*.json`` is both written and round-trippable.
+    """
+    output = tmp_path / "out"
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_with_phase_2_keys.yaml"),
+            "--output",
+            str(output),
+            "--ticket",
+            "CUSTOM-PATTERNS-1",
+            "--",
+            "bash",
+            "-c",
+            "echo hi; exit 0",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    cell_dir = output / "CUSTOM-PATTERNS-1" / "none-none"
+    # The dispatcher per-trial JSONs live under the workload
+    # subdirectory (``_subprocess`` for ``aorta probe``); the
+    # cell-root ``trial_<n>/`` holds the SubprocessWorkload's own
+    # ``result.json``.
+    dispatcher_jsons = list((cell_dir / "_subprocess").glob("trial_d*_m*_t*.json"))
+    assert dispatcher_jsons, (
+        "dispatcher per-trial JSON was not written -- probe-mode + "
+        "custom_patterns regressed the dispatcher's JSON-serialization "
+        "path"
+    )
+    # Round-trip the dispatcher JSON: if any field still carries a
+    # CompiledPattern / re.Pattern, ``json.loads`` would never have
+    # gotten here, but the explicit reload + sanity check makes the
+    # regression obvious in failure output.
+    doc = json.loads(dispatcher_jsons[0].read_text(encoding="utf-8"))
+    summarized = doc["config"]["_aorta_probe_extras"]["custom_patterns"]
+    assert isinstance(summarized, list) and summarized, (
+        f"_aorta_probe_extras.custom_patterns should be a non-empty "
+        f"list of summary dicts after sanitization; got {summarized!r}"
+    )
+    entry = summarized[0]
+    assert entry["detector_id"] == "custom:hip_oom"
+    assert entry["regex"] == "hipErrorOutOfMemory"
+    assert entry["on_match"] == "fail"
+
+
 def test_no_ticket_routed_to_no_ticket_slug(tmp_path):
     """FR 1.14 -- omitted --ticket routes to '_no_ticket_/' under output."""
     # The fixture has a ticket; override it to None by writing a fresh recipe.

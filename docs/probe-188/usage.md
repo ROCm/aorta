@@ -194,8 +194,8 @@ forward-compatible:
 `peak_vram_mib` is a coarse high-water mark sampled from two
 `amd-smi` snapshots (pre- and post-Popen). It may be `null` when
 `amd-smi` is missing or unparseable -- Tier-5 sandbox conditions
-that reference it bind `null -> 0` so they stay deterministic
-(see `aorta.probe.sandbox.build_sandbox_env`).
+that reference it bind `null -> 0` inside `aorta.probe.sandbox.evaluate`
+so they stay deterministic.
 
 The verdict comes from `aorta.probe.classifier`:
 
