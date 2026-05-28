@@ -754,9 +754,12 @@ def _run_one_cell(
             # Phase 2 (issue #188): pre-compiled custom_patterns and
             # hang knobs forwarded to SubprocessWorkload. The
             # compiled CompiledPattern objects ride as a tuple --
-            # ``RunRequest.__post_init__`` deep-copies the dict but
-            # the tuple of frozen dataclasses is immutable so the
-            # deep copy is a no-op cost-wise.
+            # ``RunRequest.__post_init__`` deep-copies the dict
+            # (and therefore traverses this tuple), but the
+            # CompiledPattern fields are all treated as immutable
+            # post-compile (re.Pattern, CodeType, str, bool) so the
+            # traversal is benign: nothing the dispatcher hands to
+            # the workload can be mutated from outside RunRequest.
             "custom_patterns": tuple(probe_extras.custom_patterns),
             "hang_window_sec": probe_extras.hang_window_sec,
             "hang_grace_period_at_start": probe_extras.hang_grace_period_at_start,
