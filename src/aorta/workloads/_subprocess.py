@@ -210,6 +210,7 @@ class SubprocessWorkload(Workload):
                     exc=exc,
                     result_path=result_path,
                     stderr_path=stderr_path,
+                    env_file_path=env_file_path,
                     argv=argv,
                     probe_extras=probe_extras,
                     env_mode=env_mode,
@@ -370,6 +371,7 @@ class SubprocessWorkload(Workload):
         exc: ValueError,
         result_path: Path,
         stderr_path: Path,
+        env_file_path: Path,
         argv: tuple[str, ...],
         probe_extras: dict[str, Any],
         env_mode: str,
@@ -382,7 +384,16 @@ class SubprocessWorkload(Workload):
         ``is_trial_complete`` predicate keys off a missing ``result.json``
         and re-runs the same broken cell on every subsequent
         ``aorta probe`` invocation.
+
+        Also unlinks ``probe.env`` (best-effort) before writing the fail
+        result so the trial directory cannot leave behind a misleading
+        artifact: ``_write_env_file`` is now validation-first
+        (atomic-on-failure), but a stale probe.env from a PRIOR run of
+        the same ``trial_<n>/`` directory (resume + flat_resume reuse
+        the same dir) would otherwise survive the validation rejection
+        and contradict ``result.json::failure_type==env_file_validation_failed``.
         """
+        env_file_path.unlink(missing_ok=True)
         try:
             stderr_path.write_text(f"{exc}\n", encoding="utf-8")
         except OSError:
@@ -452,54 +463,73 @@ class SubprocessWorkload(Workload):
         return {str(k): str(v) for k, v in bundle.items()}
 
 
+def _validate_env_file_entries(env: dict[str, str]) -> None:
+    """Reject hostile/malformed env keys+values without touching the filesystem.
+
+    Two row-injection vectors that the sidecar-mitigation loader does
+    NOT catch (it only enforces ``isinstance(key, str)``):
+
+    * ``\\n``, ``\\r`` or ``=`` in a *key* would let a hostile sidecar
+      inject extra ``KEY=VALUE`` rows or rebind a later key.
+    * ``\\n``/``\\r`` in a *value* would corrupt the bare-KEY=VALUE
+      file shape; a downstream reader would silently see a truncated
+      value.
+
+    Run a full-map validation pass BEFORE the caller opens / truncates
+    ``probe.env`` so a rejection on row 5 does not leave rows 1..4 on
+    disk (per the round-6 review on ``_write_env_file``: a partial
+    file is "valid-looking but incomplete" -- worse than no file at
+    all, because downstream tools cannot tell the difference between
+    "the cell ran with these vars" and "the cell rejected the
+    bundle but only after writing these four").
+    """
+    for key in sorted(env):
+        if "\n" in key or "\r" in key or "=" in key:
+            raise ValueError(
+                f"env key {key!r} contains a newline, carriage "
+                "return, or '=' character; probe.env uses bare "
+                "KEY=VALUE format and rejects these to prevent "
+                "row-injection via a hostile mitigation sidecar"
+            )
+        value = env[key]
+        if "\n" in value or "\r" in value:
+            raise ValueError(
+                f"env value for {key!r} contains a newline; "
+                "probe.env uses bare KEY=VALUE format and cannot "
+                "encode multi-line values"
+            )
+
+
 def _write_env_file(path: Path, env: dict[str, str]) -> None:
     """Write a POSIX KEY=VALUE\\n env file at ``chmod 0600``.
 
-    The 0600 mode is set BEFORE writing the values via ``open(... 0o600)``
-    on platforms that honour ``os.O_CREAT`` mode bits, and chmod'd
-    after as a belt-and-suspenders for filesystems that ignore the
-    open-mode (NFS without root squash, some FUSE backends).
+    Atomic with respect to validation failure: ``_validate_env_file_entries``
+    runs the full key/value check BEFORE we ``os.open(..., O_TRUNC)``, so
+    a hostile or malformed bundle either produces a complete + correct
+    file or leaves the path untouched. The previous interleaved shape
+    (open-truncate first, validate per-row while writing) could leave a
+    partial probe.env from rows 1..N-1 when row N was rejected. That
+    file looked legitimate (0600, KEY=VALUE shape) but contained only
+    a subset of the cell's bundle -- exactly the misleading artifact
+    the round-6 review flagged.
+
+    The 0600 mode is set via ``os.O_CREAT`` mode bits on platforms
+    that honour them, and chmod'd after as a belt-and-suspenders for
+    filesystems that ignore the open-mode (NFS without root squash,
+    some FUSE backends).
 
     Per R5 in the rubric, the env file is the leakage surface for
     secrets in ``file`` mode; Phase 3 redaction scrubs these from the
     bundle, but Phase 1 ships the 0600 guard as the only mitigation.
     """
+    _validate_env_file_entries(env)
+
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             for key in sorted(env):
-                # POSIX env-file shape: bare KEY=VALUE\n, no quoting.
-                # Sidecar mitigations only enforce that keys are
-                # strings, NOT that they are single-line and
-                # ``=``-free, so a hostile mitigation file could try
-                # to inject extra KEY=VALUE rows via ``\n`` or
-                # ``\r`` in a key, or smuggle a second ``=`` to
-                # rebind a later key. Reject all three explicitly
-                # (newline/CR/equals) so the file shape stays one
-                # KEY=VALUE per row and a downstream reader cannot
-                # be coerced into seeing a different binding than
-                # what the mitigation actually wrote.
-                if "\n" in key or "\r" in key or "=" in key:
-                    raise ValueError(
-                        f"env key {key!r} contains a newline, carriage "
-                        "return, or '=' character; probe.env uses bare "
-                        "KEY=VALUE format and rejects these to prevent "
-                        "row-injection via a hostile mitigation sidecar"
-                    )
-                # Reject newlines in values up-front for the same
-                # reason: a value with ``\n`` would corrupt the
-                # file shape and a downstream tool would silently
-                # read a truncated value.
-                value = env[key]
-                if "\n" in value or "\r" in value:
-                    raise ValueError(
-                        f"env value for {key!r} contains a newline; "
-                        "probe.env uses bare KEY=VALUE format and cannot "
-                        "encode multi-line values"
-                    )
-                fh.write(f"{key}={value}\n")
+                fh.write(f"{key}={env[key]}\n")
     finally:
-        # Re-assert 0600 in case the underlying FS dropped the open-mode.
         try:
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:

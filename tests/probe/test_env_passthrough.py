@@ -103,6 +103,81 @@ def test_env_file_is_0600(tmp_path):
     assert perms == 0o600, f"expected 0600, got 0o{perms:o}"
 
 
+def test_env_file_validation_failure_does_not_leave_partial_file(tmp_path):
+    """Validation rejection must NOT leave a partial probe.env on disk.
+
+    Regression for PR #194 round 6 (Copilot): the previous shape
+    ``os.open(..., O_TRUNC) -> for-loop with mid-stream raise`` would
+    write rows 0..k-1 to disk and then raise on row k. The caller
+    recorded ``env_file_validation_failed`` in result.json, but a
+    partial probe.env was already on disk -- a 0600 KEY=VALUE file
+    that looked legitimate but contained only a subset of the
+    cell's bundle. Operators inspecting the trial directory would
+    see a probe.env that contradicts result.json's failure_type.
+
+    The fix is two-pronged and this test pins both: validate-first
+    in ``_write_env_file`` (atomic-on-rejection) AND a defensive
+    unlink in the caller's failure path (so a *prior* run's stale
+    probe.env from the same trial directory cannot survive either).
+    """
+    wl = _make_workload(
+        tmp_path,
+        argv=["true"],
+        env_mode="file",
+        # Sorted iteration: AAA, BBB, ZZZ_BAD (the bad key). If
+        # validation were per-row-during-write, AAA + BBB would
+        # land on disk before the ZZZ raise.
+        cell_env_vars={
+            "AAA_GOOD": "first",
+            "BBB_GOOD": "second",
+            "ZZZ_BAD\nKEY": "value",
+        },
+    )
+    wl.setup()
+    wl.run()
+    trial_dir = tmp_path / "trial_0"
+    env_path = trial_dir / "probe.env"
+    assert not env_path.exists(), (
+        "probe.env must not exist after env-file validation failure; "
+        f"found contents: {env_path.read_text() if env_path.exists() else '(absent)'}"
+    )
+    # Sanity: the failure was still recorded.
+    import json
+
+    doc = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
+    assert doc["failure_type"] == "env_file_validation_failed"
+
+
+def test_env_file_validation_failure_scrubs_stale_prior_file(tmp_path):
+    """A stale probe.env from a previous run must be cleaned up on rejection.
+
+    Resume + flat_resume reuse the same ``trial_<n>/`` directory across
+    invocations. If a previous run wrote a valid probe.env and the
+    current run's bundle fails validation, the on-disk artifact
+    must agree with result.json -- a stale leftover would contradict
+    ``failure_type=env_file_validation_failed``.
+    """
+    trial_dir = tmp_path / "trial_0"
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    stale_path = trial_dir / "probe.env"
+    stale_path.write_text("STALE=from_prior_run\n", encoding="utf-8")
+    stale_path.chmod(0o600)
+
+    wl = _make_workload(
+        tmp_path,
+        argv=["true"],
+        env_mode="file",
+        cell_env_vars={"BAD\nKEY": "value"},
+    )
+    wl.setup()
+    wl.run()
+
+    assert not stale_path.exists(), (
+        "stale probe.env from a prior run was not scrubbed after the "
+        "current run's env-file validation failure"
+    )
+
+
 def test_env_file_rejects_newline_in_value(tmp_path):
     """Newline in env value -> Tier-1 fail artifact (not unhandled raise).
 

@@ -33,6 +33,7 @@ import logging
 import re
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -367,55 +368,70 @@ def _collect_trial_paths(results_dir: Path) -> list[str]:
     return [str(p) for p in found]
 
 
-def _extract_trial_indices(trial_paths: list[str]) -> set[int]:
-    """Return the integer trial indices encoded in dispatcher / legacy filenames.
+@dataclass(frozen=True)
+class _HydratedTrial:
+    """One successfully hydrated dispatcher JSON, keyed by parsed trial index.
 
-    Mirrors the regex pair from :func:`_collect_trial_paths` so the
-    resume short-circuit can verify the on-disk index set matches the
-    current recipe's ``range(effective_trials)`` (catches the
-    ``_t0 missing, _t2 stale`` edge case where the count check alone
-    would pass with the wrong indices). Files whose stems don't parse
-    are silently ignored -- they're already shoved to the end of the
-    sorted list by ``_collect_trial_paths`` and never carry an index
-    that could overlap with a real trial.
+    Carries the dispatcher's source path alongside the body so the
+    resume short-circuit can return ``trial_paths`` aligned with
+    ``hydrated`` (same index -> same position in both lists) without
+    re-walking the directory.
     """
-    indices: set[int] = set()
-    for raw in trial_paths:
-        stem = Path(raw).stem
-        m = _DISPATCHER_TRIAL_RE.match(stem) or _LEGACY_TRIAL_RE.match(stem)
-        if m is not None:
-            indices.add(int(m.group(1)))
-    return indices
+
+    index: int
+    path: str
+    trial: TrialResult
 
 
-def _hydrate_trials_from_paths(trial_paths: list[str]) -> list[TrialResult]:
-    """Load dispatcher-written ``trial_*.json`` files into TrialResult objects.
+def _hydrate_trials_by_index(trial_paths: list[str]) -> dict[int, _HydratedTrial]:
+    """Hydrate dispatcher ``trial_*.json`` files into an index-keyed map.
 
-    Used by the ``aorta probe`` resume short-circuit so
-    :func:`aorta.triage.matrix.aggregate_cell` receives the real trial
-    bodies on a skipped-but-complete cell. Returning ``[]`` would force
-    matrix.md to record ``trials=0/passed=0`` for the cell -- inconsistent
-    with what actually ran.
+    Each entry appears in the returned dict iff ALL THREE of:
 
-    Files that fail to parse, miss required keys, or otherwise violate
-    the :class:`TrialResult` schema are SKIPPED (logged at WARNING). The
-    caller compares the returned length against ``effective_trials`` and
-    falls back to a full re-run on a short list, so a single corrupted
-    dispatcher JSON cannot misrepresent the cell.
+    1. The filename's trial-index suffix parses under the dispatcher
+       regex (``trial_d<d>_m<m>_t<idx>``) or the legacy
+       ``trial_<idx>`` shape.
+    2. ``Path.read_text`` + ``json.loads`` succeed.
+    3. :meth:`TrialResult.from_dict` accepts the body.
+
+    Any failure at steps 2 or 3 logs at WARNING and the entry is
+    silently dropped -- the caller's
+    ``required_indices.issubset(hydrated_by_index.keys())`` check
+    then catches the missing index and falls back to a full re-run.
+
+    Index-keyed (rather than the previous "list + side-channel index
+    set" shape) so a corrupted required ``_t0.json`` co-existing with
+    a stale extra ``_t<N>.json`` cannot pass the resume validation.
+    The previous implementation validated indices via the *filename
+    set* (from :func:`_collect_trial_paths`) while hydration silently
+    skipped the unreadable required file; the count check then passed
+    on the stale extra and the slice returned the wrong trial bodies.
+    The fix lives in the key set of this dict: a body that does not
+    hydrate cannot be in the keys, so the subset check is the load-
+    bearing invariant rather than the filename walk.
     """
-    hydrated: list[TrialResult] = []
+    by_index: dict[int, _HydratedTrial] = {}
     for raw in trial_paths:
         path = Path(raw)
+        m = _DISPATCHER_TRIAL_RE.match(path.stem) or _LEGACY_TRIAL_RE.match(path.stem)
+        if m is None:
+            # Filename doesn't parse; ignored just as
+            # ``_collect_trial_paths`` already shoves these to the
+            # end of the sorted list.
+            continue
+        index = int(m.group(1))
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("resume: unreadable trial JSON %s (%s)", path, exc)
             continue
         try:
-            hydrated.append(TrialResult.from_dict(data))
+            trial = TrialResult.from_dict(data)
         except (KeyError, TypeError, ValueError) as exc:
             log.warning("resume: trial JSON %s violates schema (%s)", path, exc)
-    return hydrated
+            continue
+        by_index[index] = _HydratedTrial(index=index, path=raw, trial=trial)
+    return by_index
 
 
 def _trial_passed_for_log(trial: Any) -> bool:
@@ -665,65 +681,54 @@ def _run_one_cell(
         )
         if completed >= effective_trials:
             trial_paths = _collect_trial_paths(cell_dir)
-            hydrated = _hydrate_trials_from_paths(trial_paths)
-            # Validate the EXACT trial-index set, not just the count. A
-            # `len(hydrated) >= effective_trials` check alone admits the
-            # pathological case where a prior run wrote dispatcher
-            # JSONs ``_t1, _t2`` (e.g. ``_t0`` was hand-deleted or
-            # corrupted) while ``trial_0/result.json`` is intact: the
-            # probe per-trial dirs and the dispatcher JSONs are TWO
-            # different artifact streams that ``is_trial_complete``
-            # and ``_collect_trial_paths`` walk separately. If the
-            # index set isn't exactly ``{0..effective_trials-1}``, the
-            # hydrated bodies carry the wrong ``trial_index`` for the
-            # current recipe and the matrix would aggregate the wrong
-            # set. Fall back to a full re-run -- correctness wins over
-            # the resume-skip optimisation in this edge case.
+            # Hydrate into an index-keyed map. The key set is the
+            # load-bearing invariant for the resume short-circuit: a
+            # dispatcher JSON that fails to read or schema-validate
+            # is absent from the keys, so a corrupted required
+            # ``_t0.json`` co-existing with a stale extra
+            # ``_t<N>.json`` (where N >= effective_trials) is caught
+            # by the subset check below -- the previous
+            # filename-set-based validation would have admitted it.
+            # See ``_hydrate_trials_by_index`` for the failure modes
+            # silently dropped on the floor.
+            hydrated_by_index = _hydrate_trials_by_index(trial_paths)
             required_indices = set(range(effective_trials))
-            collected_indices = _extract_trial_indices(trial_paths)
-            indices_match = required_indices.issubset(collected_indices)
-            if len(hydrated) >= effective_trials and indices_match:
-                # Slice to the CURRENT recipe's effective_trials. A user
-                # who re-runs with ``trials: 1`` after a previous
-                # ``trials: 3`` left a directory with three completed
-                # trial dirs on disk; without the slice, matrix.md
-                # would aggregate the stale extra trials instead of
-                # the requested one. ``_collect_trial_paths`` already
-                # sorts by trial index, so the first ``effective_trials``
-                # entries are exactly the indices we just validated.
-                # Stale on-disk ``trial_<n>/`` directories with
-                # ``n >= effective_trials`` are left in place so manual
-                # inspection of the prior run is still possible;
-                # downstream aggregation only sees the indices it
-                # asked for.
-                hydrated = hydrated[:effective_trials]
-                trial_paths = trial_paths[:effective_trials]
+            if required_indices.issubset(hydrated_by_index.keys()):
+                # Build the canonical (hydrated, trial_paths) pair from
+                # the dict so positions line up by index: position i
+                # carries the body and path for trial i. ``aggregate_cell``
+                # records the path list in matrix.json::cells[*].trial_paths
+                # in the same order as the trial bodies, so misalignment
+                # here would silently scramble downstream cross-references.
+                # Stale on-disk extras with index >= effective_trials are
+                # dropped here (not deleted) so manual inspection of the
+                # prior run is still possible; downstream aggregation
+                # only sees what the current recipe asked for.
+                hydrated = [hydrated_by_index[i].trial for i in range(effective_trials)]
+                trial_paths = [hydrated_by_index[i].path for i in range(effective_trials)]
                 log.info(
                     "cell %r: all %d trial(s) already complete -- skipping per resume mode",
                     cell.name,
                     effective_trials,
                 )
                 return hydrated, None, resolved_env_vars, trial_paths
-            if not indices_match:
-                missing = sorted(required_indices - collected_indices)
-                log.info(
-                    "cell %r: result.json marks %d trial(s) complete but "
-                    "dispatcher JSONs miss indices %s (collected %s); "
-                    "re-running the cell so matrix counts stay consistent",
-                    cell.name,
-                    completed,
-                    missing,
-                    sorted(collected_indices),
-                )
-            else:
-                log.info(
-                    "cell %r: result.json marks %d trial(s) complete but only %d "
-                    "dispatcher JSON(s) hydrated; re-running the cell so matrix "
-                    "counts stay consistent",
-                    cell.name,
-                    completed,
-                    len(hydrated),
-                )
+            # Subset check failed -> at least one required index is missing.
+            # The single-branch log subsumes the previous two-branch shape
+            # (separate "indices missing" vs "count short" cases): with the
+            # index-keyed map, an index that didn't hydrate IS by definition
+            # both a missing index and a missing body, so distinguishing the
+            # two on the operator side adds no diagnostic value.
+            missing = sorted(required_indices - hydrated_by_index.keys())
+            log.info(
+                "cell %r: result.json marks %d trial(s) complete but "
+                "successful hydration is missing trial indices %s "
+                "(hydrated %s); re-running the cell so matrix counts "
+                "stay consistent",
+                cell.name,
+                completed,
+                missing,
+                sorted(hydrated_by_index.keys()),
+            )
 
     # Recipe-scope workload_config is the base; cell-scope merges over it so
     # the cell wins on key collision and non-collision keys union. Empty

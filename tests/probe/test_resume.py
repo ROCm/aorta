@@ -334,6 +334,126 @@ def test_resume_falls_back_when_trial_indices_dont_cover_current_recipe(tmp_path
     )
 
 
+def test_resume_falls_back_when_required_trial_json_is_corrupt(tmp_path):
+    """Corrupted (unreadable) required ``_t0.json`` + stale extra ``_t2.json``
+    must trigger a full re-run, not silently re-map stale bodies to wrong indices.
+
+    Regression for PR #194 round 6 (Copilot): the previous index-set
+    validation walked ``_collect_trial_paths`` (filename set) while
+    ``_hydrate_trials_from_paths`` silently skipped unreadable files.
+    A corrupt-but-present ``_t0.json`` therefore appeared in the
+    filename set (passing the subset check) but NOT in the hydrated
+    list. A stale extra ``_t2.json`` (from a prior trials=3 run) kept
+    ``len(hydrated) >= effective_trials`` true. The slice
+    ``hydrated[:2]`` then returned data from ``_t1`` and ``_t2``
+    labelled as trials 0 and 1 -- a silent body-vs-index scramble in
+    matrix.json.
+
+    Distinct from the existing
+    ``test_resume_falls_back_when_trial_indices_dont_cover_current_recipe``
+    test (which deletes ``_t0.json``, so the filename set already
+    misses index 0). The fix moves the validation to be keyed on
+    *successful hydration*, so a corrupt-but-present file is treated
+    the same as a missing one.
+    """
+    output = tmp_path / "out"
+
+    recipe = tmp_path / "trials_2.yaml"
+    recipe.write_text(
+        "schema_version: 1\n"
+        "mode: probe\n"
+        "ticket: RESUME-CORRUPT\n"
+        "trials: 2\n"
+        "mitigation_axis: [none]\n"
+        "diagnostic_axis: [none]\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    rc1 = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(recipe),
+            "--output",
+            str(output),
+            "--ticket",
+            "RESUME-CORRUPT",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ],
+    ).exit_code
+    assert rc1 == 0
+    cell_dir = output / "RESUME-CORRUPT" / "none-none"
+
+    dispatcher_jsons = sorted(cell_dir.rglob("trial_d*_m*_t*.json"))
+    assert len(dispatcher_jsons) == 2
+
+    # Corrupt the ``_t0`` dispatcher JSON in place (file still exists,
+    # so the filename set still contains index 0; but its JSON is
+    # unparseable so hydration must skip it). Keep the matching
+    # ``trial_0/result.json`` intact so ``is_trial_complete`` still
+    # returns True for index 0 -> the resume code path executes the
+    # short-circuit check.
+    t0_dispatcher = next(p for p in dispatcher_jsons if p.stem.endswith("_t0"))
+    t0_dispatcher.write_text("{not valid json", encoding="utf-8")
+
+    # Add a STALE ``_t2`` JSON copied from ``_t1`` so the body count
+    # alone would still pass for trials=2 (3 dispatcher JSONs on disk
+    # but only _t1 + _t2 hydrate successfully -> len(hydrated)=2 >=
+    # effective_trials=2).
+    t1_dispatcher = next(p for p in dispatcher_jsons if p.stem.endswith("_t1"))
+    stale_t2 = t1_dispatcher.with_name(t1_dispatcher.stem[:-2] + "t2.json")
+    stale_t2.write_text(t1_dispatcher.read_text(encoding="utf-8"), encoding="utf-8")
+
+    rc2 = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(recipe),
+            "--output",
+            str(output),
+            "--ticket",
+            "RESUME-CORRUPT",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ],
+    ).exit_code
+    assert rc2 == 0
+
+    # After the re-run: ``_t0.json`` must be parseable again (the
+    # dispatcher rewrote the workload subdir) AND matrix.json must
+    # report exactly 2 trials -- not 3 (stale extras leaked into the
+    # aggregation) and not the buggy "indices 1 and 2 labelled as 0
+    # and 1" outcome.
+    rewritten = sorted(cell_dir.rglob("trial_d*_m*_t*.json"))
+    parseable = []
+    for p in rewritten:
+        try:
+            json.loads(p.read_text(encoding="utf-8"))
+            parseable.append(p)
+        except json.JSONDecodeError:
+            pass
+    assert len(parseable) >= 2, (
+        "after the re-run at least _t0 and _t1 must parse; got parseable="
+        f"{[p.name for p in parseable]}"
+    )
+
+    matrix_doc = json.loads(
+        (output / "RESUME-CORRUPT" / "matrix.json").read_text(encoding="utf-8")
+    )
+    cells = {c["name"]: c for c in matrix_doc["cells"]}
+    assert cells["none-none"]["trials"] == 2, (
+        f"matrix reported {cells['none-none']['trials']} trials; expected 2 "
+        "(resume short-circuit should have fallen back to a full re-run "
+        "because hydration could not produce a TrialResult for required "
+        "index 0)"
+    )
+
+
 def test_reruns_truncated_result_json(tmp_path):
     """Half a `{` in result.json -> trial is re-executed."""
     output = tmp_path / "out"
