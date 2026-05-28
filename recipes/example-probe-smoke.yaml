@@ -19,8 +19,8 @@
 # `<output>/<ticket>/<cell>/trial_<n>/`.
 #
 # Mitigation / diagnostic names below must resolve in the B3 registry.
-# For the full NaN-debug flag sweep see recipes/nan-debug-sweep.yaml and
-# examples/nan-debug-sidecar.json (issue #195).
+# For the full runtime + diagnostic flag sweep see recipes/probe-flag-sweep.yaml
+# and examples/probe-flag-sidecar.json (issue #195).
 schema_version: 1
 mode: probe
 

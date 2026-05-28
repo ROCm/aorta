@@ -9,9 +9,9 @@ from aorta.registry.errors import (
 )
 from aorta.registry.mitigations import BUILTIN_MITIGATIONS, get_mitigation, load_mitigations
 
-# NaN-debug sweep built-ins (issue #195): every entry must resolve to the
-# exact env-var bundle stamped at registry load time.
-NAN_DEBUG_BUILTIN_EXPECTED: dict[str, dict[str, str]] = {
+# Probe-flag-sweep built-ins (issue #195): every non-core entry must resolve
+# to the exact env-var bundle stamped at registry load time.
+PROBE_FLAG_BUILTIN_EXPECTED: dict[str, dict[str, str]] = {
     name: dict(env)
     for name, env in BUILTIN_MITIGATIONS.items()
     if name
@@ -84,8 +84,8 @@ def test_non_dict_payload_raises(fake_eps):
 
 @pytest.mark.parametrize(
     ("name", "expected_env"),
-    sorted(NAN_DEBUG_BUILTIN_EXPECTED.items()),
-    ids=sorted(NAN_DEBUG_BUILTIN_EXPECTED),
+    sorted(PROBE_FLAG_BUILTIN_EXPECTED.items()),
+    ids=sorted(PROBE_FLAG_BUILTIN_EXPECTED),
 )
-def test_nan_debug_builtin_mitigation_env_bundles(name: str, expected_env: dict[str, str]):
+def test_probe_flag_builtin_mitigation_env_bundles(name: str, expected_env: dict[str, str]):
     assert get_mitigation(name) == expected_env

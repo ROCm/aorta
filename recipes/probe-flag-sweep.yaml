@@ -1,32 +1,35 @@
-# Probe-mode sweep for NaN-debug runtime flags (issue #195 / aorta probe #188).
+# Probe-mode sweep for ROCm / PyTorch runtime + diagnostic flags (issue #195,
+# tracked under aorta probe #188).
 #
 # Runs the cartesian product mitigation_axis x diagnostic_axis across every
 # cell. Each cell stamps its env-var bundle on the child process (inherit mode)
-# or writes probe.env (file mode). Behaviour notes cite flag effect only.
+# or writes probe.env (file mode). Header comments cite flag *effect* only --
+# they make no claim about which workload, customer, or investigation
+# motivated registering the flag.
 #
 # Usage:
 #   aorta probe \
-#       --recipe recipes/nan-debug-sweep.yaml \
+#       --recipe recipes/probe-flag-sweep.yaml \
 #       --output ./probe_results \
-#       --ticket NAN-DEBUG-SWEEP \
+#       --ticket PROBE-FLAG-SWEEP \
 #       -- \
 #       <your existing launch command>
 #
 # Workload-internal flags (FBGEMM_*, TORCHINDUCTOR_*, EVAL_DISABLE_PIPELINING)
-# live in examples/nan-debug-sidecar.json. Pass --mitigations-file when your
+# live in examples/probe-flag-sidecar.json. Pass --mitigations-file when your
 # stack reads those vars. Build-time SDPA/CK flags are not stamped here.
 #
-# TODO: AMD_WAIT_* — pending canonical env-var spelling; add to the registry
-# when confirmed.
+# TODO: AMD_WAIT_* family -- pending canonical env-var spelling; add to the
+# registry when confirmed.
 #
 schema_version: 1
 mode: probe
 
-ticket: NAN-DEBUG-SWEEP
+ticket: PROBE-FLAG-SWEEP
 
 trials: 1
 
-# Serialization / mitigation flags observed during NaN-debug investigation.
+# Serialization-side and allocator-side runtime flags.
 mitigation_axis:
   - none
   - gpu_max_hw_queues_2          # caps hardware queue parallelism

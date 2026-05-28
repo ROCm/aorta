@@ -35,7 +35,7 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     "none":     {},
     "tf32_off": {"DISABLE_TF32": "1"},  # consumed by hipBLASLt itself
     "xnack":    {"HSA_XNACK": "1"},     # consumed by ROCm runtime
-    # --- NaN-debug sweep: hardware queue & ROCm runtime ---
+    # --- hardware queue & ROCm runtime ---
     "gpu_max_hw_queues_2": {
         "GPU_MAX_HW_QUEUES": "2",
     },
@@ -57,28 +57,28 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     "debug_clr_no_batch_cpu_sync": {
         "DEBUG_CLR_BATCH_CPU_SYNC_SIZE": "0",
     },
-    # --- NaN-debug sweep: RCCL / NCCL ---
+    # --- RCCL / NCCL ---
     "nccl_launch_order_implicit": {
         "NCCL_LAUNCH_ORDER_IMPLICIT": "1",
     },
     "rccl_gfx942_cheap_fence_off": {
         "RCCL_GFX942_CHEAP_FENCE_OFF": "1",
     },
-    # --- NaN-debug sweep: PyTorch CCA ---
+    # --- PyTorch CCA ---
     "pytorch_no_cuda_memory_caching": {
         "PYTORCH_NO_CUDA_MEMORY_CACHING": "1",
     },
     "pytorch_alloc_expandable_segments": {
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     },
-    # --- NaN-debug sweep: HIP / AMD diagnostics ---
+    # --- HIP / AMD diagnostics ---
     "hip_launch_blocking": {
         "HIP_LAUNCH_BLOCKING": "1",
     },
     "amd_log_level_4": {
         "AMD_LOG_LEVEL": "4",
     },
-    # --- NaN-debug sweep: SDPA backend pin ---
+    # --- SDPA backend pin ---
     "fa_prefer_ck": {
         "TORCH_ROCM_FA_PREFER_CK": "1",
     },

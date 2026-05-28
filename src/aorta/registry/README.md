@@ -254,23 +254,24 @@ resolves it by renaming or removing one of the entries. This is intentional:
 silent overrides cause hours of "why does my mitigation behave wrong"
 debugging.
 
-## NaN-debug sweep set
+## Runtime + diagnostic flag sweep set
 
-A recent NaN-debug investigation identified runtime-level and workload-internal
-flags worth sweeping as a unit via `aorta probe`:
+The built-in registry ships a set of ROCm / PyTorch / NCCL runtime knobs that
+are useful as named mitigations in `aorta probe` sweeps, alongside a workload-
+internal sidecar for stack-specific vars:
 
 | Surface | Location | Contents |
 |---|---|---|
 | Runtime mitigations | Built-in registry (`mitigations.py`) | `gpu_max_hw_queues_2`, `roc_aql_queue_size_1024`, `nccl_launch_order_implicit`, `hsa_no_scratch_reclaim`, `pytorch_no_cuda_memory_caching`, `fa_prefer_ck` / `fa_prefer_aotriton`, and others — see `aorta mitigations list` |
-| Workload-internal flags | [`examples/nan-debug-sidecar.json`](../../examples/nan-debug-sidecar.json) | `FBGEMM_*`, `TORCHINDUCTOR_*`, `EVAL_DISABLE_PIPELINING` — only effective when the workload reads them |
-| Ready-made probe recipe | [`recipes/nan-debug-sweep.yaml`](../../recipes/nan-debug-sweep.yaml) | `mitigation_axis` + `diagnostic_axis` covering the built-in set |
+| Workload-internal flags | [`examples/probe-flag-sidecar.json`](../../examples/probe-flag-sidecar.json) | `FBGEMM_*`, `TORCHINDUCTOR_*`, `EVAL_DISABLE_PIPELINING` — only effective when the workload reads them |
+| Ready-made probe recipe | [`recipes/probe-flag-sweep.yaml`](../../recipes/probe-flag-sweep.yaml) | `mitigation_axis` + `diagnostic_axis` covering the built-in set |
 
 ```bash
 aorta probe \
-    --recipe recipes/nan-debug-sweep.yaml \
-    --mitigations-file examples/nan-debug-sidecar.json \
+    --recipe recipes/probe-flag-sweep.yaml \
+    --mitigations-file examples/probe-flag-sidecar.json \
     --output ./probe_results \
-    --ticket NAN-DEBUG-SWEEP \
+    --ticket PROBE-FLAG-SWEEP \
     --dry-run \
     -- \
     echo hi
