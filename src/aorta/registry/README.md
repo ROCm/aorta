@@ -254,6 +254,30 @@ resolves it by renaming or removing one of the entries. This is intentional:
 silent overrides cause hours of "why does my mitigation behave wrong"
 debugging.
 
+## NaN-debug sweep set
+
+A recent NaN-debug investigation identified runtime-level and workload-internal
+flags worth sweeping as a unit via `aorta probe`:
+
+| Surface | Location | Contents |
+|---|---|---|
+| Runtime mitigations | Built-in registry (`mitigations.py`) | `gpu_max_hw_queues_2`, `roc_aql_queue_size_1024`, `nccl_launch_order_implicit`, `hsa_no_scratch_reclaim`, `pytorch_no_cuda_memory_caching`, `fa_prefer_ck` / `fa_prefer_aotriton`, and others — see `aorta mitigations list` |
+| Workload-internal flags | [`examples/nan-debug-sidecar.json`](../../examples/nan-debug-sidecar.json) | `FBGEMM_*`, `TORCHINDUCTOR_*`, `EVAL_DISABLE_PIPELINING` — only effective when the workload reads them |
+| Ready-made probe recipe | [`recipes/nan-debug-sweep.yaml`](../../recipes/nan-debug-sweep.yaml) | `mitigation_axis` + `diagnostic_axis` covering the built-in set |
+
+```bash
+aorta probe \
+    --recipe recipes/nan-debug-sweep.yaml \
+    --mitigations-file examples/nan-debug-sidecar.json \
+    --output ./probe_results \
+    --ticket NAN-DEBUG-SWEEP \
+    --dry-run \
+    -- \
+    echo hi
+```
+
+Tracked in issue #195.
+
 ## Verifying what's registered
 
 ```bash

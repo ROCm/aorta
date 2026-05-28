@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "mitigations": {
+    "fbgemm_no_jk": {
+      "FBGEMM_NO_JK": "1"
+    },
+    "fbgemm_tbe_v2": {
+      "FBGEMM_TBE_V2": "1"
+    },
+    "fbgemm_tbe_rocm_hip_backward": {
+      "FBGEMM_TBE_ROCM_HIP_BACKWARD_KERNEL": "1"
+    },
+    "fbgemm_bounds_check_v2": {
+      "FBGEMM_BOUNDS_CHECK_INDICES_V2": "1"
+    },
+    "torchinductor_max_autotune_pointwise": {
+      "TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE": "1"
+    },
+    "eval_disable_pipelining": {
+      "EVAL_DISABLE_PIPELINING": "1"
+    }
+  }
+}

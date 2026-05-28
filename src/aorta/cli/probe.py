@@ -274,6 +274,16 @@ class _ProbeCommand(click.Command):
     ),
 )
 @click.option(
+    "--mitigations-file",
+    "mitigation_files",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    multiple=True,
+    help=(
+        "JSON sidecar file with ad-hoc mitigations and/or environments "
+        "(repeatable). Merged with built-ins at recipe load time."
+    ),
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
@@ -288,6 +298,7 @@ def probe(
     ticket: str | None,
     dry_run: bool,
     env_passthrough_mode: str | None,
+    mitigation_files: tuple[Path, ...],
     verbose: int,
     argv: tuple[str, ...],
 ) -> None:
@@ -321,7 +332,7 @@ def probe(
             else None
         )
         clean_argv = validate_trailing_argv(argv)
-        r = load_recipe(recipe)
+        r = load_recipe(recipe, sidecar_files=mitigation_files or None)
         if r.probe_extras is None:
             raise ProbeUsageError(
                 f"recipe {recipe} is not a probe-mode recipe; "

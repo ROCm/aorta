@@ -7,7 +7,20 @@ from aorta.registry.errors import (
     RegistryError,
     UnknownMitigationError,
 )
-from aorta.registry.mitigations import get_mitigation, load_mitigations
+from aorta.registry.mitigations import BUILTIN_MITIGATIONS, get_mitigation, load_mitigations
+
+# NaN-debug sweep built-ins (issue #195): every entry must resolve to the
+# exact env-var bundle stamped at registry load time.
+NAN_DEBUG_BUILTIN_EXPECTED: dict[str, dict[str, str]] = {
+    name: dict(env)
+    for name, env in BUILTIN_MITIGATIONS.items()
+    if name
+    not in (
+        "none",
+        "tf32_off",
+        "xnack",
+    )
+}
 
 
 def test_get_mitigation_returns_env_vars():
@@ -67,3 +80,12 @@ def test_non_dict_payload_raises(fake_eps):
     fake_eps([("bad", "not-a-dict", "plugin_x")])
     with pytest.raises(RegistryError, match="plugin_x.*bad.*str"):
         load_mitigations()
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_env"),
+    sorted(NAN_DEBUG_BUILTIN_EXPECTED.items()),
+    ids=sorted(NAN_DEBUG_BUILTIN_EXPECTED),
+)
+def test_nan_debug_builtin_mitigation_env_bundles(name: str, expected_env: dict[str, str]):
+    assert get_mitigation(name) == expected_env

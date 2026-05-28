@@ -19,13 +19,8 @@
 # `<output>/<ticket>/<cell>/trial_<n>/`.
 #
 # Mitigation / diagnostic names below must resolve in the B3 registry.
-# The built-in registry (see src/aorta/registry/mitigations.py) ships
-# only `none`, `tf32_off`, and `xnack`; any other name (e.g.
-# `hsa_no_scratch_reclaim`, `fa_prefer_ck`, `hip_launch_blocking`) must
-# come from an `aorta.mitigations` entry-point plugin or a
-# `--mitigations-file` sidecar. Issue #195 tracks adding the rubric's
-# other example axes to the built-in set. Swap in `none` for any name
-# you have not registered locally.
+# For the full NaN-debug flag sweep see recipes/nan-debug-sweep.yaml and
+# examples/nan-debug-sidecar.json (issue #195).
 schema_version: 1
 mode: probe
 

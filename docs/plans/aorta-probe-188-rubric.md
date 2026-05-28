@@ -67,6 +67,8 @@ This reading is the only one consistent with the no-parse invariant. The impleme
 
 `tf32_off`, `hsa_no_scratch_reclaim`, `fa_prefer_ck`, `hip_launch_blocking`, `none` — every name in the issue's example axes looks like a B3 `Mitigation`. The probe-mode recipe-builder can synthesise cells with `mitigations=(mitigation_axis_value, diagnostic_axis_value)`, name them `<m>-<d>`, and rely on the existing `_validate_no_mitigation_collisions` check (`src/aorta/triage/recipe.py:531-572`) to catch overlapping env-var keys between the two axes. The only registry-side work is **verifying that every name in the issue's example axes is registered** (Phase 1 docs deliverable).
 
+→ **Update (issue #195):** the NaN-debug flag sweep set (runtime built-ins + `examples/nan-debug-sidecar.json` + `recipes/nan-debug-sweep.yaml`) extends F7 beyond the three example-axis names; see #195 for the full table and acceptance checklist.
+
 ---
 
 ## 1. Branching and PR Convention

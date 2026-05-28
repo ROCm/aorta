@@ -1,0 +1,60 @@
+# Probe-mode sweep for NaN-debug runtime flags (issue #195 / aorta probe #188).
+#
+# Runs the cartesian product mitigation_axis x diagnostic_axis across every
+# cell. Each cell stamps its env-var bundle on the child process (inherit mode)
+# or writes probe.env (file mode). Behaviour notes cite flag effect only.
+#
+# Usage:
+#   aorta probe \
+#       --recipe recipes/nan-debug-sweep.yaml \
+#       --output ./probe_results \
+#       --ticket NAN-DEBUG-SWEEP \
+#       -- \
+#       <your existing launch command>
+#
+# Workload-internal flags (FBGEMM_*, TORCHINDUCTOR_*, EVAL_DISABLE_PIPELINING)
+# live in examples/nan-debug-sidecar.json. Pass --mitigations-file when your
+# stack reads those vars. Build-time SDPA/CK flags are not stamped here.
+#
+# TODO: AMD_WAIT_* — pending canonical env-var spelling; add to the registry
+# when confirmed.
+#
+schema_version: 1
+mode: probe
+
+ticket: NAN-DEBUG-SWEEP
+
+trials: 1
+
+# Serialization / mitigation flags observed during NaN-debug investigation.
+mitigation_axis:
+  - none
+  - gpu_max_hw_queues_2          # caps hardware queue parallelism
+  - roc_aql_queue_size_1024      # caps CPU-GPU AQL queue depth (backpressure)
+  - nccl_launch_order_implicit   # serializes RCCL launches device-wide
+  - hsa_no_scratch_reclaim
+  - hsa_no_sdma
+  - pytorch_no_cuda_memory_caching
+  - pytorch_alloc_expandable_segments
+  - fa_prefer_ck
+  - fa_prefer_aotriton
+  - roc_signal_pool_16k
+  - gpu_force_blit_copy_128
+  - debug_clr_no_batch_cpu_sync
+  - rccl_gfx942_cheap_fence_off
+
+# Diagnostic / reporting flags (synchronous launches, verbose AMD logging).
+diagnostic_axis:
+  - none
+  - hip_launch_blocking
+  - amd_log_level_4
+
+step_time_regex: null
+collect_paths: []
+timeout_per_trial: null
+
+env_passthrough_mode: inherit
+
+confound:
+  threshold: 1.15
+  baseline_cell: none-none

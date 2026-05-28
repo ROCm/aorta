@@ -31,9 +31,60 @@ _GROUP = "aorta.mitigations"
 # package, registered via the `aorta.mitigations` entry-point group.
 # See src/aorta/registry/README.md for the full criterion.
 BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
+    # --- core ---
     "none":     {},
     "tf32_off": {"DISABLE_TF32": "1"},  # consumed by hipBLASLt itself
     "xnack":    {"HSA_XNACK": "1"},     # consumed by ROCm runtime
+    # --- NaN-debug sweep: hardware queue & ROCm runtime ---
+    "gpu_max_hw_queues_2": {
+        "GPU_MAX_HW_QUEUES": "2",
+    },
+    "roc_aql_queue_size_1024": {
+        "ROC_AQL_QUEUE_SIZE": "1024",
+    },
+    "hsa_no_sdma": {
+        "HSA_ENABLE_SDMA": "0",
+    },
+    "hsa_no_scratch_reclaim": {
+        "HSA_NO_SCRATCH_RECLAIM": "1",
+    },
+    "roc_signal_pool_16k": {
+        "ROC_SIGNAL_POOL_SIZE": "16384",
+    },
+    "gpu_force_blit_copy_128": {
+        "GPU_FORCE_BLIT_COPY_SIZE": "128",
+    },
+    "debug_clr_no_batch_cpu_sync": {
+        "DEBUG_CLR_BATCH_CPU_SYNC_SIZE": "0",
+    },
+    # --- NaN-debug sweep: RCCL / NCCL ---
+    "nccl_launch_order_implicit": {
+        "NCCL_LAUNCH_ORDER_IMPLICIT": "1",
+    },
+    "rccl_gfx942_cheap_fence_off": {
+        "RCCL_GFX942_CHEAP_FENCE_OFF": "1",
+    },
+    # --- NaN-debug sweep: PyTorch CCA ---
+    "pytorch_no_cuda_memory_caching": {
+        "PYTORCH_NO_CUDA_MEMORY_CACHING": "1",
+    },
+    "pytorch_alloc_expandable_segments": {
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    },
+    # --- NaN-debug sweep: HIP / AMD diagnostics ---
+    "hip_launch_blocking": {
+        "HIP_LAUNCH_BLOCKING": "1",
+    },
+    "amd_log_level_4": {
+        "AMD_LOG_LEVEL": "4",
+    },
+    # --- NaN-debug sweep: SDPA backend pin ---
+    "fa_prefer_ck": {
+        "TORCH_ROCM_FA_PREFER_CK": "1",
+    },
+    "fa_prefer_aotriton": {
+        "TORCH_ROCM_FA_PREFER_CK": "0",
+    },
 }
 
 
