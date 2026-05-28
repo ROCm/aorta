@@ -38,6 +38,7 @@ from aorta.probe.cli_helpers import (
 from aorta.probe.recipe_builder import ProbeExtras
 from aorta.registry import RegistryError
 from aorta.run.cli_helpers import configure_verbose_logging
+from aorta.triage.output import RunDirLockedError
 from aorta.triage.recipe import (
     RecipeCellError,
     RecipeSchemaError,
@@ -227,6 +228,12 @@ def probe(
             resume_existing=True,
             subprocess_argv=clean_argv,
         )
+    except RunDirLockedError as exc:
+        # Friendlier surface than a stack trace: the exception message
+        # already names the holder host/PID and the lockfile path to
+        # remove. Wrap into ClickException so click exits 1 with the
+        # operator-visible message rather than a Python traceback.
+        raise click.ClickException(str(exc)) from exc
     except (RegistryError, RecipeCellError, RecipeSchemaError) as exc:
         raise click.ClickException(str(exc)) from exc
     if not dry_run:

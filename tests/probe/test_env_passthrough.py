@@ -104,7 +104,19 @@ def test_env_file_is_0600(tmp_path):
 
 
 def test_env_file_rejects_newline_in_value(tmp_path):
-    """Newline in env value would corrupt the KEY=VALUE shape -- reject up-front."""
+    """Newline in env value -> Tier-1 fail artifact (not unhandled raise).
+
+    Previous contract (pre-PR-#194-review): ``_write_env_file`` raised
+    ``ValueError`` and the exception escaped ``run()``. That broke the
+    "every probe trial leaves an artifact" contract: the dispatcher
+    recorded an ``infrastructure_failed`` TrialResult but no per-trial
+    ``result.json`` was on disk, which made ``flat_resume``'s
+    ``is_trial_complete`` predicate re-run the broken cell on every
+    subsequent ``aorta probe`` invocation. The new contract synthesises
+    a ``result.json`` (verdict=fail, ``failure_type=env_file_validation_failed``)
+    so resume sees the cell as complete and the operator gets a
+    grep-able cause in the artifact tree.
+    """
     wl = _make_workload(
         tmp_path,
         argv=["true"],
@@ -112,8 +124,34 @@ def test_env_file_rejects_newline_in_value(tmp_path):
         cell_env_vars={"MULTILINE": "line1\nline2"},
     )
     wl.setup()
-    with pytest.raises(ValueError, match="newline"):
-        wl.run()
+    result = wl.run()
+
+    trial_dir = tmp_path / "trial_0"
+    result_path = trial_dir / "result.json"
+    assert result_path.is_file(), (
+        "env-file validation failure must still leave result.json -- "
+        "otherwise flat_resume re-runs the cell forever"
+    )
+    import json
+
+    doc = json.loads(result_path.read_text(encoding="utf-8"))
+    assert doc["verdict"] == "fail"
+    assert doc["failure_type"] == "env_file_validation_failed"
+    assert "newline" in doc["error_message"]
+    assert doc["env_passthrough_mode"] == "file"
+    assert doc["trial_index"] == 0
+    # ``stderr.log`` carries the same diagnostic so operators inspecting
+    # the trial without parsing JSON still see the cause.
+    stderr_text = (trial_dir / "stderr.log").read_text(encoding="utf-8")
+    assert "newline" in stderr_text
+
+    # WorkloadResult must reflect "never launched" so the matrix
+    # outcome classifier doesn't conflate this with a completed
+    # 1/1 trial (the same invariant the Popen-exec-failed branch
+    # already maintains).
+    assert result.passed is False
+    assert result.main_work_started is False
+    assert result.executed_iterations == 0
 
 
 @pytest.mark.parametrize(
@@ -126,12 +164,19 @@ def test_env_file_rejects_newline_in_value(tmp_path):
     ],
 )
 def test_env_file_rejects_unsafe_chars_in_key(tmp_path, bad_key):
-    """Regression for PR #194 review: hostile mitigation sidecars
-    could smuggle ``\\n``, ``\\r``, or ``=`` into env *keys* to
-    inject extra KEY=VALUE rows or rebind a later key. The
-    sidecar loader only enforces ``isinstance(key, str)``, so the
-    env-file writer is the right place to catch this -- it is the
-    layer that owns the on-disk KEY=VALUE row shape.
+    """Hostile sidecar keys -> Tier-1 fail artifact.
+
+    Original regression (PR #194 round 4): hostile mitigation sidecars
+    could smuggle ``\\n``, ``\\r``, or ``=`` into env *keys* to inject
+    extra KEY=VALUE rows or rebind a later key. The sidecar loader
+    only enforces ``isinstance(key, str)``, so the env-file writer is
+    the right place to catch this -- it is the layer that owns the
+    on-disk KEY=VALUE row shape.
+
+    Pre-fix behaviour was a raw ``ValueError`` escape; post-fix the
+    rejection is recorded as ``verdict=fail`` /
+    ``failure_type=env_file_validation_failed`` in ``result.json`` so
+    flat_resume can move past the broken cell.
     """
     wl = _make_workload(
         tmp_path,
@@ -140,8 +185,17 @@ def test_env_file_rejects_unsafe_chars_in_key(tmp_path, bad_key):
         cell_env_vars={bad_key: "safe-value"},
     )
     wl.setup()
-    with pytest.raises(ValueError, match="env key"):
-        wl.run()
+    result = wl.run()
+
+    trial_dir = tmp_path / "trial_0"
+    import json
+
+    doc = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "fail"
+    assert doc["failure_type"] == "env_file_validation_failed"
+    assert "env key" in doc["error_message"]
+    assert result.passed is False
+    assert result.main_work_started is False
 
 
 def test_inherit_mode_passes_env_to_child(tmp_path, monkeypatch):

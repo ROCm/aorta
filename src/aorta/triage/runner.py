@@ -27,6 +27,7 @@ Per the acceptance criteria in issue #151, this module MUST NOT use
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -55,6 +56,7 @@ from aorta.triage.matrix import (
     aggregate_cell,
 )
 from aorta.triage.output import (
+    acquire_flat_resume_lock,
     format_timestamp,
     resolve_run_dir,
     safe_slug,
@@ -916,6 +918,47 @@ def run_recipe(
     ts = timestamp or format_timestamp()
     run_dir = resolve_run_dir(output_dir, recipe, timestamp=ts, layout=layout)
 
+    # ``flat_resume`` reuses a stable ``<output>/<ticket>/`` directory across
+    # invocations so resume can detect per-trial ``result.json`` files as
+    # already complete. That same property means two concurrent ``aorta
+    # probe`` invocations against the same ``--output``/``--ticket`` would
+    # race on ``matrix.json``, ``matrix.md``, and per-cell artifacts. Take
+    # an advisory PID+host lock for the duration of the matrix run; the
+    # ``"timestamped"`` layout (``aorta triage run``) is unaffected because
+    # ``resolve_run_dir`` already gives each invocation a fresh leaf via the
+    # ``-N`` suffix loop. ``ExitStack`` keeps the lock optional without
+    # forcing a re-indent of the entire matrix loop.
+    with contextlib.ExitStack() as stack:
+        if layout == "flat_resume":
+            stack.enter_context(acquire_flat_resume_lock(run_dir))
+        return _run_recipe_locked(
+            recipe=recipe,
+            extra_sidecar_files=extra_sidecar_files,
+            ts=ts,
+            run_dir=run_dir,
+            layout=layout,
+            resume_existing=resume_existing,
+            subprocess_argv=subprocess_argv,
+        )
+
+
+def _run_recipe_locked(
+    *,
+    recipe: Recipe,
+    extra_sidecar_files: tuple[Path, ...],
+    ts: str,
+    run_dir: Path,
+    layout: Literal["timestamped", "flat_resume"],
+    resume_existing: bool,
+    subprocess_argv: tuple[str, ...] | None,
+) -> Path:
+    """Body of :func:`run_recipe` after the flat_resume lock is held.
+
+    Extracted so the lock-acquisition is a single
+    ``contextlib.ExitStack`` block at the top of :func:`run_recipe` and
+    the matrix-loop body doesn't need to be re-indented inside a ``with``.
+    Not part of the public API -- callers go through :func:`run_recipe`.
+    """
     # Operator sidecars come from two places: ones the Recipe was built
     # against (``recipe.sidecar_files``, populated by ``load_recipe`` /
     # ``build_recipe_from_flags``) and ones the caller hands in directly at

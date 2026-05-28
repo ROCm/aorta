@@ -181,7 +181,39 @@ class SubprocessWorkload(Workload):
         child_env = os.environ.copy()
         env_file_path = trial_dir / "probe.env"
         if env_mode == "file":
-            _write_env_file(env_file_path, cell_env_snapshot)
+            try:
+                _write_env_file(env_file_path, cell_env_snapshot)
+            except ValueError as exc:
+                # ``_write_env_file`` rejects hostile/malformed mitigation
+                # keys/values (newlines, '=' in key, etc.) by raising
+                # ``ValueError``. Without this handler the exception would
+                # escape ``run()`` and the dispatcher would record an
+                # ``infrastructure_failed`` TrialResult -- but with NO
+                # per-trial ``result.json``. That breaks two contracts at
+                # once:
+                #
+                # 1. The artifact-tree contract (every probe trial leaves
+                #    ``trial_<n>/result.json``).
+                # 2. ``flat_resume``: ``is_trial_complete`` keys off the
+                #    presence of ``result.json``, so a missing file makes
+                #    every subsequent ``aorta probe`` invocation re-run
+                #    the same broken cell forever.
+                #
+                # Treat it like the exec-time ``Popen`` failures below
+                # (FileNotFoundError, PermissionError): synthesize a
+                # Tier-1 ``fail`` ``result.json``, write the error message
+                # to ``stderr.log``, and return a ``WorkloadResult`` with
+                # ``launched=False`` / ``main_work_started=False`` so the
+                # matrix classifier doesn't conflate this with a real
+                # subprocess that exited non-zero.
+                return self._write_env_file_failure_result(
+                    exc=exc,
+                    result_path=result_path,
+                    stderr_path=stderr_path,
+                    argv=argv,
+                    probe_extras=probe_extras,
+                    env_mode=env_mode,
+                )
             child_env["AORTA_ENV_FILE"] = str(env_file_path.absolute())
         else:
             # ``inherit`` mode: scrub any probe.env left over from a
@@ -328,6 +360,79 @@ class SubprocessWorkload(Workload):
             metrics={
                 "verdict": verdict,
                 "exit_code": exit_code,
+                "result_json_path": str(result_path),
+            },
+        )
+
+    def _write_env_file_failure_result(
+        self,
+        *,
+        exc: ValueError,
+        result_path: Path,
+        stderr_path: Path,
+        argv: tuple[str, ...],
+        probe_extras: dict[str, Any],
+        env_mode: str,
+    ) -> WorkloadResult:
+        """Persist a Tier-1 ``fail`` artifact when probe.env validation rejects.
+
+        Mirrors the exec-failed bookkeeping in :meth:`run` so the per-trial
+        directory always contains both ``stderr.log`` (with the validation
+        error message) and ``result.json``. Without this, ``flat_resume``'s
+        ``is_trial_complete`` predicate keys off a missing ``result.json``
+        and re-runs the same broken cell on every subsequent
+        ``aorta probe`` invocation.
+        """
+        try:
+            stderr_path.write_text(f"{exc}\n", encoding="utf-8")
+        except OSError:
+            pass
+        result_doc: dict[str, Any] = {
+            "verdict": "fail",
+            # Exit-code 2 mirrors the ``_setup_validation`` convention used
+            # elsewhere in the codebase for "config rejected before
+            # subprocess could start" -- distinct from 126/127 which we
+            # reserve for chmod/PATH problems on argv[0].
+            "exit_code": 2,
+            # Walltime is 0 because the subprocess never launched; we
+            # spent only the env-file-validation pass which is bounded
+            # to a few hundred microseconds. Reporting 0.0 keeps the
+            # matrix's step-time aggregates from being polluted by a
+            # cell that never produced step times.
+            "walltime_sec": 0.0,
+            "argv": list(argv),
+            "cell_name": probe_extras.get("cell_name", "_unknown_"),
+            "trial_index": self._trial_index,
+            "env_passthrough_mode": env_mode,
+            "timed_out": False,
+            "failure_type": "env_file_validation_failed",
+            "error_message": str(exc),
+        }
+        result_path.write_text(
+            json.dumps(result_doc, indent=2, sort_keys=False),
+            encoding="utf-8",
+        )
+        return WorkloadResult(
+            passed=False,
+            failure_count=1,
+            failure_details=[
+                {
+                    "exit_code": 2,
+                    "timed_out": False,
+                    "type": "env_file_validation_failed",
+                }
+            ],
+            # ``launched`` / ``main_work_started`` mirror the Popen-exec-
+            # failed branch in :meth:`run`: the subprocess never started,
+            # so neither flag flips. This keeps the matrix outcome
+            # classifier from counting this as a completed 1/1 trial.
+            main_work_started=False,
+            executed_iterations=0,
+            configured_iterations=1,
+            elapsed_sec=0.0,
+            metrics={
+                "verdict": "fail",
+                "exit_code": 2,
                 "result_json_path": str(result_path),
             },
         )

@@ -31,10 +31,15 @@ Sibling files / directories (written by :mod:`aorta.triage.runner`):
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
+import errno
 import json
+import logging
+import os
 import re
-from collections.abc import Iterable
+import socket
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
@@ -46,7 +51,14 @@ from aorta.triage.confound import CONFOUND_DID_NOT_RUN, ConfoundTag
 from aorta.triage.matrix import CellStats
 from aorta.triage.recipe import Recipe
 
+log = logging.getLogger(__name__)
+
 NO_TICKET_SLUG = "_no_ticket_"
+
+# ``flat_resume`` lockfile name. Lives at ``<run_dir>/.aorta-probe.lock``; the
+# leading dot keeps it out of casual ``ls`` output and matches the convention
+# used by other resume-state files in the run dir.
+FLAT_RESUME_LOCKFILE = ".aorta-probe.lock"
 
 # Filesystem-safe slug: replace anything that isn't [A-Za-z0-9_.-] with '_'.
 # Ticket IDs like "PROJ-123" pass through unchanged; spaces, slashes, ':'
@@ -164,6 +176,211 @@ def resolve_run_dir(
         f"resolve_run_dir: exhausted 10000 suffixes for {parent / ts!r}; "
         "something is wedged upstream (clock not advancing? runaway loop?)"
     )
+
+
+class RunDirLockedError(RuntimeError):
+    """Raised when a ``flat_resume`` run dir is already locked by another writer.
+
+    Carries the parsed lock-holder identity so the CLI layer can render a
+    targeted operator message (host, PID, start time) rather than a generic
+    "something is wrong" stack trace.
+    """
+
+    def __init__(
+        self,
+        run_dir: Path,
+        holder_host: str,
+        holder_pid: int | None,
+        holder_started_at: str | None,
+        reason: str,
+    ) -> None:
+        self.run_dir = run_dir
+        self.holder_host = holder_host
+        self.holder_pid = holder_pid
+        self.holder_started_at = holder_started_at
+        self.reason = reason
+        super().__init__(
+            f"flat_resume run dir {run_dir} is locked: {reason} "
+            f"(holder host={holder_host!r} pid={holder_pid} "
+            f"started_at={holder_started_at!r}). If the holder is no longer "
+            f"running, remove {run_dir / FLAT_RESUME_LOCKFILE} and retry."
+        )
+
+
+def _pid_alive(pid: int) -> bool:
+    """Best-effort liveness probe for a same-host PID.
+
+    ``os.kill(pid, 0)`` is the standard Unix idiom: it doesn't actually
+    signal the process, just performs the permission/existence check. We
+    treat ``EPERM`` (process exists but is owned by another user) as alive
+    too -- that's still a live process that could be mid-write.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we can't signal it (different uid).
+        return True
+    except OSError:
+        # Defensive: any other errno -> assume alive to avoid stomping.
+        return True
+    return True
+
+
+@contextlib.contextmanager
+def acquire_flat_resume_lock(run_dir: Path) -> Iterator[None]:
+    """Advisory PID+host lockfile for the ``flat_resume`` run directory.
+
+    ``flat_resume`` reuses a stable ``<output>/<ticket>/`` leaf across
+    invocations (intentional, so per-trial ``result.json`` files can be
+    detected as already-complete). That same property means two concurrent
+    ``aorta probe`` invocations against the same ``--output`` /
+    ``--ticket`` would race on ``matrix.json``, ``matrix.md``, and per-cell
+    artifacts.
+
+    On entry we ``O_CREAT|O_EXCL`` a small JSON file holding our PID, host,
+    and start timestamp. If the file already exists we read it and decide:
+
+    * Same host **and** ``os.kill(pid, 0)`` succeeds -> raise
+      :class:`RunDirLockedError`. The other writer is genuinely live;
+      stomping their tree would corrupt both runs.
+    * Same host **and** PID is dead -> stale lock from a crashed prior
+      run. Log a warning, overwrite, and proceed (this is the recovery
+      path -- it's the whole reason ``flat_resume`` exists).
+    * Different host -> we have no way to verify liveness across hosts.
+      Fail closed: raise :class:`RunDirLockedError` and ask the operator
+      to remove the lockfile explicitly. (Shared NFS with concurrent
+      multi-host writers is the worst case; rather than guess we surface
+      the situation.)
+    * Lockfile present but unparseable -> treat as stale (a partial write
+      from a crashed prior run); warn + overwrite. The alternative is to
+      wedge resume indefinitely on a corrupt lock file.
+
+    On context exit the lockfile is best-effort removed; failure to
+    remove (e.g. the run dir was deleted under us) does not raise so the
+    caller's own exit path isn't masked.
+
+    Limitations (deliberately documented rather than papered over):
+
+    * Advisory only -- a non-aorta writer (or an aorta version predating
+      this lock) into the same tree is undetected.
+    * Same-host liveness is checked via PID; PID reuse on busy hosts
+      with very long-running operator sessions is theoretically possible
+      but unlikely within a probe sweep's lifetime.
+    * Cross-host NFS semantics for ``O_EXCL`` are
+      filesystem-implementation-dependent. We don't rely on the
+      atomicity of the cross-host case; the same-host PID check is the
+      load-bearing guarantee. Operators running concurrent multi-host
+      probes against the same tree should not (Phase-1 scope).
+    """
+    lock_path = run_dir / FLAT_RESUME_LOCKFILE
+    payload = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    serialised = json.dumps(payload, indent=2).encode("utf-8")
+
+    while True:
+        try:
+            fd = os.open(
+                str(lock_path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            # Existing lock: inspect the holder and decide stale-vs-live.
+            holder_host: str = "<unknown>"
+            holder_pid: int | None = None
+            holder_started_at: str | None = None
+            try:
+                holder_raw = lock_path.read_text(encoding="utf-8")
+                holder = json.loads(holder_raw)
+                holder_host = str(holder.get("host", "<unknown>"))
+                pid_raw = holder.get("pid")
+                holder_pid = int(pid_raw) if pid_raw is not None else None
+                started_raw = holder.get("started_at")
+                holder_started_at = str(started_raw) if started_raw is not None else None
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                # Corrupt or unreadable lock: treat as stale.
+                log.warning(
+                    "flat_resume lock at %s is unreadable (%s); "
+                    "treating as stale and taking over",
+                    lock_path,
+                    exc,
+                )
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+                continue
+
+            our_host = socket.gethostname()
+            if holder_host == our_host:
+                if holder_pid is not None and _pid_alive(holder_pid):
+                    # ``raise ... from None``: the originating
+                    # ``FileExistsError`` from ``os.open`` is an expected
+                    # signal, not an error; chaining it would mislead the
+                    # operator into thinking something failed at the FS
+                    # layer when the real cause is "another process owns
+                    # this dir".
+                    raise RunDirLockedError(
+                        run_dir=run_dir,
+                        holder_host=holder_host,
+                        holder_pid=holder_pid,
+                        holder_started_at=holder_started_at,
+                        reason="another aorta probe process on this host "
+                        "is still running",
+                    ) from None
+                log.warning(
+                    "flat_resume lock at %s is stale (holder pid=%s on this "
+                    "host is no longer running, started_at=%s); taking over",
+                    lock_path,
+                    holder_pid,
+                    holder_started_at,
+                )
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+                continue
+
+            # See the same-host live branch above for the ``from None``
+            # rationale.
+            raise RunDirLockedError(
+                run_dir=run_dir,
+                holder_host=holder_host,
+                holder_pid=holder_pid,
+                holder_started_at=holder_started_at,
+                reason=(
+                    "lock was created on a different host; cross-host "
+                    "liveness cannot be verified automatically"
+                ),
+            ) from None
+        except OSError as exc:
+            # Anything other than EEXIST (which FileExistsError covers)
+            # is a genuine open() failure -- don't pretend we hold the
+            # lock.
+            raise RuntimeError(
+                f"acquire_flat_resume_lock: could not create {lock_path} "
+                f"(errno={errno.errorcode.get(exc.errno, exc.errno)}): {exc}"
+            ) from exc
+        else:
+            break
+
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(serialised)
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            # Best-effort: the dir may have been removed under us, or a
+            # concurrent process raced us to cleanup. Either way, not
+            # crashing here keeps the caller's exit path intact.
+            pass
 
 
 def _format_mitigations(mitigations: Iterable[str]) -> str:
