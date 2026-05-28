@@ -490,3 +490,104 @@ def test_classifier_crash_on_passing_trial_falls_back_to_pass(tmp_path, monkeypa
     assert doc["failure_detectors_fired"] == []
     assert "classifier_error" in doc["capture"]
     assert result.passed is True
+
+
+def test_peak_vram_mib_threaded_from_amd_smi_snapshots(tmp_path, monkeypatch):
+    """Regression for PR #197 round-6 review:
+    ``peak_vram_mib`` was hard-coded to ``None`` both in the
+    ``TrialContext`` handed to ``classify_trial`` and in the emitted
+    ``result.json``, which made Tier-5 sandbox conditions like
+    ``peak_vram_mib > 70000`` permanently unreachable on real hosts.
+
+    With the fix, the workload computes a coarse high-water mark
+    from the two amd-smi snapshots it already collects
+    (pre-Popen + post-Popen) and threads the value into BOTH the
+    classifier context and ``result.json``.
+    """
+    from aorta.probe.classifier.tier3_kernel import AmdSmiSnapshot
+    from aorta.workloads import _subprocess as workload_mod
+
+    pre = AmdSmiSnapshot(vram_used_mib=4000, thermal_throttle_count=0)
+    post = AmdSmiSnapshot(vram_used_mib=71234, thermal_throttle_count=0)
+
+    calls = {"n": 0}
+
+    def _two_snapshots(_state):
+        calls["n"] += 1
+        return pre if calls["n"] == 1 else post
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", _two_snapshots)
+
+    seen_ctx_peak: dict[str, int | None] = {}
+    real_classify = workload_mod.classify_trial
+
+    def _spy_classify(ctx):
+        seen_ctx_peak["value"] = ctx.peak_vram_mib
+        return real_classify(ctx)
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _spy_classify)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    wl.run()
+
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["peak_vram_mib"] == 71234, (
+        "peak_vram_mib in result.json should be max(pre.vram, post.vram); "
+        f"got {doc['peak_vram_mib']!r}"
+    )
+    assert seen_ctx_peak["value"] == 71234, (
+        "TrialContext.peak_vram_mib should match the result.json value so "
+        "Tier-5 sandbox conditions and the emitted doc agree"
+    )
+
+
+def test_peak_vram_mib_none_when_amd_smi_unavailable(tmp_path, monkeypatch):
+    """Both snapshots returning ``None`` -> ``peak_vram_mib`` stays
+    ``None`` (the sandbox's ``None -> 0`` shim then keeps Tier-5
+    conditions deterministic).
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", lambda _state: None)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    wl.run()
+
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["peak_vram_mib"] is None
+
+
+def test_read_log_text_uses_replace_not_backslashreplace(tmp_path):
+    """Regression for PR #197 round-6 review: ``_read_log_text`` used
+    ``errors="backslashreplace"`` which expands each invalid byte
+    into up to four characters (``\\\\xff``). For a binary-heavy log,
+    that inflates the decoded string past ``MAX_LOG_BYTES``,
+    defeating the documented regex-DoS cap.
+
+    The fix decodes with ``errors="replace"`` so each invalid byte
+    becomes a single U+FFFD replacement char, holding the 1:1
+    byte->char invariant.
+    """
+    from aorta.probe.sandbox import MAX_LOG_BYTES
+    from aorta.workloads._subprocess import _read_log_text
+
+    # A blob of pure invalid bytes the size of the cap. ``replace``
+    # gives len == MAX_LOG_BYTES; ``backslashreplace`` would give
+    # 4 * MAX_LOG_BYTES.
+    binary = b"\xff" * MAX_LOG_BYTES
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    stdout_path.write_bytes(binary)
+    stderr_path.write_bytes(b"")
+
+    text = _read_log_text(stdout_path, stderr_path)
+    # Allow a small overhead for the ``\n`` joiner and the empty
+    # stderr piece; the load-bearing assertion is the 4x cap.
+    assert len(text) <= MAX_LOG_BYTES + 8, (
+        f"decoded log length {len(text)} exceeds the MAX_LOG_BYTES "
+        f"({MAX_LOG_BYTES}) cap -- the decode path is back on "
+        "backslashreplace and a binary-heavy log can quadruple the "
+        "regex-input size, defeating the cap."
+    )

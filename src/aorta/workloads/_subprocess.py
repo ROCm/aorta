@@ -412,6 +412,21 @@ class SubprocessWorkload(Workload):
         log_text = _read_log_text(stdout_path, stderr_path)
         hang_detected = bool(hang_monitor and hang_monitor.hang_detected)
 
+        # Best-effort ``peak_vram_mib`` from the Tier-3 amd-smi
+        # snapshots. We only have two samples (pre + post Popen) so
+        # this is a coarse high-water-mark, not a true peak -- a
+        # short-lived spike in the middle of the trial is invisible
+        # to a 2-point sampler. We surface it anyway because the
+        # alternative is leaving the field permanently ``None`` and
+        # rendering Tier-5 sandbox conditions like
+        # ``peak_vram_mib > 70000`` unusable on real hosts, which is
+        # the bot-flagged gap. Both snapshots are fail-soft (either
+        # can be ``None`` when amd-smi is missing / unparseable) --
+        # if neither is available we fall back to ``None`` and the
+        # sandbox's existing ``peak_vram_mib is None -> 0`` shim in
+        # :func:`aorta.probe.sandbox.build_sandbox_env` keeps
+        # conditions deterministic.
+
         # Tier 3 post-snapshot + dmesg scan. ``since_seconds`` covers
         # the trial walltime plus a small pad so kernel messages
         # logged shortly after the child crashed (amdgpu reset etc.)
@@ -436,6 +451,16 @@ class SubprocessWorkload(Workload):
             fired_kernel_ids = []
             dmesg_text = None
 
+        peak_vram_mib: int | None
+        if amd_smi_pre is not None and amd_smi_post is not None:
+            peak_vram_mib = max(amd_smi_pre.vram_used_mib, amd_smi_post.vram_used_mib)
+        elif amd_smi_pre is not None:
+            peak_vram_mib = amd_smi_pre.vram_used_mib
+        elif amd_smi_post is not None:
+            peak_vram_mib = amd_smi_post.vram_used_mib
+        else:
+            peak_vram_mib = None
+
         # Classifier crash containment (rubric §2.B FR 2.11 fail-soft
         # policy applied to the classifier itself). The trial has
         # already run end-to-end -- we have its exit_code,
@@ -457,7 +482,7 @@ class SubprocessWorkload(Workload):
                     log_text=log_text,
                     custom_patterns=custom_patterns,
                     hang_detected=hang_detected,
-                    peak_vram_mib=None,
+                    peak_vram_mib=peak_vram_mib,
                     dmesg_text=dmesg_text,
                     amd_smi_pre=amd_smi_pre,
                     amd_smi_post=amd_smi_post,
@@ -477,7 +502,7 @@ class SubprocessWorkload(Workload):
             "verdict": verdict_obj.verdict,
             "exit_code": exit_code,
             "walltime_sec": walltime_sec,
-            "peak_vram_mib": None,
+            "peak_vram_mib": peak_vram_mib,
             "argv": list(argv),
             "cell_name": probe_extras.get("cell_name", "_unknown_"),
             "trial_index": self._trial_index,
@@ -678,12 +703,22 @@ def _validate_env_file_entries(env: dict[str, str]) -> None:
 def _read_log_text(stdout_path: Path, stderr_path: Path) -> str:
     """Read stdout + stderr back as a single text blob for the classifier.
 
-    Reads are bounded to twice
-    :data:`aorta.probe.sandbox.MAX_LOG_BYTES` so a runaway log
-    can't OOM the classifier; the per-tier scanners further bound
-    individual ``re.search`` invocations. Errors decoded with
-    ``backslashreplace`` so a binary blob doesn't blow up the
-    text channel.
+    Reads are bounded to :data:`aorta.probe.sandbox.MAX_LOG_BYTES`
+    per stream as a hard regex-DoS cap; the per-tier scanners further
+    bound individual ``re.search`` invocations.
+
+    Errors decoded with ``errors="replace"`` (U+FFFD per invalid
+    byte, 1:1 byte→char) rather than ``backslashreplace`` (up to
+    4 chars per invalid byte for ``\\xff`` etc.). The cheaper
+    expansion matters because ``MAX_LOG_BYTES`` is meant to be the
+    upper bound on the regex-input length; with
+    ``backslashreplace`` a binary-heavy stdout could quadruple the
+    decoded string and let a runaway log inflate regex CPU/memory
+    past the documented cap. The replacement char loses the
+    underlying byte value but the classifier scanners don't depend
+    on the exact byte -- they pattern-match on textual error
+    messages, where invalid UTF-8 is noise that just needs a
+    placeholder so the surrounding text stays in line.
     """
     from aorta.probe.sandbox import MAX_LOG_BYTES
 
@@ -691,7 +726,7 @@ def _read_log_text(stdout_path: Path, stderr_path: Path) -> str:
     for path in (stdout_path, stderr_path):
         try:
             data = path.read_bytes()[:MAX_LOG_BYTES]
-            parts.append(data.decode("utf-8", errors="backslashreplace"))
+            parts.append(data.decode("utf-8", errors="replace"))
         except FileNotFoundError:
             parts.append("")
         except OSError:

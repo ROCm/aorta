@@ -169,9 +169,7 @@ class _ProbeCommand(click.Command):
     the more helpful "use --list-patterns" hint.
     """
 
-    _BYPASS_TOKENS: frozenset[str] = frozenset(
-        {"--help", "-h", "--list-patterns", "--version"}
-    )
+    _BYPASS_TOKENS: frozenset[str] = frozenset({"--help", "-h", "--list-patterns", "--version"})
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         if not ctx.resilient_parsing and not help_token_in_option_zone(

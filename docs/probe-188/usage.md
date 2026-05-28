@@ -160,17 +160,17 @@ of the three built-ins above) when copy-pasting this template.
 
 ## 6. What the verdict means in Phase 2
 
-A Phase-2 `result.json` looks like (Phase 1 keys are a subset):
-
-Phase-1 `result.json` shape (exact keys written by
-`SubprocessWorkload.run()`):
+Phase-2 `result.json` shape (exact keys written by
+`SubprocessWorkload.run()`). The Phase-1 subset is annotated inline
+so downstream tooling that only parsed the Phase-1 fields stays
+forward-compatible:
 
 ```json
 {
   "verdict": "fail",
   "exit_code": 137,
   "walltime_sec": 12.345,
-  "peak_vram_mib": null,
+  "peak_vram_mib": 71234,
   "argv": ["python3", "my_repro.py", "--steps", "100"],
   "cell_name": "none-none",
   "trial_index": 0,
@@ -182,6 +182,20 @@ Phase-1 `result.json` shape (exact keys written by
   "timed_out": false
 }
 ```
+
+* **Phase-1 keys** (back-compat guaranteed by the
+  `tests/probe/test_subprocess_workload.py` minimum-shape assertion):
+  `verdict`, `exit_code`, `walltime_sec`, `peak_vram_mib`, `argv`,
+  `cell_name`, `trial_index`, `env_passthrough_mode`, `timed_out`.
+* **Phase-2 additions** (new in this PR, never replaced or removed):
+  `failure_detectors_fired`, `warn_detectors_fired`, `capture`,
+  `tier_durations_ms`.
+
+`peak_vram_mib` is a coarse high-water mark sampled from two
+`amd-smi` snapshots (pre- and post-Popen). It may be `null` when
+`amd-smi` is missing or unparseable -- Tier-5 sandbox conditions
+that reference it bind `null -> 0` so they stay deterministic
+(see `aorta.probe.sandbox.build_sandbox_env`).
 
 The verdict comes from `aorta.probe.classifier`:
 
