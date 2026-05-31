@@ -54,22 +54,32 @@ resume is tracked as a Phase 2+ enhancement).
 ```yaml
 schema_version: 1
 mode: probe                       # discriminator — required for probe-mode
-ticket: ROCM-1234                 # optional; --ticket on CLI overrides
+ticket: ROCM-1234                 # optional; overridden by --ticket when that flag is passed
 trials: 3                         # >= 1
 mitigation_axis:
   - none
   - tf32_off
 diagnostic_axis:
   - none
-  - hsa_no_scratch_reclaim        # only if registered in the B3 registry
+  - xnack                         # built-in (see note below on registered names)
 step_time_regex: null             # phase-1 stub; ignored (rubric §F8)
 collect_paths: []                 # phase-1 stub; ignored
 timeout_per_trial: 1800           # seconds; null = no timeout
-env_passthrough_mode: inherit     # 'inherit' | 'file' — CLI flag overrides
+env_passthrough_mode: inherit     # 'inherit' | 'file' — overridden by --env-passthrough-mode when that flag is passed
 ```
 
 Phase 2/3 keys (`custom_patterns`, `condition`, `redaction`) are
 **rejected at load time** with a "deferred to Phase 2/3" error message.
+
+**Registered mitigation / diagnostic names.** The built-in registry
+(see `src/aorta/registry/mitigations.py`) currently ships only `none`,
+`tf32_off`, and `xnack`. Any other name (e.g. `hsa_no_scratch_reclaim`,
+`fa_prefer_ck`, `hip_launch_blocking`) must come from an
+`aorta.mitigations` entry-point plugin or a `--mitigations-file`
+sidecar JSON, otherwise the recipe fails to load with
+`UnknownMitigationError`. Issue #195 tracks expanding the built-in
+set; until that lands, swap any unregistered name for `none` (or one
+of the three built-ins above) when copy-pasting this template.
 
 ## 3. Env-passthrough modes (`--env-passthrough-mode`)
 
@@ -116,9 +126,14 @@ Phase 2/3 keys (`custom_patterns`, `condition`, `redaction`) are
 
 ## 5. CLI / recipe interaction
 
-* `--ticket` overrides the recipe's `ticket` field.
-* `--env-passthrough-mode` overrides the recipe's `env_passthrough_mode`
-  field.
+* `--ticket` overrides the recipe's `ticket` field when present. If the
+  flag is omitted, the recipe value is used (falling back to
+  `_no_ticket_` if the recipe also omits it, per
+  `aorta.triage.output.NO_TICKET_SLUG`).
+* `--env-passthrough-mode` overrides the recipe's
+  `env_passthrough_mode` field when present. If the flag is omitted,
+  the recipe value is used (falling back to `inherit` if the recipe
+  also omits it).
 * `--dry-run` validates the recipe, prints the planned cell list +
   argv, and exits without writing to disk.
 * Any flag not in the table above must come from the recipe; the CLI is
