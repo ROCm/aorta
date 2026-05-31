@@ -87,7 +87,11 @@ def classify_trial(ctx: TrialContext) -> tuple[Verdict, dict[str, float]]:
 
     Tier 3 is fail-soft on missing binaries; passing a None
     ``tier3_state`` skips Tier 3 entirely (rubric §2.B FR 2.3 +
-    FR 2.11). Tier 5 is skipped when ``custom_patterns`` is empty.
+    FR 2.11). Tier 5 is always invoked so its measured duration
+    appears in ``tier_durations_ms``; with an empty
+    ``custom_patterns`` tuple the call returns an empty
+    :class:`~aorta.probe.classifier.tier5_custom.CustomScanResult`
+    in microseconds.
     """
     import time
 

@@ -191,8 +191,12 @@ To bound catastrophic backtracking on operator-supplied regex at
 runtime — without swapping the regex engine — every per-trial
 regex scan runs against a **10 MiB-capped window**
 (`MAX_LOG_BYTES = 10 * 1024 * 1024`). Logs longer than the cap are
-scanned in successive non-overlapping windows. The same rule applies
-to the Tier 4 built-in scanner.
+scanned in successive windows that overlap by **4 KiB**
+(`_WINDOW_OVERLAP_BYTES`, capped at half the window so each step
+still advances) so a multi-line match straddling a seam — a
+Python traceback header at the end of one window with its body at
+the start of the next — still fires. The same rule applies to the
+Tier 4 built-in scanner.
 
 ---
 

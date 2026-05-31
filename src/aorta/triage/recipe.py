@@ -495,17 +495,21 @@ def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
     )
 
 
-def _reject_phase_2_3_keys(data: dict) -> None:
+def _reject_phase_3_keys(data: dict) -> None:
     """Intercept Phase 3 keys with a "deferred to phase N" pointer.
 
-    Phase 2 (issue #188) accepts ``custom_patterns`` /
-    ``hang_window_sec`` / ``hang_grace_period_at_start`` in
-    ``mode: probe`` recipes (validated downstream); ``redaction``
-    and a top-level ``condition`` are deferred to Phase 3. Without
-    this interception, a copy-pasted-from-the-design-doc recipe
+    Phase 2 keys (``custom_patterns`` / ``hang_window_sec`` /
+    ``hang_grace_period_at_start``) are NOT intercepted here — they
+    are valid in ``mode: probe`` recipes and parsed downstream. Only
+    Phase 3 keys (``redaction``, top-level ``condition``) hit this
+    rejection. Without it, a copy-pasted-from-the-design-doc recipe
     carrying ``redaction:`` would silently fall into the generic
     "unknown top-level key" path and the operator would have no
     signal that the key WILL be valid once Phase 3 ships.
+
+    Renamed from ``_reject_phase_2_3_keys`` in PR #197 after Phase 2
+    keys became valid (Copilot review): keeping the old name would
+    have mis-suggested that Phase 2 keys are still trapped here.
     """
     phase3 = set(data) & _PHASE_3_KEYS
     if phase3:
@@ -521,12 +525,15 @@ def _validate_top_level(data: Any) -> None:
     if not isinstance(data, dict):
         raise RecipeSchemaError(f"recipe top-level must be a mapping, got {type(data).__name__}")
 
-    # Phase 2/3 keys are intercepted BEFORE either the unknown-key or
-    # the per-mode required-key checks. A recipe with both a Phase 2
-    # key AND a typo'd top-level key should surface the Phase 2 error
-    # first because that's the one the operator can act on without
-    # changing their intent.
-    _reject_phase_2_3_keys(data)
+    # Phase 3 keys are intercepted BEFORE either the unknown-key or
+    # the per-mode required-key checks so the operator sees a
+    # "deferred to Phase 3" pointer instead of a generic
+    # "unknown top-level key" error. Phase 2 keys
+    # (``custom_patterns``, ``hang_window_sec``,
+    # ``hang_grace_period_at_start``) are NOT intercepted here; they
+    # live in ``_PROBE_TOP_LEVEL`` and parse normally when
+    # ``mode == "probe"``.
+    _reject_phase_3_keys(data)
 
     mode = data.get("mode", "triage")
     if mode not in ("triage", "probe"):

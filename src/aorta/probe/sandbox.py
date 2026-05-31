@@ -59,7 +59,11 @@ if hasattr(sys, "set_int_max_str_digits"):
 # against catastrophic backtracking on operator-supplied regex without
 # requiring a different regex engine (Phase 2 explicitly forbids the
 # ``regex`` / ``re2`` swap). Per-scan window; logs larger than this
-# are scanned in successive ``MAX_LOG_BYTES``-sized chunks.
+# are scanned in successive windows that overlap by a small
+# ``_WINDOW_OVERLAP_BYTES`` slice (defined in
+# :mod:`aorta.probe.classifier.tier4_patterns` /
+# :mod:`aorta.probe.classifier.tier5_custom`) so a match straddling
+# the seam still fires.
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MiB
 
 # Per-expression character cap (post-strip). Prevents an attacker from

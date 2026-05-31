@@ -25,10 +25,13 @@ corresponding ID fires.
 The detectors run AGAINST a 10-MiB-capped window of the trial's
 stdout/stderr concatenation (see :data:`MAX_LOG_BYTES` in
 :mod:`aorta.probe.sandbox`). A log larger than the cap is scanned
-in successive windows so a single ``re.search`` never touches more
-than the cap at once — the only defence against catastrophic
-backtracking that does not require swapping the regex engine
-(rubric §X.2 R2).
+in successive windows that **overlap** by
+:data:`_WINDOW_OVERLAP_BYTES` (see :func:`_iter_windows`) so a
+multi-line match straddling a seam still fires; each
+``re.search`` invocation still touches at most ``MAX_LOG_BYTES``
+of input, preserving the catastrophic-backtracking bound that's
+the only defence against operator-supplied regex without
+swapping the regex engine (rubric §X.2 R2).
 """
 
 from __future__ import annotations
@@ -148,11 +151,16 @@ def scan(log_text: str) -> list[str]:
     Each pattern runs at most once over the input; patterns are
     independent (an HIP error and a Python traceback in the same
     log fire both detectors). The scanner enforces the
-    :data:`MAX_LOG_BYTES` per-scan window cap: logs longer than the
-    cap are split into sequential non-overlapping windows and each
-    pattern runs against each window. This bounds catastrophic
-    backtracking on operator-supplied logs without changing the
-    regex engine (rubric §X.2 R2).
+    :data:`MAX_LOG_BYTES` per-scan window cap: logs longer than
+    the cap are split into successive windows that **overlap by
+    :data:`_WINDOW_OVERLAP_BYTES`** so a multi-line match
+    straddling a seam still fires (see :func:`_iter_windows`).
+    Each pattern runs against each window. This bounds
+    catastrophic backtracking on operator-supplied logs without
+    changing the regex engine (rubric §X.2 R2). Per Copilot's PR
+    #197 review — the doc previously claimed "non-overlapping",
+    which has been wrong since the Sonbol-round straddling-match
+    fix.
 
     Returns the IDs in catalogue order — Tier 4 is internally
     deterministic, but ``failure_detectors_fired`` overall preserves

@@ -196,11 +196,18 @@ def _validate_one(
     if condition_raw is not None:
         try:
             condition_code = validate_and_compile(condition_raw)
-        except SandboxError:
-            # Re-raise so the rubric-mandated subclass identity is
-            # preserved (RecipeSchemaError catch-clauses still
-            # catch it because SandboxError subclasses it).
-            raise
+        except SandboxError as exc:
+            # Wrap with the recipe path so a multi-entry recipe makes
+            # the bad entry findable without counting list positions.
+            # ``SandboxError`` subclasses ``RecipeSchemaError`` per the
+            # rubric, so callers that catch the parent type still
+            # catch the wrapped instance; the wrapped message keeps
+            # the original sandbox detail (forbidden node, magnitude
+            # cap, ...) intact at the end so no diagnostic is lost.
+            # Per Copilot's PR #197 review.
+            raise SandboxError(
+                f"{path}.match.condition: {exc}"
+            ) from exc
         condition_source = condition_raw
 
     on_match_raw = entry.get("on_match", "fail")

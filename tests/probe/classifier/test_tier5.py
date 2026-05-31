@@ -274,6 +274,37 @@ def test_validate_rejects_hostile_condition():
         validate_custom_patterns(raw)
 
 
+def test_sandbox_error_carries_recipe_path():
+    """Regression for PR #197 review (Copilot): when a hostile
+    ``condition`` survives parse, the raised ``SandboxError`` must
+    name the offending ``custom_patterns[i]`` entry so a multi-entry
+    recipe makes the bad entry findable without manual list-position
+    counting. The wrapping preserves the original sandbox detail at
+    the end of the message so no diagnostic is lost.
+    """
+    raw = [
+        {"id": "ok", "match": {"regex": "ok"}},
+        {"id": "ok2", "match": {"regex": "ok2"}},
+        {
+            "id": "bad",
+            "match": {
+                "regex": "fatal",
+                "condition": "__import__('os').system('id')",
+            },
+        },
+    ]
+    with pytest.raises(SandboxError) as exc_info:
+        validate_custom_patterns(raw)
+    msg = str(exc_info.value)
+    assert "recipe.custom_patterns[2].match.condition" in msg, (
+        f"SandboxError must carry the recipe path; got: {msg!r}"
+    )
+    # The original sandbox detail (`forbidden`) survives the wrap.
+    assert "forbidden" in msg.lower() or "__import__" in msg, (
+        f"wrapped SandboxError dropped the original sandbox detail; got: {msg!r}"
+    )
+
+
 def test_validate_rejects_unknown_top_keys():
     raw = [{"id": "p", "match": {"regex": "x"}, "bogus": True}]
     with pytest.raises(RecipeSchemaError, match="unknown keys"):

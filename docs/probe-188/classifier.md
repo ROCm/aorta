@@ -138,7 +138,12 @@ with the `tier4:` prefix stripped (e.g. `cuda_error.txt` for
 
 Catastrophic-backtracking mitigation: every Tier 4 `re.search` runs
 against a **10 MiB-capped window** (`MAX_LOG_BYTES`). Logs longer
-than the cap are scanned in successive non-overlapping windows.
+than the cap are scanned in successive windows that overlap by
+**4 KiB** (`_WINDOW_OVERLAP_BYTES`, capped at half the window) so
+matches straddling a window seam — typically the multi-line shape
+of `Traceback (most recent call last):` plus its body — still
+fire. The same overlapping-window scheme is used by Tier 5
+(`tier5_custom._iter_windows`).
 
 ## Tier 5 — Custom Patterns
 

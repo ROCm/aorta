@@ -772,7 +772,11 @@ def _run_single_trial(
         # were only ever needed by ``SubprocessWorkload.run()``,
         # which has already consumed them by the time we get here.
         _sanitize_probe_extras_for_json(serialized.get("config"))
-        with open(output_path, "w") as f:
+        # ``encoding="utf-8"`` matches the stdout/stderr opens at L601-602
+        # and the rest of the codebase's text-artifact writes -- avoids
+        # platform-default-encoding surprises on Windows / containers
+        # without a configured locale. Per Copilot's PR #197 review.
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(serialized, f, indent=2)
 
     return trial_result
