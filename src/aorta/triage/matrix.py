@@ -692,16 +692,30 @@ def _aggregate_top_detector_ids(
         #   - Some test trials populate ``result`` directly. Accept
         #     either shape.
         metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+        # Dedup within a SINGLE trial across the two source shapes
+        # above. Production ``SubprocessWorkload`` writes to
+        # ``metrics`` only, but the docstring above explicitly
+        # invites the flat ``result`` shape from test fixtures —
+        # any trial that populates both would double-count the
+        # detector and skew ``top_failure_detector_id`` /
+        # ``top_warn_detector_id``. The seen-sets are reset per
+        # trial so cross-trial fire counts (the docstring's
+        # "fire-count across the cell's trials") are unchanged.
+        # Per Sonbol's PR #197 review.
+        seen_fail_this_trial: set[str] = set()
+        seen_warn_this_trial: set[str] = set()
         for source in (metrics, result):
             for entry in source.get("failure_detectors_fired", []) or []:
-                if not isinstance(entry, str):
+                if not isinstance(entry, str) or entry in seen_fail_this_trial:
                     continue
+                seen_fail_this_trial.add(entry)
                 if entry not in fail_counter:
                     fail_order.append(entry)
                 fail_counter[entry] += 1
             for entry in source.get("warn_detectors_fired", []) or []:
-                if not isinstance(entry, str):
+                if not isinstance(entry, str) or entry in seen_warn_this_trial:
                     continue
+                seen_warn_this_trial.add(entry)
                 if entry not in warn_counter:
                     warn_order.append(entry)
                 warn_counter[entry] += 1

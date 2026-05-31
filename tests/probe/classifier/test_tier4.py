@@ -71,3 +71,48 @@ def test_catalogue_entries_have_compiled_regex():
         assert isinstance(pattern.regex, re.Pattern)
         assert pattern.detector_id.startswith("tier4:")
         assert pattern.sample  # non-empty sample line
+
+
+def test_window_overlap_catches_straddling_match(monkeypatch):
+    """Regression for PR #197 review (Sonbol): a pattern whose match
+    straddles a window boundary must still fire.
+
+    The previous ``_iter_windows`` shape sliced ``text`` into
+    back-to-back non-overlapping chunks; a multi-line failure
+    signature (Python traceback header on one window, body on the
+    next) was silently missed on the >10 MiB long-log path -- the
+    very class of input Tier 4 is meant to catch. The fix adds
+    ``_WINDOW_OVERLAP_BYTES`` of carry-over between adjacent
+    windows.
+
+    Verified by shrinking the window to a small size and planting
+    a traceback that crosses the seam.
+    """
+    monkeypatch.setattr(tier4_patterns, "MAX_LOG_BYTES", 100)
+
+    # Pattern is anchored at line start (``^Traceback ...`` with
+    # re.MULTILINE), so the fixture wraps the traceback in newlines.
+    # Lay out the seam so the traceback header straddles the
+    # window-1 / window-2 boundary (window=100, no overlap would
+    # split "Traceback..." in half across two windows).
+    pad_left = ("x" * 79) + "\n"  # forces the next char to be at column 0
+    pad_right = "\n" + ("y" * 79)
+    straddling = (
+        pad_left
+        + "Traceback (most recent call last):\n"
+        + "  File 'x.py', line 1\n"
+        + "RuntimeError: boom"
+        + pad_right
+    )
+    assert len(straddling) > 100, "fixture must exceed MAX_LOG_BYTES to force chunking"
+    # Sanity: the traceback header crosses byte 100 (window seam).
+    header_start = straddling.index("Traceback")
+    assert header_start < 100 < header_start + len("Traceback (most recent call last):"), (
+        "fixture must place the header *across* the seam to exercise the overlap"
+    )
+
+    fired = scan(straddling)
+    assert tier4_patterns.DETECTOR_PYTHON_TRACEBACK in fired, (
+        "straddling traceback must fire across the chunk seam; "
+        "non-overlapping windows would silently miss it"
+    )

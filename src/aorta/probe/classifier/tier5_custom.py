@@ -316,16 +316,40 @@ def scan(
     return result
 
 
+# Same overlap rationale as Tier 4 (see
+# :data:`aorta.probe.classifier.tier4_patterns._WINDOW_OVERLAP_BYTES`).
+# Operator-supplied ``custom_patterns`` may legitimately match a
+# multi-line region (a stack frame, a JSON payload); 4 KiB of
+# overlap covers every plausible single-match width without
+# meaningfully inflating scan cost.
+_WINDOW_OVERLAP_BYTES = 4096
+
+
 def _iter_windows(text: str, window: int):
-    """Same window-chunked scanner as Tier 4. Kept separate so a
-    future change to the Tier 4 window strategy doesn't have to
-    move in lock-step with the custom-pattern runner.
+    """Window-chunked scanner. Same shape as Tier 4 with an overlap.
+
+    Kept separate from the Tier 4 helper so a future change to the
+    Tier 4 window strategy doesn't have to move in lock-step with
+    the custom-pattern runner. The overlap closes the same
+    straddling-match gap that Tier 4 had: a custom pattern whose
+    match crosses a 10 MiB seam was silently missed by the
+    non-overlapping shape. Overlap is capped at half the window so
+    each step still advances by at least ``window // 2`` --
+    mirrors the Tier 4 helper's loop-safety guard. Per Sonbol's PR
+    #197 review (sweep from the Tier 4 fix to the parallel Tier 5
+    helper).
     """
     if len(text) <= window:
         yield text
         return
-    for start in range(0, len(text), window):
-        yield text[start : start + window]
+    overlap = min(_WINDOW_OVERLAP_BYTES, max(window // 2, 0))
+    start = 0
+    while start < len(text):
+        end = min(start + window, len(text))
+        yield text[start:end]
+        if end == len(text):
+            return
+        start = end - overlap
 
 
 __all__ = [

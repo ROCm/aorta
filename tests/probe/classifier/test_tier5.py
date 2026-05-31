@@ -162,6 +162,39 @@ def test_window_cap_does_not_explode_on_huge_log():
     assert isinstance(result, CustomScanResult)
 
 
+def test_window_overlap_catches_straddling_match(monkeypatch):
+    """Regression for PR #197 review (Sonbol, sweep from Tier 4 to
+    Tier 5): a custom_patterns match that straddles a window
+    boundary must still fire.
+
+    Operator-supplied custom patterns can legitimately match
+    multi-line regions (stack frames, JSON payloads); the
+    previous non-overlapping ``_iter_windows`` silently dropped
+    those when the match seam fell on a chunk boundary. The fix
+    mirrors Tier 4's overlap, defended below by shrinking the
+    window and planting a match that crosses it.
+    """
+    from aorta.probe.classifier import tier5_custom
+
+    monkeypatch.setattr(tier5_custom, "MAX_LOG_BYTES", 100)
+
+    pad_left = "x" * 80
+    pad_right = "y" * 80
+    straddling = pad_left + "FATAL: payload boundary kaboom" + pad_right
+    pattern = _make(raw_id="straddle", regex=r"FATAL: payload boundary kaboom")
+    result = tier5_custom.scan(
+        straddling,
+        (pattern,),
+        exit_code=1,
+        walltime_sec=1.0,
+        peak_vram_mib=None,
+    )
+    assert "custom:straddle" in result.fail_detectors, (
+        "straddling match must fire across the chunk seam; "
+        "non-overlapping windows would silently miss it"
+    )
+
+
 def test_empty_patterns_returns_empty_result():
     result = scan(
         "anything",

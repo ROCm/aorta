@@ -17,3 +17,6 @@ math.__loader__.load_module('os')
 '%999999998s' % capture['x']  # forbidden-node: ast.Mod is no longer in the allow-list (printf-style %s would allocate the same billion-byte buffer)
 capture['x'] * 999999998  # forbidden-node: ast.Mult; the multiplier dodges the integer-literal cap because it's named
 'oom' in capture['msg']  # forbidden-node: ast.In is not in the allow-list (the docs explicitly point users at the regex field for substring matching)
+capture[exit_code]  # capture[...] index must be a string literal -- a Name index would land as KeyError at eval time (capture is dict[str, str]) and tier5 swallows the exception silently
+capture[0]  # capture[...] index must be a string literal -- a numeric index would land as KeyError at eval time and tier5 swallows the exception silently
+capture['x':]  # capture[...] index must be a string literal -- a slice would land as TypeError at eval time and tier5 swallows the exception silently

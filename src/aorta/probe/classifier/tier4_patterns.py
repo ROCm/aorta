@@ -172,23 +172,45 @@ def scan(log_text: str) -> list[str]:
     return fired
 
 
+# Overlap between adjacent windows in :func:`_iter_windows`. Sized to
+# comfortably exceed the longest match the Tier 4 catalogue can
+# produce -- the widest built-in pattern today matches a Python
+# traceback header plus a few continuation lines (a few hundred
+# bytes), so 4 KiB is ~10x safety margin. If a future pattern needs
+# more, raise this constant; the cost is bounded ``re.search``
+# re-work on the overlap region, never a missed match.
+_WINDOW_OVERLAP_BYTES = 4096
+
+
 def _iter_windows(text: str, window: int):
-    """Yield non-overlapping ``window``-sized slices of ``text``.
+    """Yield ``window``-sized slices of ``text`` with a small overlap.
 
     Used to bound each ``re.search`` invocation's worst-case input
-    size. A pattern whose match straddles a window boundary may
-    miss in that scan; for the Tier 4 catalogue this is acceptable
-    because every pattern matches a single short line (a Python
-    traceback header, an HIP error code) that fits comfortably
-    inside a 10MiB window. If a pattern is ever added whose match
-    can be longer than the window, this helper should switch to
-    overlapping windows of (window, window + overlap).
+    size. The previous shape sliced ``text`` into back-to-back
+    non-overlapping chunks; a pattern whose match straddled a
+    chunk boundary (``Traceback (most recent call last):`` ending
+    one window with the body starting the next) was silently
+    missed -- the very class of multi-line failure signature the
+    Tier 4 detectors are meant to catch on the long-log path.
+    Overlap by :data:`_WINDOW_OVERLAP_BYTES` (capped at half the
+    window so each step still advances by at least ``window // 2``,
+    avoiding an infinite loop when a test or future caller sets a
+    pathologically small window). Cost is at most one extra
+    overlap-sized scan per seam, bounded by ``2 * len(text) /
+    window``. Per Sonbol's PR #197 review.
     """
     if len(text) <= window:
         yield text
         return
-    for start in range(0, len(text), window):
-        yield text[start : start + window]
+    # Cap overlap so step >= window // 2 -- guarantees forward progress.
+    overlap = min(_WINDOW_OVERLAP_BYTES, max(window // 2, 0))
+    start = 0
+    while start < len(text):
+        end = min(start + window, len(text))
+        yield text[start:end]
+        if end == len(text):
+            return
+        start = end - overlap
 
 
 __all__ = [

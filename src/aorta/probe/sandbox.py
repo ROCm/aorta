@@ -35,10 +35,25 @@ from __future__ import annotations
 
 import ast
 import math
+import sys
 from types import CodeType
 from typing import Any
 
 from aorta.triage.recipe import RecipeSchemaError
+
+# CPython 3.11+ caps ``int()``-from-string parsing at 4300 digits by
+# default (`PEP 651 / GH-95778`) to defend against the O(n^2) digit
+# parser. 3.10 does not. The sandbox allows ``int()`` calls (it's a
+# legitimate move on a numeric regex capture), and ``capture[...]``
+# can return a multi-megabyte string when a hostile pattern matches
+# a huge log window — so ``int(capture['x'])`` would burn the CPU
+# for minutes on 3.10. Apply the same 4300-digit cap explicitly at
+# import time so the sandbox has matching behavior across the
+# project's supported Python versions (pyproject ``requires-python
+# = ">=3.10"``). No-op on 3.11+ where the same cap is already the
+# default. Per Sonbol's PR #197 review.
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(4300)
 
 # Hard cap on per-trial log bytes scanned for regex matches. Hardens
 # against catastrophic backtracking on operator-supplied regex without
@@ -247,11 +262,29 @@ def _check_node(node: ast.AST) -> None:
 
     if isinstance(node, ast.Subscript):
         # ``capture[...]`` only. ``foo[0]`` rejects because the
-        # subscripted name must be ``capture``; the index expression
-        # is itself walked, so ``capture[exit_code]`` would still be
-        # subject to the ``Name`` check on ``exit_code``.
+        # subscripted name must be ``capture``.
         if not (isinstance(node.value, ast.Name) and node.value.id == "capture"):
             raise SandboxError("condition: subscript only allowed on capture[...]")
+        # The slice must be a *string literal* — anything else (a
+        # ``Name`` like ``capture[exit_code]``, a slice like
+        # ``capture['x':]``, a tuple/star/call) gets through the
+        # whitelist of nested node types because ``ast.walk``
+        # validates them in isolation, but lands as a runtime
+        # ``KeyError`` / ``TypeError`` on eval. The Tier-5 runner
+        # then swallows that with ``except Exception: fired =
+        # False`` (tier5_custom.py post-eval), so a typoed recipe
+        # ships to prod and the detector silently never fires.
+        # Closing this at parse time means the sandbox contract
+        # ("you can only look up named string keys in capture") is
+        # actually enforced, and the recipe author gets a
+        # ``SandboxError`` at recipe-load time naming the bad index
+        # rather than a silent no-fire. Per Sonbol's PR #197
+        # review.
+        if not (isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)):
+            raise SandboxError(
+                f"condition: capture[...] index must be a string literal, "
+                f"got {ast.unparse(node.slice)!r}"
+            )
         return
 
     if isinstance(node, ast.Call):

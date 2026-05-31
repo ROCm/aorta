@@ -9,8 +9,8 @@ import pytest
 
 from aorta.probe.classifier import tier3_kernel
 from aorta.probe.classifier.tier3_kernel import (
-    AmdSmiSnapshot,
     GPU_IDLE_UTILIZATION_THRESHOLD_PCT,
+    AmdSmiSnapshot,
     Tier3State,
     _parse_amd_smi_monitor_csv,
     gpu_idle_probe_from_state,
@@ -45,6 +45,31 @@ def test_scan_dmesg_text_no_match():
 
 def test_scan_dmesg_text_empty():
     assert scan_dmesg_text("") == []
+
+
+def test_scan_dmesg_text_truncates_to_tail_not_head(monkeypatch):
+    """Regression for PR #197 review (Sonbol): the dmesg truncation
+    must keep the tail, not the head.
+
+    XGMI / HBM / MMU kernel signatures are almost always emitted
+    in the seconds before a failing trial ends -- i.e. at the
+    end of the dmesg ring. The previous head-slice (``text[:MAX]``)
+    discarded exactly those lines on long-running trials.
+
+    Verified by planting an XGMI error at the *tail* of an oversized
+    blob and confirming the detector fires.
+    """
+    monkeypatch.setattr(tier3_kernel, "MAX_DMESG_BYTES", 100)
+    head_noise = "boot: amdgpu probe ok\n" * 20  # well past 100 bytes
+    tail_signature = "XGMI link down detected on dev 1\n"
+    blob = head_noise + tail_signature
+    assert len(blob) > 100, "fixture must exceed cap to force truncation"
+
+    fired = scan_dmesg_text(blob)
+    assert tier3_kernel.DETECTOR_XGMI_LINK_ERROR in fired, (
+        "tail-side signature must survive truncation; the previous "
+        "head-slice would have discarded it"
+    )
 
 
 def test_xgmi_healthy_does_not_fire():

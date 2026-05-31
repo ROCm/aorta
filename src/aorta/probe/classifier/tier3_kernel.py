@@ -132,7 +132,13 @@ def scan_dmesg_text(text: str) -> list[str]:
     if not text:
         return []
     if len(text) > MAX_DMESG_BYTES:
-        text = text[:MAX_DMESG_BYTES]
+        # Keep the *tail*, not the head. The XGMI / HBM / MMU
+        # kernel signatures Tier 3 looks for are almost always
+        # emitted in the seconds before the trial ends -- i.e. at
+        # the end of the dmesg ring. The previous head-slice
+        # discarded exactly those lines on long-running trials
+        # where the ring filled up. Per Sonbol's PR #197 review.
+        text = text[-MAX_DMESG_BYTES:]
     fired: list[str] = []
     for detector_id, pattern in _PATTERNS:
         if pattern.search(text):

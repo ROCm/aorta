@@ -37,6 +37,7 @@ the workload reads it post-exit to decide whether to add
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -44,10 +45,29 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+log = logging.getLogger(__name__)
+
 DETECTOR_HANG = "tier2:hang"
 
 DEFAULT_HANG_WINDOW_SEC = 30.0
 DEFAULT_HANG_GRACE_SEC = 60.0
+
+# Upper-bound on how long :attr:`HangMonitor.gpu_idle_probe` can
+# block. Mirrors the live ``amd-smi monitor`` subprocess timeout in
+# :mod:`aorta.probe.classifier.tier3_kernel` (10s) plus a 1s
+# buffer. Used by :meth:`HangMonitor.stop` to size the thread-join
+# budget so a poll currently blocked inside ``amd-smi`` is given
+# time to return before teardown -- if ``stop()`` returned early,
+# the poll thread would race the *next* trial's monitor for
+# ``Tier3State`` reads (cross-trial state corruption). Per Sonbol's
+# PR #197 review.
+#
+# Hard-coded rather than imported from tier3 so the tier2 module
+# keeps no compile-time dependency on tier3 (the monitor takes
+# ``gpu_idle_probe`` as a callable specifically so the two tiers
+# stay decoupled). If the amd-smi timeout grows materially in
+# tier3, raise this constant in lockstep.
+GPU_IDLE_PROBE_MAX_BLOCK_SEC = 11.0
 
 
 @dataclass(frozen=True)
@@ -143,11 +163,35 @@ class HangMonitor:
         self._thread.start()
 
     def stop(self) -> None:
-        """Signal the thread to exit and join with a small timeout."""
+        """Signal the thread to exit and join, with a budget that covers the slowest probe.
+
+        The join budget must outlast the longest in-flight call the
+        monitor thread can be inside when ``stop()`` runs. The
+        ``gpu_idle_probe`` closure typically wraps
+        ``tier3_kernel.poll_amd_smi``, whose subprocess timeout is
+        ~10s; a naive ``join(timeout=poll_interval + 1)`` (=6s)
+        returns *before* a stuck amd-smi call gives up, leaving an
+        orphan thread that lives into the next trial and races for
+        ``Tier3State`` reads. Take the max of the two budgets; log
+        a warning if the thread is still alive after that (it
+        means a probe wedged past its own timeout — rare, but the
+        caller deserves a breadcrumb in the run log).
+        Per Sonbol's PR #197 review.
+        """
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=self.poll_interval_sec + 1.0)
-            self._thread = None
+        if self._thread is None:
+            return
+        join_budget = max(self.poll_interval_sec + 1.0, GPU_IDLE_PROBE_MAX_BLOCK_SEC)
+        self._thread.join(timeout=join_budget)
+        if self._thread.is_alive():
+            log.warning(
+                "HangMonitor.stop(): poll thread for pid=%d still alive after "
+                "%.1fs join budget; continuing teardown (next trial may see "
+                "stale tier-3 state).",
+                self.pid,
+                join_budget,
+            )
+        self._thread = None
 
     def _run(self) -> None:
         """Polling loop. Exits when ``_stop`` is set or hang is detected.

@@ -251,3 +251,91 @@ def test_aggregator_returns_none_when_no_detectors_fired():
     )
     assert stats.top_failure_detector_id is None
     assert stats.top_warn_detector_id is None
+
+
+def test_aggregator_dedups_when_both_sources_mirror_detector():
+    """Regression for PR #197 review (Sonbol): when a trial populates
+    both ``result["metrics"]["failure_detectors_fired"]`` and the
+    flat ``result["failure_detectors_fired"]`` (a shape the
+    docstring explicitly invites for test trials), the previous
+    aggregator double-counted the detector and could misrank
+    ``top_failure_detector_id``.
+
+    Construct one trial that mirrors ``tier4:hip_error`` into both
+    sources and a second trial that only fires ``tier4:nan_signature``.
+    Without the dedup, hip_error's count would be 2 (one from
+    metrics, one from result) vs nan_signature's 1, and the top
+    would be hip_error. With the dedup, hip_error counts as 1
+    (per trial) and ties nan_signature, with hip_error winning on
+    encounter order. We assert the per-source dedup specifically
+    by making the contest decisive: two trials each mirror
+    hip_error into both sources, and two trials each fire
+    nan_signature only into metrics. Without dedup hip=4 vs
+    nan=2; with dedup hip=2 vs nan=2 and encounter-order
+    resolves to hip_error -- so we instead set up the case where
+    the bug would have picked the wrong winner.
+    """
+    def mirrored_trial(detector_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            exit_status="failed",
+            wall_clock_sec=1.0,
+            result={
+                "failure_detectors_fired": [detector_id],
+                "metrics": {
+                    "failure_detectors_fired": [detector_id],
+                },
+            },
+        )
+
+    trials = [
+        mirrored_trial("tier4:hip_error"),
+        _trial_with_detectors(failures=["tier4:nan_signature"]),
+        _trial_with_detectors(failures=["tier4:nan_signature"]),
+    ]
+    stats = aggregate_cell(
+        name="c",
+        mitigations=("none",),
+        environment="local",
+        extra_env={},
+        resolved_env_vars={},
+        trials=trials,
+        effective_steps=1,
+    )
+    # With dedup: hip_error fires once (1 trial), nan_signature fires
+    # twice (2 trials). Winner: nan_signature.
+    # Without dedup: hip_error fires twice (mirrored across sources),
+    # nan_signature fires twice, tie resolves to hip_error (first
+    # encountered) -- the wrong answer.
+    assert stats.top_failure_detector_id == "tier4:nan_signature", (
+        "double-count bug: hip_error was mirrored across both sources "
+        "in one trial and outranked nan_signature (which legitimately "
+        "fired in two trials)"
+    )
+
+
+def test_aggregator_dedups_warn_detectors_same_class():
+    """Same dedup applies to warn_detectors_fired (proactive sweep)."""
+    mirror = SimpleNamespace(
+        exit_status="ok",
+        wall_clock_sec=1.0,
+        result={
+            "warn_detectors_fired": ["tier3:vram_growth"],
+            "metrics": {
+                "warn_detectors_fired": ["tier3:vram_growth"],
+            },
+        },
+    )
+    just_other = _trial_with_detectors(warns=["tier3:thermal_throttle"])
+    stats = aggregate_cell(
+        name="c",
+        mitigations=("none",),
+        environment="local",
+        extra_env={},
+        resolved_env_vars={},
+        trials=[mirror, just_other, just_other],
+        effective_steps=1,
+    )
+    assert stats.top_warn_detector_id == "tier3:thermal_throttle", (
+        "warn-side double-count: vram_growth mirrored across sources "
+        "in one trial outranked thermal_throttle (two distinct trials)"
+    )

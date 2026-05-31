@@ -150,3 +150,85 @@ def test_io_total_returns_none_for_unreadable_pid():
     """
     mon = HangMonitor(pid=-1, stdout_path=Path("/dev/null"))
     assert mon._io_total() is None
+
+
+def test_stop_join_budget_outlasts_slow_gpu_probe(tmp_path: Path, caplog):
+    """Regression for PR #197 review (Sonbol): ``stop()`` must wait long
+    enough for a ``gpu_idle_probe`` blocked inside ``amd-smi`` (10s
+    subprocess timeout) to return -- otherwise the join returns
+    early, the orphan thread keeps running, and it races the *next*
+    trial's monitor for ``Tier3State`` reads.
+
+    The join budget is ``max(poll_interval + 1,
+    GPU_IDLE_PROBE_MAX_BLOCK_SEC)``; this test pins
+    ``GPU_IDLE_PROBE_MAX_BLOCK_SEC`` to a small value so the test is
+    fast, makes the probe sleep for a slice under that budget, and
+    asserts the thread is gone after ``stop()`` returns.
+    """
+    monkey_budget = 0.3
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text("hi\n", encoding="utf-8")
+
+    def slow_probe() -> bool:
+        time.sleep(0.2)
+        return False
+
+    mon = HangMonitor(
+        pid=1,
+        stdout_path=stdout,
+        hang_window_sec=10.0,
+        hang_grace_period_at_start=10.0,
+        poll_interval_sec=0.01,
+        gpu_idle_probe=slow_probe,
+    )
+
+    import logging
+    from unittest.mock import patch
+
+    with patch.object(tier2_hang, "GPU_IDLE_PROBE_MAX_BLOCK_SEC", monkey_budget):
+        mon.start()
+        time.sleep(0.05)
+        with caplog.at_level(logging.WARNING, logger="aorta.probe.classifier.tier2_hang"):
+            mon.stop()
+
+    assert mon._thread is None, "stop() must clear the thread handle after join"
+    # The slow probe (0.2s) completes inside the 0.3s budget so no
+    # warning fires.
+    assert not any("still alive" in rec.getMessage() for rec in caplog.records)
+
+
+def test_stop_warns_when_probe_outlasts_budget(tmp_path: Path, caplog):
+    """If the probe outlasts even the generous join budget (an
+    amd-smi call wedged past its own subprocess timeout), the
+    monitor logs a warning so the operator has a breadcrumb in
+    the run log instead of a silent cross-trial state leak.
+    Per Sonbol's PR #197 review.
+    """
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text("hi\n", encoding="utf-8")
+
+    def wedged_probe() -> bool:
+        time.sleep(2.0)
+        return False
+
+    mon = HangMonitor(
+        pid=1,
+        stdout_path=stdout,
+        hang_window_sec=10.0,
+        hang_grace_period_at_start=10.0,
+        poll_interval_sec=0.01,
+        gpu_idle_probe=wedged_probe,
+    )
+
+    import logging
+    from unittest.mock import patch
+
+    with patch.object(tier2_hang, "GPU_IDLE_PROBE_MAX_BLOCK_SEC", 0.1):
+        mon.start()
+        time.sleep(0.05)
+        with caplog.at_level(logging.WARNING, logger="aorta.probe.classifier.tier2_hang"):
+            mon.stop()
+
+    warnings = [rec for rec in caplog.records if "still alive" in rec.getMessage()]
+    assert warnings, "expected a 'still alive' warning when probe outlasts join budget"
+    assert mon._thread is None, "stop() still clears the thread handle"

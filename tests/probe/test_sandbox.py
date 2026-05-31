@@ -234,6 +234,56 @@ def test_mod_operator_rejected_for_printf_format() -> None:
             validate_and_compile(hostile)
 
 
+def test_subscript_index_must_be_string_literal() -> None:
+    """Regression for PR #197 review (Sonbol): the Subscript rule
+    only checks that the *base* is ``capture`` -- without an index
+    check, ``capture[exit_code]`` (Name), ``capture[0]`` (numeric
+    Constant), and ``capture['x':]`` (slice) all parse cleanly and
+    only blow up at eval time. The Tier 5 runner then swallows
+    those eval-time exceptions silently with
+    ``except Exception: fired = False``, so a typoed recipe ships
+    to prod and the detector never fires. Closing the check at
+    parse time means recipe authors get a ``SandboxError`` at
+    load time naming the bad index.
+    """
+    for hostile, expected_marker in (
+        ("capture[exit_code]", "exit_code"),
+        ("capture[0]", "0"),
+        ("capture['x':]", "'x'"),
+    ):
+        with pytest.raises(SandboxError, match="must be a string literal"):
+            validate_and_compile(hostile)
+        # Sanity: the error message names the bad index so the
+        # operator can fix it without reading the sandbox source.
+        with pytest.raises(SandboxError) as exc_info:
+            validate_and_compile(hostile)
+        assert expected_marker in str(exc_info.value)
+
+
+def test_int_from_string_digit_cap_active() -> None:
+    """Regression for PR #197 review (Sonbol): Python 3.10 has no
+    default cap on ``int()``-from-string parsing, so a hostile
+    regex capture returning a multi-megabyte string would let
+    ``int(capture['x'])`` burn CPU for minutes via the O(n^2)
+    digit parser. The sandbox module sets
+    ``sys.set_int_max_str_digits(4300)`` at import time to apply
+    the CPython 3.11+ default cap explicitly on 3.10.
+
+    Verified by attempting to parse a 5000-char digit string at
+    eval time -- the cap raises ``ValueError`` synchronously
+    rather than hanging.
+    """
+    code = validate_and_compile("int(capture['x']) > 0")
+    with pytest.raises(ValueError, match="(?i)exceeds the limit"):
+        evaluate(
+            code,
+            capture={"x": "0" * 5000},
+            exit_code=0,
+            walltime_sec=1.0,
+            peak_vram_mib=None,
+        )
+
+
 def test_empty_builtins_neutralises_eval() -> None:
     """Defence-in-depth: even if ``eval`` were reached, ``__builtins__={}``
     means ``__import__`` is unreachable.
