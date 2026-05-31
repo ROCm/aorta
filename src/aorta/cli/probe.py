@@ -328,9 +328,7 @@ def probe(
                 "set 'mode: probe' at the recipe top level"
             )
         r = apply_recipe_overrides(r, ticket=ticket, cli_passthrough_mode=cli_passthrough_mode)
-    except ProbeUsageError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
+    except (ProbeUsageError, RecipeSchemaError, RecipeCellError, RegistryError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     try:
