@@ -122,8 +122,14 @@ def scrub_file(self, src: Path, dst: Path) -> RedactionCounts: ...
 ```
 
 * `src` is a regular file inside the source `<run-dir>`.
-* `dst` is the destination path in the staging tree (parent dirs
-  pre-created).
+* `dst` is the destination path in the staging tree. **The
+  implementation creates `dst.parent` itself** -- the bundle
+  writer only creates the top-level bundle root, not the
+  per-file parent dirs. `IdentityRedactor.scrub_file` calls
+  `dst.parent.mkdir(parents=True, exist_ok=True)` before copying;
+  Phase 3's `RedactingRedactor` must do the same. (Earlier
+  revisions of this doc said the parent was pre-created;
+  that was wrong -- see PR #199.)
 * `RedactionCounts` is a frozen dataclass with the three documented
   counters (`env_keys_removed`, `paths_rewritten`, `ips_rewritten`)
   plus `bytes_in` / `bytes_out`.

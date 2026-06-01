@@ -31,6 +31,24 @@ MANIFEST_FILENAME = "manifest.json"
 MANIFEST_SCHEMA_VERSION = 1
 
 
+def _to_utc(now: _dt.datetime) -> _dt.datetime:
+    """Normalise an arbitrary datetime to UTC.
+
+    Bundle artifacts ALWAYS label timestamps as UTC ("Z" suffix in
+    manifests; no suffix but UTC-convention in filenames). Callers
+    (tests, future Phase 3 hooks) may inject a naive or
+    non-UTC-aware ``now`` -- we treat a naive datetime as already
+    being in UTC (matches ``datetime.now(timezone.utc)``'s shape
+    once tz is stripped) and convert any aware datetime to UTC
+    before formatting. The alternative (silently slapping ``Z`` on
+    a local-time naive datetime) is the bug Copilot caught on PR
+    #199.
+    """
+    if now.tzinfo is None:
+        return now.replace(tzinfo=_dt.timezone.utc)
+    return now.astimezone(_dt.timezone.utc)
+
+
 @dataclass(frozen=True)
 class FileRecord:
     """One row of ``manifest.json::files``.
@@ -88,12 +106,18 @@ class Manifest:
         """Build a :class:`Manifest` and derive ``redaction_applied``.
 
         ``now`` is optional so tests can pin a deterministic
-        timestamp; default uses ``datetime.now(timezone.utc)``. The
-        timestamp is rendered in ISO-8601 with the ``Z`` suffix so
-        downstream tools can parse it with ``datetime.fromisoformat``
-        (Python 3.11+) or any standard ISO-8601 parser.
+        timestamp; default uses ``datetime.now(timezone.utc)``. A
+        non-UTC or naive ``now`` is normalised by :func:`_to_utc`
+        before formatting so the ``Z`` suffix in the on-disk
+        ``created_at`` always reflects the real UTC clock (not
+        the caller's local time silently labelled UTC).
+
+        The timestamp is rendered in ISO-8601 with the ``Z`` suffix
+        so downstream tools can parse it with
+        ``datetime.fromisoformat`` (Python 3.11+) or any standard
+        ISO-8601 parser.
         """
-        now = now or _dt.datetime.now(_dt.timezone.utc)
+        now = _to_utc(now or _dt.datetime.now(_dt.timezone.utc))
         applied = any(f.env_keys_removed or f.paths_rewritten or f.ips_rewritten for f in files)
         return cls(
             schema_version=MANIFEST_SCHEMA_VERSION,

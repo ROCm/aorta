@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import os
 import tarfile
 import tempfile
 from collections.abc import Callable
@@ -42,7 +43,7 @@ from aorta.bundle.errors import (
     NoTicketError,
     RunDirNotFoundError,
 )
-from aorta.bundle.manifest import MANIFEST_FILENAME, FileRecord, Manifest
+from aorta.bundle.manifest import MANIFEST_FILENAME, FileRecord, Manifest, _to_utc
 from aorta.bundle.redactor import IdentityRedactor, Redactor
 from aorta.triage.output import NO_TICKET_SLUG, safe_slug
 
@@ -79,8 +80,15 @@ def _bundle_timestamp(now: _dt.datetime | None = None) -> str:
     to three digits (``microsecond // 1000``). Plain ``%f`` would give
     six digits, which is more entropy than we need and clutters the
     filename.
+
+    A naive or non-UTC ``now`` is normalised through
+    :func:`aorta.bundle.manifest._to_utc` so the embedded clock
+    matches the ``Z`` convention in the manifest's ``created_at``.
+    Test injection of a deterministic naive datetime previously
+    rendered the caller's local clock as UTC silently -- the same
+    trap Copilot caught on the manifest path.
     """
-    now = now or _dt.datetime.now(_dt.timezone.utc)
+    now = _to_utc(now or _dt.datetime.now(_dt.timezone.utc))
     return f"{now.strftime('%Y-%m-%dT%H-%M-%S')}-{now.microsecond // 1000:03d}"
 
 
@@ -177,20 +185,27 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
     block it (the legitimate use case -- symlinking a shared
     ``host_env.json`` -- is a feature).
 
-    Skips:
+    Skips (TOP-LEVEL ONLY; a nested file with the same basename in a
+    cell / trial directory is a legitimate artifact and IS bundled):
 
-    * The ``flat_resume`` lockfile (``.aorta-probe.lock``) -- it is
+    * The ``flat_resume`` lockfile (``./.aorta-probe.lock``) -- it is
       a transient runtime artifact, not a deliverable.
-    * ``manifest.json`` left over from a prior bundle invocation
+    * ``./manifest.json`` left over from a prior bundle invocation
       that wrote into the source tree (defensive; the writer never
       does this today, but a downstream copy could).
+
+    The skip set is matched against the file's relative POSIX path,
+    not its basename -- a workload that emits ``cell/trial_0/manifest.json``
+    or ``cell/.aorta-probe.lock`` (e.g. a script that wraps its own
+    bundler-style output) gets those files bundled normally.
     """
-    skipped_basenames = frozenset({".aorta-probe.lock", MANIFEST_FILENAME})
+    skipped_rel_paths = frozenset({".aorta-probe.lock", MANIFEST_FILENAME})
     files: list[Path] = []
     for path in run_dir.rglob("*"):
         if not path.is_file():
             continue
-        if path.name in skipped_basenames:
+        rel = path.relative_to(run_dir).as_posix()
+        if rel in skipped_rel_paths:
             continue
         files.append(path)
     files.sort(key=lambda p: p.relative_to(run_dir).as_posix())
@@ -215,6 +230,14 @@ def stage_run_dir(
     documented in ``docs/probe-188/bundle.md``). Builds a
     :class:`Manifest` from the per-file :class:`RedactionCounts`
     and writes it to ``<staging_dir>/<bundle_name>/manifest.json``.
+
+    Parent-dir responsibility: this function creates ONLY the
+    bundle root (``<staging_dir>/<bundle_name>/``). The per-file
+    ``dst.parent`` directories are created by the redactor's
+    ``scrub_file`` implementation (see the :class:`Redactor` ABC
+    docstring -- "Create the destination's parent directory if
+    missing."). The split keeps the staging contract local to the
+    redactor and avoids two layers of ``mkdir(exist_ok=True)``.
 
     Returns the in-memory manifest so the caller can show it under
     ``--review`` without re-reading from disk.
@@ -260,6 +283,19 @@ def write_tarball(staging_dir: Path, bundle_name: str, output: Path) -> Path:
     with ``exist_ok=True`` so a fresh checkout's ``./<ticket>...``
     default just works.
 
+    Atomicity:
+
+    * The tarball is written to a sibling ``<output>.partial`` first
+      and renamed onto the final path with ``os.replace`` only after
+      the gzip footer is flushed. Mid-write failures (``ENOSPC``,
+      tarfile / gzip raising, a network FS dropping out) leave the
+      partial behind for cleanup but never produce a half-written
+      ``output``.
+    * If ``output`` already exists from a prior run, an in-flight
+      failure leaves the OLD content intact -- ``os.replace`` only
+      overwrites on success. The ``.partial`` sibling is unlinked
+      either way so a retry does not race against a stale temp file.
+
     Tarball entries are added in the order :func:`_iter_source_files`
     produced (alphabetical on relative POSIX path), with the manifest
     last so consumers running ``tar -tzf`` see the data first and
@@ -270,21 +306,42 @@ def write_tarball(staging_dir: Path, bundle_name: str, output: Path) -> Path:
     output = output.absolute()
     output.parent.mkdir(parents=True, exist_ok=True)
     bundle_root = staging_dir / bundle_name
+    partial = output.with_name(output.name + ".partial")
 
-    with tarfile.open(output, "w:gz") as tar:
-        # Walk the staged tree (NOT the source tree) so the
-        # manifest written by stage_run_dir is included.
-        rel_paths: list[Path] = []
-        for path in bundle_root.rglob("*"):
-            if path.is_file():
-                rel_paths.append(path.relative_to(bundle_root))
-        # Sort with manifest.json last so ``tar -tzf`` reads it as
-        # the trailer (matches the docstring contract).
-        rel_paths.sort(
-            key=lambda p: (p.name == MANIFEST_FILENAME, p.as_posix()),
-        )
-        for rel in rel_paths:
-            tar.add(str(bundle_root / rel), arcname=f"{bundle_name}/{rel.as_posix()}")
+    # Defensive: a stale .partial from a crashed previous run would
+    # otherwise survive into the new try and confuse the os.replace
+    # path (or, worse, get atomic-replaced into place if the next
+    # write somehow succeeded against it).
+    if partial.exists():
+        partial.unlink()
+
+    try:
+        with tarfile.open(partial, "w:gz") as tar:
+            # Walk the staged tree (NOT the source tree) so the
+            # manifest written by stage_run_dir is included.
+            rel_paths: list[Path] = []
+            for path in bundle_root.rglob("*"):
+                if path.is_file():
+                    rel_paths.append(path.relative_to(bundle_root))
+            # Sort with manifest.json last so ``tar -tzf`` reads it as
+            # the trailer (matches the docstring contract).
+            rel_paths.sort(
+                key=lambda p: (p.name == MANIFEST_FILENAME, p.as_posix()),
+            )
+            for rel in rel_paths:
+                tar.add(str(bundle_root / rel), arcname=f"{bundle_name}/{rel.as_posix()}")
+        os.replace(partial, output)
+    except BaseException:
+        # Includes OSError (ENOSPC, EACCES, ...), KeyboardInterrupt,
+        # and anything tarfile raises. The bundle_run_dir caller
+        # wraps OSError into BundleIOError; here we just make sure
+        # neither the partial nor a corrupted final file survives.
+        if partial.exists():
+            try:
+                partial.unlink()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+        raise
     return output
 
 

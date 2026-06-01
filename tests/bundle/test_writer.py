@@ -449,3 +449,156 @@ def test_bundle_run_dir_wraps_oserror_from_redactor_into_bundle_io_error(
     # No tarball was written despite the half-staged tree -- the
     # TemporaryDirectory cleans up.
     assert not (tmp_path / "out.tar.gz").exists()
+
+
+# --- skip-filter is top-level only (review fix) ----------------------------
+
+
+def test_iter_source_files_keeps_nested_manifest_and_lockfile_lookalikes(
+    synthetic_run_dir, tmp_path
+):
+    """Per docstring: only ``./manifest.json`` and ``./.aorta-probe.lock``
+    are dropped. A workload that writes those same basenames inside a
+    cell / trial directory is emitting legitimate artifacts and must
+    have them bundled.
+
+    Before PR #199 round 2, ``_iter_source_files`` matched basenames
+    anywhere in the tree, silently dropping nested artifacts.
+    """
+    nested_manifest = synthetic_run_dir / "none-none" / "trial_0" / "manifest.json"
+    nested_lockfile = synthetic_run_dir / "tf32_off-none" / "trial_0" / ".aorta-probe.lock"
+    nested_manifest.write_text('{"workload": "ok"}', encoding="utf-8")
+    nested_lockfile.write_text("nested lock\n", encoding="utf-8")
+    # Top-level versions of both should still be dropped.
+    (synthetic_run_dir / "manifest.json").write_text("stale\n", encoding="utf-8")
+    (synthetic_run_dir / ".aorta-probe.lock").write_text("stale\n", encoding="utf-8")
+
+    out = tmp_path / "out.tar.gz"
+    bundle_run_dir(synthetic_run_dir, output=out)
+    with tarfile.open(out, "r:gz") as tar:
+        names = set(tar.getnames())
+    # Derive bundle_root from a file that lives ONLY at the top level
+    # (host_env.json) so we don't accidentally pick a deeper match.
+    bundle_root = next(n for n in names if n.endswith("/host_env.json"))[: -len("/host_env.json")]
+    # Nested look-alikes survived the filter.
+    assert f"{bundle_root}/none-none/trial_0/manifest.json" in names
+    assert f"{bundle_root}/tf32_off-none/trial_0/.aorta-probe.lock" in names
+    # Top-level stale ones did NOT.
+    # (The OWN manifest.json the bundle writes at top-level is the
+    # only ./manifest.json in the archive, written by stage_run_dir.)
+    assert sum(1 for n in names if n == f"{bundle_root}/manifest.json") == 1
+    assert f"{bundle_root}/.aorta-probe.lock" not in names
+
+
+# --- atomic tarball write (review fix) -------------------------------------
+
+
+def test_write_tarball_failure_leaves_no_partial(synthetic_run_dir, tmp_path, monkeypatch):
+    """If tarfile / gzip raises mid-write (ENOSPC, EIO, ...) the
+    final ``output`` path must NOT exist -- BundleIOError's message
+    claims 'No tarball was written' and the writer has to honour
+    that.
+
+    The partial sibling (``<output>.partial``) is also cleaned up so
+    a retry does not race against stale temp data.
+    """
+    import aorta.bundle.writer as writer_mod
+
+    real_open = tarfile.open
+
+    def _raising_open(*args, **kwargs):
+        tar = real_open(*args, **kwargs)
+        original_add = tar.add
+        call_count = {"n": 0}
+
+        def boom_after_one_add(*a, **kw):
+            call_count["n"] += 1
+            if call_count["n"] >= 2:
+                raise OSError(28, "No space left on device")  # ENOSPC
+            return original_add(*a, **kw)
+
+        tar.add = boom_after_one_add
+        return tar
+
+    monkeypatch.setattr(writer_mod.tarfile, "open", _raising_open)
+
+    out = tmp_path / "out.tar.gz"
+    with pytest.raises(BundleIOError) as exc:
+        bundle_run_dir(synthetic_run_dir, output=out)
+    assert "No space left on device" in str(exc.value)
+    # The promise: neither the final file nor the partial survives.
+    assert not out.exists(), "Atomic write violated -- partial tarball at final path"
+    assert not out.with_name(out.name + ".partial").exists(), ".partial sibling leaked on failure"
+
+
+def test_write_tarball_failure_preserves_prior_output(synthetic_run_dir, tmp_path, monkeypatch):
+    """The atomicity guarantee is strongest when ``output`` already
+    exists from a prior run: a mid-write failure must NOT corrupt
+    or remove the prior copy.
+
+    Pre-populates ``output`` with a sentinel, forces the new write
+    to fail, then re-reads the file and asserts the sentinel is
+    intact.
+    """
+    import aorta.bundle.writer as writer_mod
+
+    out = tmp_path / "out.tar.gz"
+    sentinel = b"PRIOR-BUNDLE-DO-NOT-DELETE"
+    out.write_bytes(sentinel)
+
+    def _exploding_open(*args, **kwargs):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(writer_mod.tarfile, "open", _exploding_open)
+
+    with pytest.raises(BundleIOError):
+        bundle_run_dir(synthetic_run_dir, output=out)
+    # Prior file untouched.
+    assert out.read_bytes() == sentinel
+    # No .partial left behind.
+    assert not out.with_name(out.name + ".partial").exists()
+
+
+def test_write_tarball_cleans_stale_partial_before_writing(synthetic_run_dir, tmp_path):
+    """A leftover ``.partial`` from a previous crashed run must not
+    survive into the next successful write -- ``write_tarball``
+    proactively unlinks it before opening the new gzip stream.
+    """
+    out = tmp_path / "out.tar.gz"
+    stale = out.with_name(out.name + ".partial")
+    stale.write_bytes(b"stale partial bytes")
+    # Should succeed and leave only the final tarball; no .partial.
+    written = bundle_run_dir(synthetic_run_dir, output=out)
+    assert written == out.resolve()
+    assert out.is_file()
+    assert not stale.exists()
+
+
+# --- UTC normalisation (review fix) ----------------------------------------
+
+
+def test_bundle_timestamp_normalises_naive_now_as_utc():
+    """A naive datetime is treated as already-UTC (matching
+    ``datetime.now(timezone.utc)``'s shape) instead of being
+    silently mislabelled.
+    """
+    import datetime as dt
+
+    naive = dt.datetime(2026, 6, 1, 7, 0, 0, 250_000)  # no tzinfo
+    out = _bundle_timestamp(naive)
+    # The naive wall-clock 07:00:00.250 is taken at face value.
+    assert out == "2026-06-01T07-00-00-250"
+
+
+def test_bundle_timestamp_normalises_non_utc_now_to_utc():
+    """An aware datetime in +05:30 is converted to UTC before
+    formatting, so the embedded clock matches the ``Z`` convention
+    in the manifest.
+    """
+    import datetime as dt
+
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    local = dt.datetime(2026, 6, 1, 12, 30, 0, 500_000, tzinfo=ist)
+    # 12:30 IST == 07:00 UTC
+    out = _bundle_timestamp(local)
+    assert out == "2026-06-01T07-00-00-500"

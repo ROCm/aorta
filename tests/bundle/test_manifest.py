@@ -97,6 +97,47 @@ def test_manifest_rejects_unknown_schema_version():
         Manifest.from_json(raw)
 
 
+def test_manifest_from_files_normalises_naive_now_as_utc(tmp_path):
+    """A naive datetime injection is treated as already-UTC --
+    NOT silently stamped with the local clock + 'Z' suffix.
+
+    Before this fix, a test pinning ``datetime(2026, 6, 1, 7, 0, 0)``
+    on a +05:30 machine would land in the on-disk manifest as
+    ``2026-06-01T07:00:00Z`` while operators read it as UTC -- a
+    silent ~5h skew per Copilot's PR #199 review.
+    """
+    naive = _dt.datetime(2026, 6, 1, 7, 0, 0)
+    m = Manifest.from_files(
+        ticket="T",
+        source_run_dir=tmp_path,
+        redactor_kind="identity",
+        aorta_version="x",
+        files=[],
+        now=naive,
+    )
+    assert m.created_at == "2026-06-01T07:00:00Z"
+
+
+def test_manifest_from_files_normalises_non_utc_now_to_utc(tmp_path):
+    """An aware datetime in +05:30 is converted to UTC before the
+    'Z' suffix is applied -- so the on-disk timestamp matches what
+    ``datetime.now(timezone.utc)`` would have produced at that
+    wall-clock instant.
+    """
+    ist = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+    local = _dt.datetime(2026, 6, 1, 12, 30, 0, tzinfo=ist)
+    # 12:30 IST == 07:00 UTC
+    m = Manifest.from_files(
+        ticket="T",
+        source_run_dir=tmp_path,
+        redactor_kind="identity",
+        aorta_version="x",
+        files=[],
+        now=local,
+    )
+    assert m.created_at == "2026-06-01T07:00:00Z"
+
+
 def test_manifest_total_bytes_helpers():
     files = [
         FileRecord(path="a", bytes_in=10, bytes_out=8),
