@@ -288,9 +288,9 @@ def write_tarball(staging_dir: Path, bundle_name: str, output: Path) -> Path:
     * The tarball is written to a sibling ``<output>.partial`` first
       and renamed onto the final path with ``os.replace`` only after
       the gzip footer is flushed. Mid-write failures (``ENOSPC``,
-      tarfile / gzip raising, a network FS dropping out) leave the
-      partial behind for cleanup but never produce a half-written
-      ``output``.
+      tarfile / gzip raising, a network FS dropping out) are cleaned up
+      by unlinking ``<output>.partial`` (best-effort) and never produce a
+      half-written ``output``.
     * If ``output`` already exists from a prior run, an in-flight
       failure leaves the OLD content intact -- ``os.replace`` only
       overwrites on success. The ``.partial`` sibling is unlinked
