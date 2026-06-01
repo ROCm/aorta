@@ -262,7 +262,7 @@ internal sidecar for stack-specific vars:
 
 | Surface | Location | Contents |
 |---|---|---|
-| Runtime mitigations | Built-in registry (`mitigations.py`) | `gpu_max_hw_queues_2`, `roc_aql_queue_size_1024`, `nccl_launch_order_implicit`, `hsa_no_scratch_reclaim`, `pytorch_no_cuda_memory_caching`, `fa_prefer_ck` / `fa_prefer_aotriton`, and others — see `aorta mitigations list` |
+| Runtime mitigations | Built-in registry (`mitigations.py`) | `gpu_max_hw_queues_2`, `roc_aql_queue_size_1024`, `nccl_launch_order_implicit`, `hsa_no_scratch_reclaim`, `hsa_disable_cache` / `hsa_enable_cache`, `pytorch_no_cuda_memory_caching`, `fa_prefer_ck` / `fa_prefer_aotriton`, and others — see `aorta mitigations list` |
 | Workload-internal flags | [`examples/probe-flag-sidecar.json`](../../../examples/probe-flag-sidecar.json) | `FBGEMM_*`, `TORCHINDUCTOR_*`, `EVAL_DISABLE_PIPELINING` — only effective when the workload reads them |
 | Ready-made probe recipe | [`recipes/probe-flag-sweep.yaml`](../../../recipes/probe-flag-sweep.yaml) | `mitigation_axis` + `diagnostic_axis` covering the built-in set |
 

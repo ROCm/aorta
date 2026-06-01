@@ -26,6 +26,8 @@ PROBE_FLAG_BUILTIN_EXPECTED: dict[str, dict[str, str]] = {
     "gpu_force_blit_copy_128": {"GPU_FORCE_BLIT_COPY_SIZE": "128"},
     "gpu_max_hw_queues_2": {"GPU_MAX_HW_QUEUES": "2"},
     "hip_launch_blocking": {"HIP_LAUNCH_BLOCKING": "1"},
+    "hsa_disable_cache": {"HSA_DISABLE_CACHE": "1"},
+    "hsa_enable_cache": {"HSA_DISABLE_CACHE": "0"},
     "hsa_no_scratch_reclaim": {"HSA_NO_SCRATCH_RECLAIM": "1"},
     "hsa_no_sdma": {"HSA_ENABLE_SDMA": "0"},
     "nccl_launch_order_implicit": {"NCCL_LAUNCH_ORDER_IMPLICIT": "1"},

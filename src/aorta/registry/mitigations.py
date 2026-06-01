@@ -48,6 +48,12 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     "hsa_no_scratch_reclaim": {
         "HSA_NO_SCRATCH_RECLAIM": "1",
     },
+    "hsa_disable_cache": {
+        "HSA_DISABLE_CACHE": "1",
+    },
+    "hsa_enable_cache": {
+        "HSA_DISABLE_CACHE": "0",
+    },
     "roc_signal_pool_16k": {
         "ROC_SIGNAL_POOL_SIZE": "16384",
     },

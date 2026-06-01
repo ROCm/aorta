@@ -45,6 +45,8 @@ mitigation_axis:
   - roc_aql_queue_size_1024      # caps CPU-GPU AQL queue depth (backpressure)
   - nccl_launch_order_implicit   # serializes RCCL launches device-wide
   - hsa_no_scratch_reclaim
+  - hsa_disable_cache            # HSA_DISABLE_CACHE=1
+  - hsa_enable_cache             # HSA_DISABLE_CACHE=0
   - hsa_no_sdma
   - pytorch_no_cuda_memory_caching
   - pytorch_alloc_expandable_segments
