@@ -169,15 +169,60 @@ def test_phase_3_keys_rejected_with_pointer(tmp_path):
     text = (
         _PROBE_MINIMAL
         + """\
-redaction:
-  scrub_env_keys: ["AWS_*"]
+condition:
+  - "exit_code != 0"
 """
     )
     with pytest.raises(RecipeSchemaError) as exc:
         load_recipe(_write_yaml(tmp_path, text))
     msg = str(exc.value)
     assert "Phase 3" in msg
-    assert "redaction" in msg
+    assert "condition" in msg
+
+
+def test_redaction_block_accepted_in_probe_mode(tmp_path):
+    text = (
+        _PROBE_MINIMAL
+        + """\
+redaction:
+  scrub_env_keys: ["AWS_*"]
+  scrub_paths: true
+  scrub_ip_addresses: true
+"""
+    )
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.probe_extras is not None
+    assert r.probe_extras.redaction is not None
+    assert r.probe_extras.redaction.scrub_paths is True
+
+
+def test_redaction_block_rejected_in_triage_mode(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 1
+cells:
+  - name: baseline
+    mitigations: [none]
+    environment: local
+redaction:
+  scrub_paths: true
+"""
+    with pytest.raises(RecipeSchemaError, match="probe-mode only"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_redaction_block_unknown_key_rejected(tmp_path):
+    text = (
+        _PROBE_MINIMAL
+        + """\
+redaction:
+  scrub_everything: true
+"""
+    )
+    with pytest.raises(RecipeSchemaError, match="unknown keys"):
+        load_recipe(_write_yaml(tmp_path, text))
 
 
 def test_top_level_condition_rejected_as_phase_3(tmp_path):

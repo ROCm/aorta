@@ -1,0 +1,154 @@
+"""Unit tests for ``aorta.probe.redaction`` (issue #188 Phase 3)."""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+from aorta.probe.redaction import (
+    RedactingRedactor,
+    RedactionCfg,
+    scrub_env_keys,
+    scrub_text,
+)
+from aorta.probe.sandbox import MAX_LOG_BYTES
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_env_key_glob():
+    env = {
+        "AWS_ACCESS_KEY_ID": "AKIA",
+        "AWS_SECRET_ACCESS_KEY": "secret",
+        "PATH": "/usr/bin",
+        "SAFE": "ok",
+    }
+    scrubbed, removed = scrub_env_keys(env, ("AWS_*",))
+    assert removed == 2
+    assert scrubbed == {"PATH": "/usr/bin", "SAFE": "ok"}
+
+
+def test_env_key_glob_case_sensitive():
+    env = {"aws_secret_key": "lower", "AWS_SECRET_KEY": "upper"}
+    scrubbed, removed = scrub_env_keys(env, ("AWS_*",))
+    assert removed == 1
+    assert "aws_secret_key" in scrubbed
+    assert "AWS_SECRET_KEY" not in scrubbed
+
+
+def test_path_rewrite():
+    text = (
+        "a /home/user/a/data/file.txt\n"
+        "b /home/user/a/data/file.txt\n"
+        "c /home/user/b/other.log\n"
+        "d /opt/third/path\n"
+        "e /opt/third/path\n"
+    )
+    out, paths, v4, v6 = scrub_text(text, scrub_paths=True, scrub_ip_addresses=False)
+    assert paths == 5
+    assert "<PATH:0>" in out
+    assert "<PATH:1>" in out
+    assert "<PATH:2>" in out
+    assert "/home/user" not in out
+    assert v4 == 0 and v6 == 0
+
+
+def test_path_rewrite_no_reverse_mapping_persisted(tmp_path: Path):
+    cfg = RedactionCfg(scrub_paths=True)
+    redactor = RedactingRedactor(cfg)
+    src = tmp_path / "stdout.log"
+    dst = tmp_path / "out" / "stdout.log"
+    src.write_text("loaded /secret/path/file\n", encoding="utf-8")
+    counts = redactor.scrub_file(src, dst)
+    assert counts.paths_rewritten == 1
+    bundled = dst.read_text(encoding="utf-8")
+    assert "/secret/path/file" not in bundled
+    assert "<PATH:0>" in bundled
+    assert "mapping" not in bundled.lower()
+
+
+def test_ip_rewrite():
+    text = "host 192.168.0.1 and 2001:db8::1 here"
+    out, paths, v4, v6 = scrub_text(
+        text,
+        scrub_paths=False,
+        scrub_ip_addresses=True,
+    )
+    assert paths == 0
+    assert v4 == 1
+    assert v6 == 1
+    assert "<IPV4:0>" in out
+    assert "<IPV6:0>" in out
+    assert "192.168.0.1" not in out
+
+
+def test_redactor_kind_string():
+    assert RedactingRedactor(RedactionCfg()).kind == "probe.v1"
+
+
+def test_redaction_dos_bound():
+    """10 MiB slash run completes within 5 seconds (regex DoS guard)."""
+    blob = "/" * MAX_LOG_BYTES
+    t0 = time.perf_counter()
+    scrub_text(blob, scrub_paths=True, scrub_ip_addresses=False)
+    assert time.perf_counter() - t0 < 5.0
+
+
+def test_redacting_redactor_scrubs_result_json_env(tmp_path: Path):
+    cfg = RedactionCfg(
+        scrub_env_keys=("AWS_*", "HOME", "USER"),
+        scrub_paths=True,
+    )
+    redactor = RedactingRedactor(cfg)
+    src = tmp_path / "result.json"
+    dst = tmp_path / "out" / "result.json"
+    src.write_text(
+        json.dumps(
+            {
+                "verdict": "pass",
+                "env": {"AWS_TOKEN": "x", "HIP_VISIBLE_DEVICES": "0"},
+                "argv": ["/home/user/train.py"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    counts = redactor.scrub_file(src, dst)
+    assert counts.env_keys_removed == 1
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+    assert "AWS_TOKEN" not in doc["env"]
+    assert "<PATH:" in doc["argv"][0]
+
+
+def test_fixture_log_scrubs_paths_and_ips(tmp_path: Path):
+    raw = (FIXTURES / "redaction_input.txt").read_text(encoding="utf-8")
+    cfg = RedactionCfg(
+        scrub_paths=True,
+        scrub_ip_addresses=True,
+    )
+    redactor = RedactingRedactor(cfg)
+    src = tmp_path / "stdout.log"
+    dst = tmp_path / "out" / "stdout.log"
+    src.write_text(raw, encoding="utf-8")
+    counts = redactor.scrub_file(src, dst)
+    out = dst.read_text(encoding="utf-8")
+    assert counts.paths_rewritten >= 3
+    assert counts.ips_rewritten >= 2
+    assert "/home/customer" not in out
+    assert "192.168.1.42" not in out
+
+
+def test_probe_env_scrubs_env_keys(tmp_path: Path):
+    cfg = RedactionCfg(scrub_env_keys=("AWS_*", "HOME", "USER"))
+    redactor = RedactingRedactor(cfg)
+    src = tmp_path / "probe.env"
+    dst = tmp_path / "out" / "probe.env"
+    src.write_text(
+        "AWS_SECRET_ACCESS_KEY=supersecret\nHOME=/home/user\nSAFE=1\n",
+        encoding="utf-8",
+    )
+    counts = redactor.scrub_file(src, dst)
+    out = dst.read_text(encoding="utf-8")
+    assert counts.env_keys_removed == 2
+    assert "supersecret" not in out
+    assert "SAFE=1" in out

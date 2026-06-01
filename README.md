@@ -66,6 +66,8 @@ AORTA generates comprehensive performance reports comparing ROCm versions across
 | [Configuration](docs/configuration.md) | FSDP tuning, RCCL variables, profiler settings |
 | [Profiling](docs/profiling.md) | Torch profiler, rocprofv3, overlap reports |
 | [Environment Probe](docs/env-probe.md) | Capture / diff / query a versioned environment snapshot; jq cookbook |
+| [`aorta probe`](docs/probe-188/usage.md) | Wrap-and-collect opaque launch commands; matrix + classifier |
+| [`aorta bundle`](docs/probe-188/bundle.md) | Package probe artifacts with recipe-driven redaction |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues |
 
 ## Repository Layout

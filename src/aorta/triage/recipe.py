@@ -77,6 +77,8 @@ _PROBE_TOP_LEVEL = frozenset(
         "custom_patterns",
         "hang_window_sec",
         "hang_grace_period_at_start",
+        # Phase 3 (issue #188): redaction block for aorta bundle.
+        "redaction",
     }
 )
 # Phase 3 keys -- intercepted at load time BEFORE the unknown-keys
@@ -89,7 +91,7 @@ _PROBE_TOP_LEVEL = frozenset(
 # is reserved for a future Phase 3-style "fail-the-trial-by-condition"
 # block; rejected here so a typo'd indent of a custom_patterns
 # condition can't fall through to a silent no-op.
-_PHASE_3_KEYS = frozenset({"redaction", "condition"})
+_PHASE_3_KEYS = frozenset({"condition"})
 # Union of valid keys -- used for the unknown-key rejection. Phase 2 keys
 # (``custom_patterns``, ``hang_window_sec``, ``hang_grace_period_at_start``)
 # ARE included via ``_PROBE_TOP_LEVEL`` and parsed normally when

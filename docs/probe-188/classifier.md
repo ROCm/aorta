@@ -205,6 +205,9 @@ Implemented in `src/aorta/probe/classifier/verdict.py::resolve`.
   "capture": {string: (string | float | int)},
   "tier_durations_ms": {"tier1": float, "tier2": float, "tier3": float, "tier4": float, "tier5": float},
 
+  // Phase 3: cell env bundle (scrubbed by aorta bundle redaction):
+  "env": {string: string},
+
   // Phase 1 keys still present (subset of Phase 2 shape):
   "env_passthrough_mode": "inherit" | "file",
   "timed_out": bool

@@ -82,7 +82,13 @@ def synthetic_run_dir(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (run_dir / "recipe.resolved.yaml").write_text(
-        "schema_version: 1\nmode: probe\n",
+        """\
+schema_version: 1
+mode: probe
+trials: 1
+mitigation_axis: [none]
+diagnostic_axis: [none]
+""",
         encoding="utf-8",
     )
     (run_dir / "host_env.json").write_text("{}\n", encoding="utf-8")

@@ -254,3 +254,23 @@ axis, e.g. `--environment-axis local,image:rocm/pytorch:nightly`. Each
 comma-separated item is parsed independently; bare names go through the
 registry, `image:<ref>` maps to the same `{ docker: <ref> }` shorthand as
 recipe mode.
+
+## Probe handout templates (issue #188 Phase 3)
+
+Generic ``mode: probe`` recipes for customer handouts. Each template
+includes a ``redaction:`` block consumed by ``aorta bundle`` when
+packaging artifacts for sharing.
+
+| Template | Typical trailing argv |
+|---|---|
+| `probe-template-torchrun.yaml` | `torchrun --nproc_per_node=N train.py ...` |
+| `probe-template-buck2.yaml` | `buck2 run //path:target -- ...` |
+| `probe-template-bash.yaml` | `bash launch.sh ...` |
+
+Dry-run smoke:
+
+```
+aorta probe --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
+```
+
+See `docs/probe-188/handout-templates.md` for per-template walkthroughs.

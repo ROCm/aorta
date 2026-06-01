@@ -152,3 +152,25 @@ def test_bundle_submodules_collected():
     """Sanity: the package actually exposes the four submodules."""
     submodules = {m.name for m in pkgutil.iter_modules(_bundle_pkg.__path__)}
     assert {"errors", "manifest", "redactor", "writer"} <= submodules
+
+
+_PROBE_REDACTION_FILES = (
+    Path(__file__).resolve().parents[2] / "src/aorta/probe/redaction.py",
+    Path(__file__).resolve().parents[2] / "src/aorta/probe/bundle_hook.py",
+)
+
+
+def test_probe_redaction_modules_no_third_party_imports():
+    """Phase 3 redaction modules stay stdlib-only (no new top-level deps)."""
+    stdlib = set(getattr(__import__("sys"), "stdlib_module_names", set()))
+    for path in _PROBE_REDACTION_FILES:
+        for name in _imports(path):
+            top = name.split(".", 1)[0]
+            if top in stdlib:
+                continue
+            if name.startswith(_AORTA_INTERNAL_PREFIX) or name == "aorta":
+                continue
+            assert top in _ALLOWED_THIRD_PARTY, (
+                f"{path}: new third-party import {name!r}; probe redaction "
+                "is stdlib-only by rubric §3.F."
+            )

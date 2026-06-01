@@ -25,6 +25,7 @@ from aorta.probe.classifier.tier5_custom import (
     CompiledPattern,
     validate_custom_patterns,
 )
+from aorta.probe.redaction import RedactionCfg, parse_redaction
 from aorta.registry import get_mitigation
 from aorta.registry.errors import UnknownMitigationError
 from aorta.triage.recipe import (
@@ -112,6 +113,8 @@ class ProbeExtras:
     custom_patterns: tuple[CompiledPattern, ...] = ()
     hang_window_sec: float = DEFAULT_HANG_WINDOW_SEC
     hang_grace_period_at_start: float = DEFAULT_HANG_GRACE_SEC
+    # Phase 3 (issue #188): redaction block consumed by ``aorta bundle``.
+    redaction: RedactionCfg | None = None
 
 
 def _ensure_str_list(path_hint: str, raw: Any, *, allow_empty: bool = False) -> list[str]:
@@ -298,6 +301,8 @@ def build_probe_recipe_from_dict(
         default=DEFAULT_HANG_GRACE_SEC,
         allow_zero=True,
     )
+    redaction_raw = data.get("redaction")
+    redaction = parse_redaction(redaction_raw) if redaction_raw is not None else None
 
     # confound block is permitted (already in _PROBE_TOP_LEVEL) but
     # not meaningful for Tier-1-only Phase 1 -- pass it through with
@@ -420,6 +425,7 @@ def build_probe_recipe_from_dict(
         custom_patterns=custom_patterns,
         hang_window_sec=hang_window_sec,
         hang_grace_period_at_start=hang_grace_period_at_start,
+        redaction=redaction,
     )
 
     return Recipe(

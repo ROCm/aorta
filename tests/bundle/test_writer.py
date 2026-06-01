@@ -321,18 +321,50 @@ def test_bundle_run_dir_review_no_aborts_with_typed_error(synthetic_run_dir, tmp
     assert not out.exists()
 
 
-# --- redaction-from flag is honoured but no-op until #188 Phase 3 ---------
+# --- redaction-from via CLI uses RedactingRedactor when recipe has block ---
 
 
-def test_bundle_run_dir_redaction_from_logged_when_present(synthetic_run_dir, tmp_path, caplog):
-    """Acceptance: --redaction-from is wired through (not yet consumed)."""
-    recipe = synthetic_run_dir / "recipe.resolved.yaml"  # already created by fixture
-    out = tmp_path / "out.tar.gz"
-    with caplog.at_level("INFO", logger="aorta.bundle.writer"):
-        bundle_run_dir(synthetic_run_dir, output=out, redaction_from=recipe)
-    assert any(
-        "aorta.probe.redaction is gated on issue #188 Phase 3" in r.message for r in caplog.records
+def test_bundle_cli_redaction_from_applies_scrubbers(synthetic_run_dir, tmp_path):
+    """Phase 3: --redaction-from loads redaction: and scrubs bundled files."""
+    recipe = synthetic_run_dir / "recipe.resolved.yaml"
+    recipe.write_text(
+        """\
+schema_version: 1
+mode: probe
+trials: 1
+mitigation_axis: [none]
+diagnostic_axis: [none]
+redaction:
+  scrub_env_keys: ["AWS_*"]
+  scrub_paths: true
+  scrub_ip_addresses: true
+""",
+        encoding="utf-8",
     )
+    trial = synthetic_run_dir / "none-none" / "trial_0"
+    trial.joinpath("stdout.log").write_text(
+        "host 10.0.0.1 path /var/secret/data\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.tar.gz"
+    from click.testing import CliRunner
+
+    from aorta.cli import main
+
+    result = CliRunner().invoke(
+        main,
+        ["bundle", str(synthetic_run_dir), "--redaction-from", str(recipe), "--output", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    import tarfile
+
+    from aorta.bundle import MANIFEST_FILENAME, Manifest
+
+    with tarfile.open(out, "r:gz") as tar:
+        member = next(n for n in tar.getnames() if n.endswith(MANIFEST_FILENAME))
+        manifest = Manifest.from_json(tar.extractfile(member).read().decode("utf-8"))
+    assert manifest.redaction_applied is True
+    assert manifest.redactor_kind == "probe.v1"
 
 
 # --- bundle name + timestamp -----------------------------------------------

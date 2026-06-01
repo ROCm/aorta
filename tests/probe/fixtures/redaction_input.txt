@@ -1,0 +1,10 @@
+AWS_SECRET_ACCESS_KEY=supersecret
+HOME=/home/customer/project
+USER=customer
+PATH=/usr/local/bin:/usr/bin
+SAFE_VAR=keep-me
+LOG=/home/customer/project/run.log
+Connecting to 192.168.1.42:8080 from /home/customer/project/data/input
+Also saw fe80::1 and 2001:db8::1 on /var/log/training/stdout.backup
+Duplicate path /home/customer/project/data/input again
+Third path /opt/rocm/lib mentioned twice: /opt/rocm/lib and /opt/rocm/lib

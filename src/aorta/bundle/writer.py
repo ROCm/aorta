@@ -414,7 +414,6 @@ def bundle_run_dir(
     *,
     ticket: str | None = None,
     output: Path | None = None,
-    redaction_from: Path | None = None,
     redactor: Redactor | None = None,
     review_callback: Callable[[Manifest], bool] | None = None,
     now: _dt.datetime | None = None,
@@ -434,18 +433,11 @@ def bundle_run_dir(
             :class:`NoTicketError` when no override is supplied.
         output: Where to write the tarball; defaults to
             ``./<bundle-name>.tar.gz``.
-        redaction_from: Recipe path to load the ``redaction:``
-            block from. Until Phase 3 of issue #188 ships
-            ``aorta.probe.redaction``, the parameter is recorded in
-            log output but NOT consumed -- the redactor stays
-            :class:`IdentityRedactor`. The function signature is
-            ready for #188 to wire the real loader in; that loader
-            will own the ``<run-dir>/recipe.resolved.yaml`` fallback
-            when it ships (today there is no fallback -- explicit
-            paths only).
-        redactor: Override the default :class:`IdentityRedactor`
-            (test injection point + Phase 3 of #188 hand-off
-            point).
+        redactor: Redactor implementation. Defaults to
+            :class:`IdentityRedactor`. The CLI resolves a
+            :class:`~aorta.probe.redaction.RedactingRedactor` from
+            ``--redaction-from`` / ``recipe.resolved.yaml`` before
+            calling this function.
         review_callback: Called with the staged :class:`Manifest`
             right before the tarball is written. Return ``True``
             to proceed, ``False`` to abort. Aborting raises
@@ -460,19 +452,6 @@ def bundle_run_dir(
     run_dir = run_dir.resolve()
     _validate_run_dir(run_dir)
     resolved_ticket = resolve_ticket(run_dir, ticket)
-
-    if redaction_from is not None:
-        # Phase 3 of #188 will read the recipe's ``redaction:`` block
-        # here and instantiate ``aorta.probe.redaction.RedactingRedactor``.
-        # Until then we honor the flag's existence (operator can wire
-        # it through pipelines today) but log that the scrubbers are
-        # not yet active.
-        log.info(
-            "aorta bundle: --redaction-from %s ignored: "
-            "aorta.probe.redaction is gated on issue #188 Phase 3 "
-            "and the bundle will be written with the IdentityRedactor.",
-            redaction_from,
-        )
 
     effective_redactor = redactor if redactor is not None else IdentityRedactor()
     bundle_name = f"{safe_slug(resolved_ticket)}-{_bundle_timestamp(now)}"

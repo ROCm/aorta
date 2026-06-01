@@ -95,13 +95,14 @@ def test_pass_minimum_result_shape(tmp_path):
     assert result_path.is_file()
     doc = json.loads(result_path.read_text(encoding="utf-8"))
     # FR 1.12: minimum shape.
-    for key in ("verdict", "exit_code", "walltime_sec", "argv", "cell_name", "trial_index"):
+    for key in ("verdict", "exit_code", "walltime_sec", "argv", "cell_name", "trial_index", "env"):
         assert key in doc, f"missing required key {key} in result.json"
     assert doc["verdict"] == "pass"
     assert doc["exit_code"] == 0
     assert doc["argv"] == ["true"]
     assert doc["cell_name"] == "none-none"
     assert doc["trial_index"] == 0
+    assert isinstance(doc["env"], dict)
     assert isinstance(doc["walltime_sec"], (int, float))
     # stdout.log and stderr.log written.
     assert (trial_dir / "stdout.log").is_file()

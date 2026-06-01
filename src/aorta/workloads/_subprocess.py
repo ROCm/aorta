@@ -518,6 +518,7 @@ class SubprocessWorkload(Workload):
             # them (rubric §2.B FR 2.9).
             "env_passthrough_mode": env_mode,
             "timed_out": timed_out,
+            "env": dict(cell_env_snapshot),
         }
         result_path.write_text(
             json.dumps(result_doc, indent=2, sort_keys=False),

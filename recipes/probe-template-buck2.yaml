@@ -1,0 +1,26 @@
+# Generic probe handout template for buck2 run-style launches.
+# Usage:
+#   aorta probe --recipe recipes/probe-template-buck2.yaml \
+#       --output ./probe-out --ticket TICKET-1234 -- \
+#       buck2 run //path/to:target -- --flag value
+schema_version: 1
+mode: probe
+ticket: TICKET-1234
+trials: 3
+timeout_per_trial: 1800
+
+mitigation_axis: [none, tf32_off]
+diagnostic_axis: [none, xnack]
+
+collect_paths:
+  - ${AORTA_ARTIFACT_DIR}/stdout.log
+  - ${AORTA_ARTIFACT_DIR}/stderr.log
+
+confound:
+  threshold: 1.15
+  baseline_cell: none-none
+
+redaction:
+  scrub_env_keys: ["AWS_*", "GCP_*", "*_TOKEN", "*_KEY", "USER", "HOME"]
+  scrub_paths: true
+  scrub_ip_addresses: true

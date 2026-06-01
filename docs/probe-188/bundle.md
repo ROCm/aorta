@@ -4,12 +4,10 @@
 > This command is the prerequisite for `aorta probe` Phase 3 (issue #188).
 
 `aorta bundle` packages a probe run directory into a single
-shareable tarball, applying recipe-specified redaction along the way.
-It does **not** ship its own scrubbers; that work lives in
-`aorta.probe.redaction` (Phase 3 of #188). Until Phase 3 lands the
-bundle command runs with the built-in `IdentityRedactor` — every
-file is copied byte-for-byte and the per-file redaction counts in
-the manifest are zero.
+shareable tarball, applying recipe-specified redaction via
+`aorta.probe.redaction.RedactingRedactor` when the recipe (or
+`<run-dir>/recipe.resolved.yaml`) includes a `redaction:` block.
+Otherwise the built-in `IdentityRedactor` copies bytes through.
 
 ## CLI
 
@@ -34,7 +32,7 @@ streamed through the redactor and copied into the staging tree.
 | `--ticket TICKET`     | inferred from `<run-dir>` basename           | Cross-check against the probe artifact tree; required when the basename is `_no_ticket_`.       |
 | `--review`            | off                                          | Print the manifest summary and pause for `[y/N]` confirmation before writing the tarball.       |
 | `--output PATH`       | `./<safe_slug(ticket)>-<UTC-timestamp>.tar.gz` | Where to write the bundle tarball. An *existing* directory drops the default filename inside it; any other PATH is used verbatim as the tarball filename. The ticket is slugified for filesystem safety (spaces/slashes → `_`). |
-| `--redaction-from F`  | (none today)                                 | Recipe to read the `redaction:` block from. Phase 3 of #188 wires the actual scrubbers in and will add the auto-fallback to `<run-dir>/recipe.resolved.yaml`. Today an explicit path is required to log a redaction-from line at all; without it the bundle runs through the `IdentityRedactor`. |
+| `--redaction-from F`  | auto: `<run-dir>/recipe.resolved.yaml`       | Recipe whose `redaction:` block governs scrubbers. Explicit path overrides the auto-fallback. Without a `redaction:` block, `IdentityRedactor` runs (no scrubbing). |
 
 ### Ticket resolution
 
@@ -108,11 +106,8 @@ unpacking the whole tree.
 * `path` is **relative to `<bundle-name>/`** (matches the path the
   reader gets after `tar -xzf ...`). Forward slashes regardless of
   host OS.
-* `redaction_applied` is `false` while the only redactor is
-  `IdentityRedactor` (the default until #188 Phase 3 ships).
-* `redactor_kind` is a stable string identifier the redactor
-  reports (currently `"identity"`; #188 Phase 3 will register e.g.
-  `"probe.v1"`).
+* `redaction_applied` is `true` when any file had non-zero env/path/ip counts.
+* `redactor_kind` is `"identity"` (no scrubbing) or `"probe.v1"` (Phase 3 redactor).
 * `source_run_dir` records **only the leaf directory name** (the
   per-ticket segment), never the operator's absolute path. A bundle
   is a shareable artifact, so the full path is deliberately withheld
@@ -151,11 +146,10 @@ def scrub_file(self, src: Path, dst: Path) -> RedactionCounts: ...
   plus `bytes_in` / `bytes_out`.
 
 The default `IdentityRedactor` calls `shutil.copyfile(src, dst)`
-and returns zeros. `aorta.probe.redaction` (Phase 3 of #188) will
-ship a `RedactingRedactor` that the bundle CLI can pick up via the
-`--redaction-from` flag once that module lands. **`aorta bundle`
-does not own the scrubbers** — the issue #196 contract is
-explicit on this.
+and returns zeros. `RedactingRedactor` in `aorta.probe.redaction`
+implements the scrubbers described in [`redaction.md`](redaction.md).
+**`aorta bundle` does not own the scrubber logic** — it only invokes
+the `Redactor` protocol.
 
 ## Originals are never modified
 
@@ -184,7 +178,6 @@ see a clean error message instead of a Python traceback.
 * Network upload of bundles.
 * Bundle decryption / unpacking utilities.
 * Auto-detection of secrets beyond what the recipe's `redaction:`
-  block specifies — Phase 3 of #188 owns that policy.
-* Implementing `aorta.probe.redaction` itself. Until that module
-  lands, the redactor is the no-op `IdentityRedactor` and the
-  manifest's per-file counts are zero.
+  block specifies — see [`redaction.md`](redaction.md).
+* Re-implementing scrubbers inside `aorta.bundle` (they live in
+  `aorta.probe.redaction`).

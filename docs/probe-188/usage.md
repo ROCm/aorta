@@ -1,14 +1,12 @@
-# `aorta probe` — Usage Walkthrough (issue #188, Phases 1+2)
+# `aorta probe` — Usage Walkthrough (issue #188, Phases 1–3)
 
 > **Phase 1 (Tier 1 only)**: verdict is `exit_code == 0 ? "pass" : "fail"`.
-> **Phase 2 (this walkthrough)**: five-tier classifier (`tier1:` process,
-> `tier2:` hang, `tier3:` kernel + GPU, `tier4:` built-in pattern library,
-> `custom:` user patterns), plus a sandboxed `condition:` evaluator for
-> custom patterns and a `--list-patterns` flag. No bundling /
-> redaction in this phase — see §3 of the rubric.
+> **Phase 2**: five-tier classifier + `custom_patterns` + `--list-patterns`.
+> **Phase 3 (this section)**: `redaction:` recipe block, `aorta bundle`,
+> handout templates — see [redaction.md](redaction.md) and [bundle.md](bundle.md).
 >
-> See [classifier.md](classifier.md) for the full detector-ID reference
-> and [sandbox.md](sandbox.md) for the `condition` whitelist.
+> See [classifier.md](classifier.md) for detector IDs and [sandbox.md](sandbox.md)
+> for the `condition` whitelist.
 
 `aorta probe` runs an **opaque user launch command** across the
 cartesian product of a **mitigation axis × diagnostic axis**, in an
@@ -230,3 +228,37 @@ flag short-circuits before recipe loading.
 `aorta.triage.runner.run_recipe` — there is no parallel runner. The
 shared-engine contract is pinned by
 `tests/probe/test_shared_engine.py`.
+
+## 9. Redaction + bundle (Phase 3)
+
+After a probe run completes, package the ticket leaf for sharing:
+
+```bash
+aorta bundle ./probe_results/ROCM-1234/ --review
+```
+
+* Redaction policy comes from the recipe's `redaction:` block.
+* When `--redaction-from` is omitted, `aorta bundle` auto-loads
+  `./probe_results/ROCM-1234/recipe.resolved.yaml` when present.
+* Without a `redaction:` block, files are copied byte-for-byte
+  (`IdentityRedactor`, zero counts in `manifest.json`).
+
+### `result.json::env`
+
+Every trial's `result.json` includes an `env` object with the cell's
+resolved mitigation + diagnostic env bundle. The bundle scrubber removes
+keys matching `scrub_env_keys` from that block (and from `probe.env` /
+`host_env.json`).
+
+Example minimal `redaction:` block:
+
+```yaml
+redaction:
+  scrub_env_keys: ["AWS_*", "*_TOKEN", "USER", "HOME"]
+  scrub_paths: true
+  scrub_ip_addresses: true
+```
+
+Handout templates: [handout-templates.md](handout-templates.md).
+Scrubber reference: [redaction.md](redaction.md).
+Bundle CLI reference: [bundle.md](bundle.md).

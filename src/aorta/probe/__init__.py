@@ -12,25 +12,29 @@ Phase 1 (issue #188) shipped the MVP:
 * re-running with the same ``--output`` skips cells whose
   ``result.json`` is valid and carries a non-empty ``verdict``.
 
-Phase 2 has shipped on top of Phase 1: the five-tier classifier lives
-in :mod:`aorta.probe.classifier` and the AST-whitelisted ``condition``
-evaluator in :mod:`aorta.probe.sandbox`. ``custom_patterns`` are
-compiled at recipe-load time and resolved post-exit by the workload;
-detector IDs land in ``result.json::failure_detectors_fired`` /
-``warn_detectors_fired``.
+Phase 2: five-tier classifier in :mod:`aorta.probe.classifier` and the
+AST-whitelisted ``condition`` evaluator in :mod:`aorta.probe.sandbox`.
 
-Phase 3 (``aorta bundle`` integration + redaction + handout templates)
-is tracked separately (issue #196) and is NOT yet implemented.
+Phase 3: redaction scrubbers in :mod:`aorta.probe.redaction`, bundle
+integration via :mod:`aorta.probe.bundle_hook`, and handout templates
+under ``recipes/probe-template-*.yaml``.
 """
 
+from aorta.probe.bundle_hook import build_redactor_from_recipe, load_redaction_cfg
 from aorta.probe.recipe_builder import (
     ProbeExtras,
     build_probe_recipe_from_dict,
 )
+from aorta.probe.redaction import RedactingRedactor, RedactionCfg, parse_redaction
 from aorta.probe.resume import is_trial_complete
 
 __all__ = [
     "ProbeExtras",
+    "RedactionCfg",
+    "RedactingRedactor",
     "build_probe_recipe_from_dict",
+    "build_redactor_from_recipe",
     "is_trial_complete",
+    "load_redaction_cfg",
+    "parse_redaction",
 ]
