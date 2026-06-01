@@ -6,6 +6,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from aorta.probe.redaction import (
     RedactingRedactor,
     RedactionCfg,
@@ -81,6 +83,27 @@ def test_ip_rewrite():
     assert "<IPV4:0>" in out
     assert "<IPV6:0>" in out
     assert "192.168.0.1" not in out
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "loopback ::1 ok",
+        "fe80 link fe80::1 ok",
+        "bracket [::1] ok",
+        "url http://[::1]:8080/path",
+    ],
+)
+def test_ipv6_compressed_and_bracketed_forms(snippet: str):
+    out, _, v4, v6 = scrub_text(
+        snippet,
+        scrub_paths=False,
+        scrub_ip_addresses=True,
+    )
+    assert v4 == 0
+    assert v6 >= 1
+    assert "::1" not in out
+    assert "[::1]" not in out
 
 
 def test_redactor_kind_string():

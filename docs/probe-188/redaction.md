@@ -50,7 +50,10 @@ bundle is written.
   `N` deduplicates within a single file (restarts per bundled file). **No reverse
   mapping** from `<PATH:N>` back to the original path is written anywhere.
 * **IPv4:** validated with `ipaddress.ip_address` before rewrite → `<IPV4:N>`.
-* **IPv6:** coarse scan + `ipaddress` validation → `<IPV6:N>`.
+* **IPv6:** bracketed literals (`[::1]`, `[2001:db8::1]`) and compressed
+  unbracketed forms (`::1`, `fe80::1`) are matched without relying on word
+  boundaries; each candidate is validated with `ipaddress` before rewrite →
+  `<IPV6:N>`.
 * IPv4 and IPv6 counters are summed into the manifest's `ips_rewritten` field.
 
 ## DoS bound

@@ -37,8 +37,19 @@ _IPV4_RE = re.compile(
     r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
 )
 
-# IPv6 candidate -- coarse scan; only matches validated by ipaddress.
-_IPV6_CANDIDATE_RE = re.compile(r"\b(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}\b")
+# IPv6 bracketed literal (URL/log form): [::1], [2001:db8::1]
+_IPV6_BRACKETED_RE = re.compile(r"\[([0-9a-fA-F:.]+)\]")
+
+# IPv6 unbracketed -- no leading \b (allows ::1 / ::); validated via ipaddress.
+_IPV6_UNBRACKETED_RE = re.compile(
+    r"(?<![0-9a-fA-F:.])"
+    r"(?:"
+    r"(?:[0-9a-fA-F]{0,4}:)+[0-9a-fA-F]{0,4}|"
+    r"::(?:[0-9a-fA-F]{0,4}:){0,6}[0-9a-fA-F]{0,4}|"
+    r"[0-9a-fA-F]{0,4}::(?:[0-9a-fA-F]{0,4}:){0,6}[0-9a-fA-F]{0,4}"
+    r")"
+    r"(?![0-9a-fA-F:.])"
+)
 
 _VALID_REDACTION_KEYS = frozenset({"scrub_env_keys", "scrub_paths", "scrub_ip_addresses"})
 
@@ -156,21 +167,32 @@ def _scrub_paths_in_text(text: str, path_index: _PathIndex) -> str:
     return _PATH_RE.sub(lambda m: path_index.replace(m), text)
 
 
+def _rewrite_ipv6(candidate: str, ip_index: _IpIndex) -> str | None:
+    """Return ``<IPV6:N>`` when ``candidate`` is a valid IPv6 address."""
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+    if addr.version != 6:
+        return None
+    return ip_index._replace(candidate, v4=False)
+
+
 def _scrub_ips_in_text(text: str, ip_index: _IpIndex) -> str:
     if not text:
         return text
 
-    def _v6_sub(match: re.Match[str]) -> str:
-        candidate = match.group(0)
-        try:
-            addr = ipaddress.ip_address(candidate)
-        except ValueError:
-            return candidate
-        if addr.version != 6:
-            return candidate
-        return ip_index._replace(candidate, v4=False)
+    def _bracketed_v6_sub(match: re.Match[str]) -> str:
+        repl = _rewrite_ipv6(match.group(1), ip_index)
+        return repl if repl is not None else match.group(0)
 
-    text = _IPV6_CANDIDATE_RE.sub(_v6_sub, text)
+    text = _IPV6_BRACKETED_RE.sub(_bracketed_v6_sub, text)
+
+    def _unbracketed_v6_sub(match: re.Match[str]) -> str:
+        repl = _rewrite_ipv6(match.group(0), ip_index)
+        return repl if repl is not None else match.group(0)
+
+    text = _IPV6_UNBRACKETED_RE.sub(_unbracketed_v6_sub, text)
 
     def _v4_sub(match: re.Match[str]) -> str:
         candidate = match.group(0)
