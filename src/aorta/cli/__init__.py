@@ -2,7 +2,7 @@
 
 import click
 
-from aorta.cli import env, environments, mitigations, probe, run, triage
+from aorta.cli import bundle, env, environments, mitigations, probe, run, triage
 
 
 @click.group()
@@ -11,6 +11,7 @@ def main() -> None:
     """AORTA - GPU debugging platform for ROCm."""
 
 
+main.add_command(bundle.bundle)
 main.add_command(env.env)
 main.add_command(environments.environments)
 main.add_command(mitigations.mitigations)
