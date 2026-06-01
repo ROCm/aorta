@@ -9,19 +9,15 @@ from aorta.registry.errors import (
 )
 from aorta.registry.mitigations import BUILTIN_MITIGATIONS, get_mitigation, load_mitigations
 
-# Pre-issue-#195 built-ins. Listed separately so the drift test below
-# can subtract them from BUILTIN_MITIGATIONS to compute the set the
-# probe-flag expected dict must cover.
-_CORE_BUILTINS = frozenset({"none", "tf32_off", "xnack"})
-
-# Independently-spelled expected env-var bundles for every non-core built-in
+# Independently-spelled expected env-var bundles for every built-in
 # registered by issue #195. Hand-spelled (NOT derived from BUILTIN_MITIGATIONS)
 # so a typo in the registry source -- e.g., HSA_NO_SCRATCH_RECLAM vs
 # HSA_NO_SCRATCH_RECLAIM, or "extendable_segments:True" instead of
 # "expandable_segments:True" -- fails the parametrised assertion. The companion
-# drift test (`test_probe_flag_expected_dict_matches_registry_set`) pins
-# set equality so this dict cannot silently fall behind the registry when
-# a new entry is added or removed.
+# drift test (``test_probe_flag_expected_dict_subset_of_registry``) catches
+# removals/renames but does not require set equality with all non-core
+# built-ins, so future built-ins added for unrelated reasons aren't forced
+# into this probe-flag-specific dict.
 PROBE_FLAG_BUILTIN_EXPECTED: dict[str, dict[str, str]] = {
     "amd_log_level_4": {"AMD_LOG_LEVEL": "4"},
     "debug_clr_no_batch_cpu_sync": {"DEBUG_CLR_BATCH_CPU_SYNC_SIZE": "0"},
@@ -111,20 +107,26 @@ def test_probe_flag_builtin_mitigation_env_bundles(name: str, expected_env: dict
     assert get_mitigation(name) == expected_env
 
 
-def test_probe_flag_expected_dict_matches_registry_set():
-    """Drift detector for `PROBE_FLAG_BUILTIN_EXPECTED`.
+def test_probe_flag_expected_dict_subset_of_registry():
+    """One-way drift detector for ``PROBE_FLAG_BUILTIN_EXPECTED``.
 
-    Adding a new built-in to ``BUILTIN_MITIGATIONS`` without listing it
-    here (or removing one without trimming this dict) fails the test --
-    catching the silent-coverage-drift the previous comprehension-based
-    expected dict could not. Set equality is asserted rather than dict
-    equality so the env-var bundle assertion above (which uses the
-    hand-spelled values) stays the sole spelling checker.
+    Asserts every name listed here still exists in ``BUILTIN_MITIGATIONS``
+    so a registry removal or rename fails this test instead of the more
+    confusing parametrised ``UnknownMitigationError`` further down. The
+    check is intentionally *one-way*: built-ins added to the registry
+    for unrelated reasons should not be forced into this issue-#195
+    expected dict, so we don't assert set equality against all non-core
+    built-ins (a previous version coupled unrelated registry evolution
+    to this dict; see PR #198 round-2 review).
+
+    New probe-flag entries are caught indirectly: anyone adding a
+    built-in that belongs in the issue-#195 sweep set is expected to
+    add the matching key here as well -- there is no automated way to
+    distinguish "probe-flag" built-ins from other future built-ins
+    without a curated tag.
     """
-    registry_non_core = set(BUILTIN_MITIGATIONS) - _CORE_BUILTINS
-    missing = registry_non_core - set(PROBE_FLAG_BUILTIN_EXPECTED)
-    unexpected = set(PROBE_FLAG_BUILTIN_EXPECTED) - registry_non_core
-    assert not missing and not unexpected, (
-        f"PROBE_FLAG_BUILTIN_EXPECTED drifted from BUILTIN_MITIGATIONS: "
-        f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+    missing = set(PROBE_FLAG_BUILTIN_EXPECTED) - set(BUILTIN_MITIGATIONS)
+    assert not missing, (
+        "PROBE_FLAG_BUILTIN_EXPECTED references names no longer in "
+        f"BUILTIN_MITIGATIONS (removed or renamed?): {sorted(missing)}"
     )

@@ -28,7 +28,14 @@ def test_help_lists_documented_flags():
     result = runner.invoke(probe, ["--help"])
     assert result.exit_code == 0
     out = result.output
-    for flag in ("--recipe", "--output", "--ticket", "--dry-run", "--env-passthrough-mode"):
+    for flag in (
+        "--recipe",
+        "--output",
+        "--ticket",
+        "--dry-run",
+        "--env-passthrough-mode",
+        "--mitigations-file",
+    ):
         assert flag in out, f"missing flag {flag} in --help output"
     # Trailing-argv usage line:
     assert "ARGV" in out or "argv" in out
@@ -427,6 +434,116 @@ def test_aorta_help_after_value_taking_option_still_works(tmp_path):
     )
     assert result.exit_code == 0
     assert "ARGV" in result.output or "argv" in result.output
+
+
+# ---- PR #198 round-2 review: --mitigations-file plumbed through to load_recipe ----
+
+
+def test_mitigations_file_resolves_sidecar_only_name(monkeypatch, tmp_path):
+    """``aorta probe --mitigations-file <sidecar>`` makes sidecar-only
+    names resolve at recipe load time.
+
+    Regression for PR #198 review (issue #195): the new flag is forwarded
+    to ``load_recipe(..., sidecar_files=...)``. Without coverage, a typo
+    in the kwarg name or a missing ``or None`` normalisation would slip
+    through. Patches ``run_recipe`` so this is a CLI-plumbing test, not
+    an end-to-end one.
+    """
+    mock = MagicMock(return_value=tmp_path / "run-dir")
+    monkeypatch.setattr(probe_cli, "run_recipe", mock)
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_needs_sidecar.yaml"),
+            "--mitigations-file",
+            str(FIXTURES / "probe_sidecar.json"),
+            "--output",
+            str(tmp_path / "out"),
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock.assert_called_once()
+
+
+def test_missing_mitigations_file_for_sidecar_recipe_fails(tmp_path):
+    """Omitting ``--mitigations-file`` for a recipe that references a
+    sidecar-only mitigation surfaces ``UnknownMitigationError`` as a
+    ``ClickException`` (exit non-zero, no traceback).
+
+    The error message must name the missing mitigation so operators
+    can map back to the sidecar JSON they forgot to pass.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_needs_sidecar.yaml"),
+            "--output",
+            str(tmp_path / "out"),
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "sidecar_only_mitigation" in result.output
+
+
+def test_mitigations_file_is_repeatable(monkeypatch, tmp_path):
+    """Two ``--mitigations-file`` flags both contribute names to the
+    resolver. Pins the ``multiple=True`` contract.
+    """
+    mock = MagicMock(return_value=tmp_path / "run-dir")
+    monkeypatch.setattr(probe_cli, "run_recipe", mock)
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_needs_two_sidecars.yaml"),
+            "--mitigations-file",
+            str(FIXTURES / "probe_sidecar.json"),
+            "--mitigations-file",
+            str(FIXTURES / "probe_sidecar_two.json"),
+            "--output",
+            str(tmp_path / "out"),
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock.assert_called_once()
+
+
+def test_mitigations_file_nonexistent_path_rejected(tmp_path):
+    """Click's ``Path(exists=True)`` fires for ``--mitigations-file`` so a
+    typo'd path exits non-zero with a clear message instead of being
+    silently dropped on the way into ``load_recipe``.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        probe,
+        [
+            "--recipe",
+            str(FIXTURES / "probe_minimal.yaml"),
+            "--mitigations-file",
+            str(tmp_path / "does-not-exist.json"),
+            "--output",
+            str(tmp_path / "out"),
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "does not exist" in result.output
 
 
 # ---- PR #194 round-3 review: exec-time errors land as Tier-1 fails ----

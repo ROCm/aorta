@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "mitigations": {
+    "sidecar_only_mitigation": {
+      "SIDECAR_ONLY_FLAG": "1"
+    }
+  }
+}

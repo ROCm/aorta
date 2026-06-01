@@ -1,0 +1,10 @@
+schema_version: 1
+mode: probe
+ticket: PROBE-188-SIDECAR-MULTI
+trials: 1
+mitigation_axis:
+  - none
+  - sidecar_only_mitigation
+  - sidecar_only_second
+diagnostic_axis:
+  - none
