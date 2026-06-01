@@ -37,6 +37,7 @@ from pathlib import Path
 
 from aorta.bundle.errors import (
     BundleAbortedError,
+    BundleIOError,
     EmptyRunDirError,
     NoTicketError,
     RunDirNotFoundError,
@@ -68,11 +69,19 @@ def _bundle_timestamp(now: _dt.datetime | None = None) -> str:
     """Filesystem-safe UTC timestamp for the bundle's directory + filename.
 
     ISO-8601 with colons replaced by dashes (Windows-friendly), to
-    millisecond precision (``%f`` truncated to ms) so two bundles
-    written in quick succession do not collide on the same name.
+    millisecond precision so two bundles written in quick succession
+    (e.g. back-to-back CI invocations) do not collide on the same
+    name -- a collision would also fail the staging
+    ``mkdir(exist_ok=False)`` and abort the second run, so this is
+    a correctness concern, not just a cosmetic one.
+
+    The format is ``%Y-%m-%dT%H-%M-%S-<ms>`` with ``<ms>`` zero-padded
+    to three digits (``microsecond // 1000``). Plain ``%f`` would give
+    six digits, which is more entropy than we need and clutters the
+    filename.
     """
     now = now or _dt.datetime.now(_dt.timezone.utc)
-    return now.strftime("%Y-%m-%dT%H-%M-%S")
+    return f"{now.strftime('%Y-%m-%dT%H-%M-%S')}-{now.microsecond // 1000:03d}"
 
 
 def resolve_ticket(run_dir: Path, ticket_flag: str | None) -> str:
@@ -146,13 +155,20 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
     """Walk ``run_dir`` and return every regular file in deterministic order.
 
     Order is sorted alphabetic on the relative POSIX path. That
-    matters for two reasons:
+    matters because:
 
     * Manifests round-trip byte-equivalently across hosts (no
-      ``os.walk`` insertion-order surprises).
-    * Tarball entry order is reproducible, which makes
-      ``sha256(<bundle>.tar.gz)`` comparisons across machines
-      meaningful when nothing else changed.
+      ``os.walk`` insertion-order surprises) -- two bundles of the
+      same source tree on different hosts produce identical
+      manifests modulo the timestamp / source path fields.
+    * Tarball entry order is reproducible at the entry-list level
+      (``tar -tzf <bundle>`` lists files in the same order
+      everywhere). Note that the resulting tarball **bytes** are
+      NOT bit-identical across hosts: ``tarfile`` and ``gzip`` embed
+      mtime / uid / gid / gzip-header timestamp by default, and the
+      writer does not normalise them. If a downstream consumer needs
+      cryptographic equality across machines they should hash the
+      manifest, not the tarball.
 
     Symlinks are followed via ``Path.is_file`` semantics; an
     operator who symlinks an external directory into their probe
@@ -320,7 +336,10 @@ def bundle_run_dir(
             ``aorta.probe.redaction``, the parameter is recorded in
             log output but NOT consumed -- the redactor stays
             :class:`IdentityRedactor`. The function signature is
-            ready for #188 to wire the real loader in.
+            ready for #188 to wire the real loader in; that loader
+            will own the ``<run-dir>/recipe.resolved.yaml`` fallback
+            when it ships (today there is no fallback -- explicit
+            paths only).
         redactor: Override the default :class:`IdentityRedactor`
             (test injection point + Phase 3 of #188 hand-off
             point).
@@ -357,18 +376,29 @@ def bundle_run_dir(
 
     with tempfile.TemporaryDirectory(prefix="aorta-bundle-") as staging_str:
         staging = Path(staging_str)
-        manifest = stage_run_dir(
-            run_dir,
-            staging,
-            bundle_name,
-            redactor=effective_redactor,
-            ticket=resolved_ticket,
-            aorta_version=_aorta_version(),
-            now=now,
-        )
+        try:
+            manifest = stage_run_dir(
+                run_dir,
+                staging,
+                bundle_name,
+                redactor=effective_redactor,
+                ticket=resolved_ticket,
+                aorta_version=_aorta_version(),
+                now=now,
+            )
+        except OSError as exc:
+            # Filesystem failure during staging (redactor scrub_file,
+            # shutil.copyfile, or manifest write). The Redactor ABC
+            # docstring promises BundleError-shaped failures here,
+            # so wrap before letting Click see it. The original
+            # OSError is preserved on .cause for ops tooling.
+            raise BundleIOError(run_dir=run_dir, cause=exc) from exc
         if review_callback is not None and not review_callback(manifest):
             raise BundleAbortedError(run_dir=run_dir)
-        return write_tarball(staging, bundle_name, _default_output_path(bundle_name, output))
+        try:
+            return write_tarball(staging, bundle_name, _default_output_path(bundle_name, output))
+        except OSError as exc:
+            raise BundleIOError(run_dir=run_dir, cause=exc) from exc
 
 
 __all__ = [

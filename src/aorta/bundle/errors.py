@@ -78,9 +78,11 @@ class EmptyRunDirError(BundleError):
 class BundleAbortedError(BundleError):
     """Raised when ``--review`` was passed and the operator answered ``n``.
 
-    Carries the manifest summary that was shown so a CLI test can
-    assert the operator was given the documented context before the
-    abort.
+    Carries the source ``run_dir`` so the CLI can render a "no
+    tarball was written; run dir untouched" message. The rendered
+    review summary is printed to ``stdout`` by the review callback
+    BEFORE the prompt -- it is not stored on the exception (CLI tests
+    assert against captured stdout, not against this class).
     """
 
     def __init__(self, run_dir: Path) -> None:
@@ -88,4 +90,29 @@ class BundleAbortedError(BundleError):
         super().__init__(
             f"aorta bundle: review-pause aborted by operator (run dir "
             f"{run_dir}). No tarball was written."
+        )
+
+
+class BundleIOError(BundleError):
+    """Raised when a filesystem error escapes the staging / tarball pipeline.
+
+    Wraps ``OSError`` from the redactor's ``scrub_file`` (and the
+    underlying ``shutil.copyfile``), from ``tarfile.add`` /
+    ``tarfile.open``, and from manifest writes so the CLI shim
+    surfaces a clean ``ClickException`` instead of a Python
+    traceback. The ``Redactor`` ABC docstring documents this wrap;
+    the writer is the place that performs it.
+
+    Carries the ``run_dir`` and the original ``OSError`` so a future
+    test or ops tool can grade whether the failure was a permissions
+    problem (``PermissionError``), out of disk (``ENOSPC``), or
+    something else without parsing the rendered message.
+    """
+
+    def __init__(self, run_dir: Path, cause: OSError) -> None:
+        self.run_dir = run_dir
+        self.cause = cause
+        super().__init__(
+            f"aorta bundle: filesystem error while bundling {run_dir}: "
+            f"{type(cause).__name__}: {cause}. No tarball was written."
         )

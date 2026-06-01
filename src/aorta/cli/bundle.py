@@ -93,8 +93,13 @@ def _render_review_summary(manifest: Manifest) -> str:
     default=None,
     help=(
         "Where to write the tarball. Default: '<ticket>-<UTC-timestamp>.tar.gz' "
-        "in the current directory. A directory value drops the default "
-        "filename inside it."
+        "in the current directory. If PATH is an EXISTING directory the "
+        "default filename is dropped inside it; otherwise PATH is "
+        "treated verbatim as the tarball filename (the parent is "
+        "created if missing). 'aorta bundle ./bundles' will write a "
+        "file literally named 'bundles' unless that directory already "
+        "exists -- create it first with mkdir if you want directory "
+        "semantics."
     ),
 )
 @click.option(
@@ -103,11 +108,13 @@ def _render_review_summary(manifest: Manifest) -> str:
     default=None,
     help=(
         "Recipe whose 'redaction:' block governs scrubber behaviour. "
-        "Falls back to '<run-dir>/recipe.resolved.yaml' if present. "
         "NOTE: until 'aorta probe' Phase 3 (issue #188) ships "
         "'aorta.probe.redaction', this flag is logged but not yet "
         "consumed -- bundles run with the IdentityRedactor (no "
-        "scrubbing, zero per-file counts)."
+        "scrubbing, zero per-file counts). Phase 3 will also add "
+        "the auto-fallback to '<run-dir>/recipe.resolved.yaml' "
+        "when this flag is omitted; today an explicit path is "
+        "required to log a redaction-from line at all."
     ),
 )
 def bundle(

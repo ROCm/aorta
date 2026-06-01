@@ -29,6 +29,7 @@ from __future__ import annotations
 from aorta.bundle.errors import (
     BundleAbortedError,
     BundleError,
+    BundleIOError,
     EmptyRunDirError,
     NoTicketError,
     RunDirNotFoundError,
@@ -47,6 +48,7 @@ __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "BundleAbortedError",
     "BundleError",
+    "BundleIOError",
     "EmptyRunDirError",
     "FileRecord",
     "IdentityRedactor",

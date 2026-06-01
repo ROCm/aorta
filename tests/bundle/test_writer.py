@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from aorta.bundle import (
+    BundleIOError,
     EmptyRunDirError,
     IdentityRedactor,
     Manifest,
@@ -22,7 +23,7 @@ from aorta.bundle import (
     resolve_ticket,
 )
 from aorta.bundle.manifest import MANIFEST_FILENAME
-from aorta.bundle.writer import stage_run_dir, write_tarball
+from aorta.bundle.writer import _bundle_timestamp, stage_run_dir, write_tarball
 
 # --- resolve_ticket --------------------------------------------------------
 
@@ -364,3 +365,87 @@ def test_bundle_run_dir_result_json_round_trip(synthetic_run_dir, tmp_path):
         # result.json is still parseable.
         doc = json.loads((bundle_root / "none-none/trial_0/result.json").read_text())
         assert doc["verdict"] == "pass"
+
+
+# --- bundle name carries millisecond precision (review fix) ----------------
+
+
+def test_bundle_timestamp_has_millisecond_resolution():
+    """Two timestamps in the same second but different ms produce
+    distinct strings -- otherwise back-to-back ``aorta bundle`` runs
+    would collide on the staging mkdir(exist_ok=False) and fail.
+
+    Pure-function test against ``_bundle_timestamp`` so we don't
+    have to race the wall clock.
+    """
+    import datetime as dt
+
+    base = dt.datetime(2026, 6, 1, 7, 0, 0, 123_000, tzinfo=dt.timezone.utc)
+    twin = base.replace(microsecond=456_000)
+    a = _bundle_timestamp(base)
+    b = _bundle_timestamp(twin)
+    assert a == "2026-06-01T07-00-00-123"
+    assert b == "2026-06-01T07-00-00-456"
+    assert a != b
+
+
+def test_bundle_name_includes_milliseconds(synthetic_run_dir, tmp_path):
+    """End-to-end: the bundle filename includes the ms suffix, so
+    back-to-back invocations don't clobber each other or fail the
+    staging mkdir.
+    """
+    import datetime as dt
+
+    fixed = dt.datetime(2026, 6, 1, 7, 0, 0, 789_000, tzinfo=dt.timezone.utc)
+    out = bundle_run_dir(synthetic_run_dir, output=tmp_path, now=fixed)
+    assert out.name == "TKT-1-2026-06-01T07-00-00-789.tar.gz"
+
+
+# --- OSError wrapping (review fix) -----------------------------------------
+
+
+class _RaisingRedactor(Redactor):
+    """Redactor whose scrub_file raises OSError on the first call.
+
+    Models the operator-visible failure modes documented on
+    :class:`Redactor` (permissions, ENOSPC, transient FS errors).
+    """
+
+    kind = "raising"
+
+    def __init__(self, exc: OSError) -> None:
+        self.exc = exc
+
+    def scrub_file(self, src: Path, dst: Path) -> RedactionCounts:
+        raise self.exc
+
+
+def test_bundle_run_dir_wraps_oserror_from_redactor_into_bundle_io_error(
+    synthetic_run_dir, tmp_path
+):
+    """The Redactor ABC docstring promises BundleError-shaped failures.
+
+    Without the writer wrap, a permission denied (or ENOSPC) on a
+    single file would escape as a raw OSError and bypass the CLI's
+    BundleError -> ClickException mapping, leaving the operator with
+    a Python traceback. The wrap below is what makes that promise
+    real.
+    """
+    boom = PermissionError(13, "Permission denied", "stdout.log")
+    with pytest.raises(BundleIOError) as exc:
+        bundle_run_dir(
+            synthetic_run_dir,
+            output=tmp_path / "out.tar.gz",
+            redactor=_RaisingRedactor(boom),
+        )
+    # The original OSError is preserved on .cause so ops tooling can
+    # grade the failure (PermissionError vs ENOSPC vs ...) without
+    # parsing the message.
+    assert exc.value.cause is boom
+    assert exc.value.run_dir == synthetic_run_dir.resolve()
+    # And the message includes the original error so the CLI surface
+    # is not "filesystem error: <empty>".
+    assert "Permission denied" in str(exc.value)
+    # No tarball was written despite the half-staged tree -- the
+    # TemporaryDirectory cleans up.
+    assert not (tmp_path / "out.tar.gz").exists()

@@ -33,8 +33,8 @@ streamed through the redactor and copied into the staging tree.
 |-----------------------|----------------------------------------------|-------------------------------------------------------------------------------------------------|
 | `--ticket TICKET`     | inferred from `<run-dir>` basename           | Cross-check against the probe artifact tree; required when the basename is `_no_ticket_`.       |
 | `--review`            | off                                          | Print the manifest summary and pause for `[y/N]` confirmation before writing the tarball.       |
-| `--output PATH`       | `./<ticket>-<UTC-timestamp>.tar.gz`          | Where to write the bundle tarball.                                                              |
-| `--redaction-from F`  | `<run-dir>/recipe.resolved.yaml` (optional)  | Recipe to read the `redaction:` block from. Phase 3 of #188 wires the actual scrubbers in.      |
+| `--output PATH`       | `./<ticket>-<UTC-timestamp>.tar.gz`          | Where to write the bundle tarball. An *existing* directory drops the default filename inside it; any other PATH is used verbatim as the tarball filename. |
+| `--redaction-from F`  | (none today)                                 | Recipe to read the `redaction:` block from. Phase 3 of #188 wires the actual scrubbers in and will add the auto-fallback to `<run-dir>/recipe.resolved.yaml`. Today an explicit path is required to log a redaction-from line at all; without it the bundle runs through the `IdentityRedactor`. |
 
 ### Ticket resolution
 
@@ -152,9 +152,10 @@ of the run directory).
 | `NoTicketError`        | basename is `_no_ticket_` and `--ticket` was not passed.                |
 | `EmptyRunDirError`     | `<run-dir>` exists but contains no `trial_*/result.json` artifacts.     |
 | `BundleAbortedError`   | `--review` was passed and the operator answered `n`.                    |
+| `BundleIOError`        | An `OSError` (permissions, ENOSPC, etc.) escaped staging or tarball writing. The original exception is preserved on `.cause`. |
 
-All four bridge to `click.ClickException` in the CLI handler so
-operators see a clean error message instead of a Python traceback.
+All bridge to `click.ClickException` in the CLI handler so operators
+see a clean error message instead of a Python traceback.
 
 ## What this command does NOT do (issue #196 out-of-scope)
 
