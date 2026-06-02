@@ -227,6 +227,52 @@ def test_line_windows_reconstructs_input():
     assert "".join(_line_windows(text)) == text
 
 
+def test_line_windows_counts_bytes_not_chars(monkeypatch):
+    """Windowing budget is UTF-8 bytes, not code points (Copilot review).
+
+    A char-count threshold would undercount multi-byte text and skip
+    windowing even when the byte size exceeds the cap.
+    """
+    monkeypatch.setattr("aorta.probe.redaction.MAX_LOG_BYTES", 10)
+    text = "\u00e9\u00e9\u00e9\n\u00e9\u00e9\u00e9\n"  # two 7-byte lines
+    assert len(text) == 8  # code points (<= cap)
+    assert len(text.encode("utf-8")) == 14  # bytes (> cap)
+    windows = _line_windows(text)
+    assert len(windows) == 2  # byte-aware splits; a char-aware cap would not
+    assert "".join(windows) == text
+
+
+def test_scrubbed_copy_preserves_restrictive_mode(tmp_path: Path):
+    """Every scrub branch carries the source mode; a 0600 source stays 0600.
+
+    RedactingRedactor rewrites files (write_text/write_bytes) which land at
+    the umask default and would widen a restrictive source inside the
+    shareable bundle (Copilot review; same class as IdentityRedactor #199).
+    """
+    cfg = RedactionCfg(scrub_env_keys=("AWS_*",), scrub_paths=True)
+    redactor = RedactingRedactor(cfg)
+    cases = {
+        "result.json": json.dumps({"env": {"HOME": "/home/user"}}),
+        "host_env.json": json.dumps({"env": {"HOME": "/home/user"}}),
+        "stdout.log": "loaded /home/user/x\n",
+        "probe.env": "HOME=/home/user\n",
+    }
+    for name, content in cases.items():
+        src = tmp_path / name
+        src.write_text(content, encoding="utf-8")
+        src.chmod(0o600)
+        dst = tmp_path / "out" / name
+        redactor.scrub_file(src, dst)
+        assert dst.stat().st_mode & 0o777 == 0o600, f"{name} mode widened"
+    # binary / non-text artifact -> else branch
+    binsrc = tmp_path / "core.bin"
+    binsrc.write_bytes(b"\x00\x01\x02")
+    binsrc.chmod(0o600)
+    bindst = tmp_path / "out" / "core.bin"
+    redactor.scrub_file(binsrc, bindst)
+    assert bindst.stat().st_mode & 0o777 == 0o600, "binary copy mode widened"
+
+
 def test_scrub_text_spans_window_seam(monkeypatch):
     """A path/IP must not be missed when it lands on a window boundary.
 

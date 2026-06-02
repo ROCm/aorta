@@ -18,7 +18,7 @@ import fnmatch
 import ipaddress
 import json
 import re
-import stat
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -208,29 +208,43 @@ def _scrub_ips_in_text(text: str, ip_index: _IpIndex) -> str:
     return _IPV4_RE.sub(_v4_sub, text)
 
 
-def _line_windows(text: str) -> list[str]:
-    """Split ``text`` into ``<= MAX_LOG_BYTES`` windows at line boundaries.
+# A UTF-8 code point is at most 4 bytes; if a string fits the byte cap even
+# when every char is 4 bytes, no windowing is needed and we can skip the
+# encode entirely (fast path for the many small JSON string values that
+# scrub_text is called on).
+_MAX_UTF8_BYTES_PER_CHAR = 4
 
-    The naive ``text[i : i + MAX_LOG_BYTES]`` slicing splits at fixed
-    byte offsets, which can cut a path or IP literal in half at the seam
-    so neither regex pass matches it (a silent redaction miss). Paths and
-    IPs never contain a line terminator, so breaking only *between* lines
-    guarantees no token straddles a window. ``splitlines(keepends=True)``
-    preserves every terminator, so ``"".join(...)`` reconstructs the input
-    byte-for-byte. A single line longer than ``MAX_LOG_BYTES`` is emitted
-    whole rather than split -- correctness of redaction wins over the exact
-    byte bound for that pathological case.
+
+def _line_windows(text: str) -> list[str]:
+    """Split ``text`` into ``<= MAX_LOG_BYTES`` (UTF-8 *byte*) windows, broken
+    only at line boundaries.
+
+    Two properties hold:
+
+    * **Byte budget.** ``MAX_LOG_BYTES`` is a byte cap, so window size is
+      measured in encoded UTF-8 bytes (``len(line.encode())``), not code
+      points -- a multi-byte log must not slip past the regex-DoS bound just
+      because it has fewer characters than bytes.
+    * **No split tokens.** The naive ``text[i : i + N]`` slicing cuts a path
+      or IP literal in half at the seam so neither regex pass matches it (a
+      silent redaction miss). Paths/IPs never contain a line terminator, so
+      breaking only *between* lines (``splitlines(keepends=True)``) keeps every
+      token whole and ``"".join(...)`` reconstructs the input byte-for-byte.
+      A single line larger than the cap is emitted whole rather than split.
     """
+    if len(text) <= MAX_LOG_BYTES // _MAX_UTF8_BYTES_PER_CHAR:
+        return [text]
     windows: list[str] = []
     buf: list[str] = []
     size = 0
     for line in text.splitlines(keepends=True):
-        if buf and size + len(line) > MAX_LOG_BYTES:
+        line_bytes = len(line.encode("utf-8"))
+        if buf and size + line_bytes > MAX_LOG_BYTES:
             windows.append("".join(buf))
             buf = []
             size = 0
         buf.append(line)
-        size += len(line)
+        size += line_bytes
     if buf:
         windows.append("".join(buf))
     return windows
@@ -245,20 +259,17 @@ def scrub_text(
     """Apply path + IP scrubbers to a text blob (per-file index scope).
 
     Returns ``(text, paths_rewritten, ipv4_rewritten, ipv6_rewritten)``.
-    Large inputs are processed in ``MAX_LOG_BYTES`` windows (split at line
-    boundaries by :func:`_line_windows`) so a hostile log cannot blow regex
-    CPU past the documented bound while still scrubbing tokens that would
-    otherwise fall on a fixed-slice seam.
+    Large inputs are processed in ``MAX_LOG_BYTES`` (UTF-8 byte) windows
+    split at line boundaries by :func:`_line_windows`, so a hostile log
+    cannot blow regex CPU past the documented bound while still scrubbing
+    tokens that would otherwise fall on a fixed-slice seam.
     """
     path_index = _PathIndex()
     ip_index = _IpIndex()
     if not scrub_paths and not scrub_ip_addresses:
         return text, 0, 0, 0
 
-    if len(text) <= MAX_LOG_BYTES:
-        windows = [text]
-    else:
-        windows = _line_windows(text)
+    windows = _line_windows(text)
 
     out_parts: list[str] = []
     for window in windows:
@@ -384,6 +395,13 @@ class RedactingRedactor(Redactor):
             dst.write_bytes(raw)
             counts = RedactionCounts(bytes_in=bytes_in, bytes_out=bytes_in)
 
+        # Carry the source's permission bits onto every staged copy. The
+        # scrub branches all (re)create dst via write_text / write_bytes,
+        # which land at the umask default (~0644) and would WIDEN a
+        # restrictive source (e.g. probe.env at 0600) inside the shareable
+        # bundle. Mirrors IdentityRedactor.scrub_file; never let the bundle
+        # copy be less restrictive than the original (PR #199 review).
+        shutil.copymode(src, dst)
         return counts
 
     def _scrub_probe_env(self, raw: bytes, dst: Path) -> RedactionCounts:
@@ -392,7 +410,9 @@ class RedactingRedactor(Redactor):
         scrubbed, removed = scrub_env_keys(env, self._cfg.scrub_env_keys)
         out = _format_probe_env(scrubbed)
         dst.write_text(out, encoding="utf-8")
-        dst.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        # Mode is carried from the source by scrub_file's shutil.copymode;
+        # the run-dir probe.env is written 0600 by the workload, so the
+        # staged copy stays owner-only without a hardcoded chmod here.
         out_bytes = out.encode("utf-8")
         return RedactionCounts(
             env_keys_removed=removed,
