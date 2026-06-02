@@ -92,8 +92,10 @@ def _render_review_summary(manifest: Manifest) -> str:
     type=click.Path(file_okay=True, dir_okay=True, path_type=Path),
     default=None,
     help=(
-        "Where to write the tarball. Default: '<ticket>-<UTC-timestamp>.tar.gz' "
-        "in the current directory. If PATH is an EXISTING directory the "
+        "Where to write the tarball. Default: "
+        "'<safe-slug(ticket)>-<UTC-timestamp>.tar.gz' in the current "
+        "directory (the ticket is slugified for filesystem safety, so "
+        "spaces/slashes become underscores). If PATH is an EXISTING directory the "
         "default filename is dropped inside it; otherwise PATH is "
         "treated verbatim as the tarball filename (the parent is "
         "created if missing). 'aorta bundle ./bundles' will write a "
@@ -160,8 +162,10 @@ def _prompt_review(manifest: Manifest) -> bool:
 
     ``click.confirm(default=False)`` matches the issue #196
     contract -- a bare press of ``Enter`` (or any non-``y`` answer)
-    aborts. Test inject ``CliRunner(input="y\\n")`` /
-    ``input="n\\n"``.
+    aborts. Tests inject the answer through the invoke call, e.g.
+    ``runner.invoke(cli, [...], input="y\\n")`` /
+    ``input="n\\n"`` (the ``input=`` kwarg belongs to ``invoke``,
+    not the ``CliRunner`` constructor).
     """
     click.echo(_render_review_summary(manifest))
     click.echo("")

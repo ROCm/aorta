@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+from pathlib import Path
 
 import pytest
 
@@ -145,7 +146,7 @@ def test_manifest_total_bytes_helpers():
     ]
     m = Manifest.from_files(
         ticket="T",
-        source_run_dir=files[0].path and (__import__("pathlib").Path(".")),
+        source_run_dir=Path("."),
         redactor_kind="identity",
         aorta_version="x",
         files=files,

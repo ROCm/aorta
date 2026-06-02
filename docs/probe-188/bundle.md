@@ -33,7 +33,7 @@ streamed through the redactor and copied into the staging tree.
 |-----------------------|----------------------------------------------|-------------------------------------------------------------------------------------------------|
 | `--ticket TICKET`     | inferred from `<run-dir>` basename           | Cross-check against the probe artifact tree; required when the basename is `_no_ticket_`.       |
 | `--review`            | off                                          | Print the manifest summary and pause for `[y/N]` confirmation before writing the tarball.       |
-| `--output PATH`       | `./<ticket>-<UTC-timestamp>.tar.gz`          | Where to write the bundle tarball. An *existing* directory drops the default filename inside it; any other PATH is used verbatim as the tarball filename. |
+| `--output PATH`       | `./<safe_slug(ticket)>-<UTC-timestamp>.tar.gz` | Where to write the bundle tarball. An *existing* directory drops the default filename inside it; any other PATH is used verbatim as the tarball filename. The ticket is slugified for filesystem safety (spaces/slashes → `_`). |
 | `--redaction-from F`  | (none today)                                 | Recipe to read the `redaction:` block from. Phase 3 of #188 wires the actual scrubbers in and will add the auto-fallback to `<run-dir>/recipe.resolved.yaml`. Today an explicit path is required to log a redaction-from line at all; without it the bundle runs through the `IdentityRedactor`. |
 
 ### Ticket resolution
@@ -74,8 +74,9 @@ resolved value lands in the manifest's `ticket` field.
             └── probe.env         # only when env_passthrough_mode == 'file'
 ```
 
-`<bundle-name>` defaults to `<ticket>-<UTC-timestamp>` and is also
-the tarball's top-level directory. The manifest lives at
+`<bundle-name>` defaults to `<safe_slug(ticket)>-<UTC-timestamp>`
+(the ticket is slugified for filesystem safety, so spaces/slashes
+become `_`) and is also the tarball's top-level directory. The manifest lives at
 `bundle/manifest.json` so a downstream consumer can extract a single
 file (`tar -xzOf <bundle> <bundle-name>/manifest.json`) without
 unpacking the whole tree.

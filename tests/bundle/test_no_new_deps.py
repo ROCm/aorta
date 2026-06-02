@@ -46,6 +46,12 @@ def _imports(path: Path) -> list[str]:
             for alias in node.names:
                 names.append(alias.name)
         elif isinstance(node, ast.ImportFrom) and node.module:
+            # Relative imports (``from .errors import ...``, level > 0)
+            # are internal by definition -- ``node.module`` is a bare
+            # sibling name with no package prefix, so recording it would
+            # mis-flag it as a third-party top-level import. Skip them.
+            if node.level > 0:
+                continue
             names.append(node.module)
     return names
 

@@ -654,6 +654,34 @@ def test_bundle_follows_in_tree_symlink(synthetic_run_dir, tmp_path):
     assert any(n.endswith("/none-none/trial_0/stdout_alias.log") for n in names)
 
 
+def test_identity_redactor_preserves_restrictive_mode(synthetic_run_dir, tmp_path):
+    """A 0600 source file (e.g. ``probe.env``) must NOT be widened to
+    the umask default when copied into the bundle staging tree
+    (Copilot PR #199 review). ``IdentityRedactor`` carries the source
+    mode via ``shutil.copymode`` so the bundle copy is never less
+    restrictive than the original.
+    """
+    import stat
+
+    secret = synthetic_run_dir / "none-none" / "trial_0" / "probe.env"
+    secret.write_text("AWS_SECRET=shhh\n", encoding="utf-8")
+    secret.chmod(0o600)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    stage_run_dir(
+        synthetic_run_dir,
+        staging,
+        "TKT-1-bundle",
+        redactor=IdentityRedactor(),
+        ticket="TKT-1",
+        aorta_version="0.2.0",
+    )
+    staged = staging / "TKT-1-bundle" / "none-none" / "trial_0" / "probe.env"
+    assert staged.is_file()
+    assert stat.S_IMODE(staged.stat().st_mode) == 0o600
+
+
 def test_manifest_does_not_leak_absolute_source_path(synthetic_run_dir, tmp_path):
     """The extracted manifest must not carry the operator's absolute
     source path (Sonbol PR #199 review): that would leak workstation

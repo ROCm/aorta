@@ -102,14 +102,17 @@ class IdentityRedactor(Redactor):
     ``manifest.json`` written under this redactor reports
     ``redaction_applied: false`` and ``redactor_kind: "identity"``.
 
-    ``shutil.copyfile`` (vs ``copy`` / ``copy2``) is deliberate:
-    we want bytes-only fidelity. Mode bits are recreated on the
-    bundle side from the staging tree; we do not inherit ``probe.env``'s
-    ``0600`` mode here because the bundle is the redacted
-    deliverable -- the secret-bearing original stays in
-    ``<run-dir>``. Phase 3 of #188 explicitly scrubs the env file
-    before bundling, so even when its mode bits did transfer, the
-    contents would be redacted.
+    Copy semantics: ``shutil.copyfile`` (vs ``copy`` / ``copy2``)
+    moves bytes only, then ``shutil.copymode`` carries the source's
+    permission bits onto the staged copy. Preserving the mode is a
+    defense-in-depth requirement, not a nicety: ``aorta probe``
+    creates ``probe.env`` at ``0600`` (owner-only), and a plain
+    ``copyfile`` would land it at the process umask default
+    (typically ``0644``) -- *widening* a secret-bearing file as it
+    enters a shareable bundle. We never want the bundle copy to be
+    less restrictive than the original (PR #199 review). We do not
+    use ``copy2`` because timestamps/xattrs are not part of the
+    bundle contract -- only the access mode matters here.
     """
 
     kind = "identity"
@@ -117,6 +120,9 @@ class IdentityRedactor(Redactor):
     def scrub_file(self, src: Path, dst: Path) -> RedactionCounts:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
+        # Carry the source mode so a 0600 probe.env is not widened to
+        # the umask default inside the shareable bundle.
+        shutil.copymode(src, dst)
         size = dst.stat().st_size
         return RedactionCounts(bytes_in=size, bytes_out=size)
 

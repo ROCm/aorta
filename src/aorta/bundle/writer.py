@@ -362,8 +362,10 @@ def write_tarball(staging_dir: Path, bundle_name: str, output: Path) -> Path:
 def _default_output_path(bundle_name: str, output: Path | None) -> Path:
     """Resolve ``--output`` per the documented default.
 
-    Issue #196's documented default is ``<ticket>-<timestamp>.tar.gz``
-    in CWD. When ``output`` is ``None`` we apply that. When the
+    Issue #196's documented default is
+    ``<safe_slug(ticket)>-<timestamp>.tar.gz`` in CWD (``bundle_name``
+    is already slugified by the caller). When ``output`` is ``None``
+    we apply that. When the
     operator passes a directory (``--output ./bundles``) we drop
     the default filename inside it. When they pass a file we use
     it verbatim, regardless of suffix -- ``aorta`` does not police
