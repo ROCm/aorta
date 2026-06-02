@@ -278,6 +278,7 @@ class SubprocessWorkload(Workload):
                     argv=argv,
                     probe_extras=probe_extras,
                     env_mode=env_mode,
+                    cell_env_snapshot=cell_env_snapshot,
                 )
             child_env["AORTA_ENV_FILE"] = str(env_file_path.absolute())
         else:
@@ -576,6 +577,7 @@ class SubprocessWorkload(Workload):
         argv: tuple[str, ...],
         probe_extras: dict[str, Any],
         env_mode: str,
+        cell_env_snapshot: dict[str, str],
     ) -> WorkloadResult:
         """Persist a Tier-1 ``fail`` artifact when probe.env validation rejects.
 
@@ -617,6 +619,10 @@ class SubprocessWorkload(Workload):
             "trial_index": self._trial_index,
             "env_passthrough_mode": env_mode,
             "timed_out": False,
+            # Mirror the normal-path result.json so every trial's env is
+            # auditable/redactable, even when probe.env validation rejected
+            # before the subprocess launched.
+            "env": dict(cell_env_snapshot),
             "failure_type": "env_file_validation_failed",
             "error_message": str(exc),
         }

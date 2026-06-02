@@ -15,7 +15,7 @@ from aorta.cli import main
 from aorta.probe.bundle_hook import build_redactor_from_recipe, load_redaction_cfg
 from aorta.probe.redaction import RedactingRedactor, RedactionCfg
 from aorta.registry.errors import UnknownMitigationError
-from aorta.triage.recipe import load_recipe
+from aorta.triage.recipe import RecipeSchemaError, load_recipe
 
 
 def _member_text(tar: tarfile.TarFile, name: str) -> str:
@@ -196,6 +196,34 @@ redaction:
     assert cfg.scrub_paths is True
     redactor = build_redactor_from_recipe(None, run_dir)
     assert isinstance(redactor, RedactingRedactor)
+
+
+def test_malformed_redaction_block_clean_cli_error(tmp_path: Path):
+    """A bad redaction: block renders a clean CLI error, not a traceback.
+
+    build_redactor_from_recipe raises RecipeSchemaError (a ValueError, not
+    a BundleError) for a malformed block; the CLI now catches it (Copilot
+    review).
+    """
+    run_dir = tmp_path / "probe-out" / "TKT-BAD"
+    run_dir.mkdir(parents=True)
+    _write_trial(run_dir / "none-none")
+    (run_dir / "recipe.resolved.yaml").write_text(
+        """\
+schema_version: 1
+mode: probe
+trials: 1
+mitigation_axis: [none]
+diagnostic_axis: [none]
+redaction:
+  scrub_paths: "yes-please"
+""",
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(main, ["bundle", str(run_dir)])
+    assert result.exit_code != 0
+    assert "scrub_paths" in result.output
+    assert not isinstance(result.exception, RecipeSchemaError)
 
 
 def test_fallback_absent_recipe_uses_identity_redactor(tmp_path: Path):

@@ -288,11 +288,27 @@ def _scrub_json_value(
         new_dict: dict[str, Any] = {}
         for key, item in value.items():
             if key == "env" and isinstance(item, dict):
-                scrubbed_env, removed = scrub_env_keys(
+                kept_env, removed = scrub_env_keys(
                     {str(k): str(v) for k, v in item.items()},
                     cfg.scrub_env_keys,
                 )
                 env_removed[0] += removed
+                # Removing matching keys is not enough: a *retained* key's
+                # value can still carry a path or IP (e.g.
+                # LD_LIBRARY_PATH=/home/customer/...). Scrub the values too
+                # so result.json env matches the host_env.json path, which
+                # already scrubs values via its whole-document pass.
+                scrubbed_env: dict[str, str] = {}
+                for env_key, env_val in kept_env.items():
+                    sv, p, v4, v6 = scrub_text(
+                        env_val,
+                        scrub_paths=cfg.scrub_paths,
+                        scrub_ip_addresses=cfg.scrub_ip_addresses,
+                    )
+                    scrubbed_env[env_key] = sv
+                    total_p += p
+                    total_v4 += v4
+                    total_v6 += v6
                 new_dict[key] = scrubbed_env
                 continue
             scrubbed, p, v4, v6 = _scrub_json_value(item, cfg=cfg, env_removed=env_removed)

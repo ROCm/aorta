@@ -27,6 +27,7 @@ from aorta.bundle import (
     bundle_run_dir,
 )
 from aorta.probe.bundle_hook import build_redactor_from_recipe
+from aorta.triage.recipe import RecipeCellError, RecipeSchemaError
 
 
 def _render_review_summary(manifest: Manifest) -> str:
@@ -145,6 +146,12 @@ def bundle(
         # cluttering the abort message.
         click.echo(str(exc), err=True)
         raise click.exceptions.Exit(1) from exc
+    except (RecipeSchemaError, RecipeCellError) as exc:
+        # build_redactor_from_recipe parses the recipe's redaction: block;
+        # a malformed block raises a recipe error (a ValueError, not a
+        # BundleError). Render it as a clean CLI error rather than letting
+        # it escape as a traceback.
+        raise click.ClickException(f"aorta bundle: {exc}") from exc
     except BundleError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Wrote bundle to {path}")

@@ -122,6 +122,27 @@ def test_fail_minimum_result_shape(tmp_path):
     assert result.passed is False
 
 
+def test_env_file_failure_result_includes_env(tmp_path):
+    """The env-file-validation failure result.json carries env (Copilot review).
+
+    The normal path records ``env`` for audit/redaction; the failure path
+    used to omit it, so a corrupted-env trial produced a result.json with
+    no env to scrub. It now mirrors the normal shape.
+    """
+    wl = _make_workload(
+        tmp_path,
+        ["true"],
+        env_passthrough_mode="file",
+        cell_env_vars={"BAD_VALUE": "line1\nline2"},
+    )
+    wl.setup()
+    wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "fail"
+    assert doc["failure_type"] == "env_file_validation_failed"
+    assert doc["env"] == {"BAD_VALUE": "line1\nline2"}
+
+
 def test_missing_executable_yields_fail(tmp_path):
     """argv[0] not found surfaces as a Tier-1 fail with exit_code=127."""
     wl = _make_workload(tmp_path, ["definitely-not-a-real-binary-9d8f7s6"])

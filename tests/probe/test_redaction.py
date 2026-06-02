@@ -145,6 +145,44 @@ def test_redacting_redactor_scrubs_result_json_env(tmp_path: Path):
     assert "<PATH:" in doc["argv"][0]
 
 
+def test_result_json_env_values_scrubbed(tmp_path: Path):
+    """Retained env values are path/IP-scrubbed, not just key-filtered.
+
+    Removing matching keys left a kept key's value (e.g. a *_PATH var)
+    leaking an absolute path/IP into the bundle even with scrub_paths on
+    (Copilot review). result.json env now matches host_env.json.
+    """
+    cfg = RedactionCfg(
+        scrub_env_keys=("AWS_*",),
+        scrub_paths=True,
+        scrub_ip_addresses=True,
+    )
+    redactor = RedactingRedactor(cfg)
+    src = tmp_path / "result.json"
+    dst = tmp_path / "out" / "result.json"
+    src.write_text(
+        json.dumps(
+            {
+                "verdict": "pass",
+                "env": {
+                    "AWS_TOKEN": "drop-me",
+                    "LD_LIBRARY_PATH": "/home/customer/lib",
+                    "MASTER_ADDR": "192.168.1.42",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    counts = redactor.scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+    assert "AWS_TOKEN" not in doc["env"]
+    assert counts.env_keys_removed == 1
+    assert "/home/customer/lib" not in doc["env"]["LD_LIBRARY_PATH"]
+    assert "192.168.1.42" not in doc["env"]["MASTER_ADDR"]
+    assert counts.paths_rewritten >= 1
+    assert counts.ips_rewritten >= 1
+
+
 def test_fixture_log_scrubs_paths_and_ips(tmp_path: Path):
     raw = (FIXTURES / "redaction_input.txt").read_text(encoding="utf-8")
     cfg = RedactionCfg(
