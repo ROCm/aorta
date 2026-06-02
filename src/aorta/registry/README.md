@@ -277,6 +277,12 @@ aorta probe \
     echo hi
 ```
 
+`--mitigations-file` only makes the sidecar names *resolvable* — it does not
+add cells. To actually sweep `fbgemm_no_jk`, `torchinductor_max_autotune_pointwise`,
+etc., add them to `mitigation_axis:` in the recipe (see the header comment in
+`recipes/probe-flag-sweep.yaml`). Without that edit the command above runs only
+the built-in axis.
+
 Tracked in issue #195.
 
 ## Verifying what's registered

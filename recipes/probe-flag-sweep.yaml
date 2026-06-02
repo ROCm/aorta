@@ -16,8 +16,17 @@
 #       <your existing launch command>
 #
 # Workload-internal flags (FBGEMM_*, TORCHINDUCTOR_*, EVAL_DISABLE_PIPELINING)
-# live in examples/probe-flag-sidecar.json. Pass --mitigations-file when your
-# stack reads those vars. Build-time SDPA/CK flags are not stamped here.
+# live in examples/probe-flag-sidecar.json. To sweep them as well, pass
+# --mitigations-file AND extend mitigation_axis with the names you want:
+#   mitigation_axis:
+#     - none
+#     - ...existing entries...
+#     - fbgemm_no_jk
+#     - fbgemm_tbe_v2
+#     - torchinductor_max_autotune_pointwise
+# Passing --mitigations-file without editing mitigation_axis makes the
+# names resolvable but does NOT add cells. Build-time SDPA/CK flags are
+# not stamped here.
 #
 # TODO: AMD_WAIT_* family -- pending canonical env-var spelling; add to the
 # registry when confirmed.
@@ -54,7 +63,7 @@ diagnostic_axis:
 
 step_time_regex: null
 collect_paths: []
-timeout_per_trial: null
+timeout_per_trial: 1800   # 30 min cap per cell; bump if your launch needs more
 
 env_passthrough_mode: inherit
 
