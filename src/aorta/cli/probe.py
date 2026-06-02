@@ -344,23 +344,8 @@ def probe(
                 f"recipe {recipe} is not a probe-mode recipe; "
                 "set 'mode: probe' at the recipe top level"
             )
-<<<<<<< HEAD
         r = apply_recipe_overrides(r, ticket=ticket, cli_passthrough_mode=cli_passthrough_mode)
-    except (ProbeUsageError, RecipeSchemaError, RecipeCellError, RegistryError) as exc:
-=======
-        if ticket is not None:
-            r = dataclasses.replace(r, ticket=ticket)
-        if cli_passthrough_mode is not None:
-            r = dataclasses.replace(
-                r,
-                probe_extras=dataclasses.replace(
-                    probe_extras, env_passthrough_mode=cli_passthrough_mode
-                ),
-            )
-    except ProbeUsageError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except (RecipeSchemaError, RecipeCellError, RegistryError, LookupError) as exc:
->>>>>>> 083c8b2 (address review: one-way drift check + probe CLI sidecar test coverage (#198))
+    except (ProbeUsageError, RecipeSchemaError, RecipeCellError, RegistryError, LookupError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     try:
