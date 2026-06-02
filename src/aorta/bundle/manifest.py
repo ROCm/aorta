@@ -5,7 +5,9 @@ bundle and is the single authoritative record of:
 
 * what was redacted (per-file counts),
 * what was bundled (relative paths inside the tarball),
-* who wrote the bundle (aorta version, redactor kind, source run dir).
+* who wrote the bundle (aorta version, redactor kind, and the source
+  run dir's leaf name only -- never its absolute path, which would
+  leak operator/customer path details off the source machine).
 
 Schema is versioned via :data:`MANIFEST_SCHEMA_VERSION`. Phase 3 of
 issue #188 will not need a bump -- it only fills in the existing
@@ -88,6 +90,14 @@ class Manifest:
     ticket: str
     created_at: str
     aorta_version: str
+    #: Provenance ONLY: the leaf directory name of the source run dir
+    #: (its basename), never the absolute path. A bundle is a
+    #: shareable artifact, so recording ``/home/<user>/<customer>/...``
+    #: would leak workstation usernames, mount points, and customer
+    #: directory names off the source machine (PR #199 security
+    #: review). The leaf name is the per-ticket segment, which is
+    #: already non-sensitive (it equals ``ticket`` in normal probe
+    #: output).
     source_run_dir: str
     redaction_applied: bool
     redactor_kind: str
@@ -124,7 +134,9 @@ class Manifest:
             ticket=ticket,
             created_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             aorta_version=aorta_version,
-            source_run_dir=str(source_run_dir.resolve()),
+            # Basename only -- NEVER the absolute path. See the
+            # ``source_run_dir`` field docstring for the rationale.
+            source_run_dir=source_run_dir.name,
             redaction_applied=applied,
             redactor_kind=redactor_kind,
             files=tuple(files),

@@ -75,6 +75,35 @@ class EmptyRunDirError(BundleError):
         )
 
 
+class UnsafeSymlinkError(BundleError):
+    """Raised when a file under ``<run-dir>`` resolves outside the tree.
+
+    ``aorta bundle`` produces a *shareable* artifact, so it must not
+    silently pull bytes from outside the run dir. A symlink (or a
+    symlinked parent component) whose resolved target escapes
+    ``run_dir`` would dereference into an unrelated local file or a
+    mounted-share path and bundle its contents -- breaking the trust
+    boundary for the command. We refuse such entries instead of
+    following them. In-tree symlinks (target stays inside
+    ``run_dir``) are still followed.
+
+    Carries the offending ``path`` and its resolved ``target`` so the
+    CLI shim can name both in the operator-visible message and tests
+    can assert on the fields.
+    """
+
+    def __init__(self, run_dir: Path, path: Path, target: Path) -> None:
+        self.run_dir = run_dir
+        self.path = path
+        self.target = target
+        super().__init__(
+            f"aorta bundle: refusing to follow symlink {path} -> {target}: "
+            f"its target is outside the run dir {run_dir}. Bundles must "
+            "stay within the source tree to remain shareable. Remove the "
+            "symlink or copy the real file into the run dir before bundling."
+        )
+
+
 class BundleAbortedError(BundleError):
     """Raised when ``--review`` was passed and the operator answered ``n``.
 

@@ -33,6 +33,7 @@ from aorta.bundle.errors import (
     EmptyRunDirError,
     NoTicketError,
     RunDirNotFoundError,
+    UnsafeSymlinkError,
 )
 from aorta.bundle.manifest import (
     MANIFEST_FILENAME,
@@ -57,6 +58,7 @@ __all__ = [
     "RedactionCounts",
     "Redactor",
     "RunDirNotFoundError",
+    "UnsafeSymlinkError",
     "bundle_run_dir",
     "resolve_ticket",
 ]

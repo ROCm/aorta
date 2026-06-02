@@ -88,7 +88,7 @@ unpacking the whole tree.
   "ticket": "TICKET-1234",
   "created_at": "2026-05-25T10:00:00Z",
   "aorta_version": "0.2.0",
-  "source_run_dir": "/abs/path/to/probe_results/TICKET-1234",
+  "source_run_dir": "TICKET-1234",
   "redaction_applied": false,
   "redactor_kind": "identity",
   "files": [
@@ -112,6 +112,21 @@ unpacking the whole tree.
 * `redactor_kind` is a stable string identifier the redactor
   reports (currently `"identity"`; #188 Phase 3 will register e.g.
   `"probe.v1"`).
+* `source_run_dir` records **only the leaf directory name** (the
+  per-ticket segment), never the operator's absolute path. A bundle
+  is a shareable artifact, so the full path is deliberately withheld
+  to avoid leaking workstation usernames, mount points, or customer
+  directory names off the source machine.
+
+## Trust boundary: symlinks
+
+`aorta bundle` walks the run dir and includes regular files only.
+A symlink (or a symlinked parent component) whose resolved target
+lands **outside** the run dir is refused with `UnsafeSymlinkError`
+rather than dereferenced — otherwise a link such as
+`cell/trial_0/leak -> ../../secret.txt` would pull unrelated local
+bytes into a "shareable" tarball and break the trust boundary.
+Symlinks whose target stays inside the run dir are still followed.
 
 ## Redactor contract
 

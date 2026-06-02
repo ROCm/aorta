@@ -19,6 +19,7 @@ from aorta.bundle import (
     RedactionCounts,
     Redactor,
     RunDirNotFoundError,
+    UnsafeSymlinkError,
     bundle_run_dir,
     resolve_ticket,
 )
@@ -476,7 +477,8 @@ def test_iter_source_files_keeps_nested_manifest_and_lockfile_lookalikes(
     out = tmp_path / "out.tar.gz"
     bundle_run_dir(synthetic_run_dir, output=out)
     with tarfile.open(out, "r:gz") as tar:
-        names = set(tar.getnames())
+        ordered_names = [n for n in tar.getnames() if n]
+    names = set(ordered_names)
     # Derive bundle_root from a file that lives ONLY at the top level
     # (host_env.json) so we don't accidentally pick a deeper match.
     bundle_root = next(n for n in names if n.endswith("/host_env.json"))[: -len("/host_env.json")]
@@ -488,6 +490,13 @@ def test_iter_source_files_keeps_nested_manifest_and_lockfile_lookalikes(
     # only ./manifest.json in the archive, written by stage_run_dir.)
     assert sum(1 for n in names if n == f"{bundle_root}/manifest.json") == 1
     assert f"{bundle_root}/.aorta-probe.lock" not in names
+    # Ordering contract (Sonbol PR #199 review): the TOP-LEVEL
+    # manifest.json is the tarball trailer even when a nested
+    # ``*/manifest.json`` exists. The sort keys on the relative POSIX
+    # path, so the nested manifest must NOT be the final member.
+    file_entries = [n for n in ordered_names if n != bundle_root]
+    assert file_entries[-1] == f"{bundle_root}/manifest.json"
+    assert file_entries[-1] != f"{bundle_root}/none-none/trial_0/manifest.json"
 
 
 # --- atomic tarball write (review fix) -------------------------------------
@@ -602,3 +611,64 @@ def test_bundle_timestamp_normalises_non_utc_now_to_utc():
     # 12:30 IST == 07:00 UTC
     out = _bundle_timestamp(local)
     assert out == "2026-06-01T07-00-00-500"
+
+
+# --- trust boundary: symlinks + manifest path leak (Sonbol review) ---------
+
+
+def test_bundle_refuses_symlink_escaping_run_dir(synthetic_run_dir, tmp_path):
+    """A symlink under the run dir whose target is OUTSIDE the tree
+    must not be dereferenced into the bundle (Sonbol PR #199 review).
+
+    ``aorta bundle`` ships a shareable artifact, so following
+    ``run_dir/cell/trial_0/link -> ../../secret.txt`` would pull an
+    unrelated local file's bytes across the trust boundary. The
+    writer refuses with :class:`UnsafeSymlinkError`.
+    """
+    secret = tmp_path / "secret.txt"
+    secret.write_text("CUSTOMER_PRIVATE_KEY=hunter2\n", encoding="utf-8")
+    link = synthetic_run_dir / "none-none" / "trial_0" / "leak"
+    link.symlink_to(secret)
+
+    out = tmp_path / "out.tar.gz"
+    with pytest.raises(UnsafeSymlinkError) as exc:
+        bundle_run_dir(synthetic_run_dir, output=out)
+    assert exc.value.target == secret.resolve()
+    assert exc.value.path.name == "leak"
+    # Nothing was written.
+    assert not out.exists()
+
+
+def test_bundle_follows_in_tree_symlink(synthetic_run_dir, tmp_path):
+    """A symlink whose target stays INSIDE the run dir is still
+    followed -- the guard only refuses escapes, not all symlinks.
+    """
+    target = synthetic_run_dir / "none-none" / "trial_0" / "stdout.log"
+    link = synthetic_run_dir / "none-none" / "trial_0" / "stdout_alias.log"
+    link.symlink_to(target)
+
+    out = tmp_path / "out.tar.gz"
+    written = bundle_run_dir(synthetic_run_dir, output=out)
+    with tarfile.open(written, "r:gz") as tar:
+        names = set(tar.getnames())
+    assert any(n.endswith("/none-none/trial_0/stdout_alias.log") for n in names)
+
+
+def test_manifest_does_not_leak_absolute_source_path(synthetic_run_dir, tmp_path):
+    """The extracted manifest must not carry the operator's absolute
+    source path (Sonbol PR #199 review): that would leak workstation
+    usernames, mount points, or customer directory names off the
+    source machine. Only the run dir's leaf name is recorded.
+    """
+    out = tmp_path / "out.tar.gz"
+    bundle_run_dir(synthetic_run_dir, output=out)
+    with tarfile.open(out, "r:gz") as tar:
+        manifest_member = next(n for n in tar.getnames() if n.endswith(f"/{MANIFEST_FILENAME}"))
+        raw = tar.extractfile(manifest_member).read().decode("utf-8")
+    manifest = Manifest.from_json(raw)
+    # Only the leaf name -- never the absolute path or any parent.
+    assert manifest.source_run_dir == synthetic_run_dir.name
+    abs_source = str(synthetic_run_dir.resolve())
+    assert abs_source not in raw
+    assert str(tmp_path) not in raw
+    assert "/" not in manifest.source_run_dir

@@ -42,6 +42,7 @@ from aorta.bundle.errors import (
     EmptyRunDirError,
     NoTicketError,
     RunDirNotFoundError,
+    UnsafeSymlinkError,
 )
 from aorta.bundle.manifest import MANIFEST_FILENAME, FileRecord, Manifest, _to_utc
 from aorta.bundle.redactor import IdentityRedactor, Redactor
@@ -178,12 +179,14 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
       cryptographic equality across machines they should hash the
       manifest, not the tarball.
 
-    Symlinks are followed via ``Path.is_file`` semantics; an
-    operator who symlinks an external directory into their probe
-    output gets that directory bundled. We document this behaviour
-    in ``docs/probe-188/bundle.md`` rather than try to detect-and-
-    block it (the legitimate use case -- symlinking a shared
-    ``host_env.json`` -- is a feature).
+    Symlinks are followed via ``Path.is_file`` semantics ONLY when
+    their resolved target stays inside ``run_dir``. A symlink (or a
+    symlinked parent component) whose target escapes the tree raises
+    :class:`UnsafeSymlinkError`: ``aorta bundle`` ships a shareable
+    artifact, so it must not dereference a link pointing at an
+    unrelated local file or a mounted-share path and pull those bytes
+    in (the trust-boundary hole flagged in PR #199 review). In-tree
+    symlinks are still followed so legitimate intra-run links work.
 
     Skips (TOP-LEVEL ONLY; a nested file with the same basename in a
     cell / trial directory is a legitimate artifact and IS bundled):
@@ -200,10 +203,18 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
     bundler-style output) gets those files bundled normally.
     """
     skipped_rel_paths = frozenset({".aorta-probe.lock", MANIFEST_FILENAME})
+    root = run_dir.resolve()
     files: list[Path] = []
     for path in run_dir.rglob("*"):
         if not path.is_file():
             continue
+        # Resolve the full path (dereferences symlinks at any
+        # component) and refuse anything that lands outside the run
+        # dir. A regular file always resolves within ``root``; only a
+        # symlink escaping the tree trips this guard.
+        resolved = path.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise UnsafeSymlinkError(run_dir=run_dir, path=path, target=resolved)
         rel = path.relative_to(run_dir).as_posix()
         if rel in skipped_rel_paths:
             continue
@@ -323,10 +334,13 @@ def write_tarball(staging_dir: Path, bundle_name: str, output: Path) -> Path:
             for path in bundle_root.rglob("*"):
                 if path.is_file():
                     rel_paths.append(path.relative_to(bundle_root))
-            # Sort with manifest.json last so ``tar -tzf`` reads it as
-            # the trailer (matches the docstring contract).
+            # Sort with the TOP-LEVEL manifest.json last so ``tar -tzf``
+            # reads it as the trailer (matches the docstring contract).
+            # Key on the relative POSIX path, not the basename: a nested
+            # ``*/manifest.json`` artifact must stay in alphabetical
+            # position, only ``./manifest.json`` is the trailer.
             rel_paths.sort(
-                key=lambda p: (p.name == MANIFEST_FILENAME, p.as_posix()),
+                key=lambda p: (p.as_posix() == MANIFEST_FILENAME, p.as_posix()),
             )
             for rel in rel_paths:
                 tar.add(str(bundle_root / rel), arcname=f"{bundle_name}/{rel.as_posix()}")
