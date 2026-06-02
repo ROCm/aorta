@@ -688,6 +688,33 @@ def test_identity_redactor_preserves_restrictive_mode(synthetic_run_dir, tmp_pat
     assert stat.S_IMODE(staged.stat().st_mode) == 0o600
 
 
+def test_tarball_headers_scrub_owner_identity(synthetic_run_dir, tmp_path):
+    """Tar headers must not leak the operator's uid/gid/uname/gname and
+    must pin mtime (Copilot PR #199 review): a shareable bundle should
+    not carry workstation identity. File MODE is still preserved through
+    the filter so a 0600 probe.env stays restrictive.
+    """
+    import stat
+
+    secret = synthetic_run_dir / "none-none" / "trial_0" / "probe.env"
+    secret.write_text("AWS_SECRET=shhh\n", encoding="utf-8")
+    secret.chmod(0o600)
+
+    out = tmp_path / "out.tar.gz"
+    bundle_run_dir(synthetic_run_dir, output=out)
+    with tarfile.open(out, "r:gz") as tar:
+        members = tar.getmembers()
+    assert members
+    for m in members:
+        assert m.uid == 0, f"{m.name}: uid leaked"
+        assert m.gid == 0, f"{m.name}: gid leaked"
+        assert m.uname == "", f"{m.name}: uname leaked"
+        assert m.gname == "", f"{m.name}: gname leaked"
+        assert m.mtime == 0, f"{m.name}: mtime not pinned"
+    env_member = next(m for m in members if m.name.endswith("/none-none/trial_0/probe.env"))
+    assert stat.S_IMODE(env_member.mode) == 0o600
+
+
 def test_manifest_does_not_leak_absolute_source_path(synthetic_run_dir, tmp_path):
     """The extracted manifest must not carry the operator's absolute
     source path (Sonbol PR #199 review): that would leak workstation

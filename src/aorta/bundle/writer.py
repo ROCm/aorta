@@ -36,6 +36,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
+from aorta.bundle._slug import NO_TICKET_SLUG, safe_slug
 from aorta.bundle.errors import (
     BundleAbortedError,
     BundleIOError,
@@ -46,7 +47,6 @@ from aorta.bundle.errors import (
 )
 from aorta.bundle.manifest import MANIFEST_FILENAME, FileRecord, Manifest, _to_utc
 from aorta.bundle.redactor import IdentityRedactor, Redactor
-from aorta.triage.output import NO_TICKET_SLUG, safe_slug
 
 log = logging.getLogger(__name__)
 
@@ -172,12 +172,14 @@ def _iter_source_files(run_dir: Path) -> list[Path]:
       manifests modulo the timestamp / source path fields.
     * Tarball entry order is reproducible at the entry-list level
       (``tar -tzf <bundle>`` lists files in the same order
-      everywhere). Note that the resulting tarball **bytes** are
-      NOT bit-identical across hosts: ``tarfile`` and ``gzip`` embed
-      mtime / uid / gid / gzip-header timestamp by default, and the
-      writer does not normalise them. If a downstream consumer needs
-      cryptographic equality across machines they should hash the
-      manifest, not the tarball.
+      everywhere). :func:`_scrub_tarinfo` additionally zeroes
+      uid/gid, clears uname/gname, and pins mtime in the tar headers
+      so the archive neither leaks the operator's workstation
+      identity nor varies on those fields. The resulting **bytes**
+      are still NOT bit-identical across hosts -- the outer gzip
+      wrapper embeds its own header timestamp that ``tarfile`` does
+      not expose -- so a consumer needing cryptographic equality
+      should hash the manifest, not the tarball.
 
     Symlinks are followed via ``Path.is_file`` semantics ONLY when
     their resolved target stays inside ``run_dir``. A symlink (or a
@@ -284,6 +286,28 @@ def stage_run_dir(
     return manifest
 
 
+def _scrub_tarinfo(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Normalise ownership + mtime in tar headers for a shareable bundle.
+
+    ``tarfile.add`` copies the staging file's uid/gid and -- because the
+    files were just written by this process -- the operator's user/group
+    names into the archive headers. A bundle is meant to be shared, so
+    those headers would leak workstation identity (and make the archive
+    non-reproducible). We zero uid/gid, clear uname/gname, and pin mtime
+    to the epoch.
+
+    The file MODE is left untouched on purpose: :class:`IdentityRedactor`
+    preserves a ``0600`` ``probe.env`` (PR #199 review) and the tarball
+    must carry that restrictive bit through to extraction.
+    """
+    tarinfo.uid = 0
+    tarinfo.gid = 0
+    tarinfo.uname = ""
+    tarinfo.gname = ""
+    tarinfo.mtime = 0
+    return tarinfo
+
+
 def write_tarball(staging_dir: Path, bundle_name: str, output: Path) -> Path:
     """Pack ``<staging_dir>/<bundle_name>/`` into ``output.tar.gz``.
 
@@ -310,9 +334,11 @@ def write_tarball(staging_dir: Path, bundle_name: str, output: Path) -> Path:
     Tarball entries are added in the order :func:`_iter_source_files`
     produced (alphabetical on relative POSIX path), with the manifest
     last so consumers running ``tar -tzf`` see the data first and
-    the index trailer last. ``tarfile.add`` is used directly with
-    a deterministic ``arcname`` so the tarball never carries the
-    operator's ``--output`` parent path.
+    the index trailer last. ``tarfile.add`` is used with a
+    deterministic ``arcname`` (so the tarball never carries the
+    operator's ``--output`` parent path) and a ``filter=``
+    (:func:`_scrub_tarinfo`) that strips ownership/identity metadata
+    from the headers while preserving file modes.
     """
     output = output.absolute()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -343,7 +369,11 @@ def write_tarball(staging_dir: Path, bundle_name: str, output: Path) -> Path:
                 key=lambda p: (p.as_posix() == MANIFEST_FILENAME, p.as_posix()),
             )
             for rel in rel_paths:
-                tar.add(str(bundle_root / rel), arcname=f"{bundle_name}/{rel.as_posix()}")
+                tar.add(
+                    str(bundle_root / rel),
+                    arcname=f"{bundle_name}/{rel.as_posix()}",
+                    filter=_scrub_tarinfo,
+                )
         os.replace(partial, output)
     except BaseException:
         # Includes OSError (ENOSPC, EACCES, ...), KeyboardInterrupt,

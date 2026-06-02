@@ -77,6 +77,53 @@ def test_no_third_party_imports_beyond_click():
             )
 
 
+def test_bundle_only_imports_its_own_aorta_subpackage():
+    """The bundle package must not import sibling ``aorta`` packages.
+
+    ``aorta.triage.output`` (the old home of ``safe_slug``) imports
+    PyYAML and the registry stack, so a ``from aorta.triage... import``
+    silently busts the stdlib+click import budget (PR #199 review).
+    Only ``aorta.bundle.*`` internal imports are allowed.
+    """
+    for path in _bundle_source_files():
+        for name in _imports(path):
+            if name == "aorta" or name.startswith(_AORTA_INTERNAL_PREFIX):
+                assert name.startswith("aorta.bundle"), (
+                    f"{path}: cross-package import {name!r}; aorta.bundle must "
+                    "depend only on its own subpackage to stay stdlib+click "
+                    "(no transitive PyYAML via aorta.triage)."
+                )
+
+
+def test_bundle_safe_slug_matches_triage_canonical():
+    """The inlined ``aorta.bundle._slug`` copy must stay byte-for-byte
+    equivalent to the canonical ``aorta.triage.output.safe_slug`` so the
+    decoupling (PR #199) cannot silently drift -- e.g. if triage tightens
+    the slug regex for a path-traversal fix, this test fails until the
+    bundle copy is updated too.
+    """
+    from aorta.bundle._slug import NO_TICKET_SLUG as BUNDLE_NO_TICKET
+    from aorta.bundle._slug import safe_slug as bundle_slug
+    from aorta.triage.output import NO_TICKET_SLUG as TRIAGE_NO_TICKET
+    from aorta.triage.output import safe_slug as triage_slug
+
+    assert BUNDLE_NO_TICKET == TRIAGE_NO_TICKET
+    samples = [
+        "PROJ-123",
+        "TKT 1",
+        "a/b/c",
+        "..",
+        ".",
+        "",
+        "weird:name*x",
+        "a.b-c_d",
+        "../../etc/passwd",
+        "with space and / slash",
+    ]
+    for s in samples:
+        assert bundle_slug(s) == triage_slug(s), f"slug drift on {s!r}"
+
+
 def test_no_subprocess_import_in_bundle():
     """Bundle is a filesystem-only writer; no children should be spawned."""
     for path in _bundle_source_files():
