@@ -21,6 +21,8 @@ from aorta.registry.mitigations import BUILTIN_MITIGATIONS, get_mitigation, load
 PROBE_FLAG_BUILTIN_EXPECTED: dict[str, dict[str, str]] = {
     "amd_log_level_4": {"AMD_LOG_LEVEL": "4"},
     "debug_clr_no_batch_cpu_sync": {"DEBUG_CLR_BATCH_CPU_SYNC_SIZE": "0"},
+    "debug_hip_dynamic_queues_1": {"DEBUG_HIP_DYNAMIC_QUEUES": "1"},
+    "debug_hip_dynamic_queues_2": {"DEBUG_HIP_DYNAMIC_QUEUES": "2"},
     "fa_prefer_aotriton": {"TORCH_ROCM_FA_PREFER_CK": "0"},
     "fa_prefer_ck": {"TORCH_ROCM_FA_PREFER_CK": "1"},
     "gpu_force_blit_copy_128": {"GPU_FORCE_BLIT_COPY_SIZE": "128"},

@@ -39,6 +39,12 @@ BUILTIN_MITIGATIONS: dict[str, dict[str, str]] = {
     "gpu_max_hw_queues_2": {
         "GPU_MAX_HW_QUEUES": "2",
     },
+    "debug_hip_dynamic_queues_1": {
+        "DEBUG_HIP_DYNAMIC_QUEUES": "1",
+    },
+    "debug_hip_dynamic_queues_2": {
+        "DEBUG_HIP_DYNAMIC_QUEUES": "2",
+    },
     "roc_aql_queue_size_1024": {
         "ROC_AQL_QUEUE_SIZE": "1024",
     },
