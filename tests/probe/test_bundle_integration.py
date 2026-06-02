@@ -10,8 +10,19 @@ import pytest
 from click.testing import CliRunner
 
 from aorta.bundle import MANIFEST_FILENAME, Manifest, bundle_run_dir
+from aorta.bundle.redactor import IdentityRedactor
 from aorta.cli import main
+from aorta.probe.bundle_hook import build_redactor_from_recipe, load_redaction_cfg
 from aorta.probe.redaction import RedactingRedactor, RedactionCfg
+from aorta.registry.errors import UnknownMitigationError
+from aorta.triage.recipe import load_recipe
+
+
+def _member_text(tar: tarfile.TarFile, name: str) -> str:
+    """Read a tar member as UTF-8 text (``extractfile`` may return None)."""
+    fh = tar.extractfile(name)
+    assert fh is not None, f"member {name} not found in tarball"
+    return fh.read().decode("utf-8")
 
 
 def _write_trial(cell_dir: Path, trial_idx: int = 0) -> None:
@@ -115,7 +126,7 @@ def test_manifest_records_per_file_counts(redaction_run_dir: Path, tmp_path: Pat
     assert result.exit_code == 0, result.output
     with tarfile.open(out, "r:gz") as tar:
         member = next(n for n in tar.getnames() if n.endswith(MANIFEST_FILENAME))
-        manifest = Manifest.from_json(tar.extractfile(member).read().decode("utf-8"))
+        manifest = Manifest.from_json(_member_text(tar, member))
     assert manifest.redaction_applied is True
     assert manifest.redactor_kind == "probe.v1"
     stdout_row = next(f for f in manifest.files if f.path.endswith("stdout.log"))
@@ -149,6 +160,50 @@ def test_originals_untouched(redaction_run_dir: Path, tmp_path: Path):
     assert before == after
 
 
+def test_fallback_redaction_resolves_despite_unresolvable_axis(tmp_path: Path):
+    """recipe.resolved.yaml fallback must not require sidecars (oyazdanb review).
+
+    A probe run driven by sidecar-defined mitigations leaves a
+    recipe.resolved.yaml whose axes name mitigations the registry cannot
+    resolve without the original sidecar files. Bundling only needs the
+    ``redaction:`` block, so ``load_redaction_cfg`` parses just that block
+    rather than running the full recipe loader (which raises here).
+    """
+    run_dir = tmp_path / "probe-out" / "TKT-SIDE"
+    run_dir.mkdir(parents=True)
+    _write_trial(run_dir / "none-none")
+    recipe = run_dir / "recipe.resolved.yaml"
+    recipe.write_text(
+        """\
+schema_version: 1
+mode: probe
+trials: 1
+mitigation_axis: [acme_customer_only_mitigation]
+diagnostic_axis: [none]
+redaction:
+  scrub_env_keys: ["AWS_*"]
+  scrub_paths: true
+  scrub_ip_addresses: true
+""",
+        encoding="utf-8",
+    )
+    # The full loader cannot resolve the sidecar-only mitigation name...
+    with pytest.raises(UnknownMitigationError):
+        load_recipe(recipe)
+    # ...but redaction resolution succeeds because it parses only the block.
+    cfg = load_redaction_cfg(recipe)
+    assert cfg is not None
+    assert cfg.scrub_paths is True
+    redactor = build_redactor_from_recipe(None, run_dir)
+    assert isinstance(redactor, RedactingRedactor)
+
+
+def test_fallback_absent_recipe_uses_identity_redactor(tmp_path: Path):
+    run_dir = tmp_path / "probe-out" / "TKT-NONE"
+    run_dir.mkdir(parents=True)
+    assert isinstance(build_redactor_from_recipe(None, run_dir), IdentityRedactor)
+
+
 def test_redaction_from_auto_fallback(redaction_run_dir: Path, tmp_path: Path):
     runner = CliRunner()
     out = tmp_path / "bundle.tar.gz"
@@ -160,6 +215,6 @@ def test_redaction_from_auto_fallback(redaction_run_dir: Path, tmp_path: Path):
     with tarfile.open(out, "r:gz") as tar:
         names = tar.getnames()
         stdout_member = next(n for n in names if n.endswith("stdout.log"))
-        text = tar.extractfile(stdout_member).read().decode("utf-8")
+        text = _member_text(tar, stdout_member)
     assert "/home/user" not in text
     assert "192.168.1.1" not in text

@@ -225,6 +225,18 @@ redaction:
         load_recipe(_write_yaml(tmp_path, text))
 
 
+def test_redaction_null_rejected(tmp_path):
+    """``redaction: null`` is present-but-invalid, not "no redaction".
+
+    Using ``data.get("redaction")`` conflated an explicit null with a
+    missing key and silently disabled scrubbing. The loader now checks
+    key presence so a null block fails validation (oyazdanb review).
+    """
+    text = _PROBE_MINIMAL + "redaction:\n"
+    with pytest.raises(RecipeSchemaError, match="must be a mapping when present"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
 def test_top_level_condition_rejected_as_phase_3(tmp_path):
     """Top-level ``condition:`` (outside custom_patterns[*].match) is Phase 3."""
     text = (

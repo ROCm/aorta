@@ -726,6 +726,26 @@ def load_recipe(
         UnknownMitigationError / UnknownEnvironmentError: A referenced
             registry name is not known. Bubbled up from B3's resolver.
     """
+    data, text = _read_recipe_document(path)
+    recipe = _build_recipe(
+        data,
+        sidecar_files=sidecar_files,
+        source_path=path,
+        source_sha256=_sha256_bytes(text),
+    )
+    return recipe
+
+
+def _read_recipe_document(path: Path) -> tuple[Any, str]:
+    """Read and YAML/JSON-parse a recipe file into ``(data, raw_text)``.
+
+    The read + parse step is split out from :func:`load_recipe` so callers
+    that need a single top-level block (e.g. ``aorta bundle`` resolving only
+    the ``redaction:`` block) can reuse it via :func:`load_recipe_mapping`
+    without running full axis/registry validation -- and without importing
+    a YAML parser themselves (the probe redaction modules are stdlib-only
+    by rubric §3.F; keeping the dependency here preserves that).
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -739,14 +759,19 @@ def load_recipe(
             data = yaml.safe_load(text)
     except (yaml.YAMLError, json.JSONDecodeError) as exc:
         raise RecipeSchemaError(f"recipe {path}: parse error ({exc})") from exc
+    return data, text
 
-    recipe = _build_recipe(
-        data,
-        sidecar_files=sidecar_files,
-        source_path=path,
-        source_sha256=_sha256_bytes(text),
-    )
-    return recipe
+
+def load_recipe_mapping(path: Path) -> Any:
+    """Return a recipe file's raw parsed mapping with no schema validation.
+
+    Used by callers that need one block out of a recipe (e.g. the bundle
+    redaction-only resolve) without resolving the mitigation / diagnostic
+    axes against the registry -- full :func:`load_recipe` would raise for a
+    valid probe run whose recipe referenced sidecar-defined names.
+    """
+    data, _ = _read_recipe_document(path)
+    return data
 
 
 def _build_recipe(

@@ -8,9 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from aorta.bundle.errors import RedactionError
 from aorta.probe.redaction import (
     RedactingRedactor,
     RedactionCfg,
+    _line_windows,
     scrub_env_keys,
     scrub_text,
 )
@@ -159,6 +161,77 @@ def test_fixture_log_scrubs_paths_and_ips(tmp_path: Path):
     assert counts.ips_rewritten >= 2
     assert "/home/customer" not in out
     assert "192.168.1.42" not in out
+
+
+def test_invalid_utf8_log_still_scrubbed(tmp_path: Path):
+    """A stray non-UTF-8 byte must not disable scrubbing (oyazdanb review).
+
+    stdout.log / stderr.log are raw subprocess bytes by design; the
+    redactor used to fail open (byte-copy the file) on the first
+    UnicodeDecodeError, silently leaking every path/IP after it. It now
+    decodes with errors="replace" and keeps scrubbing.
+    """
+    cfg = RedactionCfg(scrub_paths=True, scrub_ip_addresses=True)
+    redactor = RedactingRedactor(cfg)
+    src = tmp_path / "stdout.log"
+    dst = tmp_path / "out" / "stdout.log"
+    src.write_bytes(b"bad\xff  /home/user/secret 192.168.1.1\n")
+    counts = redactor.scrub_file(src, dst)
+    out = dst.read_text(encoding="utf-8")
+    assert counts.paths_rewritten >= 1
+    assert counts.ips_rewritten >= 1
+    assert "/home/user/secret" not in out
+    assert "192.168.1.1" not in out
+
+
+def test_line_windows_reconstructs_input():
+    text = "alpha\nbeta\r\ngamma\rdelta\nno-trailing-newline"
+    assert "".join(_line_windows(text)) == text
+
+
+def test_scrub_text_spans_window_seam(monkeypatch):
+    """A path/IP must not be missed when it lands on a window boundary.
+
+    The old fixed-slice windowing cut tokens in half at ``i*MAX_LOG_BYTES``
+    so neither regex pass matched them. Line-aware windows never split a
+    line, so an IP sitting just past the byte budget is still scrubbed.
+    """
+    monkeypatch.setattr("aorta.probe.redaction.MAX_LOG_BYTES", 20)
+    text = "x" * 15 + "\n" + "192.168.1.1 /home/user/secret\n"
+    out, paths, v4, v6 = scrub_text(text, scrub_paths=True, scrub_ip_addresses=True)
+    assert v4 == 1
+    assert paths == 1
+    assert "192.168.1.1" not in out
+    assert "/home/user/secret" not in out
+
+
+def test_corrupt_result_json_fails_closed(tmp_path: Path):
+    """Corrupt result.json fails closed with a typed BundleError (Issue E).
+
+    A raw JSONDecodeError would escape staging as a traceback and is not
+    an OSError, so the writer's OSError wrap would miss it -- and partial
+    handling risks an unredacted bundle. RedactionError is a BundleError,
+    so the CLI fails closed (no bundle written).
+    """
+    cfg = RedactionCfg(scrub_paths=True)
+    redactor = RedactingRedactor(cfg)
+    src = tmp_path / "result.json"
+    dst = tmp_path / "out" / "result.json"
+    src.write_text("{ this is not valid json", encoding="utf-8")
+    with pytest.raises(RedactionError) as excinfo:
+        redactor.scrub_file(src, dst)
+    assert excinfo.value.path == src
+    assert not dst.exists()
+
+
+def test_corrupt_host_env_json_fails_closed(tmp_path: Path):
+    cfg = RedactionCfg(scrub_env_keys=("AWS_*",))
+    redactor = RedactingRedactor(cfg)
+    src = tmp_path / "host_env.json"
+    dst = tmp_path / "out" / "host_env.json"
+    src.write_text("not json at all", encoding="utf-8")
+    with pytest.raises(RedactionError):
+        redactor.scrub_file(src, dst)
 
 
 def test_probe_env_scrubs_env_keys(tmp_path: Path):

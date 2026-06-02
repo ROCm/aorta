@@ -12,8 +12,8 @@ import logging
 from pathlib import Path
 
 from aorta.bundle.redactor import IdentityRedactor, Redactor
-from aorta.probe.redaction import RedactingRedactor, RedactionCfg
-from aorta.triage.recipe import load_recipe
+from aorta.probe.redaction import RedactingRedactor, RedactionCfg, parse_redaction
+from aorta.triage.recipe import load_recipe_mapping
 
 log = logging.getLogger(__name__)
 
@@ -21,12 +21,27 @@ _RECIPE_RESOLVED_NAME = "recipe.resolved.yaml"
 
 
 def load_redaction_cfg(recipe_path: Path) -> RedactionCfg | None:
-    """Load ``redaction:`` from a probe-mode recipe file."""
-    recipe = load_recipe(recipe_path)
-    if recipe.probe_extras is None or recipe.probe_extras.redaction is None:
+    """Parse only the ``redaction:`` block from a recipe file.
+
+    Bundling needs nothing but the ``redaction:`` mapping, so this parses
+    just that key (via :func:`~aorta.triage.recipe.load_recipe_mapping`)
+    rather than running the full recipe loader. A full
+    :func:`~aorta.triage.recipe.load_recipe` resolves the mitigation /
+    diagnostic axes against the registry, which fails for a perfectly
+    valid probe run whose recipe referenced sidecar-defined mitigations or
+    environments (the ``recipe.resolved.yaml`` fallback has no sidecar
+    paths to thread back in). Parsing the block directly decouples the
+    bundle redaction-resolve from recipe axis validity.
+
+    Returns ``None`` when the file has no ``redaction:`` key. An explicit
+    ``redaction: null`` is rejected by :func:`parse_redaction` (a null
+    block is invalid, not "no redaction"), matching the probe recipe
+    builder.
+    """
+    data = load_recipe_mapping(recipe_path)
+    if not isinstance(data, dict) or "redaction" not in data:
         return None
-    cfg: RedactionCfg = recipe.probe_extras.redaction
-    return cfg
+    return parse_redaction(data["redaction"])
 
 
 def build_redactor_from_recipe(

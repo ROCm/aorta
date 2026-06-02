@@ -148,3 +148,30 @@ class BundleIOError(BundleError):
             "any existing file at the output path was left untouched (the "
             "atomic write only replaces it on success)."
         )
+
+
+class RedactionError(BundleError):
+    """Raised when a redactor cannot guarantee an artifact was scrubbed.
+
+    A :class:`~aorta.bundle.redactor.Redactor` that parses structured
+    artifacts (``result.json``, ``host_env.json``) must fail *closed*
+    when the artifact is corrupted/truncated: a raw
+    ``json.JSONDecodeError`` would otherwise escape staging as an
+    unhandled traceback, and -- worse -- partial parsing could let an
+    unredacted artifact through. Failing with a typed ``BundleError``
+    means the CLI shim renders a clean message and no bundle is written
+    when scrubbing cannot be guaranteed.
+
+    Carries the offending ``path`` and the underlying ``cause`` so the
+    operator can name the bad file and tests can assert on the fields
+    instead of substring-matching the rendered message.
+    """
+
+    def __init__(self, path: Path, cause: Exception) -> None:
+        self.path = path
+        self.cause = cause
+        super().__init__(
+            f"aorta bundle: cannot redact {path}: {type(cause).__name__}: "
+            f"{cause}. Refusing to write a bundle whose scrubbing is not "
+            "guaranteed -- fix or remove the corrupted artifact and re-run."
+        )

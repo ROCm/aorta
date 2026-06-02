@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from aorta.bundle.errors import RedactionError
 from aorta.bundle.redactor import RedactionCounts, Redactor
 from aorta.probe.sandbox import MAX_LOG_BYTES
 from aorta.triage.recipe import RecipeSchemaError
@@ -207,6 +208,34 @@ def _scrub_ips_in_text(text: str, ip_index: _IpIndex) -> str:
     return _IPV4_RE.sub(_v4_sub, text)
 
 
+def _line_windows(text: str) -> list[str]:
+    """Split ``text`` into ``<= MAX_LOG_BYTES`` windows at line boundaries.
+
+    The naive ``text[i : i + MAX_LOG_BYTES]`` slicing splits at fixed
+    byte offsets, which can cut a path or IP literal in half at the seam
+    so neither regex pass matches it (a silent redaction miss). Paths and
+    IPs never contain a line terminator, so breaking only *between* lines
+    guarantees no token straddles a window. ``splitlines(keepends=True)``
+    preserves every terminator, so ``"".join(...)`` reconstructs the input
+    byte-for-byte. A single line longer than ``MAX_LOG_BYTES`` is emitted
+    whole rather than split -- correctness of redaction wins over the exact
+    byte bound for that pathological case.
+    """
+    windows: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for line in text.splitlines(keepends=True):
+        if buf and size + len(line) > MAX_LOG_BYTES:
+            windows.append("".join(buf))
+            buf = []
+            size = 0
+        buf.append(line)
+        size += len(line)
+    if buf:
+        windows.append("".join(buf))
+    return windows
+
+
 def scrub_text(
     text: str,
     *,
@@ -216,8 +245,10 @@ def scrub_text(
     """Apply path + IP scrubbers to a text blob (per-file index scope).
 
     Returns ``(text, paths_rewritten, ipv4_rewritten, ipv6_rewritten)``.
-    Large inputs are processed in ``MAX_LOG_BYTES`` windows so a hostile
-    log cannot blow regex CPU past the documented bound.
+    Large inputs are processed in ``MAX_LOG_BYTES`` windows (split at line
+    boundaries by :func:`_line_windows`) so a hostile log cannot blow regex
+    CPU past the documented bound while still scrubbing tokens that would
+    otherwise fall on a fixed-slice seam.
     """
     path_index = _PathIndex()
     ip_index = _IpIndex()
@@ -227,7 +258,7 @@ def scrub_text(
     if len(text) <= MAX_LOG_BYTES:
         windows = [text]
     else:
-        windows = [text[i : i + MAX_LOG_BYTES] for i in range(0, len(text), MAX_LOG_BYTES)]
+        windows = _line_windows(text)
 
     out_parts: list[str] = []
     for window in windows:
@@ -328,9 +359,9 @@ class RedactingRedactor(Redactor):
         if src.name == "probe.env":
             counts = self._scrub_probe_env(raw, dst)
         elif src.name == "result.json":
-            counts = self._scrub_result_json(raw, dst)
+            counts = self._scrub_result_json(raw, dst, src)
         elif src.name == "host_env.json":
-            counts = self._scrub_host_env_json(raw, dst)
+            counts = self._scrub_host_env_json(raw, dst, src)
         elif _is_text_artifact(src):
             counts = self._scrub_text_bytes(raw, dst)
         else:
@@ -353,9 +384,16 @@ class RedactingRedactor(Redactor):
             bytes_out=len(out_bytes),
         )
 
-    def _scrub_result_json(self, raw: bytes, dst: Path) -> RedactionCounts:
+    def _scrub_result_json(self, raw: bytes, dst: Path, src: Path) -> RedactionCounts:
         text = raw.decode("utf-8", errors="replace")
-        doc = json.loads(text)
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError as exc:
+            # Fail closed: a corrupt/truncated result.json must not slip
+            # through unredacted, and the raw decode error would otherwise
+            # escape staging as an unhandled traceback (it is not an
+            # OSError, so the writer's OSError->BundleIOError wrap misses it).
+            raise RedactionError(src, exc) from exc
         env_removed = [0]
         scrubbed, paths, v4, v6 = _scrub_json_value(doc, cfg=self._cfg, env_removed=env_removed)
         out = json.dumps(scrubbed, indent=2, sort_keys=False) + "\n"
@@ -369,9 +407,15 @@ class RedactingRedactor(Redactor):
             bytes_out=len(out_bytes),
         )
 
-    def _scrub_host_env_json(self, raw: bytes, dst: Path) -> RedactionCounts:
+    def _scrub_host_env_json(self, raw: bytes, dst: Path, src: Path) -> RedactionCounts:
         text = raw.decode("utf-8", errors="replace")
-        doc = json.loads(text)
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError as exc:
+            # Fail closed for the same reason as _scrub_result_json: a
+            # parse failure must stop bundling rather than emit a
+            # potentially unredacted host_env.json.
+            raise RedactionError(src, exc) from exc
         env_removed = [0]
         if isinstance(doc, dict) and "env" in doc and isinstance(doc["env"], dict):
             scrubbed_env, removed = scrub_env_keys(
@@ -396,11 +440,13 @@ class RedactingRedactor(Redactor):
         )
 
     def _scrub_text_bytes(self, raw: bytes, dst: Path) -> RedactionCounts:
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            dst.write_bytes(raw)
-            return RedactionCounts(bytes_in=len(raw), bytes_out=len(raw))
+        # Decode with errors="replace" rather than failing open. stdout.log /
+        # stderr.log are raw subprocess bytes by design, so a single stray
+        # non-UTF-8 byte must not disable path/IP scrubbing for the whole
+        # file (a security footgun). This matches the lenient decode already
+        # used by _scrub_probe_env and the probe log reader; scrub_text still
+        # bounds CPU via its MAX_LOG_BYTES windows.
+        text = raw.decode("utf-8", errors="replace")
         out, paths, v4, v6 = scrub_text(
             text,
             scrub_paths=self._cfg.scrub_paths,

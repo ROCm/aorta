@@ -301,8 +301,12 @@ def build_probe_recipe_from_dict(
         default=DEFAULT_HANG_GRACE_SEC,
         allow_zero=True,
     )
-    redaction_raw = data.get("redaction")
-    redaction = parse_redaction(redaction_raw) if redaction_raw is not None else None
+    # Use ``in`` rather than ``.get(...) is not None`` so an explicit
+    # ``redaction: null`` is treated as present-but-invalid (parse_redaction
+    # rejects None) instead of being silently conflated with "no redaction
+    # block" -- a null block should fail validation, not quietly disable
+    # scrubbing.
+    redaction = parse_redaction(data["redaction"]) if "redaction" in data else None
 
     # confound block is permitted (already in _PROBE_TOP_LEVEL) but
     # not meaningful for Tier-1-only Phase 1 -- pass it through with
