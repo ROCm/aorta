@@ -503,10 +503,11 @@ def test_iter_source_files_keeps_nested_manifest_and_lockfile_lookalikes(
 
 
 def test_write_tarball_failure_leaves_no_partial(synthetic_run_dir, tmp_path, monkeypatch):
-    """If tarfile / gzip raises mid-write (ENOSPC, EIO, ...) the
-    final ``output`` path must NOT exist -- BundleIOError's message
-    claims 'No tarball was written' and the writer has to honour
-    that.
+    """If tarfile / gzip raises mid-write (ENOSPC, EIO, ...) and the
+    final ``output`` path did not pre-exist, it must NOT exist after
+    the failure -- BundleIOError's message promises 'no new tarball
+    was written' and the writer has to honour that (here there is no
+    prior file at the path, so nothing should appear).
 
     The partial sibling (``<output>.partial``) is also cleaned up so
     a retry does not race against stale temp data.
@@ -560,12 +561,17 @@ def test_write_tarball_failure_preserves_prior_output(synthetic_run_dir, tmp_pat
 
     monkeypatch.setattr(writer_mod.tarfile, "open", _exploding_open)
 
-    with pytest.raises(BundleIOError):
+    with pytest.raises(BundleIOError) as exc:
         bundle_run_dir(synthetic_run_dir, output=out)
     # Prior file untouched.
     assert out.read_bytes() == sentinel
     # No .partial left behind.
     assert not out.with_name(out.name + ".partial").exists()
+    # The message must NOT claim the path is empty -- it says no NEW
+    # tarball was written and the existing file was left untouched
+    # (Copilot PR #199 review).
+    assert "no new tarball was written" in str(exc.value).lower()
+    assert "left untouched" in str(exc.value).lower()
 
 
 def test_write_tarball_cleans_stale_partial_before_writing(synthetic_run_dir, tmp_path):

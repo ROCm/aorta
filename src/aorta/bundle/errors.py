@@ -107,7 +107,7 @@ class UnsafeSymlinkError(BundleError):
 class BundleAbortedError(BundleError):
     """Raised when ``--review`` was passed and the operator answered ``n``.
 
-    Carries the source ``run_dir`` so the CLI can render a "no
+    Carries the source ``run_dir`` so the CLI can render a "no new
     tarball was written; run dir untouched" message. The rendered
     review summary is printed to ``stdout`` by the review callback
     BEFORE the prompt -- it is not stored on the exception (CLI tests
@@ -118,7 +118,8 @@ class BundleAbortedError(BundleError):
         self.run_dir = run_dir
         super().__init__(
             f"aorta bundle: review-pause aborted by operator (run dir "
-            f"{run_dir}). No tarball was written."
+            f"{run_dir}). No new tarball was written; any existing file "
+            "at the output path was left untouched."
         )
 
 
@@ -143,5 +144,7 @@ class BundleIOError(BundleError):
         self.cause = cause
         super().__init__(
             f"aorta bundle: filesystem error while bundling {run_dir}: "
-            f"{type(cause).__name__}: {cause}. No tarball was written."
+            f"{type(cause).__name__}: {cause}. No new tarball was written; "
+            "any existing file at the output path was left untouched (the "
+            "atomic write only replaces it on success)."
         )
