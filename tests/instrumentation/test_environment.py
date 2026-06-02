@@ -397,6 +397,9 @@ def _example_snapshot(**overrides) -> object:
             "version_code": 22707,
             "version": "2.27.7",
             "lib_hash": "sha256:rcclhash",
+            "net_plugin_mode": "external",
+            "anp_lib_hash": "sha256:anphash",
+            "net_lib_hash": None,
         },
         "gpu_arch": {
             "agent_count": 8,
@@ -3541,6 +3544,9 @@ class TestRccl:
             "version_code",
             "version",
             "lib_hash",
+            "net_plugin_mode",
+            "anp_lib_hash",
+            "net_lib_hash",
         }
 
     def test_decode_modern_version_code(self):
@@ -3583,7 +3589,84 @@ class TestRccl:
         assert block["version_code"] == 22707
         assert block["version"] == "2.27.7"
         assert block["lib_hash"] is not None
+        # No net-plugin .so present -> internal mode, no plugin hashes.
+        assert block["net_plugin_mode"] == "internal"
+        assert block["anp_lib_hash"] is None
+        assert block["net_lib_hash"] is None
         assert reasons == []
+
+    def _rccl_dirs(self, tmp_path: Path, monkeypatch):
+        """Set up a librccl.so + header so the install reads as present."""
+        header_dir = tmp_path / "include"
+        header_dir.mkdir()
+        (header_dir / "rccl.h").write_text("#define NCCL_VERSION_CODE 22707\n")
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        (lib_dir / "librccl.so").write_bytes(b"rccl-bytes")
+        monkeypatch.setattr(env_mod, "RCCL_VERSION_HEADER", header_dir / "rccl.h")
+        monkeypatch.setattr(env_mod, "RCCL_LIB_DIR", lib_dir)
+        return lib_dir
+
+    def test_net_plugin_external_when_anp_present_and_env_set(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        lib_dir = self._rccl_dirs(tmp_path, monkeypatch)
+        (lib_dir / "librccl-anp.so").write_bytes(b"anp-bytes")
+        isolated_env.setenv("NCCL_NET_PLUGIN", "librccl-anp.so")
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        assert block["net_plugin_mode"] == "external"
+        assert block["anp_lib_hash"] is not None
+        assert reasons == []
+
+    def test_net_plugin_internal_when_anp_present_but_env_unset(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        # ANP .so on disk but the operator did not opt in via
+        # NCCL_NET_PLUGIN -> RCCL uses its built-in net path.
+        lib_dir = self._rccl_dirs(tmp_path, monkeypatch)
+        (lib_dir / "librccl-anp.so").write_bytes(b"anp-bytes")
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        assert block["net_plugin_mode"] == "internal"
+        assert block["anp_lib_hash"] is not None  # hash still captured
+        assert reasons == []
+
+    def test_net_plugin_internal_when_no_plugin_so(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        self._rccl_dirs(tmp_path, monkeypatch)
+        isolated_env.setenv("NCCL_NET_PLUGIN", "librccl-anp.so")
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        # Env set but ANP .so absent -> can't be external.
+        assert block["net_plugin_mode"] == "internal"
+        assert block["anp_lib_hash"] is None
+        assert reasons == []
+
+    def test_net_plugin_unknown_when_rccl_install_unreadable(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        # No librccl.so at all -> lib_hash None -> mode undeterminable.
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        monkeypatch.setattr(
+            env_mod, "RCCL_VERSION_HEADER", tmp_path / "missing.h"
+        )
+        monkeypatch.setattr(env_mod, "RCCL_LIB_DIR", lib_dir)
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        assert block["net_plugin_mode"] == "unknown"
+        assert block["anp_lib_hash"] is None
+        assert block["net_lib_hash"] is None
+        # lib_hash absence still records the existing reason; net-plugin
+        # absence does NOT add its own reason. (Match on the field-prefix
+        # "rccl.net_"/"rccl.anp_" rather than a bare "net_plugin"
+        # substring -- the tmp_path folder name embeds the test name,
+        # which contains "net_plugin" and would give a false positive.)
+        assert any(r.startswith("rccl.lib_hash") for r in reasons)
+        assert not any(r.startswith("rccl.net_") for r in reasons)
+        assert not any(r.startswith("rccl.anp_") for r in reasons)
 
 
 # ---------------------------------------------------------------------------

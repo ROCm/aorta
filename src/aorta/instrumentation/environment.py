@@ -830,7 +830,7 @@ class EnvSnapshot:
                 f"  hipblaslt: {hipblaslt.get('package_version', '?')} rocm_release_tweak={hipblaslt.get('rocm_release_tweak', '?')}",
                 f"  rocblas:   {rocblas.get('package_version', '?')} rocm_release_tweak={rocblas.get('rocm_release_tweak', '?')}",
                 f"  miopen:    {miopen.get('package_version', '?')} rocm_release_tweak={miopen.get('rocm_release_tweak', '?')}",
-                f"  rccl:      {rccl.get('version', '?')} (code={rccl.get('version_code', '?')})",
+                f"  rccl:      {rccl.get('version', '?')} (code={rccl.get('version_code', '?')}) net_plugin={rccl.get('net_plugin_mode', '?')}",
                 # gpu_arch: dedup'd targets are the meaningful diff
                 # signal (homogeneous vs mixed-arch hosts); count tells
                 # how many GPUs were detected. Both null when the
@@ -4725,10 +4725,31 @@ def _capture_rccl(reasons: list[str]) -> dict[str, Any]:
     version_code, version_str = _parse_rccl_header(header_text)
     lib_hash = _hash_shared_library(RCCL_LIB_DIR, "librccl.so")
 
+    # Net-plugin identity. Both plugin .so's are legitimately absent on a
+    # non-ANP setup, so a None hash is a documented absence -- it never
+    # appends a reason. net_plugin_mode is "external" only when the
+    # operator opted into a plugin (NCCL_NET_PLUGIN set) AND the ANP .so
+    # is actually present (RoCE offload via librccl-anp); otherwise RCCL
+    # falls back to its built-in net-ib path => "internal". When we can't
+    # even read the RCCL install (lib_hash None), we can't tell which path
+    # is active, so the mode is "unknown".
+    anp_lib_hash = _hash_shared_library(RCCL_LIB_DIR, "librccl-anp.so")
+    net_lib_hash = _hash_shared_library(RCCL_LIB_DIR, "librccl-net.so")
+    net_plugin_set = bool(os.environ.get("NCCL_NET_PLUGIN"))
+    if lib_hash is None:
+        net_plugin_mode = "unknown"
+    elif net_plugin_set and anp_lib_hash is not None:
+        net_plugin_mode = "external"
+    else:
+        net_plugin_mode = "internal"
+
     block: dict[str, Any] = {
         "version_code": version_code,
         "version": version_str,
         "lib_hash": lib_hash,
+        "net_plugin_mode": net_plugin_mode,
+        "anp_lib_hash": anp_lib_hash,
+        "net_lib_hash": net_lib_hash,
     }
     if version_code is None:
         if header_text is None:
