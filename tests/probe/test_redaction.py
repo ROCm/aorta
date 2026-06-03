@@ -242,6 +242,30 @@ def test_line_windows_counts_bytes_not_chars(monkeypatch):
     assert "".join(windows) == text
 
 
+def test_line_windows_hard_splits_oversized_line(monkeypatch):
+    """A single line longer than the cap is split, not emitted whole (Copilot).
+
+    Line-based windowing only flushes between lines, so a hostile newline-free
+    log would otherwise be passed to the regex as one over-cap window and
+    defeat the byte budget. Each emitted window must stay ``<= MAX_LOG_BYTES``.
+    """
+    monkeypatch.setattr("aorta.probe.redaction.MAX_LOG_BYTES", 20)
+    text = "/" * 73  # one 73-byte line, no terminator, > cap
+    windows = _line_windows(text)
+    assert len(windows) > 1
+    assert all(len(w.encode("utf-8")) <= 20 for w in windows)
+    assert "".join(windows) == text
+
+
+def test_line_windows_oversized_multibyte_line_stays_under_cap(monkeypatch):
+    """Hard-split budget is bytes: a multi-byte over-cap line stays bounded."""
+    monkeypatch.setattr("aorta.probe.redaction.MAX_LOG_BYTES", 20)
+    text = "\u00e9" * 40  # 40 chars, 80 bytes, no terminator
+    windows = _line_windows(text)
+    assert all(len(w.encode("utf-8")) <= 20 for w in windows)
+    assert "".join(windows) == text
+
+
 def test_scrubbed_copy_preserves_restrictive_mode(tmp_path: Path):
     """Every scrub branch carries the source mode; a 0600 source stays 0600.
 
@@ -278,9 +302,12 @@ def test_scrub_text_spans_window_seam(monkeypatch):
 
     The old fixed-slice windowing cut tokens in half at ``i*MAX_LOG_BYTES``
     so neither regex pass matched them. Line-aware windows never split a
-    line, so an IP sitting just past the byte budget is still scrubbed.
+    line (when each line is within the cap), so an IP sitting just past the
+    byte budget is still scrubbed. The cap here is set so the token-bearing
+    line fits on its own but the two lines together force a between-lines
+    break -- the seam falls on the newline, not mid-token.
     """
-    monkeypatch.setattr("aorta.probe.redaction.MAX_LOG_BYTES", 20)
+    monkeypatch.setattr("aorta.probe.redaction.MAX_LOG_BYTES", 35)
     text = "x" * 15 + "\n" + "192.168.1.1 /home/user/secret\n"
     out, paths, v4, v6 = scrub_text(text, scrub_paths=True, scrub_ip_addresses=True)
     assert v4 == 1

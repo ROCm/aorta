@@ -232,6 +232,35 @@ def test_fallback_absent_recipe_uses_identity_redactor(tmp_path: Path):
     assert isinstance(build_redactor_from_recipe(None, run_dir), IdentityRedactor)
 
 
+@pytest.mark.parametrize(
+    "content",
+    ["", "- a\n- b\n", "just-a-scalar\n"],
+    ids=["empty", "list", "scalar"],
+)
+def test_non_mapping_recipe_fails_closed(tmp_path: Path, content: str):
+    """A recipe that is not a top-level mapping must fail closed (Copilot).
+
+    Returning None there would hand back an IdentityRedactor and emit an
+    unredacted bundle the operator believed was scrubbed -- a fail-open. A
+    valid mapping with no redaction: key still legitimately returns None.
+    """
+    recipe = tmp_path / "recipe.resolved.yaml"
+    recipe.write_text(content, encoding="utf-8")
+    with pytest.raises(RecipeSchemaError):
+        load_redaction_cfg(recipe)
+
+
+def test_corrupt_fallback_recipe_clean_cli_error(tmp_path: Path):
+    """A non-mapping recipe.resolved.yaml fallback renders a clean CLI error."""
+    run_dir = tmp_path / "probe-out" / "TKT-CORRUPT"
+    run_dir.mkdir(parents=True)
+    _write_trial(run_dir / "none-none")
+    (run_dir / "recipe.resolved.yaml").write_text("- not-a-mapping\n", encoding="utf-8")
+    result = CliRunner().invoke(main, ["bundle", str(run_dir)])
+    assert result.exit_code != 0
+    assert not isinstance(result.exception, RecipeSchemaError)
+
+
 def test_redaction_from_auto_fallback(redaction_run_dir: Path, tmp_path: Path):
     runner = CliRunner()
     out = tmp_path / "bundle.tar.gz"

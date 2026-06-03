@@ -13,7 +13,7 @@ from pathlib import Path
 
 from aorta.bundle.redactor import IdentityRedactor, Redactor
 from aorta.probe.redaction import RedactingRedactor, RedactionCfg, parse_redaction
-from aorta.triage.recipe import load_recipe_mapping
+from aorta.triage.recipe import RecipeSchemaError, load_recipe_mapping
 
 log = logging.getLogger(__name__)
 
@@ -33,13 +33,22 @@ def load_redaction_cfg(recipe_path: Path) -> RedactionCfg | None:
     paths to thread back in). Parsing the block directly decouples the
     bundle redaction-resolve from recipe axis validity.
 
-    Returns ``None`` when the file has no ``redaction:`` key. An explicit
-    ``redaction: null`` is rejected by :func:`parse_redaction` (a null
-    block is invalid, not "no redaction"), matching the probe recipe
-    builder.
+    Returns ``None`` only when a *valid* recipe mapping has no ``redaction:``
+    key. A file that does not parse to a mapping at all (empty file, list, or
+    scalar -- i.e. a corrupted recipe / ``--redaction-from`` target) raises
+    :class:`~aorta.triage.recipe.RecipeSchemaError` rather than silently
+    returning ``None``: failing open there would emit an unredacted bundle the
+    operator believed was scrubbed. An explicit ``redaction: null`` is likewise
+    rejected by :func:`parse_redaction` (a null block is invalid, not "no
+    redaction"), matching the probe recipe builder.
     """
     data = load_recipe_mapping(recipe_path)
-    if not isinstance(data, dict) or "redaction" not in data:
+    if not isinstance(data, dict):
+        raise RecipeSchemaError(
+            f"recipe {recipe_path}: expected a top-level mapping, got "
+            f"{type(data).__name__}; refusing to fall back to no redaction"
+        )
+    if "redaction" not in data:
         return None
     return parse_redaction(data["redaction"])
 

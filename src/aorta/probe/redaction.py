@@ -230,15 +230,33 @@ def _line_windows(text: str) -> list[str]:
       silent redaction miss). Paths/IPs never contain a line terminator, so
       breaking only *between* lines (``splitlines(keepends=True)``) keeps every
       token whole and ``"".join(...)`` reconstructs the input byte-for-byte.
-      A single line larger than the cap is emitted whole rather than split.
+
+    A single line whose own UTF-8 byte length exceeds the cap (e.g. a hostile
+    newline-free log) would otherwise be emitted as one over-cap window and
+    defeat the byte budget entirely, so it is hard-split into ``<= cap`` byte
+    chunks. Each chunk holds ``MAX_LOG_BYTES // 4`` code points, which is
+    ``<= MAX_LOG_BYTES`` bytes for any UTF-8 string (4 bytes/char max). A token
+    straddling such a hard-split seam may be missed -- an accepted cost for a
+    line that defeats line-based windowing by construction; correctness still
+    holds for every newline-terminated log.
     """
-    if len(text) <= MAX_LOG_BYTES // _MAX_UTF8_BYTES_PER_CHAR:
+    # max chars per window that is guaranteed <= MAX_LOG_BYTES UTF-8 bytes.
+    max_chars = max(1, MAX_LOG_BYTES // _MAX_UTF8_BYTES_PER_CHAR)
+    if len(text) <= max_chars:
         return [text]
     windows: list[str] = []
     buf: list[str] = []
     size = 0
     for line in text.splitlines(keepends=True):
         line_bytes = len(line.encode("utf-8"))
+        if line_bytes > MAX_LOG_BYTES:
+            if buf:
+                windows.append("".join(buf))
+                buf = []
+                size = 0
+            for i in range(0, len(line), max_chars):
+                windows.append(line[i : i + max_chars])
+            continue
         if buf and size + line_bytes > MAX_LOG_BYTES:
             windows.append("".join(buf))
             buf = []
