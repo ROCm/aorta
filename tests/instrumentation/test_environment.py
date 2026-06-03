@@ -478,8 +478,8 @@ def _example_snapshot(**overrides) -> object:
             "ainic": {"present": False},
             "broadcom": {
                 "present": True,
-                "driver_version": "6.8.0",
-                "firmware": "230.0.157.0/pkg 230.1.110.0",
+                "driver_version": "6.9.0-0_fbk10_brcmrdma13_141_g9",
+                "firmware": "232.0.219.16/pkg 232.1.196.16",
                 "rdma_devices": ["bnxt_re0"],
                 "links": [
                     {"device": "bnxt_re0", "state": "ACTIVE", "netdev": "benic7p1"}
@@ -3750,13 +3750,23 @@ _REAL_RDMA_LINK = (
     "link bnxt_re0/1 state ACTIVE physical_state LINK_UP netdev benic7p1 \n"
     "link bnxt_re1/1 state ACTIVE physical_state LINK_UP netdev benic8p1 \n"
 )
-# ethtool -i shape (driver: / version: / firmware-version:). The exact
-# firmware string was not captured; this is a representative bnxt value.
+# ethtool -i output captured verbatim from the real node (benic1p1 /
+# fenic0). Note: driver "version:" is a kernel-ish build string (same for
+# both NICs); firmware-version carries the meaningful per-NIC value, and
+# the CX7 form has a parenthesised suffix that must survive parsing.
 _REAL_ETHTOOL_BNXT = (
     "driver: bnxt_en\n"
-    "version: 6.8.0\n"
-    "firmware-version: 230.0.157.0/pkg 230.1.110.0\n"
-    "bus-info: 0000:03:00.0\n"
+    "version: 6.9.0-0_fbk10_brcmrdma13_141_g9\n"
+    "firmware-version: 232.0.219.16/pkg 232.1.196.16\n"
+    "expansion-rom-version: \n"
+    "bus-info: 0000:f3:00.0\n"
+)
+_REAL_ETHTOOL_CX7 = (
+    "driver: mlx5_core\n"
+    "version: 6.9.0-0_fbk10_brcmrdma13_141_g9\n"
+    "firmware-version: 28.36.1010 (FB_0000000038)\n"
+    "expansion-rom-version: \n"
+    "bus-info: 0000:31:00.0\n"
 )
 
 
@@ -3794,11 +3804,24 @@ class TestNicsParsers:
     def test_parse_ethtool_fields(self):
         assert (
             env_mod._parse_ethtool_field(_REAL_ETHTOOL_BNXT, "firmware-version")
-            == "230.0.157.0/pkg 230.1.110.0"
+            == "232.0.219.16/pkg 232.1.196.16"
         )
-        assert env_mod._parse_ethtool_field(_REAL_ETHTOOL_BNXT, "version") == "6.8.0"
+        assert (
+            env_mod._parse_ethtool_field(_REAL_ETHTOOL_BNXT, "version")
+            == "6.9.0-0_fbk10_brcmrdma13_141_g9"
+        )
         assert env_mod._parse_ethtool_field(_REAL_ETHTOOL_BNXT, "driver") == "bnxt_en"
         assert env_mod._parse_ethtool_field(None, "version") is None
+        # CX7 firmware carries a parenthesised suffix that must survive.
+        assert (
+            env_mod._parse_ethtool_field(_REAL_ETHTOOL_CX7, "firmware-version")
+            == "28.36.1010 (FB_0000000038)"
+        )
+        # Empty field value -> None (not "").
+        assert (
+            env_mod._parse_ethtool_field(_REAL_ETHTOOL_CX7, "expansion-rom-version")
+            is None
+        )
 
     def test_parse_nicctl_version_json_and_text(self):
         assert (
@@ -3889,8 +3912,10 @@ class TestNicsCapture:
         nics = env_mod._capture_nics(reasons)
         b = nics["broadcom"]
         assert b["present"] is True
-        assert b["firmware"] == "230.0.157.0/pkg 230.1.110.0"
-        assert b["driver_version"] == "6.8.0"  # sysfs absent -> ethtool fallback
+        assert b["firmware"] == "232.0.219.16/pkg 232.1.196.16"
+        # sysfs /sys/module/bnxt_en/version absent on the real node ->
+        # driver_version falls back to ethtool -i version:.
+        assert b["driver_version"] == "6.9.0-0_fbk10_brcmrdma13_141_g9"
         assert b["rdma_devices"] == ["bnxt_re0", "bnxt_re1"]
         assert b["links"][0] == {
             "device": "bnxt_re0",
