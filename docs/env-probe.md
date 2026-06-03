@@ -194,7 +194,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `hipblaslt` | `dict` | header parse + `sha256(libhipblaslt.so)` + sorted-filenames hash of `lib/hipblaslt/library/*` | `rocm_release_tweak` (NOT a per-hipBLASLt commit -- it's the ROCm release identifier shared across every library in a release; see note below), `package_version`, `lib_hash`, `kernel_db_revision`, `applied_prs: {}` |
 | `rocblas` | `dict` | header parse + `sha256(librocblas.so)` + sorted-filenames hash of `lib/rocblas/library/*` | Same shape as `hipblaslt`. Header lives at `include/rocblas/internal/rocblas-version.h`. |
 | `miopen` | `dict` | header parse + `sha256(libMIOpen.so)` + sorted-filenames hash of `share/miopen/db/*.txt` | `rocm_release_tweak`, `package_version`, `lib_hash`, `kernel_db_revision`. MIOpen drives convolution kernels on ROCm; kernel-DB drift changes which conv kernel runs. |
-| `rccl` | `dict` | header parse for `NCCL_VERSION_CODE` + `sha256(librccl.so)` + `sha256(librccl-anp.so)` / `sha256(librccl-net.so)` | `version_code` (raw int, e.g. `22707`), `version` (decoded `"2.27.7"`), `lib_hash`, `net_plugin_mode` (`"external"`/`"internal"`/`"unknown"`), `anp_lib_hash`, `net_lib_hash`. RCCL is AMD's NCCL-compatible collectives library. `net_plugin_mode` is `"external"` only when `NCCL_NET_PLUGIN` is set **and** `librccl-anp.so` is present (RoCE offload via the AMD-ANP plugin); otherwise RCCL uses its built-in net-ib path (`"internal"`). `"unknown"` when the RCCL install itself is unreadable (`lib_hash` `null`). Both plugin hashes are `null` when absent -- a documented absence on non-ANP setups, so it does NOT set `partial`. |
+| `rccl` | `dict` | header parse for `NCCL_VERSION_CODE` + `sha256(librccl.so)` + resolve+hash of `NCCL_NET_PLUGIN` + best-effort `sha256` of `librccl-anp.so`/`librccl-net.so` in the lib dir | `version_code` (raw int, e.g. `22707`), `version` (decoded `"2.27.7"`), `lib_hash`, `net_plugin_mode` (`"external"`/`"internal"`/`"unknown"`), `plugin_path`, `plugin_lib_hash`, `anp_lib_hash`, `net_lib_hash`. RCCL is AMD's NCCL-compatible collectives library. **`plugin_path`/`plugin_lib_hash` are the authoritative net-plugin signal**: `NCCL_NET_PLUGIN` is resolved to a real `.so` (absolute path, or bare name found on `LD_LIBRARY_PATH` then the rccl lib dir) and *that* file is hashed -- this is how a real AMD-ANP deployment ships the plugin (`librccl-net.so` under a user-build tree, not `librccl-anp.so` in `/opt/rocm/lib`). `net_plugin_mode` is `"external"` when `NCCL_NET_PLUGIN` resolves, `"internal"` when it is unset/empty (built-in net-ib), and `"unknown"` when it is set but unresolvable (misconfigured launcher -- this records a `partial_reason`; the unset case does not). `anp_lib_hash`/`net_lib_hash` are a best-effort scan of the rccl lib dir for the packaged-install case; `null` when absent (documented absence, no `partial`). |
 | `gpu_arch` | `dict` | `rocm_agent_enumerator` subprocess (no `/dev/kfd` access typically required) | `agent_count`, `gfx_targets` (sorted unique), `agent_arch_counts` (per-arch distribution -- captures both homogeneous and mixed-arch boxes). |
 | `host` | `dict` | `os.uname()` + `os.confstr("CS_GNU_LIBC_VERSION")` | `kernel_release`, `kernel_version`, `machine`, `glibc_version`. Kernel + glibc drift is the #1 confound for compiled-against-vs-runtime issues with C++ extensions. |
 | `composable_kernel` | `dict` | header at `include/ck/version.h` + `nm -D` of `libtorch_hip.so` piped through `c++filt` + `torch.__config__.show()` flag scan | Two sub-blocks (`system: {version, commit, ck_tile_present}`, `pytorch_bundled: {present, symbol_count}`) plus top-level `pytorch_use_ck_sdpa` / `pytorch_use_ck_gemm` booleans (build-time flags baked into the wheel; NOT runtime env vars). System and bundled CK can drift independently. |
@@ -380,15 +380,20 @@ tracking schema evolution don't have to read source.
 Additive change to the `rccl` block (issue #202, RCCL net-plugin
 identity):
 
-* `rccl` gained three nested keys: `net_plugin_mode`
-  (`"external"`/`"internal"`/`"unknown"`), `anp_lib_hash`, and
-  `net_lib_hash`. The hashes reuse `_hash_shared_library` over
-  `librccl-anp.so` / `librccl-net.so`; both are `null` when the plugin
-  `.so` is absent (a documented absence on non-ANP setups, so it does
-  NOT set `partial`). `net_plugin_mode` is derived (see the field
-  table). No schema bump -- these are nested keys under an existing
-  top-level dict, so a 1.6 reader loading an older snapshot must guard
-  with `.get(...)`.
+* `rccl` gained five nested keys: `net_plugin_mode`
+  (`"external"`/`"internal"`/`"unknown"`), `plugin_path`,
+  `plugin_lib_hash`, `anp_lib_hash`, and `net_lib_hash`. The
+  authoritative signal is `plugin_path`/`plugin_lib_hash`: the probe
+  resolves `NCCL_NET_PLUGIN` to a real `.so` (absolute path or bare name
+  on `LD_LIBRARY_PATH`/lib dir) and hashes it -- matching how real
+  AMD-ANP ships the plugin (`librccl-net.so` in a user-build tree).
+  `anp_lib_hash`/`net_lib_hash` remain a best-effort lib-dir scan for
+  packaged installs. All reuse `_hash_shared_library` (no new hashing
+  logic). `net_plugin_mode` is derived (see the field table); the
+  `"unknown"` case (env set but unresolvable) records a `partial_reason`,
+  every other case is silent. No schema bump -- nested keys under an
+  existing top-level dict, so a 1.6 reader loading an older snapshot must
+  guard with `.get(...)`.
 
 Additive change to `library_introspection` (PR #187, issue #183):
 
@@ -829,8 +834,9 @@ sources are:
 | `miopen.kernel_db_revision` | sha256 of sorted filenames of `*.txt` under `/opt/rocm/share/miopen/db/` (changes when conv-kernel set changes; the `MIOPEN_SYSTEM_DB_PATH` env var overrides this directory at runtime) |
 | `rccl.version_code` / `rccl.version` | `NCCL_VERSION_CODE` define in `/opt/rocm/include/rccl/rccl.h`, decoded into `MAJOR.MINOR.PATCH` |
 | `rccl.lib_hash` | `sha256(/opt/rocm/lib/librccl.so)` resolved through symlinks |
-| `rccl.anp_lib_hash` / `rccl.net_lib_hash` | `sha256(/opt/rocm/lib/librccl-anp.so)` / `sha256(/opt/rocm/lib/librccl-net.so)` resolved through symlinks; `null` when the plugin `.so` is absent (documented absence, no `partial`) |
-| `rccl.net_plugin_mode` | derived: `"external"` when `NCCL_NET_PLUGIN` is set and `librccl-anp.so` present; `"internal"` otherwise; `"unknown"` when `rccl.lib_hash` is `null` (install unreadable) |
+| `rccl.plugin_path` / `rccl.plugin_lib_hash` | `NCCL_NET_PLUGIN` resolved to a real `.so` (absolute path, or bare name searched on `LD_LIBRARY_PATH` then `/opt/rocm/lib`) and `sha256`'d through symlinks; both `null` when `NCCL_NET_PLUGIN` is unset or unresolvable |
+| `rccl.anp_lib_hash` / `rccl.net_lib_hash` | best-effort `sha256(/opt/rocm/lib/librccl-anp.so)` / `sha256(/opt/rocm/lib/librccl-net.so)` for packaged installs; `null` when absent (documented absence, no `partial`) |
+| `rccl.net_plugin_mode` | derived: `"external"` when `NCCL_NET_PLUGIN` resolves to a real `.so`; `"internal"` when unset/empty; `"unknown"` when set but unresolvable (records a `partial_reason`) |
 | `gpu_arch.*` | `rocm_agent_enumerator` subprocess (one gfx-target per detected GPU on stdout); `gfx000` placeholder filtered out |
 | `host.kernel_release` / `kernel_version` / `machine` | `os.uname()` |
 | `host.glibc_version` | `os.confstr("CS_GNU_LIBC_VERSION")` with the redundant `"glibc "` prefix stripped (so the value is the bare version string, e.g. `"2.35"`); returns `null` on non-glibc systems like musl / macOS |

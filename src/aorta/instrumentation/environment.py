@@ -830,7 +830,7 @@ class EnvSnapshot:
                 f"  hipblaslt: {hipblaslt.get('package_version', '?')} rocm_release_tweak={hipblaslt.get('rocm_release_tweak', '?')}",
                 f"  rocblas:   {rocblas.get('package_version', '?')} rocm_release_tweak={rocblas.get('rocm_release_tweak', '?')}",
                 f"  miopen:    {miopen.get('package_version', '?')} rocm_release_tweak={miopen.get('rocm_release_tweak', '?')}",
-                f"  rccl:      {rccl.get('version', '?')} (code={rccl.get('version_code', '?')}) net_plugin={rccl.get('net_plugin_mode', '?')}",
+                f"  rccl:      {rccl.get('version', '?')} (code={rccl.get('version_code', '?')}) net_plugin={rccl.get('net_plugin_mode', '?')}{(' [' + os.path.basename(rccl['plugin_path']) + ']') if rccl.get('plugin_path') else ''}",
                 # gpu_arch: dedup'd targets are the meaningful diff
                 # signal (homogeneous vs mixed-arch hosts); count tells
                 # how many GPUs were detected. Both null when the
@@ -4725,29 +4725,46 @@ def _capture_rccl(reasons: list[str]) -> dict[str, Any]:
     version_code, version_str = _parse_rccl_header(header_text)
     lib_hash = _hash_shared_library(RCCL_LIB_DIR, "librccl.so")
 
-    # Net-plugin identity. Both plugin .so's are legitimately absent on a
-    # non-ANP setup, so a None hash is a documented absence -- it never
-    # appends a reason. net_plugin_mode is "external" only when the
-    # operator opted into a plugin (NCCL_NET_PLUGIN set) AND the ANP .so
-    # is actually present (RoCE offload via librccl-anp); otherwise RCCL
-    # falls back to its built-in net-ib path => "internal". When we can't
-    # even read the RCCL install (lib_hash None), we can't tell which path
-    # is active, so the mode is "unknown".
+    # Net-plugin identity. The authoritative signal is what
+    # NCCL_NET_PLUGIN actually resolves to -- on real AMD-ANP deployments
+    # the plugin is named librccl-net.so and lives in a user-build tree
+    # (e.g. /apps/build/amd-anp*/build/), selected via NCCL_NET_PLUGIN as
+    # either an absolute path or a bare name found on LD_LIBRARY_PATH; it
+    # is NOT a librccl-anp.so dropped into /opt/rocm/lib. So we resolve
+    # the env var to a real file and hash THAT (plugin_path +
+    # plugin_lib_hash). Mode:
+    #   external -> NCCL_NET_PLUGIN set and resolves to a real .so
+    #   internal -> NCCL_NET_PLUGIN unset/empty (RCCL's built-in net-ib)
+    #   unknown  -> set but unresolvable (misconfigured launcher) -> this
+    #               is an expected-but-failed capture, so it appends a
+    #               reason; the unset case never does.
+    # anp_lib_hash / net_lib_hash remain a best-effort scan of the rccl
+    # lib dir for the packaged-install case (None when absent is a
+    # documented absence -- no reason).
     anp_lib_hash = _hash_shared_library(RCCL_LIB_DIR, "librccl-anp.so")
     net_lib_hash = _hash_shared_library(RCCL_LIB_DIR, "librccl-net.so")
-    net_plugin_set = bool(os.environ.get("NCCL_NET_PLUGIN"))
-    if lib_hash is None:
-        net_plugin_mode = "unknown"
-    elif net_plugin_set and anp_lib_hash is not None:
+    plugin_env = os.environ.get("NCCL_NET_PLUGIN") or ""
+    plugin_path_obj = _resolve_net_plugin(plugin_env) if plugin_env else None
+    plugin_path = str(plugin_path_obj) if plugin_path_obj else None
+    plugin_lib_hash = (
+        _hash_shared_library(plugin_path_obj.parent, plugin_path_obj.name)
+        if plugin_path_obj
+        else None
+    )
+    if not plugin_env:
+        net_plugin_mode = "internal"
+    elif plugin_path_obj is not None:
         net_plugin_mode = "external"
     else:
-        net_plugin_mode = "internal"
+        net_plugin_mode = "unknown"
 
     block: dict[str, Any] = {
         "version_code": version_code,
         "version": version_str,
         "lib_hash": lib_hash,
         "net_plugin_mode": net_plugin_mode,
+        "plugin_path": plugin_path,
+        "plugin_lib_hash": plugin_lib_hash,
         "anp_lib_hash": anp_lib_hash,
         "net_lib_hash": net_lib_hash,
     }
@@ -4765,7 +4782,64 @@ def _capture_rccl(reasons: list[str]) -> dict[str, Any]:
         reasons.append(
             f"rccl.lib_hash: {RCCL_LIB_DIR}/librccl.so missing or unreadable"
         )
+    if net_plugin_mode == "unknown":
+        # Expected-but-failed: the launcher asked for a plugin but it
+        # could not be located. (The unset case is "internal", not a
+        # failure, and records nothing.)
+        reasons.append(
+            f"rccl.net_plugin_mode: NCCL_NET_PLUGIN={plugin_env!r} set but "
+            "could not be resolved to a readable .so on its path / "
+            "LD_LIBRARY_PATH / " + str(RCCL_LIB_DIR)
+        )
     return block
+
+
+def _resolve_net_plugin(plugin_env: str) -> Path | None:
+    """Resolve an NCCL_NET_PLUGIN value to an existing plugin .so path.
+
+    NCCL/RCCL accepts NCCL_NET_PLUGIN as either an absolute/relative path
+    (contains a separator) or a bare library name resolved against the
+    loader search path. We mirror that:
+
+    * value containing a path separator -> use it directly if it exists.
+    * bare name -> try it verbatim, then with a ``lib`` prefix and a
+      ``.so`` suffix (NCCL's own normalisation), searching each
+      LD_LIBRARY_PATH entry and finally RCCL_LIB_DIR.
+
+    Returns the first existing match (symlinks left for
+    _hash_shared_library to resolve), or None if nothing resolves.
+    """
+    raw = plugin_env.strip()
+    if not raw:
+        return None
+
+    # Explicit path form.
+    if os.sep in raw or (os.altsep and os.altsep in raw):
+        p = Path(raw)
+        return p if p.exists() else None
+
+    # Bare-name form: build candidate filenames NCCL would try.
+    names = [raw]
+    stem = raw[3:] if raw.startswith("lib") else raw
+    for cand in (f"lib{stem}.so", f"{stem}.so", f"lib{stem}", stem):
+        if cand not in names:
+            names.append(cand)
+
+    search_dirs: list[Path] = []
+    for entry in (os.environ.get("LD_LIBRARY_PATH") or "").split(os.pathsep):
+        if entry:
+            search_dirs.append(Path(entry))
+    search_dirs.append(RCCL_LIB_DIR)
+
+    for d in search_dirs:
+        for name in names:
+            candidate = d / name
+            try:
+                if candidate.exists():
+                    return candidate
+            except OSError:
+                continue
+    return None
 
 
 def _parse_rccl_header(text: str | None) -> tuple[int | None, str | None]:

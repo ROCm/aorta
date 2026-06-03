@@ -398,7 +398,9 @@ def _example_snapshot(**overrides) -> object:
             "version": "2.27.7",
             "lib_hash": "sha256:rcclhash",
             "net_plugin_mode": "external",
-            "anp_lib_hash": "sha256:anphash",
+            "plugin_path": "/apps/build/amd-anp/build/librccl-net.so",
+            "plugin_lib_hash": "sha256:pluginhash",
+            "anp_lib_hash": None,
             "net_lib_hash": None,
         },
         "gpu_arch": {
@@ -3545,6 +3547,8 @@ class TestRccl:
             "version",
             "lib_hash",
             "net_plugin_mode",
+            "plugin_path",
+            "plugin_lib_hash",
             "anp_lib_hash",
             "net_lib_hash",
         }
@@ -3589,14 +3593,20 @@ class TestRccl:
         assert block["version_code"] == 22707
         assert block["version"] == "2.27.7"
         assert block["lib_hash"] is not None
-        # No net-plugin .so present -> internal mode, no plugin hashes.
+        # NCCL_NET_PLUGIN unset -> internal mode, no plugin path/hash.
         assert block["net_plugin_mode"] == "internal"
+        assert block["plugin_path"] is None
+        assert block["plugin_lib_hash"] is None
         assert block["anp_lib_hash"] is None
         assert block["net_lib_hash"] is None
         assert reasons == []
 
     def _rccl_dirs(self, tmp_path: Path, monkeypatch):
-        """Set up a librccl.so + header so the install reads as present."""
+        """Set up a librccl.so + header so the install reads as present.
+
+        Also clears LD_LIBRARY_PATH so plugin resolution is deterministic
+        (only the dirs the test sets up are searched).
+        """
         header_dir = tmp_path / "include"
         header_dir.mkdir()
         (header_dir / "rccl.h").write_text("#define NCCL_VERSION_CODE 22707\n")
@@ -3605,68 +3615,97 @@ class TestRccl:
         (lib_dir / "librccl.so").write_bytes(b"rccl-bytes")
         monkeypatch.setattr(env_mod, "RCCL_VERSION_HEADER", header_dir / "rccl.h")
         monkeypatch.setattr(env_mod, "RCCL_LIB_DIR", lib_dir)
+        monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
         return lib_dir
 
-    def test_net_plugin_external_when_anp_present_and_env_set(
+    def test_net_plugin_external_via_absolute_path(
         self, isolated_env, tmp_path: Path, monkeypatch
     ):
-        lib_dir = self._rccl_dirs(tmp_path, monkeypatch)
-        (lib_dir / "librccl-anp.so").write_bytes(b"anp-bytes")
-        isolated_env.setenv("NCCL_NET_PLUGIN", "librccl-anp.so")
+        # Real ANP deployment: NCCL_NET_PLUGIN points at an absolute path
+        # to librccl-net.so in a user-build tree (NOT /opt/rocm/lib).
+        self._rccl_dirs(tmp_path, monkeypatch)
+        anp_build = tmp_path / "apps" / "amd-anp" / "build"
+        anp_build.mkdir(parents=True)
+        plugin = anp_build / "librccl-net.so"
+        plugin.write_bytes(b"anp-net-bytes")
+        isolated_env.setenv("NCCL_NET_PLUGIN", str(plugin))
         reasons: list[str] = []
         block = env_mod._capture_rccl(reasons)
         assert block["net_plugin_mode"] == "external"
-        assert block["anp_lib_hash"] is not None
+        assert block["plugin_path"] == str(plugin)
+        assert block["plugin_lib_hash"] is not None
         assert reasons == []
 
-    def test_net_plugin_internal_when_anp_present_but_env_unset(
+    def test_net_plugin_external_via_ld_library_path(
         self, isolated_env, tmp_path: Path, monkeypatch
     ):
-        # ANP .so on disk but the operator did not opt in via
-        # NCCL_NET_PLUGIN -> RCCL uses its built-in net path.
-        lib_dir = self._rccl_dirs(tmp_path, monkeypatch)
-        (lib_dir / "librccl-anp.so").write_bytes(b"anp-bytes")
-        reasons: list[str] = []
-        block = env_mod._capture_rccl(reasons)
-        assert block["net_plugin_mode"] == "internal"
-        assert block["anp_lib_hash"] is not None  # hash still captured
-        assert reasons == []
-
-    def test_net_plugin_internal_when_no_plugin_so(
-        self, isolated_env, tmp_path: Path, monkeypatch
-    ):
+        # Bare-name form: NCCL_NET_PLUGIN=librccl-net.so resolved through
+        # an LD_LIBRARY_PATH entry.
         self._rccl_dirs(tmp_path, monkeypatch)
-        isolated_env.setenv("NCCL_NET_PLUGIN", "librccl-anp.so")
+        anp_build = tmp_path / "apps" / "amd-anp" / "build"
+        anp_build.mkdir(parents=True)
+        plugin = anp_build / "librccl-net.so"
+        plugin.write_bytes(b"anp-net-bytes")
+        monkeypatch.setenv("LD_LIBRARY_PATH", str(anp_build))
+        isolated_env.setenv("NCCL_NET_PLUGIN", "librccl-net.so")
         reasons: list[str] = []
         block = env_mod._capture_rccl(reasons)
-        # Env set but ANP .so absent -> can't be external.
-        assert block["net_plugin_mode"] == "internal"
-        assert block["anp_lib_hash"] is None
+        assert block["net_plugin_mode"] == "external"
+        assert block["plugin_path"] == str(plugin)
+        assert block["plugin_lib_hash"] is not None
         assert reasons == []
 
-    def test_net_plugin_unknown_when_rccl_install_unreadable(
+    def test_net_plugin_external_bare_name_normalised(
         self, isolated_env, tmp_path: Path, monkeypatch
     ):
-        # No librccl.so at all -> lib_hash None -> mode undeterminable.
-        lib_dir = tmp_path / "lib"
-        lib_dir.mkdir()
-        monkeypatch.setattr(
-            env_mod, "RCCL_VERSION_HEADER", tmp_path / "missing.h"
-        )
-        monkeypatch.setattr(env_mod, "RCCL_LIB_DIR", lib_dir)
+        # NCCL normalises a bare "ncclnet"-style name; we accept the
+        # common forms. Here the env value omits the lib prefix / .so.
+        self._rccl_dirs(tmp_path, monkeypatch)
+        anp_build = tmp_path / "anp"
+        anp_build.mkdir()
+        plugin = anp_build / "librccl-net.so"
+        plugin.write_bytes(b"anp-net-bytes")
+        monkeypatch.setenv("LD_LIBRARY_PATH", str(anp_build))
+        isolated_env.setenv("NCCL_NET_PLUGIN", "rccl-net")
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        assert block["net_plugin_mode"] == "external"
+        assert block["plugin_path"] == str(plugin)
+        assert reasons == []
+
+    def test_net_plugin_internal_when_env_unset(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        # An ANP .so present in the rccl lib dir is still "internal" when
+        # the operator did not opt in via NCCL_NET_PLUGIN.
+        lib_dir = self._rccl_dirs(tmp_path, monkeypatch)
+        (lib_dir / "librccl-net.so").write_bytes(b"anp-bytes")
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        assert block["net_plugin_mode"] == "internal"
+        assert block["plugin_path"] is None
+        assert block["plugin_lib_hash"] is None
+        # Packaged-install best-effort scan still records the lib-dir hash.
+        assert block["net_lib_hash"] is not None
+        assert reasons == []
+
+    def test_net_plugin_unknown_when_env_set_but_unresolvable(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        # Launcher asked for a plugin but it can't be found anywhere ->
+        # expected-but-failed capture: unknown + a partial reason.
+        self._rccl_dirs(tmp_path, monkeypatch)
+        isolated_env.setenv("NCCL_NET_PLUGIN", "/nonexistent/librccl-net.so")
         reasons: list[str] = []
         block = env_mod._capture_rccl(reasons)
         assert block["net_plugin_mode"] == "unknown"
-        assert block["anp_lib_hash"] is None
-        assert block["net_lib_hash"] is None
-        # lib_hash absence still records the existing reason; net-plugin
-        # absence does NOT add its own reason. (Match on the field-prefix
-        # "rccl.net_"/"rccl.anp_" rather than a bare "net_plugin"
-        # substring -- the tmp_path folder name embeds the test name,
-        # which contains "net_plugin" and would give a false positive.)
-        assert any(r.startswith("rccl.lib_hash") for r in reasons)
-        assert not any(r.startswith("rccl.net_") for r in reasons)
-        assert not any(r.startswith("rccl.anp_") for r in reasons)
+        assert block["plugin_path"] is None
+        assert block["plugin_lib_hash"] is None
+        assert any(r.startswith("rccl.net_plugin_mode") for r in reasons)
+
+    def test_resolve_net_plugin_empty_returns_none(self):
+        assert env_mod._resolve_net_plugin("") is None
+        assert env_mod._resolve_net_plugin("   ") is None
 
 
 # ---------------------------------------------------------------------------
