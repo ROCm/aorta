@@ -29,8 +29,14 @@ from aorta.probe.sandbox import MAX_LOG_BYTES
 from aorta.triage.recipe import RecipeSchemaError
 
 # Path scrubber: absolute POSIX paths with at least one directory component.
+# The negative lookbehind anchors the match at a path START so a sub-path of a
+# larger filename token is not matched piecemeal -- but it deliberately EXCLUDES
+# '/' so a leading '/' that itself follows another '/' still matches. Including
+# '/' in the lookbehind would skip the path inside `file:///home/user/...` and
+# `//host/home/user/...` (the leading slash precedes the real path), leaking
+# exactly the absolute paths this scrubber documents it removes.
 _PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_./-])/(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+"
+    r"(?<![A-Za-z0-9_.-])/(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+"
 )
 
 # IPv4 candidate -- validated with :func:`ipaddress.ip_address` before rewrite.
@@ -76,8 +82,12 @@ def parse_redaction(raw: Any) -> RedactionCfg:
         )
     unknown = set(raw) - _VALID_REDACTION_KEYS
     if unknown:
+        # YAML permits non-string mapping keys (e.g. `1: x`); sorting a mixed
+        # str/int set raises TypeError, which would escape as an unhandled
+        # exception instead of a RecipeSchemaError. Sort by str repr so any
+        # bad-key recipe fails closed with the schema error.
         raise RecipeSchemaError(
-            f"recipe.redaction: unknown keys {sorted(unknown)}; "
+            f"recipe.redaction: unknown keys {sorted(map(str, unknown))}; "
             f"allowed: {sorted(_VALID_REDACTION_KEYS)}"
         )
     keys_raw = raw.get("scrub_env_keys", [])
@@ -398,20 +408,23 @@ class RedactingRedactor(Redactor):
 
     def scrub_file(self, src: Path, dst: Path) -> RedactionCounts:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        raw = src.read_bytes()
-        bytes_in = len(raw)
 
         if src.name == "probe.env":
-            counts = self._scrub_probe_env(raw, dst)
+            counts = self._scrub_probe_env(src.read_bytes(), dst)
         elif src.name == "result.json":
-            counts = self._scrub_result_json(raw, dst, src)
+            counts = self._scrub_result_json(src.read_bytes(), dst, src)
         elif src.name == "host_env.json":
-            counts = self._scrub_host_env_json(raw, dst, src)
+            counts = self._scrub_host_env_json(src.read_bytes(), dst, src)
         elif _is_text_artifact(src):
-            counts = self._scrub_text_bytes(raw, dst)
+            counts = self._scrub_text_bytes(src.read_bytes(), dst)
         else:
-            dst.write_bytes(raw)
-            counts = RedactionCounts(bytes_in=bytes_in, bytes_out=bytes_in)
+            # Binary / non-scrubbable artifact (e.g. a multi-GB core dump):
+            # stream the copy via shutil.copyfile rather than reading the whole
+            # file into a bytes object and writing it back. The no-scrub branch
+            # applies no transform, so byte counts come from stat() (in == out).
+            shutil.copyfile(src, dst)
+            size = dst.stat().st_size
+            counts = RedactionCounts(bytes_in=size, bytes_out=size)
 
         # Carry the source's permission bits onto every staged copy. The
         # scrub branches all (re)create dst via write_text / write_bytes,

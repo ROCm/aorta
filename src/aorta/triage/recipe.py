@@ -763,7 +763,13 @@ def _read_recipe_document(path: Path) -> tuple[Any, str]:
 
 
 def load_recipe_mapping(path: Path) -> Any:
-    """Return a recipe file's raw parsed mapping with no schema validation.
+    """Return a recipe file's raw parsed top-level value with no validation.
+
+    The return type is whatever YAML/JSON yields for the document root -- a
+    ``dict`` for a well-formed recipe, but also ``None`` (empty file),
+    ``list``, or a scalar for a malformed one. Callers MUST check the shape
+    (e.g. ``isinstance(data, dict)``) and fail closed on a non-mapping rather
+    than assuming a ``dict``; see :func:`aorta.probe.bundle_hook.load_redaction_cfg`.
 
     Used by callers that need one block out of a recipe (e.g. the bundle
     redaction-only resolve) without resolving the mitigation / diagnostic

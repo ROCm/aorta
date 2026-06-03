@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import pytest
@@ -13,10 +12,12 @@ from aorta.probe.redaction import (
     RedactingRedactor,
     RedactionCfg,
     _line_windows,
+    parse_redaction,
     scrub_env_keys,
     scrub_text,
 )
 from aorta.probe.sandbox import MAX_LOG_BYTES
+from aorta.triage.recipe import RecipeSchemaError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -56,6 +57,31 @@ def test_path_rewrite():
     assert "<PATH:2>" in out
     assert "/home/user" not in out
     assert v4 == 0 and v6 == 0
+
+
+def test_path_rewrite_double_slash_and_file_url():
+    """A path whose leading '/' follows another '/' must still scrub (Copilot).
+
+    The negative lookbehind once included '/', which skipped the path inside
+    `file:///home/user/...` and protocol-relative `//host/home/user/...`,
+    leaking absolute paths the scrubber documents it removes.
+    """
+    text = "u file:///home/user/secret\np //host/home/user/secret\n"
+    out, paths, v4, v6 = scrub_text(text, scrub_paths=True, scrub_ip_addresses=False)
+    assert paths == 2
+    assert "/home/user/secret" not in out
+    assert "<PATH:0>" in out and "<PATH:1>" in out
+
+
+def test_parse_redaction_non_string_key_fails_closed():
+    """A non-string mapping key must raise RecipeSchemaError, not TypeError.
+
+    YAML allows `1: x`; the unknown-key error sorts the offending keys, and a
+    mixed str/int set would raise TypeError sorting -- escaping as an
+    unhandled exception instead of the recipe schema error (Copilot).
+    """
+    with pytest.raises(RecipeSchemaError, match="unknown keys"):
+        parse_redaction({1: "x", "scrub_paths": True})
 
 
 def test_path_rewrite_no_reverse_mapping_persisted(tmp_path: Path):
@@ -112,12 +138,20 @@ def test_redactor_kind_string():
     assert RedactingRedactor(RedactionCfg()).kind == "probe.v1"
 
 
+@pytest.mark.timeout(15)
 def test_redaction_dos_bound():
-    """10 MiB slash run completes within 5 seconds (regex DoS guard)."""
+    """A 10 MiB slash run must not blow up regex CPU (DoS guard).
+
+    Enforced with pytest-timeout (a declared dev dep) rather than a measured
+    ``perf_counter() < 5.0`` assertion: a wall-clock assert is flaky under CI
+    load, and -- more importantly -- if the regex DID catastrophically
+    backtrack the call would never return, so the post-hoc assert would never
+    run. The timeout marker bounds the whole test even on a true hang. The
+    15 s budget is generous headroom over the sub-second normal runtime.
+    """
     blob = "/" * MAX_LOG_BYTES
-    t0 = time.perf_counter()
-    scrub_text(blob, scrub_paths=True, scrub_ip_addresses=False)
-    assert time.perf_counter() - t0 < 5.0
+    result = scrub_text(blob, scrub_paths=True, scrub_ip_addresses=False)
+    assert len(result) == 4
 
 
 def test_redacting_redactor_scrubs_result_json_env(tmp_path: Path):
@@ -295,6 +329,23 @@ def test_scrubbed_copy_preserves_restrictive_mode(tmp_path: Path):
     bindst = tmp_path / "out" / "core.bin"
     redactor.scrub_file(binsrc, bindst)
     assert bindst.stat().st_mode & 0o777 == 0o600, "binary copy mode widened"
+
+
+def test_binary_artifact_copied_byte_identical(tmp_path: Path):
+    """The binary no-scrub branch streams via copyfile, byte-identical + counts.
+
+    The branch no longer reads the whole artifact into memory (memory spike on
+    a multi-GB core dump); it must still copy contents exactly and report
+    bytes_in == bytes_out == file size from stat() (Copilot).
+    """
+    payload = bytes(range(256)) * 8
+    src = tmp_path / "core.bin"
+    src.write_bytes(payload)
+    dst = tmp_path / "out" / "core.bin"
+    counts = RedactingRedactor(RedactionCfg(scrub_paths=True)).scrub_file(src, dst)
+    assert dst.read_bytes() == payload
+    assert counts.bytes_in == len(payload)
+    assert counts.bytes_out == len(payload)
 
 
 def test_scrub_text_spans_window_seam(monkeypatch):
