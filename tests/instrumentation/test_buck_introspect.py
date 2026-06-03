@@ -88,6 +88,13 @@ class TestMatchLibrary:
             ("hipblaslt-foo:lib", "hipblaslt"),
             ("//third-party/rocm:rccl_lib", "rccl"),
             ("//third-party/rocm:rccl-lib", "rccl"),
+            # AINIC net-plugin targets (issue #202).
+            ("//third-party/anp:rccl-anp-lib", "ainic"),
+            ("//third-party/anp:rccl_anp_lib", "ainic"),
+            ("//third-party/anp:rccl-net-lib", "ainic"),
+            ("//third-party/anp:rccl_net_lib", "ainic"),
+            ("//x:rccl-anp", "ainic"),
+            ("//x:rccl-net", "ainic"),
             ("//third-party/pytorch:torch", "pytorch"),
             ("//third-party/pytorch:pytorch", "pytorch"),
             ("//third-party/pytorch:torch_hip", "pytorch"),

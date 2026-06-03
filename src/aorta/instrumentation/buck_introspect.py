@@ -72,6 +72,12 @@ KNOWN_LIBRARY_PATTERNS: dict[str, list[re.Pattern]] = {
     "rccl": [
         re.compile(r":rccl(_lib|-lib)?$"),
     ],
+    "ainic": [
+        # AMD-ANP / RCCL net-plugin Buck targets (issue #202). The plugin
+        # ships as :rccl-anp(-lib) / :rccl-net(-lib) across cells.
+        re.compile(r":rccl[_-]anp(_lib|-lib)?$"),
+        re.compile(r":rccl[_-]net(_lib|-lib)?$"),
+    ],
     "rocm": [
         re.compile(r":(hip|rocm)_runtime$"),  # libamdhip64 / librocm-runtime
     ],

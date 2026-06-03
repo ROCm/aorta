@@ -63,7 +63,23 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.6"
+SCHEMA_VERSION = "1.7"
+# 1.6 -> 1.7 (issue #202, RCCL net-plugin + multi-vendor NIC stack):
+#   - New top-level ``nics`` block keyed by vendor (``ainic``,
+#     ``broadcom``, ``cx7``). Each entry has a Tier-0 ``present`` gate
+#     (from ``lspci -d <vendor>:<device>``), Tier-1 sudo-free fields
+#     (``driver_version``, ``firmware``, ``rdma_devices``, ``links``),
+#     and -- AINIC only -- Tier-2 ``nicctl`` fields (``nicctl_version``,
+#     ``card``, ``profile``, ``dcqcn``) gathered via ``sudo -n``.
+#     A vendor that is absent from ``lspci`` is a DOCUMENTED ABSENCE
+#     (``present: false``, no ``partial``); only an expected-but-failed
+#     capture appends a reason. Additive: ``EnvSnapshot.nics`` uses
+#     ``field(default_factory=dict)`` so ``from_dict`` on a <=1.6
+#     snapshot still round-trips.
+#   - The ``rccl`` block gained ``net_plugin_mode`` / ``plugin_path`` /
+#     ``plugin_lib_hash`` / ``anp_lib_hash`` / ``net_lib_hash`` (nested
+#     keys; no separate bump, folded into this one).
+#
 # 1.5 -> 1.6 (PR #187 review):
 #   - Each ``library_introspection`` entry now carries TWO Buck-label
 #     fields instead of one: ``target`` (canonical Buck label,
@@ -716,6 +732,13 @@ class EnvSnapshot:
             "backends_enabled": {name: None for name in _PYTORCH_SDPA_GETTERS}
         }
     )
+    # nics: issue #202 (schema 1.7). Multi-vendor NIC/RoCE fabric stack
+    # keyed by vendor (``ainic``/``broadcom``/``cx7``). Defaulted so
+    # pre-1.7 snapshots loaded via ``from_dict()`` don't raise; the empty
+    # dict is the correct reading of a historical capture that predates
+    # NIC probing. Populated by ``_capture_nics()`` in collect_env() /
+    # ``_disaster_snapshot()``.
+    nics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to the env.json shape. Round-trip pair with from_dict."""
@@ -751,6 +774,7 @@ class EnvSnapshot:
         kwargs.setdefault("build_system", {"kind": "none"})
         kwargs.setdefault("library_introspection", [])
         kwargs.setdefault("library_introspection_alternates", [])
+        kwargs.setdefault("nics", {})
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -781,6 +805,7 @@ class EnvSnapshot:
         aotriton = self.aotriton or {}
         miopen = self.miopen or {}
         rccl = self.rccl or {}
+        nics = self.nics or {}
         gpu_arch = self.gpu_arch or {}
         host = self.host or {}
         # Use ``is not None`` -- RDHC may return an empty dict on a healthy
@@ -831,6 +856,7 @@ class EnvSnapshot:
                 f"  rocblas:   {rocblas.get('package_version', '?')} rocm_release_tweak={rocblas.get('rocm_release_tweak', '?')}",
                 f"  miopen:    {miopen.get('package_version', '?')} rocm_release_tweak={miopen.get('rocm_release_tweak', '?')}",
                 f"  rccl:      {rccl.get('version', '?')} (code={rccl.get('version_code', '?')}) net_plugin={rccl.get('net_plugin_mode', '?')}{(' [' + os.path.basename(rccl['plugin_path']) + ']') if rccl.get('plugin_path') else ''}",
+                f"  nics:      {self._summary_nics_line(nics)}",
                 # gpu_arch: dedup'd targets are the meaningful diff
                 # signal (homogeneous vs mixed-arch hosts); count tells
                 # how many GPUs were detected. Both null when the
@@ -929,6 +955,27 @@ class EnvSnapshot:
         rev = bs.get("revision")
         rev_short = rev[:8] if rev else "?"
         return f"buck2={version} repo_root={repo_root} rev={rev_short}"
+
+    def _summary_nics_line(self, nics: dict) -> str:
+        """One-line multi-vendor NIC rendering for the CLI brief.
+
+        Per present vendor: ``<vendor>(fw=<firmware> links=<up>/<total>)``.
+        Absent vendors are omitted to keep the line short; ``(none
+        present)`` when no vendor is installed.
+        """
+        if not nics:
+            return "(no nic probe)"
+        parts: list[str] = []
+        for key, entry in nics.items():
+            entry = entry or {}
+            present = entry.get("present")
+            if not present:
+                continue
+            links = entry.get("links") or []
+            up = sum(1 for ln in links if (ln or {}).get("state") == "ACTIVE")
+            fw = entry.get("firmware") or "?"
+            parts.append(f"{key}(fw={fw} links={up}/{len(links)})")
+        return "  ".join(parts) if parts else "(none present)"
 
     def _summary_pytorch_build_line(self) -> str:
         """Single-line summary of the structured pytorch_build block."""
@@ -1284,6 +1331,7 @@ def collect_env(
         aotriton = _capture_aotriton(reasons)
         miopen = _capture_miopen(reasons)
         rccl = _capture_rccl(reasons)
+        nics = _capture_nics(reasons)
         gpu_arch = _capture_gpu_arch(reasons)
         host = _capture_host(reasons)
         docker = _capture_docker_metadata(runtime_context, reasons)
@@ -1341,6 +1389,7 @@ def collect_env(
             library_introspection=library_introspection,
             library_introspection_alternates=library_introspection_alternates,
             pytorch_sdpa=pytorch_sdpa,
+            nics=nics,
         )
     except Exception as exc:  # noqa: BLE001 -- this is the never-raises gate
         log.info("collect_env() hit unexpected exception", exc_info=True)
@@ -1442,7 +1491,13 @@ def _disaster_snapshot(
             "version_code": None,
             "version": None,
             "lib_hash": None,
+            "net_plugin_mode": "unknown",
+            "plugin_path": None,
+            "plugin_lib_hash": None,
+            "anp_lib_hash": None,
+            "net_lib_hash": None,
         },
+        nics={},
         gpu_arch={
             "agent_count": None,
             "gfx_targets": None,
@@ -4840,6 +4895,446 @@ def _resolve_net_plugin(plugin_env: str) -> Path | None:
             except OSError:
                 continue
     return None
+
+
+# Multi-vendor NIC/RoCE fabric capture (issue #202, schema 1.7).
+#
+# Vendor registry: PCI vendor:device id (lspci -d), kernel netdev driver
+# module, RDMA device-name prefix (ibv_devices / rdma link), and the
+# sysfs PCI-vendor id used to map a netdev back to its vendor (the
+# 0x-prefixed value in /sys/class/net/<ifname>/device/vendor).
+#
+# Confirmed against a live node (8x BCM57608 + 2x ConnectX-7): the
+# /sys/module/<drv>/version file does NOT exist for mlx5_core or bnxt_en
+# on a modern in-tree-module kernel, so driver_version falls back to the
+# ``version:`` field of ``ethtool -i``. A vendor present in lspci but with
+# no RDMA devices (CX7 on that node) is a valid state, NOT a partial.
+_NIC_VENDORS: tuple[dict[str, str], ...] = (
+    {
+        "key": "ainic",
+        "pci_id": "1dd8:1002",
+        "sysfs_vendor": "0x1dd8",
+        "driver": "ionic",
+        "rdma_prefix": "ionic_",
+    },
+    {
+        "key": "broadcom",
+        "pci_id": "14e4:1760",
+        "sysfs_vendor": "0x14e4",
+        "driver": "bnxt_en",
+        "rdma_prefix": "bnxt_re",
+    },
+    {
+        "key": "cx7",
+        "pci_id": "15b3:1021",
+        "sysfs_vendor": "0x15b3",
+        "driver": "mlx5_core",
+        "rdma_prefix": "mlx5_",
+    },
+)
+
+# sysfs root for netdev -> PCI-vendor mapping. Module-level so tests can
+# monkeypatch it to a tmp tree.
+SYS_CLASS_NET = Path("/sys/class/net")
+
+
+def _run_nic_cmd(
+    argv: list[str], reasons: list[str], label: str, *, sudo: bool = False
+) -> str | None:
+    """Run a NIC tool fail-soft; return stripped stdout or None.
+
+    Mirrors the module's subprocess contract exactly: shutil.which() gate,
+    subprocess.run(capture_output, text, timeout=SHORT_TIMEOUT_SEC,
+    check=False), wrapped in the standard exception tuple. ``sudo=True``
+    prepends ``["sudo", "-n", "-E", ...]`` (the _run_rdhc exemplar): -n
+    makes sudo fail fast instead of prompting, so the probe never hangs.
+
+    On any failure a reason is appended under ``label`` and None returned.
+    Callers that treat a missing tool as a DOCUMENTED ABSENCE must check
+    shutil.which() themselves first and skip calling this.
+    """
+    tool = argv[0]
+    if shutil.which(tool) is None:
+        reasons.append(f"{label}: {tool} not on PATH")
+        return None
+    cmd = (["sudo", "-n", "-E"] + argv) if sudo else argv
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=SHORT_TIMEOUT_SEC,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        msg = f"{label}: {tool} exceeded {SHORT_TIMEOUT_SEC:.0f}s timeout"
+        log.info(msg)
+        reasons.append(msg)
+        return None
+    except (FileNotFoundError, OSError) as exc:
+        msg = f"{label}: failed to invoke {tool} ({exc})"
+        log.info(msg)
+        reasons.append(msg)
+        return None
+    if proc.returncode != 0:
+        stderr_lines = (proc.stderr or "").splitlines()
+        tail = next(
+            (ln.strip() for ln in reversed(stderr_lines) if ln.strip()), ""
+        )
+        detail = (
+            f"stderr: {tail[:200]}"
+            if tail
+            else ("no stderr; likely sudo-n unavailable" if sudo else "no stderr")
+        )
+        msg = f"{label}: {tool} exited {proc.returncode} ({detail})"
+        log.info(msg)
+        reasons.append(msg)
+        return None
+    return (proc.stdout or "").strip()
+
+
+def _nic_ifaces_for_vendor(sysfs_vendor: str) -> list[str]:
+    """Return netdev names whose PCI vendor id matches ``sysfs_vendor``.
+
+    Reads ``/sys/class/net/<ifname>/device/vendor`` (a single line like
+    ``0x15b3``) for each interface. Pure sysfs, never raises -- a missing
+    or unreadable file just skips that interface.
+    """
+    ifaces: list[str] = []
+    try:
+        entries = sorted(p.name for p in SYS_CLASS_NET.iterdir())
+    except OSError:
+        return ifaces
+    for name in entries:
+        vfile = SYS_CLASS_NET / name / "device" / "vendor"
+        try:
+            if vfile.read_text().strip().lower() == sysfs_vendor.lower():
+                ifaces.append(name)
+        except OSError:
+            continue
+    return ifaces
+
+
+def _parse_ethtool_field(text: str | None, field: str) -> str | None:
+    """Extract ``<field>: value`` from ``ethtool -i`` output."""
+    if not text:
+        return None
+    for line in text.splitlines():
+        if line.startswith(field + ":"):
+            value = line.split(":", 1)[1].strip()
+            return value or None
+    return None
+
+
+def _parse_ibv_devices(text: str | None, prefix: str) -> list[str]:
+    """Parse ``ibv_devices`` output -> device names matching ``prefix``.
+
+    Output shape (confirmed on hardware):
+
+        device                 node GUID
+        ------              ----------------
+        bnxt_re0            d604e6fffe3e3890
+        ...
+
+    Skips the two header lines; takes column 0; filters by prefix.
+    """
+    if not text:
+        return []
+    out: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("device") or set(stripped) <= {"-"}:
+            continue
+        name = stripped.split()[0]
+        if name.startswith(prefix):
+            out.append(name)
+    return out
+
+
+def _parse_rdma_link(text: str | None, prefix: str) -> list[dict[str, str | None]]:
+    """Parse ``rdma link`` output -> [{device, state, netdev}].
+
+    Line shape (confirmed on hardware; note trailing space):
+
+        link bnxt_re0/1 state ACTIVE physical_state LINK_UP netdev benic7p1
+
+    device is the token after ``link`` with the ``/port`` suffix stripped;
+    state is the token after ``state``; netdev the token after ``netdev``.
+    Filters to devices matching ``prefix``.
+    """
+    if not text:
+        return []
+    def _after(toks: list[str], key: str) -> str | None:
+        return toks[toks.index(key) + 1] if key in toks else None
+
+    links: list[dict[str, str | None]] = []
+    for line in text.splitlines():
+        toks = line.split()
+        if len(toks) < 2 or toks[0] != "link":
+            continue
+        device = toks[1].split("/", 1)[0]
+        if not device.startswith(prefix):
+            continue
+        links.append(
+            {
+                "device": device,
+                "state": _after(toks, "state"),
+                "netdev": _after(toks, "netdev"),
+            }
+        )
+    return links
+
+
+def _parse_nicctl_version(text: str | None) -> str | None:
+    """Extract a version string from ``nicctl show version ... [--json]``.
+
+    Tries JSON first (the documented --json output, shape unconfirmed, so
+    we scan any string value that looks like a version), then falls back
+    to a regex over plain text. Returns None on any miss.
+    """
+    if not text:
+        return None
+    stripped = text.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            data = json.loads(stripped)
+        except (ValueError, TypeError):
+            data = None
+        if data is not None:
+            for val in _iter_json_strings(data):
+                m = re.search(r"\d+\.\d+\.\d+[\w.\-]*", val)
+                if m:
+                    return m.group(0)
+    m = re.search(r"\d+\.\d+\.\d+[\w.\-]*", stripped)
+    return m.group(0) if m else None
+
+
+def _iter_json_strings(data: Any):
+    """Yield every string value in a nested JSON structure."""
+    if isinstance(data, str):
+        yield data
+    elif isinstance(data, dict):
+        for v in data.values():
+            yield from _iter_json_strings(v)
+    elif isinstance(data, list):
+        for v in data:
+            yield from _iter_json_strings(v)
+
+
+def _capture_ainic_tier2(reasons: list[str]) -> dict[str, Any]:
+    """AINIC-only Tier-2 nicctl capture (sudo).
+
+    Command surface confirmed against the AMD "AI NIC CLIs" reference and
+    the Pollara 400 debugging guide:
+      - ``nicctl --version`` -> userspace tool version
+      - ``nicctl show version firmware --json`` -> firmware version
+      - ``nicctl show version host-software --json`` -> host SW version
+      - ``nicctl show card --detail`` -> card UUID / ASIC / PCIe
+      - ``nicctl show dcqcn --roce-device <dev> --profile-id <id>`` (-r/-i)
+    The exact STDOUT LAYOUTS were still unavailable when this was written
+    (``--json`` is documented as WIP), so parsers try JSON first and fall
+    back to TOLERANT regex / key search -- never column positions. Re-pin
+    against a real capture before the customer engagement. Every field
+    degrades to None on any miss; nicctl-absent is documented-absence,
+    handled by the caller.
+    """
+    tier2: dict[str, Any] = {
+        "nicctl_version": None,
+        "card": {"asic": None, "host_sw": None, "firmware": None, "uuid": None},
+        "profile": {"device_config": None, "sriov": None},
+        "dcqcn": {
+            "enabled": None,
+            "token_bucket_size": None,
+            "ai_rate": None,
+            "hai_rate": None,
+            "cnp_dscp": None,
+        },
+    }
+
+    version = _run_nic_cmd(
+        ["nicctl", "--version"], reasons, "nics.ainic.nicctl_version"
+    )
+    if version:
+        m = re.search(r"\d+\.\d+\.\d+[-\w]*", version)
+        tier2["nicctl_version"] = m.group(0) if m else version
+
+    # Firmware + host-software via the dedicated version commands
+    # (JSON-first, regex fallback). These are the authoritative source --
+    # more reliable than scraping ``show card``.
+    fw_text = _run_nic_cmd(
+        ["nicctl", "show", "version", "firmware", "--json"],
+        reasons,
+        "nics.ainic.card.firmware",
+        sudo=True,
+    )
+    tier2["card"]["firmware"] = _parse_nicctl_version(fw_text)
+    hsw_text = _run_nic_cmd(
+        ["nicctl", "show", "version", "host-software", "--json"],
+        reasons,
+        "nics.ainic.card.host_sw",
+        sudo=True,
+    )
+    tier2["card"]["host_sw"] = _parse_nicctl_version(hsw_text)
+
+    # Card detail: UUID (feeds the profile query) + ASIC.
+    card_text = _run_nic_cmd(
+        ["nicctl", "show", "card", "--detail"],
+        reasons,
+        "nics.ainic.card",
+        sudo=True,
+    )
+    if card_text:
+        uuid_m = re.search(
+            r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+            card_text,
+        )
+        if uuid_m:
+            tier2["card"]["uuid"] = uuid_m.group(0)
+        asic_m = re.search(r"(?i)\b(salina|elba|giglio)\b", card_text)
+        if asic_m:
+            tier2["card"]["asic"] = asic_m.group(1).upper()
+        if tier2["card"]["firmware"] is None:
+            fw_m = re.search(
+                r"(?im)^\s*(?:firmware|fw)[\w \-]*[:=]\s*([0-9][\w.\-]+)",
+                card_text,
+            )
+            if fw_m:
+                tier2["card"]["firmware"] = fw_m.group(1)
+
+    card_uuid = tier2["card"]["uuid"]
+    if card_uuid:
+        prof_text = _run_nic_cmd(
+            ["nicctl", "show", "card", "profile", "-c", card_uuid],
+            reasons,
+            "nics.ainic.profile",
+            sudo=True,
+        )
+        if prof_text:
+            dc_m = re.search(r"(device_config_\w+)", prof_text)
+            if dc_m:
+                dc = dc_m.group(1)
+                tier2["profile"]["device_config"] = dc
+                tier2["profile"]["sriov"] = ("_vf" in dc) or ("pf1_vf" in dc)
+
+    dcqcn_text = _run_nic_cmd(
+        ["nicctl", "show", "dcqcn", "--roce-device", "ionic_0",
+         "--profile-id", "1"],
+        reasons,
+        "nics.ainic.dcqcn",
+        sudo=True,
+    )
+    if dcqcn_text:
+        def _num(key: str) -> int | None:
+            m = re.search(
+                rf"(?im)^\s*{re.escape(key)}[\s:=]+(\d+)", dcqcn_text
+            )
+            return int(m.group(1)) if m else None
+
+        tier2["dcqcn"]["token_bucket_size"] = _num("token-bucket-size")
+        tier2["dcqcn"]["ai_rate"] = _num("ai-rate")
+        tier2["dcqcn"]["hai_rate"] = _num("hai-rate")
+        tier2["dcqcn"]["cnp_dscp"] = _num("cnp-dscp")
+        en_m = re.search(r"(?im)^\s*enabled[\s:=]+(true|false|1|0)", dcqcn_text)
+        if en_m:
+            tier2["dcqcn"]["enabled"] = en_m.group(1).lower() in ("true", "1")
+
+    return tier2
+
+
+def _capture_nics(reasons: list[str]) -> dict[str, Any]:
+    """Capture multi-vendor NIC / RoCE fabric state (issue #202).
+
+    Returns a dict keyed by vendor (``ainic``/``broadcom``/``cx7``).
+    Three-tier model per vendor:
+
+    * Tier 0 -- presence gate via ``lspci -d <id>``. Empty => the vendor
+      is not installed: ``{"present": false}`` and we return early. This
+      is a DOCUMENTED ABSENCE -- no reason, no partial. The probe runs on
+      many non-NIC and single-vendor nodes.
+    * Tier 1 -- sudo-free: driver_version (sysfs, falling back to
+      ``ethtool -i`` ``version:``), firmware (``ethtool -i``
+      ``firmware-version:``), rdma_devices (``ibv_devices``), links
+      (``rdma link``). A present vendor with zero RDMA devices is valid
+      (observed on CX7) and not a partial.
+    * Tier 2 -- AINIC only: ``nicctl`` card/profile/dcqcn via sudo -n.
+
+    Never raises; never hangs (sudo -n, bounded timeouts).
+    """
+    nics: dict[str, Any] = {}
+    lspci_present = shutil.which("lspci") is not None
+    if not lspci_present:
+        # Without lspci we cannot run the presence gate for ANY vendor.
+        # That is an expected-but-failed capture (we wanted to probe and
+        # could not), so record one reason and return all-unknown.
+        reasons.append("nics: lspci not on PATH; NIC presence undeterminable")
+
+    for vendor in _NIC_VENDORS:
+        key = vendor["key"]
+        if not lspci_present:
+            nics[key] = {"present": None}
+            continue
+
+        lspci_out = _run_nic_cmd(
+            ["lspci", "-d", vendor["pci_id"]], reasons, f"nics.{key}"
+        )
+        if not lspci_out:
+            # Documented absence: vendor hardware not present.
+            nics[key] = {"present": False}
+            continue
+
+        entry: dict[str, Any] = {
+            "present": True,
+            "driver_version": None,
+            "firmware": None,
+            "rdma_devices": [],
+            "links": [],
+        }
+
+        # Discover this vendor's netdev(s) via sysfs PCI-vendor match.
+        ifaces = _nic_ifaces_for_vendor(vendor["sysfs_vendor"])
+
+        # driver_version: prefer sysfs, fall back to ethtool -i version.
+        ver = None
+        try:
+            ver = (
+                Path(f"/sys/module/{vendor['driver']}/version")
+                .read_text()
+                .strip()
+            ) or None
+        except OSError:
+            ver = None
+
+        ethtool_text = None
+        if ifaces and shutil.which("ethtool") is not None:
+            ethtool_text = _run_nic_cmd(
+                ["ethtool", "-i", ifaces[0]], reasons, f"nics.{key}.ethtool"
+            )
+        if ver is None:
+            ver = _parse_ethtool_field(ethtool_text, "version")
+        entry["driver_version"] = ver
+        entry["firmware"] = _parse_ethtool_field(ethtool_text, "firmware-version")
+
+        # RDMA devices + links (documented-absence if none -> no reason).
+        if shutil.which("ibv_devices") is not None:
+            ibv_text = _run_nic_cmd(
+                ["ibv_devices"], reasons, f"nics.{key}.rdma_devices"
+            )
+            entry["rdma_devices"] = _parse_ibv_devices(
+                ibv_text, vendor["rdma_prefix"]
+            )
+        if shutil.which("rdma") is not None:
+            rdma_text = _run_nic_cmd(["rdma", "link"], reasons, f"nics.{key}.links")
+            entry["links"] = _parse_rdma_link(rdma_text, vendor["rdma_prefix"])
+
+        # Tier 2 -- AINIC only, and only when nicctl exists (else the
+        # management plane is a documented absence: no reason).
+        if key == "ainic" and shutil.which("nicctl") is not None:
+            entry.update(_capture_ainic_tier2(reasons))
+
+        nics[key] = entry
+
+    return nics
 
 
 def _parse_rccl_header(text: str | None) -> tuple[int | None, str | None]:

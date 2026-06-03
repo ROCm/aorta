@@ -196,6 +196,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `miopen` | `dict` | header parse + `sha256(libMIOpen.so)` + sorted-filenames hash of `share/miopen/db/*.txt` | `rocm_release_tweak`, `package_version`, `lib_hash`, `kernel_db_revision`. MIOpen drives convolution kernels on ROCm; kernel-DB drift changes which conv kernel runs. |
 | `rccl` | `dict` | header parse for `NCCL_VERSION_CODE` + `sha256(librccl.so)` + resolve+hash of `NCCL_NET_PLUGIN` + best-effort `sha256` of `librccl-anp.so`/`librccl-net.so` in the lib dir | `version_code` (raw int, e.g. `22707`), `version` (decoded `"2.27.7"`), `lib_hash`, `net_plugin_mode` (`"external"`/`"internal"`/`"unknown"`), `plugin_path`, `plugin_lib_hash`, `anp_lib_hash`, `net_lib_hash`. RCCL is AMD's NCCL-compatible collectives library. **`plugin_path`/`plugin_lib_hash` are the authoritative net-plugin signal**: `NCCL_NET_PLUGIN` is resolved to a real `.so` (absolute path, or bare name found on `LD_LIBRARY_PATH` then the rccl lib dir) and *that* file is hashed -- this is how a real AMD-ANP deployment ships the plugin (`librccl-net.so` under a user-build tree, not `librccl-anp.so` in `/opt/rocm/lib`). `net_plugin_mode` is `"external"` when `NCCL_NET_PLUGIN` resolves, `"internal"` when it is unset/empty (built-in net-ib), and `"unknown"` when it is set but unresolvable (misconfigured launcher -- this records a `partial_reason`; the unset case does not). `anp_lib_hash`/`net_lib_hash` are a best-effort scan of the rccl lib dir for the packaged-install case; `null` when absent (documented absence, no `partial`). |
 | `gpu_arch` | `dict` | `rocm_agent_enumerator` subprocess (no `/dev/kfd` access typically required) | `agent_count`, `gfx_targets` (sorted unique), `agent_arch_counts` (per-arch distribution -- captures both homogeneous and mixed-arch boxes). |
+| `nics` | `dict` | `lspci` presence gate + `ethtool -i` + `ibv_devices` + `rdma link` (Tier-1, sudo-free); AINIC adds `nicctl` via `sudo -n` (Tier-2) | Multi-vendor RoCE NIC/fabric stack keyed by vendor (`ainic`/`broadcom`/`cx7`), schema 1.7 (issue #202). Each vendor: `present` (bool, from `lspci -d <id>`). When present: `driver_version`, `firmware`, `rdma_devices` (list), `links` (`[{device, state, netdev}]`). AINIC-only Tier-2: `nicctl_version`, `card` (`asic`/`host_sw`/`firmware`/`uuid`), `profile` (`device_config`/`sriov`), `dcqcn` (`enabled`/`token_bucket_size`/`ai_rate`/`hai_rate`/`cnp_dscp`). **Documented absence**: vendor absent from `lspci` -> `{"present": false}`, no `partial`; present with zero RDMA devices is valid. AINIC Tier-2 output layouts are tolerant-parsed and pending confirmation against real `nicctl` capture. |
 | `host` | `dict` | `os.uname()` + `os.confstr("CS_GNU_LIBC_VERSION")` | `kernel_release`, `kernel_version`, `machine`, `glibc_version`. Kernel + glibc drift is the #1 confound for compiled-against-vs-runtime issues with C++ extensions. |
 | `composable_kernel` | `dict` | header at `include/ck/version.h` + `nm -D` of `libtorch_hip.so` piped through `c++filt` + `torch.__config__.show()` flag scan | Two sub-blocks (`system: {version, commit, ck_tile_present}`, `pytorch_bundled: {present, symbol_count}`) plus top-level `pytorch_use_ck_sdpa` / `pytorch_use_ck_gemm` booleans (build-time flags baked into the wheel; NOT runtime env vars). System and bundled CK can drift independently. |
 | `tensile` | `dict` | optional `import Tensile` + sorted-filenames hash over the union of hipBLASLt + rocBLAS kernel DBs | `package_version` (usually `null` outside builders), `kernel_db_combined_hash` |
@@ -375,11 +376,27 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.6` (current)
+### `1.7` (current)
 
-Additive change to the `rccl` block (issue #202, RCCL net-plugin
-identity):
+RCCL net-plugin identity + multi-vendor NIC/RoCE fabric capture
+(issue #202). Both additive; the new top-level `nics` block is what
+drives the version bump.
 
+* New top-level **`nics`** block keyed by vendor (`ainic`, `broadcom`,
+  `cx7`). Each vendor has a Tier-0 `present` gate (`lspci -d
+  <vendor>:<device>`); when present, Tier-1 sudo-free fields
+  `driver_version` (sysfs `/sys/module/<drv>/version`, falling back to
+  `ethtool -i` `version:` -- the sysfs file does not exist for in-tree
+  `mlx5_core`/`bnxt_en` on modern kernels), `firmware` (`ethtool -i`
+  `firmware-version:`), `rdma_devices` (`ibv_devices`), and `links`
+  (`rdma link` -> `[{device, state, netdev}]`). AINIC additionally gets
+  Tier-2 `nicctl` fields (`nicctl_version`, `card`, `profile`, `dcqcn`)
+  via `sudo -n`. **Documented absence**: a vendor not in `lspci` is
+  `{"present": false}` with no `partial`; a present vendor with zero RDMA
+  devices (observed on CX7) is valid, not partial. Only an
+  expected-but-failed capture (tool times out, sudo denied) records a
+  reason. `EnvSnapshot.nics` uses `field(default_factory=dict)` so a
+  <=1.6 snapshot round-trips via `from_dict()`.
 * `rccl` gained five nested keys: `net_plugin_mode`
   (`"external"`/`"internal"`/`"unknown"`), `plugin_path`,
   `plugin_lib_hash`, `anp_lib_hash`, and `net_lib_hash`. The
@@ -391,9 +408,14 @@ identity):
   packaged installs. All reuse `_hash_shared_library` (no new hashing
   logic). `net_plugin_mode` is derived (see the field table); the
   `"unknown"` case (env set but unresolvable) records a `partial_reason`,
-  every other case is silent. No schema bump -- nested keys under an
-  existing top-level dict, so a 1.6 reader loading an older snapshot must
-  guard with `.get(...)`.
+  every other case is silent. These are nested keys under the existing
+  `rccl` dict, so a reader loading an older snapshot must guard with
+  `.get(...)`.
+* Buck: `KNOWN_LIBRARY_PATTERNS` gained an `"ainic"` key matching
+  `:rccl-anp(-lib)` / `:rccl-net(-lib)` targets, so the ANP/net plugin
+  surfaces in `library_introspection` like `rccl`.
+
+### `1.6`
 
 Additive change to `library_introspection` (PR #187, issue #183):
 
