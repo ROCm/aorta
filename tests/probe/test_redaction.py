@@ -217,6 +217,68 @@ def test_result_json_env_values_scrubbed(tmp_path: Path):
     assert counts.ips_rewritten >= 1
 
 
+def test_result_json_placeholders_consistent_across_fields(tmp_path: Path):
+    """Path/IP placeholders share one index across the whole result.json.
+
+    The old per-leaf scrub_text() call allocated a fresh index per string,
+    so two DIFFERENT paths in different fields both became <PATH:0> (a
+    collision) and the SAME path in two fields could get different Ns
+    (inconsistent). One shared per-file index fixes both (Copilot review).
+    """
+    cfg = RedactionCfg(scrub_paths=True)
+    redactor = RedactingRedactor(cfg)
+    src = tmp_path / "result.json"
+    dst = tmp_path / "out" / "result.json"
+    src.write_text(
+        json.dumps(
+            {
+                "a": "load /home/user/alpha",
+                "b": "load /home/user/beta",
+                "c": "again /home/user/alpha",
+            }
+        ),
+        encoding="utf-8",
+    )
+    counts = redactor.scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+    # alpha (fields a & c) shares one placeholder; beta (field b) gets a
+    # distinct one -- no collision, and the same path is consistent.
+    assert doc["a"].endswith("<PATH:0>")
+    assert doc["c"].endswith("<PATH:0>")
+    assert doc["b"].endswith("<PATH:1>")
+    assert "<PATH:0>" not in doc["b"]  # distinct paths never collide on one N
+    assert counts.paths_rewritten == 3
+
+
+def test_text_stream_scrub_matches_whole_file(tmp_path: Path, monkeypatch):
+    """Streaming a multi-window log scrubs identically + byte-faithfully.
+
+    The text branch streams off disk instead of reading the whole file
+    (memory spike on big stdout.log; Copilot review). Output must equal a
+    whole-file scrub_text pass: placeholders consistent across windows and
+    CRLF terminators preserved byte-for-byte. A tiny cap forces many windows.
+    """
+    monkeypatch.setattr("aorta.probe.redaction.MAX_LOG_BYTES", 64)
+    cfg = RedactionCfg(scrub_paths=True, scrub_ip_addresses=True)
+    redactor = RedactingRedactor(cfg)
+    # Repeated path/IP across many windows so cross-window placeholder
+    # consistency (one shared index) is exercised; CRLF terminators included.
+    line = "loaded /home/user/alpha from 192.168.1.42\r\n"
+    text = line * 200
+    src = tmp_path / "stdout.log"
+    dst = tmp_path / "out" / "stdout.log"
+    src.write_bytes(text.encode("utf-8"))
+    redactor.scrub_file(src, dst)
+    expected, _, _, _ = scrub_text(text, scrub_paths=True, scrub_ip_addresses=True)
+    out_bytes = dst.read_bytes()
+    assert out_bytes == expected.encode("utf-8")
+    assert b"\r\n" in out_bytes  # CRLF preserved (no universal-newline translation)
+    out = out_bytes.decode("utf-8")
+    assert "/home/user/alpha" not in out
+    assert "192.168.1.42" not in out
+    assert out.count("<PATH:0>") == 200  # one shared index, not per-window
+
+
 def test_fixture_log_scrubs_paths_and_ips(tmp_path: Path):
     raw = (FIXTURES / "redaction_input.txt").read_text(encoding="utf-8")
     cfg = RedactionCfg(

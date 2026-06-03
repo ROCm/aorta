@@ -19,6 +19,7 @@ import ipaddress
 import json
 import re
 import shutil
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -254,28 +255,39 @@ def _line_windows(text: str) -> list[str]:
     max_chars = max(1, MAX_LOG_BYTES // _MAX_UTF8_BYTES_PER_CHAR)
     if len(text) <= max_chars:
         return [text]
-    windows: list[str] = []
+    return list(_stream_line_windows(text.splitlines(keepends=True)))
+
+
+def _stream_line_windows(lines: Iterable[str]) -> Iterator[str]:
+    """Window an *iterable of lines* into ``<= MAX_LOG_BYTES`` byte chunks.
+
+    Same budget/no-split-token semantics as :func:`_line_windows`, but driven
+    off a line iterator so a caller streaming a large log off disk never
+    materialises the whole file. ``_line_windows`` is the in-memory adapter
+    (``str.splitlines(keepends=True)``); the streaming text path feeds a file
+    handle's lines straight in.
+    """
+    max_chars = max(1, MAX_LOG_BYTES // _MAX_UTF8_BYTES_PER_CHAR)
     buf: list[str] = []
     size = 0
-    for line in text.splitlines(keepends=True):
+    for line in lines:
         line_bytes = len(line.encode("utf-8"))
         if line_bytes > MAX_LOG_BYTES:
             if buf:
-                windows.append("".join(buf))
+                yield "".join(buf)
                 buf = []
                 size = 0
             for i in range(0, len(line), max_chars):
-                windows.append(line[i : i + max_chars])
+                yield line[i : i + max_chars]
             continue
         if buf and size + line_bytes > MAX_LOG_BYTES:
-            windows.append("".join(buf))
+            yield "".join(buf)
             buf = []
             size = 0
         buf.append(line)
         size += line_bytes
     if buf:
-        windows.append("".join(buf))
-    return windows
+        yield "".join(buf)
 
 
 def scrub_text(
@@ -294,25 +306,67 @@ def scrub_text(
     """
     path_index = _PathIndex()
     ip_index = _IpIndex()
+    out = "".join(
+        _scrub_windows_into(
+            _line_windows(text),
+            scrub_paths=scrub_paths,
+            scrub_ip_addresses=scrub_ip_addresses,
+            path_index=path_index,
+            ip_index=ip_index,
+        )
+    )
+    return (
+        out,
+        path_index.rewrites,
+        ip_index.ipv4_rewrites,
+        ip_index.ipv6_rewrites,
+    )
+
+
+def _scrub_windows_into(
+    windows: Iterable[str],
+    *,
+    scrub_paths: bool,
+    scrub_ip_addresses: bool,
+    path_index: _PathIndex,
+    ip_index: _IpIndex,
+) -> Iterator[str]:
+    """Scrub each window against *caller-owned* indices.
+
+    Sharing one ``_PathIndex`` / ``_IpIndex`` across every window (and, for
+    JSON, across every string leaf) keeps ``<PATH:N>`` / ``<IPV*:N>``
+    placeholders consistent within a single file: the same path always maps to
+    the same N and two distinct paths never collide on one N. Allocating a
+    fresh index per window/leaf (the old per-leaf ``scrub_text`` call) broke
+    that documented per-file scope.
+    """
     if not scrub_paths and not scrub_ip_addresses:
-        return text, 0, 0, 0
-
-    windows = _line_windows(text)
-
-    out_parts: list[str] = []
+        yield from windows
+        return
     for window in windows:
         chunk = window
         if scrub_paths:
             chunk = _scrub_paths_in_text(chunk, path_index)
         if scrub_ip_addresses:
             chunk = _scrub_ips_in_text(chunk, ip_index)
-        out_parts.append(chunk)
+        yield chunk
 
-    return (
-        "".join(out_parts),
-        path_index.rewrites,
-        ip_index.ipv4_rewrites,
-        ip_index.ipv6_rewrites,
+
+def _scrub_str_into(
+    text: str,
+    *,
+    cfg: RedactionCfg,
+    path_index: _PathIndex,
+    ip_index: _IpIndex,
+) -> str:
+    return "".join(
+        _scrub_windows_into(
+            _line_windows(text),
+            scrub_paths=cfg.scrub_paths,
+            scrub_ip_addresses=cfg.scrub_ip_addresses,
+            path_index=path_index,
+            ip_index=ip_index,
+        )
     )
 
 
@@ -321,9 +375,17 @@ def _scrub_json_value(
     *,
     cfg: RedactionCfg,
     env_removed: list[int],
-) -> tuple[Any, int, int, int]:
+    path_index: _PathIndex,
+    ip_index: _IpIndex,
+) -> Any:
+    """Recursively scrub a JSON value, returning the scrubbed copy.
+
+    Path/IP counts are NOT returned per node: ``path_index`` / ``ip_index``
+    are shared across the whole document walk so placeholders stay file-
+    consistent (Copilot review), and the caller reads the running totals off
+    the indices once the walk completes.
+    """
     if isinstance(value, dict):
-        total_p = total_v4 = total_v6 = 0
         new_dict: dict[str, Any] = {}
         for key, item in value.items():
             if key == "env" and isinstance(item, dict):
@@ -337,43 +399,35 @@ def _scrub_json_value(
                 # LD_LIBRARY_PATH=/home/customer/...). Scrub the values too
                 # so result.json env matches the host_env.json path, which
                 # already scrubs values via its whole-document pass.
-                scrubbed_env: dict[str, str] = {}
-                for env_key, env_val in kept_env.items():
-                    sv, p, v4, v6 = scrub_text(
-                        env_val,
-                        scrub_paths=cfg.scrub_paths,
-                        scrub_ip_addresses=cfg.scrub_ip_addresses,
+                new_dict[key] = {
+                    env_key: _scrub_str_into(
+                        env_val, cfg=cfg, path_index=path_index, ip_index=ip_index
                     )
-                    scrubbed_env[env_key] = sv
-                    total_p += p
-                    total_v4 += v4
-                    total_v6 += v6
-                new_dict[key] = scrubbed_env
+                    for env_key, env_val in kept_env.items()
+                }
                 continue
-            scrubbed, p, v4, v6 = _scrub_json_value(item, cfg=cfg, env_removed=env_removed)
-            new_dict[key] = scrubbed
-            total_p += p
-            total_v4 += v4
-            total_v6 += v6
-        return new_dict, total_p, total_v4, total_v6
+            new_dict[key] = _scrub_json_value(
+                item,
+                cfg=cfg,
+                env_removed=env_removed,
+                path_index=path_index,
+                ip_index=ip_index,
+            )
+        return new_dict
     if isinstance(value, list):
-        total_p = total_v4 = total_v6 = 0
-        new_list: list[Any] = []
-        for item in value:
-            scrubbed, p, v4, v6 = _scrub_json_value(item, cfg=cfg, env_removed=env_removed)
-            new_list.append(scrubbed)
-            total_p += p
-            total_v4 += v4
-            total_v6 += v6
-        return new_list, total_p, total_v4, total_v6
+        return [
+            _scrub_json_value(
+                item,
+                cfg=cfg,
+                env_removed=env_removed,
+                path_index=path_index,
+                ip_index=ip_index,
+            )
+            for item in value
+        ]
     if isinstance(value, str):
-        text, paths, v4, v6 = scrub_text(
-            value,
-            scrub_paths=cfg.scrub_paths,
-            scrub_ip_addresses=cfg.scrub_ip_addresses,
-        )
-        return text, paths, v4, v6
-    return value, 0, 0, 0
+        return _scrub_str_into(value, cfg=cfg, path_index=path_index, ip_index=ip_index)
+    return value
 
 
 def _parse_probe_env(text: str) -> dict[str, str]:
@@ -416,7 +470,7 @@ class RedactingRedactor(Redactor):
         elif src.name == "host_env.json":
             counts = self._scrub_host_env_json(src.read_bytes(), dst, src)
         elif _is_text_artifact(src):
-            counts = self._scrub_text_bytes(src.read_bytes(), dst)
+            counts = self._scrub_text_stream(src, dst)
         else:
             # Binary / non-scrubbable artifact (e.g. a multi-GB core dump):
             # stream the copy via shutil.copyfile rather than reading the whole
@@ -462,14 +516,22 @@ class RedactingRedactor(Redactor):
             # OSError, so the writer's OSError->BundleIOError wrap misses it).
             raise RedactionError(src, exc) from exc
         env_removed = [0]
-        scrubbed, paths, v4, v6 = _scrub_json_value(doc, cfg=self._cfg, env_removed=env_removed)
+        path_index = _PathIndex()
+        ip_index = _IpIndex()
+        scrubbed = _scrub_json_value(
+            doc,
+            cfg=self._cfg,
+            env_removed=env_removed,
+            path_index=path_index,
+            ip_index=ip_index,
+        )
         out = json.dumps(scrubbed, indent=2, sort_keys=False) + "\n"
         dst.write_text(out, encoding="utf-8")
         out_bytes = out.encode("utf-8")
         return RedactionCounts(
             env_keys_removed=env_removed[0],
-            paths_rewritten=paths,
-            ips_rewritten=v4 + v6,
+            paths_rewritten=path_index.rewrites,
+            ips_rewritten=ip_index.ipv4_rewrites + ip_index.ipv6_rewrites,
             bytes_in=len(raw),
             bytes_out=len(out_bytes),
         )
@@ -506,26 +568,40 @@ class RedactingRedactor(Redactor):
             bytes_out=len(out_bytes),
         )
 
-    def _scrub_text_bytes(self, raw: bytes, dst: Path) -> RedactionCounts:
-        # Decode with errors="replace" rather than failing open. stdout.log /
-        # stderr.log are raw subprocess bytes by design, so a single stray
-        # non-UTF-8 byte must not disable path/IP scrubbing for the whole
-        # file (a security footgun). This matches the lenient decode already
-        # used by _scrub_probe_env and the probe log reader; scrub_text still
-        # bounds CPU via its MAX_LOG_BYTES windows.
-        text = raw.decode("utf-8", errors="replace")
-        out, paths, v4, v6 = scrub_text(
-            text,
-            scrub_paths=self._cfg.scrub_paths,
-            scrub_ip_addresses=self._cfg.scrub_ip_addresses,
-        )
-        out_bytes = out.encode("utf-8")
-        dst.write_bytes(out_bytes)
+    def _scrub_text_stream(self, src: Path, dst: Path) -> RedactionCounts:
+        # stdout.log / stderr.log can be very large in real runs, so stream the
+        # scrub window-by-window off disk instead of reading the whole artifact
+        # into memory (peak ~= one MAX_LOG_BYTES window, not O(file size)).
+        #
+        # * ``newline=""`` disables universal-newline translation so CR / CRLF
+        #   terminators survive byte-for-byte; the scrubbed output is then
+        #   identical to a whole-file pass (windows are processed in file order
+        #   against one shared index, so placeholder assignment is unchanged).
+        # * ``errors="replace"`` keeps scrubbing alive on stray non-UTF-8
+        #   subprocess bytes rather than failing open -- same fail-safe as the
+        #   former whole-file decode (a single bad byte must not disable path /
+        #   IP scrubbing for the rest of the file).
+        cfg = self._cfg
+        path_index = _PathIndex()
+        ip_index = _IpIndex()
+        bytes_out = 0
+        with open(src, encoding="utf-8", errors="replace", newline="") as fh, open(
+            dst, "w", encoding="utf-8", newline=""
+        ) as out_fh:
+            for chunk in _scrub_windows_into(
+                _stream_line_windows(fh),
+                scrub_paths=cfg.scrub_paths,
+                scrub_ip_addresses=cfg.scrub_ip_addresses,
+                path_index=path_index,
+                ip_index=ip_index,
+            ):
+                out_fh.write(chunk)
+                bytes_out += len(chunk.encode("utf-8"))
         return RedactionCounts(
-            paths_rewritten=paths,
-            ips_rewritten=v4 + v6,
-            bytes_in=len(raw),
-            bytes_out=len(out_bytes),
+            paths_rewritten=path_index.rewrites,
+            ips_rewritten=ip_index.ipv4_rewrites + ip_index.ipv6_rewrites,
+            bytes_in=src.stat().st_size,
+            bytes_out=bytes_out,
         )
 
 
