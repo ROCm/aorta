@@ -68,6 +68,7 @@ AORTA generates comprehensive performance reports comparing ROCm versions across
 | [Environment Probe](docs/env-probe.md) | Capture / diff / query a versioned environment snapshot; jq cookbook |
 | [`aorta probe`](docs/probe-188/usage.md) | Wrap-and-collect opaque launch commands; matrix + classifier |
 | [`aorta bundle`](docs/probe-188/bundle.md) | Package probe artifacts with recipe-driven redaction |
+| [Buck2](docs/buck2.md) | Build / run the AORTA CLI via Buck2; hermetic Python, `env probe` + `triage` walkthroughs |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues |
 
 ## Repository Layout

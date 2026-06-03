@@ -21,3 +21,13 @@
 
 [build]
   execution_platforms = prelude//platforms:default
+
+# Short names for the targets users invoke most often. Lets a demo /
+# walkthrough say `buck2 run aorta -- env probe --summary` instead of
+# `buck2 run //:aorta -- env probe --summary`. Aliases are command-line
+# sugar only -- the canonical labels in BUCK files don't change, so
+# `cquery 'deps(//:aorta)'` and the equivalent `cquery 'deps(aorta)'`
+# return the same graph.
+[alias]
+  aorta = //:aorta
+  aorta_lib = //:aorta_lib
