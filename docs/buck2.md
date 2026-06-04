@@ -143,9 +143,10 @@ buck2 run aorta -- env probe --buck-target aorta_lib --field library_introspecti
 when you run inside a container that mounts the repo at a different
 path. If Buck2 isn't on PATH, or your `cwd` is outside any Buck
 workspace, `build_system` cleanly degrades to `{"kind": "none"}` --
-the field is always present and never `null`, and no
-`partial_reason` is appended (a non-Buck environment isn't an
-error condition, it's just one of the two documented shapes; see
+the field is always present and never `null`, and no entry is
+appended to the snapshot's `partial_reasons` list (a non-Buck
+environment isn't an error condition, it's just one of the two
+documented shapes; see
 [`src/aorta/instrumentation/build_system.py`]).
 
 ## `aorta triage` under Buck2
@@ -319,8 +320,9 @@ that, you're back to sub-second incrementals.
 
 These come from the env probe, not Buck2. The probe runs on whatever
 host you're on; CPU-only / no-ROCm hosts cleanly report each missing
-field as a `partial_reason` rather than crashing. The Buck-built
-`aorta` binary doesn't paper over a missing GPU stack -- it surfaces it.
+field by appending an entry to the snapshot's `partial_reasons` list
+rather than crashing. The Buck-built `aorta` binary doesn't paper
+over a missing GPU stack -- it surfaces it.
 
 ### `Network: Up: 0B  Down: 68MiB` on the first build
 
