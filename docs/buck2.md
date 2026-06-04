@@ -1,9 +1,15 @@
 # Buck2
 
-Build, test, and run the AORTA CLI with [Buck2](https://buck2.build/) -- a
+Build and run the AORTA CLI with [Buck2](https://buck2.build/) -- a
 fast, hermetic, multi-language build system. The repo already ships a
 working Buck2 setup (added in [#187]); this doc is the user-facing
 walkthrough.
+
+> The Buck2 scaffold in this PR defines `python_library` /
+> `python_binary` targets only -- no `python_test` targets yet, so
+> `buck2 test` is not configured. Tests still run via `pytest` (see
+> the project's `pyproject.toml`). Wiring up `python_test` targets is
+> tracked separately.
 
 [#187]: https://github.com/ROCm/aorta/pull/187
 
@@ -181,7 +187,9 @@ buck2 run aorta -- triage run --recipe recipes/example-fsdp-smoke.yaml --dry-run
 ### Running a recipe end-to-end (graceful degradation)
 
 The public `aorta` build ships no `aorta.workloads` plugins (workloads
-register via a separate package's entry-points; see [Extending] below).
+register via a separate package's entry-points; see
+[Extending: adding workloads via plugins](#extending-adding-workloads-via-plugins)
+below).
 The example recipe targets `workload: fsdp`, so each cell will error
 with `Workload 'fsdp' not found. Available: []`. That's intentional --
 the recipe's own header documents it -- and `aorta triage` is built to
