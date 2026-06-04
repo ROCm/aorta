@@ -91,18 +91,25 @@ workload_config:
   # 1M elements x 2 B = 2 MB shard; 2 MB x (N-1) all_gather fan-out per layer.
   fsdp_shard_size: 1000000
 
-  # GEMM compute between collectives keeps the reproducer near production
-  # per-step timing (~500ms) so the L2->HBM writeback race window matches real
-  # training rather than running orders of magnitude faster. gemm_layers ~36 at
-  # gemm_size 5120 (~14ms/layer on MI300X) approximates the documented ~500ms.
-  # model_dim / num_layers carried over from the original model: block.
+  # Transformer compute between collectives keeps the reproducer near production
+  # per-step timing so the L2->HBM writeback race window matches real training.
+  # model_dim=1024, num_layers=24: attention + FFN per layer, forward + backward,
+  # approximates ~500ms/step on MI355X.
+  #
+  # shared_layer_weights=true: all 24 layers share one weight matrix (fixed seed=0)
+  # and each layer independently receives the same fixed reference input (seed=1)
+  # rather than chaining activations layer-to-layer.  This makes every layer's
+  # forward output analytically identical so _verify_layer_activations() can serve
+  # as a second independent corruption signal alongside the collective-buffer
+  # pattern check: a mismatch across layers means an all_gather corruption on that
+  # layer propagated through GEMM compute -- something the rank-fill pattern check
+  # on full_param alone cannot catch.
   simulate_compute: true
-  compute_type: gemm
-  gemm_size: 5120
-  gemm_layers: 36
-  include_backward_compute: true
+  compute_type: transformer
   model_dim: 1024
   num_layers: 24
+  include_backward_compute: true
+  shared_layer_weights: true
 
 cells:
   # ------------------------------------------------------------------

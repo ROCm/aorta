@@ -159,6 +159,20 @@ class ReproducerConfig:
     include_backward_compute: bool = True
     """Also simulate backward pass (doubles compute time)."""
 
+    shared_layer_weights: bool = False
+    """
+    Use a single shared weight matrix for all layers (transformer compute type).
+
+    When True, all num_layers layers use the same weight matrix initialized with
+    a fixed seed, and each layer receives the same fixed reference input rather
+    than chaining activations.  This makes per-layer forward outputs analytically
+    identical so that cross-layer activation comparison can serve as a secondary
+    corruption signal: any all_gather corruption that propagates through GEMM
+    compute will produce a mismatch between layer outputs.
+
+    Only meaningful when compute_type == 'transformer'.
+    """
+
     # =========================================================================
     # Optimizer (used by modes that support it, e.g., DDP)
     # =========================================================================

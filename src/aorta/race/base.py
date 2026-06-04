@@ -85,8 +85,11 @@ class BaseReproducer(ABC):
         """Get torch dtype from config string."""
         dtype_map = {
             "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
             "float16": torch.float16,
+            "fp16": torch.float16,
             "float32": torch.float32,
+            "fp32": torch.float32,
         }
         return dtype_map.get(self.config.dtype, torch.bfloat16)
 

@@ -30,7 +30,7 @@ from aorta.workloads._base import Workload, WorkloadResult
 log = logging.getLogger(__name__)
 
 _VALID_MODES = {"default", "ddp", "fsdp"}
-_VALID_DTYPES = {"bfloat16", "float16", "float32"}
+_VALID_DTYPES = {"bfloat16", "bf16", "float16", "fp16", "float32", "fp32"}
 
 # Platform-injected config keys that are NOT ReproducerConfig fields but are
 # always present (the dispatcher writes `steps` into every workload config;
