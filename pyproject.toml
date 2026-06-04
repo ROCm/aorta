@@ -80,6 +80,11 @@ hw-queue-profiling = [
     "seaborn>=0.12.0",
 ]
 
+# For aorta agent closed-loop (LiteLLM proposer)
+agent = [
+    "litellm>=1.0.0",
+]
+
 # For aorta.ebpf kernel tracing module.
 # The runtime requirements are the bpftrace binary and CAP_BPF/CAP_PERFMON
 # (or sudo); no Python deps beyond the base.
@@ -104,6 +109,7 @@ all = [
     "aorta[report]",
     "aorta[hw-queue]",
     "aorta[hw-queue-profiling]",
+    "aorta[agent]",
     "aorta[dev]",
 ]
 
