@@ -5,7 +5,7 @@ fast, hermetic, multi-language build system. The repo already ships a
 working Buck2 setup (added in [#187]); this doc is the user-facing
 walkthrough.
 
-> The Buck2 scaffold in this PR defines `python_library` /
+> The repo's current Buck2 scaffold defines `python_library` /
 > `python_binary` targets only -- no `python_test` targets yet, so
 > `buck2 test` is not configured. Tests still run via `pytest` (see
 > the project's `pyproject.toml`). Wiring up `python_test` targets is
@@ -321,9 +321,19 @@ buck2 log show | jq -c 'select(.Event.data.SpanStart != null) | .Event.data.Span
 
 You're seeing entry-point discovery return empty. Two checks:
 
-1. Did you install the plugin's wheel (not just source)?
-   `pip show my_plugin` should list `aorta.workloads` under
-   "Entry-points".
+1. Did you install the plugin's wheel (not just source)? `pip show`
+   does not report entry points, so check directly via
+   `importlib.metadata`:
+
+   ```bash
+   python -c "from importlib.metadata import entry_points; \
+              print(list(entry_points(group='aorta.workloads')))"
+   ```
+
+   Empty list means the wheel's `dist-info/entry_points.txt` either
+   wasn't installed or didn't include the `aorta.workloads` group.
+   You can also inspect the wheel directly:
+   `unzip -p my_plugin-*.whl '*/entry_points.txt'`.
 2. If running under Buck2, the plugin's wheel must be a
    `prebuilt_python_library` in the dep graph -- a plain
    `python_library` of the plugin's `.py` files won't carry
