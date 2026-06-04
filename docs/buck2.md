@@ -18,10 +18,11 @@ Three concrete wins over `pip install -e . && aorta ...`:
   probe` artifact captured on machine A is comparable byte-for-byte
   with one captured on machine B.
 * **`aorta env probe` becomes self-documenting**. The snapshot's
-  `build_system` field auto-populates with `{kind: buck2, buck2_version,
-  repo_root, revision}` whenever `env probe` is run inside a Buck2
-  workspace (whether via `buck2 run` or pip-installed; detection is
-  workspace-based, not provenance-based). Combined with the hermetic
+  `build_system` field auto-populates with
+  `{"kind": "buck2", "buck2_version": ..., "repo_root": ..., "revision": ...}`
+  whenever `env probe` is run inside a Buck2 workspace (whether via
+  `buck2 run` or pip-installed; detection is workspace-based, not
+  provenance-based). Combined with the hermetic
   Python above, two snapshots from different Buck checkouts diff cleanly
   on `revision` -- no bespoke "what built this" plumbing needed.
 * **Fast incrementals**. The Buck daemon keeps the parsed target
