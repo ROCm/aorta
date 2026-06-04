@@ -20,9 +20,11 @@ Three concrete wins over `pip install -e . && aorta ...`:
 * **Hermetic Python**. The toolchain downloads a pinned CPython 3.13.6
   standalone from python-build-standalone -- *not* your `.venv` Python and
   *not* the host's `/usr/bin/python3`. Every Buck-built `aorta` binary
-  runs under the same interpreter ABI on every machine, so an
-  `env probe` artifact captured on machine A is comparable
-  byte-for-byte with one captured on machine B.
+  runs under the same interpreter ABI on every machine, so the
+  Python-interpreter portion of an `env probe` snapshot is identical
+  across machines; the rest of the snapshot (ROCm versions, hostname,
+  GPU, paths) is host-specific by design and diffs cleanly on the
+  fields that actually changed.
 * **`aorta env probe` becomes self-documenting**. The snapshot's
   `build_system` field auto-populates with
   `{"kind": "buck2", "buck2_version": ..., "repo_root": ..., "revision": ...}`
@@ -162,6 +164,12 @@ documented shapes; see
 subcommands are read-only and demo-friendly; `triage run` actually
 executes cells.
 
+Built-in mitigations are defined in `src/aorta/registry/mitigations.py`
+(currently ~22 entries spanning core / hardware-queue / RCCL / PyTorch
+/ HIP / SDPA-backend groups). The transcripts below show only the
+"core" three so the doc doesn't drift as built-ins are added; running
+the command on your machine prints the full set.
+
 ```bash
 # Inspect the registries (built-ins + any installed plugins)
 buck2 run aorta -- triage list-mitigations
@@ -169,6 +177,7 @@ buck2 run aorta -- triage list-mitigations
 # none      aorta   (none)
 # tf32_off  aorta   DISABLE_TF32=1
 # xnack     aorta   HSA_XNACK=1
+# ... (~19 more ROCm / HIP / RCCL / PyTorch / SDPA entries; truncated)
 
 buck2 run aorta -- triage list-environments
 # NAME     SOURCE  DOCKER  VENV
