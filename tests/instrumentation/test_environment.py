@@ -3724,6 +3724,44 @@ class TestRccl:
         assert env_mod._resolve_net_plugin("") is None
         assert env_mod._resolve_net_plugin("   ") is None
 
+    def test_resolve_net_plugin_oserror_on_explicit_path_is_failsoft(
+        self, monkeypatch
+    ):
+        # Path.exists() can raise (e.g. PermissionError when a parent dir
+        # is not traversable -- and on CPython < 3.12 exists() does NOT
+        # swallow it). The resolver must treat that as "does not resolve"
+        # and return None rather than letting the exception escape and
+        # trip the disaster snapshot. Force the raise so the contract is
+        # verified on every Python version, not just <3.12.
+        def _boom(self):  # noqa: ANN001
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(env_mod.Path, "exists", _boom)
+        assert env_mod._resolve_net_plugin("/restricted/dir/librccl-net.so") is None
+
+    def test_net_plugin_unknown_does_not_break_capture_on_oserror(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        # End-to-end: an explicit NCCL_NET_PLUGIN whose existence check
+        # raises OSError must degrade to net_plugin_mode="unknown" + a
+        # reason, and _capture_rccl must NOT raise.
+        self._rccl_dirs(tmp_path, monkeypatch)
+        isolated_env.setenv("NCCL_NET_PLUGIN", "/restricted/dir/librccl-net.so")
+        real_exists = env_mod.Path.exists
+
+        def _maybe_boom(self):  # noqa: ANN001
+            if str(self) == "/restricted/dir/librccl-net.so":
+                raise PermissionError(13, "Permission denied")
+            return real_exists(self)
+
+        monkeypatch.setattr(env_mod.Path, "exists", _maybe_boom)
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        assert block["net_plugin_mode"] == "unknown"
+        assert block["plugin_path"] is None
+        assert block["plugin_lib_hash"] is None
+        assert any(r.startswith("rccl.net_plugin_mode") for r in reasons)
+
 
 # ---------------------------------------------------------------------------
 # Multi-vendor NIC / RoCE fabric capture (issue #202, schema 1.7)

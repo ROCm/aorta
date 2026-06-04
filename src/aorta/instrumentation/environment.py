@@ -4868,10 +4868,18 @@ def _resolve_net_plugin(plugin_env: str) -> Path | None:
     if not raw:
         return None
 
-    # Explicit path form.
+    # Explicit path form. ``Path.exists()`` can raise (e.g. PermissionError
+    # on Python < 3.12 when a path component is not traversable, or any
+    # other OSError) -- treat that as "does not resolve" so the probe stays
+    # fail-soft (a misconfigured/inaccessible NCCL_NET_PLUGIN must degrade
+    # to net_plugin_mode="unknown" + a reason, never raise out of
+    # _capture_rccl and trip the disaster snapshot).
     if os.sep in raw or (os.altsep and os.altsep in raw):
         p = Path(raw)
-        return p if p.exists() else None
+        try:
+            return p if p.exists() else None
+        except OSError:
+            return None
 
     # Bare-name form: build candidate filenames NCCL would try.
     names = [raw]
