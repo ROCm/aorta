@@ -58,6 +58,7 @@ in `BUCK` files uses the full `//:aorta` form.
 ```text
 aorta/
 ├── .buckconfig                  # cells, toolchains, target aliases
+├── .buckroot                    # workspace marker (empty file; what `buck2 root` finds)
 ├── BUCK                         # //:aorta_lib + //:aorta targets
 ├── toolchains/BUCK              # system_demo_toolchains() -> CPython 3.13.6
 └── third-party/python/BUCK      # click + pyyaml wheels pinned by sha256
@@ -328,14 +329,18 @@ Buck2 is fetching the pinned CPython standalone (~50 MB) and the pinned
 Cached under `buck-out/` after the first hit. Subsequent builds are
 network-silent.
 
-### `buck2 run aorta -- --version` raises `RuntimeError: 'aorta' is not installed`
+### `buck2 run aorta -- --version` fails with a missing-metadata error
 
 Click's `--version` decorator queries `importlib.metadata` for the
 package version, which only works for pip-installed distributions.
 The Buck-built binary's link tree doesn't carry pip dist-info for
-`aorta` itself, so the lookup fails. Use `buck2 run aorta -- --help`
-instead, or query via `buck2 run aorta -- env probe --field python_version`
-if you want the toolchain Python version.
+`aorta` itself, so the lookup fails. The exact exception text varies
+by Click / Python version -- recent Click surfaces it as
+`RuntimeError: 'aorta' is not installed`, older versions raise
+`PackageNotFoundError` from `importlib.metadata`. Use
+`buck2 run aorta -- --help` instead, or query
+`buck2 run aorta -- env probe --field python_version` for the
+toolchain Python version.
 
 ## See also
 
