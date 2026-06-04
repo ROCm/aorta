@@ -60,9 +60,13 @@ aorta/
 ├── .buckconfig                  # cells, toolchains, target aliases
 ├── BUCK                         # //:aorta_lib + //:aorta targets
 ├── toolchains/BUCK              # system_demo_toolchains() -> CPython 3.13.6
-├── third-party/python/BUCK      # click + pyyaml wheels pinned by sha256
-└── prelude/                     # bundled (downloaded by Buck2; not vendored)
+└── third-party/python/BUCK      # click + pyyaml wheels pinned by sha256
 ```
+
+The `prelude` cell (declared in `.buckconfig`) has no on-disk
+directory in this repo. `external_cells.prelude = bundled` tells
+Buck2 to use the copy of the OSS prelude shipped inside the `buck2`
+binary itself, so nothing is vendored.
 
 Two targets exist today:
 
@@ -107,7 +111,7 @@ buck2 run aorta -- env probe --field build_system
 # -> {"kind": "buck2", "buck2_version": "buck2 c920dd03...", "repo_root": "/path/to/aorta", "revision": "<git sha>"}
 
 # Same binary, but run from outside any Buck2 workspace
-(cd /tmp && /home/vikhande/.local/bin/buck2 root)  # would fail -> kind=none
+(cd /tmp && buck2 root)                     # exits non-zero -> kind=none
 # To run aorta from /tmp you'd typically use a pip-installed aorta:
 cd /tmp && aorta env probe --field build_system
 # -> {"kind": "none"}
@@ -136,8 +140,12 @@ buck2 run aorta -- env probe --buck-target aorta_lib --field library_introspecti
 
 `build_system.repo_root` is the *Buck-root* path -- meaningful even
 when you run inside a container that mounts the repo at a different
-path. If Buck2 isn't on PATH (or you `pip install`-ed), the field is
-`null` and `partial_reasons` says so cleanly.
+path. If Buck2 isn't on PATH, or your `cwd` is outside any Buck
+workspace, `build_system` cleanly degrades to `{"kind": "none"}` --
+the field is always present and never `null`, and no
+`partial_reason` is appended (a non-Buck environment isn't an
+error condition, it's just one of the two documented shapes; see
+[`src/aorta/instrumentation/build_system.py`]).
 
 ## `aorta triage` under Buck2
 
