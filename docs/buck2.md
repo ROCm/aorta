@@ -14,9 +14,9 @@ Three concrete wins over `pip install -e . && aorta ...`:
 * **Hermetic Python**. The toolchain downloads a pinned CPython 3.13.6
   standalone from python-build-standalone -- *not* your `.venv` Python and
   *not* the host's `/usr/bin/python3`. Every Buck-built `aorta` binary
-  runs under the same interpreter ABI on every machine, so an `env
-  probe` artifact captured on machine A is comparable byte-for-byte
-  with one captured on machine B.
+  runs under the same interpreter ABI on every machine, so an
+  `env probe` artifact captured on machine A is comparable
+  byte-for-byte with one captured on machine B.
 * **`aorta env probe` becomes self-documenting**. The snapshot's
   `build_system` field auto-populates with
   `{"kind": "buck2", "buck2_version": ..., "repo_root": ..., "revision": ...}`
@@ -87,9 +87,9 @@ Two targets exist today:
   `prebuilt_python_library`, `http_file`.
 * **Provider** -- the typed output a rule emits. `python_binary` emits
   a `RunInfo` provider; `buck2 run` knows how to execute it.
-* **Cell** -- a Buck2-aware sub-repository, defined in `.buckconfig
-  [cells]`. We have `root` (this repo), `prelude` (Buck2's bundled
-  rules), and `toolchains`.
+* **Cell** -- a Buck2-aware sub-repository, defined in the `[cells]`
+  section of `.buckconfig`. We have `root` (this repo), `prelude`
+  (Buck2's bundled rules), and `toolchains`.
 * **Daemon (`buckd`)** -- per-project; holds the parsed graph and
   Watchman state in memory. First invocation is slower (~3s), then
   near-instant for unchanged inputs. Kill with `buck2 kill`.
@@ -304,8 +304,9 @@ buck2 log show | jq -c 'select(.Event.data.SpanStart != null) | .Event.data.Span
 
 You're seeing entry-point discovery return empty. Two checks:
 
-1. Did you install the plugin's wheel (not just source)?  `pip show
-   my_plugin` should list `aorta.workloads` under "Entry-points".
+1. Did you install the plugin's wheel (not just source)?
+   `pip show my_plugin` should list `aorta.workloads` under
+   "Entry-points".
 2. If running under Buck2, the plugin's wheel must be a
    `prebuilt_python_library` in the dep graph -- a plain
    `python_library` of the plugin's `.py` files won't carry
@@ -313,9 +314,11 @@ You're seeing entry-point discovery return empty. Two checks:
 
 ### `buck2` is slow on the first command after a config change
 
-`.buckconfig` edits force a daemon restart. The next invocation
-re-parses the graph (~30 s for small repos, longer for big ones). After
-that, you're back to sub-second incrementals.
+`.buckconfig` edits force a daemon restart **and** invalidate the
+cached parse state, so the next invocation re-parses the graph from
+scratch -- noticeably slower than a normal cold start (see "Daemon
+(`buckd`)" in the glossary above) since nothing can be reused. After
+that single re-parse, you're back to sub-second incrementals.
 
 ### `partial_reasons` complains about `rdhc`, `/opt/rocm/...` etc.
 
