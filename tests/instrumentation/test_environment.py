@@ -965,6 +965,16 @@ class TestCollectEnvContract:
         # JSON-native check (no default=str needed)
         json.dumps(d)
 
+    def test_disaster_snapshot_nics_block_is_fully_shaped(self):
+        """The disaster path shapes nics like every other block (all
+        vendor keys present, undeterminable presence) -- not an empty
+        dict -- so downstream diffs/parsers stay predictable."""
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=[], unexpected_reason="collect_env: boom"
+        )
+        assert set(snap.nics.keys()) == {"ainic", "broadcom", "cx7"}
+        assert all(snap.nics[v] == {"present": None} for v in snap.nics)
+
     def test_disaster_snapshot_populates_every_envsnapshot_field(self):
         """Hard guard against a future PR adding a field to EnvSnapshot
         without updating _disaster_snapshot.
@@ -3651,6 +3661,27 @@ class TestRccl:
         assert block["net_plugin_mode"] == "external"
         assert block["plugin_path"] == str(plugin)
         assert block["plugin_lib_hash"] is not None
+        assert reasons == []
+
+    def test_plugin_lib_hash_is_resolved_file_not_sibling(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        # plugin_lib_hash must hash exactly the resolved plugin file, not
+        # a higher-versioned sibling in the same dir (the _hash_shared_library
+        # fallback risk). Place a sibling with different bytes alongside.
+        self._rccl_dirs(tmp_path, monkeypatch)
+        anp_build = tmp_path / "apps" / "amd-anp" / "build"
+        anp_build.mkdir(parents=True)
+        plugin = anp_build / "librccl-net.so"
+        plugin.write_bytes(b"the-real-resolved-plugin")
+        sibling = anp_build / "librccl-net.so.9.9.9"
+        sibling.write_bytes(b"a-different-sibling-build")
+        isolated_env.setenv("NCCL_NET_PLUGIN", str(plugin))
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        assert block["net_plugin_mode"] == "external"
+        assert block["plugin_lib_hash"] == env_mod._hash_file_path(plugin)
+        assert block["plugin_lib_hash"] != env_mod._hash_file_path(sibling)
         assert reasons == []
 
     def test_net_plugin_external_via_ld_library_path(
@@ -6422,6 +6453,45 @@ class TestSummaryNewBriefLines:
             if ln.lstrip().startswith(prefix):
                 return ln
         raise AssertionError(f"no `{prefix}` line in summary")
+
+    # ---- nics ----
+    def test_nics_undeterminable_presence_renders_question_mark(self):
+        # present=None (e.g. lspci missing/failed) must surface as
+        # "<vendor>(?)", never be silently dropped into "(none present)".
+        snap = _example_snapshot(nics={
+            "ainic": {"present": None},
+            "broadcom": {"present": False},
+            "cx7": {"present": None},
+        })
+        line = self._line(snap, "nics:")
+        assert "ainic(?)" in line
+        assert "cx7(?)" in line
+        assert "(none present)" not in line
+
+    def test_nics_all_absent_renders_none_present(self):
+        snap = _example_snapshot(nics={
+            "ainic": {"present": False},
+            "broadcom": {"present": False},
+            "cx7": {"present": False},
+        })
+        line = self._line(snap, "nics:")
+        assert "(none present)" in line
+
+    def test_nics_present_vendor_renders_fw_and_links(self):
+        snap = _example_snapshot(nics={
+            "ainic": {"present": False},
+            "broadcom": {
+                "present": True,
+                "firmware": "232.0.219.16",
+                "links": [
+                    {"device": "bnxt_re0", "state": "ACTIVE"},
+                    {"device": "bnxt_re1", "state": "DOWN"},
+                ],
+            },
+            "cx7": {"present": False},
+        })
+        line = self._line(snap, "nics:")
+        assert "broadcom(fw=232.0.219.16 links=1/2)" in line
 
     # ---- cmake cache ----
     def test_cmake_cache_unavailable_renders_explicit_message(self):

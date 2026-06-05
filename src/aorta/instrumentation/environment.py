@@ -961,7 +961,10 @@ class EnvSnapshot:
 
         Per present vendor: ``<vendor>(fw=<firmware> links=<up>/<total>)``.
         Absent vendors are omitted to keep the line short; ``(none
-        present)`` when no vendor is installed.
+        present)`` when no vendor is installed. A vendor whose presence is
+        UNDETERMINABLE (``present is None`` -- e.g. lspci missing or
+        failed) renders as ``<vendor>(?)`` so the operator sees the gap
+        rather than a misleading "(none present)".
         """
         if not nics:
             return "(no nic probe)"
@@ -969,6 +972,9 @@ class EnvSnapshot:
         for key, entry in nics.items():
             entry = entry or {}
             present = entry.get("present")
+            if present is None:
+                parts.append(f"{key}(?)")
+                continue
             if not present:
                 continue
             links = entry.get("links") or []
@@ -1497,7 +1503,15 @@ def _disaster_snapshot(
             "anp_lib_hash": None,
             "net_lib_hash": None,
         },
-        nics={},
+        nics={
+            # Shape the block like every other disaster-snapshot block:
+            # all vendor keys present with undeterminable presence, so a
+            # crash still yields a predictable nics shape for downstream
+            # diffs/parsers (rather than an empty dict).
+            "ainic": {"present": None},
+            "broadcom": {"present": None},
+            "cx7": {"present": None},
+        },
         gpu_arch={
             "agent_count": None,
             "gfx_targets": None,
@@ -4804,11 +4818,12 @@ def _capture_rccl(reasons: list[str]) -> dict[str, Any]:
     plugin_env = (os.environ.get("NCCL_NET_PLUGIN") or "").strip()
     plugin_path_obj = _resolve_net_plugin(plugin_env) if plugin_env else None
     plugin_path = str(plugin_path_obj) if plugin_path_obj else None
-    plugin_lib_hash = (
-        _hash_shared_library(plugin_path_obj.parent, plugin_path_obj.name)
-        if plugin_path_obj
-        else None
-    )
+    # Hash the RESOLVED file directly, not via _hash_shared_library(dir,
+    # name): the latter would silently fall back to a versioned sibling in
+    # the same dir if this exact file were unreadable, so plugin_path and
+    # plugin_lib_hash could describe different files. _hash_file_path hashes
+    # exactly plugin_path (resolving symlinks) or returns None.
+    plugin_lib_hash = _hash_file_path(plugin_path_obj) if plugin_path_obj else None
     if not plugin_env:
         net_plugin_mode = "internal"
     elif plugin_path_obj is not None:
@@ -4848,6 +4863,14 @@ def _capture_rccl(reasons: list[str]) -> dict[str, Any]:
             f"rccl.net_plugin_mode: NCCL_NET_PLUGIN={plugin_env!r} set but "
             "could not be resolved to a readable .so on its path / "
             "LD_LIBRARY_PATH / " + str(RCCL_LIB_DIR)
+        )
+    elif net_plugin_mode == "external" and plugin_lib_hash is None:
+        # The plugin resolved (mode is genuinely external -- the runtime
+        # will load it) but the probe could not read it to hash it, so the
+        # authoritative identity signal is incomplete: flag it.
+        reasons.append(
+            f"rccl.plugin_lib_hash: NCCL_NET_PLUGIN resolved to {plugin_path} "
+            "but it could not be read to hash"
         )
     return block
 
