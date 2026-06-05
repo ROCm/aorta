@@ -4137,6 +4137,24 @@ class TestNicsCapture:
         assert a["card"]["uuid"] is None
         assert any(r.startswith("nics.ainic") for r in reasons)
 
+    def test_run_nic_cmd_sudo_exec_failure_names_sudo(self, monkeypatch):
+        # When sudo=True and the exec itself raises (e.g. sudo missing),
+        # the reason must name the actual runner (sudo), not the wrapped
+        # tool, so partial_reasons are accurate.
+        monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/nicctl")
+
+        def boom_run(cmd, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+        monkeypatch.setattr(env_mod.subprocess, "run", boom_run)
+        reasons: list[str] = []
+        out = env_mod._run_nic_cmd(
+            ["nicctl", "--version"], reasons, "nics.ainic.x", sudo=True
+        )
+        assert out is None
+        assert any("failed to invoke sudo" in r for r in reasons)
+        assert not any("failed to invoke nicctl" in r for r in reasons)
+
 
 # ---------------------------------------------------------------------------
 # GPU architecture detection (rocm_agent_enumerator)

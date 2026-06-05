@@ -5009,7 +5009,10 @@ def _run_nic_cmd(
         reasons.append(msg)
         return None
     except (FileNotFoundError, OSError) as exc:
-        msg = f"{label}: failed to invoke {tool} ({exc})"
+        # Report the binary actually exec'd (cmd[0]) -- under sudo=True the
+        # failing exec is "sudo", not the wrapped tool, so naming `tool`
+        # would mislead operators reading partial_reasons.
+        msg = f"{label}: failed to invoke {cmd[0]} ({exc})"
         log.info(msg)
         reasons.append(msg)
         return None
