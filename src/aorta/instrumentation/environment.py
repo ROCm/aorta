@@ -4798,7 +4798,10 @@ def _capture_rccl(reasons: list[str]) -> dict[str, Any]:
     # documented absence -- no reason).
     anp_lib_hash = _hash_shared_library(RCCL_LIB_DIR, "librccl-anp.so")
     net_lib_hash = _hash_shared_library(RCCL_LIB_DIR, "librccl-net.so")
-    plugin_env = os.environ.get("NCCL_NET_PLUGIN") or ""
+    # Strip here so the mode logic matches _resolve_net_plugin()'s own
+    # strip(): NCCL_NET_PLUGIN exported as whitespace (or empty) is the
+    # documented "internal" case, not an unresolvable "unknown".
+    plugin_env = (os.environ.get("NCCL_NET_PLUGIN") or "").strip()
     plugin_path_obj = _resolve_net_plugin(plugin_env) if plugin_env else None
     plugin_path = str(plugin_path_obj) if plugin_path_obj else None
     plugin_lib_hash = (
@@ -5286,8 +5289,16 @@ def _capture_nics(reasons: list[str]) -> dict[str, Any]:
         lspci_out = _run_nic_cmd(
             ["lspci", "-d", vendor["pci_id"]], reasons, f"nics.{key}"
         )
+        if lspci_out is None:
+            # lspci ran but failed (non-zero / timeout): presence is
+            # UNDETERMINABLE, not a documented absence. _run_nic_cmd has
+            # already recorded a reason; surface present=null so a real
+            # capture failure isn't silently read as "vendor absent".
+            nics[key] = {"present": None}
+            continue
         if not lspci_out:
-            # Documented absence: vendor hardware not present.
+            # lspci ran cleanly with no matching PCI device: documented
+            # absence (vendor hardware not present). No reason, no partial.
             nics[key] = {"present": False}
             continue
 

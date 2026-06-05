@@ -95,7 +95,7 @@ operator can act on them without `jq`'ing the JSON. A closing
 end-of-output. Sample:
 
 ```text
-Wrote env probe to /tmp/env.json (schema_version=1.6) [PARTIAL]
+Wrote env probe to /tmp/env.json (schema_version=1.7) [PARTIAL]
   runtime:   baremetal / python=venv
   build_sys: none
   rocm:      7.2.1 (dev: None)
@@ -103,7 +103,8 @@ Wrote env probe to /tmp/env.json (schema_version=1.6) [PARTIAL]
   hipblaslt: 1.2.2 rocm_release_tweak=dabb6df2b9
   rocblas:   5.2.0 rocm_release_tweak=dabb6df2b9
   miopen:    3.5.1 rocm_release_tweak=dabb6df2b9
-  rccl:      2.27.7 (code=22707) net_plugin=external
+  rccl:      2.27.7 (code=22707) net_plugin=external [librccl-net.so]
+  nics:      broadcom(fw=232.0.219.16/pkg 232.1.196.16 links=8/8)  cx7(fw=28.36.1010 (FB_0000000038) links=0/0)
   gpu_arch:  ['gfx942'] (counts={'gfx942': 8})
   host:      kernel=5.15.0-174-generic machine=x86_64  glibc=2.35
   ck:        system=1.2.0/23d531c8  ck_tile=yes  libtorch_hip=4067 ck:: syms

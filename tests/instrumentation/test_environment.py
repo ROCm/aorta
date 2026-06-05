@@ -3706,6 +3706,20 @@ class TestRccl:
         assert block["net_lib_hash"] is not None
         assert reasons == []
 
+    def test_net_plugin_internal_when_env_whitespace_only(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        # NCCL_NET_PLUGIN exported as whitespace is equivalent to unset:
+        # the documented "internal" case, NOT an unresolvable "unknown".
+        self._rccl_dirs(tmp_path, monkeypatch)
+        isolated_env.setenv("NCCL_NET_PLUGIN", "   ")
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        assert block["net_plugin_mode"] == "internal"
+        assert block["plugin_path"] is None
+        assert block["plugin_lib_hash"] is None
+        assert not any(r.startswith("rccl.net_plugin_mode") for r in reasons)
+
     def test_net_plugin_unknown_when_env_set_but_unresolvable(
         self, isolated_env, tmp_path: Path, monkeypatch
     ):
@@ -3921,6 +3935,24 @@ class TestNicsCapture:
         assert nics["cx7"] == {"present": False}
         # No vendor was present -> nothing fell back -> NO partial.
         assert reasons == []
+
+    def test_lspci_failure_is_undeterminable_not_absent(
+        self, isolated_env, monkeypatch
+    ):
+        # lspci runs but FAILS (non-zero) for one vendor: presence is
+        # undeterminable -> present=None + a reason, NOT a documented
+        # absence. Other vendors (clean empty exit) stay present=False.
+        fake_which, fake_run = self._fake_tools(
+            {"lspci"}, {("lspci", "-d", "1dd8:1002"): (1, "")}
+        )
+        monkeypatch.setattr(env_mod.shutil, "which", fake_which)
+        monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
+        reasons: list[str] = []
+        nics = env_mod._capture_nics(reasons)
+        assert nics["ainic"] == {"present": None}
+        assert nics["broadcom"] == {"present": False}
+        assert nics["cx7"] == {"present": False}
+        assert any(r.startswith("nics.ainic") for r in reasons)
 
     def test_broadcom_tier1_full_capture(
         self, isolated_env, tmp_path: Path, monkeypatch
