@@ -5102,7 +5102,14 @@ def _parse_rdma_link(text: str | None, prefix: str) -> list[dict[str, str | None
     if not text:
         return []
     def _after(toks: list[str], key: str) -> str | None:
-        return toks[toks.index(key) + 1] if key in toks else None
+        # Guard the index: a malformed/truncated line where ``key`` is the
+        # last token (e.g. "... state" with no value) must yield None, not
+        # raise IndexError into _capture_nics().
+        if key in toks:
+            i = toks.index(key)
+            if i + 1 < len(toks):
+                return toks[i + 1]
+        return None
 
     links: list[dict[str, str | None]] = []
     for line in text.splitlines():
@@ -5350,8 +5357,15 @@ def _capture_nics(reasons: list[str]) -> dict[str, Any]:
         except OSError:
             ver = None
 
+        # firmware/driver come from ethtool -i on one of the vendor's
+        # netdevs. Let _run_nic_cmd own the which()-gate + fail-soft reason
+        # (so a PRESENT vendor with ethtool missing is an explicit partial,
+        # not a silent None). No netdev discoverable is a tolerated state
+        # (driver_version may still come from sysfs; like present-with-
+        # zero-RDMA it is not by itself a partial), so ethtool is simply
+        # skipped then.
         ethtool_text = None
-        if ifaces and shutil.which("ethtool") is not None:
+        if ifaces:
             ethtool_text = _run_nic_cmd(
                 ["ethtool", "-i", ifaces[0]], reasons, f"nics.{key}.ethtool"
             )
@@ -5360,17 +5374,17 @@ def _capture_nics(reasons: list[str]) -> dict[str, Any]:
         entry["driver_version"] = ver
         entry["firmware"] = _parse_ethtool_field(ethtool_text, "firmware-version")
 
-        # RDMA devices + links (documented-absence if none -> no reason).
-        if shutil.which("ibv_devices") is not None:
-            ibv_text = _run_nic_cmd(
-                ["ibv_devices"], reasons, f"nics.{key}.rdma_devices"
-            )
-            entry["rdma_devices"] = _parse_ibv_devices(
-                ibv_text, vendor["rdma_prefix"]
-            )
-        if shutil.which("rdma") is not None:
-            rdma_text = _run_nic_cmd(["rdma", "link"], reasons, f"nics.{key}.links")
-            entry["links"] = _parse_rdma_link(rdma_text, vendor["rdma_prefix"])
+        # RDMA devices + links. Always go through _run_nic_cmd so a missing
+        # ibv_devices/rdma tool on a PRESENT vendor becomes an explicit
+        # partial reason rather than a silently-empty list. A tool that
+        # runs but reports no matching devices (e.g. CX7 with zero RDMA) is
+        # the documented-absence case -- empty success, no reason.
+        ibv_text = _run_nic_cmd(
+            ["ibv_devices"], reasons, f"nics.{key}.rdma_devices"
+        )
+        entry["rdma_devices"] = _parse_ibv_devices(ibv_text, vendor["rdma_prefix"])
+        rdma_text = _run_nic_cmd(["rdma", "link"], reasons, f"nics.{key}.links")
+        entry["links"] = _parse_rdma_link(rdma_text, vendor["rdma_prefix"])
 
         # Tier 2 -- AINIC only, and only when nicctl exists (else the
         # management plane is a documented absence: no reason).

@@ -857,7 +857,7 @@ sources are:
 | `miopen.kernel_db_revision` | sha256 of sorted filenames of `*.txt` under `/opt/rocm/share/miopen/db/` (changes when conv-kernel set changes; the `MIOPEN_SYSTEM_DB_PATH` env var overrides this directory at runtime) |
 | `rccl.version_code` / `rccl.version` | `NCCL_VERSION_CODE` define in `/opt/rocm/include/rccl/rccl.h`, decoded into `MAJOR.MINOR.PATCH` |
 | `rccl.lib_hash` | `sha256(/opt/rocm/lib/librccl.so)` resolved through symlinks |
-| `rccl.plugin_path` / `rccl.plugin_lib_hash` | `NCCL_NET_PLUGIN` resolved to a real `.so` (absolute path, or bare name searched on `LD_LIBRARY_PATH` then `/opt/rocm/lib`) and `sha256`'d through symlinks; both `null` when `NCCL_NET_PLUGIN` is unset or unresolvable |
+| `rccl.plugin_path` / `rccl.plugin_lib_hash` | `NCCL_NET_PLUGIN` resolved to a real regular file (absolute path, or bare name searched on `LD_LIBRARY_PATH` then `/opt/rocm/lib`) and `sha256`'d through symlinks. Both `null` when `NCCL_NET_PLUGIN` is unset or unresolvable. When it resolves but the file can't be read to hash, `plugin_path` is still populated while `plugin_lib_hash` is `null` (and a `partial_reason` is recorded). |
 | `rccl.anp_lib_hash` / `rccl.net_lib_hash` | best-effort `sha256(/opt/rocm/lib/librccl-anp.so)` / `sha256(/opt/rocm/lib/librccl-net.so)` for packaged installs; `null` when absent (documented absence, no `partial`) |
 | `rccl.net_plugin_mode` | derived: `"external"` when `NCCL_NET_PLUGIN` resolves to a real `.so`; `"internal"` when unset/empty; `"unknown"` when set but unresolvable (records a `partial_reason`) |
 | `gpu_arch.*` | `rocm_agent_enumerator` subprocess (one gfx-target per detected GPU on stdout); `gfx000` placeholder filtered out |

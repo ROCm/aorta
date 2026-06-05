@@ -3788,11 +3788,11 @@ class TestRccl:
     def test_resolve_net_plugin_oserror_on_explicit_path_is_failsoft(
         self, monkeypatch
     ):
-        # Path.exists() can raise (e.g. PermissionError when a parent dir
-        # is not traversable -- and on CPython < 3.12 exists() does NOT
-        # swallow it). The resolver must treat that as "does not resolve"
-        # and return None rather than letting the exception escape and
-        # trip the disaster snapshot. Force the raise so the contract is
+        # Path.is_file() can raise (e.g. PermissionError when a parent dir
+        # is not traversable -- and on CPython < 3.12 it does NOT swallow
+        # it). The resolver must treat that as "does not resolve" and
+        # return None rather than letting the exception escape and trip
+        # the disaster snapshot. Force the raise so the contract is
         # verified on every Python version, not just <3.12.
         def _boom(self):  # noqa: ANN001
             raise PermissionError(13, "Permission denied")
@@ -3898,6 +3898,15 @@ class TestNicsParsers:
         links = env_mod._parse_rdma_link(text, "ionic_")
         assert links == [
             {"device": "ionic_2", "state": "DOWN", "netdev": "enp137s0"}
+        ]
+
+    def test_parse_rdma_link_truncated_line_is_failsoft(self):
+        # A malformed/truncated line where a key token is last (no value)
+        # must NOT raise IndexError -- the field degrades to None.
+        text = "link bnxt_re0/1 state\n"
+        links = env_mod._parse_rdma_link(text, "bnxt_re")
+        assert links == [
+            {"device": "bnxt_re0", "state": None, "netdev": None}
         ]
 
     def test_parse_ethtool_fields(self):
