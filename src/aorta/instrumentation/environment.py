@@ -4882,19 +4882,22 @@ def _resolve_net_plugin(plugin_env: str) -> Path | None:
     (contains a separator) or a bare library name resolved against the
     loader search path. We mirror that:
 
-    * value containing a path separator -> use it directly if it exists.
+    * value containing a path separator -> use it directly if it is a
+      regular file.
     * bare name -> try it verbatim, then with a ``lib`` prefix and a
       ``.so`` suffix (NCCL's own normalisation), searching each
       LD_LIBRARY_PATH entry and finally RCCL_LIB_DIR.
 
-    Returns the first existing match (symlinks left for
-    _hash_shared_library to resolve), or None if nothing resolves.
+    Matches are restricted to regular files (``is_file()`` follows
+    symlinks) so a directory or other non-dlopen'able path is never
+    reported as a resolved plugin. Returns the first match (symlinks left
+    for the hasher to resolve), or None if nothing resolves.
     """
     raw = plugin_env.strip()
     if not raw:
         return None
 
-    # Explicit path form. ``Path.exists()`` can raise (e.g. PermissionError
+    # Explicit path form. ``Path.is_file()`` can raise (e.g. PermissionError
     # on Python < 3.12 when a path component is not traversable, or any
     # other OSError) -- treat that as "does not resolve" so the probe stays
     # fail-soft (a misconfigured/inaccessible NCCL_NET_PLUGIN must degrade
@@ -4903,7 +4906,7 @@ def _resolve_net_plugin(plugin_env: str) -> Path | None:
     if os.sep in raw or (os.altsep and os.altsep in raw):
         p = Path(raw)
         try:
-            return p if p.exists() else None
+            return p if p.is_file() else None
         except OSError:
             return None
 
@@ -4924,7 +4927,7 @@ def _resolve_net_plugin(plugin_env: str) -> Path | None:
         for name in names:
             candidate = d / name
             try:
-                if candidate.exists():
+                if candidate.is_file():
                     return candidate
             except OSError:
                 continue

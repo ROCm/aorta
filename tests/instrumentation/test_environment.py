@@ -3769,6 +3769,22 @@ class TestRccl:
         assert env_mod._resolve_net_plugin("") is None
         assert env_mod._resolve_net_plugin("   ") is None
 
+    def test_net_plugin_directory_is_not_external(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        # NCCL_NET_PLUGIN pointing at a directory (or any non-regular
+        # file) must NOT resolve -- the runtime can't dlopen a directory.
+        self._rccl_dirs(tmp_path, monkeypatch)
+        a_dir = tmp_path / "not-a-plugin-dir"
+        a_dir.mkdir()
+        isolated_env.setenv("NCCL_NET_PLUGIN", str(a_dir))
+        reasons: list[str] = []
+        block = env_mod._capture_rccl(reasons)
+        assert block["net_plugin_mode"] == "unknown"
+        assert block["plugin_path"] is None
+        assert block["plugin_lib_hash"] is None
+        assert any(r.startswith("rccl.net_plugin_mode") for r in reasons)
+
     def test_resolve_net_plugin_oserror_on_explicit_path_is_failsoft(
         self, monkeypatch
     ):
@@ -3781,7 +3797,7 @@ class TestRccl:
         def _boom(self):  # noqa: ANN001
             raise PermissionError(13, "Permission denied")
 
-        monkeypatch.setattr(env_mod.Path, "exists", _boom)
+        monkeypatch.setattr(env_mod.Path, "is_file", _boom)
         assert env_mod._resolve_net_plugin("/restricted/dir/librccl-net.so") is None
 
     def test_net_plugin_unknown_does_not_break_capture_on_oserror(
@@ -3792,14 +3808,14 @@ class TestRccl:
         # reason, and _capture_rccl must NOT raise.
         self._rccl_dirs(tmp_path, monkeypatch)
         isolated_env.setenv("NCCL_NET_PLUGIN", "/restricted/dir/librccl-net.so")
-        real_exists = env_mod.Path.exists
+        real_is_file = env_mod.Path.is_file
 
         def _maybe_boom(self):  # noqa: ANN001
             if str(self) == "/restricted/dir/librccl-net.so":
                 raise PermissionError(13, "Permission denied")
-            return real_exists(self)
+            return real_is_file(self)
 
-        monkeypatch.setattr(env_mod.Path, "exists", _maybe_boom)
+        monkeypatch.setattr(env_mod.Path, "is_file", _maybe_boom)
         reasons: list[str] = []
         block = env_mod._capture_rccl(reasons)
         assert block["net_plugin_mode"] == "unknown"
