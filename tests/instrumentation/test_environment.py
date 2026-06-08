@@ -165,6 +165,7 @@ class TestPathConstants:
             "RCCL_VERSION_HEADER",
             "RCCL_LIB_DIR",
             "SYS_CLASS_NET",
+            "SYS_CLASS_INFINIBAND",
             "DOCKERENV_MARKER",
             "PODMAN_CONTAINERENV_MARKER",
             "CGROUP_FILE",
@@ -209,6 +210,7 @@ class TestPathConstants:
             "RCCL_VERSION_HEADER",
             "RCCL_LIB_DIR",
             "SYS_CLASS_NET",
+            "SYS_CLASS_INFINIBAND",
             "DOCKERENV_MARKER",
             "PODMAN_CONTAINERENV_MARKER",
             "CGROUP_FILE",
@@ -3867,25 +3869,56 @@ _REAL_ETHTOOL_CX7 = (
     "expansion-rom-version: \n"
     "bus-info: 0000:31:00.0\n"
 )
+# Real output captured from a live AINIC host (8x gfx950, PR #208 review):
+# the RoCE devices are named rdma0..rdma7 (NOT ionic_*) and the netdevs
+# tw-eth0..7 -- the case that broke name-prefix matching.
+_AINIC_IBV_DEVICES = (
+    "    device                 node GUID\n"
+    "    ------              ----------------\n"
+    "    rdma0            ba0a90fffe1c0a00\n"
+    "    rdma1            ba0a90fffe1c0a01\n"
+    "    rdma2            ba0a90fffe1c0a02\n"
+    "    rdma3            ba0a90fffe1c0a03\n"
+    "    rdma4            ba0a90fffe1c0a04\n"
+    "    rdma5            ba0a90fffe1c0a05\n"
+    "    rdma6            ba0a90fffe1c0a06\n"
+    "    rdma7            ba0a90fffe1c0a07\n"
+)
+_AINIC_RDMA_LINK = "".join(
+    f"link rdma{i}/1 state ACTIVE physical_state LINK_UP netdev tw-eth{i} \n"
+    for i in range(8)
+)
+_AINIC_DCQCN = (
+    "dcqcn-profile 1\n"
+    "  enabled true\n"
+    "  token-bucket-size 800000\n"
+    "  ai-rate 160\n"
+    "  hai-rate 300\n"
+    "  cnp-dscp 48\n"
+)
 
 
 class TestNicsParsers:
     """Pure-parser unit tests against real captured output shapes."""
 
-    def test_parse_ibv_devices_filters_prefix(self):
-        assert env_mod._parse_ibv_devices(_REAL_IBV_DEVICES, "bnxt_re") == [
+    def test_parse_ibv_devices_all_names(self):
+        # Returns ALL device names (column 0); vendor binding is the
+        # caller's job via sysfs driver, not a name-prefix filter here.
+        assert env_mod._parse_ibv_devices(_REAL_IBV_DEVICES) == [
             "bnxt_re0",
             "bnxt_re1",
         ]
-        # A different prefix on the same output matches nothing.
-        assert env_mod._parse_ibv_devices(_REAL_IBV_DEVICES, "mlx5_") == []
+        # Generic rdma<N> naming is parsed identically (the AINIC case).
+        assert env_mod._parse_ibv_devices(_AINIC_IBV_DEVICES) == [
+            f"rdma{i}" for i in range(8)
+        ]
 
     def test_parse_ibv_devices_empty(self):
-        assert env_mod._parse_ibv_devices("", "bnxt_re") == []
-        assert env_mod._parse_ibv_devices(None, "bnxt_re") == []
+        assert env_mod._parse_ibv_devices("") == []
+        assert env_mod._parse_ibv_devices(None) == []
 
     def test_parse_rdma_link_shape(self):
-        links = env_mod._parse_rdma_link(_REAL_RDMA_LINK, "bnxt_re")
+        links = env_mod._parse_rdma_link(_REAL_RDMA_LINK)
         assert links == [
             {"device": "bnxt_re0", "state": "ACTIVE", "netdev": "benic7p1"},
             {"device": "bnxt_re1", "state": "ACTIVE", "netdev": "benic8p1"},
@@ -3895,7 +3928,7 @@ class TestNicsParsers:
         text = (
             "link ionic_2/1 state DOWN physical_state DISABLED netdev enp137s0\n"
         )
-        links = env_mod._parse_rdma_link(text, "ionic_")
+        links = env_mod._parse_rdma_link(text)
         assert links == [
             {"device": "ionic_2", "state": "DOWN", "netdev": "enp137s0"}
         ]
@@ -3904,10 +3937,35 @@ class TestNicsParsers:
         # A malformed/truncated line where a key token is last (no value)
         # must NOT raise IndexError -- the field degrades to None.
         text = "link bnxt_re0/1 state\n"
-        links = env_mod._parse_rdma_link(text, "bnxt_re")
+        links = env_mod._parse_rdma_link(text)
         assert links == [
             {"device": "bnxt_re0", "state": None, "netdev": None}
         ]
+
+    def test_sysfs_device_driver_resolves_symlink(self, tmp_path):
+        # The authoritative vendor binding: read <name>/device/driver and
+        # return its basename. Naming-independent (rdma0 -> ionic).
+        root = tmp_path / "class"
+        dev = root / "rdma0" / "device"
+        dev.mkdir(parents=True)
+        os.symlink("../../../bus/pci/drivers/ionic", dev / "driver")
+        assert env_mod._sysfs_device_driver(root, "rdma0") == "ionic"
+        assert env_mod._sysfs_device_driver(root, "missing") is None
+        assert env_mod._sysfs_device_driver(root, "") is None
+
+    def test_split_firmware_version(self):
+        # Broadcom glued form -> split; de-dup when the halves are equal.
+        assert env_mod._split_firmware_version(
+            "232.0.219.16/pkg 232.1.196.16"
+        ) == ("232.0.219.16", "232.1.196.16")
+        assert env_mod._split_firmware_version(
+            "232.0.219.16/pkg 232.0.219.16"
+        ) == ("232.0.219.16", None)
+        # CX7 parenthesised form (no /pkg) passes through unchanged.
+        assert env_mod._split_firmware_version(
+            "28.36.1010 (FB_0000000038)"
+        ) == ("28.36.1010 (FB_0000000038)", None)
+        assert env_mod._split_firmware_version(None) == (None, None)
 
     def test_parse_ethtool_fields(self):
         assert (
@@ -3964,6 +4022,38 @@ class TestNicsCapture:
             return subprocess.CompletedProcess(args=cmd, returncode=rc, stdout=out, stderr="")
 
         return fake_which, fake_run
+
+    def _build_sysfs(
+        self, tmp_path, monkeypatch, *, netdevs=None, ib_devs=None, net_vendor=None
+    ):
+        """Build fake /sys/class/{net,infiniband} trees + monkeypatch roots.
+
+        netdevs:    {netdev_name: driver}  -> device/driver symlink
+        ib_devs:    {ib_name: driver}      -> device/driver symlink
+        net_vendor: {netdev_name: "0x14e4"} -> device/vendor file
+        """
+        net_root = tmp_path / "class_net"
+        ib_root = tmp_path / "class_ib"
+        net_root.mkdir(parents=True, exist_ok=True)
+        ib_root.mkdir(parents=True, exist_ok=True)
+
+        def _mk(root, name, driver=None, vendor=None):
+            dev = root / name / "device"
+            dev.mkdir(parents=True, exist_ok=True)
+            if driver is not None:
+                os.symlink(f"../../../bus/pci/drivers/{driver}", dev / "driver")
+            if vendor is not None:
+                (dev / "vendor").write_text(vendor + "\n")
+
+        netdevs = netdevs or {}
+        ib_devs = ib_devs or {}
+        net_vendor = net_vendor or {}
+        for name in set(netdevs) | set(net_vendor):
+            _mk(net_root, name, driver=netdevs.get(name), vendor=net_vendor.get(name))
+        for name, driver in ib_devs.items():
+            _mk(ib_root, name, driver=driver)
+        monkeypatch.setattr(env_mod, "SYS_CLASS_NET", net_root)
+        monkeypatch.setattr(env_mod, "SYS_CLASS_INFINIBAND", ib_root)
 
     def test_no_lspci_records_one_reason_all_unknown(
         self, isolated_env, monkeypatch
@@ -4027,18 +4117,23 @@ class TestNicsCapture:
         )
         monkeypatch.setattr(env_mod.shutil, "which", fake_which)
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        # Fake the sysfs netdev->vendor mapping for broadcom (0x14e4).
-        net = tmp_path / "net"
-        iface = net / "benic1p1" / "device"
-        iface.mkdir(parents=True)
-        (iface / "vendor").write_text("0x14e4\n")
-        monkeypatch.setattr(env_mod, "SYS_CLASS_NET", net)
+        # sysfs: benic1p1 carries vendor 0x14e4 (for netdev->vendor iface
+        # discovery); all netdevs + ib devices bind to driver bnxt_en (for
+        # the driver-based vendor binding).
+        self._build_sysfs(
+            tmp_path, monkeypatch,
+            netdevs={"benic1p1": "bnxt_en", "benic7p1": "bnxt_en", "benic8p1": "bnxt_en"},
+            ib_devs={"bnxt_re0": "bnxt_en", "bnxt_re1": "bnxt_en"},
+            net_vendor={"benic1p1": "0x14e4"},
+        )
 
         reasons: list[str] = []
         nics = env_mod._capture_nics(reasons)
         b = nics["broadcom"]
         assert b["present"] is True
-        assert b["firmware"] == "232.0.219.16/pkg 232.1.196.16"
+        # Broadcom glued "<fw>/pkg <pkg>" is split into firmware + pkg_version.
+        assert b["firmware"] == "232.0.219.16"
+        assert b["pkg_version"] == "232.1.196.16"
         # sysfs /sys/module/bnxt_en/version absent on the real node ->
         # driver_version falls back to ethtool -i version:.
         assert b["driver_version"] == "6.9.0-0_fbk10_brcmrdma13_141_g9"
@@ -4068,7 +4163,13 @@ class TestNicsCapture:
         )
         monkeypatch.setattr(env_mod.shutil, "which", fake_which)
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        monkeypatch.setattr(env_mod, "SYS_CLASS_NET", tmp_path / "empty")
+        # bnxt_re* devices/netdevs bind to bnxt_en, so the driver-based
+        # filter correctly excludes them from cx7 (mlx5_core).
+        self._build_sysfs(
+            tmp_path, monkeypatch,
+            netdevs={"benic7p1": "bnxt_en", "benic8p1": "bnxt_en"},
+            ib_devs={"bnxt_re0": "bnxt_en", "bnxt_re1": "bnxt_en"},
+        )
 
         reasons: list[str] = []
         nics = env_mod._capture_nics(reasons)
@@ -4095,7 +4196,7 @@ class TestNicsCapture:
         )
         monkeypatch.setattr(env_mod.shutil, "which", fake_which)
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        monkeypatch.setattr(env_mod, "SYS_CLASS_NET", tmp_path / "empty")
+        self._build_sysfs(tmp_path, monkeypatch)  # empty sysfs
 
         reasons: list[str] = []
         nics = env_mod._capture_nics(reasons)
@@ -4127,15 +4228,63 @@ class TestNicsCapture:
         )
         monkeypatch.setattr(env_mod.shutil, "which", fake_which)
         monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
-        monkeypatch.setattr(env_mod, "SYS_CLASS_NET", tmp_path / "empty")
+        self._build_sysfs(tmp_path, monkeypatch)  # empty sysfs
 
         reasons: list[str] = []
         nics = env_mod._capture_nics(reasons)
         a = nics["ainic"]
-        assert a["nicctl_version"] == "1.117.5-a-74"  # non-sudo, succeeded
+        assert a["nicctl_version"] == "1.117.5-a-74"  # --version succeeded
         assert a["card"]["firmware"] is None
         assert a["card"]["uuid"] is None
         assert any(r.startswith("nics.ainic") for r in reasons)
+
+    def test_ainic_rdma_naming_recovered_via_sysfs_driver(
+        self, isolated_env, tmp_path: Path, monkeypatch
+    ):
+        # Regression for PR #208 review (AINIC host): RoCE devices named
+        # rdma0..rdma7 (not ionic_*) must still be bound to ainic via their
+        # kernel driver (ionic), and DCQCN must target the resolved device
+        # (rdma0), not a hardcoded ionic_0.
+        outputs = {
+            ("lspci", "-d", "1dd8:1002"): (0, "c1:00.0 Ethernet controller: Pensando\n"),
+            ("lspci", "-d", "14e4:1760"): (0, ""),
+            ("lspci", "-d", "15b3:1021"): (0, ""),
+            ("ibv_devices",): (0, _AINIC_IBV_DEVICES),
+            ("rdma", "link"): (0, _AINIC_RDMA_LINK),
+            ("nicctl", "--version"): (0, "nicctl version 1.117.5-a-74"),
+            # DCQCN keyed on the RESOLVED device (rdma0). If the code still
+            # hardcoded ionic_0 this key would miss and dcqcn would be None.
+            ("nicctl", "show", "dcqcn", "--roce-device", "rdma0", "--profile-id", "1"):
+                (0, _AINIC_DCQCN),
+        }
+        fake_which, fake_run = self._fake_tools(
+            {"lspci", "ibv_devices", "rdma", "nicctl"}, outputs
+        )
+        monkeypatch.setattr(env_mod.shutil, "which", fake_which)
+        monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
+        # All 8 rdma devices + netdevs bind to the ionic driver.
+        self._build_sysfs(
+            tmp_path, monkeypatch,
+            netdevs={f"tw-eth{i}": "ionic" for i in range(8)},
+            ib_devs={f"rdma{i}": "ionic" for i in range(8)},
+        )
+
+        reasons: list[str] = []
+        nics = env_mod._capture_nics(reasons)
+        a = nics["ainic"]
+        assert a["present"] is True
+        # All 8 RoCE devices recovered despite the rdma<N> naming.
+        assert a["rdma_devices"] == [f"rdma{i}" for i in range(8)]
+        assert len(a["links"]) == 8
+        assert all(ln["state"] == "ACTIVE" for ln in a["links"])
+        assert a["links"][0] == {
+            "device": "rdma0", "state": "ACTIVE", "netdev": "tw-eth0"
+        }
+        # DCQCN targeted the resolved device (rdma0) and parsed.
+        assert a["dcqcn"]["token_bucket_size"] == 800000
+        assert a["dcqcn"]["enabled"] is True
+        # No "no AINIC RDMA device resolved" reason (devices were found).
+        assert not any("no AINIC RDMA device" in r for r in reasons)
 
     def test_run_nic_cmd_sudo_exec_failure_names_sudo(self, monkeypatch):
         # When sudo=True and the exec itself raises (e.g. sudo missing),

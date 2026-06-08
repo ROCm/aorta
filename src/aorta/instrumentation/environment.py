@@ -4937,9 +4937,17 @@ def _resolve_net_plugin(plugin_env: str) -> Path | None:
 # Multi-vendor NIC/RoCE fabric capture (issue #202, schema 1.7).
 #
 # Vendor registry: PCI vendor:device id (lspci -d), kernel netdev driver
-# module, RDMA device-name prefix (ibv_devices / rdma link), and the
-# sysfs PCI-vendor id used to map a netdev back to its vendor (the
-# 0x-prefixed value in /sys/class/net/<ifname>/device/vendor).
+# module, and the sysfs PCI-vendor id used to map a netdev back to its
+# vendor (the 0x-prefixed value in /sys/class/net/<ifname>/device/vendor).
+#
+# ``driver`` is the authoritative key for binding RDMA devices and links
+# to a vendor. We do NOT match on RDMA/netdev device-NAME prefixes: device
+# names (ionic_0 vs rdma3, benic7p1 vs tw-eth0) are an admin/kernel choice
+# and vary between hosts -- prefix matching silently dropped all 8 ACTIVE
+# RoCE links on an AINIC host whose devices were named rdma0..rdma7
+# (reported on PR #208). Instead, each ibv/rdma device is resolved to its
+# bound kernel driver via the sysfs ``device/driver`` symlink, which is
+# the same name regardless of how the device was named.
 #
 # Confirmed against a live node (8x BCM57608 + 2x ConnectX-7): the
 # /sys/module/<drv>/version file does NOT exist for mlx5_core or bnxt_en
@@ -4952,27 +4960,65 @@ _NIC_VENDORS: tuple[dict[str, str], ...] = (
         "pci_id": "1dd8:1002",
         "sysfs_vendor": "0x1dd8",
         "driver": "ionic",
-        "rdma_prefix": "ionic_",
     },
     {
         "key": "broadcom",
         "pci_id": "14e4:1760",
         "sysfs_vendor": "0x14e4",
         "driver": "bnxt_en",
-        "rdma_prefix": "bnxt_re",
     },
     {
         "key": "cx7",
         "pci_id": "15b3:1021",
         "sysfs_vendor": "0x15b3",
         "driver": "mlx5_core",
-        "rdma_prefix": "mlx5_",
     },
 )
 
-# sysfs root for netdev -> PCI-vendor mapping. Module-level so tests can
-# monkeypatch it to a tmp tree.
+# sysfs roots. Module-level so tests can monkeypatch them to a tmp tree.
+# SYS_CLASS_NET: netdev -> PCI-vendor / driver mapping.
+# SYS_CLASS_INFINIBAND: RDMA device -> driver mapping.
 SYS_CLASS_NET = Path("/sys/class/net")
+SYS_CLASS_INFINIBAND = Path("/sys/class/infiniband")
+
+
+def _sysfs_device_driver(class_root: Path, name: str) -> str | None:
+    """Resolve the kernel driver bound to a ``/sys/class/<x>/<name>`` device.
+
+    Reads the ``<name>/device/driver`` symlink (which points at
+    ``.../bus/pci/drivers/<drv>``) and returns its basename -- e.g.
+    ``ionic`` / ``bnxt_en`` / ``mlx5_core``. This is authoritative and
+    naming-independent: RDMA and netdev device *names* are an admin/kernel
+    choice, so binding a device to its vendor by name prefix is unreliable
+    (see the _NIC_VENDORS note). Pure sysfs, never raises -- a missing or
+    unreadable symlink just yields None.
+    """
+    if not name:
+        return None
+    link = class_root / name / "device" / "driver"
+    try:
+        return os.path.basename(os.readlink(link))
+    except OSError:
+        return None
+
+
+def _link_vendor_driver(link: dict[str, str | None]) -> str | None:
+    """Resolve an ``rdma link`` entry to its bound kernel driver.
+
+    Prefer the netdev (``/sys/class/net/<netdev>/device/driver``); fall
+    back to the RDMA device itself
+    (``/sys/class/infiniband/<device>/device/driver``) when the link has
+    no netdev. Returns None when neither resolves.
+    """
+    netdev = link.get("netdev")
+    if netdev:
+        drv = _sysfs_device_driver(SYS_CLASS_NET, netdev)
+        if drv:
+            return drv
+    device = link.get("device")
+    if device:
+        return _sysfs_device_driver(SYS_CLASS_INFINIBAND, device)
+    return None
 
 
 def _run_nic_cmd(
@@ -5066,8 +5112,8 @@ def _parse_ethtool_field(text: str | None, field: str) -> str | None:
     return None
 
 
-def _parse_ibv_devices(text: str | None, prefix: str) -> list[str]:
-    """Parse ``ibv_devices`` output -> device names matching ``prefix``.
+def _parse_ibv_devices(text: str | None) -> list[str]:
+    """Parse ``ibv_devices`` output -> ALL device names (column 0).
 
     Output shape (confirmed on hardware):
 
@@ -5076,23 +5122,29 @@ def _parse_ibv_devices(text: str | None, prefix: str) -> list[str]:
         bnxt_re0            d604e6fffe3e3890
         ...
 
-    Skips the two header lines; takes column 0; filters by prefix.
+    Skips the two header lines and takes column 0. Vendor binding is NOT
+    done here by name -- the caller maps each name to its driver via
+    ``_sysfs_device_driver(SYS_CLASS_INFINIBAND, name)``.
     """
     if not text:
         return []
     out: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("device") or set(stripped) <= {"-"}:
+        # Skip blanks, the "device   node GUID" header, and the
+        # "------   ----------------" separator (dashes + spaces only).
+        if (
+            not stripped
+            or stripped.startswith("device")
+            or set(stripped) <= {"-", " "}
+        ):
             continue
-        name = stripped.split()[0]
-        if name.startswith(prefix):
-            out.append(name)
+        out.append(stripped.split()[0])
     return out
 
 
-def _parse_rdma_link(text: str | None, prefix: str) -> list[dict[str, str | None]]:
-    """Parse ``rdma link`` output -> [{device, state, netdev}].
+def _parse_rdma_link(text: str | None) -> list[dict[str, str | None]]:
+    """Parse ``rdma link`` output -> ALL [{device, state, netdev}].
 
     Line shape (confirmed on hardware; note trailing space):
 
@@ -5100,7 +5152,8 @@ def _parse_rdma_link(text: str | None, prefix: str) -> list[dict[str, str | None
 
     device is the token after ``link`` with the ``/port`` suffix stripped;
     state is the token after ``state``; netdev the token after ``netdev``.
-    Filters to devices matching ``prefix``.
+    Vendor binding is NOT done here by name -- the caller maps each link to
+    its driver via ``_sysfs_device_driver`` on the netdev (or device).
     """
     if not text:
         return []
@@ -5119,17 +5172,37 @@ def _parse_rdma_link(text: str | None, prefix: str) -> list[dict[str, str | None
         toks = line.split()
         if len(toks) < 2 or toks[0] != "link":
             continue
-        device = toks[1].split("/", 1)[0]
-        if not device.startswith(prefix):
-            continue
         links.append(
             {
-                "device": device,
+                "device": toks[1].split("/", 1)[0],
                 "state": _after(toks, "state"),
                 "netdev": _after(toks, "netdev"),
             }
         )
     return links
+
+
+def _split_firmware_version(raw: str | None) -> tuple[str | None, str | None]:
+    """Split an ``ethtool -i`` firmware-version into (firmware, pkg_version).
+
+    Broadcom reports a glued ``"<fw>/pkg <pkg>"`` form (e.g.
+    ``"232.0.219.16/pkg 232.1.196.16"``) that is hard to diff and whose two
+    halves are usually identical. Split on ``/pkg`` so each piece compares
+    cleanly across hosts; de-dup to ``pkg_version=None`` when the halves
+    match. Forms without ``/pkg`` (e.g. CX7's
+    ``"28.36.1010 (FB_0000000038)"``) pass through unchanged with
+    ``pkg_version=None``.
+    """
+    if not raw:
+        return (None, None)
+    if "/pkg" in raw:
+        left, _, right = raw.partition("/pkg")
+        firmware = left.strip() or None
+        pkg_version = right.strip() or None
+        if pkg_version == firmware:
+            pkg_version = None
+        return (firmware, pkg_version)
+    return (raw, None)
 
 
 def _parse_nicctl_version(text: str | None) -> str | None:
@@ -5168,8 +5241,16 @@ def _iter_json_strings(data: Any):
             yield from _iter_json_strings(v)
 
 
-def _capture_ainic_tier2(reasons: list[str]) -> dict[str, Any]:
+def _capture_ainic_tier2(
+    reasons: list[str], rdma_devices: list[str]
+) -> dict[str, Any]:
     """AINIC-only Tier-2 nicctl capture (sudo).
+
+    ``rdma_devices`` is the vendor's resolved RDMA device list (from
+    Tier-1, driver-bound). The DCQCN query targets the first such device
+    rather than a hardcoded ``ionic_0`` -- on real hardware the AINIC RoCE
+    devices are not necessarily named ``ionic_0`` (observed as
+    ``rdma0..rdma7`` on an AINIC host, PR #208).
 
     Command surface confirmed against the AMD "AI NIC CLIs" reference and
     the Pollara 400 debugging guide:
@@ -5199,7 +5280,7 @@ def _capture_ainic_tier2(reasons: list[str]) -> dict[str, Any]:
     }
 
     version = _run_nic_cmd(
-        ["nicctl", "--version"], reasons, "nics.ainic.nicctl_version"
+        ["nicctl", "--version"], reasons, "nics.ainic.nicctl_version", sudo=True
     )
     if version:
         m = re.search(r"\d+\.\d+\.\d+[-\w]*", version)
@@ -5264,13 +5345,24 @@ def _capture_ainic_tier2(reasons: list[str]) -> dict[str, Any]:
                 tier2["profile"]["device_config"] = dc
                 tier2["profile"]["sriov"] = ("_vf" in dc) or ("pf1_vf" in dc)
 
-    dcqcn_text = _run_nic_cmd(
-        ["nicctl", "show", "dcqcn", "--roce-device", "ionic_0",
-         "--profile-id", "1"],
-        reasons,
-        "nics.ainic.dcqcn",
-        sudo=True,
-    )
+    # DCQCN is per-RoCE-device; target the first resolved AINIC RDMA device
+    # rather than a hardcoded name. (Profile id is still 1 -- Q2, pending a
+    # real multi-profile AINIC node to read the active id from show card.)
+    roce_device = rdma_devices[0] if rdma_devices else None
+    if roce_device is None:
+        reasons.append(
+            "nics.ainic.dcqcn: no AINIC RDMA device resolved; "
+            "cannot query dcqcn"
+        )
+        dcqcn_text = None
+    else:
+        dcqcn_text = _run_nic_cmd(
+            ["nicctl", "show", "dcqcn", "--roce-device", roce_device,
+             "--profile-id", "1"],
+            reasons,
+            "nics.ainic.dcqcn",
+            sudo=True,
+        )
     if dcqcn_text:
         def _num(key: str) -> int | None:
             m = re.search(
@@ -5342,6 +5434,7 @@ def _capture_nics(reasons: list[str]) -> dict[str, Any]:
             "present": True,
             "driver_version": None,
             "firmware": None,
+            "pkg_version": None,
             "rdma_devices": [],
             "links": [],
         }
@@ -5375,24 +5468,40 @@ def _capture_nics(reasons: list[str]) -> dict[str, Any]:
         if ver is None:
             ver = _parse_ethtool_field(ethtool_text, "version")
         entry["driver_version"] = ver
-        entry["firmware"] = _parse_ethtool_field(ethtool_text, "firmware-version")
+        fw_raw = _parse_ethtool_field(ethtool_text, "firmware-version")
+        entry["firmware"], entry["pkg_version"] = _split_firmware_version(fw_raw)
 
         # RDMA devices + links. Always go through _run_nic_cmd so a missing
         # ibv_devices/rdma tool on a PRESENT vendor becomes an explicit
         # partial reason rather than a silently-empty list. A tool that
         # runs but reports no matching devices (e.g. CX7 with zero RDMA) is
         # the documented-absence case -- empty success, no reason.
+        #
+        # Bind each device to this vendor by its kernel DRIVER (via the
+        # sysfs device/driver symlink), not by name prefix -- device names
+        # vary by host (ionic_0 vs rdma3) and prefix matching silently
+        # dropped real links (PR #208).
+        drv = vendor["driver"]
         ibv_text = _run_nic_cmd(
             ["ibv_devices"], reasons, f"nics.{key}.rdma_devices"
         )
-        entry["rdma_devices"] = _parse_ibv_devices(ibv_text, vendor["rdma_prefix"])
+        entry["rdma_devices"] = [
+            dev
+            for dev in _parse_ibv_devices(ibv_text)
+            if _sysfs_device_driver(SYS_CLASS_INFINIBAND, dev) == drv
+        ]
         rdma_text = _run_nic_cmd(["rdma", "link"], reasons, f"nics.{key}.links")
-        entry["links"] = _parse_rdma_link(rdma_text, vendor["rdma_prefix"])
+        entry["links"] = [
+            link
+            for link in _parse_rdma_link(rdma_text)
+            if _link_vendor_driver(link) == drv
+        ]
 
         # Tier 2 -- AINIC only, and only when nicctl exists (else the
-        # management plane is a documented absence: no reason).
+        # management plane is a documented absence: no reason). Pass the
+        # resolved RDMA device list so DCQCN targets a real device.
         if key == "ainic" and shutil.which("nicctl") is not None:
-            entry.update(_capture_ainic_tier2(reasons))
+            entry.update(_capture_ainic_tier2(reasons, entry["rdma_devices"]))
 
         nics[key] = entry
 
