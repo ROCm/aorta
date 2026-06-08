@@ -80,11 +80,11 @@ any contract violation. Always run it first; it is faster and more reliable
 than eyeballing JSON.
 
 ```bash
-python .cursor/skills/verify-run-output/scripts/verify_run.py <path> [<path> ...]
+python .agents/skills/verify-run-output/scripts/verify_run.py <path> [<path> ...]
 # show every passing check too:
-python .cursor/skills/verify-run-output/scripts/verify_run.py <path> --verbose
+python .agents/skills/verify-run-output/scripts/verify_run.py <path> --verbose
 # machine-readable:
-python .cursor/skills/verify-run-output/scripts/verify_run.py <path> --json
+python .agents/skills/verify-run-output/scripts/verify_run.py <path> --json
 ```
 
 It accepts a single artifact file, a run directory (it walks the tree), or
