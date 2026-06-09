@@ -264,6 +264,11 @@ def scan_amd_smi(
     :data:`VRAM_GROWTH_THRESHOLD_MIB` and
     :data:`DETECTOR_THERMAL_THROTTLE` if the throttle counter went
     up during the trial.
+
+    ``check_vram_growth=False`` (recipe knob ``tier3_vram_growth:
+    false``) suppresses :data:`DETECTOR_VRAM_GROWTH` entirely — used
+    where whole-device VRAM is meaningless (shared/multi-tenant GPUs).
+    The thermal-throttle detector is unaffected.
     """
     if pre is None or post is None:
         _log_disabled_once(
