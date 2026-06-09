@@ -137,6 +137,17 @@ def test_amdsmi_fake_env_var_thermal_throttle(monkeypatch):
     assert tier3_kernel.DETECTOR_THERMAL_THROTTLE in fired
 
 
+def test_amdsmi_vram_growth_can_be_disabled(monkeypatch):
+    """``check_vram_growth=False`` skips the pre/post VRAM delta leg."""
+    monkeypatch.setenv("AORTA_PROBE_AMDSMI_FAKE", "vram=100,throttle=0")
+    state = Tier3State()
+    pre = poll_amd_smi(state)
+    monkeypatch.setenv("AORTA_PROBE_AMDSMI_FAKE", "vram=500,throttle=0")
+    post = poll_amd_smi(state)
+    fired = scan_amd_smi(state, pre, post, check_vram_growth=False)
+    assert tier3_kernel.DETECTOR_VRAM_GROWTH not in fired
+
+
 def test_amdsmi_below_threshold_does_not_fire(monkeypatch):
     """VRAM delta under the threshold stays silent (noise floor)."""
     monkeypatch.setenv("AORTA_PROBE_AMDSMI_FAKE", "vram=100,throttle=0")

@@ -76,10 +76,18 @@ Source: `src/aorta/probe/classifier/tier3_kernel.py`.
 
 `amd-smi` snapshot diff IDs:
 
-| ID | Fires when |
-|---|---|
-| `tier3:vram_growth` | `vram_used_mib(post) - vram_used_mib(pre) >= 256 MiB` |
-| `tier3:thermal_throttle` | `thermal_throttle_count(post) > thermal_throttle_count(pre)` |
+| ID | Fires when | Severity |
+|---|---|---|
+| `tier3:vram_growth` | `vram_used_mib(post) - vram_used_mib(pre) >= 256 MiB` | **warn** |
+| `tier3:thermal_throttle` | `thermal_throttle_count(post) > thermal_throttle_count(pre)` | fail |
+
+> **`tier3:vram_growth` is advisory (warn), not a failure.** The probe samples
+> WHOLE-GPU VRAM at only two points (pre/post the opaque subprocess) and cannot
+> attribute the delta to the trial's own process on a multi-tenant host, so it
+> never flips the verdict to `fail` — it lands in `warn_detectors_fired`. The
+> kernel-fault `dmesg` IDs above stay hard failures. The set of advisory IDs is
+> `TIER3_WARN_DETECTOR_IDS` in `tier3_kernel.py`. A recipe can suppress the
+> check entirely (no warn) with `tier3_vram_growth: false`.
 
 **Fail-soft**: missing `dmesg` / `amd-smi` binaries log
 `tier3 disabled: <reason>` exactly **once per `aorta probe`

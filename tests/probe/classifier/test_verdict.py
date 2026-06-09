@@ -81,6 +81,24 @@ def test_warn_alone_is_pass():
     assert verdict.warn_detectors_fired == ["custom:slow_iter"]
 
 
+def test_tier3_warn_is_pass_not_fail():
+    """Advisory Tier-3 detectors (e.g. vram_growth) warn, never fail."""
+    verdict = resolve(_inputs(tier3_warn=["tier3:vram_growth"]))
+    assert verdict.verdict == "pass"
+    assert verdict.failure_detectors_fired == []
+    assert verdict.warn_detectors_fired == ["tier3:vram_growth"]
+
+
+def test_tier3_warn_does_not_mask_a_real_failure():
+    """A warn-level tier3 ID coexists with a hard failure from another tier."""
+    verdict = resolve(
+        _inputs(tier3=["tier3:amdgpu_reset"], tier3_warn=["tier3:vram_growth"])
+    )
+    assert verdict.verdict == "fail"
+    assert verdict.failure_detectors_fired == ["tier3:amdgpu_reset"]
+    assert verdict.warn_detectors_fired == ["tier3:vram_growth"]
+
+
 def test_info_match_populates_capture_only():
     """Info-only patterns populate ``capture`` but never the verdict lists."""
     custom = CustomScanResult(capture={"bw": "240"})

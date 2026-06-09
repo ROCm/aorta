@@ -230,6 +230,7 @@ class SubprocessWorkload(Workload):
         hang_grace_sec = (
             DEFAULT_HANG_GRACE_SEC if _hang_grace_raw is None else float(_hang_grace_raw)
         )
+        tier3_vram_growth = bool(probe_extras.get("tier3_vram_growth", True))
 
         # ``inherit`` mode: the dispatcher has already stamped the
         # cell's mitigation + diagnostic env vars onto os.environ in
@@ -489,6 +490,7 @@ class SubprocessWorkload(Workload):
                     amd_smi_post=amd_smi_post,
                     tier3_extra=tuple(fired_kernel_ids),
                     tier3_state=_TIER3_STATE,
+                    tier3_vram_growth=tier3_vram_growth,
                 )
             )
         except Exception as classifier_exc:  # noqa: BLE001 -- classifier crash containment

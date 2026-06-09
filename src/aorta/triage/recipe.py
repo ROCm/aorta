@@ -77,6 +77,9 @@ _PROBE_TOP_LEVEL = frozenset(
         "custom_patterns",
         "hang_window_sec",
         "hang_grace_period_at_start",
+        # Disable Tier-3 pre/post VRAM delta for opaque docker wrappers
+        # where GPU allocation is expected, not a leak signal.
+        "tier3_vram_growth",
         # Phase 3 (issue #188): redaction block for aorta bundle.
         "redaction",
     }

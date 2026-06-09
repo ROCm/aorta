@@ -65,6 +65,9 @@ class VerdictInputs:
     tier2: list[str] = field(default_factory=list)
     tier3: list[str] = field(default_factory=list)
     tier4: list[str] = field(default_factory=list)
+    # Advisory Tier-3 detectors (e.g. ``tier3:vram_growth``) that surface as
+    # warns rather than failures -- they never flip the verdict to fail.
+    tier3_warn: list[str] = field(default_factory=list)
     custom_result: CustomScanResult = field(default_factory=CustomScanResult)
     custom_required_patterns: tuple[CompiledPattern, ...] = ()
 
@@ -108,7 +111,10 @@ def resolve(inputs: VerdictInputs) -> Verdict:
     if required_ids and not (required_ids <= inputs.custom_result.fired_required_ids):
         failures.append(DETECTOR_MISSING_PASS_SIGNAL)
 
-    warns = list(inputs.custom_result.warn_detectors)
+    # Built-in advisory (warn) detectors precede user custom warns, mirroring
+    # the tier-before-custom ordering used for failures above.
+    warns = list(inputs.tier3_warn)
+    warns.extend(inputs.custom_result.warn_detectors)
     capture = dict(inputs.custom_result.capture)
 
     verdict = "fail" if failures else "pass"

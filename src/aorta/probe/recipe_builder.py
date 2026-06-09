@@ -113,6 +113,10 @@ class ProbeExtras:
     custom_patterns: tuple[CompiledPattern, ...] = ()
     hang_window_sec: float = DEFAULT_HANG_WINDOW_SEC
     hang_grace_period_at_start: float = DEFAULT_HANG_GRACE_SEC
+    # When False, skip the Tier-3 pre/post VRAM delta check. Useful for
+    # opaque docker wrappers where GPU allocation is normal workload
+    # behaviour rather than a leak signal.
+    tier3_vram_growth: bool = True
     # Phase 3 (issue #188): redaction block consumed by ``aorta bundle``.
     redaction: RedactionCfg | None = None
 
@@ -301,6 +305,13 @@ def build_probe_recipe_from_dict(
         default=DEFAULT_HANG_GRACE_SEC,
         allow_zero=True,
     )
+    tier3_vram_growth_raw = data.get("tier3_vram_growth", True)
+    if not isinstance(tier3_vram_growth_raw, bool):
+        raise RecipeSchemaError(
+            "recipe.tier3_vram_growth: must be a boolean, got "
+            f"{type(tier3_vram_growth_raw).__name__} ({tier3_vram_growth_raw!r})"
+        )
+    tier3_vram_growth = tier3_vram_growth_raw
     # Use ``in`` rather than ``.get(...) is not None`` so an explicit
     # ``redaction: null`` is treated as present-but-invalid (parse_redaction
     # rejects None) instead of being silently conflated with "no redaction
@@ -429,6 +440,7 @@ def build_probe_recipe_from_dict(
         custom_patterns=custom_patterns,
         hang_window_sec=hang_window_sec,
         hang_grace_period_at_start=hang_grace_period_at_start,
+        tier3_vram_growth=tier3_vram_growth,
         redaction=redaction,
     )
 

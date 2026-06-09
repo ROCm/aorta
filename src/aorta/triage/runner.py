@@ -783,6 +783,7 @@ def _run_one_cell(
             "custom_patterns": tuple(probe_extras.custom_patterns),
             "hang_window_sec": probe_extras.hang_window_sec,
             "hang_grace_period_at_start": probe_extras.hang_grace_period_at_start,
+            "tier3_vram_growth": probe_extras.tier3_vram_growth,
         }
 
     # save_logs is forced True for probe-mode cells because

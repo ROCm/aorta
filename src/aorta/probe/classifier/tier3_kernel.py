@@ -67,6 +67,16 @@ DETECTOR_THERMAL_THROTTLE = "tier3:thermal_throttle"
 # processes can move VRAM by a few MiB during the trial.
 VRAM_GROWTH_THRESHOLD_MIB = 256
 
+# Tier-3 detector IDs that are advisory (warn) rather than hard failures.
+# ``tier3:vram_growth`` is a warn because the probe samples WHOLE-GPU VRAM at
+# only two points (pre/post the opaque subprocess) and cannot attribute the
+# delta to the trial's own process on a shared host -- too unreliable to flip
+# a verdict, but still worth surfacing. The verdict resolver routes these IDs
+# to ``warn_detectors_fired`` instead of ``failure_detectors_fired``. The
+# kernel-fault detectors (GPU reset, SDMA timeout, VM/L2 fault, XGMI, AER)
+# stay hard failures -- they are unambiguous and self-attributing.
+TIER3_WARN_DETECTOR_IDS = frozenset({DETECTOR_VRAM_GROWTH})
+
 # Cap on the amount of dmesg text we scan per trial. Same rationale
 # as :data:`aorta.probe.sandbox.MAX_LOG_BYTES`: a runaway dmesg
 # producing > 10MiB of output in one trial would point at a kernel
@@ -243,6 +253,8 @@ def scan_amd_smi(
     state: Tier3State,
     pre: AmdSmiSnapshot | None,
     post: AmdSmiSnapshot | None,
+    *,
+    check_vram_growth: bool = True,
 ) -> list[str]:
     """Diff two amd-smi snapshots and return the fired Tier 3 detectors.
 
@@ -261,7 +273,10 @@ def scan_amd_smi(
         )
         return []
     fired: list[str] = []
-    if post.vram_used_mib - pre.vram_used_mib >= VRAM_GROWTH_THRESHOLD_MIB:
+    if (
+        check_vram_growth
+        and post.vram_used_mib - pre.vram_used_mib >= VRAM_GROWTH_THRESHOLD_MIB
+    ):
         fired.append(DETECTOR_VRAM_GROWTH)
     if post.thermal_throttle_count > pre.thermal_throttle_count:
         fired.append(DETECTOR_THERMAL_THROTTLE)
@@ -551,6 +566,7 @@ __all__ = [
     "GPU_IDLE_UTILIZATION_THRESHOLD_PCT",
     "MAX_DMESG_BYTES",
     "Tier3State",
+    "TIER3_WARN_DETECTOR_IDS",
     "VRAM_GROWTH_THRESHOLD_MIB",
     "gpu_idle_probe_from_state",
     "poll_amd_smi",

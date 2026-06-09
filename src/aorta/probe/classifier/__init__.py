@@ -32,7 +32,11 @@ from aorta.probe.classifier import (
 )
 from aorta.probe.classifier.tier1_process import Tier1Context
 from aorta.probe.classifier.tier2_hang import DETECTOR_HANG
-from aorta.probe.classifier.tier3_kernel import AmdSmiSnapshot, Tier3State
+from aorta.probe.classifier.tier3_kernel import (
+    TIER3_WARN_DETECTOR_IDS,
+    AmdSmiSnapshot,
+    Tier3State,
+)
 from aorta.probe.classifier.tier5_custom import CompiledPattern
 from aorta.probe.classifier.verdict import Verdict, VerdictInputs, resolve
 
@@ -76,6 +80,7 @@ class TrialContext:
     # can supply IDs without the source text and the classifier can
     # supply the source text without the IDs -- the two paths union.
     tier3_extra: tuple[str, ...] = ()
+    tier3_vram_growth: bool = True
 
 
 def classify_trial(ctx: TrialContext) -> tuple[Verdict, dict[str, float]]:
@@ -126,7 +131,12 @@ def classify_trial(ctx: TrialContext) -> tuple[Verdict, dict[str, float]]:
             tier3.extend(tier3_kernel.scan_dmesg_text(ctx.dmesg_text))
         if ctx.amd_smi_pre is not None and ctx.amd_smi_post is not None:
             tier3.extend(
-                tier3_kernel.scan_amd_smi(ctx.tier3_state, ctx.amd_smi_pre, ctx.amd_smi_post)
+                tier3_kernel.scan_amd_smi(
+                    ctx.tier3_state,
+                    ctx.amd_smi_pre,
+                    ctx.amd_smi_post,
+                    check_vram_growth=ctx.tier3_vram_growth,
+                )
             )
     tier_durations_ms["tier3"] = (time.perf_counter() - t0) * 1000.0
 
@@ -144,12 +154,19 @@ def classify_trial(ctx: TrialContext) -> tuple[Verdict, dict[str, float]]:
     )
     tier_durations_ms["tier5"] = (time.perf_counter() - t0) * 1000.0
 
+    # Split Tier-3 IDs into hard failures vs. advisory warns. ``vram_growth``
+    # is advisory (see TIER3_WARN_DETECTOR_IDS) so it never flips the verdict;
+    # kernel-fault IDs stay failures. Preserve encounter order within each.
+    tier3_fail = [d for d in tier3 if d not in TIER3_WARN_DETECTOR_IDS]
+    tier3_warn = [d for d in tier3 if d in TIER3_WARN_DETECTOR_IDS]
+
     verdict = resolve(
         VerdictInputs(
             tier1=tier1,
             tier2=tier2,
-            tier3=tier3,
+            tier3=tier3_fail,
             tier4=tier4,
+            tier3_warn=tier3_warn,
             custom_result=custom_result,
             custom_required_patterns=ctx.custom_patterns,
         )
