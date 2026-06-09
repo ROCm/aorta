@@ -45,23 +45,43 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-import torch
-import torch.distributed as dist
-from torch import nn
-
-from aorta.instrumentation.checksum import (
-    ChecksumSet,
-    compare,
-    global_checksum,
-    tensor_checksum,
-)
-from aorta.instrumentation.determinism import enable_deterministic
-from aorta.models import BlockConfig, RepeatedBlockModel
 from aorta.workloads._base import Workload, WorkloadResult
+
+# torch (and the torch-dependent aorta helpers) are imported lazily so this
+# module can be IMPORTED for workload discovery / registration in a lightweight
+# environment that has no torch (e.g. a CLI venv that only drives docker-based
+# runs). The class methods and module helpers reference these as module
+# globals; they are bound for real whenever torch is installed. setup() raises
+# a clear error if torch is unavailable when the workload actually runs.
+try:
+    import torch
+    import torch.distributed as dist
+    from torch import nn  # noqa: F401  (referenced only in string annotations)
+
+    from aorta.instrumentation.checksum import (
+        ChecksumSet,
+        compare,
+        global_checksum,
+        tensor_checksum,
+    )
+    from aorta.instrumentation.determinism import enable_deterministic
+    from aorta.models import BlockConfig, RepeatedBlockModel
+
+    _DTYPES: dict[str, "torch.dtype"] = {
+        "bf16": torch.bfloat16,
+        "fp16": torch.float16,
+        "fp32": torch.float32,
+    }
+    _IMPORT_ERROR: ImportError | None = None
+except ImportError as exc:
+    _DTYPES = {}
+    _IMPORT_ERROR = exc
 
 log = logging.getLogger(__name__)
 
-_DTYPES: dict[str, torch.dtype] = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+# dtype names valid in a recipe, kept independent of torch so config validation
+# works even when torch is not importable.
+_VALID_DTYPE_NAMES = ("bf16", "fp16", "fp32")
 
 
 @dataclass
@@ -96,8 +116,8 @@ class LlmDeterminismConfig:
     def from_dict(cls, d: dict[str, Any]) -> LlmDeterminismConfig:
         known = set(cls.__dataclass_fields__)
         cfg = cls(**{k: v for k, v in d.items() if k in known})
-        if cfg.dtype not in _DTYPES:
-            raise ValueError(f"dtype must be one of {list(_DTYPES)}, got {cfg.dtype!r}")
+        if cfg.dtype not in _VALID_DTYPE_NAMES:
+            raise ValueError(f"dtype must be one of {list(_VALID_DTYPE_NAMES)}, got {cfg.dtype!r}")
         if cfg.checksum_mode not in ("per_rank", "global"):
             raise ValueError(f"checksum_mode must be per_rank|global, got {cfg.checksum_mode!r}")
         if cfg.steps < 1:
@@ -169,6 +189,12 @@ class LlmDeterminismWorkload(Workload):
     min_world_size: ClassVar[int] = 1  # also runs single-rank for local dev.
 
     def setup(self) -> None:
+        if _IMPORT_ERROR is not None:
+            raise RuntimeError(
+                "llm_determinism requires PyTorch, which is not importable in "
+                f"this environment: {_IMPORT_ERROR}. Install torch, or run this "
+                "workload inside the container/venv that provides it."
+            ) from _IMPORT_ERROR
         self._cfg = LlmDeterminismConfig.from_dict(self.config)
         if not dist.is_initialized():
             backend = "nccl" if torch.cuda.is_available() else "gloo"
