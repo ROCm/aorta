@@ -29,16 +29,23 @@ from aorta.workloads._base import Workload, WorkloadResult
 # class methods reference these names as module globals; they are bound for
 # real whenever torch is installed. setup() raises a clear error if torch is
 # unavailable when the workload actually runs.
+#
+# Only ``import torch`` is guarded, and it catches ``Exception`` (not just
+# ``ImportError``) because a broken install -- mismatched CUDA/ROCm runtime,
+# unloadable shared library -- surfaces as OSError/RuntimeError, and discovery
+# must stay clean for all of those. The ``aorta.race`` imports live in ``else``
+# so a genuine bug in that package raises loudly during discovery instead of
+# being misattributed to "torch not importable".
 try:
     import torch
     import torch.distributed as dist
-
+except Exception as exc:
+    _IMPORT_ERROR: Exception | None = exc
+else:
     from aorta.race.config import ReproducerConfig
     from aorta.race.modes import create_reproducer
 
-    _IMPORT_ERROR: ImportError | None = None
-except ImportError as exc:
-    _IMPORT_ERROR = exc
+    _IMPORT_ERROR = None
 
 log = logging.getLogger(__name__)
 

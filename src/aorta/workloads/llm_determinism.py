@@ -53,11 +53,21 @@ from aorta.workloads._base import Workload, WorkloadResult
 # runs). The class methods and module helpers reference these as module
 # globals; they are bound for real whenever torch is installed. setup() raises
 # a clear error if torch is unavailable when the workload actually runs.
+#
+# Only the torch imports are guarded, and they catch ``Exception`` (not just
+# ``ImportError``) because a broken install -- mismatched CUDA/ROCm runtime,
+# unloadable shared library -- surfaces as OSError/RuntimeError, and discovery
+# must stay clean for all of those. The torch-dependent ``aorta`` helpers live
+# in ``else`` so a genuine bug in those modules raises loudly during discovery
+# instead of being misattributed to "torch not importable".
 try:
     import torch
     import torch.distributed as dist
     from torch import nn  # noqa: F401  (referenced only in string annotations)
-
+except Exception as exc:
+    _DTYPES: dict[str, torch.dtype] = {}
+    _IMPORT_ERROR: Exception | None = exc
+else:
     from aorta.instrumentation.checksum import (
         ChecksumSet,
         compare,
@@ -67,15 +77,12 @@ try:
     from aorta.instrumentation.determinism import enable_deterministic
     from aorta.models import BlockConfig, RepeatedBlockModel
 
-    _DTYPES: dict[str, "torch.dtype"] = {
+    _DTYPES = {
         "bf16": torch.bfloat16,
         "fp16": torch.float16,
         "fp32": torch.float32,
     }
-    _IMPORT_ERROR: ImportError | None = None
-except ImportError as exc:
-    _DTYPES = {}
-    _IMPORT_ERROR = exc
+    _IMPORT_ERROR = None
 
 log = logging.getLogger(__name__)
 
