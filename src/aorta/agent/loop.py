@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import time
+
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from aorta.agent.llm import LLMProposer, _BASELINE_CELL, make_proposer
+from aorta.agent.llm import AgentStep, LLMProposer, StopReason, _BASELINE_CELL, make_proposer
 from aorta.agent.policy import AgentPolicy, PolicyViolation
 from aorta.agent.report import write_agent_report
 from aorta.agent.state import AgentState, append_log_event, wake
@@ -17,6 +19,7 @@ from aorta.probe.recipe_builder import build_probe_recipe_from_dict
 from aorta.registry import load_mitigations
 from aorta.registry.errors import UnknownMitigationError
 from aorta.triage.output import NO_TICKET_SLUG, safe_slug
+from aorta.triage.recipe import load_recipe
 from aorta.triage.runner import run_recipe
 
 log = logging.getLogger(__name__)
@@ -37,6 +40,7 @@ class AgentConfig:
     llm_backend: str = "fake"
     llm_model: str = "gpt-4o-mini"
     mitigations_allowlist: tuple[str, ...] | None = None
+    recipe_path: Path | None = None
     dry_run: bool = False
     run_bundle: bool = False
 
@@ -62,29 +66,80 @@ def _run_dir(config: AgentConfig) -> Path:
     return config.output_dir / _ticket_slug(config.ticket)
 
 
+def _recipe_template_dict(config: AgentConfig) -> dict[str, Any]:
+    """Load optional probe recipe YAML; return extra keys to merge into each run."""
+    if config.recipe_path is None:
+        return {}
+    # Validate via the normal loader (sidecar merge, schema checks).
+    recipe = load_recipe(
+        config.recipe_path,
+        sidecar_files=list(config.policy.sidecar_files) or None,
+    )
+    if recipe.probe_extras is None:
+        raise ValueError(f"{config.recipe_path} is not a probe-mode recipe")
+    raw = yaml.safe_load(config.recipe_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{config.recipe_path}: expected a YAML mapping")
+    template: dict[str, Any] = {}
+    for key in (
+        "trials",
+        "diagnostic_axis",
+        "timeout_per_trial",
+        "env_passthrough_mode",
+        "step_time_regex",
+        "collect_paths",
+        "custom_patterns",
+        "hang_window_sec",
+        "hang_grace_period_at_start",
+    ):
+        if key in raw:
+            template[key] = raw[key]
+    template["_mitigation_axis_order"] = list(recipe.probe_extras.mitigation_axis)
+    if recipe.ticket:
+        template["ticket"] = recipe.ticket
+    return template
+
+
 def _list_candidate_mitigations(
     config: AgentConfig,
+    recipe_template: dict[str, Any],
 ) -> list[str]:
     if config.mitigations_allowlist:
         return list(config.mitigations_allowlist)
+    axis = recipe_template.get("_mitigation_axis_order")
+    if isinstance(axis, list) and axis:
+        return [str(m) for m in axis if m != _BASELINE_MITIGATION]
     extra = list(config.policy.sidecar_files) if config.policy.sidecar_files else None
     names = sorted(load_mitigations(extra_files=extra).keys())
-    return names
+    return [n for n in names if n != _BASELINE_MITIGATION]
 
 
 def _build_probe_recipe_dict(
-    *,
-    ticket: str | None,
+    config: AgentConfig,
     mitigation_axis: list[str],
+    recipe_template: dict[str, Any],
 ) -> dict[str, Any]:
-    return {
+    ticket = config.ticket or recipe_template.get("ticket")
+    data: dict[str, Any] = {
         "schema_version": 1,
         "mode": "probe",
         "ticket": ticket,
-        "trials": 1,
+        "trials": recipe_template.get("trials", 1),
         "mitigation_axis": mitigation_axis,
-        "diagnostic_axis": [_BASELINE_DIAGNOSTIC],
+        "diagnostic_axis": recipe_template.get("diagnostic_axis", [_BASELINE_DIAGNOSTIC]),
     }
+    for key in (
+        "timeout_per_trial",
+        "env_passthrough_mode",
+        "step_time_regex",
+        "collect_paths",
+        "custom_patterns",
+        "hang_window_sec",
+        "hang_grace_period_at_start",
+    ):
+        if key in recipe_template:
+            data[key] = recipe_template[key]
+    return data
 
 
 def _read_cell_summaries(run_dir: Path) -> list[dict[str, Any]]:
@@ -114,6 +169,50 @@ def _read_cell_summaries(run_dir: Path) -> list[dict[str, Any]]:
     return summaries
 
 
+def _baseline_passed(summaries: list[dict[str, Any]]) -> bool:
+    for row in summaries:
+        if row.get("cell_name") == _BASELINE_CELL and row.get("verdict") == "pass":
+            return True
+    return False
+
+
+def _resolve_stop_outcome(
+    step: AgentStep,
+    summaries: list[dict[str, Any]],
+) -> tuple[str, str]:
+    """Map a proposer stop step to outcome label + operator-facing message."""
+    reason: StopReason | None = step.stop_reason
+    if reason is None and step.stop:
+        if _baseline_passed(summaries):
+            reason = "baseline_pass"
+        elif not step.next_mitigations and "No remaining" in step.hypothesis:
+            reason = "exhausted_candidates"
+        else:
+            reason = "agent_requested"
+
+    if reason == "baseline_pass":
+        return (
+            "baseline_pass",
+            "Baseline cell (none-none) passed. The repro succeeds without "
+            "mitigations; no search was run.",
+        )
+    if reason == "exhausted_candidates":
+        return (
+            "exhausted_candidates",
+            "No further registered mitigations to try (already attempted or "
+            "not in the allowlist). Inspect failure detectors in "
+            "agent_report.md or run a manual probe matrix.",
+        )
+    return (
+        "agent_stop",
+        step.hypothesis
+        or (
+            "Agent stopped search. Inspect failure detectors and extend "
+            "mitigations allowlist or run a manual probe matrix."
+        ),
+    )
+
+
 def _find_winning_mitigation(summaries: list[dict[str, Any]]) -> str | None:
     for row in summaries:
         cell = row.get("cell_name") or ""
@@ -127,12 +226,10 @@ def _find_winning_mitigation(summaries: list[dict[str, Any]]) -> str | None:
 def _execute_probe_matrix(
     config: AgentConfig,
     mitigation_axis: list[str],
+    recipe_template: dict[str, Any],
 ) -> Path:
     """Run (or dry-run) probe recipe; return ticket run directory."""
-    recipe_dict = _build_probe_recipe_dict(
-        ticket=config.ticket,
-        mitigation_axis=mitigation_axis,
-    )
+    recipe_dict = _build_probe_recipe_dict(config, mitigation_axis, recipe_template)
     sidecar = config.policy.sidecar_files or None
     recipe = build_probe_recipe_from_dict(
         recipe_dict,
@@ -156,13 +253,17 @@ def run_agent_loop(
     proposer: LLMProposer | None = None,
 ) -> AgentLoopResult:
     """Run the closed-loop mitigation search."""
-    run_dir = _run_dir(config)
-    ticket_slug = _ticket_slug(config.ticket)
+    recipe_template = _recipe_template_dict(config)
+    if config.ticket is None and recipe_template.get("ticket"):
+        ticket_slug = safe_slug(str(recipe_template["ticket"]))
+    else:
+        ticket_slug = _ticket_slug(config.ticket)
+    run_dir = config.output_dir / ticket_slug
     state = wake(run_dir, ticket=ticket_slug)
     if proposer is None:
         proposer = make_proposer(config.llm_backend, model=config.llm_model)
 
-    candidates = _list_candidate_mitigations(config)
+    candidates = _list_candidate_mitigations(config, recipe_template)
     mitigation_axis: list[str] = [_BASELINE_MITIGATION]
     for m in state.tried_mitigations:
         if m != _BASELINE_MITIGATION and m not in mitigation_axis:
@@ -197,7 +298,7 @@ def run_agent_loop(
 
             config.policy.check_iteration_budget(state.iterations_completed)
 
-            run_dir = _execute_probe_matrix(config, mitigation_axis)
+            run_dir = _execute_probe_matrix(config, mitigation_axis, recipe_template)
             summaries = _read_cell_summaries(run_dir)
             winner = _find_winning_mitigation(summaries)
             if winner:
@@ -233,14 +334,16 @@ def run_agent_loop(
                     "next_mitigations": step.next_mitigations,
                     "confidence": step.confidence,
                     "stop": step.stop,
+                    "stop_reason": step.stop_reason,
                 },
             )
 
             if step.stop or not step.next_mitigations:
-                outcome = "agent_stop"
-                recommended = (
-                    "Agent stopped search. Inspect failure detectors and "
-                    "extend mitigations allowlist or run a manual probe matrix."
+                outcome, recommended = _resolve_stop_outcome(step, summaries)
+                append_log_event(
+                    run_dir,
+                    "search_stopped",
+                    {"outcome": outcome, "stop_reason": step.stop_reason},
                 )
                 break
 

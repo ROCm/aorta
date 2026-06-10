@@ -74,6 +74,7 @@ class AgentPolicy:
             next_mitigations=cleaned,
             confidence=max(0.0, min(1.0, step.confidence)),
             stop=step.stop,
+            stop_reason=step.stop_reason,
         )
 
     def needs_approval(self, mitigation: str) -> bool:

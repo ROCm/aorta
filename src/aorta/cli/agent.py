@@ -21,6 +21,32 @@ from aorta.probe.cli_helpers import (
 )
 from aorta.run.cli_helpers import configure_verbose_logging
 
+# Human-readable one-liners keyed by :attr:`AgentLoopResult.outcome`.
+_OUTCOME_HEADLINES: dict[str, str] = {
+    "baseline_pass": "Baseline passed — no mitigation search needed.",
+    "converged": "Mitigation found — repro passes with a non-baseline cell.",
+    "exhausted_candidates": "Search stopped — no more mitigations to try.",
+    "agent_stop": "Search stopped by the agent.",
+    "approval_required": "Paused — operator approval required.",
+    "walltime_exhausted": "Stopped — wall-time budget exhausted.",
+    "policy_stop": "Stopped — policy limit hit.",
+    "registry_error": "Stopped — registry error.",
+}
+
+
+def _echo_agent_result(result: object) -> None:
+    from aorta.agent.loop import AgentLoopResult
+
+    assert isinstance(result, AgentLoopResult)
+    headline = _OUTCOME_HEADLINES.get(
+        result.outcome,
+        f"Finished with outcome: {result.outcome}",
+    )
+    click.echo(f"Agent outcome: {result.outcome} — {headline}")
+    if result.report_path:
+        click.echo(f"Wrote {result.report_path}")
+    click.echo(result.recommended_action)
+
 
 def _reject_flag_shaped_callback(
     ctx: click.Context, param: click.Parameter, value: object
@@ -81,6 +107,17 @@ class _AgentCommand(click.Command):
     default=None,
     callback=_reject_flag_shaped_callback,
     help="Ticket ID for output grouping (recommended for bundle handoff).",
+)
+@click.option(
+    "--recipe",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    callback=_reject_flag_shaped_callback,
+    help=(
+        "Probe-mode recipe YAML: supplies custom_patterns, timeout, "
+        "diagnostic_axis, and mitigation search order. Mitigation axis "
+        "still grows iteratively."
+    ),
 )
 @click.option(
     "--symptom",
@@ -152,6 +189,7 @@ class _AgentCommand(click.Command):
 def agent(
     output: Path,
     ticket: str | None,
+    recipe: Path | None,
     symptom: str | None,
     max_iterations: int,
     max_walltime_sec: float | None,
@@ -184,6 +222,7 @@ def agent(
             llm_backend=llm_backend,
             llm_model=llm_model,
             mitigations_allowlist=mitigation_allowlist or None,
+            recipe_path=recipe,
             dry_run=dry_run,
             run_bundle=run_bundle,
         )
@@ -194,10 +233,7 @@ def agent(
     if dry_run:
         click.echo(f"Dry-run complete under {result.run_dir}")
         return
-    click.echo(f"Agent outcome: {result.outcome}")
-    if result.report_path:
-        click.echo(f"Wrote {result.report_path}")
-    click.echo(result.recommended_action)
+    _echo_agent_result(result)
 
 
 __all__ = ["agent"]

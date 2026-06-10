@@ -168,6 +168,15 @@ Default backend is `fake` (deterministic, offline-safe).
 `<output>/<ticket>/agent_log.jsonl` — append-only JSON lines for resume and
 audit. `wake()` replays tried mitigations and last category.
 
+### CLI outcomes
+
+| Outcome | Meaning |
+|---------|---------|
+| `baseline_pass` | `none-none` passed; repro OK without mitigations |
+| `converged` | A non-baseline mitigation cell passed |
+| `exhausted_candidates` | No more registered mitigations left to try |
+| `agent_stop` | Proposer ended search for another reason |
+
 ### Tests
 
 - Mock `run_recipe`; assert growing `mitigation_axis` and `flat_resume`.
@@ -177,7 +186,8 @@ audit. `wake()` replays tried mitigations and last category.
 
 ---
 
-## Questions?
+## Related docs
 
-See [`docs/probe-188/usage.md`](../probe-188/usage.md) for probe-mode recipes
-and `src/aorta/agent/` for the implementation.
+- [agentic-testing-guide.md](agentic-testing-guide.md) — usage, examples, LLM vs fake, under the hood  
+- [`docs/probe-188/usage.md`](../probe-188/usage.md) for probe-mode recipes
+- `src/aorta/agent/` for the implementation.

@@ -115,5 +115,6 @@ def test_loop_uses_flat_resume_engine(mock_run_recipe, tmp_path, monkeypatch):
         mitigations_allowlist=("none",),
     )
     result = run_agent_loop(config)
-    assert result.outcome in ("agent_stop", "converged")
+    assert result.outcome == "baseline_pass"
+    assert "Baseline cell" in result.recommended_action
     mock_run_recipe.assert_called()

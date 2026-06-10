@@ -9,7 +9,14 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+
+# Why the proposer set ``stop=True`` (drives CLI/report outcome labels).
+StopReason = Literal[
+    "baseline_pass",
+    "exhausted_candidates",
+    "agent_requested",
+]
 
 AUTOPSY_CATEGORIES: frozenset[str] = frozenset(
     {
@@ -36,15 +43,26 @@ class AgentStep:
     next_mitigations: list[str]
     confidence: float
     stop: bool
+    stop_reason: StopReason | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AgentStep:
+        stop = bool(raw.get("stop", False))
+        reason_raw = raw.get("stop_reason")
+        stop_reason: StopReason | None = None
+        if stop and isinstance(reason_raw, str) and reason_raw in (
+            "baseline_pass",
+            "exhausted_candidates",
+            "agent_requested",
+        ):
+            stop_reason = reason_raw  # type: ignore[assignment]
         return cls(
             category=str(raw.get("category", "unknown")),
             hypothesis=str(raw.get("hypothesis", "")),
             next_mitigations=list(raw.get("next_mitigations") or []),
             confidence=float(raw.get("confidence", 0.0)),
-            stop=bool(raw.get("stop", False)),
+            stop=stop,
+            stop_reason=stop_reason,
         )
 
 
@@ -99,17 +117,7 @@ class FakeLLMProposer:
             elif "oom" in low:
                 category = "oom_fragment"
 
-        remaining = [c for c in candidates if c not in tried and c != "none"]
-        if not remaining:
-            return AgentStep(
-                category=category,
-                hypothesis="No remaining registered mitigations to try.",
-                next_mitigations=[],
-                confidence=0.9,
-                stop=True,
-            )
-
-        # If baseline passed, stop immediately.
+        # Baseline pass wins even when the allowlist has no further mitigations.
         for summary in cell_summaries:
             if summary.get("cell_name") == _BASELINE_CELL and summary.get("verdict") == "pass":
                 return AgentStep(
@@ -118,7 +126,19 @@ class FakeLLMProposer:
                     next_mitigations=[],
                     confidence=1.0,
                     stop=True,
+                    stop_reason="baseline_pass",
                 )
+
+        remaining = [c for c in candidates if c not in tried and c != "none"]
+        if not remaining:
+            return AgentStep(
+                category=category,
+                hypothesis="No remaining registered mitigations to try.",
+                next_mitigations=[],
+                confidence=0.9,
+                stop=True,
+                stop_reason="exhausted_candidates",
+            )
 
         next_m = remaining[0]
         return AgentStep(
@@ -151,8 +171,12 @@ class LiteLLMProposer:
             import litellm
         except ImportError as exc:
             raise ImportError(
-                "LiteLLM is required for the litellm backend. "
-                "Install with: pip install 'aorta[agent]'"
+                "LiteLLM is required for --llm-backend=litellm. "
+                "Install it with either:\n"
+                "  pip install litellm\n"
+                "  pip install -e '.[agent]'   # from the aorta repo root (editable + extra)\n"
+                "If pip says the 'agent' extra does not exist, your installed aorta "
+                "package is stale — reinstall from this repo with -e '.[agent]'."
             ) from exc
 
         remaining = [c for c in candidates if c not in tried and c != "none"]
@@ -188,17 +212,22 @@ class LiteLLMProposer:
                 next_mitigations=[],
                 confidence=0.0,
                 stop=True,
+                stop_reason="agent_requested",
             )
         raw = json.loads(content)
         step = AgentStep.from_dict(raw)
         # Filter to remaining candidates only
         filtered = [m for m in step.next_mitigations if m in remaining]
+        stop_reason = step.stop_reason
+        if step.stop and stop_reason is None:
+            stop_reason = "agent_requested"
         return AgentStep(
             category=step.category,
             hypothesis=step.hypothesis,
             next_mitigations=filtered,
             confidence=step.confidence,
             stop=step.stop,
+            stop_reason=stop_reason,
         )
 
 
@@ -216,5 +245,6 @@ __all__ = [
     "FakeLLMProposer",
     "LLMProposer",
     "LiteLLMProposer",
+    "StopReason",
     "make_proposer",
 ]

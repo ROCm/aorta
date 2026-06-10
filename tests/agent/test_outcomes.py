@@ -1,0 +1,35 @@
+"""Stop-outcome resolution for the agent loop."""
+
+from __future__ import annotations
+
+from aorta.agent.llm import AgentStep
+from aorta.agent.loop import _resolve_stop_outcome
+
+
+def test_resolve_baseline_pass():
+    step = AgentStep(
+        category="unknown",
+        hypothesis="Baseline cell passed; no mitigation search needed.",
+        next_mitigations=[],
+        confidence=1.0,
+        stop=True,
+        stop_reason="baseline_pass",
+    )
+    summaries = [{"cell_name": "none-none", "verdict": "pass"}]
+    outcome, msg = _resolve_stop_outcome(step, summaries)
+    assert outcome == "baseline_pass"
+    assert "without mitigations" in msg
+
+
+def test_resolve_exhausted_candidates():
+    step = AgentStep(
+        category="rccl_hang",
+        hypothesis="No remaining registered mitigations to try.",
+        next_mitigations=[],
+        confidence=0.9,
+        stop=True,
+        stop_reason="exhausted_candidates",
+    )
+    outcome, msg = _resolve_stop_outcome(step, [])
+    assert outcome == "exhausted_candidates"
+    assert "No further registered" in msg
