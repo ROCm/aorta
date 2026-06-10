@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -56,11 +55,24 @@ class AgentStep:
             "agent_requested",
         ):
             stop_reason = reason_raw  # type: ignore[assignment]
+        # Defensive coercion: a real (or buggy) LLM can send a bare string,
+        # null, or object for these fields. Only accept a genuine list for
+        # next_mitigations -- never list("tf32_off"), which explodes into
+        # single characters -- and fall back to a safe confidence instead of
+        # raising on a non-numeric value. PolicyValidation re-checks names.
+        raw_mitigations = raw.get("next_mitigations")
+        next_mitigations = (
+            [str(m) for m in raw_mitigations] if isinstance(raw_mitigations, list) else []
+        )
+        try:
+            confidence = float(raw.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
         return cls(
             category=str(raw.get("category", "unknown")),
             hypothesis=str(raw.get("hypothesis", "")),
-            next_mitigations=list(raw.get("next_mitigations") or []),
-            confidence=float(raw.get("confidence", 0.0)),
+            next_mitigations=next_mitigations,
+            confidence=confidence,
             stop=stop,
             stop_reason=stop_reason,
         )
@@ -167,6 +179,19 @@ class LiteLLMProposer:
         candidates: list[str],
         tried: list[str],
     ) -> AgentStep:
+        remaining = [c for c in candidates if c not in tried and c != "none"]
+        # Nothing left to try: stop without spending tokens (and without
+        # needing litellm installed at all). Mirrors FakeLLMProposer.
+        if not remaining:
+            return AgentStep(
+                category="unknown",
+                hypothesis="No remaining registered mitigations to try.",
+                next_mitigations=[],
+                confidence=0.9,
+                stop=True,
+                stop_reason="exhausted_candidates",
+            )
+
         try:
             import litellm
         except ImportError as exc:
@@ -179,7 +204,6 @@ class LiteLLMProposer:
                 "package is stale — reinstall from this repo with -e '.[agent]'."
             ) from exc
 
-        remaining = [c for c in candidates if c not in tried and c != "none"]
         system = (
             "You are an AORTA probe agent. Propose ONLY registered mitigation "
             "names from the candidate list. Never propose shell commands or argv. "
@@ -214,8 +238,23 @@ class LiteLLMProposer:
                 stop=True,
                 stop_reason="agent_requested",
             )
-        raw = json.loads(content)
-        step = AgentStep.from_dict(raw)
+        # Even with response_format=json_object, providers can return
+        # malformed/partial JSON or a non-object. Convert any parse/shape
+        # failure into a safe stop so the loop still emits a report.
+        try:
+            raw = json.loads(content)
+            if not isinstance(raw, dict):
+                raise TypeError(f"expected a JSON object, got {type(raw).__name__}")
+            step = AgentStep.from_dict(raw)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            return AgentStep(
+                category="unknown",
+                hypothesis=f"LLM returned unparseable response: {exc}",
+                next_mitigations=[],
+                confidence=0.0,
+                stop=True,
+                stop_reason="agent_requested",
+            )
         # Filter to remaining candidates only
         filtered = [m for m in step.next_mitigations if m in remaining]
         stop_reason = step.stop_reason

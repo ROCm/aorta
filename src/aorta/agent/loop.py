@@ -317,8 +317,6 @@ def run_agent_loop(
                     )
                     break
 
-            config.policy.check_iteration_budget(state.iterations_completed)
-
             run_dir = _execute_probe_matrix(config, mitigation_axis, recipe_template)
             summaries = _read_cell_summaries(run_dir)
             winner = _find_winning_mitigation(summaries)
@@ -336,6 +334,12 @@ def run_agent_loop(
                     {"winning_mitigation": winner},
                 )
                 break
+
+            # Budget bounds the number of PROPOSAL cycles. Checked here -- after
+            # executing the current axis and winner detection, before proposing
+            # the next mitigation -- so the most recently appended mitigation
+            # always gets a chance to run (and converge) before we stop.
+            config.policy.check_iteration_budget(state.iterations_completed)
 
             step = proposer.propose(
                 symptom=config.symptom,
