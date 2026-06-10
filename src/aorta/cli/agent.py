@@ -12,6 +12,7 @@ import click
 
 from aorta.agent.loop import AgentConfig, run_agent_loop
 from aorta.agent.policy import AgentPolicy, PolicyViolation
+from aorta.registry import RegistryError
 from aorta.probe.cli_helpers import (
     ProbeUsageError,
     help_token_in_option_zone,
@@ -238,7 +239,19 @@ def agent(
             run_bundle=run_bundle,
         )
         result = run_agent_loop(config)
-    except (ProbeUsageError, PolicyViolation) as exc:
+    except (
+        ProbeUsageError,
+        PolicyViolation,
+        ValueError,
+        LookupError,
+        RegistryError,
+        RuntimeError,
+    ) as exc:
+        # ProbeUsageError/PolicyViolation -- argv + policy guardrails.
+        # ValueError    -- non-probe/non-mapping --recipe, RecipeSchemaError/RecipeCellError.
+        # LookupError   -- UnknownMitigationError/UnknownEnvironmentError (KeyError subclasses).
+        # RegistryError -- malformed sidecar / collision with built-ins or plugins.
+        # RuntimeError  -- launch-mode validation failure.
         raise click.ClickException(_retarget_probe_usage(str(exc))) from exc
 
     if dry_run:

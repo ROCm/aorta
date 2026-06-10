@@ -136,7 +136,9 @@ def _scan_cell_verdicts(run_dir: Path) -> dict[str, str]:
     verdicts: dict[str, str] = {}
     if not run_dir.is_dir():
         return verdicts
-    for cell_dir in run_dir.iterdir():
+    # Sorted so the winning_mitigation picked during wake() is deterministic
+    # across filesystems (matches loop._read_cell_summaries).
+    for cell_dir in sorted(run_dir.iterdir()):
         if not cell_dir.is_dir():
             continue
         verdict = aggregate_cell_verdict(read_trial_results(cell_dir))
