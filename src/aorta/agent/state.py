@@ -9,10 +9,15 @@ replays the log and scans existing probe cell verdicts to rebuild
 from __future__ import annotations
 
 import json
+import logging
+import os
+import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 _LOG_NAME = "agent_log.jsonl"
 
@@ -39,12 +44,23 @@ def agent_log_path(run_dir: Path) -> Path:
 
 
 def append_log_event(run_dir: Path, event_type: str, payload: dict[str, Any]) -> None:
-    """Append one JSON line to ``agent_log.jsonl``."""
+    """Append one JSON line to ``agent_log.jsonl`` (owner-only, 0600).
+
+    The log records argv/symptom/hypothesis, which can carry sensitive
+    data, so the file is created owner-only like ``probe.env`` (FR 1.10)
+    rather than at the umask default. ``0o600`` in the ``os.open`` mode is
+    only ever narrowed by umask (never widened), and a one-time ``chmod``
+    on creation covers platforms that ignore the create mode bits.
+    """
     run_dir.mkdir(parents=True, exist_ok=True)
     record = {"ts": _utc_now_iso(), "type": event_type, **payload}
     path = agent_log_path(run_dir)
-    with path.open("a", encoding="utf-8") as fh:
+    is_new = not path.exists()
+    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
+    if is_new:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
 
 def _read_log_events(run_dir: Path) -> list[dict[str, Any]]:
@@ -52,31 +68,77 @@ def _read_log_events(run_dir: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     events: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = line.strip()
         if not line:
             continue
-        events.append(json.loads(line))
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            # The log is the resume source of truth; a truncated/corrupt
+            # tail (e.g. interrupted write) must not abort replay.
+            log.warning("skipping malformed line %d in %s", lineno, path)
+            continue
     return events
 
 
-def _scan_cell_verdicts(run_dir: Path) -> dict[str, str]:
-    """Map cell name -> verdict from ``trial_0/result.json`` when present."""
-    verdicts: dict[str, str] = {}
-    if not run_dir.is_dir():
-        return verdicts
-    for cell_dir in run_dir.iterdir():
-        if not cell_dir.is_dir():
+def read_trial_results(cell_dir: Path) -> list[dict[str, Any]]:
+    """Parse every ``trial_*/result.json`` under a cell dir, ordered by index.
+
+    Multi-trial probe cells write one ``result.json`` per trial; a verdict
+    decision must consider all of them, not just ``trial_0`` (a later trial
+    can fail even when ``trial_0`` passed).
+    """
+    indexed: list[tuple[int, dict[str, Any]]] = []
+    for trial_dir in cell_dir.glob("trial_*"):
+        if not trial_dir.is_dir():
             continue
-        result_path = cell_dir / "trial_0" / "result.json"
+        result_path = trial_dir / "result.json"
         if not result_path.is_file():
             continue
         try:
             data = json.loads(result_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
-        verdict = data.get("verdict")
-        if isinstance(verdict, str) and verdict:
+        try:
+            index = int(trial_dir.name.removeprefix("trial_"))
+        except ValueError:
+            index = 0
+        indexed.append((index, data))
+    indexed.sort(key=lambda item: item[0])
+    return [data for _, data in indexed]
+
+
+def aggregate_cell_verdict(trial_results: list[dict[str, Any]]) -> str | None:
+    """Reduce per-trial verdicts to a single cell verdict.
+
+    A cell is ``pass`` only if *every* trial passed; otherwise the first
+    non-``pass`` verdict is returned as the representative failure. Returns
+    ``None`` when no trial recorded a verdict.
+    """
+    verdicts = [
+        data["verdict"]
+        for data in trial_results
+        if isinstance(data.get("verdict"), str) and data["verdict"]
+    ]
+    if not verdicts:
+        return None
+    for verdict in verdicts:
+        if verdict != "pass":
+            return verdict
+    return "pass"
+
+
+def _scan_cell_verdicts(run_dir: Path) -> dict[str, str]:
+    """Map cell name -> aggregated verdict across all trials when present."""
+    verdicts: dict[str, str] = {}
+    if not run_dir.is_dir():
+        return verdicts
+    for cell_dir in run_dir.iterdir():
+        if not cell_dir.is_dir():
+            continue
+        verdict = aggregate_cell_verdict(read_trial_results(cell_dir))
+        if verdict:
             verdicts[cell_dir.name] = verdict
     return verdicts
 
@@ -124,6 +186,8 @@ def wake(run_dir: Path, *, ticket: str) -> AgentState:
 __all__ = [
     "AgentState",
     "agent_log_path",
+    "aggregate_cell_verdict",
     "append_log_event",
+    "read_trial_results",
     "wake",
 ]

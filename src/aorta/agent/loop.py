@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 
@@ -14,7 +13,13 @@ from typing import Any
 from aorta.agent.llm import AgentStep, LLMProposer, StopReason, _BASELINE_CELL, make_proposer
 from aorta.agent.policy import AgentPolicy, PolicyViolation
 from aorta.agent.report import write_agent_report
-from aorta.agent.state import AgentState, append_log_event, wake
+from aorta.agent.state import (
+    AgentState,
+    aggregate_cell_verdict,
+    append_log_event,
+    read_trial_results,
+    wake,
+)
 from aorta.probe.recipe_builder import build_probe_recipe_from_dict
 from aorta.registry import load_mitigations
 from aorta.registry.errors import UnknownMitigationError
@@ -149,21 +154,33 @@ def _read_cell_summaries(run_dir: Path) -> list[dict[str, Any]]:
     for cell_dir in sorted(run_dir.iterdir()):
         if not cell_dir.is_dir():
             continue
-        result_path = cell_dir / "trial_0" / "result.json"
-        if not result_path.is_file():
+        trial_results = read_trial_results(cell_dir)
+        if not trial_results:
             continue
-        try:
-            data = json.loads(result_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
+        # Union detectors across trials and surface the first failing trial
+        # for capture/exit evidence so a single bad trial in an otherwise
+        # passing cell is not hidden behind trial_0.
+        failure_detectors: list[str] = []
+        warn_detectors: list[str] = []
+        for data in trial_results:
+            for det in data.get("failure_detectors_fired") or []:
+                if det not in failure_detectors:
+                    failure_detectors.append(det)
+            for det in data.get("warn_detectors_fired") or []:
+                if det not in warn_detectors:
+                    warn_detectors.append(det)
+        evidence = next(
+            (d for d in trial_results if d.get("verdict") not in (None, "pass")),
+            trial_results[0],
+        )
         summaries.append(
             {
-                "cell_name": data.get("cell_name", cell_dir.name),
-                "verdict": data.get("verdict"),
-                "failure_detectors_fired": data.get("failure_detectors_fired") or [],
-                "warn_detectors_fired": data.get("warn_detectors_fired") or [],
-                "capture": data.get("capture") or {},
-                "exit_code": data.get("exit_code"),
+                "cell_name": trial_results[0].get("cell_name", cell_dir.name),
+                "verdict": aggregate_cell_verdict(trial_results),
+                "failure_detectors_fired": failure_detectors,
+                "warn_detectors_fired": warn_detectors,
+                "capture": evidence.get("capture") or {},
+                "exit_code": evidence.get("exit_code"),
             }
         )
     return summaries

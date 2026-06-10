@@ -49,12 +49,14 @@ def write_agent_report(
     lines.append("")
     lines.append("## Evidence chain")
     lines.append("")
+    any_capture = False
     for row in cell_summaries:
         capture = row.get("capture") or {}
         if not capture:
             continue
+        any_capture = True
         lines.append(f"- **{row.get('cell_name')}** capture: `{capture}`")
-    if len(lines) == lines.index("## Evidence chain") + 3:
+    if not any_capture:
         lines.append("_No capture fields recorded._")
     lines.append("")
     lines.append("## Recommended next action")

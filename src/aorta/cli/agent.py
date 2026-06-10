@@ -48,6 +48,17 @@ def _echo_agent_result(result: object) -> None:
     click.echo(result.recommended_action)
 
 
+def _retarget_probe_usage(message: str) -> str:
+    """Rewrite shared probe-helper usage strings for the ``agent`` command.
+
+    ``require_double_dash_separator`` / ``validate_trailing_argv`` live in
+    ``aorta.probe.cli_helpers`` and hard-code ``Usage: aorta probe ...``.
+    Reused verbatim, ``aorta agent`` would print the wrong command name, so
+    we translate at the CLI boundary rather than forking the helpers.
+    """
+    return message.replace("aorta probe", "aorta agent")
+
+
 def _reject_flag_shaped_callback(
     ctx: click.Context, param: click.Parameter, value: object
 ) -> object:
@@ -73,7 +84,7 @@ class _AgentCommand(click.Command):
             try:
                 require_double_dash_separator(args)
             except ProbeUsageError as exc:
-                raise click.UsageError(str(exc), ctx=ctx) from exc
+                raise click.UsageError(_retarget_probe_usage(str(exc)), ctx=ctx) from exc
         return super().parse_args(ctx, args)
 
     def _value_taking_option_tokens(self) -> frozenset[str]:
@@ -228,7 +239,7 @@ def agent(
         )
         result = run_agent_loop(config)
     except (ProbeUsageError, PolicyViolation) as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(_retarget_probe_usage(str(exc))) from exc
 
     if dry_run:
         click.echo(f"Dry-run complete under {result.run_dir}")
