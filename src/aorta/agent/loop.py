@@ -19,6 +19,7 @@ from aorta.agent.state import (
     append_log_event,
     read_trial_results,
     wake,
+    winning_mitigation,
 )
 from aorta.probe.recipe_builder import build_probe_recipe_from_dict
 from aorta.registry import load_mitigations
@@ -128,13 +129,19 @@ def _build_probe_recipe_dict(
     recipe_template: dict[str, Any],
 ) -> dict[str, Any]:
     ticket = config.ticket or recipe_template.get("ticket")
+    # Always include the baseline diagnostic so a canonical none-none baseline
+    # cell exists; baseline-pass / winner detection both key off it. A recipe
+    # diagnostic_axis that omits "none" would otherwise have no no-op baseline.
+    diagnostic_axis = list(recipe_template.get("diagnostic_axis", [_BASELINE_DIAGNOSTIC]))
+    if _BASELINE_DIAGNOSTIC not in diagnostic_axis:
+        diagnostic_axis = [_BASELINE_DIAGNOSTIC, *diagnostic_axis]
     data: dict[str, Any] = {
         "schema_version": 1,
         "mode": "probe",
         "ticket": ticket,
         "trials": recipe_template.get("trials", 1),
         "mitigation_axis": mitigation_axis,
-        "diagnostic_axis": recipe_template.get("diagnostic_axis", [_BASELINE_DIAGNOSTIC]),
+        "diagnostic_axis": diagnostic_axis,
     }
     for key in (
         "timeout_per_trial",
@@ -236,11 +243,9 @@ def _resolve_stop_outcome(
 
 def _find_winning_mitigation(summaries: list[dict[str, Any]]) -> str | None:
     for row in summaries:
-        cell = row.get("cell_name") or ""
-        if cell == _BASELINE_CELL:
-            continue
-        if row.get("verdict") == "pass" and "-" in cell:
-            return cell.split("-", 1)[0]
+        win = winning_mitigation(row.get("cell_name") or "", row.get("verdict"))
+        if win is not None:
+            return win
     return None
 
 

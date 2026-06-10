@@ -21,6 +21,29 @@ log = logging.getLogger(__name__)
 
 _LOG_NAME = "agent_log.jsonl"
 
+# Cells are named ``{mitigation}-{diagnostic}``; both axes use "none" for the
+# no-op baseline, so the baseline cell is ``none-none``.
+_BASELINE_NAME = "none"
+
+
+def winning_mitigation(cell_name: str, verdict: str | None) -> str | None:
+    """Return the mitigation iff ``cell_name`` is a genuine convergence win.
+
+    A win is a *non-baseline mitigation* passing with the *baseline
+    diagnostic* -- i.e. a ``{mitigation}-none`` cell where ``mitigation !=
+    "none"``. A pass on a diagnostic-only cell (``none-xnack``) or on a
+    mitigation+diagnostic cell (``tf32_off-xnack``) is NOT attributable to the
+    mitigation alone, and ``none`` is never a "winning mitigation". The
+    diagnostic is taken as the last ``-`` segment so mitigation names that
+    themselves contain ``-`` still parse correctly.
+    """
+    if verdict != "pass" or "-" not in cell_name:
+        return None
+    mitigation, diagnostic = cell_name.rsplit("-", 1)
+    if mitigation == _BASELINE_NAME or diagnostic != _BASELINE_NAME:
+        return None
+    return mitigation
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -173,15 +196,14 @@ def wake(run_dir: Path, *, ticket: str) -> AgentState:
 
     verdicts = _scan_cell_verdicts(run_dir)
     for cell_name, verdict in verdicts.items():
-        if cell_name == "none-none":
-            continue
         if "-" not in cell_name:
             continue
-        mitigation = cell_name.split("-", 1)[0]
-        if mitigation not in state.tried_mitigations:
+        mitigation = cell_name.rsplit("-", 1)[0]
+        if mitigation != _BASELINE_NAME and mitigation not in state.tried_mitigations:
             state.tried_mitigations.append(mitigation)
-        if verdict == "pass" and state.winning_mitigation is None:
-            state.winning_mitigation = mitigation
+        win = winning_mitigation(cell_name, verdict)
+        if win is not None and state.winning_mitigation is None:
+            state.winning_mitigation = win
             state.converged = True
 
     return state
@@ -194,4 +216,5 @@ __all__ = [
     "append_log_event",
     "read_trial_results",
     "wake",
+    "winning_mitigation",
 ]
