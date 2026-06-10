@@ -188,6 +188,6 @@ audit. `wake()` replays tried mitigations and last category.
 
 ## Related docs
 
-- [agentic-testing-guide.md](agentic-testing-guide.md) — usage, examples, LLM vs fake, under the hood  
+- [agentic-testing-guide.md](agentic-testing-guide.md) — usage, examples, LLM vs fake, under the hood
 - [`docs/probe-188/usage.md`](../probe-188/usage.md) for probe-mode recipes
 - `src/aorta/agent/` for the implementation.

@@ -328,11 +328,11 @@ aorta agent (CLI)
 Every trial’s `verdict` comes from `aorta.probe.classifier`, not from the
 agent:
 
-1. **Tier 1** — process exit code  
-2. **Tier 2** — hang monitor (stdout stall window)  
-3. **Tier 3** — kernel / GPU signals  
-4. **Tier 4** — built-in stderr regex catalogue  
-5. **Tier 5** — recipe `custom_patterns`  
+1. **Tier 1** — process exit code
+2. **Tier 2** — hang monitor (stdout stall window)
+3. **Tier 3** — kernel / GPU signals
+4. **Tier 4** — built-in stderr regex catalogue
+5. **Tier 5** — recipe `custom_patterns`
 
 See [classifier.md](../probe-188/classifier.md).
 
@@ -417,7 +417,7 @@ Then retry `--llm-backend litellm`.
 
 ## Related docs
 
-- [aorta-probe-agent.md](aorta-probe-agent.md) — design deck + build phases  
-- [probe-188/usage.md](../probe-188/usage.md) — probe recipes and artifacts  
-- [probe-188/classifier.md](../probe-188/classifier.md) — detector IDs  
-- [probe-188/bundle.md](../probe-188/bundle.md) — packaging for handoff  
+- [aorta-probe-agent.md](aorta-probe-agent.md) — design deck + build phases
+- [probe-188/usage.md](../probe-188/usage.md) — probe recipes and artifacts
+- [probe-188/classifier.md](../probe-188/classifier.md) — detector IDs
+- [probe-188/bundle.md](../probe-188/bundle.md) — packaging for handoff
