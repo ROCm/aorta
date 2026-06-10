@@ -477,9 +477,10 @@ def test_tier3_vram_growth_threaded_into_classifier(tmp_path, monkeypatch):
     wl = _make_workload(tmp_path, ["true"], tier3_vram_growth=False)
     wl.setup()
     wl.run()
-    assert captured["tier3_vram_growth"] is False, (
+    assert captured.get("tier3_vram_growth") is False, (
         "probe_extras['tier3_vram_growth']=False did not reach the "
-        "TrialContext -- the recipe opt-out is silently ignored."
+        "TrialContext -- the recipe opt-out is silently ignored "
+        "(or classify_trial was never called, so the spy never ran)."
     )
 
 
