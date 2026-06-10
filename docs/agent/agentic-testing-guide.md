@@ -288,8 +288,11 @@ PYTHONPATH=src aorta agent --output /tmp/agent_out --ticket smoke-fail -- ...
 **Under the hood:**
 
 - `wake()` reads `agent_log.jsonl` and existing cell directories.
-- `run_recipe(..., resume_existing=True, layout="flat_resume")` skips
-  cells whose `trial_0/result.json` already has a verdict.
+- `run_recipe(..., resume_existing=True, layout="flat_resume")` skips a
+  trial only when its own `trial_<n>/result.json` is complete (checked
+  per trial via `aorta.probe.resume.is_trial_complete`), so a cell reruns
+  the specific trials whose result is missing, incomplete, or corrupt —
+  not just when `trial_0` is absent.
 - Search continues from the last untried mitigation — no duplicate work.
 
 ---

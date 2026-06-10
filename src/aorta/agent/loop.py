@@ -96,6 +96,9 @@ def _recipe_template_dict(config: AgentConfig) -> dict[str, Any]:
         "custom_patterns",
         "hang_window_sec",
         "hang_grace_period_at_start",
+        # Carried forward so the generated probe recipe (and its
+        # recipe.resolved.yaml) keeps redaction config for the --bundle step.
+        "redaction",
     ):
         if key in raw:
             template[key] = raw[key]
@@ -141,6 +144,7 @@ def _build_probe_recipe_dict(
         "custom_patterns",
         "hang_window_sec",
         "hang_grace_period_at_start",
+        "redaction",
     ):
         if key in recipe_template:
             data[key] = recipe_template[key]
@@ -420,14 +424,13 @@ def run_agent_loop(
         try:
             from aorta.bundle import bundle_run_dir
             from aorta.probe.bundle_hook import build_redactor_from_recipe
-            from aorta.triage.recipe import load_recipe
 
-            resolved = run_dir / "recipe.resolved.yaml"
-            redactor = None
-            if resolved.is_file():
-                recipe = load_recipe(resolved)
-                if recipe.probe_extras and recipe.probe_extras.redaction:
-                    redactor = build_redactor_from_recipe(recipe.probe_extras.redaction)
+            # build_redactor_from_recipe resolves the redaction: block via the
+            # parse-only loader (no axis/registry validation), so it works for
+            # sidecar-defined mitigations. It prefers the explicit recipe path
+            # and falls back to run_dir/recipe.resolved.yaml, returning an
+            # IdentityRedactor only when neither carries redaction.
+            redactor = build_redactor_from_recipe(config.recipe_path, run_dir)
             bundle_run_dir(run_dir, redactor=redactor)
             log.info("Wrote bundle for %s", run_dir)
         except Exception as exc:  # pragma: no cover - bundle is best-effort

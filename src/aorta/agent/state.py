@@ -53,7 +53,9 @@ def append_log_event(run_dir: Path, event_type: str, payload: dict[str, Any]) ->
     on creation covers platforms that ignore the create mode bits.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
-    record = {"ts": _utc_now_iso(), "type": event_type, **payload}
+    # Reserved metadata wins: spreading payload first means a payload key
+    # named "ts"/"type" can't clobber the event envelope.
+    record = {**payload, "ts": _utc_now_iso(), "type": event_type}
     path = agent_log_path(run_dir)
     is_new = not path.exists()
     fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
