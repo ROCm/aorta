@@ -457,6 +457,45 @@ def test_hang_grace_zero_survives_runtime_extraction(tmp_path, monkeypatch):
     assert captured["hang_window_sec"] == 30.0
 
 
+def test_tier3_vram_growth_threaded_into_classifier(tmp_path, monkeypatch):
+    """Regression for PR #215 review (Sonbol): ``probe_extras["tier3_vram_growth"]``
+    must thread through the workload into the ``TrialContext`` handed to
+    ``classify_trial`` so the recipe opt-out actually reaches the Tier-3
+    VRAM check. Spy on ``classify_trial`` and assert it observed ``False``.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    captured: dict[str, object] = {}
+    real_classify = workload_mod.classify_trial
+
+    def _spy_classify(ctx):
+        captured["tier3_vram_growth"] = ctx.tier3_vram_growth
+        return real_classify(ctx)
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _spy_classify)
+
+    wl = _make_workload(tmp_path, ["true"], tier3_vram_growth=False)
+    wl.setup()
+    wl.run()
+    assert captured["tier3_vram_growth"] is False, (
+        "probe_extras['tier3_vram_growth']=False did not reach the "
+        "TrialContext -- the recipe opt-out is silently ignored."
+    )
+
+
+def test_tier3_vram_growth_non_bool_payload_raises(tmp_path):
+    """A malformed ``tier3_vram_growth`` payload (e.g. the string "false")
+    raises ``TypeError`` rather than being truthily coerced to ``True`` and
+    silently re-enabling the detector. Mirrors the recipe-builder guard and
+    the sibling ``float(...)`` knobs that surface a bad payload instead of
+    swallowing it.
+    """
+    wl = _make_workload(tmp_path, ["true"], tier3_vram_growth="false")
+    wl.setup()
+    with pytest.raises(TypeError, match="tier3_vram_growth.*must be a bool"):
+        wl.run()
+
+
 def test_classifier_crash_still_writes_result_json(tmp_path, monkeypatch):
     """Regression for PR #197 round-3 review: if ``classify_trial``
     raises (regex catastrophe, future refactor edge case, etc.),

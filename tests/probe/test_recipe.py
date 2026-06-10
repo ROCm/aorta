@@ -453,3 +453,38 @@ hang_grace_period_at_start: -1
     )
     with pytest.raises(RecipeSchemaError, match="hang_grace_period_at_start.*>= 0"):
         load_recipe(recipe_path)
+
+
+# ---- tier3_vram_growth opt-out round-trip (PR #215 review) ----------------
+
+
+def test_tier3_vram_growth_defaults_true(tmp_path):
+    """Omitting ``tier3_vram_growth`` leaves the Tier-3 VRAM delta check
+    enabled -- the knob defaults to ``True`` so existing recipes are
+    unchanged. Pins the recipe -> ``ProbeExtras`` path that the original
+    PR #215 left untested (Sonbol review).
+    """
+    recipe = load_recipe(_write_yaml(tmp_path, _PROBE_MINIMAL))
+    assert recipe.probe_extras is not None
+    assert recipe.probe_extras.tier3_vram_growth is True
+
+
+def test_tier3_vram_growth_false_round_trips(tmp_path):
+    """``tier3_vram_growth: false`` parses to a real bool and lands on
+    ``ProbeExtras.tier3_vram_growth`` so the dispatcher can forward it into
+    ``probe_extras`` and the workload can skip the whole-device VRAM check.
+    """
+    text = _PROBE_MINIMAL + "tier3_vram_growth: false\n"
+    recipe = load_recipe(_write_yaml(tmp_path, text))
+    assert recipe.probe_extras is not None
+    assert recipe.probe_extras.tier3_vram_growth is False
+
+
+def test_tier3_vram_growth_non_bool_rejected(tmp_path):
+    """A non-bool ``tier3_vram_growth`` is rejected at load. Truthiness
+    coercion (``bool("false") is True``) would silently re-enable the
+    detector, so the builder fails closed with ``RecipeSchemaError``.
+    """
+    text = _PROBE_MINIMAL + 'tier3_vram_growth: "notabool"\n'
+    with pytest.raises(RecipeSchemaError, match="tier3_vram_growth.*must be a boolean"):
+        load_recipe(_write_yaml(tmp_path, text))
