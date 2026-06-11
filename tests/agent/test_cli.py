@@ -8,7 +8,8 @@ from unittest.mock import MagicMock
 from click.testing import CliRunner
 
 import aorta.cli.agent as agent_cli
-from aorta.agent.loop import AgentLoopResult, AgentState
+from aorta.agent.loop import AgentLoopResult
+from aorta.agent.state import AgentState
 from aorta.cli.agent import agent
 
 
