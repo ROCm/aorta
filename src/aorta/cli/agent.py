@@ -255,7 +255,7 @@ def agent(
         raise click.ClickException(_retarget_probe_usage(str(exc))) from exc
 
     if dry_run:
-        click.echo(f"Dry-run complete under {result.run_dir}")
+        click.echo("Dry-run complete: planned probe cells printed above; no artifacts written.")
         return
     _echo_agent_result(result)
 

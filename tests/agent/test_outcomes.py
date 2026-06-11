@@ -16,8 +16,9 @@ def test_resolve_baseline_pass():
         stop_reason="baseline_pass",
     )
     summaries = [{"cell_name": "none-none", "verdict": "pass"}]
-    outcome, msg = _resolve_stop_outcome(step, summaries)
+    outcome, msg, reason = _resolve_stop_outcome(step, summaries)
     assert outcome == "baseline_pass"
+    assert reason == "baseline_pass"
     assert "without mitigations" in msg
 
 
@@ -30,6 +31,22 @@ def test_resolve_exhausted_candidates():
         stop=True,
         stop_reason="exhausted_candidates",
     )
-    outcome, msg = _resolve_stop_outcome(step, [])
+    outcome, msg, reason = _resolve_stop_outcome(step, [])
     assert outcome == "exhausted_candidates"
+    assert reason == "exhausted_candidates"
     assert "No further registered" in msg
+
+
+def test_resolve_infers_reason_when_proposer_omits_it():
+    """stop=True with stop_reason=None must yield a non-None inferred reason."""
+    step = AgentStep(
+        category="rccl_hang",
+        hypothesis="No remaining registered mitigations to try.",
+        next_mitigations=[],
+        confidence=0.5,
+        stop=True,
+        stop_reason=None,
+    )
+    outcome, _msg, reason = _resolve_stop_outcome(step, [])
+    assert outcome == "exhausted_candidates"
+    assert reason == "exhausted_candidates"

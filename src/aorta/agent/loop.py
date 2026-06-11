@@ -68,10 +68,6 @@ def _ticket_slug(ticket: str | None) -> str:
     return safe_slug(ticket)
 
 
-def _run_dir(config: AgentConfig) -> Path:
-    return config.output_dir / _ticket_slug(config.ticket)
-
-
 def _recipe_template_dict(config: AgentConfig) -> dict[str, Any]:
     """Load optional probe recipe YAML; return extra keys to merge into each run."""
     if config.recipe_path is None:
@@ -207,10 +203,16 @@ def _baseline_passed(summaries: list[dict[str, Any]]) -> bool:
 def _resolve_stop_outcome(
     step: AgentStep,
     summaries: list[dict[str, Any]],
-) -> tuple[str, str]:
-    """Map a proposer stop step to outcome label + operator-facing message."""
+) -> tuple[str, str, StopReason]:
+    """Map a proposer stop step to (outcome label, operator message, resolved reason).
+
+    The third element is the inferred ``StopReason`` -- the proposer may set
+    ``stop=True`` without a ``stop_reason``, so we derive one here and return
+    it so the audit log records the same reason that drove ``outcome``
+    instead of a bare ``None``.
+    """
     reason: StopReason | None = step.stop_reason
-    if reason is None and step.stop:
+    if reason is None:
         if _baseline_passed(summaries):
             reason = "baseline_pass"
         elif not step.next_mitigations and "No remaining" in step.hypothesis:
@@ -223,6 +225,7 @@ def _resolve_stop_outcome(
             "baseline_pass",
             "Baseline cell (none-none) passed. The repro succeeds without "
             "mitigations; no search was run.",
+            reason,
         )
     if reason == "exhausted_candidates":
         return (
@@ -230,6 +233,7 @@ def _resolve_stop_outcome(
             "No further registered mitigations to try (already attempted or "
             "not in the allowlist). Inspect failure detectors in "
             "agent_report.md or run a manual probe matrix.",
+            reason,
         )
     return (
         "agent_stop",
@@ -238,6 +242,7 @@ def _resolve_stop_outcome(
             "Agent stopped search. Inspect failure detectors and extend "
             "mitigations allowlist or run a manual probe matrix."
         ),
+        reason or "agent_requested",
     )
 
 
@@ -294,6 +299,25 @@ def run_agent_loop(
     for m in state.tried_mitigations:
         if m != _BASELINE_MITIGATION and m not in mitigation_axis:
             mitigation_axis.append(m)
+
+    if config.dry_run:
+        # Dry-run is filesystem-free: print the planned probe matrix and return
+        # without writing any logs or report. run_recipe(dry_run=True) returns a
+        # sentinel Path("."); discard it rather than treating it as a real run
+        # dir (otherwise log/report writes land in the caller's cwd). run_dir
+        # below is the planned path, kept only for the result -- nothing is
+        # written there.
+        _execute_probe_matrix(config, mitigation_axis, recipe_template)
+        return AgentLoopResult(
+            run_dir=run_dir,
+            state=state,
+            report_path=None,
+            outcome="dry_run",
+            recommended_action=(
+                "Dry-run only: planned probe cells printed above; "
+                "no probe cells executed and no artifacts written."
+            ),
+        )
 
     start_time = time.monotonic()
     append_log_event(
@@ -369,11 +393,13 @@ def run_agent_loop(
             )
 
             if step.stop or not step.next_mitigations:
-                outcome, recommended = _resolve_stop_outcome(step, summaries)
+                outcome, recommended, resolved_reason = _resolve_stop_outcome(
+                    step, summaries
+                )
                 append_log_event(
                     run_dir,
                     "search_stopped",
-                    {"outcome": outcome, "stop_reason": step.stop_reason},
+                    {"outcome": outcome, "stop_reason": resolved_reason},
                 )
                 break
 
@@ -418,18 +444,18 @@ def run_agent_loop(
         recommended = str(exc)
         append_log_event(run_dir, "error", {"reason": str(exc)})
 
-    report_path = None
-    if not config.dry_run:
-        summaries = _read_cell_summaries(run_dir)
-        report_path = write_agent_report(
-            run_dir,
-            state=state,
-            cell_summaries=summaries,
-            outcome=outcome,
-            recommended_action=recommended,
-        )
+    # Dry-run returns early above, so the search loop always wrote a real
+    # run_dir by here -- write the autopsy report unconditionally.
+    summaries = _read_cell_summaries(run_dir)
+    report_path = write_agent_report(
+        run_dir,
+        state=state,
+        cell_summaries=summaries,
+        outcome=outcome,
+        recommended_action=recommended,
+    )
 
-    if config.run_bundle and not config.dry_run and report_path is not None:
+    if config.run_bundle and report_path is not None:
         try:
             from aorta.bundle import bundle_run_dir
             from aorta.probe.bundle_hook import build_redactor_from_recipe
