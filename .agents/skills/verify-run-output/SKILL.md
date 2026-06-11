@@ -58,7 +58,8 @@ Verification progress:
 - [ ] 2. Run the structural + consistency validator
 - [ ] 3. Interpret findings against the schema (reference.md)
 - [ ] 4. Judge semantic plausibility (verdict justified by evidence?)
-- [ ] 5. Report verdict + findings
+- [ ] 5. Root-cause any failure (trace fail/warn back to its origin)
+- [ ] 6. Report verdict + findings (+ root cause)
 ```
 
 ### Step 1 — Identify
@@ -115,7 +116,55 @@ Beyond schema validity, judge whether the verdict is *earned*:
   coherent story (e.g. a `speed (+N%)` confound means "verify before trusting
   this mitigation", not "fixed").
 
-### Step 5 — Report
+### Step 5 — Root-cause any failure
+
+Verification is not done at "it failed" — if any cell/trial has a `fail`
+verdict (or a suspicious `warn`), trace it back to its **origin** and report
+*why*. A verdict without a cause is not actionable. This step is the difference
+between "the run failed" and "the run failed because X, fix Y".
+
+Work the evidence chain from detector → log → cause:
+
+1. **Start from the fired detectors**, not a guess. Read the offending trial's
+   `failure_detectors_fired` / `warn_detectors_fired` and
+   `failure_details[*]`. Built-in IDs (`tier1:` … `tier4:`) tell you the
+   *class* of failure (non-zero exit, signal, hang, dmesg signature, library
+   error); `custom:` IDs come from the recipe/sidecar patterns and tell you
+   what the **workload itself** flagged.
+2. **Open the actual logs** the trial points at — `stdout.log` / `stderr.log`
+   next to `result.json`, the `_subprocess/*.stdout.log`, and any
+   `run.log` / log dir the workload prints. Pull the **verbatim** error line
+   (the exception, the `Errors: N` summary, the dmesg signature). Do **not**
+   paraphrase it.
+3. **Separate the trigger from the root cause.** A non-zero exit
+   (`tier1:exit_nonzero`) is the *trigger*; the ImportError / CUDA OOM /
+   assertion in the log is the *root cause*. Likewise distinguish a
+   **pre-run/setup crash** (workload never reached its main work — see the
+   `main_work_started=false` / `0/<N>` iters signals from Step 4) from a
+   **genuine in-workload failure** (the thing under test actually failed). The
+   first means "the harness/repro/container is broken"; the second means "the
+   bug reproduced". Saying which one it is is the most important output of this
+   step.
+4. **Explain a uniform matrix.** If *every* cell fails identically (same
+   detectors, same log line), that is itself the finding: the failure is
+   upstream of anything the matrix varies (mitigations/env), so no cell can
+   discriminate and the run carries no mitigation signal. Name the shared
+   cause.
+5. **Check the cause against the environment / inputs.** Tie the root cause to
+   concrete evidence already in the tree where you can: the failing `argv`, the
+   docker image/tag, the `resolved_env_vars`, the `env.json` (e.g. a missing
+   package, a version mismatch, an unset flag). Point at the file/field, don't
+   speculate.
+6. **Know when to stop.** Root-cause from the artifacts and the repo. If the
+   true cause lives in an external container image, a third-party package, or
+   code not in the tree, say so and report the most specific cause you *can*
+   prove rather than inventing one. Don't fix anything — this skill is
+   read-only.
+
+If the verdict is a clean PASS with no warnings, there is nothing to
+root-cause; skip to the report.
+
+### Step 6 — Report
 
 Use this structure:
 
@@ -129,14 +178,24 @@ Use this structure:
 - FAIL: <contract violation, with the offending value>
 - WARN: <suspicious-but-not-wrong, with reasoning>
 
+### Root cause (only when something failed or warned)
+<the evidence chain: fired detector → verbatim log line → underlying cause.
+State explicitly whether it is a pre-run/setup crash (harness/repro/container
+broken) or a genuine in-workload failure (bug reproduced), and — for a uniform
+matrix — that the cause is upstream of what the cells vary. Cite the file/field
+the evidence came from. Omit this section entirely for a clean PASS.>
+
 ### Interpretation
 <1–3 sentences: did the run do what it claims? Is the result trustworthy?>
 
 ### Suggested next step (only if warranted)
-<e.g. re-run cell X, install rdhc for full system_health, inspect trial Y log>
+<e.g. fix the root cause (pin package X in image Y), re-run cell Z, install
+rdhc for full system_health, inspect trial Y log>
 ```
 
-Keep it tight. If everything is clean, say so in two lines — do not pad.
+Keep it tight. If everything is clean, say so in two lines — do not pad. When
+something failed, the **Root cause** section is the part the user most needs —
+make it specific and evidence-backed, never a guess.
 
 ## Anti-patterns
 
