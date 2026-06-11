@@ -12,7 +12,6 @@ import click
 
 from aorta.agent.loop import AgentConfig, run_agent_loop
 from aorta.agent.policy import AgentPolicy, PolicyViolation
-from aorta.registry import RegistryError
 from aorta.probe.cli_helpers import (
     ProbeUsageError,
     help_token_in_option_zone,
@@ -20,6 +19,7 @@ from aorta.probe.cli_helpers import (
     require_double_dash_separator,
     validate_trailing_argv,
 )
+from aorta.registry import RegistryError
 from aorta.run.cli_helpers import configure_verbose_logging
 
 # Human-readable one-liners keyed by :attr:`AgentLoopResult.outcome`.

@@ -10,8 +10,8 @@ from aorta.agent.llm import (
     AUTOPSY_CATEGORIES,
     AgentStep,
     FakeLLMProposer,
-    LLMProposer,
     LiteLLMProposer,
+    LLMProposer,
 )
 from aorta.agent.loop import AgentConfig, AgentLoopResult, run_agent_loop
 from aorta.agent.policy import AgentPolicy, PolicyViolation

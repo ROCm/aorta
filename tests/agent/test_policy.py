@@ -53,3 +53,19 @@ def test_iteration_budget():
     policy.check_iteration_budget(1)
     with pytest.raises(PolicyViolation, match="budget"):
         policy.check_iteration_budget(2)
+
+
+def test_rejects_non_positive_max_iterations():
+    with pytest.raises(PolicyViolation, match="max_iterations"):
+        AgentPolicy(max_iterations=0)
+
+
+@pytest.mark.parametrize("bad", [0, 0.0, -1, -30.5])
+def test_rejects_non_positive_max_walltime(bad):
+    with pytest.raises(PolicyViolation, match="max_walltime_sec"):
+        AgentPolicy(max_walltime_sec=bad)
+
+
+def test_accepts_none_and_positive_max_walltime():
+    assert AgentPolicy(max_walltime_sec=None).max_walltime_sec is None
+    assert AgentPolicy(max_walltime_sec=30.0).max_walltime_sec == 30.0

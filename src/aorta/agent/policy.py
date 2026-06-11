@@ -35,6 +35,10 @@ class AgentPolicy:
     def __post_init__(self) -> None:
         if self.max_iterations < 1:
             raise PolicyViolation("max_iterations must be >= 1")
+        # None disables the wall-clock budget; a 0/negative cap is user error
+        # (the loop would stop immediately with walltime_exhausted).
+        if self.max_walltime_sec is not None and self.max_walltime_sec <= 0:
+            raise PolicyViolation("max_walltime_sec must be > 0 when set")
 
     def check_iteration_budget(self, iterations_done: int) -> None:
         if iterations_done >= self.max_iterations:

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 import time
-
-import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from aorta.agent.llm import AgentStep, LLMProposer, StopReason, _BASELINE_CELL, make_proposer
+import yaml
+
+from aorta.agent.llm import _BASELINE_CELL, AgentStep, LLMProposer, StopReason, make_proposer
 from aorta.agent.policy import AgentPolicy, PolicyViolation
 from aorta.agent.report import write_agent_report
 from aorta.agent.state import (
