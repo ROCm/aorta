@@ -68,6 +68,25 @@ def _ticket_slug(ticket: str | None) -> str:
     return safe_slug(ticket)
 
 
+def _resolve_raw_ticket(
+    config: AgentConfig, recipe_template: dict[str, Any]
+) -> str | None:
+    """Operator ticket ID (CLI wins, then recipe), or None when absent.
+
+    Whitespace-only / empty values normalise to None so the raw ID and the
+    filesystem slug agree EVERYWHERE: ``run_recipe`` slugs the recipe's
+    ``ticket`` via ``resolve_run_dir`` while the agent slugs this same value
+    for its log/report dir, so passing the normalised raw ID to both keeps
+    them pointed at one directory. Slugging is a filesystem concern, never an
+    ID rewrite -- logs, the audit trail, the report, and the bundle manifest
+    all keep the raw ID.
+    """
+    for candidate in (config.ticket, recipe_template.get("ticket")):
+        if candidate is not None and str(candidate).strip():
+            return str(candidate)
+    return None
+
+
 def _recipe_template_dict(config: AgentConfig) -> dict[str, Any]:
     """Load optional probe recipe YAML; return extra keys to merge into each run."""
     if config.recipe_path is None:
@@ -120,11 +139,13 @@ def _list_candidate_mitigations(
 
 
 def _build_probe_recipe_dict(
-    config: AgentConfig,
+    ticket: str | None,
     mitigation_axis: list[str],
     recipe_template: dict[str, Any],
 ) -> dict[str, Any]:
-    ticket = config.ticket or recipe_template.get("ticket")
+    # ``ticket`` is the already-resolved raw operator ID (see
+    # _resolve_raw_ticket). Passing it verbatim keeps the probe's
+    # resolve_run_dir slug aligned with the agent's log/report dir.
     # Always include the baseline diagnostic so a canonical none-none baseline
     # cell exists; baseline-pass / winner detection both key off it. A recipe
     # diagnostic_axis that omits "none" would otherwise have no no-op baseline.
@@ -256,11 +277,12 @@ def _find_winning_mitigation(summaries: list[dict[str, Any]]) -> str | None:
 
 def _execute_probe_matrix(
     config: AgentConfig,
+    ticket: str | None,
     mitigation_axis: list[str],
     recipe_template: dict[str, Any],
 ) -> Path:
     """Run (or dry-run) probe recipe; return ticket run directory."""
-    recipe_dict = _build_probe_recipe_dict(config, mitigation_axis, recipe_template)
+    recipe_dict = _build_probe_recipe_dict(ticket, mitigation_axis, recipe_template)
     sidecar = config.policy.sidecar_files or None
     recipe = build_probe_recipe_from_dict(
         recipe_dict,
@@ -285,12 +307,12 @@ def run_agent_loop(
 ) -> AgentLoopResult:
     """Run the closed-loop mitigation search."""
     recipe_template = _recipe_template_dict(config)
-    if config.ticket is None and recipe_template.get("ticket"):
-        ticket_slug = safe_slug(str(recipe_template["ticket"]))
-    else:
-        ticket_slug = _ticket_slug(config.ticket)
+    raw_ticket = _resolve_raw_ticket(config, recipe_template)
+    ticket_slug = _ticket_slug(raw_ticket)
     run_dir = config.output_dir / ticket_slug
-    state = wake(run_dir, ticket=ticket_slug)
+    # Record the raw operator ID (not the slug) so reports/logs show the real
+    # ticket; fall back to the slug only for the no-ticket case.
+    state = wake(run_dir, ticket=raw_ticket or ticket_slug)
     if proposer is None:
         proposer = make_proposer(config.llm_backend, model=config.llm_model)
 
@@ -307,7 +329,7 @@ def run_agent_loop(
         # dir (otherwise log/report writes land in the caller's cwd). run_dir
         # below is the planned path, kept only for the result -- nothing is
         # written there.
-        _execute_probe_matrix(config, mitigation_axis, recipe_template)
+        _execute_probe_matrix(config, raw_ticket, mitigation_axis, recipe_template)
         return AgentLoopResult(
             run_dir=run_dir,
             state=state,
@@ -324,7 +346,8 @@ def run_agent_loop(
         run_dir,
         "session_start",
         {
-            "ticket": ticket_slug,
+            "ticket": raw_ticket,
+            "ticket_slug": ticket_slug,
             "argv": list(config.subprocess_argv),
             "symptom": config.symptom,
             "llm_backend": config.llm_backend,
@@ -346,7 +369,9 @@ def run_agent_loop(
                     )
                     break
 
-            run_dir = _execute_probe_matrix(config, mitigation_axis, recipe_template)
+            run_dir = _execute_probe_matrix(
+                config, raw_ticket, mitigation_axis, recipe_template
+            )
             summaries = _read_cell_summaries(run_dir)
             winner = _find_winning_mitigation(summaries)
             if winner:
@@ -466,7 +491,10 @@ def run_agent_loop(
             # and falls back to run_dir/recipe.resolved.yaml, returning an
             # IdentityRedactor only when neither carries redaction.
             redactor = build_redactor_from_recipe(config.recipe_path, run_dir)
-            bundle_run_dir(run_dir, redactor=redactor)
+            # Pass the raw ticket so the manifest records the operator ID;
+            # without it bundle_run_dir infers the slug from run_dir.name. When
+            # raw_ticket is None it falls back to that inference (no-ticket).
+            bundle_run_dir(run_dir, ticket=raw_ticket, redactor=redactor)
             log.info("Wrote bundle for %s", run_dir)
         except Exception as exc:  # pragma: no cover - bundle is best-effort
             log.warning("Bundle step skipped: %s", exc)

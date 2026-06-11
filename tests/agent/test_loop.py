@@ -109,6 +109,80 @@ def test_loop_uses_flat_resume_engine(mock_run_recipe, tmp_path, monkeypatch):
     mock_run_recipe.assert_called()
 
 
+def _baseline_pass_summaries(_run_dir):
+    return [
+        {
+            "cell_name": "none-none",
+            "verdict": "pass",
+            "failure_detectors_fired": [],
+            "capture": {},
+        }
+    ]
+
+
+def test_whitespace_ticket_aligns_slug_and_recipe(mock_run_recipe, tmp_path, monkeypatch):
+    """A whitespace-only ticket normalises to None so the agent slug and the
+    probe recipe ticket agree, and the audit log keeps raw + slug distinct."""
+    import json
+
+    import aorta.agent.loop as loop_mod
+    from aorta.triage.output import NO_TICKET_SLUG
+
+    mock_run_recipe.return_value = tmp_path / "run"
+    monkeypatch.setattr(loop_mod, "_read_cell_summaries", _baseline_pass_summaries)
+
+    config = AgentConfig(
+        output_dir=tmp_path / "out",
+        ticket="   ",
+        subprocess_argv=("true",),
+        policy=AgentPolicy(max_iterations=2),
+        mitigations_allowlist=("none",),
+    )
+    run_agent_loop(config)
+
+    # Probe recipe ticket normalised to None -> resolve_run_dir uses the slug.
+    recipe = mock_run_recipe.call_args_list[-1][0][0]
+    assert not recipe.ticket
+    # session_start log records the raw ticket (None) and the slug separately,
+    # under the same NO_TICKET_SLUG dir the probe would resolve to.
+    log_path = tmp_path / "out" / NO_TICKET_SLUG / "agent_log.jsonl"
+    assert log_path.is_file()
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    start = next(e for e in events if e["type"] == "session_start")
+    assert start["ticket"] is None
+    assert start["ticket_slug"] == NO_TICKET_SLUG
+
+
+def test_bundle_receives_raw_ticket(mock_run_recipe, tmp_path, monkeypatch):
+    """--bundle must pass the raw operator ID so the manifest keeps it (not the slug)."""
+    import aorta.agent.loop as loop_mod
+    import aorta.bundle as bundle_mod
+    import aorta.probe.bundle_hook as hook_mod
+
+    mock_run_recipe.return_value = tmp_path / "run"
+    monkeypatch.setattr(loop_mod, "_read_cell_summaries", _baseline_pass_summaries)
+
+    captured = {}
+
+    def fake_bundle(run_dir, *, ticket=None, redactor=None, **kw):
+        captured["ticket"] = ticket
+        return tmp_path / "bundle.tar.gz"
+
+    monkeypatch.setattr(bundle_mod, "bundle_run_dir", fake_bundle)
+    monkeypatch.setattr(hook_mod, "build_redactor_from_recipe", lambda *a, **k: None)
+
+    config = AgentConfig(
+        output_dir=tmp_path / "out",
+        ticket="TKT/with space",
+        subprocess_argv=("true",),
+        policy=AgentPolicy(max_iterations=2),
+        mitigations_allowlist=("none",),
+        run_bundle=True,
+    )
+    run_agent_loop(config)
+    assert captured["ticket"] == "TKT/with space"
+
+
 def test_dry_run_writes_no_artifacts(mock_run_recipe, tmp_path, monkeypatch):
     """--dry-run must not write agent_log.jsonl / report, nor scan the cwd.
 

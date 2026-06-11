@@ -68,9 +68,20 @@ class AgentStep:
             confidence = float(raw.get("confidence", 0.0))
         except (TypeError, ValueError):
             confidence = 0.0
+        # Type-aware, not str(): a null/non-string category or hypothesis from
+        # the LLM must NOT become the literal "None"/"null" (which fails policy
+        # validation for category and pollutes the report for hypothesis).
+        category_raw = raw.get("category")
+        category = (
+            category_raw
+            if isinstance(category_raw, str) and category_raw.strip()
+            else "unknown"
+        )
+        hypothesis_raw = raw.get("hypothesis")
+        hypothesis = hypothesis_raw if isinstance(hypothesis_raw, str) else ""
         return cls(
-            category=str(raw.get("category", "unknown")),
-            hypothesis=str(raw.get("hypothesis", "")),
+            category=category,
+            hypothesis=hypothesis,
             next_mitigations=next_mitigations,
             confidence=confidence,
             stop=stop,
