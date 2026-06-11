@@ -225,7 +225,7 @@ Wrote /tmp/agent_out/smoke-fail/agent_report.md
 Re-run the repro with mitigation `tf32_off` applied (see cell `tf32_off-none` probe.env or matrix).
 ```
 
-**Sample `none-none` result.json` (abbreviated):**
+**Sample `none-none/trial_0/result.json` (abbreviated):**
 
 ```json
 {

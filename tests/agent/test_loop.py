@@ -183,6 +183,48 @@ def test_bundle_receives_raw_ticket(mock_run_recipe, tmp_path, monkeypatch):
     assert captured["ticket"] == "TKT/with space"
 
 
+def test_proposer_exception_still_writes_report(mock_run_recipe, tmp_path, monkeypatch):
+    """A backend error from the proposer must not skip the report/audit trail."""
+    import json
+
+    import aorta.agent.loop as loop_mod
+
+    mock_run_recipe.return_value = tmp_path / "run"
+    monkeypatch.setattr(
+        loop_mod,
+        "_read_cell_summaries",
+        lambda _d: [
+            {
+                "cell_name": "none-none",
+                "verdict": "fail",
+                "failure_detectors_fired": ["tier1:exit_nonzero"],
+                "capture": {},
+            }
+        ],
+    )
+
+    class BoomProposer:
+        def propose(self, **kwargs):
+            raise RuntimeError("litellm provider exploded")
+
+    config = AgentConfig(
+        output_dir=tmp_path / "out",
+        ticket="BOOM-1",
+        subprocess_argv=("true",),
+        policy=AgentPolicy(max_iterations=3),
+        mitigations_allowlist=("none", "tf32_off"),
+    )
+    result = run_agent_loop(config, proposer=BoomProposer())
+
+    assert result.outcome == "error"
+    assert result.report_path is not None and result.report_path.is_file()
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "agent_log.jsonl").read_text().splitlines()
+    ]
+    assert any(e["type"] == "error" and "litellm" in e["reason"] for e in events)
+
+
 def test_dry_run_writes_no_artifacts(mock_run_recipe, tmp_path, monkeypatch):
     """--dry-run must not write agent_log.jsonl / report, nor scan the cwd.
 

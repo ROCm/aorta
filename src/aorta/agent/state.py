@@ -80,12 +80,18 @@ def append_log_event(run_dir: Path, event_type: str, payload: dict[str, Any]) ->
     # named "ts"/"type" can't clobber the event envelope.
     record = {**payload, "ts": _utc_now_iso(), "type": event_type}
     path = agent_log_path(run_dir)
-    is_new = not path.exists()
     fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
-    if is_new:
+    # Enforce owner-only on EVERY write (best-effort), not just on create: a
+    # log left by an older version or created manually with broader perms must
+    # be narrowed, since it carries sensitive argv/symptom/hypothesis. chmod
+    # can fail on exotic filesystems or cross-owner files -- never let that
+    # abort logging.
+    try:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        log.debug("could not enforce 0600 on %s", path)
 
 
 def _read_log_events(run_dir: Path) -> list[dict[str, Any]]:

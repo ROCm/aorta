@@ -468,6 +468,23 @@ def run_agent_loop(
         outcome = "registry_error"
         recommended = str(exc)
         append_log_event(run_dir, "error", {"reason": str(exc)})
+    except Exception as exc:  # noqa: BLE001 - audit trail must survive any backend error
+        # A proposer backend (e.g. LiteLLM network/provider error) or any
+        # other unexpected failure must NOT skip the report write below --
+        # losing agent_report.md/agent_log.jsonl would erase the audit trail
+        # for the run. Convert to a safe stop outcome and fall through.
+        outcome = "error"
+        recommended = (
+            f"Agent loop aborted on an unexpected error ({type(exc).__name__}): "
+            f"{exc}. Inspect agent_log.jsonl and probe cell artifacts; the "
+            "report below was still written."
+        )
+        log.exception("agent loop aborted; emitting report before re-surfacing")
+        append_log_event(
+            run_dir,
+            "error",
+            {"reason": str(exc), "error_type": type(exc).__name__},
+        )
 
     # Dry-run returns early above, so the search loop always wrote a real
     # run_dir by here -- write the autopsy report unconditionally.
