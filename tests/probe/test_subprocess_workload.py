@@ -653,3 +653,123 @@ def test_read_log_text_uses_replace_not_backslashreplace(tmp_path):
         "backslashreplace and a binary-heavy log can quadruple the "
         "regex-input size, defeating the cap."
     )
+
+
+# ---- Latched-hang reconciliation against exit (false-positive fix) -------
+
+
+def _force_latched_hang(monkeypatch):
+    """Replace ``HangMonitor`` with a stub whose ``hang_detected`` is True.
+
+    The real monitor's stdout/io legs are blind to work delegated to a
+    child process tree (``sudo`` -> ``bash`` -> ``docker run`` ->
+    container -> ``python3``): the wrapper goes silent and does almost
+    no I/O of its own, so the monitor latches ``hang_detected`` on a
+    perfectly healthy run. This stub reproduces that latch
+    deterministically -- no real subprocess hang, no /proc polling, no
+    amd-smi -- so the reconciliation logic in ``run()`` can be pinned.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    real_monitor = workload_mod.HangMonitor
+
+    class _AlwaysHangMonitor(real_monitor):  # type: ignore[misc, valid-type]
+        def start(self) -> None:
+            self.hang_detected = True
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload_mod, "HangMonitor", _AlwaysHangMonitor)
+
+
+def _spy_classify_hang(monkeypatch, captured: dict):
+    """Spy on ``classify_trial`` to capture the ``hang_detected`` it sees."""
+    from aorta.workloads import _subprocess as workload_mod
+
+    real_classify = workload_mod.classify_trial
+
+    def _spy(ctx):
+        captured["hang_detected"] = ctx.hang_detected
+        return real_classify(ctx)
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _spy)
+
+
+def test_clean_exit_discards_latched_hang_flag(tmp_path, monkeypatch):
+    """A wrapped command that exits 0 within the timeout is NEVER
+    classified ``tier2:hang``, even when the in-flight monitor latched
+    ``hang_detected`` (issue: false-positive ``tier2:hang`` on
+    docker/sudo-delegated workloads). A voluntary exit 0 within the
+    timeout cannot have been hung, so the advisory flag is dropped
+    before it reaches the classifier.
+    """
+    captured: dict = {}
+    _force_latched_hang(monkeypatch)
+    _spy_classify_hang(monkeypatch, captured)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    result = wl.run()
+
+    assert captured["hang_detected"] is False, (
+        "latched hang flag reached classify_trial despite a clean exit 0 "
+        "within the timeout -- the reconciliation gate is missing"
+    )
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "pass"
+    assert doc["exit_code"] == 0
+    assert doc["timed_out"] is False
+    assert "tier2:hang" not in doc["failure_detectors_fired"]
+    assert result.passed is True
+
+
+def test_nonzero_exit_keeps_latched_hang_flag(tmp_path, monkeypatch):
+    """A latched hang flag survives when the process exits non-zero.
+
+    Reconciliation only discards the flag for a *clean* exit
+    (``exit_code == 0 and not timed_out``). A non-zero exit is a real
+    failure, so the hang signal is preserved and ``tier2:hang`` still
+    surfaces -- the fix must not blanket-suppress the detector.
+    """
+    captured: dict = {}
+    _force_latched_hang(monkeypatch)
+    _spy_classify_hang(monkeypatch, captured)
+
+    wl = _make_workload(tmp_path, ["false"])
+    wl.setup()
+    result = wl.run()
+
+    assert captured["hang_detected"] is True, (
+        "the reconciliation gate over-reached: it discarded the latched "
+        "hang flag on a non-zero exit, where the signal is still meaningful"
+    )
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "fail"
+    assert doc["exit_code"] != 0
+    assert "tier2:hang" in doc["failure_detectors_fired"]
+    assert result.passed is False
+
+
+def test_timed_out_keeps_latched_hang_flag(tmp_path, monkeypatch):
+    """A latched hang flag survives a genuine timeout.
+
+    When ``proc.wait(timeout=...)`` fires, the process is killed
+    (``exit_code == -1``, ``timed_out == True``) -- a real hang. The
+    reconciliation gate keys off ``exit_code == 0 and not timed_out``,
+    so a timed-out trial keeps ``tier2:hang``.
+    """
+    captured: dict = {}
+    _force_latched_hang(monkeypatch)
+    _spy_classify_hang(monkeypatch, captured)
+
+    wl = _make_workload(tmp_path, ["sleep", "30"], timeout_per_trial=0.2)
+    wl.setup()
+    result = wl.run()
+
+    assert captured["hang_detected"] is True
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["timed_out"] is True
+    assert doc["verdict"] == "fail"
+    assert "tier2:hang" in doc["failure_detectors_fired"]
+    assert result.passed is False

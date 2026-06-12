@@ -41,6 +41,7 @@ Phase-1 minimum shape keeps working.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
@@ -65,6 +66,8 @@ from aorta.probe.classifier.tier3_kernel import (
 )
 from aorta.probe.classifier.verdict import Verdict
 from aorta.workloads._base import Workload, WorkloadResult
+
+log = logging.getLogger(__name__)
 
 # Process-wide Tier 3 state. Shared across every SubprocessWorkload
 # instance the dispatcher constructs over one ``aorta probe`` invocation
@@ -428,6 +431,36 @@ class SubprocessWorkload(Workload):
         # are bugs, not trial outcomes).
         log_text = _read_log_text(stdout_path, stderr_path)
         hang_detected = bool(hang_monitor and hang_monitor.hang_detected)
+        # Reconcile the latched hang flag against the actual exit.
+        #
+        # The in-flight HangMonitor watches three signals on the
+        # *wrapper* PID: stdout silence on this trial's stdout.log, I/O
+        # idleness on /proc/<wrapper_pid>/io, and GPU idleness. For a
+        # workload that delegates its real work to a child process tree
+        # the parent can't see (``sudo`` -> ``bash run.sh`` ->
+        # ``docker run`` -> container -> ``python3``), the wrapper goes
+        # quiet and does almost no I/O of its own while the descendants
+        # do all the work. That trips ``stdout_silent`` + ``io_idle``
+        # (two of three) and latches ``hang_detected`` even though the
+        # workload is alive and busy. Those two legs are structurally
+        # blind to delegated work, so a mid-run latch is advisory only.
+        #
+        # A process that voluntarily exited 0 within its timeout was, by
+        # definition, not hung -- a real hang would have either kept the
+        # process alive until ``proc.wait(timeout=...)`` fired
+        # (``timed_out=True``) or surfaced as a non-zero exit. Drop the
+        # latched flag in that case so a clean run is never classified
+        # ``tier2:hang``. Genuine hangs (``timed_out=True``) and crashes
+        # (``exit_code != 0``) keep the flag and still classify as fail.
+        if hang_detected and exit_code == 0 and not timed_out:
+            log.info(
+                "tier2:hang latched mid-run for argv[0]=%r but the process "
+                "exited 0 within the timeout; discarding the advisory flag "
+                "(the monitor's stdout/io legs are blind to work delegated "
+                "to a child process tree).",
+                argv[0] if argv else "<unknown>",
+            )
+            hang_detected = False
 
         # Best-effort ``peak_vram_mib`` from the Tier-3 amd-smi
         # snapshots. We only have two samples (pre + post Popen) so
