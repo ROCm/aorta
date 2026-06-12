@@ -46,7 +46,11 @@ class AgentStep:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AgentStep:
-        stop = bool(raw.get("stop", False))
+        # Accept only a genuine JSON boolean: bool("false") is True, so a
+        # malformed/untrusted "stop": "false" must not prematurely stop the
+        # loop. Anything that isn't a real bool defaults to not-stopping.
+        stop_raw = raw.get("stop", False)
+        stop = stop_raw if isinstance(stop_raw, bool) else False
         reason_raw = raw.get("stop_reason")
         stop_reason: StopReason | None = None
         if stop and isinstance(reason_raw, str) and reason_raw in (

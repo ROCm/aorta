@@ -38,3 +38,20 @@ def test_from_dict_bare_string_mitigations_not_exploded():
 def test_from_dict_non_numeric_confidence_is_safe():
     step = AgentStep.from_dict({"confidence": "high"})
     assert step.confidence == 0.0
+
+
+def test_from_dict_string_stop_does_not_stop_loop():
+    """A non-bool "stop" (e.g. the string "false") must not stop the loop.
+
+    ``bool("false")`` is ``True``; only a genuine JSON boolean may stop.
+    """
+    assert AgentStep.from_dict({"stop": "false"}).stop is False
+    assert AgentStep.from_dict({"stop": "true"}).stop is False
+    assert AgentStep.from_dict({"stop": 0}).stop is False
+    assert AgentStep.from_dict({"stop": None}).stop is False
+
+
+def test_from_dict_real_bool_stop_preserved():
+    assert AgentStep.from_dict({"stop": True}).stop is True
+    assert AgentStep.from_dict({"stop": False}).stop is False
+    assert AgentStep.from_dict({}).stop is False

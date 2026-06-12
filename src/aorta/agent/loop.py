@@ -479,7 +479,9 @@ def run_agent_loop(
             f"{exc}. Inspect agent_log.jsonl and probe cell artifacts; the "
             "report below was still written."
         )
-        log.exception("agent loop aborted; emitting report before re-surfacing")
+        log.exception(
+            "agent loop aborted; recording 'error' outcome and emitting report"
+        )
         append_log_event(
             run_dir,
             "error",
