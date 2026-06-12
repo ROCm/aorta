@@ -120,6 +120,44 @@ def _baseline_pass_summaries(_run_dir):
     ]
 
 
+def test_baseline_pass_short_circuits_before_proposer(
+    mock_run_recipe, tmp_path, monkeypatch
+):
+    """A passing baseline must stop the loop before the proposer/budget run.
+
+    Baseline-pass is deterministic from probe results, so with an LLM/custom
+    backend it must short-circuit -- never spending a propose() call (tokens)
+    nor mis-reporting policy_stop when the iteration budget is tight.
+    """
+    import aorta.agent.loop as loop_mod
+
+    mock_run_recipe.return_value = tmp_path / "run"
+    monkeypatch.setattr(loop_mod, "_read_cell_summaries", _baseline_pass_summaries)
+
+    class _ExplodingProposer:
+        called = False
+
+        def propose(self, **kwargs):
+            type(self).called = True
+            raise AssertionError("proposer must not be called when baseline passes")
+
+    proposer = _ExplodingProposer()
+    config = AgentConfig(
+        output_dir=tmp_path / "out",
+        ticket="BASELINE-LLM",
+        subprocess_argv=("true",),
+        # Tight budget: a non-short-circuited loop would hit the budget check
+        # and resolve to policy_stop instead of baseline_pass.
+        policy=AgentPolicy(max_iterations=1),
+        mitigations_allowlist=("none", "tf32_off"),
+        llm_backend="litellm",
+    )
+    result = run_agent_loop(config, proposer=proposer)
+
+    assert result.outcome == "baseline_pass"
+    assert _ExplodingProposer.called is False
+
+
 def test_whitespace_ticket_aligns_slug_and_recipe(mock_run_recipe, tmp_path, monkeypatch):
     """A whitespace-only ticket normalises to None so the agent slug and the
     probe recipe ticket agree, and the audit log keeps raw + slug distinct."""

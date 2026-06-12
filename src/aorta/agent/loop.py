@@ -373,6 +373,24 @@ def run_agent_loop(
                 config, raw_ticket, mitigation_axis, recipe_template
             )
             summaries = _read_cell_summaries(run_dir)
+
+            # Baseline-pass is fully deterministic from probe results: if the
+            # none-none baseline cell passes, the repro succeeds without any
+            # mitigation and the search is moot. Short-circuit here -- BEFORE
+            # winner detection (a passing {mitigation}-none cell is not a "fix"
+            # when nothing was broken), the iteration-budget check, and the
+            # proposer call. Otherwise an LLM backend would spend tokens, and
+            # an exhausted budget would mis-report policy_stop instead of
+            # baseline_pass.
+            if _baseline_passed(summaries):
+                outcome = "baseline_pass"
+                recommended = (
+                    "Baseline cell (none-none) passed. The repro succeeds "
+                    "without mitigations; no search was run."
+                )
+                append_log_event(run_dir, "baseline_pass", {})
+                break
+
             winner = _find_winning_mitigation(summaries)
             if winner:
                 state.winning_mitigation = winner
