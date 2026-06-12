@@ -595,6 +595,98 @@ class TestEnvSnapshot:
 # ---------------------------------------------------------------------------
 
 
+class TestProbeStdioRedirect:
+    """fd-level capture of benign HIP/C-runtime probe noise (#220).
+
+    On a multi-GPU ROCm host the in-process ``import torch`` during the env
+    probe makes the HIP runtime ``dlopen`` write one
+    ``(null): No such file or directory`` line per GPU straight to fd 2.
+    ``_ProbeStdioRedirect`` must intercept those raw ``write(2, ...)`` syscalls
+    (which ``contextlib.redirect_stderr`` cannot) so they never reach the
+    operator's terminal, and re-emit them at DEBUG for post-hoc debugging.
+    """
+
+    def _with_outer_terminal(self, tmp_path: Path):
+        """Install a temp file on real fds 1/2; return (path, restore())."""
+        outer = tmp_path / "outer_terminal.txt"
+        sys.stdout.flush()
+        sys.stderr.flush()
+        outer_fd = os.open(
+            str(outer), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644
+        )
+        saved1, saved2 = os.dup(1), os.dup(2)
+        os.dup2(outer_fd, 1)
+        os.dup2(outer_fd, 2)
+
+        def restore():
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(saved1, 1)
+            os.dup2(saved2, 2)
+            os.close(saved1)
+            os.close(saved2)
+            os.close(outer_fd)
+
+        return outer, restore
+
+    def test_raw_fd2_writes_are_captured_not_leaked(self, tmp_path, caplog):
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            for _ in range(8):  # one (null) line per GPU on an 8-GPU host
+                os.write(2, b"(null): No such file or directory\n")
+            os.write(1, b"some toolchain chatter\n")
+            with caplog.at_level("DEBUG", logger=env_mod.log.name):
+                redirect.stop()
+        finally:
+            restore()
+
+        assert outer.read_text() == "", "probe noise leaked to the terminal"
+        assert any(
+            "(null): No such file or directory" in rec.getMessage()
+            for rec in caplog.records
+        ), "captured noise should be re-emitted at DEBUG"
+
+    def test_stop_is_idempotent(self, tmp_path):
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            os.write(2, b"noise\n")
+            redirect.stop()
+            redirect.stop()  # must be a no-op, not crash or re-restore
+        finally:
+            restore()
+        assert outer.read_text() == ""
+
+    def test_collect_env_does_not_leak_probe_noise(
+        self, all_disabled, tmp_path, monkeypatch
+    ):
+        """End-to-end: fd-2 noise from a probe never reaches the terminal."""
+        original = env_mod._detect_runtime_context
+
+        def noisy_detect():
+            for _ in range(8):
+                os.write(2, b"(null): No such file or directory\n")
+            return original()
+
+        monkeypatch.setattr(env_mod, "_detect_runtime_context", noisy_detect)
+
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            snapshot = collect_env()
+        finally:
+            restore()
+
+        assert isinstance(snapshot, EnvSnapshot)
+        assert outer.read_text() == "", "env probe leaked HIP noise to terminal"
+        # The benign noise is NOT a probe failure -> must not inflate partial.
+        assert not any(
+            "(null)" in reason for reason in snapshot.partial_reasons
+        )
+
+
 class TestCollectEnvContract:
     def test_collect_env_never_raises_when_all_probes_fail(self, all_disabled):
         """Acceptance: monkeypatch every probe to fail, still get an EnvSnapshot."""

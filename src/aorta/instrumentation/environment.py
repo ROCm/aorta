@@ -1276,6 +1276,97 @@ class EnvSnapshot:
 # ---------------------------------------------------------------------------
 
 
+class _ProbeStdioRedirect:
+    """OS-level fd 1/2 capture for the duration of the env-probe body.
+
+    ``collect_env`` imports torch in-process to read versions / scan kernels
+    (``_capture_pytorch_version`` and the other torch-touching probes). On a
+    multi-GPU ROCm host the in-process HIP runtime ``dlopen`` performs a
+    device-topology enumeration that writes one benign
+    ``(null): No such file or directory`` line per GPU **directly to file
+    descriptor 2** (a C-runtime ``perror`` with a NULL program name), plus
+    occasional toolchain chatter on fd 1. Because the probe runs in the
+    long-lived ``aorta`` parent process, that noise lands on the operator's
+    terminal and looks like a fatal workload error (#220).
+
+    ``contextlib.redirect_stderr`` cannot intercept this -- it only swaps the
+    Python ``sys.stderr`` object and never moves the real fd 2 -- so we
+    ``dup2`` fds 1/2 onto a temp file for the probe and re-emit any captured
+    bytes at DEBUG level afterwards.
+
+    Fail-soft, matching ``collect_env``'s never-raises contract: if the real
+    descriptors can't be duplicated (already closed / detached), the probe
+    runs unredirected rather than risk losing the snapshot. ``stop`` is
+    idempotent so the caller can restore early (before disaster logging) and
+    still rely on a ``finally`` safety net.
+    """
+
+    def __init__(self) -> None:
+        self._saved_out: int | None = None
+        self._saved_err: int | None = None
+        self._capture: Any | None = None
+
+    def start(self) -> None:
+        try:
+            self._saved_out = os.dup(1)
+            self._saved_err = os.dup(2)
+        except OSError:
+            # No real stdio fds to protect (e.g. detached/closed). Probe as-is.
+            self._saved_out = None
+            self._saved_err = None
+            return
+        try:
+            self._capture = tempfile.TemporaryFile(mode="w+b")
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(self._capture.fileno(), 1)
+            os.dup2(self._capture.fileno(), 2)
+        except OSError:
+            # Redirect setup failed after dup(); undo and probe unredirected.
+            self._restore_fds()
+
+    def _restore_fds(self) -> None:
+        if self._saved_out is not None:
+            try:
+                os.dup2(self._saved_out, 1)
+            finally:
+                os.close(self._saved_out)
+                self._saved_out = None
+        if self._saved_err is not None:
+            try:
+                os.dup2(self._saved_err, 2)
+            finally:
+                os.close(self._saved_err)
+                self._saved_err = None
+
+    def stop(self) -> None:
+        if self._saved_out is None and self._saved_err is None:
+            return
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self._restore_fds()
+        noise = ""
+        if self._capture is not None:
+            try:
+                self._capture.seek(0)
+                noise = (
+                    self._capture.read().decode("utf-8", errors="replace").strip()
+                )
+            except OSError:
+                noise = ""
+            finally:
+                self._capture.close()
+                self._capture = None
+        if noise:
+            log.debug(
+                "env probe suppressed %d byte(s) of low-level stdout/stderr "
+                "(benign HIP/C-runtime device-enumeration noise on ROCm hosts; "
+                "see #220): %s",
+                len(noise),
+                noise,
+            )
+
+
 def collect_env(
     buck_target: str | None = None,
     buck_timeout: int = 10,
@@ -1312,6 +1403,12 @@ def collect_env(
     subprocess (seconds; default 10).
     """
     reasons: list[str] = []
+    # Capture fds 1/2 at the OS level for the probe body so that the benign
+    # HIP/C-runtime device-enumeration noise the in-process ``import torch``
+    # below emits straight to fd 2 never reaches the operator's terminal
+    # (#220). It is re-emitted at DEBUG level instead.
+    _probe_stdio = _ProbeStdioRedirect()
+    _probe_stdio.start()
     try:
         runtime_context = _detect_runtime_context()  # never partial; always populates
         system_health = _run_rdhc(reasons)
@@ -1398,6 +1495,9 @@ def collect_env(
             nics=nics,
         )
     except Exception as exc:  # noqa: BLE001 -- this is the never-raises gate
+        # Restore stdio before logging so the disaster trace reaches the
+        # operator's terminal rather than the captured (and discarded) buffer.
+        _probe_stdio.stop()
         log.info("collect_env() hit unexpected exception", exc_info=True)
         return _disaster_snapshot(
             preceding_reasons=reasons,
@@ -1406,6 +1506,9 @@ def collect_env(
                 f"({type(exc).__name__}: {exc})"
             ),
         )
+    finally:
+        # Idempotent: a no-op if the except branch already restored stdio.
+        _probe_stdio.stop()
 
 
 def _disaster_snapshot(
