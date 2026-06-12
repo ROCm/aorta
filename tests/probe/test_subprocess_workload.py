@@ -415,6 +415,45 @@ def test_terminate_process_tree_refuses_own_group(monkeypatch):
     assert sent == [signal.SIGTERM], "must fall back to signalling the child"
 
 
+def test_terminate_process_tree_escalates_to_kill_on_interrupt(monkeypatch):
+    """A Ctrl-C during the SIGTERM grace wait must still SIGKILL, then re-raise.
+
+    Regression for the #220 follow-up: if ``KeyboardInterrupt`` propagated out
+    of the first ``proc.wait()`` the function would skip the SIGKILL
+    escalation and re-orphan a SIGTERM-ignoring group (e.g. a stubborn
+    ``docker run`` client). It must force-kill the group before propagating.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    signals: list[int] = []
+    fake_pgid = 313131
+
+    monkeypatch.setattr(workload_mod.os, "getpgid", lambda pid: fake_pgid)
+    monkeypatch.setattr(workload_mod.os, "getpgrp", lambda: fake_pgid + 1)
+    monkeypatch.setattr(
+        workload_mod.os, "killpg", lambda pgid, sig: signals.append(sig)
+    )
+
+    class _InterruptingChild:
+        pid = 999
+
+        def __init__(self):
+            self._waits = 0
+
+        def wait(self, timeout=None):
+            self._waits += 1
+            if self._waits == 1:
+                # Operator hits Ctrl-C again while we wait out the grace.
+                raise KeyboardInterrupt()
+            return -9
+
+    with pytest.raises(KeyboardInterrupt):
+        workload_mod._terminate_process_tree(_InterruptingChild(), grace_sec=0.01)
+    assert signals == [signal.SIGTERM, signal.SIGKILL], (
+        "interrupt during grace must still escalate to SIGKILL before re-raising"
+    )
+
+
 def test_keyboard_interrupt_reaps_tree_and_reraises(tmp_path, monkeypatch):
     """Ctrl-C during a trial must reap the child tree, then re-raise.
 

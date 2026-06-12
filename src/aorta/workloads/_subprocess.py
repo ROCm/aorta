@@ -133,11 +133,17 @@ def _terminate_process_tree(
     and is not in this group; tearing it down needs an explicit ``docker kill``
     in the workload wrapper.
 
-    Never raises. A race where the group already exited (``ESRCH``) is the
-    expected common case, not an error. As a safety net it refuses to signal
-    the caller's own process group -- which can only happen if the child was
-    not started in a new session -- so a misconfiguration can never take down
-    the ``aorta`` process itself.
+    A race where the group already exited (``ESRCH``) is the expected common
+    case, not an error. As a safety net it refuses to signal the caller's own
+    process group -- which can only happen if the child was not started in a
+    new session -- so a misconfiguration can never take down the ``aorta``
+    process itself.
+
+    The only exception it propagates is ``KeyboardInterrupt``: a second
+    ``Ctrl-C`` landing while we wait out the grace period must not abandon the
+    teardown mid-escalation and re-orphan the tree (#220). In that case we
+    force ``SIGKILL`` on the group, reap best-effort, and *then* re-raise so
+    the operator's interrupt still aborts the run.
     """
     pgid: int | None
     try:
@@ -162,6 +168,16 @@ def _terminate_process_tree(
         except (ProcessLookupError, OSError):
             pass
 
+    def _reap_after_kill() -> None:
+        # The group has already been SIGKILLed; give it a brief, fully
+        # interrupt-tolerant chance to be reaped so we don't leave zombies.
+        try:
+            proc.wait(timeout=grace_sec)
+        except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
+            pass
+        except KeyboardInterrupt:
+            pass
+
     _send(signal.SIGTERM)
     try:
         proc.wait(timeout=grace_sec)
@@ -170,11 +186,21 @@ def _terminate_process_tree(
         pass
     except (ProcessLookupError, OSError):
         return
+    except KeyboardInterrupt:
+        # Don't abandon teardown mid-escalation: force-kill the group and
+        # reap before propagating the operator's interrupt.
+        _send(signal.SIGKILL)
+        _reap_after_kill()
+        raise
     _send(signal.SIGKILL)
     try:
         proc.wait(timeout=grace_sec)
     except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
         pass
+    except KeyboardInterrupt:
+        # Group already got SIGKILL; reap what we can, then propagate.
+        _reap_after_kill()
+        raise
 
 
 class SubprocessWorkload(Workload):
