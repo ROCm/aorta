@@ -442,25 +442,33 @@ class SubprocessWorkload(Workload):
                     start_new_session=True,
                 )
                 launched = True
-                # Wire the third leg of the two-of-three Tier 2
-                # predicate. The closure spawns one ``amd-smi monitor``
-                # call per HangMonitor poll (~12/min at the default 5s
-                # poll cadence) and returns True iff the busiest GPU
-                # reports < GPU_IDLE_UTILIZATION_THRESHOLD_PCT. When
-                # amd-smi is missing or unparseable the closure returns
-                # False, so the predicate gracefully degrades to the
-                # 2-of-2 ``stdout_silent`` + ``io_idle`` shape that the
-                # round-1 wiring was already covering (rubric §2.B FR
-                # 2.11 fail-soft policy).
-                hang_monitor = HangMonitor(
-                    pid=proc.pid,
-                    stdout_path=stdout_path,
-                    hang_window_sec=hang_window_sec,
-                    hang_grace_period_at_start=hang_grace_sec,
-                    gpu_idle_probe=gpu_idle_probe_from_state(_TIER3_STATE),
-                )
-                hang_monitor.start()
+                # Everything from the monitor wiring through proc.wait() is in
+                # one try so a Ctrl-C landing *anywhere* after Popen -- e.g.
+                # during HangMonitor.start() -- still reaches the
+                # ``except KeyboardInterrupt`` that reaps the child tree, and
+                # the ``finally`` always stops the monitor thread. Otherwise an
+                # interrupt between Popen and the wait would orphan the
+                # sudo/docker/python grandchildren this PR is meant to reap
+                # (#220) and leak the monitor thread.
                 try:
+                    # Wire the third leg of the two-of-three Tier 2
+                    # predicate. The closure spawns one ``amd-smi monitor``
+                    # call per HangMonitor poll (~12/min at the default 5s
+                    # poll cadence) and returns True iff the busiest GPU
+                    # reports < GPU_IDLE_UTILIZATION_THRESHOLD_PCT. When
+                    # amd-smi is missing or unparseable the closure returns
+                    # False, so the predicate gracefully degrades to the
+                    # 2-of-2 ``stdout_silent`` + ``io_idle`` shape that the
+                    # round-1 wiring was already covering (rubric §2.B FR
+                    # 2.11 fail-soft policy).
+                    hang_monitor = HangMonitor(
+                        pid=proc.pid,
+                        stdout_path=stdout_path,
+                        hang_window_sec=hang_window_sec,
+                        hang_grace_period_at_start=hang_grace_sec,
+                        gpu_idle_probe=gpu_idle_probe_from_state(_TIER3_STATE),
+                    )
+                    hang_monitor.start()
                     exit_code = proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     timed_out = True

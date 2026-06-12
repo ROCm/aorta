@@ -495,6 +495,59 @@ def test_keyboard_interrupt_reaps_tree_and_reraises(tmp_path, monkeypatch):
     assert len(torn_down) == 1, "child tree must be torn down on interrupt"
 
 
+def test_keyboard_interrupt_during_monitor_start_reaps_tree(tmp_path, monkeypatch):
+    """Ctrl-C during HangMonitor.start() (before proc.wait) must still reap.
+
+    Regression for the #222 follow-up: the monitor wiring + start() now live
+    in the same try as proc.wait(), so an interrupt landing between Popen and
+    the wait reaches the ``except KeyboardInterrupt`` teardown instead of
+    orphaning the child tree.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    real_popen = workload_mod.subprocess.Popen
+    torn_down: list = []
+
+    class _OkPopen:
+        def __init__(self, *args, **kwargs):
+            self._real = real_popen(
+                ["true"],
+                start_new_session=True,
+                **{
+                    k: v
+                    for k, v in kwargs.items()
+                    if k in ("stdout", "stderr", "env")
+                },
+            )
+            self.pid = self._real.pid
+
+        def wait(self, timeout=None):  # should never be reached
+            return self._real.wait(timeout=timeout)
+
+    class _InterruptingMonitor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise KeyboardInterrupt()
+
+        def stop(self):
+            pass
+
+    def _spy_teardown(proc, grace_sec=workload_mod._TERMINATE_GRACE_SEC):
+        torn_down.append(proc)
+
+    monkeypatch.setattr(workload_mod.subprocess, "Popen", _OkPopen)
+    monkeypatch.setattr(workload_mod, "HangMonitor", _InterruptingMonitor)
+    monkeypatch.setattr(workload_mod, "_terminate_process_tree", _spy_teardown)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    with pytest.raises(KeyboardInterrupt):
+        wl.run()
+    assert len(torn_down) == 1, "tree must be reaped even if Ctrl-C precedes proc.wait()"
+
+
 # ---- FR 2.9 (Phase 2 result.json shape) ----------------------------------
 
 
