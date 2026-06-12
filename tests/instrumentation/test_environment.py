@@ -688,6 +688,33 @@ class TestProbeStdioRedirect:
             os.fstat(duped[0])  # orphan fd was closed, not leaked
         redirect.stop()  # unredirected instance -> no-op, must not crash
 
+    def test_start_dup2_failure_closes_capture_file(self, monkeypatch):
+        """A ``dup2()`` failure after the temp file is created must close it (#221).
+
+        ``start()`` dups fds 1/2 successfully, then ``dup2`` raises. The
+        fallback restores the real fds (clearing ``_saved_out/_saved_err``),
+        which makes a later ``stop()`` short-circuit -- so ``start()`` itself
+        must close the capture file or it leaks the handle.
+        """
+        redirect = env_mod._ProbeStdioRedirect()
+        real_dup2 = os.dup2
+        calls: list[int] = []
+
+        def flaky_dup2(*args, **kwargs):
+            # Fail the first capture redirect; let _restore_fds() succeed.
+            if not calls:
+                calls.append(1)
+                raise OSError("simulated: dup2 failed")
+            return real_dup2(*args, **kwargs)
+
+        monkeypatch.setattr(env_mod.os, "dup2", flaky_dup2)
+        redirect.start()
+
+        assert redirect._saved_out is None
+        assert redirect._saved_err is None
+        assert redirect._capture is None, "capture temp file was leaked"
+        redirect.stop()  # no-op, must not crash
+
     def test_collect_env_does_not_leak_probe_noise(
         self, all_disabled, tmp_path, monkeypatch
     ):

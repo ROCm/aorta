@@ -1331,7 +1331,15 @@ class _ProbeStdioRedirect:
             os.dup2(self._capture.fileno(), 2)
         except OSError:
             # Redirect setup failed after dup(); undo and probe unredirected.
+            # Close the capture file here: _restore_fds() clears the saved fds,
+            # so a later stop() short-circuits and would otherwise leak it.
             self._restore_fds()
+            if self._capture is not None:
+                try:
+                    self._capture.close()
+                except OSError:
+                    pass
+                self._capture = None
 
     def _restore_fds(self) -> None:
         if self._saved_out is not None:
