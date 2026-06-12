@@ -660,6 +660,34 @@ class TestProbeStdioRedirect:
             restore()
         assert outer.read_text() == ""
 
+    def test_start_partial_dup_failure_does_not_leak_fd(self, monkeypatch):
+        """A partial ``dup()`` must not orphan the first descriptor (#221).
+
+        If ``os.dup(1)`` succeeds but ``os.dup(2)`` raises (fd 2 already
+        closed/detached), ``start()`` falls back to probing unredirected -- but
+        the fd from the successful first ``dup()`` must be closed, not leaked.
+        """
+        redirect = env_mod._ProbeStdioRedirect()
+        real_dup = os.dup
+        duped: list[int] = []
+
+        def flaky_dup(fd):
+            if not duped:
+                new = real_dup(fd)
+                duped.append(new)
+                return new
+            raise OSError("simulated: fd 2 closed/detached")
+
+        monkeypatch.setattr(env_mod.os, "dup", flaky_dup)
+        redirect.start()
+
+        assert redirect._saved_out is None
+        assert redirect._saved_err is None
+        assert duped, "test should have exercised the first dup()"
+        with pytest.raises(OSError):
+            os.fstat(duped[0])  # orphan fd was closed, not leaked
+        redirect.stop()  # unredirected instance -> no-op, must not crash
+
     def test_collect_env_does_not_leak_probe_noise(
         self, all_disabled, tmp_path, monkeypatch
     ):

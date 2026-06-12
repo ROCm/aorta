@@ -1311,7 +1311,15 @@ class _ProbeStdioRedirect:
             self._saved_out = os.dup(1)
             self._saved_err = os.dup(2)
         except OSError:
-            # No real stdio fds to protect (e.g. detached/closed). Probe as-is.
+            # No real stdio fds to protect (e.g. detached/closed), or the
+            # second dup() raised after the first succeeded. Close any orphan
+            # descriptor from a partial dup() so we don't leak it, then probe
+            # unredirected.
+            if self._saved_out is not None:
+                try:
+                    os.close(self._saved_out)
+                except OSError:
+                    pass
             self._saved_out = None
             self._saved_err = None
             return
@@ -1346,14 +1354,16 @@ class _ProbeStdioRedirect:
         sys.stderr.flush()
         self._restore_fds()
         noise = ""
+        noise_bytes = 0
         if self._capture is not None:
             try:
                 self._capture.seek(0)
-                noise = (
-                    self._capture.read().decode("utf-8", errors="replace").strip()
-                )
+                raw = self._capture.read()
+                noise_bytes = len(raw)
+                noise = raw.decode("utf-8", errors="replace").strip()
             except OSError:
                 noise = ""
+                noise_bytes = 0
             finally:
                 self._capture.close()
                 self._capture = None
@@ -1362,7 +1372,7 @@ class _ProbeStdioRedirect:
                 "env probe suppressed %d byte(s) of low-level stdout/stderr "
                 "(benign HIP/C-runtime device-enumeration noise on ROCm hosts; "
                 "see #220): %s",
-                len(noise),
+                noise_bytes,
                 noise,
             )
 
