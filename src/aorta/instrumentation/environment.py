@@ -1306,6 +1306,16 @@ class _ProbeStdioRedirect:
         self._saved_err: int | None = None
         self._capture: Any | None = None
 
+    @staticmethod
+    def _flush_std_streams() -> None:
+        # Best-effort: a closed/detached stream raises ValueError (not OSError)
+        # on flush(); never let that escape (collect_env never-raises contract).
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
     def start(self) -> None:
         try:
             self._saved_out = os.dup(1)
@@ -1325,41 +1335,55 @@ class _ProbeStdioRedirect:
             return
         try:
             self._capture = tempfile.TemporaryFile(mode="w+b")
-            sys.stdout.flush()
-            sys.stderr.flush()
+            self._flush_std_streams()
             os.dup2(self._capture.fileno(), 1)
             os.dup2(self._capture.fileno(), 2)
-        except OSError:
-            # Redirect setup failed after dup(); undo and probe unredirected.
+        except Exception:
+            # Broadened from OSError: TemporaryFile/dup2 can raise OSError and
+            # a closed stream's flush() raises ValueError. start() runs *before*
+            # collect_env()'s try/except, so any escape would violate the
+            # never-raises contract -- fail soft and probe unredirected.
             # Close the capture file here: _restore_fds() clears the saved fds,
             # so a later stop() short-circuits and would otherwise leak it.
             self._restore_fds()
             if self._capture is not None:
                 try:
                     self._capture.close()
-                except OSError:
+                except Exception:
                     pass
                 self._capture = None
 
     def _restore_fds(self) -> None:
+        # Fail-soft: called from stop() inside collect_env()'s except/finally,
+        # so a dup2()/close() failure (e.g. EBADF on an invalidated fd) must
+        # never raise or it would mask the snapshot / original exception.
         if self._saved_out is not None:
             try:
                 os.dup2(self._saved_out, 1)
+            except OSError:
+                pass
             finally:
-                os.close(self._saved_out)
+                try:
+                    os.close(self._saved_out)
+                except OSError:
+                    pass
                 self._saved_out = None
         if self._saved_err is not None:
             try:
                 os.dup2(self._saved_err, 2)
+            except OSError:
+                pass
             finally:
-                os.close(self._saved_err)
+                try:
+                    os.close(self._saved_err)
+                except OSError:
+                    pass
                 self._saved_err = None
 
     def stop(self) -> None:
         if self._saved_out is None and self._saved_err is None:
             return
-        sys.stdout.flush()
-        sys.stderr.flush()
+        self._flush_std_streams()
         self._restore_fds()
         noise = ""
         noise_bytes = 0
@@ -1369,11 +1393,17 @@ class _ProbeStdioRedirect:
                 raw = self._capture.read()
                 noise_bytes = len(raw)
                 noise = raw.decode("utf-8", errors="replace").strip()
-            except OSError:
+            except Exception:
+                # Broadened from OSError: seek/read on a closed file raises
+                # ValueError. stop() runs in collect_env()'s finally and must
+                # never raise.
                 noise = ""
                 noise_bytes = 0
             finally:
-                self._capture.close()
+                try:
+                    self._capture.close()
+                except Exception:
+                    pass
                 self._capture = None
         if noise:
             log.debug(

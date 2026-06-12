@@ -715,6 +715,73 @@ class TestProbeStdioRedirect:
         assert redirect._capture is None, "capture temp file was leaked"
         redirect.stop()  # no-op, must not crash
 
+    def test_start_fail_soft_on_non_oserror_flush(self, monkeypatch):
+        """A closed stream's flush() raises ValueError; start() must fail soft.
+
+        ``start()`` runs *before* ``collect_env()``'s try/except, so any
+        exception escaping it (here a ``ValueError`` from ``sys.stdout.flush``)
+        would break the never-raises contract (#221).
+        """
+        redirect = env_mod._ProbeStdioRedirect()
+
+        class _ClosedStream:
+            def flush(self):
+                raise ValueError("I/O operation on closed file")
+
+        monkeypatch.setattr(env_mod.sys, "stdout", _ClosedStream())
+        redirect.start()  # must not raise
+        redirect.stop()
+        # Setup aborted -> nothing left dangling.
+        assert redirect._saved_out is None
+        assert redirect._saved_err is None
+        assert redirect._capture is None
+
+    def test_stop_never_raises_when_streams_closed(self, tmp_path, monkeypatch):
+        """stop() runs in collect_env()'s finally and must never raise (#221)."""
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            os.write(2, b"noise\n")
+
+            class _ClosedStream:
+                def flush(self):
+                    raise ValueError("closed")
+
+            monkeypatch.setattr(env_mod.sys, "stdout", _ClosedStream())
+            try:
+                redirect.stop()  # must not raise despite flush ValueError
+            finally:
+                # Undo the closed-stdout patch before the outer-terminal
+                # teardown, which flushes sys.stdout itself.
+                monkeypatch.undo()
+        finally:
+            restore()
+        assert redirect._capture is None
+
+    def test_restore_fds_swallows_dup2_failure(self, tmp_path, monkeypatch):
+        """_restore_fds() must be best-effort: a dup2 EBADF must not escape."""
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            real_dup2 = os.dup2
+
+            def boom_dup2(*_a, **_k):
+                raise OSError("simulated: EBADF on restore")
+
+            monkeypatch.setattr(env_mod.os, "dup2", boom_dup2)
+            try:
+                redirect.stop()  # must not raise even though restore dup2 fails
+            finally:
+                # Restore the real dup2 before the outer terminal teardown,
+                # which itself dup2()s fds 1/2 back to the test runner.
+                monkeypatch.setattr(env_mod.os, "dup2", real_dup2)
+        finally:
+            restore()
+        assert redirect._saved_out is None
+        assert redirect._saved_err is None
+
     def test_collect_env_does_not_leak_probe_noise(
         self, all_disabled, tmp_path, monkeypatch
     ):
