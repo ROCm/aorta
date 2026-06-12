@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import time
@@ -105,6 +106,75 @@ CONFIG_KEY_PROBE_EXTRAS = "_aorta_probe_extras"
 # ``_aorta_log_prefix``. Captured group is the trial index; we use it
 # to compute ``trial_<idx>/`` per the probe-mode artifact layout.
 _LOG_PREFIX_TRIAL_RE = re.compile(r"trial_d\d+_m\d+_t(\d+)$")
+
+
+# Grace period (seconds) between the SIGTERM and the SIGKILL escalation in
+# ``_terminate_process_tree``. Short enough that an interrupted operator isn't
+# left waiting, long enough that a foreground ``docker run`` can forward the
+# SIGTERM to the container's PID 1 and let it stop cleanly.
+_TERMINATE_GRACE_SEC = 10.0
+
+
+def _terminate_process_tree(
+    proc: subprocess.Popen, grace_sec: float = _TERMINATE_GRACE_SEC
+) -> None:
+    """Best-effort teardown of the child's *entire* process group.
+
+    The child is launched with ``start_new_session=True`` so it leads its own
+    process group; signalling that group (``os.killpg``) rather than just
+    ``proc.pid`` reaps grandchildren too -- e.g. a
+    ``sudo -> bash -> docker run -> python3`` tree that would otherwise survive
+    an interrupted or timed-out trial and keep its GPUs pinned (#220).
+
+    Escalation: ``SIGTERM`` first (a foreground ``docker run`` forwards it to
+    the container's PID 1, giving the container a chance to stop cleanly), then
+    ``SIGKILL`` after ``grace_sec`` for anything that ignored it. Note that a
+    *detached* ``docker run -d`` container is reparented to the docker daemon
+    and is not in this group; tearing it down needs an explicit ``docker kill``
+    in the workload wrapper.
+
+    Never raises. A race where the group already exited (``ESRCH``) is the
+    expected common case, not an error. As a safety net it refuses to signal
+    the caller's own process group -- which can only happen if the child was
+    not started in a new session -- so a misconfiguration can never take down
+    the ``aorta`` process itself.
+    """
+    pgid: int | None
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        pgid = None
+    if pgid is not None and pgid == os.getpgrp():
+        # Defensive: child not in its own session (should never happen in
+        # production). Fall back to signalling just the direct child so we
+        # never nuke our own process group.
+        pgid = None
+
+    def _send(sig: int) -> None:
+        if pgid is not None:
+            try:
+                os.killpg(pgid, sig)
+                return
+            except (ProcessLookupError, OSError):
+                pass
+        try:
+            proc.send_signal(sig)
+        except (ProcessLookupError, OSError):
+            pass
+
+    _send(signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace_sec)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except (ProcessLookupError, OSError):
+        return
+    _send(signal.SIGKILL)
+    try:
+        proc.wait(timeout=grace_sec)
+    except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
+        pass
 
 
 class SubprocessWorkload(Workload):
@@ -338,6 +408,12 @@ class SubprocessWorkload(Workload):
                     stdout=out_fh,
                     stderr=err_fh,
                     env=child_env,
+                    # Lead a new session/process group so the *whole* child
+                    # tree (sudo -> bash -> docker run -> python3, etc.) can
+                    # be reaped via os.killpg on timeout / interrupt instead
+                    # of orphaning grandchildren that keep their GPUs pinned
+                    # (#220). See _terminate_process_tree.
+                    start_new_session=True,
                 )
                 launched = True
                 # Wire the third leg of the two-of-three Tier 2
@@ -362,27 +438,27 @@ class SubprocessWorkload(Workload):
                     exit_code = proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     timed_out = True
-                    # Race-safe shutdown: the child can exit between
-                    # the ``wait()`` timeout and our ``kill()`` (e.g.
-                    # the workload finished while the kernel was
-                    # delivering the SIGALRM the timeout uses), which
-                    # makes ``Popen.kill()`` raise
-                    # ``ProcessLookupError`` (ESRCH) on Linux. Swallow
-                    # that one specific case so the trial deterministically
-                    # records ``timed_out=True`` and ``exit_code=-1``
-                    # rather than crashing the workload and leaving the
-                    # trial with no ``result.json``. Any other OSError
-                    # from kill() (EPERM etc.) re-raises so we don't
-                    # silently swallow a genuine bug.
-                    try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        proc.wait()
-                    except ProcessLookupError:
-                        pass
+                    # Tear down the whole child process group, not just the
+                    # direct child: a timed-out trial may have spawned a
+                    # sudo/docker/python grandchild tree that would otherwise
+                    # survive and keep its GPUs pinned (#220).
+                    # ``_terminate_process_tree`` is race-safe -- it swallows
+                    # the ESRCH that occurs when the child exits between the
+                    # timeout firing and the signal landing -- so the trial
+                    # deterministically records ``timed_out=True`` and
+                    # ``exit_code=-1`` with a ``result.json`` on disk.
+                    _terminate_process_tree(proc)
                     exit_code = -1
+                except KeyboardInterrupt:
+                    # Operator Ctrl-C (SIGINT delivered to the aorta parent;
+                    # the child is in its own session and does NOT receive the
+                    # terminal's SIGINT). Reap the whole child tree before the
+                    # interrupt unwinds the run, otherwise sudo/docker/python
+                    # grandchildren survive and exhaust the GPUs (#220), then
+                    # re-raise so the run aborts as the operator intended.
+                    timed_out = True
+                    _terminate_process_tree(proc)
+                    raise
                 finally:
                     if hang_monitor is not None:
                         hang_monitor.stop()

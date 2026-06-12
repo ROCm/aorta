@@ -7,6 +7,7 @@ shape), and the Tier-1 verdict rule.
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 
 import pytest
@@ -289,7 +290,13 @@ def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
     class _RacingPopen:
         def __init__(self, *args, **kwargs):
             self._real = real_popen(
-                ["true"], **{k: v for k, v in kwargs.items() if k in ("stdout", "stderr", "env")}
+                ["true"],
+                start_new_session=True,
+                **{
+                    k: v
+                    for k, v in kwargs.items()
+                    if k in ("stdout", "stderr", "env")
+                },
             )
             self.pid = self._real.pid
             self._wait_calls = 0
@@ -300,10 +307,12 @@ def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
                 # First ``proc.wait(timeout=...)`` -- pretend the
                 # child is still running so the timeout branch fires.
                 raise _subprocess.TimeoutExpired(cmd="true", timeout=timeout)
-            # Second ``proc.wait()`` after kill() -- child is gone.
+            # Second ``proc.wait()`` inside the teardown -- child is gone.
             raise ProcessLookupError(3, "No such process")
 
-        def kill(self):
+        def send_signal(self, sig):
+            # The teardown fallback path (when the process group is gone)
+            # signals the direct child; the child already exited -> ESRCH.
             raise ProcessLookupError(3, "No such process")
 
     monkeypatch.setattr(_subprocess, "Popen", _RacingPopen)
@@ -318,6 +327,133 @@ def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
     assert doc["timed_out"] is True
     assert doc["exit_code"] == -1
     assert result.passed is False
+
+
+# ---- #220 (orphaned child teardown on timeout / interrupt) ---------------
+
+
+def test_child_started_in_new_session(tmp_path, monkeypatch):
+    """The child must lead its own session so the whole tree is reapable.
+
+    Without ``start_new_session=True`` a ``sudo -> bash -> docker run -> python3``
+    tree cannot be torn down via ``os.killpg`` and survives an interrupted /
+    timed-out trial, keeping its GPUs pinned (#220).
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    captured: dict = {}
+    real_popen = workload_mod.subprocess.Popen
+
+    def _spy_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(workload_mod.subprocess, "Popen", _spy_popen)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    wl.run()
+    assert captured.get("start_new_session") is True
+
+
+def test_terminate_process_tree_escalates_term_then_kill(monkeypatch):
+    """SIGTERM first, then SIGKILL after the grace period, on the group."""
+    from aorta.workloads import _subprocess as workload_mod
+
+    signals: list[int] = []
+    fake_pgid = 424242
+
+    monkeypatch.setattr(workload_mod.os, "getpgid", lambda pid: fake_pgid)
+    # Ensure the self-group guard does not trip (pgid != our group).
+    monkeypatch.setattr(workload_mod.os, "getpgrp", lambda: fake_pgid + 1)
+    monkeypatch.setattr(
+        workload_mod.os, "killpg", lambda pgid, sig: signals.append(sig)
+    )
+
+    class _Stubborn:
+        pid = 777
+
+        def __init__(self):
+            self._waits = 0
+
+        def wait(self, timeout=None):
+            self._waits += 1
+            if self._waits == 1:
+                # Ignored SIGTERM -> force the SIGKILL escalation.
+                raise workload_mod.subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+            return -9
+
+    workload_mod._terminate_process_tree(_Stubborn(), grace_sec=0.01)
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_terminate_process_tree_refuses_own_group(monkeypatch):
+    """Safety net: never signal the aorta process's own group via killpg."""
+    from aorta.workloads import _subprocess as workload_mod
+
+    killpg_calls: list = []
+    sent: list = []
+    our_group = 555
+
+    monkeypatch.setattr(workload_mod.os, "getpgid", lambda pid: our_group)
+    monkeypatch.setattr(workload_mod.os, "getpgrp", lambda: our_group)
+    monkeypatch.setattr(
+        workload_mod.os, "killpg", lambda pgid, sig: killpg_calls.append(sig)
+    )
+
+    class _Child:
+        pid = 888
+
+        def send_signal(self, sig):
+            sent.append(sig)
+
+        def wait(self, timeout=None):
+            return 0
+
+    workload_mod._terminate_process_tree(_Child(), grace_sec=0.01)
+    assert killpg_calls == [], "must not killpg our own process group"
+    assert sent == [signal.SIGTERM], "must fall back to signalling the child"
+
+
+def test_keyboard_interrupt_reaps_tree_and_reraises(tmp_path, monkeypatch):
+    """Ctrl-C during a trial must reap the child tree, then re-raise.
+
+    Regression for #220: an interrupted probe previously left the wrapped
+    child tree running. The workload must signal the group and propagate the
+    ``KeyboardInterrupt`` so the run aborts as the operator intended.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    real_popen = workload_mod.subprocess.Popen
+    torn_down: list = []
+
+    class _InterruptingPopen:
+        def __init__(self, *args, **kwargs):
+            self._real = real_popen(
+                ["true"],
+                start_new_session=True,
+                **{
+                    k: v
+                    for k, v in kwargs.items()
+                    if k in ("stdout", "stderr", "env")
+                },
+            )
+            self.pid = self._real.pid
+
+        def wait(self, timeout=None):
+            raise KeyboardInterrupt()
+
+    def _spy_teardown(proc, grace_sec=workload_mod._TERMINATE_GRACE_SEC):
+        torn_down.append(proc)
+
+    monkeypatch.setattr(workload_mod.subprocess, "Popen", _InterruptingPopen)
+    monkeypatch.setattr(workload_mod, "_terminate_process_tree", _spy_teardown)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    with pytest.raises(KeyboardInterrupt):
+        wl.run()
+    assert len(torn_down) == 1, "child tree must be torn down on interrupt"
 
 
 # ---- FR 2.9 (Phase 2 result.json shape) ----------------------------------
