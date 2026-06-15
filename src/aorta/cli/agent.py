@@ -32,6 +32,7 @@ _OUTCOME_HEADLINES: dict[str, str] = {
     "walltime_exhausted": "Stopped — wall-time budget exhausted.",
     "policy_stop": "Stopped — policy limit hit.",
     "registry_error": "Stopped — registry error.",
+    "error": "Aborted — unexpected error; see report and agent_log.jsonl.",
 }
 
 

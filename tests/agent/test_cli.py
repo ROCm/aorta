@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 from click.testing import CliRunner
@@ -49,3 +48,22 @@ def test_agent_requires_double_dash_separator():
     result = runner.invoke(agent, ["--output", "/tmp/o", "echo", "hi"])
     assert result.exit_code != 0
     assert "separator" in result.output.lower() or "Usage" in result.output
+
+
+def test_error_outcome_has_dedicated_headline(monkeypatch, tmp_path):
+    # run_agent_loop can return outcome="error" from its generic exception
+    # handler; the CLI must show a specific headline, not the generic fallback.
+    mock_result = AgentLoopResult(
+        run_dir=tmp_path / "r",
+        state=AgentState(ticket="T1"),
+        report_path=tmp_path / "r" / "agent_report.md",
+        outcome="error",
+        recommended_action="inspect logs",
+    )
+    monkeypatch.setattr(agent_cli, "run_agent_loop", MagicMock(return_value=mock_result))
+
+    runner = CliRunner()
+    result = runner.invoke(agent, ["--output", str(tmp_path / "out"), "--", "echo", "ok"])
+    assert result.exit_code == 0, result.output
+    assert agent_cli._OUTCOME_HEADLINES["error"] in result.output
+    assert "Finished with outcome: error" not in result.output
