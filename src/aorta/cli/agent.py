@@ -48,6 +48,14 @@ def _echo_agent_result(result: object) -> None:
     if result.report_path:
         click.echo(f"Wrote {result.report_path}")
     click.echo(result.recommended_action)
+    if result.bundle_error:
+        # --bundle was requested but failed; the loop only logs a warning
+        # (muted by default), so say so explicitly -- the bundle does NOT exist.
+        click.echo(
+            f"WARNING: --bundle requested but bundling failed: {result.bundle_error}. "
+            "No bundle was written.",
+            err=True,
+        )
 
 
 def _retarget_probe_usage(message: str) -> str:

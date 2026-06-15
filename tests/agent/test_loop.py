@@ -308,6 +308,89 @@ def test_registry_error_logs_matching_event_type(mock_run_recipe, tmp_path, monk
     assert not any(e["type"] == "error" for e in events)
 
 
+def test_proposer_outside_allowlist_fails_fast(mock_run_recipe, tmp_path, monkeypatch):
+    """A registered-but-not-allowlisted mitigation must not be executed.
+
+    validate_step() only checks registry membership; the operator's
+    --mitigation allowlist is a loop-level guardrail. A custom proposer
+    returning a registered mitigation outside the allowlist must trip
+    policy_stop, not silently widen the search.
+    """
+    import aorta.agent.loop as loop_mod
+    from aorta.agent.llm import AgentStep
+
+    mock_run_recipe.return_value = tmp_path / "run"
+    monkeypatch.setattr(
+        loop_mod,
+        "_read_cell_summaries",
+        lambda _d: [
+            {
+                "cell_name": "none-none",
+                "verdict": "fail",
+                "failure_detectors_fired": ["tier1:exit_nonzero"],
+                "capture": {},
+            }
+        ],
+    )
+
+    class OutOfAllowlistProposer:
+        def propose(self, **kwargs):
+            # hsa_no_sdma is registered (passes validate_step) but is NOT in the
+            # --mitigation allowlist below.
+            return AgentStep(
+                category="unknown",
+                hypothesis="try something off-allowlist",
+                next_mitigations=["hsa_no_sdma"],
+                confidence=0.9,
+                stop=False,
+            )
+
+    config = AgentConfig(
+        output_dir=tmp_path / "out",
+        ticket="ALLOW-1",
+        subprocess_argv=("true",),
+        policy=AgentPolicy(max_iterations=3),
+        mitigations_allowlist=("none", "tf32_off"),
+    )
+    result = run_agent_loop(config, proposer=OutOfAllowlistProposer())
+
+    assert result.outcome == "policy_stop"
+    assert "candidate set" in result.recommended_action
+    # The off-allowlist mitigation must never reach a probe run: only the
+    # initial baseline matrix runs.
+    assert mock_run_recipe.call_count == 1
+
+
+def test_bundle_failure_is_surfaced(mock_run_recipe, tmp_path, monkeypatch):
+    """A --bundle failure must be reported on the result, not swallowed by a
+    default-muted logger (the operator would otherwise assume a bundle exists)."""
+    import aorta.agent.loop as loop_mod
+    import aorta.bundle as bundle_mod
+    import aorta.probe.bundle_hook as hook_mod
+
+    mock_run_recipe.return_value = tmp_path / "run"
+    monkeypatch.setattr(loop_mod, "_read_cell_summaries", _baseline_pass_summaries)
+
+    def boom_bundle(*a, **k):
+        raise RuntimeError("redaction config missing")
+
+    monkeypatch.setattr(bundle_mod, "bundle_run_dir", boom_bundle)
+    monkeypatch.setattr(hook_mod, "build_redactor_from_recipe", lambda *a, **k: None)
+
+    config = AgentConfig(
+        output_dir=tmp_path / "out",
+        ticket="BND-FAIL",
+        subprocess_argv=("true",),
+        policy=AgentPolicy(max_iterations=2),
+        mitigations_allowlist=("none",),
+        run_bundle=True,
+    )
+    result = run_agent_loop(config)
+
+    assert result.bundle_error is not None
+    assert "redaction config missing" in result.bundle_error
+
+
 def test_dry_run_writes_no_artifacts(mock_run_recipe, tmp_path, monkeypatch):
     """--dry-run must not write agent_log.jsonl / report, nor scan the cwd.
 

@@ -67,3 +67,23 @@ def test_error_outcome_has_dedicated_headline(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert agent_cli._OUTCOME_HEADLINES["error"] in result.output
     assert "Finished with outcome: error" not in result.output
+
+
+def test_bundle_error_is_echoed_to_operator(monkeypatch, tmp_path):
+    # A --bundle failure is captured on the result; the CLI must tell the
+    # operator the bundle does not exist instead of exiting silently.
+    mock_result = AgentLoopResult(
+        run_dir=tmp_path / "r",
+        state=AgentState(ticket="T1"),
+        report_path=tmp_path / "r" / "agent_report.md",
+        outcome="converged",
+        recommended_action="done",
+        bundle_error="redaction config missing",
+    )
+    monkeypatch.setattr(agent_cli, "run_agent_loop", MagicMock(return_value=mock_result))
+
+    runner = CliRunner()
+    result = runner.invoke(agent, ["--output", str(tmp_path / "out"), "--", "echo", "ok"])
+    assert result.exit_code == 0, result.output
+    assert "bundling failed" in result.output
+    assert "redaction config missing" in result.output

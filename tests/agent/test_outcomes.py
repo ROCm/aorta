@@ -50,3 +50,21 @@ def test_resolve_infers_reason_when_proposer_omits_it():
     outcome, _msg, reason = _resolve_stop_outcome(step, [])
     assert outcome == "exhausted_candidates"
     assert reason == "exhausted_candidates"
+
+
+def test_resolve_downgrades_unconfirmed_baseline_pass():
+    """A proposer-claimed baseline_pass must not be honored when the probe
+    verdicts don't show none-none passing -- otherwise a misbehaving proposer
+    could falsely report success and stop the search."""
+    step = AgentStep(
+        category="unknown",
+        hypothesis="Claiming baseline passed without evidence.",
+        next_mitigations=[],
+        confidence=1.0,
+        stop=True,
+        stop_reason="baseline_pass",
+    )
+    summaries = [{"cell_name": "none-none", "verdict": "fail"}]
+    outcome, _msg, reason = _resolve_stop_outcome(step, summaries)
+    assert outcome == "agent_stop"
+    assert reason == "agent_requested"

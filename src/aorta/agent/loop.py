@@ -60,6 +60,9 @@ class AgentLoopResult:
     report_path: Path | None
     outcome: str
     recommended_action: str
+    # Set when --bundle was requested but bundling failed; surfaced to the
+    # operator by the CLI so a silent log.warning can't imply a bundle exists.
+    bundle_error: str | None = None
 
 
 def _ticket_slug(ticket: str | None) -> str:
@@ -240,6 +243,14 @@ def _resolve_stop_outcome(
             reason = "exhausted_candidates"
         else:
             reason = "agent_requested"
+    elif reason == "baseline_pass" and not _baseline_passed(summaries):
+        # baseline_pass is a deterministic probe verdict, not the proposer's
+        # call. run_agent_loop short-circuits a genuinely passing baseline
+        # before the proposer is consulted, so reaching here with an
+        # unconfirmed baseline_pass means none-none did NOT pass. Downgrade to
+        # an agent-requested stop rather than letting a misbehaving proposer
+        # falsely report success and end the search early.
+        reason = "agent_requested"
 
     if reason == "baseline_pass":
         return (
@@ -446,6 +457,20 @@ def run_agent_loop(
                 )
                 break
 
+            # validate_step() only enforces registry membership + category. The
+            # operator's candidate/allowlist (--mitigation, recipe order) is a
+            # loop-level guardrail, so enforce it here: a custom/buggy proposer
+            # must not run a registered-but-not-allowlisted mitigation. Fail
+            # fast -- PolicyViolation is caught below and surfaces as
+            # policy_stop -- instead of silently widening the search.
+            disallowed = [m for m in step.next_mitigations if m not in candidates]
+            if disallowed:
+                raise PolicyViolation(
+                    f"proposer returned mitigations outside the allowed "
+                    f"candidate set: {sorted(disallowed)}. "
+                    f"Allowed: {sorted(candidates)}."
+                )
+
             pending = config.policy.pending_approvals(step.next_mitigations)
             if pending:
                 outcome = "approval_required"
@@ -517,6 +542,7 @@ def run_agent_loop(
         recommended_action=recommended,
     )
 
+    bundle_error: str | None = None
     if config.run_bundle and report_path is not None:
         try:
             from aorta.bundle import bundle_run_dir
@@ -533,8 +559,13 @@ def run_agent_loop(
             # raw_ticket is None it falls back to that inference (no-ticket).
             bundle_run_dir(run_dir, ticket=raw_ticket, redactor=redactor)
             log.info("Wrote bundle for %s", run_dir)
-        except Exception as exc:  # pragma: no cover - bundle is best-effort
-            log.warning("Bundle step skipped: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - bundle is best-effort, but must be surfaced
+            # Don't let a bundle failure pass silently: log.warning is muted by
+            # default, so without this the command exits cleanly and the
+            # operator assumes the bundle exists. Capture the error on the
+            # result so the CLI can tell them it did NOT.
+            bundle_error = str(exc)
+            log.warning("Bundle step failed: %s", exc)
 
     return AgentLoopResult(
         run_dir=run_dir,
@@ -542,6 +573,7 @@ def run_agent_loop(
         report_path=report_path,
         outcome=outcome,
         recommended_action=recommended,
+        bundle_error=bundle_error,
     )
 
 
