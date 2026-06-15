@@ -485,7 +485,7 @@ def run_agent_loop(
     except UnknownMitigationError as exc:
         outcome = "registry_error"
         recommended = str(exc)
-        append_log_event(run_dir, "error", {"reason": str(exc)})
+        append_log_event(run_dir, "registry_error", {"reason": str(exc)})
     except Exception as exc:  # noqa: BLE001 - audit trail must survive any backend error
         # A proposer backend (e.g. LiteLLM network/provider error) or any
         # other unexpected failure must NOT skip the report write below --

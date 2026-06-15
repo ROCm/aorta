@@ -263,6 +263,51 @@ def test_proposer_exception_still_writes_report(mock_run_recipe, tmp_path, monke
     assert any(e["type"] == "error" and "litellm" in e["reason"] for e in events)
 
 
+def test_registry_error_logs_matching_event_type(mock_run_recipe, tmp_path, monkeypatch):
+    """An UnknownMitigationError surfaces outcome=registry_error and the audit
+    log event type must match it (not the generic "error"), so agent_log.jsonl
+    can be filtered by the same key the operator sees."""
+    import json
+
+    import aorta.agent.loop as loop_mod
+    from aorta.registry.errors import UnknownMitigationError
+
+    mock_run_recipe.return_value = tmp_path / "run"
+    monkeypatch.setattr(
+        loop_mod,
+        "_read_cell_summaries",
+        lambda _d: [
+            {
+                "cell_name": "none-none",
+                "verdict": "fail",
+                "failure_detectors_fired": ["tier1:exit_nonzero"],
+                "capture": {},
+            }
+        ],
+    )
+
+    class UnknownMitigationProposer:
+        def propose(self, **kwargs):
+            raise UnknownMitigationError("totally_unknown")
+
+    config = AgentConfig(
+        output_dir=tmp_path / "out",
+        ticket="REG-1",
+        subprocess_argv=("true",),
+        policy=AgentPolicy(max_iterations=3),
+        mitigations_allowlist=("none", "tf32_off"),
+    )
+    result = run_agent_loop(config, proposer=UnknownMitigationProposer())
+
+    assert result.outcome == "registry_error"
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "agent_log.jsonl").read_text().splitlines()
+    ]
+    assert any(e["type"] == "registry_error" for e in events)
+    assert not any(e["type"] == "error" for e in events)
+
+
 def test_dry_run_writes_no_artifacts(mock_run_recipe, tmp_path, monkeypatch):
     """--dry-run must not write agent_log.jsonl / report, nor scan the cwd.
 
