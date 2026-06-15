@@ -41,6 +41,7 @@ Phase-1 minimum shape keeps working.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import signal
@@ -66,6 +67,8 @@ from aorta.probe.classifier.tier3_kernel import (
 )
 from aorta.probe.classifier.verdict import Verdict
 from aorta.workloads._base import Workload, WorkloadResult
+
+log = logging.getLogger(__name__)
 
 # Process-wide Tier 3 state. Shared across every SubprocessWorkload
 # instance the dispatcher constructs over one ``aorta probe`` invocation
@@ -141,11 +144,14 @@ def _terminate_process_tree(
     and is not in this group; tearing it down needs an explicit ``docker kill``
     in the workload wrapper.
 
-    A race where the group already exited (``ESRCH``) is the expected common
-    case, not an error. As a safety net it refuses to signal the caller's own
-    process group -- which can only happen if the child was not started in a
-    new session -- so a misconfiguration can never take down the ``aorta``
-    process itself.
+    A race where the group already exited (``ESRCH`` /
+    ``ProcessLookupError``) is the expected common case, not an error, and is
+    swallowed silently. Any *other* signal-delivery failure (e.g. ``EPERM``)
+    is logged at WARNING -- it means the group could not be torn down and the
+    tree may leak, which the operator needs to see. As a safety net it refuses
+    to signal the caller's own process group -- which can only happen if the
+    child was not started in a new session -- so a misconfiguration can never
+    take down the ``aorta`` process itself.
 
     The only exception it propagates is ``KeyboardInterrupt``: a second
     ``Ctrl-C`` landing while we wait out the grace period must not abandon the
@@ -169,12 +175,36 @@ def _terminate_process_tree(
             try:
                 os.killpg(pgid, sig)
                 return
-            except (ProcessLookupError, OSError):
+            except ProcessLookupError:
+                # Expected ESRCH race: the group exited between the decision
+                # to signal and delivery. Not an error -- fall through to the
+                # direct-child attempt (also a likely ESRCH no-op).
                 pass
+            except OSError as exc:
+                # Non-ESRCH failure (e.g. EPERM): the group could NOT be
+                # signalled, so the child tree may survive and keep its GPUs
+                # pinned (#220). Surface it instead of leaking silently, then
+                # still try the direct child as a best-effort fallback.
+                log.warning(
+                    "killpg(%d, %s) failed: %s; the child process group may "
+                    "not be fully reaped (orphaned grandchildren can keep "
+                    "their GPUs pinned, #220)",
+                    pgid,
+                    signal.Signals(sig).name,
+                    exc,
+                )
         try:
             proc.send_signal(sig)
-        except (ProcessLookupError, OSError):
+        except ProcessLookupError:
             pass
+        except OSError as exc:
+            log.warning(
+                "send_signal(%s) to child pid %s failed: %s; the child may "
+                "not be reaped (#220)",
+                signal.Signals(sig).name,
+                getattr(proc, "pid", "?"),
+                exc,
+            )
 
     reap_sec = min(grace_sec, _REAP_AFTER_KILL_SEC)
 

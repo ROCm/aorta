@@ -415,6 +415,46 @@ def test_terminate_process_tree_refuses_own_group(monkeypatch):
     assert sent == [signal.SIGTERM], "must fall back to signalling the child"
 
 
+def test_terminate_process_tree_warns_on_non_esrch_killpg(monkeypatch, caplog):
+    """A non-ESRCH killpg failure (e.g. EPERM) must be surfaced, not swallowed.
+
+    The expected ESRCH race stays silent, but an EPERM means the group could
+    not be torn down and the tree may leak (#220). The operator needs that
+    visibility, and teardown still falls back to signalling the direct child.
+    """
+    import logging
+
+    from aorta.workloads import _subprocess as workload_mod
+
+    fake_pgid = 626262
+    sent: list = []
+
+    monkeypatch.setattr(workload_mod.os, "getpgid", lambda pid: fake_pgid)
+    monkeypatch.setattr(workload_mod.os, "getpgrp", lambda: fake_pgid + 1)
+
+    def _eperm_killpg(pgid, sig):
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(workload_mod.os, "killpg", _eperm_killpg)
+
+    class _Child:
+        pid = 999
+
+        def send_signal(self, sig):
+            sent.append(sig)
+
+        def wait(self, timeout=None):
+            return 0
+
+    with caplog.at_level(logging.WARNING, logger=workload_mod.log.name):
+        workload_mod._terminate_process_tree(_Child(), grace_sec=0.01)
+
+    assert any("killpg" in r.message for r in caplog.records), (
+        "non-ESRCH killpg failure must be logged at WARNING"
+    )
+    assert sent == [signal.SIGTERM], "must still fall back to the direct child"
+
+
 def test_terminate_process_tree_escalates_to_kill_on_interrupt(monkeypatch):
     """A Ctrl-C during the SIGTERM grace wait must still SIGKILL, then re-raise.
 
