@@ -114,6 +114,14 @@ _LOG_PREFIX_TRIAL_RE = re.compile(r"trial_d\d+_m\d+_t(\d+)$")
 # SIGTERM to the container's PID 1 and let it stop cleanly.
 _TERMINATE_GRACE_SEC = 10.0
 
+# Reap budget (seconds) for the ``proc.wait()`` *after* a SIGKILL has gone out.
+# SIGKILL is uncatchable, so the group is torn down by the kernel almost
+# immediately; this wait only exists to reap zombies, not to give the child a
+# chance to react. Capping it (rather than reusing the full SIGTERM grace) keeps
+# Ctrl-C aborts and timeout handling responsive instead of stalling up to
+# ``grace_sec`` on a process that is already dead.
+_REAP_AFTER_KILL_SEC = 1.0
+
 
 def _terminate_process_tree(
     proc: subprocess.Popen, grace_sec: float = _TERMINATE_GRACE_SEC
@@ -168,11 +176,13 @@ def _terminate_process_tree(
         except (ProcessLookupError, OSError):
             pass
 
+    reap_sec = min(grace_sec, _REAP_AFTER_KILL_SEC)
+
     def _reap_after_kill() -> None:
         # The group has already been SIGKILLed; give it a brief, fully
         # interrupt-tolerant chance to be reaped so we don't leave zombies.
         try:
-            proc.wait(timeout=grace_sec)
+            proc.wait(timeout=reap_sec)
         except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
             pass
         except KeyboardInterrupt:
@@ -194,7 +204,7 @@ def _terminate_process_tree(
         raise
     _send(signal.SIGKILL)
     try:
-        proc.wait(timeout=grace_sec)
+        proc.wait(timeout=reap_sec)
     except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
         pass
     except KeyboardInterrupt:
@@ -489,8 +499,9 @@ class SubprocessWorkload(Workload):
                     # terminal's SIGINT). Reap the whole child tree before the
                     # interrupt unwinds the run, otherwise sudo/docker/python
                     # grandchildren survive and exhaust the GPUs (#220), then
-                    # re-raise so the run aborts as the operator intended.
-                    timed_out = True
+                    # re-raise so the run aborts as the operator intended. We
+                    # do NOT set ``timed_out`` here: an operator abort isn't a
+                    # timeout, and the re-raise skips ``result.json`` anyway.
                     _terminate_process_tree(proc)
                     raise
                 finally:
