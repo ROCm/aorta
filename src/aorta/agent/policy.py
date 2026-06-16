@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,19 @@ from aorta.registry.errors import UnknownMitigationError
 
 class PolicyViolation(ValueError):
     """Agent step or config violated safety policy."""
+
+
+# A proposed mitigation name must round-trip *unchanged* through the probe
+# cell-name builder. ``_safe_cell_segment`` (aorta/probe/recipe_builder.py)
+# scrubs anything outside ``[A-Za-z0-9_.-]`` to ``_`` and prepends ``_`` to a
+# leading ``.``/``-``; the agent later recovers tried/winning mitigations by
+# parsing the ``<mitigation>-<diagnostic>`` cell directory name back
+# (state.winning_mitigation / wake). A registered-but-unsafe name (e.g. a
+# sidecar/plugin mitigation containing ``/``) would be silently scrubbed in
+# the cell name and never match the registry name again, breaking
+# convergence / resume / allowlist checks. This mirrors the cell-name segment
+# rule (``^[A-Za-z0-9_][A-Za-z0-9_.\\-]*$``) so we reject such names up front.
+_CELL_SAFE_MITIGATION_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 
 
 # Mitigations that may require explicit operator approval before run.
@@ -60,6 +74,13 @@ class AgentPolicy:
             if " " in name or name.startswith("-"):
                 raise PolicyViolation(
                     f"mitigation {name!r} looks like shell/argv, not a registry name"
+                )
+            if not _CELL_SAFE_MITIGATION_RE.match(name):
+                raise PolicyViolation(
+                    f"mitigation {name!r} contains characters unsafe for a probe "
+                    f"cell name; it must match [A-Za-z0-9_][A-Za-z0-9_.-]* so it "
+                    f"round-trips through the cell directory name (the agent "
+                    f"recovers tried/winning mitigations by parsing it back)"
                 )
             try:
                 get_mitigation(

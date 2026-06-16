@@ -21,6 +21,22 @@ def test_rejects_shell_like_mitigation_name():
         policy.validate_step(step)
 
 
+@pytest.mark.parametrize("bad_name", ["tf32/off", "tf32:off", "foo@bar", ".hidden"])
+def test_rejects_cell_unsafe_mitigation_name(bad_name):
+    """A name that wouldn't round-trip through the probe cell-name builder is
+    rejected, so the agent never records a scrubbed name as the winner."""
+    policy = AgentPolicy()
+    step = AgentStep(
+        category="unknown",
+        hypothesis="off-charset",
+        next_mitigations=[bad_name],
+        confidence=0.5,
+        stop=False,
+    )
+    with pytest.raises(PolicyViolation, match="cell"):
+        policy.validate_step(step)
+
+
 def test_rejects_unregistered_mitigation():
     policy = AgentPolicy()
     step = AgentStep(
