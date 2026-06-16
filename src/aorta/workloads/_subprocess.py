@@ -574,10 +574,12 @@ class SubprocessWorkload(Workload):
             "env": dict(cell_env_snapshot),
         }
         # Durable per-trial breadcrumb when a latched tier2:hang was
-        # reconciled away on a clean exit. The verdict stays a clean pass,
-        # but the #224 follow-ups (descendant-tree-aware hang predicate)
-        # need to study exactly these wrapper-delegated false positives, so
-        # leave a trace in result.json rather than only the log.info above.
+        # reconciled away on a clean exit (exit 0, not timed out). Only the
+        # tier2:hang signal is dropped -- the final verdict still reflects the
+        # other tiers, so a clean exit can still fail on Tier-3/4/5. The #224
+        # follow-ups (descendant-tree-aware hang predicate) need to study these
+        # wrapper-delegated false positives, so leave a trace in result.json
+        # rather than only the log.info above.
         if hang_reconciled_away:
             result_doc["capture"]["tier2_hang_latched_but_reconciled"] = True
         result_path.write_text(
