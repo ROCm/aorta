@@ -1305,6 +1305,10 @@ class _ProbeStdioRedirect:
         self._saved_out: int | None = None
         self._saved_err: int | None = None
         self._capture: Any | None = None
+        # Aorta's own stdout/stderr log handlers, repointed at the real
+        # terminal for the redirect window (see _reroute_loggers).
+        self._rerouted_handlers: list[tuple[logging.Handler, Any]] = []
+        self._passthrough: Any | None = None
 
     @staticmethod
     def _flush_std_streams() -> None:
@@ -1352,6 +1356,66 @@ class _ProbeStdioRedirect:
                 except Exception:
                     pass
                 self._capture = None
+            return
+        # fd 1/2 now point at the capture file. That also swallows aorta's own
+        # Python logs (e.g. _run_rdhc's log.info), which would otherwise vanish
+        # at -v or be mislabeled as benign HIP noise at -vv. Repoint aorta's
+        # stdout/stderr log handlers at the real terminal for the window.
+        if self._capture is not None and self._saved_err is not None:
+            self._reroute_loggers()
+
+    def _reroute_loggers(self) -> None:
+        """Point aorta's stdout/stderr log handlers at the saved real fd.
+
+        Keeps real Python-level diagnostics on the operator's terminal while
+        the raw fd 1/2 redirect still swallows the C-runtime ``(null)`` noise.
+        Fail-soft: any failure leaves the handlers untouched (logs fall back to
+        the capture file, the pre-existing behaviour) rather than risk the
+        never-raises contract.
+        """
+        try:
+            passthrough = os.fdopen(os.dup(self._saved_err), "w", closefd=True)
+        except Exception:
+            return
+        root = logging.getLogger()
+        rerouted: list[tuple[logging.Handler, Any]] = []
+        for handler in list(root.handlers):
+            if isinstance(handler, logging.StreamHandler) and getattr(
+                handler, "stream", None
+            ) in (sys.stdout, sys.stderr):
+                try:
+                    original = handler.stream
+                    handler.setStream(passthrough)
+                    rerouted.append((handler, original))
+                except Exception:
+                    pass
+        if not rerouted:
+            try:
+                passthrough.close()
+            except Exception:
+                pass
+            return
+        self._passthrough = passthrough
+        self._rerouted_handlers = rerouted
+
+    def _restore_loggers(self) -> None:
+        """Undo :meth:`_reroute_loggers`. Idempotent and fail-soft."""
+        for handler, original in self._rerouted_handlers:
+            try:
+                handler.setStream(original)
+            except Exception:
+                pass
+        self._rerouted_handlers = []
+        if self._passthrough is not None:
+            try:
+                self._passthrough.flush()
+            except Exception:
+                pass
+            try:
+                self._passthrough.close()
+            except Exception:
+                pass
+            self._passthrough = None
 
     def _restore_fds(self) -> None:
         # Fail-soft: called from stop() inside collect_env()'s except/finally,
@@ -1385,6 +1449,7 @@ class _ProbeStdioRedirect:
             return
         self._flush_std_streams()
         self._restore_fds()
+        self._restore_loggers()
         noise = ""
         noise_bytes = 0
         if self._capture is not None:
@@ -1408,8 +1473,9 @@ class _ProbeStdioRedirect:
         if noise:
             log.debug(
                 "env probe suppressed %d byte(s) of low-level stdout/stderr "
-                "(benign HIP/C-runtime device-enumeration noise on ROCm hosts; "
-                "see #220): %s",
+                "(expected: benign HIP/C-runtime device-enumeration noise on "
+                "ROCm hosts; aorta's own logs are routed to the terminal "
+                "separately; see #220): %s",
                 noise_bytes,
                 noise,
             )

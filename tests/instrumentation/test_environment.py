@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -647,6 +648,47 @@ class TestProbeStdioRedirect:
             "(null): No such file or directory" in rec.getMessage()
             for rec in caplog.records
         ), "captured noise should be re-emitted at DEBUG"
+
+    def test_aorta_logs_reach_terminal_during_redirect(self, tmp_path):
+        """Aorta's own logs must survive the fd redirect (#221 review).
+
+        The redirect captures *all* of fd 1/2 for the probe body, which would
+        otherwise swallow aorta's own ``log.info`` (vanishing at -v, mislabeled
+        as benign HIP noise at -vv). ``_reroute_loggers`` repoints the stderr
+        StreamHandler at the real terminal for the window, so a real diagnostic
+        still reaches the operator while the C-level ``(null)`` noise does not.
+        """
+        root = logging.getLogger()
+        saved_handlers = root.handlers[:]
+        saved_level = root.level
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            for handler in saved_handlers:
+                root.removeHandler(handler)
+            stream_handler = logging.StreamHandler(sys.stderr)
+            stream_handler.setLevel(logging.INFO)
+            root.addHandler(stream_handler)
+            root.setLevel(logging.INFO)
+
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            env_mod.log.info("real diagnostic from a probe")
+            os.write(2, b"(null): No such file or directory\n")
+            redirect.stop()
+        finally:
+            root.removeHandler(stream_handler)
+            for handler in saved_handlers:
+                root.addHandler(handler)
+            root.setLevel(saved_level)
+            restore()
+
+        terminal_text = outer.read_text()
+        assert "real diagnostic from a probe" in terminal_text, (
+            "aorta's own INFO log was swallowed by the probe fd redirect"
+        )
+        assert "(null): No such file or directory" not in terminal_text, (
+            "benign HIP noise leaked to the terminal"
+        )
 
     def test_stop_is_idempotent(self, tmp_path):
         outer, restore = self._with_outer_terminal(tmp_path)
