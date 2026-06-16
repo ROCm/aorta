@@ -12,8 +12,10 @@ from aorta.agent.policy import AgentPolicy
 
 
 @pytest.fixture
-def mock_run_recipe(monkeypatch):
-    mock = MagicMock(return_value=Path("/tmp/agent-run"))
+def mock_run_recipe(monkeypatch, tmp_path):
+    # Default to a per-test path under tmp_path so the loop's agent_log.jsonl /
+    # report writes stay hermetic; individual tests still override return_value.
+    mock = MagicMock(return_value=tmp_path / "agent-run")
     import aorta.agent.loop as loop_mod
 
     monkeypatch.setattr(loop_mod, "run_recipe", mock)
