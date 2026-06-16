@@ -1377,18 +1377,28 @@ class _ProbeStdioRedirect:
             passthrough = os.fdopen(os.dup(self._saved_err), "w", closefd=True)
         except Exception:
             return
-        root = logging.getLogger()
+        # Scan both the root logger and the "aorta" logger: the CLI's
+        # ``configure_verbose_logging`` installs the -v/-vv StreamHandler on the
+        # "aorta" logger and sets ``propagate=False`` (see run/cli_helpers.py),
+        # so a root-only sweep would miss it and the operator's -v/-vv output
+        # would still be swallowed into the capture file. Dedup handler
+        # instances in case the same handler is attached to both.
         rerouted: list[tuple[logging.Handler, Any]] = []
-        for handler in list(root.handlers):
-            if isinstance(handler, logging.StreamHandler) and getattr(
-                handler, "stream", None
-            ) in (sys.stdout, sys.stderr):
-                try:
-                    original = handler.stream
-                    handler.setStream(passthrough)
-                    rerouted.append((handler, original))
-                except Exception:
-                    pass
+        seen: set[int] = set()
+        for logger in (logging.getLogger(), logging.getLogger("aorta")):
+            for handler in list(logger.handlers):
+                if id(handler) in seen:
+                    continue
+                if isinstance(handler, logging.StreamHandler) and getattr(
+                    handler, "stream", None
+                ) in (sys.stdout, sys.stderr):
+                    try:
+                        original = handler.stream
+                        handler.setStream(passthrough)
+                        rerouted.append((handler, original))
+                        seen.add(id(handler))
+                    except Exception:
+                        pass
         if not rerouted:
             try:
                 passthrough.close()

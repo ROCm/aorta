@@ -649,7 +649,19 @@ class TestProbeStdioRedirect:
             for rec in caplog.records
         ), "captured noise should be re-emitted at DEBUG"
 
-    def test_aorta_logs_reach_terminal_during_redirect(self, tmp_path):
+    @pytest.mark.parametrize(
+        "logger_name, propagate",
+        [
+            # utils.setup_logging: stderr handler on the root logger.
+            ("", True),
+            # CLI configure_verbose_logging (-v/-vv): handler on the "aorta"
+            # logger with propagate=False -- a root-only reroute would miss it.
+            ("aorta", False),
+        ],
+    )
+    def test_aorta_logs_reach_terminal_during_redirect(
+        self, tmp_path, logger_name, propagate
+    ):
         """Aorta's own logs must survive the fd redirect (#221 review).
 
         The redirect captures *all* of fd 1/2 for the probe body, which would
@@ -657,18 +669,22 @@ class TestProbeStdioRedirect:
         as benign HIP noise at -vv). ``_reroute_loggers`` repoints the stderr
         StreamHandler at the real terminal for the window, so a real diagnostic
         still reaches the operator while the C-level ``(null)`` noise does not.
+        Covers both wiring styles: the root logger (``setup_logging``) and the
+        "aorta" logger with ``propagate=False`` (the CLI verbosity path).
         """
-        root = logging.getLogger()
-        saved_handlers = root.handlers[:]
-        saved_level = root.level
+        target = logging.getLogger(logger_name)
+        saved_handlers = target.handlers[:]
+        saved_level = target.level
+        saved_propagate = target.propagate
+        stream_handler = logging.StreamHandler(sys.stderr)
         outer, restore = self._with_outer_terminal(tmp_path)
         try:
             for handler in saved_handlers:
-                root.removeHandler(handler)
-            stream_handler = logging.StreamHandler(sys.stderr)
+                target.removeHandler(handler)
             stream_handler.setLevel(logging.INFO)
-            root.addHandler(stream_handler)
-            root.setLevel(logging.INFO)
+            target.addHandler(stream_handler)
+            target.setLevel(logging.INFO)
+            target.propagate = propagate
 
             redirect = env_mod._ProbeStdioRedirect()
             redirect.start()
@@ -676,10 +692,11 @@ class TestProbeStdioRedirect:
             os.write(2, b"(null): No such file or directory\n")
             redirect.stop()
         finally:
-            root.removeHandler(stream_handler)
+            target.removeHandler(stream_handler)
             for handler in saved_handlers:
-                root.addHandler(handler)
-            root.setLevel(saved_level)
+                target.addHandler(handler)
+            target.setLevel(saved_level)
+            target.propagate = saved_propagate
             restore()
 
         terminal_text = outer.read_text()
