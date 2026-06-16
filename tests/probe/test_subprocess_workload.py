@@ -721,6 +721,9 @@ def test_clean_exit_discards_latched_hang_flag(tmp_path, monkeypatch):
     assert doc["exit_code"] == 0
     assert doc["timed_out"] is False
     assert "tier2:hang" not in doc["failure_detectors_fired"]
+    # Durable breadcrumb: the verdict is a clean pass, but the discarded
+    # latch is recorded for the #224 follow-up to study.
+    assert doc["capture"].get("tier2_hang_latched_but_reconciled") is True
     assert result.passed is True
 
 
@@ -748,6 +751,8 @@ def test_nonzero_exit_keeps_latched_hang_flag(tmp_path, monkeypatch):
     assert doc["verdict"] == "fail"
     assert doc["exit_code"] != 0
     assert "tier2:hang" in doc["failure_detectors_fired"]
+    # No reconciliation happened -> no breadcrumb on a preserved-flag fail.
+    assert "tier2_hang_latched_but_reconciled" not in doc["capture"]
     assert result.passed is False
 
 
@@ -772,4 +777,5 @@ def test_timed_out_keeps_latched_hang_flag(tmp_path, monkeypatch):
     assert doc["timed_out"] is True
     assert doc["verdict"] == "fail"
     assert "tier2:hang" in doc["failure_detectors_fired"]
+    assert "tier2_hang_latched_but_reconciled" not in doc["capture"]
     assert result.passed is False

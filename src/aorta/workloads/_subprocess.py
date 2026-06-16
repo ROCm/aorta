@@ -452,6 +452,7 @@ class SubprocessWorkload(Workload):
         # latched flag in that case so a clean run is never classified
         # ``tier2:hang``. Genuine hangs (``timed_out=True``) and crashes
         # (``exit_code != 0``) keep the flag and still classify as fail.
+        hang_reconciled_away = False
         if hang_detected and exit_code == 0 and not timed_out:
             log.info(
                 "tier2:hang latched mid-run for argv[0]=%r but the process "
@@ -461,6 +462,7 @@ class SubprocessWorkload(Workload):
                 argv[0] if argv else "<unknown>",
             )
             hang_detected = False
+            hang_reconciled_away = True
 
         # Best-effort ``peak_vram_mib`` from the Tier-3 amd-smi
         # snapshots. We only have two samples (pre + post Popen) so
@@ -571,6 +573,13 @@ class SubprocessWorkload(Workload):
             "timed_out": timed_out,
             "env": dict(cell_env_snapshot),
         }
+        # Durable per-trial breadcrumb when a latched tier2:hang was
+        # reconciled away on a clean exit. The verdict stays a clean pass,
+        # but the #224 follow-ups (descendant-tree-aware hang predicate)
+        # need to study exactly these wrapper-delegated false positives, so
+        # leave a trace in result.json rather than only the log.info above.
+        if hang_reconciled_away:
+            result_doc["capture"]["tier2_hang_latched_but_reconciled"] = True
         result_path.write_text(
             json.dumps(result_doc, indent=2, sort_keys=False),
             encoding="utf-8",
