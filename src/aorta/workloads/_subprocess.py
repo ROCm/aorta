@@ -74,6 +74,7 @@ from aorta.probe.classifier.verdict import (
     partition_detectors,
     verdict_from_detectors,
 )
+from aorta.run.retention import apply_retention
 from aorta.workloads._base import Workload, WorkloadResult
 
 log = logging.getLogger(__name__)
@@ -808,6 +809,12 @@ class SubprocessWorkload(Workload):
             encoding="utf-8",
         )
 
+        # Issue #231: prune heavy per-trial artifacts now that the verdict
+        # is known, keeping the level mapped from this trial's verdict.
+        # Runs AFTER result.json is written so the trial record (which
+        # retention never deletes) always survives for resume + the matrix.
+        self._apply_retention(trial_dir, verdict_obj.verdict, probe_extras)
+
         # ``main_work_started`` / ``executed_iterations`` mirror
         # whether ``Popen`` actually launched a child. A normal
         # non-zero child exit is still ``launched=True`` (the
@@ -935,6 +942,11 @@ class SubprocessWorkload(Workload):
             json.dumps(result_doc, indent=2, sort_keys=False),
             encoding="utf-8",
         )
+        # Issue #231: honor ``retain.on_error`` for this infra-error trial
+        # too (mirrors the main run() path). The probe.env was already
+        # unlinked above; this prunes any other heavy artifacts a prior
+        # resume left in the reused trial dir.
+        self._apply_retention(result_path.parent, "error", probe_extras)
         return WorkloadResult(
             passed=False,
             failure_count=1,
@@ -962,6 +974,41 @@ class SubprocessWorkload(Workload):
                 "warn_detectors_fired": [],
             },
         )
+
+    def _apply_retention(
+        self, trial_dir: Path, verdict: str, probe_extras: dict[str, Any]
+    ) -> None:
+        """Prune this trial's heavy artifacts per ``retain`` (issue #231).
+
+        No-op when the recipe omits ``retain`` (keep-everything default) or
+        when the resolved level is ``full``. ``aorta.run.retention`` never
+        deletes the trial record (``result.json``), so resume and the
+        matrix are unaffected regardless of level. Retention failures are
+        best-effort and must never sink an already-classified trial, so any
+        error is logged and swallowed.
+        """
+        retain = probe_extras.get("retain")
+        if not retain:
+            return
+        level = retain.get(f"on_{verdict}", "full")
+        try:
+            outcome = apply_retention(trial_dir, level)
+        except Exception as exc:  # noqa: BLE001 -- retention is best-effort
+            log.warning(
+                "retention: pruning %s at level %r failed (%s); artifacts kept",
+                trial_dir,
+                level,
+                exc,
+            )
+            return
+        if outcome.deleted:
+            log.info(
+                "retention[%s]: pruned %d artifact(s) (~%d bytes) from %s",
+                level,
+                len(outcome.deleted),
+                outcome.freed_bytes,
+                trial_dir,
+            )
 
     def _capture_cell_env(self, probe_extras: dict[str, Any]) -> dict[str, str]:
         """Compute the cell's mitigation+diagnostic env-var bundle.

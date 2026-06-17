@@ -41,6 +41,8 @@ from aorta.triage.recipe import (
     Recipe,
     RecipeCellError,
     RecipeSchemaError,
+    RetainPolicy,
+    _parse_retain,
     _parse_stop_after,
 )
 
@@ -134,6 +136,12 @@ class ProbeExtras:
     disable_detector_tiers: tuple[str, ...] = ()
     # Phase 3 (issue #188): redaction block consumed by ``aorta bundle``.
     redaction: RedactionCfg | None = None
+    # Issue #231: verdict-keyed per-trial artifact retention. ``None``
+    # preserves the legacy keep-everything behaviour; when set,
+    # SubprocessWorkload prunes each trial dir to the level mapped from
+    # that trial's verdict (full/summary/log/none) after classification,
+    # never dropping the trial record (``result.json``).
+    retain: RetainPolicy | None = None
 
 
 def _ensure_str_list(path_hint: str, raw: Any, *, allow_empty: bool = False) -> list[str]:
@@ -339,6 +347,7 @@ def build_probe_recipe_from_dict(
         # the bare case. Mirrors the ``recipe:`` prefix used in the triage
         # loader (aorta.triage.recipe).
         raise RecipeSchemaError(f"recipe: {exc}") from exc
+    retain = _parse_retain("recipe", data.get("retain"))
     # Use ``in`` rather than ``.get(...) is not None`` so an explicit
     # ``redaction: null`` is treated as present-but-invalid (parse_redaction
     # rejects None) instead of being silently conflated with "no redaction
@@ -471,6 +480,7 @@ def build_probe_recipe_from_dict(
         disable_detectors=disable_detectors,
         disable_detector_tiers=disable_detector_tiers,
         redaction=redaction,
+        retain=retain,
     )
 
     return Recipe(

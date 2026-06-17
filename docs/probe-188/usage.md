@@ -134,6 +134,35 @@ built-in `tier1`-`tier4` id that isn't in that tier's catalogue ->
 (repeatable) is **unioned onto** the recipe's set, so an operator can
 silence one more detector without restating the recipe's list.
 
+Verdict-keyed artifact retention (issue #231) keeps the **heavy** per-trial
+output (profiler traces, per-layer dumps -- hundreds of MB each) only for
+the trials where it has diagnostic value, so a big sweep doesn't fill the
+disk with passing-run data:
+
+```yaml
+retain:
+  on_fail:  full       # keep everything (log + summary + heavy artifacts)
+  on_pass:  summary    # keep small summary artifacts; delete heavy ones
+  on_error: log        # keep the trial log only; drop summary + heavy
+```
+
+Levels form a ladder, each keeping everything the one below it keeps:
+`none` (the trial record only) < `log` (+ `stdout.log` / `stderr.log` /
+`probe.env`) < `summary` (+ small collector roll-ups) < `full` (+ heavy
+collector outputs; the default). Each of `on_fail` / `on_pass` / `on_error`
+is optional and defaults to `full`, so **omitting `retain` keeps everything
+exactly as before**. Deletion only ever touches *artifact files* -- the
+per-trial `result.json` (the matrix / rate bookkeeping and the probe resume
+marker) is **never** deleted, at any level. Pairs naturally with
+`stop_after`: "collect N fails with full artifacts, summary-only for the
+clean trials along the way."
+
+Collectors declare which of their outputs are heavy vs summary via an
+optional `artifacts.json` manifest in the trial directory
+(`{"artifacts": [{"path": "trace.pb", "class": "heavy"}, ...]}`); absent a
+manifest, a file is classified by convention (`*.summary.*` is a summary,
+the known logs are `log`, anything else is `heavy`).
+
 Phase 3 keys (`redaction`, top-level `condition`) are still **rejected
 at load time** with a "deferred to Phase 3" error message.
 

@@ -88,6 +88,11 @@ _PROBE_TOP_LEVEL = frozenset(
         # mode: probe (triage-mode check below rejects them otherwise).
         "disable_detectors",
         "disable_detector_tiers",
+        # Issue #231: verdict-keyed per-trial artifact retention. Probe-only
+        # (enforced by SubprocessWorkload on its own trial dir), so it is NOT
+        # added to _TRIAGE_TOP_LEVEL -- unlike stop_after, which the
+        # dispatcher enforces generically for every mode.
+        "retain",
         # Phase 3 (issue #188): redaction block for aorta bundle.
         "redaction",
     }
@@ -198,6 +203,46 @@ class StopAfter:
     events: int
     max_trials: int
     event_verdict: str = "fail"
+
+
+# Retention levels accepted in a ``retain`` block, keyed by verdict. The
+# operative ladder (none < log < summary < full) and the deletion engine
+# live in :mod:`aorta.run.retention`; this frozenset is the schema-layer
+# copy used for load-time validation. They are kept in lockstep by
+# ``tests/probe/test_recipe.py`` (a drift guard) so the schema can never
+# accept a level the engine doesn't understand, and vice versa. Duplicated
+# rather than imported to keep this module's import graph free of any
+# ``aorta.run`` dependency (which would risk a cycle via the dispatcher).
+_RETAIN_LEVELS = frozenset({"full", "summary", "log", "none"})
+_VALID_RETAIN_KEYS = frozenset({"on_fail", "on_pass", "on_error"})
+
+
+@dataclass(frozen=True)
+class RetainPolicy:
+    """Verdict-keyed per-trial artifact retention policy (issue #231).
+
+    Each field is a retention *level* (see :data:`_RETAIN_LEVELS`) applied
+    to a trial with that verdict after classification. The default is
+    ``full`` everywhere -- i.e. an explicit ``RetainPolicy()`` is
+    behaviourally identical to the legacy keep-everything default, so a
+    recipe that omits ``retain`` (``probe_extras.retain is None``) and one
+    that spells out ``full`` for all three verdicts behave the same. The
+    deletion itself is performed by :func:`aorta.run.retention.apply_retention`,
+    which never drops the trial record (``result.json``) regardless of
+    level.
+    """
+
+    on_fail: str = "full"
+    on_pass: str = "full"
+    on_error: str = "full"
+
+    def level_for(self, verdict: str) -> str:
+        """Return the retention level for ``verdict`` (``full`` if unknown)."""
+        return {
+            "fail": self.on_fail,
+            "pass": self.on_pass,
+            "error": self.on_error,
+        }.get(verdict, "full")
 
 
 @dataclass(frozen=True)
@@ -442,6 +487,41 @@ def _parse_stop_after(path_hint: str, raw: Any) -> StopAfter | None:
             f"{sorted(_STOP_AFTER_EVENT_VERDICTS)}, got {event_verdict!r}"
         )
     return StopAfter(events=events, max_trials=max_trials, event_verdict=event_verdict)
+
+
+def _parse_retain(path_hint: str, raw: Any) -> RetainPolicy | None:
+    """Parse + validate the ``retain`` block (issue #231).
+
+    ``None`` / missing -> ``None`` (legacy keep-everything behaviour --
+    the probe workload skips retention entirely). Each of ``on_fail`` /
+    ``on_pass`` / ``on_error`` is optional and defaults to ``full``; any
+    value supplied must be one of :data:`_RETAIN_LEVELS`. The verdict->level
+    mapping is applied per trial *after* classification.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise RecipeSchemaError(
+            f"{path_hint}.retain: must be a mapping, got {type(raw).__name__}"
+        )
+    unknown = set(raw) - _VALID_RETAIN_KEYS
+    if unknown:
+        raise RecipeSchemaError(
+            f"{path_hint}.retain: unknown keys {sorted(unknown)}; "
+            f"allowed: {sorted(_VALID_RETAIN_KEYS)}"
+        )
+    levels: dict[str, str] = {}
+    for key in _VALID_RETAIN_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if value not in _RETAIN_LEVELS:
+            raise RecipeSchemaError(
+                f"{path_hint}.retain.{key}: must be one of "
+                f"{sorted(_RETAIN_LEVELS)}, got {value!r}"
+            )
+        levels[key] = value
+    return RetainPolicy(**levels)
 
 
 def _parse_positive_int(path_hint: str, value: Any) -> int:

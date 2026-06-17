@@ -298,16 +298,17 @@ def test_stop_after_can_key_on_the_error_verdict():
 
 # ==========================================================================
 # GROUP E -- recipe knobs the operator-facing tasks add (#56, #57)
-# OPEN: retention + stop_after are not yet parsed onto the probe recipe.
+# FIXED: stop_after (#57/#232, run-level Recipe.stop_after) and verdict-keyed
+# retention (#56/#231, ProbeExtras.retain) both parse + validate on the probe
+# recipe now. These are permanent guards.
 # ==========================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="aorta-internal #56: verdict-keyed artifact retention not yet on "
-    "the probe recipe. Remove when ProbeExtras carries a retention policy.",
-)
 def test_recipe_accepts_verdict_keyed_retention():
+    """#56/#231 (FIXED): the probe recipe accepts a verdict-keyed ``retain``
+    block, surfaced on ``ProbeExtras.retain``. The deletion engine
+    (``aorta.run.retention``) keeps the heavy artifact only for the verdict
+    whose level is ``full`` and never drops the trial record."""
     from aorta.probe.recipe_builder import build_probe_recipe_from_dict
 
     r = build_probe_recipe_from_dict(
@@ -318,9 +319,11 @@ def test_recipe_accepts_verdict_keyed_retention():
             "mitigation_axis": ["none"],
             "diagnostic_axis": ["none"],
             "retain": {"on_fail": "full", "on_pass": "summary", "on_error": "log"},
-        }
+        },
+        [],
     )
     assert r.probe_extras.retain is not None  # type: ignore[attr-defined]
+    assert r.probe_extras.retain.level_for("fail") == "full"  # type: ignore[attr-defined]
 
 
 def test_recipe_accepts_stop_after_rule():

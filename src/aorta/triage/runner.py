@@ -878,6 +878,16 @@ def _run_one_cell(
             "disable_detectors": tuple(probe_extras.disable_detectors),
             "disable_detector_tiers": tuple(probe_extras.disable_detector_tiers),
         }
+        # Issue #231: verdict-keyed artifact retention. Forwarded as a plain
+        # verdict->level mapping so SubprocessWorkload needn't import the
+        # RetainPolicy type; absent (None) when the recipe omits ``retain``,
+        # which the workload treats as keep-everything.
+        if probe_extras.retain is not None:
+            probe_extras_payload["retain"] = {
+                "on_fail": probe_extras.retain.on_fail,
+                "on_pass": probe_extras.retain.on_pass,
+                "on_error": probe_extras.retain.on_error,
+            }
 
     # save_logs is forced True for probe-mode cells because
     # SubprocessWorkload reads ``_aorta_log_prefix`` to derive its
