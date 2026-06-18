@@ -209,8 +209,9 @@ class StopAfter:
 # operative ladder (none < log < summary < full) and the deletion engine
 # live in :mod:`aorta.run.retention`; this frozenset is the schema-layer
 # copy used for load-time validation. They are kept in lockstep by
-# ``tests/probe/test_recipe.py`` (a drift guard) so the schema can never
-# accept a level the engine doesn't understand, and vice versa. Duplicated
+# ``tests/probe/test_retention.py::test_schema_levels_match_engine_ladder``
+# (a drift guard) so the schema can never accept a level the engine
+# doesn't understand, and vice versa. Duplicated
 # rather than imported to keep this module's import graph free of any
 # ``aorta.run`` dependency (which would risk a cycle via the dispatcher).
 _RETAIN_LEVELS = frozenset({"full", "summary", "log", "none"})
@@ -515,7 +516,10 @@ def _parse_retain(path_hint: str, raw: Any) -> RetainPolicy | None:
         if key not in raw:
             continue
         value = raw[key]
-        if value not in _RETAIN_LEVELS:
+        # Check the type before membership: ``value not in _RETAIN_LEVELS``
+        # hashes ``value``, so an unhashable YAML node (a dict/list) would
+        # raise a raw ``TypeError`` instead of a clean schema error.
+        if not isinstance(value, str) or value not in _RETAIN_LEVELS:
             raise RecipeSchemaError(
                 f"{path_hint}.retain.{key}: must be one of "
                 f"{sorted(_RETAIN_LEVELS)}, got {value!r}"

@@ -126,10 +126,18 @@ def classify_artifact(rel_path: str, manifest: dict[str, str] | None = None) -> 
 def _load_manifest(trial_dir: Path) -> dict[str, str]:
     """Read the optional ``artifacts.json`` collector manifest.
 
-    Returns a ``{relative_posix_path: class}`` map. Tolerant by design: a
-    missing file yields ``{}``; a malformed file or an unknown class is
-    logged and skipped (that path falls back to convention) rather than
-    aborting the run.
+    Returns a ``{relative_posix_path: class}`` map. Tolerant by design,
+    never aborts the run:
+
+    * A missing file, or a malformed file (bad JSON / no ``artifacts``
+      list), yields ``{}`` -- the whole trial falls back to filename
+      convention.
+    * A malformed entry (missing ``path`` / ``class``) is logged and
+      skipped, so that one path falls back to convention.
+    * An entry with an *unknown* class is logged and kept in the map
+      pinned to :data:`HEAVY` (the conservative choice for disk), not
+      skipped -- so it is retained/pruned as a heavy artifact rather
+      than deferring to convention.
     """
     manifest_path = trial_dir / RETENTION_MANIFEST_NAME
     if not manifest_path.is_file():

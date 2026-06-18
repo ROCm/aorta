@@ -78,6 +78,15 @@ def test_retain_rejects_non_mapping():
         build_probe_recipe_from_dict(_probe_dict(retain=["full"]), [])
 
 
+@pytest.mark.parametrize("bad_value", [{"nested": "full"}, ["full"]])
+def test_retain_rejects_unhashable_level_value(bad_value):
+    # An unhashable YAML node (dict/list) as a level value must surface a
+    # clean RecipeSchemaError, not a raw TypeError from the set-membership
+    # check (`value not in _RETAIN_LEVELS` hashes `value`).
+    with pytest.raises(RecipeSchemaError, match="must be one of"):
+        build_probe_recipe_from_dict(_probe_dict(retain={"on_fail": bad_value}), [])
+
+
 def test_schema_levels_match_engine_ladder():
     """Drift guard: the schema's accepted levels must equal the engine's."""
     assert _RETAIN_LEVELS == set(RETAIN_LEVELS)
