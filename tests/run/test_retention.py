@@ -215,6 +215,37 @@ def test_non_list_artifacts_is_malformed(tmp_path: Path, caplog: pytest.LogCaptu
     assert _names(d) == {"result.json"}
 
 
+def test_symlinked_manifest_is_malformed(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """A symlinked artifacts.json must not be dereferenced (it could read a
+    file outside the trial tree). Treat it as malformed + fall back."""
+    # A valid manifest living outside the trial dir that, if followed, would
+    # keep huge.bin as a summary (i.e. survive pruning at level "none").
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_manifest = outside / "real.json"
+    real_manifest.write_text(
+        json.dumps({"artifacts": [{"path": "huge.bin", "class": "summary"}]}),
+        encoding="utf-8",
+    )
+
+    d = tmp_path / "trial_0"
+    d.mkdir()
+    (d / "result.json").write_text("{}", encoding="utf-8")
+    (d / "huge.bin").write_text("q" * 100, encoding="utf-8")
+    (d / RETENTION_MANIFEST_NAME).symlink_to(real_manifest)
+
+    with caplog.at_level("WARNING"):
+        apply_retention(d, "none")
+
+    # The symlink was NOT followed: warned about symlink, fell back to
+    # convention, and huge.bin (heavy by name) was pruned at level none.
+    # The manifest symlink itself survives (deletion side skips symlinks).
+    assert any("symlink" in r.getMessage() for r in caplog.records)
+    survivors = _names(d)
+    assert "huge.bin" not in survivors  # pruned by convention
+    assert "result.json" in survivors  # record always kept
+
+
 def test_symlink_escaping_trial_dir_is_not_deleted(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ):

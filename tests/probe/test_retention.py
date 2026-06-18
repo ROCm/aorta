@@ -167,6 +167,28 @@ def test_record_survives_at_none_level(tmp_path: Path):
     assert not (trial_dir / "stdout.log").exists()  # none drops logs too
 
 
+def test_non_dict_retain_payload_warns_and_skips(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """A malformed programmatic ``retain`` payload (e.g. a bare string, not a
+    mapping) must not sink the trial -- retention is best-effort, so warn +
+    skip and keep every artifact (the schema path rejects this, but a
+    programmatic caller can bypass it)."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        trial_dir, result = _run_trial(
+            tmp_path,
+            argv=["true"],
+            trial_idx=0,
+            retain="summary",  # type: ignore[arg-type]
+        )
+    assert result.passed is True
+    assert (trial_dir / "trace.bin").is_file()  # nothing pruned
+    assert (trial_dir / "result.json").is_file()
+    assert any("expected a mapping" in r.getMessage() for r in caplog.records)
+
+
 def test_disk_criterion_heavy_kept_only_for_fails(tmp_path: Path):
     """A 10-trial cell with 3 fails retains 3 heavy artifacts, not 10."""
     n_trials = 10

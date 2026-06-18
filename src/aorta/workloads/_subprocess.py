@@ -990,6 +990,18 @@ class SubprocessWorkload(Workload):
         retain = probe_extras.get("retain")
         if not retain:
             return
+        # Retention is documented best-effort -- a malformed payload (e.g. a
+        # string or RetainPolicy passed via programmatic config) must not
+        # sink the trial with an AttributeError. Mirror the isinstance(dict)
+        # guard in _capture_cell_env and warn+skip when it isn't a mapping.
+        if not isinstance(retain, dict):
+            log.warning(
+                "retention: probe_extras['retain'] is %s, expected a mapping; "
+                "skipping retention for %s",
+                type(retain).__name__,
+                trial_dir,
+            )
+            return
         level = retain.get(f"on_{verdict}", "full")
         try:
             outcome = apply_retention(trial_dir, level)

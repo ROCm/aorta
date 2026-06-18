@@ -148,6 +148,18 @@ def _load_manifest(trial_dir: Path) -> dict[str, str]:
       than deferring to convention.
     """
     manifest_path = trial_dir / RETENTION_MANIFEST_NAME
+    # A symlinked manifest could point read_text() at an arbitrary file
+    # outside the trial tree (is_file()/read_text() dereference symlinks).
+    # Mirror the deletion-side symlink/containment guards: treat it as
+    # malformed and fall back to filename convention.
+    if manifest_path.is_symlink():
+        log.warning(
+            "retention: %s in %s is a symlink; treating as malformed and "
+            "falling back to filename convention",
+            RETENTION_MANIFEST_NAME,
+            trial_dir,
+        )
+        return {}
     if not manifest_path.is_file():
         return {}
     try:
