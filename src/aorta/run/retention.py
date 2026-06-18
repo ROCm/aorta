@@ -73,11 +73,14 @@ _MANIFEST_CLASSES: frozenset[str] = frozenset({LOG, SUMMARY, HEAVY})
 # bad manifest never aborts a run or silently keeps tens of GB.
 RETENTION_MANIFEST_NAME = "artifacts.json"
 
-# Files that ARE the trial record -- never deleted, regardless of level or
-# any manifest entry. ``result.json`` is the probe resume marker
-# (``aorta.probe.resume.is_trial_complete``) and the matrix's per-trial
-# source of truth.
-_RECORD_NAMES: frozenset[str] = frozenset({"result.json"})
+# Trial-dir-relative POSIX paths that ARE the trial record -- never
+# deleted, regardless of level or any manifest entry. ``result.json`` is
+# the probe resume marker (``aorta.probe.resume.is_trial_complete``, which
+# keys off ``trial_dir/result.json`` specifically) and the matrix's
+# per-trial source of truth. Matched by exact relative path, NOT basename:
+# a heavy collector output that happens to be named ``result.json`` under a
+# subdirectory is prunable like any other artifact.
+_RECORD_PATHS: frozenset[str] = frozenset({"result.json"})
 # Known small operational artifacts that ride at the ``log`` tier.
 _LOG_NAMES: frozenset[str] = frozenset({"stdout.log", "stderr.log", "probe.env"})
 
@@ -108,10 +111,14 @@ def classify_artifact(rel_path: str, manifest: dict[str, str] | None = None) -> 
     log / summary filename conventions, then a default of :data:`HEAVY`
     (an unrecognised file is assumed to be a big collector output -- the
     conservative choice for disk).
+
+    The record guard matches the exact trial-dir-relative path (so only
+    the top-level ``result.json`` is protected); the log / summary
+    conventions match on basename.
     """
-    name = Path(rel_path).name
-    if name in _RECORD_NAMES:
+    if rel_path in _RECORD_PATHS:
         return RECORD
+    name = Path(rel_path).name
     if manifest and rel_path in manifest:
         return manifest[rel_path]
     if name == RETENTION_MANIFEST_NAME:
@@ -129,8 +136,9 @@ def _load_manifest(trial_dir: Path) -> dict[str, str]:
     Returns a ``{relative_posix_path: class}`` map. Tolerant by design,
     never aborts the run:
 
-    * A missing file, or a malformed file (bad JSON / no ``artifacts``
-      list), yields ``{}`` -- the whole trial falls back to filename
+    * A missing file, or a malformed file (bad JSON, no ``artifacts``
+      key, or an ``artifacts`` value that is not a list), yields ``{}``
+      with a warning -- the whole trial falls back to filename
       convention.
     * A malformed entry (missing ``path`` / ``class``) is logged and
       skipped, so that one path falls back to convention.
@@ -145,6 +153,10 @@ def _load_manifest(trial_dir: Path) -> dict[str, str]:
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
         entries = raw["artifacts"]
+        if not isinstance(entries, list):
+            raise TypeError(
+                f"'artifacts' must be a list, got {type(entries).__name__}"
+            )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         log.warning(
             "retention: ignoring malformed %s in %s (%s); "
@@ -155,7 +167,7 @@ def _load_manifest(trial_dir: Path) -> dict[str, str]:
         )
         return {}
     mapping: dict[str, str] = {}
-    for entry in entries if isinstance(entries, list) else []:
+    for entry in entries:
         try:
             path = str(entry["path"])
             cls = str(entry["class"])
@@ -185,6 +197,11 @@ def apply_retention(trial_dir: Path, level: str) -> RetentionOutcome:
 
     Unknown ``level`` values are treated as ``full`` (fail-safe: never
     delete more than asked) with a warning.
+
+    Symlinks are never unlinked, and any path that dereferences outside
+    ``trial_dir`` is skipped (kept) with a warning -- a buggy or hostile
+    collector symlink can never make retention delete files outside the
+    trial output tree.
     """
     if level not in _LEVEL_RANK:
         log.warning("retention: unknown level %r; keeping everything (full)", level)
@@ -196,14 +213,35 @@ def apply_retention(trial_dir: Path, level: str) -> RetentionOutcome:
 
     manifest = _load_manifest(trial_dir)
     level_rank = _LEVEL_RANK[level]
+    root = trial_dir.resolve()
     deleted: list[str] = []
     kept: list[str] = []
     freed = 0
 
     for path in sorted(trial_dir.rglob("*")):
+        # Never unlink a symlink (deleting the link reclaims no disk and
+        # following it could escape the trial tree) and never delete a
+        # path that dereferences outside ``trial_dir``. Mirrors the
+        # containment guard in ``aorta.bundle.writer``, but retention is
+        # tolerant -- it keeps the offending entry and warns rather than
+        # aborting the sweep.
+        if path.is_symlink():
+            rel = path.relative_to(trial_dir).as_posix()
+            log.warning("retention: skipping symlink %s; not pruning it", rel)
+            kept.append(rel)
+            continue
         if not path.is_file():
             continue
         rel = path.relative_to(trial_dir).as_posix()
+        resolved = path.resolve()
+        if resolved != root and root not in resolved.parents:
+            log.warning(
+                "retention: skipping %s; resolves outside trial dir (%s); keeping it",
+                rel,
+                resolved,
+            )
+            kept.append(rel)
+            continue
         cls = classify_artifact(rel, manifest)
         if cls == RECORD or _CLASS_RANK[cls] <= level_rank:
             kept.append(rel)
@@ -237,7 +275,7 @@ def _prune_empty_dirs(trial_dir: Path) -> None:
     pruned is itself removed. The trial directory root is never removed.
     """
     for path in sorted(trial_dir.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-        if path == trial_dir or not path.is_dir():
+        if path == trial_dir or path.is_symlink() or not path.is_dir():
             continue
         try:
             next(path.iterdir())

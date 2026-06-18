@@ -76,6 +76,18 @@ def test_record_guard_beats_manifest():
     assert classify_artifact("result.json", {"result.json": HEAVY}) == RECORD
 
 
+def test_record_guard_matches_exact_path_not_basename():
+    """Only the top-level result.json is the record; a nested one is heavy.
+
+    Resume / matrix completion keys off ``trial_dir/result.json``
+    specifically, so a same-named heavy collector file under a subdir must
+    stay prunable rather than being protected by basename.
+    """
+    assert classify_artifact("result.json") == RECORD
+    assert classify_artifact("sub/result.json") == HEAVY
+    assert classify_artifact("prof/nested/result.json") == HEAVY
+
+
 # ---- apply_retention: the level ladder ------------------------------------
 
 
@@ -170,6 +182,61 @@ def test_malformed_manifest_falls_back_to_convention(tmp_path: Path):
     apply_retention(d, "none")
     survivors = _names(d)
     assert survivors == {"result.json"}
+
+
+def test_nested_result_json_is_pruned(tmp_path: Path):
+    """A heavy collector file named result.json under a subdir is prunable."""
+    d = tmp_path / "trial_0"
+    d.mkdir()
+    (d / "result.json").write_text("{}", encoding="utf-8")  # the real record
+    sub = d / "collector"
+    sub.mkdir()
+    (sub / "result.json").write_text("z" * 500, encoding="utf-8")  # heavy
+    apply_retention(d, "none")
+    survivors = _names(d)
+    assert survivors == {"result.json"}  # nested one pruned, real record kept
+
+
+def test_non_list_artifacts_is_malformed(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """A manifest whose ``artifacts`` is not a list warns + falls back."""
+    d = tmp_path / "trial_0"
+    d.mkdir()
+    (d / "result.json").write_text("{}", encoding="utf-8")
+    (d / "huge.bin").write_text("q" * 100, encoding="utf-8")
+    (d / RETENTION_MANIFEST_NAME).write_text(
+        json.dumps({"artifacts": {"path": "huge.bin", "class": "summary"}}),
+        encoding="utf-8",
+    )
+    with caplog.at_level("WARNING"):
+        apply_retention(d, "none")
+    # Warned about the malformed manifest...
+    assert any("malformed" in r.getMessage() for r in caplog.records)
+    # ...and fell back to convention: huge.bin is heavy -> pruned at none.
+    assert _names(d) == {"result.json"}
+
+
+def test_symlink_escaping_trial_dir_is_not_deleted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """A symlink pointing outside the trial dir is skipped, never unlinked."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "precious.bin"
+    victim.write_text("do not delete", encoding="utf-8")
+
+    d = tmp_path / "trial_0"
+    d.mkdir()
+    (d / "result.json").write_text("{}", encoding="utf-8")
+    link = d / "escape.bin"  # heavy name; would be pruned if treated as a file
+    link.symlink_to(victim)
+
+    with caplog.at_level("WARNING"):
+        outcome = apply_retention(d, "none")
+
+    assert link.is_symlink()  # the link itself survives
+    assert victim.is_file() and victim.read_text() == "do not delete"
+    assert "escape.bin" not in outcome.deleted
+    assert any("symlink" in r.getMessage() for r in caplog.records)
 
 
 def test_unknown_manifest_class_treated_as_heavy(tmp_path: Path):
