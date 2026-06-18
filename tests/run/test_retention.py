@@ -94,10 +94,10 @@ def test_record_guard_matches_exact_path_not_basename():
 @pytest.mark.parametrize(
     ("level", "present", "gone"),
     [
-        ("full", {"result.json", "stdout.log", "trace.bin", "rollup.summary.json", "prof/big.pb"}, set()),
-        ("summary", {"result.json", "stdout.log", "rollup.summary.json"}, {"trace.bin", "prof/big.pb"}),
+        ("full", {"result.json", "stdout.log", "stderr.log", "probe.env", "trace.bin", "rollup.summary.json", "prof/big.pb"}, set()),
+        ("summary", {"result.json", "stdout.log", "stderr.log", "probe.env", "rollup.summary.json"}, {"trace.bin", "prof/big.pb"}),
         ("log", {"result.json", "stdout.log", "stderr.log", "probe.env"}, {"trace.bin", "rollup.summary.json", "prof/big.pb"}),
-        ("none", {"result.json"}, {"stdout.log", "trace.bin", "rollup.summary.json", "prof/big.pb"}),
+        ("none", {"result.json"}, {"stdout.log", "stderr.log", "probe.env", "trace.bin", "rollup.summary.json", "prof/big.pb"}),
     ],
 )
 def test_apply_levels(tmp_path: Path, level: str, present: set[str], gone: set[str]):

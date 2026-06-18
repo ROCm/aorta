@@ -87,6 +87,16 @@ def test_retain_rejects_unhashable_level_value(bad_value):
         build_probe_recipe_from_dict(_probe_dict(retain={"on_fail": bad_value}), [])
 
 
+def test_retain_multiple_bad_keys_report_deterministically():
+    # With several invalid level values, the validator iterates keys in a
+    # fixed (sorted) order so the surfaced error is stable across runs /
+    # hash seeds. Sorted order is on_error < on_fail < on_pass, so on_fail
+    # is reported first here.
+    bad = {"on_pass": "bogus_p", "on_fail": "bogus_f"}
+    with pytest.raises(RecipeSchemaError, match=r"retain\.on_fail: must be one of"):
+        build_probe_recipe_from_dict(_probe_dict(retain=bad), [])
+
+
 def test_schema_levels_match_engine_ladder():
     """Drift guard: the schema's accepted levels must equal the engine's."""
     assert _RETAIN_LEVELS == set(RETAIN_LEVELS)

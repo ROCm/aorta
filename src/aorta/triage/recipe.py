@@ -512,7 +512,10 @@ def _parse_retain(path_hint: str, raw: Any) -> RetainPolicy | None:
             f"allowed: {sorted(_VALID_RETAIN_KEYS)}"
         )
     levels: dict[str, str] = {}
-    for key in _VALID_RETAIN_KEYS:
+    # Iterate in a fixed (sorted) order: ``_VALID_RETAIN_KEYS`` is a
+    # frozenset, so raw iteration order is hash-seed dependent and would
+    # make the surfaced error non-deterministic when several keys are bad.
+    for key in sorted(_VALID_RETAIN_KEYS):
         if key not in raw:
             continue
         value = raw[key]
