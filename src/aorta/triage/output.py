@@ -55,6 +55,12 @@ log = logging.getLogger(__name__)
 
 NO_TICKET_SLUG = "_no_ticket_"
 
+# The run-directory layouts ``resolve_run_dir`` / ``_cell_directory`` accept.
+# Kept as one source of truth so the two runtime guards can't drift (a value
+# accepted by one but silently mishandled by the other would render wrong
+# ``Directory`` links). Mirrors the ``Literal`` on the public signatures.
+_VALID_LAYOUTS = ("timestamped", "flat_resume")
+
 # ``flat_resume`` lockfile name. Lives at ``<run_dir>/.aorta-probe.lock``; the
 # leading dot keeps it out of casual ``ls`` output and matches the convention
 # used by other resume-state files in the run dir.
@@ -136,7 +142,7 @@ def resolve_run_dir(
     # would otherwise silently land in the timestamped branch. Reject
     # unknown values at runtime so probe-mode callers can't
     # accidentally get the wrong output tree.
-    if layout not in ("timestamped", "flat_resume"):
+    if layout not in _VALID_LAYOUTS:
         raise ValueError(
             f"resolve_run_dir: layout must be 'timestamped' or 'flat_resume', "
             f"got {layout!r}"
@@ -545,7 +551,16 @@ def _cell_directory(name: str, layout: str) -> str:
     The final segment is the recipe cell name (``<mitigation>-<diagnostic>``
     in probe mode), so the on-disk folder stays the canonical join key while
     the table itself reads the two axes from their own columns (#229).
+
+    ``layout`` is validated against the same set as :func:`resolve_run_dir`
+    so a typo (e.g. ``"flatresume"``) raises instead of silently rendering a
+    triage-style ``cells/<slug>/`` link for a probe run.
     """
+    if layout not in _VALID_LAYOUTS:
+        raise ValueError(
+            f"_cell_directory: layout must be 'timestamped' or 'flat_resume', "
+            f"got {layout!r}"
+        )
     slug = safe_slug(name)
     if layout == "flat_resume":
         return f"{slug}/"

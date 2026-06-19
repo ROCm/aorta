@@ -214,6 +214,23 @@ def test_resolve_run_dir_rejects_unknown_layout(tmp_path):
         resolve_run_dir(tmp_path, r, layout="")  # type: ignore[arg-type]
 
 
+def test_cell_directory_rejects_unknown_layout():
+    """Regression for PR #241 review: ``_cell_directory`` shares the
+    ``layout`` contract with ``resolve_run_dir`` but used to treat it as a
+    free-form str, so a typo (``"flatresume"``) silently rendered a
+    triage-style ``cells/<slug>/`` link for a probe run. It must reject
+    unknown values too.
+    """
+    from aorta.triage.output import _cell_directory
+
+    assert _cell_directory("a-b", "flat_resume") == "a-b/"
+    assert _cell_directory("a-b", "timestamped") == "cells/a-b/"
+    with pytest.raises(ValueError, match="layout must be"):
+        _cell_directory("a-b", "flatresume")
+    with pytest.raises(ValueError, match="layout must be"):
+        _cell_directory("a-b", "")
+
+
 def test_default_layout_is_byte_equivalent_to_timestamped(tmp_path):
     """Existing callers see no behaviour change -- the default is 'timestamped'."""
     r = _simple_recipe(ticket="PROJ-1")

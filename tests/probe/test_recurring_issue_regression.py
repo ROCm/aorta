@@ -237,12 +237,15 @@ def _probe_matrix_md(tmp_path, *, mitigation_axis, diagnostic_axis) -> str:
     from aorta.triage.output import write_matrix_md
     from aorta.triage.recipe import load_recipe
 
+    # Emit axis values as a double-quoted YAML flow sequence (json.dumps gives
+    # exactly that) so YAML 1.1 boolean coercion of tokens like ``on``/``off``/
+    # ``yes``/``no`` can't silently rewrite an axis name into ``True``/``False``.
     body = (
         "schema_version: 1\n"
         "mode: probe\n"
         "trials: 1\n"
-        f"mitigation_axis: [{', '.join(mitigation_axis)}]\n"
-        f"diagnostic_axis: [{', '.join(diagnostic_axis)}]\n"
+        f"mitigation_axis: {json.dumps(list(mitigation_axis))}\n"
+        f"diagnostic_axis: {json.dumps(list(diagnostic_axis))}\n"
     )
     p = tmp_path / "r.yaml"
     p.write_text(body, encoding="utf-8")
