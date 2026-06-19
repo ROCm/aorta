@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from bump_version import (  # noqa: E402
     bump_version,
+    main,
     read_version,
     resolve_new_version,
     set_version,
@@ -68,6 +69,23 @@ def test_set_version_preserves_line_endings(nl):
     updated = set_version(text, "0.3.0")
     assert read_version(text) == "0.2.0"
     assert updated == expected
+
+
+@pytest.mark.parametrize("nl", ["\r\n", "\r", "\n"])
+def test_main_preserves_line_endings_end_to_end(tmp_path, capsys, nl):
+    """End-to-end: running the CLI on a CRLF/CR file must not normalize line
+    endings. ``read_text``/``write_text`` would translate newlines and silently
+    rewrite the whole file; main() reads + writes with ``newline=""`` so only
+    the version value changes on disk (compared as raw bytes).
+    """
+    raw = nl.join(["[project]", 'name = "aorta"', 'version = "0.2.0"', ""]).encode("utf-8")
+    expected = nl.join(["[project]", 'name = "aorta"', 'version = "0.3.0"', ""]).encode("utf-8")
+    p = tmp_path / "pyproject.toml"
+    p.write_bytes(raw)
+    rc = main(["--set", "0.3.0", "--pyproject", str(p)])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "0.3.0"
+    assert p.read_bytes() == expected
 
 
 # A trailing inline comment on the table header is valid TOML; the bumper must
