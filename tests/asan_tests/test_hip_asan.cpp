@@ -78,7 +78,7 @@ static int test_clean() {
     free(h_a); free(h_b); free(h_c);
 
     printf("test_clean: %s (compute result %s)\n",
-           "PASSED", errors ? "WRONG" : "correct");
+           errors ? "FAILED" : "PASSED", errors ? "WRONG" : "correct");
     return errors;
 }
 
