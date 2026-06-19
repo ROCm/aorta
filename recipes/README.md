@@ -187,16 +187,16 @@ torchrun's target -- `-m aorta` is not a runnable module:
 aorta sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
 
 # single node, 2 ranks (bump --nproc_per_node to your GPU count):
-torchrun --standalone --nproc_per_node=2 $(which aorta) triage run \
+torchrun --standalone --nproc_per_node=2 $(which aorta) sweep run \
   --recipe recipes/example-fsdp-smoke.yaml
 
 # multi-node (1 rank/host x N hosts -- the AINIC topology):
 torchrun --nnodes=N --nproc_per_node=1 --rdzv-backend=c10d \
-  --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) triage run \
+  --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
   --recipe recipes/example-fsdp-smoke.yaml
 ```
 
-Each rank runs the full `triage run`; the ranks find each other in
+Each rank runs the full `sweep run`; the ranks find each other in
 `dist.init_process_group()`. Cells run in-process per rank (sequentially),
 and results are written by **rank 0 only** (the dispatcher gates writes on
 `RANK`), so multi-rank launches don't clobber each other. This is the same

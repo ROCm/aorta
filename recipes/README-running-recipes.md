@@ -41,7 +41,7 @@ env:
 ```bash
 torchrun --nnodes=<N> --nproc-per-node=<GPUS_PER_NODE> \
   --rdzv-backend=c10d --rdzv-endpoint=<HEAD_HOST>:<PORT> \
-  $(command -v aorta) triage run --recipe <recipe>
+  $(command -v aorta) sweep run --recipe <recipe>
 ```
 
 Launch contract (read once):

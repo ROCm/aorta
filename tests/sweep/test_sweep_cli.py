@@ -243,6 +243,9 @@ def test_list_patterns_runs():
     runner = CliRunner()
     result = runner.invoke(main, ["sweep", "list-patterns"])
     assert result.exit_code == 0, result.output
+    # Banner names the command the user actually ran, not "aorta probe".
+    assert "aorta sweep built-in pattern library" in result.output
+    assert "aorta probe" not in result.output
 
 
 def test_list_patterns_version_banner():
@@ -250,6 +253,7 @@ def test_list_patterns_version_banner():
     result = runner.invoke(main, ["sweep", "list-patterns", "--version"])
     assert result.exit_code == 0, result.output
     assert "pattern library v" in result.output
+    assert result.output.startswith("aorta sweep pattern library v")
 
 
 # --- deprecation aliases -------------------------------------------------

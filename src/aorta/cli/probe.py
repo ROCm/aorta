@@ -87,20 +87,25 @@ def _aorta_package_version() -> str:
         return "unknown"
 
 
-def _print_list_patterns(show_version: bool) -> None:
+def _print_list_patterns(show_version: bool, banner_prefix: str = "aorta probe") -> None:
     """Render the Tier-4 catalogue or the version banner (rubric FR 2.5).
 
     Plain stdout writes (no JSON) so the output is greppable from a
     shell. Each pattern emits a stable three-line entry: ID,
     description, sample regex match line.
+
+    ``banner_prefix`` names the invoking command in the banner (defaults
+    to ``"aorta probe"``); ``aorta sweep list-patterns`` passes
+    ``"aorta sweep"`` so the header matches what the user actually ran.
+    The catalogue itself is identical -- only the banner text changes.
     """
     if show_version:
         click.echo(
-            f"aorta probe pattern library v{BUILTIN_PATTERN_VERSION} "
+            f"{banner_prefix} pattern library v{BUILTIN_PATTERN_VERSION} "
             f"(aorta {_aorta_package_version()})"
         )
         return
-    click.echo(f"aorta probe built-in pattern library (v{BUILTIN_PATTERN_VERSION})")
+    click.echo(f"{banner_prefix} built-in pattern library (v{BUILTIN_PATTERN_VERSION})")
     click.echo("")
     for pattern in all_patterns():
         click.echo(f"  {pattern.detector_id}")

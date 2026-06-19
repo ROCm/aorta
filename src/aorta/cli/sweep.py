@@ -504,11 +504,11 @@ def sweep_list_environments(files: tuple[Path, ...]) -> None:
     "--version",
     "show_version",
     is_flag=True,
-    help="Print 'aorta probe pattern library v<N> (aorta <pkg-version>)' and exit.",
+    help="Print 'aorta sweep pattern library v<N> (aorta <pkg-version>)' and exit.",
 )
 def sweep_list_patterns(show_version: bool) -> None:
     """Print the built-in Tier-4 failure-signature pattern catalogue and exit."""
-    _print_list_patterns(show_version=show_version)
+    _print_list_patterns(show_version=show_version, banner_prefix="aorta sweep")
 
 
 __all__ = ["sweep"]

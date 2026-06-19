@@ -10,12 +10,12 @@
 #   aorta sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
 #
 #   # single node, 2 ranks (CX-7 / RCCL smoke; bump to your GPU count):
-#   torchrun --standalone --nproc_per_node=2 $(which aorta) triage run \
+#   torchrun --standalone --nproc_per_node=2 $(which aorta) sweep run \
 #     --recipe recipes/example-fsdp-smoke.yaml
 #
 #   # multi-node (e.g. 1 rank/host x 40 hosts -- the AINIC topology):
 #   torchrun --nnodes=40 --nproc_per_node=1 --rdzv-backend=c10d \
-#     --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) triage run \
+#     --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
 #     --recipe recipes/example-fsdp-smoke.yaml
 #
 # Results are written by rank 0 only (dispatcher gates on RANK), so multi-rank
