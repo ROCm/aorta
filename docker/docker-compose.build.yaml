@@ -19,7 +19,10 @@ services:
       context: .
       dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}
       args:
-        - BASE_IMAGE=${BASE_IMAGE:-}
+        # Only Dockerfile.nan-repro-asan consumes BASE_IMAGE (FROM ${BASE_IMAGE});
+        # the others hard-code FROM. Default to nan-repro-asan's own ARG default so
+        # an unset BASE_IMAGE doesn't override the Dockerfile with an empty FROM.
+        - BASE_IMAGE=${BASE_IMAGE:-rocm/pytorch-private:nan-repro}
       # Required for build: apt/npm access during docker compose build
       network: host
     # Security Configuration (Elevated Privileges Required)

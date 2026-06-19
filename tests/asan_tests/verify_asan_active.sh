@@ -116,7 +116,7 @@ if echo "${LD_LIBRARY_PATH:-}" | grep -q "rocm-asan"; then
     check "LD_LIBRARY_PATH includes ASAN overlay dir" "pass"
 else
     check "LD_LIBRARY_PATH includes ASAN overlay dir" "fail"
-    echo "         LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+    echo "         LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
 fi
 
 # =========================================================================
@@ -142,9 +142,9 @@ print(f'asan_rt={found_asan_rt}')
 " 2>/dev/null || echo "error=true")
 
     if echo "$MAPS_OUTPUT" | grep -q "asan_hip=True"; then
-        check "ASAN libamdhip64.so loaded from /opt/rocm-asan/lib" "pass"
+        check "ASAN libamdhip64.so loaded from $ASAN_OVERLAY_DIR" "pass"
     else
-        check "ASAN libamdhip64.so loaded from /opt/rocm-asan/lib" "fail"
+        check "ASAN libamdhip64.so loaded from $ASAN_OVERLAY_DIR" "fail"
         echo "         Normal lib may be loaded instead."
     fi
 

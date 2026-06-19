@@ -316,8 +316,13 @@ class TestASANCompilation:
         """)
         output = build_dir / "asan_linked"
         compile_hip_source(source, output)
+        # Check ELF NEEDED entries via readelf -d rather than ldd: ldd resolves
+        # transitive deps and is sensitive to LD_LIBRARY_PATH, which is noisy in
+        # the ASAN overlay env. -shared-libasan makes libclang_rt.asan a direct
+        # NEEDED entry, so readelf is both sufficient and deterministic (matches
+        # test_non_asan_compiler).
         result = subprocess.run(
-            ["ldd", str(output)], capture_output=True, text=True
+            ["readelf", "-d", str(output)], capture_output=True, text=True
         )
         assert "libclang_rt.asan" in result.stdout, \
             "Binary compiled with -fsanitize=address should link to ASAN runtime"

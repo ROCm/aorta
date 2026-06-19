@@ -27,10 +27,12 @@ run_python() {
     local code="$2"
 
     echo -n "  [$name] "
-    set +e
+    # This script intentionally runs without errexit (set -uo pipefail), so the
+    # command substitution below does not abort on a non-zero Python exit and
+    # RC=$? captures it directly — no set +e/set -e toggling needed (and toggling
+    # would wrongly enable errexit for the rest of the script).
     OUTPUT=$(python3 -c "$code" 2>&1)
     RC=$?
-    set -e
 
     if grep -q "ERROR: AddressSanitizer" <<< "$OUTPUT"; then
         asan_reports=$((asan_reports + 1))
@@ -109,9 +111,7 @@ if count > 0:
     print(f'  GPU 0: {torch.cuda.get_device_name(0)}')
 "
 
-set +e
 GPU_COUNT=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo "0")
-set -e
 
 if [ "$GPU_COUNT" -gt 0 ]; then
     run_python "tensor to GPU" "
