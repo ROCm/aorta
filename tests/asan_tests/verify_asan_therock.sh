@@ -16,8 +16,6 @@ ROCM=${ROCM_HOME:-/opt/rocm}
 ASAN_OVERLAY_DIR=${ASAN_LIB_DIR:-/opt/rocm-asan/lib}
 CLANG="$ROCM/llvm/bin/clang++"
 ASAN_LIB=$(find "$ROCM/llvm/lib/clang" -name "libclang_rt.asan-x86_64.so" 2>/dev/null | head -1)
-ASAN_RT_DIR=""
-[ -n "$ASAN_LIB" ] && ASAN_RT_DIR=$(dirname "$ASAN_LIB")
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR=$(mktemp -d /tmp/asan_test.XXXXXX)
 trap 'rm -rf "$TMPDIR"' EXIT

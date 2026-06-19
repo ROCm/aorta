@@ -13,7 +13,7 @@ set -uo pipefail
 ROCM=${ROCM_HOME:-/opt/rocm}
 ASAN_OVERLAY_DIR=${ASAN_LIB_DIR:-/opt/rocm-asan/lib}
 TMPDIR=$(mktemp -d /tmp/asan_verify.XXXXXX)
-trap "rm -rf $TMPDIR" EXIT
+trap 'rm -rf "$TMPDIR"' EXIT
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
