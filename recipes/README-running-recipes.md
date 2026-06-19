@@ -29,7 +29,7 @@ python -m pytest tests/ -q
 ## 3. Validate a recipe without running it
 
 ```bash
-aorta triage run --recipe <recipe> --dry-run
+aorta sweep run --recipe <recipe> --dry-run
 ```
 
 ## 4. Run on the cluster
@@ -49,7 +49,7 @@ Launch contract (read once):
 - Distributed workloads call `dist.init_process_group(backend="nccl")` with no
   args, reading the standard env: `RANK`, `WORLD_SIZE`, `MASTER_ADDR`,
   `MASTER_PORT`, `LOCAL_RANK` (used to bind the GPU). Any launcher that sets
-  these works (torchrun shown; under Slurm drive the same `aorta triage run`
+  these works (torchrun shown; under Slurm drive the same `aorta sweep run`
   line via `srun` / `torchrun`).
 - Run the **same** command on every rank. Only rank 0 writes result artifacts;
   other ranks participate in the collectives.

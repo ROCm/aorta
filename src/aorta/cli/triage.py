@@ -1,12 +1,19 @@
-"""`aorta triage` - mitigation x environment matrix runner.
+"""`aorta triage` - DEPRECATED alias for the workload flow of `aorta sweep`.
 
-Two equivalent entry points (both converge on :func:`aorta.triage.run_recipe`):
+`aorta triage` has been merged into the unified `aorta sweep` command
+(issue #248). It keeps working as a thin deprecation shim: every command
+here prints a stderr notice naming the `aorta sweep` replacement and then
+delegates to the shared ``execute_*`` functions that `aorta sweep` also
+calls -- so behaviour stays byte-identical.
 
-* ``aorta triage run --recipe <file>`` -- primary mode. Recipe file is the
-  source of truth; validated at load time.
-* ``aorta triage run --mode matrix --workload ... --mitigation-axis ...
-  --environment-axis ...`` -- flag shim. Internally builds a :class:`Recipe`
-  via :func:`aorta.triage.recipe.build_recipe_from_flags` and dispatches.
+The shared engine entry points (both converge on
+:func:`aorta.triage.run_recipe`):
+
+* ``--recipe <file>`` -- primary mode. Recipe file is the source of truth;
+  validated at load time.
+* ``--mode matrix --workload ... --mitigation-axis ... --environment-axis
+  ...`` -- flag shim. Internally builds a :class:`Recipe` via
+  :func:`aorta.triage.recipe.build_recipe_from_flags` and dispatches.
 
 Discovery subcommands delegate to B3's resolver so users can see which
 mitigations / environments come from ``aorta`` vs a plugin / sidecar.
@@ -18,6 +25,7 @@ from pathlib import Path
 
 import click
 
+from aorta.cli._deprecation import emit_deprecation
 from aorta.registry import (
     RegistryError,
     load_environments,
@@ -175,7 +183,47 @@ def triage_run(
     verbose: int,
 ) -> None:
     """Run the triage matrix: sweep mitigations x environments x trials, write matrix.md + matrix.json."""
+    emit_deprecation("aorta triage run", "aorta sweep run")
     configure_verbose_logging(verbose)
+    execute_triage_run(
+        recipe=recipe,
+        dry_run=dry_run,
+        mode=mode,
+        workload=workload,
+        mitigation_axis=mitigation_axis,
+        environment_axis=environment_axis,
+        trials=trials,
+        steps=steps,
+        ticket=ticket,
+        baseline_cell=baseline_cell,
+        confound_threshold=confound_threshold,
+        output_dir=output_dir,
+        mitigation_files=mitigation_files,
+    )
+
+
+def execute_triage_run(
+    *,
+    recipe: Path | None,
+    dry_run: bool,
+    mode: str,
+    workload: str | None,
+    mitigation_axis: str | None,
+    environment_axis: str | None,
+    trials: int | None,
+    steps: int | None,
+    ticket: str | None,
+    baseline_cell: str | None,
+    confound_threshold: float | None,
+    output_dir: Path,
+    mitigation_files: tuple[Path, ...],
+) -> None:
+    """Workload-flow body shared by ``aorta sweep run`` and ``aorta triage run``.
+
+    Logging is configured by the Click handler before this is called;
+    keeping it out of here lets ``aorta sweep run`` own verbose setup once
+    regardless of which flow it dispatches to.
+    """
     # Defence-in-depth: Click's ``Choice(["matrix"])`` already enforces this,
     # but the CLI advertises ``--mode optimize`` as a future P1 addition (per
     # D11) and the dispatch site for that branch does not exist yet. Assert
@@ -313,6 +361,12 @@ def _reject_flag_mode_args(
 )
 def list_mitigations(files: tuple[Path, ...]) -> None:
     """List every registered mitigation with its source_package and env-var bundle."""
+    emit_deprecation("aorta triage list-mitigations", "aorta sweep list-mitigations")
+    execute_list_mitigations(files)
+
+
+def execute_list_mitigations(files: tuple[Path, ...]) -> None:
+    """Print the mitigation registry; shared by ``aorta sweep`` + ``aorta triage``."""
     # Wrap RegistryError the same way `triage run` and `aorta run` do: a
     # malformed or colliding --mitigations-file should surface as a one-line
     # ClickException, not a Python traceback.
@@ -339,6 +393,12 @@ def list_mitigations(files: tuple[Path, ...]) -> None:
 )
 def list_environments(files: tuple[Path, ...]) -> None:
     """List every registered environment with its source_package and docker/venv."""
+    emit_deprecation("aorta triage list-environments", "aorta sweep list-environments")
+    execute_list_environments(files)
+
+
+def execute_list_environments(files: tuple[Path, ...]) -> None:
+    """Print the environment registry; shared by ``aorta sweep`` + ``aorta triage``."""
     try:
         registry = load_environments(extra_files=list(files) or None)
     except RegistryError as exc:

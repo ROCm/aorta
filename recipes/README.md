@@ -1,6 +1,12 @@
 # Triage recipes
 
-A triage **recipe** is the authoritative description of a `aorta triage run
+> **Renamed (issue #248):** `aorta triage` and `aorta probe` are now the
+> single command **`aorta sweep`**. Use `aorta sweep run` everywhere this
+> guide says `aorta triage run`, and `aorta sweep run ... -- <cmd>` for the
+> subprocess (former `aorta probe`) flow. The old commands still work as
+> deprecated aliases that print a notice and delegate to the same engine.
+
+A triage **recipe** is the authoritative description of a `aorta sweep run
 --mode matrix` invocation: which `(mitigation x environment)` cells to run,
 per-cell trial / step counts, the ticket the matrix belongs to, and the
 speed-confound detection config.
@@ -172,13 +178,13 @@ workload_config:
 `same_stream_mode`, `stop_on_first_corruption`, `log_interval`).
 
 Because `race` is `launch_mode: distributed`, it MUST be launched under
-torchrun (a bare `aorta triage run` starts one process, WORLD_SIZE=1, and is
+torchrun (a bare `aorta sweep run` starts one process, WORLD_SIZE=1, and is
 refused by launch-mode validation). Use the `aorta` console script as
 torchrun's target -- `-m aorta` is not a runnable module:
 
 ```bash
 # validate only (no GPUs / no launcher):
-aorta triage run --recipe recipes/example-fsdp-smoke.yaml --dry-run
+aorta sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
 
 # single node, 2 ranks (bump --nproc_per_node to your GPU count):
 torchrun --standalone --nproc_per_node=2 $(which aorta) triage run \
@@ -268,7 +274,7 @@ real paths; a future B1 follow-up can drop this level of nesting via a
 
 Every run writes `recipe.resolved.yaml` alongside the matrix. The file is
 **a strict, schema-valid recipe** -- you can pass it back to
-`aorta triage run --recipe ...` directly. Inline-docker cells are
+`aorta sweep run --recipe ...` directly. Inline-docker cells are
 re-emitted in the `{ docker: <ref> }` shorthand so the same
 `_inline_<hash>` is re-derived without needing to ship a sidecar JSON
 next to the file.
@@ -280,7 +286,7 @@ so the run directory is self-contained for replay. The runner also prints
 the exact rerun command on stdout when sidecars are involved, e.g.:
 
 ```
-cd <run_dir> && aorta triage run --recipe recipe.resolved.yaml \
+cd <run_dir> && aorta sweep run --recipe recipe.resolved.yaml \
   --mitigations-file sidecars/foo.json
 ```
 
@@ -304,7 +310,7 @@ audit data is still preserved next to the run.
 The equivalent of `recipes/example-fsdp-smoke.yaml` as flag-mode CLI:
 
 ```
-aorta triage run --mode matrix \
+aorta sweep run --mode matrix \
   --workload fsdp \
   --mitigation-axis none,tf32_off,xnack \
   --environment-axis local \
@@ -333,7 +339,7 @@ packaging artifacts for sharing.
 Dry-run smoke:
 
 ```
-aorta probe --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
+aorta sweep run --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
 ```
 
 See `docs/probe-188/handout-templates.md` for per-template walkthroughs.

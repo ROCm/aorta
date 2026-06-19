@@ -43,6 +43,7 @@ from pathlib import Path
 
 import click
 
+from aorta.cli._deprecation import emit_deprecation
 from aorta.probe.classifier.tier4_patterns import (
     BUILTIN_PATTERN_VERSION,
     all_patterns,
@@ -353,7 +354,11 @@ def probe(
     All arguments after ``--`` are forwarded byte-for-byte to the user
     command. Aorta never parses them; the only "boundary" is the
     optional ``probe.env`` file written under ``--env-passthrough-mode file``.
+
+    DEPRECATED: this command is now a thin alias for ``aorta sweep run``.
+    It prints a stderr notice and delegates to the same shared engine.
     """
+    emit_deprecation("aorta probe", "aorta sweep run")
     if list_patterns:
         _print_list_patterns(show_version=show_version)
         return
@@ -368,6 +373,41 @@ def probe(
             "Missing option '--recipe'. Pass --recipe <path>, or run "
             "with --list-patterns to print the built-in pattern catalogue."
         )
+    execute_probe(
+        recipe=recipe,
+        output=output,
+        ticket=ticket,
+        dry_run=dry_run,
+        env_passthrough_mode=env_passthrough_mode,
+        stop_after_events=stop_after_events,
+        max_trials=max_trials,
+        disable_detectors=disable_detectors,
+        mitigation_files=mitigation_files,
+        argv=argv,
+    )
+
+
+def execute_probe(
+    *,
+    recipe: Path,
+    output: Path,
+    ticket: str | None,
+    dry_run: bool,
+    env_passthrough_mode: str | None,
+    stop_after_events: int | None = None,
+    max_trials: int | None = None,
+    disable_detectors: tuple[str, ...] = (),
+    mitigation_files: tuple[Path, ...],
+    argv: tuple[str, ...],
+) -> None:
+    """Subprocess-flow body shared by ``aorta sweep run`` and ``aorta probe``.
+
+    The caller guarantees ``recipe is not None`` and has already configured
+    verbose logging and handled the ``--list-patterns`` / ``--version``
+    short-circuits. Everything from recipe load through artifact write
+    lives here so both front doors reach an identical code path (the
+    shared-engine contract in ``tests/probe/test_shared_engine.py``).
+    """
     try:
         # ``--env-passthrough-mode`` defaults to None so the handler can
         # distinguish "user passed the flag" from "user omitted it"; per
@@ -409,4 +449,4 @@ def probe(
         click.echo(f"Wrote probe artifacts to {run_dir}")
 
 
-__all__ = ["probe", "ProbeExtras"]
+__all__ = ["probe", "execute_probe", "ProbeExtras"]

@@ -60,10 +60,10 @@
 # Usage
 # -----
 #   # Dry-run validation (no GPU required):
-#   aorta triage run --recipe recipes/ainic-sdc-stress-reproducer.yaml --dry-run
+#   aorta sweep run --recipe recipes/ainic-sdc-stress-reproducer.yaml --dry-run
 #
 #   # Full matrix (10-40 MI355X nodes, all AINIC interconnect):
-#   aorta triage run --recipe recipes/ainic-sdc-stress-reproducer.yaml
+#   aorta sweep run --recipe recipes/ainic-sdc-stress-reproducer.yaml
 #
 # Required environment
 # --------------------

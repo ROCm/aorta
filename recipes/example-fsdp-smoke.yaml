@@ -1,13 +1,13 @@
 # Smoke-test recipe for the `race` workload (`mode: fsdp`).
 #
 # `race` is a DISTRIBUTED workload (min_world_size=2), so it MUST be launched
-# under torchrun -- a bare `aorta triage run` starts a single process
+# under torchrun -- a bare `aorta sweep run` starts a single process
 # (WORLD_SIZE=1) and is correctly refused by launch-mode validation. Use the
 # `aorta` console script as torchrun's target (`-m aorta` is NOT a runnable
 # module):
 #
 #   # validate only (no GPUs / no launcher needed):
-#   aorta triage run --recipe recipes/example-fsdp-smoke.yaml --dry-run
+#   aorta sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
 #
 #   # single node, 2 ranks (CX-7 / RCCL smoke; bump to your GPU count):
 #   torchrun --standalone --nproc_per_node=2 $(which aorta) triage run \

@@ -8,7 +8,7 @@
 # motivated registering the flag.
 #
 # Usage:
-#   aorta probe \
+#   aorta sweep run \
 #       --recipe recipes/probe-flag-sweep.yaml \
 #       --output ./probe_results \
 #       --ticket PROBE-FLAG-SWEEP \

@@ -1,5 +1,22 @@
 # `aorta probe` — Usage Walkthrough (issue #188, Phases 1–3)
 
+> **⚠️ Renamed (issue #248):** `aorta probe` and `aorta triage` are now the
+> single unified command **`aorta sweep`**. The subprocess flow described
+> here is `aorta sweep run ... -- <command>`; the built-in-workload flow is
+> `aorta sweep run` with a `mode: triage` recipe or the `--workload` flag
+> shim. `aorta probe` / `aorta triage` still work as deprecated aliases
+> (they print a one-line notice and delegate to the same engine) but will be
+> removed in a future release. Everywhere this guide says `aorta probe`,
+> read `aorta sweep run`.
+>
+> | Old | New |
+> | --- | --- |
+> | `aorta probe --recipe r.yaml -- <cmd>` | `aorta sweep run --recipe r.yaml -- <cmd>` |
+> | `aorta probe --list-patterns` | `aorta sweep list-patterns` |
+> | `aorta triage run --recipe r.yaml` | `aorta sweep run --recipe r.yaml` |
+> | `aorta triage list-mitigations` | `aorta sweep list-mitigations` |
+> | `aorta triage list-environments` | `aorta sweep list-environments` |
+
 > **Phase 1 (Tier 1 only)**: verdict is `exit_code == 0 ? "pass" : "fail"`.
 > **Phase 2**: five-tier classifier + `custom_patterns` + `--list-patterns`.
 > **Phase 3 (this section)**: `redaction:` recipe block, `aorta bundle`,
@@ -18,7 +35,7 @@ trials and records the exit code.
 ## 1. Quick start
 
 ```bash
-aorta probe \
+aorta sweep run \
     --recipe my_probe.yaml \
     --output ./probe_results \
     --ticket ROCM-1234 \
