@@ -49,6 +49,7 @@ aorta = "aorta.cli:main"
 _subprocess = "aorta.workloads._subprocess:SubprocessWorkload"
 llm_determinism = "aorta.workloads.llm_determinism:LlmDeterminismWorkload"
 race = "aorta.workloads.race:RaceWorkload"
+training = "aorta.workloads.training:TrainingWorkload"
 
 [project.optional-dependencies]
 # For analysis/visualization scripts
