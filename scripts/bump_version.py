@@ -86,10 +86,16 @@ def set_version(text: str, new_version: str) -> str:
             out.append(line)
             continue
         if in_project and not replaced:
-            match = _VERSION_LINE_RE.match(line.rstrip("\n"))
+            # Split off the exact trailing newline sequence ("\r\n", "\r",
+            # "\n" or "") and match against the bare content, so a CRLF/CR
+            # checkout keeps its line endings byte-for-byte (the "untouched"
+            # guarantee) instead of relying on the regex's "." swallowing the
+            # stray "\r".
+            content = line.rstrip("\r\n")
+            terminator = line[len(content):]
+            match = _VERSION_LINE_RE.match(content)
             if match is not None:
-                newline = "\n" if line.endswith("\n") else ""
-                out.append(f"{match.group(1)}{new_version}{match.group(3)}{newline}")
+                out.append(f"{match.group(1)}{new_version}{match.group(3)}{terminator}")
                 replaced = True
                 continue
         out.append(line)

@@ -57,6 +57,19 @@ def test_set_version_preserves_trailing_content():
     assert set_version(text, "0.2.1") == '[project]\nversion = "0.2.1"  # keep me\n'
 
 
+@pytest.mark.parametrize("nl", ["\r\n", "\r", "\n"])
+def test_set_version_preserves_line_endings(nl):
+    """The "byte-for-byte untouched" promise must hold on CRLF/CR checkouts
+    (e.g. a Windows ``pyproject.toml``), not just LF — only the version value
+    changes, every line ending is preserved exactly.
+    """
+    text = nl.join(["[project]", 'name = "aorta"', 'version = "0.2.0"', ""])
+    expected = nl.join(["[project]", 'name = "aorta"', 'version = "0.3.0"', ""])
+    updated = set_version(text, "0.3.0")
+    assert read_version(text) == "0.2.0"
+    assert updated == expected
+
+
 # A trailing inline comment on the table header is valid TOML; the bumper must
 # still recognize the [project] table (regression for the header parse).
 COMMENTED_HEADER = '[project]  # the package\nname = "aorta"\nversion = "0.2.0"\n'
