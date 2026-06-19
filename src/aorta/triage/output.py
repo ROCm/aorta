@@ -541,7 +541,7 @@ def _render_failure_hints(cell_stats: list[CellStats]) -> list[str]:
     return lines
 
 
-def _cell_directory(name: str, layout: str) -> str:
+def _cell_directory(name: str, layout: Literal["timestamped", "flat_resume"]) -> str:
     """Per-cell artifact directory, rendered relative to ``matrix.md``.
 
     Probe runs (issue #188 ``flat_resume`` layout) put cell artifacts at
@@ -575,7 +575,7 @@ def write_matrix_md(
     confound_tags: dict[str, tuple[ConfoundTag, float | None]],
     warnings: list[str],
     run_timestamp: str,
-    layout: str = "timestamped",
+    layout: Literal["timestamped", "flat_resume"] = "timestamped",
 ) -> None:
     """Render matrix.md in the format from issue #151 §"matrix.md target format".
 
@@ -684,6 +684,18 @@ def write_matrix_md(
     for cell in cell_stats:
         tag, _ = confound_tags.get(cell.name, (cell.error and "error" or "-", None))
         if is_probe:
+            # probe.recipe_builder guarantees a (mitigation, diagnostic) pair;
+            # if that invariant is ever violated, warn so it isn't hidden, but
+            # still render "—" rather than abort the whole matrix at the end of
+            # a (potentially long) run -- output paths stay tolerant here, like
+            # the resume/manifest guards (#237).
+            if len(cell.mitigations) != 2:
+                log.warning(
+                    "probe cell %r has %d mitigation axis value(s), expected the "
+                    "(mitigation, diagnostic) pair; rendering missing axes as '—'",
+                    cell.name,
+                    len(cell.mitigations),
+                )
             mitigation = cell.mitigations[0] if cell.mitigations else "—"
             diagnostic = cell.mitigations[1] if len(cell.mitigations) > 1 else "—"
             row: list[str] = [mitigation, diagnostic, cell.environment]
