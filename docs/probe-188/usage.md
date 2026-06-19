@@ -1,4 +1,4 @@
-# `aorta probe` — Usage Walkthrough (issue #188, Phases 1–3)
+# `aorta sweep` (subprocess flow) — Usage Walkthrough (issue #188, Phases 1–3; formerly `aorta probe`)
 
 > **⚠️ Renamed (issue #248):** `aorta probe` and `aorta triage` are now the
 > single unified command **`aorta sweep`**. The subprocess flow described

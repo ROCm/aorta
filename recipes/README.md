@@ -6,8 +6,8 @@
 > subprocess (former `aorta probe`) flow. The old commands still work as
 > deprecated aliases that print a notice and delegate to the same engine.
 
-A triage **recipe** is the authoritative description of a `aorta sweep run
---mode matrix` invocation: which `(mitigation x environment)` cells to run,
+A triage **recipe** is the authoritative description of an `aorta sweep run --mode matrix`
+invocation: which `(mitigation x environment)` cells to run,
 per-cell trial / step counts, the ticket the matrix belongs to, and the
 speed-confound detection config.
 

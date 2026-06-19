@@ -63,7 +63,14 @@ def _peek_recipe_mode(path: Path) -> str | None:
         return None
     if isinstance(data, dict):
         mode = data.get("mode", "triage")
-        return "probe" if mode == "probe" else "triage"
+        if mode == "probe":
+            return "probe"
+        if mode == "triage":
+            return "triage"
+        # Unknown/malformed mode (typo, null, non-str): don't guess "triage"
+        # and mis-dispatch -- return None so the real loader raises the
+        # canonical RecipeSchemaError instead of a misleading sweep usage error.
+        return None
     return None
 
 
@@ -199,7 +206,9 @@ def sweep() -> None:
     type=click.Choice(["matrix"]),
     default="matrix",
     show_default=True,
-    help="matrix = full contingency table. 'optimize' deferred to a future release.",
+    help="matrix = full contingency table. 'optimize' deferred to a future release. "
+    "Applies to the workload/matrix flow only; ignored for probe/subprocess "
+    "runs (recipe 'mode: probe' or a '-- <command>' invocation).",
 )
 @click.option(
     "--workload",

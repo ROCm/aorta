@@ -256,6 +256,28 @@ def test_list_patterns_version_banner():
     assert result.output.startswith("aorta sweep pattern library v")
 
 
+# --- _peek_recipe_mode dispatch helper -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("mode: probe\n", "probe"),
+        ("mode: triage\n", "triage"),
+        ("workload: fsdp\n", "triage"),  # mode absent -> triage default
+        ("mode: prboe\n", None),  # typo: defer to the real loader, don't guess
+        ("mode: null\n", None),
+        ("- just\n- a\n- list\n", None),  # not a mapping
+    ],
+)
+def test_peek_recipe_mode(tmp_path, body, expected):
+    from aorta.cli.sweep import _peek_recipe_mode
+
+    p = tmp_path / "r.yaml"
+    p.write_text("schema_version: 1\n" + body, encoding="utf-8")
+    assert _peek_recipe_mode(p) == expected
+
+
 # --- deprecation aliases -------------------------------------------------
 
 
