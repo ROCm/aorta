@@ -174,7 +174,8 @@ class CellStats:
     top_failure_detector_id: str | None = None
     top_warn_detector_id: str | None = None
     # Issue #232: human-readable stop_after outcome for the cell, e.g.
-    # "stopped early (3 fail in 24)" vs "cap reached (0 fail in 160)".
+    # "stopped early: 3 fail event(s) in 24 trial(s)" vs
+    # "cap reached: 0 fail event(s) in 160 trial(s)".
     # ``None`` for cells with no stop_after rule, and also for cells that
     # errored before a note could be computed. The matrix renderer shows
     # the "Stop after" column whenever the recipe carries a stop_after
