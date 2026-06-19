@@ -79,6 +79,15 @@ def test_apply_suffix_rejects_four_segment_version():
         apply_suffix("0.2.0.1", "rc20260619")
 
 
+@pytest.mark.parametrize("current", ["0.2.0.dev0", "0.2.0.post1"])
+def test_apply_suffix_rejects_dot_prefixed_prerelease(current):
+    # The anchored prefix only strips a non-dot-prefixed suffix (e.g. rcN);
+    # dot-prefixed PEP 440 segments are rejected, not silently dropped --
+    # matches the documented contract (and the four-segment guard above).
+    with pytest.raises(ValueError):
+        apply_suffix(current, "rc20260619")
+
+
 # A trailing inline comment on the table header is valid TOML; the bumper must
 # still recognize the [project] table (regression for the header parse).
 COMMENTED_HEADER = '[project]  # the package\nname = "aorta"\nversion = "0.2.0"\n'

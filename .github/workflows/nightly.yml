@@ -19,9 +19,17 @@ permissions:
 
 jobs:
   nightly:
-    # Run the nightly cron only on the canonical repo, but still allow manual
-    # runs (e.g. on a fork) for testing.
-    if: github.event_name != 'schedule' || github.repository == 'ROCm/aorta'
+    # Guard what can publish to the *shared* canonical dev-wheels release:
+    #   * scheduled cron: canonical repo only;
+    #   * manual dispatch on the canonical repo: only from `main` (a manual run
+    #     against an arbitrary branch must not stamp non-main code into the
+    #     shared rolling pre-release);
+    #   * manual dispatch on a fork: always allowed -- it publishes to the
+    #     fork's own dev-wheels release, so it's safe for testing.
+    if: >-
+      (github.event_name == 'schedule' && github.repository == 'ROCm/aorta') ||
+      (github.event_name == 'workflow_dispatch' &&
+        (github.repository != 'ROCm/aorta' || github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     steps:
       - name: Check out code

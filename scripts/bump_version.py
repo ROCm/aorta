@@ -68,10 +68,15 @@ def bump_version(current: str, level: str) -> str:
 def apply_suffix(current: str, suffix: str) -> str:
     """Return the ``MAJOR.MINOR.PATCH`` base of ``current`` with ``suffix`` appended.
 
-    Any existing pre-release/local part on ``current`` is dropped first, so
-    re-stamping (e.g. ``0.2.0rc20260101`` -> ``0.2.0rc20260619``) is idempotent
-    on the base version. Used to mint nightly release-candidate versions such as
-    ``0.2.0rc20260619``.
+    ``current`` is matched against an anchored ``MAJOR.MINOR.PATCH`` prefix
+    (``_SEMVER_PREFIX_RE``); only a suffix that begins on a *non-numeric,
+    non-dot* boundary is stripped, so re-stamping
+    ``0.2.0rc20260101`` -> ``0.2.0rc20260619`` is idempotent on the base.
+    Inputs whose extra part is dot-prefixed (PEP 440 ``.dev0`` / ``.post1``)
+    or extends the release number (``0.2.0.1``) are intentionally rejected
+    with ``ValueError`` rather than silently truncated -- not every existing
+    pre-release/local form is dropped. Used to mint nightly
+    release-candidate versions such as ``0.2.0rc20260619``.
     """
     match = _SEMVER_PREFIX_RE.match(current)
     if match is None:
