@@ -279,8 +279,6 @@ int main(int argc, char** argv) {
     printf("HIP devices: %d (hipGetDeviceCount: %s)\n",
            device_count, hipGetErrorString(err));
 
-    bool need_gpu = true;
-
     if (strcmp(test, "heap_overflow") == 0) {
         return test_heap_overflow();
     } else if (strcmp(test, "use_after_free") == 0) {

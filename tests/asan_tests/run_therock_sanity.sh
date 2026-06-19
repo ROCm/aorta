@@ -4,11 +4,12 @@
 # This wraps https://github.com/ROCm/TheRock/blob/main/tests/test_rocm_sanity.py
 # with the right environment variables for our ASAN Docker container.
 #
-# Usage (inside the Docker container, with GPU access):
-#   /workspace/asan_tests/run_therock_sanity.sh
-#   /workspace/asan_tests/run_therock_sanity.sh -v              # verbose
-#   /workspace/asan_tests/run_therock_sanity.sh -k test_hip     # run specific test
-#   /workspace/asan_tests/run_therock_sanity.sh --co             # list tests only
+# Usage (inside the Docker container, with GPU access; the repo is mounted at
+# /workspace/aorta by docker-compose.build.yaml):
+#   /workspace/aorta/tests/asan_tests/run_therock_sanity.sh
+#   /workspace/aorta/tests/asan_tests/run_therock_sanity.sh -v              # verbose
+#   /workspace/aorta/tests/asan_tests/run_therock_sanity.sh -k test_hip     # run specific test
+#   /workspace/aorta/tests/asan_tests/run_therock_sanity.sh --co             # list tests only
 #
 # Requirements:
 #   - GPU access (--device=/dev/kfd --device=/dev/dri)

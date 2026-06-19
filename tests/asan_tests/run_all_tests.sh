@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # run_all_tests.sh — Run all ASAN verification tests.
 #
-# Usage (inside the Docker container):
-#   /workspace/asan_tests/run_all_tests.sh           # all tests
-#   /workspace/asan_tests/run_all_tests.sh therock    # TheRock ASAN verification
-#   /workspace/asan_tests/run_all_tests.sh pytorch    # PyTorch ASAN verification
-#   /workspace/asan_tests/run_all_tests.sh sanity     # TheRock official sanity tests
-#   /workspace/asan_tests/run_all_tests.sh asan       # pytest ASAN feature tests
+# Usage (inside the Docker container; the repo is mounted at /workspace/aorta
+# by docker-compose.build.yaml):
+#   /workspace/aorta/tests/asan_tests/run_all_tests.sh           # all tests
+#   /workspace/aorta/tests/asan_tests/run_all_tests.sh therock    # TheRock ASAN verification
+#   /workspace/aorta/tests/asan_tests/run_all_tests.sh pytorch    # PyTorch ASAN verification
+#   /workspace/aorta/tests/asan_tests/run_all_tests.sh sanity     # TheRock official sanity tests
+#   /workspace/aorta/tests/asan_tests/run_all_tests.sh asan       # pytest ASAN feature tests
 #
-# ASAN reports are written to /workspace/asan_tests/results/
+# ASAN reports are written to the results/ directory alongside this script.
 
 set -euo pipefail
 

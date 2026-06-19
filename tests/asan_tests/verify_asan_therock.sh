@@ -109,7 +109,9 @@ if [ "$DEVICE_COUNT" -gt 0 ] && [ -f "$TMPDIR/test_hip_asan" ]; then
     echo "  Found $DEVICE_COUNT GPU(s)"
 
     echo "  Running clean test (no errors expected)..."
-    CLEAN_OUTPUT=$("$TMPDIR/test_hip_asan" clean 2>&1 || true)
+    # No `|| true` here: we check CLEAN_RC below, so the command substitution
+    # must preserve the binary's real exit code (errexit is not set).
+    CLEAN_OUTPUT=$("$TMPDIR/test_hip_asan" clean 2>&1)
     CLEAN_RC=$?
     check "Clean HIP program runs correctly" test "$CLEAN_RC" -eq 0
     check "No ASAN errors in clean run" \
@@ -117,7 +119,7 @@ if [ "$DEVICE_COUNT" -gt 0 ] && [ -f "$TMPDIR/test_hip_asan" ]; then
 
     echo "  Running event_query stress test..."
     EVENT_OUTPUT=$(ASAN_OPTIONS="detect_leaks=0:halt_on_error=0:verify_asan_link_order=0" \
-        "$TMPDIR/test_hip_asan" event_query 2>&1 || true)
+        "$TMPDIR/test_hip_asan" event_query 2>&1)
     EVENT_RC=$?
     check "hipEventQuery stress test completes" test "$EVENT_RC" -eq 0
 
@@ -130,7 +132,7 @@ if [ "$DEVICE_COUNT" -gt 0 ] && [ -f "$TMPDIR/test_hip_asan" ]; then
 
     echo "  Running multi_stream test..."
     STREAM_OUTPUT=$(ASAN_OPTIONS="detect_leaks=0:halt_on_error=0:verify_asan_link_order=0" \
-        "$TMPDIR/test_hip_asan" multi_stream 2>&1 || true)
+        "$TMPDIR/test_hip_asan" multi_stream 2>&1)
     STREAM_RC=$?
     check "Multi-stream event polling completes" test "$STREAM_RC" -eq 0
 else

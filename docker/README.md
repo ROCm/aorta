@@ -41,6 +41,8 @@ docker compose -f docker-compose.build.yaml up -d
 | `Dockerfile.rocm70_9-1-shampoo` | ROCm 7.0.9.1 + Shampoo optimizer | Shampoo optimizer experiments |
 | `Dockerfile.rocm70_2-ubuntu-pytorch` | ROCm 7.0.2 Ubuntu PyTorch | Legacy ROCm 7.0.2 support |
 | `Dockerfile.rocm70_2-ubuntu-nan` | ROCm 7.0.2 + NaN debugging | Debugging NaN issues |
+| `Dockerfile.therock-host-asan-pytorch` | TheRock HOST_ASAN HIP runtime + PyTorch built from source | AddressSanitizer debugging of the HIP runtime under PyTorch |
+| `Dockerfile.nan-repro-asan` | ASAN HIP runtime overlay (ROCm 7.2.0) on the NaN-repro base | ASAN debugging of NaN-repro workloads with ABI-matched ROCm |
 
 ## Configuration Variables
 
