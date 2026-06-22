@@ -608,10 +608,16 @@ def write_matrix_md(
     # matrix.md layout is byte-equivalent.
     show_top_failure = any(c.top_failure_detector_id for c in cell_stats)
     show_top_warn = any(c.top_warn_detector_id for c in cell_stats)
-    # Issue #232: the "Stop after" column appears only when at least one
-    # cell ran under a stop_after rule, so legacy / fixed-trials runs stay
+    # Issue #232: the "Stop after" column appears whenever the recipe
+    # carries a stop_after rule, so legacy / fixed-trials runs stay
     # byte-equivalent. It distinguishes "stopped early" from "cap reached".
-    show_stop_after = any(c.stop_after_note for c in cell_stats)
+    # Gate on the recipe (configuration) rather than on any cell's
+    # ``stop_after_note``: the note is only populated for cells that ran
+    # cleanly (``error is None``), so an all-errored run would otherwise
+    # hide the column even though the rule was active (and matrix.json
+    # still carries ``stop_after``). Errored cells render "—" in the
+    # column.
+    show_stop_after = recipe.stop_after is not None
     # Issue #230: the "Errors" column appears only when at least one cell
     # had an infra-error trial, so legacy / error-free runs stay
     # byte-equivalent. It surfaces error trials excluded from the failure
@@ -811,7 +817,16 @@ def write_matrix_json(
         "schema_version": 1,
         "workload": recipe.workload,
         "ticket": recipe.ticket,
-        "trials_per_cell": recipe.trials,
+        # The per-cell trial budget. With a ``stop_after`` rule the budget is
+        # the cap (``max_trials``) -- which cells may stop short of -- not the
+        # fixed ``recipe.trials`` (often ``1`` on probe recipes), so report the
+        # cap to keep the summary truthful. Per-cell ``trials:`` overrides and
+        # realised counts live on each cell entry's ``trials`` field.
+        "trials_per_cell": (
+            recipe.stop_after.max_trials
+            if recipe.stop_after is not None
+            else recipe.trials
+        ),
         "steps_per_trial": recipe.steps,
         "run_timestamp": run_timestamp,
         "baseline_cell": baseline_name,
@@ -884,6 +899,10 @@ def write_resolved_recipe(
     mitigation env-var bundle) live in ``matrix.json`` instead, where they
     belong as run-time state.
 
+    An active ``stop_after`` rule (issue #232) is re-emitted so a rerun from
+    the resolved YAML preserves the stopping behaviour rather than silently
+    reverting to fixed ``trials``.
+
     For runs that used ``--mitigations-file``, the resolved YAML still
     references those mitigation/environment names by name -- it is **not**
     self-contained on its own. The runner snapshots the operator-supplied
@@ -947,6 +966,15 @@ def write_resolved_recipe(
         "threshold": recipe.confound.threshold,
         "baseline_cell": recipe.confound.baseline_cell,
     }
+    if recipe.stop_after is not None:
+        # Re-emit the active stop_after rule so a rerun from this resolved
+        # YAML preserves the stopping behaviour. Without it the rerun would
+        # silently fall back to fixed ``trials`` (often 1 in probe mode).
+        doc["stop_after"] = {
+            "events": recipe.stop_after.events,
+            "max_trials": recipe.stop_after.max_trials,
+            "event_verdict": recipe.stop_after.event_verdict,
+        }
     doc["cells"] = resolved_cells
 
     path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")

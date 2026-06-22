@@ -296,8 +296,9 @@ class _ProbeCommand(click.Command):
     metavar="K",
     help=(
         "Stop each cell once K trials match the event verdict (default "
-        "verdict: fail), instead of running a fixed count. Requires "
-        "--max-trials. Overlays the recipe's 'stop_after:' block (#232)."
+        "verdict: fail), instead of running a fixed count. The loop needs "
+        "a hard cap: pass --max-trials unless the recipe's 'stop_after:' "
+        "block already supplies one. Overlays that block (#232)."
     ),
 )
 @click.option(
@@ -306,8 +307,10 @@ class _ProbeCommand(click.Command):
     default=None,
     metavar="N",
     help=(
-        "Hard cap on trials per cell when --stop-after-events is set "
-        "(always honored). Required whenever --stop-after-events is passed."
+        "Hard cap on trials per cell when stop-after is active (always "
+        "honored). Pair with --stop-after-events; either flag may be "
+        "omitted when the recipe's 'stop_after:' block already supplies "
+        "that half (so --max-trials alone overrides just the recipe's cap)."
     ),
 )
 @click.option(

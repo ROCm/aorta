@@ -223,7 +223,7 @@ def apply_recipe_overrides(
         recipe = dataclasses.replace(
             recipe,
             probe_extras=dataclasses.replace(
-                recipe.probe_extras, env_passthrough_mode=cli_passthrough_mode
+                probe_extras, env_passthrough_mode=cli_passthrough_mode
             ),
         )
     if cli_stop_after_events is not None or cli_max_trials is not None:

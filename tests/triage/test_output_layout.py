@@ -468,6 +468,28 @@ def test_resolved_recipe_round_trips_workload_config(
     assert reloaded.cells[1].workload_config == {"shampoo_api": "old"}
 
 
+def test_resolved_recipe_round_trips_stop_after(
+    tmp_path, patched_env, patched_run_trials
+):
+    """An active stop_after rule must survive load -> run -> reload, so a rerun
+    from recipe.resolved.yaml keeps the stopping behaviour (issue #232)."""
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, StopAfter, load_recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(Cell(name="a", mitigations=("none",), environment="local"),),
+        ticket="SA-RT",
+        confound=ConfoundCfg(baseline_cell="a"),
+        stop_after=StopAfter(events=2, max_trials=5, event_verdict="fail"),
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    reloaded = load_recipe(run_dir / "recipe.resolved.yaml")
+    assert reloaded.stop_after == StopAfter(events=2, max_trials=5, event_verdict="fail")
+
+
 # ---- Config column (diffs-only workload_config) --------------------------
 #
 # The column surfaces per-cell workload_config keys whose value varies

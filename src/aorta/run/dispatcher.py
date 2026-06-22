@@ -457,14 +457,19 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             events_seen += 1
             if events_seen >= stop_after.events:
                 if should_write:
+                    # "early" only when trials remain in the budget; hitting
+                    # the target on the final allowed trial is a cap reach,
+                    # not an early stop -- don't mislead operator logs.
+                    stopped_early = len(results) < request.trials
                     logger.info(
                         "stop_after: %d %r event(s) observed in %d trial(s) "
-                        "(target %d, cap %d) -- stopping cell early",
+                        "(target %d, cap %d) -- %s",
                         events_seen,
                         stop_after.event_verdict,
                         len(results),
                         stop_after.events,
                         request.trials,
+                        "stopping cell early" if stopped_early else "cap reached",
                     )
                 break
 
