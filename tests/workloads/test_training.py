@@ -210,13 +210,12 @@ def test_wrap_model_selects_fsdp(monkeypatch) -> None:
 
 @pytest.fixture()
 def _cpu_singleton_env(monkeypatch):
-    """Bare-process env so setup() forms a 1-rank gloo group."""
+    """Bare-process env so setup() forms a 1-rank gloo group.
+
+    MASTER_PORT is left unset — the workload picks an ephemeral free port.
+    """
     for key in ("RANK", "WORLD_SIZE", "LOCAL_RANK", "MASTER_ADDR", "MASTER_PORT"):
         monkeypatch.delenv(key, raising=False)
-    # Unique port avoids collisions across repeated runs in one session.
-    import random
-
-    monkeypatch.setenv("MASTER_PORT", str(29500 + random.randint(0, 2000)))
     yield
 
 
