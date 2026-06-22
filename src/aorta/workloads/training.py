@@ -416,10 +416,20 @@ class TrainingWorkload(Workload):
 
         # Global verdict: any rank seeing a failure fails the cell.
         local_fail = torch.tensor([len(failures)], dtype=torch.long, device=self._device)
+        # Reduce earliest failure step across ranks (-1 means no failure locally).
+        local_first = torch.tensor(
+            [first_failure if first_failure is not None else cfg.steps],
+            dtype=torch.long,
+            device=self._device,
+        )
         if dist.is_initialized():
             dist.all_reduce(local_fail, op=dist.ReduceOp.SUM)
+            dist.all_reduce(local_first, op=dist.ReduceOp.MIN)
             dist.barrier()
         global_failures = int(local_fail.item())
+        global_first_failure: int | None = int(local_first.item())
+        if global_first_failure >= cfg.steps:
+            global_first_failure = None
 
         elapsed = time.perf_counter() - t0
         passed = global_failures == 0
@@ -438,7 +448,7 @@ class TrainingWorkload(Workload):
         return WorkloadResult(
             passed=passed,
             failure_count=global_failures,
-            first_failure_iteration=first_failure,
+            first_failure_iteration=global_first_failure,
             failure_details=failures,
             total_iterations=cfg.steps,
             step_times_ms=step_times,
@@ -493,7 +503,12 @@ class TrainingWorkload(Workload):
         # Singleton smoke: no launcher set the rendezvous env. Provide local
         # defaults so a bare ``aorta run`` can still form a 1-rank group.
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", "29500")
+        if "MASTER_PORT" not in os.environ:
+            import socket
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                os.environ["MASTER_PORT"] = str(s.getsockname()[1])
         os.environ.setdefault("RANK", "0")
         os.environ.setdefault("WORLD_SIZE", "1")
         os.environ.setdefault("LOCAL_RANK", "0")
