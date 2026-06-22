@@ -39,12 +39,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0  # full history so a manual run can push the bump + tag
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"  # 3.11+ for stdlib tomllib to read the version
 
@@ -165,6 +165,7 @@ jobs:
       url: https://pypi.org/p/aorta
     permissions:
       id-token: write  # OIDC token for Trusted Publishing; no API token stored
+      contents: read   # let download-artifact fetch the dist bundle under the restricted token
     steps:
       - name: Download built distributions
         uses: actions/download-artifact@v7

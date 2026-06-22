@@ -113,10 +113,16 @@ def set_version(text: str, new_version: str) -> str:
             out.append(line)
             continue
         if in_project and not replaced:
-            match = _VERSION_LINE_RE.match(line.rstrip("\n"))
+            # Split off the exact trailing newline sequence ("\r\n", "\r",
+            # "\n" or "") and match against the bare content, so a CRLF/CR
+            # checkout keeps its line endings byte-for-byte (the "untouched"
+            # guarantee) instead of relying on the regex's "." swallowing the
+            # stray "\r".
+            content = line.rstrip("\r\n")
+            terminator = line[len(content):]
+            match = _VERSION_LINE_RE.match(content)
             if match is not None:
-                newline = "\n" if line.endswith("\n") else ""
-                out.append(f"{match.group(1)}{new_version}{match.group(3)}{newline}")
+                out.append(f"{match.group(1)}{new_version}{match.group(3)}{terminator}")
                 replaced = True
                 continue
         out.append(line)
@@ -174,10 +180,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    text = args.pyproject.read_text()
+    # newline="" disables universal-newline translation on both read and write
+    # so a CRLF/CR pyproject.toml round-trips byte-for-byte (Path.read_text /
+    # write_text would normalize "\r\n" -> "\n" on read and back to os.linesep
+    # on write, defeating set_version's line-ending preservation). encoding is
+    # pinned so the result doesn't depend on the platform default.
+    with open(args.pyproject, encoding="utf-8", newline="") as fh:
+        text = fh.read()
     current = read_version(text)
     new_version = resolve_new_version(current, args.level, args.explicit, args.suffix)
-    args.pyproject.write_text(set_version(text, new_version))
+    with open(args.pyproject, "w", encoding="utf-8", newline="") as fh:
+        fh.write(set_version(text, new_version))
     print(new_version)
     return 0
 
