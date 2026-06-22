@@ -43,9 +43,18 @@ jobs:
           cutoff="$(date -u -d "${RETENTION_DAYS} days ago" +%s)"
           echo "Retention: ${RETENTION_DAYS} days (cutoff $(date -u -d "@${cutoff}")). Dry run: ${DRY_RUN}."
 
-          if ! release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/dev-wheels" --jq '.id' 2>/dev/null)"; then
+          # Only a real 404 means "no dev-wheels release yet". Any other gh
+          # failure (auth, rate limit, network, GitHub 5xx) must fail the job so
+          # a genuine cleanup failure isn't silently masked as "nothing to do".
+          err_file="$(mktemp)"
+          if release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/dev-wheels" --jq '.id' 2>"${err_file}")"; then
+            :
+          elif grep -q "HTTP 404" "${err_file}"; then
             echo "No dev-wheels release yet; nothing to clean."
             exit 0
+          else
+            echo "::error::Could not look up the dev-wheels release: $(cat "${err_file}")"
+            exit 1
           fi
 
           deleted=0

@@ -183,6 +183,10 @@ jobs:
   # this repo + workflow + the `pypi` environment (see docs/releasing.md).
   publish-pypi:
     needs: build-and-release
+    # Trusted Publishing is scoped to the canonical repo + `pypi` environment, so
+    # this job can only succeed on ROCm/aorta. Skip it on forks to avoid noisy
+    # OIDC failures (the GitHub Release job above still runs everywhere).
+    if: github.repository == 'ROCm/aorta'
     runs-on: ubuntu-latest
     environment:
       name: pypi
