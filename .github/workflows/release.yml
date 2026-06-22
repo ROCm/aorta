@@ -108,9 +108,18 @@ jobs:
             echo "::error::project.version '${pkg_version}' is not a valid release version (expected MAJOR.MINOR.PATCH with an optional suffix); refusing to form tag v${pkg_version}."
             exit 1
           fi
+          tag="v${pkg_version}"
+          # The semver regex still permits values that are not valid git ref
+          # names (e.g. a suffix with '..', a trailing '.', or '.lock'). Let git
+          # itself be the source of truth so such a version fails fast here
+          # rather than later at tag creation/push.
+          if ! git check-ref-format "refs/tags/${tag}"; then
+            echo "::error::project.version '${pkg_version}' yields an invalid git tag '${tag}' (rejected by git check-ref-format); choose a tag-safe version."
+            exit 1
+          fi
           echo "version=${pkg_version}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${pkg_version}" >> "$GITHUB_OUTPUT"
-          echo "Resolved release version ${pkg_version} (tag v${pkg_version})."
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version ${pkg_version} (tag ${tag})."
 
       # Fail fast BEFORE building: a pushed tag must match the package version so
       # a release can never disagree with the metadata customers install.
