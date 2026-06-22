@@ -109,10 +109,10 @@ version you want — the newest is tagged **Latest** on the
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm7.1/
 
 # Install AORTA from the release (pin the version you want)
-pip install "aorta @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/aorta-X.Y.Z-py3-none-any.whl"
+pip install "amd-aorta @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/amd_aorta-X.Y.Z-py3-none-any.whl"
 
 # With optional extras, e.g. the hardware-queue tools
-pip install "aorta[hw-queue] @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/aorta-X.Y.Z-py3-none-any.whl"
+pip install "amd-aorta[hw-queue] @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/amd_aorta-X.Y.Z-py3-none-any.whl"
 ```
 
 Maintainers: see [docs/releasing.md](docs/releasing.md) for how releases are cut.

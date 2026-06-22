@@ -64,7 +64,7 @@ The workflow then:
 > tag-push trigger instead.
 
 After the workflow finishes, confirm the [latest release](https://github.com/ROCm/aorta/releases/latest)
-shows `aorta-X.Y.Z-py3-none-any.whl` plus the sdist, and run the customer
+shows `amd_aorta-X.Y.Z-py3-none-any.whl` plus the sdist, and run the customer
 install command below in a clean virtualenv as a smoke test.
 
 ## Customer install flow
@@ -80,13 +80,13 @@ pip install --pre torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/nightly/rocm7.1/
 
 # 2. AORTA from the release (pin to the version you want)
-pip install "aorta @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/aorta-X.Y.Z-py3-none-any.whl"
+pip install "amd-aorta @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/amd_aorta-X.Y.Z-py3-none-any.whl"
 ```
 
 To install with optional extras (for example the hardware-queue tools):
 
 ```bash
-pip install "aorta[hw-queue] @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/aorta-X.Y.Z-py3-none-any.whl"
+pip install "amd-aorta[hw-queue] @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/amd_aorta-X.Y.Z-py3-none-any.whl"
 ```
 
 ## Out of scope (possible follow-ups)
