@@ -124,8 +124,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+          # Only a real 404 means "tag is free". Any other gh failure (auth,
+          # network, GitHub 5xx) must abort with a clear error rather than be
+          # silently read as "tag absent" and fail later at push time.
+          if err="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" 2>&1 >/dev/null)"; then
             echo "::error::Tag ${tag} already exists. Bump the version before cutting a new release."
+            exit 1
+          elif ! printf '%s' "${err}" | grep -q "HTTP 404"; then
+            echo "::error::Could not verify whether tag ${tag} exists: ${err}"
             exit 1
           fi
 
