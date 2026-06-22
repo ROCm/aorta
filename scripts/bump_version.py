@@ -189,8 +189,12 @@ def main(argv: list[str] | None = None) -> int:
         text = fh.read()
     current = read_version(text)
     new_version = resolve_new_version(current, args.level, args.explicit, args.suffix)
+    # Render the full updated text BEFORE opening for write: open(..., "w")
+    # truncates immediately, so if set_version raised here (e.g. malformed
+    # [project]) an in-place write would leave pyproject.toml emptied.
+    new_text = set_version(text, new_version)
     with open(args.pyproject, "w", encoding="utf-8", newline="") as fh:
-        fh.write(set_version(text, new_version))
+        fh.write(new_text)
     print(new_version)
     return 0
 

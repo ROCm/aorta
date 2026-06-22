@@ -39,12 +39,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0  # full history so a manual run can push the bump + tag
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"  # 3.11+ for stdlib tomllib to read the version
 
@@ -114,25 +114,40 @@ jobs:
             exit 1
           fi
 
-      # Manual runs create the tag from the resolved version. Refuse if it
-      # already exists so an already-released version is never re-released.
-      - name: Create and push tag for manual release
+      # Manual runs create the tag from the resolved version. Fail fast here if
+      # it already exists so an already-released version is never re-released --
+      # but defer the actual tag push until after the build succeeds (below) so
+      # a failed build never leaves an orphaned remote tag that blocks reruns.
+      - name: Verify tag is available for manual release
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+          # Only a real 404 means "tag is free". Any other gh failure (auth,
+          # network, GitHub 5xx) must abort with a clear error rather than be
+          # silently read as "tag absent" and fail later at push time.
+          if err="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" 2>&1 >/dev/null)"; then
             echo "::error::Tag ${tag} already exists. Bump the version before cutting a new release."
             exit 1
+          elif ! printf '%s' "${err}" | grep -q "HTTP 404"; then
+            echo "::error::Could not verify whether tag ${tag} exists: ${err}"
+            exit 1
           fi
-          git tag "${tag}"
-          git push origin "${tag}"
 
       - name: Build wheel and sdist
         run: |
           python -m pip install --upgrade build
           python -m build
+
+      # Only now that the build has succeeded do we create and push the tag, so
+      # a build failure on a manual run leaves nothing to clean up before retry.
+      - name: Create and push tag for manual release
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          git tag "${tag}"
+          git push origin "${tag}"
 
       # Share the built artifacts with the publish job so PyPI gets the exact
       # same wheel + sdist that were attached to the GitHub Release (build once).

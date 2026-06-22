@@ -119,6 +119,31 @@ def test_main_preserves_line_endings_end_to_end(tmp_path, capsys, nl):
     assert p.read_bytes() == expected
 
 
+def test_main_suffix_end_to_end(tmp_path, capsys):
+    """End-to-end CLI coverage for ``--suffix``: it stamps the suffix onto the
+    base version, writes it back, and prints the new version (guards the
+    argparse wiring + apply_suffix precedence, not just the helper in isolation).
+    """
+    p = tmp_path / "pyproject.toml"
+    p.write_text('[project]\nname = "aorta"\nversion = "0.2.0"\n')
+    rc = main(["--suffix", "rc20260620", "--pyproject", str(p)])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "0.2.0rc20260620"
+    assert 'version = "0.2.0rc20260620"' in p.read_text()
+
+
+def test_main_set_takes_precedence_over_suffix(tmp_path, capsys):
+    """``--set`` outranks ``--suffix`` (documented precedence: explicit > suffix
+    > level); passing both must yield the explicit version verbatim.
+    """
+    p = tmp_path / "pyproject.toml"
+    p.write_text('[project]\nname = "aorta"\nversion = "0.2.0"\n')
+    rc = main(["--set", "1.4.2", "--suffix", "rc20260620", "--pyproject", str(p)])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "1.4.2"
+    assert 'version = "1.4.2"' in p.read_text()
+
+
 # A trailing inline comment on the table header is valid TOML; the bumper must
 # still recognize the [project] table (regression for the header parse).
 COMMENTED_HEADER = '[project]  # the package\nname = "aorta"\nversion = "0.2.0"\n'
