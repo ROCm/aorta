@@ -69,6 +69,11 @@ def test_moe_transformer_rejects_single_expert() -> None:
         ModelSpec.from_dict({"kind": "moe_transformer", "moe": {"num_experts": 1}})
 
 
+def test_transformer_rejects_misaligned_hidden_heads() -> None:
+    with pytest.raises(ValueError, match="divisible by num_heads"):
+        ModelSpec.from_dict({"kind": "transformer", "hidden_size": 100, "num_heads": 3})
+
+
 def test_config_ignores_unknown_keys() -> None:
     cfg = TrainingConfig.from_dict({"seed": 5, "_aorta_environment": {"x": 1}, "bogus": 1})
     assert cfg.seed == 5

@@ -125,6 +125,12 @@ class ModelSpec:
             raise ValueError(
                 f"model.num_experts must be >= 2 for moe_transformer, got {spec.num_experts}"
             )
+        if spec.kind in ("transformer", "moe_transformer"):
+            if spec.hidden_size % spec.num_heads != 0:
+                raise ValueError(
+                    f"model.hidden_size ({spec.hidden_size}) must be divisible by "
+                    f"num_heads ({spec.num_heads})"
+                )
         return spec
 
     @property
@@ -485,9 +491,8 @@ class TrainingWorkload(Workload):
         self._model = None
         self._optimizer = None
         self._scheduler = None
-        if self._owns_process_group and dist.is_initialized():
-            dist.destroy_process_group()
-            self._owns_process_group = False
+        if dist.is_initialized():
+            dist.barrier()
 
     # -- internals ---------------------------------------------------------- #
     def _resolve_device_and_backend(self, device_pref: str) -> tuple["torch.device", str]:
