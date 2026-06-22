@@ -163,7 +163,7 @@ class _AgentCommand(click.Command):
     type=click.Choice(["fake", "litellm"]),
     default="fake",
     show_default=True,
-    help="Proposer backend: fake (offline) or litellm (requires aorta[agent]).",
+    help="Proposer backend: fake (offline) or litellm (requires amd-aorta[agent]).",
 )
 @click.option(
     "--llm-model",

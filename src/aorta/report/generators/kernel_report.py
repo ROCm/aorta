@@ -9,7 +9,7 @@ Reads ``rank_*_metrics.jsonl`` files in a run directory and emits:
     style narrative. The HTML is intentionally dependency-free so the
     generator works with the base ``aorta`` install.
 
-The generator depends only on the standard library; ``aorta[report]``'s
+The generator depends only on the standard library; ``amd-aorta[report]``'s
 heavy plotting stack (matplotlib, pandas) is *not* required for kernel
 reports.
 """

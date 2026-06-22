@@ -75,7 +75,7 @@ hw-queue = [
 
 # For hw_queue_eval profiling features
 hw-queue-profiling = [
-    "aorta[hw-queue]",
+    "amd-aorta[hw-queue]",
     "matplotlib>=3.5.0",
     "seaborn>=0.12.0",
 ]
@@ -105,12 +105,12 @@ dev = [
 
 # Full installation
 all = [
-    "aorta[analysis]",
-    "aorta[report]",
-    "aorta[hw-queue]",
-    "aorta[hw-queue-profiling]",
-    "aorta[agent]",
-    "aorta[dev]",
+    "amd-aorta[analysis]",
+    "amd-aorta[report]",
+    "amd-aorta[hw-queue]",
+    "amd-aorta[hw-queue-profiling]",
+    "amd-aorta[agent]",
+    "amd-aorta[dev]",
 ]
 
 [project.urls]

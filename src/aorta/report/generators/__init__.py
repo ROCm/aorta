@@ -2,7 +2,7 @@
 
 The HTML / Excel / plot generators each pull a heavy optional dep
 (matplotlib, openpyxl, pandas) that is *not* part of the base ``aorta``
-install -- they live behind the ``aorta[report]`` extra. The kernel-
+install -- they live behind the ``amd-aorta[report]`` extra. The kernel-
 trace generator, by contrast, deliberately depends only on the standard
 library so a NaN-correlation report can be produced on a stock host.
 
