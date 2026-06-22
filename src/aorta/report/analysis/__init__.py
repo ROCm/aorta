@@ -1,7 +1,7 @@
 """Analysis modules for TraceLens trace processing.
 
 The GEMM / single-config / sweep analysers each pull pandas / numpy /
-openpyxl, which live behind ``aorta[report]``. ``kernel_correlator`` is
+openpyxl, which live behind ``amd-aorta[report]``. ``kernel_correlator`` is
 deliberately stdlib-only so the NaN-correlation pipeline runs on a base
 install. To keep that promise, only the lightweight modules
 (``tracelens_wrapper``, ``kernel_correlator``) are imported eagerly here;

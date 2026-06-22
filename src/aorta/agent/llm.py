@@ -1,7 +1,7 @@
 """LLM proposers for the probe agent loop.
 
 ``FakeLLMProposer`` round-robins registered mitigations (offline tests).
-``LiteLLMProposer`` calls LiteLLM when ``aorta[agent]`` is installed.
+``LiteLLMProposer`` calls LiteLLM when ``amd-aorta[agent]`` is installed.
 """
 
 from __future__ import annotations
@@ -181,7 +181,7 @@ class FakeLLMProposer:
 
 
 class LiteLLMProposer:
-    """LiteLLM-backed proposer (requires ``pip install 'aorta[agent]'``)."""
+    """LiteLLM-backed proposer (requires ``pip install 'amd-aorta[agent]'``)."""
 
     def __init__(self, *, model: str = "gpt-4o-mini") -> None:
         self._model = model
