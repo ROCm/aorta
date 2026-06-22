@@ -89,14 +89,23 @@ jobs:
       - name: Resolve release version from pyproject.toml
         id: version
         run: |
-          # Capture the parse failure (invalid TOML / missing project.version)
-          # so it surfaces as a clean annotation instead of a raw traceback.
+          # On a parse failure (invalid TOML / missing project.version) add a
+          # GitHub Actions annotation so the cause is easy to spot; the Python
+          # traceback may still appear in the step log for deeper debugging.
           if ! pkg_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"; then
             echo "::error::Could not read project.version from pyproject.toml (invalid TOML or missing project.version)."
             exit 1
           fi
           if [ -z "${pkg_version}" ]; then
             echo "::error::project.version in pyproject.toml is empty."
+            exit 1
+          fi
+          # The version becomes the git tag (v${version}); reject anything that
+          # isn't MAJOR.MINOR.PATCH (+ optional PEP 440 suffix) up front so a
+          # hand-edited / non-semver value fails here with a clear message
+          # instead of deep in `gh api` / tag creation.
+          if ! printf '%s' "${pkg_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.+a-zA-Z0-9-]*)?$'; then
+            echo "::error::project.version '${pkg_version}' is not a valid release version (expected MAJOR.MINOR.PATCH with an optional suffix); refusing to form tag v${pkg_version}."
             exit 1
           fi
           echo "version=${pkg_version}" >> "$GITHUB_OUTPUT"
