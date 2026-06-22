@@ -105,7 +105,6 @@ class ModelSpec:
     vocab_size: int = 32_000
     # MoE knobs. The repeated-block MoE is top-1 only (no top_k); experts are
     # driven purely by ``num_experts``.
-    moe_enabled: bool = False
     num_experts: int = 4
 
     @classmethod
@@ -114,8 +113,6 @@ class ModelSpec:
         moe = dict(d.pop("moe", {}) or {})
         known = set(cls.__dataclass_fields__)
         spec = cls(**{k: v for k, v in d.items() if k in known})
-        if "enabled" in moe:
-            spec.moe_enabled = bool(moe["enabled"])
         if "num_experts" in moe:
             spec.num_experts = int(moe["num_experts"])
         if spec.kind not in _VALID_MODEL_KINDS:
@@ -124,13 +121,17 @@ class ModelSpec:
             raise ValueError(f"model.num_layers must be >= 1, got {spec.num_layers}")
         if spec.num_experts < 1:
             raise ValueError(f"model.num_experts must be >= 1, got {spec.num_experts}")
+        if spec.kind == "moe_transformer" and spec.num_experts < 2:
+            raise ValueError(
+                f"model.num_experts must be >= 2 for moe_transformer, got {spec.num_experts}"
+            )
         return spec
 
     @property
     def effective_experts(self) -> int:
-        """Resolved expert count: >1 only for the MoE topology."""
+        """Expert count used for model construction: >=2 for MoE, 1 for dense."""
         if self.kind == "moe_transformer":
-            return max(2, self.num_experts)
+            return self.num_experts
         return 1
 
 
@@ -151,6 +152,8 @@ class OptimizerSpec:
             raise ValueError(f"optimizer.kind must be 'adamw', got {spec.kind!r}")
         if isinstance(spec.betas, list):
             spec.betas = tuple(spec.betas)  # type: ignore[assignment]
+        if len(spec.betas) != 2:
+            raise ValueError(f"optimizer.betas must be a pair (beta1, beta2), got length {len(spec.betas)}")
         return spec
 
 
@@ -228,7 +231,7 @@ class TrainingConfig:
 # Helpers
 # --------------------------------------------------------------------------- #
 def _percentile(values: list[float], pct: float) -> float:
-    """Nearest-rank percentile (no numpy dependency at the base layer)."""
+    """Linear-interpolation percentile (no numpy dependency at the base layer)."""
     if not values:
         return 0.0
     ordered = sorted(values)

@@ -42,7 +42,6 @@ workload_config:
     ffn_size: 1024
     vocab_size: 1024
     moe:
-      enabled: false
       num_experts: 4
       # NOTE: aorta.models.repeated_block MoE is top-1 only — there is no
       # top_k knob. Drive MoE via num_experts.

@@ -64,6 +64,11 @@ def test_effective_experts_is_one_for_dense_topologies() -> None:
     assert ModelSpec.from_dict({"kind": "moe_transformer", "moe": {"num_experts": 3}}).effective_experts == 3
 
 
+def test_moe_transformer_rejects_single_expert() -> None:
+    with pytest.raises(ValueError, match="num_experts must be >= 2"):
+        ModelSpec.from_dict({"kind": "moe_transformer", "moe": {"num_experts": 1}})
+
+
 def test_config_ignores_unknown_keys() -> None:
     cfg = TrainingConfig.from_dict({"seed": 5, "_aorta_environment": {"x": 1}, "bogus": 1})
     assert cfg.seed == 5
@@ -79,8 +84,9 @@ def test_config_ignores_unknown_keys() -> None:
         {"warmup_steps": -1},
         {"model": {"kind": "rnn"}},
         {"model": {"num_layers": 0}},
-        {"model": {"moe": {"num_experts": 0}}},
+        {"model": {"kind": "moe_transformer", "moe": {"num_experts": 1}}},
         {"optimizer": {"kind": "sgd"}},
+        {"optimizer": {"betas": [0.9]}},
     ],
 )
 def test_config_rejects_garbage(bad: dict) -> None:
