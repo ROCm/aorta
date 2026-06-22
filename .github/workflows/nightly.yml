@@ -43,8 +43,10 @@ jobs:
       - name: Stamp release-candidate version
         run: |
           suffix="rc$(date -u +%Y%m%d)"
-          rc_version="$(python scripts/bump_version.py --suffix "${suffix}")" \
-            || { echo "::error::Failed to stamp release-candidate version."; exit 1; }
+          if ! rc_version="$(python scripts/bump_version.py --suffix "${suffix}")"; then
+            echo "::error::Failed to stamp release-candidate version."
+            exit 1
+          fi
           echo "Building nightly ${rc_version}."
 
       - name: Build wheel and sdist

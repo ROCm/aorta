@@ -89,6 +89,24 @@ def test_apply_suffix_rejects_dot_prefixed_prerelease(current):
         apply_suffix(current, "rc20260619")
 
 
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "",  # empty -> would emit version = "0.2.0" unchanged / meaningless
+        'rc"20260619',  # embedded quote would break/inject the TOML version line
+        "rc 20260619",  # whitespace is not a valid version token
+        "rc\n20260619",  # newline would inject extra TOML content
+        "rc;rm -rf",  # arbitrary punctuation outside the safe charset
+    ],
+)
+def test_apply_suffix_rejects_unsafe_suffix(suffix):
+    # The suffix is concatenated straight into the quoted TOML version string,
+    # so anything that isn't a clean PEP 440-style token must be rejected before
+    # it can corrupt pyproject.toml.
+    with pytest.raises(ValueError):
+        apply_suffix("0.2.0", suffix)
+
+
 @pytest.mark.parametrize("nl", ["\r\n", "\r", "\n"])
 def test_set_version_preserves_line_endings(nl):
     """The "byte-for-byte untouched" promise must hold on CRLF/CR checkouts

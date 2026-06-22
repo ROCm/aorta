@@ -30,6 +30,11 @@ _SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 # pre-release part (e.g. "0.2.0rc20260101") is still allowed for re-stamping.
 _SEMVER_PREFIX_RE = re.compile(r"^(\d+\.\d+\.\d+)(?![\d.])")
 _VERSION_LINE_RE = re.compile(r'^(\s*version\s*=\s*")([^"]*)(".*)$')
+# A suffix is concatenated straight into the quoted TOML version string, so it
+# must be a single PEP 440-style token: non-empty and limited to alphanumerics
+# plus . + - (no quotes, whitespace, or newlines that could break the TOML or
+# inject extra content).
+_SUFFIX_RE = re.compile(r"^[A-Za-z0-9.+-]+$")
 
 
 def _table_header(line: str) -> str | None:
@@ -78,6 +83,11 @@ def apply_suffix(current: str, suffix: str) -> str:
     pre-release/local form is dropped. Used to mint nightly
     release-candidate versions such as ``0.2.0rc20260619``.
     """
+    if _SUFFIX_RE.match(suffix) is None:
+        raise ValueError(
+            f"invalid suffix {suffix!r}; expected a non-empty token of "
+            "alphanumerics and . + - (no quotes/whitespace/newlines)"
+        )
     match = _SEMVER_PREFIX_RE.match(current)
     if match is None:
         raise ValueError(
