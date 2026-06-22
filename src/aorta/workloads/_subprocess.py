@@ -808,13 +808,14 @@ class SubprocessWorkload(Workload):
         and re-runs the same broken cell on every subsequent
         ``aorta probe`` invocation.
 
-        Also unlinks ``probe.env`` (best-effort) before writing the fail
-        result so the trial directory cannot leave behind a misleading
-        artifact: ``_write_env_file`` is now validation-first
-        (atomic-on-failure), but a stale probe.env from a PRIOR run of
-        the same ``trial_<n>/`` directory (resume + flat_resume reuse
-        the same dir) would otherwise survive the validation rejection
-        and contradict ``result.json::failure_type==env_file_validation_failed``.
+        Also unlinks ``probe.env`` (best-effort) before writing the
+        ``error``-verdict result so the trial directory cannot leave
+        behind a misleading artifact: ``_write_env_file`` is now
+        validation-first (atomic-on-failure), but a stale probe.env from
+        a PRIOR run of the same ``trial_<n>/`` directory (resume +
+        flat_resume reuse the same dir) would otherwise survive the
+        validation rejection and contradict
+        ``result.json::failure_type==env_file_validation_failed``.
         """
         env_file_path.unlink(missing_ok=True)
         try:
