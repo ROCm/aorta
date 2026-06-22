@@ -431,6 +431,15 @@ class TrainingWorkload(Workload):
         if global_first_failure >= cfg.steps:
             global_first_failure = None
 
+        # When the global verdict is failed but this rank has no local failures,
+        # inject a synthetic record so the rank-0 JSON is debuggable.
+        if global_failures > 0 and not failures and global_first_failure is not None:
+            failures.append({
+                "step": global_first_failure,
+                "rank": "remote",
+                "problems": ["numeric_failure_on_remote_rank"],
+            })
+
         elapsed = time.perf_counter() - t0
         passed = global_failures == 0
         # Percentiles over post-warmup steps when any remain, else all steps.
