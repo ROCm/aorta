@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout AORTA repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ROCm/aorta
           ref: ${{ github.ref }}
@@ -312,14 +312,14 @@ jobs:
           echo "- HTML performance report" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rccl-warp-speed-results
           path: aorta/${{ steps.find_experiment.outputs.experiment_dir }}
           retention-days: 30
 
       - name: Upload comparison results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rccl-comparison-results
           path: |
@@ -328,7 +328,7 @@ jobs:
           retention-days: 30
 
       - name: Upload final report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rccl-final-report
           path: aorta/${{ steps.find_experiment.outputs.experiment_dir }}/
@@ -350,13 +350,13 @@ jobs:
 
     steps:
       - name: Download experiment results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: rccl-final-report
           path: results
 
       - name: Checkout aorta-report repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ROCm/aorta-report
           ref: main
