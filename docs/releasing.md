@@ -99,6 +99,7 @@ pip install --pre torch torchvision torchaudio \
 **Stable (recommended) — from PyPI:**
 
 ```bash
+# Distribution name is amd-aorta (import package remains `aorta`)
 pip install amd-aorta                  # latest stable
 pip install "amd-aorta==X.Y.Z"         # a specific version
 pip install "amd-aorta[hw-queue]"      # with optional extras
