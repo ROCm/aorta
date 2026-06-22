@@ -13,8 +13,8 @@ produces:
     by the report generators.
 
 The module avoids a hard dependency on pandas/numpy so it is usable from
-the small ``aorta`` install footprint; richer rendering lives in
-``aorta.report.generators.kernel_report``.
+the small base install (``pip install amd-aorta``); richer rendering lives
+in ``aorta.report.generators.kernel_report``.
 """
 
 from __future__ import annotations
