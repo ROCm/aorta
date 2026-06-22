@@ -1,7 +1,7 @@
 # Releasing AORTA
 
 AORTA is distributed to customers as a versioned, `pip install`-able package.
-Stable releases are published to **PyPI** (`pip install aorta`) and also
+Stable releases are published to **PyPI** (`pip install amd-aorta`) and also
 attached to a [GitHub Release](https://github.com/ROCm/aorta/releases);
 pre-release nightlies are published to a rolling **`dev-wheels`** pre-release.
 AORTA is a pure-Python package, so a single `py3-none-any` wheel installs on
@@ -67,7 +67,7 @@ PyPI publishing uses [Trusted Publishing](https://docs.pypi.org/trusted-publishe
 (OIDC), so there is no API token stored in the repo. Before the first stable
 release, a PyPI owner must register this repo as a trusted publisher once:
 
-1. Create (or claim) the `aorta` project on PyPI.
+1. Create (or claim) the `amd-aorta` project on PyPI.
 2. In the project's *Publishing* settings, add a GitHub trusted publisher:
    owner `ROCm`, repo `aorta`, workflow `release.yml`, environment `pypi`.
 3. In the GitHub repo, create an Environment named `pypi` (optionally with
@@ -83,7 +83,7 @@ Until this is configured the `publish-pypi` job will fail; the GitHub Release
 > tag-push trigger instead.
 
 After the workflow finishes, confirm the [latest release](https://github.com/ROCm/aorta/releases/latest)
-shows `aorta-X.Y.Z-py3-none-any.whl` plus the sdist, and run the customer
+shows `amd_aorta-X.Y.Z-py3-none-any.whl` plus the sdist, and run the customer
 install command below in a clean virtualenv as a smoke test.
 
 ## Customer install flow
@@ -99,16 +99,16 @@ pip install --pre torch torchvision torchaudio \
 **Stable (recommended) — from PyPI:**
 
 ```bash
-pip install aorta                  # latest stable
-pip install "aorta==X.Y.Z"         # a specific version
-pip install "aorta[hw-queue]"      # with optional extras
+pip install amd-aorta                  # latest stable
+pip install "amd-aorta==X.Y.Z"         # a specific version
+pip install "amd-aorta[hw-queue]"      # with optional extras
 ```
 
 **Stable — from the GitHub Release** (no PyPI; pin to the version you want, the
 newest is tagged **Latest** on the [releases page](https://github.com/ROCm/aorta/releases)):
 
 ```bash
-pip install "aorta @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/aorta-X.Y.Z-py3-none-any.whl"
+pip install "amd-aorta @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/amd_aorta-X.Y.Z-py3-none-any.whl"
 ```
 
 ## Nightly / pre-release channel
@@ -124,7 +124,7 @@ Customers who need a fix before the next stable release install a specific
 nightly by pointing pip at the release's asset index:
 
 ```bash
-pip install "aorta==X.Y.ZrcYYYYMMDD" \
+pip install "amd-aorta==X.Y.ZrcYYYYMMDD" \
     -f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
 ```
 

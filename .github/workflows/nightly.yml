@@ -4,7 +4,7 @@ name: Nightly wheels
 # publish them to a single rolling "dev-wheels" pre-release, so customers can
 # install pre-release fixes between stable releases:
 #
-#   pip install "aorta==X.Y.ZrcYYYYMMDD" \
+#   pip install "amd-aorta==X.Y.ZrcYYYYMMDD" \
 #     -f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
 #
 # The rc version is stamped at build time (scripts/bump_version.py --suffix) and
@@ -62,7 +62,7 @@ jobs:
             release candidates, not stable releases. Install a specific build:
 
             ```
-            pip install "aorta==X.Y.ZrcYYYYMMDD" \
+            pip install "amd-aorta==X.Y.ZrcYYYYMMDD" \
               -f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
             ```
           files: |

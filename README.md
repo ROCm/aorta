@@ -106,8 +106,8 @@ wheel), so install it first, then AORTA from PyPI:
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm7.1/
 
 # Install AORTA
-pip install aorta                 # latest stable
-pip install "aorta[hw-queue]"     # with optional extras
+pip install amd-aorta                 # latest stable
+pip install "amd-aorta[hw-queue]"     # with optional extras
 ```
 
 Prefer the GitHub Release assets, or need a pre-release nightly? See

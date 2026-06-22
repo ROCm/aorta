@@ -1,7 +1,7 @@
 name: Release
 
 # Build the wheel + sdist once, attach them to a GitHub Release, and publish the
-# same artifacts to PyPI (so customers can `pip install aorta`). The release
+# same artifacts to PyPI (so customers can `pip install amd-aorta`). The release
 # version is always read from pyproject.toml (never hard-coded here).
 #
 # Two ways to cut a release:
@@ -179,7 +179,7 @@ jobs:
           generate_release_notes: true
 
   # Publish the same artifacts to PyPI via Trusted Publishing (OIDC) so customers
-  # can `pip install aorta`. Requires a one-time PyPI trusted-publisher setup for
+  # can `pip install amd-aorta`. Requires a one-time PyPI trusted-publisher setup for
   # this repo + workflow + the `pypi` environment (see docs/releasing.md).
   publish-pypi:
     needs: build-and-release
@@ -190,7 +190,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/aorta
+      url: https://pypi.org/p/amd-aorta
     permissions:
       id-token: write  # OIDC token for Trusted Publishing; no API token stored
       contents: read   # let download-artifact fetch the dist bundle under the restricted token
