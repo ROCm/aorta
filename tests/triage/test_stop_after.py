@@ -268,6 +268,36 @@ def test_stop_after_column_shown_when_all_cells_error(tmp_path):
     assert "| — " in note_row
 
 
+def test_matrix_md_trials_per_cell_reflects_cap(tmp_path):
+    # The matrix.md "Trials per cell" header must show the stop_after cap
+    # ("up to N"), not ``recipe.trials`` (often 1 on probe recipes), so the
+    # header matches the real per-cell budget. A rule-less recipe still
+    # renders the bare ``recipe.trials``.
+    from aorta.triage.matrix import aggregate_cell
+    from aorta.triage.output import write_matrix_md
+
+    def _render(recipe):
+        cell = aggregate_cell(
+            name="none-none",
+            mitigations=("none",),
+            environment="local",
+            extra_env={},
+            resolved_env_vars={},
+            trials=[],
+            effective_steps=10,
+            error="infrastructure_failed: boom",
+        )
+        out = tmp_path / "matrix.md"
+        write_matrix_md(out, recipe, [cell], cell, {}, [], "2026-06-17T00:00:00Z")
+        return out.read_text(encoding="utf-8")
+
+    with_rule = _render(_probe_recipe(tmp_path, "stop_after:\n  events: 2\n  max_trials: 6\n"))
+    assert "**Trials per cell**: up to 6" in with_rule
+
+    without_rule = _render(_probe_recipe(tmp_path))
+    assert "**Trials per cell**: 1" in without_rule
+
+
 # --------------------------------------------------------------------------
 # CLI overlay (apply_recipe_overrides)
 # --------------------------------------------------------------------------

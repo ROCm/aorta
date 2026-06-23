@@ -162,6 +162,17 @@ of the three built-ins above) when copy-pasting this template.
   (the per-trial coordinate would have to round-trip through the dispatcher
   and the dispatcher currently writes its own `trial_<N>.json` set
   unconditionally).
+* When the recipe carries a `stop_after` rule the skip test is
+  rule-aware instead of counting against `trials`: the runner walks the
+  **contiguous** on-disk trial prefix from `trial_0` and skips the cell
+  only when that prefix already satisfies the stopping rule -- i.e. it
+  has accumulated `stop_after.events` qualifying verdicts **or** reached
+  `stop_after.max_trials`. A cell that legitimately stopped early
+  therefore resumes as a skip even though it has fewer than `max_trials`
+  trials on disk. If the contiguous prefix has neither hit the event
+  target nor reached the cap (or a trial in it is missing/malformed), the
+  **whole cell** re-runs from `trial_0`; the re-run is bounded because the
+  dispatcher applies the same early-stop.
 
 ## 5. CLI / recipe interaction
 
