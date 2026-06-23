@@ -337,6 +337,14 @@ def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
     """
     import subprocess as _subprocess
 
+    from aorta.workloads import _subprocess as workload_mod
+
+    # The amd-smi pre/post snapshots in run() shell out via subprocess.run
+    # (which uses ``with Popen(...)``). Neutralise the Tier-3 poll so the
+    # global Popen patch below only governs the workload's own child launch
+    # -- the fake Popen has no context-manager protocol.
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", lambda _state: None)
+
     real_popen = _subprocess.Popen
 
     class _RacingPopen:
@@ -582,6 +590,7 @@ def test_keyboard_interrupt_reaps_tree_and_reraises(tmp_path, monkeypatch):
     def _spy_teardown(proc, grace_sec=workload_mod._TERMINATE_GRACE_SEC):
         torn_down.append(proc)
 
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", lambda _state: None)
     monkeypatch.setattr(workload_mod.subprocess, "Popen", _InterruptingPopen)
     monkeypatch.setattr(workload_mod, "_terminate_process_tree", _spy_teardown)
 
@@ -634,6 +643,7 @@ def test_keyboard_interrupt_during_monitor_start_reaps_tree(tmp_path, monkeypatc
     def _spy_teardown(proc, grace_sec=workload_mod._TERMINATE_GRACE_SEC):
         torn_down.append(proc)
 
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", lambda _state: None)
     monkeypatch.setattr(workload_mod.subprocess, "Popen", _OkPopen)
     monkeypatch.setattr(workload_mod, "HangMonitor", _InterruptingMonitor)
     monkeypatch.setattr(workload_mod, "_terminate_process_tree", _spy_teardown)
