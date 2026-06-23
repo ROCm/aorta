@@ -55,6 +55,12 @@ log = logging.getLogger(__name__)
 
 NO_TICKET_SLUG = "_no_ticket_"
 
+# The run-directory layouts ``resolve_run_dir`` / ``_cell_directory`` accept.
+# Kept as one source of truth so the two runtime guards can't drift (a value
+# accepted by one but silently mishandled by the other would render wrong
+# ``Directory`` links). Mirrors the ``Literal`` on the public signatures.
+_VALID_LAYOUTS = ("timestamped", "flat_resume")
+
 # ``flat_resume`` lockfile name. Lives at ``<run_dir>/.aorta-probe.lock``; the
 # leading dot keeps it out of casual ``ls`` output and matches the convention
 # used by other resume-state files in the run dir.
@@ -136,7 +142,7 @@ def resolve_run_dir(
     # would otherwise silently land in the timestamped branch. Reject
     # unknown values at runtime so probe-mode callers can't
     # accidentally get the wrong output tree.
-    if layout not in ("timestamped", "flat_resume"):
+    if layout not in _VALID_LAYOUTS:
         raise ValueError(
             f"resolve_run_dir: layout must be 'timestamped' or 'flat_resume', "
             f"got {layout!r}"
@@ -543,6 +549,32 @@ def _render_failure_hints(cell_stats: list[CellStats]) -> list[str]:
     return lines
 
 
+def _cell_directory(name: str, layout: Literal["timestamped", "flat_resume"]) -> str:
+    """Per-cell artifact directory, rendered relative to ``matrix.md``.
+
+    Probe runs (issue #188 ``flat_resume`` layout) put cell artifacts at
+    ``<run_dir>/<safe_slug(name)>/`` -- a sibling of ``matrix.md`` -- so the
+    relative path is just ``<slug>/``. Triage runs nest them under
+    ``cells/<slug>/``. The trailing slash marks the value as a directory.
+    The final segment is the recipe cell name (``<mitigation>-<diagnostic>``
+    in probe mode), so the on-disk folder stays the canonical join key while
+    the table itself reads the two axes from their own columns (#229).
+
+    ``layout`` is validated against the same set as :func:`resolve_run_dir`
+    so a typo (e.g. ``"flatresume"``) raises instead of silently rendering a
+    triage-style ``cells/<slug>/`` link for a probe run.
+    """
+    if layout not in _VALID_LAYOUTS:
+        raise ValueError(
+            f"_cell_directory: layout must be 'timestamped' or 'flat_resume', "
+            f"got {layout!r}"
+        )
+    slug = safe_slug(name)
+    if layout == "flat_resume":
+        return f"{slug}/"
+    return f"cells/{slug}/"
+
+
 def write_matrix_md(
     path: Path,
     recipe: Recipe,
@@ -551,8 +583,17 @@ def write_matrix_md(
     confound_tags: dict[str, tuple[ConfoundTag, float | None]],
     warnings: list[str],
     run_timestamp: str,
+    layout: Literal["timestamped", "flat_resume"] = "timestamped",
 ) -> None:
-    """Render matrix.md in the format from issue #151 §"matrix.md target format"."""
+    """Render matrix.md in the format from issue #151 §"matrix.md target format".
+
+    In probe mode (``recipe.probe_extras is not None``) the identity columns
+    are the two recipe axes -- ``Mitigation`` and ``Diagnostic`` -- plus a
+    trailing ``Directory`` column with the per-cell artifact path, instead of
+    the triage-mode fused ``Cell`` / ``Mitigations`` columns. This keeps the
+    on-disk ``<mitigation>-<diagnostic>`` folder name (the agent's join key)
+    while removing the ambiguous fused name from the rendered table (#229).
+    """
     lines: list[str] = []
     lines.append(f"# Triage Matrix - {recipe.workload}")
     lines.append("")
@@ -632,11 +673,19 @@ def write_matrix_md(
     # byte-equivalent. It surfaces error trials excluded from the failure
     # rate and flags cells whose error rate makes the rate untrustworthy.
     show_errors = any(c.error_count for c in cell_stats)
-    header_cells: list[str] = [
-        "Cell",
-        "Mitigations",
-        "Environment",
-    ]
+    # Issue #229: probe-mode runs synthesise cells as the cartesian product
+    # of ``mitigation_axis x diagnostic_axis`` and store both axes on
+    # ``cell.mitigations = (mitigation, diagnostic)``. Splitting them into
+    # their own columns (named after the recipe axes) -- plus a trailing
+    # ``Directory`` column -- removes the ambiguous fused ``<mit>-<diag>``
+    # identifier (a bare trailing ``-none`` when the diagnostic axis is
+    # unused) from the table without renaming the on-disk folder.
+    is_probe = recipe.probe_extras is not None
+    header_cells: list[str] = (
+        ["Mitigation", "Diagnostic", "Environment"]
+        if is_probe
+        else ["Cell", "Mitigations", "Environment"]
+    )
     if show_config:
         header_cells.append("Config")
     header_cells.extend(["Failure rate", "Failures"])
@@ -651,15 +700,34 @@ def write_matrix_md(
     if show_iters:
         header_cells.append("Iters")
     header_cells.extend(["Mean step (ms)", "Confound"])
+    if is_probe:
+        header_cells.append("Directory")
     header = tuple(header_cells)
     rows: list[tuple[str, ...]] = [header]
     for cell in cell_stats:
         tag, _ = confound_tags.get(cell.name, (cell.error and "error" or "-", None))
-        row: list[str] = [
-            cell.name,
-            _format_mitigations(cell.mitigations),
-            cell.environment,
-        ]
+        if is_probe:
+            # probe.recipe_builder guarantees a (mitigation, diagnostic) pair;
+            # if that invariant is ever violated, warn so it isn't hidden, but
+            # still render "—" rather than abort the whole matrix at the end of
+            # a (potentially long) run -- output paths stay tolerant here, like
+            # the resume/manifest guards (#237).
+            if len(cell.mitigations) != 2:
+                log.warning(
+                    "probe cell %r has %d mitigation axis value(s), expected the "
+                    "(mitigation, diagnostic) pair; rendering missing axes as '—'",
+                    cell.name,
+                    len(cell.mitigations),
+                )
+            mitigation = cell.mitigations[0] if cell.mitigations else "—"
+            diagnostic = cell.mitigations[1] if len(cell.mitigations) > 1 else "—"
+            row: list[str] = [mitigation, diagnostic, cell.environment]
+        else:
+            row = [
+                cell.name,
+                _format_mitigations(cell.mitigations),
+                cell.environment,
+            ]
         if show_config:
             row.append(_format_workload_config(cell, varying_config_keys))
         row.extend([_format_failure_rate(cell), _format_failures(cell)])
@@ -674,6 +742,8 @@ def write_matrix_md(
         if show_iters:
             row.append(cell.iters_display)
         row.extend([_format_step_ms(cell), _format_confound(tag)])
+        if is_probe:
+            row.append(_cell_directory(cell.name, layout))
         rows.append(tuple(row))
     widths = [max(len(r[i]) for r in rows) for i in range(len(header))]
 
@@ -689,10 +759,21 @@ def write_matrix_md(
     lines.extend(_render_failure_hints(cell_stats))
     lines.append("## Notes")
     lines.append("")
-    lines.append(
-        "- Cell name comes from the recipe; mitigations + environment columns "
-        "disambiguate when names get terse."
-    )
+    if is_probe:
+        lines.append(
+            "- `Mitigation` / `Diagnostic` come from the recipe's "
+            "`mitigation_axis` / `diagnostic_axis`; each cell is one "
+            "`(mitigation, diagnostic)` pair. `Directory` is the cell's "
+            "artifact directory (logs + per-trial `result.json`), relative to "
+            "this file; its final segment is the `<mitigation>-<diagnostic>` "
+            "cell name (#229). `none` in either axis means that axis was not "
+            "varied for the cell."
+        )
+    else:
+        lines.append(
+            "- Cell name comes from the recipe; mitigations + environment columns "
+            "disambiguate when names get terse."
+        )
     lines.append("- Confound column legend:")
     lines.append("  - `(baseline)` -- the cell against which all step-time ratios are computed.")
     lines.append("  - `-` -- the mitigation appears to work without a speed cost. Trust this cell.")

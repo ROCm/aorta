@@ -156,7 +156,13 @@ caution, not a fix.
 
 matrix.md ↔ matrix.json: `workload` and `ticket` should match; cell rows
 correspond to `cells`. matrix.md shows only `mean step (ms)`; per-cell
-percentiles, histograms, and trial paths live in matrix.json.
+percentiles, histograms, and trial paths live in matrix.json. In probe-mode
+matrix.md the row identity is the `Mitigation` + `Diagnostic` columns (the
+two recipe axes, i.e. `cells[*].mitigations = (mitigation, diagnostic)`)
+plus a trailing `Directory` column with the per-cell artifact path; the
+folder's final segment is still the `cells[*].name`
+(`<mitigation>-<diagnostic>`) join key (issue #229). Triage-mode matrix.md
+keeps the fused `Cell` + `Mitigations` columns.
 
 ---
 

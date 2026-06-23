@@ -163,6 +163,17 @@ optional `artifacts.json` manifest in the trial directory
 manifest, a file is classified by convention (`*.summary.*` is a summary,
 the known logs are `log`, anything else is `heavy`).
 
+**Reading `matrix.md` (probe runs).** The reproduction-summary table
+splits the cell's two recipe axes into their own columns -- `Mitigation`
+and `Diagnostic` -- instead of a fused `<mitigation>-<diagnostic>`
+identifier, and ends with a `Directory` column giving the per-cell
+artifact path relative to `matrix.md` (e.g. `tf32_off-none/`). The folder
+name on disk is still `<mitigation>-<diagnostic>` (it stays the stable
+join key for tooling and resume); only the table presentation changed, so
+an unused diagnostic axis reads as `Diagnostic = none` rather than a
+confusing trailing `-none` (issue #229). Triage-mode runs keep the
+original `Cell` / `Mitigations` columns.
+
 Phase 3 keys (`redaction`, top-level `condition`) are still **rejected
 at load time** with a "deferred to Phase 3" error message.
 
