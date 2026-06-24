@@ -115,6 +115,26 @@ def test_stop_after_valid_in_triage_mode(tmp_path):
     assert r.stop_after == StopAfter(events=1, max_trials=8, event_verdict="fail")
 
 
+def test_stop_after_rejects_per_cell_trials_override(tmp_path):
+    # Issue #232: stop_after.max_trials is the per-cell cap, so a per-cell
+    # ``trials:`` override would be silently ignored at run time. Reject the
+    # combination at load time instead of surprising the operator.
+    text = (
+        "schema_version: 1\n"
+        "workload: fsdp\n"
+        "trials: 2\n"
+        "steps: 10\n"
+        "stop_after:\n  events: 1\n  max_trials: 8\n"
+        "cells:\n"
+        "  - name: baseline-local\n"
+        "    mitigations: [none]\n"
+        "    environment: local\n"
+        "    trials: 3\n"
+    )
+    with pytest.raises(RecipeSchemaError, match="incompatible with per-cell 'trials'"):
+        load_recipe(_write(tmp_path, text))
+
+
 # --------------------------------------------------------------------------
 # Event predicate
 # --------------------------------------------------------------------------
