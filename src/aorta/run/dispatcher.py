@@ -490,11 +490,29 @@ def _trial_is_event(result: TrialResult, event_verdict: str) -> bool:
     ``error`` is not yet a distinct outcome (binary verdict space until
     the three-way verdict task #230); the recipe loader rejects it, so
     it never reaches here.
+
+    Raises:
+        ValueError: if ``event_verdict`` is not one of the canonical
+            :data:`aorta.triage.recipe._STOP_AFTER_EVENT_VERDICTS`
+            values. The recipe loader validates this up front, so a bad
+            value here means a programmatic caller bypassed the loader;
+            fail loudly rather than silently treat an unknown/typo'd
+            verdict as ``"fail"``.
     """
+    # Compare against the canonical vocabulary the recipe schema exports
+    # rather than re-hardcoding {"pass", "fail"} here. Imported locally
+    # because a module-level ``aorta.triage`` import would invert the
+    # layering (aorta.triage.runner imports this function) -- same
+    # rationale as ``RunRequest.stop_after`` being typed ``Any``.
+    from aorta.triage.recipe import _STOP_AFTER_EVENT_VERDICTS
+
+    if not isinstance(event_verdict, str) or event_verdict not in _STOP_AFTER_EVENT_VERDICTS:
+        raise ValueError(
+            f"event_verdict must be one of {sorted(_STOP_AFTER_EVENT_VERDICTS)}, "
+            f"got {event_verdict!r}"
+        )
     passed = result.exit_status == "ok"
-    if event_verdict == "pass":
-        return passed
-    return not passed
+    return passed if event_verdict == "pass" else not passed
 
 
 def _run_single_trial(

@@ -156,6 +156,15 @@ def test_trial_is_event(exit_status, verdict, expected):
     assert _trial_is_event(_tr(exit_status), verdict) is expected
 
 
+@pytest.mark.parametrize("bad_verdict", ["error", "FAIL", "fial", "", None, 1])
+def test_trial_is_event_rejects_unknown_verdict(bad_verdict):
+    # An unknown/typo'd verdict must raise rather than silently fall through
+    # to the "fail" branch -- otherwise a programmatic caller that bypassed
+    # the recipe loader would get misinterpreted semantics (#236 r3 pattern).
+    with pytest.raises(ValueError, match="event_verdict must be one of"):
+        _trial_is_event(_tr("ok"), bad_verdict)
+
+
 # --------------------------------------------------------------------------
 # Dispatcher early-stop loop
 # --------------------------------------------------------------------------
