@@ -110,6 +110,11 @@ pip install amd-aorta                 # latest stable
 pip install "amd-aorta[hw-queue]"     # with optional extras
 ```
 
+`amd-aorta` lands on PyPI with the first stable release cut after this merges
+(PyPI Trusted Publishing is a one-time setup). Until then -- or if
+`pip install amd-aorta` fails because PyPI isn't populated yet -- install from
+the GitHub Release assets instead.
+
 Prefer the GitHub Release assets, or need a pre-release nightly? See
 [docs/releasing.md](docs/releasing.md) for the GitHub-Release install, the
 nightly `dev-wheels` channel, and how releases are cut.
