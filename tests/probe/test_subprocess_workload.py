@@ -255,6 +255,43 @@ def test_successful_trial_flags_main_work_started(tmp_path):
     assert result.failure_details[0]["type"] == "subprocess_nonzero_exit"
 
 
+def test_failure_detail_type_is_detector_failure_on_clean_exit(tmp_path):
+    """Issue #229: a trial that exits 0 but is failed by a non-Tier-1
+    detector (here a Tier-4 NaN log pattern) must NOT be labelled
+    ``subprocess_nonzero_exit`` -- that contradicts ``exit_code == 0``.
+
+    This is the exact minimal repro from the issue body. The failure came
+    purely from the classifier, so the type is ``detector_failure``.
+    """
+    wl = _make_workload(tmp_path, ["bash", "-c", "echo 'loss is NaN'; exit 0"])
+    wl.setup()
+    result = wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    # The classifier failed the trial on Tier 4, despite a clean exit.
+    assert doc["exit_code"] == 0
+    assert doc["verdict"] == "fail"
+    assert "tier4:nan_signature" in doc["failure_detectors_fired"]
+    # The failure-detail type now agrees with the actual exit state.
+    assert result.failure_details[0]["exit_code"] == 0
+    assert result.failure_details[0]["type"] == "detector_failure", (
+        "failure_details[].type must not say 'subprocess_nonzero_exit' when "
+        "exit_code == 0 (issue #229)"
+    )
+
+
+def test_failure_detail_type_is_timeout_when_timed_out(tmp_path):
+    """Issue #229: a timed-out trial reports ``subprocess_timeout`` rather
+    than ``subprocess_nonzero_exit`` -- the child did not voluntarily exit
+    with a non-zero status; it was killed by the per-trial timeout."""
+    wl = _make_workload(tmp_path, ["sleep", "30"], timeout_per_trial=0.5)
+    wl.setup()
+    result = wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["timed_out"] is True
+    assert result.failure_details[0]["timed_out"] is True
+    assert result.failure_details[0]["type"] == "subprocess_timeout"
+
+
 def test_non_executable_script_yields_error(tmp_path):
     """A user command pointing at a file without the +x bit must land
     as an ``error`` verdict (exit_code=126; issue #230), NOT escape to

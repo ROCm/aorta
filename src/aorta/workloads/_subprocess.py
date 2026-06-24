@@ -766,8 +766,10 @@ class SubprocessWorkload(Workload):
                     {
                         "exit_code": exit_code,
                         "timed_out": timed_out,
-                        "type": (
-                            "subprocess_nonzero_exit" if launched else "subprocess_exec_failed"
+                        "type": _failure_detail_type(
+                            launched=launched,
+                            timed_out=timed_out,
+                            exit_code=exit_code,
                         ),
                         "failure_detectors_fired": list(verdict_obj.failure_detectors_fired),
                     }
@@ -948,6 +950,37 @@ def _validate_env_file_entries(env: dict[str, str]) -> None:
                 "probe.env uses bare KEY=VALUE format and cannot "
                 "encode multi-line values"
             )
+
+
+def _failure_detail_type(*, launched: bool, timed_out: bool, exit_code: int) -> str:
+    """Map a failing trial's process outcome to a ``failure_details[].type``.
+
+    The type must agree with the trial's actual exit state. The previous
+    inline expression hard-coded ``subprocess_nonzero_exit`` whenever the
+    child *launched*, which contradicted the artifact for a trial that
+    exited ``0`` but was failed by a non-Tier-1 detector (e.g. a Tier-4 log
+    pattern) -- ``{"exit_code": 0, "type": "subprocess_nonzero_exit"}`` is
+    impossible to reconcile by anyone reading the JSON (issue #229).
+
+    Precedence (most-specific first):
+
+    * ``not launched`` -> ``subprocess_exec_failed`` -- exec-time ``Popen``
+      failure (ENOENT / EACCES / ENOEXEC); the child never started.
+    * ``timed_out``    -> ``subprocess_timeout`` -- killed by the per-trial
+      timeout (``exit_code`` is the synthetic ``-1`` in this case, so it is
+      neither a "nonzero exit" the operator chose nor a clean exit).
+    * ``exit_code != 0`` -> ``subprocess_nonzero_exit`` -- the child ran and
+      exited non-zero (the original, still-correct case).
+    * otherwise (``exit_code == 0``) -> ``detector_failure`` -- the child
+      exited cleanly; the failure came purely from a classifier detector.
+    """
+    if not launched:
+        return "subprocess_exec_failed"
+    if timed_out:
+        return "subprocess_timeout"
+    if exit_code != 0:
+        return "subprocess_nonzero_exit"
+    return "detector_failure"
 
 
 def _read_log_text(stdout_path: Path, stderr_path: Path) -> str:
