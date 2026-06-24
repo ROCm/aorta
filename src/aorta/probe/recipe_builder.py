@@ -17,6 +17,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from aorta.probe.classifier.disables import (
+    DetectorSpecError,
+    normalize_detector_ids,
+    normalize_tiers,
+)
 from aorta.probe.classifier.tier2_hang import (
     DEFAULT_HANG_GRACE_SEC,
     DEFAULT_HANG_WINDOW_SEC,
@@ -118,6 +123,15 @@ class ProbeExtras:
     # opaque docker wrappers where GPU allocation is normal workload
     # behaviour rather than a leak signal.
     tier3_vram_growth: bool = True
+    # Issue #229: operator detector-disable knobs. ``disable_detectors``
+    # holds ``<tier>:<id>`` tokens (e.g. ``"tier2:hang"``);
+    # ``disable_detector_tiers`` holds whole-tier tokens (``"tier3"``).
+    # Validated at load time by ``aorta.probe.classifier.disables``; a
+    # disabled detector is never evaluated and never counts toward the
+    # verdict. Empty tuples are the no-op default so recipes that don't
+    # set the knobs round-trip exactly.
+    disable_detectors: tuple[str, ...] = ()
+    disable_detector_tiers: tuple[str, ...] = ()
     # Phase 3 (issue #188): redaction block consumed by ``aorta bundle``.
     redaction: RedactionCfg | None = None
 
@@ -314,6 +328,17 @@ def build_probe_recipe_from_dict(
         )
     tier3_vram_growth = tier3_vram_growth_raw
     stop_after = _parse_stop_after("recipe", data.get("stop_after"))
+    try:
+        disable_detectors = normalize_detector_ids(data.get("disable_detectors"))
+        disable_detector_tiers = normalize_tiers(data.get("disable_detector_tiers"))
+    except DetectorSpecError as exc:
+        # ``DetectorSpecError`` messages either already carry a field prefix
+        # (e.g. ``disable_detectors: ...``) or are a bare token diagnostic
+        # (e.g. ``unknown tier 'tier9'``). ``recipe: {exc}`` reads cleanly for
+        # both, whereas ``recipe.{exc}`` produced ``recipe.unknown tier`` for
+        # the bare case. Mirrors the ``recipe:`` prefix used in the triage
+        # loader (aorta.triage.recipe).
+        raise RecipeSchemaError(f"recipe: {exc}") from exc
     # Use ``in`` rather than ``.get(...) is not None`` so an explicit
     # ``redaction: null`` is treated as present-but-invalid (parse_redaction
     # rejects None) instead of being silently conflated with "no redaction
@@ -443,6 +468,8 @@ def build_probe_recipe_from_dict(
         hang_window_sec=hang_window_sec,
         hang_grace_period_at_start=hang_grace_period_at_start,
         tier3_vram_growth=tier3_vram_growth,
+        disable_detectors=disable_detectors,
+        disable_detector_tiers=disable_detector_tiers,
         redaction=redaction,
     )
 

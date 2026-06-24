@@ -108,6 +108,32 @@ prefix already satisfies the rule is skipped. CLI escape hatch:
 out of a sweep that's mostly flaking on infrastructure rather than
 reproducing the bug.
 
+Detector-disable knobs (issue #229) silence detectors that fire on
+benign, workload-specific behaviour:
+
+```yaml
+disable_detector_tiers:            # skip whole tiers (not evaluated)
+  - tier3                          #   e.g. all kernel/GPU-counter checks
+disable_detectors:                 # skip individual detectors
+  - tier2:hang                     #   a repro that legitimately idles
+  - tier3:vram_growth              #   opaque docker wrapper allocates VRAM
+  - custom:my_pattern              #   a custom_patterns[*] id
+```
+
+A disabled detector is **not evaluated** and **never counts** toward the
+verdict or the `failure_detectors_fired` / `warn_detectors_fired` lists;
+the disabled set is echoed into `result.json::capture` for audit. The one
+exception is a command that never launches (exec-time failure such as
+command-not-found): Tier 1 is forced back on for that trial so a run that
+did no real work can't resolve to a green verdict, even if the operator
+disabled Tier 1. Tokens
+are validated at load time (unknown tier, malformed `<tier>:<id>`, or a
+built-in `tier1`-`tier4` id that isn't in that tier's catalogue ->
+`RecipeSchemaError`); `custom:<id>` ids stay free-form. The
+`--disable-detector TIER[:ID]` CLI flag
+(repeatable) is **unioned onto** the recipe's set, so an operator can
+silence one more detector without restating the recipe's list.
+
 Phase 3 keys (`redaction`, top-level `condition`) are still **rejected
 at load time** with a "deferred to Phase 3" error message.
 

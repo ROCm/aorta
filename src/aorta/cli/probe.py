@@ -314,6 +314,19 @@ class _ProbeCommand(click.Command):
     ),
 )
 @click.option(
+    "--disable-detector",
+    "disable_detectors",
+    multiple=True,
+    metavar="TIER[:ID]",
+    help=(
+        "Silence a detector or whole tier (repeatable). Pass a tier name "
+        "('tier3') to skip the entire tier, or a '<tier>:<id>' token "
+        "('tier2:hang') to skip one detector. A disabled detector is not "
+        "evaluated and never counts toward the verdict. Unioned with any "
+        "'disable_detectors:' / 'disable_detector_tiers:' set in the recipe."
+    ),
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
@@ -330,6 +343,7 @@ def probe(
     env_passthrough_mode: str | None,
     stop_after_events: int | None,
     max_trials: int | None,
+    disable_detectors: tuple[str, ...],
     mitigation_files: tuple[Path, ...],
     verbose: int,
     argv: tuple[str, ...],
@@ -369,6 +383,7 @@ def probe(
         r = apply_recipe_overrides(
             r, ticket=ticket, cli_passthrough_mode=cli_passthrough_mode,
             cli_stop_after_events=stop_after_events, cli_max_trials=max_trials,
+            cli_disable_detectors=disable_detectors,
         )
     except (ProbeUsageError, RecipeSchemaError, RecipeCellError, RegistryError, LookupError) as exc:
         raise click.ClickException(str(exc)) from exc

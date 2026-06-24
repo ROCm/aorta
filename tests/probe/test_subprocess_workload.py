@@ -18,6 +18,7 @@ from aorta.workloads._subprocess import (
     CONFIG_KEY_PROBE_EXTRAS,
     CONFIG_KEY_SUBPROCESS_ARGV,
     SubprocessWorkload,
+    _coerce_disable_tokens,
     _tier1_only_fallback_verdict,
 )
 
@@ -51,6 +52,36 @@ def test_fallback_verdict_nonzero_exit_resolves_to_fail(tmp_path):
     )
     assert verdict.verdict == "fail"
     assert "tier1:exit_nonzero" in verdict.failure_detectors_fired
+
+
+# ---- Issue #229: disable-token payload coercion --------------------------
+
+
+def test_coerce_disable_tokens_none_is_empty():
+    assert _coerce_disable_tokens(None, "disable_detectors") == frozenset()
+
+
+def test_coerce_disable_tokens_accepts_sequence():
+    assert _coerce_disable_tokens(["tier2:hang", "tier3"], "disable_detectors") == frozenset(
+        {"tier2:hang", "tier3"}
+    )
+
+
+@pytest.mark.parametrize("bad", ["tier3", 5, {"a": 1}])
+def test_coerce_disable_tokens_rejects_non_sequence(bad):
+    # A bare string would otherwise iterate per-character into a set of
+    # letters; fail fast like the sibling tier3_vram_growth knob.
+    with pytest.raises(TypeError, match="disable_detectors"):
+        _coerce_disable_tokens(bad, "disable_detectors")
+
+
+@pytest.mark.parametrize("bad", [["tier3", 5], ("tier2:hang", None), [b"tier3"]])
+def test_coerce_disable_tokens_rejects_non_string_elements(bad):
+    # A non-string token would survive into the set and later crash
+    # sorted(disabled_detectors) (mixed types) or silently no-op against
+    # the string detector IDs -- reject per-entry, fail fast.
+    with pytest.raises(TypeError, match="must all be strings"):
+        _coerce_disable_tokens(bad, "disable_detectors")
 
 # ---- FR 1.17 (entry-point resolution) ------------------------------------
 
@@ -203,6 +234,73 @@ def test_missing_executable_yields_error(tmp_path):
     assert "tier1:exec_failed" in doc["error_detectors_fired"]
     assert doc["failure_detectors_fired"] == []
     assert result.passed is False
+
+
+@pytest.mark.parametrize(
+    "extras",
+    [
+        {"disable_detector_tiers": ["tier1"]},
+        {"disable_detectors": ["tier1:exit_nonzero"]},
+    ],
+)
+def test_disabled_tier1_does_not_pass_unlaunched_command(tmp_path, extras):
+    """A command that never launches must not pass even if Tier 1 is disabled.
+
+    Regression for oyazdanb's #234 review: honouring a Tier-1 disable on
+    the exec-failure path would let a command-not-found resolve to a green
+    verdict -- a run that did no real work yet looks like a pass. The
+    workload forces Tier 1 back on for the unlaunched path; the disable
+    still applies to launched trials (asserted in the sibling test).
+
+    With the three-way verdict (#230) the unlaunched path fires
+    ``tier1:exec_failed`` -> ``error`` (not ``exit_nonzero`` -> ``fail``),
+    so the guard now asserts a non-green ``error`` verdict.
+    """
+    wl = _make_workload(tmp_path, ["definitely-not-a-real-binary-9d8f7s6"], **extras)
+    wl.setup()
+    result = wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "error"
+    assert doc["exit_code"] == 127
+    assert "tier1:exec_failed" in doc["error_detectors_fired"]
+    assert "tier1:exit_nonzero" not in doc["failure_detectors_fired"]
+    assert result.passed is False
+    # Capture must echo the *effective* disabled set the classifier honoured,
+    # not the requested one -- else the artifact would claim tier1 was
+    # disabled while tier1:exit_nonzero shows as fired (Copilot #234 review).
+    capture = doc["capture"]
+    assert "tier1" not in capture.get("disabled_detector_tiers", [])
+    assert "tier1:exit_nonzero" not in capture.get("disabled_detectors", [])
+
+
+@pytest.mark.parametrize(
+    "extras",
+    [
+        {"disable_detector_tiers": ["tier1"]},
+        {"disable_detectors": ["tier1:exit_nonzero"]},
+    ],
+)
+def test_disabled_tier1_still_passes_launched_nonzero_exit(tmp_path, extras):
+    """The Tier-1 disable still applies on a launched trial.
+
+    Pins the lower bound of the unlaunched-path guard above: a child that
+    actually ran and exited non-zero is silenced by the disable as the
+    operator intended (the override is scoped to the exec-failure path).
+    """
+    wl = _make_workload(tmp_path, ["false"], **extras)  # launches, exits 1
+    wl.setup()
+    result = wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "pass"
+    assert "tier1:exit_nonzero" not in doc["failure_detectors_fired"]
+    assert result.passed is True
+    # On a launched trial the disable is honoured, so the effective set
+    # equals the requested set and is recorded in capture for audit.
+    capture = doc["capture"]
+    recorded = capture.get("disabled_detector_tiers", []) + capture.get(
+        "disabled_detectors", []
+    )
+    assert recorded == list(extras.values())[0]
 
 
 def test_exec_time_failure_flags_main_work_not_started(tmp_path):
@@ -788,6 +886,102 @@ def test_tier3_actually_runs_per_trial(tmp_path, monkeypatch):
     )
 
 
+def test_disable_tier3_skips_probes(tmp_path, monkeypatch):
+    """Issue #229 review: disabling the ``tier3`` tier must skip the
+    side-effecting amd-smi / dmesg probes in the workload, not merely
+    drop their verdict contribution. Spy on both and assert neither runs.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    calls = {"poll": 0, "dmesg": 0}
+
+    def _spy_poll(_state):
+        calls["poll"] += 1
+        return None
+
+    def _spy_dmesg(_state, **_kw):
+        calls["dmesg"] += 1
+        return []
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", _spy_poll)
+    monkeypatch.setattr(workload_mod, "scan_dmesg", _spy_dmesg)
+
+    wl = _make_workload(tmp_path, ["true"], disable_detector_tiers=["tier3"])
+    wl.setup()
+    wl.run()
+    assert calls == {"poll": 0, "dmesg": 0}, (
+        "disabling tier3 still ran the amd-smi/dmesg probes; the knob only "
+        "filtered the verdict instead of skipping the collection"
+    )
+
+
+def test_tier3_probes_run_when_not_disabled(tmp_path, monkeypatch):
+    # Counterpart to the disable test: with tier3 active the probes run.
+    # Spy on BOTH probes so the test stays hermetic -- the real scan_dmesg()
+    # shells out to `dmesg` (host-permission dependent, flaky/slow).
+    from aorta.workloads import _subprocess as workload_mod
+
+    calls = {"poll": 0, "dmesg": 0}
+
+    def _spy_poll(_state):
+        calls["poll"] += 1
+        return None
+
+    def _spy_dmesg(_state, **_kw):
+        calls["dmesg"] += 1
+        return []
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", _spy_poll)
+    monkeypatch.setattr(workload_mod, "scan_dmesg", _spy_dmesg)
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    wl.run()
+    assert calls["poll"] >= 1
+    assert calls["dmesg"] >= 1
+
+
+def test_tier3_probes_skipped_when_not_launched(tmp_path, monkeypatch):
+    """Copilot #234 review: an exec-time Popen failure (the subprocess
+    never launched) must skip the Tier-3 *post*-snapshot + dmesg scan.
+
+    A command-not-found trial did no GPU work, so running those probes only
+    adds overhead / permission noise and risks misattributing an unrelated
+    host kernel/GPU event to a trial that never ran. The pre-snapshot still
+    fires once -- it happens before the Popen attempt, so ``launched`` is
+    not yet known -- but the post-launch collection is gated on ``launched``.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    calls = {"poll": 0, "dmesg": 0}
+
+    def _spy_poll(_state):
+        calls["poll"] += 1
+        return None
+
+    def _spy_dmesg(_state, **_kw):
+        calls["dmesg"] += 1
+        return []
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", _spy_poll)
+    monkeypatch.setattr(workload_mod, "scan_dmesg", _spy_dmesg)
+
+    # Tier 3 stays enabled: the gate under test is the unlaunched flag, not
+    # an operator disable (covered by test_disable_tier3_skips_probes).
+    wl = _make_workload(tmp_path, ["definitely-not-a-real-binary-9d8f7s6"])
+    wl.setup()
+    wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["exit_code"] == 127  # exec-time (ENOENT) failure path
+    assert calls["poll"] == 1, (
+        "expected only the pre-snapshot to run; the post-snapshot must be "
+        "skipped when the subprocess never launched"
+    )
+    assert calls["dmesg"] == 0, (
+        "scan_dmesg ran for a subprocess that never launched; an unrelated "
+        "kernel event could be misattributed to a command-not-found trial"
+    )
+
+
 def test_hang_grace_zero_survives_runtime_extraction(tmp_path, monkeypatch):
     """Regression for PR #197 review: ``probe_extras["hang_grace_period_at_start"]
     == 0.0`` is a validated "no grace, fire as soon as the window
@@ -900,6 +1094,62 @@ def test_classifier_crash_still_writes_result_json(tmp_path, monkeypatch):
     assert "synthetic classifier crash" in doc["capture"]["classifier_error"]
     # The workload result still reports the failure (not a hang) so
     # the dispatcher records a failed trial deterministically.
+    assert result.passed is False
+
+
+def test_classifier_crash_fallback_honours_tier1_disable(tmp_path, monkeypatch):
+    """The Tier-1-only crash fallback must honour the disable knob too.
+
+    Bugbot #234 follow-up: a launched trial with Tier 1 silenced should
+    stay ``pass`` even when ``classify_trial`` crashes -- the fallback
+    applies the same disabled set, so a disabled ``tier1:exit_nonzero``
+    is not re-fired behind the operator's back.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    def _exploding_classify(_ctx):
+        raise RuntimeError("synthetic classifier crash")
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _exploding_classify)
+    wl = _make_workload(tmp_path, ["false"], disable_detectors=["tier1:exit_nonzero"])
+    wl.setup()
+    result = wl.run()
+
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "pass"
+    assert "tier1:exit_nonzero" not in doc["failure_detectors_fired"]
+    assert "classifier_error" in doc["capture"]
+    assert result.passed is True
+
+
+def test_classifier_crash_fallback_still_fails_unlaunched_with_tier1_disabled(
+    tmp_path, monkeypatch
+):
+    """A command that never launches must not pass in the crash fallback too.
+
+    The exec-failure path forces Tier 1 back on (the ``effective_*`` set),
+    and that same set feeds the fallback, so a command-not-found can't
+    resolve green even when Tier 1 is disabled and the classifier crashed.
+    With the three-way verdict (#230) the fallback fires
+    ``tier1:exec_failed`` -> ``error`` for the unlaunched path.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    def _exploding_classify(_ctx):
+        raise RuntimeError("synthetic classifier crash")
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _exploding_classify)
+    wl = _make_workload(
+        tmp_path,
+        ["definitely-not-a-real-binary-9d8f7s6"],
+        disable_detector_tiers=["tier1"],
+    )
+    wl.setup()
+    result = wl.run()
+
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "error"
+    assert "tier1:exec_failed" in doc["error_detectors_fired"]
     assert result.passed is False
 
 

@@ -84,6 +84,10 @@ _PROBE_TOP_LEVEL = frozenset(
         "tier3_vram_growth",
         # Issue #232: collect-until-N stopping rule (valid in both modes).
         "stop_after",
+        # Issue #229: operator detector-disable knobs. Accepted only in
+        # mode: probe (triage-mode check below rejects them otherwise).
+        "disable_detectors",
+        "disable_detector_tiers",
         # Phase 3 (issue #188): redaction block for aorta bundle.
         "redaction",
     }

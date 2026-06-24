@@ -12,6 +12,12 @@ import dataclasses
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal
 
+from aorta.probe.classifier.disables import (
+    DetectorSpecError,
+    normalize_detector_ids,
+    normalize_tiers,
+)
+
 if TYPE_CHECKING:
     from aorta.triage.recipe import Recipe
 
@@ -195,6 +201,7 @@ def apply_recipe_overrides(
     cli_passthrough_mode: Literal["inherit", "file"] | None,
     cli_stop_after_events: int | None = None,
     cli_max_trials: int | None = None,
+    cli_disable_detectors: tuple[str, ...] = (),
 ) -> Recipe:
     """Layer CLI flags on top of a loaded probe-mode ``Recipe``.
 
@@ -208,6 +215,13 @@ def apply_recipe_overrides(
       Missing halves fall back to the recipe's existing ``stop_after``;
       a target with no cap (neither flag nor recipe supplies ``max_trials``)
       is rejected so the loop is never unbounded.
+    * ``--disable-detector`` -- when passed (repeatable), each token is
+      a whole-tier name (``tier3``) or a ``<tier>:<id>`` detector id
+      (``tier2:hang``). Tokens are validated + classified here and
+      UNIONed onto whatever the recipe already disables, so the CLI is
+      additive rather than a replacement (an operator silencing one
+      more detector on top of a recipe shouldn't have to restate the
+      recipe's list).
 
     The caller must verify ``recipe.probe_extras is not None`` before
     invoking this helper (probe-mode discriminator is the CLI's
@@ -223,11 +237,13 @@ def apply_recipe_overrides(
         recipe = dataclasses.replace(
             recipe,
             probe_extras=dataclasses.replace(
-                probe_extras, env_passthrough_mode=cli_passthrough_mode
+                recipe.probe_extras, env_passthrough_mode=cli_passthrough_mode
             ),
         )
     if cli_stop_after_events is not None or cli_max_trials is not None:
         recipe = _overlay_stop_after(recipe, cli_stop_after_events, cli_max_trials)
+    if cli_disable_detectors:
+        recipe = _overlay_disable_detectors(recipe, cli_disable_detectors)
     return recipe
 
 
@@ -263,6 +279,33 @@ def _overlay_stop_after(
     return dataclasses.replace(
         recipe,
         stop_after=StopAfter(events=events, max_trials=max_trials, event_verdict=event_verdict),
+    )
+
+
+def _overlay_disable_detectors(recipe: Recipe, tokens: tuple[str, ...]) -> Recipe:
+    """Classify ``--disable-detector`` tokens and union them onto the recipe.
+
+    A token with a ``:`` is a detector id (``tier2:hang``); a bare
+    token is a whole-tier name (``tier3``). Invalid tokens raise
+    :class:`ProbeUsageError` so the CLI surfaces a friendly message
+    rather than a stack trace.
+    """
+    probe_extras = recipe.probe_extras
+    assert probe_extras is not None
+    tier_tokens = [t for t in tokens if ":" not in t]
+    id_tokens = [t for t in tokens if ":" in t]
+    try:
+        new_ids = normalize_detector_ids(list(probe_extras.disable_detectors) + id_tokens)
+        new_tiers = normalize_tiers(list(probe_extras.disable_detector_tiers) + tier_tokens)
+    except DetectorSpecError as exc:
+        raise ProbeUsageError(f"--disable-detector: {exc}") from exc
+    return dataclasses.replace(
+        recipe,
+        probe_extras=dataclasses.replace(
+            probe_extras,
+            disable_detectors=new_ids,
+            disable_detector_tiers=new_tiers,
+        ),
     )
 
 

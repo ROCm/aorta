@@ -873,6 +873,10 @@ def _run_one_cell(
             "hang_window_sec": probe_extras.hang_window_sec,
             "hang_grace_period_at_start": probe_extras.hang_grace_period_at_start,
             "tier3_vram_growth": probe_extras.tier3_vram_growth,
+            # Issue #229: operator detector-disable knobs threaded to the
+            # workload so the classifier can skip them per trial.
+            "disable_detectors": tuple(probe_extras.disable_detectors),
+            "disable_detector_tiers": tuple(probe_extras.disable_detector_tiers),
         }
 
     # save_logs is forced True for probe-mode cells because
@@ -954,6 +958,11 @@ def _print_dry_run(
         )
         click.echo(f"Argv (forwarded byte-for-byte): {argv_display}")
         click.echo(f"Env-passthrough mode: {recipe.probe_extras.env_passthrough_mode}")
+        disabled = list(recipe.probe_extras.disable_detector_tiers) + list(
+            recipe.probe_extras.disable_detectors
+        )
+        if disabled:
+            click.echo(f"Disabled detectors: {', '.join(disabled)}")
         for cell in recipe.cells:
             env_bundle = recipe.probe_extras.cell_envs.get(cell.name, {})
             env_str = " ".join(f"{k}={v}" for k, v in sorted(env_bundle.items())) or "(no env)"

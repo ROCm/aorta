@@ -140,6 +140,13 @@ _BUILTIN_PATTERNS: tuple[BuiltinPattern, ...] = (
 )
 
 
+# Catalogue of every detector id this tier can fire, in catalogue
+# order. Parity with ``tier{1,2,3}.ALL_DETECTOR_IDS`` so the disable
+# knob (:mod:`aorta.probe.classifier.disables`) can validate
+# ``tier4:<id>`` tokens against the real catalogue at parse time.
+ALL_DETECTOR_IDS: tuple[str, ...] = tuple(p.detector_id for p in _BUILTIN_PATTERNS)
+
+
 def all_patterns() -> tuple[BuiltinPattern, ...]:
     """Return the immutable Tier 4 pattern catalogue."""
     return _BUILTIN_PATTERNS
@@ -222,6 +229,7 @@ def _iter_windows(text: str, window: int):
 
 
 __all__ = [
+    "ALL_DETECTOR_IDS",
     "BUILTIN_PATTERN_VERSION",
     "BuiltinPattern",
     "DETECTOR_COLLECTIVE_TIMEOUT",

@@ -52,7 +52,10 @@ from pathlib import Path
 from typing import Any
 
 from aorta.probe.classifier import TrialContext, classify_trial
-from aorta.probe.classifier.tier1_process import Tier1Context
+from aorta.probe.classifier.tier1_process import (
+    DETECTOR_EXIT_NONZERO,
+    Tier1Context,
+)
 from aorta.probe.classifier.tier1_process import detect as tier1_detect
 from aorta.probe.classifier.tier2_hang import (
     DEFAULT_HANG_GRACE_SEC,
@@ -60,6 +63,7 @@ from aorta.probe.classifier.tier2_hang import (
     HangMonitor,
 )
 from aorta.probe.classifier.tier3_kernel import (
+    AmdSmiSnapshot,
     Tier3State,
     gpu_idle_probe_from_state,
     poll_amd_smi,
@@ -387,6 +391,21 @@ class SubprocessWorkload(Workload):
             )
         tier3_vram_growth = _vram_growth_raw
 
+        # Issue #229: detector-disable knobs. Validated on the
+        # recipe-builder side; default to empty so non-probe / legacy
+        # payloads are the no-op (every detector active).
+        disabled_detectors = _coerce_disable_tokens(
+            probe_extras.get("disable_detectors"), "disable_detectors"
+        )
+        disabled_tiers = _coerce_disable_tokens(
+            probe_extras.get("disable_detector_tiers"), "disable_detector_tiers"
+        )
+        # Disabling a whole tier means "not evaluated at all" -- for Tier 3
+        # that includes the side-effecting amd-smi / dmesg probes, not just
+        # their contribution to the verdict. Gate the collection itself so
+        # the knob actually avoids the probe overhead + permission noise.
+        tier3_enabled = "tier3" not in disabled_tiers
+
         # ``inherit`` mode: the dispatcher has already stamped the
         # cell's mitigation + diagnostic env vars onto os.environ in
         # _run_single_trial's pre-run overlay (it restores them in the
@@ -455,7 +474,8 @@ class SubprocessWorkload(Workload):
         # ``None`` and contributes nothing without aborting the trial.
         # The shared ``_TIER3_STATE`` ensures the "amd-smi disabled"
         # log fires at most once across the full probe invocation.
-        amd_smi_pre = poll_amd_smi(_TIER3_STATE)
+        # Skipped entirely when Tier 3 is operator-disabled.
+        amd_smi_pre = poll_amd_smi(_TIER3_STATE) if tier3_enabled else None
 
         t0 = time.perf_counter()
         exit_code: int
@@ -637,23 +657,34 @@ class SubprocessWorkload(Workload):
         # still land in the window. Both helpers are fail-soft and
         # share ``_TIER3_STATE`` with the pre-snapshot above so the
         # one-warning-per-invocation contract holds.
-        amd_smi_post = poll_amd_smi(_TIER3_STATE)
-        dmesg_text: str | None
-        try:
-            fired_kernel_ids = scan_dmesg(
-                _TIER3_STATE,
-                since_seconds=walltime_sec + _DMESG_SINCE_PAD_SEC,
-            )
-            # ``scan_dmesg`` returns the fired detector IDs directly;
-            # rebuild a synthetic text blob so the classifier's
-            # ``scan_dmesg_text`` second pass is a no-op (it would
-            # otherwise re-scan ``None`` and emit []). The empty
-            # string here keeps Tier 3's text path inert; the
-            # already-fired IDs are surfaced via ``tier3_extra``.
-            dmesg_text = "" if fired_kernel_ids else None
-        except Exception:
-            fired_kernel_ids = []
-            dmesg_text = None
+        #
+        # Skipped when the subprocess never launched (exec-time Popen
+        # failure -- ENOENT / EACCES / ENOEXEC): a command-not-found
+        # trial did no GPU work, so the post-snapshot + dmesg scan add
+        # only overhead and permission noise, and any amdgpu/kernel
+        # message in the window belongs to an unrelated process -- not
+        # this trial. Gating on ``launched`` keeps those events from
+        # being misattributed to a trial that never ran. (Copilot review)
+        amd_smi_post: AmdSmiSnapshot | None = None
+        dmesg_text: str | None = None
+        fired_kernel_ids: list[str] = []
+        if tier3_enabled and launched:
+            amd_smi_post = poll_amd_smi(_TIER3_STATE)
+            try:
+                fired_kernel_ids = scan_dmesg(
+                    _TIER3_STATE,
+                    since_seconds=walltime_sec + _DMESG_SINCE_PAD_SEC,
+                )
+                # ``scan_dmesg`` returns the fired detector IDs directly;
+                # rebuild a synthetic text blob so the classifier's
+                # ``scan_dmesg_text`` second pass is a no-op (it would
+                # otherwise re-scan ``None`` and emit []). The empty
+                # string here keeps Tier 3's text path inert; the
+                # already-fired IDs are surfaced via ``tier3_extra``.
+                dmesg_text = "" if fired_kernel_ids else None
+            except Exception:
+                fired_kernel_ids = []
+                dmesg_text = None
 
         peak_vram_mib: int | None
         if amd_smi_pre is not None and amd_smi_post is not None:
@@ -676,6 +707,19 @@ class SubprocessWorkload(Workload):
         # verdict derived from the same Tier 1 inputs, record the
         # classifier exception under ``capture['classifier_error']``
         # for the operator, and continue.
+        # A subprocess that never launched (exec-time Popen failure --
+        # ENOENT / EACCES / ENOEXEC) has only Tier 1 to speak to its
+        # outcome. Honouring a Tier-1 disable on that path would let a
+        # command-not-found resolve to a green verdict -- a run that did
+        # no real work yet looks like a pass. Force Tier 1 (and its
+        # ``exit_nonzero`` detector) back on for the exec-failure path so
+        # the failure always surfaces; the disable still applies on every
+        # launched trial. (oyazdanb review)
+        effective_disabled_tiers = disabled_tiers
+        effective_disabled_detectors = disabled_detectors
+        if not launched:
+            effective_disabled_tiers = disabled_tiers - {"tier1"}
+            effective_disabled_detectors = disabled_detectors - {DETECTOR_EXIT_NONZERO}
         try:
             verdict_obj, tier_durations_ms = classify_trial(
                 TrialContext(
@@ -694,6 +738,8 @@ class SubprocessWorkload(Workload):
                     tier3_extra=tuple(fired_kernel_ids),
                     tier3_state=_TIER3_STATE,
                     tier3_vram_growth=tier3_vram_growth,
+                    disabled_tiers=effective_disabled_tiers,
+                    disabled_detectors=effective_disabled_detectors,
                 )
             )
         except Exception as classifier_exc:  # noqa: BLE001 -- classifier crash containment
@@ -703,6 +749,8 @@ class SubprocessWorkload(Workload):
                 trial_dir=trial_dir,
                 exec_failed=not launched,
                 classifier_exc=classifier_exc,
+                disabled_tiers=effective_disabled_tiers,
+                disabled_detectors=effective_disabled_detectors,
             )
 
         result_doc: dict[str, Any] = {
@@ -740,6 +788,21 @@ class SubprocessWorkload(Workload):
         # rather than only the log.info above.
         if hang_reconciled_away:
             result_doc["capture"]["tier2_hang_latched_but_reconciled"] = True
+        # Issue #229: surface the operator's disable knobs in the trial
+        # artifact so a reader knows a detector was intentionally silenced
+        # rather than simply not firing. Record the *effective* set the
+        # classifier actually honoured -- on the exec-failure path Tier 1
+        # is forced back on, so echoing the requested set here would make
+        # the artifact self-contradictory (claim ``tier1`` disabled while
+        # ``tier1:exit_nonzero`` shows as fired). (Copilot review)
+        if effective_disabled_detectors:
+            result_doc["capture"]["disabled_detectors"] = sorted(
+                effective_disabled_detectors
+            )
+        if effective_disabled_tiers:
+            result_doc["capture"]["disabled_detector_tiers"] = sorted(
+                effective_disabled_tiers
+            )
         result_path.write_text(
             json.dumps(result_doc, indent=2, sort_keys=False),
             encoding="utf-8",
@@ -915,6 +978,38 @@ class SubprocessWorkload(Workload):
         return {str(k): str(v) for k, v in bundle.items()}
 
 
+def _coerce_disable_tokens(raw: object, key: str) -> frozenset[str]:
+    """Build a disable-token set from a ``probe_extras`` payload, fail-fast.
+
+    ``probe_extras`` is an untyped dict at runtime, so a malformed payload
+    where the value is a bare string (e.g. ``"tier3"``) would otherwise
+    iterate per-character and yield ``{'t','i','e','r','3'}``. Reject
+    strings explicitly so a bad payload surfaces instead of silently
+    mis-disabling. Each element must itself be a ``str`` -- a non-string
+    token (e.g. ``["tier3", 5]``) would otherwise survive into the
+    set and later crash ``sorted(disabled_detectors)`` (TypeError on
+    mixed types) or silently no-op against the string detector IDs.
+    ``None`` is the documented no-op (every detector active). Mirrors
+    the fail-fast posture of the sibling ``tier3_vram_growth`` knob.
+    """
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple, set, frozenset)):
+        raise TypeError(
+            f"probe_extras[{key!r}] must be a list/tuple/set/frozenset of string "
+            f"tokens (a non-string sequence), got {type(raw).__name__} ({raw!r})"
+        )
+    tokens: list[str] = []
+    for tok in raw:
+        if not isinstance(tok, str):
+            raise TypeError(
+                f"probe_extras[{key!r}] tokens must all be strings, got "
+                f"{type(tok).__name__} ({tok!r})"
+            )
+        tokens.append(tok)
+    return frozenset(tokens)
+
+
 def _validate_env_file_entries(env: dict[str, str]) -> None:
     """Reject hostile/malformed env keys+values without touching the filesystem.
 
@@ -1024,6 +1119,8 @@ def _tier1_only_fallback_verdict(
     trial_dir: Path,
     exec_failed: bool,
     classifier_exc: BaseException,
+    disabled_tiers: frozenset[str] = frozenset(),
+    disabled_detectors: frozenset[str] = frozenset(),
 ) -> tuple[Verdict, dict[str, float]]:
     """Build a deterministic verdict when :func:`classify_trial` raises.
 
@@ -1039,6 +1136,12 @@ def _tier1_only_fallback_verdict(
     ``capture`` rather than the per-tier breakdown -- the other
     four tiers genuinely did not run.
 
+    The operator's detector-disable knobs apply here too, so this
+    fallback honours the same contract as :func:`classify_trial`: a
+    silenced ``tier1`` / ``tier1:<id>`` doesn't fire. The caller passes
+    the *effective* set (Tier 1 forced back on for an exec-failure trial)
+    so a command-not-found still fails even with Tier 1 disabled.
+
     Verdict rule: the same fail > error > pass precedence the full
     resolver applies (issue #230) -- a Tier-1 ``tier1:timeout`` with
     no recognised hang or a ``tier1:exec_failed`` resolves to
@@ -1052,14 +1155,21 @@ def _tier1_only_fallback_verdict(
     ``exit_nonzero`` from the synthetic 127/126/1 exit code) even
     when the full classifier is the thing that crashed.
     """
-    fired = tier1_detect(
-        Tier1Context(
-            exit_code=exit_code,
-            timed_out=timed_out,
-            trial_dir=trial_dir,
-            exec_failed=exec_failed,
-        )
-    )
+    if "tier1" in disabled_tiers:
+        fired: list[str] = []
+    else:
+        fired = [
+            d
+            for d in tier1_detect(
+                Tier1Context(
+                    exit_code=exit_code,
+                    timed_out=timed_out,
+                    trial_dir=trial_dir,
+                    exec_failed=exec_failed,
+                )
+            )
+            if d not in disabled_detectors
+        ]
     failures, errors = partition_detectors(list(fired))
     capture: dict[str, str | float | int] = {
         "classifier_error": f"{type(classifier_exc).__name__}: {classifier_exc}",

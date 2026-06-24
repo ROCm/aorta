@@ -339,6 +339,54 @@ def test_timeout_per_trial_must_be_positive(tmp_path):
         load_recipe(_write_yaml(tmp_path, text))
 
 
+# ---- issue #229: detector-disable knobs ----------------------------------
+
+
+def test_disable_detector_knobs_parse(tmp_path):
+    text = _PROBE_MINIMAL + (
+        "disable_detectors: [tier2:hang, custom:my_id]\n"
+        "disable_detector_tiers: [tier3]\n"
+    )
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.probe_extras is not None
+    assert r.probe_extras.disable_detectors == ("tier2:hang", "custom:my_id")
+    assert r.probe_extras.disable_detector_tiers == ("tier3",)
+
+
+def test_disable_detector_knobs_default_empty(tmp_path):
+    r = load_recipe(_write_yaml(tmp_path, _PROBE_MINIMAL))
+    assert r.probe_extras is not None
+    assert r.probe_extras.disable_detectors == ()
+    assert r.probe_extras.disable_detector_tiers == ()
+
+
+def test_disable_detector_bad_id_rejected(tmp_path):
+    text = _PROBE_MINIMAL + "disable_detectors: [hang]\n"
+    with pytest.raises(RecipeSchemaError, match="malformed detector id"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_disable_detector_tier_unknown_rejected(tmp_path):
+    text = _PROBE_MINIMAL + "disable_detector_tiers: [tier9]\n"
+    with pytest.raises(RecipeSchemaError, match="unknown tier"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_disable_detector_keys_rejected_in_triage_mode(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+disable_detectors: [tier2:hang]
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+"""
+    with pytest.raises(RecipeSchemaError, match="probe-mode only"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
 # ---- PR #194 round-3 review: probe confound rejects unknown keys ---------
 
 
