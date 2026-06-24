@@ -146,15 +146,22 @@ def trial_verdict(trial: Any) -> str:
     about whether a trial reproduced the bug, failed for an infra reason,
     or passed.
 
-    Accepts any object exposing ``exit_status`` and a ``result`` dict
-    (duck-typed -- callers pass :class:`TrialResult` or lightweight
-    stand-ins in tests). Resolution order:
+    Accepts any object exposing ``workload`` / ``exit_status`` and a
+    ``result`` dict (duck-typed -- callers pass :class:`TrialResult` or
+    lightweight stand-ins in tests). Resolution order:
 
     1. **Probe trials** carry the classifier's three-way verdict in
        ``result["metrics"]["verdict"]``; it is authoritative. (A probe
        ``error`` trial reports ``passed=False`` and therefore
        ``exit_status == "workload_failed"``, so the metric is the only
-       place the error/fail distinction survives.)
+       place the error/fail distinction survives.)  This is trusted
+       **only** for the probe producer (``trial.workload ==
+       _subprocess``).  ``metrics`` is otherwise a free-form,
+       workload-owned field, so a non-probe workload could legitimately
+       stash its own ``metrics["verdict"]`` -- trusting it for every
+       workload would let a failed trial be miscounted as a pass in the
+       matrix and the ``stop_after`` rule.  Gating on the producer keeps
+       the metric authoritative exactly where ``_subprocess`` writes it.
     2. **Other trials** (triage workloads with no probe verdict) derive
        it from ``exit_status``: an ``infrastructure_failed`` /
        ``workload_setup_failed`` trial never validly ran the measurement
@@ -162,21 +169,26 @@ def trial_verdict(trial: Any) -> str:
        reporting ``passed is False`` -> ``fail``; otherwise ``pass``.
     """
     result = getattr(trial, "result", None)
-    if isinstance(result, dict):
-        metrics = result.get("metrics")
-        if isinstance(metrics, dict):
-            v = metrics.get("verdict")
-            # Use the classifier's canonical vocabulary so this can't drift
-            # from the producer. Imported locally to keep aorta.run free of a
-            # module-load dependency on aorta.probe (no cycle today, but the
-            # local import keeps it that way if probe ever needs this
-            # predicate). The isinstance guard ensures a non-string metric
-            # value can never match (and never reaches frozenset membership
-            # with an unhashable type).
-            from aorta.probe.classifier.verdict import VALID_VERDICTS
+    workload = getattr(trial, "workload", None)
+    # Only the probe producer's metric verdict is authoritative (see
+    # docstring). The producer name and verdict vocabulary are imported
+    # locally from their canonical sources so neither can drift from this
+    # predicate, and so aorta.run keeps no module-load dependency on
+    # aorta.probe (no cycle today; the local imports keep it that way).
+    if isinstance(result, dict) and workload is not None:
+        from aorta.probe.recipe_builder import SUBPROCESS_WORKLOAD_NAME
 
-            if isinstance(v, str) and v in VALID_VERDICTS:
-                return v
+        if workload == SUBPROCESS_WORKLOAD_NAME:
+            metrics = result.get("metrics")
+            if isinstance(metrics, dict):
+                v = metrics.get("verdict")
+                from aorta.probe.classifier.verdict import VALID_VERDICTS
+
+                # The isinstance guard ensures a non-string metric value can
+                # never match (and never reaches frozenset membership with an
+                # unhashable type).
+                if isinstance(v, str) and v in VALID_VERDICTS:
+                    return v
 
     status = getattr(trial, "exit_status", None)
     if status in ("infrastructure_failed", "workload_setup_failed"):
