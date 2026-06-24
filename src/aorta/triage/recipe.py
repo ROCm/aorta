@@ -166,12 +166,12 @@ class ConfoundCfg:
     baseline_cell: str | None = None
 
 
-# Verdicts that may be counted as a ``stop_after`` event. ``error`` is
-# intentionally excluded: the verdict space is binary (pass/fail) until
-# the three-way verdict task (#230) lands a real ``error`` outcome, so
-# accepting it here would silently never match. Re-add ``error`` in the
-# same change that wires it through the classifier.
-_STOP_AFTER_EVENT_VERDICTS = frozenset({"fail", "pass"})
+# Verdicts that may be counted as a ``stop_after`` event. The three-way
+# verdict (#230) wired ``error`` through the classifier and the shared
+# ``aorta.run.results.trial_verdict`` predicate, so all three outcomes are
+# now countable (e.g. ``event_verdict: error`` to stop a flaky-infra sweep
+# early once enough trials have errored).
+_STOP_AFTER_EVENT_VERDICTS = frozenset({"fail", "pass", "error"})
 
 
 @dataclass(frozen=True)
@@ -429,12 +429,9 @@ def _parse_stop_after(path_hint: str, raw: Any) -> StopAfter | None:
         )
     event_verdict = raw.get("event_verdict", "fail")
     if event_verdict not in _STOP_AFTER_EVENT_VERDICTS:
-        hint = ""
-        if event_verdict == "error":
-            hint = " ('error' counts arrive with the three-way verdict, #230)"
         raise RecipeSchemaError(
             f"{path_hint}.stop_after.event_verdict: must be one of "
-            f"{sorted(_STOP_AFTER_EVENT_VERDICTS)}, got {event_verdict!r}{hint}"
+            f"{sorted(_STOP_AFTER_EVENT_VERDICTS)}, got {event_verdict!r}"
         )
     return StopAfter(events=events, max_trials=max_trials, event_verdict=event_verdict)
 

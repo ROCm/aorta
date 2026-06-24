@@ -42,7 +42,7 @@ _TRIAL_EXIT_STATUS = {
     "workload_setup_failed",
     "infrastructure_failed",
 }
-_PROBE_VERDICTS = {"pass", "fail"}
+_PROBE_VERDICTS = {"pass", "fail", "error"}
 # Top-level env.json keys that should always be present (a subset chosen
 # to be stable across schema 1.x; absence is a real problem, not drift).
 _ENV_REQUIRED_KEYS = {
@@ -142,27 +142,57 @@ def check_probe_result(doc: dict, target: str, rep: Report) -> None:
     if not isinstance(fired, list):
         rep.fail(target, "failure_detectors_fired must be a list")
         fired = []
+    # Issue #230: infra-error signals live in their own list. Optional for
+    # legacy result.json that predates the three-way verdict.
+    errored = doc.get("error_detectors_fired")
+    if errored is None:
+        errored = []
+    elif not isinstance(errored, list):
+        rep.warn(target, "error_detectors_fired present but not a list")
+        errored = []
     warned = doc.get("warn_detectors_fired")
     if warned is not None and not isinstance(warned, list):
         rep.warn(target, "warn_detectors_fired present but not a list")
 
-    # Verdict precedence: any failure detector => verdict must be fail.
-    if fired and verdict == "pass":
+    # Verdict precedence (fail > error > pass, issue #230):
+    # - any failure detector  => verdict must be ``fail``
+    # - else any error detector => verdict must be ``error``
+    # - else                    => verdict must be ``pass``
+    if fired and verdict != "fail":
         rep.fail(
             target,
-            f"verdict=pass but failure_detectors_fired is non-empty ({fired})",
+            f"verdict={verdict!r} but failure_detectors_fired is non-empty "
+            f"({fired}); failures outrank everything -> expected fail",
         )
-    if not fired and verdict == "fail":
-        rep.warn(
+    if not fired and errored and verdict != "error":
+        rep.fail(
             target,
-            "verdict=fail with empty failure_detectors_fired "
-            "(expected at least one detector or meta:missing_pass_signal)",
+            f"verdict={verdict!r} but only error detectors fired ({errored}); "
+            "expected error",
         )
+    if not fired and not errored and verdict not in ("pass",):
+        # verdict=fail/error with nothing fired. fail keeps its legacy warn
+        # (meta:missing_pass_signal may have been the cause and dropped);
+        # error with no error detector is a contradiction.
+        if verdict == "fail":
+            rep.warn(
+                target,
+                "verdict=fail with empty failure_detectors_fired "
+                "(expected at least one detector or meta:missing_pass_signal)",
+            )
+        elif verdict == "error":
+            rep.fail(
+                target,
+                "verdict=error with empty error_detectors_fired "
+                "(an error verdict must name its infra-error reason)",
+            )
 
-    # timeout consistency.
+    # timeout consistency. ``tier1:timeout`` is an *error* detector, so look
+    # in both lists (a recognised hang co-fires tier2:hang -> the timeout
+    # may sit in error_detectors_fired even on a fail verdict).
     timed_out = doc.get("timed_out")
     has_timeout_detector = any(
-        isinstance(d, str) and d.endswith("timeout") for d in fired
+        isinstance(d, str) and d.endswith("timeout") for d in (*fired, *errored)
     )
     if timed_out is True and not has_timeout_detector:
         rep.warn(target, "timed_out=true but no tier1:timeout detector fired")
@@ -272,20 +302,37 @@ def check_matrix_json(doc: dict, target: str, rep: Report) -> None:
         trials = cell.get("trials")
         passed = cell.get("passed_count")
         failed = cell.get("failed_count")
+        # Issue #230: error trials are a third bucket. Optional/0 for legacy
+        # matrix.json that predates the three-way verdict.
+        errored = cell.get("error_count", 0)
+        if not isinstance(errored, int):
+            errored = 0
         err = cell.get("error")
         if err is None and all(isinstance(x, int) for x in (trials, passed, failed)):
-            if passed + failed != trials:
+            if passed + failed + errored != trials:
                 rep.fail(
                     ct,
-                    f"passed_count({passed})+failed_count({failed}) != trials({trials})",
+                    f"passed_count({passed})+failed_count({failed})+"
+                    f"error_count({errored}) != trials({trials})",
                 )
             rate = cell.get("failure_rate")
-            if _is_number(rate) and trials:
-                expect = failed / trials
+            if _is_number(rate):
+                # Event rate excludes error trials from the denominator.
+                valid = passed + failed
+                expect = (failed / valid) if valid else 0.0
                 if abs(rate - expect) > 1e-6:
                     rep.fail(
                         ct,
-                        f"failure_rate={rate} != failed/trials={expect:.6f}",
+                        f"failure_rate={rate} != failed/valid_trials={expect:.6f} "
+                        f"(valid = passed+failed = {valid}; errors excluded)",
+                    )
+            erate = cell.get("error_rate")
+            if _is_number(erate) and trials:
+                expect_e = errored / trials
+                if abs(erate - expect_e) > 1e-6:
+                    rep.fail(
+                        ct,
+                        f"error_rate={erate} != error/trials={expect_e:.6f}",
                     )
             hist = cell.get("exit_status_counts")
             if isinstance(hist, dict) and hist:

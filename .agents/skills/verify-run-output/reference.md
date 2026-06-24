@@ -46,25 +46,34 @@ name exactly what couldn't be captured (rdhc, headers, submodule SHAs, …).
 
 Produced by `aorta probe` at `<cell>/trial_<n>/result.json`.
 
-Keys: `verdict` (`"pass"|"fail"`), `exit_code` (int), `walltime_sec` (float),
-`peak_vram_mib` (int|null), `argv` (list[str]), `cell_name` (str),
-`trial_index` (int), `failure_detectors_fired` (list[str]),
+Keys: `verdict` (`"pass"|"fail"|"error"`), `exit_code` (int),
+`walltime_sec` (float), `peak_vram_mib` (int|null), `argv` (list[str]),
+`cell_name` (str), `trial_index` (int), `failure_detectors_fired` (list[str]),
+`error_detectors_fired` (list[str]; issue #230, optional on legacy files),
 `warn_detectors_fired` (list[str]), `capture` (dict),
 `tier_durations_ms` (dict), `env` (dict[str,str], cell env bundle),
 `env_passthrough_mode` (`"inherit"|"file"`), `timed_out` (bool).
 
-Verdict precedence (from `classifier.md`):
-1. Any `tier1:`/`tier2:`/`tier3:`/`tier4:` detector OR any `on_match: fail`
-   custom (`custom:<id>`) pattern fires → `verdict = "fail"`.
-2. A `required_for_pass: true` pattern that did NOT fire injects
-   `meta:missing_pass_signal` and flips to `fail`.
+Verdict precedence (three-way, **fail > error > pass**; from `classifier.md`):
+1. Any `tier1:`/`tier2:`/`tier3:`/`tier4:` detector (other than the error
+   detectors below) OR any `on_match: fail` custom (`custom:<id>`) pattern
+   fires → `verdict = "fail"`. A `required_for_pass: true` pattern that did
+   NOT fire injects `meta:missing_pass_signal` and is a `fail`.
+2. Else, if only an error detector fired
+   (`tier1:timeout` with no co-firing `tier2:hang`, `tier1:exec_failed`, or
+   `meta:env_file_validation_failed`) → `verdict = "error"` (no valid
+   observation; excluded from the matrix event-rate denominator).
 3. Otherwise → `verdict = "pass"`.
 
 Consistency rules:
 - `failure_detectors_fired` non-empty ⟹ `verdict == "fail"`. Else = FAIL.
+- `error_detectors_fired` non-empty AND `failure_detectors_fired` empty ⟹
+  `verdict == "error"`. Else = FAIL.
 - `verdict == "fail"` with empty `failure_detectors_fired` = WARN (expect a
-  detector or `meta:missing_pass_signal`).
-- `timed_out == true` ⟺ a `…:timeout` detector present. Mismatch = WARN.
+  detector or `meta:missing_pass_signal`); `verdict == "error"` with empty
+  `error_detectors_fired` = FAIL (an error must name its reason).
+- `timed_out == true` ⟺ a `…:timeout` detector present (in EITHER list —
+  `tier1:timeout` is an error detector). Mismatch = WARN.
 - `warn_detectors_fired` / `capture` never change the verdict.
 - Detector IDs are stable strings; built-in (`tierN:`) and `custom:<id>` are
   peers. Do not treat a `custom:` ID as invalid — it is recipe-declared.
@@ -116,17 +125,23 @@ Both `aorta probe` and `aorta triage run` write these via the shared engine.
 `cells` (list).
 
 Each cell (CellStats): `name`, `mitigations`, `environment`, `extra_env`,
-`resolved_env_vars`, `trials`, `passed_count`, `failed_count`, `failure_rate`,
+`resolved_env_vars`, `trials`, `passed_count`, `failed_count`,
+`error_count` (issue #230), `failure_rate`, `error_rate`, `unreliable`,
 `mean_step_time_ms` (+ std/min/max/p50/p90/p99), `mean_wall_clock_sec`,
 `exit_status_counts` (dict), `step_times_ms`, `trial_paths`, `error`
 (str|null), `step_time_source`, `failure_hints`, `outcome_counts`,
 `executed_iter_min/max`, `configured_iters`, `iters_display`,
 `workload_config`, `confound`, `step_time_ratio`, `resolved_environment`,
-`top_failure_detector_id`, `top_warn_detector_id`.
+`top_failure_detector_id`, `top_warn_detector_id`, `stop_after_note`.
 
 Consistency rules (non-error cells):
-- `passed_count + failed_count == trials`. Else = FAIL.
-- `failure_rate == failed_count / trials`. Else = FAIL.
+- `passed_count + failed_count + error_count == trials`. Else = FAIL.
+- `failure_rate == failed_count / (passed_count + failed_count)` — the event
+  rate over *valid* trials; `error` trials are excluded from the denominator
+  (issue #230). `0.0` when there are no valid trials. Else = FAIL.
+- `error_rate == error_count / trials`. Else = FAIL.
+- `unreliable == true` when `error_rate >= 0.10` (advisory; the event rate
+  rests on too few valid trials).
 - `sum(exit_status_counts.values()) == trials`. Else = WARN.
 - `error != null` ⟹ row is preserved with zeroed numerics; `failure_rate`
   reported `n/a` in matrix.md. This is intentional completeness, not a bug.

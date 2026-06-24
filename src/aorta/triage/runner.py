@@ -530,15 +530,14 @@ def _hydrate_trials_by_index(trial_paths: list[str]) -> dict[int, _HydratedTrial
 
 
 def _trial_passed_for_log(trial: Any) -> bool:
-    """Mirror of ``aorta.triage.matrix._trial_passed`` for the per-cell
-    log line.
+    """Per-cell-log pass predicate, kept consistent with the matrix
+    ``passed_count``.
 
-    Kept local rather than imported from the matrix module's private
-    namespace so the runner doesn't depend on a leading-underscore
-    callable (Python convention: private to defining module). The
-    semantic is identical -- a trial passes iff ``exit_status == "ok"``
-    AND the wrapped ``WorkloadResult.passed`` is not False -- so the
-    log line and the matrix.md row agree on what counts as a pass.
+    Kept local rather than reaching into another module's private
+    namespace (Python convention: private to defining module). A trial
+    passes iff ``exit_status == "ok"`` AND the wrapped
+    ``WorkloadResult.passed`` is not False, so the log line and the
+    matrix.md row agree on what counts as a pass.
     """
     if getattr(trial, "exit_status", None) != "ok":
         return False
@@ -1206,8 +1205,7 @@ def _run_recipe_locked(
                 cell_elapsed,
             )
         else:
-            # Use the canonical pass/fail predicate from
-            # ``aorta.triage.matrix._trial_passed`` so the per-cell log line
+            # Use the local pass/fail predicate so the per-cell log line
             # agrees with the matrix-level passed_count: a trial is "passed"
             # iff its exit_status is "ok" AND its WorkloadResult.passed is
             # not False. Reading only ``result.get("passed")`` ignores the

@@ -81,9 +81,18 @@ def test_stop_after_cap_below_target_rejected(tmp_path):
         load_recipe(_write(tmp_path, text))
 
 
-def test_stop_after_error_verdict_points_to_230(tmp_path):
+def test_stop_after_error_verdict_now_accepted(tmp_path):
+    """Issue #230 landed the three-way verdict, so ``event_verdict: error``
+    is now a valid stopping rule (e.g. bail out of an infra-flaky sweep)."""
     text = _PROBE_HEAD + "stop_after:\n  events: 1\n  max_trials: 5\n  event_verdict: error\n"
-    with pytest.raises(RecipeSchemaError, match="#230"):
+    recipe = load_recipe(_write(tmp_path, text))
+    assert recipe.stop_after is not None
+    assert recipe.stop_after.event_verdict == "error"
+
+
+def test_stop_after_unknown_verdict_rejected(tmp_path):
+    text = _PROBE_HEAD + "stop_after:\n  events: 1\n  max_trials: 5\n  event_verdict: bogus\n"
+    with pytest.raises(RecipeSchemaError, match="event_verdict"):
         load_recipe(_write(tmp_path, text))
 
 
@@ -147,20 +156,28 @@ def _tr(exit_status: str) -> SimpleNamespace:
     [
         ("ok", "fail", False),
         ("workload_failed", "fail", True),
-        ("infrastructure_failed", "fail", True),
+        # Issue #230: an infra crash is an ``error`` event, NOT a ``fail``
+        # event -- it never validly reproduced the bug.
+        ("infrastructure_failed", "fail", False),
+        ("infrastructure_failed", "error", True),
+        ("workload_setup_failed", "error", True),
+        ("workload_failed", "error", False),
         ("ok", "pass", True),
         ("workload_failed", "pass", False),
+        ("infrastructure_failed", "pass", False),
     ],
 )
 def test_trial_is_event(exit_status, verdict, expected):
     assert _trial_is_event(_tr(exit_status), verdict) is expected
 
 
-@pytest.mark.parametrize("bad_verdict", ["error", "FAIL", "fial", "", None, 1])
+@pytest.mark.parametrize("bad_verdict", ["FAIL", "fial", "", None, 1])
 def test_trial_is_event_rejects_unknown_verdict(bad_verdict):
     # An unknown/typo'd verdict must raise rather than silently fall through
     # to the "fail" branch -- otherwise a programmatic caller that bypassed
     # the recipe loader would get misinterpreted semantics (#236 r3 pattern).
+    # ``error`` is a valid three-way event verdict (#230), so it is no longer
+    # in this rejected set.
     with pytest.raises(ValueError, match="event_verdict must be one of"):
         _trial_is_event(_tr("ok"), bad_verdict)
 
@@ -191,6 +208,23 @@ class _PassWL(Workload):
 
     def run(self) -> WorkloadResult:
         return WorkloadResult(passed=True, total_iterations=1, elapsed_sec=0.1)
+
+    def cleanup(self) -> None:
+        pass
+
+
+class _ErrorWL(Workload):
+    """Setup raises -> dispatcher records exit_status='workload_setup_failed'
+    -> three-way verdict 'error' (issue #230)."""
+
+    launch_mode = "single_process"
+    min_world_size = 1
+
+    def setup(self) -> None:
+        raise RuntimeError("infra boom")
+
+    def run(self) -> WorkloadResult:  # pragma: no cover - never reached
+        return WorkloadResult(passed=True)
 
     def cleanup(self) -> None:
         pass
@@ -230,6 +264,22 @@ def test_dispatcher_event_verdict_pass(tmp_path):
 def test_dispatcher_no_stop_after_runs_all(tmp_path):
     results = _run_trials_with(_FailWL, None, tmp_path, trials=3)
     assert len(results) == 3
+
+
+def test_dispatcher_event_verdict_error_stops_early(tmp_path):
+    """Issue #230: ``event_verdict: error`` stops a cell once enough trials
+    have errored (e.g. bail out of an infra-flaky sweep)."""
+    sa = StopAfter(events=2, max_trials=10, event_verdict="error")
+    results = _run_trials_with(_ErrorWL, sa, tmp_path, trials=sa.max_trials)
+    assert len(results) == 2
+
+
+def test_dispatcher_errors_do_not_count_as_fail_events(tmp_path):
+    """An all-error workload never satisfies an ``event_verdict: fail`` rule,
+    so the cell runs to the cap (errors are not fails -- issue #230)."""
+    sa = StopAfter(events=2, max_trials=3, event_verdict="fail")
+    results = _run_trials_with(_ErrorWL, sa, tmp_path, trials=sa.max_trials)
+    assert len(results) == 3  # cap reached, never stopped early on a "fail"
 
 
 def test_dispatcher_log_says_early_when_budget_remains(tmp_path, caplog):

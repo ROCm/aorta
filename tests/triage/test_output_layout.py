@@ -384,10 +384,11 @@ def test_matrix_md_failures_column_renders_failed_over_total(tmp_path, patched_e
     r = _simple_recipe(ticket="T-1")
     run_dir = runner.run_recipe(r, output_dir=tmp_path)
     md = (run_dir / "matrix.md").read_text()
-    # The baseline row's numeric cell: 0 failures of 2 trials.
+    # The baseline row's numeric cell: 0 failures of 2 valid trials.
     assert "0 / 2" in md
-    # Legend line documents what "Failures" means.
-    assert "`Failures` is `failed_count / trial_count`" in md
+    # Legend line documents what "Failures" means (issue #230: denominator
+    # is valid trials = passed + failed, errors excluded).
+    assert "`Failures` is `failed_count / valid_trials`" in md
 
 
 def test_resolved_recipe_is_loadable_by_load_recipe(tmp_path, patched_env, patched_run_trials):

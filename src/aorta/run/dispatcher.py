@@ -23,7 +23,7 @@ from aorta.instrumentation.environment import collect_env
 from aorta.registry import Environment, get_environment, get_mitigation
 from aorta.run.collectors import KNOWN_RECIPES
 from aorta.run.discovery import get_workload_class
-from aorta.run.results import TrialResult
+from aorta.run.results import TrialResult, trial_verdict
 from aorta.run.validation import validate_launch_mode
 from aorta.workloads import Workload, WorkloadResult
 
@@ -479,17 +479,19 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
 def _trial_is_event(result: TrialResult, event_verdict: str) -> bool:
     """Decide whether ``result`` counts as a ``stop_after`` event.
 
-    Aligned with :func:`aorta.run.cli_helpers.summarize_results`'s
-    pass/fail predicate (a trial passes iff ``exit_status == "ok"``) so
-    the stop-count and the matrix pass/fail columns can never disagree:
+    Uses the shared three-way :func:`aorta.run.results.trial_verdict`
+    predicate (issue #230) so the stop-count and the matrix pass / fail /
+    error columns can never disagree:
 
-    * ``event_verdict == "fail"`` -> any non-``ok`` exit (the bug
-      reproduced, infra flaked, setup died).
-    * ``event_verdict == "pass"`` -> a clean ``ok`` trial.
+    * ``event_verdict == "fail"`` -> the bug reproduced (genuine failure).
+    * ``event_verdict == "pass"`` -> a clean trial.
+    * ``event_verdict == "error"`` -> the trial never validly ran (infra
+      crash, launch failure, timeout with no recognised hang). Useful to
+      bail out of a sweep that's mostly flaking on infrastructure.
 
-    ``error`` is not yet a distinct outcome (binary verdict space until
-    the three-way verdict task #230); the recipe loader rejects it, so
-    it never reaches here.
+    Note this is a behaviour refinement over the pre-#230 predicate
+    (``fail`` == any non-``ok`` exit): infra errors no longer count as
+    ``fail`` events -- they count as ``error`` events instead.
 
     Raises:
         ValueError: if ``event_verdict`` is not one of the canonical
@@ -499,8 +501,8 @@ def _trial_is_event(result: TrialResult, event_verdict: str) -> bool:
             fail loudly rather than silently treat an unknown/typo'd
             verdict as ``"fail"``.
     """
-    # Compare against the canonical vocabulary the recipe schema exports
-    # rather than re-hardcoding {"pass", "fail"} here. Imported locally
+    # Validate against the canonical vocabulary the recipe schema exports
+    # rather than re-hardcoding the verdict set here. Imported locally
     # because a module-level ``aorta.triage`` import would invert the
     # layering (aorta.triage.runner imports this function) -- same
     # rationale as ``RunRequest.stop_after`` being typed ``Any``.
@@ -511,8 +513,7 @@ def _trial_is_event(result: TrialResult, event_verdict: str) -> bool:
             f"event_verdict must be one of {sorted(_STOP_AFTER_EVENT_VERDICTS)}, "
             f"got {event_verdict!r}"
         )
-    passed = result.exit_status == "ok"
-    return passed if event_verdict == "pass" else not passed
+    return trial_verdict(result) == event_verdict
 
 
 def _run_single_trial(
