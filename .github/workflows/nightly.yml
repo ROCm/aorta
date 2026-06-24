@@ -54,6 +54,19 @@ jobs:
           python -m pip install --upgrade build
           python -m build
 
+      # softprops/action-gh-release creates the dev-wheels tag on the first run
+      # but does NOT move it on subsequent runs, so the rolling tag (and the
+      # release's "commit" link) would keep pointing at the commit it was first
+      # cut from while the uploaded wheels come from the current run. Force-move
+      # the tag to the built commit first so the tag/release metadata stays
+      # consistent with the artifacts. Lightweight tag; the job's
+      # `contents: write` permission (via checkout's persisted credentials)
+      # authorizes the push.
+      - name: Point dev-wheels tag at the built commit
+        run: |
+          git tag -f dev-wheels "${GITHUB_SHA}"
+          git push --force origin "refs/tags/dev-wheels"
+
       - name: Publish to rolling dev-wheels pre-release
         uses: softprops/action-gh-release@v3
         with:
