@@ -944,6 +944,23 @@ def _build_recipe(
     _validate_unique_cell_names(cells)
     cells_tuple = tuple(cells)
 
+    # Issue #232: when ``stop_after`` is active the per-cell trial budget is
+    # ``stop_after.max_trials`` (see ``runner._run_one_cell``, which sets
+    # ``cap`` from ``max_trials`` and ignores ``cell.effective_trials``). A
+    # per-cell ``trials:`` override would therefore be silently dropped and a
+    # cell could run far more trials than configured. Reject the combination at
+    # load time rather than surprise the operator with an expensive run.
+    if stop_after is not None:
+        overridden = [c.name for c in cells_tuple if c.trials is not None]
+        if overridden:
+            raise RecipeSchemaError(
+                "recipe.stop_after is incompatible with per-cell 'trials' "
+                f"overrides (cells: {overridden}); when stop_after is set, "
+                "stop_after.max_trials is the per-cell cap, so a cell-level "
+                "'trials' would be silently ignored. Drop the per-cell "
+                "'trials' or remove stop_after."
+            )
+
     _validate_names_resolve(cells_tuple, inline_envs, sidecar_files)
     _validate_no_mitigation_collisions(cells_tuple, sidecar_files)
 

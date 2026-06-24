@@ -571,7 +571,16 @@ def write_matrix_md(
     else:
         recipe_line += "(flag-mode; in-memory)"
     lines.append(recipe_line + "  ")
-    lines.append(f"**Trials per cell**: {recipe.trials}  ")
+    # With a ``stop_after`` rule the per-cell budget is the hard cap
+    # (``max_trials``), not ``recipe.trials`` (often ``1`` on probe
+    # recipes); render it as "up to N" so the header matches the real
+    # budget. Legacy runs with no rule stay byte-equivalent.
+    trial_budget = (
+        f"up to {recipe.stop_after.max_trials}"
+        if recipe.stop_after is not None
+        else str(recipe.trials)
+    )
+    lines.append(f"**Trials per cell**: {trial_budget}  ")
     lines.append(f"**Steps per trial**: {recipe.steps}  ")
     lines.append(f"**Run timestamp**: {run_timestamp}  ")
     baseline_step = (

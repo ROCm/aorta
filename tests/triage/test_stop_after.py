@@ -124,6 +124,26 @@ def test_stop_after_valid_in_triage_mode(tmp_path):
     assert r.stop_after == StopAfter(events=1, max_trials=8, event_verdict="fail")
 
 
+def test_stop_after_rejects_per_cell_trials_override(tmp_path):
+    # Issue #232: stop_after.max_trials is the per-cell cap, so a per-cell
+    # ``trials:`` override would be silently ignored at run time. Reject the
+    # combination at load time instead of surprising the operator.
+    text = (
+        "schema_version: 1\n"
+        "workload: fsdp\n"
+        "trials: 2\n"
+        "steps: 10\n"
+        "stop_after:\n  events: 1\n  max_trials: 8\n"
+        "cells:\n"
+        "  - name: baseline-local\n"
+        "    mitigations: [none]\n"
+        "    environment: local\n"
+        "    trials: 3\n"
+    )
+    with pytest.raises(RecipeSchemaError, match="incompatible with per-cell 'trials'"):
+        load_recipe(_write(tmp_path, text))
+
+
 # --------------------------------------------------------------------------
 # Event predicate
 # --------------------------------------------------------------------------
@@ -149,6 +169,17 @@ def _tr(exit_status: str) -> SimpleNamespace:
 )
 def test_trial_is_event(exit_status, verdict, expected):
     assert _trial_is_event(_tr(exit_status), verdict) is expected
+
+
+@pytest.mark.parametrize("bad_verdict", ["FAIL", "fial", "", None, 1])
+def test_trial_is_event_rejects_unknown_verdict(bad_verdict):
+    # An unknown/typo'd verdict must raise rather than silently fall through
+    # to the "fail" branch -- otherwise a programmatic caller that bypassed
+    # the recipe loader would get misinterpreted semantics (#236 r3 pattern).
+    # ``error`` is a valid three-way event verdict (#230), so it is no longer
+    # in this rejected set.
+    with pytest.raises(ValueError, match="event_verdict must be one of"):
+        _trial_is_event(_tr("ok"), bad_verdict)
 
 
 # --------------------------------------------------------------------------
@@ -314,6 +345,36 @@ def test_stop_after_column_shown_when_all_cells_error(tmp_path):
     assert "Stop after" in md
     note_row = next(line for line in md.splitlines() if line.startswith("| none-none "))
     assert "| — " in note_row
+
+
+def test_matrix_md_trials_per_cell_reflects_cap(tmp_path):
+    # The matrix.md "Trials per cell" header must show the stop_after cap
+    # ("up to N"), not ``recipe.trials`` (often 1 on probe recipes), so the
+    # header matches the real per-cell budget. A rule-less recipe still
+    # renders the bare ``recipe.trials``.
+    from aorta.triage.matrix import aggregate_cell
+    from aorta.triage.output import write_matrix_md
+
+    def _render(recipe):
+        cell = aggregate_cell(
+            name="none-none",
+            mitigations=("none",),
+            environment="local",
+            extra_env={},
+            resolved_env_vars={},
+            trials=[],
+            effective_steps=10,
+            error="infrastructure_failed: boom",
+        )
+        out = tmp_path / "matrix.md"
+        write_matrix_md(out, recipe, [cell], cell, {}, [], "2026-06-17T00:00:00Z")
+        return out.read_text(encoding="utf-8")
+
+    with_rule = _render(_probe_recipe(tmp_path, "stop_after:\n  events: 2\n  max_trials: 6\n"))
+    assert "**Trials per cell**: up to 6" in with_rule
+
+    without_rule = _render(_probe_recipe(tmp_path))
+    assert "**Trials per cell**: 1" in without_rule
 
 
 # --------------------------------------------------------------------------

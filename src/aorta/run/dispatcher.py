@@ -492,7 +492,27 @@ def _trial_is_event(result: TrialResult, event_verdict: str) -> bool:
     Note this is a behaviour refinement over the pre-#230 predicate
     (``fail`` == any non-``ok`` exit): infra errors no longer count as
     ``fail`` events -- they count as ``error`` events instead.
+
+    Raises:
+        ValueError: if ``event_verdict`` is not one of the canonical
+            :data:`aorta.triage.recipe._STOP_AFTER_EVENT_VERDICTS`
+            values. The recipe loader validates this up front, so a bad
+            value here means a programmatic caller bypassed the loader;
+            fail loudly rather than silently treat an unknown/typo'd
+            verdict as ``"fail"``.
     """
+    # Validate against the canonical vocabulary the recipe schema exports
+    # rather than re-hardcoding the verdict set here. Imported locally
+    # because a module-level ``aorta.triage`` import would invert the
+    # layering (aorta.triage.runner imports this function) -- same
+    # rationale as ``RunRequest.stop_after`` being typed ``Any``.
+    from aorta.triage.recipe import _STOP_AFTER_EVENT_VERDICTS
+
+    if not isinstance(event_verdict, str) or event_verdict not in _STOP_AFTER_EVENT_VERDICTS:
+        raise ValueError(
+            f"event_verdict must be one of {sorted(_STOP_AFTER_EVENT_VERDICTS)}, "
+            f"got {event_verdict!r}"
+        )
     return trial_verdict(result) == event_verdict
 
 
