@@ -314,3 +314,77 @@ def test_triage_list_mitigations_warns():
     assert result.exit_code == 0, result.output
     assert "deprecated" in result.stderr
     assert "aorta sweep list-mitigations" in result.stderr
+
+
+# --- cross-front-door parity --------------------------------------------
+#
+# The PR's headline guarantee is that ``aorta sweep run`` is byte-identical
+# to the legacy ``aorta triage run`` / ``aorta probe`` aliases because every
+# front door delegates to the same shared engine. The tests above pin each
+# front door's ``run_recipe`` call against hard-coded expectations *in
+# isolation*; that lets the two paths drift apart while both still pass (a
+# future edit could change one dispatcher's engine kwargs without the other).
+# These tests pin the calls to be *equal* for identical input, so a
+# divergence between front doors fails loudly instead of silently. They are
+# the ``aorta sweep`` extension of ``tests/probe/test_shared_engine.py``,
+# which only ever covered the original probe<->triage pair.
+
+
+def _capture_engine_call(mock, invoke):
+    """Run one CLI invocation; return ``(recipe, kwargs_without_recipe)``.
+
+    Asserts the invocation succeeded and reached ``run_recipe`` exactly
+    once. ``recipe`` is normalised out of ``args``/``kwargs`` so the
+    comparison doesn't depend on whether a flow passes it positionally.
+    """
+    mock.reset_mock()
+    result = invoke()
+    assert result.exit_code == 0, result.output
+    mock.assert_called_once()
+    args, kwargs = mock.call_args
+    kwargs = dict(kwargs)
+    recipe_arg = args[0] if args else kwargs.pop("recipe", None)
+    return recipe_arg, kwargs
+
+
+def test_workload_flow_parity_sweep_vs_triage(mock_run_recipe, tmp_path):
+    """`aorta sweep run` reaches run_recipe identically to `aorta triage run`."""
+    recipe = _write_triage_recipe(tmp_path)
+    out = str(tmp_path / "out")
+    runner = CliRunner()
+
+    sweep_recipe, sweep_kwargs = _capture_engine_call(
+        mock_run_recipe,
+        lambda: runner.invoke(main, ["sweep", "run", "--recipe", str(recipe), "--output", out]),
+    )
+    triage_recipe, triage_kwargs = _capture_engine_call(
+        mock_run_recipe,
+        lambda: runner.invoke(triage, ["run", "--recipe", str(recipe), "--output-dir", out]),
+    )
+
+    assert sweep_recipe == triage_recipe
+    assert sweep_kwargs == triage_kwargs
+
+
+def test_subprocess_flow_parity_sweep_vs_probe(mock_run_recipe, tmp_path):
+    """`aorta sweep run -- <cmd>` reaches run_recipe identically to `aorta probe -- <cmd>`."""
+    out = str(tmp_path / "out")
+    runner = CliRunner()
+
+    sweep_recipe, sweep_kwargs = _capture_engine_call(
+        mock_run_recipe,
+        lambda: runner.invoke(
+            main,
+            ["sweep", "run", "--recipe", str(PROBE_MINIMAL), "--output", out, "--", "echo", "hi"],
+        ),
+    )
+    probe_recipe, probe_kwargs = _capture_engine_call(
+        mock_run_recipe,
+        lambda: runner.invoke(
+            probe,
+            ["--recipe", str(PROBE_MINIMAL), "--output", out, "--", "echo", "hi"],
+        ),
+    )
+
+    assert sweep_recipe == probe_recipe
+    assert sweep_kwargs == probe_kwargs
