@@ -167,7 +167,9 @@ def parse_env_passthrough_mode_opt(value: str | None) -> Literal["inherit", "fil
     return None if value is None else parse_env_passthrough_mode(value)
 
 
-def validate_trailing_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
+def validate_trailing_argv(
+    argv: tuple[str, ...], command_label: str = "aorta probe"
+) -> tuple[str, ...]:
     """Reject an empty / clearly-misparsed trailing-argv list.
 
     ``aorta probe -- <argv>`` is the only legal channel for the user
@@ -180,16 +182,21 @@ def validate_trailing_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
     command's executable name is essentially never dash-prefixed, but a
     leaked aorta option (e.g. ``-v`` smuggled past Click) is. Catching
     this here turns a 127 exit-code "fail" trial into a clear usage error.
+
+    ``command_label`` names the invoking front door in the usage hint
+    (defaults to ``"aorta probe"``); ``aorta sweep run`` passes its own
+    label so a leaked flag through the sweep front door doesn't point the
+    user at the deprecated ``aorta probe`` command.
     """
     if not argv:
         raise ProbeUsageError(
-            "no trailing argv supplied. Usage: aorta probe [options] -- <command> [args...]"
+            f"no trailing argv supplied. Usage: {command_label} [options] -- <command> [args...]"
         )
     if argv[0].startswith("-"):
         raise ProbeUsageError(
             f"user command starts with {argv[0]!r}, which looks like a flag. "
             "Place all aorta options before '--' and the user command after. "
-            "Usage: aorta probe [options] -- <command> [args...]"
+            f"Usage: {command_label} [options] -- <command> [args...]"
         )
     return argv
 

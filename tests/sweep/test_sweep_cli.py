@@ -222,6 +222,36 @@ def test_empty_argv_after_separator_rejected(mock_run_recipe):
     mock_run_recipe.assert_not_called()
 
 
+def test_leaked_dash_flag_without_separator_names_sweep(mock_run_recipe):
+    """A dash-prefixed leaked token (no `--`) errors naming `aorta sweep run`, not `aorta probe`.
+
+    `_bare_positional_before_separator` skips dash tokens, so a forgotten
+    `--` with a flag-shaped first token (`-c`) slips past the sweep guard
+    into `execute_probe`'s `validate_trailing_argv`. That usage error must
+    point the user at the front door they actually invoked.
+    """
+    runner = CliRunner()
+    result = runner.invoke(main, ["sweep", "run", "--recipe", str(PROBE_MINIMAL), "-c"])
+    assert result.exit_code != 0
+    assert "looks like a flag" in result.output
+    assert "aorta sweep run" in result.output
+    assert "aorta probe" not in result.output
+    mock_run_recipe.assert_not_called()
+
+
+def test_dash_command_after_separator_names_sweep(mock_run_recipe):
+    """Same class with `--` present: a dash-shaped user command names the sweep front door."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["sweep", "run", "--recipe", str(PROBE_MINIMAL), "--", "-c"]
+    )
+    assert result.exit_code != 0
+    assert "looks like a flag" in result.output
+    assert "aorta sweep run" in result.output
+    assert "aorta probe" not in result.output
+    mock_run_recipe.assert_not_called()
+
+
 # --- discovery subcommands -----------------------------------------------
 
 

@@ -439,6 +439,7 @@ def _dispatch_probe_flow(
         env_passthrough_mode=env_passthrough_mode,
         mitigation_files=mitigation_files,
         argv=argv,
+        command_label="aorta sweep run",
     )
 
 

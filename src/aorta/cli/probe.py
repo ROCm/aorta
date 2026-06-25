@@ -404,6 +404,7 @@ def execute_probe(
     disable_detectors: tuple[str, ...] = (),
     mitigation_files: tuple[Path, ...],
     argv: tuple[str, ...],
+    command_label: str = "aorta probe",
 ) -> None:
     """Subprocess-flow body shared by ``aorta sweep run`` and ``aorta probe``.
 
@@ -412,13 +413,18 @@ def execute_probe(
     short-circuits. Everything from recipe load through artifact write
     lives here so both front doors reach an identical code path (the
     shared-engine contract in ``tests/probe/test_shared_engine.py``).
+
+    ``command_label`` names the front door for usage errors raised while
+    validating the trailing argv; ``aorta sweep run`` passes its own label
+    so a leaked-flag error points at the invoked command, not the
+    deprecated ``aorta probe`` alias.
     """
     try:
         # ``--env-passthrough-mode`` defaults to None so the handler can
         # distinguish "user passed the flag" from "user omitted it"; per
         # FR 1.10 the CLI wins only when present (see apply_recipe_overrides).
         cli_passthrough_mode = parse_env_passthrough_mode_opt(env_passthrough_mode)
-        clean_argv = validate_trailing_argv(argv)
+        clean_argv = validate_trailing_argv(argv, command_label=command_label)
         r = load_recipe(recipe, sidecar_files=mitigation_files or None)
         if r.probe_extras is None:
             raise ProbeUsageError(
