@@ -96,6 +96,15 @@ def test_stop_after_unknown_verdict_rejected(tmp_path):
         load_recipe(_write(tmp_path, text))
 
 
+def test_stop_after_unhashable_verdict_rejected(tmp_path):
+    """An unhashable ``event_verdict`` (e.g. a YAML list) must raise a
+    RecipeSchemaError, not a raw TypeError from the frozenset membership
+    test -- the loader guards ``isinstance(str)`` first."""
+    text = _PROBE_HEAD + "stop_after:\n  events: 1\n  max_trials: 5\n  event_verdict: [fail]\n"
+    with pytest.raises(RecipeSchemaError, match="event_verdict"):
+        load_recipe(_write(tmp_path, text))
+
+
 def test_stop_after_non_int_rejected(tmp_path):
     text = _PROBE_HEAD + "stop_after:\n  events: 1.5\n  max_trials: 5\n"
     with pytest.raises(RecipeSchemaError, match="must be an integer"):

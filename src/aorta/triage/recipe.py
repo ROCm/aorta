@@ -432,7 +432,11 @@ def _parse_stop_after(path_hint: str, raw: Any) -> StopAfter | None:
             "could never reach the target"
         )
     event_verdict = raw.get("event_verdict", "fail")
-    if event_verdict not in _STOP_AFTER_EVENT_VERDICTS:
+    # Guard ``isinstance(str)`` BEFORE the membership test: an unhashable
+    # YAML value (e.g. ``event_verdict: [fail]``) would otherwise raise a
+    # raw ``TypeError`` from ``x in frozenset`` instead of a helpful
+    # RecipeSchemaError. Mirrors the dispatcher's ``_trial_is_event`` guard.
+    if not isinstance(event_verdict, str) or event_verdict not in _STOP_AFTER_EVENT_VERDICTS:
         raise RecipeSchemaError(
             f"{path_hint}.stop_after.event_verdict: must be one of "
             f"{sorted(_STOP_AFTER_EVENT_VERDICTS)}, got {event_verdict!r}"
