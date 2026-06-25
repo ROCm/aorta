@@ -8,8 +8,10 @@ behind the cluster of ``aorta probe`` bugs filed against this platform:
 * ``aorta`` #223 / #224 / aorta-internal #53 -- false-positive
   ``tier2:hang`` on a wrapper-delegated (docker/sudo) command that exits 0.
 * ``aorta`` #222 -- orphaned child process tree on interrupt/timeout.
-* aorta-internal #55 -- re-verification of #53 *plus* a still-open
-  ``failure_details[].type`` that contradicts ``exit_code``. The fused
+* aorta-internal #55 -- re-verification of #53. Item 2 (a
+  ``failure_details[].type`` that contradicted ``exit_code``) is now fixed:
+  the type is derived from the actual process outcome, so a clean exit
+  failed by a non-Tier-1 detector is ``detector_failure``. The fused
   ``<mitigation>-<diagnostic>`` cell-name ambiguity (item 3) is fixed:
   matrix.md now renders the two axes as separate columns plus a
   ``Directory`` path, keeping the folder name as the agent's join key.
@@ -187,22 +189,20 @@ def test_timed_out_with_latched_hang_stays_a_failure(tmp_path, monkeypatch):
 
 # ==========================================================================
 # GROUP B -- failure_details[].type must agree with exit_code (#55 item 2)
-# OPEN on this branch: the type is hard-stamped "subprocess_nonzero_exit"
-# whenever the child launched, regardless of the actual exit status.
+# FIXED on main: aorta `#229` (merged via `#233`) routed the type through
+# `_subprocess._failure_detail_type`, which derives it from the actual
+# (launched, timed_out, exit_code) outcome instead of hard-stamping
+# "subprocess_nonzero_exit" whenever the child launched. A clean exit failed
+# by a non-Tier-1 detector is now "detector_failure". Promoted from
+# xfail(strict) to a permanent guard per this module's CONVENTIONS.
 # ==========================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="aorta-internal #55 item 2: failure_details[].type is stamped "
-    "'subprocess_nonzero_exit' even when exit_code == 0 (failure came from a "
-    "non-Tier-1 detector). Remove this marker when the type is derived from "
-    "the actual exit/verdict.",
-)
 def test_failure_detail_type_consistent_with_zero_exit(tmp_path):
     """A trial that exits 0 but fails on a log-pattern (Tier 4) must not be
     labelled ``subprocess_nonzero_exit`` -- that string is self-contradictory
-    with ``exit_code == 0`` and misleads anyone reading the per-trial JSON."""
+    with ``exit_code == 0`` and misleads anyone reading the per-trial JSON.
+    The clean-exit-but-detector-failed case is stamped ``detector_failure``."""
     wl = _make_workload(tmp_path, ["bash", "-c", "echo 'loss is NaN'; exit 0"])
     wl.setup()
     result = wl.run()
@@ -211,8 +211,10 @@ def test_failure_detail_type_consistent_with_zero_exit(tmp_path):
     assert doc["verdict"] == "fail"  # tier4:nan_signature fired
     assert result.failure_details, "a failing trial must carry a failure_detail"
     detail_type = result.failure_details[0]["type"]
-    assert detail_type != "subprocess_nonzero_exit", (
-        f"failure_details[].type={detail_type!r} contradicts exit_code=0"
+    assert detail_type == "detector_failure", (
+        f"failure_details[].type={detail_type!r} must be 'detector_failure' "
+        "for a clean exit failed by a non-Tier-1 detector (not "
+        "'subprocess_nonzero_exit', which contradicts exit_code=0)"
     )
 
 
