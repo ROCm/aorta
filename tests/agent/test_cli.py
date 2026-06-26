@@ -50,6 +50,17 @@ def test_agent_requires_double_dash_separator():
     assert "separator" in result.output.lower() or "Usage" in result.output
 
 
+def test_agent_leaked_flag_usage_error_names_agent_not_probe():
+    # A dash-prefixed trailing token (a leaked flag) trips
+    # validate_trailing_argv; the usage hint must name the invoked command
+    # (`aorta agent`), never the shared-helper default `aorta probe`.
+    runner = CliRunner()
+    result = runner.invoke(agent, ["--output", "/tmp/o", "--", "-c"])
+    assert result.exit_code != 0
+    assert "aorta agent" in result.output
+    assert "aorta probe" not in result.output
+
+
 def test_error_outcome_has_dedicated_headline(monkeypatch, tmp_path):
     # run_agent_loop can return outcome="error" from its generic exception
     # handler; the CLI must show a specific headline, not the generic fallback.

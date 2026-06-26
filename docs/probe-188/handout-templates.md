@@ -19,18 +19,20 @@ All three templates use a 2×2 mitigation × diagnostic matrix (`none` /
 ## Workflow
 
 1. Copy or symlink the template; set `ticket:` to the customer's ticket id.
-2. Run probe (customer prepends `aorta probe`, keeps their argv after `--`):
+2. Run the sweep (customer prepends `aorta sweep run`, keeps their argv after `--`):
 
    ```bash
-   aorta probe --recipe recipes/probe-template-bash.yaml \
+   aorta sweep run --recipe recipes/probe-template-bash.yaml \
        --output ./probe-out --ticket TICKET-1234 -- \
        bash launch.sh
    ```
 
+   (`aorta probe` still works as a deprecated alias.)
+
 3. Dry-run first when validating the recipe on your side:
 
    ```bash
-   aorta probe --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
+   aorta sweep run --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
    ```
 
 4. After the matrix completes, bundle the ticket leaf:

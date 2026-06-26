@@ -23,10 +23,10 @@
 # Usage
 # -----
 #   # Dry-run validation:
-#   aorta triage run --recipe recipes/ainic-gdr-flush-sdc.yaml --dry-run
+#   aorta sweep run --recipe recipes/ainic-gdr-flush-sdc.yaml --dry-run
 #
 #   # Full matrix (requires 10-12 MI355X nodes, all AINIC interconnect):
-#   aorta triage run --recipe recipes/ainic-gdr-flush-sdc.yaml
+#   aorta sweep run --recipe recipes/ainic-gdr-flush-sdc.yaml
 #
 # Required environment
 # --------------------

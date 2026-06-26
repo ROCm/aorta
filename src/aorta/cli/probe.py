@@ -43,6 +43,7 @@ from pathlib import Path
 
 import click
 
+from aorta.cli._deprecation import emit_deprecation
 from aorta.probe.classifier.tier4_patterns import (
     BUILTIN_PATTERN_VERSION,
     all_patterns,
@@ -86,20 +87,25 @@ def _aorta_package_version() -> str:
         return "unknown"
 
 
-def _print_list_patterns(show_version: bool) -> None:
+def _print_list_patterns(show_version: bool, banner_prefix: str = "aorta probe") -> None:
     """Render the Tier-4 catalogue or the version banner (rubric FR 2.5).
 
     Plain stdout writes (no JSON) so the output is greppable from a
     shell. Each pattern emits a stable three-line entry: ID,
     description, sample regex match line.
+
+    ``banner_prefix`` names the invoking command in the banner (defaults
+    to ``"aorta probe"``); ``aorta sweep list-patterns`` passes
+    ``"aorta sweep"`` so the header matches what the user actually ran.
+    The catalogue itself is identical -- only the banner text changes.
     """
     if show_version:
         click.echo(
-            f"aorta probe pattern library v{BUILTIN_PATTERN_VERSION} "
+            f"{banner_prefix} pattern library v{BUILTIN_PATTERN_VERSION} "
             f"(aorta {_aorta_package_version()})"
         )
         return
-    click.echo(f"aorta probe built-in pattern library (v{BUILTIN_PATTERN_VERSION})")
+    click.echo(f"{banner_prefix} built-in pattern library (v{BUILTIN_PATTERN_VERSION})")
     click.echo("")
     for pattern in all_patterns():
         click.echo(f"  {pattern.detector_id}")
@@ -353,10 +359,18 @@ def probe(
     All arguments after ``--`` are forwarded byte-for-byte to the user
     command. Aorta never parses them; the only "boundary" is the
     optional ``probe.env`` file written under ``--env-passthrough-mode file``.
+
+    DEPRECATED: this command is now a thin alias for ``aorta sweep run``.
+    It prints a stderr notice and delegates to the same shared engine.
     """
     if list_patterns:
+        # The catalogue surface moved to its own subcommand, so point this
+        # alias at 'aorta sweep list-patterns' rather than the generic
+        # 'aorta sweep run'. Notice stays on stderr; stdout is the catalogue.
+        emit_deprecation("aorta probe --list-patterns", "aorta sweep list-patterns")
         _print_list_patterns(show_version=show_version)
         return
+    emit_deprecation("aorta probe", "aorta sweep run")
     if show_version:
         # ``--version`` is only meaningful with ``--list-patterns``;
         # see :func:`_reject_bare_version_flag` for the rationale.
@@ -368,12 +382,53 @@ def probe(
             "Missing option '--recipe'. Pass --recipe <path>, or run "
             "with --list-patterns to print the built-in pattern catalogue."
         )
+    execute_probe(
+        recipe=recipe,
+        output=output,
+        ticket=ticket,
+        dry_run=dry_run,
+        env_passthrough_mode=env_passthrough_mode,
+        stop_after_events=stop_after_events,
+        max_trials=max_trials,
+        disable_detectors=disable_detectors,
+        mitigation_files=mitigation_files,
+        argv=argv,
+    )
+
+
+def execute_probe(
+    *,
+    recipe: Path,
+    output: Path,
+    ticket: str | None,
+    dry_run: bool,
+    env_passthrough_mode: str | None,
+    stop_after_events: int | None = None,
+    max_trials: int | None = None,
+    disable_detectors: tuple[str, ...] = (),
+    mitigation_files: tuple[Path, ...],
+    argv: tuple[str, ...],
+    command_label: str = "aorta probe",
+) -> None:
+    """Subprocess-flow body shared by ``aorta sweep run`` and ``aorta probe``.
+
+    The caller guarantees ``recipe is not None`` and has already configured
+    verbose logging and handled the ``--list-patterns`` / ``--version``
+    short-circuits. Everything from recipe load through artifact write
+    lives here so both front doors reach an identical code path (the
+    shared-engine contract in ``tests/probe/test_shared_engine.py``).
+
+    ``command_label`` names the front door for usage errors raised while
+    validating the trailing argv; ``aorta sweep run`` passes its own label
+    so a leaked-flag error points at the invoked command, not the
+    deprecated ``aorta probe`` alias.
+    """
     try:
         # ``--env-passthrough-mode`` defaults to None so the handler can
         # distinguish "user passed the flag" from "user omitted it"; per
         # FR 1.10 the CLI wins only when present (see apply_recipe_overrides).
         cli_passthrough_mode = parse_env_passthrough_mode_opt(env_passthrough_mode)
-        clean_argv = validate_trailing_argv(argv)
+        clean_argv = validate_trailing_argv(argv, command_label=command_label)
         r = load_recipe(recipe, sidecar_files=mitigation_files or None)
         if r.probe_extras is None:
             raise ProbeUsageError(
@@ -409,4 +464,4 @@ def probe(
         click.echo(f"Wrote probe artifacts to {run_dir}")
 
 
-__all__ = ["probe", "ProbeExtras"]
+__all__ = ["probe", "execute_probe", "ProbeExtras"]

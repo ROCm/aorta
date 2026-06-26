@@ -1,6 +1,6 @@
 # Generic probe handout template for torchrun-style launches.
 # Usage:
-#   aorta probe --recipe recipes/probe-template-torchrun.yaml \
+#   aorta sweep run --recipe recipes/probe-template-torchrun.yaml \
 #       --output ./probe-out --ticket TICKET-1234 -- \
 #       torchrun --nproc_per_node=8 train.py --config configs/default.yaml
 schema_version: 1

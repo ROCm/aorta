@@ -69,10 +69,10 @@ AORTA generates comprehensive performance reports comparing ROCm versions across
 | [Configuration](docs/configuration.md) | FSDP tuning, RCCL variables, profiler settings |
 | [Profiling](docs/profiling.md) | Torch profiler, rocprofv3, overlap reports |
 | [Environment Probe](docs/env-probe.md) | Capture / diff / query a versioned environment snapshot; jq cookbook |
-| [`aorta probe`](docs/probe-188/usage.md) | Wrap-and-collect opaque launch commands; matrix + classifier |
+| [`aorta sweep`](docs/probe-188/usage.md) | Unified matrix runner — built-in workloads **or** opaque launch commands (replaces `aorta triage` / `aorta probe`) |
 | [`aorta agent`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
 | [`aorta bundle`](docs/probe-188/bundle.md) | Package probe artifacts with recipe-driven redaction |
-| [Buck2](docs/buck2.md) | Build / run the AORTA CLI via Buck2; hermetic Python, `env probe` + `triage` walkthroughs |
+| [Buck2](docs/buck2.md) | Build / run the AORTA CLI via Buck2; hermetic Python, `env probe` + `sweep` walkthroughs |
 | [Releasing](docs/releasing.md) | Cut a customer-installable release; maintainer + customer install flow |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues |
 
