@@ -100,19 +100,21 @@ jobs:
             echo "::error::project.version in pyproject.toml is empty."
             exit 1
           fi
-          # The version becomes the git tag (v${version}); reject anything that
-          # isn't MAJOR.MINOR.PATCH (+ optional PEP 440 suffix) up front so a
-          # hand-edited / non-semver value fails here with a clear message
-          # instead of deep in `gh api` / tag creation.
-          if ! printf '%s' "${pkg_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.+a-zA-Z0-9-]*)?$'; then
-            echo "::error::project.version '${pkg_version}' is not a valid release version (expected MAJOR.MINOR.PATCH with an optional suffix); refusing to form tag v${pkg_version}."
+          # release.yml is the STABLE channel: it marks the GitHub Release
+          # "Latest" and publishes to PyPI. Pre-release / rc builds
+          # (X.Y.ZrcYYYYMMDD) belong to nightly.yml's rolling dev-wheels channel.
+          # Reject any suffixed / non-MAJOR.MINOR.PATCH version up front --
+          # otherwise an rc value would pass validation here and ship as a stable
+          # release, collapsing the stable-vs-nightly split this automation adds.
+          if ! printf '%s' "${pkg_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::project.version '${pkg_version}' is not a stable MAJOR.MINOR.PATCH release; use nightly.yml for pre-release rc builds."
             exit 1
           fi
           tag="v${pkg_version}"
-          # The semver regex still permits values that are not valid git ref
-          # names (e.g. a suffix with '..', a trailing '.', or '.lock'). Let git
-          # itself be the source of truth so such a version fails fast here
-          # rather than later at tag creation/push.
+          # Defensive backstop: a MAJOR.MINOR.PATCH value always yields a valid
+          # git ref, but let git be the source of truth so the tag is rejected
+          # here rather than later at tag creation/push if the check above is ever
+          # loosened.
           if ! git check-ref-format "refs/tags/${tag}"; then
             echo "::error::project.version '${pkg_version}' yields an invalid git tag '${tag}' (rejected by git check-ref-format); choose a tag-safe version."
             exit 1
