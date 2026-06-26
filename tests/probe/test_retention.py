@@ -15,6 +15,7 @@ Two layers:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -187,6 +188,38 @@ def test_non_dict_retain_payload_warns_and_skips(
     assert (trial_dir / "trace.bin").is_file()  # nothing pruned
     assert (trial_dir / "result.json").is_file()
     assert any("expected a mapping" in r.getMessage() for r in caplog.records)
+
+
+def _read_result(trial_dir: Path) -> dict:
+    return json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
+
+
+def test_retention_outcome_recorded_in_result_json(tmp_path: Path):
+    """A pruning trial stamps the applied level + deleted list into the
+    record so a missing heavy artifact is auditable post-bundle (oyazdanb)."""
+    trial_dir, _ = _run_trial(tmp_path, argv=["true"], trial_idx=0, retain=_POLICY)
+    retention = _read_result(trial_dir).get("capture", {}).get("retention")
+    assert retention is not None, "capture.retention missing from result.json"
+    assert retention.get("level") == "summary"  # on_pass=summary
+    assert "trace.bin" in retention.get("deleted", [])
+    assert retention.get("freed_bytes", 0) >= 4096
+
+
+def test_retention_record_absent_without_policy(tmp_path: Path):
+    """No ``retain`` block -> no retention audit key (keep-everything)."""
+    trial_dir, _ = _run_trial(tmp_path, argv=["true"], trial_idx=0, retain=None)
+    assert "retention" not in _read_result(trial_dir).get("capture", {})
+
+
+def test_retention_record_on_full_is_noop_but_audited(tmp_path: Path):
+    """A failing trial at ``full`` keeps everything; the audit record still
+    notes the level so a reader sees retention was active (deleted empty)."""
+    trial_dir, _ = _run_trial(tmp_path, argv=["false"], trial_idx=0, retain=_POLICY)
+    retention = _read_result(trial_dir).get("capture", {}).get("retention")
+    assert retention is not None, "capture.retention missing from result.json"
+    assert retention.get("level") == "full"
+    assert retention.get("deleted") == []
+    assert (trial_dir / "trace.bin").is_file()  # nothing pruned at full
 
 
 def test_disk_criterion_heavy_kept_only_for_fails(tmp_path: Path):

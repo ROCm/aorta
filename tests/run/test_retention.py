@@ -270,6 +270,39 @@ def test_symlink_escaping_trial_dir_is_not_deleted(
     assert any("symlink" in r.getMessage() for r in caplog.records)
 
 
+def test_symlinked_subdir_is_not_descended(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """A symlinked *directory* must be kept and never walked into.
+
+    Enumeration uses ``os.walk(followlinks=False)`` so a collector that
+    drops a symlinked subdir pointing at an external (possibly huge) tree
+    can't make retention traverse it. The link is kept, its target is
+    untouched, and nothing under it is pruned.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "external_heavy.bin").write_text("z" * 4096, encoding="utf-8")
+
+    d = tmp_path / "trial_0"
+    d.mkdir()
+    (d / "result.json").write_text("{}", encoding="utf-8")
+    (d / "trace.bin").write_text("x" * 1000, encoding="utf-8")  # heavy, real file
+    (d / "linkdir").symlink_to(outside, target_is_directory=True)
+
+    with caplog.at_level("WARNING"):
+        outcome = apply_retention(d, "none")
+
+    # The real heavy file was pruned; the symlinked dir + its target survive.
+    assert "trace.bin" in outcome.deleted
+    assert (d / "linkdir").is_symlink()
+    assert (outside / "external_heavy.bin").is_file()  # never descended/pruned
+    assert "linkdir" in outcome.kept
+    # The external file was never even enumerated as a candidate.
+    assert "linkdir/external_heavy.bin" not in outcome.deleted
+    assert any("symlink" in r.getMessage() for r in caplog.records)
+
+
 def test_unknown_manifest_class_treated_as_heavy(tmp_path: Path):
     d = tmp_path / "trial_0"
     d.mkdir()

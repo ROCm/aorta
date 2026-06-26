@@ -157,6 +157,12 @@ marker) is **never** deleted, at any level. Pairs naturally with
 `stop_after`: "collect N fails with full artifacts, summary-only for the
 clean trials along the way."
 
+When a `retain` policy runs, the applied level and the list of pruned
+artifacts are written back into that trial's `result.json` under
+`capture.retention` (`{"level": ..., "deleted": [...], "freed_bytes": N}`).
+A reader of a bundled or resumed run can then tell a missing heavy artifact
+was *pruned by policy* rather than never produced.
+
 Collectors declare which of their outputs are heavy vs summary via an
 optional `artifacts.json` manifest in the trial directory
 (`{"artifacts": [{"path": "trace.pb", "class": "heavy"}, ...]}`); absent a
@@ -291,6 +297,9 @@ forward-compatible:
   `tier_durations_ms`.
 * **Issue #230 addition**: `error_detectors_fired` — the infra-error
   signals (separate from genuine failures) that drive the `error` verdict.
+* **Issue #231 addition**: `capture.retention` — present only when a
+  `retain` policy ran; records the applied `level`, the `deleted` artifact
+  list, and `freed_bytes` so pruning is auditable from the trial record.
 
 `peak_vram_mib` is a coarse high-water mark sampled from two
 `amd-smi` snapshots (pre- and post-Popen). It may be `null` when

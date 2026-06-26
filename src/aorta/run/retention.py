@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -213,7 +214,10 @@ def apply_retention(trial_dir: Path, level: str) -> RetentionOutcome:
     Symlinks are never unlinked, and any path that dereferences outside
     ``trial_dir`` is skipped (kept) with a warning -- a buggy or hostile
     collector symlink can never make retention delete files outside the
-    trial output tree.
+    trial output tree. Enumeration uses ``os.walk(..., followlinks=False)``
+    so retention never even *descends* into a symlinked subdirectory (a
+    collector that drops a symlinked dir pointing at, say, ``/`` could
+    otherwise make a naive ``rglob`` walk an arbitrary, huge external tree).
     """
     if level not in _LEVEL_RANK:
         log.warning("retention: unknown level %r; keeping everything (full)", level)
@@ -230,18 +234,13 @@ def apply_retention(trial_dir: Path, level: str) -> RetentionOutcome:
     kept: list[str] = []
     freed = 0
 
-    for path in sorted(trial_dir.rglob("*")):
-        # Never unlink a symlink (deleting the link reclaims no disk and
-        # following it could escape the trial tree) and never delete a
-        # path that dereferences outside ``trial_dir``. Mirrors the
-        # containment guard in ``aorta.bundle.writer``, but retention is
-        # tolerant -- it keeps the offending entry and warns rather than
-        # aborting the sweep.
-        if path.is_symlink():
-            rel = path.relative_to(trial_dir).as_posix()
-            log.warning("retention: skipping symlink %s; not pruning it", rel)
-            kept.append(rel)
-            continue
+    for path in _iter_trial_files(trial_dir, kept):
+        # ``_iter_trial_files`` already excluded symlinks (files and
+        # directories) and never descended into symlinked dirs. Defence in
+        # depth: still refuse to delete a path that dereferences outside
+        # ``trial_dir``. Mirrors the containment guard in
+        # ``aorta.bundle.writer``, but retention is tolerant -- it keeps the
+        # offending entry and warns rather than aborting the sweep.
         if not path.is_file():
             continue
         rel = path.relative_to(trial_dir).as_posix()
@@ -280,14 +279,58 @@ def apply_retention(trial_dir: Path, level: str) -> RetentionOutcome:
     )
 
 
+def _iter_trial_files(trial_dir: Path, kept: list[str]) -> list[Path]:
+    """Enumerate the regular files under ``trial_dir``, symlink-safe.
+
+    Uses ``os.walk(..., followlinks=False)`` so retention never descends
+    into a symlinked subdirectory -- a collector that drops a symlink to an
+    external tree (e.g. ``/``) can't make retention walk an arbitrary,
+    possibly huge filesystem. (The ``resolve()`` containment check in
+    :func:`apply_retention` blocks *deletion* outside the tree, but not the
+    traversal itself, which is the DoS this avoids.)
+
+    Symlinks -- whether to files or directories -- are recorded in ``kept``
+    with a warning and never returned, so the deletion side never unlinks a
+    link (which would reclaim no disk and could escape the trial tree).
+    Returns the regular files in a deterministic sorted order.
+    """
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(trial_dir, followlinks=False):
+        base = Path(dirpath)
+        # Symlinked subdirs appear in ``dirnames``; os.walk won't recurse
+        # into them (followlinks=False). Record + drop them so they are
+        # neither descended into nor later treated as prunable.
+        symlinked_dirs = {d for d in dirnames if (base / d).is_symlink()}
+        for name in symlinked_dirs:
+            rel = (base / name).relative_to(trial_dir).as_posix()
+            log.warning("retention: skipping symlink %s; not pruning it", rel)
+            kept.append(rel)
+        dirnames[:] = [d for d in dirnames if d not in symlinked_dirs]
+        for name in filenames:
+            path = base / name
+            if path.is_symlink():
+                rel = path.relative_to(trial_dir).as_posix()
+                log.warning("retention: skipping symlink %s; not pruning it", rel)
+                kept.append(rel)
+                continue
+            files.append(path)
+    return sorted(files)
+
+
 def _prune_empty_dirs(trial_dir: Path) -> None:
     """Remove now-empty subdirectories left after deleting heavy files.
 
-    Walks bottom-up so a directory emptied only because its children were
-    pruned is itself removed. The trial directory root is never removed.
+    Walks bottom-up (``os.walk(topdown=False)``) so a directory emptied
+    only because its children were pruned is itself removed. As in
+    :func:`_iter_trial_files`, ``followlinks=False`` keeps the walk from
+    descending into symlinked dirs, and symlinked dirs are never
+    ``rmdir``-ed. The trial directory root is never removed.
     """
-    for path in sorted(trial_dir.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-        if path == trial_dir or path.is_symlink() or not path.is_dir():
+    for dirpath, _dirnames, _filenames in os.walk(
+        trial_dir, topdown=False, followlinks=False
+    ):
+        path = Path(dirpath)
+        if path == trial_dir or path.is_symlink():
             continue
         try:
             next(path.iterdir())
