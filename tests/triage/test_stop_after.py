@@ -340,7 +340,7 @@ def test_stop_after_column_shown_when_all_cells_error(tmp_path):
     recipe = _probe_recipe(tmp_path, "stop_after:\n  events: 2\n  max_trials: 6\n")
     errored = aggregate_cell(
         name="none-none",
-        mitigations=("none",),
+        mitigations=("none", "none"),
         environment="local",
         extra_env={},
         resolved_env_vars={},
@@ -352,8 +352,10 @@ def test_stop_after_column_shown_when_all_cells_error(tmp_path):
     write_matrix_md(out, recipe, [errored], errored, {}, [], "2026-06-17T00:00:00Z")
     md = out.read_text(encoding="utf-8")
     assert "Stop after" in md
-    note_row = next(line for line in md.splitlines() if line.startswith("| none-none "))
-    assert "| — " in note_row
+    # The probe matrix renders split ``Mitigation`` | ``Diagnostic`` columns
+    # (#229), so the row starts with the ``Mitigation`` axis value ("none").
+    note_row = next(line for line in md.splitlines() if line.startswith("| none "))
+    assert "| — " in note_row  # Stop after column is "—" for the all-errored run
 
 
 def test_matrix_md_trials_per_cell_reflects_cap(tmp_path):
@@ -367,7 +369,7 @@ def test_matrix_md_trials_per_cell_reflects_cap(tmp_path):
     def _render(recipe):
         cell = aggregate_cell(
             name="none-none",
-            mitigations=("none",),
+            mitigations=("none", "none"),
             environment="local",
             extra_env={},
             resolved_env_vars={},
