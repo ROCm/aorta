@@ -190,8 +190,13 @@ aorta sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
 torchrun --standalone --nproc_per_node=2 $(which aorta) sweep run \
   --recipe recipes/example-fsdp-smoke.yaml
 
-# multi-node (1 rank/host x N hosts -- the AINIC topology):
+# multi-node, 1 rank per host (AINIC/Pollara -- 1 process owns all GPUs on the node):
 torchrun --nnodes=N --nproc_per_node=1 --rdzv-backend=c10d \
+  --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
+  --recipe recipes/example-fsdp-smoke.yaml
+
+# multi-node, 1 rank per GPU (IB / NVLink / generic fabric):
+torchrun --nnodes=N --nproc_per_node=8 --rdzv-backend=c10d \
   --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
   --recipe recipes/example-fsdp-smoke.yaml
 ```
@@ -210,6 +215,26 @@ launch model as the `llm_determinism` workload.
 > `race: ignoring unknown workload_config key ...` and fix the recipe.
 > Note `verify_iterations` defaults to `10000` and `simulate_compute` to
 > `True`; cap these for smoke runs or a trial takes hours.
+
+### Race smoke recipes
+
+| Recipe | Purpose | Fabric |
+|---|---|---|
+| `recipes/race_smoke.yaml` | Fabric-agnostic sanity check (1 trial, 5 iters, model_dim=512). Works on NVLink, IB, AINIC, or SHM. | Any |
+| `recipes/ainic-smoke.yaml` | Same but forces `NCCL_NET_GDR_LEVEL=SYS` + dmabuf + GDR read to validate the AINIC/Pollara GDR path specifically. | AINIC only |
+
+Confirmed working on a single node with 8 GPUs (one rank per GPU):
+
+```bash
+# single node, 8 GPUs:
+torchrun --standalone --nproc_per_node=8 $(which aorta) sweep run \
+  --recipe recipes/race_smoke.yaml
+
+# AINIC cluster, multi-node (1 rank per host via Slurm):
+# see rccl_ainic/run-cell.sbatch
+```
+
+A green run proves: `compute_type=transformer`, `layers_verified > 0`, `layer_checksum_mismatches == 0`, `passed=true`. Use `recipes/ainic-gdr-flush-sdc.yaml` for the full SDC triage matrix.
 
 ## Output layout
 

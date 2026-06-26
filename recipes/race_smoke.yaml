@@ -1,0 +1,65 @@
+# Race smoke test -- fast fabric-agnostic sanity check.
+#
+# Purpose: confirm the full real path works end-to-end on any distributed GPU
+# cluster in seconds. Exercises the same code path as the full SDC matrix:
+# real RepeatedTransformerBlock compute, real_backward gradient kernels, the
+# per-layer int16 checksum detector, and real all_gather / reduce_scatter --
+# just sized down (1 cell, 1 trial, 5 iters, smaller model).
+#
+# Works on any fabric: NVLink (single node), InfiniBand, AINIC (Pollara RoCEv2),
+# or SHM. RCCL auto-negotiates the best transport for the hardware it finds.
+# For AINIC-specific GDR path validation use recipes/ainic-smoke.yaml instead.
+#
+# What a green smoke run proves (check metrics in the trial JSON / matrix.json):
+#   compute_type == transformer        (real transformer path, not GEMM fallback)
+#   layers_verified > 0                (per-layer checksum detector actually ran)
+#   layer_checksum_mismatches == 0     (clean)
+#   avg_step_time_ms > 0               (real compute, not a no-op)
+#   exit_status == ok, passed == true  (collectives + verify completed)
+#
+# Run (same command on every rank, one rank per GPU):
+#   aorta sweep run --recipe recipes/race_smoke.yaml
+# Read:
+#   cat triage_results/RACE-SMOKE/race/*/matrix.md
+#
+# NOTE: this is a sanity check, not a reproduction attempt -- too small/short to
+# meaningfully exercise SDC. Use ainic-gdr-flush-sdc.yaml for the full matrix.
+# Minimum 2 ranks required (min_world_size=2 in the race workload).
+
+schema_version: 1
+
+ticket: RACE-SMOKE
+workload: race
+
+# 1 trial, tiny iter budget -> finishes in seconds.
+trials: 1
+steps: 5
+
+save_logs: true
+
+workload_config:
+  mode: fsdp
+  warmup_iterations: 0
+  verify_iterations: 5
+  stop_on_first_corruption: false
+  log_interval: 1
+  dtype: bfloat16
+
+  # Smaller shard + model than the full recipe so the smoke run is fast while
+  # still exercising the real transformer block, real backward, and checksums.
+  fsdp_shard_size: 250000
+  simulate_compute: true
+  compute_type: transformer
+  model_dim: 512
+  num_layers: 4
+  include_backward_compute: true
+  shared_layer_weights: true
+  real_backward: true
+
+cells:
+  - name: smoke
+    mitigations: [none]
+    environment: local
+    extra_env:
+      NCCL_PROTO: "Simple"
+      NCCL_DEBUG: "INFO"
