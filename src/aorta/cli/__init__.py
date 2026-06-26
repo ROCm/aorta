@@ -2,7 +2,7 @@
 
 import click
 
-from aorta.cli import agent, bundle, env, environments, mitigations, probe, run, sweep, triage
+from aorta.cli import agent, bench, bundle, env, environments, mitigations, probe, run, sweep, triage
 
 
 @click.group()
@@ -12,6 +12,7 @@ def main() -> None:
 
 
 main.add_command(agent.agent)
+main.add_command(bench.bench)
 main.add_command(bundle.bundle)
 main.add_command(env.env)
 main.add_command(environments.environments)
