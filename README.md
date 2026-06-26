@@ -230,15 +230,13 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [Getting Started](docs/getting-started.md) | Prerequisites, Docker setup, installation |
 | [Hardware Queue Eval](docs/hw-queue-eval.md) | Workloads, CLI usage, metrics |
 | [Environment Probe](docs/env-probe.md) | Capture / diff / query a versioned environment snapshot; jq cookbook |
-| [`aorta sweep`](docs/probe-188/usage.md) | Unified matrix runner — built-in workloads **or** opaque launch commands |
+| [`aorta sweep`](docs/probe/usage.md) | Unified matrix runner — built-in workloads **or** opaque launch commands |
 | [LLM Determinism](docs/llm-determinism.md) | Bit-exact double-run nondeterminism probe |
 | [`aorta agent`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
 | [`aorta bundle`](docs/probe-188/bundle.md) | Package sweep artifacts with recipe-driven redaction |
 | [Recipes](recipes/README.md) | Recipe schema and running recipes |
 | [Buck2](docs/buck2.md) | Build / run the AORTA CLI via Buck2 |
-| [Profiling](docs/profiling.md) | Torch profiler, rocprofv3, overlap reports |
-| [Configuration](docs/configuration.md) | FSDP tuning, RCCL variables, profiler settings |
-| [Troubleshooting](docs/troubleshooting.md) | Common issues |
+
 
 ## Repository Layout
 
