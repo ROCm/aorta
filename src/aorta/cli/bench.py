@@ -13,19 +13,21 @@ _INSTALL_HINT = (
 def _load_hw_queue_cli() -> click.Group | None:
     """Return the hw_queue_eval CLI group, or None if the [hw-queue] extra is absent.
 
-    Raises any ImportError that is NOT caused by a missing optional dependency
-    (e.g. a syntax error or broken internal import inside hw_queue_eval) so
-    real bugs are not silently swallowed.
+    Only treats a missing *external* dependency (e.g. torch, numpy) as
+    "extra not installed". A ModuleNotFoundError for an aorta.hw_queue_eval.*
+    sub-module — or any other ImportError — propagates so real bugs surface.
     """
     try:
         from aorta.hw_queue_eval.cli import cli  # noqa: PLC0415
 
         return cli
-    except ModuleNotFoundError:
-        # A missing module means an optional dependency (torch, numpy, …) is
-        # absent — treat as "extra not installed" and return None.
+    except ModuleNotFoundError as exc:
+        # Only swallow the error when the missing module is NOT part of
+        # aorta.hw_queue_eval itself (i.e. it's an absent external dep).
+        if exc.name is not None and exc.name.startswith("aorta.hw_queue_eval"):
+            raise
         return None
-    # Any other ImportError (bad internal import, syntax error, …) propagates.
+    # Any other ImportError propagates unchanged.
 
 
 class _LazyHwQueueGroup(click.Group):
@@ -47,18 +49,21 @@ class _LazyHwQueueGroup(click.Group):
             raise click.ClickException(_INSTALL_HINT)
         return inner
 
-    @property
-    def params(self) -> list[click.Parameter]:  # type: ignore[override]
+    def get_params(self, ctx: click.Context) -> list[click.Parameter]:
+        # Forward the inner group's params (e.g. --version) when available.
+        # Overrides get_params rather than the params property to avoid
+        # conflicting with click.Command.__init__'s self.params assignment.
         inner = self._inner()
-        return inner.params if inner is not None else super().params
+        return inner.get_params(ctx) if inner is not None else super().get_params(ctx)
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         inner = self._inner()
         if inner is not None:
             inner.format_help(ctx, formatter)
         else:
-            # Show the install hint instead of an empty proxy help page so
-            # `aorta bench hw_queue_eval --help` is useful on a base install.
+            # Show the install hint on `aorta bench hw_queue_eval --help`
+            # when the extra is absent. --help always exits 0; the hint is
+            # the signal, not the exit code.
             with formatter.section("Error"):
                 formatter.write_text(_INSTALL_HINT)
 

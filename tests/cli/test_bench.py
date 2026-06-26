@@ -4,8 +4,8 @@ Tests the shim contract only — not hw_queue_eval internals:
 - ``aorta bench --help`` lists hw_queue_eval as a subcommand.
 - ``aorta bench hw_queue_eval --help`` exposes the same commands that
   hw_queue_eval's own CLI group registers (derived at runtime, not hardcoded).
-- When hw_queue_eval is unavailable, every entry point (bare invoke, --help)
-  exits non-zero with a clear install hint.
+- When hw_queue_eval is unavailable, bare invoke exits non-zero with a clear
+  install hint; ``--help`` exits 0 but shows the hint instead of empty help.
 - ``bench`` is correctly wired under the top-level ``aorta`` CLI.
 """
 
@@ -59,6 +59,11 @@ def test_hw_queue_unavailable_invoke_shows_install_hint() -> None:
 
 @pytest.mark.skipif(_HW_QUEUE_AVAILABLE, reason="hw_queue_eval is installed — error path not active")
 def test_hw_queue_unavailable_help_shows_install_hint() -> None:
-    """``--help`` when hw_queue_eval is missing shows install hint instead of empty help."""
+    """``--help`` when hw_queue_eval is missing shows install hint.
+
+    Click always exits 0 for --help; the hint text is the signal, not the
+    exit code.
+    """
     result = CliRunner().invoke(bench, ["hw_queue_eval", "--help"])
+    assert result.exit_code == 0, result.output
     assert "amd-aorta[hw-queue]" in result.output
