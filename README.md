@@ -35,9 +35,10 @@ not bundled in the wheel). Install it first, then AORTA.
 ### From PyPI (recommended for users)
 
 ```bash
-# 1. PyTorch for your ROCm version (adjust the index URL to match your ROCm)
+# 1. PyTorch for your ROCm version — see https://pytorch.org/get-started/locally/
+#    for the index URL matching your ROCm release.
 pip install --pre torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/nightly/rocm7.1/
+  --index-url https://download.pytorch.org/whl/nightly/rocm<YOUR_ROCM_VERSION>/
 
 # 2. AORTA (distribution: amd-aorta; import package + CLI: aorta)
 pip install amd-aorta
@@ -48,6 +49,9 @@ Optional extras:
 ```bash
 pip install "amd-aorta[hw-queue]"   # hardware-queue evaluation (numpy/pandas/tabulate)
 ```
+
+> `[hw-queue]` requires PyTorch — install torch from the ROCm index (step 1
+> above) before installing this extra.
 
 Other extras: `analysis` (matplotlib only), `hw-queue-profiling` (hw-queue +
 profiling plots), `ebpf` (no extra Python deps; needs the `bpftrace` binary and
@@ -63,9 +67,9 @@ cd aorta
 
 uv venv && source .venv/bin/activate
 
-# PyTorch nightly for ROCm 7.1 (adjust the index URL to match your ROCm)
+# PyTorch for your ROCm version — see https://pytorch.org/get-started/locally/
 uv pip install --pre torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/nightly/rocm7.1/
+  --index-url https://download.pytorch.org/whl/nightly/rocm<YOUR_ROCM_VERSION>/
 
 # Editable install with the extras you need
 uv pip install -e ".[hw-queue]"
@@ -104,10 +108,10 @@ aorta environments list
 # --- Single workload trial (no matrix) ---
 aorta run --workload llm_determinism --trials 1 --steps 50
 
-# --- Hardware queue evaluation ---
-python -m aorta.hw_queue_eval list
-python -m aorta.hw_queue_eval run hetero_kernels --streams 8
-python -m aorta.hw_queue_eval sweep hetero_kernels --streams 1,2,4,8,16
+# --- Hardware queue evaluation (requires amd-aorta[hw-queue] + torch) ---
+aorta bench hw_queue_eval list
+aorta bench hw_queue_eval run hetero_kernels --streams 8
+aorta bench hw_queue_eval sweep hetero_kernels --streams 1,2,4,8,16
 ```
 
 ## Main Workflows
@@ -134,7 +138,7 @@ snapshots with `jq` to localize cross-environment regressions. See
 
 ### Hardware queue evaluation
 
-`python -m aorta.hw_queue_eval` stress-tests GPU queue scheduling across many
+`aorta bench hw_queue_eval` stress-tests GPU queue scheduling across many
 concurrent streams. See [`docs/hw-queue-eval.md`](docs/hw-queue-eval.md).
 
 ### Single-workload runs
