@@ -51,7 +51,7 @@ from aorta.probe.cli_helpers import (
     ProbeUsageError,
     apply_recipe_overrides,
     help_token_in_option_zone,
-    parse_env_passthrough_mode,
+    parse_env_passthrough_mode_opt,
     reject_flag_shaped_value,
     require_double_dash_separator,
     validate_trailing_argv,
@@ -290,6 +290,43 @@ class _ProbeCommand(click.Command):
     ),
 )
 @click.option(
+    "--stop-after-events",
+    type=int,
+    default=None,
+    metavar="K",
+    help=(
+        "Stop each cell once K trials match the event verdict (default "
+        "verdict: fail), instead of running a fixed count. The loop needs "
+        "a hard cap: pass --max-trials unless the recipe's 'stop_after:' "
+        "block already supplies one. Overlays that block (#232)."
+    ),
+)
+@click.option(
+    "--max-trials",
+    type=int,
+    default=None,
+    metavar="N",
+    help=(
+        "Hard cap on trials per cell when stop-after is active (always "
+        "honored). Pair with --stop-after-events; either flag may be "
+        "omitted when the recipe's 'stop_after:' block already supplies "
+        "that half (so --max-trials alone overrides just the recipe's cap)."
+    ),
+)
+@click.option(
+    "--disable-detector",
+    "disable_detectors",
+    multiple=True,
+    metavar="TIER[:ID]",
+    help=(
+        "Silence a detector or whole tier (repeatable). Pass a tier name "
+        "('tier3') to skip the entire tier, or a '<tier>:<id>' token "
+        "('tier2:hang') to skip one detector. A disabled detector is not "
+        "evaluated and never counts toward the verdict. Unioned with any "
+        "'disable_detectors:' / 'disable_detector_tiers:' set in the recipe."
+    ),
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
@@ -304,6 +341,9 @@ def probe(
     ticket: str | None,
     dry_run: bool,
     env_passthrough_mode: str | None,
+    stop_after_events: int | None,
+    max_trials: int | None,
+    disable_detectors: tuple[str, ...],
     mitigation_files: tuple[Path, ...],
     verbose: int,
     argv: tuple[str, ...],
@@ -332,11 +372,7 @@ def probe(
         # ``--env-passthrough-mode`` defaults to None so the handler can
         # distinguish "user passed the flag" from "user omitted it"; per
         # FR 1.10 the CLI wins only when present (see apply_recipe_overrides).
-        cli_passthrough_mode = (
-            parse_env_passthrough_mode(env_passthrough_mode)
-            if env_passthrough_mode is not None
-            else None
-        )
+        cli_passthrough_mode = parse_env_passthrough_mode_opt(env_passthrough_mode)
         clean_argv = validate_trailing_argv(argv)
         r = load_recipe(recipe, sidecar_files=mitigation_files or None)
         if r.probe_extras is None:
@@ -344,7 +380,11 @@ def probe(
                 f"recipe {recipe} is not a probe-mode recipe; "
                 "set 'mode: probe' at the recipe top level"
             )
-        r = apply_recipe_overrides(r, ticket=ticket, cli_passthrough_mode=cli_passthrough_mode)
+        r = apply_recipe_overrides(
+            r, ticket=ticket, cli_passthrough_mode=cli_passthrough_mode,
+            cli_stop_after_events=stop_after_events, cli_max_trials=max_trials,
+            cli_disable_detectors=disable_detectors,
+        )
     except (ProbeUsageError, RecipeSchemaError, RecipeCellError, RegistryError, LookupError) as exc:
         raise click.ClickException(str(exc)) from exc
 

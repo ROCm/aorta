@@ -48,6 +48,13 @@ DETECTOR_SIGABRT = "tier1:sigabrt"
 DETECTOR_SIGBUS = "tier1:sigbus"
 DETECTOR_TIMEOUT = "tier1:timeout"
 DETECTOR_COREDUMP = "tier1:coredump"
+# The wrapped command never launched (``Popen`` raised ENOENT / EACCES /
+# ENOEXEC). Distinct from ``exit_nonzero``: a command-not-found never
+# exercised the code path under test, so the three-way verdict resolver
+# (issue #230) treats it as an ``error`` (no valid observation) rather
+# than a ``fail`` (the event manifested). See
+# :data:`aorta.probe.classifier.verdict.ERROR_DETECTOR_IDS`.
+DETECTOR_EXEC_FAILED = "tier1:exec_failed"
 
 # Map ``returncode`` (negative when the process died via signal) to
 # the corresponding detector ID. ``signal`` constants are platform-
@@ -80,11 +87,20 @@ class Tier1Context:
     suppresses the ``exit_nonzero`` detector (a process killed by
     ``proc.kill()`` after a timeout always exits with a non-zero
     code; we want the more informative detector ID to fire alone).
+
+    ``exec_failed`` marks an exec-time ``Popen`` failure -- the
+    wrapped command never launched (ENOENT / EACCES / ENOEXEC). It
+    fires ``tier1:exec_failed`` *alone* (the synthetic 127/126/1 exit
+    code the workload assigns is bookkeeping, not a real child exit,
+    so ``exit_nonzero`` would be misleading) and suppresses every
+    other Tier-1 detector -- a process that never started cannot have
+    timed out, taken a signal, or dumped core.
     """
 
     exit_code: int
     timed_out: bool
     trial_dir: Path
+    exec_failed: bool = False
 
 
 def detect(ctx: Tier1Context) -> list[str]:
@@ -99,6 +115,11 @@ def detect(ctx: Tier1Context) -> list[str]:
     fired (the trial's Tier 1 status is "pass — exit zero").
     """
     fired: list[str] = []
+
+    # Exec-time launch failure: the command never started, so no other
+    # Tier-1 signal is meaningful. Fire ``tier1:exec_failed`` alone.
+    if ctx.exec_failed:
+        return [DETECTOR_EXEC_FAILED]
 
     if ctx.timed_out:
         fired.append(DETECTOR_TIMEOUT)
@@ -143,12 +164,14 @@ ALL_DETECTOR_IDS = (
     DETECTOR_SIGBUS,
     DETECTOR_EXIT_NONZERO,
     DETECTOR_COREDUMP,
+    DETECTOR_EXEC_FAILED,
 )
 
 
 __all__ = [
     "ALL_DETECTOR_IDS",
     "DETECTOR_COREDUMP",
+    "DETECTOR_EXEC_FAILED",
     "DETECTOR_EXIT_NONZERO",
     "DETECTOR_SIGABRT",
     "DETECTOR_SIGBUS",

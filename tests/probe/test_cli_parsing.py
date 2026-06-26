@@ -363,6 +363,48 @@ def test_default_passthrough_mode_when_neither_set(monkeypatch, tmp_path):
     assert recipe_arg.probe_extras.env_passthrough_mode == "inherit"
 
 
+# ---- issue #229: --disable-detector overlay ------------------------------
+
+
+def test_cli_disable_detector_unions_onto_recipe(monkeypatch, tmp_path):
+    """``--disable-detector`` adds to (does not replace) the recipe's set."""
+    recipe_text = _RECIPE_NO_MODE + "disable_detectors: [custom:from_recipe]\n"
+    recipe_arg = _invoke_probe_capturing_recipe(
+        monkeypatch,
+        tmp_path,
+        recipe_text=recipe_text,
+        cli_extra=["--disable-detector", "tier2:hang", "--disable-detector", "tier3"],
+    )
+    assert recipe_arg.probe_extras is not None
+    assert recipe_arg.probe_extras.disable_detectors == ("custom:from_recipe", "tier2:hang")
+    assert recipe_arg.probe_extras.disable_detector_tiers == ("tier3",)
+
+
+def test_cli_disable_detector_invalid_token_errors(monkeypatch, tmp_path):
+    """A malformed token surfaces a friendly CLI error, not a traceback."""
+    mock = MagicMock(return_value=tmp_path / "run-dir")
+    monkeypatch.setattr(probe_cli, "run_recipe", mock)
+    recipe_path = tmp_path / "r.yaml"
+    recipe_path.write_text(_RECIPE_NO_MODE, encoding="utf-8")
+    result = CliRunner().invoke(
+        probe,
+        [
+            "--recipe",
+            str(recipe_path),
+            "--output",
+            str(tmp_path / "out"),
+            "--disable-detector",
+            "tier9:nope",
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--disable-detector" in result.output
+    mock.assert_not_called()
+
+
 def test_cli_env_passthrough_mode_file_overrides_no_recipe_key(monkeypatch, tmp_path):
     """Recipe omits the key, CLI says ``file`` -> ``file`` wins."""
     recipe_arg = _invoke_probe_capturing_recipe(

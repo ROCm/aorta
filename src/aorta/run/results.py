@@ -137,4 +137,67 @@ class TrialResult:
         )
 
 
-__all__ = ["TrialResult"]
+def trial_verdict(trial: Any) -> str:
+    """Three-way verdict (``"pass"`` / ``"fail"`` / ``"error"``) for a trial.
+
+    This is the single shared predicate (issue #230) used by the matrix
+    aggregator (pass / fail / error counts) and the ``stop_after`` event
+    counter (:mod:`aorta.run.dispatcher`) so the two can never disagree
+    about whether a trial reproduced the bug, failed for an infra reason,
+    or passed.
+
+    Accepts any object exposing ``workload`` / ``exit_status`` and a
+    ``result`` dict (duck-typed -- callers pass :class:`TrialResult` or
+    lightweight stand-ins in tests). Resolution order:
+
+    1. **Probe trials** carry the classifier's three-way verdict in
+       ``result["metrics"]["verdict"]``; it is authoritative. (A probe
+       ``error`` trial reports ``passed=False`` and therefore
+       ``exit_status == "workload_failed"``, so the metric is the only
+       place the error/fail distinction survives.)  This is trusted
+       **only** for the probe producer (``trial.workload ==
+       _subprocess``).  ``metrics`` is otherwise a free-form,
+       workload-owned field, so a non-probe workload could legitimately
+       stash its own ``metrics["verdict"]`` -- trusting it for every
+       workload would let a failed trial be miscounted as a pass in the
+       matrix and the ``stop_after`` rule.  Gating on the producer keeps
+       the metric authoritative exactly where ``_subprocess`` writes it.
+    2. **Other trials** (triage workloads with no probe verdict) derive
+       it from ``exit_status``: an ``infrastructure_failed`` /
+       ``workload_setup_failed`` trial never validly ran the measurement
+       -> ``error``; any other non-``ok`` status, or a ``WorkloadResult``
+       reporting ``passed is False`` -> ``fail``; otherwise ``pass``.
+    """
+    result = getattr(trial, "result", None)
+    workload = getattr(trial, "workload", None)
+    # Only the probe producer's metric verdict is authoritative (see
+    # docstring). The producer name and verdict vocabulary are imported
+    # locally from their canonical sources so neither can drift from this
+    # predicate, and so aorta.run keeps no module-load dependency on
+    # aorta.probe (no cycle today; the local imports keep it that way).
+    if isinstance(result, dict) and workload is not None:
+        from aorta.probe.recipe_builder import SUBPROCESS_WORKLOAD_NAME
+
+        if workload == SUBPROCESS_WORKLOAD_NAME:
+            metrics = result.get("metrics")
+            if isinstance(metrics, dict):
+                v = metrics.get("verdict")
+                from aorta.probe.classifier.verdict import VALID_VERDICTS
+
+                # The isinstance guard ensures a non-string metric value can
+                # never match (and never reaches frozenset membership with an
+                # unhashable type).
+                if isinstance(v, str) and v in VALID_VERDICTS:
+                    return v
+
+    status = getattr(trial, "exit_status", None)
+    if status in ("infrastructure_failed", "workload_setup_failed"):
+        return "error"
+    if status is not None and status != "ok":
+        return "fail"
+    if isinstance(result, dict) and result.get("passed") is False:
+        return "fail"
+    return "pass"
+
+
+__all__ = ["TrialResult", "trial_verdict"]

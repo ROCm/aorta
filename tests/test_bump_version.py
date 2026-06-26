@@ -5,16 +5,22 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-
-from bump_version import (  # noqa: E402
-    apply_suffix,
-    bump_version,
-    main,
-    read_version,
-    resolve_new_version,
-    set_version,
-)
+_SCRIPTS_DIR = str(Path(__file__).parent.parent / "scripts")
+sys.path.insert(0, _SCRIPTS_DIR)
+try:
+    from bump_version import (  # noqa: E402
+        apply_suffix,
+        bump_version,
+        main,
+        read_version,
+        resolve_new_version,
+        set_version,
+    )
+finally:
+    # Keep the import-time path change local to bump_version so the rest of the
+    # pytest session can't accidentally import the many top-level modules under
+    # scripts/.
+    sys.path.remove(_SCRIPTS_DIR)
 
 SAMPLE = """\
 [build-system]
@@ -107,6 +113,7 @@ def test_apply_suffix_rejects_unsafe_suffix(suffix):
         apply_suffix("0.2.0", suffix)
 
 
+
 @pytest.mark.parametrize("nl", ["\r\n", "\r", "\n"])
 def test_set_version_preserves_line_endings(nl):
     """The "byte-for-byte untouched" promise must hold on CRLF/CR checkouts
@@ -162,6 +169,7 @@ def test_main_set_takes_precedence_over_suffix(tmp_path, capsys):
     assert 'version = "1.4.2"' in p.read_text()
 
 
+
 # A trailing inline comment on the table header is valid TOML; the bumper must
 # still recognize the [project] table (regression for the header parse).
 COMMENTED_HEADER = '[project]  # the package\nname = "aorta"\nversion = "0.2.0"\n'
@@ -188,6 +196,7 @@ def test_resolve_new_version_suffix_overrides_level():
 
 def test_resolve_new_version_explicit_overrides_suffix():
     assert resolve_new_version("0.2.0", None, "5.6.7", "rc20260619") == "5.6.7"
+
 
 
 def test_resolve_new_version_rejects_bad_explicit():
