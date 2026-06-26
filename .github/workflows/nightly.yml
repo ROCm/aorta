@@ -17,6 +17,17 @@ on:
 permissions:
   contents: write  # required to create/update the dev-wheels release + assets
 
+# Serialize every run that mutates the shared, rolling dev-wheels release/tag.
+# cleanup_releases.yml shares this group, so a nightly publish, a cleanup prune,
+# and any overlapping manual dispatch / cron run can never race on force-pushing
+# the `dev-wheels` tag or uploading/deleting its assets (which would leave the
+# tag pointing at an unpredictable commit or a mixed artifact set). Do NOT cancel
+# the in-progress run: a publish interrupted mid tag-push/upload is worse than a
+# brief queue wait, so newer runs queue behind it instead.
+concurrency:
+  group: dev-wheels-release
+  cancel-in-progress: false
+
 jobs:
   nightly:
     # Guard what can publish to the *shared* canonical dev-wheels release:

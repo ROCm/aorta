@@ -21,6 +21,14 @@ on:
 permissions:
   contents: write  # required to delete release assets
 
+# Share nightly.yml's concurrency group so a prune can't race a nightly publish
+# (or another cleanup run) on the same rolling dev-wheels release -- e.g. deleting
+# assets while a publish is mid-upload. Don't cancel an in-progress run; let it
+# finish and queue behind it.
+concurrency:
+  group: dev-wheels-release
+  cancel-in-progress: false
+
 jobs:
   cleanup:
     if: github.repository == 'ROCm/aorta'
