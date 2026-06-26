@@ -4,7 +4,7 @@
 # ----------
 # FSDP2 all_gather on cross-node process groups (1 rank / host, all traffic
 # over AMD AINIC / Pollara RoCEv2) produces silent zero corruption on received
-# tensors at iteration 0 only.  Root cause (path b, Jun 3 2026):
+# tensors at iteration 0 only.  Root cause (path b):
 #
 #   GPU kernel writes param shard -> lands in L2 cache
 #   CPU proxy posts WQE before L2->HBM writeback completes
@@ -22,7 +22,7 @@
 #   2. Increase the number of independent trials (more all_gather calls per step).
 #   3. Replicate the multi-stream topology from the production training stack.
 #
-# Production training stream topology (confirmed Jun 3 2026):
+# Production training stream topology:
 #   ~6-7 CUDA streams live per step.  All communication streams are created as
 #   HIGH-PRIORITY streams (cudaStreamNonBlocking with priority -1).  On AMD
 #   hardware, high-priority streams get preferential HW queue scheduling, which
@@ -77,9 +77,8 @@
 #
 # References
 # ----------
-#   Developer on the user team, brain dump (Jun 3 2026 onsite):
-#     Path b -- GPU HBM write -> CPU proxy signal -> AINIC PCIe read
-#   User team 2K GPU overnight confirmation: NCCL_GDR_FLUSH_DISABLE=0 cleans corruption
+#   Root cause analysis: path b -- GPU HBM write -> CPU proxy signal -> AINIC PCIe read
+#   2K GPU overnight confirmation: NCCL_GDR_FLUSH_DISABLE=0 cleans corruption
 #   Production training topology: ~6-7 streams/step, all comms on high-priority streams
 #   Companion recipe: recipes/ainic-gdr-flush-sdc.yaml (baseline, fix, controls)
 #   Aorta race workload: src/aorta/race/modes/fsdp.py
@@ -91,7 +90,7 @@ ticket: AINIC-SDC-001
 workload: race
 
 # 24 trials: stressed config raises per-attempt rate above the baseline ~35%
-# (observed at the user team's scale); 24 trials gives >99.9% detection
+# (observed at scale); 24 trials gives >99.9% detection
 # probability if per-trial rate is >=25%.
 trials: 24
 
@@ -186,7 +185,7 @@ cells:
   # Expected: zero corruption despite maximum stress and high-priority stream
   # scheduling pressure.
   # ~18% allreduce throughput penalty vs baseline (330->270 GB/s at 2K scale).
-  # Confirmed clean: user team 2K GPU overnight run, multiple restarts (Jun 3 2026).
+  # Confirmed clean: 2K GPU overnight run, multiple restarts.
   - name: gdr-flush-stressed
     mitigations: [none]
     environment: local

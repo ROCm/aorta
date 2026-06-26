@@ -90,9 +90,11 @@ diff <(jq -S . env_a.json) <(jq -S . env_b.json) # diff two snapshots
 aorta sweep run --recipe recipes/example-llm-determinism.yaml --dry-run   # validate only
 aorta sweep run --recipe recipes/example-llm-determinism.yaml             # run the matrix
 
-# Distributed workloads (e.g. the `race` recipe) launch under torchrun:
+# Distributed workloads launch under torchrun (llm_determinism, race, fsdp):
 torchrun --standalone --nproc_per_node=2 $(which aorta) \
   sweep run --recipe recipes/example-fsdp-smoke.yaml
+torchrun --standalone --nproc_per_node=1 $(which aorta) \
+  run --workload llm_determinism --trials 1 --steps 50
 
 # --- Unified sweep (wrap an opaque launch command) ---
 aorta sweep run --recipe recipes/probe-template-bash.yaml \
@@ -105,13 +107,14 @@ aorta sweep list-patterns
 aorta mitigations list                           # standalone registry view
 aorta environments list
 
-# --- Single workload trial (no matrix) ---
-aorta run --workload llm_determinism --trials 1 --steps 50
+# --- Single workload trial (no matrix) — training/inference only ---
+aorta run --workload training --trials 1 --steps 50
+aorta run --workload inference --trials 1 --steps 50
 
 # --- Hardware queue evaluation (requires amd-aorta[hw-queue] + torch) ---
 aorta bench hw_queue_eval list
 aorta bench hw_queue_eval run hetero_kernels --streams 8
-aorta bench hw_queue_eval sweep hetero_kernels --streams 1,2,4,8,16
+aorta bench hw_queue_eval sweep hetero_kernels --streams 2,4,8,16
 ```
 
 ## Main Workflows
@@ -145,7 +148,9 @@ concurrent streams. See [`docs/hw-queue-eval.md`](docs/hw-queue-eval.md).
 
 `aorta run --workload <name>` runs one workload directly (trials/steps,
 environment overlay, mitigations) without building a matrix — handy for iterating
-on a single reproducer.
+on a single reproducer. Note: `llm_determinism` and `race` require a distributed
+environment and must be launched under `torchrun`; `training` and `inference`
+self-bootstrap a single process.
 
 ## Workloads
 
