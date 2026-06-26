@@ -41,10 +41,6 @@ workload_config:
     num_heads: 4
     ffn_size: 1024
     vocab_size: 1024
-    moe:
-      num_experts: 4
-      # NOTE: aorta.models.repeated_block MoE is top-1 only — there is no
-      # top_k knob. Drive MoE via num_experts.
 
   optimizer:
     kind: adamw

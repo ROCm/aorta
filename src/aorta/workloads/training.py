@@ -112,6 +112,18 @@ class ModelSpec:
         d = dict(d or {})
         moe = dict(d.pop("moe", {}) or {})
         known = set(cls.__dataclass_fields__)
+        unknown = set(d) - known
+        if unknown:
+            log.warning(
+                "ModelSpec: unknown keys in model config (possible typos): %s",
+                sorted(unknown),
+            )
+        unknown_moe = set(moe) - {"num_experts"}
+        if unknown_moe:
+            log.warning(
+                "ModelSpec: unknown keys in model.moe config (possible typos): %s",
+                sorted(unknown_moe),
+            )
         spec = cls(**{k: v for k, v in d.items() if k in known})
         if "num_experts" in moe:
             spec.num_experts = int(moe["num_experts"])
@@ -126,6 +138,10 @@ class ModelSpec:
                 f"model.num_experts must be >= 2 for moe_transformer, got {spec.num_experts}"
             )
         if spec.kind in ("transformer", "moe_transformer"):
+            if spec.num_heads < 1:
+                raise ValueError(
+                    f"model.num_heads must be >= 1, got {spec.num_heads}"
+                )
             if spec.hidden_size % spec.num_heads != 0:
                 raise ValueError(
                     f"model.hidden_size ({spec.hidden_size}) must be divisible by "
@@ -153,6 +169,12 @@ class OptimizerSpec:
     def from_dict(cls, d: dict[str, Any]) -> "OptimizerSpec":
         d = dict(d or {})
         known = set(cls.__dataclass_fields__)
+        unknown = set(d) - known
+        if unknown:
+            log.warning(
+                "OptimizerSpec: unknown keys in optimizer config (possible typos): %s",
+                sorted(unknown),
+            )
         spec = cls(**{k: v for k, v in d.items() if k in known})
         if str(spec.kind).lower() != "adamw":
             raise ValueError(f"optimizer.kind must be 'adamw', got {spec.kind!r}")
@@ -173,6 +195,12 @@ class ChecksSpec:
     def from_dict(cls, d: dict[str, Any]) -> "ChecksSpec":
         d = dict(d or {})
         known = set(cls.__dataclass_fields__)
+        unknown = set(d) - known
+        if unknown:
+            log.warning(
+                "ChecksSpec: unknown keys in checks config (possible typos): %s",
+                sorted(unknown),
+            )
         return cls(**{k: bool(v) for k, v in d.items() if k in known})
 
 
@@ -210,6 +238,13 @@ class TrainingConfig:
             "warmup_steps",
             "steps",
         }
+        all_known = scalar_keys | {"model", "optimizer", "checks"}
+        unknown = set(d) - all_known
+        if unknown:
+            log.warning(
+                "TrainingConfig: unknown keys in workload_config (possible typos): %s",
+                sorted(unknown),
+            )
         cfg = cls(
             model=model,
             optimizer=optimizer,
