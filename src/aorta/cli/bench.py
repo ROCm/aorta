@@ -11,13 +11,21 @@ _INSTALL_HINT = (
 
 
 def _load_hw_queue_cli() -> click.Group | None:
-    """Return the hw_queue_eval CLI group, or None if the extra is not installed."""
+    """Return the hw_queue_eval CLI group, or None if the [hw-queue] extra is absent.
+
+    Raises any ImportError that is NOT caused by a missing optional dependency
+    (e.g. a syntax error or broken internal import inside hw_queue_eval) so
+    real bugs are not silently swallowed.
+    """
     try:
         from aorta.hw_queue_eval.cli import cli  # noqa: PLC0415
 
         return cli
-    except ImportError:
+    except ModuleNotFoundError:
+        # A missing module means an optional dependency (torch, numpy, …) is
+        # absent — treat as "extra not installed" and return None.
         return None
+    # Any other ImportError (bad internal import, syntax error, …) propagates.
 
 
 class _LazyHwQueueGroup(click.Group):
@@ -27,6 +35,7 @@ class _LazyHwQueueGroup(click.Group):
     actually invokes ``aorta bench hw_queue_eval``. Group-level metadata
     (help text, params like ``--version``) is forwarded from the inner group
     so the surface matches ``python -m aorta.hw_queue_eval`` exactly.
+    When the extra is absent, every entry point shows a clear install hint.
     """
 
     def _inner(self) -> click.Group | None:
@@ -45,7 +54,13 @@ class _LazyHwQueueGroup(click.Group):
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         inner = self._inner()
-        (inner if inner is not None else super()).format_help(ctx, formatter)
+        if inner is not None:
+            inner.format_help(ctx, formatter)
+        else:
+            # Show the install hint instead of an empty proxy help page so
+            # `aorta bench hw_queue_eval --help` is useful on a base install.
+            with formatter.section("Error"):
+                formatter.write_text(_INSTALL_HINT)
 
     def list_commands(self, ctx: click.Context) -> list[str]:
         inner = self._inner()
@@ -55,7 +70,7 @@ class _LazyHwQueueGroup(click.Group):
         return self._require().get_command(ctx, cmd_name)
 
     def invoke(self, ctx: click.Context) -> None:
-        # Ensures install hint fires on bare `aorta bench hw_queue_eval`
+        # Ensures the install hint fires on bare `aorta bench hw_queue_eval`
         # (no subcommand) rather than Click's generic "Missing command" error.
         self._require()
         super().invoke(ctx)
