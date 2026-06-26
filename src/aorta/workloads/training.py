@@ -118,7 +118,10 @@ class ModelSpec:
                 "ModelSpec: unknown keys in model config (possible typos): %s",
                 sorted(unknown),
             )
-        unknown_moe = set(moe) - {"num_experts"}
+        # ``enabled`` is accepted (silently ignored) — the issue/#238 recipe
+        # shape includes ``model.moe.enabled`` and the docstring says this module
+        # accepts verbose recipe spellings; topology is driven by ``kind`` only.
+        unknown_moe = set(moe) - {"num_experts", "enabled"}
         if unknown_moe:
             log.warning(
                 "ModelSpec: unknown keys in model.moe config (possible typos): %s",
@@ -239,7 +242,7 @@ class TrainingConfig:
             "steps",
         }
         all_known = scalar_keys | {"model", "optimizer", "checks"}
-        unknown = set(d) - all_known
+        unknown = {k for k in set(d) - all_known if not k.startswith("_aorta_")}
         if unknown:
             log.warning(
                 "TrainingConfig: unknown keys in workload_config (possible typos): %s",
