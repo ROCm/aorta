@@ -309,6 +309,43 @@ def sweep() -> None:
     ),
 )
 @click.option(
+    "--stop-after-events",
+    type=int,
+    default=None,
+    metavar="K",
+    help=(
+        "Probe flow only. Stop each cell once K trials match the event "
+        "verdict (default verdict: fail), instead of running a fixed count. "
+        "The loop needs a hard cap: pass --max-trials unless the recipe's "
+        "'stop_after:' block already supplies one. Overlays that block (#232)."
+    ),
+)
+@click.option(
+    "--max-trials",
+    type=int,
+    default=None,
+    metavar="N",
+    help=(
+        "Probe flow only. Hard cap on trials per cell when stop-after is "
+        "active (always honored). Pair with --stop-after-events; either flag "
+        "may be omitted when the recipe's 'stop_after:' block already supplies "
+        "that half (so --max-trials alone overrides just the recipe's cap)."
+    ),
+)
+@click.option(
+    "--disable-detector",
+    "disable_detectors",
+    multiple=True,
+    metavar="TIER[:ID]",
+    help=(
+        "Probe flow only. Silence a detector or whole tier (repeatable). Pass "
+        "a tier name ('tier3') to skip the entire tier, or a '<tier>:<id>' "
+        "token ('tier2:hang') to skip one detector. A disabled detector is "
+        "not evaluated and never counts toward the verdict. Unioned with any "
+        "'disable_detectors:' / 'disable_detector_tiers:' set in the recipe."
+    ),
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
@@ -329,6 +366,9 @@ def sweep_run(
     confound_threshold: float | None,
     output: Path | None,
     env_passthrough_mode: str | None,
+    stop_after_events: int | None,
+    max_trials: int | None,
+    disable_detectors: tuple[str, ...],
     mitigation_files: tuple[Path, ...],
     verbose: int,
     argv: tuple[str, ...],
@@ -370,6 +410,9 @@ def sweep_run(
             ticket=ticket,
             dry_run=dry_run,
             env_passthrough_mode=env_passthrough_mode,
+            stop_after_events=stop_after_events,
+            max_trials=max_trials,
+            disable_detectors=disable_detectors,
             mitigation_files=mitigation_files,
             argv=argv,
             workload=workload,
@@ -396,6 +439,9 @@ def sweep_run(
             output=output,
             mitigation_files=mitigation_files,
             env_passthrough_mode=env_passthrough_mode,
+            stop_after_events=stop_after_events,
+            max_trials=max_trials,
+            disable_detectors=disable_detectors,
         )
 
 
@@ -406,6 +452,9 @@ def _dispatch_probe_flow(
     ticket: str | None,
     dry_run: bool,
     env_passthrough_mode: str | None,
+    stop_after_events: int | None,
+    max_trials: int | None,
+    disable_detectors: tuple[str, ...],
     mitigation_files: tuple[Path, ...],
     argv: tuple[str, ...],
     workload: str | None,
@@ -437,6 +486,9 @@ def _dispatch_probe_flow(
         ticket=ticket,
         dry_run=dry_run,
         env_passthrough_mode=env_passthrough_mode,
+        stop_after_events=stop_after_events,
+        max_trials=max_trials,
+        disable_detectors=disable_detectors,
         mitigation_files=mitigation_files,
         argv=argv,
         command_label="aorta sweep run",
@@ -459,12 +511,27 @@ def _dispatch_workload_flow(
     output: Path | None,
     mitigation_files: tuple[Path, ...],
     env_passthrough_mode: str | None,
+    stop_after_events: int | None,
+    max_trials: int | None,
+    disable_detectors: tuple[str, ...],
 ) -> None:
     """Validate workload-flow-specific preconditions, then run the workload flow."""
     if env_passthrough_mode is not None:
         raise click.UsageError(
             "--env-passthrough-mode applies to the probe flow only (a user "
             "command after '--'); it has no effect on a workload run."
+        )
+    probe_only_flags = {
+        "--stop-after-events": stop_after_events,
+        "--max-trials": max_trials,
+        "--disable-detector": disable_detectors,
+    }
+    set_probe_only = [k for k, v in probe_only_flags.items() if v not in (None, ())]
+    if set_probe_only:
+        raise click.UsageError(
+            f"{', '.join(set_probe_only)} only apply to the probe/subprocess "
+            "flow (a user command after '--' or a 'mode: probe' recipe); they "
+            "have no effect on a workload run."
         )
     execute_triage_run(
         recipe=recipe,

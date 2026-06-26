@@ -363,10 +363,14 @@ def probe(
     DEPRECATED: this command is now a thin alias for ``aorta sweep run``.
     It prints a stderr notice and delegates to the same shared engine.
     """
-    emit_deprecation("aorta probe", "aorta sweep run")
     if list_patterns:
+        # The catalogue surface moved to its own subcommand, so point this
+        # alias at 'aorta sweep list-patterns' rather than the generic
+        # 'aorta sweep run'. Notice stays on stderr; stdout is the catalogue.
+        emit_deprecation("aorta probe --list-patterns", "aorta sweep list-patterns")
         _print_list_patterns(show_version=show_version)
         return
+    emit_deprecation("aorta probe", "aorta sweep run")
     if show_version:
         # ``--version`` is only meaningful with ``--list-patterns``;
         # see :func:`_reject_bare_version_flag` for the rationale.

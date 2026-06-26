@@ -342,19 +342,21 @@ Full ordering rules + per-tier detector IDs:
 [classifier.md](classifier.md). `condition:` expression whitelist:
 [sandbox.md](sandbox.md).
 
-## 7. `--list-patterns` (Phase 2 deviation)
+## 7. `list-patterns`
 
-The rubric's `aorta probe list-patterns` subcommand is implemented as
-a **flag** on the existing `aorta probe` command:
+The Tier-4 pattern catalogue is printed by the `aorta sweep list-patterns`
+subcommand:
 
 ```bash
-aorta probe --list-patterns          # full Tier 4 catalogue (one entry per pattern)
-aorta probe --list-patterns --version  # 'aorta probe pattern library v1 (aorta <pkg>)'
+aorta sweep list-patterns            # full Tier 4 catalogue (one entry per pattern)
+aorta sweep list-patterns --version  # 'aorta sweep pattern library v1 (aorta <pkg>)'
 ```
 
-This deviation preserves the Phase-1 CLI surface byte-equivalently —
-`aorta probe -- <argv>` still works without a subcommand prefix. The
-flag short-circuits before recipe loading.
+The deprecated `aorta probe --list-patterns` flag still works for the
+transition period — it short-circuits before recipe loading, prints the
+same catalogue to stdout, and warns on stderr to use
+`aorta sweep list-patterns`. It was the Phase-1 surface, implemented as a
+flag on `aorta probe` rather than the rubric's subcommand.
 
 ## 8. Shared engine guarantee
 

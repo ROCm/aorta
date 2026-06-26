@@ -203,6 +203,25 @@ def test_triage_only_flag_rejected_in_probe_flow(mock_run_recipe):
     mock_run_recipe.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "extra_flags",
+    [
+        ["--stop-after-events", "3"],
+        ["--max-trials", "20"],
+        ["--disable-detector", "tier3"],
+    ],
+)
+def test_probe_only_flag_rejected_in_workload_flow(mock_run_recipe, tmp_path, extra_flags):
+    """Probe-only knobs have no effect on a workload run and are rejected up-front."""
+    recipe = _write_triage_recipe(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["sweep", "run", "--recipe", str(recipe), *extra_flags])
+    assert result.exit_code != 0
+    assert "only apply to the probe/subprocess flow" in result.output
+    assert extra_flags[0] in result.output
+    mock_run_recipe.assert_not_called()
+
+
 def test_bare_positional_without_separator_rejected(mock_run_recipe):
     """A bare positional with no `--` is refused (inherited probe safety)."""
     runner = CliRunner()
@@ -346,6 +365,31 @@ def test_triage_list_mitigations_warns():
     assert "aorta sweep list-mitigations" in result.stderr
 
 
+def test_probe_list_patterns_points_at_sweep_list_patterns():
+    """`aorta probe --list-patterns` warns toward `aorta sweep list-patterns`, not `run`."""
+    runner = CliRunner(mix_stderr=False)
+    result = runner.invoke(probe, ["--list-patterns"])
+    assert result.exit_code == 0, result.output
+    assert "deprecated" in result.stderr
+    assert "aorta sweep list-patterns" in result.stderr
+    # The generic `aorta sweep run` target is wrong for this surface.
+    assert "aorta sweep run" not in result.stderr
+    # Notice stays on stderr; stdout remains the catalogue.
+    assert "deprecated" not in result.stdout
+    assert "pattern" in result.stdout.lower()
+
+
+def test_probe_list_patterns_version_points_at_sweep_list_patterns():
+    """`aorta probe --list-patterns --version` keeps the notice on stderr, stdout parseable."""
+    runner = CliRunner(mix_stderr=False)
+    result = runner.invoke(probe, ["--list-patterns", "--version"])
+    assert result.exit_code == 0, result.output
+    assert "aorta sweep list-patterns" in result.stderr
+    assert "aorta sweep run" not in result.stderr
+    assert "deprecated" not in result.stdout
+    assert result.stdout.startswith("aorta probe pattern library v")
+
+
 # --- cross-front-door parity --------------------------------------------
 #
 # The PR's headline guarantee is that ``aorta sweep run`` is byte-identical
@@ -413,6 +457,56 @@ def test_subprocess_flow_parity_sweep_vs_probe(mock_run_recipe, tmp_path):
         lambda: runner.invoke(
             probe,
             ["--recipe", str(PROBE_MINIMAL), "--output", out, "--", "echo", "hi"],
+        ),
+    )
+
+    assert sweep_recipe == probe_recipe
+    assert sweep_kwargs == probe_kwargs
+
+
+def test_subprocess_flow_parity_sweep_vs_probe_with_stop_after(mock_run_recipe, tmp_path):
+    """`--stop-after-events`/`--max-trials` reach run_recipe identically across front doors."""
+    out = str(tmp_path / "out")
+    flags = ["--stop-after-events", "3", "--max-trials", "20"]
+    runner = CliRunner()
+
+    sweep_recipe, sweep_kwargs = _capture_engine_call(
+        mock_run_recipe,
+        lambda: runner.invoke(
+            main,
+            ["sweep", "run", "--recipe", str(PROBE_MINIMAL), "--output", out, *flags, "--", "echo", "hi"],
+        ),
+    )
+    probe_recipe, probe_kwargs = _capture_engine_call(
+        mock_run_recipe,
+        lambda: runner.invoke(
+            probe,
+            ["--recipe", str(PROBE_MINIMAL), "--output", out, *flags, "--", "echo", "hi"],
+        ),
+    )
+
+    assert sweep_recipe == probe_recipe
+    assert sweep_kwargs == probe_kwargs
+
+
+def test_subprocess_flow_parity_sweep_vs_probe_with_disable_detector(mock_run_recipe, tmp_path):
+    """`--disable-detector` (repeatable) reaches run_recipe identically across front doors."""
+    out = str(tmp_path / "out")
+    flags = ["--disable-detector", "tier3", "--disable-detector", "tier2:hang"]
+    runner = CliRunner()
+
+    sweep_recipe, sweep_kwargs = _capture_engine_call(
+        mock_run_recipe,
+        lambda: runner.invoke(
+            main,
+            ["sweep", "run", "--recipe", str(PROBE_MINIMAL), "--output", out, *flags, "--", "echo", "hi"],
+        ),
+    )
+    probe_recipe, probe_kwargs = _capture_engine_call(
+        mock_run_recipe,
+        lambda: runner.invoke(
+            probe,
+            ["--recipe", str(PROBE_MINIMAL), "--output", out, *flags, "--", "echo", "hi"],
         ),
     )
 
