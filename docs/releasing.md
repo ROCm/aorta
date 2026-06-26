@@ -14,7 +14,10 @@ bump plus a trigger.
 
 Releases are automated by [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 Each run builds the artifacts for the resolved `pyproject.toml` version and
-publishes them as a new GitHub Release marked **Latest**. Each release needs a
+publishes them as a new GitHub Release. A strict `X.Y.Z` version is marked
+**Latest**; a version carrying a pre-release suffix (e.g. `0.3.0rc1`) is
+published as a **pre-release** and is *not* marked Latest, so the releases-page
+Latest pin always points at the last stable cut. Each release needs a
 new version: on a **manual run** the workflow refuses to release a version whose
 tag already exists, and on a **tag push** Git itself rejects a tag that already
 exists (force-updating an existing tag would re-release it).
@@ -54,8 +57,9 @@ The workflow then:
 - **before building**, fails fast if a pushed tag does not match that version
   (so a release can never disagree with the package metadata),
 - builds the wheel + sdist with `python -m build`,
-- creates the GitHub Release named `AORTA X.Y.Z`, marks it **Latest**, and
-  uploads the wheel + sdist as release assets with auto-generated notes.
+- creates the GitHub Release named `AORTA X.Y.Z`, marks a strict `X.Y.Z` cut
+  **Latest** (a pre-release suffix is published as a pre-release, not Latest),
+  and uploads the wheel + sdist as release assets with auto-generated notes.
 
 > **Branch protection note.** A manual bump run pushes the version-bump commit
 > to the branch it ran from. If you run it against a protected branch (e.g.

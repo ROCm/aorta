@@ -215,8 +215,8 @@ class LiteLLMProposer:
                 "Install it with either:\n"
                 "  pip install litellm\n"
                 "  pip install -e '.[agent]'   # from the aorta repo root (editable + extra)\n"
-                "If pip says the 'agent' extra does not exist, your installed aorta "
-                "package is stale — reinstall from this repo with -e '.[agent]'."
+                "If pip says the 'agent' extra does not exist, your installed amd-aorta "
+                "distribution is stale — reinstall from this repo with -e '.[agent]'."
             ) from exc
 
         system = (
