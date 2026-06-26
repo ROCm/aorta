@@ -5,15 +5,21 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-
-from bump_version import (  # noqa: E402
-    bump_version,
-    main,
-    read_version,
-    resolve_new_version,
-    set_version,
-)
+_SCRIPTS_DIR = str(Path(__file__).parent.parent / "scripts")
+sys.path.insert(0, _SCRIPTS_DIR)
+try:
+    from bump_version import (  # noqa: E402
+        bump_version,
+        main,
+        read_version,
+        resolve_new_version,
+        set_version,
+    )
+finally:
+    # Keep the import-time path change local to bump_version so the rest of the
+    # pytest session can't accidentally import the many top-level modules under
+    # scripts/.
+    sys.path.remove(_SCRIPTS_DIR)
 
 SAMPLE = """\
 [build-system]

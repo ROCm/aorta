@@ -29,7 +29,9 @@ def _read():
 def _optional_dependencies_block(text):
     """The text of the [project.optional-dependencies] table only."""
     start = text.index("[project.optional-dependencies]")
-    rest = text[start + 1 :]
+    rest = text[start:]
+    # The header's own '[' has no preceding newline in rest, so the next
+    # "\n[" match is the following table -- i.e. the end of this block.
     end = re.search(r"\n\[", rest)
     return rest if end is None else rest[: end.start()]
 
