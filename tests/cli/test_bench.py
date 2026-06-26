@@ -10,14 +10,15 @@ Tests the shim contract only — not hw_queue_eval internals:
 
 from __future__ import annotations
 
-import importlib
-
 import pytest
 from click.testing import CliRunner
 
-from aorta.cli.bench import bench
+from aorta.cli.bench import bench, _load_hw_queue_cli
 
-_HW_QUEUE_AVAILABLE = importlib.util.find_spec("aorta.hw_queue_eval") is not None
+# Availability is determined by actually attempting the import, not find_spec:
+# aorta.hw_queue_eval files are always present in the source tree, but the
+# import fails on a base install because hw_queue_eval.__init__ pulls torch.
+_HW_QUEUE_AVAILABLE = _load_hw_queue_cli() is not None
 
 
 def test_bench_help_lists_hw_queue_eval() -> None:
