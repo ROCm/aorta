@@ -424,6 +424,78 @@ class TestRunTrials:
             run_trials(req)
         assert "_aorta_collect" not in captured_config
 
+    def test_collect_options_injected_into_config(self, tmp_path):
+        """``RunRequest.collect_options`` lands at
+        ``config['_aorta_collect_options']`` so a workload can read its
+        collector's knobs (e.g. layer_numerics NANLOG_* overrides)."""
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_opts"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_opts",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+                collect_options={"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}},
+            )
+            run_trials(req)
+        assert captured_config["_aorta_collect_options"] == {
+            "layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}
+        }
+
+    def test_collect_options_absent_when_empty(self, tmp_path):
+        """No ``_aorta_collect_options`` key when the mapping is empty --
+        back-compat for list-form / no-collector runs."""
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "noopts"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="noopts",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+            )
+            run_trials(req)
+        assert "_aorta_collect_options" not in captured_config
+
     def test_collect_survives_trial_json_roundtrip(self, tmp_path):
         """``_aorta_collect`` is a plain list, so the trial JSON dump needs
         no sanitizer for it (unlike ``_aorta_probe_extras``)."""

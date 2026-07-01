@@ -165,14 +165,56 @@ def test_collect_unknown_recipe_rejected(tmp_path):
 
 
 def test_collect_wrong_type_rejected(tmp_path):
-    text = _MINIMAL_YAML + "collect: layer_numerics\n"  # string, not a list
-    with pytest.raises(RecipeSchemaError, match="must be a list of strings"):
+    text = _MINIMAL_YAML + "collect: layer_numerics\n"  # bare string, not list/mapping
+    with pytest.raises(RecipeSchemaError, match="must be a list of collector names"):
         load_recipe(_write_yaml(tmp_path, text))
 
 
 def test_collect_recipe_error_uses_recipe_field_label():
     with pytest.raises(RecipeSchemaError, match=r"^recipe\.collect:"):
         _parse_collect("recipe", "layer_numerics")
+
+
+# ---- collect mapping form (per-collector options) -------------------------
+
+
+def test_collect_mapping_form_parses_names_and_options(tmp_path):
+    text = _MINIMAL_YAML + (
+        "collect:\n"
+        "  layer_numerics:\n"
+        "    NANLOG_SAMPLE_EVERY: \"1\"\n"
+        "    NANLOG_PRE_CONTEXT: \"20\"\n"
+    )
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.collect == ("layer_numerics",)
+    assert r.collect_options == {
+        "layer_numerics": {"NANLOG_SAMPLE_EVERY": "1", "NANLOG_PRE_CONTEXT": "20"}
+    }
+
+
+def test_collect_mapping_form_null_options_enables_without_options(tmp_path):
+    text = _MINIMAL_YAML + "collect:\n  layer_numerics:\n"  # enabled, no options
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.collect == ("layer_numerics",)
+    assert r.collect_options == {}  # no entry for an option-less collector
+
+
+def test_collect_list_form_has_empty_options(tmp_path):
+    text = _MINIMAL_YAML + "collect: [layer_numerics]\n"
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.collect_options == {}
+
+
+def test_collect_mapping_unknown_recipe_rejected(tmp_path):
+    text = _MINIMAL_YAML + "collect:\n  not_a_collector:\n    K: \"v\"\n"
+    with pytest.raises(RecipeSchemaError, match="unknown collector recipe"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_collect_mapping_non_string_option_value_rejected(tmp_path):
+    text = _MINIMAL_YAML + "collect:\n  layer_numerics:\n    NANLOG_SAMPLE_EVERY: 1\n"
+    with pytest.raises(RecipeSchemaError, match="string->string"):
+        load_recipe(_write_yaml(tmp_path, text))
 
 
 def test_collect_from_flags(tmp_path):

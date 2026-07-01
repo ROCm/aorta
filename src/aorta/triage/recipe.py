@@ -364,7 +364,13 @@ class Recipe:
             against ``KNOWN_RECIPES`` and threads them into
             ``config['_aorta_collect']`` for the workload to act on. Empty
             tuple (default) means no collector -- identical to today's
-            recipes. Set via the recipe ``collect:`` key or ``--collect``.
+            recipes. Set via the recipe ``collect:`` key (list or mapping
+            form) or the ``--collect`` CLI flag (names only).
+        collect_options: Per-collector knobs from the mapping form of
+            ``collect:`` (e.g. ``{"layer_numerics": {"NANLOG_SAMPLE_EVERY":
+            "1"}}``). Only collectors given a non-empty option dict appear.
+            Threaded into ``config['_aorta_collect_options']``. Recipe-file
+            only -- the ``--collect`` CLI flag carries names, not options.
     """
 
     schema_version: int
@@ -389,6 +395,14 @@ class Recipe:
     # identical to today's recipes (no collector). Settable from the recipe
     # ``collect:`` key or the ``--collect`` CLI flag (both flow here).
     collect: tuple[str, ...] = ()
+    # Per-collector options (the mapping form of ``collect:``), keyed by
+    # collector name -> ``dict[str, str]`` of knobs. Only collectors that were
+    # given a non-empty option dict appear here; a bare name in ``collect``
+    # has no entry. Threaded to ``config['_aorta_collect_options']`` so the
+    # workload (or a shared collector helper) can apply them -- e.g.
+    # ``{"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}}``. Empty dict
+    # (default) is identical to today's recipes.
+    collect_options: dict[str, dict[str, str]] = field(default_factory=dict)
     # Issue #232: collect-until-N stopping rule applied per cell. ``None``
     # preserves the legacy fixed-``trials`` behaviour. When set, the cell
     # runs up to ``stop_after.max_trials`` trials, stopping early once
@@ -646,16 +660,34 @@ def _parse_workload_config(path_hint: str, raw: Any) -> dict[str, Any]:
     return out
 
 
-def _parse_collect(path_hint: str, raw: Any) -> tuple[str, ...]:
-    """Validate a ``collect:`` list of collector recipe names.
+def _parse_collect(
+    path_hint: str, raw: Any
+) -> tuple[tuple[str, ...], dict[str, dict[str, str]]]:
+    """Validate the ``collect:`` field; return ``(names, options)``.
 
-    Returns an empty tuple when ``raw`` is None / missing so the caller can
-    call ``_parse_collect(hint, data.get("collect"))`` without branching.
-    Names are validated against :data:`aorta.run.collectors.KNOWN_RECIPES`
-    at load time so an unknown collector fails the whole recipe up front
-    (matching the dispatcher's runtime check) rather than after cells have
-    already run. Order is preserved and duplicates are de-duplicated while
-    keeping first-seen order.
+    Two accepted shapes (both cross-cutting -- the same collectors run in
+    every cell):
+
+    * **List form** -- names only, no per-collector options::
+
+        collect: [layer_numerics, rocprof]
+
+    * **Mapping form** -- name -> option dict, for collectors that take
+      knobs. An empty / null value means "enabled, no options"::
+
+        collect:
+          layer_numerics:
+            NANLOG_SAMPLE_EVERY: "1"
+          rocprof:            # enabled, no options
+
+    Returns ``((), {})`` when ``raw`` is None / missing so callers can do
+    ``_parse_collect(hint, data.get("collect"))`` without branching. Names
+    are validated against :data:`aorta.run.collectors.KNOWN_RECIPES` at load
+    time so an unknown collector fails the whole recipe up front (matching
+    the dispatcher's runtime check). Names are de-duplicated preserving
+    first-seen order. Option values MUST be strings (they become environment
+    variables / CLI-shaped knobs downstream); non-string values are rejected
+    at load time rather than silently ``str()``-coerced.
     """
     # Local import keeps the triage->run layering explicit; collectors is a
     # leaf module so there is no cycle, but importing at call time avoids any
@@ -663,20 +695,45 @@ def _parse_collect(path_hint: str, raw: Any) -> tuple[str, ...]:
     from aorta.run.collectors import KNOWN_RECIPES
 
     if raw is None:
-        return ()
+        return (), {}
     label = path_hint if path_hint.startswith("--") else f"{path_hint}.collect"
-    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+
+    # Normalise both shapes into an ordered name list + options mapping.
+    options: dict[str, dict[str, str]] = {}
+    if isinstance(raw, dict):
+        names = list(raw.keys())
+        for name, opts in raw.items():
+            if not isinstance(name, str):
+                raise RecipeSchemaError(
+                    f"{label}: collector names must be strings, got {name!r}"
+                )
+            if opts is None:
+                continue  # enabled, no options
+            if not isinstance(opts, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in opts.items()
+            ):
+                raise RecipeSchemaError(
+                    f"{label}.{name}: options must be a mapping of string->string "
+                    f"(option values become env-var knobs), got {opts!r}"
+                )
+            if opts:
+                options[name] = dict(opts)
+    elif isinstance(raw, list) and all(isinstance(x, str) for x in raw):
+        names = raw
+    else:
         raise RecipeSchemaError(
-            f"{label}: must be a list of strings, got {raw!r}"
+            f"{label}: must be a list of collector names or a mapping of "
+            f"name -> option dict, got {raw!r}"
         )
-    unknown = [x for x in raw if x not in KNOWN_RECIPES]
+
+    unknown = [x for x in names if x not in KNOWN_RECIPES]
     if unknown:
         raise RecipeSchemaError(
             f"{label}: unknown collector recipe(s) {unknown}; "
             f"valid: {sorted(KNOWN_RECIPES)}"
         )
-    # De-duplicate, preserving first-seen order (dict keys are ordered).
-    return tuple(dict.fromkeys(raw))
+    # De-duplicate names, preserving first-seen order (dict keys are ordered).
+    return tuple(dict.fromkeys(names)), options
 
 
 def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
@@ -1083,7 +1140,7 @@ def _build_recipe(
             f"recipe.save_logs: must be a boolean, got {type(raw_save_logs).__name__}"
         )
 
-    collect = _parse_collect("recipe", data.get("collect"))
+    collect, collect_options = _parse_collect("recipe", data.get("collect"))
 
     raw_cells = data["cells"]
     if not isinstance(raw_cells, list) or not raw_cells:
@@ -1137,6 +1194,7 @@ def _build_recipe(
         workload_config=workload_config,
         save_logs=raw_save_logs,
         collect=collect,
+        collect_options=collect_options,
         stop_after=stop_after,
     )
 
@@ -1245,6 +1303,10 @@ def build_recipe_from_flags(
                 f"--baseline-cell {baseline_cell!r} does not match any cell; cells: {sorted(names)}"
             )
 
+    # Flag mode carries collector NAMES only (comma-separated --collect);
+    # per-collector options are recipe-file-only (the mapping form), so
+    # collect_options is always empty here.
+    collect_names, _ = _parse_collect("--collect", list(collect) if collect else None)
     return Recipe(
         schema_version=SCHEMA_VERSION,
         workload=workload,
@@ -1257,7 +1319,7 @@ def build_recipe_from_flags(
         sidecar_files=tuple(sidecar_files) if sidecar_files else (),
         source_path=None,
         source_sha256=None,
-        collect=_parse_collect("--collect", list(collect) if collect else None),
+        collect=collect_names,
     )
 
 
