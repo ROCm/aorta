@@ -43,7 +43,7 @@ from aorta.cli.triage import (
     execute_list_mitigations,
     execute_triage_run,
 )
-from aorta.run.cli_helpers import configure_verbose_logging
+from aorta.run.cli_helpers import configure_verbose_logging, parse_csv
 from aorta.triage.recipe import RecipeSchemaError, load_recipe_mapping
 
 _BYPASS_TOKENS: frozenset[str] = frozenset({"--help", "-h"})
@@ -415,7 +415,7 @@ def sweep_run(
 
     is_probe_flow = has_command or recipe_mode == "probe"
     if is_probe_flow:
-        if collect:
+        if parse_csv(collect):
             raise click.UsageError(
                 "--collect applies to the workload flow only; it has no effect "
                 "on a probe/subprocess run (a user command after '--' or a "

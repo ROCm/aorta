@@ -19,6 +19,7 @@ from aorta.triage.recipe import (
     Recipe,
     RecipeCellError,
     RecipeSchemaError,
+    _parse_collect,
     build_recipe_from_flags,
     inline_env_name,
     load_recipe,
@@ -169,6 +170,11 @@ def test_collect_wrong_type_rejected(tmp_path):
         load_recipe(_write_yaml(tmp_path, text))
 
 
+def test_collect_recipe_error_uses_recipe_field_label():
+    with pytest.raises(RecipeSchemaError, match=r"^recipe\.collect:"):
+        _parse_collect("recipe", "layer_numerics")
+
+
 def test_collect_from_flags(tmp_path):
     r = build_recipe_from_flags(
         workload="fsdp",
@@ -179,6 +185,18 @@ def test_collect_from_flags(tmp_path):
         collect=("layer_numerics",),
     )
     assert r.collect == ("layer_numerics",)
+
+
+def test_collect_flag_error_uses_cli_label():
+    with pytest.raises(RecipeSchemaError, match=r"^--collect:"):
+        build_recipe_from_flags(
+            workload="fsdp",
+            mitigation_axis="none",
+            environment_axis="local",
+            trials=1,
+            steps=1,
+            collect=("not_a_collector",),
+        )
 
 
 def test_unknown_top_level_key_rejected(tmp_path):

@@ -664,14 +664,15 @@ def _parse_collect(path_hint: str, raw: Any) -> tuple[str, ...]:
 
     if raw is None:
         return ()
+    label = path_hint if path_hint.startswith("--") else f"{path_hint}.collect"
     if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
         raise RecipeSchemaError(
-            f"{path_hint}.collect: must be a list of strings, got {raw!r}"
+            f"{label}: must be a list of strings, got {raw!r}"
         )
     unknown = [x for x in raw if x not in KNOWN_RECIPES]
     if unknown:
         raise RecipeSchemaError(
-            f"{path_hint}.collect: unknown collector recipe(s) {unknown}; "
+            f"{label}: unknown collector recipe(s) {unknown}; "
             f"valid: {sorted(KNOWN_RECIPES)}"
         )
     # De-duplicate, preserving first-seen order (dict keys are ordered).
