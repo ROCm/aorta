@@ -8,12 +8,10 @@ layer/step to go bad and captures the run-up trajectory leading to it,
 without editing the training script (it patches the class ``__init__`` and
 attaches hooks the moment the real model is built).
 
-This submodule is the platform half of the ``--collect layer_numerics``
-collector. The script itself (:data:`SCRIPT_PATH`) is launched as a
-``runpy`` front-end around a workload's entry script; a subprocess-shaped
-workload wrapper reads ``config["_aorta_collect"]`` and, when
-``"layer_numerics"`` is present, rewrites its launch argv to run the entry
-*through* this script with the :func:`build_env` env bundle applied.
+This submodule is the platform half of the planned ``--collect layer_numerics``
+collector. Dispatcher validation accepts the collector name today; follow-up
+wiring will launch the script (:data:`SCRIPT_PATH`) as a ``runpy`` front-end
+around a workload's entry script with the :func:`build_env` env bundle applied.
 
 The script is a verbatim upstream drop (see ``README.md`` for provenance);
 all tunables are ``NANLOG_*`` environment variables, so this package adds
@@ -25,12 +23,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-#: Absolute path to the logger script. The collector launches the workload
-#: entry as ``python <SCRIPT_PATH> <entry.py>`` so the hooks arm before the
-#: model is built. Exposed as data (not a function) so callers -- notably
-#: the aorta-internal ``recom_repro`` wrapper's argv builder -- can compute
-#: a docker bind-mount from ``SCRIPT_PATH.parent`` without importing torch.
-SCRIPT_PATH: Path = Path(__file__).parent / "instrument_nan_logger.py"
+#: Absolute path to the logger script. Future collector wiring launches the
+#: workload entry as ``python <SCRIPT_PATH> <entry.py>`` so the hooks arm before
+#: the model is built. Exposed as data (not a function) so downstream callers
+#: can compute a docker bind-mount from ``SCRIPT_PATH.parent`` without importing
+#: torch.
+SCRIPT_PATH: Path = (Path(__file__).parent / "instrument_nan_logger.py").resolve()
 
 #: Default ``NANLOG_*`` bundle the collector applies. Chosen to match the
 #: capture that produced the residual-NaN bundle: all seven channels on,
@@ -72,6 +70,9 @@ def build_env(
     env: dict[str, str] = dict(_DEFAULTS)
     env["NANLOG_DIR"] = str(Path(results_dir) / OUTPUT_SUBDIR)
     if overrides:
+        invalid = sorted(key for key in overrides if not key.startswith("NANLOG_"))
+        if invalid:
+            raise ValueError(f"build_env overrides must be NANLOG_* keys: {invalid}")
         env.update(overrides)
     return env
 

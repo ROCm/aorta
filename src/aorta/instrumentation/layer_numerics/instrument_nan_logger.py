@@ -117,6 +117,11 @@ import time
 from collections import deque
 from pathlib import Path
 
+if __name__ == "__main__" and len(sys.argv) < 2:
+    sys.stderr.write("nanlog: usage: python instrument_nan_logger.py <target_script.py> [args...]\n")
+    sys.stderr.flush()
+    sys.exit(2)
+
 import torch
 
 # ---------------------------------------------------------------------------

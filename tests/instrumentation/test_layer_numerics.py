@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from aorta.instrumentation.layer_numerics import (
     OUTPUT_SUBDIR,
     SCRIPT_PATH,
@@ -24,12 +26,19 @@ def test_registered_as_known_recipe() -> None:
 
 
 def test_script_path_exists_and_is_the_logger() -> None:
+    assert SCRIPT_PATH.is_absolute()
     assert SCRIPT_PATH.is_file()
     assert SCRIPT_PATH.name == "instrument_nan_logger.py"
     # Sanity: it's the real logger, not an empty placeholder.
     text = SCRIPT_PATH.read_text(encoding="utf-8")
     assert "NANLOG_DIR" in text
     assert 'if __name__ == "__main__"' in text  # standalone entry preserved
+
+
+def test_public_package_docs_do_not_name_private_downstream_workloads() -> None:
+    text = SCRIPT_PATH.with_name("__init__.py").read_text(encoding="utf-8")
+    assert "aorta" + "-internal" not in text
+    assert "recom" + "_repro" not in text
 
 
 def test_build_env_points_nanlog_dir_into_results_tree() -> None:
@@ -63,6 +72,11 @@ def test_build_env_overrides_win() -> None:
 def test_build_env_override_can_redirect_output() -> None:
     env = build_env(Path("/tmp/x"), overrides={"NANLOG_DIR": "/custom/out"})
     assert env["NANLOG_DIR"] == "/custom/out"
+
+
+def test_build_env_rejects_non_nanlog_overrides() -> None:
+    with pytest.raises(ValueError, match="NANLOG_"):
+        build_env(Path("/tmp/x"), overrides={"PATH": "/unexpected"})
 
 
 def test_build_env_does_not_mutate_defaults() -> None:
