@@ -352,6 +352,116 @@ class TestRunTrials:
             "timeout_per_trial": None,
         }
 
+    def test_collect_injected_into_config(self, tmp_path):
+        """``RunRequest.collect`` lands at ``config['_aorta_collect']`` as a list.
+
+        This is the single seam a workload reads to decide whether to
+        attach a collector (e.g. the recom_repro wrapper launching the
+        layer_numerics logger). Injected AFTER ``config_overrides`` merge,
+        so the reserved-``_aorta_*`` rejection guards the slot.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_capturing"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_capturing",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+            )
+            run_trials(req)
+        # Stored as a plain list (JSON-safe), not the source tuple.
+        assert captured_config["_aorta_collect"] == ["layer_numerics"]
+
+    def test_collect_absent_when_empty(self, tmp_path):
+        """No ``_aorta_collect`` key when ``RunRequest.collect`` is empty.
+
+        Every existing run (no ``--collect``) must round-trip with the key
+        absent so the JSON-serialised trial result shape is unchanged.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "nocollect"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(workload="nocollect", trials=1, results_dir=tmp_path)
+            run_trials(req)
+        assert "_aorta_collect" not in captured_config
+
+    def test_collect_survives_trial_json_roundtrip(self, tmp_path):
+        """``_aorta_collect`` is a plain list, so the trial JSON dump needs
+        no sanitizer for it (unlike ``_aorta_probe_extras``)."""
+        import json
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                pass
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_json"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_json",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics", "rocprof"),
+            )
+            run_trials(req)
+
+        written = list(tmp_path.rglob("trial_*.json"))
+        assert written, "expected a per-trial JSON to be written"
+        loaded = json.loads(written[0].read_text(encoding="utf-8"))
+        assert loaded["config"]["_aorta_collect"] == ["layer_numerics", "rocprof"]
+
     def test_cleanup_error_is_logged_not_swallowed(self, tmp_path, caplog):
         """A failing ``cleanup()`` is logged so leaked resources are visible."""
         import logging
