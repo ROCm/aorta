@@ -98,6 +98,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "pytest-timeout>=2.1.0",
     "pytest-xdist>=3.3.0",
+    "pytest-forked>=1.6.0",  # per-test process isolation for the CPU CI gate
     "pre-commit>=3.0.0",
     "black>=23.0.0",
     "isort>=5.12.0",

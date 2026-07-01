@@ -15,3 +15,4 @@ pre-commit>=3.0.0
 # Optional: useful testing utilities
 pytest-timeout>=2.1.0
 pytest-xdist>=3.3.0  # For parallel test execution
+pytest-forked>=1.6.0  # Per-test process isolation (used by the CPU CI gate; see docs/ci-testing-plan.md)
