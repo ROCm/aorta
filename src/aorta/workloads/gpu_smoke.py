@@ -10,7 +10,7 @@ Primary purpose: a hardware-free **emulator / CI smoke test**. Run the whole
 ``aorta triage run`` under the mirage GPU emulator (rocjitsu) and this workload's
 GPU kernel executes on the simulated device:
 
-    mirage run --profile rocjitsu-MI350X -- \
+    mirage run --profile mi350x -- \
         aorta triage run --recipe recipes/gpu-smoke-emulated.yaml
 
 It is also a useful "is the GPU usable at all?" probe on real hardware.

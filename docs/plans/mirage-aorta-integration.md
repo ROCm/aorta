@@ -36,8 +36,9 @@ honours it.
 Both default `None`, so every existing environment, recipe, and sidecar is
 unchanged. The registry (`environments.py`) and the JSON sidecar loader
 (`sidecar.py`) accept the new keys; a built-in `emulated-rocjitsu` environment
-(`mirage_profile: rocjitsu-MI350X`) resolves out-of-box against a stock mirage
-install. The dispatcher already serialises the whole descriptor into
+(`mirage_profile: mi350x`) resolves when the profile exists (scripts create it
+on first use). A companion `emulated-rocjitsu-dbt` environment targets
+rocjitsu-dbt on physical GPUs. The dispatcher already serialises the whole descriptor into
 `_aorta_environment`, so no dispatcher change is needed to carry the new fields.
 
 ### Launch backend
@@ -69,17 +70,33 @@ end-to-end GPU check and is ideal as a hardware-free emulator/CI smoke test.
 
 ## Usage
 
-```sh
-# one-time: create/confirm a mirage rocjitsu profile (or use the built-in)
-mirage profile show rocjitsu-MI350X
+**Reproduction guide:** [docs/emulated-gpu-mirage-setup.md](../emulated-gpu-mirage-setup.md)
 
-# run a triage recipe on the emulated GPU
-mirage run --profile rocjitsu-MI350X -- \
+```sh
+# Build mirage (rocm-systems/emulation/mirage), then from this repo:
+export MIRAGE_BIN=/path/to/mirage
+
+# Recommended: vLLM container path (fast torch)
+./scripts/emulation/run_mirage_container.sh gpu-smoke
+./scripts/emulation/run_mirage_container.sh probe
+
+# rocjitsu-dbt on a machine with GPUs
+EMULATOR=rocjitsu-dbt ./scripts/emulation/run_mirage_container.sh gpu-smoke
+
+# Full CLI matrix (12 commands × rocjitsu + rocjitsu-dbt)
+./scripts/emulation/run_mirage_matrix.sh
+```
+
+Host-only path (slow under rocjitsu CPU emulation):
+
+```sh
+mirage profile create mi350x --emulator rocjitsu --agent MI350X --no-input
+mirage run --profile mi350x -- \
     aorta triage run --recipe recipes/gpu-smoke-emulated.yaml
 ```
 
-Prerequisites on the run host: the `mirage` CLI on `$PATH` (or `$MIRAGE_BIN`),
-the rocjitsu runtime available to mirage, and a ROCm `torch` for the target.
+Prerequisites: `mirage` CLI (`$MIRAGE_BIN`), rocjitsu runtime, and for the
+recommended path a ROCm torch inside the vLLM container image.
 
 ## Capabilities & limitations
 

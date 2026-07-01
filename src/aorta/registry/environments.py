@@ -38,14 +38,18 @@ BUILTIN_ENVIRONMENTS: dict[str, dict[str, str | None]] = {
     "default": {},
     # GPU-emulated baseline: run the workload under the mirage control plane +
     # rocjitsu software emulator (no physical GPU). `mirage_profile` names the
-    # mirage built-in profile `rocjitsu-MI350X` (MI350X = gfx950, a single-GPU
-    # CDNA4 node), so this resolves out-of-box against a stock mirage install;
-    # `emulator` is a convenience hint. For multi-GPU, create a custom mirage
-    # profile and point a sidecar/plugin environment at it. Consumed by
-    # aorta.emulation.mirage_launch.
+    # mirage profile `mi350x` (MI350X = gfx950, single-GPU CDNA4 node). Scripts
+    # under `scripts/emulation/` create this profile on first use if missing.
+    # `emulator` is a convenience hint. Consumed by aorta.emulation.mirage_launch.
     "emulated-rocjitsu": {
         "emulator": "rocjitsu",
-        "mirage_profile": "rocjitsu-MI350X",
+        "mirage_profile": "mi350x",
+    },
+    # Same as emulated-rocjitsu but uses rocjitsu-dbt (dynamic binary translation
+    # onto a physical GPU). Requires supported host hardware.
+    "emulated-rocjitsu-dbt": {
+        "emulator": "rocjitsu-dbt",
+        "mirage_profile": "dbt-mi350x",
     },
 }
 

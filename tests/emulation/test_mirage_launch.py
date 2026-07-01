@@ -62,7 +62,12 @@ class TestEnvironmentSchema:
     def test_builtin_emulated_environment(self):
         env = get_environment("emulated-rocjitsu")
         assert env.emulator == "rocjitsu"
-        assert env.mirage_profile == "rocjitsu-MI350X"
+        assert env.mirage_profile == "mi350x"
+
+    def test_builtin_emulated_dbt_environment(self):
+        env = get_environment("emulated-rocjitsu-dbt")
+        assert env.emulator == "rocjitsu-dbt"
+        assert env.mirage_profile == "dbt-mi350x"
 
 
 class TestSidecar:
