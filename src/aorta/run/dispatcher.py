@@ -606,6 +606,22 @@ def _run_single_trial(
     if request.probe_extras is not None:
         config["_aorta_probe_extras"] = dict(request.probe_extras)
 
+    # Thread the validated collector recipe names into the workload config
+    # under a reserved key so a workload can decide whether to attach a
+    # collector (e.g. the recom_repro wrapper rewrites its launch argv to
+    # run the entry through the layer_numerics NaN logger when
+    # "layer_numerics" is present). Same reserved-``_aorta_*`` convention
+    # as ``_aorta_environment`` above; ``run_trials`` rejects user-supplied
+    # ``_aorta_*`` keys in ``config_overrides`` so this can't clobber a
+    # caller value. Injected only when non-empty so existing trials (no
+    # ``--collect``) round-trip with the key absent -- back-compat. Stored
+    # as a plain ``list[str]`` (JSON-safe; the trial-JSON dump needs no
+    # sanitizer for it, unlike ``_aorta_probe_extras``). The platform
+    # itself launches no collector for subprocess workloads -- it threads
+    # the names, the wrapper acts on them.
+    if request.collect:
+        config["_aorta_collect"] = list(request.collect)
+
     # Snapshot the env BEFORE applying mitigation / extra_env so the
     # ``finally`` block can restore both the dispatcher's overlay and
     # any workload-side mutations introduced by ``setup()`` / ``run()``.
