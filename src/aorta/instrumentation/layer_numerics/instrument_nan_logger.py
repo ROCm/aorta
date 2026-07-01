@@ -122,7 +122,7 @@ if __name__ == "__main__" and len(sys.argv) < 2:
     sys.stderr.flush()
     sys.exit(2)
 
-import torch
+import torch  # noqa: E402 - keep no-arg usage path dependency-light.
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -743,9 +743,6 @@ def _write_summary() -> None:
 # ---------------------------------------------------------------------------
 # Install + run target
 # ---------------------------------------------------------------------------
-_install_autohook()
-_install_optimizer_autohook()
-
 if __name__ == "__main__":
     import atexit
     atexit.register(_write_summary)
@@ -753,6 +750,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         _log("usage: python instrument_nan_logger.py <target_script.py> [args...]")
         sys.exit(2)
+    _install_autohook()
+    _install_optimizer_autohook()
     target = Path(sys.argv[1]).resolve()
     sys.argv = [str(target)] + sys.argv[2:]
     _log(f"running target {target}")
