@@ -110,6 +110,7 @@ class TestRunRequest:
         assert req.config_overrides == {}
         assert req.results_dir == Path("results")
         assert req.collect == ()
+        assert req.collect_options == {}
 
     def test_custom_values(self):
         """RunRequest accepts custom values."""
@@ -123,6 +124,7 @@ class TestRunRequest:
             config_overrides={"batch_size": 32},
             results_dir=Path("/tmp/results"),
             collect=("rocprof",),
+            collect_options={"rocprof": {"FORMAT": "json"}},
         )
         assert req.workload == "fsdp"
         assert req.trials == 3
@@ -133,6 +135,7 @@ class TestRunRequest:
         assert req.config_overrides == {"batch_size": 32}
         assert req.results_dir == Path("/tmp/results")
         assert req.collect == ("rocprof",)
+        assert req.collect_options == {"rocprof": {"FORMAT": "json"}}
 
     def test_is_frozen(self):
         """RunRequest is immutable."""
@@ -152,22 +155,26 @@ class TestRunRequest:
         """
         extra_env_in = {"FOO": "1"}
         config_in = {"steps": 10, "nested": {"k": "v"}}
+        collect_options_in = {"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}}
 
         req = RunRequest(
             workload="w",
             trials=1,
             extra_env=extra_env_in,
             config_overrides=config_in,
+            collect_options=collect_options_in,
         )
 
         extra_env_in["FOO"] = "999"
         extra_env_in["NEW"] = "added"
         config_in["steps"] = 999
         config_in["nested"]["k"] = "modified"
+        collect_options_in["layer_numerics"]["NANLOG_SAMPLE_EVERY"] = "999"
 
         assert req.extra_env == {"FOO": "1"}
         assert req.config_overrides["steps"] == 10
         assert req.config_overrides["nested"]["k"] == "v"
+        assert req.collect_options["layer_numerics"]["NANLOG_SAMPLE_EVERY"] == "1"
 
 
 class TestRunTrials:
@@ -205,6 +212,39 @@ class TestRunTrials:
             )
             with pytest.raises(ValueError, match="Invalid extra_env keys"):
                 run_trials(req)
+
+    def test_rejects_collect_options_without_enabled_collector(self, tmp_path):
+        req = RunRequest(
+            workload="anything",
+            trials=1,
+            collect=("rocprof",),
+            collect_options={"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}},
+            results_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match="not enabled in collect"):
+            run_trials(req)
+
+    def test_rejects_non_mapping_collect_options(self, tmp_path):
+        req = RunRequest(
+            workload="anything",
+            trials=1,
+            collect=("layer_numerics",),
+            collect_options=["layer_numerics"],  # type: ignore[arg-type]
+            results_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match="collect_options must be a mapping"):
+            run_trials(req)
+
+    def test_rejects_non_string_collect_option_values(self, tmp_path):
+        req = RunRequest(
+            workload="anything",
+            trials=1,
+            collect=("layer_numerics",),
+            collect_options={"layer_numerics": {"NANLOG_SAMPLE_EVERY": 1}},  # type: ignore[dict-item]
+            results_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match=r"dict\[str, str\]"):
+            run_trials(req)
 
     def test_rejects_reserved_aorta_prefix_in_config_overrides(self, tmp_path):
         """``_aorta_*`` keys are reserved for platform-supplied values

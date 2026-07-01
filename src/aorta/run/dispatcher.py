@@ -270,10 +270,10 @@ class RunRequest:
         # Defensively deep-copy mutable dict fields.  ``frozen=True``
         # blocks attribute reassignment, so we use
         # ``object.__setattr__`` to install the copies.
-        for field_name in ("extra_env", "config_overrides"):
+        for field_name in ("extra_env", "config_overrides", "collect_options"):
             object.__setattr__(self, field_name, copy.deepcopy(getattr(self, field_name)))
-        # ``probe_extras`` is the same pattern as the two dict fields
-        # above -- frozen blocks attribute reassignment but does not
+        # ``probe_extras`` is the same pattern as the dict fields above --
+        # frozen blocks attribute reassignment but does not
         # stop the caller from mutating the nested dict. Deep-copy on
         # construction so an in-flight request can never be mutated
         # out from under the dispatcher. ``None`` short-circuits.
@@ -321,6 +321,27 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
         raise ValueError(
             f"Unknown collector recipes: {sorted(invalid_collectors)}. "
             f"Valid: {sorted(KNOWN_RECIPES)}"
+        )
+    if not isinstance(request.collect_options, dict):
+        raise ValueError(
+            "collect_options must be a mapping of collector name -> dict[str, str]"
+        )
+    stale_collect_options = sorted(set(request.collect_options) - set(request.collect))
+    if stale_collect_options:
+        raise ValueError(
+            "collect_options provided for collectors not enabled in collect: "
+            f"{stale_collect_options}"
+        )
+    bad_collect_options = [
+        name
+        for name, opts in request.collect_options.items()
+        if not isinstance(opts, dict)
+        or not all(isinstance(k, str) and isinstance(v, str) for k, v in opts.items())
+    ]
+    if bad_collect_options:
+        raise ValueError(
+            "collect_options entries must be dict[str, str]; invalid collectors: "
+            f"{bad_collect_options}"
         )
 
     # 3. Validate ``extra_env`` keys.  The CLI validates this at parse
