@@ -19,6 +19,7 @@ from aorta.triage.recipe import (
     Recipe,
     RecipeCellError,
     RecipeSchemaError,
+    _parse_collect,
     build_recipe_from_flags,
     inline_env_name,
     load_recipe,
@@ -135,6 +136,67 @@ def test_missing_required_top_level(tmp_path):
     text = _MINIMAL_YAML.replace("workload: fsdp\n", "")
     with pytest.raises(RecipeSchemaError, match="missing required key 'workload'"):
         load_recipe(_write_yaml(tmp_path, text))
+
+
+# ---- collect (collector recipes) ------------------------------------------
+
+
+def test_collect_defaults_empty(tmp_path):
+    r = load_recipe(_write_yaml(tmp_path, _MINIMAL_YAML))
+    assert r.collect == ()
+
+
+def test_collect_parsed_from_recipe(tmp_path):
+    text = _MINIMAL_YAML + "collect: [layer_numerics]\n"
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.collect == ("layer_numerics",)
+
+
+def test_collect_dedups_preserving_order(tmp_path):
+    text = _MINIMAL_YAML + "collect: [layer_numerics, rocprof, layer_numerics]\n"
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.collect == ("layer_numerics", "rocprof")
+
+
+def test_collect_unknown_recipe_rejected(tmp_path):
+    text = _MINIMAL_YAML + "collect: [not_a_collector]\n"
+    with pytest.raises(RecipeSchemaError, match="unknown collector recipe"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_collect_wrong_type_rejected(tmp_path):
+    text = _MINIMAL_YAML + "collect: layer_numerics\n"  # string, not a list
+    with pytest.raises(RecipeSchemaError, match="must be a list of strings"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_collect_recipe_error_uses_recipe_field_label():
+    with pytest.raises(RecipeSchemaError, match=r"^recipe\.collect:"):
+        _parse_collect("recipe", "layer_numerics")
+
+
+def test_collect_from_flags(tmp_path):
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="local",
+        trials=1,
+        steps=1,
+        collect=("layer_numerics",),
+    )
+    assert r.collect == ("layer_numerics",)
+
+
+def test_collect_flag_error_uses_cli_label():
+    with pytest.raises(RecipeSchemaError, match=r"^--collect:"):
+        build_recipe_from_flags(
+            workload="fsdp",
+            mitigation_axis="none",
+            environment_axis="local",
+            trials=1,
+            steps=1,
+            collect=("not_a_collector",),
+        )
 
 
 def test_unknown_top_level_key_rejected(tmp_path):

@@ -53,6 +53,9 @@ _TRIAGE_TOP_LEVEL = frozenset(
         "cells",
         "workload_config",
         "save_logs",
+        # Cross-cutting collector names attached to every cell (e.g.
+        # layer_numerics). Not a matrix axis.
+        "collect",
         # Issue #232: collect-until-N stopping rule (valid in both modes).
         "stop_after",
     }
@@ -354,6 +357,14 @@ class Recipe:
             **rank-0 only** -- matches the trial-JSON write guarantee.
             Wrappers running on non-rank-0 won't see the keys and
             should treat capture as off there.
+        collect: Collector recipe names attached to every cell (e.g.
+            ``("layer_numerics",)``). Cross-cutting capture, not a matrix
+            axis -- the same collectors run in every cell. Forwarded to each
+            cell's ``RunRequest.collect``; the dispatcher validates them
+            against ``KNOWN_RECIPES`` and threads them into
+            ``config['_aorta_collect']`` for the workload to act on. Empty
+            tuple (default) means no collector -- identical to today's
+            recipes. Set via the recipe ``collect:`` key or ``--collect``.
     """
 
     schema_version: int
@@ -369,6 +380,15 @@ class Recipe:
     source_sha256: str | None = None
     workload_config: dict[str, Any] = field(default_factory=dict)
     save_logs: bool = False
+    # Collector recipe names attached to every cell (e.g. ``layer_numerics``
+    # for the per-layer NaN logger). Cross-cutting capture, NOT a matrix
+    # axis -- the same collectors run in every cell. Forwarded verbatim to
+    # each cell's ``RunRequest.collect``; the dispatcher validates the names
+    # against ``KNOWN_RECIPES`` and threads them to ``config['_aorta_collect']``
+    # for the workload to act on. Empty tuple (the default) is behaviourally
+    # identical to today's recipes (no collector). Settable from the recipe
+    # ``collect:`` key or the ``--collect`` CLI flag (both flow here).
+    collect: tuple[str, ...] = ()
     # Issue #232: collect-until-N stopping rule applied per cell. ``None``
     # preserves the legacy fixed-``trials`` behaviour. When set, the cell
     # runs up to ``stop_after.max_trials`` trials, stopping early once
@@ -624,6 +644,39 @@ def _parse_workload_config(path_hint: str, raw: Any) -> dict[str, Any]:
             )
         out[k] = v
     return out
+
+
+def _parse_collect(path_hint: str, raw: Any) -> tuple[str, ...]:
+    """Validate a ``collect:`` list of collector recipe names.
+
+    Returns an empty tuple when ``raw`` is None / missing so the caller can
+    call ``_parse_collect(hint, data.get("collect"))`` without branching.
+    Names are validated against :data:`aorta.run.collectors.KNOWN_RECIPES`
+    at load time so an unknown collector fails the whole recipe up front
+    (matching the dispatcher's runtime check) rather than after cells have
+    already run. Order is preserved and duplicates are de-duplicated while
+    keeping first-seen order.
+    """
+    # Local import keeps the triage->run layering explicit; collectors is a
+    # leaf module so there is no cycle, but importing at call time avoids any
+    # top-of-module import-order coupling.
+    from aorta.run.collectors import KNOWN_RECIPES
+
+    if raw is None:
+        return ()
+    label = path_hint if path_hint.startswith("--") else f"{path_hint}.collect"
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise RecipeSchemaError(
+            f"{label}: must be a list of strings, got {raw!r}"
+        )
+    unknown = [x for x in raw if x not in KNOWN_RECIPES]
+    if unknown:
+        raise RecipeSchemaError(
+            f"{label}: unknown collector recipe(s) {unknown}; "
+            f"valid: {sorted(KNOWN_RECIPES)}"
+        )
+    # De-duplicate, preserving first-seen order (dict keys are ordered).
+    return tuple(dict.fromkeys(raw))
 
 
 def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
@@ -1030,6 +1083,8 @@ def _build_recipe(
             f"recipe.save_logs: must be a boolean, got {type(raw_save_logs).__name__}"
         )
 
+    collect = _parse_collect("recipe", data.get("collect"))
+
     raw_cells = data["cells"]
     if not isinstance(raw_cells, list) or not raw_cells:
         raise RecipeSchemaError(f"recipe.cells: must be a non-empty list, got {raw_cells!r}")
@@ -1081,6 +1136,7 @@ def _build_recipe(
         source_sha256=source_sha256,
         workload_config=workload_config,
         save_logs=raw_save_logs,
+        collect=collect,
         stop_after=stop_after,
     )
 
@@ -1095,6 +1151,7 @@ def build_recipe_from_flags(
     baseline_cell: str | None = None,
     confound_threshold: float = 1.15,
     sidecar_files: tuple[Path, ...] | None = None,
+    collect: tuple[str, ...] = (),
 ) -> Recipe:
     """Construct an in-memory :class:`Recipe` from the CLI flag shim.
 
@@ -1200,6 +1257,7 @@ def build_recipe_from_flags(
         sidecar_files=tuple(sidecar_files) if sidecar_files else (),
         source_path=None,
         source_sha256=None,
+        collect=_parse_collect("--collect", list(collect) if collect else None),
     )
 
 

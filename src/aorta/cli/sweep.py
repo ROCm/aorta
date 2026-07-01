@@ -43,7 +43,7 @@ from aorta.cli.triage import (
     execute_list_mitigations,
     execute_triage_run,
 )
-from aorta.run.cli_helpers import configure_verbose_logging
+from aorta.run.cli_helpers import configure_verbose_logging, parse_csv
 from aorta.triage.recipe import RecipeSchemaError, load_recipe_mapping
 
 _BYPASS_TOKENS: frozenset[str] = frozenset({"--help", "-h"})
@@ -346,6 +346,16 @@ def sweep() -> None:
     ),
 )
 @click.option(
+    "--collect",
+    default="",
+    help=(
+        "Comma-separated collector recipe names to attach to every cell "
+        "(e.g. 'layer_numerics' for the per-layer NaN logger). Cross-cutting "
+        "capture, not a matrix axis -- allowed together with --recipe, where "
+        "it overrides any recipe-pinned 'collect:'. Workload flow only."
+    ),
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
@@ -370,6 +380,7 @@ def sweep_run(
     max_trials: int | None,
     disable_detectors: tuple[str, ...],
     mitigation_files: tuple[Path, ...],
+    collect: str,
     verbose: int,
     argv: tuple[str, ...],
 ) -> None:
@@ -404,6 +415,12 @@ def sweep_run(
 
     is_probe_flow = has_command or recipe_mode == "probe"
     if is_probe_flow:
+        if parse_csv(collect):
+            raise click.UsageError(
+                "--collect applies to the workload flow only; it has no effect "
+                "on a probe/subprocess run (a user command after '--' or a "
+                "'mode: probe' recipe)."
+            )
         _dispatch_probe_flow(
             recipe=recipe,
             output=output,
@@ -442,6 +459,7 @@ def sweep_run(
             stop_after_events=stop_after_events,
             max_trials=max_trials,
             disable_detectors=disable_detectors,
+            collect=collect,
         )
 
 
@@ -514,6 +532,7 @@ def _dispatch_workload_flow(
     stop_after_events: int | None,
     max_trials: int | None,
     disable_detectors: tuple[str, ...],
+    collect: str = "",
 ) -> None:
     """Validate workload-flow-specific preconditions, then run the workload flow."""
     if env_passthrough_mode is not None:
@@ -547,6 +566,7 @@ def _dispatch_workload_flow(
         confound_threshold=confound_threshold,
         output_dir=output if output is not None else Path("triage_results"),
         mitigation_files=mitigation_files,
+        collect=collect,
     )
 
 
