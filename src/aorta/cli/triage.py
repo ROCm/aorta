@@ -267,12 +267,23 @@ def execute_triage_run(
         try:
             r = load_recipe(recipe, sidecar_files=mitigation_files or None)
             # --collect is not a flag-mode axis arg, so it's allowed with
-            # --recipe. When provided, it overrides a recipe-pinned collect;
-            # validate the names via the same loader path the recipe uses.
+            # --recipe. When provided, it overrides a recipe-pinned collect
+            # NAME list; validate via the same loader path the recipe uses.
+            # Per-collector options are recipe-file-only (the mapping form).
+            # When the CLI overrides the collector names, keep only options
+            # for collectors that are still enabled.
             cli_collect = parse_csv(collect)
             if cli_collect:
+                collect_names, _ = _parse_collect("--collect", list(cli_collect))
+                collect_options = {
+                    name: opts
+                    for name, opts in r.collect_options.items()
+                    if name in collect_names
+                }
                 r = dataclasses.replace(
-                    r, collect=_parse_collect("--collect", list(cli_collect))
+                    r,
+                    collect=collect_names,
+                    collect_options=collect_options,
                 )
         except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
             raise click.ClickException(str(exc)) from exc

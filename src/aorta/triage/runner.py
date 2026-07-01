@@ -910,6 +910,7 @@ def _run_one_cell(
         probe_extras=probe_extras_payload,
         stop_after=stop_after,
         collect=tuple(recipe.collect),
+        collect_options=dict(recipe.collect_options),
     )
 
     try:

@@ -104,7 +104,10 @@ class RunRequest:
         steps: Number of steps per trial (workload-specific).
         config_overrides: Additional workload configuration.
         results_dir: Directory to write per-trial JSON files.
-        collect: Collector recipe names (MVP: validated but no-op).
+        collect: Collector recipe names, threaded to
+            ``config['_aorta_collect']`` for the workload to act on.
+        collect_options: Per-collector option dicts (name -> {knob: value}),
+            threaded to ``config['_aorta_collect_options']`` when non-empty.
         sidecar_files: JSON sidecar files describing ad-hoc mitigations
             and/or environments (B3.1).  Forwarded to
             ``aorta.registry.get_mitigation`` /
@@ -242,6 +245,12 @@ class RunRequest:
     config_overrides: dict[str, Any] = field(default_factory=dict)
     results_dir: Path = field(default_factory=lambda: Path("results"))
     collect: tuple[str, ...] = field(default_factory=tuple)
+    # Per-collector options keyed by collector name -> dict[str, str] of
+    # knobs (e.g. {"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}}). Threaded
+    # into config["_aorta_collect_options"] when non-empty so a workload (or a
+    # shared collector helper) can apply them. Empty (default) = no options,
+    # key absent from config -- back-compat with every existing run.
+    collect_options: dict[str, dict[str, str]] = field(default_factory=dict)
     sidecar_files: tuple[Path, ...] = field(default_factory=tuple)
     dataset_index: int = 0
     mitigation_index: int = 0
@@ -261,10 +270,10 @@ class RunRequest:
         # Defensively deep-copy mutable dict fields.  ``frozen=True``
         # blocks attribute reassignment, so we use
         # ``object.__setattr__`` to install the copies.
-        for field_name in ("extra_env", "config_overrides"):
+        for field_name in ("extra_env", "config_overrides", "collect_options"):
             object.__setattr__(self, field_name, copy.deepcopy(getattr(self, field_name)))
-        # ``probe_extras`` is the same pattern as the two dict fields
-        # above -- frozen blocks attribute reassignment but does not
+        # ``probe_extras`` is the same pattern as the dict fields above --
+        # frozen blocks attribute reassignment but does not
         # stop the caller from mutating the nested dict. Deep-copy on
         # construction so an in-flight request can never be mutated
         # out from under the dispatcher. ``None`` short-circuits.
@@ -312,6 +321,27 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
         raise ValueError(
             f"Unknown collector recipes: {sorted(invalid_collectors)}. "
             f"Valid: {sorted(KNOWN_RECIPES)}"
+        )
+    if not isinstance(request.collect_options, dict):
+        raise ValueError(
+            "collect_options must be a mapping of collector name -> dict[str, str]"
+        )
+    stale_collect_options = sorted(set(request.collect_options) - set(request.collect))
+    if stale_collect_options:
+        raise ValueError(
+            "collect_options provided for collectors not enabled in collect: "
+            f"{stale_collect_options}"
+        )
+    bad_collect_options = [
+        name
+        for name, opts in request.collect_options.items()
+        if not isinstance(opts, dict)
+        or not all(isinstance(k, str) and isinstance(v, str) for k, v in opts.items())
+    ]
+    if bad_collect_options:
+        raise ValueError(
+            "collect_options entries must be dict[str, str]; invalid collectors: "
+            f"{bad_collect_options}"
         )
 
     # 3. Validate ``extra_env`` keys.  The CLI validates this at parse
@@ -621,6 +651,16 @@ def _run_single_trial(
     # the names, the wrapper acts on them.
     if request.collect:
         config["_aorta_collect"] = list(request.collect)
+
+    # Per-collector options (the mapping form of ``collect:``). Same reserved
+    # ``_aorta_*`` convention + non-empty-only injection as ``_aorta_collect``
+    # above. A plain nested ``dict[str, dict[str, str]]`` is JSON-safe, so the
+    # trial-JSON dump needs no sanitizer. A workload (or a shared collector
+    # helper) reads its own collector's options and applies them.
+    if request.collect_options:
+        config["_aorta_collect_options"] = {
+            name: dict(opts) for name, opts in request.collect_options.items()
+        }
 
     # Snapshot the env BEFORE applying mitigation / extra_env so the
     # ``finally`` block can restore both the dispatcher's overlay and
