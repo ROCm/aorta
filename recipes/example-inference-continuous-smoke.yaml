@@ -1,0 +1,53 @@
+# Smoke-test recipe for the `inference` workload, continuous-batch serving mode.
+#
+# Continuous batching here is a small, deterministic SIMULATION: each scheduler
+# tick admits queued arrivals (fixed: one per tick) up to `max_active_requests`,
+# runs one batched decode forward over the active requests, and retires finished
+# ones. It is public-safe and dependency-free — not a real serving stack.
+#
+# `steps` is the scheduler tick budget. Sizes are tiny so a smoke finishes fast.
+#
+#   aorta triage run --recipe recipes/example-inference-continuous-smoke.yaml --dry-run
+#   aorta triage run --recipe recipes/example-inference-continuous-smoke.yaml
+schema_version: 1
+ticket: EXAMPLE-INFERENCE-CONTINUOUS-SMOKE
+workload: inference
+trials: 1
+steps: 8
+
+workload_config:
+  mode: continuous_batch     # offline_batch|continuous_batch
+  seed: 1234
+  device: auto               # auto|cuda|cpu
+  dtype: bfloat16            # bfloat16|float16|float32
+  warmup_steps: 0
+
+  request:
+    batch_size: 6            # total requests to serve through the scheduler
+    prompt_len: 64
+    generate_tokens: 8
+
+  model:
+    kind: decoder_transformer  # mlp|encoder_transformer|decoder_transformer
+    hidden_size: 256
+    num_layers: 2
+    num_heads: 4
+    ffn_size: 1024
+    vocab_size: 32000
+
+  serving:
+    kv_cache: true
+    continuous_batch:
+      enabled: true
+      max_active_requests: 4
+      arrival_pattern: fixed
+
+  checks:
+    fail_on_nan_logits: true
+    fail_on_nonfinite_output: true
+    compare_logits_checksum: true
+
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local

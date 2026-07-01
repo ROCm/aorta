@@ -160,7 +160,7 @@ aorta agent \
   python3 my_repro.py --steps 100
 ```
 
-Install LLM support: `pip install 'aorta[agent]'` (pulls `litellm`).
+Install LLM support: `pip install 'amd-aorta[agent]'` (pulls `litellm`).
 Default backend is `fake` (deterministic, offline-safe).
 
 ### State file

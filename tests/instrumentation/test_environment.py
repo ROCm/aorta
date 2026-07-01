@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -593,6 +594,278 @@ class TestEnvSnapshot:
 # ---------------------------------------------------------------------------
 # collect_env contract: never raises + partial semantics + idempotency
 # ---------------------------------------------------------------------------
+
+
+class TestProbeStdioRedirect:
+    """fd-level capture of benign HIP/C-runtime probe noise (#220).
+
+    On a multi-GPU ROCm host the in-process ``import torch`` during the env
+    probe makes the HIP runtime ``dlopen`` write one
+    ``(null): No such file or directory`` line per GPU straight to fd 2.
+    ``_ProbeStdioRedirect`` must intercept those raw ``write(2, ...)`` syscalls
+    (which ``contextlib.redirect_stderr`` cannot) so they never reach the
+    operator's terminal, and re-emit them at DEBUG for post-hoc debugging.
+    """
+
+    def _with_outer_terminal(self, tmp_path: Path):
+        """Install a temp file on real fds 1/2; return (path, restore())."""
+        outer = tmp_path / "outer_terminal.txt"
+        sys.stdout.flush()
+        sys.stderr.flush()
+        outer_fd = os.open(
+            str(outer), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644
+        )
+        saved1, saved2 = os.dup(1), os.dup(2)
+        os.dup2(outer_fd, 1)
+        os.dup2(outer_fd, 2)
+
+        def restore():
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(saved1, 1)
+            os.dup2(saved2, 2)
+            os.close(saved1)
+            os.close(saved2)
+            os.close(outer_fd)
+
+        return outer, restore
+
+    def test_raw_fd2_writes_are_captured_not_leaked(self, tmp_path, caplog):
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            for _ in range(8):  # one (null) line per GPU on an 8-GPU host
+                os.write(2, b"(null): No such file or directory\n")
+            os.write(1, b"some toolchain chatter\n")
+            with caplog.at_level("DEBUG", logger=env_mod.log.name):
+                redirect.stop()
+        finally:
+            restore()
+
+        assert outer.read_text() == "", "probe noise leaked to the terminal"
+        assert any(
+            "(null): No such file or directory" in rec.getMessage()
+            for rec in caplog.records
+        ), "captured noise should be re-emitted at DEBUG"
+
+    @pytest.mark.parametrize(
+        "logger_name, propagate",
+        [
+            # utils.setup_logging: stderr handler on the root logger.
+            ("", True),
+            # CLI configure_verbose_logging (-v/-vv): handler on the "aorta"
+            # logger with propagate=False -- a root-only reroute would miss it.
+            ("aorta", False),
+        ],
+    )
+    def test_aorta_logs_reach_terminal_during_redirect(
+        self, tmp_path, logger_name, propagate
+    ):
+        """Aorta's own logs must survive the fd redirect (#221 review).
+
+        The redirect captures *all* of fd 1/2 for the probe body, which would
+        otherwise swallow aorta's own ``log.info`` (vanishing at -v, mislabeled
+        as benign HIP noise at -vv). ``_reroute_loggers`` repoints the stderr
+        StreamHandler at the real terminal for the window, so a real diagnostic
+        still reaches the operator while the C-level ``(null)`` noise does not.
+        Covers both wiring styles: the root logger (``setup_logging``) and the
+        "aorta" logger with ``propagate=False`` (the CLI verbosity path).
+        """
+        target = logging.getLogger(logger_name)
+        saved_handlers = target.handlers[:]
+        saved_level = target.level
+        saved_propagate = target.propagate
+        stream_handler = logging.StreamHandler(sys.stderr)
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            for handler in saved_handlers:
+                target.removeHandler(handler)
+            stream_handler.setLevel(logging.INFO)
+            target.addHandler(stream_handler)
+            target.setLevel(logging.INFO)
+            target.propagate = propagate
+
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            env_mod.log.info("real diagnostic from a probe")
+            os.write(2, b"(null): No such file or directory\n")
+            redirect.stop()
+        finally:
+            target.removeHandler(stream_handler)
+            for handler in saved_handlers:
+                target.addHandler(handler)
+            target.setLevel(saved_level)
+            target.propagate = saved_propagate
+            restore()
+
+        terminal_text = outer.read_text()
+        assert "real diagnostic from a probe" in terminal_text, (
+            "aorta's own INFO log was swallowed by the probe fd redirect"
+        )
+        assert "(null): No such file or directory" not in terminal_text, (
+            "benign HIP noise leaked to the terminal"
+        )
+
+    def test_stop_is_idempotent(self, tmp_path):
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            os.write(2, b"noise\n")
+            redirect.stop()
+            redirect.stop()  # must be a no-op, not crash or re-restore
+        finally:
+            restore()
+        assert outer.read_text() == ""
+
+    def test_start_partial_dup_failure_does_not_leak_fd(self, monkeypatch):
+        """A partial ``dup()`` must not orphan the first descriptor (#221).
+
+        If ``os.dup(1)`` succeeds but ``os.dup(2)`` raises (fd 2 already
+        closed/detached), ``start()`` falls back to probing unredirected -- but
+        the fd from the successful first ``dup()`` must be closed, not leaked.
+        """
+        redirect = env_mod._ProbeStdioRedirect()
+        real_dup = os.dup
+        duped: list[int] = []
+
+        def flaky_dup(fd):
+            if not duped:
+                new = real_dup(fd)
+                duped.append(new)
+                return new
+            raise OSError("simulated: fd 2 closed/detached")
+
+        monkeypatch.setattr(env_mod.os, "dup", flaky_dup)
+        redirect.start()
+
+        assert redirect._saved_out is None
+        assert redirect._saved_err is None
+        assert duped, "test should have exercised the first dup()"
+        with pytest.raises(OSError):
+            os.fstat(duped[0])  # orphan fd was closed, not leaked
+        redirect.stop()  # unredirected instance -> no-op, must not crash
+
+    def test_start_dup2_failure_closes_capture_file(self, monkeypatch):
+        """A ``dup2()`` failure after the temp file is created must close it (#221).
+
+        ``start()`` dups fds 1/2 successfully, then ``dup2`` raises. The
+        fallback restores the real fds (clearing ``_saved_out/_saved_err``),
+        which makes a later ``stop()`` short-circuit -- so ``start()`` itself
+        must close the capture file or it leaks the handle.
+        """
+        redirect = env_mod._ProbeStdioRedirect()
+        real_dup2 = os.dup2
+        calls: list[int] = []
+
+        def flaky_dup2(*args, **kwargs):
+            # Fail the first capture redirect; let _restore_fds() succeed.
+            if not calls:
+                calls.append(1)
+                raise OSError("simulated: dup2 failed")
+            return real_dup2(*args, **kwargs)
+
+        monkeypatch.setattr(env_mod.os, "dup2", flaky_dup2)
+        redirect.start()
+
+        assert redirect._saved_out is None
+        assert redirect._saved_err is None
+        assert redirect._capture is None, "capture temp file was leaked"
+        redirect.stop()  # no-op, must not crash
+
+    def test_start_fail_soft_on_non_oserror_flush(self, monkeypatch):
+        """A closed stream's flush() raises ValueError; start() must fail soft.
+
+        ``start()`` runs *before* ``collect_env()``'s try/except, so any
+        exception escaping it (here a ``ValueError`` from ``sys.stdout.flush``)
+        would break the never-raises contract (#221).
+        """
+        redirect = env_mod._ProbeStdioRedirect()
+
+        class _ClosedStream:
+            def flush(self):
+                raise ValueError("I/O operation on closed file")
+
+        monkeypatch.setattr(env_mod.sys, "stdout", _ClosedStream())
+        redirect.start()  # must not raise
+        redirect.stop()
+        # Setup aborted -> nothing left dangling.
+        assert redirect._saved_out is None
+        assert redirect._saved_err is None
+        assert redirect._capture is None
+
+    def test_stop_never_raises_when_streams_closed(self, tmp_path, monkeypatch):
+        """stop() runs in collect_env()'s finally and must never raise (#221)."""
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            os.write(2, b"noise\n")
+
+            class _ClosedStream:
+                def flush(self):
+                    raise ValueError("closed")
+
+            monkeypatch.setattr(env_mod.sys, "stdout", _ClosedStream())
+            try:
+                redirect.stop()  # must not raise despite flush ValueError
+            finally:
+                # Undo the closed-stdout patch before the outer-terminal
+                # teardown, which flushes sys.stdout itself.
+                monkeypatch.undo()
+        finally:
+            restore()
+        assert redirect._capture is None
+
+    def test_restore_fds_swallows_dup2_failure(self, tmp_path, monkeypatch):
+        """_restore_fds() must be best-effort: a dup2 EBADF must not escape."""
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            redirect = env_mod._ProbeStdioRedirect()
+            redirect.start()
+            real_dup2 = os.dup2
+
+            def boom_dup2(*_a, **_k):
+                raise OSError("simulated: EBADF on restore")
+
+            monkeypatch.setattr(env_mod.os, "dup2", boom_dup2)
+            try:
+                redirect.stop()  # must not raise even though restore dup2 fails
+            finally:
+                # Restore the real dup2 before the outer terminal teardown,
+                # which itself dup2()s fds 1/2 back to the test runner.
+                monkeypatch.setattr(env_mod.os, "dup2", real_dup2)
+        finally:
+            restore()
+        assert redirect._saved_out is None
+        assert redirect._saved_err is None
+
+    def test_collect_env_does_not_leak_probe_noise(
+        self, all_disabled, tmp_path, monkeypatch
+    ):
+        """End-to-end: fd-2 noise from a probe never reaches the terminal."""
+        original = env_mod._detect_runtime_context
+
+        def noisy_detect():
+            for _ in range(8):
+                os.write(2, b"(null): No such file or directory\n")
+            return original()
+
+        monkeypatch.setattr(env_mod, "_detect_runtime_context", noisy_detect)
+
+        outer, restore = self._with_outer_terminal(tmp_path)
+        try:
+            snapshot = collect_env()
+        finally:
+            restore()
+
+        assert isinstance(snapshot, EnvSnapshot)
+        assert outer.read_text() == "", "env probe leaked HIP noise to terminal"
+        # The benign noise is NOT a probe failure -> must not inflate partial.
+        assert not any(
+            "(null)" in reason for reason in snapshot.partial_reasons
+        )
 
 
 class TestCollectEnvContract:

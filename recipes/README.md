@@ -1,7 +1,13 @@
 # Triage recipes
 
-A triage **recipe** is the authoritative description of a `aorta triage run
---mode matrix` invocation: which `(mitigation x environment)` cells to run,
+> **Renamed (issue #248):** `aorta triage` and `aorta probe` are now the
+> single command **`aorta sweep`**. Use `aorta sweep run` everywhere this
+> guide says `aorta triage run`, and `aorta sweep run ... -- <cmd>` for the
+> subprocess (former `aorta probe`) flow. The old commands still work as
+> deprecated aliases that print a notice and delegate to the same engine.
+
+A triage **recipe** is the authoritative description of an `aorta sweep run --mode matrix`
+invocation: which `(mitigation x environment)` cells to run,
 per-cell trial / step counts, the ticket the matrix belongs to, and the
 speed-confound detection config.
 
@@ -172,25 +178,30 @@ workload_config:
 `same_stream_mode`, `stop_on_first_corruption`, `log_interval`).
 
 Because `race` is `launch_mode: distributed`, it MUST be launched under
-torchrun (a bare `aorta triage run` starts one process, WORLD_SIZE=1, and is
+torchrun (a bare `aorta sweep run` starts one process, WORLD_SIZE=1, and is
 refused by launch-mode validation). Use the `aorta` console script as
 torchrun's target -- `-m aorta` is not a runnable module:
 
 ```bash
 # validate only (no GPUs / no launcher):
-aorta triage run --recipe recipes/example-fsdp-smoke.yaml --dry-run
+aorta sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
 
 # single node, 2 ranks (bump --nproc_per_node to your GPU count):
-torchrun --standalone --nproc_per_node=2 $(which aorta) triage run \
+torchrun --standalone --nproc_per_node=2 $(which aorta) sweep run \
   --recipe recipes/example-fsdp-smoke.yaml
 
-# multi-node (1 rank/host x N hosts -- the AINIC topology):
+# multi-node, 1 rank per host (AINIC/Pollara -- 1 process owns all GPUs on the node):
 torchrun --nnodes=N --nproc_per_node=1 --rdzv-backend=c10d \
-  --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) triage run \
+  --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
+  --recipe recipes/example-fsdp-smoke.yaml
+
+# multi-node, 1 rank per GPU (IB / NVLink / generic fabric):
+torchrun --nnodes=N --nproc_per_node=8 --rdzv-backend=c10d \
+  --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
   --recipe recipes/example-fsdp-smoke.yaml
 ```
 
-Each rank runs the full `triage run`; the ranks find each other in
+Each rank runs the full `sweep run`; the ranks find each other in
 `dist.init_process_group()`. Cells run in-process per rank (sequentially),
 and results are written by **rank 0 only** (the dispatcher gates writes on
 `RANK`), so multi-rank launches don't clobber each other. This is the same
@@ -204,6 +215,26 @@ launch model as the `llm_determinism` workload.
 > `race: ignoring unknown workload_config key ...` and fix the recipe.
 > Note `verify_iterations` defaults to `10000` and `simulate_compute` to
 > `True`; cap these for smoke runs or a trial takes hours.
+
+### Race smoke recipes
+
+| Recipe | Purpose | Fabric |
+|---|---|---|
+| `recipes/race_smoke.yaml` | Fabric-agnostic sanity check (1 trial, 5 iters, model_dim=512). Works on NVLink, IB, AINIC, or SHM. | Any |
+| `recipes/ainic-smoke.yaml` | Same but forces `NCCL_NET_GDR_LEVEL=SYS` + dmabuf + GDR read to validate the AINIC/Pollara GDR path specifically. | AINIC only |
+
+Confirmed working on a single node with 8 GPUs (one rank per GPU):
+
+```bash
+# single node, 8 GPUs:
+torchrun --standalone --nproc_per_node=8 $(which aorta) sweep run \
+  --recipe recipes/race_smoke.yaml
+
+# AINIC cluster, multi-node (1 rank per host via Slurm):
+# see rccl_ainic/run-cell.sbatch
+```
+
+A green run proves: `compute_type=transformer`, `layers_verified > 0`, `layer_checksum_mismatches == 0`, `passed=true`. Use `recipes/ainic-gdr-flush-sdc.yaml` for the full SDC triage matrix.
 
 ## Output layout
 
@@ -268,7 +299,7 @@ real paths; a future B1 follow-up can drop this level of nesting via a
 
 Every run writes `recipe.resolved.yaml` alongside the matrix. The file is
 **a strict, schema-valid recipe** -- you can pass it back to
-`aorta triage run --recipe ...` directly. Inline-docker cells are
+`aorta sweep run --recipe ...` directly. Inline-docker cells are
 re-emitted in the `{ docker: <ref> }` shorthand so the same
 `_inline_<hash>` is re-derived without needing to ship a sidecar JSON
 next to the file.
@@ -280,7 +311,7 @@ so the run directory is self-contained for replay. The runner also prints
 the exact rerun command on stdout when sidecars are involved, e.g.:
 
 ```
-cd <run_dir> && aorta triage run --recipe recipe.resolved.yaml \
+cd <run_dir> && aorta sweep run --recipe recipe.resolved.yaml \
   --mitigations-file sidecars/foo.json
 ```
 
@@ -304,7 +335,7 @@ audit data is still preserved next to the run.
 The equivalent of `recipes/example-fsdp-smoke.yaml` as flag-mode CLI:
 
 ```
-aorta triage run --mode matrix \
+aorta sweep run --mode matrix \
   --workload fsdp \
   --mitigation-axis none,tf32_off,xnack \
   --environment-axis local \
@@ -333,7 +364,7 @@ packaging artifacts for sharing.
 Dry-run smoke:
 
 ```
-aorta probe --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
+aorta sweep run --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
 ```
 
 See `docs/probe-188/handout-templates.md` for per-template walkthroughs.

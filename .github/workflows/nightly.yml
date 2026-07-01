@@ -1,0 +1,98 @@
+name: Nightly wheels
+
+# Build a release-candidate wheel + sdist from the current main every night and
+# publish them to a single rolling "dev-wheels" pre-release, so customers can
+# install pre-release fixes between stable releases:
+#
+#   pip install "amd-aorta==X.Y.ZrcYYYYMMDD" \
+#     -f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
+#
+# The rc version is stamped at build time (scripts/bump_version.py --suffix) and
+# is NOT committed back to the repo. Old assets are pruned by cleanup_releases.yml.
+on:
+  schedule:
+    - cron: "0 11 * * *"  # 11:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write  # required to create/update the dev-wheels release + assets
+
+# Serialize every run that mutates the shared, rolling dev-wheels release/tag.
+# cleanup_releases.yml shares this group, so a nightly publish, a cleanup prune,
+# and any overlapping manual dispatch / cron run can never race on force-pushing
+# the `dev-wheels` tag or uploading/deleting its assets (which would leave the
+# tag pointing at an unpredictable commit or a mixed artifact set). Do NOT cancel
+# the in-progress run: a publish interrupted mid tag-push/upload is worse than a
+# brief queue wait, so newer runs queue behind it instead.
+concurrency:
+  group: dev-wheels-release
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    # Guard what can publish to the *shared* canonical dev-wheels release:
+    #   * scheduled cron: canonical repo only;
+    #   * manual dispatch on the canonical repo: only from `main` (a manual run
+    #     against an arbitrary branch must not stamp non-main code into the
+    #     shared rolling pre-release);
+    #   * manual dispatch on a fork: always allowed -- it publishes to the
+    #     fork's own dev-wheels release, so it's safe for testing.
+    if: >-
+      (github.event_name == 'schedule' && github.repository == 'ROCm/aorta') ||
+      (github.event_name == 'workflow_dispatch' &&
+        (github.repository != 'ROCm/aorta' || github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Stamp release-candidate version
+        run: |
+          suffix="rc$(date -u +%Y%m%d)"
+          if ! rc_version="$(python scripts/bump_version.py --suffix "${suffix}")"; then
+            echo "::error::Failed to stamp release-candidate version."
+            exit 1
+          fi
+          echo "Building nightly ${rc_version}."
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      # softprops/action-gh-release creates the dev-wheels tag on the first run
+      # but does NOT move it on subsequent runs, so the rolling tag (and the
+      # release's "commit" link) would keep pointing at the commit it was first
+      # cut from while the uploaded wheels come from the current run. Force-move
+      # the tag to the built commit first so the tag/release metadata stays
+      # consistent with the artifacts. Lightweight tag; the job's
+      # `contents: write` permission (via checkout's persisted credentials)
+      # authorizes the push.
+      - name: Point dev-wheels tag at the built commit
+        run: |
+          git tag -f dev-wheels "${GITHUB_SHA}"
+          git push --force origin "refs/tags/dev-wheels"
+
+      - name: Publish to rolling dev-wheels pre-release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: dev-wheels
+          name: "Nightly dev wheels"
+          body: |
+            Rolling pre-release wheels built nightly from `main`. These are
+            release candidates, not stable releases. Install a specific build:
+
+            ```
+            pip install "amd-aorta==X.Y.ZrcYYYYMMDD" \
+              -f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
+            ```
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          prerelease: true
+          make_latest: "false"  # never overtake the stable "Latest" release

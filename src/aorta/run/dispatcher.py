@@ -23,7 +23,7 @@ from aorta.instrumentation.environment import collect_env
 from aorta.registry import Environment, get_environment, get_mitigation
 from aorta.run.collectors import KNOWN_RECIPES
 from aorta.run.discovery import get_workload_class
-from aorta.run.results import TrialResult
+from aorta.run.results import TrialResult, trial_verdict
 from aorta.run.validation import validate_launch_mode
 from aorta.workloads import Workload, WorkloadResult
 
@@ -248,6 +248,14 @@ class RunRequest:
     save_logs: bool = False
     subprocess_argv: tuple[str, ...] | None = None
     probe_extras: dict[str, Any] | None = None
+    # Issue #232: collect-until-N stopping rule. When set (a
+    # :class:`aorta.triage.recipe.StopAfter`), ``trials`` is the hard cap
+    # (``max_trials``) and the loop breaks early once ``events``
+    # qualifying verdicts are observed. Typed as ``Any`` to keep this
+    # module's import graph cycle-free (same rationale as
+    # ``Recipe.probe_extras``); the loop only duck-types ``.events`` /
+    # ``.event_verdict``. ``kw_only`` so positional callers are unaffected.
+    stop_after: Any | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         # Defensively deep-copy mutable dict fields.  ``frozen=True``
@@ -414,6 +422,11 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             request.steps if request.steps is not None else "(workload default)",
         )
     results: list[TrialResult] = []
+    # Issue #232: ``request.trials`` is the hard cap (``max_trials`` when a
+    # stop_after rule is attached). ``events_seen`` tracks qualifying
+    # verdicts so the loop can break early once the target is met.
+    stop_after = request.stop_after
+    events_seen = 0
     for trial_idx in range(request.trials):
         if should_write:
             logger.info("trial %d/%d: starting", trial_idx + 1, request.trials)
@@ -440,8 +453,67 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
                 result.exit_status,
             )
         results.append(result)
+        if stop_after is not None and _trial_is_event(result, stop_after.event_verdict):
+            events_seen += 1
+            if events_seen >= stop_after.events:
+                if should_write:
+                    # "early" only when trials remain in the budget; hitting
+                    # the target on the final allowed trial is a cap reach,
+                    # not an early stop -- don't mislead operator logs.
+                    stopped_early = len(results) < request.trials
+                    logger.info(
+                        "stop_after: %d %r event(s) observed in %d trial(s) "
+                        "(target %d, cap %d) -- %s",
+                        events_seen,
+                        stop_after.event_verdict,
+                        len(results),
+                        stop_after.events,
+                        request.trials,
+                        "stopping cell early" if stopped_early else "cap reached",
+                    )
+                break
 
     return results
+
+
+def _trial_is_event(result: TrialResult, event_verdict: str) -> bool:
+    """Decide whether ``result`` counts as a ``stop_after`` event.
+
+    Uses the shared three-way :func:`aorta.run.results.trial_verdict`
+    predicate (issue #230) so the stop-count and the matrix pass / fail /
+    error columns can never disagree:
+
+    * ``event_verdict == "fail"`` -> the bug reproduced (genuine failure).
+    * ``event_verdict == "pass"`` -> a clean trial.
+    * ``event_verdict == "error"`` -> the trial never validly ran (infra
+      crash, launch failure, timeout with no recognised hang). Useful to
+      bail out of a sweep that's mostly flaking on infrastructure.
+
+    Note this is a behaviour refinement over the pre-#230 predicate
+    (``fail`` == any non-``ok`` exit): infra errors no longer count as
+    ``fail`` events -- they count as ``error`` events instead.
+
+    Raises:
+        ValueError: if ``event_verdict`` is not one of the canonical
+            :data:`aorta.triage.recipe._STOP_AFTER_EVENT_VERDICTS`
+            values. The recipe loader validates this up front, so a bad
+            value here means a programmatic caller bypassed the loader;
+            fail loudly rather than silently treat an unknown/typo'd
+            verdict as ``"fail"``.
+    """
+    # Validate against the canonical vocabulary the recipe schema exports
+    # rather than re-hardcoding the verdict set here. Imported locally
+    # because a module-level ``aorta.triage`` import would invert the
+    # layering (aorta.triage.runner imports this function) -- same
+    # rationale as ``RunRequest.stop_after`` being typed ``Any``.
+    from aorta.triage.recipe import _STOP_AFTER_EVENT_VERDICTS
+
+    if not isinstance(event_verdict, str) or event_verdict not in _STOP_AFTER_EVENT_VERDICTS:
+        raise ValueError(
+            f"event_verdict must be one of {sorted(_STOP_AFTER_EVENT_VERDICTS)}, "
+            f"got {event_verdict!r}"
+        )
+    return trial_verdict(result) == event_verdict
 
 
 def _run_single_trial(

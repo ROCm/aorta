@@ -1,8 +1,98 @@
 """Tests for TrialResult dataclass."""
 
+from types import SimpleNamespace
+
 import pytest
 
-from aorta.run.results import TrialResult
+from aorta.run.results import TrialResult, trial_verdict
+
+
+class TestTrialVerdict:
+    """Three-way shared verdict predicate (issue #230)."""
+
+    @staticmethod
+    def _trial(exit_status="ok", *, passed=None, metrics_verdict=None, workload="_subprocess"):
+        # ``workload`` defaults to the probe producer (``_subprocess``)
+        # because the metric-verdict path is only trusted for it; pass a
+        # different name to model a non-probe triage workload.
+        result = {}
+        if passed is not None:
+            result["passed"] = passed
+        if metrics_verdict is not None:
+            result["metrics"] = {"verdict": metrics_verdict}
+        return SimpleNamespace(exit_status=exit_status, result=result, workload=workload)
+
+    def test_probe_metric_verdict_is_authoritative(self):
+        # A probe ``error`` trial reports passed=False / workload_failed, but
+        # the metric carries the real three-way outcome.
+        t = self._trial(
+            exit_status="workload_failed", passed=False, metrics_verdict="error"
+        )
+        assert trial_verdict(t) == "error"
+
+    def test_probe_fail_metric(self):
+        t = self._trial(exit_status="workload_failed", passed=False, metrics_verdict="fail")
+        assert trial_verdict(t) == "fail"
+
+    def test_probe_pass_metric(self):
+        t = self._trial(exit_status="ok", passed=True, metrics_verdict="pass")
+        assert trial_verdict(t) == "pass"
+
+    def test_infra_failed_without_metric_is_error(self):
+        assert trial_verdict(self._trial("infrastructure_failed", passed=False)) == "error"
+
+    def test_setup_failed_without_metric_is_error(self):
+        assert trial_verdict(self._trial("workload_setup_failed", passed=False)) == "error"
+
+    def test_workload_failed_without_metric_is_fail(self):
+        assert trial_verdict(self._trial("workload_failed", passed=False)) == "fail"
+
+    def test_ok_passed_false_is_fail(self):
+        assert trial_verdict(self._trial("ok", passed=False)) == "fail"
+
+    def test_ok_is_pass(self):
+        assert trial_verdict(self._trial("ok", passed=True)) == "pass"
+
+    def test_missing_result_defaults_to_pass_on_ok(self):
+        assert trial_verdict(SimpleNamespace(exit_status="ok")) == "pass"
+
+    def test_unknown_metric_verdict_falls_through_to_status(self):
+        # A verdict string outside the canonical VALID_VERDICTS set is
+        # ignored; resolution falls back to exit_status.
+        t = self._trial(exit_status="ok", passed=True, metrics_verdict="bogus")
+        assert trial_verdict(t) == "pass"
+
+    def test_non_string_metric_verdict_is_ignored(self):
+        # A non-string verdict metric must never match (or raise on
+        # frozenset membership) -- fall back to exit_status.
+        t = self._trial(exit_status="workload_failed", passed=False, metrics_verdict=1)
+        assert trial_verdict(t) == "fail"
+
+    def test_non_probe_metric_verdict_is_not_trusted(self):
+        # ``metrics`` is a workload-owned free-form field: a non-probe
+        # workload may stash its own ``metrics["verdict"]`` that means
+        # something else. trial_verdict() must only trust it for the probe
+        # producer (``_subprocess``), so here a failed triage trial that
+        # happens to carry ``metrics["verdict"] == "pass"`` still resolves
+        # to ``fail`` from exit_status (review: oyazdanb, PR #236).
+        t = self._trial(
+            exit_status="workload_failed",
+            passed=False,
+            metrics_verdict="pass",
+            workload="some_triage_workload",
+        )
+        assert trial_verdict(t) == "fail"
+
+    def test_non_probe_error_status_ignores_pass_metric(self):
+        # Same guard for the infra-error path: a non-probe workload that
+        # crashed in infrastructure but left a stale ``metrics["verdict"]``
+        # of ``pass`` must still resolve to ``error``.
+        t = self._trial(
+            exit_status="infrastructure_failed",
+            metrics_verdict="pass",
+            workload="some_triage_workload",
+        )
+        assert trial_verdict(t) == "error"
 
 
 class TestTrialResult:

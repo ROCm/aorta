@@ -98,3 +98,6 @@ run_logs/
 # `.buckd/` is buck2's local daemon state.
 buck-out/
 .buckd/
+
+# actionlint binary (dev tool for linting workflows; install locally, don't commit).
+/actionlint

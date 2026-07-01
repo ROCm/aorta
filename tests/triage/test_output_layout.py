@@ -214,6 +214,23 @@ def test_resolve_run_dir_rejects_unknown_layout(tmp_path):
         resolve_run_dir(tmp_path, r, layout="")  # type: ignore[arg-type]
 
 
+def test_cell_directory_rejects_unknown_layout():
+    """Regression for PR #241 review: ``_cell_directory`` shares the
+    ``layout`` contract with ``resolve_run_dir`` but used to treat it as a
+    free-form str, so a typo (``"flatresume"``) silently rendered a
+    triage-style ``cells/<slug>/`` link for a probe run. It must reject
+    unknown values too.
+    """
+    from aorta.triage.output import _cell_directory
+
+    assert _cell_directory("a-b", "flat_resume") == "a-b/"
+    assert _cell_directory("a-b", "timestamped") == "cells/a-b/"
+    with pytest.raises(ValueError, match="layout must be"):
+        _cell_directory("a-b", "flatresume")
+    with pytest.raises(ValueError, match="layout must be"):
+        _cell_directory("a-b", "")
+
+
 def test_default_layout_is_byte_equivalent_to_timestamped(tmp_path):
     """Existing callers see no behaviour change -- the default is 'timestamped'."""
     r = _simple_recipe(ticket="PROJ-1")
@@ -384,10 +401,11 @@ def test_matrix_md_failures_column_renders_failed_over_total(tmp_path, patched_e
     r = _simple_recipe(ticket="T-1")
     run_dir = runner.run_recipe(r, output_dir=tmp_path)
     md = (run_dir / "matrix.md").read_text()
-    # The baseline row's numeric cell: 0 failures of 2 trials.
+    # The baseline row's numeric cell: 0 failures of 2 valid trials.
     assert "0 / 2" in md
-    # Legend line documents what "Failures" means.
-    assert "`Failures` is `failed_count / trial_count`" in md
+    # Legend line documents what "Failures" means (issue #230: denominator
+    # is valid trials = passed + failed, errors excluded).
+    assert "`Failures` is `failed_count / valid_trials`" in md
 
 
 def test_resolved_recipe_is_loadable_by_load_recipe(tmp_path, patched_env, patched_run_trials):
@@ -465,6 +483,28 @@ def test_resolved_recipe_round_trips_workload_config(
     assert reloaded.workload_config == {"shampoo_api": "new", "warmup": 5}
     assert reloaded.cells[0].workload_config == {}
     assert reloaded.cells[1].workload_config == {"shampoo_api": "old"}
+
+
+def test_resolved_recipe_round_trips_stop_after(
+    tmp_path, patched_env, patched_run_trials
+):
+    """An active stop_after rule must survive load -> run -> reload, so a rerun
+    from recipe.resolved.yaml keeps the stopping behaviour (issue #232)."""
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, StopAfter, load_recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(Cell(name="a", mitigations=("none",), environment="local"),),
+        ticket="SA-RT",
+        confound=ConfoundCfg(baseline_cell="a"),
+        stop_after=StopAfter(events=2, max_trials=5, event_verdict="fail"),
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    reloaded = load_recipe(run_dir / "recipe.resolved.yaml")
+    assert reloaded.stop_after == StopAfter(events=2, max_trials=5, event_verdict="fail")
 
 
 # ---- Config column (diffs-only workload_config) --------------------------

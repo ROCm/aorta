@@ -323,7 +323,13 @@ class LlmDeterminismWorkload(Workload):
         )
 
     def cleanup(self) -> None:
-        self._hooks.remove()
+        # setup() assigns _hooks partway through; if it raised before reaching
+        # that line (e.g. port conflict in dist.init_process_group), _hooks is
+        # never set. cleanup() runs unconditionally in the dispatcher's finally
+        # block, so guard against a partially-initialized instance.
+        hooks = getattr(self, "_hooks", None)
+        if hooks is not None:
+            hooks.remove()
         if dist.is_initialized():
             dist.barrier()
         # Process group teardown left to the launcher.

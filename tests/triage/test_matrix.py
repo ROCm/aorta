@@ -81,14 +81,50 @@ def test_mixed_pass_fail_counts_correctly():
     assert abs(stats.failure_rate - (1 / 3)) < 1e-9
 
 
-def test_infrastructure_failed_exit_status_counts_as_failure():
+def test_infrastructure_failed_exit_status_counts_as_error():
+    """Issue #230: infra crashes are ``error`` (no valid observation), not
+    ``fail`` -- they're excluded from the event-rate denominator."""
     trials = [
         _trial(passed=True, exit_status="ok"),
         _trial(passed=True, exit_status="infrastructure_failed"),
     ]
     stats = _default_call(trials=trials)
     assert stats.passed_count == 1
+    assert stats.failed_count == 0
+    assert stats.error_count == 1
+    # Event rate excludes the error trial from the denominator: 0 fails / 1
+    # valid trial == 0.0 (not 0/2 either -- the error trial isn't counted).
+    assert stats.failure_rate == 0.0
+    assert stats.error_rate == 0.5
+
+
+def test_workload_setup_failed_counts_as_error():
+    """``workload_setup_failed`` -> ``error`` (setup died before the
+    measurement; issue #230)."""
+    trials = [
+        _trial(passed=False, exit_status="workload_failed"),
+        _trial(passed=False, exit_status="workload_setup_failed"),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.passed_count == 0
     assert stats.failed_count == 1
+    assert stats.error_count == 1
+    # 1 genuine fail / 1 valid trial == 1.0; the setup-failed error is excluded.
+    assert stats.failure_rate == 1.0
+    assert stats.error_rate == 0.5
+
+
+def test_all_error_cell_has_zero_event_rate():
+    """A cell where every trial errored has event_rate 0.0 (no valid trials),
+    not a division-by-zero."""
+    trials = [_trial(passed=False, exit_status="infrastructure_failed") for _ in range(3)]
+    stats = _default_call(trials=trials)
+    assert stats.passed_count == 0
+    assert stats.failed_count == 0
+    assert stats.error_count == 3
+    assert stats.failure_rate == 0.0
+    assert stats.error_rate == 1.0
+    assert stats.is_unreliable is True
 
 
 def test_step_times_preferred_over_fallback():
@@ -217,8 +253,14 @@ def test_exit_status_histogram_distinguishes_failure_modes():
     }
     # Histogram total must equal trial count, by construction.
     assert sum(stats.exit_status_counts.values()) == stats.trials
-    # And the failure_rate is consistent with the histogram (4 of 6 not "ok").
-    assert abs(stats.failure_rate - (4.0 / 6.0)) < 1e-9
+    # Issue #230 three-way split: ok=2 (pass), workload_failed=1 (fail),
+    # workload_setup_failed + 2x infrastructure_failed = 3 (error).
+    assert stats.passed_count == 2
+    assert stats.failed_count == 1
+    assert stats.error_count == 3
+    # Event rate excludes the 3 error trials: 1 fail / (2 pass + 1 fail) = 1/3.
+    assert abs(stats.failure_rate - (1.0 / 3.0)) < 1e-9
+    assert abs(stats.error_rate - (3.0 / 6.0)) < 1e-9
 
 
 def test_failure_rate_docstring_is_general_not_nan_specific():

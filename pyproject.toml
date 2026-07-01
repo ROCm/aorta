@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aorta"
+name = "amd-aorta"
 version = "0.2.0"
 description = "PyTorch compute-communication overlap debugging toolkit with GPU hardware queue evaluation"
 readme = "README.md"
@@ -47,10 +47,12 @@ aorta = "aorta.cli:main"
 # reserved argv config key is only injected by ``aorta probe``.
 [project.entry-points."aorta.workloads"]
 _subprocess = "aorta.workloads._subprocess:SubprocessWorkload"
+inference = "aorta.workloads.inference:InferenceWorkload"
 llm_determinism = "aorta.workloads.llm_determinism:LlmDeterminismWorkload"
 race = "aorta.workloads.race:RaceWorkload"
 # Single-process GPU smoke test (no torchrun); ideal for emulated/CI runs.
 gpu_smoke = "aorta.workloads.gpu_smoke:GpuSmokeWorkload"
+training = "aorta.workloads.training:TrainingWorkload"
 
 [project.optional-dependencies]
 # For analysis/visualization scripts
@@ -77,7 +79,7 @@ hw-queue = [
 
 # For hw_queue_eval profiling features
 hw-queue-profiling = [
-    "aorta[hw-queue]",
+    "amd-aorta[hw-queue]",
     "matplotlib>=3.5.0",
     "seaborn>=0.12.0",
 ]
@@ -107,12 +109,12 @@ dev = [
 
 # Full installation
 all = [
-    "aorta[analysis]",
-    "aorta[report]",
-    "aorta[hw-queue]",
-    "aorta[hw-queue-profiling]",
-    "aorta[agent]",
-    "aorta[dev]",
+    "amd-aorta[analysis]",
+    "amd-aorta[report]",
+    "amd-aorta[hw-queue]",
+    "amd-aorta[hw-queue-profiling]",
+    "amd-aorta[agent]",
+    "amd-aorta[dev]",
 ]
 
 [project.urls]

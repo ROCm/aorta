@@ -1276,6 +1276,221 @@ class EnvSnapshot:
 # ---------------------------------------------------------------------------
 
 
+class _ProbeStdioRedirect:
+    """OS-level fd 1/2 capture for the duration of the env-probe body.
+
+    ``collect_env`` imports torch in-process to read versions / scan kernels
+    (``_capture_pytorch_version`` and the other torch-touching probes). On a
+    multi-GPU ROCm host the in-process HIP runtime ``dlopen`` performs a
+    device-topology enumeration that writes one benign
+    ``(null): No such file or directory`` line per GPU **directly to file
+    descriptor 2** (a C-runtime ``perror`` with a NULL program name), plus
+    occasional toolchain chatter on fd 1. Because the probe runs in the
+    long-lived ``aorta`` parent process, that noise lands on the operator's
+    terminal and looks like a fatal workload error (#220).
+
+    ``contextlib.redirect_stderr`` cannot intercept this -- it only swaps the
+    Python ``sys.stderr`` object and never moves the real fd 2 -- so we
+    ``dup2`` fds 1/2 onto a temp file for the probe and re-emit any captured
+    bytes at DEBUG level afterwards.
+
+    Fail-soft, matching ``collect_env``'s never-raises contract: if the real
+    descriptors can't be duplicated (already closed / detached), the probe
+    runs unredirected rather than risk losing the snapshot. ``stop`` is
+    idempotent so the caller can restore early (before disaster logging) and
+    still rely on a ``finally`` safety net.
+    """
+
+    def __init__(self) -> None:
+        self._saved_out: int | None = None
+        self._saved_err: int | None = None
+        self._capture: Any | None = None
+        # Aorta's own stdout/stderr log handlers, repointed at the real
+        # terminal for the redirect window (see _reroute_loggers).
+        self._rerouted_handlers: list[tuple[logging.Handler, Any]] = []
+        self._passthrough: Any | None = None
+
+    @staticmethod
+    def _flush_std_streams() -> None:
+        # Best-effort: a closed/detached stream raises ValueError (not OSError)
+        # on flush(); never let that escape (collect_env never-raises contract).
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
+    def start(self) -> None:
+        try:
+            self._saved_out = os.dup(1)
+            self._saved_err = os.dup(2)
+        except OSError:
+            # No real stdio fds to protect (e.g. detached/closed), or the
+            # second dup() raised after the first succeeded. Close any orphan
+            # descriptor from a partial dup() so we don't leak it, then probe
+            # unredirected.
+            if self._saved_out is not None:
+                try:
+                    os.close(self._saved_out)
+                except OSError:
+                    pass
+            self._saved_out = None
+            self._saved_err = None
+            return
+        try:
+            self._capture = tempfile.TemporaryFile(mode="w+b")
+            self._flush_std_streams()
+            os.dup2(self._capture.fileno(), 1)
+            os.dup2(self._capture.fileno(), 2)
+        except Exception:
+            # Broadened from OSError: TemporaryFile/dup2 can raise OSError and
+            # a closed stream's flush() raises ValueError. start() runs *before*
+            # collect_env()'s try/except, so any escape would violate the
+            # never-raises contract -- fail soft and probe unredirected.
+            # Close the capture file here: _restore_fds() clears the saved fds,
+            # so a later stop() short-circuits and would otherwise leak it.
+            self._restore_fds()
+            if self._capture is not None:
+                try:
+                    self._capture.close()
+                except Exception:
+                    pass
+                self._capture = None
+            return
+        # fd 1/2 now point at the capture file. That also swallows aorta's own
+        # Python logs (e.g. _run_rdhc's log.info), which would otherwise vanish
+        # at -v or be mislabeled as benign HIP noise at -vv. Repoint aorta's
+        # stdout/stderr log handlers at the real terminal for the window.
+        if self._capture is not None and self._saved_err is not None:
+            self._reroute_loggers()
+
+    def _reroute_loggers(self) -> None:
+        """Point aorta's stdout/stderr log handlers at the saved real fd.
+
+        Keeps real Python-level diagnostics on the operator's terminal while
+        the raw fd 1/2 redirect still swallows the C-runtime ``(null)`` noise.
+        Fail-soft: any failure leaves the handlers untouched (logs fall back to
+        the capture file, the pre-existing behaviour) rather than risk the
+        never-raises contract.
+        """
+        try:
+            passthrough = os.fdopen(os.dup(self._saved_err), "w", closefd=True)
+        except Exception:
+            return
+        # Scan both the root logger and the "aorta" logger: the CLI's
+        # ``configure_verbose_logging`` installs the -v/-vv StreamHandler on the
+        # "aorta" logger and sets ``propagate=False`` (see run/cli_helpers.py),
+        # so a root-only sweep would miss it and the operator's -v/-vv output
+        # would still be swallowed into the capture file. Dedup handler
+        # instances in case the same handler is attached to both.
+        rerouted: list[tuple[logging.Handler, Any]] = []
+        seen: set[int] = set()
+        for logger in (logging.getLogger(), logging.getLogger("aorta")):
+            for handler in list(logger.handlers):
+                if id(handler) in seen:
+                    continue
+                if isinstance(handler, logging.StreamHandler) and getattr(
+                    handler, "stream", None
+                ) in (sys.stdout, sys.stderr):
+                    try:
+                        original = handler.stream
+                        handler.setStream(passthrough)
+                        rerouted.append((handler, original))
+                        seen.add(id(handler))
+                    except Exception:
+                        pass
+        if not rerouted:
+            try:
+                passthrough.close()
+            except Exception:
+                pass
+            return
+        self._passthrough = passthrough
+        self._rerouted_handlers = rerouted
+
+    def _restore_loggers(self) -> None:
+        """Undo :meth:`_reroute_loggers`. Idempotent and fail-soft."""
+        for handler, original in self._rerouted_handlers:
+            try:
+                handler.setStream(original)
+            except Exception:
+                pass
+        self._rerouted_handlers = []
+        if self._passthrough is not None:
+            try:
+                self._passthrough.flush()
+            except Exception:
+                pass
+            try:
+                self._passthrough.close()
+            except Exception:
+                pass
+            self._passthrough = None
+
+    def _restore_fds(self) -> None:
+        # Fail-soft: called from stop() inside collect_env()'s except/finally,
+        # so a dup2()/close() failure (e.g. EBADF on an invalidated fd) must
+        # never raise or it would mask the snapshot / original exception.
+        if self._saved_out is not None:
+            try:
+                os.dup2(self._saved_out, 1)
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.close(self._saved_out)
+                except OSError:
+                    pass
+                self._saved_out = None
+        if self._saved_err is not None:
+            try:
+                os.dup2(self._saved_err, 2)
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.close(self._saved_err)
+                except OSError:
+                    pass
+                self._saved_err = None
+
+    def stop(self) -> None:
+        if self._saved_out is None and self._saved_err is None:
+            return
+        self._flush_std_streams()
+        self._restore_fds()
+        self._restore_loggers()
+        noise = ""
+        noise_bytes = 0
+        if self._capture is not None:
+            try:
+                self._capture.seek(0)
+                raw = self._capture.read()
+                noise_bytes = len(raw)
+                noise = raw.decode("utf-8", errors="replace").strip()
+            except Exception:
+                # Broadened from OSError: seek/read on a closed file raises
+                # ValueError. stop() runs in collect_env()'s finally and must
+                # never raise.
+                noise = ""
+                noise_bytes = 0
+            finally:
+                try:
+                    self._capture.close()
+                except Exception:
+                    pass
+                self._capture = None
+        if noise:
+            log.debug(
+                "env probe suppressed %d byte(s) of low-level stdout/stderr "
+                "(expected: benign HIP/C-runtime device-enumeration noise on "
+                "ROCm hosts; aorta's own logs are routed to the terminal "
+                "separately; see #220): %s",
+                noise_bytes,
+                noise,
+            )
+
+
 def collect_env(
     buck_target: str | None = None,
     buck_timeout: int = 10,
@@ -1312,6 +1527,12 @@ def collect_env(
     subprocess (seconds; default 10).
     """
     reasons: list[str] = []
+    # Capture fds 1/2 at the OS level for the probe body so that the benign
+    # HIP/C-runtime device-enumeration noise the in-process ``import torch``
+    # below emits straight to fd 2 never reaches the operator's terminal
+    # (#220). It is re-emitted at DEBUG level instead.
+    _probe_stdio = _ProbeStdioRedirect()
+    _probe_stdio.start()
     try:
         runtime_context = _detect_runtime_context()  # never partial; always populates
         system_health = _run_rdhc(reasons)
@@ -1398,6 +1619,9 @@ def collect_env(
             nics=nics,
         )
     except Exception as exc:  # noqa: BLE001 -- this is the never-raises gate
+        # Restore stdio before logging so the disaster trace reaches the
+        # operator's terminal rather than the captured (and discarded) buffer.
+        _probe_stdio.stop()
         log.info("collect_env() hit unexpected exception", exc_info=True)
         return _disaster_snapshot(
             preceding_reasons=reasons,
@@ -1406,6 +1630,9 @@ def collect_env(
                 f"({type(exc).__name__}: {exc})"
             ),
         )
+    finally:
+        # Idempotent: a no-op if the except branch already restored stdio.
+        _probe_stdio.stop()
 
 
 def _disaster_snapshot(

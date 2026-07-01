@@ -158,10 +158,14 @@ environment isn't an error condition, it's just one of the two
 documented shapes; see
 [`src/aorta/instrumentation/build_system.py`]).
 
-## `aorta triage` under Buck2
+## `aorta sweep` under Buck2
 
-`aorta triage` runs a mitigation x environment matrix. Three discovery
-subcommands are read-only and demo-friendly; `triage run` actually
+> **Renamed (issue #248):** `aorta triage` is now `aorta sweep`. The
+> commands below use `sweep`; `triage` still works as a deprecated alias.
+
+`aorta sweep` runs a mitigation x environment matrix (built-in workload
+flow) or wraps an opaque user command (subprocess flow). Three discovery
+subcommands are read-only and demo-friendly; `sweep run` actually
 executes cells.
 
 Built-in mitigations are defined in `src/aorta/registry/mitigations.py`
@@ -172,20 +176,20 @@ the command on your machine prints the full set.
 
 ```bash
 # Inspect the registries (built-ins + any installed plugins)
-buck2 run aorta -- triage list-mitigations
+buck2 run aorta -- sweep list-mitigations
 # NAME      SOURCE  ENV
 # none      aorta   (none)
 # tf32_off  aorta   DISABLE_TF32=1
 # xnack     aorta   HSA_XNACK=1
 # ... (~19 more ROCm / HIP / RCCL / PyTorch / SDPA entries; truncated)
 
-buck2 run aorta -- triage list-environments
+buck2 run aorta -- sweep list-environments
 # NAME     SOURCE  DOCKER  VENV
 # default  aorta   -       -
 # local    aorta   -       -
 
 # Validate a recipe without executing it
-buck2 run aorta -- triage run --recipe recipes/example-fsdp-smoke.yaml --dry-run
+buck2 run aorta -- sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
 # Dry run: fsdp / ticket=EXAMPLE-151
 # Cells (3):
 #   - baseline-local: mitigations=['none'] environment=local trials=2 steps=100
@@ -201,11 +205,11 @@ register via a separate package's entry-points; see
 below).
 The example recipe targets `workload: fsdp`, so each cell will error
 with `Workload 'fsdp' not found. Available: []`. That's intentional --
-the recipe's own header documents it -- and `aorta triage` is built to
+the recipe's own header documents it -- and `aorta sweep` is built to
 keep going:
 
 ```bash
-buck2 run aorta -- triage run --recipe recipes/example-fsdp-smoke.yaml -v
+buck2 run aorta -- sweep run --recipe recipes/example-fsdp-smoke.yaml -v
 ```
 
 What you get back (under `triage_results/EXAMPLE-151/fsdp/<timestamp>/`):
@@ -241,9 +245,9 @@ matrix you can inspect with `jq '.cells[].confound' triage_results/.../matrix.js
 For ad-hoc experiments without installing a plugin:
 
 ```bash
-buck2 run aorta -- triage list-mitigations \
+buck2 run aorta -- sweep list-mitigations \
     --mitigations-file examples/mitigations-sidecar.json
-buck2 run aorta -- triage list-environments \
+buck2 run aorta -- sweep list-environments \
     --mitigations-file examples/mitigations-sidecar.json
 ```
 
@@ -287,8 +291,8 @@ prebuilt_python_library(
 ```
 
 Then add `"//third-party/python:my_plugin"` to your fork of `:aorta`'s
-`deps`. After rebuild, `buck2 run aorta -- triage list-mitigations` and
-`buck2 run aorta -- triage run --workload my_workload ...` see the
+`deps`. After rebuild, `buck2 run aorta -- sweep list-mitigations` and
+`buck2 run aorta -- sweep run --workload my_workload ...` see the
 plugin.
 
 `discover_workloads()` catches any import-time exception per

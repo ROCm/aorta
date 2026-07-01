@@ -1,8 +1,8 @@
-# Smoke-test recipe for `aorta probe` (issue #188).
+# Smoke-test recipe for `aorta sweep run` probe flow (issue #188; #248).
 #
 # Opaque user launch command:
 #
-#   aorta probe \
+#   aorta sweep run \
 #       --recipe recipes/example-probe-smoke.yaml \
 #       --output ./probe_results \
 #       --ticket PROBE-188 \

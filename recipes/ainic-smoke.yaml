@@ -15,7 +15,7 @@
 #   exit_status == ok, passed == true   (collectives + verify completed)
 #
 # Run (same command on every rank, one rank per GPU):
-#   aorta triage run --recipe recipes/ainic-smoke.yaml
+#   aorta sweep run --recipe recipes/ainic-smoke.yaml
 # Read:
 #   cat triage_results/AINIC-SMOKE/race/*/matrix.md
 #

@@ -39,6 +39,20 @@ def test_timeout_fires_alone(tmp_path):
     assert tier1_process.DETECTOR_EXIT_NONZERO not in detectors
 
 
+def test_exec_failed_fires_alone(tmp_path):
+    """``exec_failed`` fires ``tier1:exec_failed`` and suppresses every
+    other Tier-1 detector -- a command that never launched (issue #230)."""
+    ctx = Tier1Context(exit_code=127, timed_out=False, trial_dir=tmp_path, exec_failed=True)
+    assert tier1_process.detect(ctx) == [tier1_process.DETECTOR_EXEC_FAILED]
+
+
+def test_exec_failed_suppresses_timeout_and_coredump(tmp_path):
+    """Even with timed_out + a stray core file, exec_failed wins alone."""
+    (tmp_path / "core.1").write_bytes(b"")
+    ctx = Tier1Context(exit_code=-1, timed_out=True, trial_dir=tmp_path, exec_failed=True)
+    assert tier1_process.detect(ctx) == [tier1_process.DETECTOR_EXEC_FAILED]
+
+
 @pytest.mark.parametrize(
     "sig,detector",
     [

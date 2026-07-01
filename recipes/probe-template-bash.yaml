@@ -1,6 +1,6 @@
 # Generic probe handout template for bash / shell-script launches.
 # Usage:
-#   aorta probe --recipe recipes/probe-template-bash.yaml \
+#   aorta sweep run --recipe recipes/probe-template-bash.yaml \
 #       --output ./probe-out --ticket TICKET-1234 -- \
 #       bash launch.sh --extra-args
 schema_version: 1

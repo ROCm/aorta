@@ -1,0 +1,91 @@
+name: Cleanup old dev-wheels assets
+
+# The rolling "dev-wheels" pre-release (see nightly.yml) accumulates a wheel +
+# sdist every night. This prunes assets older than the retention window so the
+# release stays bounded. Scheduled runs delete for real; manual runs default to
+# a dry run.
+on:
+  schedule:
+    - cron: "0 2 * * 1"  # 02:00 UTC every Monday
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: "Delete dev-wheels assets older than this many days."
+        type: number
+        default: 90
+      dry_run:
+        description: "List what would be deleted without deleting."
+        type: boolean
+        default: true
+
+permissions:
+  contents: write  # required to delete release assets
+
+# Share nightly.yml's concurrency group so a prune can't race a nightly publish
+# (or another cleanup run) on the same rolling dev-wheels release -- e.g. deleting
+# assets while a publish is mid-upload. Don't cancel an in-progress run; let it
+# finish and queue behind it.
+concurrency:
+  group: dev-wheels-release
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: github.repository == 'ROCm/aorta'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Pass the raw input (don't `|| 90` here): a GHA expression treats an
+      # explicit 0 as falsy, which would silently become 90 and make a
+      # "delete everything older than now" run impossible. Default in bash below.
+      RETENTION_DAYS: ${{ inputs.retention_days }}
+      # Scheduled runs (no inputs) delete for real; manual runs honor the toggle.
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+    steps:
+      - name: Prune aged dev-wheels assets
+        run: |
+          set -euo pipefail
+          # Default here (not in the GHA expression) so an explicit 0 survives;
+          # scheduled runs pass no input, so RETENTION_DAYS is empty -> 90.
+          RETENTION_DAYS="${RETENTION_DAYS:-90}"
+          cutoff="$(date -u -d "${RETENTION_DAYS} days ago" +%s)"
+          echo "Retention: ${RETENTION_DAYS} days (cutoff $(date -u -d "@${cutoff}")). Dry run: ${DRY_RUN}."
+
+          # Only a real 404 means "no dev-wheels release yet". Any other gh
+          # failure (auth, rate limit, network, GitHub 5xx) must fail the job so
+          # a genuine cleanup failure isn't silently masked as "nothing to do".
+          err_file="$(mktemp)"
+          if release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/dev-wheels" --jq '.id' 2>"${err_file}")"; then
+            :
+          elif grep -q "HTTP 404" "${err_file}"; then
+            echo "No dev-wheels release yet; nothing to clean."
+            exit 0
+          else
+            echo "::error::Could not look up the dev-wheels release: $(cat "${err_file}")"
+            exit 1
+          fi
+
+          deleted=0
+          kept=0
+          while IFS=$'\t' read -r asset_id name created; do
+            [ -z "${asset_id}" ] && continue
+            created_s="$(date -u -d "${created}" +%s)"
+            if [ "${created_s}" -lt "${cutoff}" ]; then
+              if [ "${DRY_RUN}" = "true" ]; then
+                echo "[dry-run] would delete ${name} (created ${created})"
+              else
+                gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+                echo "deleted ${name} (created ${created})"
+              fi
+              deleted=$((deleted + 1))
+            else
+              kept=$((kept + 1))
+            fi
+          done < <(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" \
+                     --jq '.[] | [(.id|tostring), .name, .created_at] | @tsv')
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "Summary (dry run): ${deleted} asset(s) would be deleted, ${kept} kept."
+          else
+            echo "Summary: ${deleted} asset(s) deleted, ${kept} kept."
+          fi

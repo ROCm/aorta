@@ -1,0 +1,62 @@
+# Smoke-test recipe for the `inference` workload, offline-batch serving mode.
+#
+# `inference` is a SINGLE-PROCESS workload (launch_mode = "single_process",
+# min_world_size = 1): no torchrun wrapper and no torch.distributed init. It
+# runs eval-only forward passes, measures prefill/decode latency + throughput,
+# and checks logits for NaN/inf. Sizes are tiny so a smoke finishes in seconds.
+#
+#   # validate only (no GPUs needed):
+#   aorta triage run --recipe recipes/example-inference-smoke.yaml --dry-run
+#
+#   # bare smoke:
+#   aorta run --workload inference --trials 1 --steps 2
+#
+#   # recipe smoke:
+#   aorta triage run --recipe recipes/example-inference-smoke.yaml
+schema_version: 1
+ticket: EXAMPLE-INFERENCE-SMOKE
+workload: inference
+trials: 1
+steps: 4
+
+workload_config:
+  mode: offline_batch        # offline_batch|continuous_batch
+  seed: 1234
+  device: auto               # auto|cuda|cpu
+  dtype: bfloat16            # bfloat16|float16|float32
+  warmup_steps: 1
+
+  request:
+    batch_size: 4
+    prompt_len: 128
+    generate_tokens: 32
+
+  model:
+    kind: decoder_transformer  # mlp|encoder_transformer|decoder_transformer
+    hidden_size: 512
+    num_layers: 4
+    num_heads: 8
+    ffn_size: 2048
+    vocab_size: 32000
+    # NOTE: aorta.models.repeated_block MoE is top-1 only — there is no top_k
+    # knob. Drive MoE via num_experts (>1 selects the MoE path).
+
+  serving:
+    kv_cache: true   # simulated only — RepeatedBlockModel has no real paged KV
+                     # cache; the workload decodes from only the newest token
+                     # (shorter input_ids slices) to exercise the prefill/decode
+                     # timing split, not real KV/hidden-state reuse.
+    continuous_batch:
+      enabled: false
+      max_active_requests: 8
+      arrival_pattern: fixed
+
+  checks:
+    fail_on_nan_logits: true
+    fail_on_nonfinite_output: true
+    compare_logits_checksum: true
+
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
