@@ -64,14 +64,16 @@ jobs:
       - name: Install CPU PyTorch
         run: pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      # dev  -> pytest + xdist + forked (isolation) + tooling
+      # tests -> pytest + xdist + forked (isolation) + timeout/cov plugins only
+      #          (the slim test extra; no black/isort/mypy/ruff/pre-commit, which
+      #          this pytest-only job never uses).
       # hw-queue -> numpy/pandas/tabulate needed by hw_queue_eval tests
       # triton -> the env-probe contract tests treat a "clean full probe" as
       #           non-partial only when triton is importable.
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,hw-queue]"
+          pip install -e ".[tests,hw-queue]"
           pip install triton
 
       # Per-test process isolation (--forked) is deliberate: the suite has
