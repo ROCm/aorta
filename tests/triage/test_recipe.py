@@ -137,6 +137,50 @@ def test_missing_required_top_level(tmp_path):
         load_recipe(_write_yaml(tmp_path, text))
 
 
+# ---- collect (collector recipes) ------------------------------------------
+
+
+def test_collect_defaults_empty(tmp_path):
+    r = load_recipe(_write_yaml(tmp_path, _MINIMAL_YAML))
+    assert r.collect == ()
+
+
+def test_collect_parsed_from_recipe(tmp_path):
+    text = _MINIMAL_YAML + "collect: [layer_numerics]\n"
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.collect == ("layer_numerics",)
+
+
+def test_collect_dedups_preserving_order(tmp_path):
+    text = _MINIMAL_YAML + "collect: [layer_numerics, rocprof, layer_numerics]\n"
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.collect == ("layer_numerics", "rocprof")
+
+
+def test_collect_unknown_recipe_rejected(tmp_path):
+    text = _MINIMAL_YAML + "collect: [not_a_collector]\n"
+    with pytest.raises(RecipeSchemaError, match="unknown collector recipe"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_collect_wrong_type_rejected(tmp_path):
+    text = _MINIMAL_YAML + "collect: layer_numerics\n"  # string, not a list
+    with pytest.raises(RecipeSchemaError, match="must be a list of strings"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_collect_from_flags(tmp_path):
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="local",
+        trials=1,
+        steps=1,
+        collect=("layer_numerics",),
+    )
+    assert r.collect == ("layer_numerics",)
+
+
 def test_unknown_top_level_key_rejected(tmp_path):
     text = _MINIMAL_YAML + "garbage: 42\n"
     with pytest.raises(RecipeSchemaError, match="unknown top-level keys"):
