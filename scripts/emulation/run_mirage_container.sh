@@ -63,6 +63,16 @@ ensure_profile() {
 }
 ensure_profile
 
+CONTAINER_BOOT='
+      rm -rf /tmp/aorta-build/src
+      cp -a /aorta-src /tmp/aorta-build/src
+      cp /runner.py /tmp/aorta_cli_runner.py
+      python3 -m pip install -q /tmp/aorta-build/src --no-deps
+      python3 -m pip install -q click pyyaml
+      cd /out
+      python3 /tmp/aorta_cli_runner.py
+    '
+
 run_in_container() {
   local json_args="$1"
   "$MIRAGE_BIN" run --in-process --profile "$PROFILE" \
@@ -72,14 +82,7 @@ run_in_container() {
     --mount "$RUNNER:/runner.py:ro" \
     --mount "$OUT:/out" \
     --mount "$OUT:/tmp/aorta-build" \
-    -- sh -c '
-      cp -a /aorta-src /tmp/aorta-build/src
-      cp /runner.py /tmp/aorta_cli_runner.py
-      python3 -m pip install -q /tmp/aorta-build/src --no-deps
-      python3 -m pip install -q click pyyaml
-      cd /out
-      python3 /tmp/aorta_cli_runner.py
-    '
+    -- sh -c "$CONTAINER_BOOT"
 }
 
 case "$WORKLOAD" in
@@ -111,14 +114,7 @@ case "$WORKLOAD" in
       --mount "$RECIPE:/recipe.yaml:ro" \
       --mount "$OUT:/out" \
       --mount "$OUT:/tmp/aorta-build" \
-      -- sh -c '
-        cp -a /aorta-src /tmp/aorta-build/src
-        cp /runner.py /tmp/aorta_cli_runner.py
-        python3 -m pip install -q /tmp/aorta-build/src --no-deps
-        python3 -m pip install -q click pyyaml
-        cd /out
-        python3 /tmp/aorta_cli_runner.py
-      '
+      -- sh -c "$CONTAINER_BOOT"
     ;;
   *)
     fail "unknown workload: $WORKLOAD (try: gpu-smoke, probe, llm-determinism)"

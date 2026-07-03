@@ -122,6 +122,7 @@ mirage run --in-process --profile mi350x \
   --mount "$OUT:/out" \
   --mount "$OUT:/tmp/aorta-build" \
   -- sh -c '
+    rm -rf /tmp/aorta-build/src
     cp -a /aorta-src /tmp/aorta-build/src
     cp /runner.py /tmp/aorta_cli_runner.py
     pip install -q /tmp/aorta-build/src --no-deps click pyyaml

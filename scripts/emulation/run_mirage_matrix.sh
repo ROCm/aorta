@@ -30,6 +30,7 @@ SUMMARY="$RESULT_ROOT/summary.tsv"
 printf 'emulator\tprofile\tcommand\texit\tnotes\n' > "$SUMMARY"
 
 BOOT='
+rm -rf /tmp/aorta-build/src
 cp -a /aorta-src /tmp/aorta-build/src
 cp /runner.py /tmp/aorta_cli_runner.py
 python3 -m pip install -q /tmp/aorta-build/src --no-deps
