@@ -47,7 +47,7 @@ git clone --branch users/vivekkhandelwal1/mirage-emulation \
   --depth 1 https://github.com/ROCm/aorta.git aorta
 cd aorta
 pip install -e .   # optional: host unit tests only
-python -m pytest tests/emulation/ -q   # 18 passed, no GPU
+python -m pytest tests/emulation/ -q   # 19 passed, no GPU
 ```
 
 ---

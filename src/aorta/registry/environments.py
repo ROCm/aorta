@@ -1,14 +1,15 @@
 """Environments registry: built-ins + entry-point discovery + collision detection.
 
 Mirrors the mitigations registry. Plugin payloads are validated against
-`_VALID_ENV_KEYS` — `docker`, `venv`, and `buck_target` are accepted. ROCm
-version is intentionally not a valid key (see `Environment` docstring).
+`_VALID_ENV_KEYS` — `docker`, `venv`, `buck_target`, `emulator`, and
+`mirage_profile` are accepted. ROCm version is intentionally not a valid key
+(see `Environment` docstring).
 
 Plugin authors register one entry-point per environment in their `pyproject.toml`
 under the `aorta.environments` group. The entry-point name IS the environment
 name; the loaded object is the recipe (`dict[str, str | None]` with any of the
-keys `docker`, `venv`, `buck_target`). Mirrors the `aorta.workloads`
-extension-point pattern.
+keys `docker`, `venv`, `buck_target`, `emulator`, `mirage_profile`). Mirrors
+the `aorta.workloads` extension-point pattern.
 """
 
 from importlib.metadata import entry_points
