@@ -144,3 +144,17 @@ class TestRun:
         wl.setup()
         r = wl.run()
         assert r.passed is True
+
+    def test_negative_n_raises(self, fake_torch):
+        fake_torch()
+        wl = GpuSmokeWorkload({"n": -1})
+        wl.setup()
+        with pytest.raises(ValueError, match="n must be >= 1"):
+            wl.run()
+
+    def test_negative_steps_raises(self, fake_torch):
+        fake_torch()
+        wl = GpuSmokeWorkload({"n": 8, "steps": -1})
+        wl.setup()
+        with pytest.raises(ValueError, match="steps must be >= 0"):
+            wl.run()

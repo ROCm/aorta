@@ -107,6 +107,9 @@ def resolve_mirage_bin() -> str:
     """
     override = os.environ.get(ENV_MIRAGE_BIN)
     if override:
+        # Expand ``~`` and ``$VARS`` so copy/pasted overrides like
+        # ``MIRAGE_BIN=~/bin/mirage`` resolve like typical shell paths.
+        override = os.path.expandvars(os.path.expanduser(override))
         # An explicit override may be an absolute path that exists, or a name
         # to resolve on PATH. Accept either; fail loudly if neither resolves.
         if os.path.isabs(override) and os.access(override, os.X_OK):

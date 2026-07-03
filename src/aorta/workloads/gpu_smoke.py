@@ -80,6 +80,10 @@ class GpuSmokeWorkload(Workload):
         # rather than silently treated as missing by a falsy-``0`` check.
         steps_cfg = self.config.get("steps")
         steps = 1 if steps_cfg is None else int(steps_cfg)
+        if n <= 0:
+            raise ValueError(f"gpu_smoke: n must be >= 1, got {n}")
+        if steps < 0:
+            raise ValueError(f"gpu_smoke: steps must be >= 0, got {steps}")
         t0 = time.perf_counter()
 
         x = torch.zeros(n, device=self._device, dtype=self._dtype)

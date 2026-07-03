@@ -152,6 +152,15 @@ class TestWrapArgv:
         argv = wrap_argv_for_environment(_emulated_config(), ["python", "x.py"])
         assert argv[0] == str(custom)
 
+    def test_mirage_bin_expands_tilde(self, monkeypatch, tmp_path):
+        custom = tmp_path / "my-mirage"
+        custom.write_text("#!/bin/sh\nexit 0\n")
+        custom.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv(ENV_MIRAGE_BIN, "~/my-mirage")
+        argv = wrap_argv_for_environment(_emulated_config(), ["python", "x.py"])
+        assert argv[0] == str(custom)
+
 
 class TestSubprocessWorkloadEmulation:
     """The aorta probe SubprocessWorkload wraps its argv when emulated."""
