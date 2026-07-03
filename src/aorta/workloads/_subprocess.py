@@ -312,18 +312,15 @@ class SubprocessWorkload(Workload):
         # here and is reported as a clean setup failure rather than silently
         # running on real hardware.
         #
-        # Guarded so the non-emulated path is a true zero-cost no-op: we only
-        # import + invoke the emulation backend when the resolved environment
-        # actually carries an emulator. This keeps every existing (real-hardware)
-        # probe byte-for-byte and overhead-for-overhead identical -- no new
-        # import, no extra work in ``setup()``.
-        env = self.config.get("_aorta_environment")
-        if isinstance(env, dict) and (
-            env.get("mirage_profile")
-            or (env.get("emulator") and env.get("emulator") != "noop")
-        ):
-            from aorta.emulation.mirage_launch import wrap_argv_for_environment
+        # Guarded via ``is_emulated_environment()`` (canonical predicate shared
+        # with ``resolve_emulation()``) so the non-emulated path does no argv
+        # rewrite. The import is stdlib-only and cheap on every setup().
+        from aorta.emulation.mirage_launch import (
+            is_emulated_environment,
+            wrap_argv_for_environment,
+        )
 
+        if is_emulated_environment(self.config):
             argv = list(wrap_argv_for_environment(self.config, argv))
         self._argv = tuple(argv)
 
