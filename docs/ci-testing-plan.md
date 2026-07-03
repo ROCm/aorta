@@ -60,6 +60,29 @@ environment instead of editing the tests. The file is intentionally minimal --
 pin only known-incompatible pieces so the gate stays reproducible without hiding
 real breakage; drop each pin as the underlying test is modernized.
 
+The pin lives in the constraints file rather than the `tests` extra on purpose:
+`tests` feeds `dev` and `all`, so a `click<8.2` cap there would leak a temporary
+compat bound into every dev/full install (and none of the other extras carry an
+upper bound). Keeping it in `PIP_CONSTRAINT` keeps the cap CI-scoped and trivial
+to drop.
+
+### Running the gate locally
+
+Reproduce the exact CI environment (including the `click<8.2` pin) by pointing
+pip at the same constraints file -- no manual version juggling:
+
+```bash
+export PIP_CONSTRAINT=.github/ci-constraints.txt
+pip install -e ".[tests,hw-queue]"
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install triton
+pytest -m "not gpu and not rocm" -n auto --forked
+```
+
+(`bpftrace` still needs to be on the box for the `aorta.ebpf` tests; on Ubuntu
+that's `sudo apt-get install -y bpftrace`. Or just `pip install "click<8.2"`
+into the venv if you'd rather not set the env var -- the pin is temporary.)
+
 ### Why per-test process isolation (`--forked`)
 
 The command is:
