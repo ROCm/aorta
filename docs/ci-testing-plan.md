@@ -58,7 +58,9 @@ uses `CliRunner(mix_stderr=False)`, which Click 8.2 removed. The runtime floor i
 `click>=8.0` and those tests depend on the pre-8.2 behaviour, so we pin the test
 environment instead of editing the tests. The file is intentionally minimal --
 pin only known-incompatible pieces so the gate stays reproducible without hiding
-real breakage; drop each pin as the underlying test is modernized.
+real breakage; drop each pin as the underlying test is modernized. Modernizing
+`test_sweep_cli.py` and dropping this pin is tracked in
+[#269](https://github.com/ROCm/aorta/issues/269).
 
 The pin lives in the constraints file rather than the `tests` extra on purpose:
 `tests` feeds `dev` and `all`, so a `click<8.2` cap there would leak a temporary
@@ -105,7 +107,8 @@ green as the offending fixtures are cleaned up over time.
 > Follow-up (out of scope for the gate): track down and fix the specific
 > fixtures that leak global state so the suite can eventually run pollution-free
 > in a single process. Until then, `--forked` is the safety net, not a crutch to
-> hide new pollution behind.
+> hide new pollution behind. Tracked in
+> [#270](https://github.com/ROCm/aorta/issues/270).
 
 ### Making it a required check
 
@@ -124,6 +127,7 @@ checks to pass before merging`, then select:
 
 ## Phase 2 - GPU test gate (planned, needs a GPU runner)
 
+Tracked in [#268](https://github.com/ROCm/aorta/issues/268).
 Blocked on: a GPU/self-hosted CI runner being wired up (e.g. MI300X/MI350X).
 
 When that runner exists, add a `gpu-tests.yml` workflow:
@@ -151,6 +155,21 @@ When that runner exists, add a `gpu-tests.yml` workflow:
 - Consider a `paths:` filter so GPU CI only triggers for changes under GPU-
   relevant directories (`src/aorta/race/**`, `src/aorta/ebpf/**`,
   `src/aorta/utils/gpu_control.py`, workloads) once it becomes a PR check.
+
+## Follow-up strategy
+
+This PR lands the Phase 1 CPU gate; the remaining work is tracked as separate
+issues so each can be picked up independently:
+
+| Follow-up | Tracked in |
+| --- | --- |
+| Phase 2 GPU test gate on a self-hosted runner | [#268](https://github.com/ROCm/aorta/issues/268) |
+| Modernize `test_sweep_cli.py` for `click>=8.2` and drop the `click<8.2` pin | [#269](https://github.com/ROCm/aorta/issues/269) |
+| Fix cross-file state pollution so the suite runs without `--forked` | [#270](https://github.com/ROCm/aorta/issues/270) |
+
+Not an issue: making the `pytest (CPU, py3.x)` jobs **required status checks** on
+`main` is a repo/admin setting (see "Making it a required check" above), not a
+code change -- it must be done in repo settings once this PR merges.
 
 ## Summary
 
