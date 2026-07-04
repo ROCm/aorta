@@ -158,7 +158,7 @@ When that runner exists, add a `gpu-tests.yml` workflow:
 
 ## Follow-up strategy
 
-This PR lands the Phase 1 CPU gate; the remaining work is tracked as separate
+With the Phase 1 CPU gate in place, the remaining work is tracked as separate
 issues so each can be picked up independently:
 
 | Follow-up | Tracked in |
@@ -169,7 +169,8 @@ issues so each can be picked up independently:
 
 Not an issue: making the `pytest (CPU, py3.x)` jobs **required status checks** on
 `main` is a repo/admin setting (see "Making it a required check" above), not a
-code change -- it must be done in repo settings once this PR merges.
+code change -- with `cpu-tests.yml` present on `main`, it is configured once in
+the repository's branch-protection settings.
 
 ## Summary
 
