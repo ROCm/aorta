@@ -136,6 +136,16 @@ class TestRun:
         r = wl.run()
         assert r.passed is False
         assert r.failure_count == 1
+        assert r.first_failure_iteration == 0
+
+    def test_fail_path_attributes_last_executed_step(self, fake_torch):
+        """Verification failures map to the last executed step index."""
+        fake_torch(sum_err=5.0)
+        wl = GpuSmokeWorkload({"n": 8, "steps": 3})
+        wl.setup()
+        r = wl.run()
+        assert r.passed is False
+        assert r.first_failure_iteration == 2
 
     def test_tolerance_absorbs_tiny_error(self, fake_torch):
         """A sub-tolerance rounding error still passes."""

@@ -106,10 +106,14 @@ class GpuSmokeWorkload(Workload):
         else:
             log.error("gpu_smoke FAIL: sum=%s expected=%s", total, expected)
 
+        # Verification runs after all steps; attribute a mismatch to the last
+        # executed step so first_failure_iteration stays in 0..steps-1.
+        first_failure = None if passed else (steps - 1 if steps > 0 else None)
+
         return WorkloadResult(
             passed=passed,
             failure_count=0 if passed else 1,
-            first_failure_iteration=None if passed else 0,
+            first_failure_iteration=first_failure,
             failure_details=[] if passed else [{"sum": total, "expected": expected}],
             total_iterations=steps,
             elapsed_sec=elapsed,
