@@ -120,7 +120,16 @@ _PHASE_3_KEYS = frozenset({"condition"})
 _VALID_TOP_LEVEL = _TRIAGE_TOP_LEVEL | _PROBE_TOP_LEVEL | {"mode"}
 _VALID_CONFOUND_KEYS = frozenset({"threshold", "baseline_cell"})
 _VALID_CELL_KEYS = frozenset(
-    {"name", "mitigations", "environment", "extra_env", "trials", "steps", "workload_config"}
+    {
+        "name",
+        "mitigations",
+        "environment",
+        "extra_env",
+        "trials",
+        "steps",
+        "workload_config",
+        "collect",
+    }
 )
 _VALID_INLINE_ENV_KEYS = frozenset({"docker"})
 
@@ -281,6 +290,18 @@ class Cell:
             ``_aorta_*`` key are rejected at load time -- ``steps`` is a
             first-class field the dispatcher would silently overwrite, and
             ``_aorta_*`` is reserved for platform-supplied keys.
+        collect: Optional per-cell override of the recipe-level ``collect``.
+            ``None`` (the default, key absent) means "inherit the recipe-level
+            collectors". A present value *replaces* the recipe-level list for
+            this cell -- it is not additive. An explicit empty list disables
+            collectors for this cell entirely (e.g. a fast baseline that skips
+            ``layer_numerics`` capture). Accepts the same list or mapping form
+            as the top-level ``collect:`` key; the mapping form's per-collector
+            options land in :attr:`collect_options`.
+        collect_options: Per-collector option dicts parsed from the cell's
+            mapping-form ``collect:``. ``None`` when ``collect`` is inherited.
+            Empty dict when the cell uses list form or mapping form with no
+            options.
     """
 
     name: str
@@ -290,12 +311,28 @@ class Cell:
     trials: int | None = None
     steps: int | None = None
     workload_config: dict[str, Any] = field(default_factory=dict)
+    collect: tuple[str, ...] | None = None
+    collect_options: dict[str, dict[str, str]] | None = None
 
     def effective_trials(self, recipe_trials: int) -> int:
         return self.trials if self.trials is not None else recipe_trials
 
     def effective_steps(self, recipe_steps: int) -> int:
         return self.steps if self.steps is not None else recipe_steps
+
+    def effective_collect(self, recipe_collect: tuple[str, ...]) -> tuple[str, ...]:
+        return self.collect if self.collect is not None else recipe_collect
+
+    def effective_collect_options(
+        self, recipe_collect_options: dict[str, dict[str, str]]
+    ) -> dict[str, dict[str, str]]:
+        # Options track the collect list they came from: when the cell
+        # overrides ``collect`` its own options apply (empty when none were
+        # given in the mapping form); only an inherited ``collect`` inherits
+        # the recipe-level options.
+        if self.collect is not None:
+            return self.collect_options or {}
+        return recipe_collect_options
 
 
 @dataclass(frozen=True)
@@ -794,6 +831,21 @@ def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
 
     workload_config = _parse_workload_config(path_hint, raw.get("workload_config"))
 
+    # ``collect`` absent -> None (inherit recipe-level). Present -> parse and
+    # replace, even when the value is an empty list ("disable for this cell").
+    # We branch on key presence rather than truthiness so ``collect: []`` and
+    # a missing key mean different things.
+    if "collect" in raw:
+        if raw["collect"] is None:
+            raise RecipeSchemaError(
+                f"{path_hint}.collect: null is not allowed at cell scope; "
+                "omit the key to inherit recipe-level collectors or use [] "
+                "to disable collectors for this cell."
+            )
+        collect, collect_options = _parse_collect(path_hint, raw["collect"])
+    else:
+        collect, collect_options = None, None
+
     return Cell(
         name=name,
         mitigations=tuple(mitigations),
@@ -802,6 +854,8 @@ def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
         trials=trials,
         steps=steps,
         workload_config=workload_config,
+        collect=collect,
+        collect_options=collect_options,
     )
 
 

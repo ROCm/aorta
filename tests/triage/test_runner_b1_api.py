@@ -430,6 +430,49 @@ cells:
     assert req.collect_options == {}
 
 
+def test_cli_collect_override_clears_cell_collect_overrides(
+    tmp_path, patched_env, patched_run_trials
+):
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        """\
+schema_version: 1
+ticket: CLI-COLLECT-2
+workload: fsdp
+trials: 1
+steps: 10
+collect: [rocprof]
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+    collect: []
+  - name: tf32-local
+    mitigations: [tf32_off]
+    environment: local
+    collect: [rocprof]
+""",
+        encoding="utf-8",
+    )
+    cli = CliRunner()
+    result = cli.invoke(
+        triage,
+        [
+            "run",
+            "--recipe",
+            str(recipe),
+            "--collect",
+            "layer_numerics",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    reqs = [call.args[0] for call in patched_run_trials.call_args_list]
+    assert [req.collect for req in reqs] == [("layer_numerics",), ("layer_numerics",)]
+    assert [req.collect_options for req in reqs] == [{}, {}]
+
+
 def test_cli_exits_nonzero_when_baseline_did_not_run_but_writes_matrix(
     tmp_path, patched_env, monkeypatch
 ):
