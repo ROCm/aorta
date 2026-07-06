@@ -307,12 +307,13 @@ def _write_isolated_env_placeholder(
         "environment. A runner-process collect_env() would record the host's "
         "state instead of the image's, so it is intentionally not written. To "
         "capture the real environment, have the workload wrapper read the "
-        "reserved config['_aorta_env_probe'] {'src', 'out'} paths, bind-mount "
-        "'src' into the container, and run "
-        "'python -m aorta.instrumentation._probe_main <out>' as the first step "
-        "inside its docker run; the runner then promotes that file in place of "
-        "this placeholder. host_env.json next to this file captures the "
-        "runner's view."
+        "reserved config['_aorta_env_probe'] {'src', 'out'} HOST paths, "
+        "bind-mount 'src' and the parent of 'out' into the container, and run "
+        "'python -m aorta.instrumentation._probe_main <container-visible out>' "
+        "as the first step inside its docker run -- note 'out' is a host path, "
+        "so pass the mounted container path, not 'out' verbatim. The runner "
+        "then promotes that file in place of this placeholder. host_env.json "
+        "next to this file captures the runner's view."
     )
     placeholder = {
         "name": env_name,
@@ -346,12 +347,15 @@ def _aorta_src_root() -> Path:
 def _is_real_env_snapshot(target: Path, env_name: str, warnings: list[str]) -> bool:
     """True iff ``target`` holds a wrapper-produced in-container snapshot.
 
-    Called AFTER an isolated env's cell has run. A real snapshot is valid
-    JSON that is NOT one of our own placeholders -- the placeholder carries
-    ``"snapshot_captured": false``, so a later retry reading it back would
-    otherwise mistake it for a genuine capture. A file that fails to parse
-    is reported (once) and treated as "not yet captured" so the env keeps
-    retrying on later cells and, failing that, gets a placeholder at the end.
+    Called AFTER an isolated env's cell has run. A real snapshot is a JSON
+    *object* (matching ``EnvSnapshot.to_dict()``) that is NOT one of our own
+    placeholders -- the placeholder carries ``"snapshot_captured": false``, so
+    a later retry reading it back would otherwise mistake it for a genuine
+    capture. Non-object JSON (arrays, strings, numbers) is rejected: promoting
+    it would hand downstream consumers a shape they don't expect. A file that
+    fails to parse is reported (once) and treated as "not yet captured" so the
+    env keeps retrying on later cells and, failing that, gets a placeholder at
+    the end.
     """
     if not target.is_file():
         return False
@@ -363,7 +367,13 @@ def _is_real_env_snapshot(target: Path, env_name: str, warnings: list[str]) -> b
             f"is unreadable ({type(exc).__name__}); will retry / fall back to placeholder."
         )
         return False
-    if isinstance(doc, dict) and doc.get("snapshot_captured") is False:
+    if not isinstance(doc, dict):
+        warnings.append(
+            f"environment {env_name!r}: in-container snapshot at {target} "
+            f"is not a JSON object ({type(doc).__name__}); will retry / fall back to placeholder."
+        )
+        return False
+    if doc.get("snapshot_captured") is False:
         return False
     return True
 
@@ -1267,6 +1277,11 @@ def _run_recipe_locked(
         # in-container probe to rank 0 to avoid N redundant collect_env calls.
         env_probe_arg: dict[str, str] | None = None
         if is_isolated and cell.environment not in captured_envs:
+            # Create the parent now so the wrapper bind-mounts an existing
+            # host dir. Otherwise ``docker run -v <out_dir>:...`` would have
+            # the daemon create it as root, and the probe (or a later
+            # placeholder write) could fail on permissions.
+            env_json_path.parent.mkdir(parents=True, exist_ok=True)
             env_probe_arg = {"src": aorta_src, "out": str(env_json_path)}
             pending_envs[cell.environment] = (env_json_path, cell.environment)
 

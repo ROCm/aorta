@@ -289,6 +289,11 @@ class RunRequest:
         # out from under the dispatcher. ``None`` short-circuits.
         if self.probe_extras is not None:
             object.__setattr__(self, "probe_extras", copy.deepcopy(self.probe_extras))
+        # ``env_probe`` is the same optional-dict pattern as ``probe_extras``:
+        # deep-copy so a caller cannot mutate the {src, out} paths after
+        # construction and steer an in-flight probe. ``None`` short-circuits.
+        if self.env_probe is not None:
+            object.__setattr__(self, "env_probe", copy.deepcopy(self.env_probe))
 
 
 def run_trials(request: RunRequest) -> list[TrialResult]:

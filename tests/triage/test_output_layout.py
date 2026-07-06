@@ -380,6 +380,33 @@ def test_isolated_env_probe_retries_on_next_cell(tmp_path, patched_env, monkeypa
     assert snap["python_version"] == "late"
 
 
+def test_isolated_env_rejects_non_object_snapshot(tmp_path, patched_env, monkeypatch):
+    """A syntactically-valid but non-object env.json is not promoted.
+
+    The wrapper writes a JSON array (wrong shape); the runner must reject it
+    and fall back to the placeholder rather than hand downstream a bad shape.
+    """
+
+    def fake_run_trials(request):
+        out = Path(request.env_probe["out"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["snapshot_captured"] is False
+
+
 def test_isolated_env_falls_back_to_placeholder_when_no_snapshot(
     tmp_path, patched_env, patched_run_trials
 ):
