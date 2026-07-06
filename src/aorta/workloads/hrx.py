@@ -197,10 +197,15 @@ class HrxWorkload(Workload):
 
         build_dir = self.config.get("build_dir")
         if build_dir:
-            self._build_dir = Path(build_dir)
+            # Resolve to absolute: _run_hipcc runs with cwd=_KERNELS_DIR and
+            # run() with cwd=self._build_dir, so a relative build_dir would send
+            # the hipcc -o output under _KERNELS_DIR and make the probe exec look
+            # for <build_dir>/<build_dir>/<binary>.
+            self._build_dir = Path(build_dir).resolve()
             self._build_dir.mkdir(parents=True, exist_ok=True)
             self._owns_build_dir = False
         else:
+            # mkdtemp already returns an absolute path.
             self._build_dir = Path(tempfile.mkdtemp(prefix="aorta-hrx-"))
             self._owns_build_dir = True
 

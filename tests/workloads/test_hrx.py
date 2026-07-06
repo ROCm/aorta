@@ -84,6 +84,33 @@ def test_build_env_strips_runtime_routing_vars(monkeypatch, tmp_path):
     assert build_env.get("ROCM_PATH") == "/opt/rocm"
 
 
+def test_relative_build_dir_is_resolved_absolute(monkeypatch, tmp_path):
+    """A relative build_dir must be absolutized so hipcc -o / probe cwd agree.
+
+    _run_hipcc runs with cwd=_KERNELS_DIR and run() with cwd=build_dir, so a
+    relative build_dir would split the -o output from the probe exec.
+    """
+    monkeypatch.chdir(tmp_path)
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, *a, **k):
+        captured["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    wl = HrxWorkload({"probe": "static", "build_dir": "relbuild"})
+    wl.setup()
+
+    assert wl._build_dir.is_absolute()
+    assert wl._binary.is_absolute()
+    assert wl._build_dir == (tmp_path / "relbuild").resolve()
+    # The hipcc -o target must be the absolute binary path, not a relative one.
+    out_arg = captured["cmd"][captured["cmd"].index("-o") + 1]
+    assert Path(out_arg).is_absolute()
+
+
 def _prep_workload(monkeypatch, tmp_path: Path) -> HrxWorkload:
     """A workload whose setup() succeeds without a real toolchain."""
     monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
