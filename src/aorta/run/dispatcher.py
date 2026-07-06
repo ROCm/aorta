@@ -662,18 +662,19 @@ def _run_single_trial(
             name: dict(opts) for name, opts in request.collect_options.items()
         }
 
-    # When a collector is active, thread the per-trial output directory so a
+    # When a collector is active, thread the per-trial output path stem so a
     # workload can write collector artifacts (e.g. the layer_numerics NaN
     # logger's summary/jsonl) into the results tree -- WITHOUT requiring
     # ``save_logs``. Previously a subprocess wrapper had to piggy-back on
     # ``_aorta_log_prefix``, which the dispatcher only sets when
     # ``save_logs=True``; that coupled an unrelated debug knob to collector
     # output landing in the right place (and being picked up by ``aorta
-    # bundle``). This is an absolute path-with-stem, same shape/derivation as
-    # ``_aorta_log_prefix`` (``.absolute()`` so a relative ``results_dir``
-    # still yields a usable path for a subprocess with a different cwd). Only
-    # set on rank 0 (matches the trial-JSON / log-capture write gate) and only
-    # when a collector was requested, so non-collector runs are unchanged.
+    # bundle``). This is an absolute path stem with no extension, same
+    # shape/derivation as ``_aorta_log_prefix`` (``.absolute()`` so a relative
+    # ``results_dir`` still yields a usable path for a subprocess with a
+    # different cwd). Only set on rank 0 (matches the trial-JSON / log-capture
+    # write gate) and only when a collector was requested, so non-collector
+    # runs are unchanged.
     if request.collect and should_write:
         trial_basename = (
             f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"

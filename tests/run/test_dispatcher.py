@@ -538,8 +538,8 @@ class TestRunTrials:
 
     def test_collect_dir_injected_when_collector_active(self, tmp_path):
         """A collector run gets ``config['_aorta_collect_dir']`` (an absolute
-        per-trial path) WITHOUT needing ``save_logs`` -- so collector artifacts
-        can land in the results tree regardless of the log-capture knob."""
+        per-trial path stem) WITHOUT needing ``save_logs`` -- so collector
+        artifacts can land in the results tree regardless of the log-capture knob."""
         captured_config: dict = {}
 
         class ConfigCapturingWorkload(Workload):
