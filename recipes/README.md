@@ -380,10 +380,12 @@ with no `pip install`. It writes exactly the same `env.json` shape as
 `aorta env probe -o`, so a promoted in-container snapshot is
 indistinguishable on disk from a local-env one.
 
-Probing is **per unique environment**, not per cell: only the first cell of
-each isolated env requests a probe. If that cell's container fails to start,
-the next cell reusing the same env retries; an env that never produces a
-snapshot gets the placeholder at the end of the run.
+Probing is **per unique environment**, not per cell: the first cell of each
+isolated env requests a probe, and subsequent cells reusing that env keep
+requesting one until a valid snapshot is captured (so a cell whose container
+fails to start doesn't permanently lose the snapshot). Once captured, later
+cells stop requesting it. An env that never produces a valid snapshot gets the
+placeholder at the end of the run.
 
 ## Re-running a past matrix
 

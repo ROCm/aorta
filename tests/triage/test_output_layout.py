@@ -363,7 +363,10 @@ def test_isolated_env_probe_retries_on_next_cell(tmp_path, patched_env, monkeypa
         if calls["n"] == 2 and request.env_probe is not None:
             out = Path(request.env_probe["out"])
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps({"python_version": "late"}), encoding="utf-8")
+            out.write_text(
+                json.dumps({"schema_version": "1.7", "python_version": "late"}),
+                encoding="utf-8",
+            )
         return [_fake_trial(), _fake_trial()]
 
     monkeypatch.setattr(runner, "run_trials", fake_run_trials)
@@ -391,6 +394,35 @@ def test_isolated_env_rejects_non_object_snapshot(tmp_path, patched_env, monkeyp
         out = Path(request.env_probe["out"])
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["snapshot_captured"] is False
+
+
+def test_isolated_env_rejects_snapshot_without_schema_version(
+    tmp_path, patched_env, monkeypatch
+):
+    """A JSON object lacking schema_version is not a valid snapshot.
+
+    Guards against a partial/buggy wrapper write (e.g. ``{}`` or a
+    half-populated dict) being promoted as if it were a real EnvSnapshot.
+    """
+
+    def fake_run_trials(request):
+        out = Path(request.env_probe["out"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"python_version": "3.12"}), encoding="utf-8")
         return [_fake_trial(), _fake_trial()]
 
     monkeypatch.setattr(runner, "run_trials", fake_run_trials)

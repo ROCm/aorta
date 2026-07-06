@@ -309,11 +309,13 @@ def _write_isolated_env_placeholder(
         "capture the real environment, have the workload wrapper read the "
         "reserved config['_aorta_env_probe'] {'src', 'out'} HOST paths, "
         "bind-mount 'src' and the parent of 'out' into the container, and run "
-        "'python -m aorta.instrumentation._probe_main <container-visible out>' "
-        "as the first step inside its docker run -- note 'out' is a host path, "
-        "so pass the mounted container path, not 'out' verbatim. The runner "
-        "then promotes that file in place of this placeholder. host_env.json "
-        "next to this file captures the runner's view."
+        "'PYTHONPATH=<mounted src> python -m aorta.instrumentation._probe_main "
+        "<container-visible out>' as the first step inside its docker run -- "
+        "PYTHONPATH is required unless aorta is installed in the image, and "
+        "'out' is a host path so pass the mounted container path, not 'out' "
+        "verbatim. The runner then promotes that file in place of this "
+        "placeholder. host_env.json next to this file captures the runner's "
+        "view."
     )
     placeholder = {
         "name": env_name,
@@ -348,14 +350,19 @@ def _is_real_env_snapshot(target: Path, env_name: str, warnings: list[str]) -> b
     """True iff ``target`` holds a wrapper-produced in-container snapshot.
 
     Called AFTER an isolated env's cell has run. A real snapshot is a JSON
-    *object* (matching ``EnvSnapshot.to_dict()``) that is NOT one of our own
+    *object* carrying a non-empty ``schema_version`` string (the shape
+    ``EnvSnapshot.to_dict()`` always produces) that is NOT one of our own
     placeholders -- the placeholder carries ``"snapshot_captured": false``, so
     a later retry reading it back would otherwise mistake it for a genuine
-    capture. Non-object JSON (arrays, strings, numbers) is rejected: promoting
-    it would hand downstream consumers a shape they don't expect. A file that
-    fails to parse is reported (once) and treated as "not yet captured" so the
+    capture. Non-object JSON (arrays, strings, numbers) and objects missing
+    ``schema_version`` (``{}``, partial/buggy writes) are rejected: promoting
+    them would hand downstream consumers a shape they don't expect.
+
+    A file that is missing, unreadable, or the wrong shape returns False so the
     env keeps retrying on later cells and, failing that, gets a placeholder at
-    the end.
+    the end. Each rejection appends a warning; on retry across N cells for the
+    same still-broken env this can log N times, which is acceptable -- the
+    signal is per-cell and points at a real, unresolved problem.
     """
     if not target.is_file():
         return False
@@ -374,6 +381,13 @@ def _is_real_env_snapshot(target: Path, env_name: str, warnings: list[str]) -> b
         )
         return False
     if doc.get("snapshot_captured") is False:
+        return False
+    if not isinstance(doc.get("schema_version"), str) or not doc["schema_version"]:
+        warnings.append(
+            f"environment {env_name!r}: in-container snapshot at {target} "
+            "lacks a non-empty schema_version (not an EnvSnapshot shape); "
+            "will retry / fall back to placeholder."
+        )
         return False
     return True
 

@@ -636,7 +636,7 @@ def _run_single_trial(
     # appears, else falls back to the placeholder. Same reserved-``_aorta_*``
     # convention + non-None-only injection as the keys above; the platform
     # launches nothing, the wrapper acts. Non-isolated envs and every
-    # pre-#(env-probe) caller leave this None so the key stays absent.
+    # pre-existing caller leave this None so the key stays absent.
     if request.env_probe is not None:
         config["_aorta_env_probe"] = dict(request.env_probe)
 
