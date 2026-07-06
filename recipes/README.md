@@ -24,7 +24,7 @@ workload: fsdp                       # required; resolved via aorta.workloads en
 trials: 8                            # required; per-cell trial count
 steps: 5000                          # required; per-cell step count
 save_logs: false                     # optional; when true, dispatcher writes per-trial stdout/stderr files
-collect: [layer_numerics]            # optional; default collectors for every cell
+collect: [layer_numerics]            # optional; default collectors; does NOT require save_logs
 
 confound:
   threshold: 1.15                    # default; > 1.15 -> "speed (+N%)" flag
