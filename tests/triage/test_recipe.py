@@ -292,6 +292,23 @@ cells:
     assert cell.effective_collect_options(r.collect_options) == {}
 
 
+def test_cell_collect_null_rejected(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 2
+steps: 100
+collect: [layer_numerics]
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+    collect:
+"""
+    with pytest.raises(RecipeSchemaError, match=r"^cells\[0\]\.collect: null"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
 def test_cell_collect_mapping_form_parses_names_and_options(tmp_path):
     text = """\
 schema_version: 1

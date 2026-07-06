@@ -76,6 +76,22 @@ _SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]")
 _RESERVED_SLUGS = frozenset({".", ".."})
 
 
+def _collect_doc(
+    collect: tuple[str, ...],
+    collect_options: dict[str, dict[str, str]] | None = None,
+) -> list[str] | dict[str, dict[str, str] | None]:
+    """Return the reloadable YAML shape for a ``collect:`` field.
+
+    List form keeps option-free collectors compact. Mapping form is needed when
+    any enabled collector has options; option-less collectors are emitted with
+    ``null`` so they stay enabled on reload.
+    """
+    options = collect_options or {}
+    if not options:
+        return list(collect)
+    return {name: (dict(options[name]) if name in options else None) for name in collect}
+
+
 def safe_slug(value: str) -> str:
     """Turn a ticket / workload / env name into a safe directory component.
 
@@ -993,6 +1009,12 @@ def write_resolved_recipe(
     the resolved YAML preserves the stopping behaviour rather than silently
     reverting to fixed ``trials``.
 
+    Collector settings are also re-emitted at recipe and cell scope so replay
+    preserves which collector artifacts were requested. Cell-level ``collect``
+    is omitted only when the cell inherits the recipe default; explicit
+    ``collect: []`` disables collection on reload just as it did in the
+    original run.
+
     For runs that used ``--mitigations-file``, the resolved YAML still
     references those mitigation/environment names by name -- it is **not**
     self-contained on its own. The runner snapshots the operator-supplied
@@ -1037,6 +1059,14 @@ def write_resolved_recipe(
             # YAML preserves both scopes (recipe-scope key below) so a
             # round-trip load+run produces the same effective config.
             cell_doc["workload_config"] = dict(cell.workload_config)
+        if cell.collect is not None:
+            # Preserve explicit cell-level collector intent. Omitted means
+            # inherit the recipe-level ``collect``; ``[]`` means disable for
+            # this cell.
+            cell_doc["collect"] = _collect_doc(
+                cell.collect,
+                cell.collect_options,
+            )
         resolved_cells.append(cell_doc)
 
     doc: dict[str, Any] = {
@@ -1052,6 +1082,8 @@ def write_resolved_recipe(
         # recipes that never used the field round-trip to byte-equivalent
         # YAML. Cell-scope values are written per cell above.
         doc["workload_config"] = dict(recipe.workload_config)
+    if recipe.collect:
+        doc["collect"] = _collect_doc(recipe.collect, recipe.collect_options)
     doc["confound"] = {
         "threshold": recipe.confound.threshold,
         "baseline_cell": recipe.confound.baseline_cell,

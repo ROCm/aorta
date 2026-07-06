@@ -836,6 +836,12 @@ def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
     # We branch on key presence rather than truthiness so ``collect: []`` and
     # a missing key mean different things.
     if "collect" in raw:
+        if raw["collect"] is None:
+            raise RecipeSchemaError(
+                f"{path_hint}.collect: null is not allowed at cell scope; "
+                "omit the key to inherit recipe-level collectors or use [] "
+                "to disable collectors for this cell."
+            )
         collect, collect_options = _parse_collect(path_hint, raw["collect"])
     else:
         collect, collect_options = None, None
