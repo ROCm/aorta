@@ -302,10 +302,99 @@ def test_isolated_env_writes_placeholder_not_runner_snapshot(
     assert env_json.exists()
     placeholder = json.loads(env_json.read_text())
     assert placeholder["snapshot_captured"] is False
-    assert "B1" in placeholder["skip_reason"]
+    assert "in-container" in placeholder["skip_reason"]
     assert placeholder["descriptor"]["docker"] == "rocm/pytorch:nightly"
     md = (run_dir / "matrix.md").read_text()
-    assert "skipped" in md.lower()
+    assert "no in-container snapshot captured" in md.lower()
+
+
+def test_isolated_env_promotes_in_container_snapshot(
+    tmp_path, patched_env, monkeypatch
+):
+    """A wrapper-written in-container env.json is promoted over the placeholder.
+
+    Simulates the ``_aorta_env_probe`` contract: the runner hands the cell
+    ``{"src", "out"}`` via ``RunRequest.env_probe``; a real wrapper would
+    bind-mount ``src`` and write a snapshot to ``out`` from inside the
+    container. Here the stubbed ``run_trials`` plays the wrapper by writing
+    a real snapshot to the requested ``out`` path.
+    """
+
+    def fake_run_trials(request):
+        assert request.env_probe is not None
+        src = Path(request.env_probe["src"])
+        assert src.is_absolute() and src.is_dir()
+        out = Path(request.env_probe["out"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps({"schema_version": "1.7", "python_version": "3.12-in-container"}),
+            encoding="utf-8",
+        )
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    snap = json.loads(env_json.read_text())
+    # Promoted, not the placeholder.
+    assert "snapshot_captured" not in snap
+    assert snap["python_version"] == "3.12-in-container"
+
+
+def test_isolated_env_probe_retries_on_next_cell(tmp_path, patched_env, monkeypatch):
+    """If the first cell's container never writes a snapshot, the next cell retries.
+
+    The env is probed once successfully across the two cells that share it;
+    the first cell's ``run_trials`` writes nothing (container failed to
+    start), the second writes the real snapshot.
+    """
+    calls = {"n": 0}
+
+    def fake_run_trials(request):
+        calls["n"] += 1
+        # Only the second cell (same env) produces the snapshot.
+        if calls["n"] == 2 and request.env_probe is not None:
+            out = Path(request.env_probe["out"])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps({"python_version": "late"}), encoding="utf-8")
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none,tf32_off",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    snap = json.loads(env_json.read_text())
+    assert snap["python_version"] == "late"
+
+
+def test_isolated_env_falls_back_to_placeholder_when_no_snapshot(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Wrapper never writes a snapshot -> honest placeholder at the end."""
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["snapshot_captured"] is False
 
 
 def test_per_env_probe_once_per_unique_env(tmp_path, patched_env, patched_run_trials):

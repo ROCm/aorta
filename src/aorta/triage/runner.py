@@ -243,10 +243,12 @@ def _is_isolated_environment(
     their :class:`aorta.registry.Environment` descriptor sets ``docker`` or
     ``venv`` -- in either case, a runner-process ``collect_env()`` call would
     record the host's state, not the trial's, and therefore the resulting
-    ``environments/<name>/env.json`` would be misleading. B1 doesn't actually
-    perform docker / venv isolation today (in-process execution); the fix
-    when it does is to capture inside the isolated env. Until then, gate the
-    runner-process probe on this predicate.
+    ``environments/<name>/env.json`` would be misleading. Isolated envs
+    instead rely on the workload wrapper to capture an in-container snapshot
+    via the ``_aorta_env_probe`` contract, which the runner promotes after
+    the cell runs (falling back to a placeholder if none appears). This
+    predicate gates that path: True routes the env to wrapper-driven probing,
+    False to the in-process ``collect_env()``.
 
     ``sidecar_files`` MUST be threaded through so envs defined only in a
     ``--mitigations-file`` JSON are visible to the registry resolver. Without
@@ -301,11 +303,16 @@ def _write_isolated_env_placeholder(
         except RegistryError as exc:  # pragma: no cover - guarded by predicate
             descriptor["_lookup_error"] = f"{type(exc).__name__}: {exc}"
     skip_reason = (
-        "B1 currently runs trials in the runner process, so a runner-time "
-        "collect_env() snapshot would record the host's state instead of the "
-        "isolated docker/venv environment the descriptor advertises. The "
-        "snapshot is intentionally skipped to avoid a misleading artifact; "
-        "host_env.json next to this file captures the runner's view."
+        "No in-container snapshot was produced for this isolated docker/venv "
+        "environment. A runner-process collect_env() would record the host's "
+        "state instead of the image's, so it is intentionally not written. To "
+        "capture the real environment, have the workload wrapper read the "
+        "reserved config['_aorta_env_probe'] {'src', 'out'} paths, bind-mount "
+        "'src' into the container, and run "
+        "'python -m aorta.instrumentation._probe_main <out>' as the first step "
+        "inside its docker run; the runner then promotes that file in place of "
+        "this placeholder. host_env.json next to this file captures the "
+        "runner's view."
     )
     placeholder = {
         "name": env_name,
@@ -316,9 +323,49 @@ def _write_isolated_env_placeholder(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(placeholder, indent=2), encoding="utf-8")
     warnings.append(
-        f"environment {env_name!r}: per-env probe skipped (isolated env, B1 in-process). "
+        f"environment {env_name!r}: no in-container snapshot captured (isolated env). "
         "See the env's env.json for the descriptor and the host-level snapshot in host_env.json."
     )
+
+
+def _aorta_src_root() -> Path:
+    """Absolute path to the aorta ``src`` tree on the runner host.
+
+    A self-isolating wrapper bind-mounts this into its container so the
+    dependency-free ``python -m aorta.instrumentation._probe_main`` entry
+    resolves without installing aorta in the image. Derived from the
+    installed package location (``.../src/aorta/__init__.py`` -> ``.../src``)
+    so it works for an editable install; a non-editable install returns the
+    site-packages root, which is equally mountable.
+    """
+    import aorta
+
+    return Path(aorta.__file__).resolve().parent.parent
+
+
+def _is_real_env_snapshot(target: Path, env_name: str, warnings: list[str]) -> bool:
+    """True iff ``target`` holds a wrapper-produced in-container snapshot.
+
+    Called AFTER an isolated env's cell has run. A real snapshot is valid
+    JSON that is NOT one of our own placeholders -- the placeholder carries
+    ``"snapshot_captured": false``, so a later retry reading it back would
+    otherwise mistake it for a genuine capture. A file that fails to parse
+    is reported (once) and treated as "not yet captured" so the env keeps
+    retrying on later cells and, failing that, gets a placeholder at the end.
+    """
+    if not target.is_file():
+        return False
+    try:
+        doc = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        warnings.append(
+            f"environment {env_name!r}: in-container snapshot at {target} "
+            f"is unreadable ({type(exc).__name__}); will retry / fall back to placeholder."
+        )
+        return False
+    if isinstance(doc, dict) and doc.get("snapshot_captured") is False:
+        return False
+    return True
 
 
 def _resolve_cell_env_vars(
@@ -715,6 +762,7 @@ def _run_one_cell(
     layout: Literal["timestamped", "flat_resume"] = "timestamped",
     resume_existing: bool = False,
     subprocess_argv: tuple[str, ...] | None = None,
+    env_probe: dict[str, str] | None = None,
 ) -> tuple[list[TrialResult], str | None, dict[str, str], list[str]]:
     """Execute a single cell through B1 and return (trials, error, env_vars, trial_paths).
 
@@ -911,6 +959,7 @@ def _run_one_cell(
         stop_after=stop_after,
         collect=tuple(cell.effective_collect(recipe.collect)),
         collect_options=dict(cell.effective_collect_options(recipe.collect_options)),
+        env_probe=env_probe,
     )
 
     try:
@@ -1157,13 +1206,25 @@ def _run_recipe_locked(
     _capture_env(run_dir / "host_env.json", scope="host", warnings=warnings)
 
     # Per-environment probes, captured once per unique env in the order
-    # cells reference them. ``seen`` preserves first-use ordering so the
-    # probe lands right before the env's first cell runs (matches the
-    # "captured once per unique --environment-axis value" acceptance
-    # criterion).
+    # cells reference them. Non-isolated (local) envs are probed in-process
+    # right before their first cell -- the runner process IS the trial env,
+    # so its snapshot is truthful and needs no container.
+    #
+    # Isolated (docker/venv) envs cannot be probed from the runner process
+    # (that would record host state under a docker label). Instead the
+    # wrapper writes an in-container snapshot to ``environments/<env>/env.json``
+    # via the ``_aorta_env_probe`` contract, and we promote it AFTER the
+    # cell runs. ``captured_envs`` tracks which isolated envs already have a
+    # real snapshot so later cells reusing the same env don't re-probe;
+    # ``pending_envs`` tracks isolated envs still awaiting one (retried on
+    # each subsequent cell of that env until success), and any left pending
+    # at the end get a placeholder.
     seen_envs: set[str] = set()
+    captured_envs: set[str] = set()
+    pending_envs: dict[str, tuple[Path, str]] = {}
 
     env_dir = run_dir / "environments"
+    aorta_src = str(_aorta_src_root())
 
     # Env-slug collision + baseline resolution were already enforced by
     # _preflight_validate at the very top of run_recipe (so dry-run sees the
@@ -1181,25 +1242,33 @@ def _run_recipe_locked(
         run_dir,
     )
     for cell_idx, cell in enumerate(recipe.cells, start=1):
+        env_json_path = env_dir / safe_slug(cell.environment) / "env.json"
+        is_isolated = _is_isolated_environment(
+            cell.environment, recipe.inline_environments, sidecar_files
+        )
+        # Local envs: probe in-process once, before the env's first cell.
+        # Isolated envs: defer to the wrapper (post-cell promotion below).
         if cell.environment not in seen_envs:
-            env_json_path = env_dir / safe_slug(cell.environment) / "env.json"
-            if _is_isolated_environment(
-                cell.environment, recipe.inline_environments, sidecar_files
-            ):
-                _write_isolated_env_placeholder(
-                    env_json_path,
-                    cell.environment,
-                    recipe.inline_environments,
-                    warnings,
-                    sidecar_files,
-                )
-            else:
+            if not is_isolated:
                 _capture_env(
                     env_json_path,
                     scope=f"environment:{cell.environment}",
                     warnings=warnings,
                 )
             seen_envs.add(cell.environment)
+
+        # Hand the wrapper the probe contract while this isolated env still
+        # lacks a real snapshot. Once captured, stop requesting it so later
+        # cells (same image, different mitigations) don't overwrite it.
+        # Not separately rank-gated: on non-rank-0 ``env_json_path`` is rooted
+        # in the discarded scratch ``run_dir`` (see run_recipe), so a promoted
+        # snapshot there is thrown away with the tempdir like every other
+        # artifact. Wrappers that fan out per rank should themselves gate the
+        # in-container probe to rank 0 to avoid N redundant collect_env calls.
+        env_probe_arg: dict[str, str] | None = None
+        if is_isolated and cell.environment not in captured_envs:
+            env_probe_arg = {"src": aorta_src, "out": str(env_json_path)}
+            pending_envs[cell.environment] = (env_json_path, cell.environment)
 
         log.info(
             "cell %d/%d: %s (mitigations=%s environment=%s) -- starting %d trial(s)",
@@ -1219,8 +1288,19 @@ def _run_recipe_locked(
             layout=layout,
             resume_existing=resume_existing,
             subprocess_argv=subprocess_argv,
+            env_probe=env_probe_arg,
         )
         cell_elapsed = time.perf_counter() - cell_t0
+
+        # Promote the wrapper's in-container snapshot if this cell produced
+        # one. Retries across cells reusing the env: only cells still in
+        # ``pending_envs`` requested a probe, so a container that failed to
+        # start on cell N gets another chance on cell N+1 of the same env.
+        if cell.environment in pending_envs:
+            probe_target, probe_env = pending_envs[cell.environment]
+            if _is_real_env_snapshot(probe_target, probe_env, warnings):
+                captured_envs.add(cell.environment)
+                del pending_envs[cell.environment]
         if error is not None:
             log.info(
                 "cell %d/%d: %s -- ERROR (%s) in %.1fs",
@@ -1279,6 +1359,19 @@ def _run_recipe_locked(
             stop_after_note=stop_after_note,
         )
         cell_stats.append(stats)
+
+    # Isolated envs whose containers never produced an in-container snapshot
+    # (wrapper didn't opt in, or every cell of that env failed to start the
+    # container) get an honest placeholder now -- one per env, matching the
+    # per-unique-environment artifact contract.
+    for probe_target, probe_env in pending_envs.values():
+        _write_isolated_env_placeholder(
+            probe_target,
+            probe_env,
+            recipe.inline_environments,
+            warnings,
+            sidecar_files,
+        )
 
     # Did-not-run baseline disqualification (issue #173). Three cases,
     # all of them produce matrix.md / matrix.json so the operator can
