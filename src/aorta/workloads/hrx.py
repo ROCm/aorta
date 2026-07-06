@@ -1,0 +1,333 @@
+"""HRX HIP-launch probe workload.
+
+Exposes the HRX HIP-compatibility-layer launch probes (from the
+``ROCm/hrx-system`` #156 / #158 / #160 investigation) as an ``aorta``
+workload so they can be run and A/B-compared (HRX-on vs stock ROCm HIP)
+through the normal ``aorta run`` / ``aorta triage`` / ``aorta probe`` flows.
+
+Design:
+    * **What to run** is this workload: one of a fixed set of single-purpose
+      HIP kernel-launch probes, selected by ``workload_config.probe``. Each
+      computes ``out[i] = in[i] + 100`` (in=7, out pre-zeroed) and prints a
+      ``VERDICT=`` line + an ``out[0]=`` sentinel. ``107``/``FULLY_WORKS`` is
+      the only passing outcome; ``0``/``OUTPUT_NOT_WRITTEN`` is the #156 bug.
+    * **Which runtime** (HRX vs stock HIP) is NOT decided here. It is an
+      environment/mitigation concern: the HRX-on cell applies an
+      ``LD_PRELOAD`` + ``LD_LIBRARY_PATH`` + ``HRX_GPU_DRIVER`` env bundle.
+      Because the probe is exec'd as a *child* process, that ``LD_PRELOAD``
+      takes effect at ``exec()`` (an in-process torch workload could not do
+      this — see the HRX handover notes).
+    * That routing bundle is stripped from the ``hipcc`` build env (see
+      :data:`_RUNTIME_ROUTING_VARS`): the dispatcher merges the cell env into
+      ``os.environ`` before ``setup()`` runs, so without stripping, a preloaded
+      HRX ``libamdhip64.so`` would run inside the *compiler/link* step. Building
+      against the stock toolchain makes the binary identical across cells; only
+      :meth:`run` inherits the bundle, so routing applies to the probe alone.
+
+The probe binary is built from vendored source with ``hipcc`` at
+:meth:`setup`. On a host without ``hipcc`` (or without a GPU) ``setup``
+raises, which the runner classifies as a setup failure / ``did_not_run`` —
+never a false ``OUTPUT_NOT_WRITTEN``.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, ClassVar
+
+from aorta.workloads._base import Workload, WorkloadResult
+
+log = logging.getLogger(__name__)
+
+_KERNELS_DIR = Path(__file__).parent / "hrx_kernels"
+
+# The only passing verdict. All probes print "VERDICT=<TOKEN> ..." where TOKEN
+# is one of these; the trailing parenthetical (e.g. "(H2D/in-arg broken)") is
+# descriptive and not part of the token.
+_PASS_VERDICT = "FULLY_WORKS"
+_VERDICT_RE = re.compile(r"^VERDICT=([A-Z_]+)", re.MULTILINE)
+_OUT0_RE = re.compile(r"^out\[0\]=([-\d.eE+]+)", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class _ProbeSpec:
+    """Build recipe for one probe.
+
+    Attributes:
+        source: main ``.cpp`` compiled to the probe executable.
+        binary: output executable name.
+        kernel_source: optional device ``.cpp`` compiled to a standalone
+            code object with ``--genco`` and loaded at runtime (module path).
+        kernel_object: output ``.code`` name for ``kernel_source``.
+    """
+
+    source: str
+    binary: str
+    kernel_source: str | None = None
+    kernel_object: str | None = None
+
+
+# Registry of supported probes. Keys are the user-facing ``probe`` config values.
+_PROBES: dict[str, _ProbeSpec] = {
+    "static": _ProbeSpec("hrx_probe.cpp", "hrx_probe"),
+    "module": _ProbeSpec(
+        "hrx_probe_module.cpp",
+        "hrx_probe_module",
+        kernel_source="hrx_probe_module_kernel.cpp",
+        kernel_object="hrx_probe_module_kernel.code",
+    ),
+    "graph_add": _ProbeSpec("hrx_probe_graph_add.cpp", "hrx_probe_graph_add"),
+    "graph_setparams": _ProbeSpec(
+        "hrx_probe_graph_setparams.cpp", "hrx_probe_graph_setparams"
+    ),
+    "graph_execsetparams": _ProbeSpec(
+        "hrx_probe_graph_execsetparams.cpp", "hrx_probe_graph_execsetparams"
+    ),
+}
+
+_DEFAULT_PROBE = "module"
+_DEFAULT_ARCH = "gfx942"
+_DEFAULT_TIMEOUT_SEC = 120
+
+# Env vars the HRX-on cell injects to route the *probe exec* through an
+# alternate HIP runtime. The dispatcher merges the cell env into os.environ
+# before setup() (the build) runs, so these are stripped from the hipcc build
+# env -- otherwise a preloaded HRX libamdhip64.so (or its LD_LIBRARY_PATH)
+# would run inside the compiler/link step instead of the probe. run() still
+# inherits os.environ, so routing takes effect at the probe's exec().
+_RUNTIME_ROUTING_VARS = ("LD_PRELOAD", "LD_LIBRARY_PATH", "HRX_GPU_DRIVER")
+
+
+def _build_env() -> dict[str, str]:
+    """os.environ minus the HRX runtime-routing vars (for the hipcc build)."""
+    return {k: v for k, v in os.environ.items() if k not in _RUNTIME_ROUTING_VARS}
+
+# Platform-injected config keys that are not HrxWorkload knobs (the dispatcher
+# writes `steps` into every workload config; `_aorta_*` carry probe/env
+# metadata). Kept silent so the unknown-key guard doesn't spam warnings.
+_RESERVED_KEYS = {"steps"}
+_KNOWN_KEYS = {
+    "probe",
+    "gpu_arch",
+    "hipcc",
+    "build_dir",
+    "timeout_sec",
+    "keep_build",
+}
+
+
+def _resolve_hipcc(configured: str | None) -> str | None:
+    """Return an invocable hipcc path, or None if none is found."""
+    candidates = [
+        configured,
+        os.environ.get("HIPCC"),
+        "/opt/rocm/bin/hipcc",
+        "hipcc",
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        found = shutil.which(cand) or (cand if os.path.isfile(cand) and os.access(cand, os.X_OK) else None)
+        if found:
+            return found
+    return None
+
+
+class HrxWorkload(Workload):
+    """Run one HRX HIP-launch probe and report its verdict.
+
+    ``workload_config`` keys:
+        probe: which launch path to exercise (default ``"module"``); one of
+            ``static`` / ``module`` / ``graph_add`` / ``graph_setparams`` /
+            ``graph_execsetparams``.
+        gpu_arch: ``--offload-arch`` target (default ``"gfx942"``).
+        hipcc: explicit hipcc path (default: ``$HIPCC`` /
+            ``/opt/rocm/bin/hipcc`` / ``hipcc`` on PATH).
+        build_dir: directory for built binaries (default: a temp dir removed
+            on cleanup unless ``keep_build`` is set).
+        timeout_sec: per-run subprocess timeout (default ``120``).
+        keep_build: keep ``build_dir`` after cleanup (default ``False``).
+    """
+
+    name: ClassVar[str] = "hrx"
+
+    def _validated_probe(self) -> str:
+        for key in self.config:
+            if key in _KNOWN_KEYS or key in _RESERVED_KEYS or key.startswith("_aorta_"):
+                continue
+            log.warning("hrx: ignoring unknown workload_config key %r", key)
+        probe = self.config.get("probe", _DEFAULT_PROBE)
+        if probe not in _PROBES:
+            raise ValueError(
+                f"hrx: unknown probe {probe!r}; choose one of {sorted(_PROBES)}"
+            )
+        return probe
+
+    def setup(self) -> None:
+        self._probe = self._validated_probe()
+        self._spec = _PROBES[self._probe]
+        self._arch = str(self.config.get("gpu_arch", _DEFAULT_ARCH))
+        self._timeout = int(self.config.get("timeout_sec", _DEFAULT_TIMEOUT_SEC))
+        # Validate explicitly rather than bool(...): a stray "false"/"0" string
+        # from a recipe would coerce to True and silently keep build dirs.
+        keep_build = self.config.get("keep_build", False)
+        if not isinstance(keep_build, bool):
+            raise ValueError(
+                f"hrx: keep_build must be a bool, got {type(keep_build).__name__}"
+            )
+        self._keep_build = keep_build
+
+        hipcc = _resolve_hipcc(self.config.get("hipcc"))
+        if hipcc is None:
+            raise RuntimeError(
+                "hrx: hipcc not found (looked at $HIPCC, /opt/rocm/bin/hipcc, "
+                "and PATH). This workload builds HIP probes from source and "
+                "requires a ROCm/hipcc toolchain. Run it in a ROCm environment, "
+                "or set workload_config.hipcc."
+            )
+        self._hipcc = hipcc
+
+        build_dir = self.config.get("build_dir")
+        if build_dir:
+            self._build_dir = Path(build_dir)
+            self._build_dir.mkdir(parents=True, exist_ok=True)
+            self._owns_build_dir = False
+        else:
+            self._build_dir = Path(tempfile.mkdtemp(prefix="aorta-hrx-"))
+            self._owns_build_dir = True
+
+        self._binary = self._build()
+
+    def _run_hipcc(self, args: list[str], what: str) -> None:
+        cmd = [self._hipcc, *args]
+        log.debug("hrx: building %s: %s", what, " ".join(cmd))
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=str(_KERNELS_DIR), env=_build_env()
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"hrx: hipcc failed to build {what} (exit {proc.returncode}).\n"
+                f"cmd: {' '.join(cmd)}\n"
+                f"stderr:\n{proc.stderr.strip()}"
+            )
+
+    def _build(self) -> Path:
+        spec = self._spec
+        # Standalone code object first (module path only), placed next to the
+        # binary because the probe loads it from its own exe directory.
+        if spec.kernel_source and spec.kernel_object:
+            self._run_hipcc(
+                [
+                    "--genco",
+                    f"--offload-arch={self._arch}",
+                    str(_KERNELS_DIR / spec.kernel_source),
+                    "-o",
+                    str(self._build_dir / spec.kernel_object),
+                ],
+                spec.kernel_object,
+            )
+        binary = self._build_dir / spec.binary
+        self._run_hipcc(
+            [
+                "-O2",
+                f"--offload-arch={self._arch}",
+                str(_KERNELS_DIR / spec.source),
+                "-o",
+                str(binary),
+            ],
+            spec.binary,
+        )
+        return binary
+
+    def run(self) -> WorkloadResult:
+        start = time.monotonic()
+        try:
+            proc = subprocess.run(
+                [str(self._binary)],
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                cwd=str(self._build_dir),
+            )
+            timed_out = False
+            stdout, stderr, exit_code = proc.stdout, proc.stderr, proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            exit_code = None
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+        elapsed = time.monotonic() - start
+
+        verdict_match = _VERDICT_RE.search(stdout)
+        out0_match = _OUT0_RE.search(stdout)
+        verdict = verdict_match.group(1) if verdict_match else None
+        out0 = float(out0_match.group(1)) if out0_match else None
+
+        # main_work_started: the probe reached the point of printing a result
+        # (it dispatched / read back), as opposed to dying during HIP init.
+        main_work_started = out0_match is not None or verdict_match is not None
+
+        passed = (not timed_out) and exit_code == 0 and verdict == _PASS_VERDICT
+
+        metrics: dict[str, Any] = {
+            "probe": self._probe,
+            "gpu_arch": self._arch,
+            "verdict": verdict,
+            "out0": out0,
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+        }
+
+        failure_details: list[dict[str, Any]] = []
+        if not passed:
+            if timed_out:
+                hint = f"probe {self._probe!r} hung (>{self._timeout}s) at launch/sync"
+            elif verdict is None:
+                hint = (
+                    f"probe {self._probe!r} produced no VERDICT line "
+                    f"(exit {exit_code}); see stderr"
+                )
+            else:
+                hint = f"probe {self._probe!r} verdict {verdict} (out[0]={out0}, expected 107)"
+            failure_details.append(
+                {
+                    "probe": self._probe,
+                    "verdict": verdict,
+                    "out0": out0,
+                    "exit_code": exit_code,
+                    "timed_out": timed_out,
+                    "stderr_tail": stderr.strip()[-2000:],
+                    "hint": hint,
+                }
+            )
+
+        return WorkloadResult(
+            passed=passed,
+            failure_count=0 if passed else 1,
+            first_failure_iteration=None if passed else 0,
+            failure_details=failure_details,
+            total_iterations=1,
+            elapsed_sec=elapsed,
+            metrics=metrics,
+            main_work_started=main_work_started,
+            executed_iterations=1 if main_work_started else 0,
+            configured_iterations=1,
+        )
+
+    def cleanup(self) -> None:
+        if getattr(self, "_owns_build_dir", False) and not getattr(
+            self, "_keep_build", False
+        ):
+            shutil.rmtree(self._build_dir, ignore_errors=True)

@@ -1,0 +1,57 @@
+# HRX HIP-launch probe -- HRX-on vs stock-ROCm A/B smoke recipe.
+#
+# Exercises one HRX HIP kernel-launch path (issue #273) and compares the HRX
+# HIP-compatibility layer against the stock ROCm HIP runtime. The `hrx`
+# workload builds the probe from vendored source with hipcc at setup and execs
+# it as a child process; each cell's `extra_env` decides which libamdhip64 that
+# child loads:
+#
+#   hrx_off : stock ROCm HIP (no routing) -- the baseline.
+#   hrx_on  : HRX's libamdhip64.so LD_PRELOADed at exec().
+#
+# A green run shows hrx_on matching hrx_off with verdict FULLY_WORKS (out[0]=107);
+# the #156 bug shows up as hrx_on -> OUTPUT_NOT_WRITTEN (out[0]=0) while hrx_off
+# stays FULLY_WORKS.
+#
+# PREREQUISITES
+#   * A ROCm/hipcc toolchain (the workload compiles the probe).
+#   * An installed HRX public dist. Set HRX_ROOT below to its prefix (the dir
+#     that contains lib/libamdhip64.so). The paths under `extra_env` must be
+#     ABSOLUTE -- extra_env values are passed verbatim (no shell expansion), so
+#     edit the placeholder before running.
+#
+# Run:
+#   aorta sweep run --recipe recipes/hrx-launch-probe-smoke.yaml \
+#     --output ./triage_results --ticket HRX-273-SMOKE
+# Read:
+#   cat triage_results/HRX-273-SMOKE/hrx/*/matrix.md
+
+schema_version: 1
+
+ticket: HRX-273-SMOKE
+workload: hrx
+
+trials: 1
+steps: 1
+
+save_logs: true
+
+workload_config:
+  # One of: static | module | graph_add | graph_setparams | graph_execsetparams
+  probe: module
+  gpu_arch: gfx942
+  timeout_sec: 120
+
+cells:
+  - name: hrx_off
+    mitigations: [none]
+    environment: local
+
+  - name: hrx_on
+    mitigations: [none]
+    environment: local
+    # EDIT: replace /path/to/hrx-root with your installed HRX prefix.
+    extra_env:
+      HRX_GPU_DRIVER: "amdgpu"
+      LD_LIBRARY_PATH: "/path/to/hrx-root/lib"
+      LD_PRELOAD: "/path/to/hrx-root/lib/libamdhip64.so"

@@ -51,6 +51,7 @@ aorta = "aorta.cli:main"
 # reserved argv config key is only injected by ``aorta probe``.
 [project.entry-points."aorta.workloads"]
 _subprocess = "aorta.workloads._subprocess:SubprocessWorkload"
+hrx = "aorta.workloads.hrx:HrxWorkload"
 inference = "aorta.workloads.inference:InferenceWorkload"
 llm_determinism = "aorta.workloads.llm_determinism:LlmDeterminismWorkload"
 race = "aorta.workloads.race:RaceWorkload"
@@ -173,7 +174,13 @@ where = ["src"]
 include = ["aorta*"]
 
 [tool.setuptools.package-data]
-aorta = ["py.typed", "ebpf/scripts/*.bt", "ebpf/scripts/PROVENANCE.md"]
+aorta = [
+    "py.typed",
+    "ebpf/scripts/*.bt",
+    "ebpf/scripts/PROVENANCE.md",
+    "workloads/hrx_kernels/*.cpp",
+    "workloads/hrx_kernels/README.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
