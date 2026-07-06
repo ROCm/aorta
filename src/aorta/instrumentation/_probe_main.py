@@ -43,7 +43,7 @@ def main(argv: list[str]) -> int:
         with open(out, "w", encoding="utf-8") as fh:
             fh.write(text)
     except OSError as exc:
-        sys.stderr.write(f"aorta probe: failed to write {out}: {exc}\n")
+        sys.stderr.write(f"aorta env probe: failed to write {out}: {exc}\n")
         return 1
     return 0
 

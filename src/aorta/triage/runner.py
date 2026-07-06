@@ -313,15 +313,17 @@ def _write_isolated_env_placeholder(
         "the host's state instead of the isolated env's, so it is "
         "intentionally not written. To capture the real environment, have the "
         "workload wrapper read the reserved config['_aorta_env_probe'] "
-        "{'src', 'out'} HOST paths and run 'PYTHONPATH=<src> python -m "
-        "aorta.instrumentation._probe_main <out>' as the first step inside the "
-        "isolated env. For docker: bind-mount 'src' and the parent of 'out' "
-        "into the container, and pass the container-visible paths ('out' is a "
-        "host path, not valid inside the container). For venv: run it in the "
-        "activated venv with the host 'src'/'out' paths directly. PYTHONPATH "
-        "is required unless aorta is installed in the isolated env. The runner "
-        "then promotes that file in place of this placeholder. The run root's "
-        "host_env.json (../../host_env.json relative to this file) captures "
+        "{'src', 'out'} HOST paths and, as the first step inside the isolated "
+        "env, run 'PYTHONPATH=SRC python -m aorta.instrumentation._probe_main "
+        "OUT' where SRC/OUT are the paths as seen FROM INSIDE that env. "
+        "For docker: bind-mount 'src' and the parent of 'out', then set "
+        "SRC/OUT to the container mount points -- NOT the host 'src'/'out' "
+        "values, which do not exist inside the container. For venv: SRC/OUT "
+        "are the host 'src'/'out' values directly (same filesystem, no mount). "
+        "PYTHONPATH is required unless aorta is installed in the isolated env. "
+        "The runner then promotes that file in place of this placeholder. The "
+        "run root's host_env.json (../../host_env.json relative to this file) "
+        "captures "
         "the runner's view."
     )
     placeholder = {
@@ -367,9 +369,12 @@ def _is_real_env_snapshot(target: Path, env_name: str, warnings: list[str]) -> b
 
     A file that is missing, unreadable, or the wrong shape returns False so the
     env keeps retrying on later cells and, failing that, gets a placeholder at
-    the end. Each rejection appends a warning; on retry across N cells for the
-    same still-broken env this can log N times, which is acceptable -- the
-    signal is per-cell and points at a real, unresolved problem.
+    the end. A *malformed* file (unreadable, non-object, or missing
+    schema_version) appends a warning -- and on retry across N cells for the
+    same still-broken env this can log N times, which is acceptable (the signal
+    is per-cell and points at a real problem). The benign cases -- file not yet
+    written, or a prior placeholder read back -- return False silently, since
+    they are the expected "not captured yet" states, not errors.
     """
     if not target.is_file():
         return False
