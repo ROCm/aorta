@@ -379,8 +379,10 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     # JSON-serialized, with a confusing ``TypeError``.  Fail fast with an
     # actionable message instead.
     if request.env_probe is not None:
-        if set(request.env_probe) != {"src", "out"} or not all(
-            isinstance(v, str) for v in request.env_probe.values()
+        if (
+            not isinstance(request.env_probe, dict)
+            or set(request.env_probe) != {"src", "out"}
+            or not all(isinstance(v, str) for v in request.env_probe.values())
         ):
             raise ValueError(
                 "env_probe must be a dict with exactly {'src', 'out'} string "

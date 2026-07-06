@@ -12,10 +12,11 @@ the flag-mode CLI funnel into. Given a validated :class:`Recipe`, it:
 4. Captures a per-environment snapshot once per unique env ->
    ``environments/<name>/env.json``. Local (non-isolated) envs are probed
    in-process *right before* that env's first cell runs. Isolated
-   (docker/venv) envs are probed by the workload wrapper *inside the
-   container* via the ``_aorta_env_probe`` contract; the runner promotes
-   that snapshot *after* the cell runs (retrying on later cells of the same
-   env) and falls back to a placeholder if none is produced.
+   (docker/venv) envs are probed by the workload wrapper *inside the isolated
+   environment* (the container, or the activated venv) via the
+   ``_aorta_env_probe`` contract; the runner promotes that snapshot *after*
+   the cell runs (retrying on later cells of the same env) and falls back to
+   a placeholder if none is produced.
 5. Builds a :class:`aorta.run.RunRequest` per cell and calls
    :func:`aorta.run.run_trials` **in-process**. Per-cell exceptions are
    caught and surfaced as an ``error`` row so other cells still run.
@@ -307,19 +308,21 @@ def _write_isolated_env_placeholder(
         except RegistryError as exc:  # pragma: no cover - guarded by predicate
             descriptor["_lookup_error"] = f"{type(exc).__name__}: {exc}"
     skip_reason = (
-        "No in-container snapshot was produced for this isolated docker/venv "
-        "environment. A runner-process collect_env() would record the host's "
-        "state instead of the image's, so it is intentionally not written. To "
-        "capture the real environment, have the workload wrapper read the "
-        "reserved config['_aorta_env_probe'] {'src', 'out'} HOST paths, "
-        "bind-mount 'src' and the parent of 'out' into the container, and run "
-        "'PYTHONPATH=<mounted src> python -m aorta.instrumentation._probe_main "
-        "<container-visible out>' as the first step inside its docker run -- "
-        "PYTHONPATH is required unless aorta is installed in the image, and "
-        "'out' is a host path so pass the mounted container path, not 'out' "
-        "verbatim. The runner then promotes that file in place of this "
-        "placeholder. The run root's host_env.json (../../host_env.json "
-        "relative to this file) captures the runner's view."
+        "No in-isolated-env snapshot was produced for this isolated "
+        "docker/venv environment. A runner-process collect_env() would record "
+        "the host's state instead of the isolated env's, so it is "
+        "intentionally not written. To capture the real environment, have the "
+        "workload wrapper read the reserved config['_aorta_env_probe'] "
+        "{'src', 'out'} HOST paths and run 'PYTHONPATH=<src> python -m "
+        "aorta.instrumentation._probe_main <out>' as the first step inside the "
+        "isolated env. For docker: bind-mount 'src' and the parent of 'out' "
+        "into the container, and pass the container-visible paths ('out' is a "
+        "host path, not valid inside the container). For venv: run it in the "
+        "activated venv with the host 'src'/'out' paths directly. PYTHONPATH "
+        "is required unless aorta is installed in the isolated env. The runner "
+        "then promotes that file in place of this placeholder. The run root's "
+        "host_env.json (../../host_env.json relative to this file) captures "
+        "the runner's view."
     )
     placeholder = {
         "name": env_name,

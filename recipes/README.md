@@ -332,10 +332,13 @@ Every run records the environment each cell ran in under
 - **Isolated envs** (a registry `Environment` with a `docker:` or `venv:`
   field, or an inline-docker cell) cannot be probed from the runner
   process -- that would record the *host's* Python / ROCm / hipBLASLt
-  state under a docker label. Instead the **workload wrapper** captures a
-  snapshot from *inside* the container, and the runner promotes it. If the
-  wrapper produces nothing, the runner writes a placeholder with
-  `"snapshot_captured": false` and the image descriptor.
+  state, not the isolated env's. Instead the **workload wrapper** captures a
+  snapshot from *inside the isolated env* (the container, or the activated
+  venv), and the runner promotes it. If the wrapper produces nothing, the
+  runner writes a placeholder with `"snapshot_captured": false` and the env
+  descriptor. The docker example below is the common case; a venv wrapper
+  runs the same probe command in its activated venv using the host
+  `src`/`out` paths directly (no bind-mount).
 
 ### Wrapper contract for in-container snapshots
 

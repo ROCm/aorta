@@ -302,7 +302,7 @@ def test_isolated_env_writes_placeholder_not_runner_snapshot(
     assert env_json.exists()
     placeholder = json.loads(env_json.read_text())
     assert placeholder["snapshot_captured"] is False
-    assert "in-container" in placeholder["skip_reason"]
+    assert "_probe_main" in placeholder["skip_reason"]
     assert placeholder["descriptor"]["docker"] == "rocm/pytorch:nightly"
     md = (run_dir / "matrix.md").read_text()
     assert "no in-container snapshot captured" in md.lower()

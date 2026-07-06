@@ -224,6 +224,8 @@ class TestRunTrials:
             {"src": "/a"},                       # missing 'out'
             {"src": "/a", "out": "/b", "x": 1},  # extra key
             {"src": "/a", "out": Path("/b")},    # non-str value
+            ["src", "out"],                      # not a dict (would AttributeError)
+            42,                                  # not even iterable (would TypeError)
         ):
             req = RunRequest(
                 workload="anything",
