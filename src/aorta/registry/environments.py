@@ -68,9 +68,10 @@ def load_environments(
 
     Raises:
         RegistryCollisionError: two contributors registered the same environment name.
-        RegistryError: a plugin's payload was not a dict, contained keys other
-            than `docker` / `venv`, or had non-`str | None` values; or a sidecar
-            file failed schema validation.
+        RegistryError: a plugin's payload was not a dict, contained keys outside
+            ``_VALID_ENV_KEYS`` (``docker``, ``venv``, ``buck_target``,
+            ``emulator``, ``mirage_profile``), or had non-``str | None`` values;
+            or a sidecar file failed schema validation.
     """
     registry: dict[str, Environment] = {
         name: Environment(

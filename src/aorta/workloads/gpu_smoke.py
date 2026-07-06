@@ -60,7 +60,7 @@ class GpuSmokeWorkload(Workload):
         # float32 -- a silent fallback can mask a misconfigured run as green.
         dtype_name = str(self.config.get("dtype", "float32"))
         if dtype_name not in dtype_map:
-            raise RuntimeError(
+            raise ValueError(
                 f"gpu_smoke: unknown dtype {dtype_name!r}; "
                 f"allowed: {sorted(dtype_map)}"
             )

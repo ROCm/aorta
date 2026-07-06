@@ -93,7 +93,7 @@ class TestSetup:
     def test_setup_raises_on_unknown_dtype(self, fake_torch):
         fake_torch(cuda_available=True)
         wl = GpuSmokeWorkload({"dtype": "flob16"})
-        with pytest.raises(RuntimeError, match="unknown dtype"):
+        with pytest.raises(ValueError, match="unknown dtype"):
             wl.setup()
 
 
