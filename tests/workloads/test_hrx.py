@@ -187,3 +187,9 @@ def test_run_no_verdict_is_failure(monkeypatch, tmp_path):
     assert res.metrics.get("verdict") is None
     assert res.main_work_started is False
     assert res.executed_iterations == 0
+    # The crash diagnostic is on stdout (probes printf there), so it must be
+    # persisted in the failure detail, and the hint must point at stdout.
+    assert res.failure_details, "expected a failure detail"
+    detail = res.failure_details[0]
+    assert "hipMalloc" in detail.get("stdout_tail", "")
+    assert "stdout" in detail.get("hint", "")

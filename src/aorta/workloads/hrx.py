@@ -302,7 +302,7 @@ class HrxWorkload(Workload):
             elif verdict is None:
                 hint = (
                     f"probe {self._probe!r} produced no VERDICT line "
-                    f"(exit {exit_code}); see stderr"
+                    f"(exit {exit_code}); see stdout/stderr"
                 )
             else:
                 hint = f"probe {self._probe!r} verdict {verdict} (out[0]={out0}, expected 107)"
@@ -313,6 +313,10 @@ class HrxWorkload(Workload):
                     "out0": out0,
                     "exit_code": exit_code,
                     "timed_out": timed_out,
+                    # The probes printf HIP errors / diagnostics to stdout, so
+                    # capture both tails -- for a crash before the VERDICT line,
+                    # the useful signal is on stdout, not stderr.
+                    "stdout_tail": stdout.strip()[-2000:],
                     "stderr_tail": stderr.strip()[-2000:],
                     "hint": hint,
                 }
