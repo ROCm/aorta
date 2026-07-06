@@ -323,16 +323,23 @@ class HrxWorkload(Workload):
                 }
             )
 
+        # No iteration ran unless the probe dispatched and read back. Report 0
+        # iterations (and no failing-iteration index) when main work never
+        # started, so the matrix elapsed_per_iter fallback -- which divides
+        # elapsed_sec by total_iterations *before* the did-not-run suppression
+        # (aorta.triage.matrix._extract_step_times) -- can't mint a misleading
+        # step time for a setup-only crash/timeout.
+        executed = 1 if main_work_started else 0
         return WorkloadResult(
             passed=passed,
             failure_count=0 if passed else 1,
-            first_failure_iteration=None if passed else 0,
+            first_failure_iteration=0 if (not passed and main_work_started) else None,
             failure_details=failure_details,
-            total_iterations=1,
+            total_iterations=executed,
             elapsed_sec=elapsed,
             metrics=metrics,
             main_work_started=main_work_started,
-            executed_iterations=1 if main_work_started else 0,
+            executed_iterations=executed,
             configured_iterations=1,
         )
 

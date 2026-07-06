@@ -149,6 +149,8 @@ def test_run_output_not_written(monkeypatch, tmp_path):
 
     assert res.passed is False
     assert res.failure_count == 1
+    assert res.total_iterations == 1
+    assert res.first_failure_iteration == 0
     assert res.metrics.get("verdict") == "OUTPUT_NOT_WRITTEN"
     assert res.metrics.get("out0") == 0.0
     assert res.failure_details, "expected a failure detail"
@@ -171,6 +173,8 @@ def test_run_timeout_is_failure(monkeypatch, tmp_path):
 
     assert res.passed is False
     assert res.metrics.get("timed_out") is True
+    # Hung before printing anything -> did-not-run shape, no phantom iteration.
+    assert res.total_iterations == 0
     assert res.failure_details, "expected a failure detail"
     assert "hung" in res.failure_details[0].get("hint", "")
 
@@ -187,6 +191,10 @@ def test_run_no_verdict_is_failure(monkeypatch, tmp_path):
     assert res.metrics.get("verdict") is None
     assert res.main_work_started is False
     assert res.executed_iterations == 0
+    # Never started -> 0 iterations + no failing index, so the matrix
+    # elapsed_per_iter fallback can't mint a misleading step time.
+    assert res.total_iterations == 0
+    assert res.first_failure_iteration is None
     # The crash diagnostic is on stdout (probes printf there), so it must be
     # persisted in the failure detail, and the hint must point at stdout.
     assert res.failure_details, "expected a failure detail"
