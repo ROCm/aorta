@@ -371,6 +371,22 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
         )
 
+    # Validate ``env_probe`` shape early.  The triage runner is the only
+    # in-tree producer and always passes ``{"src": str, "out": str}``, but
+    # ``RunRequest`` is a public library API -- a programmatic caller passing
+    # a bad shape (missing keys, Path values) would otherwise only fail much
+    # later when the value is injected into ``TrialResult.config`` and
+    # JSON-serialized, with a confusing ``TypeError``.  Fail fast with an
+    # actionable message instead.
+    if request.env_probe is not None:
+        if set(request.env_probe) != {"src", "out"} or not all(
+            isinstance(v, str) for v in request.env_probe.values()
+        ):
+            raise ValueError(
+                "env_probe must be a dict with exactly {'src', 'out'} string "
+                f"values; got {request.env_probe!r}."
+            )
+
     # 4. Reject reserved ``_aorta_*`` keys in ``config_overrides``.
     #    The dispatcher writes platform-supplied values (currently
     #    ``_aorta_environment``) into ``config`` after merging

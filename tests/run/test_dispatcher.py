@@ -213,6 +213,27 @@ class TestRunTrials:
             with pytest.raises(ValueError, match="Invalid extra_env keys"):
                 run_trials(req)
 
+    def test_rejects_malformed_env_probe(self, tmp_path):
+        """``env_probe`` must be {'src', 'out'} with str values.
+
+        The triage runner always passes the right shape, but RunRequest is a
+        public API -- a bad shape must fail fast here, not later at JSON
+        serialization of TrialResult.config.
+        """
+        for bad in (
+            {"src": "/a"},                       # missing 'out'
+            {"src": "/a", "out": "/b", "x": 1},  # extra key
+            {"src": "/a", "out": Path("/b")},    # non-str value
+        ):
+            req = RunRequest(
+                workload="anything",
+                trials=1,
+                env_probe=bad,
+                results_dir=tmp_path,
+            )
+            with pytest.raises(ValueError, match="env_probe must be a dict"):
+                run_trials(req)
+
     def test_rejects_collect_options_without_enabled_collector(self, tmp_path):
         req = RunRequest(
             workload="anything",

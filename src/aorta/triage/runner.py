@@ -314,8 +314,8 @@ def _write_isolated_env_placeholder(
         "PYTHONPATH is required unless aorta is installed in the image, and "
         "'out' is a host path so pass the mounted container path, not 'out' "
         "verbatim. The runner then promotes that file in place of this "
-        "placeholder. host_env.json next to this file captures the runner's "
-        "view."
+        "placeholder. The run root's host_env.json (../../host_env.json "
+        "relative to this file) captures the runner's view."
     )
     placeholder = {
         "name": env_name,
@@ -1265,11 +1265,18 @@ def _run_recipe_locked(
         recipe.steps,
         run_dir,
     )
+    # Isolation status is per-environment (a registry lookup), so cache it by
+    # env name: matrices where many cells share one env would otherwise repeat
+    # the resolution once per cell.
+    isolation_cache: dict[str, bool] = {}
+
     for cell_idx, cell in enumerate(recipe.cells, start=1):
         env_json_path = env_dir / safe_slug(cell.environment) / "env.json"
-        is_isolated = _is_isolated_environment(
-            cell.environment, recipe.inline_environments, sidecar_files
-        )
+        if cell.environment not in isolation_cache:
+            isolation_cache[cell.environment] = _is_isolated_environment(
+                cell.environment, recipe.inline_environments, sidecar_files
+            )
+        is_isolated = isolation_cache[cell.environment]
         # Local envs: probe in-process once, before the env's first cell.
         # Isolated envs: defer to the wrapper (post-cell promotion below).
         if cell.environment not in seen_envs:
