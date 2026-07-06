@@ -9,9 +9,13 @@ the flag-mode CLI funnel into. Given a validated :class:`Recipe`, it:
    ``_inline_<hash>`` envs) so B1's registry resolver picks them up.
 3. Captures the host :func:`aorta.instrumentation.environment.collect_env`
    snapshot once -> ``host_env.json``.
-4. For each unique environment in ``recipe.cells``, captures a
-   per-environment ``collect_env`` snapshot once, *right before that env's
-   first cell runs* -> ``environments/<name>/env.json``.
+4. Captures a per-environment snapshot once per unique env ->
+   ``environments/<name>/env.json``. Local (non-isolated) envs are probed
+   in-process *right before* that env's first cell runs. Isolated
+   (docker/venv) envs are probed by the workload wrapper *inside the
+   container* via the ``_aorta_env_probe`` contract; the runner promotes
+   that snapshot *after* the cell runs (retrying on later cells of the same
+   env) and falls back to a placeholder if none is produced.
 5. Builds a :class:`aorta.run.RunRequest` per cell and calls
    :func:`aorta.run.run_trials` **in-process**. Per-cell exceptions are
    caught and surfaced as an ``error`` row so other cells still run.
