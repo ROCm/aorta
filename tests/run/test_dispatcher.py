@@ -536,6 +536,76 @@ class TestRunTrials:
             run_trials(req)
         assert "_aorta_collect_options" not in captured_config
 
+    def test_collect_dir_injected_when_collector_active(self, tmp_path):
+        """A collector run gets ``config['_aorta_collect_dir']`` (an absolute
+        per-trial path) WITHOUT needing ``save_logs`` -- so collector artifacts
+        can land in the results tree regardless of the log-capture knob."""
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_dir"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_dir",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+                # note: save_logs NOT set
+            )
+            run_trials(req)
+        collect_dir = captured_config["_aorta_collect_dir"]
+        assert Path(collect_dir).is_absolute()
+        assert collect_dir.endswith("trial_d0_m0_t0")
+        # No log prefix, because save_logs was not requested -- proves the two
+        # are decoupled.
+        assert "_aorta_log_prefix" not in captured_config
+
+    def test_collect_dir_absent_without_collector(self, tmp_path):
+        """No ``_aorta_collect_dir`` for a run with no collector -- back-compat
+        (the key only appears when a collector was requested)."""
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "nocollectdir"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(workload="nocollectdir", trials=1, results_dir=tmp_path)
+            run_trials(req)
+        assert "_aorta_collect_dir" not in captured_config
+
     def test_collect_survives_trial_json_roundtrip(self, tmp_path):
         """``_aorta_collect`` is a plain list, so the trial JSON dump needs
         no sanitizer for it (unlike ``_aorta_probe_extras``)."""

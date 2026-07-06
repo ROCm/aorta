@@ -24,6 +24,7 @@ workload: fsdp                       # required; resolved via aorta.workloads en
 trials: 8                            # required; per-cell trial count
 steps: 5000                          # required; per-cell step count
 save_logs: false                     # optional; when true, dispatcher writes per-trial stdout/stderr files
+collect: [layer_numerics]            # optional; collector names -- does NOT require save_logs
 
 confound:
   threshold: 1.15                    # default; > 1.15 -> "speed (+N%)" flag
@@ -116,6 +117,24 @@ cells:
   `results_dir`. The dispatcher already holds the
   `<prefix>.{stdout,stderr}.log` paths open, so wrappers must NOT
   write to them directly.
+- **`collect`** -- optional `list[str]` or mapping, default absent (no
+  collectors). Names one or more cross-cutting collectors to attach to every
+  cell (e.g. `[layer_numerics]` for the per-layer NaN/magnitude logger).
+  List form enables collectors with default options; mapping form passes
+  per-collector options:
+
+  ```yaml
+  # list form (default options):
+  collect: [layer_numerics]
+
+  # mapping form (per-collector options):
+  collect:
+    layer_numerics:
+      NANLOG_SAMPLE_EVERY: "10"
+  ```
+
+  Unknown collector names are rejected at load time (validated against
+  `aorta.run.collectors.KNOWN_RECIPES`).
 - **`workload_config`** -- optional `dict[str, Any]`, allowed at both
   recipe scope (top level) and per cell. Forwarded to the workload
   constructor through the dispatcher's `Request.config_overrides`. Use
