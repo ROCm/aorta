@@ -991,7 +991,7 @@ def _print_dry_run(
         # collision, non-collision keys union with recipe-scope.
         effective_workload_config = {**recipe.workload_config, **cell.workload_config}
         effective_collect = cell.effective_collect(recipe.collect)
-        # Flag cells whose collectors differ from the recipe default so an
+        # Flag cells that declare an explicit collector override so an
         # operator can spot per-cell on/off at a glance.
         collect_note = " (cell override)" if cell.collect is not None else ""
         click.echo(

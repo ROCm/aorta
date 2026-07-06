@@ -299,8 +299,8 @@ class Cell:
             as the top-level ``collect:`` key; the mapping form's per-collector
             options land in :attr:`collect_options`.
         collect_options: Per-collector option dicts parsed from the cell's
-            mapping-form ``collect:``. ``None`` when ``collect`` is inherited or
-            given in list form. Empty dict when the mapping form carried no
+            mapping-form ``collect:``. ``None`` when ``collect`` is inherited.
+            Empty dict when the cell uses list form or mapping form with no
             options.
     """
 

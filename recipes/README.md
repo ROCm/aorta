@@ -24,6 +24,7 @@ workload: fsdp                       # required; resolved via aorta.workloads en
 trials: 8                            # required; per-cell trial count
 steps: 5000                          # required; per-cell step count
 save_logs: false                     # optional; when true, dispatcher writes per-trial stdout/stderr files
+collect: [layer_numerics]            # optional; default collectors for every cell
 
 confound:
   threshold: 1.15                    # default; > 1.15 -> "speed (+N%)" flag
@@ -38,6 +39,7 @@ cells:
   - name: tf32_off-local
     mitigations: [tf32_off]
     environment: local
+    collect: []                      # optional per-cell override; disables collection here
 
   - name: stack-tf32-xnack-local     # mitigation stacking (env vars unioned in list order)
     mitigations: [tf32_off, xnack]
@@ -116,6 +118,30 @@ cells:
   `results_dir`. The dispatcher already holds the
   `<prefix>.{stdout,stderr}.log` paths open, so wrappers must NOT
   write to them directly.
+- **`collect`** -- optional `list[str]` or mapping, default absent (no
+  collectors). Names one or more cross-cutting collectors to attach to every
+  cell (e.g. `[layer_numerics]` for the per-layer NaN/magnitude logger).
+  List form enables collectors with default options; mapping form passes
+  per-collector options:
+
+  ```yaml
+  # list form (default options):
+  collect: [layer_numerics]
+
+  # mapping form (per-collector options):
+  collect:
+    layer_numerics:
+      NANLOG_SAMPLE_EVERY: "10"
+  ```
+
+  Cells may also set `collect:`. An absent cell key inherits the recipe-level
+  collectors, a present value replaces the recipe-level collectors for that
+  cell, and `collect: []` disables collectors for that cell. The same mapping
+  form is accepted at cell scope. CLI `--collect` is an operator override and
+  applies to every cell, clearing any per-cell collector overrides.
+
+  Unknown collector names are rejected at load time (validated against
+  `aorta.run.collectors.KNOWN_RECIPES`).
 - **`workload_config`** -- optional `dict[str, Any]`, allowed at both
   recipe scope (top level) and per cell. Forwarded to the workload
   constructor through the dispatcher's `Request.config_overrides`. Use
