@@ -909,8 +909,8 @@ def _run_one_cell(
         subprocess_argv=subprocess_argv,
         probe_extras=probe_extras_payload,
         stop_after=stop_after,
-        collect=tuple(recipe.collect),
-        collect_options=dict(recipe.collect_options),
+        collect=tuple(cell.effective_collect(recipe.collect)),
+        collect_options=dict(cell.effective_collect_options(recipe.collect_options)),
     )
 
     try:
@@ -990,6 +990,10 @@ def _print_dry_run(
         # the workload would be constructed with -- cell-scope wins on key
         # collision, non-collision keys union with recipe-scope.
         effective_workload_config = {**recipe.workload_config, **cell.workload_config}
+        effective_collect = cell.effective_collect(recipe.collect)
+        # Flag cells whose collectors differ from the recipe default so an
+        # operator can spot per-cell on/off at a glance.
+        collect_note = " (cell override)" if cell.collect is not None else ""
         click.echo(
             f"  - {cell.name}: mitigations={list(cell.mitigations)} "
             f"environment={cell.environment} "
@@ -997,6 +1001,7 @@ def _print_dry_run(
             f"steps={cell.effective_steps(recipe.steps)}"
             + (f" extra_env={cell.extra_env}" if cell.extra_env else "")
             + (f" workload_config={effective_workload_config}" if effective_workload_config else "")
+            + (f" collect={list(effective_collect)}{collect_note}" if effective_collect or cell.collect is not None else "")
         )
     if recipe.inline_environments:
         click.echo("Inline docker environments:")
