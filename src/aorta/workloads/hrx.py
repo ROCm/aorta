@@ -3,7 +3,8 @@
 Exposes the HRX HIP-compatibility-layer launch probes (from the
 ``ROCm/hrx-system`` #156 / #158 / #160 investigation) as an ``aorta``
 workload so they can be run and A/B-compared (HRX-on vs stock ROCm HIP)
-through the normal ``aorta run`` / ``aorta triage`` / ``aorta probe`` flows.
+through the normal ``aorta run`` / ``aorta sweep run`` flows (the in-process
+workload flow; not the deprecated ``aorta probe`` subprocess alias).
 
 Design:
     * **What to run** is this workload: one of a fixed set of single-purpose

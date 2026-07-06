@@ -2,7 +2,7 @@
 
 The `hrx` workload runs the HRX HIP-compatibility-layer launch probes so the
 HRX runtime can be exercised and A/B-compared (HRX-on vs stock ROCm HIP)
-through the normal `aorta run` / `aorta triage` / `aorta sweep` flows.
+through the normal `aorta run` / `aorta sweep run` workload flows.
 
 It originates from the `ROCm/hrx-system` #156 / #158 / #160 investigation
 (see issue #273).
