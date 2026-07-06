@@ -909,6 +909,8 @@ def _run_one_cell(
         subprocess_argv=subprocess_argv,
         probe_extras=probe_extras_payload,
         stop_after=stop_after,
+        collect=tuple(recipe.collect),
+        collect_options=dict(recipe.collect_options),
     )
 
     try:

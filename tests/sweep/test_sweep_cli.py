@@ -94,6 +94,29 @@ def test_trailing_command_routes_to_probe_flow(mock_run_recipe, tmp_path):
     assert kwargs.get("subprocess_argv") == ("echo", "hi")
 
 
+def test_empty_collect_csv_is_ignored_in_probe_flow(mock_run_recipe, tmp_path):
+    """An effectively empty ``--collect`` value should not block subprocess flow."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "sweep",
+            "run",
+            "--recipe",
+            str(PROBE_MINIMAL),
+            "--collect",
+            " , , ",
+            "--output",
+            str(tmp_path / "out"),
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_run_recipe.assert_called_once()
+
+
 def test_probe_recipe_without_command_routes_to_probe_flow_guard(mock_run_recipe):
     """A probe-mode recipe with no trailing command is a clear usage error."""
     runner = CliRunner()

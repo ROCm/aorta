@@ -390,6 +390,46 @@ cells:
     assert patched_run_trials.call_count == 2
 
 
+def test_cli_collect_override_filters_recipe_collect_options(
+    tmp_path, patched_env, patched_run_trials
+):
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        """\
+schema_version: 1
+ticket: CLI-COLLECT-1
+workload: fsdp
+trials: 1
+steps: 10
+collect:
+  layer_numerics:
+    NANLOG_SAMPLE_EVERY: "1"
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+""",
+        encoding="utf-8",
+    )
+    cli = CliRunner()
+    result = cli.invoke(
+        triage,
+        [
+            "run",
+            "--recipe",
+            str(recipe),
+            "--collect",
+            "rocprof",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    req: RunRequest = patched_run_trials.call_args.args[0]
+    assert req.collect == ("rocprof",)
+    assert req.collect_options == {}
+
+
 def test_cli_exits_nonzero_when_baseline_did_not_run_but_writes_matrix(
     tmp_path, patched_env, monkeypatch
 ):

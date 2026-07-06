@@ -21,6 +21,7 @@ mitigations / environments come from ``aorta`` vs a plugin / sidecar.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import click
@@ -31,10 +32,11 @@ from aorta.registry import (
     load_environments,
     load_mitigations,
 )
-from aorta.run.cli_helpers import configure_verbose_logging
+from aorta.run.cli_helpers import configure_verbose_logging, parse_csv
 from aorta.triage.recipe import (
     RecipeCellError,
     RecipeSchemaError,
+    _parse_collect,
     build_recipe_from_flags,
     load_recipe,
 )
@@ -152,6 +154,17 @@ def triage() -> None:
     ),
 )
 @click.option(
+    "--collect",
+    default="",
+    help=(
+        "Comma-separated collector recipe names to attach to every cell "
+        "(e.g. 'layer_numerics' for the per-layer NaN logger). Cross-cutting "
+        "capture, not a matrix axis -- allowed together with --recipe, where "
+        "it overrides any recipe-pinned 'collect:'. Names are validated "
+        "against the known collector recipes."
+    ),
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
@@ -180,6 +193,7 @@ def triage_run(
     confound_threshold: float | None,
     output_dir: Path,
     mitigation_files: tuple[Path, ...],
+    collect: str,
     verbose: int,
 ) -> None:
     """Run the triage matrix: sweep mitigations x environments x trials, write matrix.md + matrix.json."""
@@ -199,6 +213,7 @@ def triage_run(
         confound_threshold=confound_threshold,
         output_dir=output_dir,
         mitigation_files=mitigation_files,
+        collect=collect,
     )
 
 
@@ -217,12 +232,20 @@ def execute_triage_run(
     confound_threshold: float | None,
     output_dir: Path,
     mitigation_files: tuple[Path, ...],
+    collect: str = "",
 ) -> None:
     """Workload-flow body shared by ``aorta sweep run`` and ``aorta triage run``.
 
     Logging is configured by the Click handler before this is called;
     keeping it out of here lets ``aorta sweep run`` own verbose setup once
     regardless of which flow it dispatches to.
+
+    ``collect`` is a comma-separated list of collector recipe names
+    (cross-cutting capture, e.g. ``layer_numerics``). It is allowed
+    alongside ``--recipe`` -- unlike the flag-mode axis args -- because it
+    is not a matrix axis. When passed with ``--recipe`` it OVERRIDES any
+    ``collect:`` the recipe pins; when the flag is empty a recipe-pinned
+    value is preserved.
     """
     # Defence-in-depth: Click's ``Choice(["matrix"])`` already enforces this,
     # but the CLI advertises ``--mode optimize`` as a future P1 addition (per
@@ -243,6 +266,25 @@ def execute_triage_run(
         )
         try:
             r = load_recipe(recipe, sidecar_files=mitigation_files or None)
+            # --collect is not a flag-mode axis arg, so it's allowed with
+            # --recipe. When provided, it overrides a recipe-pinned collect
+            # NAME list; validate via the same loader path the recipe uses.
+            # Per-collector options are recipe-file-only (the mapping form).
+            # When the CLI overrides the collector names, keep only options
+            # for collectors that are still enabled.
+            cli_collect = parse_csv(collect)
+            if cli_collect:
+                collect_names, _ = _parse_collect("--collect", list(cli_collect))
+                collect_options = {
+                    name: opts
+                    for name, opts in r.collect_options.items()
+                    if name in collect_names
+                }
+                r = dataclasses.replace(
+                    r,
+                    collect=collect_names,
+                    collect_options=collect_options,
+                )
         except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
             raise click.ClickException(str(exc)) from exc
     else:
@@ -272,6 +314,7 @@ def execute_triage_run(
                 baseline_cell=baseline_cell,
                 confound_threshold=1.15 if confound_threshold is None else confound_threshold,
                 sidecar_files=mitigation_files or None,
+                collect=parse_csv(collect),
             )
         except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
             raise click.ClickException(str(exc)) from exc
