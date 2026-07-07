@@ -13,7 +13,7 @@ import yaml
 import aorta.triage.runner as runner
 from aorta.instrumentation.environment import EnvSnapshot
 from aorta.triage.output import NO_TICKET_SLUG, resolve_run_dir, safe_slug
-from aorta.triage.recipe import Recipe, build_recipe_from_flags
+from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, build_recipe_from_flags
 
 # ---- Fixtures -------------------------------------------------------------
 
@@ -483,6 +483,67 @@ def test_resolved_recipe_round_trips_workload_config(
     assert reloaded.workload_config == {"shampoo_api": "new", "warmup": 5}
     assert reloaded.cells[0].workload_config == {}
     assert reloaded.cells[1].workload_config == {"shampoo_api": "old"}
+
+
+def test_resolved_recipe_round_trips_collect(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Collector settings must survive load -> run -> reload for replay."""
+    from aorta.triage.recipe import load_recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(
+            Cell(name="inherit", mitigations=("none",), environment="local"),
+            Cell(
+                name="disable",
+                mitigations=("none",),
+                environment="local",
+                collect=(),
+                collect_options={},
+            ),
+            Cell(
+                name="override",
+                mitigations=("none",),
+                environment="local",
+                collect=("layer_numerics",),
+                collect_options={"layer_numerics": {"NANLOG_SAMPLE_EVERY": "10"}},
+            ),
+        ),
+        ticket="COLLECT-RT",
+        confound=ConfoundCfg(baseline_cell="inherit"),
+        collect=("layer_numerics", "rocprof"),
+        collect_options={"layer_numerics": {"NANLOG_PRE_CONTEXT": "20"}},
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    resolved_path = run_dir / "recipe.resolved.yaml"
+    doc = yaml.safe_load(resolved_path.read_text())
+
+    assert doc["collect"] == {
+        "layer_numerics": {"NANLOG_PRE_CONTEXT": "20"},
+        "rocprof": None,
+    }
+    cells = {cell["name"]: cell for cell in doc["cells"]}
+    assert "collect" not in cells["inherit"]
+    assert cells["disable"]["collect"] == []
+    assert cells["override"]["collect"] == {
+        "layer_numerics": {"NANLOG_SAMPLE_EVERY": "10"}
+    }
+
+    reloaded = load_recipe(resolved_path)
+    assert reloaded.collect == ("layer_numerics", "rocprof")
+    assert reloaded.collect_options == {
+        "layer_numerics": {"NANLOG_PRE_CONTEXT": "20"}
+    }
+    assert reloaded.cells[0].collect is None
+    assert reloaded.cells[1].collect == ()
+    assert reloaded.cells[2].collect == ("layer_numerics",)
+    assert reloaded.cells[2].collect_options == {
+        "layer_numerics": {"NANLOG_SAMPLE_EVERY": "10"}
+    }
 
 
 def test_resolved_recipe_round_trips_stop_after(

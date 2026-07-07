@@ -241,6 +241,115 @@ def test_collect_flag_error_uses_cli_label():
         )
 
 
+def test_cell_collect_absent_inherits_recipe_collect(tmp_path):
+    text = _MINIMAL_YAML + "collect: [layer_numerics]\n"
+    r = load_recipe(_write_yaml(tmp_path, text))
+    cell = r.cells[0]
+    assert cell.collect is None
+    assert cell.collect_options is None
+    assert cell.effective_collect(r.collect) == ("layer_numerics",)
+    assert cell.effective_collect_options(r.collect_options) == {}
+
+
+def test_cell_collect_list_form_replaces_recipe_collect(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 2
+steps: 100
+collect: [rocprof]
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+    collect: [layer_numerics]
+"""
+    r = load_recipe(_write_yaml(tmp_path, text))
+    cell = r.cells[0]
+    assert cell.collect == ("layer_numerics",)
+    assert cell.collect_options == {}
+    assert cell.effective_collect(r.collect) == ("layer_numerics",)
+    assert cell.effective_collect_options(r.collect_options) == {}
+
+
+def test_cell_collect_empty_list_disables_recipe_collect(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 2
+steps: 100
+collect: [layer_numerics]
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+    collect: []
+"""
+    r = load_recipe(_write_yaml(tmp_path, text))
+    cell = r.cells[0]
+    assert cell.collect == ()
+    assert cell.effective_collect(r.collect) == ()
+    assert cell.effective_collect_options(r.collect_options) == {}
+
+
+def test_cell_collect_null_rejected(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 2
+steps: 100
+collect: [layer_numerics]
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+    collect:
+"""
+    with pytest.raises(RecipeSchemaError, match=r"^cells\[0\]\.collect: null"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_cell_collect_mapping_form_parses_names_and_options(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 2
+steps: 100
+collect: [rocprof]
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+    collect:
+      layer_numerics:
+        NANLOG_SAMPLE_EVERY: "10"
+"""
+    r = load_recipe(_write_yaml(tmp_path, text))
+    cell = r.cells[0]
+    assert cell.collect == ("layer_numerics",)
+    assert cell.collect_options == {"layer_numerics": {"NANLOG_SAMPLE_EVERY": "10"}}
+    assert cell.effective_collect(r.collect) == ("layer_numerics",)
+    assert cell.effective_collect_options(r.collect_options) == {
+        "layer_numerics": {"NANLOG_SAMPLE_EVERY": "10"}
+    }
+
+
+def test_cell_collect_error_uses_cell_field_label(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 2
+steps: 100
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+    collect: not_a_list_or_mapping
+"""
+    with pytest.raises(RecipeSchemaError, match=r"^cells\[0\]\.collect:"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
 def test_unknown_top_level_key_rejected(tmp_path):
     text = _MINIMAL_YAML + "garbage: 42\n"
     with pytest.raises(RecipeSchemaError, match="unknown top-level keys"):

@@ -271,7 +271,8 @@ def execute_triage_run(
             # NAME list; validate via the same loader path the recipe uses.
             # Per-collector options are recipe-file-only (the mapping form).
             # When the CLI overrides the collector names, keep only options
-            # for collectors that are still enabled.
+            # for collectors that are still enabled and clear per-cell
+            # overrides so the operator-requested collectors apply everywhere.
             cli_collect = parse_csv(collect)
             if cli_collect:
                 collect_names, _ = _parse_collect("--collect", list(cli_collect))
@@ -284,6 +285,10 @@ def execute_triage_run(
                     r,
                     collect=collect_names,
                     collect_options=collect_options,
+                    cells=tuple(
+                        dataclasses.replace(cell, collect=None, collect_options=None)
+                        for cell in r.cells
+                    ),
                 )
         except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
             raise click.ClickException(str(exc)) from exc
