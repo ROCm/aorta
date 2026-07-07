@@ -318,11 +318,14 @@ diagnostic_axis: [none]
 """
 
 
-def test_probe_rerun_surfaces_resumed_cell_in_summary_and_matrix(tmp_path):
+def test_probe_rerun_surfaces_resumed_cell_in_summary_and_matrix(tmp_path, _hermetic_engine):
     """Reproduce the reported confusion: a second run against the same
     ``--output``/``--ticket`` serves the cell from cache, so an ``exit 1``
     command still shows a green cell. The summary must now say so, and
     ``matrix.json`` must record ``resumed: true``.
+
+    Uses ``_hermetic_engine`` to stub ``runner.collect_env`` so the test does
+    not probe host state; the real subprocess + resume short-circuit still run.
     """
     recipe = tmp_path / "probe.yaml"
     recipe.write_text(_PROBE_RECIPE, encoding="utf-8")
