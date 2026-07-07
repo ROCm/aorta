@@ -20,9 +20,9 @@
 #     ABSOLUTE -- extra_env values are passed verbatim (no shell expansion), so
 #     edit the placeholder before running.
 #
-# Run:
-#   aorta sweep run --recipe recipes/hrx-launch-probe-smoke.yaml \
-#     --output ./triage_results --ticket HRX-273-SMOKE
+# Run (the ticket comes from `ticket:` below -- do NOT also pass --ticket, it
+# conflicts with --recipe):
+#   aorta sweep run --recipe recipes/hrx-launch-probe-smoke.yaml --output ./triage_results
 # Read:
 #   cat triage_results/HRX-273-SMOKE/hrx/*/matrix.md
 

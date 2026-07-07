@@ -66,8 +66,9 @@ classified as a setup failure / `did_not_run` — it never reports a false
 The A/B matrix (both cells, one command) comes from the recipe:
 
 ```bash
-aorta sweep run --recipe recipes/hrx-launch-probe-smoke.yaml \
-  --output ./triage_results --ticket HRX-273-SMOKE
+# The ticket comes from the recipe (ticket: HRX-273-SMOKE); passing --ticket
+# too would fail ("--recipe conflicts with --ticket").
+aorta sweep run --recipe recipes/hrx-launch-probe-smoke.yaml --output ./triage_results
 cat triage_results/HRX-273-SMOKE/hrx/*/matrix.md
 ```
 
