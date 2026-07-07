@@ -439,6 +439,42 @@ def test_isolated_env_rejects_snapshot_without_schema_version(
     assert placeholder["snapshot_captured"] is False
 
 
+def test_isolated_env_rejects_symlink_snapshot_and_preserves_target(
+    tmp_path, patched_env, monkeypatch
+):
+    """A container-controlled env.json symlink must not be read or overwritten."""
+    victim = tmp_path / "host_victim.txt"
+    victim.write_text("do not clobber", encoding="utf-8")
+
+    def fake_run_trials(request):
+        out = Path(request.env_probe["out"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            out.symlink_to(victim)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"symlink creation unavailable on this platform: {exc}")
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+
+    assert not env_json.is_symlink()
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["snapshot_captured"] is False
+    assert victim.read_text(encoding="utf-8") == "do not clobber"
+
+    doc = json.loads((run_dir / "matrix.json").read_text())
+    assert any("symlink" in warning.lower() for warning in doc["warnings"])
+
+
 def test_isolated_env_falls_back_to_placeholder_when_no_snapshot(
     tmp_path, patched_env, patched_run_trials
 ):

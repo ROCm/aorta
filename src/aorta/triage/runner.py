@@ -332,12 +332,40 @@ def _write_isolated_env_placeholder(
         "skip_reason": skip_reason,
         "descriptor": descriptor,
     }
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(placeholder, indent=2), encoding="utf-8")
+    _write_json_atomic_replace(target, placeholder)
     warnings.append(
         f"environment {env_name!r}: no in-container snapshot captured (isolated env). "
         "See the env's env.json for the descriptor and the host-level snapshot in host_env.json."
     )
+
+
+def _write_json_atomic_replace(target: Path, payload: dict[str, Any]) -> None:
+    """Write JSON by replacing ``target`` instead of following it.
+
+    Isolated-env wrappers write into a host-mounted output directory. If a
+    wrapper leaves ``env.json`` as a symlink, a direct ``write_text`` fallback
+    would follow the link and overwrite whatever host path it points at. A
+    random temp file plus ``os.replace`` replaces the directory entry itself.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            tmp_path = Path(fh.name)
+            fh.write(json.dumps(payload, indent=2))
+        os.replace(tmp_path, target)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
 
 
 def _aorta_src_root() -> Path:
@@ -376,6 +404,12 @@ def _is_real_env_snapshot(target: Path, env_name: str, warnings: list[str]) -> b
     written, or a prior placeholder read back -- return False silently, since
     they are the expected "not captured yet" states, not errors.
     """
+    if target.is_symlink():
+        warnings.append(
+            f"environment {env_name!r}: in-container snapshot at {target} "
+            "is a symlink; will retry / fall back to placeholder."
+        )
+        return False
     if not target.is_file():
         return False
     try:
