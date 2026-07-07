@@ -17,7 +17,10 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      # Only vMAJOR.MINOR.PATCH tags (same semver shape as setuptools_scm /
+      # bump_version.py), so stray tags like v1 / v1beta / v0.2.0rc1 don't
+      # trigger noisy Release runs that just fail the stable-version gate.
+      - "v[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       bump:

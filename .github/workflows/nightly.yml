@@ -67,12 +67,24 @@ jobs:
             exit 1
           fi
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AMD_AORTA=${rc_version}" >> "$GITHUB_ENV"
+          echo "RC_VERSION=${rc_version}" >> "$GITHUB_ENV"
           echo "Building nightly ${rc_version}."
 
       - name: Build wheel and sdist
         run: |
           python -m pip install --upgrade build
           python -m build
+
+      # Fail fast if the built wheel doesn't carry the stamped rc version (e.g. a
+      # setuptools_scm/PRETEND_VERSION misconfiguration), so a mis-versioned
+      # artifact is never uploaded to the shared dev-wheels release.
+      - name: Verify built version matches
+        run: |
+          if [ ! -f "dist/amd_aorta-${RC_VERSION}-py3-none-any.whl" ]; then
+            echo "::error::Built wheel does not match stamped version ${RC_VERSION}. dist/ contains:"
+            ls -1 dist/
+            exit 1
+          fi
 
       # softprops/action-gh-release creates the dev-wheels tag on the first run
       # but does NOT move it on subsequent runs, so the rolling tag (and the
