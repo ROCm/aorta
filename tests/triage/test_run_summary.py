@@ -115,6 +115,31 @@ def test_error_only_cell_is_tagged_error_not_fail():
     assert "2 errored of 2 trial(s)" in err_line
 
 
+def test_mixed_fail_and_error_cell_counted_once_as_failing():
+    """A cell with BOTH failing and errored trials is a single [fail] cell.
+
+    Regression for a Copilot review on #281: ``with_errors`` also counted a
+    cell that had failing trials, so the buckets could sum past ``total`` and
+    disagreed with the per-cell ``[fail]`` tag. The three buckets must
+    partition the cells.
+    """
+    stats = [
+        _cell("baseline-local", "none", [_pass_trial(), _pass_trial()]),
+        _cell("mixed-local", "tf32_off", [_fail_trial(), _error_trial()]),
+    ]
+    lines = format_run_summary(stats, Path("/tmp/run"))
+    # The mixed cell is counted with the failing bucket, not both.
+    assert lines[0] == (
+        "Sweep summary: 2 cell(s) -- 1 clean, 1 with failing trials, 0 with errors."
+    )
+    # clean + with_failures + with_errors must equal total (2).
+    mixed_line = next(ln for ln in lines if "mixed-local" in ln)
+    assert mixed_line.startswith("  [fail] mixed-local:")
+    # Both counts still surface on the per-cell detail line.
+    assert "1 failed" in mixed_line
+    assert "1 errored" in mixed_line
+
+
 def test_whole_cell_error_line_and_message_is_single_line():
     stats = [
         _cell("baseline-local", "none", [_pass_trial()]),

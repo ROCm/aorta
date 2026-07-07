@@ -677,9 +677,21 @@ def format_run_summary(
             lines.append(resumed_note)
         return lines
 
+    # The three buckets PARTITION the cells (clean + with_failures + with_errors
+    # == total): each non-clean cell falls in exactly one, mirroring its per-cell
+    # tag below. A cell with any genuine failing trial is counted "with failing
+    # trials" ([fail]) even if it also has errored trials; a cell is counted
+    # "with errors" only when the whole cell errored (``error`` set) or it has
+    # errored trials and NO failing trial ([error]). Without the
+    # ``failed_count == 0`` guard a mixed fail+error cell would be counted twice
+    # and the buckets could sum past ``total`` (Copilot, #281).
     clean_count = total - len(non_clean)
     with_failures = sum(1 for c in cell_stats if c.error is None and c.failed_count > 0)
-    with_errors = sum(1 for c in cell_stats if c.error is not None or c.error_count > 0)
+    with_errors = sum(
+        1
+        for c in cell_stats
+        if c.error is not None or (c.error_count > 0 and c.failed_count == 0)
+    )
 
     lines = [
         f"Sweep summary: {total} cell(s) -- {clean_count} clean, "
