@@ -263,6 +263,16 @@ of the three built-ins above) when copy-pasting this template.
   target nor reached the cap (or a trial in it is missing/malformed), the
   **whole cell** re-runs from `trial_0`; the re-run is bounded because the
   dispatcher applies the same early-stop.
+* A resumed (cache-served) cell is no longer silent (issue #282). Each
+  cell records a `resumed` boolean in `matrix.json` (`cells[*].resumed`,
+  `false` for freshly-run cells and for every timestamped-triage cell,
+  which never resumes), and the end-of-run summary printed on stdout
+  suffixes its totals line with the resumed count, tags each non-clean
+  resumed cell with `[resumed]`, and prints a note explaining how to force
+  a fresh run (delete `<output>/<ticket>/` or use a new `--ticket` /
+  `--output`). This is why an intentionally-failing command can still show
+  a green cell on a re-run against the same `--output`/`--ticket`: the cell
+  was served from cache and the new command never executed.
 
 ## 5. CLI / recipe interaction
 

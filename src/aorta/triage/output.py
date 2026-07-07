@@ -628,27 +628,54 @@ def format_run_summary(
     a short, always-on report the runner echoes to stdout:
 
     * one totals line (cells, how many clean / with failing trials / with
-      errors);
+      errors), suffixed with the count of cells that were **resumed** from a
+      prior run's cached artifacts when any were (issue #282);
     * one line per **non-clean** cell -- ``cell did not run (...)`` when the
       whole cell errored before any trial (``cell.error`` set), otherwise its
       failed/errored trial counts out of the cell's trial budget -- plus the
-      workload's own one-line failure ``hint`` when it emitted one, and the
+      workload's own one-line failure ``hint`` when it emitted one, a
+      ``[resumed]`` marker when the cell's trials came from cache, and the
       cell's artifact directory (relative to ``run_dir``, correct for both the
       timestamped triage layout and the flat-resume probe layout) so the logs
       and per-trial JSON are one ``cd`` away; and
-    * a footer pointing at ``matrix.md`` for the full table, plus a ``-v`` tip
-      when the run was not already verbose.
+    * a footer pointing at ``matrix.md`` for the full table, a "how to force a
+      fresh run" note when any cell was resumed, plus a ``-v`` tip when the run
+      was not already verbose.
+
+    Resume is why an ``exit 1`` command can still report a green cell: the
+    ``flat_resume`` layout reuses ``<output>/<ticket>/`` across invocations, so
+    a cell whose trials are already complete on disk is served from cache and
+    the new command never runs. Calling that out here means an operator does
+    not have to open the per-trial logs to tell a cached pass from a fresh one.
 
     Scales with the number of cells, not trials, so a long sweep still ends in
-    a scannable report; an all-passing run collapses to the single totals line.
-    Returns the lines (no trailing newline); the caller joins + echoes them.
+    a scannable report; an all-passing run with nothing resumed collapses to
+    the single totals line. Returns the lines (no trailing newline); the caller
+    joins + echoes them.
     """
     total = len(cell_stats)
     non_clean = [c for c in cell_stats if not _cell_is_clean(c)]
+    resumed_count = sum(1 for c in cell_stats if c.resumed)
+    resumed_suffix = (
+        f" {resumed_count} resumed from a prior run (no trials re-executed)."
+        if resumed_count
+        else ""
+    )
+    # Actionable when a cache hit surprised the operator: how to force fresh.
+    resumed_note = (
+        f"Note: resumed cells reused cached artifacts under {run_dir}; delete "
+        "that directory or use a new --ticket/--output to force a fresh run."
+        if resumed_count
+        else None
+    )
 
     if not non_clean:
-        # Happy path: exactly one line so a clean sweep isn't noisy.
-        return [f"Sweep summary: all {total} cell(s) passed."]
+        # Happy path: one totals line (plus the resume note only when a cache
+        # hit means "passed" might not mean "freshly re-verified").
+        lines = [f"Sweep summary: all {total} cell(s) passed.{resumed_suffix}"]
+        if resumed_note is not None:
+            lines.append(resumed_note)
+        return lines
 
     clean_count = total - len(non_clean)
     with_failures = sum(1 for c in cell_stats if c.error is None and c.failed_count > 0)
@@ -657,6 +684,7 @@ def format_run_summary(
     lines = [
         f"Sweep summary: {total} cell(s) -- {clean_count} clean, "
         f"{with_failures} with failing trials, {with_errors} with errors."
+        f"{resumed_suffix}"
     ]
     for cell in non_clean:
         rel_dir = _cell_directory(cell.name, layout)
@@ -677,9 +705,12 @@ def format_run_summary(
             # valid observation there.
             tag = "[fail]" if cell.failed_count else "[error]"
         hint_str = f" ({_oneline(hint)})" if hint else ""
-        lines.append(f"  {tag} {cell.name}: {detail}{hint_str} -> {rel_dir}")
+        resumed_mark = " [resumed]" if cell.resumed else ""
+        lines.append(f"  {tag} {cell.name}: {detail}{hint_str}{resumed_mark} -> {rel_dir}")
 
     lines.append(f"Full matrix: {run_dir / 'matrix.md'}")
+    if resumed_note is not None:
+        lines.append(resumed_note)
     if not verbose_active:
         lines.append("Tip: re-run with -v to stream per-cell progress live.")
     return lines

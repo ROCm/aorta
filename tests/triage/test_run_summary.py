@@ -13,6 +13,7 @@ cells failed or where their captured output landed. These tests pin:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,7 +52,7 @@ def _error_trial() -> SimpleNamespace:
     )
 
 
-def _cell(name, mitigation, trials, error=None):
+def _cell(name, mitigation, trials, error=None, resumed=False):
     return aggregate_cell(
         name=name,
         mitigations=(mitigation,),
@@ -61,6 +62,7 @@ def _cell(name, mitigation, trials, error=None):
         trials=trials,
         effective_steps=50,
         error=error,
+        resumed=resumed,
     )
 
 
@@ -152,6 +154,51 @@ def test_verbose_run_suppresses_the_verbose_tip():
     assert any(ln.startswith("Full matrix:") for ln in lines)
 
 
+# ---- format_run_summary: resumed (cached) cells (issue #282) --------------
+
+
+def test_no_resumed_cells_leaves_summary_unchanged():
+    """The resume wording only appears when a cell was actually resumed."""
+    stats = [_cell("baseline-local", "none", [_pass_trial(), _pass_trial()])]
+    lines = format_run_summary(stats, Path("/tmp/run"))
+    assert lines == ["Sweep summary: all 1 cell(s) passed."]
+    assert not any("resumed" in ln.lower() for ln in lines)
+
+
+def test_all_clean_resumed_run_reports_resume_and_how_to_force_fresh():
+    stats = [
+        _cell("none-none", "none", [_pass_trial()], resumed=True),
+        _cell("tf32-none", "tf32_off", [_pass_trial()], resumed=True),
+    ]
+    lines = format_run_summary(stats, Path("/tmp/run"), layout="flat_resume")
+    assert lines[0] == (
+        "Sweep summary: all 2 cell(s) passed. "
+        "2 resumed from a prior run (no trials re-executed)."
+    )
+    # The actionable "force a fresh run" note points at the run dir.
+    note = next(ln for ln in lines if ln.startswith("Note:"))
+    assert "/tmp/run" in note
+    assert "--ticket" in note
+
+
+def test_resumed_failing_cell_is_marked_and_counted():
+    stats = [
+        _cell("none-none", "none", [_fail_trial("NaN at layer 3")], resumed=True),
+        _cell("tf32-none", "tf32_off", [_pass_trial()], resumed=False),
+    ]
+    lines = format_run_summary(stats, Path("/tmp/run"), layout="flat_resume")
+    # Totals line carries the resumed count.
+    assert "1 resumed from a prior run" in lines[0]
+    # The resumed non-clean cell is tagged; the marker sits before the arrow.
+    fail_line = next(ln for ln in lines if "none-none" in ln)
+    assert "[resumed]" in fail_line
+    assert "(NaN at layer 3)" in fail_line
+    assert fail_line.rstrip().endswith("-> none-none/")
+    # A fresh (non-resumed) cell that passed never gets a line at all.
+    assert not any("tf32-none" in ln for ln in lines)
+    assert any(ln.startswith("Note:") for ln in lines)
+
+
 # ---- aorta sweep run: end-to-end -----------------------------------------
 
 _TRIAGE_RECIPE = """\
@@ -232,3 +279,54 @@ def test_summary_prints_even_on_degraded_run(tmp_path, monkeypatch, _hermetic_en
     assert result.exit_code != 0, result.output
     assert "Sweep summary:" in result.output
     assert "[error] baseline-local:" in result.output
+
+
+# ---- aorta sweep run: end-to-end resume visibility (issue #282) -----------
+
+_PROBE_RECIPE = """\
+schema_version: 1
+mode: probe
+ticket: RESUME-VIS
+trials: 1
+mitigation_axis: [none]
+diagnostic_axis: [none]
+"""
+
+
+def test_probe_rerun_surfaces_resumed_cell_in_summary_and_matrix(tmp_path):
+    """Reproduce the reported confusion: a second run against the same
+    ``--output``/``--ticket`` serves the cell from cache, so an ``exit 1``
+    command still shows a green cell. The summary must now say so, and
+    ``matrix.json`` must record ``resumed: true``.
+    """
+    recipe = tmp_path / "probe.yaml"
+    recipe.write_text(_PROBE_RECIPE, encoding="utf-8")
+    output = tmp_path / "out"
+
+    # First run: fresh, the command actually executes and passes.
+    first = CliRunner().invoke(
+        main,
+        ["sweep", "run", "--recipe", str(recipe), "--output", str(output),
+         "--ticket", "RESUME-VIS", "--", "sh", "-c", "exit 0"],
+    )
+    assert first.exit_code == 0, first.output
+    assert "resumed from a prior run" not in first.output
+
+    # Second run: SAME output/ticket, but a failing command. The cell is
+    # already complete on disk -> served from cache, the exit-1 never runs.
+    second = CliRunner().invoke(
+        main,
+        ["sweep", "run", "--recipe", str(recipe), "--output", str(output),
+         "--ticket", "RESUME-VIS", "--", "sh", "-c", "exit 1"],
+    )
+    assert second.exit_code == 0, second.output
+    # The cache hit is now visible on stdout, with the count and how to
+    # force a fresh run -- no need to open the per-trial logs.
+    assert "1 resumed from a prior run (no trials re-executed)." in second.output
+    assert "Note:" in second.output
+    assert "--ticket" in second.output
+
+    # And it is persisted so tooling can tell cached from fresh.
+    matrix = json.loads((output / "RESUME-VIS" / "matrix.json").read_text(encoding="utf-8"))
+    cells = {c["name"]: c for c in matrix["cells"]}
+    assert cells.get("none-none", {}).get("resumed") is True

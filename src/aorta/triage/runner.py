@@ -431,11 +431,11 @@ def _resume_stop_after_cell(
     cap: int,
     stop_after: Any,
     resolved_env_vars: dict[str, str],
-) -> tuple[list[TrialResult], None, dict[str, str], list[str]] | None:
+) -> tuple[list[TrialResult], None, dict[str, str], list[str], bool] | None:
     """Resume short-circuit for a ``stop_after`` cell (issue #232).
 
-    Returns the hydrated ``(trials, error, env, paths)`` tuple iff the
-    on-disk trial prefix ALREADY satisfies the stopping rule -- i.e. the
+    Returns the hydrated ``(trials, error, env, paths, resumed)`` tuple iff
+    the on-disk trial prefix ALREADY satisfies the stopping rule -- i.e. the
     contiguous run of complete ``trial_<i>`` directories from index 0
     either hit the event target or reached the cap. Otherwise returns
     ``None`` so the caller re-runs the cell from scratch (re-running is
@@ -475,7 +475,7 @@ def _resume_stop_after_cell(
             stop_after.events,
             cap,
         )
-        return hydrated, None, resolved_env_vars, trial_paths
+        return hydrated, None, resolved_env_vars, trial_paths, True
     return None
 
 
@@ -731,8 +731,13 @@ def _run_one_cell(
     layout: Literal["timestamped", "flat_resume"] = "timestamped",
     resume_existing: bool = False,
     subprocess_argv: tuple[str, ...] | None = None,
-) -> tuple[list[TrialResult], str | None, dict[str, str], list[str]]:
-    """Execute a single cell through B1 and return (trials, error, env_vars, trial_paths).
+) -> tuple[list[TrialResult], str | None, dict[str, str], list[str], bool]:
+    """Execute a single cell through B1 and return (trials, error, env_vars, trial_paths, resumed).
+
+    ``resumed`` is True only when the whole cell was hydrated from a prior
+    run's on-disk artifacts via the ``flat_resume`` resume short-circuit
+    (no trials re-executed); False for freshly-run cells and for every
+    timestamped-layout cell (which never resumes).
 
     Exception handling scope is deliberately wide: any failure originating
     from B1 (unknown mitigation, workload crash in ``setup``, docker pull
@@ -795,9 +800,11 @@ def _run_one_cell(
         # on-disk prefix already satisfies the stopping rule; otherwise
         # fall through to a full re-run (the dispatcher will itself stop
         # early, so re-running is bounded by ``cap``).
-        resumed = _resume_stop_after_cell(cell, cell_dir, cap, stop_after, resolved_env_vars)
-        if resumed is not None:
-            return resumed
+        resumed_result = _resume_stop_after_cell(
+            cell, cell_dir, cap, stop_after, resolved_env_vars
+        )
+        if resumed_result is not None:
+            return resumed_result
     elif resume_existing and layout == "flat_resume":
         from aorta.probe.resume import is_trial_complete
 
@@ -836,7 +843,7 @@ def _run_one_cell(
                     cell.name,
                     effective_trials,
                 )
-                return hydrated, None, resolved_env_vars, trial_paths
+                return hydrated, None, resolved_env_vars, trial_paths, True
             # Subset check failed -> at least one required index is missing.
             # The single-branch log subsumes the previous two-branch shape
             # (separate "indices missing" vs "count short" cases): with the
@@ -933,10 +940,10 @@ def _run_one_cell(
         trials = run_trials(request)
     except Exception as exc:
         log.warning("cell %r failed with %s: %s", cell.name, type(exc).__name__, exc, exc_info=True)
-        return [], f"{type(exc).__name__}: {exc}", resolved_env_vars, []
+        return [], f"{type(exc).__name__}: {exc}", resolved_env_vars, [], False
 
     trial_paths = _collect_trial_paths(cell_dir)
-    return trials, None, resolved_env_vars, trial_paths
+    return trials, None, resolved_env_vars, trial_paths, False
 
 
 def _preflight_validate(recipe: Recipe) -> None:
@@ -1233,7 +1240,7 @@ def _run_recipe_locked(
             cell.effective_trials(recipe.trials),
         )
         cell_t0 = time.perf_counter()
-        trials, error, resolved_env_vars, trial_paths = _run_one_cell(
+        trials, error, resolved_env_vars, trial_paths, resumed = _run_one_cell(
             cell,
             recipe,
             run_dir,
@@ -1263,11 +1270,13 @@ def _run_recipe_locked(
             # both halves of the predicate are needed.
             passed = sum(1 for t in trials if _trial_passed_for_log(t))
             summary, suffix = _format_cell_summary(trials, passed)
+            done_verb = "resumed (cached, no re-run) in" if resumed else "done in"
             log.info(
-                "cell %d/%d: %s -- done in %.1fs %s%s",
+                "cell %d/%d: %s -- %s %.1fs %s%s",
                 cell_idx,
                 total_cells,
                 cell.name,
+                done_verb,
                 cell_elapsed,
                 summary,
                 suffix,
@@ -1299,6 +1308,7 @@ def _run_recipe_locked(
             error=error,
             workload_config={**recipe.workload_config, **cell.workload_config},
             stop_after_note=stop_after_note,
+            resumed=resumed,
         )
         cell_stats.append(stats)
 
