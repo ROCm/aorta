@@ -101,8 +101,17 @@ def current_version_from_git() -> str:
             capture_output=True,
             text=True,
         ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover - env-specific
-        raise RuntimeError(f"could not list git tags: {exc}") from exc
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - env-specific
+        # Surface git's own stderr (captured above), e.g. "not a git
+        # repository", so the failure is actionable in CI and local runs --
+        # str(exc) alone only reports the non-zero exit code.
+        stderr = (exc.stderr or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise RuntimeError(
+            f"could not list git tags (git exited {exc.returncode}){detail}"
+        ) from exc
+    except OSError as exc:  # pragma: no cover - env-specific (e.g. git not installed)
+        raise RuntimeError(f"could not run git to list tags: {exc}") from exc
 
     versions: list[tuple[int, int, int]] = []
     for line in out.splitlines():
