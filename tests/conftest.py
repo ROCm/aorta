@@ -24,9 +24,11 @@ import pytest
 # ``entry_points`` never triggers a fresh (failing) Triton import. Best-effort:
 # Triton is an optional dependency and absent on CPU-only stacks, where no
 # ``triton.backends.compiler`` exists to orphan, so there is nothing to guard.
-try:  # noqa: SIM105 -- contextlib.suppress would hide an unexpected import error type
+# Catch ``Exception`` (not just ``ImportError``): a broken Triton/native install
+# can fail with OSError/RuntimeError, and any such failure is a clean no-op here.
+try:
     import triton  # noqa: F401
-except Exception:  # noqa: BLE001 -- optional dep; any import failure is a clean no-op
+except Exception:
     pass
 
 
