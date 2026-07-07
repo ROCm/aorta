@@ -113,9 +113,16 @@ def test_resolve_new_version_rejects_bad_explicit():
         resolve_new_version("0.2.0", None, "not-a-version")
 
 
-def test_resolve_new_version_rejects_non_semver_current_without_bump():
+def test_resolve_new_version_requires_input():
+    # Empty input must fail loudly rather than silently return the current
+    # version unchanged (this tool computes the *next* version).
     with pytest.raises(ValueError):
-        resolve_new_version("0.2.0rc1", None, None)
+        resolve_new_version("0.2.0", None, None)
+
+
+def test_resolve_new_version_suffix_only_rejects_non_semver_current():
+    with pytest.raises(ValueError):
+        resolve_new_version("0.2.0rc1", None, None, "rc20260620")
 
 
 def test_main_bump_uses_current_override(capsys):

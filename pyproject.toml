@@ -137,11 +137,12 @@ Repository = "https://github.com/ROCm/aorta"
 #   * a checkout ahead of the latest tag builds ``X.Y.(Z+1).devN+g<sha>`` so a
 #     local ``pip install .`` / ``pip install git+...`` always reflects the most
 #     recent release (plus how far past it the tree is), never a stale literal.
-# Only version-like tags (``v`` + a digit) are matched, so the rolling
-# ``dev-wheels`` nightly tag is never mistaken for a release. A tree with no git
-# metadata (e.g. an unpacked sdist without .git) falls back to the literal below;
-# built sdists/wheels embed the resolved version in their metadata, so installing
-# from those still reports the correct version.
+# Only ``vMAJOR.MINOR.PATCH`` tags are matched (same shape as
+# ``scripts/bump_version.py``), so neither the rolling ``dev-wheels`` nightly tag
+# nor a stray ``v1`` / ``v1beta`` tag can be mistaken for a release. A tree with
+# no git metadata (e.g. an unpacked sdist without .git) falls back to the literal
+# below; built sdists/wheels embed the resolved version in their metadata, so
+# installing from those still reports the correct version.
 git_describe_command = [
     "git",
     "describe",
@@ -149,7 +150,7 @@ git_describe_command = [
     "--tags",
     "--long",
     "--match",
-    "v[0-9]*",
+    "v[0-9]*.[0-9]*.[0-9]*",
 ]
 fallback_version = "0.0.0+unknown"
 

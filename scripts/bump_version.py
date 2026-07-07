@@ -124,10 +124,14 @@ def resolve_new_version(
 ) -> str:
     """Resolve the target version from ``current`` plus a bump/explicit/suffix.
 
-    The base is chosen by precedence ``explicit`` (``--set``) > ``level`` bump >
-    ``current`` as-is. A ``suffix`` (e.g. ``rc20260619``) is then appended to that
-    base, so ``level='patch'`` + ``suffix='rc...'`` yields the *next* release's rc
-    (``0.2.0`` -> ``0.2.1rc...``) rather than an rc of the already-released base.
+    At least one of ``level``, ``explicit``, or ``suffix`` is required: this tool
+    computes the *next* version, so returning ``current`` unchanged on empty input
+    would be a misleading "success" (e.g. a blank bump input in CI). The base is
+    chosen by precedence ``explicit`` (``--set``) > ``level`` bump > ``current``
+    as-is (suffix-only). A ``suffix`` (e.g. ``rc20260619``) is then appended to
+    that base, so ``level='patch'`` + ``suffix='rc...'`` yields the *next*
+    release's rc (``0.2.0`` -> ``0.2.1rc...``) rather than an rc of the
+    already-released base.
     """
     if explicit is not None:
         if _SEMVER_RE.match(explicit) is None:
@@ -135,13 +139,18 @@ def resolve_new_version(
         base = explicit
     elif level is not None:
         base = bump_version(current, level)
-    else:
+    elif suffix is not None:
+        # suffix-only: stamp onto the current base (e.g. re-stamping an rc date).
         if _SEMVER_RE.match(current) is None:
             raise ValueError(
                 f"current version {current!r} is not MAJOR.MINOR.PATCH; "
                 "pass a bump level or --set VERSION"
             )
         base = current
+    else:
+        raise ValueError(
+            "one of a bump level (major/minor/patch), --set VERSION, or --suffix SUFFIX is required"
+        )
     if suffix is not None:
         return apply_suffix(base, suffix)
     return base
