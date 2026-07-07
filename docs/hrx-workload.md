@@ -84,3 +84,80 @@ aorta run --workload hrx
 aorta run --workload hrx --extra-env \
   "HRX_GPU_DRIVER=amdgpu,LD_LIBRARY_PATH=/path/to/hrx-root/lib,LD_PRELOAD=/path/to/hrx-root/lib/libamdhip64.so"
 ```
+
+# HRX performance workload (`hrx_perf`)
+
+Where `hrx` checks *correctness*, the companion `hrx_perf` workload measures
+*speed* under HRX vs stock ROCm HIP. It builds a deliberately **big** HIP
+benchmark with `hipcc` and execs it, timing each iteration host-side (launch +
+`hipDeviceSynchronize`) so the per-step number includes runtime/launch overhead
+— the axis on which an alternate HIP runtime can differ.
+
+## Benchmarks
+
+Select with `workload_config.bench`:
+
+| `bench` | kind | what it stresses | throughput metric |
+|---|---|---|---|
+| `gemm` (default) | compute-bound tiled SGEMM (`C = A*B`, N×N floats) | FLOPs + launch path | `metrics.gflops` |
+| `triad` | bandwidth-bound STREAM triad (`a = b + s*c`) | HBM bandwidth + launch path | `metrics.gbps` |
+
+Each bench runs `warmup` untimed then `iters` timed iterations and verifies a
+checksum (a wrong result → `PERF_FAIL`, so a bogus runtime can't yield a
+meaningless "fast" number).
+
+## How the comparison shows up
+
+The workload reports every timed iteration as `step_times_ms`, so
+`aorta sweep run`'s matrix renders:
+
+- **Mean step (ms)** per cell — the mean timed iteration.
+- **Confound** — `hrx_on`'s step time as a ratio of the `hrx_off` baseline.
+  `speed (+N%)` means HRX was N% slower per iteration; `-` means no meaningful
+  slowdown.
+
+Achieved throughput (`gflops` / `gbps`) is in each trial's `result.json`
+`metrics` and in `matrix.json`.
+
+Example (`hrx_off` baseline; `hrx_on` here shows `did_not_run` because the
+recipe still has the placeholder HRX path — fill it in to get a real number):
+
+```
+| Cell    | ... | Iters | Mean step (ms) | Confound    |
+|---------|-----|-------|----------------|-------------|
+| hrx_off | ... | 50/50 | 9.6            | (baseline)  |
+| hrx_on  | ... | —     | n/a            | did_not_run |
+```
+
+## Config keys
+
+| key | default | meaning |
+|---|---|---|
+| `bench` | `gemm` | `gemm` or `triad` |
+| `gpu_arch` | `gfx942` | `hipcc --offload-arch` target |
+| `size` | gemm `4096`, triad `64000000` | matrix dim N (gemm) / element count (triad) |
+| `iters` | `50` | timed iterations (reported as per-step times) |
+| `warmup` | `10` | untimed warmup iterations |
+| `hipcc` | `$HIPCC` / `/opt/rocm/bin/hipcc` / PATH | compiler |
+| `build_dir` | temp dir | where bench binaries are built |
+| `timeout_sec` | `600` | per-run subprocess timeout |
+| `keep_build` | `false` | keep `build_dir` after cleanup |
+
+HRX-on vs HRX-off routing, the `hipcc` build-env sanitization, and the
+`LD_PRELOAD` guards (nonexistent path fails setup; ignored preload fails the
+run) are identical to the `hrx` workload above.
+
+## Quick run
+
+```bash
+# compute-bound A/B (add --strict to fail if a cell errors or never runs)
+aorta sweep run --recipe recipes/hrx-perf-gemm.yaml --output ./triage_results --strict
+cat triage_results/HRX-PERF-GEMM/hrx_perf/*/matrix.md
+
+# bandwidth-bound A/B
+aorta sweep run --recipe recipes/hrx-perf-triad.yaml --output ./triage_results --strict
+cat triage_results/HRX-PERF-TRIAD/hrx_perf/*/matrix.md
+
+# single run, stock HIP, defaults (gemm 4096)
+aorta run --workload hrx_perf
+```

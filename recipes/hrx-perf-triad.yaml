@@ -1,0 +1,61 @@
+# HRX perf -- bandwidth-bound STREAM triad, HRX-on vs stock-ROCm A/B.
+#
+# Memory-bound counterpart to hrx-perf-gemm: a big STREAM triad
+# (a = b + s*c over N floats) that stresses HBM bandwidth and per-launch
+# overhead rather than compute. The `hrx_perf` workload builds the bench with
+# hipcc at setup and execs it; each timed iteration is measured host-side
+# (launch + hipDeviceSynchronize), so per-step time includes runtime/launch
+# overhead -- where HRX can differ from stock HIP.
+#
+# HOW TO READ THE RESULT
+#   The matrix's per-cell "Mean step (ms)" is the mean timed iteration; the
+#   Confound column reports hrx_on's step time as a ratio of the hrx_off
+#   baseline. Achieved bandwidth is in each trial's result.json metrics
+#   (metrics.gbps) and matrix.json.
+#
+# PREREQUISITES
+#   * A ROCm/hipcc toolchain (the workload compiles the bench).
+#   * An installed HRX public dist. Replace /path/to/hrx-root in the hrx_on
+#     cell below with its prefix (the dir containing lib/libamdhip64.so). Paths
+#     under extra_env are passed verbatim -- use ABSOLUTE paths. A
+#     wrong/placeholder path fails setup instead of silently measuring stock HIP.
+#   * size=64000000 floats => ~768 MB across 3 arrays; lower `size` for a
+#     smaller GPU.
+#
+# Run (ticket comes from `ticket:` below; add --strict to fail if a cell errors
+# or never runs):
+#   aorta sweep run --recipe recipes/hrx-perf-triad.yaml --output ./triage_results --strict
+# Read:
+#   cat triage_results/HRX-PERF-TRIAD/hrx_perf/*/matrix.md
+
+schema_version: 1
+
+ticket: HRX-PERF-TRIAD
+workload: hrx_perf
+
+trials: 3
+steps: 1
+
+save_logs: true
+
+workload_config:
+  bench: triad
+  gpu_arch: gfx942
+  size: 64000000
+  iters: 100
+  warmup: 20
+  timeout_sec: 600
+
+cells:
+  - name: hrx_off
+    mitigations: [none]
+    environment: local
+
+  - name: hrx_on
+    mitigations: [none]
+    environment: local
+    # EDIT: replace /path/to/hrx-root with your installed HRX prefix.
+    extra_env:
+      HRX_GPU_DRIVER: "amdgpu"
+      LD_LIBRARY_PATH: "/path/to/hrx-root/lib"
+      LD_PRELOAD: "/path/to/hrx-root/lib/libamdhip64.so"
