@@ -24,7 +24,7 @@ except PackageNotFoundError:  # pragma: no cover - source tree without dist-info
 def load_training_entrypoint() -> Any:
     """Lazily import and return the default training entry point."""
     module = import_module("aorta.training.fsdp_trainer")
-    return getattr(module, "main")
+    return module.main
 
 
 def load_hw_queue_eval():
