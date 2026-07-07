@@ -13,11 +13,15 @@ from typing import Any
 # generated from ``pyproject.toml`` at build/install time. This keeps
 # ``aorta.__version__`` in lockstep with whatever was actually installed (wheel,
 # ``pip install .``, editable, or ``pip install git+...``) instead of a hard-coded
-# literal that silently drifts from the released version. The fallback only
-# triggers when running against an uninstalled source tree with no metadata.
+# literal that silently drifts from the released version. This runs at import
+# time, so the fallback is best-effort and defensive: besides the expected
+# missing-metadata case (uninstalled source tree), any unexpected metadata error
+# (e.g. unreadable/corrupted dist-info) must not break ``import aorta``.
 try:
     __version__ = version("amd-aorta")
-except PackageNotFoundError:  # pragma: no cover - source tree without dist-info
+except PackageNotFoundError:  # source tree without dist-info
+    __version__ = "0.0.0+unknown"
+except Exception:  # pragma: no cover - defensive: never break import on metadata errors
     __version__ = "0.0.0+unknown"
 
 
