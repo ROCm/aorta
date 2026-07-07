@@ -33,6 +33,7 @@ Per the acceptance criteria in issue #151, this module MUST NOT use
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -368,6 +369,27 @@ def _write_json_atomic_replace(target: Path, payload: dict[str, Any]) -> None:
                 tmp_path.unlink()
 
 
+def _read_json_no_follow(target: Path) -> Any:
+    """Read JSON without following a final-path symlink when supported."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        fd = os.open(target, os.O_RDONLY | nofollow)
+        try:
+            fh = os.fdopen(fd, "r", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+        with fh:
+            return json.load(fh)
+
+    # Windows does not expose O_NOFOLLOW. Keep the explicit symlink rejection
+    # there; POSIX runners use the atomic open path above.
+    if target.is_symlink():
+        raise OSError(errno.ELOOP, "symlink not allowed", str(target))
+    with target.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def _aorta_src_root() -> Path:
     """Absolute path to the aorta ``src`` tree on the runner host.
 
@@ -404,17 +426,17 @@ def _is_real_env_snapshot(target: Path, env_name: str, warnings: list[str]) -> b
     written, or a prior placeholder read back -- return False silently, since
     they are the expected "not captured yet" states, not errors.
     """
-    if target.is_symlink():
-        warnings.append(
-            f"environment {env_name!r}: in-container snapshot at {target} "
-            "is a symlink; will retry / fall back to placeholder."
-        )
-        return False
-    if not target.is_file():
-        return False
     try:
-        doc = json.loads(target.read_text(encoding="utf-8"))
+        doc = _read_json_no_follow(target)
+    except FileNotFoundError:
+        return False
     except (OSError, json.JSONDecodeError) as exc:
+        if isinstance(exc, OSError) and exc.errno == errno.ELOOP:
+            warnings.append(
+                f"environment {env_name!r}: in-container snapshot at {target} "
+                "is a symlink; will retry / fall back to placeholder."
+            )
+            return False
         warnings.append(
             f"environment {env_name!r}: in-container snapshot at {target} "
             f"is unreadable ({type(exc).__name__}); will retry / fall back to placeholder."

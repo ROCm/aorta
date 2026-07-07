@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -473,6 +474,30 @@ def test_isolated_env_rejects_symlink_snapshot_and_preserves_target(
 
     doc = json.loads((run_dir / "matrix.json").read_text())
     assert any("symlink" in warning.lower() for warning in doc["warnings"])
+
+
+def test_isolated_env_snapshot_rejects_symlink_at_open_time(
+    tmp_path, monkeypatch
+):
+    """O_NOFOLLOW closes the race between checking and opening env.json."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("os.O_NOFOLLOW is unavailable on this platform")
+
+    victim = tmp_path / "host_victim.json"
+    victim.write_text(json.dumps({"schema_version": "1.7"}), encoding="utf-8")
+    link = tmp_path / "env.json"
+    try:
+        link.symlink_to(victim)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation unavailable on this platform: {exc}")
+
+    # Simulate the old check-then-read race: the pre-read symlink check sees
+    # "not a symlink", but the open-time no-follow guard must still reject it.
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+
+    warnings: list[str] = []
+    assert runner._is_real_env_snapshot(link, "container-env", warnings) is False
+    assert any("symlink" in warning.lower() for warning in warnings)
 
 
 def test_isolated_env_falls_back_to_placeholder_when_no_snapshot(
