@@ -273,7 +273,7 @@ A green run proves: `compute_type=transformer`, `layers_verified > 0`, `layer_ch
         matrix.json
         recipe.resolved.yaml                    # post-resolution snapshot
         host_env.json                           # collect_env() once per run
-        environments/<env-name>/env.json        # once per unique environment
+        environments/<env-name>/env.json        # once per unique environment (see "Environment snapshots")
         inline_environments.sidecar.json        # only when inline docker is used
         sidecars/<basename>                     # one copy per --mitigations-file
         cells/<cell-name>/<workload>/trial_*.json
@@ -320,6 +320,75 @@ write to `cells/<cell-name>/`, and B1 ends up writing
 `cells/<cell-name>/<workload>/trial_N.json`. `matrix.json` records the
 real paths; a future B1 follow-up can drop this level of nesting via a
 `skip_workload_subdir` kwarg on `RunRequest`.
+
+## Environment snapshots
+
+Every run records the environment each cell ran in under
+`environments/<env-name>/env.json`, once per unique environment:
+
+- **Local (non-isolated) envs** are probed in-process: the runner calls
+  `collect_env()` directly, because the runner process *is* the trial
+  environment. The snapshot is written before the env's first cell runs.
+- **Isolated envs** (a registry `Environment` with a `docker:` or `venv:`
+  field, or an inline-docker cell) cannot be probed from the runner
+  process -- that would record the *host's* Python / ROCm / hipBLASLt
+  state, not the isolated env's. Instead the **workload wrapper** captures a
+  snapshot from *inside the isolated env* (the container, or the activated
+  venv), and the runner promotes it. If the wrapper produces nothing, the
+  runner writes a placeholder with `"snapshot_captured": false` and the env
+  descriptor. The docker example below is the common case; a venv wrapper
+  runs the same probe command in its activated venv using the host
+  `src`/`out` paths directly (no bind-mount).
+
+### Wrapper contract for in-container snapshots
+
+For isolated envs the dispatcher injects a reserved
+`config["_aorta_env_probe"]` dict with two keys:
+
+- `src` -- absolute path to the aorta `src` tree on the runner host. Bind-mount
+  this into the container so the dependency-free probe entry resolves without
+  installing aorta in the image.
+- `out` -- absolute host path (`environments/<env-name>/env.json`) the runner
+  will read after the cell runs. Bind-mount its parent and write there.
+
+A self-isolating wrapper (e.g. `recom_repro` invoking `docker run`) opts in
+by reading the reserved config key and running the probe as the first step
+inside the container. There are no `AORTA_PROBE_SRC` / `AORTA_ENV_OUT`
+environment variables -- the paths arrive only through
+`config["_aorta_env_probe"]`, and the wrapper is responsible for turning them
+into bind-mounts on the `docker run` it builds:
+
+```python
+# inside the wrapper's run(), before building argv:
+probe = self.config.get("_aorta_env_probe")   # None for non-isolated envs
+mounts, probe_prefix = [], ""
+if probe is not None:
+    src, out = probe["src"], probe["out"]      # host paths from the runner
+    out_dir = os.path.dirname(out)
+    mounts = ["-v", f"{src}:/opt/aorta_src:ro", "-v", f"{out_dir}:/aorta_out"]
+    probe_prefix = (
+        "PYTHONPATH=/opt/aorta_src python -m aorta.instrumentation._probe_main "
+        f"/aorta_out/{os.path.basename(out)} && "
+    )
+
+argv = [
+    "docker", "run", *mounts, image,
+    "bash", "-c", f"{probe_prefix}{workload_cmd}",
+]
+```
+
+`aorta.instrumentation._probe_main` imports only stdlib plus the
+`collect_env()` module (no Click), so it runs under a bare container Python
+with no `pip install`. It writes exactly the same `env.json` shape as
+`aorta env probe -o`, so a promoted in-container snapshot is
+indistinguishable on disk from a local-env one.
+
+Probing is **per unique environment**, not per cell: the first cell of each
+isolated env requests a probe, and subsequent cells reusing that env keep
+requesting one until a valid snapshot is captured (so a cell whose container
+fails to start doesn't permanently lose the snapshot). Once captured, later
+cells stop requesting it. An env that never produces a valid snapshot gets the
+placeholder at the end of the run.
 
 ## Re-running a past matrix
 
