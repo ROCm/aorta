@@ -80,7 +80,10 @@ def _aorta_package_version() -> str:
     try:
         from importlib.metadata import PackageNotFoundError, version
 
-        return version("aorta")
+        # Query the canonical distribution name from pyproject.toml (``amd-aorta``),
+        # not the import package name (``aorta``), so this resolves reliably from
+        # installed dist metadata rather than falling back to "unknown".
+        return version("amd-aorta")
     except PackageNotFoundError:
         return "unknown"
     except Exception:  # pragma: no cover - defensive
