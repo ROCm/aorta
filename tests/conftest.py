@@ -25,11 +25,17 @@ import pytest
 # Triton is an optional dependency and absent on CPU-only stacks, where no
 # ``triton.backends.compiler`` exists to orphan, so there is nothing to guard.
 # Catch ``Exception`` (not just ``ImportError``): a broken Triton/native install
-# can fail with OSError/RuntimeError, and any such failure is a clean no-op here.
+# can fail with OSError/RuntimeError. On any failure, purge partially-imported
+# ``triton.*`` modules so the failure leaves a clean slate instead of seeding
+# the very half-state (an orphaned ``triton.backends.compiler`` with ``triton``
+# gone) that this pre-import exists to prevent.
 try:
     import triton  # noqa: F401
 except Exception:
-    pass
+    import sys
+
+    for _mod in [m for m in sys.modules if m == "triton" or m.startswith("triton.")]:
+        del sys.modules[_mod]
 
 
 @pytest.fixture
