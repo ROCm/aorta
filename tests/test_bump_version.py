@@ -1,10 +1,17 @@
 """Tests for scripts/bump_version.py (computes the next release version from git tags)."""
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+# The two tests below shell out to the real ``git`` executable; skip (rather than
+# error with FileNotFoundError) on minimal environments that lack it.
+requires_git = pytest.mark.skipif(
+    shutil.which("git") is None, reason="git executable not available"
+)
 
 _SCRIPTS_DIR = str(Path(__file__).parent.parent / "scripts")
 sys.path.insert(0, _SCRIPTS_DIR)
@@ -127,6 +134,7 @@ def test_main_nightly_suffix_on_next_base(capsys):
     assert capsys.readouterr().out.strip() == "0.2.1rc20260620"
 
 
+@requires_git
 def test_current_version_from_git_picks_highest_release_tag(tmp_path, monkeypatch):
     """The helper returns the highest ``vX.Y.Z`` tag and ignores non-release
     tags such as the rolling ``dev-wheels`` nightly tag."""
@@ -149,6 +157,7 @@ def test_current_version_from_git_picks_highest_release_tag(tmp_path, monkeypatc
     assert current_version_from_git() == "0.10.0"
 
 
+@requires_git
 def test_current_version_from_git_defaults_to_initial(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
