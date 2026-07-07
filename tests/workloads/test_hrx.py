@@ -62,8 +62,13 @@ def test_build_env_strips_runtime_routing_vars(monkeypatch, tmp_path):
     The dispatcher merges the cell env into os.environ before setup() runs, so
     a preloaded HRX libamdhip64.so would otherwise run inside the compiler.
     """
-    for var in hrx_mod._RUNTIME_ROUTING_VARS:
-        monkeypatch.setenv(var, "/some/hrx/value")
+    # Use real paths so the setup-time LD_PRELOAD existence check passes; this
+    # test is about build-env stripping, not routing validation.
+    real_lib = tmp_path / "libamdhip64.so"
+    real_lib.write_bytes(b"\x7fELF")
+    monkeypatch.setenv("LD_PRELOAD", str(real_lib))
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(tmp_path))
+    monkeypatch.setenv("HRX_GPU_DRIVER", "amdgpu")
     monkeypatch.setenv("ROCM_PATH", "/opt/rocm")  # unrelated var must survive
 
     captured: dict[str, dict[str, str] | None] = {}
@@ -111,6 +116,38 @@ def test_relative_build_dir_is_resolved_absolute(monkeypatch, tmp_path):
     assert Path(out_arg).is_absolute()
 
 
+def test_setup_rejects_nonexistent_ld_preload(monkeypatch, tmp_path):
+    """A placeholder/typo'd LD_PRELOAD must fail setup, not silently fall back.
+
+    ld.so only warns and runs against the default HIP runtime, so an hrx_on cell
+    would otherwise report a misleading FULLY_WORKS.
+    """
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(HrxWorkload, "_build", lambda self: self._build_dir / "x")
+    monkeypatch.setenv("LD_PRELOAD", "/path/to/hrx-root/lib/libamdhip64.so")
+    wl = HrxWorkload({"probe": "module", "build_dir": str(tmp_path)})
+    with pytest.raises(RuntimeError, match="LD_PRELOAD names object"):
+        wl.setup()
+
+
+def test_setup_accepts_existing_ld_preload(monkeypatch, tmp_path):
+    """An LD_PRELOAD that points at a real file must pass the existence check."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(HrxWorkload, "_build", lambda self: self._build_dir / "x")
+    real_lib = tmp_path / "libamdhip64.so"
+    real_lib.write_bytes(b"\x7fELF")
+    monkeypatch.setenv("LD_PRELOAD", str(real_lib))
+    HrxWorkload({"probe": "module", "build_dir": str(tmp_path)}).setup()
+
+
+def test_setup_skips_bare_soname_ld_preload(monkeypatch, tmp_path):
+    """A bare soname (no '/') is resolved via LD_LIBRARY_PATH -- don't false-fail."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(HrxWorkload, "_build", lambda self: self._build_dir / "x")
+    monkeypatch.setenv("LD_PRELOAD", "libamdhip64.so")
+    HrxWorkload({"probe": "module", "build_dir": str(tmp_path)}).setup()
+
+
 def _prep_workload(monkeypatch, tmp_path: Path) -> HrxWorkload:
     """A workload whose setup() succeeds without a real toolchain."""
     monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
@@ -120,8 +157,12 @@ def _prep_workload(monkeypatch, tmp_path: Path) -> HrxWorkload:
     return wl
 
 
-def _fake_completed(stdout: str, returncode: int) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(args=["probe"], returncode=returncode, stdout=stdout, stderr="")
+def _fake_completed(
+    stdout: str, returncode: int, stderr: str = ""
+) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        args=["probe"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
 
 
 def test_run_fully_works(monkeypatch, tmp_path):
@@ -138,6 +179,49 @@ def test_run_fully_works(monkeypatch, tmp_path):
     assert res.metrics.get("out0") == 107.0
     assert res.main_work_started is True
     assert res.executed_iterations == 1
+
+
+def test_run_preload_ignored_is_failure(monkeypatch, tmp_path):
+    """FULLY_WORKS + an ld.so 'ignored' warning is a false green -> fail it.
+
+    Catches the exists-but-unloadable case (wrong arch / missing deps) that the
+    setup existence check can't see.
+    """
+    wl = _prep_workload(monkeypatch, tmp_path)
+    monkeypatch.setenv("LD_PRELOAD", "/some/hrx/libamdhip64.so")
+    stdout = "out[0]=107 (expect 107)\nVERDICT=FULLY_WORKS\n"
+    stderr = (
+        "ERROR: ld.so: object '/some/hrx/libamdhip64.so' from LD_PRELOAD cannot "
+        "be preloaded (cannot open shared object file): ignored.\n"
+    )
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: _fake_completed(stdout, 0, stderr)
+    )
+
+    res = wl.run()
+
+    assert res.passed is False
+    assert res.metrics.get("preload_ignored") is True
+    assert res.metrics.get("verdict") == "FULLY_WORKS"
+    assert res.failure_details, "expected a failure detail"
+    assert "ignored" in res.failure_details[0].get("hint", "").lower()
+
+
+def test_run_no_preload_no_false_positive(monkeypatch, tmp_path):
+    """With LD_PRELOAD unset, a passing verdict must stay green (no backstop)."""
+    wl = _prep_workload(monkeypatch, tmp_path)
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    stdout = "out[0]=107 (expect 107)\nVERDICT=FULLY_WORKS\n"
+    # Stray stderr text must not be misread as an ld.so preload warning.
+    stderr = "some unrelated warning: cannot be preloaded elsewhere\n"
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: _fake_completed(stdout, 0, stderr)
+    )
+
+    res = wl.run()
+
+    assert res.passed is True
+    assert res.metrics.get("preload_ignored") is False
 
 
 def test_run_output_not_written(monkeypatch, tmp_path):

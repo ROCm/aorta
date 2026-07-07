@@ -17,7 +17,11 @@ Design:
       ``LD_PRELOAD`` + ``LD_LIBRARY_PATH`` + ``HRX_GPU_DRIVER`` env bundle.
       Because the probe is exec'd as a *child* process, that ``LD_PRELOAD``
       takes effect at ``exec()`` (an in-process torch workload could not do
-      this — see the HRX handover notes).
+      this — see the HRX handover notes). A bad routing bundle is caught, not
+      run silently: :meth:`setup` fails if ``LD_PRELOAD`` names a path that
+      doesn't exist, and :meth:`run` marks the result failed if ``ld.so`` reports
+      it ignored the preload — either case would otherwise fall back to the
+      default HIP runtime and mint a misleading ``FULLY_WORKS``.
     * That routing bundle is stripped from the ``hipcc`` build env (see
       :data:`_RUNTIME_ROUTING_VARS`): the dispatcher merges the cell env into
       ``os.environ`` before ``setup()`` runs, so without stripping, a preloaded
@@ -56,6 +60,18 @@ _KERNELS_DIR = Path(__file__).parent / "hrx_kernels"
 _PASS_VERDICT = "FULLY_WORKS"
 _VERDICT_RE = re.compile(r"^VERDICT=([A-Z_]+)", re.MULTILINE)
 _OUT0_RE = re.compile(r"^out\[0\]=([-\d.eE+]+)", re.MULTILINE)
+
+# ld.so emits this (to stderr) when it cannot load an LD_PRELOAD object and
+# falls back to running the process WITHOUT it, e.g.
+#   ERROR: ld.so: object '/x/libamdhip64.so' from LD_PRELOAD cannot be
+#   preloaded (cannot open shared object file): ignored.
+# For this workload that silent fallback means the probe ran against the
+# default HIP runtime, not the one the cell intended -- a false green.
+_LDSO_PRELOAD_IGNORED_RE = re.compile(r"from LD_PRELOAD cannot be preloaded")
+
+# ld.so dynamic string tokens are expanded by the loader at exec time; we can't
+# resolve them here, so LD_PRELOAD entries containing them are not existence-checked.
+_LD_DYNAMIC_TOKEN_RE = re.compile(r"\$(?:ORIGIN|LIB|PLATFORM)\b|\$\{")
 
 
 @dataclass(frozen=True)
@@ -110,6 +126,35 @@ _RUNTIME_ROUTING_VARS = ("LD_PRELOAD", "LD_LIBRARY_PATH", "HRX_GPU_DRIVER")
 def _build_env() -> dict[str, str]:
     """os.environ minus the HRX runtime-routing vars (for the hipcc build)."""
     return {k: v for k, v in os.environ.items() if k not in _RUNTIME_ROUTING_VARS}
+
+
+def _missing_preload_objects() -> list[str]:
+    """Path-like ``LD_PRELOAD`` entries that don't resolve to an existing file.
+
+    A missing ``LD_PRELOAD`` object is NOT fatal to the dynamic loader: ``ld.so``
+    prints a warning to stderr and runs the process anyway -- against the
+    *default* ``libamdhip64``. For this workload that means an ``hrx_on`` cell
+    whose ``LD_PRELOAD`` points at a placeholder or mistyped path would silently
+    exercise stock HIP and report a misleading ``FULLY_WORKS``. Surface it
+    up-front instead.
+
+    Only *path-like* entries (absolute, or containing a ``/``) are checked;
+    bare sonames are resolved via ``LD_LIBRARY_PATH`` / the ldconfig cache, which
+    we can't reliably enumerate here (the run()-time stderr backstop catches
+    those). Entries with unresolved dynamic tokens ($ORIGIN/$LIB/$PLATFORM) are
+    skipped for the same reason.
+    """
+    raw = os.environ.get("LD_PRELOAD", "").strip()
+    if not raw:
+        return []
+    missing: list[str] = []
+    # The loader accepts whitespace and ``:`` as LD_PRELOAD separators.
+    for entry in (p for p in re.split(r"[:\s]+", raw) if p):
+        if _LD_DYNAMIC_TOKEN_RE.search(entry):
+            continue
+        if (os.path.isabs(entry) or "/" in entry) and not os.path.isfile(entry):
+            missing.append(entry)
+    return missing
 
 # Platform-injected config keys that are not HrxWorkload knobs (the dispatcher
 # writes `steps` into every workload config; `_aorta_*` carry probe/env
@@ -173,6 +218,21 @@ class HrxWorkload(Workload):
         return probe
 
     def setup(self) -> None:
+        # Fail fast on a bad routing bundle: a nonexistent LD_PRELOAD object is
+        # only a stderr warning to the loader, so an hrx_on cell would otherwise
+        # silently run against stock HIP and report a false FULLY_WORKS.
+        missing = _missing_preload_objects()
+        if missing:
+            raise RuntimeError(
+                "hrx: LD_PRELOAD names object(s) that do not exist: "
+                + ", ".join(repr(m) for m in missing)
+                + ". The dynamic loader would ignore these with only a stderr "
+                "warning and run the probe against the DEFAULT HIP runtime, so "
+                "the cell would silently test stock HIP and report a misleading "
+                "FULLY_WORKS. Fix the path(s) in the cell's extra_env -- replace "
+                "the /path/to/hrx-root placeholder with your installed HRX "
+                "prefix, and make sure LD_PRELOAD/LD_LIBRARY_PATH are absolute."
+            )
         self._probe = self._validated_probe()
         self._spec = _PROBES[self._probe]
         self._arch = str(self.config.get("gpu_arch", _DEFAULT_ARCH))
@@ -285,7 +345,22 @@ class HrxWorkload(Workload):
         # (it dispatched / read back), as opposed to dying during HIP init.
         main_work_started = out0_match is not None or verdict_match is not None
 
-        passed = (not timed_out) and exit_code == 0 and verdict == _PASS_VERDICT
+        # Even a FULLY_WORKS verdict is a false green if the cell requested an
+        # LD_PRELOAD that the loader ended up ignoring: the probe then ran
+        # against the default HIP runtime, not the intended one. The setup-time
+        # check catches nonexistent paths; this catches exists-but-unloadable
+        # (wrong arch, missing transitive deps) via ld.so's stderr warning.
+        preload_requested = bool(os.environ.get("LD_PRELOAD", "").strip())
+        preload_ignored = preload_requested and bool(
+            _LDSO_PRELOAD_IGNORED_RE.search(stderr)
+        )
+
+        passed = (
+            (not timed_out)
+            and exit_code == 0
+            and verdict == _PASS_VERDICT
+            and not preload_ignored
+        )
 
         metrics: dict[str, Any] = {
             "probe": self._probe,
@@ -294,11 +369,20 @@ class HrxWorkload(Workload):
             "out0": out0,
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "preload_ignored": preload_ignored,
         }
 
         failure_details: list[dict[str, Any]] = []
         if not passed:
-            if timed_out:
+            if preload_ignored:
+                hint = (
+                    f"probe {self._probe!r}: LD_PRELOAD was set but the loader "
+                    "ignored it (see stderr) -- the probe ran against the "
+                    "DEFAULT HIP runtime, so this result does NOT reflect the "
+                    "intended runtime. Check the LD_PRELOAD object's path, "
+                    "architecture, and shared-library dependencies."
+                )
+            elif timed_out:
                 hint = f"probe {self._probe!r} hung (>{self._timeout}s) at launch/sync"
             elif verdict is None:
                 hint = (
@@ -314,6 +398,7 @@ class HrxWorkload(Workload):
                     "out0": out0,
                     "exit_code": exit_code,
                     "timed_out": timed_out,
+                    "preload_ignored": preload_ignored,
                     # The probes printf HIP errors / diagnostics to stdout, so
                     # capture both tails -- for a crash before the VERDICT line,
                     # the useful signal is on stdout, not stderr.
