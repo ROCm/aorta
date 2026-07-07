@@ -132,6 +132,27 @@ class MatrixIncompleteError(Exception):
         self.run_dir = run_dir
 
 
+class MatrixStrictError(Exception):
+    """Raised AFTER ``run_recipe`` writes its artifacts when ``strict=True``
+    and one or more cells never produced a valid observation -- i.e. the whole
+    cell errored (``CellStats.error is not None``) or every trial in the cell
+    classified as ``did_not_run`` (:func:`is_did_not_run_cell`).
+
+    This is deliberately narrower than "a cell failed": a cell that *reproduces*
+    a bug (``passed=False`` with trials that actually ran) is an expected matrix
+    outcome and does NOT trip strict mode -- otherwise every A/B repro run would
+    exit non-zero. Strict only catches cells whose result is meaningless because
+    they never ran (e.g. an ``hrx_on`` cell whose ``LD_PRELOAD`` was rejected at
+    setup). The matrix artifacts ARE present (the exception carries ``run_dir``);
+    the exception signals the degradation to the CLI so it can exit non-zero.
+    """
+
+    def __init__(self, message: str, run_dir: Path, cells: list[str]) -> None:
+        super().__init__(message)
+        self.run_dir = run_dir
+        self.cells = cells
+
+
 def _merge_sidecar_files(
     recipe_files: tuple[Path, ...],
     extra: tuple[Path, ...],
@@ -1185,6 +1206,7 @@ def run_recipe(
     layout: Literal["timestamped", "flat_resume"] = "timestamped",
     resume_existing: bool = False,
     subprocess_argv: tuple[str, ...] | None = None,
+    strict: bool = False,
 ) -> Path:
     """Execute a recipe and write matrix.md / matrix.json / recipe.resolved.yaml.
 
@@ -1218,6 +1240,11 @@ def run_recipe(
             cell's :class:`SubprocessWorkload` via the typed
             ``RunRequest.subprocess_argv`` field. Required for probe-mode;
             ignored in triage-mode.
+        strict: When True, raise :class:`MatrixStrictError` (after writing
+            artifacts) if any cell errored or every trial in it did_not_run.
+            A cell that merely reproduces a bug (ran but ``passed=False``) does
+            NOT trip this. Off by default so the matrix flow keeps tolerating
+            per-cell failures.
 
     Returns:
         The run directory path (``<output-dir>/<ticket>/<workload>/<timestamp>``
@@ -1276,6 +1303,7 @@ def run_recipe(
             layout=layout,
             resume_existing=resume_existing,
             subprocess_argv=subprocess_argv,
+            strict=strict,
             should_write=should_write,
         )
 
@@ -1289,6 +1317,7 @@ def _run_recipe_locked(
     layout: Literal["timestamped", "flat_resume"],
     resume_existing: bool,
     subprocess_argv: tuple[str, ...] | None,
+    strict: bool = False,
     should_write: bool = True,
 ) -> Path:
     """Body of :func:`run_recipe` after the flat_resume lock is held.
@@ -1653,6 +1682,27 @@ def _run_recipe_locked(
         # message and exit non-zero. Tests / programmatic callers can
         # ``except MatrixIncompleteError`` to inspect ``run_dir``.
         raise MatrixIncompleteError(incomplete_reason, run_dir)
+
+    if strict:
+        # A cell is "invalid" only if it never produced a usable observation:
+        # the whole cell errored, or every trial did_not_run. A cell that ran
+        # but reported passed=False (a real bug repro) is an expected matrix
+        # outcome and must NOT trip strict mode. Checked after the incomplete
+        # guard so a degraded baseline keeps its more-specific message.
+        invalid = [
+            s.name for s in cell_stats if s.error is not None or is_did_not_run_cell(s)
+        ]
+        if invalid:
+            raise MatrixStrictError(
+                f"strict mode: {len(invalid)} of {len(cell_stats)} cell(s) never "
+                f"produced a valid result (errored or did_not_run): "
+                f"{', '.join(invalid)}. Inspect "
+                f"cells/<cell>/<workload>/trial_*.json for the cause (a common "
+                f"one is a rejected LD_PRELOAD / setup failure). Drop --strict to "
+                f"treat these as tolerated per-cell failures.",
+                run_dir,
+                invalid,
+            )
 
     return run_dir
 

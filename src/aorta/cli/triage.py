@@ -40,7 +40,12 @@ from aorta.triage.recipe import (
     build_recipe_from_flags,
     load_recipe,
 )
-from aorta.triage.runner import MatrixIncompleteError, _is_rank_zero, run_recipe
+from aorta.triage.runner import (
+    MatrixIncompleteError,
+    MatrixStrictError,
+    _is_rank_zero,
+    run_recipe,
+)
 
 
 @click.group()
@@ -165,6 +170,17 @@ def triage() -> None:
     ),
 )
 @click.option(
+    "--strict",
+    is_flag=True,
+    help=(
+        "Exit non-zero if any cell errored or never ran (every trial "
+        "did_not_run, e.g. a setup failure). A cell that RAN but reported a "
+        "failure (a real bug repro) does NOT trip this -- that's an expected "
+        "matrix outcome. The matrix is still written. Useful in CI to catch a "
+        "cell that silently didn't run (e.g. a rejected LD_PRELOAD)."
+    ),
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
@@ -194,6 +210,7 @@ def triage_run(
     output_dir: Path,
     mitigation_files: tuple[Path, ...],
     collect: str,
+    strict: bool,
     verbose: int,
 ) -> None:
     """Run the triage matrix: sweep mitigations x environments x trials, write matrix.md + matrix.json."""
@@ -214,6 +231,7 @@ def triage_run(
         output_dir=output_dir,
         mitigation_files=mitigation_files,
         collect=collect,
+        strict=strict,
     )
 
 
@@ -233,6 +251,7 @@ def execute_triage_run(
     output_dir: Path,
     mitigation_files: tuple[Path, ...],
     collect: str = "",
+    strict: bool = False,
 ) -> None:
     """Workload-flow body shared by ``aorta sweep run`` and ``aorta triage run``.
 
@@ -338,15 +357,17 @@ def execute_triage_run(
             r,
             output_dir=output_dir,
             dry_run=dry_run,
+            strict=strict,
         )
-    except MatrixIncompleteError as exc:
+    except (MatrixIncompleteError, MatrixStrictError) as exc:
         # Artifacts ARE written for inspection -- print where they
         # landed first, then raise ClickException so the CLI exits
         # non-zero with the degradation reason. This is distinct from
         # RecipeCellError below: that's pre-execution validation
         # failure (no artifacts), this is post-execution degradation
         # (matrix.md / matrix.json present but classification couldn't
-        # anchor). Only rank 0 wrote artifacts, so only rank 0 reports.
+        # anchor, or --strict caught an errored/did_not_run cell). Only
+        # rank 0 wrote artifacts, so only rank 0 reports.
         if _is_rank_zero():
             click.echo(f"Wrote matrix to {exc.run_dir}")
         raise click.ClickException(str(exc)) from exc
