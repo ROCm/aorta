@@ -591,6 +591,100 @@ def _cell_directory(name: str, layout: Literal["timestamped", "flat_resume"]) ->
     return f"cells/{slug}/"
 
 
+def _cell_is_clean(cell: CellStats) -> bool:
+    """True when a cell has no whole-cell error and no failing/erroring trials.
+
+    A "clean" cell is one an operator never needs to open: it ran, and every
+    trial passed. Anything else (a whole-cell ``error``, at least one failing
+    trial, or at least one infra-``error`` trial) is worth a line in the
+    end-of-run summary so the failure and its artifacts are one glance away.
+    """
+    return cell.error is None and cell.failed_count == 0 and cell.error_count == 0
+
+
+def _oneline(text: str) -> str:
+    """Collapse a possibly multi-line message into a single summary line.
+
+    Cell-level ``error`` strings are ``f"{type(exc).__name__}: {exc}"`` and an
+    exception message can carry newlines; the summary is one line per cell, so
+    fold internal whitespace to single spaces.
+    """
+    return " ".join(text.split())
+
+
+def format_run_summary(
+    cell_stats: list[CellStats],
+    run_dir: Path,
+    *,
+    layout: Literal["timestamped", "flat_resume"] = "timestamped",
+    verbose_active: bool = False,
+) -> list[str]:
+    """Build the concise end-of-run sweep summary (issue #280).
+
+    ``aorta sweep run`` is otherwise silent during a run and prints only a
+    single ``Wrote matrix to ...`` line at the end, so an operator has no way
+    to see which cells failed or where their captured output landed without
+    opening ``matrix.md`` and digging through per-cell log files. This renders
+    a short, always-on report the runner echoes to stdout:
+
+    * one totals line (cells, how many clean / with failing trials / with
+      errors);
+    * one line per **non-clean** cell -- ``cell did not run (...)`` when the
+      whole cell errored before any trial (``cell.error`` set), otherwise its
+      failed/errored trial counts out of the cell's trial budget -- plus the
+      workload's own one-line failure ``hint`` when it emitted one, and the
+      cell's artifact directory (relative to ``run_dir``, correct for both the
+      timestamped triage layout and the flat-resume probe layout) so the logs
+      and per-trial JSON are one ``cd`` away; and
+    * a footer pointing at ``matrix.md`` for the full table, plus a ``-v`` tip
+      when the run was not already verbose.
+
+    Scales with the number of cells, not trials, so a long sweep still ends in
+    a scannable report; an all-passing run collapses to the single totals line.
+    Returns the lines (no trailing newline); the caller joins + echoes them.
+    """
+    total = len(cell_stats)
+    non_clean = [c for c in cell_stats if not _cell_is_clean(c)]
+
+    if not non_clean:
+        # Happy path: exactly one line so a clean sweep isn't noisy.
+        return [f"Sweep summary: all {total} cell(s) passed."]
+
+    clean_count = total - len(non_clean)
+    with_failures = sum(1 for c in cell_stats if c.error is None and c.failed_count > 0)
+    with_errors = sum(1 for c in cell_stats if c.error is not None or c.error_count > 0)
+
+    lines = [
+        f"Sweep summary: {total} cell(s) -- {clean_count} clean, "
+        f"{with_failures} with failing trials, {with_errors} with errors."
+    ]
+    for cell in non_clean:
+        rel_dir = _cell_directory(cell.name, layout)
+        hint = cell.failure_hints[0][0] if cell.failure_hints else None
+        if cell.error is not None:
+            # Whole cell never ran (unknown mitigation, docker pull failure, ...).
+            detail = f"cell did not run ({_oneline(cell.error)})"
+            tag = "[error]"
+        else:
+            parts = []
+            if cell.failed_count:
+                parts.append(f"{cell.failed_count} failed")
+            if cell.error_count:
+                parts.append(f"{cell.error_count} errored")
+            detail = f"{', '.join(parts)} of {cell.trials} trial(s)"
+            # A cell with any genuine failure is a [fail]; one with only infra
+            # errors (no failing trial) is an [error] -- the bug never got a
+            # valid observation there.
+            tag = "[fail]" if cell.failed_count else "[error]"
+        hint_str = f" ({_oneline(hint)})" if hint else ""
+        lines.append(f"  {tag} {cell.name}: {detail}{hint_str} -> {rel_dir}")
+
+    lines.append(f"Full matrix: {run_dir / 'matrix.md'}")
+    if not verbose_active:
+        lines.append("Tip: re-run with -v to stream per-cell progress live.")
+    return lines
+
+
 def write_matrix_md(
     path: Path,
     recipe: Recipe,
@@ -1136,6 +1230,7 @@ def resolved_cell_environment(
 
 __all__ = [
     "NO_TICKET_SLUG",
+    "format_run_summary",
     "format_timestamp",
     "resolve_run_dir",
     "resolved_cell_environment",

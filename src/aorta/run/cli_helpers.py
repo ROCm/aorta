@@ -31,11 +31,13 @@ from aorta.run.results import TrialResult
 def configure_verbose_logging(verbose_count: int) -> None:
     """Wire a stderr StreamHandler onto the ``aorta`` logger when -v is set.
 
-    Both ``aorta run`` and ``aorta triage run`` are silent by default --
-    the ``aorta.*`` loggers exist but have no handlers, so INFO-level
-    progress calls are dropped. Without this, a long matrix run prints
-    nothing until the final ``Wrote matrix to ...`` line, leaving
-    operators with no signal that anything is happening.
+    Both ``aorta run`` and ``aorta triage run`` emit no *live* progress by
+    default -- the ``aorta.*`` loggers exist but have no handlers, so
+    INFO-level progress calls are dropped. Without this, a long matrix run
+    prints nothing *while it runs*; the shared engine still prints a concise
+    end-of-run summary (issue #280) and the final ``Wrote matrix to ...``
+    line at the end, but ``-v`` is what surfaces the per-cell blow-by-blow
+    as the matrix executes.
 
     Scope: only the ``aorta.*`` logger hierarchy. Workloads registered
     via the ``aorta.workloads`` entry-point group from sibling packages

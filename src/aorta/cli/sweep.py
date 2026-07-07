@@ -359,7 +359,12 @@ def sweep() -> None:
     "-v",
     "--verbose",
     count=True,
-    help="Stream per-cell progress to stderr. -v = INFO, -vv = DEBUG (aorta.* logger).",
+    help=(
+        "Stream live per-cell progress to stderr while the matrix runs. "
+        "-v = INFO, -vv = DEBUG (aorta.* logger). A concise end-of-run "
+        "summary (which cells failed + where their artifacts are) prints "
+        "to stdout regardless of this flag."
+    ),
 )
 @click.argument("argv", nargs=-1, type=click.UNPROCESSED)
 def sweep_run(

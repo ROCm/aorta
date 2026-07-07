@@ -133,6 +133,12 @@ Both flows write `matrix.md` + `matrix.json`, embed a per-environment `env.json`
 snapshot, and emit a replayable `recipe.resolved.yaml`. See
 [`docs/probe-188/usage.md`](docs/probe-188/usage.md).
 
+At the end of every run `aorta sweep run` prints a concise summary to stdout —
+which cells failed vs. errored, the workload's own failure hint, and the path to
+each failing cell's artifact directory (logs + per-trial JSON) — so you don't
+have to open `matrix.md` to find what broke. Pass `-v` (`-vv`) to also stream
+live per-cell progress to stderr while a long matrix runs.
+
 ### Environment snapshot / reproducibility
 
 `aorta env probe` captures a versioned, schema-stable `env.json`. Diff two

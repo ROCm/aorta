@@ -60,6 +60,7 @@ from aorta.triage.matrix import (
 )
 from aorta.triage.output import (
     acquire_flat_resume_lock,
+    format_run_summary,
     format_timestamp,
     resolve_run_dir,
     safe_slug,
@@ -91,6 +92,21 @@ def _is_rank_zero() -> bool:
     except ValueError:
         log.warning("Ignoring non-integer RANK=%r; treating this process as rank 0.", raw_rank)
         return True
+
+
+def _verbose_active() -> bool:
+    """True when ``-v`` / ``-vv`` installed the aorta stderr progress handler.
+
+    Lets the end-of-run summary (issue #280) suppress its "re-run with -v"
+    tip when the operator already streamed live progress. Mirrors the marker
+    attribute :func:`aorta.run.cli_helpers.configure_verbose_logging` stamps
+    on the handler it installs, so the two stay in lockstep without importing
+    the CLI layer.
+    """
+    return any(
+        getattr(handler, "_aorta_verbose", False)
+        for handler in logging.getLogger("aorta").handlers
+    )
 
 
 class MatrixIncompleteError(Exception):
@@ -1112,6 +1128,7 @@ def run_recipe(
             layout=layout,
             resume_existing=resume_existing,
             subprocess_argv=subprocess_argv,
+            should_write=should_write,
         )
 
 
@@ -1124,6 +1141,7 @@ def _run_recipe_locked(
     layout: Literal["timestamped", "flat_resume"],
     resume_existing: bool,
     subprocess_argv: tuple[str, ...] | None,
+    should_write: bool = True,
 ) -> Path:
     """Body of :func:`run_recipe` after the flat_resume lock is held.
 
@@ -1131,6 +1149,10 @@ def _run_recipe_locked(
     ``contextlib.ExitStack`` block at the top of :func:`run_recipe` and
     the matrix-loop body doesn't need to be re-indented inside a ``with``.
     Not part of the public API -- callers go through :func:`run_recipe`.
+
+    ``should_write`` mirrors :func:`run_recipe`'s rank-0 gate: only rank 0
+    owns the real output tree, so only rank 0 prints the end-of-run summary
+    (a ``torchrun`` launch otherwise emits one copy per rank).
     """
     # Operator sidecars come from two places: ones the Recipe was built
     # against (``recipe.sidecar_files``, populated by ``load_recipe`` /
@@ -1399,6 +1421,25 @@ def _run_recipe_locked(
         click.echo(
             f"to rerun: cd {run_dir} && aorta triage run --recipe recipe.resolved.yaml {flags}"
         )
+
+    # Concise end-of-run summary (issue #280): otherwise ``aorta sweep run`` is
+    # silent during the run and prints only ``Wrote matrix to ...`` at the end,
+    # leaving operators with no signal of which cells failed or where the
+    # captured output landed. Rank-0 only (same gate as the artifact writes),
+    # and printed before the ``MatrixIncompleteError`` raise so a degraded run
+    # -- exactly when the operator most needs to know what failed -- still
+    # reports. Best-effort: a formatting bug must never mask the run's outcome.
+    if should_write:
+        try:
+            for line in format_run_summary(
+                cell_stats,
+                run_dir,
+                layout=layout,
+                verbose_active=_verbose_active(),
+            ):
+                click.echo(line)
+        except Exception:  # pragma: no cover - defensive; summary is advisory
+            log.warning("failed to render end-of-run summary", exc_info=True)
 
     if incomplete_reason is not None:
         # Artifacts are written; raise so the CLI can print the failure
