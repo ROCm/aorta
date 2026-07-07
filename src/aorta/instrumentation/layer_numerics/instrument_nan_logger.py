@@ -134,12 +134,15 @@ Settings (environment variables):
                          was late-written, vs a numeric blowup whose bad elements
                          would be at the tail of the value range. Default 0.
   NANLOG_DUMP_TENSOR     "1" -> on the first NaN/Inf/huge detection, save the full
-                         bad tensor(s) to disk as .pt files (one per bad tensor in
-                         that step). Post-hoc analysis can then inspect ALL bad
-                         element locations, values, and surrounding context without
-                         any schema or size limit. Implementation: _stash holds an
-                         extra tensor reference each step (no GPU sync, no copy);
-                         _drain_step saves on first bad then releases all refs.
+                         bad tensor to disk as a .pt file (one-shot: the FIRST bad
+                         tensor in that step's drain order; the forward hook stashes
+                         a layer's input before its output, so when both are bad the
+                         INPUT — the aliasing origin — is the one saved). Post-hoc
+                         analysis can then inspect ALL bad element locations, values,
+                         and surrounding context without any schema or size limit.
+                         Implementation: _stash holds an extra tensor reference each
+                         step (no GPU sync, no copy); _drain_step saves on first bad
+                         then releases all refs.
                          Cost: zero on clean steps (just a Python ref, tensor is
                          already alive for autograd); ~1 ms GPU→Host copy + ~10 ms
                          disk write on the ONE step that triggers. Risk: holding an
@@ -609,14 +612,22 @@ def _first_tensor(x):
 
 def _fwd_hook(name):
     def hook(_module, inp, out):
-        if "act" in _CHANNELS:
-            t = _first_tensor(out)
-            if torch.is_tensor(t):
-                _stash(name, "fwd", t, role="act")
+        # Stash the INPUT before the output (act). When an aliasing corruption
+        # makes BOTH a layer's input and its resulting output bad in the same
+        # step, the one-shot NANLOG_DUMP_TENSOR then captures the INPUT (the
+        # corrupt origin / 8 MiB block) rather than the output (a downstream
+        # consequence of feeding that garbage through the GEMM). This is the
+        # whole point of the emb_proj aliasing workflow; it also matches the
+        # natural input->output order. Layers where only the output is bad still
+        # dump the output (the input isn't a bad candidate), so nothing is lost.
         if "input" in _CHANNELS:
             t = _first_tensor(inp)
             if torch.is_tensor(t):
                 _stash(name, "fwd", t, role="input")
+        if "act" in _CHANNELS:
+            t = _first_tensor(out)
+            if torch.is_tensor(t):
+                _stash(name, "fwd", t, role="act")
     return hook
 
 
