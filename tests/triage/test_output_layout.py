@@ -696,6 +696,56 @@ def test_perf_report_marks_did_not_run_timing_na(tmp_path, patched_env, monkeypa
     assert "missing" in text
 
 
+def test_perf_report_error_cell_wall_is_error_not_zero(tmp_path):
+    """An error cell renders EVERY measured column -- including Wall -- as
+    'error', never a misleading 0.000 (error rows force wall to 0.0)."""
+    from aorta.triage.matrix import CellStats
+    from aorta.triage.output import write_perf_report
+
+    def _cell(name, *, error=None, wall=1.0, source="per_step"):
+        return CellStats(
+            name=name,
+            mitigations=("none",),
+            environment="local",
+            extra_env={},
+            resolved_env_vars={},
+            trials=2,
+            passed_count=2,
+            failed_count=0,
+            mean_step_time_ms=10.0,
+            std_step_time_ms=0.0,
+            min_step_time_ms=10.0,
+            max_step_time_ms=10.0,
+            p50_step_time_ms=10.0,
+            p90_step_time_ms=10.0,
+            p99_step_time_ms=10.0,
+            mean_wall_clock_sec=wall,
+            step_time_source=source,
+            step_times_ms=[10.0, 10.0] if error is None else [],
+            error=error,
+            error_count=0 if error is None else 2,
+        )
+
+    baseline = _cell("none-local")
+    errored = _cell("boom-local", error="docker pull failed", wall=0.0, source="missing")
+    out = tmp_path / "perf.md"
+    write_perf_report(
+        out,
+        build_recipe_from_flags(
+            workload="echo", mitigation_axis="none", environment_axis="local",
+            trials=2, steps=1,
+        ),
+        [baseline, errored],
+        baseline=baseline,
+        run_timestamp="2026-01-01T00:00:00Z",
+    )
+    text = out.read_text()
+    # Isolate the error cell's table row and assert Wall is 'error', not 0.000.
+    err_row = next(ln for ln in text.splitlines() if ln.startswith("| boom-local"))
+    assert "0.000" not in err_row
+    assert err_row.count("error") >= 8  # every measured column + source
+
+
 def test_resolved_recipe_is_loadable_by_load_recipe(tmp_path, patched_env, patched_run_trials):
     """`recipe.resolved.yaml` must round-trip through load_recipe() -- no debug fields."""
     from aorta.triage.recipe import load_recipe

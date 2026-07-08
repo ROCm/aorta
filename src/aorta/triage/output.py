@@ -1137,8 +1137,13 @@ def write_matrix_json(
     path.write_text(json.dumps(doc, indent=2, sort_keys=False), encoding="utf-8")
 
 
-def _fmt_perf_ms(value: float) -> str:
-    """Format a millisecond figure for perf.md (3 decimals, fixed)."""
+def _fmt_perf_fixed3(value: float) -> str:
+    """Format a numeric figure for perf.md as a fixed 3-decimal string.
+
+    Unit-agnostic: used for both the millisecond step-time columns and the
+    seconds-valued ``Wall (s)`` column, so the unit lives in the table header,
+    not the formatter.
+    """
     return f"{value:.3f}"
 
 
@@ -1203,10 +1208,13 @@ def write_perf_report(
     for cell in cell_stats:
         label = cell.name + (" (baseline)" if cell.name == baseline.name else "")
         if cell.error is not None:
+            # Every measured column is "error" for an error cell -- including
+            # Wall, which would otherwise print a misleading 0.000 (error rows
+            # force mean_wall_clock_sec to 0.0, not a real measurement).
             timing_rows.append(
                 (label, str(cell.trials), cell.iters_display,
                  "error", "error", "error", "error", "error", "error",
-                 "error", _fmt_perf_ms(cell.mean_wall_clock_sec), "error")
+                 "error", "error", "error")
             )
             continue
         # A cell with no usable per-step timing (setup-only crash / did-not-run)
@@ -1216,13 +1224,13 @@ def write_perf_report(
             step_cells = ("n/a",) * 7
         else:
             step_cells = (
-                _fmt_perf_ms(cell.mean_step_time_ms),
-                _fmt_perf_ms(cell.std_step_time_ms),
-                _fmt_perf_ms(cell.min_step_time_ms),
-                _fmt_perf_ms(cell.p50_step_time_ms),
-                _fmt_perf_ms(cell.p90_step_time_ms),
-                _fmt_perf_ms(cell.p99_step_time_ms),
-                _fmt_perf_ms(cell.max_step_time_ms),
+                _fmt_perf_fixed3(cell.mean_step_time_ms),
+                _fmt_perf_fixed3(cell.std_step_time_ms),
+                _fmt_perf_fixed3(cell.min_step_time_ms),
+                _fmt_perf_fixed3(cell.p50_step_time_ms),
+                _fmt_perf_fixed3(cell.p90_step_time_ms),
+                _fmt_perf_fixed3(cell.p99_step_time_ms),
+                _fmt_perf_fixed3(cell.max_step_time_ms),
             )
         # Reorder step_cells (mean, std, min, p50, p90, p99, max) into the
         # header order (Mean, Std, Min, p50, p90, p99, Max) -- identical here,
@@ -1231,7 +1239,7 @@ def write_perf_report(
         timing_rows.append(
             (label, str(cell.trials), cell.iters_display,
              mean, std, mn, p50, p90, p99, mx,
-             _fmt_perf_ms(cell.mean_wall_clock_sec), cell.step_time_source)
+             _fmt_perf_fixed3(cell.mean_wall_clock_sec), cell.step_time_source)
         )
     lines.extend(_perf_table(timing_rows))
     lines.append("")
