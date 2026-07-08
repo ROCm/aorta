@@ -65,6 +65,7 @@ from aorta.triage.matrix import (
     aggregate_cell,
 )
 from aorta.triage.output import (
+    PERF_REPORT_FILENAME,
     acquire_flat_resume_lock,
     format_run_summary,
     format_timestamp,
@@ -72,6 +73,7 @@ from aorta.triage.output import (
     safe_slug,
     write_matrix_json,
     write_matrix_md,
+    write_perf_report,
     write_resolved_recipe,
 )
 from aorta.triage.recipe import InlineEnv, Recipe, RecipeCellError
@@ -1638,6 +1640,13 @@ def _run_recipe_locked(
         run_timestamp=ts,
         warnings=warnings,
         sidecar_files=sidecar_files,
+    )
+    write_perf_report(
+        run_dir / PERF_REPORT_FILENAME,
+        recipe=recipe,
+        cell_stats=cell_stats,
+        baseline=baseline_stats,
+        run_timestamp=ts,
     )
     write_resolved_recipe(
         run_dir / "recipe.resolved.yaml",

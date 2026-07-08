@@ -791,3 +791,69 @@ def test_workload_config_persisted_on_error_cell():
     stats = _default_call(trials=[_trial()], error="docker pull failed",
                           workload_config={"shampoo_api": "old"})
     assert stats.workload_config == {"shampoo_api": "old"}
+
+
+# ---- workload metrics aggregation (perf.md / matrix.json) ----------------
+
+
+def _metric_trial(metrics: dict, passed: bool = True):
+    """Trial stand-in carrying a ``result["metrics"]`` dict."""
+    return SimpleNamespace(
+        exit_status="ok" if passed else "workload_failed",
+        wall_clock_sec=1.0,
+        result={"passed": passed, "metrics": metrics},
+    )
+
+
+def test_metrics_summary_defaults_empty_when_no_metrics():
+    stats = _default_call(trials=[_trial()])
+    assert stats.metrics_summary == {}
+
+
+def test_metrics_summary_aggregates_scalar_metrics_mean_min_max_n():
+    trials = [
+        _metric_trial({"gflops": 100.0, "mean_step_ms": 9.0}),
+        _metric_trial({"gflops": 200.0, "mean_step_ms": 11.0}),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.metrics_summary["gflops"] == {
+        "mean": 150.0,
+        "min": 100.0,
+        "max": 200.0,
+        "n": 2.0,
+    }
+    assert stats.metrics_summary["mean_step_ms"]["mean"] == 10.0
+
+
+def test_metrics_summary_skips_non_scalar_and_bool_values():
+    """Lists (e.g. failure_detectors_fired) and bools are not measurements."""
+    trials = [
+        _metric_trial(
+            {
+                "gbps": 3800.0,
+                "failure_detectors_fired": ["tier1:x"],
+                "healthy": True,
+                "label": "run-a",
+            }
+        )
+    ]
+    stats = _default_call(trials=trials)
+    assert set(stats.metrics_summary) == {"gbps"}
+
+
+def test_metrics_summary_aggregates_only_trials_reporting_the_key():
+    """A key present in some trials aggregates over just those; n reflects it."""
+    trials = [
+        _metric_trial({"gflops": 100.0}),
+        _metric_trial({}),  # this trial reported no metrics
+        _metric_trial({"gflops": 300.0}),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.metrics_summary["gflops"]["n"] == 2.0
+    assert stats.metrics_summary["gflops"]["mean"] == 200.0
+
+
+def test_metrics_summary_empty_for_error_cell():
+    trials = [_metric_trial({"gflops": 100.0})]
+    stats = _default_call(trials=trials, error="docker pull failed")
+    assert stats.metrics_summary == {}

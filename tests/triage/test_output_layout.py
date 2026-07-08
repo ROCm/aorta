@@ -617,6 +617,85 @@ def test_matrix_md_failures_column_renders_failed_over_total(tmp_path, patched_e
     assert "`Failures` is `failed_count / valid_trials`" in md
 
 
+# ---- perf.md report ------------------------------------------------------
+
+
+def _fake_trial_with_metrics(
+    metrics: dict, step_times_ms: list[float] | None = None
+) -> _FakeTrial:
+    return _FakeTrial(
+        result={
+            "passed": True,
+            "step_times_ms": step_times_ms or [100.0],
+            "metrics": metrics,
+        }
+    )
+
+
+def test_perf_report_written_every_run(tmp_path, patched_env, patched_run_trials):
+    """perf.md is written next to matrix.md/json on a plain run, with the
+    always-on step-timing table and no throughput table (no metrics)."""
+    r = _simple_recipe(ticket="T-1")
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    perf = run_dir / "perf.md"
+    assert perf.exists()
+    text = perf.read_text()
+    assert "# Performance Report - fsdp" in text
+    assert "**Ticket**: T-1" in text
+    assert "## Step timing (ms)" in text
+    # Percentile columns present.
+    for col in ("Mean", "Std", "p50", "p90", "p99", "Max", "Wall (s)", "Source"):
+        assert col in text
+    assert "none-local" in text and "tf32_off-local" in text
+    # No workload emitted numeric metrics -> throughput table omitted.
+    assert "## Workload metrics" not in text
+
+
+def test_matrix_md_points_to_perf_report(tmp_path, patched_env, patched_run_trials):
+    run_dir = runner.run_recipe(_simple_recipe(), output_dir=tmp_path)
+    md = (run_dir / "matrix.md").read_text()
+    assert "perf.md" in md
+
+
+def test_perf_report_includes_workload_metrics(tmp_path, patched_env, monkeypatch):
+    """When a workload reports numeric metrics, perf.md gains a throughput
+    table and matrix.json carries the aggregated metrics_summary."""
+    trials = [
+        _fake_trial_with_metrics({"gflops": 100.0}),
+        _fake_trial_with_metrics({"gflops": 300.0}),
+    ]
+    monkeypatch.setattr(runner, "run_trials", MagicMock(return_value=trials))
+    run_dir = runner.run_recipe(_simple_recipe(ticket="T-1"), output_dir=tmp_path)
+
+    text = (run_dir / "perf.md").read_text()
+    assert "## Workload metrics" in text
+    assert "gflops" in text
+    # mean of 100 and 300 -> 200.000 (thousands-separated formatter).
+    assert "200.000" in text
+
+    doc = json.loads((run_dir / "matrix.json").read_text())
+    base = next(c for c in doc["cells"] if c["name"] == "none-local")
+    assert base["metrics_summary"]["gflops"]["mean"] == 200.0
+    assert base["metrics_summary"]["gflops"]["n"] == 2.0
+
+
+def test_perf_report_marks_did_not_run_timing_na(tmp_path, patched_env, monkeypatch):
+    """A cell whose trials never started shows n/a timing (source=missing),
+    not a misleading 0.000. The baseline cell still runs so the matrix
+    completes (an all-did_not_run recipe has no usable baseline)."""
+    # run_trials is called once per cell in recipe order: none-local (baseline)
+    # then tf32_off-local. Only the second cell "did not run".
+    monkeypatch.setattr(
+        runner,
+        "run_trials",
+        MagicMock(side_effect=[[_fake_trial(), _fake_trial()], [_fake_trial_did_not_run()]]),
+    )
+    run_dir = runner.run_recipe(_simple_recipe(), output_dir=tmp_path)
+    text = (run_dir / "perf.md").read_text()
+    assert "n/a" in text
+    assert "missing" in text
+
+
 def test_resolved_recipe_is_loadable_by_load_recipe(tmp_path, patched_env, patched_run_trials):
     """`recipe.resolved.yaml` must round-trip through load_recipe() -- no debug fields."""
     from aorta.triage.recipe import load_recipe
