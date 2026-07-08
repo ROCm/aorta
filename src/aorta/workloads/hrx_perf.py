@@ -331,10 +331,17 @@ class HrxPerfWorkload(Workload):
             )
 
         executed = len(step_times)
+        # Contract (WorkloadResult): None only when passing. When we failed but
+        # timed iterations did run (e.g. a PERF_FAIL checksum after the timed
+        # loop), report a best-effort index of 0 -- the perf failure isn't tied
+        # to a single iteration, but 0 keeps us within the documented
+        # 0..total_iterations-1 range and consistent with the hrx workload. A
+        # setup-only failure/timeout (no step_times) stays None.
+        first_failure_iteration = 0 if (not passed and main_work_started) else None
         return WorkloadResult(
             passed=passed,
             failure_count=0 if passed else 1,
-            first_failure_iteration=None,
+            first_failure_iteration=first_failure_iteration,
             failure_details=failure_details,
             total_iterations=executed,
             step_times_ms=step_times,

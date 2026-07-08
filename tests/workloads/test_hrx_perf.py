@@ -177,6 +177,31 @@ def test_run_failed_result_is_failure(monkeypatch, tmp_path):
     assert res.failure_count == 1
     assert res.failure_details, "expected a failure detail"
     assert res.metrics.get("result") == "PERF_FAIL"
+    # No timed iterations ran here -> did-not-run shape, index stays None.
+    assert res.first_failure_iteration is None
+
+
+def test_run_failed_with_iterations_reports_failure_index(monkeypatch, tmp_path):
+    """A PERF_FAIL that still produced timed steps reports index 0, not None.
+
+    WorkloadResult documents None only for the passing case; when iterations
+    executed but the trial failed, the index must land in 0..total-1 (mirrors
+    the hrx workload) so downstream consumers don't special-case hrx_perf.
+    """
+    wl = _prep(monkeypatch, tmp_path)
+    stdout = (
+        "bench=gemm size=4096 iters=3 warmup=10\n"
+        "step_ms=12.5\nstep_ms=12.0\nstep_ms=13.0\n"
+        "checksum=0.0 expected=4096\nRESULT=PERF_FAIL\n"
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _completed(stdout, 1))
+
+    res = wl.run()
+
+    assert res.passed is False
+    assert res.main_work_started is True
+    assert res.total_iterations == 3
+    assert res.first_failure_iteration == 0
 
 
 def test_run_preload_ignored_fails_even_with_ok_result(monkeypatch, tmp_path):
