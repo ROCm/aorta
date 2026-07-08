@@ -17,9 +17,12 @@ name: Release
 on:
   push:
     tags:
-      # Only vMAJOR.MINOR.PATCH tags (same semver shape as setuptools_scm /
-      # bump_version.py), so stray tags like v1 / v1beta / v0.2.0rc1 don't
-      # trigger noisy Release runs that just fail the stable-version gate.
+      # Coarse first-pass filter for vMAJOR.MINOR.PATCH tags. This is a glob,
+      # not a regex: the `*`s aren't end-anchored, so it rejects shapes like
+      # v1 / v1beta but still admits rc-style / 4-segment tags such as
+      # v0.2.0rc1 / v1.2.3.4. Those are caught (and the run failed) by the
+      # stable-version gate in "Resolve release version" below, which is the
+      # real safety net; this filter just trims the most obvious noise.
       - "v[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
