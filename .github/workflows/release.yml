@@ -143,15 +143,14 @@ jobs:
 
       # Fail fast if the built artifacts don't carry the resolved version (e.g. a
       # setuptools_scm misconfiguration), so a release can never disagree with the
-      # metadata customers install.
+      # metadata customers install. Read the version from the wheel's embedded
+      # METADATA (the source of truth pip installs) rather than pattern-matching a
+      # single filename, so a future build/platform tag or extra wheel can't make
+      # this pass/fail on the wrong signal.
       - name: Verify built version matches
-        run: |
-          version="${{ steps.version.outputs.version }}"
-          if [ ! -f "dist/amd_aorta-${version}-py3-none-any.whl" ]; then
-            echo "::error::Built wheel does not match resolved version ${version}. dist/ contains:"
-            ls -1 dist/
-            exit 1
-          fi
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: python scripts/check_wheel_version.py "${EXPECTED_VERSION}"
 
       # Only now that the build has succeeded do we create and push the tag, so
       # a build failure on a manual run leaves nothing to clean up before retry.

@@ -118,7 +118,8 @@ def current_version_from_git() -> str:
         tag = line.strip()
         match = _SEMVER_RE.match(tag[1:] if tag.startswith("v") else tag)
         if match is not None:
-            versions.append(tuple(int(p) for p in match.groups()))  # type: ignore[arg-type]
+            major, minor, patch = match.groups()
+            versions.append((int(major), int(minor), int(patch)))
     if not versions:
         return _INITIAL_VERSION
     major, minor, patch = max(versions)

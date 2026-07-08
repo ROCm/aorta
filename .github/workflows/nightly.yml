@@ -77,14 +77,11 @@ jobs:
 
       # Fail fast if the built wheel doesn't carry the stamped rc version (e.g. a
       # setuptools_scm/PRETEND_VERSION misconfiguration), so a mis-versioned
-      # artifact is never uploaded to the shared dev-wheels release.
+      # artifact is never uploaded to the shared dev-wheels release. Validate the
+      # wheel's embedded METADATA version (what pip installs) rather than a single
+      # filename, so a future build/platform tag or extra wheel can't skew it.
       - name: Verify built version matches
-        run: |
-          if [ ! -f "dist/amd_aorta-${RC_VERSION}-py3-none-any.whl" ]; then
-            echo "::error::Built wheel does not match stamped version ${RC_VERSION}. dist/ contains:"
-            ls -1 dist/
-            exit 1
-          fi
+        run: python scripts/check_wheel_version.py "${RC_VERSION}"
 
       # softprops/action-gh-release creates the dev-wheels tag on the first run
       # but does NOT move it on subsequent runs, so the rolling tag (and the
