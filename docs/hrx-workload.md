@@ -57,9 +57,11 @@ See `recipes/hrx-launch-probe-smoke.yaml` for a ready-to-edit A/B recipe.
 ## Prerequisites
 
 A ROCm/`hipcc` toolchain (the workload compiles the probe from vendored
-source). On a host without `hipcc`/GPU, `setup()` raises and the cell is
-classified as a setup failure / `did_not_run` — it never reports a false
-`OUTPUT_NOT_WRITTEN`.
+source) and an accessible ROCm GPU. `setup()` raises when `hipcc` is missing
+**or** when no GPU is reachable (it checks that `/dev/kfd` is readable+writable,
+the node HIP needs to initialise a device), so a CPU-only host or a container
+started without `--device=/dev/kfd` classifies the cell as a setup failure /
+`did_not_run` — it never reports a false `OUTPUT_NOT_WRITTEN`.
 
 ## Quick run
 

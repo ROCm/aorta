@@ -43,8 +43,10 @@ from typing import Any, ClassVar
 
 from aorta.workloads._base import Workload, WorkloadResult
 from aorta.workloads.hrx import (
+    _GPU_KFD_NODE,
     _LDSO_PRELOAD_IGNORED_RE,
     _build_env,
+    _gpu_available,
     _missing_preload_objects,
     _resolve_hipcc,
 )
@@ -181,6 +183,18 @@ class HrxPerfWorkload(Workload):
             )
         self._hipcc = hipcc
 
+        # Fail in setup() (not run()) when no GPU is reachable: a benchmark with
+        # no device produces no step times, which the matrix would treat as a
+        # did-not-run anyway, but raising here makes the classification explicit
+        # and matches the hrx workload's contract.
+        if not _gpu_available():
+            raise RuntimeError(
+                f"hrx_perf: no accessible ROCm GPU ({_GPU_KFD_NODE} is not "
+                "readable+writable). This workload times a real HIP benchmark "
+                "and needs a GPU; run it on a ROCm host (or a container started "
+                "with --device=/dev/kfd --device=/dev/dri and the render group)."
+            )
+
         build_dir = self.config.get("build_dir")
         if build_dir:
             # Absolutize: _build runs hipcc with cwd=_KERNELS_DIR and run() execs
@@ -196,6 +210,14 @@ class HrxPerfWorkload(Workload):
 
     def _build(self) -> Path:
         binary = self._build_dir / self._spec.binary
+        # Reuse an already-built benchmark. setup() runs per trial, so a run
+        # pinning a shared build_dir would otherwise recompile the same binary
+        # each trial. The default build_dir is a fresh temp dir, so this only
+        # fires for an operator-supplied build_dir (assumed not shared across
+        # differing bench/arch configs -- the binary name encodes neither).
+        if binary.is_file():
+            log.debug("hrx_perf: reusing existing %s in %s", self._spec.binary, self._build_dir)
+            return binary
         cmd = [
             self._hipcc,
             "-O3",

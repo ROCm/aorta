@@ -16,6 +16,21 @@ import pytest
 from aorta.workloads import hrx as hrx_mod
 from aorta.workloads.hrx import _PROBES, HrxWorkload
 
+# Captured before the autouse GPU stub below masks it, so the check's own
+# logic can be exercised directly.
+_REAL_GPU_AVAILABLE = hrx_mod._gpu_available
+
+
+@pytest.fixture(autouse=True)
+def _gpu_present(monkeypatch):
+    """Pretend a GPU is reachable so setup() stays GPU-free by default.
+
+    setup() now raises when no ROCm GPU is accessible; unit tests must not
+    depend on real hardware, so stub the check True. Tests that exercise the
+    no-GPU path override this within their body.
+    """
+    monkeypatch.setattr(hrx_mod, "_gpu_available", lambda: True)
+
 
 def test_vendored_sources_present():
     """Every registered probe's source (and code object source) is vendored."""
@@ -45,6 +60,64 @@ def test_setup_raises_without_hipcc(monkeypatch):
     wl = HrxWorkload({"probe": "module"})
     with pytest.raises(RuntimeError, match="hipcc not found"):
         wl.setup()
+
+
+def test_setup_raises_without_gpu(monkeypatch, tmp_path):
+    """hipcc present but no reachable GPU -> setup failure (did_not_run).
+
+    Without this, run() would produce passed=False, which the matrix miscounts
+    as a reproduced bug rather than an environment gap.
+    """
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(hrx_mod, "_gpu_available", lambda: False)
+    monkeypatch.setattr(HrxWorkload, "_build", lambda self: self._build_dir / "x")
+    wl = HrxWorkload({"probe": "module", "build_dir": str(tmp_path)})
+    with pytest.raises(RuntimeError, match="no accessible ROCm GPU"):
+        wl.setup()
+
+
+def test_gpu_available_uses_kfd_access(monkeypatch):
+    """_gpu_available() keys off read+write access to the KFD node."""
+    seen: dict[str, str] = {}
+
+    def _fake_access(path, mode):
+        seen["path"] = path
+        return False
+
+    monkeypatch.setattr(hrx_mod.os, "access", _fake_access)
+    assert _REAL_GPU_AVAILABLE() is False
+    assert seen["path"] == hrx_mod._GPU_KFD_NODE
+
+
+def test_build_reuses_existing_binary(monkeypatch, tmp_path):
+    """A pre-built binary in a shared build_dir is reused (no recompile)."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    # static probe: single binary, no code object.
+    (tmp_path / _PROBES["static"].binary).write_bytes(b"\x7fELF")
+
+    def _fail_run(*a, **k):
+        raise AssertionError("hipcc must not run when the binary already exists")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    wl = HrxWorkload({"probe": "static", "build_dir": str(tmp_path)})
+    wl.setup()
+    assert wl._binary == (tmp_path / _PROBES["static"].binary)
+
+
+def test_build_recompiles_when_code_object_missing(monkeypatch, tmp_path):
+    """Module probe with a stale binary but no code object must rebuild."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    # Binary present but the required .code object is absent -> not reusable.
+    (tmp_path / _PROBES["module"].binary).write_bytes(b"\x7fELF")
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    HrxWorkload({"probe": "module", "build_dir": str(tmp_path)}).setup()
+    assert calls, "hipcc must run when the code object is missing"
 
 
 def test_setup_rejects_non_bool_keep_build(monkeypatch):

@@ -187,6 +187,31 @@ def _resolve_hipcc(configured: str | None) -> str | None:
     return None
 
 
+# The ROCm kernel-fusion driver node. HIP cannot initialise a GPU context
+# without opening it read/write, so its absence/inaccessibility is the
+# canonical "no usable ROCm GPU here" signal (a CPU-only host or a container
+# started without ``--device=/dev/kfd``).
+_GPU_KFD_NODE = "/dev/kfd"
+
+
+def _gpu_available() -> bool:
+    """Best-effort check that a ROCm GPU is reachable by the HIP runtime.
+
+    Returns ``True`` when the KFD compute node (:data:`_GPU_KFD_NODE`) is
+    readable+writable by this process. This is a cheap, dependency-free proxy
+    for "HIP can init a device" -- it does not spawn ``rocminfo`` and does not
+    prove a *specific* arch is present, only that the compute driver node is
+    accessible. It is deliberately conservative (checks only the definitive
+    node) so a real ROCm host never false-negatives; the point is to catch the
+    plainly-no-GPU case in :meth:`HrxWorkload.setup` so the cell is classified
+    ``did_not_run`` instead of minting a false ``OUTPUT_NOT_WRITTEN``.
+
+    Split out as a module-level function so GPU-free unit tests can monkeypatch
+    it.
+    """
+    return os.access(_GPU_KFD_NODE, os.R_OK | os.W_OK)
+
+
 class HrxWorkload(Workload):
     """Run one HRX HIP-launch probe and report its verdict.
 
@@ -256,6 +281,20 @@ class HrxWorkload(Workload):
             )
         self._hipcc = hipcc
 
+        # Fail in setup() (not run()) when no GPU is reachable, so a host with
+        # hipcc but no accessible device is classified did_not_run (a setup
+        # failure, excluded from the failure rate) rather than producing a
+        # passed=False result the matrix would miscount as a reproduced bug.
+        if not _gpu_available():
+            raise RuntimeError(
+                f"hrx: no accessible ROCm GPU ({_GPU_KFD_NODE} is not "
+                "readable+writable). This workload dispatches a real HIP kernel "
+                "and needs a GPU; run it on a ROCm host (or a container started "
+                "with --device=/dev/kfd --device=/dev/dri and the render group). "
+                "Raising here keeps the cell classified as did_not_run rather "
+                "than a false OUTPUT_NOT_WRITTEN."
+            )
+
         build_dir = self.config.get("build_dir")
         if build_dir:
             # Resolve to absolute: _run_hipcc runs with cwd=_KERNELS_DIR and
@@ -287,6 +326,20 @@ class HrxWorkload(Workload):
 
     def _build(self) -> Path:
         spec = self._spec
+        binary = self._build_dir / spec.binary
+        kernel_obj = (
+            self._build_dir / spec.kernel_object if spec.kernel_object else None
+        )
+        # Reuse an already-built probe. setup() runs once per trial, so a run
+        # that pins a shared build_dir would otherwise recompile identical
+        # artifacts every trial. The default build_dir is a fresh temp dir
+        # (unique per setup), so this fast-path only fires for an operator-
+        # supplied build_dir. Assumes that dir is not shared across differing
+        # probe/arch configs -- the binary name encodes neither -- which is the
+        # same assumption a fixed build_dir already implies.
+        if binary.is_file() and (kernel_obj is None or kernel_obj.is_file()):
+            log.debug("hrx: reusing existing %s in %s", spec.binary, self._build_dir)
+            return binary
         # Standalone code object first (module path only), placed next to the
         # binary because the probe loads it from its own exe directory.
         if spec.kernel_source and spec.kernel_object:
@@ -300,7 +353,6 @@ class HrxWorkload(Workload):
                 ],
                 spec.kernel_object,
             )
-        binary = self._build_dir / spec.binary
         self._run_hipcc(
             [
                 "-O2",

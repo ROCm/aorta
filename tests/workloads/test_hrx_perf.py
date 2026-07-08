@@ -15,6 +15,12 @@ from aorta.workloads import hrx_perf as perf_mod
 from aorta.workloads.hrx_perf import _BENCHES, HrxPerfWorkload
 
 
+@pytest.fixture(autouse=True)
+def _gpu_present(monkeypatch):
+    """Stub GPU reachability True so setup() stays GPU-free by default."""
+    monkeypatch.setattr(perf_mod, "_gpu_available", lambda: True)
+
+
 def test_vendored_bench_sources_present():
     for spec in _BENCHES.values():
         assert (perf_mod._KERNELS_DIR / spec.source).is_file()
@@ -48,6 +54,30 @@ def test_setup_rejects_nonexistent_ld_preload(monkeypatch, tmp_path):
     wl = HrxPerfWorkload({"bench": "gemm", "build_dir": str(tmp_path)})
     with pytest.raises(RuntimeError, match="LD_PRELOAD names object"):
         wl.setup()
+
+
+def test_setup_raises_without_gpu(monkeypatch, tmp_path):
+    """hipcc present but no reachable GPU -> setup failure (did_not_run)."""
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(perf_mod, "_gpu_available", lambda: False)
+    monkeypatch.setattr(HrxPerfWorkload, "_build", lambda self: self._build_dir / "x")
+    wl = HrxPerfWorkload({"bench": "gemm", "build_dir": str(tmp_path)})
+    with pytest.raises(RuntimeError, match="no accessible ROCm GPU"):
+        wl.setup()
+
+
+def test_build_reuses_existing_binary(monkeypatch, tmp_path):
+    """A pre-built benchmark in a shared build_dir is reused (no recompile)."""
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    (tmp_path / _BENCHES["gemm"].binary).write_bytes(b"\x7fELF")
+
+    def _fail_run(*a, **k):
+        raise AssertionError("hipcc must not run when the binary already exists")
+
+    monkeypatch.setattr(subprocess, "run", _fail_run)
+    wl = HrxPerfWorkload({"bench": "gemm", "build_dir": str(tmp_path)})
+    wl.setup()
+    assert wl._binary == (tmp_path / _BENCHES["gemm"].binary)
 
 
 def test_build_passes_sanitized_env_and_arch(monkeypatch, tmp_path):
