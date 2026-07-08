@@ -66,6 +66,7 @@ from aorta.triage.matrix import (
 )
 from aorta.triage.output import (
     acquire_flat_resume_lock,
+    format_run_summary,
     format_timestamp,
     resolve_run_dir,
     safe_slug,
@@ -97,6 +98,21 @@ def _is_rank_zero() -> bool:
     except ValueError:
         log.warning("Ignoring non-integer RANK=%r; treating this process as rank 0.", raw_rank)
         return True
+
+
+def _verbose_active() -> bool:
+    """True when ``-v`` / ``-vv`` installed the aorta stderr progress handler.
+
+    Lets the end-of-run summary (issue #280) suppress its "re-run with -v"
+    tip when the operator already streamed live progress. Mirrors the marker
+    attribute :func:`aorta.run.cli_helpers.configure_verbose_logging` stamps
+    on the handler it installs, so the two stay in lockstep without importing
+    the CLI layer.
+    """
+    return any(
+        getattr(handler, "_aorta_verbose", False)
+        for handler in logging.getLogger("aorta").handlers
+    )
 
 
 class MatrixIncompleteError(Exception):
@@ -554,11 +570,11 @@ def _resume_stop_after_cell(
     cap: int,
     stop_after: Any,
     resolved_env_vars: dict[str, str],
-) -> tuple[list[TrialResult], None, dict[str, str], list[str]] | None:
+) -> tuple[list[TrialResult], None, dict[str, str], list[str], bool] | None:
     """Resume short-circuit for a ``stop_after`` cell (issue #232).
 
-    Returns the hydrated ``(trials, error, env, paths)`` tuple iff the
-    on-disk trial prefix ALREADY satisfies the stopping rule -- i.e. the
+    Returns the hydrated ``(trials, error, env, paths, resumed)`` tuple iff
+    the on-disk trial prefix ALREADY satisfies the stopping rule -- i.e. the
     contiguous run of complete ``trial_<i>`` directories from index 0
     either hit the event target or reached the cap. Otherwise returns
     ``None`` so the caller re-runs the cell from scratch (re-running is
@@ -598,7 +614,7 @@ def _resume_stop_after_cell(
             stop_after.events,
             cap,
         )
-        return hydrated, None, resolved_env_vars, trial_paths
+        return hydrated, None, resolved_env_vars, trial_paths, True
     return None
 
 
@@ -855,8 +871,13 @@ def _run_one_cell(
     resume_existing: bool = False,
     subprocess_argv: tuple[str, ...] | None = None,
     env_probe: dict[str, str] | None = None,
-) -> tuple[list[TrialResult], str | None, dict[str, str], list[str]]:
-    """Execute a single cell through B1 and return (trials, error, env_vars, trial_paths).
+) -> tuple[list[TrialResult], str | None, dict[str, str], list[str], bool]:
+    """Execute a single cell through B1 and return (trials, error, env_vars, trial_paths, resumed).
+
+    ``resumed`` is True only when the whole cell was hydrated from a prior
+    run's on-disk artifacts via the ``flat_resume`` resume short-circuit
+    (no trials re-executed); False for freshly-run cells and for every
+    timestamped-layout cell (which never resumes).
 
     Exception handling scope is deliberately wide: any failure originating
     from B1 (unknown mitigation, workload crash in ``setup``, docker pull
@@ -919,9 +940,11 @@ def _run_one_cell(
         # on-disk prefix already satisfies the stopping rule; otherwise
         # fall through to a full re-run (the dispatcher will itself stop
         # early, so re-running is bounded by ``cap``).
-        resumed = _resume_stop_after_cell(cell, cell_dir, cap, stop_after, resolved_env_vars)
-        if resumed is not None:
-            return resumed
+        resumed_result = _resume_stop_after_cell(
+            cell, cell_dir, cap, stop_after, resolved_env_vars
+        )
+        if resumed_result is not None:
+            return resumed_result
     elif resume_existing and layout == "flat_resume":
         from aorta.probe.resume import is_trial_complete
 
@@ -960,7 +983,7 @@ def _run_one_cell(
                     cell.name,
                     effective_trials,
                 )
-                return hydrated, None, resolved_env_vars, trial_paths
+                return hydrated, None, resolved_env_vars, trial_paths, True
             # Subset check failed -> at least one required index is missing.
             # The single-branch log subsumes the previous two-branch shape
             # (separate "indices missing" vs "count short" cases): with the
@@ -1058,10 +1081,10 @@ def _run_one_cell(
         trials = run_trials(request)
     except Exception as exc:
         log.warning("cell %r failed with %s: %s", cell.name, type(exc).__name__, exc, exc_info=True)
-        return [], f"{type(exc).__name__}: {exc}", resolved_env_vars, []
+        return [], f"{type(exc).__name__}: {exc}", resolved_env_vars, [], False
 
     trial_paths = _collect_trial_paths(cell_dir)
-    return trials, None, resolved_env_vars, trial_paths
+    return trials, None, resolved_env_vars, trial_paths, False
 
 
 def _preflight_validate(recipe: Recipe) -> None:
@@ -1253,6 +1276,7 @@ def run_recipe(
             layout=layout,
             resume_existing=resume_existing,
             subprocess_argv=subprocess_argv,
+            should_write=should_write,
         )
 
 
@@ -1265,6 +1289,7 @@ def _run_recipe_locked(
     layout: Literal["timestamped", "flat_resume"],
     resume_existing: bool,
     subprocess_argv: tuple[str, ...] | None,
+    should_write: bool = True,
 ) -> Path:
     """Body of :func:`run_recipe` after the flat_resume lock is held.
 
@@ -1272,6 +1297,10 @@ def _run_recipe_locked(
     ``contextlib.ExitStack`` block at the top of :func:`run_recipe` and
     the matrix-loop body doesn't need to be re-indented inside a ``with``.
     Not part of the public API -- callers go through :func:`run_recipe`.
+
+    ``should_write`` mirrors :func:`run_recipe`'s rank-0 gate: only rank 0
+    owns the real output tree, so only rank 0 prints the end-of-run summary
+    (a ``torchrun`` launch otherwise emits one copy per rank).
     """
     # Operator sidecars come from two places: ones the Recipe was built
     # against (``recipe.sidecar_files``, populated by ``load_recipe`` /
@@ -1384,7 +1413,7 @@ def _run_recipe_locked(
             cell.effective_trials(recipe.trials),
         )
         cell_t0 = time.perf_counter()
-        trials, error, resolved_env_vars, trial_paths = _run_one_cell(
+        trials, error, resolved_env_vars, trial_paths, resumed = _run_one_cell(
             cell,
             recipe,
             run_dir,
@@ -1425,11 +1454,13 @@ def _run_recipe_locked(
             # both halves of the predicate are needed.
             passed = sum(1 for t in trials if _trial_passed_for_log(t))
             summary, suffix = _format_cell_summary(trials, passed)
+            done_verb = "resumed (cached, no re-run) in" if resumed else "done in"
             log.info(
-                "cell %d/%d: %s -- done in %.1fs %s%s",
+                "cell %d/%d: %s -- %s %.1fs %s%s",
                 cell_idx,
                 total_cells,
                 cell.name,
+                done_verb,
                 cell_elapsed,
                 summary,
                 suffix,
@@ -1461,6 +1492,7 @@ def _run_recipe_locked(
             error=error,
             workload_config={**recipe.workload_config, **cell.workload_config},
             stop_after_note=stop_after_note,
+            resumed=resumed,
         )
         cell_stats.append(stats)
 
@@ -1596,6 +1628,25 @@ def _run_recipe_locked(
         click.echo(
             f"to rerun: cd {run_dir} && aorta triage run --recipe recipe.resolved.yaml {flags}"
         )
+
+    # Concise end-of-run summary (issue #280): otherwise ``aorta sweep run`` is
+    # silent during the run and prints only ``Wrote matrix to ...`` at the end,
+    # leaving operators with no signal of which cells failed or where the
+    # captured output landed. Rank-0 only (same gate as the artifact writes),
+    # and printed before the ``MatrixIncompleteError`` raise so a degraded run
+    # -- exactly when the operator most needs to know what failed -- still
+    # reports. Best-effort: a formatting bug must never mask the run's outcome.
+    if should_write:
+        try:
+            for line in format_run_summary(
+                cell_stats,
+                run_dir,
+                layout=layout,
+                verbose_active=_verbose_active(),
+            ):
+                click.echo(line)
+        except Exception:  # pragma: no cover - defensive; summary is advisory
+            log.warning("failed to render end-of-run summary", exc_info=True)
 
     if incomplete_reason is not None:
         # Artifacts are written; raise so the CLI can print the failure

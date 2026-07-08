@@ -131,7 +131,13 @@ aorta bench hw_queue_eval sweep hetero_kernels --streams 2,4,8,16
 
 Both flows write `matrix.md` + `matrix.json`, embed a per-environment `env.json`
 snapshot, and emit a replayable `recipe.resolved.yaml`. See
-[`docs/probe-188/usage.md`](docs/probe-188/usage.md).
+[`docs/probe/usage.md`](docs/probe/usage.md).
+
+At the end of every run `aorta sweep run` prints a concise summary to stdout —
+which cells failed vs. errored, the workload's own failure hint, and the path to
+each failing cell's artifact directory (logs + per-trial JSON) — so you don't
+have to open `matrix.md` to find what broke. Pass `-v` (`-vv`) to also stream
+live per-cell progress to stderr while a long matrix runs.
 
 ### Environment snapshot / reproducibility
 
@@ -238,7 +244,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [`aorta sweep`](docs/probe/usage.md) | Unified matrix runner — built-in workloads **or** opaque launch commands |
 | [LLM Determinism](docs/llm-determinism.md) | Bit-exact double-run nondeterminism probe |
 | [`aorta agent`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
-| [`aorta bundle`](docs/probe-188/bundle.md) | Package sweep artifacts with recipe-driven redaction |
+| [`aorta bundle`](docs/probe/bundle.md) | Package sweep artifacts with recipe-driven redaction |
 | [Recipes](recipes/README.md) | Recipe schema and running recipes |
 | [Buck2](docs/buck2.md) | Build / run the AORTA CLI via Buck2 |
 
