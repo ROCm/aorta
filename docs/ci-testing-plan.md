@@ -78,37 +78,55 @@ export PIP_CONSTRAINT=.github/ci-constraints.txt
 pip install -e ".[tests,hw-queue]"
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install triton
-pytest -m "not gpu and not rocm" -n auto --forked
+pytest -m "not gpu and not rocm" -n auto
 ```
 
 (`bpftrace` still needs to be on the box for the `aorta.ebpf` tests; on Ubuntu
 that's `sudo apt-get install -y bpftrace`. Or just `pip install "click<8.2"`
 into the venv if you'd rather not set the env var -- the pin is temporary.)
 
-### Why per-test process isolation (`--forked`)
+### Parallelism (`-n auto`, no `--forked`)
 
 The command is:
 
 ```
-pytest -m "not gpu and not rocm" -n auto --forked
+pytest -m "not gpu and not rocm" -n auto
 ```
 
-Running the whole suite in a single interpreter produces ~100 failures whose
-membership shifts with test ordering. Every affected file passes cleanly when
-run on its own, which is the signature of **cross-file global-state pollution**
-(leaked env vars, patched module globals, cached imports), not real breakage.
+`-n auto` (`pytest-xdist`) parallelizes across cores to keep wall-clock time
+down (~1-2 min). Per-test process isolation (`--forked`) is **not** used.
 
-Rather than couple the gate to that latent pollution (which would make it flaky
-and order-dependent), each test runs in its own forked subprocess
-(`pytest-forked`), and `-n auto` (`pytest-xdist`) parallelizes across cores to
-keep wall-clock time down (~1-2 min). This is deterministic today and stays
-green as the offending fixtures are cleaned up over time.
+Historically the suite could not run pollution-free in a single interpreter:
+running everything together produced ~100 failures whose membership shifted
+with test ordering, while every affected file passed on its own -- the
+signature of cross-file global-state pollution. The gate leaned on `--forked`
+as a safety net while the leak was tracked down.
 
-> Follow-up (out of scope for the gate): track down and fix the specific
-> fixtures that leak global state so the suite can eventually run pollution-free
-> in a single process. Until then, `--forked` is the safety net, not a crutch to
-> hide new pollution behind. Tracked in
-> [#270](https://github.com/ROCm/aorta/issues/270).
+That pollution came from two culprits, both fixed in
+[#270](https://github.com/ROCm/aorta/issues/270):
+
+1. **Leaked `subprocess.Popen`.** The `aorta.ebpf` runner tests patched the
+   shared stdlib `subprocess.Popen` with a hand-entered `mock.patch`
+   (`ctx.__enter__()`), relying on the test body's `finally` to undo it. When
+   `start()` raised before that `finally` was established (e.g. a missing
+   `bpftrace` binary rejected in `_build_command`), the patch leaked, so every
+   later `subprocess.run` in the interpreter hit the fake `Popen`. Fixed by
+   restoring the patch via the `monkeypatch` fixture, which tears down
+   regardless of whether `start()` raised.
+
+2. **Corrupted `triton` in `sys.modules`.** Many dispatcher/discovery tests
+   patch `importlib.metadata.entry_points` with a `MagicMock` to fake
+   `aorta.workloads` discovery. Triton discovers its compiler backends lazily on
+   first import via that same `entry_points` API, so if Triton's first import
+   happened under the mock (e.g. `run_trials` -> `collect_env` probes the Triton
+   version), backend discovery raised and left `sys.modules` half-initialized
+   (`triton.backends.compiler` cached but `triton` gone). That then broke
+   `torch.use_deterministic_algorithms` in every later workload test. Fixed by
+   pre-importing Triton once in `tests/conftest.py`, against the real
+   `entry_points`, so later mocked imports are harmless cache hits.
+
+The suite is now deterministic in one interpreter (verified across randomized
+orderings), so `--forked` is dropped and only `-n auto` is kept, for speed.
 
 ### Making it a required check
 
@@ -165,7 +183,7 @@ issues so each can be picked up independently:
 | --- | --- |
 | Phase 2 GPU test gate on a self-hosted runner | [#268](https://github.com/ROCm/aorta/issues/268) |
 | Modernize `test_sweep_cli.py` for `click>=8.2` and drop the `click<8.2` pin | [#269](https://github.com/ROCm/aorta/issues/269) |
-| Fix cross-file state pollution so the suite runs without `--forked` | [#270](https://github.com/ROCm/aorta/issues/270) |
+| ~~Fix cross-file state pollution so the suite runs without `--forked`~~ (done: [#270](https://github.com/ROCm/aorta/issues/270)) | [#270](https://github.com/ROCm/aorta/issues/270) |
 
 Not an issue: making the `pytest (CPU, py3.x)` jobs **required status checks** on
 `main` is a repo/admin setting (see "Making it a required check" above), not a
@@ -176,5 +194,5 @@ the repository's branch-protection settings.
 
 | Phase | Runner | Selection | Status |
 | --- | --- | --- | --- |
-| 1 - CPU gate | `ubuntu-latest` (3.10-3.12) | `not gpu and not rocm`, `--forked` | Implemented (`cpu-tests.yml`) |
+| 1 - CPU gate | `ubuntu-latest` (3.10-3.12) | `not gpu and not rocm`, `-n auto` | Implemented (`cpu-tests.yml`) |
 | 2 - GPU gate | `[self-hosted, gpu]` | `gpu or rocm` + real-hw + regression | Planned (needs runner) |
