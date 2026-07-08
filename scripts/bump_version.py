@@ -149,7 +149,10 @@ def resolve_new_version(
     elif level is not None:
         base = bump_version(current, level)
     elif suffix is not None:
-        # suffix-only: stamp onto the current base (e.g. re-stamping an rc date).
+        # suffix-only: append the suffix to the current release base as-is
+        # (e.g. stamp today's rc onto the latest vX.Y.Z tag). `current` must be
+        # a plain MAJOR.MINOR.PATCH here -- the guard below rejects an already
+        # suffixed value, so this mints a fresh rc rather than re-dating one.
         if _SEMVER_RE.match(current) is None:
             raise ValueError(
                 f"current version {current!r} is not MAJOR.MINOR.PATCH; "
