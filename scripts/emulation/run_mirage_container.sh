@@ -8,6 +8,10 @@
 # Usage:
 #   ./scripts/emulation/run_mirage_container.sh gpu-smoke
 #   ./scripts/emulation/run_mirage_container.sh probe
+#   ./scripts/emulation/run_mirage_container.sh inference-smoke
+#   ./scripts/emulation/run_mirage_container.sh training-ddp-smoke
+#   ./scripts/emulation/run_mirage_container.sh training-fsdp-smoke
+#   ./scripts/emulation/run_mirage_container.sh llm-determinism
 #   EMULATOR=rocjitsu-dbt ./scripts/emulation/run_mirage_container.sh gpu-smoke
 #
 # Env knobs:
@@ -17,6 +21,8 @@
 #   EMULATOR            rocjitsu (default) or rocjitsu-dbt
 #   PROFILE             mirage profile (default: mi350x or dbt-mi350x)
 #   OUT                 host output directory
+#   LLM_RECIPE          (llm-determinism only) host recipe YAML to mount;
+#                       defaults to the in-repo llm-determinism-emulated.yaml
 #   XDG_CONFIG_HOME     mirage config dir
 #   XDG_RUNTIME_DIR     mirage runtime dir
 #
@@ -98,26 +104,60 @@ case "$WORKLOAD" in
     log "probe smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
     run_in_container '["probe","--recipe","/tmp/aorta-build/src/recipes/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE","--","bash","-c","echo hi from mirage probe"]'
     ;;
+  inference-smoke)
+    OUT="${OUT:-/tmp/aorta-inference-out}"
+    mkdir -p "$OUT"
+    log "triage inference-smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
+    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/inference-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+    ;;
+  training-ddp-smoke)
+    OUT="${OUT:-/tmp/aorta-training-ddp-out}"
+    mkdir -p "$OUT"
+    log "triage training-ddp-smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
+    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/training-ddp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+    ;;
+  training-fsdp-smoke)
+    OUT="${OUT:-/tmp/aorta-training-fsdp-out}"
+    mkdir -p "$OUT"
+    log "triage training-fsdp-smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
+    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/training-fsdp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+    ;;
   llm-determinism)
     OUT="${OUT:-/tmp/aorta-llm-out}"
-    RECIPE="${LLM_RECIPE:?set LLM_RECIPE to a llm_determinism recipe YAML on the host}"
-    [[ -f "$RECIPE" ]] || fail "recipe not found: $RECIPE"
     mkdir -p "$OUT"
+    # Default: the tiny in-repo singleton recipe (baked into the copied source,
+    # runs on one emulated GPU). Override LLM_RECIPE to mount a full multi-cell
+    # recipe (e.g. recipes/example-llm-determinism.yaml) from the host instead.
+    RECIPE="${LLM_RECIPE:-}"
     log "llm_determinism (slow under rocjitsu; faster with rocjitsu-dbt) -> $OUT"
-    "$MIRAGE_BIN" run --in-process --profile "$PROFILE" \
-      --image "$IMAGE" \
-      --env 'AORTA_CLI_JSON=["triage","run","--verbose","--recipe","/recipe.yaml","--output-dir","/out/triage_results"]' \
-      --env RANK=0 --env WORLD_SIZE=1 --env LOCAL_RANK=0 \
-      --env MASTER_ADDR=127.0.0.1 --env MASTER_PORT=29500 \
-      --mount "$AORTA_SRC:/aorta-src:ro" \
-      --mount "$RUNNER:/runner.py:ro" \
-      --mount "$RECIPE:/recipe.yaml:ro" \
-      --mount "$OUT:/out" \
-      --mount "$OUT:/tmp/aorta-build" \
-      -- sh -c "$CONTAINER_BOOT"
+    if [[ -n "$RECIPE" ]]; then
+      [[ -f "$RECIPE" ]] || fail "recipe not found: $RECIPE"
+      "$MIRAGE_BIN" run --in-process --profile "$PROFILE" \
+        --image "$IMAGE" \
+        --env 'AORTA_CLI_JSON=["triage","run","--verbose","--recipe","/recipe.yaml","--output-dir","/out/triage_results"]' \
+        --env RANK=0 --env WORLD_SIZE=1 --env LOCAL_RANK=0 \
+        --env MASTER_ADDR=127.0.0.1 --env MASTER_PORT=29500 \
+        --mount "$AORTA_SRC:/aorta-src:ro" \
+        --mount "$RUNNER:/runner.py:ro" \
+        --mount "$RECIPE:/recipe.yaml:ro" \
+        --mount "$OUT:/out" \
+        --mount "$OUT:/tmp/aorta-build" \
+        -- sh -c "$CONTAINER_BOOT"
+    else
+      "$MIRAGE_BIN" run --in-process --profile "$PROFILE" \
+        --image "$IMAGE" \
+        --env 'AORTA_CLI_JSON=["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/llm-determinism-emulated.yaml","--output-dir","/out/triage_results"]' \
+        --env RANK=0 --env WORLD_SIZE=1 --env LOCAL_RANK=0 \
+        --env MASTER_ADDR=127.0.0.1 --env MASTER_PORT=29500 \
+        --mount "$AORTA_SRC:/aorta-src:ro" \
+        --mount "$RUNNER:/runner.py:ro" \
+        --mount "$OUT:/out" \
+        --mount "$OUT:/tmp/aorta-build" \
+        -- sh -c "$CONTAINER_BOOT"
+    fi
     ;;
   *)
-    fail "unknown workload: $WORKLOAD (try: gpu-smoke, probe, llm-determinism)"
+    fail "unknown workload: $WORKLOAD (try: gpu-smoke, probe, inference-smoke, training-ddp-smoke, training-fsdp-smoke, llm-determinism)"
     ;;
 esac
 

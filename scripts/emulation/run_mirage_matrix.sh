@@ -8,6 +8,11 @@
 #   export MIRAGE_BIN=/path/to/mirage
 #   ./scripts/emulation/run_mirage_matrix.sh
 #
+# Optional env knobs:
+#   TIMEOUT_SEC       per-case timeout (default 900)
+#   INCLUDE_LLM_DET   set to 1 to also run the (slow) llm_determinism case;
+#                     pair with a larger TIMEOUT_SEC (e.g. 1800) under rocjitsu
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,6 +66,16 @@ run_case() {
     fi
   fi
 
+  # torch.distributed workloads (llm_determinism) use env:// rendezvous and
+  # require RANK/WORLD_SIZE/etc even for a world_size=1 singleton. Inject them
+  # only for those cases; other cases (help, env probe, gpu_smoke, ...) don't
+  # need them.
+  local extra_env=()
+  if [[ "$tag" == *llm-determinism* ]]; then
+    extra_env=(--env RANK=0 --env WORLD_SIZE=1 --env LOCAL_RANK=0
+               --env MASTER_ADDR=127.0.0.1 --env MASTER_PORT=29500)
+  fi
+
   local logfile="$outdir/run.log"
   local ec=0
   set +e
@@ -68,6 +83,7 @@ run_case() {
     "$MIRAGE_BIN" run --in-process --profile "$profile" \
       --image "$IMAGE" \
       --env "AORTA_CLI_JSON=$json_args" \
+      "${extra_env[@]}" \
       --mount "$AORTA_SRC:/aorta-src:ro" \
       --mount "$RUNNER:/runner.py:ro" \
       --mount "$outdir:/out" \
@@ -92,9 +108,21 @@ CASES=(
   'run-gpu-smoke|["run","--workload","gpu_smoke","--environment","local","--trials","1"]'
   'triage-dry-run|["triage","run","--dry-run","--recipe","/tmp/aorta-build/src/recipes/gpu-smoke-emulated.yaml"]'
   'triage-gpu-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/gpu-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+  'triage-inference-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/inference-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+  'triage-training-ddp-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/training-ddp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+  'triage-training-fsdp-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/training-fsdp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
   'probe-smoke|["probe","--recipe","/tmp/aorta-build/src/recipes/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE-MATRIX","--","bash","-c","echo hi from mirage probe"]'
   'probe-list-patterns|["probe","--list-patterns"]'
 )
+
+# Torch-heavy cases kept out of the default matrix: llm_determinism is very slow
+# under rocjitsu CPU emulation and would routinely trip TIMEOUT_SEC. Opt in with
+# INCLUDE_LLM_DET=1 (and consider a larger TIMEOUT_SEC, e.g. 1800).
+if [[ "${INCLUDE_LLM_DET:-0}" == "1" ]]; then
+  CASES+=(
+    'triage-llm-determinism|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/llm-determinism-emulated.yaml","--output-dir","/out/triage_results"]'
+  )
+fi
 
 for pair in "rocjitsu:mi350x" "rocjitsu-dbt:dbt-mi350x"; do
   emulator="${pair%%:*}"
