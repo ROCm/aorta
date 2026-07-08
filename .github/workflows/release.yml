@@ -94,9 +94,11 @@ jobs:
           # release.yml is the STABLE channel: it marks the GitHub Release
           # "Latest" and publishes to PyPI. Pre-release / rc builds
           # (X.Y.ZrcYYYYMMDD) belong to nightly.yml's rolling dev-wheels channel.
-          # Reject any suffixed / non-MAJOR.MINOR.PATCH version so an rc value can
-          # never ship as a stable release.
-          if ! printf '%s' "${pkg_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          # Reject any suffixed / non-MAJOR.MINOR.PATCH version (and leading-zero
+          # segments like 01.02.003, which normalize away and wouldn't match the
+          # built wheel's version) so an rc or ambiguous value can never ship as a
+          # stable release.
+          if ! printf '%s' "${pkg_version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
             echo "::error::Release version '${pkg_version}' is not a stable MAJOR.MINOR.PATCH release; use nightly.yml for pre-release rc builds."
             exit 1
           fi

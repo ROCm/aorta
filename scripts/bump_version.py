@@ -27,12 +27,16 @@ import re
 import subprocess
 import sys
 
-_SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+# Each segment is 0 or a non-zero-leading run of digits: leading-zero segments
+# (e.g. "01.02.003") are rejected so a version round-trips through int() parsing
+# and re-rendering unchanged, matching SemVer and the tag/gate validation.
+_SEGMENT = r"(?:0|[1-9]\d*)"
+_SEMVER_RE = re.compile(rf"^({_SEGMENT})\.({_SEGMENT})\.({_SEGMENT})$")
 # Match a MAJOR.MINOR.PATCH base, but only when the patch is not followed by
 # another dot or digit -- so a malformed 4-segment value like "0.2.0.1" is
 # rejected instead of being silently truncated to "0.2.0". A trailing
 # pre-release part (e.g. "0.2.0rc20260101") is still allowed for re-stamping.
-_SEMVER_PREFIX_RE = re.compile(r"^(\d+\.\d+\.\d+)(?![\d.])")
+_SEMVER_PREFIX_RE = re.compile(rf"^({_SEGMENT}\.{_SEGMENT}\.{_SEGMENT})(?![\d.])")
 # A suffix is concatenated straight onto the base version, so it must be a
 # single PEP 440-style token: non-empty and limited to alphanumerics plus . + -
 # (no quotes, whitespace, or newlines that could corrupt the emitted version).

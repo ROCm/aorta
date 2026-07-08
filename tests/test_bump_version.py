@@ -113,6 +113,21 @@ def test_resolve_new_version_rejects_bad_explicit():
         resolve_new_version("0.2.0", None, "not-a-version")
 
 
+@pytest.mark.parametrize("explicit", ["01.2.3", "1.02.3", "1.2.03"])
+def test_resolve_new_version_rejects_leading_zero_explicit(explicit):
+    # Leading-zero segments normalize away under int() parsing (01 -> 1), so a
+    # tag/version like v01.02.003 wouldn't round-trip or match the built wheel;
+    # reject them up front to keep versions unambiguous (SemVer alignment).
+    with pytest.raises(ValueError):
+        resolve_new_version("0.2.0", None, explicit)
+
+
+@pytest.mark.parametrize("level", ["patch", "minor", "major"])
+def test_bump_version_rejects_leading_zero_current(level):
+    with pytest.raises(ValueError):
+        bump_version("01.02.003", level)
+
+
 def test_resolve_new_version_requires_input():
     # Empty input must fail loudly rather than silently return the current
     # version unchanged (this tool computes the *next* version).

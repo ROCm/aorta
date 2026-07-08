@@ -144,11 +144,13 @@ Repository = "https://github.com/ROCm/aorta"
 # ``*`` also spans dots, so it alone still admits ``v0.2.0rc1`` and
 # ``v1.2.3.4``); ``--exclude`` drops any tag carrying a non-digit/non-dot
 # character or a fourth numeric segment, and ``tag_regex`` then anchors the
-# extracted version to exactly three numeric components. A tree with no git
+# extracted version to exactly three numeric components with no leading zeros
+# (so it round-trips through the integer parsing in ``bump_version.py`` and the
+# release gate unchanged). A tree with no git
 # metadata (e.g. an unpacked sdist without .git) falls back to the literal below;
 # built sdists/wheels embed the resolved version in their metadata, so installing
 # from those still reports the correct version.
-tag_regex = "^v(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)$"
+tag_regex = "^v(?P<version>(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*))$"
 git_describe_command = [
     "git",
     "describe",
