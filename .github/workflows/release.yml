@@ -68,6 +68,14 @@ jobs:
               echo "::error::A manual release must run on a branch, not a tag ref (${GITHUB_REF_NAME}). Re-run from the default branch, or push a vX.Y.Z tag instead."
               exit 1
             fi
+            # release.yml is the STABLE channel (marks the GitHub Release
+            # "Latest" and publishes to PyPI), so a manual run must originate
+            # from the default branch -- never an unmerged feature branch.
+            # Tag-push releases are unaffected: they take the else branch below.
+            if [ "${GITHUB_REF}" != "refs/heads/${{ github.event.repository.default_branch }}" ]; then
+              echo "::error::Manual releases must run from the default branch (${{ github.event.repository.default_branch }}), not ${GITHUB_REF_NAME}."
+              exit 1
+            fi
             if [ -n "${EXPLICIT_VERSION}" ]; then
               pkg_version="$(python scripts/bump_version.py --set "${EXPLICIT_VERSION}")" \
                 || { echo "::error::Could not resolve explicit version '${EXPLICIT_VERSION}' (see log)."; exit 1; }
