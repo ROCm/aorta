@@ -265,6 +265,16 @@ class RunRequest:
     # ``Recipe.probe_extras``); the loop only duck-types ``.events`` /
     # ``.event_verdict``. ``kw_only`` so positional callers are unaffected.
     stop_after: Any | None = field(default=None, kw_only=True)
+    # In-container env-probe contract for isolated (docker/venv) envs.
+    # The triage runner sets this to ``{"src": <host aorta src>, "out":
+    # <environments/<env>/env.json>}`` so a self-isolating wrapper can
+    # bind-mount the aorta source and drop a real snapshot the runner
+    # then promotes (else it falls back to a placeholder). ``None`` (the
+    # default) means "no in-container probe requested" -- every
+    # pre-existing caller and every non-isolated env round-trips with the
+    # ``_aorta_env_probe`` key absent. ``kw_only`` so positional callers
+    # are unaffected, matching ``stop_after`` above.
+    env_probe: dict[str, str] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         # Defensively deep-copy mutable dict fields.  ``frozen=True``
@@ -279,6 +289,11 @@ class RunRequest:
         # out from under the dispatcher. ``None`` short-circuits.
         if self.probe_extras is not None:
             object.__setattr__(self, "probe_extras", copy.deepcopy(self.probe_extras))
+        # ``env_probe`` is the same optional-dict pattern as ``probe_extras``:
+        # deep-copy so a caller cannot mutate the {src, out} paths after
+        # construction and steer an in-flight probe. ``None`` short-circuits.
+        if self.env_probe is not None:
+            object.__setattr__(self, "env_probe", copy.deepcopy(self.env_probe))
 
 
 def run_trials(request: RunRequest) -> list[TrialResult]:
@@ -355,6 +370,24 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             f"Invalid extra_env keys {bad_keys}: each key must match "
             "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
         )
+
+    # Validate ``env_probe`` shape early.  The triage runner is the only
+    # in-tree producer and always passes ``{"src": str, "out": str}``, but
+    # ``RunRequest`` is a public library API -- a programmatic caller passing
+    # a bad shape (missing keys, Path values) would otherwise only fail much
+    # later when the value is injected into ``TrialResult.config`` and
+    # JSON-serialized, with a confusing ``TypeError``.  Fail fast with an
+    # actionable message instead.
+    if request.env_probe is not None:
+        if (
+            not isinstance(request.env_probe, dict)
+            or set(request.env_probe) != {"src", "out"}
+            or not all(isinstance(v, str) for v in request.env_probe.values())
+        ):
+            raise ValueError(
+                "env_probe must be a dict with exactly {'src', 'out'} string "
+                f"values; got {request.env_probe!r}."
+            )
 
     # 4. Reject reserved ``_aorta_*`` keys in ``config_overrides``.
     #    The dispatcher writes platform-supplied values (currently
@@ -610,6 +643,20 @@ def _run_single_trial(
     # in ``config_overrides`` so this assignment can't silently clobber
     # a caller-supplied value.
     config["_aorta_environment"] = asdict(env_descriptor)
+
+    # In-container env-probe contract (isolated docker/venv envs only).
+    # The triage runner supplies ``{"src": ..., "out": ...}`` so a
+    # self-isolating wrapper can bind-mount the aorta source at ``src``
+    # and, as the first step inside its ``docker run``, write a real
+    # ``env.json`` to the host path ``out`` -- captured INSIDE the
+    # container, so ``sys.prefix`` / ROCm / hipBLASLt reflect the image
+    # rather than the runner's venv. The runner promotes that file if it
+    # appears, else falls back to the placeholder. Same reserved-``_aorta_*``
+    # convention + non-None-only injection as the keys above; the platform
+    # launches nothing, the wrapper acts. Non-isolated envs and every
+    # pre-existing caller leave this None so the key stays absent.
+    if request.env_probe is not None:
+        config["_aorta_env_probe"] = dict(request.env_probe)
 
     # Subprocess-shaped workloads (currently SubprocessWorkload, wired
     # by ``aorta probe``) receive their opaque user argv via a typed

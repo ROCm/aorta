@@ -546,7 +546,7 @@ class TestStopNeverReRaises:
     rank, leaking the rendezvous backend and hanging every other rank.
     """
 
-    def _start_runner(self, fake_kwargs):
+    def _start_runner(self, monkeypatch, fake_kwargs):
         captured: dict = {}
 
         def factory(*args, **kwargs):
@@ -557,46 +557,47 @@ class TestStopNeverReRaises:
             return captured["popen"]
 
         runner = _make_runner()
-        ctx = _patch_popen(factory)
-        ctx.__enter__()
+        # ``monkeypatch`` (not a hand-entered ``mock.patch``) so the patch on
+        # the *shared* stdlib ``subprocess.Popen`` is always torn down at test
+        # end -- even if ``start()`` raises before this helper returns (e.g.
+        # ``_build_command`` rejecting a missing bpftrace binary). A leaked
+        # ``FakePopen`` would otherwise poison every later ``subprocess.run``
+        # in the same interpreter, which is the cross-file pollution in #270.
+        monkeypatch.setattr("aorta.ebpf.runner.subprocess.Popen", factory)
         runner.start()
-        return runner, captured["popen"], ctx
+        return runner, captured["popen"]
 
-    def test_stop_swallows_terminate_process_lookup_error(self, caplog):
-        runner, _fake, ctx = self._start_runner(
+    def test_stop_swallows_terminate_process_lookup_error(self, caplog, monkeypatch):
+        runner, _fake = self._start_runner(
+            monkeypatch,
             {
                 "script_lines": [],
                 "terminate_raises": ProcessLookupError(3, "No such process"),
-            }
+            },
         )
-        try:
-            import logging
+        import logging
 
-            with caplog.at_level(logging.DEBUG, logger="aorta.ebpf.runner"):
-                events = runner.stop()
-        finally:
-            ctx.__exit__(None, None, None)
+        with caplog.at_level(logging.DEBUG, logger="aorta.ebpf.runner"):
+            events = runner.stop()
         # No exception propagated, return type is still the events list.
         assert isinstance(events, list)
         assert runner.is_running is False
 
-    def test_stop_swallows_kill_process_lookup_error(self):
+    def test_stop_swallows_kill_process_lookup_error(self, monkeypatch):
         # ``terminate()`` succeeds, but ``wait()`` times out so the code
         # path falls through to ``kill()``, which races. Pre-fix this
         # would re-raise ``ProcessLookupError`` from ``stop()``.
         import subprocess as _sp
 
-        runner, _fake, ctx = self._start_runner(
+        runner, _fake = self._start_runner(
+            monkeypatch,
             {
                 "script_lines": [],
                 "wait_raises": _sp.TimeoutExpired(cmd="bpftrace", timeout=0.1),
                 "kill_raises": ProcessLookupError(3, "No such process"),
-            }
+            },
         )
-        try:
-            events = runner.stop()
-        finally:
-            ctx.__exit__(None, None, None)
+        events = runner.stop()
         assert isinstance(events, list)
 
     def test_stop_short_circuits_on_already_exited(self):
@@ -635,23 +636,21 @@ class TestStopNeverReRaises:
             events = runner.stop()
         assert isinstance(events, list)
 
-    def test_stop_swallows_unexpected_exception(self, caplog):
+    def test_stop_swallows_unexpected_exception(self, caplog, monkeypatch):
         # Defensive: any unexpected exception type must still be
         # logged-and-swallowed, not propagated. The docstring promises
         # this without qualifying on exception class.
-        runner, _fake, ctx = self._start_runner(
+        runner, _fake = self._start_runner(
+            monkeypatch,
             {
                 "script_lines": [],
                 "terminate_raises": OSError(1, "Operation not permitted"),
-            }
+            },
         )
-        try:
-            import logging
+        import logging
 
-            with caplog.at_level(logging.ERROR, logger="aorta.ebpf.runner"):
-                events = runner.stop()
-        finally:
-            ctx.__exit__(None, None, None)
+        with caplog.at_level(logging.ERROR, logger="aorta.ebpf.runner"):
+            events = runner.stop()
         assert isinstance(events, list)
 
 
