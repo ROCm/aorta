@@ -746,6 +746,61 @@ def test_perf_report_error_cell_wall_is_error_not_zero(tmp_path):
     assert err_row.count("error") >= 8  # every measured column + source
 
 
+def test_perf_report_missing_source_row_keeps_real_wall(tmp_path):
+    """A non-error ``Source = missing`` row shows ``n/a`` for the per-step
+    columns but a *real* ``Wall (s)`` value -- wall clock is measured even when
+    per-step timing is absent, so the Notes wording (n/a per-step, Wall still
+    shown) must match what the row actually prints."""
+    from aorta.triage.matrix import CellStats
+    from aorta.triage.output import write_perf_report
+
+    def _cell(name, *, wall, source, step_times):
+        return CellStats(
+            name=name,
+            mitigations=("none",),
+            environment="local",
+            extra_env={},
+            resolved_env_vars={},
+            trials=2,
+            passed_count=2,
+            failed_count=0,
+            mean_step_time_ms=10.0,
+            std_step_time_ms=0.0,
+            min_step_time_ms=10.0,
+            max_step_time_ms=10.0,
+            p50_step_time_ms=10.0,
+            p90_step_time_ms=10.0,
+            p99_step_time_ms=10.0,
+            mean_wall_clock_sec=wall,
+            step_time_source=source,
+            step_times_ms=step_times,
+            error=None,
+            error_count=0,
+        )
+
+    baseline = _cell("none-local", wall=1.0, source="per_step", step_times=[10.0, 10.0])
+    # Real end-to-end wall clock, but no usable per-step series -> source missing.
+    missing = _cell("slow-local", wall=42.5, source="missing", step_times=[])
+    out = tmp_path / "perf.md"
+    write_perf_report(
+        out,
+        build_recipe_from_flags(
+            workload="echo", mitigation_axis="none", environment_axis="local",
+            trials=2, steps=1,
+        ),
+        [baseline, missing],
+        baseline=baseline,
+        run_timestamp="2026-01-01T00:00:00Z",
+    )
+    text = out.read_text()
+    missing_row = next(ln for ln in text.splitlines() if ln.startswith("| slow-local"))
+    # Per-step columns render n/a; Wall is the genuine measurement, not n/a.
+    assert "n/a" in missing_row
+    assert "42.500" in missing_row
+    # The Notes must not claim the whole row is n/a timing.
+    assert "n/a` for the per-step columns" in text
+
+
 def test_perf_report_metric_columns_sorted(tmp_path):
     """The workload-metrics table columns are sorted, so perf.md is byte-stable
     regardless of the order metric keys were first seen across cells / trials."""
@@ -795,7 +850,11 @@ def test_perf_report_metric_columns_sorted(tmp_path):
         run_timestamp="2026-01-01T00:00:00Z",
     )
     text = out.read_text()
-    header = next(ln for ln in text.splitlines() if ln.startswith("| Cell "))
+    # Scope to the workload-metrics section: the step-timing table also has a
+    # ``| Cell ...`` header (Trials/Iters/... -- deliberately unsorted), so pick
+    # the first ``| Cell`` row *after* the metrics heading.
+    metrics_section = text.split("## Workload metrics", 1)[1]
+    header = next(ln for ln in metrics_section.splitlines() if ln.startswith("| Cell "))
     cols = [c.strip() for c in header.strip().strip("|").split("|")][1:]
     assert cols == sorted(cols)
     assert cols == ["gflops", "mean_step_ms", "triad_gbps"]

@@ -1287,7 +1287,10 @@ def write_perf_report(
         "mirrors `matrix.md`: iterations executed vs. configured. `Source` is "
         "the step-time fidelity (`per_step` > `elapsed_per_iter` > "
         "`wall_clock_total` > `missing`); rows with `Source = missing` show "
-        "`n/a` timing because any number would fold setup/teardown."
+        "`n/a` for the per-step columns (`Mean`..`Max`) because any per-step "
+        "number would fold in setup/teardown. `Wall (s)` is still the real "
+        "end-to-end wall clock and is always shown (it reads `error` only for "
+        "error cells)."
     )
     lines.append(
         "- Percentiles are over the concatenated per-step samples across the "
