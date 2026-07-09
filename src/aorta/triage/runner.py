@@ -1716,4 +1716,4 @@ def _run_recipe_locked(
     return run_dir
 
 
-__all__ = ["MatrixIncompleteError", "run_recipe"]
+__all__ = ["MatrixIncompleteError", "MatrixStrictError", "run_recipe"]
