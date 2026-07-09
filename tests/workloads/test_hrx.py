@@ -129,6 +129,18 @@ def test_setup_rejects_non_bool_keep_build(monkeypatch):
         wl.setup()
 
 
+@pytest.mark.parametrize("bad", [0, -1])
+def test_setup_rejects_nonpositive_timeout(monkeypatch, bad):
+    """A zero/negative timeout_sec fails fast in setup() with a config error,
+    rather than raising from subprocess.run(timeout=...) at run() time and being
+    misclassified as an infrastructure failure."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(HrxWorkload, "_build", lambda self: self._build_dir / "x")
+    wl = HrxWorkload({"probe": "module", "timeout_sec": bad})
+    with pytest.raises(ValueError, match="timeout_sec"):
+        wl.setup()
+
+
 def test_build_env_strips_runtime_routing_vars(monkeypatch, tmp_path):
     """hipcc must build against the stock toolchain, not the HRX-on cell env.
 

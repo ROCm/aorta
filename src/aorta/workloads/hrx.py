@@ -261,7 +261,14 @@ class HrxWorkload(Workload):
         self._probe = self._validated_probe()
         self._spec = _PROBES[self._probe]
         self._arch = str(self.config.get("gpu_arch", _DEFAULT_ARCH))
+        # Validate here: subprocess.run(..., timeout=<=0) would raise at run()
+        # time and be misclassified as an infrastructure failure. Fail fast in
+        # setup() with a clear config error instead.
         self._timeout = int(self.config.get("timeout_sec", _DEFAULT_TIMEOUT_SEC))
+        if self._timeout <= 0:
+            raise ValueError(
+                f"hrx: timeout_sec ({self._timeout}) must be > 0"
+            )
         # Validate explicitly rather than bool(...): a stray "false"/"0" string
         # from a recipe would coerce to True and silently keep build dirs.
         keep_build = self.config.get("keep_build", False)

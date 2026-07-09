@@ -40,6 +40,18 @@ def test_non_positive_size_rejected(monkeypatch):
         wl.setup()
 
 
+@pytest.mark.parametrize("bad", [0, -1])
+def test_setup_rejects_nonpositive_timeout(monkeypatch, bad):
+    """A zero/negative timeout_sec fails fast in setup() with a config error,
+    rather than raising from subprocess.run(timeout=...) at run() time and being
+    misclassified as an infrastructure failure."""
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(HrxPerfWorkload, "_build", lambda self: self._build_dir / "x")
+    wl = HrxPerfWorkload({"bench": "gemm", "timeout_sec": bad})
+    with pytest.raises(ValueError, match="timeout_sec"):
+        wl.setup()
+
+
 def test_setup_raises_without_hipcc(monkeypatch):
     monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: None)
     wl = HrxPerfWorkload({"bench": "gemm"})

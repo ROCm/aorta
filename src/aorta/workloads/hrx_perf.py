@@ -165,7 +165,14 @@ class HrxPerfWorkload(Workload):
         self._bench, self._size, self._iters, self._warmup = self._validated_config()
         self._spec = _BENCHES[self._bench]
         self._arch = str(self.config.get("gpu_arch", _DEFAULT_ARCH))
+        # Validate here: subprocess.run(..., timeout=<=0) would raise at run()
+        # time and be misclassified as an infrastructure failure. Fail fast in
+        # setup() with a clear config error instead.
         self._timeout = int(self.config.get("timeout_sec", _DEFAULT_TIMEOUT_SEC))
+        if self._timeout <= 0:
+            raise ValueError(
+                f"hrx_perf: timeout_sec ({self._timeout}) must be > 0"
+            )
         keep_build = self.config.get("keep_build", False)
         if not isinstance(keep_build, bool):
             raise ValueError(
