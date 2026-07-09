@@ -746,6 +746,61 @@ def test_perf_report_error_cell_wall_is_error_not_zero(tmp_path):
     assert err_row.count("error") >= 8  # every measured column + source
 
 
+def test_perf_report_metric_columns_sorted(tmp_path):
+    """The workload-metrics table columns are sorted, so perf.md is byte-stable
+    regardless of the order metric keys were first seen across cells / trials."""
+    from aorta.triage.matrix import CellStats
+    from aorta.triage.output import write_perf_report
+
+    def _cell(name, metrics):
+        return CellStats(
+            name=name,
+            mitigations=("none",),
+            environment="local",
+            extra_env={},
+            resolved_env_vars={},
+            trials=1,
+            passed_count=1,
+            failed_count=0,
+            mean_step_time_ms=10.0,
+            std_step_time_ms=0.0,
+            min_step_time_ms=10.0,
+            max_step_time_ms=10.0,
+            p50_step_time_ms=10.0,
+            p90_step_time_ms=10.0,
+            p99_step_time_ms=10.0,
+            mean_wall_clock_sec=1.0,
+            step_time_source="per_step",
+            step_times_ms=[10.0],
+            metrics_summary=metrics,
+        )
+
+    def _agg(mean):
+        return {"mean": mean, "min": mean, "max": mean, "n": 1.0}
+
+    # Deliberately insert keys in a non-alphabetical order, and give each cell
+    # a different insertion order + a key the other lacks. Without sorting the
+    # header order would depend on this iteration order.
+    baseline = _cell("none-local", {"triad_gbps": _agg(1.0), "gflops": _agg(2.0)})
+    other = _cell("tf32_off-local", {"mean_step_ms": _agg(3.0), "gflops": _agg(4.0)})
+    out = tmp_path / "perf.md"
+    write_perf_report(
+        out,
+        build_recipe_from_flags(
+            workload="echo", mitigation_axis="none", environment_axis="local",
+            trials=1, steps=1,
+        ),
+        [baseline, other],
+        baseline=baseline,
+        run_timestamp="2026-01-01T00:00:00Z",
+    )
+    text = out.read_text()
+    header = next(ln for ln in text.splitlines() if ln.startswith("| Cell "))
+    cols = [c.strip() for c in header.strip().strip("|").split("|")][1:]
+    assert cols == sorted(cols)
+    assert cols == ["gflops", "mean_step_ms", "triad_gbps"]
+
+
 def test_resolved_recipe_is_loadable_by_load_recipe(tmp_path, patched_env, patched_run_trials):
     """`recipe.resolved.yaml` must round-trip through load_recipe() -- no debug fields."""
     from aorta.triage.recipe import load_recipe

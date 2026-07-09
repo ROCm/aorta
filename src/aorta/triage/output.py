@@ -1245,11 +1245,14 @@ def write_perf_report(
     lines.append("")
 
     # --- Workload throughput / metrics (conditional) ---------------------
-    metric_keys: list[str] = []
+    # Sort the column keys so perf.md is byte-stable across runs: the union
+    # of metric names is otherwise ordered by cell-iteration / dict-insertion
+    # order, which can shift between workloads / Python versions and produce
+    # noisy diffs when comparing two runs of the same recipe.
+    metric_key_set: set[str] = set()
     for cell in cell_stats:
-        for key in cell.metrics_summary:
-            if key not in metric_keys:
-                metric_keys.append(key)
+        metric_key_set.update(cell.metrics_summary)
+    metric_keys: list[str] = sorted(metric_key_set)
     if metric_keys:
         lines.append("## Workload metrics (mean across trials)")
         lines.append("")
