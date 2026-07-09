@@ -57,6 +57,10 @@ def test_main_matches_build_tagged_wheel(tmp_path):
 
 def test_main_normalizes_rc_separator(tmp_path):
     # setuptools may spell an rc with a separator; normalized compare still matches.
+    # This relies on PEP 440 normalization via ``packaging``; without it the script
+    # falls back to exact string equality (by design), so skip rather than fail in
+    # environments where ``packaging`` isn't installed (it's not in the tests extra).
+    pytest.importorskip("packaging.version")
     _make_wheel(tmp_path, "amd_aorta-0.2.1rc20260708-py3-none-any.whl", "0.2.1rc20260708")
     assert main(["0.2.1-rc20260708", str(tmp_path)]) == 0
 
