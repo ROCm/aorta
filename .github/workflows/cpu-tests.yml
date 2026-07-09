@@ -32,10 +32,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
-    env:
-      # Reproducible pins for known test/dependency incompatibilities. Kept
-      # deliberately small; see the file for rationale and follow-ups.
-      PIP_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
     steps:
       - name: Check out code
         uses: actions/checkout@v5
@@ -45,12 +41,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          # Track the inputs this job actually resolves from: the package
-          # metadata (extras) and the CI constraints file (pinned versions via
-          # PIP_CONSTRAINT). This job never installs requirements-dev.txt.
-          cache-dependency-path: |
-            pyproject.toml
-            .github/ci-constraints.txt
+          # Track the input this job actually resolves from: the package
+          # metadata (extras). This job never installs requirements-dev.txt.
+          cache-dependency-path: pyproject.toml
 
       # The aorta.ebpf runner tests configure an explicit bpftrace_path and the
       # runner validates that a real file exists there before building the

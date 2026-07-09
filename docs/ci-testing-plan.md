@@ -51,30 +51,23 @@ assume, and nothing heavier:
 | `triton` | The env-probe contract tests (`tests/instrumentation/test_environment.py`) treat a "clean full probe" as non-partial only when `triton` is importable. |
 | `bpftrace` (apt) | The `aorta.ebpf` runner tests set an explicit `bpftrace_path` and the runner validates a real file exists at `/usr/bin/bpftrace` before building the command. The subprocess itself is mocked (`FakePopen`), so only the binary's presence matters; apt installs it at exactly that path. |
 
-Installs go through a small pip constraints file,
-[`.github/ci-constraints.txt`](../.github/ci-constraints.txt) (wired in via
-`PIP_CONSTRAINT`). Today it pins only `click<8.2`: `tests/sweep/test_sweep_cli.py`
-uses `CliRunner(mix_stderr=False)`, which Click 8.2 removed. The runtime floor is
-`click>=8.0` and those tests depend on the pre-8.2 behaviour, so we pin the test
-environment instead of editing the tests. The file is intentionally minimal --
-pin only known-incompatible pieces so the gate stays reproducible without hiding
-real breakage; drop each pin as the underlying test is modernized. Modernizing
-`test_sweep_cli.py` and dropping this pin is tracked in
-[#269](https://github.com/ROCm/aorta/issues/269).
-
-The pin lives in the constraints file rather than the `tests` extra on purpose:
-`tests` feeds `dev` and `all`, so a `click<8.2` cap there would leak a temporary
-compat bound into every dev/full install (and none of the other extras carry an
-upper bound). Keeping it in `PIP_CONSTRAINT` keeps the cap CI-scoped and trivial
-to drop.
+The suite installs unpinned dependencies: it runs green on the current `click`
+(>=8.2) as well as the `click>=8.0` floor declared in `pyproject.toml`. (An
+earlier revision pinned `click<8.2` via a `.github/ci-constraints.txt`
+constraints file because `tests/sweep/test_sweep_cli.py` used the
+`CliRunner(mix_stderr=False)` argument that Click 8.2 removed; that test now
+feature-detects the argument, so the pin and the constraints file are gone --
+see [#269](https://github.com/ROCm/aorta/issues/269).) If a future
+test/dependency incompatibility needs a CI-scoped pin, re-introduce a
+`PIP_CONSTRAINT` constraints file (kept minimal, pinning only known-incompatible
+pieces) rather than capping versions in the `tests` extra, which feeds `dev` /
+`all` and would leak a compat bound into every dev/full install.
 
 ### Running the gate locally
 
-Reproduce the exact CI environment (including the `click<8.2` pin) by pointing
-pip at the same constraints file -- no manual version juggling:
+Reproduce the CI environment -- no manual version juggling:
 
 ```bash
-export PIP_CONSTRAINT=.github/ci-constraints.txt
 pip install -e ".[tests,hw-queue]"
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install triton
@@ -82,8 +75,7 @@ pytest -m "not gpu and not rocm" -n auto
 ```
 
 (`bpftrace` still needs to be on the box for the `aorta.ebpf` tests; on Ubuntu
-that's `sudo apt-get install -y bpftrace`. Or just `pip install "click<8.2"`
-into the venv if you'd rather not set the env var -- the pin is temporary.)
+that's `sudo apt-get install -y bpftrace`.)
 
 ### Parallelism (`-n auto`, no `--forked`)
 
@@ -182,8 +174,10 @@ issues so each can be picked up independently:
 | Follow-up | Tracked in |
 | --- | --- |
 | Phase 2 GPU test gate on a self-hosted runner | [#268](https://github.com/ROCm/aorta/issues/268) |
-| Modernize `test_sweep_cli.py` for `click>=8.2` and drop the `click<8.2` pin | [#269](https://github.com/ROCm/aorta/issues/269) |
 | ~~Fix cross-file state pollution so the suite runs without `--forked`~~ (done: [#270](https://github.com/ROCm/aorta/issues/270)) | [#270](https://github.com/ROCm/aorta/issues/270) |
+
+Done: [#269](https://github.com/ROCm/aorta/issues/269) modernized
+`test_sweep_cli.py` for `click>=8.2` and removed the `click<8.2` CI pin.
 
 Not an issue: making the `pytest (CPU, py3.x)` jobs **required status checks** on
 `main` is a repo/admin setting (see "Making it a required check" above), not a
