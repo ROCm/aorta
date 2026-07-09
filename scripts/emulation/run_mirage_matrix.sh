@@ -83,7 +83,7 @@ run_case() {
     "$MIRAGE_BIN" run --in-process --profile "$profile" \
       --image "$IMAGE" \
       --env "AORTA_CLI_JSON=$json_args" \
-      "${extra_env[@]}" \
+      ${extra_env[@]+"${extra_env[@]}"} \
       --mount "$AORTA_SRC:/aorta-src:ro" \
       --mount "$RUNNER:/runner.py:ro" \
       --mount "$outdir:/out" \

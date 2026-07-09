@@ -161,6 +161,30 @@ class TestWrapArgv:
         argv = wrap_argv_for_environment(_emulated_config(), ["python", "x.py"])
         assert argv[0] == str(custom)
 
+    def test_mirage_bin_relative_path(self, monkeypatch, tmp_path):
+        # A relative path with a directory component (as used by the repo's
+        # docs/scripts, e.g. ./build/manylinux/bin/mirage) must resolve to the
+        # absolute executable rather than falling through to a $PATH lookup.
+        bindir = tmp_path / "build" / "bin"
+        bindir.mkdir(parents=True)
+        custom = bindir / "mirage"
+        custom.write_text("#!/bin/sh\nexit 0\n")
+        custom.chmod(0o755)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(ENV_MIRAGE_BIN, "./build/bin/mirage")
+        argv = wrap_argv_for_environment(_emulated_config(), ["python", "x.py"])
+        assert argv[0] == str(custom)
+
+    def test_mirage_bin_relative_path_not_executable_errors(
+        self, monkeypatch, tmp_path
+    ):
+        # A path-shaped override that doesn't point to an executable must fail
+        # loudly (not silently fall back to $PATH).
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(ENV_MIRAGE_BIN, "./does/not/exist/mirage")
+        with pytest.raises(EmulationError, match="does not point to an executable"):
+            wrap_argv_for_environment(_emulated_config(), ["python", "x.py"])
+
 
 class TestSubprocessWorkloadEmulation:
     """The aorta probe SubprocessWorkload wraps its argv when emulated."""

@@ -130,31 +130,28 @@ case "$WORKLOAD" in
     # recipe (e.g. recipes/example-llm-determinism.yaml) from the host instead.
     RECIPE="${LLM_RECIPE:-}"
     log "llm_determinism (slow under rocjitsu; faster with rocjitsu-dbt) -> $OUT"
+    # The default and host-recipe paths differ only in the recipe path baked
+    # into AORTA_CLI_JSON and one extra `--mount`. Compute both, then run a
+    # single shared invocation so the two can't drift.
+    recipe_mount=()
     if [[ -n "$RECIPE" ]]; then
       [[ -f "$RECIPE" ]] || fail "recipe not found: $RECIPE"
-      "$MIRAGE_BIN" run --in-process --profile "$PROFILE" \
-        --image "$IMAGE" \
-        --env 'AORTA_CLI_JSON=["triage","run","--verbose","--recipe","/recipe.yaml","--output-dir","/out/triage_results"]' \
-        --env RANK=0 --env WORLD_SIZE=1 --env LOCAL_RANK=0 \
-        --env MASTER_ADDR=127.0.0.1 --env MASTER_PORT=29500 \
-        --mount "$AORTA_SRC:/aorta-src:ro" \
-        --mount "$RUNNER:/runner.py:ro" \
-        --mount "$RECIPE:/recipe.yaml:ro" \
-        --mount "$OUT:/out" \
-        --mount "$OUT:/tmp/aorta-build" \
-        -- sh -c "$CONTAINER_BOOT"
+      RECIPE_JSON='["triage","run","--verbose","--recipe","/recipe.yaml","--output-dir","/out/triage_results"]'
+      recipe_mount=(--mount "$RECIPE:/recipe.yaml:ro")
     else
-      "$MIRAGE_BIN" run --in-process --profile "$PROFILE" \
-        --image "$IMAGE" \
-        --env 'AORTA_CLI_JSON=["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/llm-determinism-emulated.yaml","--output-dir","/out/triage_results"]' \
-        --env RANK=0 --env WORLD_SIZE=1 --env LOCAL_RANK=0 \
-        --env MASTER_ADDR=127.0.0.1 --env MASTER_PORT=29500 \
-        --mount "$AORTA_SRC:/aorta-src:ro" \
-        --mount "$RUNNER:/runner.py:ro" \
-        --mount "$OUT:/out" \
-        --mount "$OUT:/tmp/aorta-build" \
-        -- sh -c "$CONTAINER_BOOT"
+      RECIPE_JSON='["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/llm-determinism-emulated.yaml","--output-dir","/out/triage_results"]'
     fi
+    "$MIRAGE_BIN" run --in-process --profile "$PROFILE" \
+      --image "$IMAGE" \
+      --env "AORTA_CLI_JSON=$RECIPE_JSON" \
+      --env RANK=0 --env WORLD_SIZE=1 --env LOCAL_RANK=0 \
+      --env MASTER_ADDR=127.0.0.1 --env MASTER_PORT=29500 \
+      --mount "$AORTA_SRC:/aorta-src:ro" \
+      --mount "$RUNNER:/runner.py:ro" \
+      ${recipe_mount[@]+"${recipe_mount[@]}"} \
+      --mount "$OUT:/out" \
+      --mount "$OUT:/tmp/aorta-build" \
+      -- sh -c "$CONTAINER_BOOT"
     ;;
   *)
     fail "unknown workload: $WORKLOAD (try: gpu-smoke, probe, inference-smoke, training-ddp-smoke, training-fsdp-smoke, llm-determinism)"

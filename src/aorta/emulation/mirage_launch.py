@@ -110,16 +110,25 @@ def resolve_mirage_bin() -> str:
         # Expand ``~`` and ``$VARS`` so copy/pasted overrides like
         # ``MIRAGE_BIN=~/bin/mirage`` resolve like typical shell paths.
         override = os.path.expandvars(os.path.expanduser(override))
-        # An explicit override may be an absolute path that exists, or a name
-        # to resolve on PATH. Accept either; fail loudly if neither resolves.
-        if os.path.isabs(override) and os.access(override, os.X_OK):
-            return override
+        # An override with a directory component -- absolute *or* relative
+        # (e.g. ``./build/manylinux/bin/mirage``, as used in this repo's docs
+        # and helper scripts) -- is a filesystem path, not a $PATH lookup.
+        # Normalise it to an absolute path so the result stays valid even if
+        # the working directory changes before mirage is exec'd.
+        if os.path.dirname(override):
+            candidate = os.path.abspath(override)
+            if os.access(candidate, os.X_OK):
+                return candidate
+            raise EmulationError(
+                f"{ENV_MIRAGE_BIN}={override!r} looks like a path but does not "
+                "point to an executable file."
+            )
+        # A bare name (no directory component): resolve it on $PATH.
         found = shutil.which(override)
         if found:
             return found
         raise EmulationError(
-            f"{ENV_MIRAGE_BIN}={override!r} does not resolve to an executable "
-            f"(not an executable absolute path and not found on $PATH)."
+            f"{ENV_MIRAGE_BIN}={override!r} was not found on $PATH."
         )
     found = shutil.which(_DEFAULT_MIRAGE_BIN)
     if found:
