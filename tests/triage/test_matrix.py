@@ -889,3 +889,29 @@ def test_metrics_summary_empty_for_error_cell():
     trials = [_metric_trial({"gflops": 100.0})]
     stats = _default_call(trials=trials, error="docker pull failed")
     assert stats.metrics_summary == {}
+
+
+def test_metrics_summary_skips_non_finite_values():
+    """NaN / +-Inf are not measurements and would serialize as invalid JSON
+    (``NaN`` / ``Infinity``) in matrix.json, so they are dropped entirely."""
+    trials = [
+        _metric_trial({"final_loss": float("nan"), "gflops": 100.0}),
+        _metric_trial({"final_loss": float("inf"), "gflops": 200.0}),
+    ]
+    stats = _default_call(trials=trials)
+    # final_loss saw only non-finite values -> dropped completely.
+    assert "final_loss" not in stats.metrics_summary
+    assert stats.metrics_summary["gflops"]["n"] == 2.0
+
+
+def test_metrics_summary_aggregates_finite_and_skips_non_finite_for_same_key():
+    """A key with a mix of finite and non-finite values aggregates only the
+    finite occurrences."""
+    trials = [
+        _metric_trial({"gflops": 100.0}),
+        _metric_trial({"gflops": float("nan")}),
+        _metric_trial({"gflops": 300.0}),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.metrics_summary["gflops"]["n"] == 2.0
+    assert stats.metrics_summary["gflops"]["mean"] == 200.0

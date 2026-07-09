@@ -560,9 +560,12 @@ def _aggregate_metrics(trials: list[Any]) -> dict[str, dict[str, float]]:
     whose value is a list / dict / string / bool in any trial are ignored for
     that trial (so the ``failure_detectors_fired`` list channel never leaks
     into the perf summary); a key that is scalar in some trials and non-scalar
-    in others is aggregated over just the scalar occurrences. Returns ``{}``
-    when no passing trial reported any numeric metric -- the common case for
-    correctness / triage workloads, which then render no throughput table.
+    in others is aggregated over just the scalar occurrences. Non-finite floats
+    (NaN / +-Inf) are also skipped -- they are not usable measurements and would
+    serialize as invalid JSON (``NaN`` / ``Infinity``) in ``matrix.json``.
+    Returns ``{}`` when no passing trial reported any numeric metric -- the
+    common case for correctness / triage workloads, which then render no
+    throughput table.
     """
     collected: dict[str, list[float]] = {}
     for trial in trials:
@@ -579,6 +582,13 @@ def _aggregate_metrics(trials: list[Any]) -> dict[str, dict[str, float]]:
             # ``bool`` is an ``int`` subclass; a True/False flag is not a
             # performance measurement, so exclude it explicitly.
             if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            # Skip non-finite values (NaN / +-Inf): they are not usable perf
+            # numbers and json.dumps would serialize them as ``NaN`` /
+            # ``Infinity``, which is invalid JSON for strict parsers. They are
+            # realistically reachable -- e.g. a workload that initializes a
+            # metric to ``float("nan")`` and reports it.
+            if not math.isfinite(value):
                 continue
             collected.setdefault(str(key), []).append(float(value))
     summary: dict[str, dict[str, float]] = {}
