@@ -222,7 +222,11 @@ class HrxPerfWorkload(Workload):
         # each trial. The default build_dir is a fresh temp dir, so this only
         # fires for an operator-supplied build_dir (assumed not shared across
         # differing bench/arch configs -- the binary name encodes neither).
-        if binary.is_file():
+        # Require the execute bit before reusing: a leftover artifact with wrong
+        # permissions or a partial write would otherwise be reused and fail
+        # run() with PermissionError -- a cell error rather than a recoverable
+        # rebuild.
+        if binary.is_file() and os.access(binary, os.X_OK):
             log.debug("hrx_perf: reusing existing %s in %s", self._spec.binary, self._build_dir)
             return binary
         cmd = [

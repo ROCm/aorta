@@ -344,7 +344,16 @@ class HrxWorkload(Workload):
         # supplied build_dir. Assumes that dir is not shared across differing
         # probe/arch configs -- the binary name encodes neither -- which is the
         # same assumption a fixed build_dir already implies.
-        if binary.is_file() and (kernel_obj is None or kernel_obj.is_file()):
+        # Require the execute bit before reusing: a leftover artifact with wrong
+        # permissions or a partial write would otherwise be reused and fail
+        # run() with PermissionError -- a cell error rather than a recoverable
+        # rebuild. The kernel code object is loaded (not exec'd), so it only
+        # needs to exist.
+        if (
+            binary.is_file()
+            and os.access(binary, os.X_OK)
+            and (kernel_obj is None or kernel_obj.is_file())
+        ):
             log.debug("hrx: reusing existing %s in %s", spec.binary, self._build_dir)
             return binary
         # Standalone code object first (module path only), placed next to the

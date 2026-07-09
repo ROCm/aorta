@@ -79,9 +79,11 @@ def test_setup_raises_without_gpu(monkeypatch, tmp_path):
 
 
 def test_build_reuses_existing_binary(monkeypatch, tmp_path):
-    """A pre-built benchmark in a shared build_dir is reused (no recompile)."""
+    """A pre-built (executable) benchmark in a shared build_dir is reused."""
     monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
-    (tmp_path / _BENCHES["gemm"].binary).write_bytes(b"\x7fELF")
+    binary = tmp_path / _BENCHES["gemm"].binary
+    binary.write_bytes(b"\x7fELF")
+    binary.chmod(0o755)
 
     def _fail_run(*a, **k):
         raise AssertionError("hipcc must not run when the binary already exists")
@@ -89,7 +91,25 @@ def test_build_reuses_existing_binary(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", _fail_run)
     wl = HrxPerfWorkload({"bench": "gemm", "build_dir": str(tmp_path)})
     wl.setup()
-    assert wl._binary == (tmp_path / _BENCHES["gemm"].binary)
+    assert wl._binary == binary
+
+
+def test_build_rebuilds_when_binary_not_executable(monkeypatch, tmp_path):
+    """A leftover benchmark binary without the execute bit is NOT reused --
+    reusing it would fail run() with PermissionError, so it must rebuild."""
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    binary = tmp_path / _BENCHES["gemm"].binary
+    binary.write_bytes(b"\x7fELF")
+    binary.chmod(0o644)  # readable but not executable
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    HrxPerfWorkload({"bench": "gemm", "build_dir": str(tmp_path)}).setup()
+    assert calls, "hipcc must run when the existing binary is not executable"
 
 
 def test_build_passes_sanitized_env_and_arch(monkeypatch, tmp_path):

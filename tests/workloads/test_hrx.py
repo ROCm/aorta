@@ -90,10 +90,12 @@ def test_gpu_available_uses_kfd_access(monkeypatch):
 
 
 def test_build_reuses_existing_binary(monkeypatch, tmp_path):
-    """A pre-built binary in a shared build_dir is reused (no recompile)."""
+    """A pre-built (executable) binary in a shared build_dir is reused."""
     monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
     # static probe: single binary, no code object.
-    (tmp_path / _PROBES["static"].binary).write_bytes(b"\x7fELF")
+    binary = tmp_path / _PROBES["static"].binary
+    binary.write_bytes(b"\x7fELF")
+    binary.chmod(0o755)
 
     def _fail_run(*a, **k):
         raise AssertionError("hipcc must not run when the binary already exists")
@@ -101,14 +103,36 @@ def test_build_reuses_existing_binary(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", _fail_run)
     wl = HrxWorkload({"probe": "static", "build_dir": str(tmp_path)})
     wl.setup()
-    assert wl._binary == (tmp_path / _PROBES["static"].binary)
+    assert wl._binary == binary
+
+
+def test_build_rebuilds_when_binary_not_executable(monkeypatch, tmp_path):
+    """A leftover binary without the execute bit (wrong perms / partial write)
+    is NOT reused -- reusing it would fail run() with PermissionError, so it
+    must rebuild instead."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    binary = tmp_path / _PROBES["static"].binary
+    binary.write_bytes(b"\x7fELF")
+    binary.chmod(0o644)  # readable but not executable
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    HrxWorkload({"probe": "static", "build_dir": str(tmp_path)}).setup()
+    assert calls, "hipcc must run when the existing binary is not executable"
 
 
 def test_build_recompiles_when_code_object_missing(monkeypatch, tmp_path):
     """Module probe with a stale binary but no code object must rebuild."""
     monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
-    # Binary present but the required .code object is absent -> not reusable.
-    (tmp_path / _PROBES["module"].binary).write_bytes(b"\x7fELF")
+    # Binary present + executable, but the required .code object is absent ->
+    # not reusable, so the rebuild reason is purely the missing code object.
+    binary = tmp_path / _PROBES["module"].binary
+    binary.write_bytes(b"\x7fELF")
+    binary.chmod(0o755)
     calls: list[list[str]] = []
 
     def _fake_run(cmd, *a, **k):
