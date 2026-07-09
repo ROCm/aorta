@@ -1210,7 +1210,12 @@ def run_recipe(
     subprocess_argv: tuple[str, ...] | None = None,
     strict: bool = False,
 ) -> Path:
-    """Execute a recipe and write matrix.md / matrix.json / recipe.resolved.yaml.
+    """Execute a recipe and write matrix.md / matrix.json / perf.md / recipe.resolved.yaml.
+
+    ``perf.md`` is a per-run performance report written next to
+    ``matrix.md`` / ``matrix.json`` on every run (pure formatting of the
+    already-collected per-trial timing + metrics; no flag, no extra
+    measurement).
 
     Args:
         recipe: Pre-validated recipe (from :func:`aorta.triage.recipe.load_recipe`

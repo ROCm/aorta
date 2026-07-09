@@ -89,11 +89,18 @@ def test_gpu_available_uses_kfd_access(monkeypatch):
     assert seen["path"] == hrx_mod._GPU_KFD_NODE
 
 
+def _arch_dir(build_dir, arch=hrx_mod._DEFAULT_ARCH):
+    """Artifacts live in <build_dir>/<arch>/ (see HrxWorkload._build_root)."""
+    d = build_dir / arch
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def test_build_reuses_existing_binary(monkeypatch, tmp_path):
     """A pre-built (executable) binary in a shared build_dir is reused."""
     monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
     # static probe: single binary, no code object.
-    binary = tmp_path / _PROBES["static"].binary
+    binary = _arch_dir(tmp_path) / _PROBES["static"].binary
     binary.write_bytes(b"\x7fELF")
     binary.chmod(0o755)
 
@@ -111,7 +118,7 @@ def test_build_rebuilds_when_binary_not_executable(monkeypatch, tmp_path):
     is NOT reused -- reusing it would fail run() with PermissionError, so it
     must rebuild instead."""
     monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
-    binary = tmp_path / _PROBES["static"].binary
+    binary = _arch_dir(tmp_path) / _PROBES["static"].binary
     binary.write_bytes(b"\x7fELF")
     binary.chmod(0o644)  # readable but not executable
     calls: list[list[str]] = []
@@ -125,12 +132,35 @@ def test_build_rebuilds_when_binary_not_executable(monkeypatch, tmp_path):
     assert calls, "hipcc must run when the existing binary is not executable"
 
 
+def test_build_rebuilds_for_different_arch(monkeypatch, tmp_path):
+    """A binary built for one arch must NOT be reused when a different arch is
+    requested against the same build_dir -- reuse is isolated per arch subdir,
+    so a shared build_dir can't silently run a wrong-arch binary."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    # An executable binary present under gfx90a...
+    other = _arch_dir(tmp_path, "gfx90a") / _PROBES["static"].binary
+    other.write_bytes(b"\x7fELF")
+    other.chmod(0o755)
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    # ...but we request gfx942, so it must rebuild rather than reuse gfx90a's.
+    HrxWorkload(
+        {"probe": "static", "gpu_arch": "gfx942", "build_dir": str(tmp_path)}
+    ).setup()
+    assert calls, "hipcc must run when only a different-arch binary exists"
+
+
 def test_build_recompiles_when_code_object_missing(monkeypatch, tmp_path):
     """Module probe with a stale binary but no code object must rebuild."""
     monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
     # Binary present + executable, but the required .code object is absent ->
     # not reusable, so the rebuild reason is purely the missing code object.
-    binary = tmp_path / _PROBES["module"].binary
+    binary = _arch_dir(tmp_path) / _PROBES["module"].binary
     binary.write_bytes(b"\x7fELF")
     binary.chmod(0o755)
     calls: list[list[str]] = []

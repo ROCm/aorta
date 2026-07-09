@@ -331,19 +331,34 @@ class HrxWorkload(Workload):
                 f"stderr:\n{proc.stderr.strip()}"
             )
 
+    def _build_root(self) -> Path:
+        """Arch-specific artifact directory under ``build_dir``.
+
+        The binary/code-object names encode the probe but NOT the GPU arch, so a
+        shared ``build_dir`` reused across differing ``--offload-arch`` builds
+        would otherwise reuse a binary compiled for the wrong arch and silently
+        run the wrong thing. Isolating artifacts in a ``<build_dir>/<arch>/``
+        subdir makes reuse arch-safe; the probe loads its code object from its
+        own exe directory (``/proc/self/exe``), so the relative name still
+        resolves inside the subdir.
+        """
+        root = self._build_dir / self._arch
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
     def _build(self) -> Path:
         spec = self._spec
-        binary = self._build_dir / spec.binary
+        build_root = self._build_root()
+        binary = build_root / spec.binary
         kernel_obj = (
-            self._build_dir / spec.kernel_object if spec.kernel_object else None
+            build_root / spec.kernel_object if spec.kernel_object else None
         )
         # Reuse an already-built probe. setup() runs once per trial, so a run
         # that pins a shared build_dir would otherwise recompile identical
         # artifacts every trial. The default build_dir is a fresh temp dir
         # (unique per setup), so this fast-path only fires for an operator-
-        # supplied build_dir. Assumes that dir is not shared across differing
-        # probe/arch configs -- the binary name encodes neither -- which is the
-        # same assumption a fixed build_dir already implies.
+        # supplied build_dir. Artifacts live in an arch subdir (see
+        # _build_root), so reuse across differing arch configs is safe.
         # Require the execute bit before reusing: a leftover artifact with wrong
         # permissions or a partial write would otherwise be reused and fail
         # run() with PermissionError -- a cell error rather than a recoverable
@@ -354,7 +369,7 @@ class HrxWorkload(Workload):
             and os.access(binary, os.X_OK)
             and (kernel_obj is None or kernel_obj.is_file())
         ):
-            log.debug("hrx: reusing existing %s in %s", spec.binary, self._build_dir)
+            log.debug("hrx: reusing existing %s in %s", spec.binary, build_root)
             return binary
         # Standalone code object first (module path only), placed next to the
         # binary because the probe loads it from its own exe directory.
@@ -365,7 +380,7 @@ class HrxWorkload(Workload):
                     f"--offload-arch={self._arch}",
                     str(_KERNELS_DIR / spec.kernel_source),
                     "-o",
-                    str(self._build_dir / spec.kernel_object),
+                    str(build_root / spec.kernel_object),
                 ],
                 spec.kernel_object,
             )

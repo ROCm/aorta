@@ -39,5 +39,8 @@ int main() {
   else if (out_h[0] == 100.0f) printf("VERDICT=INPUT_READ_ZERO (H2D/in-arg broken)\n");
   else if (out_h[0] == 0.0f)   printf("VERDICT=OUTPUT_NOT_WRITTEN (kernel-write/out-arg broken)\n");
   else                         printf("VERDICT=GARBAGE (address mismatch)\n");
-  return 0;
+  // Exit 0 on 107 (works), 1 otherwise -- mirrors the other probe variants so
+  // downstream tooling can tell success from failure by exit code even if
+  // stdout parsing changes.
+  return out_h[0] == 107.0f ? 0 : 1;
 }

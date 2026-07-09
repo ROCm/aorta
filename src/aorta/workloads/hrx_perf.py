@@ -216,18 +216,24 @@ class HrxPerfWorkload(Workload):
         self._binary = self._build()
 
     def _build(self) -> Path:
-        binary = self._build_dir / self._spec.binary
+        # Artifacts live in an arch subdir so a shared build_dir reused across
+        # differing --offload-arch builds can't reuse a benchmark compiled for a
+        # different GPU arch (the binary name encodes the bench but not the
+        # arch). size/iters/warmup are runtime argv, not compile-time, so arch
+        # is the only compile-time discriminator that needs isolating.
+        build_root = self._build_dir / self._arch
+        build_root.mkdir(parents=True, exist_ok=True)
+        binary = build_root / self._spec.binary
         # Reuse an already-built benchmark. setup() runs per trial, so a run
         # pinning a shared build_dir would otherwise recompile the same binary
         # each trial. The default build_dir is a fresh temp dir, so this only
-        # fires for an operator-supplied build_dir (assumed not shared across
-        # differing bench/arch configs -- the binary name encodes neither).
+        # fires for an operator-supplied build_dir.
         # Require the execute bit before reusing: a leftover artifact with wrong
         # permissions or a partial write would otherwise be reused and fail
         # run() with PermissionError -- a cell error rather than a recoverable
         # rebuild.
         if binary.is_file() and os.access(binary, os.X_OK):
-            log.debug("hrx_perf: reusing existing %s in %s", self._spec.binary, self._build_dir)
+            log.debug("hrx_perf: reusing existing %s in %s", self._spec.binary, build_root)
             return binary
         cmd = [
             self._hipcc,

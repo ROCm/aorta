@@ -547,6 +547,13 @@ def _percentile(samples: list[float], q: float) -> float:
 def _aggregate_metrics(trials: list[Any]) -> dict[str, dict[str, float]]:
     """Aggregate scalar ``result["metrics"]`` values across a cell's trials.
 
+    Only trials that represent a **valid, successful observation** are
+    aggregated -- ``trial_verdict(trial) == "pass"``. ``perf.md`` presents these
+    as performance numbers, so metrics from failed / errored trials (partial
+    output, a preflight failure that still emitted some numeric fields, a
+    ``PERF_FAIL`` checksum) would be misleading and are skipped. A cell whose
+    trials all failed therefore contributes no metrics (empty summary).
+
     For every metric key whose value is a real int/float scalar (``bool`` is
     excluded -- it is an ``int`` subclass but not a measurement), collect the
     per-trial values and reduce them to ``{"mean", "min", "max", "n"}``. Keys
@@ -554,11 +561,14 @@ def _aggregate_metrics(trials: list[Any]) -> dict[str, dict[str, float]]:
     that trial (so the ``failure_detectors_fired`` list channel never leaks
     into the perf summary); a key that is scalar in some trials and non-scalar
     in others is aggregated over just the scalar occurrences. Returns ``{}``
-    when no trial reported any numeric metric -- the common case for
+    when no passing trial reported any numeric metric -- the common case for
     correctness / triage workloads, which then render no throughput table.
     """
     collected: dict[str, list[float]] = {}
     for trial in trials:
+        # Only successful trials yield trustworthy perf numbers (see docstring).
+        if trial_verdict(trial) != "pass":
+            continue
         result = getattr(trial, "result", None)
         if not isinstance(result, dict):
             continue

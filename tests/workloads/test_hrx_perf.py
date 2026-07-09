@@ -78,10 +78,17 @@ def test_setup_raises_without_gpu(monkeypatch, tmp_path):
         wl.setup()
 
 
+def _arch_dir(build_dir, arch=perf_mod._DEFAULT_ARCH):
+    """Artifacts live in <build_dir>/<arch>/ (see HrxPerfWorkload._build)."""
+    d = build_dir / arch
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def test_build_reuses_existing_binary(monkeypatch, tmp_path):
     """A pre-built (executable) benchmark in a shared build_dir is reused."""
     monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
-    binary = tmp_path / _BENCHES["gemm"].binary
+    binary = _arch_dir(tmp_path) / _BENCHES["gemm"].binary
     binary.write_bytes(b"\x7fELF")
     binary.chmod(0o755)
 
@@ -98,7 +105,7 @@ def test_build_rebuilds_when_binary_not_executable(monkeypatch, tmp_path):
     """A leftover benchmark binary without the execute bit is NOT reused --
     reusing it would fail run() with PermissionError, so it must rebuild."""
     monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
-    binary = tmp_path / _BENCHES["gemm"].binary
+    binary = _arch_dir(tmp_path) / _BENCHES["gemm"].binary
     binary.write_bytes(b"\x7fELF")
     binary.chmod(0o644)  # readable but not executable
     calls: list[list[str]] = []
@@ -110,6 +117,26 @@ def test_build_rebuilds_when_binary_not_executable(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", _fake_run)
     HrxPerfWorkload({"bench": "gemm", "build_dir": str(tmp_path)}).setup()
     assert calls, "hipcc must run when the existing binary is not executable"
+
+
+def test_build_rebuilds_for_different_arch(monkeypatch, tmp_path):
+    """A benchmark built for one arch must NOT be reused when a different arch is
+    requested against the same build_dir -- reuse is isolated per arch subdir."""
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    other = _arch_dir(tmp_path, "gfx90a") / _BENCHES["gemm"].binary
+    other.write_bytes(b"\x7fELF")
+    other.chmod(0o755)
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    HrxPerfWorkload(
+        {"bench": "gemm", "gpu_arch": "gfx942", "build_dir": str(tmp_path)}
+    ).setup()
+    assert calls, "hipcc must run when only a different-arch binary exists"
 
 
 def test_build_passes_sanitized_env_and_arch(monkeypatch, tmp_path):
