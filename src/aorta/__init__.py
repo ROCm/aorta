@@ -5,16 +5,30 @@ This package provides:
 - GPU hardware queue evaluation framework (hw_queue_eval subpackage)
 """
 
-__version__ = "0.2.0"
-
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
+
+# Single source of truth for the version is the distribution metadata, which is
+# generated from ``pyproject.toml`` at build/install time. This keeps
+# ``aorta.__version__`` in lockstep with whatever was actually installed (wheel,
+# ``pip install .``, editable, or ``pip install git+...``) instead of a hard-coded
+# literal that silently drifts from the released version. This runs at import
+# time, so the fallback is best-effort and defensive: besides the expected
+# missing-metadata case (uninstalled source tree), any unexpected metadata error
+# (e.g. unreadable/corrupted dist-info) must not break ``import aorta``.
+try:
+    __version__ = version("amd-aorta")
+except PackageNotFoundError:  # source tree without dist-info
+    __version__ = "0.0.0+unknown"
+except Exception:  # pragma: no cover - defensive: never break import on metadata errors
+    __version__ = "0.0.0+unknown"
 
 
 def load_training_entrypoint() -> Any:
     """Lazily import and return the default training entry point."""
     module = import_module("aorta.training.fsdp_trainer")
-    return getattr(module, "main")
+    return module.main
 
 
 def load_hw_queue_eval():

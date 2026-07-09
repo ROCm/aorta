@@ -70,17 +70,22 @@ from aorta.triage.runner import run_recipe
 
 
 def _aorta_package_version() -> str:
-    """Return the installed ``aorta`` package version (best-effort).
+    """Return the installed ``amd-aorta`` package version (best-effort).
 
-    ``importlib.metadata.version`` is the supported API; falls back
-    to ``"unknown"`` only when the package metadata is missing
-    (editable install on a Python that doesn't expose dist-info,
-    very rare).
+    Queries the canonical *distribution* name (``amd-aorta``), not the import
+    package name (``aorta``). ``importlib.metadata.version`` is the supported
+    API; falls back to ``"unknown"`` when the package metadata is missing
+    (``PackageNotFoundError`` -- e.g. an editable install on a Python that
+    doesn't expose dist-info) and, defensively, on any other unexpected
+    metadata error, since a version banner must never crash the probe.
     """
     try:
         from importlib.metadata import PackageNotFoundError, version
 
-        return version("aorta")
+        # Query the canonical distribution name from pyproject.toml (``amd-aorta``),
+        # not the import package name (``aorta``), so this resolves reliably from
+        # installed dist metadata rather than falling back to "unknown".
+        return version("amd-aorta")
     except PackageNotFoundError:
         return "unknown"
     except Exception:  # pragma: no cover - defensive

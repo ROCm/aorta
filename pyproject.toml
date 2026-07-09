@@ -1,10 +1,14 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=64", "setuptools_scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "amd-aorta"
-version = "0.2.0"
+# The version is not hard-coded here: it is derived from git tags at build time
+# by setuptools_scm (see [tool.setuptools_scm]). ``dynamic`` tells setuptools the
+# version is supplied by the build backend, so there is a single source of truth
+# (the ``vX.Y.Z`` tag) that both released wheels and local/editable installs read.
+dynamic = ["version"]
 description = "PyTorch compute-communication overlap debugging toolkit with GPU hardware queue evaluation"
 readme = "README.md"
 license = {text = "MIT"}
@@ -126,6 +130,41 @@ all = [
 Homepage = "https://github.com/ROCm/aorta"
 Documentation = "https://github.com/ROCm/aorta#readme"
 Repository = "https://github.com/ROCm/aorta"
+
+[tool.setuptools_scm]
+# Single source of truth for the version: the ``vX.Y.Z`` git tags.
+#   * a checkout sitting exactly on a tag builds a clean ``X.Y.Z``;
+#   * a checkout ahead of the latest tag builds ``X.Y.(Z+1).devN+g<sha>`` so a
+#     local ``pip install .`` / ``pip install git+...`` always reflects the most
+#     recent release (plus how far past it the tree is), never a stale literal.
+# Only exact ``vMAJOR.MINOR.PATCH`` tags are matched (same shape as
+# ``scripts/bump_version.py``), so neither the rolling ``dev-wheels`` nightly tag
+# nor a stray ``v1`` / ``v1beta`` / ``v0.2.0rc1`` / ``v1.2.3.4`` tag can be
+# mistaken for a release. The ``--match`` glob is only a coarse first pass (glob
+# ``*`` also spans dots, so it alone still admits ``v0.2.0rc1`` and
+# ``v1.2.3.4``); ``--exclude`` drops any tag carrying a non-digit/non-dot
+# character or a fourth numeric segment, and ``tag_regex`` then anchors the
+# extracted version to exactly three numeric components with no leading zeros
+# (so it round-trips through the integer parsing in ``bump_version.py`` and the
+# release gate unchanged). A tree with no git
+# metadata (e.g. an unpacked sdist without .git) falls back to the literal below;
+# built sdists/wheels embed the resolved version in their metadata, so installing
+# from those still reports the correct version.
+tag_regex = "^v(?P<version>(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*))$"
+git_describe_command = [
+    "git",
+    "describe",
+    "--dirty",
+    "--tags",
+    "--long",
+    "--match",
+    "v[0-9]*.[0-9]*.[0-9]*",
+    "--exclude",
+    "v*[!0-9.]*",
+    "--exclude",
+    "v*.*.*.*",
+]
+fallback_version = "0.0.0+unknown"
 
 [tool.setuptools.packages.find]
 where = ["src"]
