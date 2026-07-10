@@ -9,7 +9,7 @@ Exhaustive command reference for manually testing and demoing [PR #227](https://
 
 **What works on this host (validated):**
 - **rocjitsu + mi350x** + vLLM container → full AORTA gpu_smoke / probe demo (~3–5 s)
-- **Host unit tests** → no GPU required (35 emulation/gpu_smoke tests)
+- **Host unit tests** → no GPU required (emulation + gpu_smoke suites)
 
 **Known limitations:**
 - Default image tag `v0.23.0-patched-v2` is **not** on this registry — use `:latest`
@@ -36,8 +36,7 @@ mkdir -p "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
 
 source "$WORK_ROOT/.venv-aorta/bin/activate"
 cd "$AORTA_ROOT"
-git checkout users/vivekkhandelwal1/mirage-emulation
-git pull origin users/vivekkhandelwal1/mirage-emulation
+git pull   # ensure the emulation code is present (merged on the default branch)
 pip install -e . --quiet
 chmod +x scripts/emulation/*.sh
 ```
@@ -344,7 +343,7 @@ python -m pytest tests/run/test_dispatcher.py -v -k environment
 
 # All emulation-related together
 python -m pytest tests/emulation/ tests/workloads/test_gpu_smoke.py -q
-# expect: 35 passed
+# expect: all pass
 ```
 
 ---

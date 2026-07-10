@@ -117,7 +117,11 @@ def resolve_mirage_bin() -> str:
         # the working directory changes before mirage is exec'd.
         if os.path.dirname(override):
             candidate = os.path.abspath(override)
-            if os.access(candidate, os.X_OK):
+            # Require a regular file, not just any +x path: directories usually
+            # carry the execute (traversal) bit, so an `os.access(..., X_OK)`
+            # check alone would wrongly accept a directory and defer the failure
+            # to a cryptic exec error.
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 return candidate
             raise EmulationError(
                 f"{ENV_MIRAGE_BIN}={override!r} looks like a path but does not "

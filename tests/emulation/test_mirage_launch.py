@@ -10,6 +10,7 @@ Covers, without needing mirage/rocjitsu/torch installed:
   untouched.
 """
 
+import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -182,6 +183,16 @@ class TestWrapArgv:
         # loudly (not silently fall back to $PATH).
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv(ENV_MIRAGE_BIN, "./does/not/exist/mirage")
+        with pytest.raises(EmulationError, match="does not point to an executable"):
+            wrap_argv_for_environment(_emulated_config(), ["python", "x.py"])
+
+    def test_mirage_bin_directory_rejected(self, monkeypatch, tmp_path):
+        # A directory typically carries the +x (traversal) bit; it must not be
+        # accepted just because os.access(..., X_OK) is true -- require a file.
+        d = tmp_path / "mirage"  # a directory named like the binary
+        d.mkdir()
+        assert os.access(d, os.X_OK)  # sanity: dir is "executable"
+        monkeypatch.setenv(ENV_MIRAGE_BIN, str(d))
         with pytest.raises(EmulationError, match="does not point to an executable"):
             wrap_argv_for_environment(_emulated_config(), ["python", "x.py"])
 

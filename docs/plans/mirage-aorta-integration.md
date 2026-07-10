@@ -31,7 +31,7 @@ honours it.
 * `mirage_profile` — name of a mirage profile (which itself encodes the emulator
   backend, topology, and exec mode). Authoritative.
 * `emulator` — optional convenience hint naming the backend
-  (`"rocjitsu"` / `"hotswap"` / `"noop"`).
+  (`"rocjitsu"` / `"rocjitsu-dbt"` / `"noop"`).
 
 Both default `None`, so every existing environment, recipe, and sidecar is
 unchanged. The registry (`environments.py`) and the JSON sidecar loader

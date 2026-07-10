@@ -40,14 +40,13 @@ mirage emulators   # rocjitsu: installed + supported
 
 ---
 
-## 3. Clone this branch
+## 3. Clone AORTA
 
 ```bash
-git clone --branch users/vivekkhandelwal1/mirage-emulation \
-  --depth 1 https://github.com/ROCm/aorta.git aorta
+git clone --depth 1 https://github.com/ROCm/aorta.git aorta
 cd aorta
 pip install -e .   # optional: host unit tests only
-python -m pytest tests/emulation/ -q   # 26 passed, no GPU
+python -m pytest tests/emulation/ -q   # all pass, no GPU required
 ```
 
 ---
