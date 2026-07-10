@@ -54,6 +54,8 @@ _subprocess = "aorta.workloads._subprocess:SubprocessWorkload"
 inference = "aorta.workloads.inference:InferenceWorkload"
 llm_determinism = "aorta.workloads.llm_determinism:LlmDeterminismWorkload"
 race = "aorta.workloads.race:RaceWorkload"
+# Single-process GPU smoke test (no torchrun); ideal for emulated/CI runs.
+gpu_smoke = "aorta.workloads.gpu_smoke:GpuSmokeWorkload"
 training = "aorta.workloads.training:TrainingWorkload"
 
 [project.optional-dependencies]

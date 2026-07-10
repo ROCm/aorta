@@ -146,6 +146,8 @@ def test_environment_constructs_with_buck_target_only():
         "docker": None,
         "venv": None,
         "buck_target": "//foo:bar",
+        "emulator": None,
+        "mirage_profile": None,
         "source_package": "aorta",
     }
 

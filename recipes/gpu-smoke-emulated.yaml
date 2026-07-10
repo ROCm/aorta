@@ -1,0 +1,31 @@
+# Single-process GPU smoke test on an emulated MI350X (mirage + rocjitsu).
+#
+# Recommended (container — fast torch path):
+#
+#   export MIRAGE_BIN=/path/to/mirage
+#   ./scripts/emulation/run_mirage_container.sh gpu-smoke
+#
+# Host one-liner (slow under rocjitsu CPU emulation; prefer container above):
+#
+#   mirage profile create mi350x --emulator rocjitsu --agent MI350X --no-input
+#   mirage run --profile mi350x -- \
+#     aorta triage run --recipe recipes/gpu-smoke-emulated.yaml
+#
+# Prereqs: mirage CLI (or $MIRAGE_BIN), rocjitsu runtime, container torch for
+# the recommended path. Expected result: the cell PASSES.
+schema_version: 1
+
+ticket: EMU-SMOKE-001
+workload: gpu_smoke
+
+trials: 1
+steps: 1
+
+workload_config:
+  n: 8
+  dtype: float32
+
+cells:
+  - name: emulated-rocjitsu
+    mitigations: [none]
+    environment: emulated-rocjitsu

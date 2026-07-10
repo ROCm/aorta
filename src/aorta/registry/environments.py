@@ -1,14 +1,15 @@
 """Environments registry: built-ins + entry-point discovery + collision detection.
 
 Mirrors the mitigations registry. Plugin payloads are validated against
-`_VALID_ENV_KEYS` — `docker`, `venv`, and `buck_target` are accepted. ROCm
-version is intentionally not a valid key (see `Environment` docstring).
+`_VALID_ENV_KEYS` — `docker`, `venv`, `buck_target`, `emulator`, and
+`mirage_profile` are accepted. ROCm version is intentionally not a valid key
+(see `Environment` docstring).
 
 Plugin authors register one entry-point per environment in their `pyproject.toml`
 under the `aorta.environments` group. The entry-point name IS the environment
 name; the loaded object is the recipe (`dict[str, str | None]` with any of the
-keys `docker`, `venv`, `buck_target`). Mirrors the `aorta.workloads`
-extension-point pattern.
+keys `docker`, `venv`, `buck_target`, `emulator`, `mirage_profile`). Mirrors
+the `aorta.workloads` extension-point pattern.
 """
 
 from importlib.metadata import entry_points
@@ -24,8 +25,10 @@ from aorta.registry.types import Environment
 
 _GROUP = "aorta.environments"
 # `buck_target` joins `docker` / `venv` as a peer baseline-recipe key (#182).
-# Order in the frozenset is irrelevant; spelled this way for grep-ability.
-_VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target"})
+# `emulator` / `mirage_profile` add a GPU-emulated baseline axis (mirage +
+# rocjitsu) so workloads can run with no physical GPU. Order in the frozenset
+# is irrelevant; spelled this way for grep-ability.
+_VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target", "emulator", "mirage_profile"})
 
 # Built-in environments. `local` and `default` are both "current process, no
 # overrides" — `default` is reserved as a site-configurable alias. Customer
@@ -34,6 +37,21 @@ _VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target"})
 BUILTIN_ENVIRONMENTS: dict[str, dict[str, str | None]] = {
     "local":   {},
     "default": {},
+    # GPU-emulated baseline: run the workload under the mirage control plane +
+    # rocjitsu software emulator (no physical GPU). `mirage_profile` names the
+    # mirage profile `mi350x` (MI350X = gfx950, single-GPU CDNA4 node). Scripts
+    # under `scripts/emulation/` create this profile on first use if missing.
+    # `emulator` is a convenience hint. Consumed by aorta.emulation.mirage_launch.
+    "emulated-rocjitsu": {
+        "emulator": "rocjitsu",
+        "mirage_profile": "mi350x",
+    },
+    # Same as emulated-rocjitsu but uses rocjitsu-dbt (dynamic binary translation
+    # onto a physical GPU). Requires supported host hardware.
+    "emulated-rocjitsu-dbt": {
+        "emulator": "rocjitsu-dbt",
+        "mirage_profile": "dbt-mi350x",
+    },
 }
 
 
@@ -50,9 +68,10 @@ def load_environments(
 
     Raises:
         RegistryCollisionError: two contributors registered the same environment name.
-        RegistryError: a plugin's payload was not a dict, contained keys other
-            than `docker` / `venv`, or had non-`str | None` values; or a sidecar
-            file failed schema validation.
+        RegistryError: a plugin's payload was not a dict, contained keys outside
+            ``_VALID_ENV_KEYS`` (``docker``, ``venv``, ``buck_target``,
+            ``emulator``, ``mirage_profile``), or had non-``str | None`` values;
+            or a sidecar file failed schema validation.
     """
     registry: dict[str, Environment] = {
         name: Environment(
@@ -60,6 +79,8 @@ def load_environments(
             docker=spec.get("docker"),
             venv=spec.get("venv"),
             buck_target=spec.get("buck_target"),
+            emulator=spec.get("emulator"),
+            mirage_profile=spec.get("mirage_profile"),
             source_package="aorta",
         )
         for name, spec in BUILTIN_ENVIRONMENTS.items()
@@ -104,6 +125,8 @@ def load_environments(
             docker=spec.get("docker"),
             venv=spec.get("venv"),
             buck_target=spec.get("buck_target"),
+            emulator=spec.get("emulator"),
+            mirage_profile=spec.get("mirage_profile"),
             source_package=plugin_name,
         )
 

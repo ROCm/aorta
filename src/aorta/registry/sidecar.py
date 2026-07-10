@@ -22,8 +22,9 @@ SCHEMA_VERSION = 1
 _VALID_TOP_LEVEL = frozenset({"version", "mitigations", "environments"})
 # Keep in sync with `aorta.registry.environments._VALID_ENV_KEYS`; the two
 # allow-lists are intentionally identical so sidecar payloads and entry-point
-# payloads accept the same schema. `buck_target` peers `docker` / `venv` per #182.
-_VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target"})
+# payloads accept the same schema. `buck_target` peers `docker` / `venv` per #182;
+# `emulator` / `mirage_profile` add the GPU-emulated (mirage) baseline axis.
+_VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target", "emulator", "mirage_profile"})
 
 
 def _source_tag(path: Path) -> str:
@@ -200,6 +201,8 @@ def load_sidecar_environments(path: Path) -> dict[str, Environment]:
             docker=spec.get("docker"),
             venv=spec.get("venv"),
             buck_target=spec.get("buck_target"),
+            emulator=spec.get("emulator"),
+            mirage_profile=spec.get("mirage_profile"),
             source_package=src,
         )
     return out

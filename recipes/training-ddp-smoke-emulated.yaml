@@ -1,0 +1,56 @@
+# Singleton TRAINING (DDP) smoke on an emulated MI350X (mirage + rocjitsu).
+#
+# `training` is a DISTRIBUTED workload but declares `min_world_size = 1`, so a
+# bare one-rank run (WORLD_SIZE=1) is a valid singleton smoke under a single
+# emulated GPU. It exercises the training lifecycle + JSON schema, NOT a
+# multi-rank DDP performance signal (that needs `mirage run --daemon
+# --gpus-per-node N` + torchrun — a later phase). The `mlp` topology is the
+# lightest lifecycle smoke. Sizes kept tiny for a fast rocjitsu run.
+#
+# Recommended (container — fast torch path):
+#
+#   export MIRAGE_BIN=/path/to/mirage
+#   ./scripts/emulation/run_mirage_container.sh training-ddp-smoke
+#
+# Validate only (no GPUs / no mirage needed):
+#
+#   aorta triage run --recipe recipes/training-ddp-smoke-emulated.yaml --dry-run
+#
+# Expected result: the cell PASSES.
+schema_version: 1
+
+ticket: EMU-TRAINING-DDP-001
+workload: training
+
+trials: 1
+steps: 2
+
+workload_config:
+  parallelism: ddp
+  seed: 1234
+  device: auto
+  dtype: float32
+  batch_size: 2
+  seq_len: 32
+  warmup_steps: 1
+
+  model:
+    kind: mlp
+    hidden_size: 128
+    num_layers: 2
+    vocab_size: 1024
+
+  optimizer:
+    kind: adamw
+    lr: 0.0001
+    weight_decay: 0.01
+
+  checks:
+    fail_on_nan_loss: true
+    fail_on_nan_grad: true
+    fail_on_nonfinite_output: true
+
+cells:
+  - name: emulated-rocjitsu
+    mitigations: [none]
+    environment: emulated-rocjitsu

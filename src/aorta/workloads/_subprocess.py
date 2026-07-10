@@ -303,6 +303,25 @@ class SubprocessWorkload(Workload):
                 f"{CONFIG_KEY_SUBPROCESS_ARGV} entries must be str, got "
                 f"{[type(a).__name__ for a in argv]}"
             )
+
+        # GPU-emulation opt-in: when the dispatcher-threaded environment
+        # (``_aorta_environment``) targets the mirage emulator, transparently
+        # rewrite the opaque user argv to ``mirage run --profile <p> -- <argv>``
+        # so the probed command runs on an emulated GPU. A
+        # requested-but-unbuildable emulation (e.g. mirage not on PATH) raises
+        # here and is reported as a clean setup failure rather than silently
+        # running on real hardware.
+        #
+        # Guarded via ``is_emulated_environment()`` (canonical predicate shared
+        # with ``resolve_emulation()``) so the non-emulated path does no argv
+        # rewrite. The import is stdlib-only and cheap on every setup().
+        from aorta.emulation.mirage_launch import (
+            is_emulated_environment,
+            wrap_argv_for_environment,
+        )
+
+        if is_emulated_environment(self.config):
+            argv = list(wrap_argv_for_environment(self.config, argv))
         self._argv = tuple(argv)
 
         log_prefix = self.config.get(CONFIG_KEY_LOG_PREFIX)
