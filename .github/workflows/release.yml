@@ -2,37 +2,45 @@ name: Release
 
 # Build the wheel + sdist once, attach them to a GitHub Release, and publish the
 # same artifacts to PyPI (so customers can `pip install amd-aorta`). The release
-# version is always read from pyproject.toml (never hard-coded here).
+# version is derived from the git tag by setuptools_scm (see
+# [tool.setuptools_scm] in pyproject.toml) -- it is never hard-coded here and is
+# never committed back to a branch, so there is a single source of truth (the
+# vX.Y.Z tag) and this workflow never has to push to a protected branch.
 #
 # Two ways to cut a release:
 #   * push a version tag:  git tag vX.Y.Z && git push origin vX.Y.Z
-#     (releases the current pyproject.toml version; tag must match it)
+#     (builds X.Y.Z straight from the tag)
 #   * run this workflow manually (Actions -> Release -> Run workflow):
 #       - bump = patch/minor/major (or an explicit version) -> the workflow
-#         bumps pyproject.toml, commits the bump back to the branch, then tags;
-#       - bump = none -> releases the current pyproject.toml version as-is.
+#         computes the next version from the latest tag, builds it, and (only
+#         after a successful build) creates and pushes the new vX.Y.Z tag.
 on:
   push:
     tags:
-      - "v*"
+      # Coarse first-pass filter for vMAJOR.MINOR.PATCH tags. This is a glob,
+      # not a regex: the `*`s aren't end-anchored, so it rejects shapes like
+      # v1 / v1beta but still admits rc-style / 4-segment tags such as
+      # v0.2.0rc1 / v1.2.3.4. Those are caught (and the run failed) by the
+      # stable-version gate in "Resolve release version" below, which is the
+      # real safety net; this filter just trims the most obvious noise.
+      - "v[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump for a manual release ('none' releases the current pyproject.toml version)."
+        description: "Version bump above the latest release tag (ignored if 'version' is set)."
         type: choice
         options:
-          - none
           - patch
           - minor
           - major
-        default: none
+        default: patch
       version:
         description: "Explicit MAJOR.MINOR.PATCH to release (overrides 'bump'; leave blank to use 'bump')."
         required: false
         default: ""
 
 permissions:
-  contents: write  # required to push the version bump + tag and create the release
+  contents: write  # required to create the release and push the new tag (manual runs)
 
 jobs:
   build-and-release:
@@ -41,103 +49,78 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0  # full history so a manual run can push the bump + tag
+          fetch-depth: 0  # full history + tags so setuptools_scm can derive the version
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"  # 3.11+ for stdlib tomllib to read the version
+          python-version: "3.11"
 
-      # Manual runs may bump pyproject.toml and commit the bump back to the
-      # branch before tagging, so the released version is never hard-coded.
-      - name: Bump version
-        if: github.event_name == 'workflow_dispatch' && (github.event.inputs.bump != 'none' || github.event.inputs.version != '')
+      - name: Resolve release version
+        id: version
         env:
           # Bind inputs to env vars rather than interpolating them straight into
           # the shell, to avoid script injection (bump_version.py also validates).
           BUMP: ${{ github.event.inputs.bump }}
           EXPLICIT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          # The bump path commits + pushes back to a branch. If a manual run is
-          # launched against a tag ref, GITHUB_REF_NAME is the tag, so the push
-          # below would create a stray branch named after the tag. Reject it.
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "::error::A manual release with a version bump must run on a branch, not a tag ref (${GITHUB_REF_NAME}). Re-run from the default branch."
-            exit 1
-          fi
-          if [ -n "${EXPLICIT_VERSION}" ]; then
-            new_version="$(python scripts/bump_version.py --set "${EXPLICIT_VERSION}")" \
-              || { echo "::error::Version bump failed for explicit version '${EXPLICIT_VERSION}' (see log)."; exit 1; }
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            # A manual run creates a NEW tag, so it must run on a branch: a tag
+            # ref has no "next version" to bump toward and can't own a new tag.
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              echo "::error::A manual release must run on a branch, not a tag ref (${GITHUB_REF_NAME}). Re-run from the default branch, or push a vX.Y.Z tag instead."
+              exit 1
+            fi
+            # release.yml is the STABLE channel (marks the GitHub Release
+            # "Latest" and publishes to PyPI), so a manual run must originate
+            # from the default branch -- never an unmerged feature branch.
+            # Tag-push releases are unaffected: they take the else branch below.
+            if [ "${GITHUB_REF}" != "refs/heads/${{ github.event.repository.default_branch }}" ]; then
+              echo "::error::Manual releases must run from the default branch (${{ github.event.repository.default_branch }}), not ${GITHUB_REF_NAME}."
+              exit 1
+            fi
+            if [ -n "${EXPLICIT_VERSION}" ]; then
+              pkg_version="$(python scripts/bump_version.py --set "${EXPLICIT_VERSION}")" \
+                || { echo "::error::Could not resolve explicit version '${EXPLICIT_VERSION}' (see log)."; exit 1; }
+            else
+              pkg_version="$(python scripts/bump_version.py "${BUMP}")" \
+                || { echo "::error::Could not compute a '${BUMP}' bump from the latest tag (see log)."; exit 1; }
+            fi
           else
-            new_version="$(python scripts/bump_version.py "${BUMP}")" \
-              || { echo "::error::Version bump failed for bump '${BUMP}' (see log)."; exit 1; }
+            # Tag push: the tag IS the version.
+            pkg_version="${GITHUB_REF_NAME#v}"
           fi
-          echo "Bumped version to ${new_version}."
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml
-          # A manual run with `version` set to the current value (or a bump that
-          # resolves to it) leaves pyproject.toml unchanged; commit then fails
-          # with a confusing "nothing to commit". Fail early with a clear hint.
-          if git diff --cached --quiet; then
-            echo "::error::pyproject.toml is already at ${new_version}; nothing to bump. Use bump='none' to release the current version, or pick a different version."
-            exit 1
-          fi
-          git commit -m "Release v${new_version}: bump version"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
 
-      - name: Resolve release version from pyproject.toml
-        id: version
-        run: |
-          # On a parse failure (invalid TOML / missing project.version) add a
-          # GitHub Actions annotation so the cause is easy to spot; the Python
-          # traceback may still appear in the step log for deeper debugging.
-          if ! pkg_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"; then
-            echo "::error::Could not read project.version from pyproject.toml (invalid TOML or missing project.version)."
-            exit 1
-          fi
-          if [ -z "${pkg_version}" ]; then
-            echo "::error::project.version in pyproject.toml is empty."
-            exit 1
-          fi
           # release.yml is the STABLE channel: it marks the GitHub Release
           # "Latest" and publishes to PyPI. Pre-release / rc builds
           # (X.Y.ZrcYYYYMMDD) belong to nightly.yml's rolling dev-wheels channel.
-          # Reject any suffixed / non-MAJOR.MINOR.PATCH version up front --
-          # otherwise an rc value would pass validation here and ship as a stable
-          # release, collapsing the stable-vs-nightly split this automation adds.
-          if ! printf '%s' "${pkg_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::project.version '${pkg_version}' is not a stable MAJOR.MINOR.PATCH release; use nightly.yml for pre-release rc builds."
+          # Reject any suffixed / non-MAJOR.MINOR.PATCH version (and leading-zero
+          # segments like 01.02.003, which normalize away and wouldn't match the
+          # built wheel's version) so an rc or ambiguous value can never ship as a
+          # stable release.
+          if ! printf '%s' "${pkg_version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::Release version '${pkg_version}' is not a stable MAJOR.MINOR.PATCH release; use nightly.yml for pre-release rc builds."
             exit 1
           fi
           tag="v${pkg_version}"
-          # Defensive backstop: a MAJOR.MINOR.PATCH value always yields a valid
-          # git ref, but let git be the source of truth so the tag is rejected
-          # here rather than later at tag creation/push if the check above is ever
-          # loosened.
           if ! git check-ref-format "refs/tags/${tag}"; then
-            echo "::error::project.version '${pkg_version}' yields an invalid git tag '${tag}' (rejected by git check-ref-format); choose a tag-safe version."
+            echo "::error::Version '${pkg_version}' yields an invalid git tag '${tag}'; choose a tag-safe version."
             exit 1
           fi
           echo "version=${pkg_version}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          # Pin the version setuptools_scm stamps into the build. On a tag push
+          # this equals the tag; on a manual run it pins the not-yet-created tag's
+          # version (the tag is pushed only after the build succeeds, below) and
+          # also strips any dirty/local segment so the wheel version is exactly
+          # X.Y.Z.
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AMD_AORTA=${pkg_version}" >> "$GITHUB_ENV"
           echo "Resolved release version ${pkg_version} (tag ${tag})."
 
-      # Fail fast BEFORE building: a pushed tag must match the package version so
-      # a release can never disagree with the metadata customers install.
-      - name: Verify pushed tag matches version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          if [ "${{ steps.version.outputs.version }}" != "${tag_version}" ]; then
-            echo "::error::Pushed tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${{ steps.version.outputs.version }}. Bump 'version' in pyproject.toml and retag."
-            exit 1
-          fi
-
-      # Manual runs create the tag from the resolved version. Fail fast here if
-      # it already exists so an already-released version is never re-released --
-      # but defer the actual tag push until after the build succeeds (below) so
-      # a failed build never leaves an orphaned remote tag that blocks reruns.
+      # Manual runs mint a NEW tag, so fail fast here if it already exists (an
+      # already-released version must never be re-released) -- but defer the tag
+      # push until after the build succeeds (below) so a failed build never
+      # leaves an orphaned remote tag that blocks reruns.
       - name: Verify tag is available for manual release
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -159,6 +142,17 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build
+
+      # Fail fast if the built artifacts don't carry the resolved version (e.g. a
+      # setuptools_scm misconfiguration), so a release can never disagree with the
+      # metadata customers install. Read the version from the wheel's embedded
+      # METADATA (the source of truth pip installs) rather than pattern-matching a
+      # single filename, so a future build/platform tag or extra wheel can't make
+      # this pass/fail on the wrong signal.
+      - name: Verify built version matches
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: python scripts/check_wheel_version.py "${EXPECTED_VERSION}"
 
       # Only now that the build has succeeded do we create and push the tag, so
       # a build failure on a manual run leaves nothing to clean up before retry.

@@ -8,54 +8,63 @@ AORTA is a pure-Python package, so a single `py3-none-any` wheel installs on
 every platform; PyTorch is intentionally **not** bundled (customers install it
 from the ROCm index — see below).
 
-The release version is always read from `version` in `pyproject.toml` — it is
-never hard-coded in the workflow — so cutting a new release is just a version
-bump plus a trigger.
+The version is **derived from git tags** by
+[`setuptools_scm`](https://setuptools-scm.readthedocs.io/) (see
+`[tool.setuptools_scm]` in `pyproject.toml`) — it is not stored in
+`pyproject.toml` or `src/aorta/__init__.py`, so there is a single source of
+truth (the `vX.Y.Z` tag). A build sitting on a tag becomes `X.Y.Z`; a checkout
+ahead of the latest tag becomes `X.Y.(Z+1).devN+g<sha>`, so a local
+`pip install .` / `pip install git+...` always reports the most recent release
+(plus how far past it the tree is) rather than a stale hard-coded value.
+`aorta.__version__` reads this same value back from the installed package
+metadata. Cutting a release is therefore just creating a tag.
 
 ## Maintainer release flow
 
 Releases are automated by [`.github/workflows/release.yml`](../.github/workflows/release.yml).
-Each run builds the artifacts for the resolved `pyproject.toml` version and
-publishes them as a new GitHub Release marked **Latest**. Each release needs a
-new version: on a **manual run** the workflow refuses to release a version whose
-tag already exists, and on a **tag push** Git itself rejects a tag that already
-exists (force-updating an existing tag would re-release it).
+Each run builds the artifacts for the resolved version and publishes them as a
+new GitHub Release marked **Latest**. Each release needs a new version: on a
+**manual run** the workflow refuses to release a version whose tag already
+exists, and on a **tag push** Git itself rejects a tag that already exists
+(force-updating an existing tag would re-release it). The release is entirely
+**tag-driven** — the workflow never pushes to a protected branch.
 
 Pick whichever trigger fits:
 
-- **Manual run with a version bump (recommended).** From the GitHub UI
+- **Manual run (recommended).** From the GitHub UI
   (*Actions -> Release -> Run workflow*), choose a `bump` of `patch`, `minor`,
   or `major` (or type an explicit version in the `version` field). The workflow
-  bumps `version` in `pyproject.toml`, commits that bump back to the branch it
-  ran from, then tags and releases — so you never edit the version by hand. The
-  bump is computed by [`scripts/bump_version.py`](../scripts/bump_version.py),
-  which you can also run locally:
+  computes the next version above the latest tag, builds it (via
+  `setuptools_scm`'s pretend-version), and — only after the build succeeds —
+  creates and pushes the new `vX.Y.Z` tag. You never edit a version by hand. The
+  next version is computed by [`scripts/bump_version.py`](../scripts/bump_version.py),
+  which reads the latest release tag and prints the next version (it writes no
+  files); you can run it locally to preview:
 
   ```bash
-  python scripts/bump_version.py patch        # 0.2.0 -> 0.2.1
-  python scripts/bump_version.py minor        # 0.2.0 -> 0.3.0
-  python scripts/bump_version.py --set 1.4.2  # set an explicit version
+  python scripts/bump_version.py patch        # latest v0.2.0 -> 0.2.1
+  python scripts/bump_version.py minor        # latest v0.2.0 -> 0.3.0
+  python scripts/bump_version.py --set 1.4.2  # an explicit version
   ```
 
-- **Manual run without a bump.** Choose `bump = none` to release the current
-  `pyproject.toml` version as-is (the workflow creates and pushes the matching
-  `vX.Y.Z` tag for you).
-
-- **Push a version tag** matching the current version, for a fully manual flow:
+- **Push a version tag**, for a fully manual flow (the tag *is* the version):
 
   ```bash
   git checkout main && git pull
-  git tag vX.Y.Z      # X.Y.Z must equal the pyproject.toml version
+  git tag vX.Y.Z
   git push origin vX.Y.Z
   ```
 
 The workflow then:
 
-- (manual bump only) bumps `pyproject.toml` and pushes the bump commit,
-- reads the version from `pyproject.toml`,
-- **before building**, fails fast if a pushed tag does not match that version
-  (so a release can never disagree with the package metadata),
+- resolves the version (from the pushed tag, or the computed next version on a
+  manual run) and pins it for the build via
+  `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AMD_AORTA`,
 - builds the wheel + sdist with `python -m build`,
+- **after building**, fails fast if the built wheel does not carry the resolved
+  version (so a release can never disagree with the package metadata),
+- on a manual run, creates and pushes the `vX.Y.Z` tag (only after a successful
+  build, so a failed build leaves no orphaned tag),
 - creates the GitHub Release named `AORTA X.Y.Z`, marks it **Latest**, and
   uploads the wheel + sdist as release assets with auto-generated notes,
 - publishes the **same** wheel + sdist to PyPI (the `publish-pypi` job reuses the
@@ -76,11 +85,10 @@ release, a PyPI owner must register this repo as a trusted publisher once:
 Until this is configured the `publish-pypi` job will fail; the GitHub Release
 (with installable assets) is still created by the preceding job.
 
-> **Branch protection note.** A manual bump run pushes the version-bump commit
-> to the branch it ran from. If you run it against a protected branch (e.g.
-> `main`) whose rules block the `GITHUB_TOKEN`, either allow the
-> `github-actions` bot to push, or bump the version in a normal PR and use the
-> tag-push trigger instead.
+> **No branch pushes.** Because the version lives in git tags (not in a tracked
+> file), the release workflow only ever *creates a tag* — it never pushes a
+> commit to `main`, so branch-protection rules on `main` don't block it. Ensure
+> your tag protection / rulesets allow the release actor to push `v*` tags.
 
 After the workflow finishes, confirm the [latest release](https://github.com/ROCm/aorta/releases/latest)
 shows `amd_aorta-X.Y.Z-py3-none-any.whl` plus the sdist, and run the customer
@@ -118,8 +126,10 @@ pip install "amd-aorta @ https://github.com/ROCm/aorta/releases/download/vX.Y.Z/
 release candidate from `main` every night and uploads it to a single rolling
 [`dev-wheels`](https://github.com/ROCm/aorta/releases/tag/dev-wheels)
 pre-release (it is never marked **Latest**). The version is stamped as
-`X.Y.ZrcYYYYMMDD` at build time (via `scripts/bump_version.py --suffix`) and is
-not committed back to the repo.
+`X.Y.ZrcYYYYMMDD` at build time — where `X.Y.Z` is the **next** release above
+the latest tag (e.g. latest `v0.2.0` → `0.2.1rcYYYYMMDD`, so the rc sorts as a
+pre-release of the version it will become) — via `setuptools_scm`'s
+pretend-version and is not committed anywhere.
 
 Customers who need a fix before the next stable release install a specific
 nightly by pointing pip at the release's asset index:

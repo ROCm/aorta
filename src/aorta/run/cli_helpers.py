@@ -31,11 +31,22 @@ from aorta.run.results import TrialResult
 def configure_verbose_logging(verbose_count: int) -> None:
     """Wire a stderr StreamHandler onto the ``aorta`` logger when -v is set.
 
-    Both ``aorta run`` and ``aorta triage run`` are silent by default --
-    the ``aorta.*`` loggers exist but have no handlers, so INFO-level
-    progress calls are dropped. Without this, a long matrix run prints
-    nothing until the final ``Wrote matrix to ...`` line, leaving
-    operators with no signal that anything is happening.
+    Both ``aorta run`` and ``aorta triage run`` / ``aorta sweep run`` emit no
+    *live* progress by default -- the ``aorta.*`` loggers exist but have no
+    handlers, so INFO-level progress calls are dropped, and ``-v`` is what
+    surfaces the per-trial / per-cell blow-by-blow while work executes.
+
+    Each command's *own* final stdout is separate from this handler and is
+    unaffected by the verbosity level:
+
+    * ``aorta triage run`` / ``aorta sweep run`` (the shared triage/sweep
+      engine, :func:`aorta.triage.runner.run_recipe`) print a concise
+      end-of-run matrix summary (issue #280) followed by the
+      ``Wrote matrix to ...`` line.
+    * ``aorta run`` (single-workload :func:`aorta.run.run_trials`, which does
+      NOT go through that engine) prints its own one-line pass/fail result
+      (``All N trial(s) passed. Results in: ...`` / ``Failed trials: ...``)
+      and never emits ``Wrote matrix to ...``.
 
     Scope: only the ``aorta.*`` logger hierarchy. Workloads registered
     via the ``aorta.workloads`` entry-point group from sibling packages

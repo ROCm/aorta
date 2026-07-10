@@ -14,6 +14,7 @@ front door. These tests pin:
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -29,6 +30,28 @@ from aorta.triage.recipe import Recipe
 
 PROBE_FIXTURES = Path(__file__).parent.parent / "probe" / "fixtures"
 PROBE_MINIMAL = PROBE_FIXTURES / "probe_minimal.yaml"
+
+# Click 8.2 removed ``CliRunner(mix_stderr=...)`` and now always captures stdout
+# and stderr as separate streams (``result.stdout`` / ``result.stderr``, with
+# ``result.output`` holding the combined text). On the ``click>=8.0`` floor we
+# still need ``mix_stderr=False`` to get that same separation. Feature-detect the
+# argument -- ``click.__version__`` is itself deprecated in 8.4+ -- so the tests
+# that assert on stderr independently run identically on both.
+_CLIRUNNER_ACCEPTS_MIX_STDERR = "mix_stderr" in inspect.signature(CliRunner.__init__).parameters
+
+
+def _split_stream_runner() -> CliRunner:
+    """A ``CliRunner`` that keeps stdout and stderr separate across click versions.
+
+    Use this only when a test asserts on ``result.stderr`` / ``result.stdout``
+    independently. Tests that assert on the combined ``result.output`` should use
+    a plain ``CliRunner()``: on the ``click>=8.0`` floor a stream-separated runner
+    drops stderr out of ``result.output``.
+    """
+    if _CLIRUNNER_ACCEPTS_MIX_STDERR:
+        return CliRunner(mix_stderr=False)
+    return CliRunner()
+
 
 _TRIAGE_RECIPE_TEXT = (
     "schema_version: 1\n"
@@ -356,7 +379,7 @@ def test_peek_recipe_mode(tmp_path, body, expected):
 def test_triage_run_warns_and_delegates(mock_run_recipe, tmp_path):
     """`aorta triage run` still works but prints a stderr deprecation notice."""
     recipe = _write_triage_recipe(tmp_path)
-    runner = CliRunner(mix_stderr=False)
+    runner = _split_stream_runner()
     result = runner.invoke(
         triage, ["run", "--recipe", str(recipe), "--output-dir", str(tmp_path / "o")]
     )
@@ -369,7 +392,7 @@ def test_triage_run_warns_and_delegates(mock_run_recipe, tmp_path):
 
 def test_probe_warns_and_delegates(mock_run_recipe, tmp_path):
     """`aorta probe` still works but prints a stderr deprecation notice."""
-    runner = CliRunner(mix_stderr=False)
+    runner = _split_stream_runner()
     result = runner.invoke(
         probe,
         ["--recipe", str(PROBE_MINIMAL), "--output", str(tmp_path / "o"), "--", "echo", "hi"],
@@ -381,7 +404,7 @@ def test_probe_warns_and_delegates(mock_run_recipe, tmp_path):
 
 
 def test_triage_list_mitigations_warns():
-    runner = CliRunner(mix_stderr=False)
+    runner = _split_stream_runner()
     result = runner.invoke(triage, ["list-mitigations"])
     assert result.exit_code == 0, result.output
     assert "deprecated" in result.stderr
@@ -390,7 +413,7 @@ def test_triage_list_mitigations_warns():
 
 def test_probe_list_patterns_points_at_sweep_list_patterns():
     """`aorta probe --list-patterns` warns toward `aorta sweep list-patterns`, not `run`."""
-    runner = CliRunner(mix_stderr=False)
+    runner = _split_stream_runner()
     result = runner.invoke(probe, ["--list-patterns"])
     assert result.exit_code == 0, result.output
     assert "deprecated" in result.stderr
@@ -404,7 +427,7 @@ def test_probe_list_patterns_points_at_sweep_list_patterns():
 
 def test_probe_list_patterns_version_points_at_sweep_list_patterns():
     """`aorta probe --list-patterns --version` keeps the notice on stderr, stdout parseable."""
-    runner = CliRunner(mix_stderr=False)
+    runner = _split_stream_runner()
     result = runner.invoke(probe, ["--list-patterns", "--version"])
     assert result.exit_code == 0, result.output
     assert "aorta sweep list-patterns" in result.stderr

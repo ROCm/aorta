@@ -209,6 +209,15 @@ class CellStats:
     # ``error`` verdict). Excluded from the ``failure_rate`` denominator;
     # surfaced via ``error_rate`` and the matrix.md "Errors" column.
     error_count: int = 0
+    # Issue #282: True when this cell's trials were hydrated from a prior
+    # run's on-disk artifacts (probe ``flat_resume`` layout) instead of
+    # being re-executed -- the resume short-circuit in
+    # :func:`aorta.triage.runner._run_one_cell`. Always False for the
+    # timestamped triage layout (which never resumes) and for freshly-run
+    # cells. Surfaced in matrix.json and the end-of-run summary so an
+    # operator can tell a cached result from a fresh one without opening
+    # the per-trial logs.
+    resumed: bool = False
 
     @property
     def failure_rate(self) -> float:
@@ -536,6 +545,7 @@ def aggregate_cell(
     error: str | None = None,
     workload_config: dict[str, Any] | None = None,
     stop_after_note: str | None = None,
+    resumed: bool = False,
 ) -> CellStats:
     """Aggregate a list of TrialResult-shaped objects into a :class:`CellStats`.
 
@@ -563,6 +573,10 @@ def aggregate_cell(
             the returned :class:`CellStats` so matrix.md and matrix.json
             can surface workload-knob differences across cells. ``None``
             and ``{}`` both collapse to an empty dict on the result.
+        resumed: True when the cell's trials were hydrated from a prior
+            run's on-disk artifacts (probe ``flat_resume`` resume
+            short-circuit) rather than re-executed. Recorded on the
+            returned :class:`CellStats` (issue #282).
 
     Returns:
         :class:`CellStats` populated from the trials.
@@ -602,6 +616,7 @@ def aggregate_cell(
             top_warn_detector_id=None,
             stop_after_note=stop_after_note,
             error_count=0,
+            resumed=resumed,
         )
 
     trial_count = len(trials)
@@ -698,6 +713,7 @@ def aggregate_cell(
         top_warn_detector_id=top_warn_id,
         stop_after_note=stop_after_note,
         error_count=errored,
+        resumed=resumed,
     )
 
 

@@ -169,14 +169,14 @@ def triage() -> None:
     "--verbose",
     count=True,
     help=(
-        "Stream per-cell progress to stderr while the matrix runs. "
+        "Stream live per-cell progress to stderr while the matrix runs. "
         "-v = INFO (matrix preamble, per-cell start/finish, timings, "
         "trials passed). -vv = DEBUG (aorta platform internals). "
         "Scope is the aorta.* logger hierarchy; workload code in "
-        "sibling packages is unaffected. Default is silent: only "
-        "the final 'Wrote matrix to ...' line prints. Useful for "
-        "long matrix runs where you'd otherwise have no signal that "
-        "anything is happening."
+        "sibling packages is unaffected. A concise end-of-run summary "
+        "(which cells failed + where their artifacts are) and the final "
+        "'Wrote matrix to ...' line print to stdout regardless of this "
+        "flag; -v adds the live blow-by-blow for long runs."
     ),
 )
 def triage_run(

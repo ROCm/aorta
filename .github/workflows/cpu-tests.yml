@@ -32,10 +32,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
-    env:
-      # Reproducible pins for known test/dependency incompatibilities. Kept
-      # deliberately small; see the file for rationale and follow-ups.
-      PIP_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
     steps:
       - name: Check out code
         uses: actions/checkout@v5
@@ -45,12 +41,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          # Track the inputs this job actually resolves from: the package
-          # metadata (extras) and the CI constraints file (pinned versions via
-          # PIP_CONSTRAINT). This job never installs requirements-dev.txt.
-          cache-dependency-path: |
-            pyproject.toml
-            .github/ci-constraints.txt
+          # Track the input this job actually resolves from: the package
+          # metadata (extras). This job never installs requirements-dev.txt.
+          cache-dependency-path: pyproject.toml
 
       # The aorta.ebpf runner tests configure an explicit bpftrace_path and the
       # runner validates that a real file exists there before building the
@@ -79,9 +72,17 @@ jobs:
           pip install -e ".[tests,hw-queue]"
           pip install triton
 
-      # Per-test process isolation (--forked) is deliberate: the suite has
-      # pre-existing cross-file state pollution that only appears when the whole
-      # suite shares one interpreter (every affected file passes on its own).
-      # Forking each test keeps the gate deterministic; -n auto keeps it fast.
+      # -n auto (pytest-xdist) parallelizes across cores for speed. --forked is
+      # intentionally NOT used: the two cross-file state leaks that made
+      # single-interpreter runs order-dependent were fixed in #270 --
+      #   1. the aorta.ebpf runner tests leaked a patched `subprocess.Popen`
+      #      (hand-entered mock.patch that never restored when start() raised);
+      #      now restored via monkeypatch.
+      #   2. the dispatcher/discovery tests patch `importlib.metadata.entry_points`
+      #      with a mock; if Triton's first import happened under that mock its
+      #      backend discovery corrupted `sys.modules`; tests/conftest.py now
+      #      pre-imports Triton so the mock can't poison it.
+      # The suite is deterministic in one interpreter, so per-test forking is no
+      # longer needed for correctness -- and dropping it makes the gate faster.
       - name: Run CPU test suite
-        run: pytest -m "not gpu and not rocm" -n auto --forked
+        run: pytest -m "not gpu and not rocm" -n auto
