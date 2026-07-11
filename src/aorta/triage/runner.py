@@ -65,6 +65,7 @@ from aorta.triage.matrix import (
     aggregate_cell,
 )
 from aorta.triage.output import (
+    PERF_REPORT_FILENAME,
     acquire_flat_resume_lock,
     format_run_summary,
     format_timestamp,
@@ -72,6 +73,7 @@ from aorta.triage.output import (
     safe_slug,
     write_matrix_json,
     write_matrix_md,
+    write_perf_report,
     write_resolved_recipe,
 )
 from aorta.triage.recipe import InlineEnv, Recipe, RecipeCellError
@@ -130,6 +132,27 @@ class MatrixIncompleteError(Exception):
     def __init__(self, message: str, run_dir: Path) -> None:
         super().__init__(message)
         self.run_dir = run_dir
+
+
+class MatrixStrictError(Exception):
+    """Raised AFTER ``run_recipe`` writes its artifacts when ``strict=True``
+    and one or more cells never produced a valid observation -- i.e. the whole
+    cell errored (``CellStats.error is not None``) or every trial in the cell
+    classified as ``did_not_run`` (:func:`is_did_not_run_cell`).
+
+    This is deliberately narrower than "a cell failed": a cell that *reproduces*
+    a bug (``passed=False`` with trials that actually ran) is an expected matrix
+    outcome and does NOT trip strict mode -- otherwise every A/B repro run would
+    exit non-zero. Strict only catches cells whose result is meaningless because
+    they never ran (e.g. an ``hrx_on`` cell whose ``LD_PRELOAD`` was rejected at
+    setup). The matrix artifacts ARE present (the exception carries ``run_dir``);
+    the exception signals the degradation to the CLI so it can exit non-zero.
+    """
+
+    def __init__(self, message: str, run_dir: Path, cells: list[str]) -> None:
+        super().__init__(message)
+        self.run_dir = run_dir
+        self.cells = cells
 
 
 def _merge_sidecar_files(
@@ -1185,8 +1208,14 @@ def run_recipe(
     layout: Literal["timestamped", "flat_resume"] = "timestamped",
     resume_existing: bool = False,
     subprocess_argv: tuple[str, ...] | None = None,
+    strict: bool = False,
 ) -> Path:
-    """Execute a recipe and write matrix.md / matrix.json / recipe.resolved.yaml.
+    """Execute a recipe and write matrix.md / matrix.json / perf.md / recipe.resolved.yaml.
+
+    ``perf.md`` is a per-run performance report written next to
+    ``matrix.md`` / ``matrix.json`` on every run (pure formatting of the
+    already-collected per-trial timing + metrics; no flag, no extra
+    measurement).
 
     Args:
         recipe: Pre-validated recipe (from :func:`aorta.triage.recipe.load_recipe`
@@ -1218,6 +1247,11 @@ def run_recipe(
             cell's :class:`SubprocessWorkload` via the typed
             ``RunRequest.subprocess_argv`` field. Required for probe-mode;
             ignored in triage-mode.
+        strict: When True, raise :class:`MatrixStrictError` (after writing
+            artifacts) if any cell errored or every trial in it did_not_run.
+            A cell that merely reproduces a bug (ran but ``passed=False``) does
+            NOT trip this. Off by default so the matrix flow keeps tolerating
+            per-cell failures.
 
     Returns:
         The run directory path (``<output-dir>/<ticket>/<workload>/<timestamp>``
@@ -1276,6 +1310,7 @@ def run_recipe(
             layout=layout,
             resume_existing=resume_existing,
             subprocess_argv=subprocess_argv,
+            strict=strict,
             should_write=should_write,
         )
 
@@ -1289,6 +1324,7 @@ def _run_recipe_locked(
     layout: Literal["timestamped", "flat_resume"],
     resume_existing: bool,
     subprocess_argv: tuple[str, ...] | None,
+    strict: bool = False,
     should_write: bool = True,
 ) -> Path:
     """Body of :func:`run_recipe` after the flat_resume lock is held.
@@ -1610,6 +1646,13 @@ def _run_recipe_locked(
         warnings=warnings,
         sidecar_files=sidecar_files,
     )
+    write_perf_report(
+        run_dir / PERF_REPORT_FILENAME,
+        recipe=recipe,
+        cell_stats=cell_stats,
+        baseline=baseline_stats,
+        run_timestamp=ts,
+    )
     write_resolved_recipe(
         run_dir / "recipe.resolved.yaml",
         recipe=recipe,
@@ -1654,7 +1697,36 @@ def _run_recipe_locked(
         # ``except MatrixIncompleteError`` to inspect ``run_dir``.
         raise MatrixIncompleteError(incomplete_reason, run_dir)
 
+    if strict:
+        # A cell is "invalid" only if it never produced a usable observation:
+        # the whole cell errored, or every trial did_not_run. A cell that ran
+        # but reported passed=False (a real bug repro) is an expected matrix
+        # outcome and must NOT trip strict mode. Checked after the incomplete
+        # guard so a degraded baseline keeps its more-specific message.
+        invalid = [
+            s.name for s in cell_stats if s.error is not None or is_did_not_run_cell(s)
+        ]
+        if invalid:
+            # Emit the concrete per-cell artifact paths (slugified exactly as
+            # they land on disk, see _run_one_cell / _cells_dir) rather than a
+            # ``<cell>``/``<workload>`` placeholder, so an operator can
+            # copy/paste straight to the offending trials -- cell names are
+            # slugified on disk, so the verbatim name wouldn't resolve.
+            inspect_paths = "; ".join(
+                f"cells/{safe_slug(name)}/{recipe.workload}/trial_*.json"
+                for name in invalid
+            )
+            raise MatrixStrictError(
+                f"strict mode: {len(invalid)} of {len(cell_stats)} cell(s) never "
+                f"produced a valid result (errored or did_not_run): "
+                f"{', '.join(invalid)}. Inspect {inspect_paths} for the cause (a "
+                f"common one is a rejected LD_PRELOAD / setup failure). Drop "
+                f"--strict to treat these as tolerated per-cell failures.",
+                run_dir,
+                invalid,
+            )
+
     return run_dir
 
 
-__all__ = ["MatrixIncompleteError", "run_recipe"]
+__all__ = ["MatrixIncompleteError", "MatrixStrictError", "run_recipe"]

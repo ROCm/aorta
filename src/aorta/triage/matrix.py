@@ -209,6 +209,17 @@ class CellStats:
     # ``error`` verdict). Excluded from the ``failure_rate`` denominator;
     # surfaced via ``error_rate`` and the matrix.md "Errors" column.
     error_count: int = 0
+    # Aggregated workload-reported performance metrics. Each entry is one
+    # scalar key from a trial's ``result["metrics"]`` (e.g. ``gflops``,
+    # ``gbps``, ``mean_step_ms``), aggregated across the cell's trials into
+    # ``{"mean", "min", "max", "n"}`` where ``n`` is the number of trials
+    # that reported that key. Only int/float scalars are aggregated -- list
+    # / dict / bool values (e.g. the ``failure_detectors_fired`` channel) are
+    # skipped, so a workload that emits no numeric metrics leaves this ``{}``.
+    # Surfaced in ``perf.md`` and ``matrix.json`` so throughput numbers
+    # (which ``matrix.md`` never showed) are recoverable without opening each
+    # per-trial JSON. Empty for error cells.
+    metrics_summary: dict[str, dict[str, float]] = field(default_factory=dict)
     # Issue #282: True when this cell's trials were hydrated from a prior
     # run's on-disk artifacts (probe ``flat_resume`` layout) instead of
     # being re-executed -- the resume short-circuit in
@@ -533,6 +544,66 @@ def _percentile(samples: list[float], q: float) -> float:
     return data[f] + (data[c] - data[f]) * (k - f)
 
 
+def _aggregate_metrics(trials: list[Any]) -> dict[str, dict[str, float]]:
+    """Aggregate scalar ``result["metrics"]`` values across a cell's trials.
+
+    Only trials that represent a **valid, successful observation** are
+    aggregated -- ``trial_verdict(trial) == "pass"``. ``perf.md`` presents these
+    as performance numbers, so metrics from failed / errored trials (partial
+    output, a preflight failure that still emitted some numeric fields, a
+    ``PERF_FAIL`` checksum) would be misleading and are skipped. A cell whose
+    trials all failed therefore contributes no metrics (empty summary).
+
+    For every metric key whose value is a real int/float scalar (``bool`` is
+    excluded -- it is an ``int`` subclass but not a measurement), collect the
+    per-trial values and reduce them to ``{"mean", "min", "max", "n"}``. Keys
+    whose value is a list / dict / string / bool in any trial are ignored for
+    that trial (so the ``failure_detectors_fired`` list channel never leaks
+    into the perf summary); a key that is scalar in some trials and non-scalar
+    in others is aggregated over just the scalar occurrences. Non-finite floats
+    (NaN / +-Inf) are also skipped -- they are not usable measurements and would
+    serialize as invalid JSON (``NaN`` / ``Infinity``) in ``matrix.json``.
+    Returns ``{}`` when no passing trial reported any numeric metric -- the
+    common case for correctness / triage workloads, which then render no
+    throughput table.
+    """
+    collected: dict[str, list[float]] = {}
+    for trial in trials:
+        # Only successful trials yield trustworthy perf numbers (see docstring).
+        if trial_verdict(trial) != "pass":
+            continue
+        result = getattr(trial, "result", None)
+        if not isinstance(result, dict):
+            continue
+        metrics = result.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        for key, value in metrics.items():
+            # ``bool`` is an ``int`` subclass; a True/False flag is not a
+            # performance measurement, so exclude it explicitly.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            # Skip non-finite values (NaN / +-Inf): they are not usable perf
+            # numbers and json.dumps would serialize them as ``NaN`` /
+            # ``Infinity``, which is invalid JSON for strict parsers. They are
+            # realistically reachable -- e.g. a workload that initializes a
+            # metric to ``float("nan")`` and reports it.
+            if not math.isfinite(value):
+                continue
+            collected.setdefault(str(key), []).append(float(value))
+    summary: dict[str, dict[str, float]] = {}
+    for key, values in collected.items():
+        if not values:
+            continue
+        summary[key] = {
+            "mean": float(statistics.fmean(values)),
+            "min": float(min(values)),
+            "max": float(max(values)),
+            "n": float(len(values)),
+        }
+    return summary
+
+
 def aggregate_cell(
     name: str,
     mitigations: tuple[str, ...],
@@ -713,6 +784,7 @@ def aggregate_cell(
         top_warn_detector_id=top_warn_id,
         stop_after_note=stop_after_note,
         error_count=errored,
+        metrics_summary=_aggregate_metrics(trials),
         resumed=resumed,
     )
 

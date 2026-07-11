@@ -166,6 +166,54 @@ def test_triage_recipe_routes_to_workload_flow(mock_run_recipe, tmp_path):
     assert kwargs.get("subprocess_argv") is None
 
 
+def test_strict_threads_to_workload_flow(mock_run_recipe, tmp_path):
+    """`--strict` reaches run_recipe as strict=True on the workload flow."""
+    recipe = _write_triage_recipe(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["sweep", "run", "--recipe", str(recipe), "--output", str(tmp_path / "out"), "--strict"],
+    )
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_run_recipe.call_args
+    assert kwargs.get("strict") is True
+
+
+def test_strict_defaults_false_in_workload_flow(mock_run_recipe, tmp_path):
+    """Without `--strict`, run_recipe is called with strict=False (opt-in)."""
+    recipe = _write_triage_recipe(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["sweep", "run", "--recipe", str(recipe), "--output", str(tmp_path / "out")]
+    )
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_run_recipe.call_args
+    assert kwargs.get("strict") is False
+
+
+def test_strict_rejected_in_probe_flow(mock_run_recipe, tmp_path):
+    """`--strict` is a workload-flow flag; combining it with a probe run errors."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "sweep",
+            "run",
+            "--recipe",
+            str(PROBE_MINIMAL),
+            "--output",
+            str(tmp_path / "out"),
+            "--strict",
+            "--",
+            "echo",
+            "hi",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--strict applies to the workload flow only" in result.output
+    mock_run_recipe.assert_not_called()
+
+
 def test_flag_mode_routes_to_workload_flow(mock_run_recipe, tmp_path):
     """Flag-shim (no recipe, no command) runs the workload flow."""
     runner = CliRunner()

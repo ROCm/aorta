@@ -356,6 +356,17 @@ def sweep() -> None:
     ),
 )
 @click.option(
+    "--strict",
+    is_flag=True,
+    help=(
+        "Workload flow only. Exit non-zero if any cell errored or never ran "
+        "(every trial did_not_run, e.g. a setup failure). A cell that RAN but "
+        "reported a failure (a real bug repro) does NOT trip this. The matrix "
+        "is still written. Useful in CI to catch a cell that silently didn't "
+        "run (e.g. a rejected LD_PRELOAD)."
+    ),
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
@@ -386,6 +397,7 @@ def sweep_run(
     disable_detectors: tuple[str, ...],
     mitigation_files: tuple[Path, ...],
     collect: str,
+    strict: bool,
     verbose: int,
     argv: tuple[str, ...],
 ) -> None:
@@ -426,6 +438,12 @@ def sweep_run(
                 "on a probe/subprocess run (a user command after '--' or a "
                 "'mode: probe' recipe)."
             )
+        if strict:
+            raise click.UsageError(
+                "--strict applies to the workload flow only; a probe/subprocess "
+                "run (a user command after '--' or a 'mode: probe' recipe) "
+                "reports per-cell verdicts differently."
+            )
         _dispatch_probe_flow(
             recipe=recipe,
             output=output,
@@ -465,6 +483,7 @@ def sweep_run(
             max_trials=max_trials,
             disable_detectors=disable_detectors,
             collect=collect,
+            strict=strict,
         )
 
 
@@ -538,6 +557,7 @@ def _dispatch_workload_flow(
     max_trials: int | None,
     disable_detectors: tuple[str, ...],
     collect: str = "",
+    strict: bool = False,
 ) -> None:
     """Validate workload-flow-specific preconditions, then run the workload flow."""
     if env_passthrough_mode is not None:
@@ -572,6 +592,7 @@ def _dispatch_workload_flow(
         output_dir=output if output is not None else Path("triage_results"),
         mitigation_files=mitigation_files,
         collect=collect,
+        strict=strict,
     )
 
 

@@ -25,6 +25,7 @@ def _trial(
     main_work_started: bool | None = None,
     executed_iterations: int | None = None,
     configured_iterations: int | None = None,
+    metrics: dict | None = None,
 ):
     """Build a TrialResult-shaped stand-in. aggregate_cell uses duck typing."""
     result: dict = {"passed": passed}
@@ -42,6 +43,8 @@ def _trial(
         result["executed_iterations"] = executed_iterations
     if configured_iterations is not None:
         result["configured_iterations"] = configured_iterations
+    if metrics is not None:
+        result["metrics"] = metrics
     return SimpleNamespace(
         exit_status=exit_status,
         wall_clock_sec=wall_clock_sec,
@@ -71,6 +74,35 @@ def test_all_pass_no_failures():
     assert stats.failed_count == 0
     assert stats.failure_rate == 0.0
     assert stats.error is None
+
+
+def test_metrics_summary_aggregates_only_passing_trials():
+    """perf.md presents metrics_summary as performance numbers, so metrics from
+    failed / errored trials (partial output, a checksum failure that still
+    emitted numbers) must not be aggregated -- only valid (passing) trials."""
+    trials = [
+        _trial(passed=True, metrics={"gflops": 100.0}),
+        _trial(passed=True, metrics={"gflops": 300.0}),
+        # A failed trial that still emitted a (suspect) number -- must be excluded.
+        _trial(passed=False, metrics={"gflops": 9999.0}),
+        # An infra error trial with a number -- must be excluded.
+        _trial(passed=True, exit_status="infrastructure_failed", metrics={"gflops": 5.0}),
+    ]
+    stats = _default_call(trials=trials)
+    agg = stats.metrics_summary["gflops"]
+    assert agg["n"] == 2.0  # only the two passing trials
+    assert agg["mean"] == 200.0
+    assert agg["max"] == 300.0  # not the failed trial's 9999
+
+
+def test_metrics_summary_empty_when_no_passing_trial():
+    """A cell whose trials all failed contributes no perf metrics."""
+    trials = [
+        _trial(passed=False, metrics={"gflops": 123.0}),
+        _trial(passed=True, exit_status="infrastructure_failed", metrics={"gflops": 4.0}),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.metrics_summary == {}
 
 
 def test_mixed_pass_fail_counts_correctly():
@@ -791,3 +823,95 @@ def test_workload_config_persisted_on_error_cell():
     stats = _default_call(trials=[_trial()], error="docker pull failed",
                           workload_config={"shampoo_api": "old"})
     assert stats.workload_config == {"shampoo_api": "old"}
+
+
+# ---- workload metrics aggregation (perf.md / matrix.json) ----------------
+
+
+def _metric_trial(metrics: dict, passed: bool = True):
+    """Trial stand-in carrying a ``result["metrics"]`` dict."""
+    return SimpleNamespace(
+        exit_status="ok" if passed else "workload_failed",
+        wall_clock_sec=1.0,
+        result={"passed": passed, "metrics": metrics},
+    )
+
+
+def test_metrics_summary_defaults_empty_when_no_metrics():
+    stats = _default_call(trials=[_trial()])
+    assert stats.metrics_summary == {}
+
+
+def test_metrics_summary_aggregates_scalar_metrics_mean_min_max_n():
+    trials = [
+        _metric_trial({"gflops": 100.0, "mean_step_ms": 9.0}),
+        _metric_trial({"gflops": 200.0, "mean_step_ms": 11.0}),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.metrics_summary["gflops"] == {
+        "mean": 150.0,
+        "min": 100.0,
+        "max": 200.0,
+        "n": 2.0,
+    }
+    assert stats.metrics_summary["mean_step_ms"]["mean"] == 10.0
+
+
+def test_metrics_summary_skips_non_scalar_and_bool_values():
+    """Lists (e.g. failure_detectors_fired) and bools are not measurements."""
+    trials = [
+        _metric_trial(
+            {
+                "gbps": 3800.0,
+                "failure_detectors_fired": ["tier1:x"],
+                "healthy": True,
+                "label": "run-a",
+            }
+        )
+    ]
+    stats = _default_call(trials=trials)
+    assert set(stats.metrics_summary) == {"gbps"}
+
+
+def test_metrics_summary_aggregates_only_trials_reporting_the_key():
+    """A key present in some trials aggregates over just those; n reflects it."""
+    trials = [
+        _metric_trial({"gflops": 100.0}),
+        _metric_trial({}),  # this trial reported no metrics
+        _metric_trial({"gflops": 300.0}),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.metrics_summary["gflops"]["n"] == 2.0
+    assert stats.metrics_summary["gflops"]["mean"] == 200.0
+
+
+def test_metrics_summary_empty_for_error_cell():
+    trials = [_metric_trial({"gflops": 100.0})]
+    stats = _default_call(trials=trials, error="docker pull failed")
+    assert stats.metrics_summary == {}
+
+
+def test_metrics_summary_skips_non_finite_values():
+    """NaN / +-Inf are not measurements and would serialize as invalid JSON
+    (``NaN`` / ``Infinity``) in matrix.json, so they are dropped entirely."""
+    trials = [
+        _metric_trial({"final_loss": float("nan"), "gflops": 100.0}),
+        _metric_trial({"final_loss": float("inf"), "gflops": 200.0}),
+    ]
+    stats = _default_call(trials=trials)
+    # final_loss saw only non-finite values -> dropped completely.
+    assert "final_loss" not in stats.metrics_summary
+    assert stats.metrics_summary["gflops"]["n"] == 2.0
+
+
+def test_metrics_summary_aggregates_finite_and_skips_non_finite_for_same_key():
+    """A key with a mix of finite and non-finite values aggregates only the
+    finite occurrences."""
+    trials = [
+        _metric_trial({"gflops": 100.0}),
+        _metric_trial({"gflops": float("nan")}),
+        _metric_trial({"gflops": 300.0}),
+    ]
+    stats = _default_call(trials=trials)
+    assert stats.metrics_summary["gflops"]["n"] == 2.0
+    assert stats.metrics_summary["gflops"]["mean"] == 200.0

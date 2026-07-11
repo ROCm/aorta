@@ -55,6 +55,11 @@ log = logging.getLogger(__name__)
 
 NO_TICKET_SLUG = "_no_ticket_"
 
+# Human-readable performance summary written next to matrix.md / matrix.json
+# on every run (see :func:`write_perf_report`). Kept as one constant so the
+# writer and the matrix.md pointer note can't drift.
+PERF_REPORT_FILENAME = "perf.md"
+
 # The run-directory layouts ``resolve_run_dir`` / ``_cell_directory`` accept.
 # Kept as one source of truth so the two runtime guards can't drift (a value
 # accepted by one but silently mishandled by the other would render wrong
@@ -1026,6 +1031,14 @@ def write_matrix_md(
         "per-trial JSON paths are in `matrix.json`."
     )
     lines.append(
+        f"- **Performance numbers**: see `{PERF_REPORT_FILENAME}` (alongside this "
+        "file) for the per-cell timing percentiles (mean / std / min / max / p50 / "
+        "p90 / p99 step ms + mean wall clock) and any workload-reported throughput "
+        "metrics (e.g. `gflops` / `gbps`). It is written for every run from data "
+        "already collected here; the same aggregates are in "
+        "`matrix.json::cells[*].metrics_summary`."
+    )
+    lines.append(
         "- `recipe.resolved.yaml` (alongside this file) is a strict, reloadable "
         "recipe: inline-docker cells are pinned via `{docker: <ref>}`, but named "
         "mitigations / environments are NOT expanded -- a later registry change "
@@ -1122,6 +1135,170 @@ def write_matrix_json(
         doc["cells"].append(entry)
 
     path.write_text(json.dumps(doc, indent=2, sort_keys=False), encoding="utf-8")
+
+
+def _fmt_perf_fixed3(value: float) -> str:
+    """Format a numeric figure for perf.md as a fixed 3-decimal string.
+
+    Unit-agnostic: used for both the millisecond step-time columns and the
+    seconds-valued ``Wall (s)`` column, so the unit lives in the table header,
+    not the formatter.
+    """
+    return f"{value:.3f}"
+
+
+def _fmt_perf_metric(value: float) -> str:
+    """Format a workload metric value (thousands-separated, 3 decimals)."""
+    return f"{value:,.3f}"
+
+
+def _perf_table(rows: list[tuple[str, ...]]) -> list[str]:
+    """Render a GitHub-flavoured markdown table with padded columns."""
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+
+    def _row(cells: tuple[str, ...]) -> str:
+        return "| " + " | ".join(c.ljust(widths[i]) for i, c in enumerate(cells)) + " |"
+
+    out = [_row(rows[0]), "|" + "|".join("-" * (w + 2) for w in widths) + "|"]
+    out.extend(_row(r) for r in rows[1:])
+    return out
+
+
+def write_perf_report(
+    path: Path,
+    recipe: Recipe,
+    cell_stats: list[CellStats],
+    baseline: CellStats,
+    run_timestamp: str,
+) -> None:
+    """Render ``perf.md`` -- the per-run performance summary next to matrix.md.
+
+    Written on **every** run: it is pure formatting of data aorta already
+    collected (per-step time samples + wall clock + any workload-reported
+    ``metrics``), so it adds no measurement cost. It always carries a step-
+    timing percentile table; a second throughput table appears only when at
+    least one cell reported numeric ``metrics`` (e.g. ``gflops`` / ``gbps``),
+    which ``matrix.md`` never surfaced. The same aggregates live in
+    ``matrix.json::cells[*].metrics_summary`` for machine consumers.
+    """
+    lines: list[str] = []
+    lines.append(f"# Performance Report - {recipe.workload}")
+    lines.append("")
+    lines.append(f"**Ticket**: {recipe.ticket or '(none)'}  ")
+    lines.append(f"**Workload**: {recipe.workload}  ")
+    lines.append(f"**Run timestamp**: {run_timestamp}  ")
+    lines.append(f"**Baseline cell**: {baseline.name}  ")
+    lines.append("")
+    lines.append(
+        "Generated for every run from the same per-trial data behind "
+        "`matrix.md` -- these are unchanged aggregates, not a second "
+        "measurement. See `matrix.md` for pass/fail + confound classification "
+        "and `matrix.json::cells[*]` for the raw per-trial series."
+    )
+    lines.append("")
+
+    # --- Step-timing percentiles (always) --------------------------------
+    lines.append("## Step timing (ms)")
+    lines.append("")
+    timing_header = (
+        "Cell", "Trials", "Iters", "Mean", "Std", "Min",
+        "p50", "p90", "p99", "Max", "Wall (s)", "Source",
+    )
+    timing_rows: list[tuple[str, ...]] = [timing_header]
+    for cell in cell_stats:
+        label = cell.name + (" (baseline)" if cell.name == baseline.name else "")
+        if cell.error is not None:
+            # Every measured column is "error" for an error cell -- including
+            # Wall, which would otherwise print a misleading 0.000 (error rows
+            # force mean_wall_clock_sec to 0.0, not a real measurement).
+            timing_rows.append(
+                (label, str(cell.trials), cell.iters_display,
+                 "error", "error", "error", "error", "error", "error",
+                 "error", "error", "error")
+            )
+            continue
+        # A cell with no usable per-step timing (setup-only crash / did-not-run)
+        # reports mean_step_time_ms == 0.0 with source "missing"; render the
+        # step columns as n/a rather than a misleading 0.000.
+        if cell.step_time_source == "missing" or not cell.step_times_ms:
+            step_cells = ("n/a",) * 7
+        else:
+            step_cells = (
+                _fmt_perf_fixed3(cell.mean_step_time_ms),
+                _fmt_perf_fixed3(cell.std_step_time_ms),
+                _fmt_perf_fixed3(cell.min_step_time_ms),
+                _fmt_perf_fixed3(cell.p50_step_time_ms),
+                _fmt_perf_fixed3(cell.p90_step_time_ms),
+                _fmt_perf_fixed3(cell.p99_step_time_ms),
+                _fmt_perf_fixed3(cell.max_step_time_ms),
+            )
+        # Reorder step_cells (mean, std, min, p50, p90, p99, max) into the
+        # header order (Mean, Std, Min, p50, p90, p99, Max) -- identical here,
+        # kept explicit so a header edit is a one-place change.
+        mean, std, mn, p50, p90, p99, mx = step_cells
+        timing_rows.append(
+            (label, str(cell.trials), cell.iters_display,
+             mean, std, mn, p50, p90, p99, mx,
+             _fmt_perf_fixed3(cell.mean_wall_clock_sec), cell.step_time_source)
+        )
+    lines.extend(_perf_table(timing_rows))
+    lines.append("")
+
+    # --- Workload throughput / metrics (conditional) ---------------------
+    # Sort the column keys so perf.md is byte-stable across runs: the union
+    # of metric names is otherwise ordered by cell-iteration / dict-insertion
+    # order, which can shift between workloads / Python versions and produce
+    # noisy diffs when comparing two runs of the same recipe.
+    metric_key_set: set[str] = set()
+    for cell in cell_stats:
+        metric_key_set.update(cell.metrics_summary)
+    metric_keys: list[str] = sorted(metric_key_set)
+    if metric_keys:
+        lines.append("## Workload metrics (mean across trials)")
+        lines.append("")
+        metrics_header = ("Cell", *metric_keys)
+        metrics_rows: list[tuple[str, ...]] = [metrics_header]
+        for cell in cell_stats:
+            label = cell.name + (" (baseline)" if cell.name == baseline.name else "")
+            row = [label]
+            for key in metric_keys:
+                agg = cell.metrics_summary.get(key)
+                row.append(_fmt_perf_metric(agg["mean"]) if agg else "—")
+            metrics_rows.append(tuple(row))
+        lines.extend(_perf_table(metrics_rows))
+        lines.append("")
+        lines.append(
+            "> Each value is the mean of the metric across the cell's trials. "
+            "Per-metric `min` / `max` / trial-count `n` are in "
+            "`matrix.json::cells[*].metrics_summary`. `—` = the cell did not "
+            "report that metric."
+        )
+        lines.append("")
+
+    lines.append("## Notes")
+    lines.append("")
+    lines.append(
+        "- This file is written for **every** run (no flag) so any run "
+        "directory is self-describing for performance -- it reuses the "
+        "per-trial data already collected, so it costs no extra measurement."
+    )
+    lines.append(
+        "- `Trials` is the number of trials aggregated for the cell. `Iters` "
+        "mirrors `matrix.md`: iterations executed vs. configured. `Source` is "
+        "the step-time fidelity (`per_step` > `elapsed_per_iter` > "
+        "`wall_clock_total` > `missing`); rows with `Source = missing` show "
+        "`n/a` for the per-step columns (`Mean`..`Max`) because any per-step "
+        "number would fold in setup/teardown. `Wall (s)` is still the real "
+        "end-to-end wall clock and is always shown (it reads `error` only for "
+        "error cells)."
+    )
+    lines.append(
+        "- Percentiles are over the concatenated per-step samples across the "
+        "cell's trials, matching `matrix.json::cells[*]`. `matrix.md` shows "
+        "only the mean + a confound ratio vs the baseline cell."
+    )
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def write_resolved_recipe(

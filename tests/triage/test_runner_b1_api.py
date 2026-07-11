@@ -540,6 +540,172 @@ cells:
     assert "did_not_run" in md
 
 
+def _write_two_cell_recipe(tmp_path: Path, ticket: str) -> Path:
+    """A baseline cell + one other cell, both local, 1 trial / 50 steps."""
+    recipe = tmp_path / f"{ticket}.yaml"
+    recipe.write_text(
+        f"""\
+schema_version: 1
+ticket: {ticket}
+workload: fsdp
+trials: 1
+steps: 50
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+  - name: bad-local
+    mitigations: [tf32_off]
+    environment: local
+""",
+        encoding="utf-8",
+    )
+    return recipe
+
+
+def _ok_trials():
+    from types import SimpleNamespace
+
+    return [
+        SimpleNamespace(
+            exit_status="ok",
+            wall_clock_sec=1.0,
+            result={"passed": True, "step_times_ms": [100.0], "elapsed_sec": 1.0},
+        )
+    ]
+
+
+def _did_not_run_trials():
+    """workload_failed with no step times + zero elapsed -> platform infers did_not_run."""
+    from types import SimpleNamespace
+
+    return [
+        SimpleNamespace(
+            exit_status="workload_failed",
+            wall_clock_sec=3.5,
+            result={"passed": False, "step_times_ms": [], "elapsed_sec": 0.0},
+        )
+    ]
+
+
+def test_strict_exits_nonzero_when_a_cell_did_not_run(tmp_path, patched_env, monkeypatch):
+    """--strict must catch a cell that never ran (setup crash -> did_not_run),
+    while the same recipe without --strict tolerates it (exit 0). The matrix is
+    written either way so the operator can inspect the cause.
+    """
+    import aorta.triage.runner as runner_mod
+
+    def per_cell(request):
+        return _ok_trials() if request.mitigations == ("none",) else _did_not_run_trials()
+
+    monkeypatch.setattr(runner_mod, "run_trials", per_cell)
+    recipe = _write_two_cell_recipe(tmp_path, "STRICT-DNR")
+    cli = CliRunner()
+    out = tmp_path / "out"
+
+    default = cli.invoke(triage, ["run", "--recipe", str(recipe), "--output-dir", str(out)])
+    assert default.exit_code == 0, default.output
+
+    strict = cli.invoke(
+        triage, ["run", "--recipe", str(recipe), "--output-dir", str(out), "--strict"]
+    )
+    assert strict.exit_code != 0, strict.output
+    assert "strict mode" in strict.output
+    assert "1 of 2 cell(s)" in strict.output  # only the bad cell, not the baseline
+    assert "bad-local" in strict.output
+    assert "Wrote matrix to" in strict.output
+
+
+def test_strict_exits_nonzero_when_a_cell_errored(tmp_path, patched_env, monkeypatch):
+    """--strict must catch a whole-cell error (run_trials raised)."""
+    import aorta.triage.runner as runner_mod
+
+    def per_cell(request):
+        if request.mitigations == ("none",):
+            return _ok_trials()
+        raise RuntimeError("cell blew up inside run_trials")
+
+    monkeypatch.setattr(runner_mod, "run_trials", per_cell)
+    recipe = _write_two_cell_recipe(tmp_path, "STRICT-ERR")
+    cli = CliRunner()
+    out = tmp_path / "out"
+
+    strict = cli.invoke(
+        triage, ["run", "--recipe", str(recipe), "--output-dir", str(out), "--strict"]
+    )
+    assert strict.exit_code != 0, strict.output
+    assert "bad-local" in strict.output
+    assert "Wrote matrix to" in strict.output
+
+
+def test_strict_tolerates_a_real_bug_repro(tmp_path, patched_env, monkeypatch):
+    """A cell that RAN but failed (a genuine bug repro) is an expected matrix
+    outcome and must NOT trip --strict.
+    """
+    from types import SimpleNamespace
+
+    import aorta.triage.runner as runner_mod
+
+    def per_cell(request):
+        if request.mitigations == ("none",):
+            return _ok_trials()
+        return [
+            SimpleNamespace(
+                exit_status="workload_failed",
+                wall_clock_sec=2.0,
+                result={
+                    "passed": False,
+                    "step_times_ms": [120.0],
+                    "elapsed_sec": 2.0,
+                    "main_work_started": True,
+                },
+            )
+        ]
+
+    monkeypatch.setattr(runner_mod, "run_trials", per_cell)
+    recipe = _write_two_cell_recipe(tmp_path, "STRICT-REPRO")
+    cli = CliRunner()
+    out = tmp_path / "out"
+
+    strict = cli.invoke(
+        triage, ["run", "--recipe", str(recipe), "--output-dir", str(out), "--strict"]
+    )
+    assert strict.exit_code == 0, strict.output
+
+
+def test_run_recipe_strict_raises_matrix_strict_error(tmp_path, patched_env, monkeypatch):
+    """Programmatic run_recipe(strict=True) raises MatrixStrictError naming the
+    offending cell(s), with artifacts already written.
+    """
+    import aorta.triage.runner as runner_mod
+    from aorta.triage.runner import MatrixStrictError
+
+    def per_cell(request):
+        return _ok_trials() if request.mitigations == ("none",) else _did_not_run_trials()
+
+    monkeypatch.setattr(runner_mod, "run_trials", per_cell)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none,tf32_off",
+        environment_axis="local",
+        trials=1,
+        steps=50,
+        ticket="STRICT-API",
+    )
+    with pytest.raises(MatrixStrictError) as excinfo:
+        runner.run_recipe(
+            r, output_dir=tmp_path, timestamp="2026-01-01T00-00-00", strict=True
+        )
+    assert excinfo.value.cells == ["tf32_off-local"]
+    # The message points at the concrete slugified per-cell artifact path
+    # (cells/<safe_slug(cell)>/<workload>/trial_*.json), not a <cell>/<workload>
+    # placeholder, so an operator can copy/paste straight to the trials (#274).
+    msg = str(excinfo.value)
+    assert "cells/tf32_off-local/fsdp/trial_*.json" in msg
+    assert "<cell>" not in msg
+    assert (excinfo.value.run_dir / "matrix.json").exists()
+
+
 def test_cli_recipe_mode_dry_run(tmp_path, patched_env, patched_run_trials):
     recipe = tmp_path / "recipe.yaml"
     recipe.write_text(
