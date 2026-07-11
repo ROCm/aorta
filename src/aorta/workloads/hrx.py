@@ -139,8 +139,19 @@ def _validated_arch(arch: str) -> str:
     path separator, so rejecting separators / traversal sentinels / absolute
     paths only rejects clearly-invalid or hostile input while leaving every
     legitimate arch untouched (so it stays usable for ``--offload-arch`` too).
+
+    A non-string value (e.g. ``gpu_arch: null`` in a recipe) is rejected up
+    front rather than coerced with ``str(...)`` -- ``str(None)`` would become
+    the literal ``'None'``, silently passing the path checks and producing a
+    confusing ``<build_dir>/None/`` directory and ``--offload-arch=None`` build
+    failure instead of a clear configuration error.
     """
-    arch = str(arch).strip()
+    if not isinstance(arch, str):
+        raise ValueError(
+            f"hrx: gpu_arch must be a string --offload-arch target (e.g. "
+            f"'gfx942'), got {type(arch).__name__} {arch!r}."
+        )
+    arch = arch.strip()
     if (
         not arch
         or arch in (".", "..")

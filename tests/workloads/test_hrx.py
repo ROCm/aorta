@@ -436,6 +436,14 @@ def test_validated_arch_rejects_path_escapes(bad):
         hrx_mod._validated_arch(bad)
 
 
+@pytest.mark.parametrize("bad", [None, 942, 90.0, ["gfx942"], {"arch": "gfx942"}])
+def test_validated_arch_rejects_non_string(bad):
+    """A non-string gpu_arch (e.g. ``gpu_arch: null``) is rejected up front,
+    not coerced via ``str(...)`` into the literal build-dir name 'None'."""
+    with pytest.raises(ValueError, match="gpu_arch"):
+        hrx_mod._validated_arch(bad)
+
+
 @pytest.mark.parametrize(
     "good",
     ["gfx942", "gfx90a", "gfx1100", "gfx90a:xnack+", "gfx942:sramecc+:xnack-"],
