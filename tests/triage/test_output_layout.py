@@ -626,7 +626,11 @@ def _fake_trial_with_metrics(
     return _FakeTrial(
         result={
             "passed": True,
-            "step_times_ms": step_times_ms or [100.0],
+            # Explicit ``is None`` (not ``or``) so a caller can model a trial
+            # that reported metrics but an empty ``step_times_ms`` ([] stays [],
+            # a realistic did_not_run / missing-per-step-timing shape) instead
+            # of it silently becoming the [100.0] default.
+            "step_times_ms": [100.0] if step_times_ms is None else step_times_ms,
             "metrics": metrics,
         }
     )

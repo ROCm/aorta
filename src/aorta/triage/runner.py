@@ -1707,13 +1707,21 @@ def _run_recipe_locked(
             s.name for s in cell_stats if s.error is not None or is_did_not_run_cell(s)
         ]
         if invalid:
+            # Emit the concrete per-cell artifact paths (slugified exactly as
+            # they land on disk, see _run_one_cell / _cells_dir) rather than a
+            # ``<cell>``/``<workload>`` placeholder, so an operator can
+            # copy/paste straight to the offending trials -- cell names are
+            # slugified on disk, so the verbatim name wouldn't resolve.
+            inspect_paths = "; ".join(
+                f"cells/{safe_slug(name)}/{recipe.workload}/trial_*.json"
+                for name in invalid
+            )
             raise MatrixStrictError(
                 f"strict mode: {len(invalid)} of {len(cell_stats)} cell(s) never "
                 f"produced a valid result (errored or did_not_run): "
-                f"{', '.join(invalid)}. Inspect "
-                f"cells/<cell>/<workload>/trial_*.json for the cause (a common "
-                f"one is a rejected LD_PRELOAD / setup failure). Drop --strict to "
-                f"treat these as tolerated per-cell failures.",
+                f"{', '.join(invalid)}. Inspect {inspect_paths} for the cause (a "
+                f"common one is a rejected LD_PRELOAD / setup failure). Drop "
+                f"--strict to treat these as tolerated per-cell failures.",
                 run_dir,
                 invalid,
             )

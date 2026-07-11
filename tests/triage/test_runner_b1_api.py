@@ -697,6 +697,12 @@ def test_run_recipe_strict_raises_matrix_strict_error(tmp_path, patched_env, mon
             r, output_dir=tmp_path, timestamp="2026-01-01T00-00-00", strict=True
         )
     assert excinfo.value.cells == ["tf32_off-local"]
+    # The message points at the concrete slugified per-cell artifact path
+    # (cells/<safe_slug(cell)>/<workload>/trial_*.json), not a <cell>/<workload>
+    # placeholder, so an operator can copy/paste straight to the trials (#274).
+    msg = str(excinfo.value)
+    assert "cells/tf32_off-local/fsdp/trial_*.json" in msg
+    assert "<cell>" not in msg
     assert (excinfo.value.run_dir / "matrix.json").exists()
 
 
