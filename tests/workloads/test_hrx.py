@@ -424,3 +424,76 @@ def test_run_no_verdict_is_failure(monkeypatch, tmp_path):
     detail = res.failure_details[0]
     assert "hipMalloc" in detail.get("stdout_tail", "")
     assert "stdout" in detail.get("hint", "")
+
+
+@pytest.mark.parametrize(
+    "bad", ["../evil", "/abs/gfx942", "a/b", "..", ".", "", "gfx\\942", "gfx\x00x"]
+)
+def test_validated_arch_rejects_path_escapes(bad):
+    """gpu_arch is a build-dir path component; separators/traversal/absolute
+    values that could escape build_dir must be rejected."""
+    with pytest.raises(ValueError, match="gpu_arch"):
+        hrx_mod._validated_arch(bad)
+
+
+@pytest.mark.parametrize(
+    "good",
+    ["gfx942", "gfx90a", "gfx1100", "gfx90a:xnack+", "gfx942:sramecc+:xnack-"],
+)
+def test_validated_arch_accepts_real_targets(good):
+    """Real --offload-arch targets (incl. :feature+/- qualifiers) pass through
+    untouched so they stay usable as both a dir name and an offload-arch."""
+    assert hrx_mod._validated_arch(good) == good
+
+
+def test_setup_rejects_unsafe_gpu_arch(monkeypatch, tmp_path):
+    """A hostile gpu_arch is rejected in setup() (wired to _validated_arch)."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(HrxWorkload, "_build", lambda self: self._build_dir / "x")
+    wl = HrxWorkload(
+        {"probe": "module", "gpu_arch": "../../etc", "build_dir": str(tmp_path)}
+    )
+    with pytest.raises(ValueError, match="gpu_arch"):
+        wl.setup()
+
+
+def test_run_writes_full_logs_when_save_logs(monkeypatch, tmp_path):
+    """With save_logs, run() writes the child's FULL stdout/stderr to sibling
+    ``<prefix>.subprocess.*.log`` files -- not just the truncated failure tails."""
+    monkeypatch.setattr(hrx_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(HrxWorkload, "_build", lambda self: tmp_path / self._spec.binary)
+    log_prefix = tmp_path / "trial_d0_m0_t0"
+    wl = HrxWorkload(
+        {
+            "probe": "module",
+            "build_dir": str(tmp_path),
+            "_aorta_save_logs": True,
+            "_aorta_log_prefix": str(log_prefix),
+        }
+    )
+    wl.setup()
+    # > 2 KB each, so the full-log write is provably not the failure tail.
+    stdout = "out[0]=107 (expect 107)\nVERDICT=FULLY_WORKS\n" + "x" * 5000
+    stderr = "some hip chatter\n" + "y" * 5000
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: _fake_completed(stdout, 0, stderr)
+    )
+
+    res = wl.run()
+
+    assert res.passed is True
+    out_log = tmp_path / "trial_d0_m0_t0.subprocess.stdout.log"
+    err_log = tmp_path / "trial_d0_m0_t0.subprocess.stderr.log"
+    assert out_log.read_text() == stdout
+    assert err_log.read_text() == stderr
+
+
+def test_run_no_logs_without_save_logs(monkeypatch, tmp_path):
+    """save_logs and the full-log capture are decoupled: no prefix -> no files."""
+    wl = _prep_workload(monkeypatch, tmp_path)
+    stdout = "out[0]=107 (expect 107)\nVERDICT=FULLY_WORKS\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _fake_completed(stdout, 0))
+
+    wl.run()
+
+    assert not list(tmp_path.glob("*.subprocess.*.log"))

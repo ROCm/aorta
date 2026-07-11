@@ -121,6 +121,20 @@ The workload reports every timed iteration as `step_times_ms`, so
 Achieved throughput (`gflops` / `gbps`) is in each trial's `result.json`
 `metrics` and in `matrix.json`.
 
+### `perf.md` — per-run performance report
+
+Every `aorta sweep run` also writes a `perf.md` next to `matrix.md` /
+`matrix.json` in the run directory (no flag needed — it is pure formatting of
+data already collected). It carries a per-cell step-timing percentile table
+(mean / std / min / max / p50 / p90 / p99 step ms + mean wall clock) and, when
+a cell reported numeric `metrics`, a workload-throughput table (`gflops` /
+`gbps` / `mean_step_ms`). The same aggregates are in
+`matrix.json::cells[*].metrics_summary`. Read it alongside `matrix.md`:
+
+```bash
+cat triage_results/HRX-PERF-GEMM/hrx_perf/*/perf.md
+```
+
 Example (`hrx_off` baseline; `hrx_on` here shows `did_not_run` because the
 recipe still has the placeholder HRX path — fill it in to get a real number):
 

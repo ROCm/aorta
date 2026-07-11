@@ -296,3 +296,43 @@ def test_run_timeout_is_failure(monkeypatch, tmp_path):
     assert res.total_iterations == 0
     assert res.main_work_started is False
     assert "timed out" in res.failure_details[0].get("hint", "")
+
+
+def test_setup_rejects_unsafe_gpu_arch(monkeypatch, tmp_path):
+    """A hostile gpu_arch must not escape build_dir (shared _validated_arch)."""
+    monkeypatch.setattr(perf_mod, "_resolve_hipcc", lambda _cfg: "/usr/bin/hipcc")
+    monkeypatch.setattr(HrxPerfWorkload, "_build", lambda self: self._build_dir / "x")
+    wl = HrxPerfWorkload(
+        {"bench": "gemm", "gpu_arch": "../../etc", "build_dir": str(tmp_path)}
+    )
+    with pytest.raises(ValueError, match="gpu_arch"):
+        wl.setup()
+
+
+def test_run_writes_full_logs_when_save_logs(monkeypatch, tmp_path):
+    """With save_logs, run() writes the child's FULL stdout/stderr to sibling
+    ``<prefix>.subprocess.*.log`` files -- not just the truncated failure tails."""
+    log_prefix = tmp_path / "trial_d0_m0_t0"
+    wl = _prep(
+        monkeypatch,
+        tmp_path,
+        {
+            "_aorta_save_logs": True,
+            "_aorta_log_prefix": str(log_prefix),
+        },
+    )
+    stdout = (
+        "bench=gemm size=4096 iters=3 warmup=10\n"
+        "step_ms=12.5\nstep_ms=12.0\nstep_ms=13.0\n"
+        "GFLOPS=1234.5\nchecksum=4096.0 expected=4096\nRESULT=PERF_OK\n"
+    ) + "x" * 5000
+    stderr = "some hip chatter\n" + "y" * 5000
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _completed(stdout, 0, stderr))
+
+    res = wl.run()
+
+    assert res.passed is True
+    out_log = tmp_path / "trial_d0_m0_t0.subprocess.stdout.log"
+    err_log = tmp_path / "trial_d0_m0_t0.subprocess.stderr.log"
+    assert out_log.read_text() == stdout
+    assert err_log.read_text() == stderr

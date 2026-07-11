@@ -48,7 +48,9 @@ from aorta.workloads.hrx import (
     _build_env,
     _gpu_available,
     _missing_preload_objects,
+    _persist_full_logs,
     _resolve_hipcc,
+    _validated_arch,
 )
 
 log = logging.getLogger(__name__)
@@ -164,7 +166,7 @@ class HrxPerfWorkload(Workload):
             )
         self._bench, self._size, self._iters, self._warmup = self._validated_config()
         self._spec = _BENCHES[self._bench]
-        self._arch = str(self.config.get("gpu_arch", _DEFAULT_ARCH))
+        self._arch = _validated_arch(self.config.get("gpu_arch", _DEFAULT_ARCH))
         # Validate here: subprocess.run(..., timeout=<=0) would raise at run()
         # time and be misclassified as an infrastructure failure. Fail fast in
         # setup() with a clear config error instead.
@@ -277,6 +279,10 @@ class HrxPerfWorkload(Workload):
             if isinstance(stderr, bytes):
                 stderr = stderr.decode(errors="replace")
         elapsed = time.monotonic() - start
+
+        # Persist the complete child output when the run requested save_logs;
+        # failure_details below only keeps truncated tails (and only on failure).
+        _persist_full_logs(self.config, stdout, stderr)
 
         step_times = [float(m) for m in _STEP_RE.findall(stdout)]
         result_match = _RESULT_RE.search(stdout)

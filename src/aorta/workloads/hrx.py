@@ -128,6 +128,63 @@ def _build_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in _RUNTIME_ROUTING_VARS}
 
 
+def _validated_arch(arch: str) -> str:
+    """Return ``arch`` if it is safe to use as a build-directory component.
+
+    ``gpu_arch`` is used verbatim as a ``<build_dir>/<arch>/`` path component
+    (see :meth:`HrxWorkload._build_root`), so an operator-supplied value like
+    ``../evil`` or ``/etc`` must not be able to escape ``build_dir``. Real
+    ``hipcc --offload-arch`` targets are of the form ``gfxNNN`` with optional
+    ``:feature+/-`` qualifiers (e.g. ``gfx90a:xnack+``) and never contain a
+    path separator, so rejecting separators / traversal sentinels / absolute
+    paths only rejects clearly-invalid or hostile input while leaving every
+    legitimate arch untouched (so it stays usable for ``--offload-arch`` too).
+    """
+    arch = str(arch).strip()
+    if (
+        not arch
+        or arch in (".", "..")
+        or "/" in arch
+        or "\\" in arch
+        or "\x00" in arch
+        or os.path.isabs(arch)
+    ):
+        raise ValueError(
+            f"hrx: gpu_arch {arch!r} is not a valid --offload-arch target -- it "
+            "is used as a build-directory name and must be a single path "
+            "component (no '/', '\\', '..', or absolute paths that could escape "
+            "build_dir)."
+        )
+    return arch
+
+
+def _persist_full_logs(config: dict[str, Any], stdout: str, stderr: str) -> None:
+    """Write the child's *full* stdout/stderr when the platform requested logs.
+
+    ``failure_details`` only keeps truncated 2 KB tails, and only on failure.
+    When ``save_logs`` is set the dispatcher injects ``_aorta_save_logs`` +
+    ``_aorta_log_prefix`` (an absolute path stem) and expects a subprocess
+    wrapper to write its own capture to a sibling
+    ``<prefix>.subprocess.{stdout,stderr}.log`` (see
+    :mod:`aorta.run.dispatcher` -- ``redirect_stdout`` does not catch a child
+    process's output). Honor that here so the complete HRX child output is
+    preserved alongside the trial artifacts, not just the tails. Best-effort:
+    a write failure is logged, never raised, so it can't turn a real result
+    into a cell error.
+    """
+    if not config.get("_aorta_save_logs"):
+        return
+    prefix = config.get("_aorta_log_prefix")
+    if not isinstance(prefix, str) or not prefix:
+        return
+    for suffix, content in (("stdout", stdout), ("stderr", stderr)):
+        dest = f"{prefix}.subprocess.{suffix}.log"
+        try:
+            Path(dest).write_text(content, encoding="utf-8", errors="backslashreplace")
+        except OSError as exc:
+            log.warning("hrx: could not write full %s log to %s: %s", suffix, dest, exc)
+
+
 def _missing_preload_objects() -> list[str]:
     """Path-like ``LD_PRELOAD`` entries that don't resolve to an existing file.
 
@@ -260,7 +317,7 @@ class HrxWorkload(Workload):
             )
         self._probe = self._validated_probe()
         self._spec = _PROBES[self._probe]
-        self._arch = str(self.config.get("gpu_arch", _DEFAULT_ARCH))
+        self._arch = _validated_arch(self.config.get("gpu_arch", _DEFAULT_ARCH))
         # Validate here: subprocess.run(..., timeout=<=0) would raise at run()
         # time and be misclassified as an infrastructure failure. Fail fast in
         # setup() with a clear config error instead.
@@ -418,6 +475,10 @@ class HrxWorkload(Workload):
             if isinstance(stderr, bytes):
                 stderr = stderr.decode(errors="replace")
         elapsed = time.monotonic() - start
+
+        # Persist the complete child output when the run requested save_logs;
+        # failure_details below only keeps truncated tails (and only on failure).
+        _persist_full_logs(self.config, stdout, stderr)
 
         verdict_match = _VERDICT_RE.search(stdout)
         out0_match = _OUT0_RE.search(stdout)
