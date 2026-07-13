@@ -160,5 +160,4 @@ For host-side `aorta probe` with `environment: emulated-rocjitsu`, AORTA wraps
 
 ## 10. Related docs
 
-- Design: [docs/plans/mirage-aorta-integration.md](plans/mirage-aorta-integration.md)
 - Recipe: [recipes/gpu-smoke-emulated.yaml](../recipes/gpu-smoke-emulated.yaml)

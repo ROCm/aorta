@@ -2,13 +2,11 @@
 
 Scripts for running AORTA under the mirage GPU emulator (PR #227).
 
-**Full manual demo guide:** [docs/emulated-gpu-mirage-demo.md](../../docs/emulated-gpu-mirage-demo.md)
-
 ## Quick start
 
 ```bash
 export MIRAGE_BIN=/path/to/mirage/build/manylinux/bin/mirage
-export MIRAGE_AORTA_IMAGE=docker.io/vllm/vllm-openai-rocm:latest   # on sharkmi300x-4
+export MIRAGE_AORTA_IMAGE=docker.io/vllm/vllm-openai-rocm:latest
 
 ./scripts/emulation/run_mirage_container.sh gpu-smoke
 ./scripts/emulation/run_mirage_container.sh probe
@@ -35,5 +33,3 @@ The `training` and `llm_determinism` recipes are single-rank singleton smokes
 multi-rank path needs `mirage run --daemon --gpus-per-node N` + `torchrun` and is
 a later phase. The matrix runs the single-process cases by default; add the slow
 `llm_determinism` case with `INCLUDE_LLM_DET=1` (and a larger `TIMEOUT_SEC`).
-
-See the demo guide for every mirage and aorta command, manual one-liners, and troubleshooting.
