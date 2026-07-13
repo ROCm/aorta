@@ -2,8 +2,7 @@
 
 Bridges AORTA's environment axis to the mirage control plane + rocjitsu
 software GPU emulator so workloads can run with no physical GPU. See
-:mod:`aorta.emulation.mirage_launch` for the launch helpers and
-``docs/plans/mirage-aorta-integration.md`` for the design.
+:mod:`aorta.emulation.mirage_launch` for the launch helpers.
 """
 
 from aorta.emulation.mirage_launch import (
