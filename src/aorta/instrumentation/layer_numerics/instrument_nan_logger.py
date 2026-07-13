@@ -151,6 +151,15 @@ Settings (environment variables):
                          timing-sensitive bug. Requires NANLOG_PIPELINE=1 (default 0).
   NANLOG_TRACK_LAYER_STRIDE  re-scan every Kth watched layer (default 1). Only with
                          NANLOG_TRACK_EVERY_LAYER=1.
+  NANLOG_BOUNDS          per-tensor in-range check "substr:lo:hi;substr:lo:hi": a
+                         watched tensor takes the first entry whose substring is in
+                         its layer_name; elements outside [lo,hi] count as oob and
+                         mark the record bad (kind="oob"). Two-sided, unlike the
+                         one-sided huge threshold. One reduction, same drain, no host
+                         sync. Unmatched tensors are unbounded (default off).
+  NANLOG_BOUND_LO / NANLOG_BOUND_HI  match-all fallback range applied to EVERY tensor
+                         (degenerate single-range form of NANLOG_BOUNDS; sensible only
+                         when watching one well-bounded target).
 
   Every record carries a `batch_id`, assigned when a batch enters at
   copy_batch_to_gpu and re-read at each later checkpoint, so one batch's
@@ -291,6 +300,61 @@ _SPARSE_HEAVY = os.environ.get("NANLOG_SPARSE_HEAVY", "0") == "1"
 # stride, tighten only once the stage-level bracket is stable.
 _TRACK_EVERY_LAYER = os.environ.get("NANLOG_TRACK_EVERY_LAYER", "0") == "1"
 _TRACK_LAYER_STRIDE = max(1, int(os.environ.get("NANLOG_TRACK_LAYER_STRIDE", "1")))
+# In-range bound check (default OFF). Flags elements OUTSIDE [lo, hi] as bad — a
+# two-sided test the one-sided huge threshold (|x| > T) cannot express (it cannot
+# catch a small out-of-range value, e.g. a negative in a [0,60] embedding input).
+# Bounds are PER-TENSOR by nature (a Linear activation has no [0,60] rule), so the
+# range is chosen per watched tensor by matching its record name against patterns:
+#   NANLOG_BOUNDS="emb_proj.projections:0:60;dense_arch:-10:10"
+# Each entry is "substring:lo:hi"; a tensor takes the FIRST entry whose substring is
+# in its layer_name (so this composes with NANLOG_WATCH_NAMES). Tensors matching no
+# pattern are unbounded (oob_count=0). The bare match-all form is the degenerate
+# single-range case: NANLOG_BOUND_LO / NANLOG_BOUND_HI apply to EVERY tensor and are
+# only sensible when you watch a single well-bounded target. When any bound is
+# active, every record carries oob_count (0 when no bound matched) so the fixed
+# per-step drain stack stays valid; an out-of-range tensor is `bad` with kind="oob".
+# One extra on-GPU reduction, same drain, no host sync.
+def _parse_bounds(spec: str):
+    """Parse "substr:lo:hi;substr:lo:hi" into [(substr, lo, hi), ...]. Malformed
+    entries are skipped with a warning rather than crashing the sidecar."""
+    out = []
+    for entry in spec.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.rsplit(":", 2)
+        if len(parts) != 3:
+            sys.stderr.write(f"nanlog: WARNING: ignoring malformed NANLOG_BOUNDS entry {entry!r} "
+                             "(expected substring:lo:hi)\n")
+            continue
+        substr, lo_s, hi_s = parts
+        try:
+            out.append((substr, float(lo_s), float(hi_s)))
+        except ValueError:
+            sys.stderr.write(f"nanlog: WARNING: ignoring NANLOG_BOUNDS entry {entry!r} "
+                             "(lo/hi not numeric)\n")
+    return out
+
+
+_BOUNDS = _parse_bounds(os.environ.get("NANLOG_BOUNDS", ""))
+_BOUND_LO = os.environ.get("NANLOG_BOUND_LO")
+_BOUND_HI = os.environ.get("NANLOG_BOUND_HI")
+# Match-all fallback (applies to every tensor) when the bare LO/HI form is used.
+_BOUND_GLOBAL = (
+    (float(_BOUND_LO) if _BOUND_LO is not None else float("-inf"),
+     float(_BOUND_HI) if _BOUND_HI is not None else float("inf"))
+    if (_BOUND_LO is not None or _BOUND_HI is not None) else None
+)
+_BOUNDS_ACTIVE = bool(_BOUNDS) or _BOUND_GLOBAL is not None
+
+
+def _bound_for(layer_name: str):
+    """Return (lo, hi) for this tensor: first matching NANLOG_BOUNDS pattern, else
+    the global LO/HI fallback, else None (unbounded)."""
+    for substr, lo, hi in _BOUNDS:
+        if substr in layer_name:
+            return (lo, hi)
+    return _BOUND_GLOBAL
 
 # Create the output dir. If it is not writable (e.g. the default lands in a
 # read-only working dir), fall back to a temp dir rather than crashing the
@@ -399,12 +463,16 @@ _grad_warned = False
 # ---------------------------------------------------------------------------
 # On-device reductions (NO .item() here — that is the whole point)
 # ---------------------------------------------------------------------------
-def _device_stats(t: torch.Tensor) -> dict:
+def _device_stats(t: torch.Tensor, bound=None) -> dict:
     """Return a dict of GPU scalar tensors. No host sync; read back later.
 
     finite_abs_max masks non-finite values to 0 first, so it stays meaningful
     even when some elements are already NaN/Inf (lets us see the magnitude
-    trend leading up to a NaN)."""
+    trend leading up to a NaN).
+
+    bound: optional (lo, hi) for this tensor. When bound tracking is active
+    (_BOUNDS_ACTIVE), oob_count is ALWAYS emitted (0 when bound is None) so the
+    fixed per-step drain stack stays uniform across records."""
     fin = torch.isfinite(t)
     # Mask non-finite values out per reduction with an identity that can never
     # win: 0 for abs-max (no real magnitude loses to 0), -inf for max, +inf for
@@ -425,8 +493,22 @@ def _device_stats(t: torch.Tensor) -> dict:
         "finite_min": safe_min.min(),
         "numel": torch.tensor(t.numel(), device=t.device),
     }
+    # Out-of-range count: finite elements outside [lo, hi]. Emitted for EVERY record
+    # once bound tracking is active (0 when this tensor has no bound) so the drain's
+    # fixed key stack is uniform. One extra reduction, same drain, no host sync.
+    if _BOUNDS_ACTIVE:
+        if bound is not None:
+            lo, hi = bound
+            stats["oob_count"] = (fin & ((t < lo) | (t > hi))).sum()
+        else:
+            stats["oob_count"] = torch.zeros((), dtype=torch.int64, device=t.device)
+    # Bad mask includes out-of-range so NANLOG_LOCATE/BAD_VALUES point at the OOB
+    # element too, not only NaN/Inf/huge.
     if _LOCATE or _BAD_VALUES:
         bad = (~fin) | (fin & (t.abs() > _HUGE))
+        if _BOUNDS_ACTIVE and bound is not None:
+            lo, hi = bound
+            bad = bad | (fin & ((t < lo) | (t > hi)))
     if _LOCATE:
         rows = t.shape[0] if t.dim() >= 1 else 1
         stats["bad_rows"] = bad.reshape(rows, -1).any(dim=1).sum()
@@ -519,7 +601,9 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
             rec["storage_nbytes"] = int(st.nbytes())
         except Exception:
             rec["data_ptr"] = hex(t.data_ptr())
-    _pending.append((rec, _device_stats(t), t if _DUMP_TENSOR and not _tensor_dumped else None))
+    bound = _bound_for(layer_name) if _BOUNDS_ACTIVE else None
+    _pending.append((rec, _device_stats(t, bound),
+                     t if _DUMP_TENSOR and not _tensor_dumped else None))
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +629,8 @@ def _drain_step() -> None:
     # Batch every scalar into one stacked tensor -> ONE .tolist() host transfer.
     keys = ["nan_count", "inf_count", "finite_count", "huge_count",
             "finite_abs_max", "finite_max", "finite_min", "numel"]
+    if _BOUNDS_ACTIVE:
+        keys = keys + ["oob_count"]
     if _LOCATE:
         keys = keys + ["bad_rows"]
     if _BAD_VALUES:
@@ -580,9 +666,12 @@ def _drain_step() -> None:
         rec["finite_max"] = d["finite_max"] if has_finite else None
         rec["finite_min"] = d["finite_min"] if has_finite else None
         rec["numel"] = int(d["numel"])
+        if _BOUNDS_ACTIVE:
+            rec["oob_count"] = int(d["oob_count"])
         if _LOCATE:
             rec["bad_rows"] = int(d["bad_rows"])
-        bad = rec["nan_count"] or rec["inf_count"] or rec["huge_count"]
+        bad = (rec["nan_count"] or rec["inf_count"] or rec["huge_count"]
+               or rec.get("oob_count", 0))
         rec["bad"] = bool(bad)
         if _BAD_VALUES and bad:
             rec["first_bad_flat_idx"] = int(d["first_bad_flat"])
@@ -599,7 +688,8 @@ def _drain_step() -> None:
 
         if bad and _first_bad is None:
             kind = ("nan" if rec["nan_count"] else
-                    "inf" if rec["inf_count"] else "huge")
+                    "inf" if rec["inf_count"] else
+                    "huge" if rec["huge_count"] else "oob")
             _first_bad = {"step": rec["step"], "layer": rec["layer_name"],
                           "direction": rec["direction"], "kind": kind,
                           "matmul_calls_so_far": rec["matmul_calls_so_far"]}
@@ -1350,6 +1440,8 @@ def _write_summary() -> None:
         "sparse_heavy": _SPARSE_HEAVY,
         "track_every_layer": _TRACK_EVERY_LAYER,
         "track_layer_stride": _TRACK_LAYER_STRIDE,
+        "bounds": [{"pattern": s, "lo": lo, "hi": hi} for s, lo, hi in _BOUNDS],
+        "bound_global": (list(_BOUND_GLOBAL) if _BOUND_GLOBAL is not None else None),
         "batches_seen": _batch_counter,
         "max_param_numel": _MAX_PARAM_NUMEL,
         "params_scanned": len(_scan_plan),
