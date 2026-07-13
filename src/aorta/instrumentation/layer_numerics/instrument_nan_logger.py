@@ -105,10 +105,61 @@ Settings (environment variables):
   NANLOG_STOP_ON_FIRST   "1" -> stop writing clean records after the first bad
                          layer is seen (default 0)
   NANLOG_VERBOSE         "1" -> print one line per step       (default 0)
+  NANLOG_ADDR            "1" (default) -> record each watched tensor's GPU address
+                         (data_ptr) + backing-storage extent (storage_ptr,
+                         storage_offset_bytes, storage_nbytes). Host-side metadata,
+                         no GPU sync. Set "0" to omit.
+  NANLOG_LOCATE          "1" -> also record bad_rows: how many rows (dim 0) hold a
+                         NaN/Inf/huge element. Extra on-GPU reduction, same drain,
+                         no host sync (default 0).
+  NANLOG_BAD_VALUES      "1" -> for each BAD tensor, record first_bad_flat_idx,
+                         first_bad_row, first_bad_col, first_bad_value (first
+                         NaN/Inf/huge element). GPU reductions, same drain (default 0).
+  NANLOG_DUMP_TENSOR     "1" -> on first NaN/Inf/huge detection, save the full bad
+                         tensor to a .pt file (one-shot; the input is saved before
+                         the output when both are bad). May delay allocator reuse
+                         (default 0).
+  NANLOG_ALLOC_SNAPSHOT  "1" -> enable the caching-allocator event recorder and dump
+                         a snapshot pickle on first NaN/Inf/huge (alloc/free events
+                         with address, size, stream, Python stack). ~10% step
+                         overhead; GPU kernel timing unaffected (default 0).
+  NANLOG_PIPELINE        "1" -> monkeypatch TrainPipelineSparseDist stage methods
+                         (copy_batch_to_gpu / start_sparse_data_dist /
+                         wait_sparse_data_dist) to tag records with a `phase` and
+                         re-scan the tracked flow objects at each stage, before the
+                         forward reads them. Warns once and stays inactive if the
+                         stage methods are absent. Same per-step drain (default 0).
+  NANLOG_TRACK_ATTR      comma list of batch attribute/key names to follow as flow
+                         tensors (default "embedding_features"); a name may resolve
+                         to a Tensor, list/tuple/dict of Tensors, or a KJT (its
+                         values() is tracked). Falls back to a bounded auto-discovery
+                         walk if none are found. Only with NANLOG_PIPELINE=1.
+  NANLOG_TRACK_MAX       hard cap on how many tensor objects the tracker follows
+                         (default 64).
+  NANLOG_SPARSE          "1" -> at the pipeline stages, capture cheap host-side
+                         KJT/JaggedTensor metadata (num keys, lengths/offsets shape,
+                         total_lengths, values shape/dtype/device) and route the
+                         index values through the normal sync-free reduction. Requires
+                         NANLOG_PIPELINE=1 (default 0).
+  NANLOG_SPARSE_HEAVY    "1" -> add sparse stats needing a host readback (empty_bags,
+                         max_bag_len, index value min/max). The one sparse path that
+                         syncs; gated separately. Requires NANLOG_SPARSE=1 (default 0).
+  NANLOG_TRACK_EVERY_LAYER "1" -> also re-scan the tracked flow objects at EACH watched
+                         layer's forward hook (record carries checkpoint=<layer_name>),
+                         bracketing the corruption to a layer interval within forward.
+                         Multiplies the per-step reduction count; can perturb a
+                         timing-sensitive bug. Requires NANLOG_PIPELINE=1 (default 0).
+  NANLOG_TRACK_LAYER_STRIDE  re-scan every Kth watched layer (default 1). Only with
+                         NANLOG_TRACK_EVERY_LAYER=1.
+
+  Every record carries a `batch_id`, assigned when a batch enters at
+  copy_batch_to_gpu and re-read at each later checkpoint, so one batch's
+  copy/sparse/forward records can be grouped across steps (null before its copy).
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import runpy
 import socket
@@ -117,12 +168,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-if __name__ == "__main__" and len(sys.argv) < 2:
-    sys.stderr.write("nanlog: usage: python instrument_nan_logger.py <target_script.py> [args...]\n")
-    sys.stderr.flush()
-    sys.exit(2)
-
-import torch  # noqa: E402 - keep no-arg usage path dependency-light.
+import torch
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -191,6 +237,60 @@ _EMBEDDING_TYPES = ("Embedding", "EmbeddingBag", "EmbeddingBagCollection",
                     "ShardedEmbeddingCollection")
 _STOP_ON_FIRST = os.environ.get("NANLOG_STOP_ON_FIRST", "0") == "1"
 _VERBOSE = os.environ.get("NANLOG_VERBOSE", "0") == "1"
+# Address capture (default ON, sync-free). Records each watched tensor's GPU
+# virtual address + backing storage extent. This is the bridge that lets a
+# memory-ALIASING corruption be traced to its PRODUCER: when projections.10's
+# INPUT goes bad at step S, its data_ptr/storage names the exact 8 MiB block; any
+# OTHER watched module whose output/param shares that storage at a nearby step is
+# the donor/writer. data_ptr()/storage queries are pure host-side metadata — no
+# GPU sync, no kernel-order change — so this is safe to leave on for repro runs.
+_CAPTURE_ADDR = os.environ.get("NANLOG_ADDR", "1") == "1"
+# Locate (default OFF). For each watched tensor also reduce how many ROWS (dim 0)
+# contain a NaN/Inf/huge element -> `bad_rows`. The acceptance test for the
+# aliasing hypothesis is bad_rows==1 on the proj.10 input (a single ~8 KiB row =
+# one tile-sized late write, vs a spread-out numeric blowup). This is an extra
+# on-GPU reduction that feeds the SAME per-step drain, so it adds no host sync; it
+# is off by default to keep the base repro's GPU kernel mix unchanged.
+_LOCATE = os.environ.get("NANLOG_LOCATE", "0") == "1"
+# Bad-value capture (default OFF). For each watched tensor also find the FIRST bad
+# element's flat index, row, col, and actual value. All are GPU scalar reductions
+# (argmax + indexing) that feed the same per-step drain -> no host sync.
+_BAD_VALUES = os.environ.get("NANLOG_BAD_VALUES", "0") == "1"
+# Allocator snapshot (default OFF). Records full caching-allocator alloc/free event
+# history with stream IDs and Python call stacks. On first NaN detection, dumps the
+# snapshot to a pickle file for post-hoc aliasing analysis. Adds ~10% step overhead
+# from per-allocation stack capture; GPU kernel timing unaffected.
+_ALLOC_SNAPSHOT = os.environ.get("NANLOG_ALLOC_SNAPSHOT", "0") == "1"
+# Dump full bad tensor(s) on first detection (default OFF — see docstring for risk).
+_DUMP_TENSOR = os.environ.get("NANLOG_DUMP_TENSOR", "0") == "1"
+# Pipeline-stage tracking (default OFF). Monkeypatch TrainPipelineSparseDist stage
+# methods to checkpoint tracked flow objects (EF by default) BEFORE forward reads
+# them, tagging every record with its `phase`. This closes the copy->forward gap
+# that the layer hooks cannot see. General tensor-flow tracker: EF is the default
+# target via NANLOG_TRACK_ATTR, not a hard-coded case.
+_PIPELINE = os.environ.get("NANLOG_PIPELINE", "0") == "1"
+_TRACK_ATTR = tuple(
+    s.strip() for s in os.environ.get("NANLOG_TRACK_ATTR", "embedding_features").split(",")
+    if s.strip()
+)
+_TRACK_MAX = int(os.environ.get("NANLOG_TRACK_MAX", "64"))
+# Sparse (TorchRec/FBGEMM) metadata capture at the pipeline stages (default OFF).
+# Cheap, host-side only. _SPARSE_HEAVY adds the readback-requiring stats (the only
+# sparse path that syncs); gated separately so it can never fire on a repro run.
+_SPARSE = os.environ.get("NANLOG_SPARSE", "0") == "1"
+_SPARSE_HEAVY = os.environ.get("NANLOG_SPARSE_HEAVY", "0") == "1"
+# Per-layer re-scan of the tracked flow objects (default OFF). When on, EACH watched
+# layer's forward hook ALSO re-scans the SAME tracked ef objects (not just the tensor
+# that layer consumes), tagged checkpoint=<layer_name>. This turns "corrupt somewhere
+# in forward-N" into "clean at layer B, corrupt at layer C" — the diagram-3 step B
+# within-forward bracket. COST: it multiplies the per-step reduction count by
+# (tracked_objects x scanned_layers); with 31 ef x 156 layers that is ~15x the base
+# GPU reduction kernels, launched inline on the compute stream, and CAN suppress the
+# timing-sensitive bug. So it is OFF by default and STRIDED: with stride K only every
+# Kth watched layer re-scans, trading resolution for perturbation. Start at a coarse
+# stride, tighten only once the stage-level bracket is stable.
+_TRACK_EVERY_LAYER = os.environ.get("NANLOG_TRACK_EVERY_LAYER", "0") == "1"
+_TRACK_LAYER_STRIDE = max(1, int(os.environ.get("NANLOG_TRACK_LAYER_STRIDE", "1")))
 
 # Create the output dir. If it is not writable (e.g. the default lands in a
 # read-only working dir), fall back to a temp dir rather than crashing the
@@ -235,6 +335,32 @@ if not _WATCH_TYPES and not _WATCH_NAMES:
 _pending: list = []
 _step = 0
 _records_written = 0
+# Current pipeline phase, set by the stage-boundary checkpoints when NANLOG_PIPELINE
+# is on (copy / sparse_start / sparse_wait / forward). Every record stamps this so
+# a corruption can be bracketed to the interval between two consecutive phases.
+# "forward" is the default because the layer hooks all fire during the root forward.
+_phase = "forward"
+# Current batch identity, the cross-STEP / cross-PHASE correlation key. Because the
+# 3-in-flight pipeline scans copy(N+2), sparse(N+1), forward(N) in one tick, the
+# step alone cannot line up one batch's copy/sparse/forward observations (they land
+# in DIFFERENT steps and the data_ptr is recycled, so neither is a reliable join
+# key). batch_id is: it is assigned once at copy_batch_to_gpu, carried on the batch
+# object, and re-read at every later checkpoint so all records of the same batch
+# share it. Grouping the JSONL by batch_id reconstructs one batch's clean->corrupt
+# timeline with no pipeline-depth arithmetic. None until the first copy checkpoint.
+_batch_id = None
+_batch_counter = 0           # monotonic source for batch_id (host-side, no sync)
+# Fallback map id(batch_obj) -> batch_id, used only when the batch object cannot be
+# tagged with an attribute (some torchrec versions re-wrap the batch). Bounded ring.
+_batch_id_by_obj: dict = {}
+_BATCH_ID_ATTR = "_nanlog_batch_id"   # attribute stamped on the batch object
+# Held references to the forward batch's tracked ef tensor OBJECTS for this step, so
+# each watched layer's forward hook can re-scan the SAME objects (per-layer re-scan,
+# NANLOG_TRACK_EVERY_LAYER). Rebuilt every step in the root forward pre-hook; empty
+# when per-layer re-scan is off. Holding the ref is free (the tensor is already alive
+# for the forward pass); the reductions happen in the layer hooks.
+_layer_scan_targets: list = []
+_layer_scan_idx = 0          # counts watched-layer fwd hooks this step, for striding
 _matmul_calls = 0          # running count of watched layer tensors (no GPU sync)
 _first_bad = None          # first layer to go bad: {"step","layer","direction","kind"}
 _root_installed = False
@@ -289,7 +415,7 @@ def _device_stats(t: torch.Tensor) -> dict:
     pos_inf = torch.full((), float("inf"), dtype=t.dtype, device=t.device)
     safe_max = torch.where(fin, t, neg_inf)
     safe_min = torch.where(fin, t, pos_inf)
-    return {
+    stats = {
         "nan_count": torch.isnan(t).sum(),
         "inf_count": torch.isinf(t).sum(),
         "finite_count": fin.sum(),
@@ -299,6 +425,27 @@ def _device_stats(t: torch.Tensor) -> dict:
         "finite_min": safe_min.min(),
         "numel": torch.tensor(t.numel(), device=t.device),
     }
+    if _LOCATE or _BAD_VALUES:
+        bad = (~fin) | (fin & (t.abs() > _HUGE))
+    if _LOCATE:
+        rows = t.shape[0] if t.dim() >= 1 else 1
+        stats["bad_rows"] = bad.reshape(rows, -1).any(dim=1).sum()
+    if _BAD_VALUES:
+        flat_bad = bad.reshape(-1).to(torch.int64)
+        first_idx = flat_bad.argmax()          # GPU scalar: flat index of first bad
+        stats["first_bad_flat"] = first_idx
+        stats["first_bad_val"] = t.reshape(-1)[first_idx]  # GPU scalar via GPU-scalar indexing
+        if t.dim() >= 2:
+            # Elements per dim-0 slice — consistent with bad_rows (which reshapes
+            # to (shape[0], -1)). For a [256,8192] tensor this is 8192; for a
+            # [B,C,H,W] tensor this is C*H*W.
+            elems_per_row = t.numel() // t.shape[0]
+            stats["first_bad_row"] = first_idx // elems_per_row
+            stats["first_bad_col"] = first_idx % elems_per_row
+        else:
+            stats["first_bad_row"] = torch.zeros((), dtype=torch.int64, device=t.device)
+            stats["first_bad_col"] = first_idx
+    return stats
 
 
 def _is_tf32_path(t: torch.Tensor) -> bool:
@@ -313,16 +460,17 @@ _FLOW_ROLES = frozenset({"act", "igrad"})
 
 
 def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
-           param_name: str = "", from_prev_step: bool = False) -> None:
+           param_name: str = "", from_prev_step: bool = False,
+           extra: dict = None) -> None:
     """Queue one tensor's on-GPU reduction for this step. No host sync.
 
     Args:
         layer_name:     fully-qualified module name the tensor belongs to.
-        direction:      "fwd" | "bwd" | "param" | "grad" — coarse origin of the
-                        tensor (see ``role`` for the precise channel).
+        direction:      "fwd" | "bwd" | "param" | "grad" | "pipeline" — coarse
+                        origin of the tensor (see ``role`` for the precise channel).
         t:              the tensor to reduce (skipped if empty / non-tensor).
         role:           the channel that produced this record
-                        (act/input/igrad/weight/bias/wgrad/bgrad).
+                        (act/input/igrad/weight/bias/wgrad/bgrad/track/sparse).
         param_name:     exact owned-parameter name (e.g. "w", "scale") for the
                         param/grad channels; "" for activation channels.
         from_prev_step: True for the weight/bias value channels, which are read in
@@ -331,6 +479,8 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
                         False for activations and for the wgrad/bgrad channels,
                         which are read at the optimizer step boundary (current
                         step). Flagged so the JSONL is never misread.
+        extra:          optional dict of host-side metadata merged into the record
+                        (e.g. sparse KJT stats). No GPU sync — caller's job.
     """
     global _matmul_calls
     if not torch.is_tensor(t) or t.numel() == 0:
@@ -340,6 +490,8 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
     rec = {
         "type": "layer_step",
         "step": _step,
+        "phase": _phase,
+        "batch_id": _batch_id,
         "rank": _RANK, "gpu": _RANK, "host": _HOST, "pid": _PID,
         "layer_name": layer_name,
         "direction": direction,
@@ -351,7 +503,23 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
         "tf32_path": _is_tf32_path(t),
         "matmul_calls_so_far": _matmul_calls,
     }
-    _pending.append((rec, _device_stats(t)))
+    if extra:
+        rec.update(extra)
+    if _CAPTURE_ADDR:
+        # Pure host-side metadata (no GPU sync): the tensor's address and the
+        # extent of its backing block. Correlate ACROSS records of the SAME step
+        # (or step-1) to find which producer's buffer aliases a corrupted input:
+        # equal/overlapping [storage_ptr, storage_ptr+storage_nbytes) ranges name
+        # the donor/writer pair that delivered the garbage to proj.10's input.
+        try:
+            st = t.untyped_storage()
+            rec["data_ptr"] = hex(t.data_ptr())
+            rec["storage_ptr"] = hex(st.data_ptr())
+            rec["storage_offset_bytes"] = int(t.storage_offset() * t.element_size())
+            rec["storage_nbytes"] = int(st.nbytes())
+        except Exception:
+            rec["data_ptr"] = hex(t.data_ptr())
+    _pending.append((rec, _device_stats(t), t if _DUMP_TENSOR and not _tensor_dumped else None))
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +537,7 @@ def _write_rec(rec: dict) -> None:
 
 def _drain_step() -> None:
     """Flush last step's pending reductions with a single batched sync."""
-    global _records_written, _first_bad, _pre_flushed
+    global _records_written, _first_bad, _pre_flushed, _tensor_dumped
     if not _pending:
         return
     pending, _pending[:] = list(_pending), []
@@ -377,8 +545,12 @@ def _drain_step() -> None:
     # Batch every scalar into one stacked tensor -> ONE .tolist() host transfer.
     keys = ["nan_count", "inf_count", "finite_count", "huge_count",
             "finite_abs_max", "finite_max", "finite_min", "numel"]
+    if _LOCATE:
+        keys = keys + ["bad_rows"]
+    if _BAD_VALUES:
+        keys = keys + ["first_bad_flat", "first_bad_val", "first_bad_row", "first_bad_col"]
     flat = []
-    for _rec, stats in pending:
+    for _rec, stats, _held_t in pending:
         for k in keys:
             flat.append(stats[k].to(torch.float64).reshape(()))
     try:
@@ -391,7 +563,7 @@ def _drain_step() -> None:
     worst = None
     bad_this_step = False        # did first_bad trigger during THIS drain?
     step_records = []            # all records this step, in order, for buffering
-    for i, (rec, _stats) in enumerate(pending):
+    for i, (rec, _stats, held_t) in enumerate(pending):
         base = i * len(keys)
         d = dict(zip(keys, vals[base:base + len(keys)]))
         rec["nan_count"] = int(d["nan_count"])
@@ -408,8 +580,21 @@ def _drain_step() -> None:
         rec["finite_max"] = d["finite_max"] if has_finite else None
         rec["finite_min"] = d["finite_min"] if has_finite else None
         rec["numel"] = int(d["numel"])
+        if _LOCATE:
+            rec["bad_rows"] = int(d["bad_rows"])
         bad = rec["nan_count"] or rec["inf_count"] or rec["huge_count"]
         rec["bad"] = bool(bad)
+        if _BAD_VALUES and bad:
+            rec["first_bad_flat_idx"] = int(d["first_bad_flat"])
+            rec["first_bad_row"] = int(d["first_bad_row"])
+            rec["first_bad_col"] = int(d["first_bad_col"])
+            val = d["first_bad_val"]
+            if math.isnan(val):
+                rec["first_bad_value"] = "NaN"
+            elif math.isinf(val):
+                rec["first_bad_value"] = "Inf" if val > 0 else "-Inf"
+            else:
+                rec["first_bad_value"] = val
         step_records.append(rec)
 
         if bad and _first_bad is None:
@@ -422,6 +607,10 @@ def _drain_step() -> None:
             _log(f"FIRST BAD: step={rec['step']} layer={rec['layer_name']} "
                  f"dir={rec['direction']} kind={kind} "
                  f"call#~{rec['matmul_calls_so_far']} tf32={rec['tf32_path']}")
+            _dump_alloc_snapshot(rec["step"])
+
+        if bad and not _tensor_dumped and held_t is not None:
+            _dump_bad_tensor(rec, held_t)
 
         if bad and rec["finite_abs_max"] is not None and rec["finite_abs_max"] > worst_abs:
             worst_abs, worst = rec["finite_abs_max"], rec
@@ -472,16 +661,47 @@ def _first_tensor(x):
     return x
 
 
+def _rescan_tracked_at_layer(layer_name: str) -> None:
+    """Re-scan the forward batch's tracked ef objects AT this layer boundary, so the
+    JSONL shows each ef object clean->corrupt across the forward layer sequence
+    (diagram-3 step B). Strided by NANLOG_TRACK_LAYER_STRIDE. Each record carries
+    role='track', direction='pipeline', phase='forward', checkpoint=<layer_name> so
+    it is distinct from the layer's own input/act. Reductions join the per-step
+    drain (no extra host sync); the GPU-kernel cost is the striding tradeoff."""
+    global _layer_scan_idx
+    if not _layer_scan_targets:
+        return
+    do_scan = (_layer_scan_idx % _TRACK_LAYER_STRIDE == 0)
+    _layer_scan_idx += 1
+    if not do_scan:
+        return
+    for tname, t in _layer_scan_targets:
+        _stash(tname, "pipeline", t, role="track", extra={"checkpoint": layer_name})
+
+
 def _fwd_hook(name):
     def hook(_module, inp, out):
-        if "act" in _CHANNELS:
-            t = _first_tensor(out)
-            if torch.is_tensor(t):
-                _stash(name, "fwd", t, role="act")
+        # Stash the INPUT before the output (act). When an aliasing corruption
+        # makes BOTH a layer's input and its resulting output bad in the same
+        # step, the one-shot NANLOG_DUMP_TENSOR then captures the INPUT (the
+        # corrupt origin / 8 MiB block) rather than the output (a downstream
+        # consequence of feeding that garbage through the GEMM). This is the
+        # whole point of the emb_proj aliasing workflow; it also matches the
+        # natural input->output order. Layers where only the output is bad still
+        # dump the output (the input isn't a bad candidate), so nothing is lost.
         if "input" in _CHANNELS:
             t = _first_tensor(inp)
             if torch.is_tensor(t):
                 _stash(name, "fwd", t, role="input")
+        if "act" in _CHANNELS:
+            t = _first_tensor(out)
+            if torch.is_tensor(t):
+                _stash(name, "fwd", t, role="act")
+        # Per-layer re-scan of the tracked ef objects (gated). Runs AFTER this
+        # layer's own capture so the JSONL order reads: layer input/act, then the
+        # ef snapshot as of this layer boundary.
+        if _TRACK_EVERY_LAYER:
+            _rescan_tracked_at_layer(name)
     return hook
 
 
@@ -598,9 +818,15 @@ def _root_pre_hook(_module, _inp):
     step's pending reductions (all GPU work from last step is already queued),
     advances the step counter, then queues this step's param scan (prev-step
     values). The single host sync per step lives in the drain."""
-    global _step
+    global _step, _phase, _layer_scan_idx
     _drain_step()
     _step += 1
+    _phase = "forward"   # stage wrappers set copy/sparse phases outside forward
+    _layer_scan_idx = 0
+    # Capture the batch forward is about to read (batch N) so per-layer re-scan holds
+    # its ef objects and forward records carry batch N's id (not the copy/sparse
+    # batch the stage wrappers last saw). No-op unless per-layer re-scan is on.
+    _capture_forward_batch(_inp)
     _scan_params()
     _maybe_warn_grad()
 
@@ -652,12 +878,16 @@ def _install_autohook() -> None:
         global _root_installed
         if _root_installed:
             return
+        _start_alloc_recording()
         n = _attach(self)
         # Drive one drain+step per training iteration off the root forward.
         self.register_forward_pre_hook(_root_pre_hook)
         _root_installed = True
         _log(f"attached layer hooks to {n} module(s) (types={list(_WATCH_TYPES)}, "
              f"names={list(_WATCH_NAMES)}); channels={sorted(_CHANNELS)}; "
+             f"capture_addr={_CAPTURE_ADDR}; locate={_LOCATE}; "
+             f"bad_values={_BAD_VALUES}; dump_tensor={_DUMP_TENSOR}; "
+             f"alloc_snapshot={_ALLOC_SNAPSHOT}; "
              f"params_scanned={len(_scan_plan)}; params_skipped={len(_skipped_params)}; "
              f"per-step drain installed on DMP root")
         if 0 < n <= 10:
@@ -701,6 +931,392 @@ def _install_optimizer_autohook() -> None:
          "the optimizer step boundary")
 
 
+# ---------------------------------------------------------------------------
+# Pipeline-stage tracking (NANLOG_PIPELINE): checkpoint tracked flow objects at
+# the TorchRec pipeline stage boundaries, BEFORE forward reads them. General
+# tensor-flow tracker — EF is only the default target (NANLOG_TRACK_ATTR).
+# ---------------------------------------------------------------------------
+_pipeline_installed = False
+_pipeline_checkpoints = 0     # count of stage checkpoints that stashed something
+_pipeline_warned = False
+
+
+def _kjt_types():
+    """Lazily resolve (KeyedJaggedTensor, JaggedTensor) classes; () if unavailable.
+    Kept out of module import so a torchrec-less environment (e.g. the smoke test)
+    still imports this logger cleanly."""
+    try:
+        from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
+        return (KeyedJaggedTensor, JaggedTensor)
+    except Exception:
+        return ()
+
+
+def _sparse_extra(obj) -> dict:
+    """Cheap, host-side-only sparse distribution metadata for a KJT/JaggedTensor.
+    No GPU sync unless NANLOG_SPARSE_HEAVY (empty_bags/max_bag_len/index min-max).
+    Returns {} for non-sparse objects."""
+    kjt_types = _kjt_types()
+    if not kjt_types or not isinstance(obj, kjt_types):
+        return {}
+    extra = {"sparse": True}
+    try:
+        keys = obj.keys()
+        extra["sparse_num_keys"] = len(keys)
+    except Exception:
+        pass
+    for meth, tag in (("lengths", "lengths"), ("offsets", "offsets"), ("values", "values")):
+        try:
+            t = getattr(obj, meth)()
+        except Exception:
+            continue
+        if not torch.is_tensor(t):
+            continue
+        extra[f"sparse_{tag}_shape"] = list(t.shape)
+        extra[f"sparse_{tag}_dtype"] = str(t.dtype)
+        if tag == "lengths":
+            extra["sparse_total_lengths"] = int(t.numel())  # host-side, no sync
+        if tag == "values":
+            extra["sparse_values_device"] = str(t.device)
+    if _SPARSE_HEAVY:
+        # The ONE sparse path that reads back from device (explicit .item() sync).
+        # Gated so it can never fire on a timing-sensitive repro run.
+        try:
+            lengths = obj.lengths()
+            if torch.is_tensor(lengths) and lengths.numel():
+                extra["sparse_empty_bags"] = int((lengths == 0).sum().item())
+                extra["sparse_max_bag_len"] = int(lengths.max().item())
+        except Exception:
+            pass
+        try:
+            vals = obj.values()
+            if torch.is_tensor(vals) and vals.numel():
+                extra["sparse_index_min"] = int(vals.min().item())
+                extra["sparse_index_max"] = int(vals.max().item())
+        except Exception:
+            pass
+    return extra
+
+
+def _emit_tracked(name: str, obj, seen: set) -> int:
+    """Stash one tracked object (or its tensor members) with role track/sparse and
+    the current phase. Recurses one level into list/tuple/dict. De-dupes by id so a
+    tensor shared across containers is scanned once per checkpoint. Returns count."""
+    if len(seen) >= _TRACK_MAX:
+        return 0
+    kjt_types = _kjt_types()
+    n = 0
+    if kjt_types and isinstance(obj, kjt_types):
+        if id(obj) in seen:
+            return 0
+        seen.add(id(obj))
+        try:
+            vals = obj.values()
+        except Exception:
+            vals = None
+        role = "sparse" if _SPARSE else "track"
+        extra = _sparse_extra(obj) if _SPARSE else None
+        if torch.is_tensor(vals):
+            _stash(name, "pipeline", vals, role=role, extra=extra)
+            n += 1
+        return n
+    if torch.is_tensor(obj):
+        if id(obj) in seen:
+            return 0
+        seen.add(id(obj))
+        _stash(name, "pipeline", obj, role="track")
+        return 1
+    if isinstance(obj, (list, tuple)):
+        for i, item in enumerate(obj):
+            if len(seen) >= _TRACK_MAX:
+                break
+            n += _emit_tracked(f"{name}[{i}]", item, seen)
+        return n
+    if isinstance(obj, dict):
+        for k, item in obj.items():
+            if len(seen) >= _TRACK_MAX:
+                break
+            n += _emit_tracked(f"{name}[{k}]", item, seen)
+        return n
+    return n
+
+
+def _auto_discover(batch, seen: set) -> int:
+    """Fallback when no NANLOG_TRACK_ATTR name is found on the batch: bounded walk
+    (depth<=2) over attributes / container members collecting Tensors and KJTs."""
+    n = 0
+    kjt_types = _kjt_types()
+
+    def visit(name, obj, depth):
+        nonlocal n
+        if len(seen) >= _TRACK_MAX:
+            return
+        if torch.is_tensor(obj) or (kjt_types and isinstance(obj, kjt_types)):
+            n += _emit_tracked(name, obj, seen)
+            return
+        if depth <= 0:
+            return
+        if isinstance(obj, (list, tuple)):
+            for i, item in enumerate(obj):
+                visit(f"{name}[{i}]", item, depth - 1)
+        elif isinstance(obj, dict):
+            for k, item in obj.items():
+                visit(f"{name}[{k}]", item, depth - 1)
+        else:
+            for attr in getattr(obj, "__dict__", {}):
+                if attr.startswith("_"):
+                    continue
+                try:
+                    visit(f"{name}.{attr}", getattr(obj, attr), depth - 1)
+                except Exception:
+                    continue
+
+    visit("batch", batch, 2)
+    return n
+
+
+def _resolve_batch_id(batch, phase: str):
+    """Return the batch_id for this batch, host-side and sync-free.
+
+    At the COPY phase a batch is entering the pipeline for the first time -> assign
+    a fresh monotonic id and stamp it on the batch object (best effort) plus an
+    id()-keyed fallback map for objects that reject attributes. At later phases the
+    SAME batch is seen again -> read the id back so copy/sparse/forward of one batch
+    share a key. Returns None if the batch can neither be tagged nor found (records
+    then carry batch_id=null rather than a wrong guess)."""
+    global _batch_counter
+    # Prefer an id already carried on the object (set at its copy checkpoint).
+    existing = getattr(batch, _BATCH_ID_ATTR, None)
+    if existing is not None:
+        return existing
+    existing = _batch_id_by_obj.get(id(batch))
+    if existing is not None:
+        return existing
+    if phase != "copy":
+        # A non-copy phase with no id means we started mid-pipeline (missed this
+        # batch's copy). Don't fabricate an id; leave it null.
+        return None
+    _batch_counter += 1
+    bid = _batch_counter
+    try:
+        object.__setattr__(batch, _BATCH_ID_ATTR, bid)
+    except Exception:
+        # Object rejects attributes (e.g. __slots__, frozen). Use the id() map,
+        # bounded so a long run cannot grow it without limit.
+        if len(_batch_id_by_obj) > 4096:
+            _batch_id_by_obj.clear()
+        _batch_id_by_obj[id(batch)] = bid
+    return bid
+
+
+def _collect_tracked(batch, seen: set, out: list) -> None:
+    """Collect the tracked flow objects on `batch` as (name, tensor) pairs into
+    `out`, resolving a KJT to its .values() tensor. Same discovery order as
+    _checkpoint (named NANLOG_TRACK_ATTR first, else bounded auto-discovery) but it
+    RETURNS the tensors instead of stashing them, so the per-layer re-scan can hold
+    the object references and re-emit them at each layer. Host-side, no reduction."""
+    kjt_types = _kjt_types()
+
+    def take(name, obj):
+        if len(seen) >= _TRACK_MAX:
+            return
+        if kjt_types and isinstance(obj, kjt_types):
+            if id(obj) in seen:
+                return
+            seen.add(id(obj))
+            try:
+                v = obj.values()
+            except Exception:
+                v = None
+            if torch.is_tensor(v):
+                out.append((name, v))
+            return
+        if torch.is_tensor(obj):
+            if id(obj) in seen:
+                return
+            seen.add(id(obj))
+            out.append((name, obj))
+            return
+        if isinstance(obj, (list, tuple)):
+            for i, item in enumerate(obj):
+                take(f"{name}[{i}]", item)
+        elif isinstance(obj, dict):
+            for k, item in obj.items():
+                take(f"{name}[{k}]", item)
+
+    found_named = False
+    for name in _TRACK_ATTR:
+        obj = None
+        if hasattr(batch, name):
+            obj = getattr(batch, name)
+        elif isinstance(batch, dict) and name in batch:
+            obj = batch[name]
+        if obj is not None:
+            found_named = True
+            take(name, obj)
+    if not found_named:
+        # Reuse the checkpoint auto-discovery, but collect into `out`. Cheapest to
+        # just walk attributes here rather than thread a callback through.
+        def visit(name, obj, depth):
+            if len(seen) >= _TRACK_MAX:
+                return
+            if torch.is_tensor(obj) or (kjt_types and isinstance(obj, kjt_types)):
+                take(name, obj)
+                return
+            if depth <= 0:
+                return
+            if isinstance(obj, (list, tuple)):
+                for i, item in enumerate(obj):
+                    visit(f"{name}[{i}]", item, depth - 1)
+            elif isinstance(obj, dict):
+                for k, item in obj.items():
+                    visit(f"{name}[{k}]", item, depth - 1)
+            else:
+                for attr in getattr(obj, "__dict__", {}):
+                    if attr.startswith("_"):
+                        continue
+                    try:
+                        visit(f"{name}.{attr}", getattr(obj, attr), depth - 1)
+                    except Exception:
+                        continue
+        visit("batch", batch, 2)
+
+
+def _capture_forward_batch(inp) -> None:
+    """From the root forward's positional args, find the batch being processed
+    (batch N, the one forward actually reads — distinct from the copy(N+2)/
+    sparse(N+1) batches the stage wrappers just saw), set _batch_id to it, and (only
+    when per-layer re-scan is on) hold its tracked ef objects in _layer_scan_targets
+    so each layer hook can re-scan the SAME objects. Host-side only; the reductions
+    happen later in the layer hooks.
+
+    Resolving _batch_id here is REQUIRED whenever pipeline tracking is on — not only
+    for the per-layer path. Otherwise the forward/layer records inherit the stale
+    _batch_id the LAST stage wrapper left set (start_sparse_data_dist for batch N+1
+    in the standard prefetch order), so the emb_proj input record where first_bad
+    fires would be tagged with the WRONG batch. We set _batch_id to the resolved
+    value even when it is None (mid-pipeline start, or a re-wrapped/untaggable batch),
+    so a forward record is either batch N or null, never a stale stage value."""
+    global _batch_id, _layer_scan_targets
+    _layer_scan_targets = []
+    if not _PIPELINE:
+        return
+    # The batch is usually the first positional arg to the root forward.
+    batch = inp[0] if isinstance(inp, (tuple, list)) and inp else inp
+    if batch is None:
+        return
+    try:
+        _batch_id = _resolve_batch_id(batch, "forward")   # batch N's id, or None — never stale
+        if _TRACK_EVERY_LAYER:
+            seen: set = set()
+            targets: list = []
+            _collect_tracked(batch, seen, targets)
+            _layer_scan_targets = targets
+    except Exception as e:
+        _log(f"WARNING: forward-batch capture failed: {e!r}")
+
+
+def _checkpoint(batch, phase: str) -> None:
+    """Set the phase + batch_id, discover the tracked flow objects on `batch`, and
+    stash a re-scan of each. Sync-free (reductions join the per-step drain). Called
+    from the wrapped pipeline stage methods. Never raises into the training run."""
+    global _phase, _batch_id, _pipeline_checkpoints
+    if batch is None:
+        return
+    _phase = phase
+    try:
+        _batch_id = _resolve_batch_id(batch, phase)
+    except Exception:
+        _batch_id = None
+    seen: set = set()
+    n = 0
+    try:
+        found_named = False
+        for name in _TRACK_ATTR:
+            obj = None
+            if hasattr(batch, name):
+                obj = getattr(batch, name)
+            elif isinstance(batch, dict) and name in batch:
+                obj = batch[name]
+            if obj is not None:
+                found_named = True
+                n += _emit_tracked(name, obj, seen)
+        if not found_named:
+            n += _auto_discover(batch, seen)
+    except Exception as e:
+        _log(f"WARNING: pipeline checkpoint ({phase}) failed: {e!r}")
+        return
+    if n:
+        _pipeline_checkpoints += 1
+
+
+def _install_pipeline_hook() -> None:
+    """Monkeypatch TrainPipelineSparseDist stage methods so each fires a sync-free
+    checkpoint of the tracked flow objects with the right `phase`. Defensive: if the
+    installed torchrec exposes none of the known stage methods, warn once and leave
+    the layer hooks untouched. Same auto-attach philosophy as the DMP __init__ patch."""
+    global _pipeline_installed, _pipeline_warned
+    if not _PIPELINE or _pipeline_installed:
+        return
+    try:
+        from torchrec.distributed.train_pipeline import TrainPipelineSparseDist as _TP
+    except Exception as e:
+        _pipeline_warned = True
+        _log(f"WARNING: NANLOG_PIPELINE=1 but TrainPipelineSparseDist could not be "
+             f"imported ({e!r}); pipeline checkpoints inactive. Layer hooks unaffected.")
+        return
+
+    # (method name on the pipeline, phase, index of the batch arg in *a, whether
+    # the batch is the RETURN value instead of an argument).
+    #   copy_batch_to_gpu(self, dataloader_iter) -> batch      (batch = return)
+    #   start_sparse_data_dist(self, batch, ...)               (batch = a[0])
+    #   wait_sparse_data_dist(self, batch, ...) OR (self)       (a[0] if present)
+    specs = [
+        ("copy_batch_to_gpu", "copy", True),
+        ("start_sparse_data_dist", "sparse_start", False),
+        ("wait_sparse_data_dist", "sparse_wait", False),
+    ]
+    patched = []
+    for meth_name, phase, from_return in specs:
+        orig = getattr(_TP, meth_name, None)
+        if orig is None or not callable(orig):
+            continue
+
+        def make(orig, phase, from_return):
+            def wrapper(self, *a, **k):
+                result = orig(self, *a, **k)
+                try:
+                    if from_return:
+                        # copy_batch_to_gpu returns the batch, or a (batch, context)
+                        # tuple across torchrec versions; unwrap the first element
+                        # only when the named track attr is not on the tuple itself.
+                        batch = result
+                        if (isinstance(batch, tuple) and batch
+                                and not any(hasattr(batch, nm) for nm in _TRACK_ATTR)):
+                            batch = batch[0]
+                    else:
+                        batch = a[0] if a else None
+                    _checkpoint(batch, phase)
+                except Exception as e:
+                    _log(f"WARNING: pipeline wrapper ({phase}) error: {e!r}")
+                return result
+            return wrapper
+
+        setattr(_TP, meth_name, make(orig, phase, from_return))
+        patched.append(meth_name)
+
+    if not patched:
+        _pipeline_warned = True
+        _log(f"WARNING: NANLOG_PIPELINE=1 but TrainPipelineSparseDist has none of the "
+             f"known stage methods (copy_batch_to_gpu/start_sparse_data_dist/"
+             f"wait_sparse_data_dist); checkpoints inactive. torchrec API changed?")
+        return
+    _pipeline_installed = True
+    _log(f"pipeline tracking armed: patched {patched}; track_attr={list(_TRACK_ATTR)}; "
+         f"track_max={_TRACK_MAX}; sparse={_SPARSE}; sparse_heavy={_SPARSE_HEAVY}; "
+         f"track_every_layer={_TRACK_EVERY_LAYER}; track_layer_stride={_TRACK_LAYER_STRIDE}")
+
+
 def _write_summary() -> None:
     """Write the end-of-run summary (first bad layer + totals)."""
     _drain_step()  # flush the final step
@@ -716,7 +1332,25 @@ def _write_summary() -> None:
         "watch_types": list(_WATCH_TYPES),
         "watch_names": list(_WATCH_NAMES),
         "watched_count": len(_watched_names),
+        "watched_names": list(_watched_names),
         "channels": sorted(_CHANNELS),
+        "capture_addr": _CAPTURE_ADDR,
+        "locate": _LOCATE,
+        "bad_values": _BAD_VALUES,
+        "dump_tensor": _DUMP_TENSOR,
+        "dump_tensor_dumped": _tensor_dumped,
+        "alloc_snapshot": _ALLOC_SNAPSHOT,
+        "alloc_snapshot_dumped": _snapshot_dumped,
+        "pipeline": _PIPELINE,
+        "pipeline_installed": _pipeline_installed,
+        "pipeline_checkpoints": _pipeline_checkpoints,
+        "track_attr": list(_TRACK_ATTR),
+        "track_max": _TRACK_MAX,
+        "sparse": _SPARSE,
+        "sparse_heavy": _SPARSE_HEAVY,
+        "track_every_layer": _TRACK_EVERY_LAYER,
+        "track_layer_stride": _TRACK_LAYER_STRIDE,
+        "batches_seen": _batch_counter,
         "max_param_numel": _MAX_PARAM_NUMEL,
         "params_scanned": len(_scan_plan),
         "grad_params_planned": len(_grad_plan),
@@ -741,6 +1375,72 @@ def _write_summary() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Allocator snapshot (NANLOG_ALLOC_SNAPSHOT)
+# ---------------------------------------------------------------------------
+_snapshot_dumped = False
+_tensor_dumped = False
+
+
+_alloc_recording_started = False
+
+
+def _start_alloc_recording() -> None:
+    """Enable allocator event recording. Safe to call multiple times (idempotent).
+
+    Deferred to the DMP __init__ hook so CUDA is guaranteed to be initialized.
+    Calling at import time would fail with 'No CUDA GPUs available' because
+    torch.cuda is not yet set up."""
+    global _alloc_recording_started
+    if not _ALLOC_SNAPSHOT or _alloc_recording_started:
+        return
+    try:
+        torch.cuda.memory._record_memory_history(
+            enabled="all", stacks="python", max_entries=500000)
+        _alloc_recording_started = True
+        _log("allocator snapshot: recording enabled (stacks=python, "
+             "max_entries=500000). Overhead: ~10% per step from stack capture; "
+             "GPU kernel timing unchanged.")
+    except Exception as e:
+        _log(f"WARNING: allocator snapshot: could not enable recording: {e!r}. "
+             "NANLOG_ALLOC_SNAPSHOT will be inactive.")
+
+
+def _dump_bad_tensor(rec: dict, t: torch.Tensor) -> None:
+    """Save the full bad tensor to disk on first detection. One-shot."""
+    global _tensor_dumped
+    if _tensor_dumped or not _DUMP_TENSOR:
+        return
+    _tensor_dumped = True
+    layer_safe = rec["layer_name"].replace(".", "_").replace("/", "_")
+    pt_path = _DIR / f"bad_tensor_step{rec['step']}_{layer_safe}_{rec['role']}_rank{_RANK}.pt"
+    try:
+        torch.save(t.detach().cpu(), pt_path)
+        _log(f"dump_tensor -> {pt_path} (shape={list(t.shape)}, dtype={t.dtype}, "
+             f"{t.numel() * t.element_size() / 1024:.0f} KB)")
+    except Exception as e:
+        _log(f"WARNING: dump_tensor failed: {e!r}")
+
+
+def _dump_alloc_snapshot(step: int) -> None:
+    """Dump the allocator snapshot on first NaN detection, then stop recording."""
+    global _snapshot_dumped
+    if _snapshot_dumped or not _ALLOC_SNAPSHOT:
+        return
+    _snapshot_dumped = True
+    snap_path = _DIR / f"alloc_snapshot_step{step}_rank{_RANK}.pickle"
+    try:
+        torch.cuda.memory._dump_snapshot(str(snap_path))
+        _log(f"allocator snapshot -> {snap_path}")
+    except Exception as e:
+        _log(f"WARNING: allocator snapshot dump failed: {e!r}")
+    try:
+        torch.cuda.memory._record_memory_history(enabled=None)
+        _log("allocator snapshot: recording stopped after dump")
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Install + run target
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -752,6 +1452,7 @@ if __name__ == "__main__":
         sys.exit(2)
     _install_autohook()
     _install_optimizer_autohook()
+    _install_pipeline_hook()
     target = Path(sys.argv[1]).resolve()
     sys.argv = [str(target)] + sys.argv[2:]
     _log(f"running target {target}")
