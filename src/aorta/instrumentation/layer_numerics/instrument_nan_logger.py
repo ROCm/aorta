@@ -937,9 +937,10 @@ def _root_pre_hook(_module, _inp):
     _step += 1
     _phase = "forward"   # stage wrappers set copy/sparse phases outside forward
     _layer_scan_idx = 0
-    # Capture the batch forward is about to read (batch N) so per-layer re-scan holds
-    # its ef objects and forward records carry batch N's id (not the copy/sparse
-    # batch the stage wrappers last saw). No-op unless per-layer re-scan is on.
+    # Scan the batch forward is about to read (batch N) at forward entry: emits the
+    # phase='forward' embedding checkpoint (making forward a stage like copy/sparse)
+    # and tags forward records with batch N's id. Also arms the per-layer re-scan
+    # targets when NANLOG_TRACK_EVERY_LAYER is on. No-op unless NANLOG_PIPELINE.
     _capture_forward_batch(_inp)
     _scan_params()
     _maybe_warn_grad()
@@ -1299,19 +1300,19 @@ def _collect_tracked(batch, seen: set, out: list) -> None:
 def _capture_forward_batch(inp) -> None:
     """From the root forward's positional args, find the batch being processed
     (batch N, the one forward actually reads — distinct from the copy(N+2)/
-    sparse(N+1) batches the stage wrappers just saw), set _batch_id to it, and (only
-    when per-layer re-scan is on) hold its tracked ef objects in _layer_scan_targets
-    so each layer hook can re-scan the SAME objects. Host-side only; the reductions
-    happen later in the layer hooks.
+    sparse(N+1) batches the stage wrappers just saw) and scan its tracked ef objects
+    at forward ENTRY (phase='forward'), so forward is a first-class stage alongside
+    copy/sparse — no watched module or per-layer re-scan required. When per-layer
+    re-scan IS on, also hold the tracked objects in _layer_scan_targets so each layer
+    hook can re-scan the SAME objects. Host-side only; the reductions join the drain.
 
-    Resolving _batch_id here is REQUIRED whenever pipeline tracking is on — not only
-    for the per-layer path. Otherwise the forward/layer records inherit the stale
-    _batch_id the LAST stage wrapper left set (start_sparse_data_dist for batch N+1
-    in the standard prefetch order), so the emb_proj input record where first_bad
-    fires would be tagged with the WRONG batch. We set _batch_id to the resolved
-    value even when it is None (mid-pipeline start, or a re-wrapped/untaggable batch),
-    so a forward record is either batch N or null, never a stale stage value."""
-    global _batch_id, _layer_scan_targets
+    The forward-entry _checkpoint resolves _batch_id to batch N. This is REQUIRED
+    whenever pipeline tracking is on: otherwise the forward/layer records inherit the
+    stale _batch_id the LAST stage wrapper left set (start_sparse_data_dist for batch
+    N+1 in the standard prefetch order), tagging the emb_proj input record where
+    first_bad fires with the WRONG batch. _batch_id ends up batch N (or None on a
+    mid-pipeline start / re-wrapped batch), never a stale stage value."""
+    global _layer_scan_targets
     _layer_scan_targets = []
     if not _PIPELINE:
         return
@@ -1320,7 +1321,10 @@ def _capture_forward_batch(inp) -> None:
     if batch is None:
         return
     try:
-        _batch_id = _resolve_batch_id(batch, "forward")   # batch N's id, or None — never stale
+        # Forward-entry checkpoint: scan the 31 ef objects once here (sets _batch_id
+        # to batch N and _phase='forward'). Makes 'forward' a stage like copy/sparse
+        # without needing NANLOG_WATCH_NAMES or NANLOG_TRACK_EVERY_LAYER.
+        _checkpoint(batch, "forward")
         if _TRACK_EVERY_LAYER:
             seen: set = set()
             targets: list = []
