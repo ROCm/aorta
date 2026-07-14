@@ -140,9 +140,9 @@ Settings (environment variables):
                          (default 64).
   NANLOG_SPARSE          "1" -> at the pipeline stages, capture cheap host-side
                          KJT/JaggedTensor metadata (num keys, lengths/offsets shape,
-                         total_lengths, values shape/dtype/device) and route the
-                         index values through the normal sync-free reduction. Requires
-                         NANLOG_PIPELINE=1 (default 0).
+                         num_bags = count of length entries, values shape/dtype/device)
+                         and route the index values through the normal sync-free
+                         reduction. Requires NANLOG_PIPELINE=1 (default 0).
   NANLOG_SPARSE_HEAVY    "1" -> add sparse stats needing a host readback (empty_bags,
                          max_bag_len, index value min/max). The one sparse path that
                          syncs; gated separately. Requires NANLOG_SPARSE=1 (default 0).
@@ -179,7 +179,13 @@ import time
 from collections import deque
 from pathlib import Path
 
-import torch
+# Keep the no-arg usage path dependency-light: print usage and exit before importing
+# torch, so `python instrument_nan_logger.py` works in a minimal env without torch.
+if __name__ == "__main__" and len(sys.argv) < 2:
+    sys.stderr.write("usage: python instrument_nan_logger.py <target_script.py> [args...]\n")
+    sys.exit(2)
+
+import torch  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -285,12 +291,25 @@ def _parse_bounds(spec: str):
 
 
 _BOUNDS = _parse_bounds(os.environ.get("NANLOG_BOUNDS", ""))
-_BOUND_LO = os.environ.get("NANLOG_BOUND_LO")
-_BOUND_HI = os.environ.get("NANLOG_BOUND_HI")
+def _parse_bound_env(name: str):
+    """Parse a NANLOG_BOUND_LO/HI value; treat unset/empty as None, warn on non-numeric
+    (never crash the sidecar at import)."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        sys.stderr.write(f"nanlog: WARNING: ignoring {name}={raw!r} (not numeric)\n")
+        return None
+
+
+_BOUND_LO = _parse_bound_env("NANLOG_BOUND_LO")
+_BOUND_HI = _parse_bound_env("NANLOG_BOUND_HI")
 # Match-all fallback (applies to every tensor) when the bare LO/HI form is used.
 _BOUND_GLOBAL = (
-    (float(_BOUND_LO) if _BOUND_LO is not None else float("-inf"),
-     float(_BOUND_HI) if _BOUND_HI is not None else float("inf"))
+    (_BOUND_LO if _BOUND_LO is not None else float("-inf"),
+     _BOUND_HI if _BOUND_HI is not None else float("inf"))
     if (_BOUND_LO is not None or _BOUND_HI is not None) else None
 )
 _BOUNDS_ACTIVE = bool(_BOUNDS) or _BOUND_GLOBAL is not None
@@ -551,10 +570,15 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
             rec["storage_offset_bytes"] = int(t.storage_offset() * t.element_size())
             rec["storage_nbytes"] = int(st.nbytes())
         except Exception:
-            rec["data_ptr"] = hex(t.data_ptr())
+            try:
+                rec["data_ptr"] = hex(t.data_ptr())
+            except Exception:
+                pass  # e.g. meta tensor — omit address fields, never crash
     bound = _bound_for(layer_name) if _BOUNDS_ACTIVE else None
-    _pending.append((rec, _device_stats(t, bound),
-                     t if _DUMP_TENSOR and not _tensor_dumped else None))
+    # For the one-shot dump, hold a DETACHED ref so we don't keep the autograd graph
+    # alive across the step (memory / allocator-reuse perturbation).
+    held = t.detach() if (_DUMP_TENSOR and not _tensor_dumped) else None
+    _pending.append((rec, _device_stats(t, bound), held))
 
 
 # ---------------------------------------------------------------------------
@@ -1031,7 +1055,7 @@ def _sparse_extra(obj) -> dict:
         extra[f"sparse_{tag}_shape"] = list(t.shape)
         extra[f"sparse_{tag}_dtype"] = str(t.dtype)
         if tag == "lengths":
-            extra["sparse_total_lengths"] = int(t.numel())  # host-side, no sync
+            extra["sparse_num_bags"] = int(t.numel())  # count of length entries (bags), not sum
         if tag == "values":
             extra["sparse_values_device"] = str(t.device)
     if _SPARSE_HEAVY:
@@ -1141,8 +1165,13 @@ def _resolve_batch_id(batch, phase: str):
     share a key. Returns None if the batch can neither be tagged nor found (records
     then carry batch_id=null rather than a wrong guess)."""
     global _batch_counter
-    # Prefer an id already carried on the object (set at its copy checkpoint).
-    existing = getattr(batch, _BATCH_ID_ATTR, None)
+    is_dict = isinstance(batch, dict)
+    # Prefer an id already carried on the batch (set at its copy checkpoint). Dict
+    # batches carry it as a key; other objects as an attribute.
+    if is_dict:
+        existing = batch.get(_BATCH_ID_ATTR)
+    else:
+        existing = getattr(batch, _BATCH_ID_ATTR, None)
     if existing is not None:
         return existing
     existing = _batch_id_by_obj.get(id(batch))
@@ -1154,11 +1183,15 @@ def _resolve_batch_id(batch, phase: str):
         return None
     _batch_counter += 1
     bid = _batch_counter
+    if is_dict:
+        batch[_BATCH_ID_ATTR] = bid
+        return bid
     try:
-        object.__setattr__(batch, _BATCH_ID_ATTR, bid)
+        setattr(batch, _BATCH_ID_ATTR, bid)   # respects custom __setattr__ / frozen
     except Exception:
-        # Object rejects attributes (e.g. __slots__, frozen). Use the id() map,
-        # bounded so a long run cannot grow it without limit.
+        # Object rejects attributes (e.g. __slots__, frozen). Fall back to the id()
+        # map, bounded so a long run cannot grow it without limit. (id() reuse after
+        # GC is a theoretical mis-join risk; only truly untaggable objects land here.)
         if len(_batch_id_by_obj) > 4096:
             _batch_id_by_obj.clear()
         _batch_id_by_obj[id(batch)] = bid
@@ -1253,13 +1286,14 @@ def _capture_forward_batch(inp) -> None:
     N+1 in the standard prefetch order), tagging the emb_proj input record where
     first_bad fires with the WRONG batch. _batch_id ends up batch N (or None on a
     mid-pipeline start / re-wrapped batch), never a stale stage value."""
-    global _layer_scan_targets
+    global _layer_scan_targets, _batch_id
     _layer_scan_targets = []
     if not _PIPELINE:
         return
     # The batch is usually the first positional arg to the root forward.
     batch = inp[0] if isinstance(inp, (tuple, list)) and inp else inp
     if batch is None:
+        _batch_id = None   # don't let forward records inherit a stale stage batch_id
         return
     try:
         # Forward-entry checkpoint: scan the 31 ef objects once here (sets _batch_id
