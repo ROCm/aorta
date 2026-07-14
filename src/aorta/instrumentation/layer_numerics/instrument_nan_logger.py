@@ -427,6 +427,16 @@ _layer_scan_targets: list = []
 _layer_scan_idx = 0          # counts watched-layer fwd hooks this step, for striding
 _matmul_calls = 0          # running count of watched layer tensors (no GPU sync)
 _first_bad = None          # first layer to go bad: {"step","layer","direction","kind"}
+# OOB aggregates for the summary, so a run's out-of-bound status is visible without
+# grepping the JSONL. Updated in the drain from oob_count/finite range. _first_oob is
+# the first bound violation seen (may equal _first_bad if oob is the first badness);
+# _oob_records counts records with oob_count>0; _peak_finite_* track the widest range
+# observed on any BOUND tensor (so "how close did it get to the bound" is answerable
+# on a clean run too).
+_first_oob = None
+_oob_records = 0
+_peak_finite_max = None
+_peak_finite_min = None
 _root_installed = False
 # Ring buffer of the last _PRE_CONTEXT steps of records that were NOT otherwise
 # written (clean + unsampled). Dumped to the JSONL when the first bad is seen so
@@ -622,6 +632,7 @@ def _write_rec(rec: dict) -> None:
 def _drain_step() -> None:
     """Flush last step's pending reductions with a single batched sync."""
     global _records_written, _first_bad, _pre_flushed, _tensor_dumped
+    global _first_oob, _oob_records, _peak_finite_max, _peak_finite_min
     if not _pending:
         return
     pending, _pending[:] = list(_pending), []
@@ -668,6 +679,19 @@ def _drain_step() -> None:
         rec["numel"] = int(d["numel"])
         if _BOUNDS_ACTIVE:
             rec["oob_count"] = int(d["oob_count"])
+            # Summary aggregates. Peak range is tracked only for tensors that
+            # actually carry a bound, so "how close to the limit" reflects the
+            # bounded targets, not unrelated activations.
+            if _bound_for(rec["layer_name"]) is not None and has_finite:
+                if _peak_finite_max is None or rec["finite_max"] > _peak_finite_max:
+                    _peak_finite_max = rec["finite_max"]
+                if _peak_finite_min is None or rec["finite_min"] < _peak_finite_min:
+                    _peak_finite_min = rec["finite_min"]
+            if rec["oob_count"] > 0:
+                _oob_records += 1
+                if _first_oob is None:
+                    _first_oob = {"step": rec["step"], "layer": rec["layer_name"],
+                                  "phase": rec.get("phase"), "oob_count": rec["oob_count"]}
         if _LOCATE:
             rec["bad_rows"] = int(d["bad_rows"])
         bad = (rec["nan_count"] or rec["inf_count"] or rec["huge_count"]
@@ -1442,6 +1466,10 @@ def _write_summary() -> None:
         "track_layer_stride": _TRACK_LAYER_STRIDE,
         "bounds": [{"pattern": s, "lo": lo, "hi": hi} for s, lo, hi in _BOUNDS],
         "bound_global": (list(_BOUND_GLOBAL) if _BOUND_GLOBAL is not None else None),
+        "first_oob": _first_oob,
+        "oob_records": _oob_records,
+        "peak_finite_max": _peak_finite_max,
+        "peak_finite_min": _peak_finite_min,
         "batches_seen": _batch_counter,
         "max_param_numel": _MAX_PARAM_NUMEL,
         "params_scanned": len(_scan_plan),
