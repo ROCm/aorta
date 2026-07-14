@@ -59,6 +59,30 @@ Each cell's outputs land under `<cell>/layer_numerics/` and are included by
 `aorta bundle`. The collector applies a default `NANLOG_*` bundle (see
 [`build_env`](__init__.py)); recipe/CLI overrides win.
 
+### Example: track an embedding input across pipeline stages
+
+Scan named batch tensors at every TorchRec stage (`copy` / `sparse_start` /
+`sparse_wait` / `forward`) and flag out-of-range values — no layer noise:
+
+```yaml
+collect:
+  layer_numerics:
+    NANLOG_PIPELINE: "1"                       # copy + sparse_start + sparse_wait + forward
+    NANLOG_TRACK_ATTR: "embedding_features"    # batch attribute to follow
+    NANLOG_BOUNDS: "embedding_features:0:60"   # out-of-range -> kind="oob"
+    NANLOG_BAD_VALUES: "1"                     # first bad row/col/value
+    NANLOG_SPARSE: "1"                         # cheap KJT metadata at the sparse stage
+    NANLOG_PRE_CONTEXT: "10"                   # dump 10-step run-up on first OOB
+    NANLOG_SAMPLE_EVERY: "50"
+```
+
+Find the first out-of-range hit:
+
+```bash
+jq -c 'select(.oob_count>0) | {step,batch_id,phase,layer_name,first_bad_value}' \
+  <results>/*/layer_numerics/layers_rank0.jsonl | head
+```
+
 ## Output
 
 Written under `NANLOG_DIR` (the collector points this at
