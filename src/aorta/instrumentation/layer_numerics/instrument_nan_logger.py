@@ -117,14 +117,14 @@ Settings (environment variables):
   NANLOG_BAD_VALUES      "1" -> for each BAD tensor, record first_bad_flat_idx,
                          first_bad_row, first_bad_col, first_bad_value (first
                          NaN/Inf/huge element). GPU reductions, same drain (default 0).
-  NANLOG_DUMP_TENSOR     "1" -> on first NaN/Inf/huge detection, save the full bad
-                         tensor to a .pt file (one-shot; the input is saved before
-                         the output when both are bad). May delay allocator reuse
-                         (default 0).
+  NANLOG_DUMP_TENSOR     "1" -> on the first bad record (NaN/Inf/huge/oob), save the
+                         full bad tensor to a .pt file (one-shot; the input is saved
+                         before the output when both are bad). May delay allocator
+                         reuse (default 0).
   NANLOG_ALLOC_SNAPSHOT  "1" -> enable the caching-allocator event recorder and dump
-                         a snapshot pickle on first NaN/Inf/huge (alloc/free events
-                         with address, size, stream, Python stack). ~10% step
-                         overhead; GPU kernel timing unaffected (default 0).
+                         a snapshot pickle on the first bad record (NaN/Inf/huge/oob;
+                         alloc/free events with address, size, stream, Python stack).
+                         ~10% step overhead; GPU kernel timing unaffected (default 0).
   NANLOG_PIPELINE        "1" -> monkeypatch TrainPipelineSparseDist stage methods
                          (copy_batch_to_gpu / start_sparse_data_dist /
                          wait_sparse_data_dist) to tag records with a `phase` and
@@ -1476,7 +1476,7 @@ def _write_summary() -> None:
         "tf32_allowed": bool(torch.backends.cuda.matmul.allow_tf32),
         "jsonl": str(_JSONL),
         "notes": (
-            "first_bad is the first layer/step that went NaN/Inf/huge, or null if "
+            "first_bad is the first layer/step that went NaN/Inf/huge/oob, or null if "
             "none was seen. matmul_calls_so_far counts watched layer tensors (not "
             "raw GEMMs); it can be lined up with a separate GEMM-output tool's "
             "'call #N' if one is also running."
@@ -1538,7 +1538,8 @@ def _dump_bad_tensor(rec: dict, t: torch.Tensor) -> None:
 
 
 def _dump_alloc_snapshot(step: int) -> None:
-    """Dump the allocator snapshot on first NaN detection, then stop recording."""
+    """Dump the allocator snapshot on the first bad record (nan/inf/huge/oob), then
+    stop recording."""
     global _snapshot_dumped
     if _snapshot_dumped or not _ALLOC_SNAPSHOT:
         return
