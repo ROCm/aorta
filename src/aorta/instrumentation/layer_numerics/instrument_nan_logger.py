@@ -446,15 +446,26 @@ def _device_stats(t: torch.Tensor, bound=None) -> dict:
     (_BOUNDS_ACTIVE), oob_count is ALWAYS emitted (0 when bound is None) so the
     fixed per-step drain stack stays uniform across records."""
     fin = torch.isfinite(t)
-    # Mask non-finite values out per reduction with an identity that can never
-    # win: 0 for abs-max (no real magnitude loses to 0), -inf for max, +inf for
-    # min. Using 0 for max/min would be a BUG -- e.g. all-negative finite values
-    # plus one NaN would report finite_max=0 instead of the true (negative) max.
-    abs_safe = torch.where(fin, t.abs(), torch.zeros((), dtype=t.dtype, device=t.device))
-    neg_inf = torch.full((), float("-inf"), dtype=t.dtype, device=t.device)
-    pos_inf = torch.full((), float("inf"), dtype=t.dtype, device=t.device)
-    safe_max = torch.where(fin, t, neg_inf)
-    safe_min = torch.where(fin, t, pos_inf)
+    # Integer/bool tensors (e.g. KJT indices) have no non-finite values and cannot
+    # hold ±inf, so the masking below is only needed — and only valid — for float
+    # dtypes. For non-float, every element is finite: reduce directly.
+    if t.is_floating_point():
+        # Mask non-finite values out per reduction with an identity that can never
+        # win: 0 for abs-max (no real magnitude loses to 0), -inf for max, +inf for
+        # min. Using 0 for max/min would be a BUG -- e.g. all-negative finite values
+        # plus one NaN would report finite_max=0 instead of the true (negative) max.
+        abs_safe = torch.where(fin, t.abs(), torch.zeros((), dtype=t.dtype, device=t.device))
+        neg_inf = torch.full((), float("-inf"), dtype=t.dtype, device=t.device)
+        pos_inf = torch.full((), float("inf"), dtype=t.dtype, device=t.device)
+        safe_max = torch.where(fin, t, neg_inf)
+        safe_min = torch.where(fin, t, pos_inf)
+    else:
+        # bool has no .abs(); promote to int so magnitude/compare reductions work.
+        t = t.to(torch.int64) if t.dtype is torch.bool else t
+        fin = torch.ones_like(t, dtype=torch.bool)
+        abs_safe = t.abs()
+        safe_max = t
+        safe_min = t
     stats = {
         "nan_count": torch.isnan(t).sum(),
         "inf_count": torch.isinf(t).sum(),
@@ -1021,15 +1032,21 @@ _pipeline_checkpoints = 0     # count of stage checkpoints that stashed somethin
 _pipeline_warned = False
 
 
+_kjt_types_cache = None
+
+
 def _kjt_types():
     """Lazily resolve (KeyedJaggedTensor, JaggedTensor) classes; () if unavailable.
-    Kept out of module import so a torchrec-less environment (e.g. the smoke test)
-    still imports this logger cleanly."""
-    try:
-        from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
-        return (KeyedJaggedTensor, JaggedTensor)
-    except Exception:
-        return ()
+    Kept out of module import so a torchrec-less environment imports cleanly; the
+    result is memoized so the hot path (every checkpoint) doesn't re-run the import."""
+    global _kjt_types_cache
+    if _kjt_types_cache is None:
+        try:
+            from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
+            _kjt_types_cache = (KeyedJaggedTensor, JaggedTensor)
+        except Exception:
+            _kjt_types_cache = ()
+    return _kjt_types_cache
 
 
 def _sparse_extra(obj) -> dict:

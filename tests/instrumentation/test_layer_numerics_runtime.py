@@ -98,6 +98,17 @@ def test_heavy_features_default_off(monkeypatch, tmp_path_factory):
     assert nl._BOUNDS_ACTIVE is False
 
 
+def test_device_stats_handles_non_float_tensors(monkeypatch, tmp_path_factory):
+    """Integer/bool tensors (e.g. KJT indices) must not crash _device_stats — it
+    cannot fill +/-inf into an int dtype. Reduces directly for non-float."""
+    nl = _load_logger({"NANLOG_WATCH_TYPES": "Linear"}, monkeypatch, tmp_path_factory)
+    for t in (torch.tensor([1, 2, 3], dtype=torch.int64),
+              torch.tensor([True, False, True]),
+              torch.tensor([0.0, 1.0, float("nan")])):
+        stats = nl._device_stats(t)
+        assert int(stats["numel"]) == 3          # no exception, sane result
+
+
 def test_addr_off_omits_address_fields(monkeypatch, tmp_path_factory):
     nl = _load_logger(
         {"NANLOG_CHANNELS": "act", "NANLOG_WATCH_TYPES": "Linear",
