@@ -105,10 +105,12 @@ Settings (environment variables):
   NANLOG_STOP_ON_FIRST   "1" -> stop writing clean records after the first bad
                          layer is seen (default 0)
   NANLOG_VERBOSE         "1" -> print one line per step       (default 0)
-  NANLOG_ADDR            "1" (default) -> record each watched tensor's GPU address
-                         (data_ptr) + backing-storage extent (storage_ptr,
-                         storage_offset_bytes, storage_nbytes). Host-side metadata,
-                         no GPU sync. Set "0" to omit.
+  NANLOG_ADDR            "1" -> record each watched tensor's GPU address (data_ptr)
+                         + backing-storage extent (storage_ptr, storage_offset_bytes,
+                         storage_nbytes). Host-side metadata, no GPU sync. Default 0
+                         (off) so the base record schema stays minimal; enable to
+                         trace memory aliasing. For a sparse (KJT) record the address
+                         is that of the KJT's .values() tensor, not the KJT object.
   NANLOG_LOCATE          "1" -> also record bad_rows: how many rows (dim 0) hold a
                          NaN/Inf/huge element. Extra on-GPU reduction, same drain,
                          no host sync (default 0).
@@ -246,14 +248,15 @@ _EMBEDDING_TYPES = ("Embedding", "EmbeddingBag", "EmbeddingBagCollection",
                     "ShardedEmbeddingCollection")
 _STOP_ON_FIRST = os.environ.get("NANLOG_STOP_ON_FIRST", "0") == "1"
 _VERBOSE = os.environ.get("NANLOG_VERBOSE", "0") == "1"
-# Address capture (default ON, sync-free). Records each watched tensor's GPU
+# Address capture (default OFF, sync-free). Records each watched tensor's GPU
 # virtual address + backing storage extent. This is the bridge that lets a
 # memory-ALIASING corruption be traced to its PRODUCER: when projections.10's
 # INPUT goes bad at step S, its data_ptr/storage names the exact 8 MiB block; any
 # OTHER watched module whose output/param shares that storage at a nearby step is
 # the donor/writer. data_ptr()/storage queries are pure host-side metadata — no
-# GPU sync, no kernel-order change — so this is safe to leave on for repro runs.
-_CAPTURE_ADDR = os.environ.get("NANLOG_ADDR", "1") == "1"
+# GPU sync, no kernel-order change — so it is safe to enable on repro runs, but it
+# is OFF by default so the base record schema stays minimal.
+_CAPTURE_ADDR = os.environ.get("NANLOG_ADDR", "0") == "1"
 # Locate (default OFF). For each watched tensor also reduce how many ROWS (dim 0)
 # contain a NaN/Inf/huge element -> `bad_rows`. The acceptance test for the
 # aliasing hypothesis is bad_rows==1 on the proj.10 input (a single ~8 KiB row =
@@ -389,6 +392,18 @@ if _unknown_channels:
 if not _WATCH_TYPES and not _WATCH_NAMES:
     _log("WARNING: both NANLOG_WATCH_TYPES and NANLOG_WATCH_NAMES are empty; "
          "no modules will be watched")
+
+# Scope-knob dependency warnings: these features silently no-op unless their
+# prerequisite is set, which reads as "the flag did nothing" with no explanation.
+# Warn once at import so a misconfigured scope is visible, mirroring the
+# unknown-channels warning above.
+if _TRACK_EVERY_LAYER and not _PIPELINE:
+    _log("WARNING: NANLOG_TRACK_EVERY_LAYER=1 has no effect without NANLOG_PIPELINE=1 "
+         "(the per-layer re-scan targets are captured by the pipeline hook); set "
+         "NANLOG_PIPELINE=1 to enable per-layer tracking.")
+if os.environ.get("NANLOG_TRACK_LAYER_STRIDE") is not None and not _TRACK_EVERY_LAYER:
+    _log("WARNING: NANLOG_TRACK_LAYER_STRIDE is set but NANLOG_TRACK_EVERY_LAYER is "
+         "off, so the stride is ignored; set NANLOG_TRACK_EVERY_LAYER=1 to use it.")
 
 
 # ---------------------------------------------------------------------------
