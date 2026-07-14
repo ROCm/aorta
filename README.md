@@ -255,7 +255,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 src/aorta/
 ├── cli/               # `aorta` CLI command groups (sweep, run, env, bundle, agent, ...)
 ├── workloads/         # In-tree workloads (training, inference, llm_determinism, race)
-├── instrumentation/   # Environment probe (versioned env.json schema + capture)
+├── instrumentation/   # Environment probe (env.json) + layer_numerics NaN/OOB logger
 ├── registry/          # Mitigations + environments registry (extension points)
 ├── hw_queue_eval/     # Hardware queue evaluation framework
 ├── training/          # FSDP2 trainer with multi-stream overlap instrumentation

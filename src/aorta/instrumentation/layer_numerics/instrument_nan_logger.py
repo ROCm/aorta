@@ -189,19 +189,9 @@ _HUGE = float(os.environ.get("NANLOG_HUGE_THRESHOLD", "1e10"))
 _SAMPLE_EVERY = int(os.environ.get("NANLOG_SAMPLE_EVERY", "50"))
 _PRE_CONTEXT = int(os.environ.get("NANLOG_PRE_CONTEXT", "0"))
 _MAX_RECORDS = int(os.environ.get("NANLOG_MAX_RECORDS", "200000"))
-# A module is watched if its CLASS NAME is in _WATCH_TYPES, OR its fully-qualified
-# module path CONTAINS any substring in _WATCH_NAMES (union, not intersection — so
-# you can target one specific layer AND a whole type at once). An unset axis
-# contributes no matches.
-#
-# The type filter defaults to "Linear", BUT only when no name filter is given.
-# This makes the common targeted case intuitive: setting NANLOG_WATCH_NAMES alone
-# watches exactly those named layers — the "Linear" default does NOT silently
-# union in every Linear, so you never have to write NANLOG_WATCH_TYPES= to clear
-# it. To watch named layers AND a type, set both explicitly:
-#   NANLOG_WATCH_NAMES=encoder.blocks.3                   -> only that block
-#   NANLOG_WATCH_NAMES=...  NANLOG_WATCH_TYPES=MoELayer   -> that block + all MoE
-# The bare default (neither var set) stays types=Linear -> original behavior.
+# Watched = class name in _WATCH_TYPES OR module path contains a _WATCH_NAMES
+# substring (union). The "Linear" type default applies only when no name filter is
+# given, so naming a layer targets exactly it without pulling in every Linear.
 _WATCH_NAMES = tuple(
     s.strip() for s in os.environ.get("NANLOG_WATCH_NAMES", "").split(",") if s.strip()
 )
@@ -209,16 +199,9 @@ _types_default = "" if _WATCH_NAMES else "Linear"
 _WATCH_TYPES = tuple(
     s.strip() for s in os.environ.get("NANLOG_WATCH_TYPES", _types_default).split(",") if s.strip()
 )
-# Capture channels (comma list). Each channel is one independently switchable
-# observation; each adds its own on-GPU reductions, so default to the cheap pair
-# that reproduces the original (activation + grad_input) timing profile exactly.
-#   act    forward output activation       (fwd hook)
-#   input  forward input activation        (fwd hook)
-#   igrad  grad w.r.t. inputs (grad_input) (bwd hook)   -- old NANLOG_BWD
-#   weight param values,  ndim >= 2        (root pre-hook, PREV step, sync-free)
-#   bias   param values,  ndim == 1        (root pre-hook, PREV step, sync-free)
-#   wgrad  param.grad,    ndim >= 2        (opt step_pre_hook, CURRENT step, sync-free)
-#   bgrad  param.grad,    ndim == 1        (opt step_pre_hook, CURRENT step, sync-free)
+# Capture channels (comma list). Each is an independently switchable observation
+# adding its own on-GPU reductions; default to the cheap act+igrad pair. See the
+# module docstring for the per-channel semantics.
 _ALL_CHANNELS = ("act", "input", "igrad", "weight", "bias", "wgrad", "bgrad")
 _CHANNELS = frozenset(
     s.strip() for s in os.environ.get("NANLOG_CHANNELS", "act,igrad").split(",") if s.strip()
@@ -248,75 +231,37 @@ _EMBEDDING_TYPES = ("Embedding", "EmbeddingBag", "EmbeddingBagCollection",
                     "ShardedEmbeddingCollection")
 _STOP_ON_FIRST = os.environ.get("NANLOG_STOP_ON_FIRST", "0") == "1"
 _VERBOSE = os.environ.get("NANLOG_VERBOSE", "0") == "1"
-# Address capture (default OFF, sync-free). Records each watched tensor's GPU
-# virtual address + backing storage extent. This is the bridge that lets a
-# memory-ALIASING corruption be traced to its PRODUCER: when projections.10's
-# INPUT goes bad at step S, its data_ptr/storage names the exact 8 MiB block; any
-# OTHER watched module whose output/param shares that storage at a nearby step is
-# the donor/writer. data_ptr()/storage queries are pure host-side metadata — no
-# GPU sync, no kernel-order change — so it is safe to enable on repro runs, but it
-# is OFF by default so the base record schema stays minimal.
+# All flags below default OFF and feed the one per-step drain (no added host sync).
+# See the module docstring for each var's full semantics.
+# Address + backing-storage extent per tensor (host-side; for aliasing analysis).
 _CAPTURE_ADDR = os.environ.get("NANLOG_ADDR", "0") == "1"
-# Locate (default OFF). For each watched tensor also reduce how many ROWS (dim 0)
-# contain a NaN/Inf/huge element -> `bad_rows`. The acceptance test for the
-# aliasing hypothesis is bad_rows==1 on the proj.10 input (a single ~8 KiB row =
-# one tile-sized late write, vs a spread-out numeric blowup). This is an extra
-# on-GPU reduction that feeds the SAME per-step drain, so it adds no host sync; it
-# is off by default to keep the base repro's GPU kernel mix unchanged.
+# bad_rows: how many dim-0 rows hold a NaN/Inf/huge element (extra on-GPU reduction).
 _LOCATE = os.environ.get("NANLOG_LOCATE", "0") == "1"
-# Bad-value capture (default OFF). For each watched tensor also find the FIRST bad
-# element's flat index, row, col, and actual value. All are GPU scalar reductions
-# (argmax + indexing) that feed the same per-step drain -> no host sync.
+# First bad element's flat idx / row / col / value.
 _BAD_VALUES = os.environ.get("NANLOG_BAD_VALUES", "0") == "1"
-# Allocator snapshot (default OFF). Records full caching-allocator alloc/free event
-# history with stream IDs and Python call stacks. On first NaN detection, dumps the
-# snapshot to a pickle file for post-hoc aliasing analysis. Adds ~10% step overhead
-# from per-allocation stack capture; GPU kernel timing unaffected.
+# Dump the caching-allocator event history to a pickle on first bad (~10% overhead).
 _ALLOC_SNAPSHOT = os.environ.get("NANLOG_ALLOC_SNAPSHOT", "0") == "1"
-# Dump full bad tensor(s) on first detection (default OFF — see docstring for risk).
+# Save the full bad tensor to a .pt on first detection (one-shot; see docstring risk).
 _DUMP_TENSOR = os.environ.get("NANLOG_DUMP_TENSOR", "0") == "1"
-# Pipeline-stage tracking (default OFF). Monkeypatch TrainPipelineSparseDist stage
-# methods to checkpoint tracked flow objects (EF by default) BEFORE forward reads
-# them, tagging every record with its `phase`. This closes the copy->forward gap
-# that the layer hooks cannot see. General tensor-flow tracker: EF is the default
-# target via NANLOG_TRACK_ATTR, not a hard-coded case.
+# Pipeline-stage tracking: scan the NANLOG_TRACK_ATTR tensors at the TorchRec stage
+# boundaries (copy/sparse/forward), tagging each record with its `phase`.
 _PIPELINE = os.environ.get("NANLOG_PIPELINE", "0") == "1"
 _TRACK_ATTR = tuple(
     s.strip() for s in os.environ.get("NANLOG_TRACK_ATTR", "embedding_features").split(",")
     if s.strip()
 )
 _TRACK_MAX = int(os.environ.get("NANLOG_TRACK_MAX", "64"))
-# Sparse (TorchRec/FBGEMM) metadata capture at the pipeline stages (default OFF).
-# Cheap, host-side only. _SPARSE_HEAVY adds the readback-requiring stats (the only
-# sparse path that syncs); gated separately so it can never fire on a repro run.
+# Cheap host-side KJT metadata; _SPARSE_HEAVY adds the one readback (sync) path.
 _SPARSE = os.environ.get("NANLOG_SPARSE", "0") == "1"
 _SPARSE_HEAVY = os.environ.get("NANLOG_SPARSE_HEAVY", "0") == "1"
-# Per-layer re-scan of the tracked flow objects (default OFF). When on, EACH watched
-# layer's forward hook ALSO re-scans the SAME tracked ef objects (not just the tensor
-# that layer consumes), tagged checkpoint=<layer_name>. This turns "corrupt somewhere
-# in forward-N" into "clean at layer B, corrupt at layer C" — the diagram-3 step B
-# within-forward bracket. COST: it multiplies the per-step reduction count by
-# (tracked_objects x scanned_layers); with 31 ef x 156 layers that is ~15x the base
-# GPU reduction kernels, launched inline on the compute stream, and CAN suppress the
-# timing-sensitive bug. So it is OFF by default and STRIDED: with stride K only every
-# Kth watched layer re-scans, trading resolution for perturbation. Start at a coarse
-# stride, tighten only once the stage-level bracket is stable.
+# Re-scan the tracked tensors at each watched layer (strided) to bracket corruption
+# to a within-forward layer interval. Multiplies the per-step reduction count.
 _TRACK_EVERY_LAYER = os.environ.get("NANLOG_TRACK_EVERY_LAYER", "0") == "1"
 _TRACK_LAYER_STRIDE = max(1, int(os.environ.get("NANLOG_TRACK_LAYER_STRIDE", "1")))
-# In-range bound check (default OFF). Flags elements OUTSIDE [lo, hi] as bad — a
-# two-sided test the one-sided huge threshold (|x| > T) cannot express (it cannot
-# catch a small out-of-range value, e.g. a negative in a [0,60] embedding input).
-# Bounds are PER-TENSOR by nature (a Linear activation has no [0,60] rule), so the
-# range is chosen per watched tensor by matching its record name against patterns:
-#   NANLOG_BOUNDS="emb_proj.projections:0:60;dense_arch:-10:10"
-# Each entry is "substring:lo:hi"; a tensor takes the FIRST entry whose substring is
-# in its layer_name (so this composes with NANLOG_WATCH_NAMES). Tensors matching no
-# pattern are unbounded (oob_count=0). The bare match-all form is the degenerate
-# single-range case: NANLOG_BOUND_LO / NANLOG_BOUND_HI apply to EVERY tensor and are
-# only sensible when you watch a single well-bounded target. When any bound is
-# active, every record carries oob_count (0 when no bound matched) so the fixed
-# per-step drain stack stays valid; an out-of-range tensor is `bad` with kind="oob".
-# One extra on-GPU reduction, same drain, no host sync.
+# Two-sided in-range check: per-tensor [lo,hi] via "substr:lo:hi;..." patterns (first
+# substring match wins); out-of-range elements are `bad` with kind="oob". Bare
+# NANLOG_BOUND_LO/HI is the match-all fallback. Catches small OOB the huge threshold
+# (|x|>T) misses.
 def _parse_bounds(spec: str):
     """Parse "substr:lo:hi;substr:lo:hi" into [(substr, lo, hi), ...]. Malformed
     entries are skipped with a warning rather than crashing the sidecar."""
@@ -393,10 +338,7 @@ if not _WATCH_TYPES and not _WATCH_NAMES:
     _log("WARNING: both NANLOG_WATCH_TYPES and NANLOG_WATCH_NAMES are empty; "
          "no modules will be watched")
 
-# Scope-knob dependency warnings: these features silently no-op unless their
-# prerequisite is set, which reads as "the flag did nothing" with no explanation.
-# Warn once at import so a misconfigured scope is visible, mirroring the
-# unknown-channels warning above.
+# Warn once when a scope knob silently no-ops without its prerequisite.
 if _TRACK_EVERY_LAYER and not _PIPELINE:
     _log("WARNING: NANLOG_TRACK_EVERY_LAYER=1 has no effect without NANLOG_PIPELINE=1 "
          "(the per-layer re-scan targets are captured by the pipeline hook); set "
@@ -414,40 +356,26 @@ if os.environ.get("NANLOG_TRACK_LAYER_STRIDE") is not None and not _TRACK_EVERY_
 _pending: list = []
 _step = 0
 _records_written = 0
-# Current pipeline phase, set by the stage-boundary checkpoints when NANLOG_PIPELINE
-# is on (copy / sparse_start / sparse_wait / forward). Every record stamps this so
-# a corruption can be bracketed to the interval between two consecutive phases.
-# "forward" is the default because the layer hooks all fire during the root forward.
+# Current pipeline phase (copy/sparse_start/sparse_wait/forward); every record stamps
+# it so a corruption can be bracketed to a stage. Default "forward" (layer hooks).
 _phase = "forward"
-# Current batch identity, the cross-STEP / cross-PHASE correlation key. Because the
-# 3-in-flight pipeline scans copy(N+2), sparse(N+1), forward(N) in one tick, the
-# step alone cannot line up one batch's copy/sparse/forward observations (they land
-# in DIFFERENT steps and the data_ptr is recycled, so neither is a reliable join
-# key). batch_id is: it is assigned once at copy_batch_to_gpu, carried on the batch
-# object, and re-read at every later checkpoint so all records of the same batch
-# share it. Grouping the JSONL by batch_id reconstructs one batch's clean->corrupt
-# timeline with no pipeline-depth arithmetic. None until the first copy checkpoint.
+# batch_id: cross-step/phase join key. The 3-in-flight pipeline scans copy(N+2),
+# sparse(N+1), forward(N) in one tick — so step and the recycled data_ptr can't line
+# up one batch's records; batch_id can. Assigned at copy_batch_to_gpu, carried on the
+# batch object, re-read at each later checkpoint. None until the first copy.
 _batch_id = None
 _batch_counter = 0           # monotonic source for batch_id (host-side, no sync)
-# Fallback map id(batch_obj) -> batch_id, used only when the batch object cannot be
-# tagged with an attribute (some torchrec versions re-wrap the batch). Bounded ring.
+# id(batch) -> batch_id fallback when the object can't take an attribute (bounded).
 _batch_id_by_obj: dict = {}
-_BATCH_ID_ATTR = "_nanlog_batch_id"   # attribute stamped on the batch object
-# Held references to the forward batch's tracked ef tensor OBJECTS for this step, so
-# each watched layer's forward hook can re-scan the SAME objects (per-layer re-scan,
-# NANLOG_TRACK_EVERY_LAYER). Rebuilt every step in the root forward pre-hook; empty
-# when per-layer re-scan is off. Holding the ref is free (the tensor is already alive
-# for the forward pass); the reductions happen in the layer hooks.
+_BATCH_ID_ATTR = "_nanlog_batch_id"
+# Tracked ef objects for this step's forward batch, so each layer hook re-scans the
+# SAME objects (per-layer re-scan). Rebuilt each step; empty when that mode is off.
 _layer_scan_targets: list = []
-_layer_scan_idx = 0          # counts watched-layer fwd hooks this step, for striding
+_layer_scan_idx = 0          # watched-layer fwd hook counter, for striding
 _matmul_calls = 0          # running count of watched layer tensors (no GPU sync)
 _first_bad = None          # first layer to go bad: {"step","layer","direction","kind"}
-# OOB aggregates for the summary, so a run's out-of-bound status is visible without
-# grepping the JSONL. Updated in the drain from oob_count/finite range. _first_oob is
-# the first bound violation seen (may equal _first_bad if oob is the first badness);
-# _oob_records counts records with oob_count>0; _peak_finite_* track the widest range
-# observed on any BOUND tensor (so "how close did it get to the bound" is answerable
-# on a clean run too).
+# OOB summary aggregates (surface out-of-bound status without grepping the JSONL):
+# first violation, count, and widest range seen on bounded tensors.
 _first_oob = None
 _oob_records = 0
 _peak_finite_max = None
@@ -613,11 +541,9 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
     if extra:
         rec.update(extra)
     if _CAPTURE_ADDR:
-        # Pure host-side metadata (no GPU sync): the tensor's address and the
-        # extent of its backing block. Correlate ACROSS records of the SAME step
-        # (or step-1) to find which producer's buffer aliases a corrupted input:
-        # equal/overlapping [storage_ptr, storage_ptr+storage_nbytes) ranges name
-        # the donor/writer pair that delivered the garbage to proj.10's input.
+        # Host-side address + backing-block extent (no GPU sync). Overlapping
+        # [storage_ptr, storage_ptr+storage_nbytes) ranges across records identify
+        # an aliasing producer/writer.
         try:
             st = t.untyped_storage()
             rec["data_ptr"] = hex(t.data_ptr())
