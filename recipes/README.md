@@ -15,6 +15,20 @@ Recipes are the primary interface. The `--mode matrix` flag shim is kept as
 an escape hatch for ad-hoc one-shots; internally it constructs an in-memory
 `Recipe` and reuses the same execution path.
 
+## Layout
+
+Recipes are grouped by workload:
+
+| Folder | Contents |
+|---|---|
+| `training/` | DDP / FSDP training smoke recipes. |
+| `inference/` | Offline / continuous inference smoke recipes. |
+| `llm-determinism/` | Bit-exact double-run determinism probe. |
+| `race/` | RCCL race / SDC reproducers (incl. AINIC/Pollara GDR). |
+| `hrx/` | HRX launch-probe and perf (GEMM / triad) recipes. |
+| `probe/` | Subprocess-flow templates for wrapping opaque launch commands. |
+| `emulated/` | Variants that run under the mirage GPU emulator (no real GPU). |
+
 ## Quick reference
 
 ```yaml
@@ -24,7 +38,6 @@ workload: fsdp                       # required; resolved via aorta.workloads en
 trials: 8                            # required; per-cell trial count
 steps: 5000                          # required; per-cell step count
 save_logs: false                     # optional; when true, dispatcher writes per-trial stdout/stderr files
-collect: [layer_numerics]            # optional; default collectors; does NOT require save_logs
 
 confound:
   threshold: 1.15                    # default; > 1.15 -> "speed (+N%)" flag
@@ -142,6 +155,17 @@ cells:
 
   Unknown collector names are rejected at load time (validated against
   `aorta.run.collectors.KNOWN_RECIPES`).
+
+  For `layer_numerics` (the per-layer NaN/magnitude logger), see
+  [`docs/layer-numerics.md`](../docs/layer-numerics.md) for worked Stage 1 /
+  Stage 2 `collect:` examples and the `NANLOG_*` options. **Opt-in caveat:** the
+  engine validates the collector name and threads it (with any `NANLOG_*`
+  options) into the workload config, but does not launch the logger itself — a
+  workload must read `_aorta_collect` and run its entry through the logger for
+  output to be produced. The built-in workloads do not, so a
+  `collect: [layer_numerics]` recipe on a built-in workload validates and runs
+  without producing logger output; use the standalone path documented in the
+  guide for a guaranteed capture.
 - **`workload_config`** -- optional `dict[str, Any]`, allowed at both
   recipe scope (top level) and per cell. Forwarded to the workload
   constructor through the dispatcher's `Request.config_overrides`. Use
@@ -210,21 +234,21 @@ torchrun's target -- `-m aorta` is not a runnable module:
 
 ```bash
 # validate only (no GPUs / no launcher):
-aorta sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
+aorta sweep run --recipe recipes/training/example-fsdp-smoke.yaml --dry-run
 
 # single node, 2 ranks (bump --nproc_per_node to your GPU count):
 torchrun --standalone --nproc_per_node=2 $(which aorta) sweep run \
-  --recipe recipes/example-fsdp-smoke.yaml
+  --recipe recipes/training/example-fsdp-smoke.yaml
 
 # multi-node, 1 rank per host (AINIC/Pollara -- 1 process owns all GPUs on the node):
 torchrun --nnodes=N --nproc_per_node=1 --rdzv-backend=c10d \
   --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
-  --recipe recipes/example-fsdp-smoke.yaml
+  --recipe recipes/training/example-fsdp-smoke.yaml
 
 # multi-node, 1 rank per GPU (IB / NVLink / generic fabric):
 torchrun --nnodes=N --nproc_per_node=8 --rdzv-backend=c10d \
   --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
-  --recipe recipes/example-fsdp-smoke.yaml
+  --recipe recipes/training/example-fsdp-smoke.yaml
 ```
 
 Each rank runs the full `sweep run`; the ranks find each other in
@@ -246,21 +270,21 @@ launch model as the `llm_determinism` workload.
 
 | Recipe | Purpose | Fabric |
 |---|---|---|
-| `recipes/race_smoke.yaml` | Fabric-agnostic sanity check (1 trial, 5 iters, model_dim=512). Works on NVLink, IB, AINIC, or SHM. | Any |
-| `recipes/ainic-smoke.yaml` | Same but forces `NCCL_NET_GDR_LEVEL=SYS` + dmabuf + GDR read to validate the AINIC/Pollara GDR path specifically. | AINIC only |
+| `recipes/race/race_smoke.yaml` | Fabric-agnostic sanity check (1 trial, 5 iters, model_dim=512). Works on NVLink, IB, AINIC, or SHM. | Any |
+| `recipes/race/ainic-smoke.yaml` | Same but forces `NCCL_NET_GDR_LEVEL=SYS` + dmabuf + GDR read to validate the AINIC/Pollara GDR path specifically. | AINIC only |
 
 Confirmed working on a single node with 8 GPUs (one rank per GPU):
 
 ```bash
 # single node, 8 GPUs:
 torchrun --standalone --nproc_per_node=8 $(which aorta) sweep run \
-  --recipe recipes/race_smoke.yaml
+  --recipe recipes/race/race_smoke.yaml
 
 # AINIC cluster, multi-node (1 rank per host via Slurm):
 # see rccl_ainic/run-cell.sbatch
 ```
 
-A green run proves: `compute_type=transformer`, `layers_verified > 0`, `layer_checksum_mismatches == 0`, `passed=true`. Use `recipes/ainic-gdr-flush-sdc.yaml` for the full SDC triage matrix.
+A green run proves: `compute_type=transformer`, `layers_verified > 0`, `layer_checksum_mismatches == 0`, `passed=true`. Use `recipes/race/ainic-gdr-flush-sdc.yaml` for the full SDC triage matrix.
 
 ## Output layout
 
@@ -427,7 +451,7 @@ audit data is still preserved next to the run.
 
 ## Flag mode (escape hatch)
 
-The equivalent of `recipes/example-fsdp-smoke.yaml` as flag-mode CLI:
+The equivalent of `recipes/training/example-fsdp-smoke.yaml` as flag-mode CLI:
 
 ```
 aorta sweep run --mode matrix \
@@ -450,16 +474,18 @@ Generic ``mode: probe`` recipes for customer handouts. Each template
 includes a ``redaction:`` block consumed by ``aorta bundle`` when
 packaging artifacts for sharing.
 
+Templates live under `recipes/probe/`.
+
 | Template | Typical trailing argv |
 |---|---|
-| `probe-template-torchrun.yaml` | `torchrun --nproc_per_node=N train.py ...` |
-| `probe-template-buck2.yaml` | `buck2 run //path:target -- ...` |
-| `probe-template-bash.yaml` | `bash launch.sh ...` |
+| `recipes/probe/probe-template-torchrun.yaml` | `torchrun --nproc_per_node=N train.py ...` |
+| `recipes/probe/probe-template-buck2.yaml` | `buck2 run //path:target -- ...` |
+| `recipes/probe/probe-template-bash.yaml` | `bash launch.sh ...` |
 
 Dry-run smoke:
 
 ```
-aorta sweep run --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
+aorta sweep run --recipe recipes/probe/probe-template-bash.yaml --dry-run -- echo hi
 ```
 
-See `docs/probe-188/handout-templates.md` for per-template walkthroughs.
+See `docs/probe/handout-templates.md` for per-template walkthroughs.

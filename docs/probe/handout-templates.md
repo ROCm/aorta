@@ -8,9 +8,9 @@ without manual scrubbing.
 
 | Template | Customer launch pattern | Example trailing argv |
 |---|---|---|
-| [`probe-template-torchrun.yaml`](../../recipes/probe-template-torchrun.yaml) | PyTorch distributed / `torchrun` | `torchrun --nproc_per_node=8 train.py --config cfg.yaml` |
-| [`probe-template-buck2.yaml`](../../recipes/probe-template-buck2.yaml) | Buck2 monorepo targets | `buck2 run //models:train -- --steps 1000` |
-| [`probe-template-bash.yaml`](../../recipes/probe-template-bash.yaml) | Shell script / Makefile wrapper | `bash launch.sh --profile production` |
+| [`probe-template-torchrun.yaml`](../../recipes/probe/probe-template-torchrun.yaml) | PyTorch distributed / `torchrun` | `torchrun --nproc_per_node=8 train.py --config cfg.yaml` |
+| [`probe-template-buck2.yaml`](../../recipes/probe/probe-template-buck2.yaml) | Buck2 monorepo targets | `buck2 run //models:train -- --steps 1000` |
+| [`probe-template-bash.yaml`](../../recipes/probe/probe-template-bash.yaml) | Shell script / Makefile wrapper | `bash launch.sh --profile production` |
 
 All three templates use a 2×2 mitigation × diagnostic matrix (`none` /
 `tf32_off` × `none` / `xnack`), three trials, and a 30-minute
@@ -22,7 +22,7 @@ All three templates use a 2×2 mitigation × diagnostic matrix (`none` /
 2. Run the sweep (customer prepends `aorta sweep run`, keeps their argv after `--`):
 
    ```bash
-   aorta sweep run --recipe recipes/probe-template-bash.yaml \
+   aorta sweep run --recipe recipes/probe/probe-template-bash.yaml \
        --output ./probe-out --ticket TICKET-1234 -- \
        bash launch.sh
    ```
@@ -32,7 +32,7 @@ All three templates use a 2×2 mitigation × diagnostic matrix (`none` /
 3. Dry-run first when validating the recipe on your side:
 
    ```bash
-   aorta sweep run --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
+   aorta sweep run --recipe recipes/probe/probe-template-bash.yaml --dry-run -- echo hi
    ```
 
 4. After the matrix completes, bundle the ticket leaf:

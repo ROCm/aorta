@@ -106,12 +106,12 @@ CASES=(
   'env-probe-json|["env","probe","-o","/out/env.json"]'
   'env-probe-field-gpu|["env","probe","--field","gpu_arch"]'
   'run-gpu-smoke|["run","--workload","gpu_smoke","--environment","local","--trials","1"]'
-  'triage-dry-run|["triage","run","--dry-run","--recipe","/tmp/aorta-build/src/recipes/gpu-smoke-emulated.yaml"]'
-  'triage-gpu-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/gpu-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
-  'triage-inference-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/inference-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
-  'triage-training-ddp-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/training-ddp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
-  'triage-training-fsdp-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/training-fsdp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
-  'probe-smoke|["probe","--recipe","/tmp/aorta-build/src/recipes/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE-MATRIX","--","bash","-c","echo hi from mirage probe"]'
+  'triage-dry-run|["triage","run","--dry-run","--recipe","/tmp/aorta-build/src/recipes/emulated/gpu-smoke-emulated.yaml"]'
+  'triage-gpu-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/gpu-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+  'triage-inference-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/inference-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+  'triage-training-ddp-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/training-ddp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+  'triage-training-fsdp-smoke|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/training-fsdp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+  'probe-smoke|["probe","--recipe","/tmp/aorta-build/src/recipes/probe/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE-MATRIX","--","bash","-c","echo hi from mirage probe"]'
   'probe-list-patterns|["probe","--list-patterns"]'
 )
 
@@ -120,7 +120,7 @@ CASES=(
 # INCLUDE_LLM_DET=1 (and consider a larger TIMEOUT_SEC, e.g. 1800).
 if [[ "${INCLUDE_LLM_DET:-0}" == "1" ]]; then
   CASES+=(
-    'triage-llm-determinism|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/llm-determinism-emulated.yaml","--output-dir","/out/triage_results"]'
+    'triage-llm-determinism|["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/llm-determinism-emulated.yaml","--output-dir","/out/triage_results"]'
   )
 fi
 

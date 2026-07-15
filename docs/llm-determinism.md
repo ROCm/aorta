@@ -119,7 +119,7 @@ jq -s '[.[0].block_post, .[1].block_post] | transpose
 
 The launcher script above runs one configuration. To sweep multiple
 configurations in one invocation, use the recipe at
-[`recipes/example-llm-determinism.yaml`](../recipes/example-llm-determinism.yaml).
+[`recipes/llm-determinism/example-llm-determinism.yaml`](../recipes/llm-determinism/example-llm-determinism.yaml).
 Pass workload knobs through `workload_config`:
 
 ```yaml
@@ -149,7 +149,7 @@ Launch (use the `aorta` console script — `python -m aorta.triage.cli` is **not
 
 ```bash
 torchrun --standalone --nproc_per_node=8 $(which aorta) triage run \
-  --recipe recipes/example-llm-determinism.yaml
+  --recipe recipes/llm-determinism/example-llm-determinism.yaml
 ```
 
 Two schema gotchas the loader enforces:

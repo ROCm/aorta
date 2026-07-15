@@ -41,7 +41,7 @@ environment concern set per cell:
   points the child at HRX's `libamdhip64.so`. `LD_PRELOAD` is honored at
   `exec()`, which is exactly why the probe is a subprocess.
 
-See `recipes/hrx-launch-probe-smoke.yaml` for a ready-to-edit A/B recipe.
+See `recipes/hrx/hrx-launch-probe-smoke.yaml` for a ready-to-edit A/B recipe.
 
 ## Config keys
 
@@ -70,7 +70,7 @@ The A/B matrix (both cells, one command) comes from the recipe:
 ```bash
 # The ticket comes from the recipe (ticket: HRX-273-SMOKE); passing --ticket
 # too would fail ("--recipe conflicts with --ticket").
-aorta sweep run --recipe recipes/hrx-launch-probe-smoke.yaml --output ./triage_results
+aorta sweep run --recipe recipes/hrx/hrx-launch-probe-smoke.yaml --output ./triage_results
 cat triage_results/HRX-273-SMOKE/hrx/*/matrix.md
 ```
 
@@ -167,11 +167,11 @@ run) are identical to the `hrx` workload above.
 
 ```bash
 # compute-bound A/B (add --strict to fail if a cell errors or never runs)
-aorta sweep run --recipe recipes/hrx-perf-gemm.yaml --output ./triage_results --strict
+aorta sweep run --recipe recipes/hrx/hrx-perf-gemm.yaml --output ./triage_results --strict
 cat triage_results/HRX-PERF-GEMM/hrx_perf/*/matrix.md
 
 # bandwidth-bound A/B
-aorta sweep run --recipe recipes/hrx-perf-triad.yaml --output ./triage_results --strict
+aorta sweep run --recipe recipes/hrx/hrx-perf-triad.yaml --output ./triage_results --strict
 cat triage_results/HRX-PERF-TRIAD/hrx_perf/*/matrix.md
 
 # single run, stock HIP, defaults (gemm 4096)

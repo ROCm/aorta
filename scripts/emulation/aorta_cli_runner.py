@@ -4,7 +4,7 @@
 Reads ``AORTA_CLI_JSON`` from the environment, or ``sys.argv[1]`` if set.
 Example::
 
-    AORTA_CLI_JSON='["triage","run","--recipe","recipes/gpu-smoke-emulated.yaml"]' \\
+    AORTA_CLI_JSON='["triage","run","--recipe","recipes/emulated/gpu-smoke-emulated.yaml"]' \\
         python3 scripts/emulation/aorta_cli_runner.py
 """
 from __future__ import annotations
