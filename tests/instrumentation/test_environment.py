@@ -3451,6 +3451,14 @@ class TestPackageCommitExtraction:
         for v in ("2.13.0a0+fb", "2.12.0+cpu", "2.10.0.dev+rocm7.0", None, ""):
             assert env_mod._extract_commit_from_version(v) is None
 
+    def test_uppercase_sha_is_matched_and_lowercased(self):
+        # Hex is case-insensitive; an uppercase SHA must be captured and
+        # normalized to lowercase to match the docstring contract.
+        assert env_mod._extract_commit_from_version("0.1.11+gA469A608") == "a469a608"
+        assert env_mod._extract_commit_from_version(
+            "3.5.1+rocm7.2.1.gitA272DFA8"
+        ) == "a272dfa8"
+
     def test_commit_from_version_string_wins(self):
         assert env_mod._capture_python_package_commit(
             "definitely_not_a_real_pkg_xyz", "1.0+g0123abcd"

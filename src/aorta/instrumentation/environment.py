@@ -2813,8 +2813,8 @@ def _capture_pytorch_version(reasons: list[str]) -> str | None:
 # so a bare local segment like ``+fb`` / ``+cpu`` / ``+rocm7.2.1`` is NOT
 # mistaken for a commit.
 _PACKAGE_COMMIT_RES: tuple[re.Pattern, ...] = (
-    re.compile(r"[+.](?:\d+\.)?git([0-9a-f]{7,40})\b"),
-    re.compile(r"[+.](?:\d+\.)?g([0-9a-f]{7,40})\b"),
+    re.compile(r"[+.](?:\d+\.)?git([0-9a-f]{7,40})\b", re.IGNORECASE),
+    re.compile(r"[+.](?:\d+\.)?g([0-9a-f]{7,40})\b", re.IGNORECASE),
 )
 
 # Module attributes some packages expose carrying a raw commit SHA,
@@ -2849,7 +2849,9 @@ def _extract_commit_from_version(version: str | None) -> str | None:
     for pat in _PACKAGE_COMMIT_RES:
         m = pat.search(version)
         if m:
-            return m.group(1)
+            # Hex is case-insensitive; normalize to lowercase so the
+            # returned SHA is stable for downstream comparison.
+            return m.group(1).lower()
     return None
 
 
