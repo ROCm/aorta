@@ -96,38 +96,38 @@ case "$WORKLOAD" in
     OUT="${OUT:-/tmp/aorta-gpu-smoke-out}"
     mkdir -p "$OUT"
     log "triage gpu-smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
-    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/gpu-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/gpu-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
     ;;
   probe)
     OUT="${OUT:-/tmp/aorta-probe-out}"
     mkdir -p "$OUT"
     log "probe smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
-    run_in_container '["probe","--recipe","/tmp/aorta-build/src/recipes/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE","--","bash","-c","echo hi from mirage probe"]'
+    run_in_container '["probe","--recipe","/tmp/aorta-build/src/recipes/probe/example-probe-smoke.yaml","--output","/out/probe_results","--ticket","PROBE-MIRAGE","--","bash","-c","echo hi from mirage probe"]'
     ;;
   inference-smoke)
     OUT="${OUT:-/tmp/aorta-inference-out}"
     mkdir -p "$OUT"
     log "triage inference-smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
-    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/inference-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/inference-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
     ;;
   training-ddp-smoke)
     OUT="${OUT:-/tmp/aorta-training-ddp-out}"
     mkdir -p "$OUT"
     log "triage training-ddp-smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
-    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/training-ddp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/training-ddp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
     ;;
   training-fsdp-smoke)
     OUT="${OUT:-/tmp/aorta-training-fsdp-out}"
     mkdir -p "$OUT"
     log "triage training-fsdp-smoke (emulator=$EMULATOR profile=$PROFILE) -> $OUT"
-    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/training-fsdp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
+    run_in_container '["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/training-fsdp-smoke-emulated.yaml","--output-dir","/out/triage_results"]'
     ;;
   llm-determinism)
     OUT="${OUT:-/tmp/aorta-llm-out}"
     mkdir -p "$OUT"
     # Default: the tiny in-repo singleton recipe (baked into the copied source,
     # runs on one emulated GPU). Override LLM_RECIPE to mount a full multi-cell
-    # recipe (e.g. recipes/example-llm-determinism.yaml) from the host instead.
+    # recipe (e.g. recipes/llm-determinism/example-llm-determinism.yaml) from the host instead.
     RECIPE="${LLM_RECIPE:-}"
     log "llm_determinism (slow under rocjitsu; faster with rocjitsu-dbt) -> $OUT"
     # The default and host-recipe paths differ only in the recipe path baked
@@ -139,7 +139,7 @@ case "$WORKLOAD" in
       RECIPE_JSON='["triage","run","--verbose","--recipe","/recipe.yaml","--output-dir","/out/triage_results"]'
       recipe_mount=(--mount "$RECIPE:/recipe.yaml:ro")
     else
-      RECIPE_JSON='["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/llm-determinism-emulated.yaml","--output-dir","/out/triage_results"]'
+      RECIPE_JSON='["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/llm-determinism-emulated.yaml","--output-dir","/out/triage_results"]'
     fi
     "$MIRAGE_BIN" run --in-process --profile "$PROFILE" \
       --image "$IMAGE" \

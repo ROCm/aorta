@@ -189,7 +189,7 @@ buck2 run aorta -- sweep list-environments
 # local    aorta   -       -
 
 # Validate a recipe without executing it
-buck2 run aorta -- sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
+buck2 run aorta -- sweep run --recipe recipes/training/example-fsdp-smoke.yaml --dry-run
 # Dry run: fsdp / ticket=EXAMPLE-151
 # Cells (3):
 #   - baseline-local: mitigations=['none'] environment=local trials=2 steps=100
@@ -209,7 +209,7 @@ the recipe's own header documents it -- and `aorta sweep` is built to
 keep going:
 
 ```bash
-buck2 run aorta -- sweep run --recipe recipes/example-fsdp-smoke.yaml -v
+buck2 run aorta -- sweep run --recipe recipes/training/example-fsdp-smoke.yaml -v
 ```
 
 What you get back (under `triage_results/EXAMPLE-151/fsdp/<timestamp>/`):

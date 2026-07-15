@@ -32,6 +32,10 @@ downstream packages can register their own workloads.
 PyTorch for ROCm is **installed separately** from the ROCm PyTorch index (it is
 not bundled in the wheel). Install it first, then AORTA.
 
+Install the published release with `pip install amd-aorta` (below). For the
+latest unreleased changes, clone the repo and do an editable install from source
+(see [From source](#from-source-for-contributors)).
+
 ### From PyPI (recommended for users)
 
 ```bash
@@ -87,17 +91,17 @@ aorta env probe --field pytorch_build.git_commit # one field, JSON-typed
 diff <(jq -S . env_a.json) <(jq -S . env_b.json) # diff two snapshots
 
 # --- Unified sweep (recipe-driven) ---
-aorta sweep run --recipe recipes/example-llm-determinism.yaml --dry-run   # validate only
-aorta sweep run --recipe recipes/example-llm-determinism.yaml             # run the matrix
+aorta sweep run --recipe recipes/llm-determinism/example-llm-determinism.yaml --dry-run   # validate only
+aorta sweep run --recipe recipes/llm-determinism/example-llm-determinism.yaml             # run the matrix
 
 # Distributed workloads launch under torchrun (llm_determinism, race, fsdp):
 torchrun --standalone --nproc_per_node=2 $(which aorta) \
-  sweep run --recipe recipes/example-fsdp-smoke.yaml
+  sweep run --recipe recipes/training/example-fsdp-smoke.yaml
 torchrun --standalone --nproc_per_node=1 $(which aorta) \
   run --workload llm_determinism --trials 1 --steps 50
 
 # --- Unified sweep (wrap an opaque launch command) ---
-aorta sweep run --recipe recipes/probe-template-bash.yaml \
+aorta sweep run --recipe recipes/probe/probe-template-bash.yaml \
   --ticket ROCM-1234 -- bash launch.sh
 
 # --- Inspect the registries / pattern catalogue ---
@@ -243,6 +247,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [Environment Probe](docs/env-probe.md) | Capture / diff / query a versioned environment snapshot; jq cookbook |
 | [`aorta sweep`](docs/probe/usage.md) | Unified matrix runner — built-in workloads **or** opaque launch commands |
 | [LLM Determinism](docs/llm-determinism.md) | Bit-exact double-run nondeterminism probe |
+| [Layer Numerics](docs/layer-numerics.md) | Per-layer / per-stage NaN, magnitude, and out-of-range logger |
 | [`aorta agent`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
 | [`aorta bundle`](docs/probe/bundle.md) | Package sweep artifacts with recipe-driven redaction |
 | [Recipes](recipes/README.md) | Recipe schema and running recipes |

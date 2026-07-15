@@ -115,7 +115,7 @@ mirage profile show mi350x >/dev/null 2>&1 || \
 
 mirage run --in-process --profile mi350x \
   --image "$MIRAGE_AORTA_IMAGE" \
-  --env 'AORTA_CLI_JSON=["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/gpu-smoke-emulated.yaml","--output-dir","/out/triage_results"]' \
+  --env 'AORTA_CLI_JSON=["triage","run","--verbose","--recipe","/tmp/aorta-build/src/recipes/emulated/gpu-smoke-emulated.yaml","--output-dir","/out/triage_results"]' \
   --mount "$AORTA_ROOT:/aorta-src:ro" \
   --mount "$AORTA_ROOT/scripts/emulation/aorta_cli_runner.py:/runner.py:ro" \
   --mount "$OUT:/out" \
@@ -160,4 +160,4 @@ For host-side `aorta probe` with `environment: emulated-rocjitsu`, AORTA wraps
 
 ## 10. Related docs
 
-- Recipe: [recipes/gpu-smoke-emulated.yaml](../recipes/gpu-smoke-emulated.yaml)
+- Recipe: [recipes/emulated/gpu-smoke-emulated.yaml](../recipes/emulated/gpu-smoke-emulated.yaml)
