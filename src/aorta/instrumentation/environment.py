@@ -63,7 +63,29 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.7"
+SCHEMA_VERSION = "1.8"
+# 1.7 -> 1.8 (Buck-target torch recovery + package commits):
+#   - ``triton`` and ``fbgemm`` blocks each gained a ``commit`` key
+#     (nested, additive). Best-effort git SHA parsed from a
+#     setuptools_scm ``+g<sha>`` local-version segment, a ROCm/fb fork
+#     ``.git<sha>`` segment, or a ``git_version`` / ``__commit__`` module
+#     attribute. ``None`` when no commit is recoverable (e.g. fb wheels
+#     versioned ``3.5.0+fb`` carry no SHA; fbgemm not separately
+#     installed). Mirrors the existing ``aiter.commit`` field. 1.7
+#     readers indexing ``triton["commit"]`` / ``fbgemm["commit"]`` on a
+#     pre-1.8 snapshot get a KeyError -- guard with ``.get(...)``.
+#   - No new top-level keys and no dataclass-field changes, so
+#     ``EnvSnapshot.from_dict`` on a <=1.7 snapshot still round-trips.
+#   - Behavioural (not schema-shape) change folded into this bump: the
+#     ``libtorch_hip.so``-dependent probes (composable_kernel
+#     pytorch_bundled symbol_count, aotriton bundled_*,
+#     pytorch_build.binary_introspection symbol counts / torch_lib_bundled)
+#     now locate torch's native lib dir via ``/proc/self/maps`` when
+#     ``<torch>/lib`` is absent. This populates those previously-null
+#     fields for Buck/monorepo torch targets (e.g. fbcode //caffe2:torch)
+#     whose C++ runtime is dlopen'd from a build-artifact dir rather than
+#     laid out under the Python package. No field shapes change.
+#
 # 1.6 -> 1.7 (issue #202, RCCL net-plugin + multi-vendor NIC stack):
 #   - New top-level ``nics`` block keyed by vendor (``ainic``,
 #     ``broadcom``, ``cx7``). Each entry has a Tier-0 ``present`` gate
@@ -424,6 +446,26 @@ CK_TILE_CONFIG_HEADER = Path("/opt/rocm/include/ck_tile/core/config.hpp")
 # `torch.__file__` at runtime by the composable_kernel probe (we never
 # initialise HIP context to find it -- pure path arithmetic).
 PYTORCH_HIP_LIB_NAME = "libtorch_hip.so"
+
+# Torch's native shared libraries (libtorch_hip.so, libaotriton_v2.so*,
+# ...) normally live in ``<torch.__file__>/../lib`` -- the wheel / source
+# layout. In Buck / monorepo "par" layouts (e.g. fbcode //caffe2:torch)
+# the Python package is materialised into a link-tree but the C++ runtime
+# is dlopen'd from a separate build-artifact directory, so
+# ``<torch>/lib`` does not exist on disk and the lib-on-disk probes come
+# back null. Because the env probe runs IN-PROCESS with torch already
+# imported, those libraries are mapped into this process -- we recover
+# the real directory from ``/proc/self/maps`` as a fallback. Sonames we
+# look for, most torch-specific first (so libtorch_hip.so wins over the
+# generic libc10.so when several are mapped).
+_TORCH_LOADED_LIB_SONAMES: tuple[str, ...] = (
+    PYTORCH_HIP_LIB_NAME,
+    "libtorch.so",
+    "libtorch_cpu.so",
+    "libc10_hip.so",
+    "libc10.so",
+)
+_PROC_SELF_MAPS = Path("/proc/self/maps")
 
 # AOTriton is the default Flash Attention backend on ROCm. Unlike CK
 # / FBGEMM / AITER, AOTriton is NOT a PyTorch git submodule -- it's
@@ -1695,9 +1737,10 @@ def _disaster_snapshot(
             "pytorch_use_ck_gemm": None,
         },
         tensile={"package_version": None, "kernel_db_combined_hash": None},
-        triton={"package_version": None},
+        triton={"package_version": None, "commit": None},
         fbgemm={
             "package_version": None,
+            "commit": None,
             "pytorch_use_fbgemm": None,
             "pytorch_use_fbgemm_genai": None,
         },
@@ -2762,6 +2805,122 @@ def _capture_pytorch_version(reasons: list[str]) -> str | None:
     )
 
 
+# Patterns that encode a VCS commit inside a PEP 440 local-version
+# segment, most specific first. setuptools_scm writes ``+g<sha>`` and
+# ``+<distance>.g<sha>``; the ROCm/fb forks append ``.git<sha>`` /
+# ``+git<sha>`` / ``.g<sha>`` (e.g. triton ``3.5.1+rocm7.2.1.gita272dfa8``).
+# We require a ``g``/``git`` lead-in before a 7-40 char lowercase hex run
+# so a bare local segment like ``+fb`` / ``+cpu`` / ``+rocm7.2.1`` is NOT
+# mistaken for a commit.
+_PACKAGE_COMMIT_RES: tuple[re.Pattern, ...] = (
+    re.compile(r"[+.](?:\d+\.)?git([0-9a-f]{7,40})\b", re.IGNORECASE),
+    re.compile(r"[+.](?:\d+\.)?g([0-9a-f]{7,40})\b", re.IGNORECASE),
+)
+
+# Module attributes some packages expose carrying a raw commit SHA,
+# checked in order. ``torch.version.git_version`` is the canonical
+# nested form; the rest are flat module attrs other libs use.
+_PACKAGE_COMMIT_ATTRS: tuple[str, ...] = (
+    "__git_version__",
+    "git_version",
+    "__commit__",
+    "__sha__",
+)
+
+
+# A bare git commit SHA: 7-40 hex chars, nothing else. Used to validate
+# the value of a module commit ATTRIBUTE (e.g. torch-style
+# ``version.git_version = "ff65f5bc..."``) before accepting it, so a
+# non-SHA attr like ``"unknown"`` / ``"dirty"`` / a tag never leaks into
+# the snapshot's ``commit`` field.
+_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{7,40}", re.IGNORECASE)
+
+
+def _extract_commit_from_version(version: str | None) -> str | None:
+    """Best-effort parse of a git commit SHA from a PEP 440-ish version.
+
+    Recognises the setuptools_scm ``+g<sha>`` / ``+<n>.g<sha>`` local
+    segment and the ROCm/fb fork ``.git<sha>`` / ``.g<sha>`` form.
+    Returns the lowercase-hex SHA, or ``None`` when the string carries
+    no commit (e.g. ``2.13.0a0+fb`` or ``3.5.0+cpu``). Never raises.
+    """
+    if not version:
+        return None
+    for pat in _PACKAGE_COMMIT_RES:
+        m = pat.search(version)
+        if m:
+            # Hex is case-insensitive; normalize to lowercase so the
+            # returned SHA is stable for downstream comparison.
+            return m.group(1).lower()
+    return None
+
+
+def _commit_from_attr_value(val: Any) -> str | None:
+    """Coerce a module commit-attribute value into a SHA, or ``None``.
+
+    Accepts a value that either embeds a SHA in a version-like string
+    (``+g<sha>`` / ``.git<sha>``) or *is* a bare 7-40 char hex SHA
+    (the common ``git_version`` shape). Any other string -- ``"unknown"``,
+    ``"dirty"``, a tag, a dirty-tree suffix -- yields ``None`` so the
+    snapshot's ``commit`` field only ever carries a real SHA or null.
+    """
+    if not isinstance(val, str):
+        return None
+    val = val.strip()
+    if not val:
+        return None
+    embedded = _extract_commit_from_version(val)
+    if embedded:
+        return embedded
+    if _COMMIT_SHA_RE.fullmatch(val):
+        return val.lower()
+    return None
+
+
+def _capture_python_package_commit(
+    package_name: str,
+    version: str | None,
+) -> str | None:
+    """Best-effort git commit for an (already-importable) Python package.
+
+    Strategy, first hit wins:
+
+    1. A SHA embedded in *version* (``+g<sha>`` / ``.git<sha>``) -- the
+       common case for ROCm/fb wheels whose ``__version__`` is stamped
+       by setuptools_scm.
+    2. A dedicated commit attribute on the imported module
+       (``__git_version__`` / ``git_version`` / ``__commit__`` /
+       ``__sha__``, or the nested ``module.version.git_version``). The
+       attribute value is accepted only if it embeds or *is* a valid
+       7-40 char hex SHA -- a non-SHA attr (``"unknown"``, ``"dirty"``,
+       a tag) is ignored so ``commit`` is always a real SHA or null.
+
+    Never adds a partial reason (the sibling ``package_version`` probe
+    already owns absence/import-failure reporting) and never raises --
+    returns ``None`` on any failure or when no commit is recoverable.
+    """
+    commit = _extract_commit_from_version(version)
+    if commit:
+        return commit
+    try:
+        # Already imported during the version probe in the common case,
+        # so this is a cheap sys.modules lookup; a genuinely-absent
+        # package just raises ImportError and yields None.
+        mod = __import__(package_name)
+    except Exception:  # noqa: BLE001 -- absence/broken import => no commit
+        return None
+    for attr in _PACKAGE_COMMIT_ATTRS:
+        commit = _commit_from_attr_value(getattr(mod, attr, None))
+        if commit:
+            return commit
+    version_obj = getattr(mod, "version", None)
+    if version_obj is not None:
+        commit = _commit_from_attr_value(getattr(version_obj, "git_version", None))
+        if commit:
+            return commit
+    return None
+
+
 # ---------------------------------------------------------------------------
 # rocBLAS introspection -- mirrors the hipBLASLt block 1:1
 # ---------------------------------------------------------------------------
@@ -3014,6 +3173,93 @@ def _probe_pytorch_bundled_ck(
     return {"present": symbol_count > 0, "symbol_count": symbol_count}
 
 
+def _loaded_lib_path_from_maps(sonames: tuple[str, ...]) -> Path | None:
+    """Return the on-disk path of a mapped shared object matching *sonames*.
+
+    Reads ``/proc/self/maps`` and returns the path of the first mapped
+    file whose basename equals one of *sonames* or is a SONAME-versioned
+    variant of it (``libtorch_hip.so`` or ``libtorch_hip.so.2``).
+    Preference follows *sonames* order, not map order, so a more
+    torch-specific match wins over a generic one even if it is mapped
+    later. Linux-only; returns ``None`` off Linux, when the file is
+    unreadable, or when nothing matches. Never raises -- this is a
+    best-effort fallback for Buck/monorepo torch layouts.
+
+    Skips mappings the kernel has marked ``" (deleted)"`` -- a mapped
+    file that was unlinked after being ``dlopen``'d (routine for a
+    build-artifact directory that gets cleaned up post-load). Matching
+    one of those would return a ``Path`` whose string literally ends in
+    ``" (deleted)"``, which never exists on disk and would make the
+    caller trust a stale/torn-down directory silently.
+    """
+    try:
+        text = _PROC_SELF_MAPS.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    found: dict[str, Path] = {}
+    for line in text.splitlines():
+        # maps line: "addr perms offset dev inode   pathname". The
+        # pathname is optional (anonymous maps) and is the 6th field.
+        # Bound the split so a pathname containing spaces (e.g.
+        # "/opt/my libs/libtorch_hip.so") stays intact as the remainder.
+        parts = line.split(maxsplit=5)
+        if len(parts) < 6:
+            continue
+        path_str = parts[5]
+        if path_str.endswith(" (deleted)"):
+            continue
+        if not path_str.startswith("/"):
+            continue
+        name = Path(path_str).name
+        for soname in sonames:
+            if soname in found:
+                continue
+            if name == soname or name.startswith(f"{soname}."):
+                found[soname] = Path(path_str)
+                break
+    for soname in sonames:
+        hit = found.get(soname)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _torch_native_lib_dir(torch_mod: Any | None) -> Path | None:
+    """Locate the directory holding torch's native shared libraries.
+
+    Prefers ``<torch.__file__>/../lib`` (wheel / source layout). Falls
+    back to the directory of a torch native lib mapped into this process
+    (via :func:`_loaded_lib_path_from_maps`) so the probe still works
+    when torch is a Buck target whose C++ runtime is dlopen'd from a
+    build-artifact directory rather than laid out under the Python
+    package -- the fbcode ``//caffe2:torch`` case. Returns ``None`` when
+    neither locates a directory. Never raises.
+
+    The maps-derived hit is only trusted if it still exists on disk --
+    ``_loaded_lib_path_from_maps`` already filters out mappings marked
+    ``" (deleted)"``, but this is a defensive second check so a caller
+    of this function never scans a torn-down build-artifact directory
+    without knowing it.
+    """
+    if torch_mod is not None:
+        torch_file = getattr(torch_mod, "__file__", None)
+        if torch_file:
+            cand = Path(torch_file).parent / "lib"
+            try:
+                if cand.is_dir():
+                    return cand
+            except OSError:
+                pass
+    loaded = _loaded_lib_path_from_maps(_TORCH_LOADED_LIB_SONAMES)
+    if loaded is not None:
+        try:
+            if loaded.exists():
+                return loaded.parent
+        except OSError:
+            pass
+    return None
+
+
 class _HipSymbolDumpCache:
     """Per-``collect_env()``-call cache for the demangled
     ``libtorch_hip.so`` symbol dump.
@@ -3104,16 +3350,33 @@ def _dump_pytorch_hip_demangled_symbols(
         return None
 
     torch_file = getattr(torch_mod, "__file__", None)
-    if not torch_file:
-        reasons.append(f"{reason_prefix}: torch.__file__ unavailable")
-        return None
 
-    lib_path = Path(torch_file).parent / "lib" / PYTORCH_HIP_LIB_NAME
-    if not lib_path.exists():
-        reasons.append(
-            f"{reason_prefix}: {lib_path} not found "
-            "(torch.version.hip claims HIP but the runtime lib is missing)"
-        )
+    # Primary: the wheel/source layout <torch>/lib/libtorch_hip.so.
+    lib_path: Path | None = None
+    if torch_file:
+        cand = Path(torch_file).parent / "lib" / PYTORCH_HIP_LIB_NAME
+        if cand.exists():
+            lib_path = cand
+
+    # Fallback for Buck/monorepo torch: the lib is dlopen'd from a
+    # build-artifact dir rather than laid out under the Python package,
+    # so <torch>/lib/libtorch_hip.so is absent. Since torch is imported
+    # in-process the lib IS mapped -- recover its real path from
+    # /proc/self/maps.
+    if lib_path is None:
+        mapped = _loaded_lib_path_from_maps((PYTORCH_HIP_LIB_NAME,))
+        if mapped is not None and mapped.exists():
+            lib_path = mapped
+
+    if lib_path is None:
+        if not torch_file:
+            reasons.append(f"{reason_prefix}: torch.__file__ unavailable")
+        else:
+            guess = Path(torch_file).parent / "lib" / PYTORCH_HIP_LIB_NAME
+            reasons.append(
+                f"{reason_prefix}: {guess} not found "
+                "(torch.version.hip claims HIP but the runtime lib is missing)"
+            )
         return None
 
     nm = shutil.which("nm")
@@ -3250,10 +3513,15 @@ def _capture_triton(reasons: list[str]) -> dict[str, str | None]:
     captures both the upstream version and the fork commit. No header
     parsing needed.
     """
+    version = _capture_python_package_version(
+        "triton", reasons, reason_prefix="triton.package_version"
+    )
     return {
-        "package_version": _capture_python_package_version(
-            "triton", reasons, reason_prefix="triton.package_version"
-        ),
+        "package_version": version,
+        # ROCm triton stamps the fork commit into __version__
+        # (e.g. "3.5.1+rocm7.2.1.gita272dfa8"); fb builds (e.g. "3.5.0+fb")
+        # carry none -> commit stays None.
+        "commit": _capture_python_package_commit("triton", version),
     }
 
 
@@ -3283,6 +3551,11 @@ def _capture_fbgemm(reasons: list[str]) -> dict[str, Any]:
     use_fbgemm, use_fbgemm_genai = _read_pytorch_fbgemm_flags(reasons)
     return {
         "package_version": package_version,
+        # Best-effort fbgemm_gpu commit: parsed from a setuptools_scm
+        # "+g<sha>" local-version segment or a git_version/__commit__
+        # module attr. None when fbgemm_gpu isn't separately installed
+        # (the common vendored-in-torch case) or carries no SHA.
+        "commit": _capture_python_package_commit("fbgemm_gpu", package_version),
         "pytorch_use_fbgemm": use_fbgemm,
         "pytorch_use_fbgemm_genai": use_fbgemm_genai,
     }
@@ -3406,9 +3679,9 @@ def _capture_aiter(reasons: list[str]) -> dict[str, Any]:
         )
 
     if version:
-        m = re.search(r"\+g([0-9a-f]{7,40})", version)
-        if m:
-            result["commit"] = m.group(1)
+        commit = _extract_commit_from_version(version)
+        if commit:
+            result["commit"] = commit
 
     result["package_version"] = version
     result["package_dist_name"] = dist_name
@@ -3787,8 +4060,13 @@ def _capture_pytorch_binary_introspection(
     # per probe (not per lib name) keeps the cost bounded.
     if torch_mod is not None:
         torch_file = getattr(torch_mod, "__file__", None)
-        if torch_file:
+        # Prefer the maps-recovered dir (handles Buck/monorepo layouts);
+        # fall back to <torch>/lib so the "scan failed" reason still
+        # names a concrete path when nothing is locatable.
+        torch_lib_dir = _torch_native_lib_dir(torch_mod)
+        if torch_lib_dir is None and torch_file:
             torch_lib_dir = Path(torch_file).parent / "lib"
+        if torch_lib_dir is not None:
             try:
                 entries = [p.name for p in torch_lib_dir.iterdir()]
             except OSError as exc:
@@ -4863,11 +5141,15 @@ def _capture_aotriton(reasons: list[str]) -> dict[str, Any]:
         return default
 
     torch_file = getattr(torch_mod, "__file__", None)
-    if not torch_file:
-        reasons.append("aotriton: torch.__file__ unavailable")
-        return default
-
-    lib_dir = Path(torch_file).parent / "lib"
+    # Prefer the maps-recovered native lib dir so AOTriton is found even
+    # when torch is a Buck target with no <torch>/lib on disk. Fall back
+    # to <torch>/lib for the reason message when nothing is locatable.
+    lib_dir = _torch_native_lib_dir(torch_mod)
+    if lib_dir is None:
+        if not torch_file:
+            reasons.append("aotriton: torch.__file__ unavailable")
+            return default
+        lib_dir = Path(torch_file).parent / "lib"
 
     # Find every libaotriton_v2.so* file. Pick the best-versioned for
     # the version+hash; record presence/absence of the images dir.

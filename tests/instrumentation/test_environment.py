@@ -277,7 +277,7 @@ class TestSchemaCompleteness:
     ):
         snapshot = collect_env()
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
-        assert snapshot.schema_version == "1.7"
+        assert snapshot.schema_version == "1.8"
         assert snapshot.system_health is None
         assert snapshot.rocm == {
             "version": None,
@@ -374,9 +374,13 @@ def _example_snapshot(**overrides) -> object:
             "package_version": None,
             "kernel_db_combined_hash": "filenames-sha256:eee",
         },
-        "triton": {"package_version": "3.5.1+rocm7.2.1.gita272dfa8"},
+        "triton": {
+            "package_version": "3.5.1+rocm7.2.1.gita272dfa8",
+            "commit": "a272dfa8",
+        },
         "fbgemm": {
             "package_version": None,
+            "commit": None,
             "pytorch_use_fbgemm": True,
             "pytorch_use_fbgemm_genai": True,
         },
@@ -3398,7 +3402,7 @@ class TestTritonBlock:
         monkeypatch.setattr(builtins, "__import__", fake_import)
         reasons: list[str] = []
         block = env_mod._capture_triton(reasons)
-        assert block == {"package_version": None}
+        assert block == {"package_version": None, "commit": None}
         assert any("triton" in r for r in reasons)
 
     def test_triton_with_version_returns_string(self, isolated_env, monkeypatch):
@@ -3416,8 +3420,278 @@ class TestTritonBlock:
         monkeypatch.setattr(builtins, "__import__", fake_import)
         reasons: list[str] = []
         block = env_mod._capture_triton(reasons)
-        assert block == {"package_version": "3.5.1+rocm7.2.1.gita272dfa8"}
+        assert block == {
+            "package_version": "3.5.1+rocm7.2.1.gita272dfa8",
+            "commit": "a272dfa8",
+        }
         assert reasons == []
+
+
+# ---------------------------------------------------------------------------
+# Package commit extraction (schema 1.8)
+# ---------------------------------------------------------------------------
+
+
+class TestPackageCommitExtraction:
+    def test_setuptools_scm_plus_g_sha(self):
+        # +g<sha> and +<distance>.g<sha> setuptools_scm local segments.
+        assert env_mod._extract_commit_from_version("0.1.11.dev32+g9a469a608") == (
+            "9a469a608"
+        )
+        assert env_mod._extract_commit_from_version("1.2.0+5.g0123abc") == "0123abc"
+
+    def test_rocm_fork_dot_git_sha(self):
+        # ROCm triton: "3.5.1+rocm7.2.1.gita272dfa8" -> a272dfa8.
+        assert env_mod._extract_commit_from_version(
+            "3.5.1+rocm7.2.1.gita272dfa8"
+        ) == "a272dfa8"
+
+    def test_plain_local_segment_is_not_a_commit(self):
+        # +fb / +cpu / +rocm7.2.1 carry no SHA -> None (must not false-match).
+        for v in ("2.13.0a0+fb", "2.12.0+cpu", "2.10.0.dev+rocm7.0", None, ""):
+            assert env_mod._extract_commit_from_version(v) is None
+
+    def test_uppercase_sha_is_matched_and_lowercased(self):
+        # Hex is case-insensitive; an uppercase SHA must be captured and
+        # normalized to lowercase to match the docstring contract.
+        assert env_mod._extract_commit_from_version("0.1.11+gA469A608") == "a469a608"
+        assert env_mod._extract_commit_from_version(
+            "3.5.1+rocm7.2.1.gitA272DFA8"
+        ) == "a272dfa8"
+
+    def test_commit_from_version_string_wins(self):
+        assert env_mod._capture_python_package_commit(
+            "definitely_not_a_real_pkg_xyz", "1.0+g0123abcd"
+        ) == "0123abcd"
+
+    def test_commit_from_module_git_version_attr(self, monkeypatch):
+        import builtins
+        import types
+
+        real_import = builtins.__import__
+        fake = types.SimpleNamespace(
+            version=types.SimpleNamespace(git_version="deadbeef1234")
+        )
+
+        def fake_import(name, *args, **kwargs):
+            if name == "fbgemm_gpu":
+                return fake
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        # version string has no SHA -> falls back to module attr.
+        assert env_mod._capture_python_package_commit(
+            "fbgemm_gpu", "1.4.0"
+        ) == "deadbeef1234"
+
+    def test_absent_package_yields_none(self, monkeypatch):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "fbgemm_gpu":
+                raise ImportError("absent")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        assert env_mod._capture_python_package_commit("fbgemm_gpu", None) is None
+
+    def test_non_sha_module_attr_is_rejected(self, monkeypatch):
+        # A git_version-style attr that is NOT a hex SHA ("unknown",
+        # "dirty", a tag) must not leak into the commit field.
+        import builtins
+        import types
+
+        real_import = builtins.__import__
+        for bad in ("unknown", "dirty", "v2.13.0-release", "N/A"):
+            fake = types.SimpleNamespace(
+                version=types.SimpleNamespace(git_version=bad)
+            )
+
+            def fake_import(name, *args, _fake=fake, **kwargs):
+                if name == "fbgemm_gpu":
+                    return _fake
+                return real_import(name, *args, **kwargs)
+
+            monkeypatch.setattr(builtins, "__import__", fake_import)
+            assert (
+                env_mod._capture_python_package_commit("fbgemm_gpu", "1.4.0") is None
+            ), bad
+
+    def test_bare_full_sha_attr_is_accepted_and_lowercased(self, monkeypatch):
+        import builtins
+        import types
+
+        real_import = builtins.__import__
+        sha = "FF65F5BC672795C5E5033900EA0A0C4F8566C8CF"
+        fake = types.SimpleNamespace(__git_version__=sha)
+
+        def fake_import(name, *args, **kwargs):
+            if name == "fbgemm_gpu":
+                return fake
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        assert env_mod._capture_python_package_commit(
+            "fbgemm_gpu", "1.4.0"
+        ) == sha.lower()
+
+    def test_commit_from_attr_value_unit(self):
+        assert env_mod._commit_from_attr_value("ff65f5bc") == "ff65f5bc"
+        assert env_mod._commit_from_attr_value("0.1+g9a469a6") == "9a469a6"
+        assert env_mod._commit_from_attr_value("unknown") is None
+        assert env_mod._commit_from_attr_value("") is None
+        assert env_mod._commit_from_attr_value(None) is None
+        assert env_mod._commit_from_attr_value(12345) is None
+
+
+# ---------------------------------------------------------------------------
+# Torch native-lib location (/proc/self/maps fallback for Buck torch)
+# ---------------------------------------------------------------------------
+
+
+class TestTorchNativeLibDir:
+    def test_prefers_wheel_layout_when_present(self, tmp_path, monkeypatch):
+        import types
+
+        lib = tmp_path / "torch" / "lib"
+        lib.mkdir(parents=True)
+        fake_torch = types.SimpleNamespace(__file__=str(tmp_path / "torch" / "__init__.py"))
+        # Even if maps would resolve, the on-disk wheel layout wins.
+        monkeypatch.setattr(
+            env_mod, "_loaded_lib_path_from_maps", lambda sonames: Path("/should/not/win")
+        )
+        assert env_mod._torch_native_lib_dir(fake_torch) == lib
+
+    def test_falls_back_to_maps_when_no_wheel_lib_dir(self, tmp_path, monkeypatch):
+        import types
+
+        # Buck layout: torch.__file__ exists but there is no sibling lib/.
+        fake_torch = types.SimpleNamespace(
+            __file__=str(tmp_path / "linktree" / "torch" / "__init__.py")
+        )
+        buck_lib = tmp_path / "buck-out" / "lib" / "libtorch_hip.so"
+        buck_lib.parent.mkdir(parents=True)
+        buck_lib.write_bytes(b"x")
+        monkeypatch.setattr(
+            env_mod, "_loaded_lib_path_from_maps", lambda sonames: buck_lib
+        )
+        assert env_mod._torch_native_lib_dir(fake_torch) == buck_lib.parent
+
+    def test_returns_none_when_nothing_locatable(self, tmp_path, monkeypatch):
+        import types
+
+        fake_torch = types.SimpleNamespace(
+            __file__=str(tmp_path / "torch" / "__init__.py")
+        )
+        monkeypatch.setattr(
+            env_mod, "_loaded_lib_path_from_maps", lambda sonames: None
+        )
+        assert env_mod._torch_native_lib_dir(fake_torch) is None
+
+    def test_symbol_dump_recovers_via_maps_for_buck_torch(
+        self, isolated_env, tmp_path, monkeypatch
+    ):
+        """The key Buck recovery: no <torch>/lib/libtorch_hip.so on disk,
+        but the lib is mapped into the process -> the symbol dump finds it
+        via /proc/self/maps instead of recording a 'not found' reason.
+        """
+        import types
+
+        # Fake torch with HIP claimed but NO sibling lib/ dir.
+        torch_dir = tmp_path / "linktree" / "torch"
+        torch_dir.mkdir(parents=True)
+        (torch_dir / "__init__.py").write_text("")
+        fake_torch = types.SimpleNamespace(
+            __file__=str(torch_dir / "__init__.py"),
+            version=types.SimpleNamespace(hip="7.0.0", cuda=None),
+        )
+        # The "real" lib lives in a Buck artifact dir, mapped into proc.
+        buck_lib = tmp_path / "buck-out" / "lib" / env_mod.PYTORCH_HIP_LIB_NAME
+        buck_lib.parent.mkdir(parents=True)
+        buck_lib.write_bytes(b"\x7fELF")
+        monkeypatch.setattr(
+            env_mod,
+            "_loaded_lib_path_from_maps",
+            lambda sonames: buck_lib if env_mod.PYTORCH_HIP_LIB_NAME in sonames else None,
+        )
+        monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/" + name)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0].endswith("nm"):
+                # nm must have been pointed at the maps-recovered path.
+                assert str(buck_lib) in cmd
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout="0 T mangled\n", stderr=""
+                )
+            if cmd[0].endswith("c++filt"):
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0,
+                    stdout="ck::tensor_operation::Foo\n", stderr="",
+                )
+            raise AssertionError(f"unexpected cmd {cmd}")
+
+        monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
+        reasons: list[str] = []
+        out = env_mod._dump_pytorch_hip_demangled_symbols(
+            reasons, "composable_kernel.pytorch_bundled", torch_mod=fake_torch
+        )
+        assert out == "ck::tensor_operation::Foo\n"
+        assert not any("not found" in r for r in reasons), reasons
+
+    def test_maps_parse_handles_spaced_pathname(self, tmp_path, monkeypatch):
+        """A mapped pathname containing spaces must be recovered intact;
+        the maps pathname is the trailing field, so a bounded split keeps
+        it whole instead of truncating at the first space.
+        """
+        soname = env_mod.PYTORCH_HIP_LIB_NAME
+        spaced = f"/opt/my libs/{soname}"
+        maps = (
+            "555555554000-555555555000 r--p 00000000 08:01 100 /usr/bin/python3\n"
+            f"7ffff7a00000-7ffff7b00000 r-xp 00000000 08:01 200 {spaced}\n"
+        )
+        fake_maps = tmp_path / "maps"
+        fake_maps.write_text(maps)
+        monkeypatch.setattr(env_mod, "_PROC_SELF_MAPS", fake_maps)
+        assert env_mod._loaded_lib_path_from_maps((soname,)) == Path(spaced)
+
+    def test_maps_parse_skips_deleted_mapping(self, tmp_path, monkeypatch):
+        """A mapping whose backing file was unlinked after dlopen is
+        rendered by the kernel as '<pathname> (deleted)'. That literal
+        string is never a real, scannable path, so it must be skipped
+        rather than returned as a false 'hit'.
+        """
+        soname = env_mod.PYTORCH_HIP_LIB_NAME
+        real_lib = tmp_path / "buck-out" / "lib" / soname
+        real_lib.parent.mkdir(parents=True)
+        real_lib.write_bytes(b"x")
+        maps = (
+            "555555554000-555555555000 r--p 00000000 08:01 100 /usr/bin/python3\n"
+            f"7ffff7a00000-7ffff7b00000 r-xp 00000000 08:01 200 {real_lib} (deleted)\n"
+        )
+        fake_maps = tmp_path / "maps"
+        fake_maps.write_text(maps)
+        monkeypatch.setattr(env_mod, "_PROC_SELF_MAPS", fake_maps)
+        assert env_mod._loaded_lib_path_from_maps((soname,)) is None
+
+    def test_native_lib_dir_ignores_stale_maps_hit(self, tmp_path, monkeypatch):
+        """Even if _loaded_lib_path_from_maps somehow returns a path that
+        no longer exists on disk (e.g. a build-artifact dir that was
+        cleaned up post-load), _torch_native_lib_dir must not trust it
+        and scan a torn-down directory silently.
+        """
+        import types
+
+        fake_torch = types.SimpleNamespace(
+            __file__=str(tmp_path / "linktree" / "torch" / "__init__.py")
+        )
+        stale_lib = tmp_path / "buck-out" / "lib" / env_mod.PYTORCH_HIP_LIB_NAME
+        # Note: parent dir intentionally not created -- nothing exists on disk.
+        monkeypatch.setattr(
+            env_mod, "_loaded_lib_path_from_maps", lambda sonames: stale_lib
+        )
+        assert env_mod._torch_native_lib_dir(fake_torch) is None
 
 
 # ---------------------------------------------------------------------------
@@ -3431,6 +3705,7 @@ class TestFbgemmBlock:
         block = env_mod._capture_fbgemm(reasons)
         assert set(block.keys()) == {
             "package_version",
+            "commit",
             "pytorch_use_fbgemm",
             "pytorch_use_fbgemm_genai",
         }
