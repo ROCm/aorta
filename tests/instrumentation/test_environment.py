@@ -3597,7 +3597,6 @@ class TestTorchNativeLibDir:
         but the lib is mapped into the process -> the symbol dump finds it
         via /proc/self/maps instead of recording a 'not found' reason.
         """
-        import builtins
         import types
 
         # Fake torch with HIP claimed but NO sibling lib/ dir.
