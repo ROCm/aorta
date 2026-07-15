@@ -103,9 +103,10 @@ Written under `NANLOG_DIR` (the collector points this at
 `<results_dir>/layer_numerics`):
 
 - `summary_rank<N>.json` — the headline: `first_bad` fingerprint
-  (step / layer / direction / kind / `matmul_calls_so_far` / `tf32_path`), and
+  (step / layer / direction / kind / `matmul_calls_so_far`), and
   when bounds are set `first_oob` / `oob_records` / `peak_finite_min` / `peak_finite_max`,
-  plus totals.
+  plus totals. (`tf32_path` is printed on the "FIRST BAD" stderr line, not
+  stored in the summary JSON.)
 - `layers_rank<N>.jsonl` — the full per-(layer, step, channel) trajectory. Each
   record carries `phase` and `batch_id` (see below).
 

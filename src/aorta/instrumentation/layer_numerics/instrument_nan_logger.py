@@ -38,7 +38,10 @@ How to run:
     python instrument_nan_logger.py /path/to/standalone_single_file.py
 
   The logger arms its hooks, then runs your script. The hooks attach to the real
-  model the moment it is built, so no edit to the training script is needed.
+  model the moment it is built, so no edit to the training script is needed --
+  PROVIDED your script builds a torchrec DistributedModelParallel root (see
+  _install_autohook below). A plain nn.Module script is not auto-hooked; call
+  _attach(model) yourself right after construction if you need that.
 
 Settings (environment variables):
   NANLOG_DIR             output dir for the JSONL + summary (default ./nan_logger_out)

@@ -18,6 +18,12 @@ timing-sensitive behavior is preserved.
 
 ## When to use it
 
+This is a **localization** step, not a detector: it assumes you already have a
+way to reproduce the NaN/Inf (a failing training run, a `aorta sweep`/`probe`
+repro, a customer's crash log) and answers *where it starts*, not *whether it
+happens*. Reach for it after a repro is in hand and before you commit to a
+mitigation.
+
 - A training or inference run produces a NaN/Inf and you need to know **which
   layer and step** it started at, not just that it happened.
 - You suspect a value is blowing up over time and want the magnitude trajectory
@@ -32,12 +38,14 @@ the timing the logger is designed to preserve.
 ## Prerequisites
 
 - PyTorch built with ROCm/HIP.
-- `torchrec` **only** if you use the automatic hook on a
-  `DistributedModelParallel` root or pipeline-stage tracking
-  (`NANLOG_PIPELINE=1`). Plain `nn.Module` models are supported through the
-  standalone script; see below.
-- No extra install — `instrument_nan_logger.py` has no dependencies beyond
-  PyTorch, and all configuration is through `NANLOG_*` environment variables.
+- `torchrec`, with your model wrapped in `DistributedModelParallel` (DMP) —
+  the automatic, no-script-edit hook attach only fires when a DMP root is
+  constructed (pipeline-stage tracking, `NANLOG_PIPELINE=1`, also needs
+  `torchrec`, for the same reason). **A plain `nn.Module` script is not
+  auto-hooked today** — see [Troubleshooting](#troubleshooting) if you need to
+  attach to one anyway.
+- No extra install beyond that — `instrument_nan_logger.py` has no other
+  dependencies, and all configuration is through `NANLOG_*` environment variables.
 
 ## Standalone usage (supported path)
 
@@ -276,11 +284,18 @@ host-side metadata, no GPU sync.
 
 ## Troubleshooting
 
-**`N = 0` (no modules hooked).** The model was built before the logger armed, or
-it is not reachable through the hook path. Run your script through the logger
-front-end (so hooks arm first), and confirm the model is a plain `nn.Module` you
-can target with `NANLOG_WATCH_NAMES` / `NANLOG_WATCH_TYPES`, or a torchrec
-`DistributedModelParallel` root (auto-hooked).
+**`N = 0` (no modules hooked).** Today the automatic attach only fires for a
+torchrec `DistributedModelParallel` (DMP) root — a plain `nn.Module` script is
+**not** auto-hooked no matter what `NANLOG_WATCH_NAMES` / `NANLOG_WATCH_TYPES`
+you set. If your script does build a DMP root: confirm you ran it *through* the
+logger front-end (so hooks arm before the model is built, not after), and check
+the startup log line for `watched modules:` to see whether your filters actually
+matched anything.
+
+To hook a plain `nn.Module` (no torchrec), you need a small script edit: import
+the logger module and call its private `_attach(model)` right after building the
+model (see `instrument_nan_logger.py`). This is not a stable public API, but it
+reuses the same hook/drain machinery as the DMP path.
 
 **JSONL is empty.** The default channels are `act,igrad`. If you need the
 forward input, set `NANLOG_CHANNELS` to include `input`. Also confirm `N > 0` in
