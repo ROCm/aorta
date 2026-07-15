@@ -12,9 +12,9 @@ from aorta.cli import main
 RECIPE_ROOT = Path(__file__).resolve().parents[2] / "recipes"
 
 TEMPLATES = [
-    "probe-template-torchrun.yaml",
-    "probe-template-buck2.yaml",
-    "probe-template-bash.yaml",
+    "probe/probe-template-torchrun.yaml",
+    "probe/probe-template-buck2.yaml",
+    "probe/probe-template-bash.yaml",
 ]
 
 

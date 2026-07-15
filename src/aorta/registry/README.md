@@ -264,11 +264,11 @@ internal sidecar for stack-specific vars:
 |---|---|---|
 | Runtime mitigations | Built-in registry (`mitigations.py`) | `gpu_max_hw_queues_2`, `debug_hip_dynamic_queues_1` / `debug_hip_dynamic_queues_2`, `roc_aql_queue_size_1024`, `nccl_launch_order_implicit`, `hsa_no_scratch_reclaim`, `hsa_disable_cache` / `hsa_enable_cache`, `pytorch_no_cuda_memory_caching`, `fa_prefer_ck` / `fa_prefer_aotriton`, and others — see `aorta mitigations list` |
 | Workload-internal flags | [`examples/probe-flag-sidecar.json`](../../../examples/probe-flag-sidecar.json) | `FBGEMM_*`, `TORCHINDUCTOR_*`, `EVAL_DISABLE_PIPELINING` — only effective when the workload reads them |
-| Ready-made probe recipe | [`recipes/probe-flag-sweep.yaml`](../../../recipes/probe-flag-sweep.yaml) | `mitigation_axis` + `diagnostic_axis` covering the built-in set |
+| Ready-made probe recipe | [`recipes/probe/probe-flag-sweep.yaml`](../../../recipes/probe/probe-flag-sweep.yaml) | `mitigation_axis` + `diagnostic_axis` covering the built-in set |
 
 ```bash
 aorta probe \
-    --recipe recipes/probe-flag-sweep.yaml \
+    --recipe recipes/probe/probe-flag-sweep.yaml \
     --mitigations-file examples/probe-flag-sidecar.json \
     --output ./probe_results \
     --ticket PROBE-FLAG-SWEEP \
@@ -280,7 +280,7 @@ aorta probe \
 `--mitigations-file` only makes the sidecar names *resolvable* — it does not
 add cells. To actually sweep `fbgemm_no_jk`, `torchinductor_max_autotune_pointwise`,
 etc., add them to `mitigation_axis:` in the recipe (see the header comment in
-`recipes/probe-flag-sweep.yaml`). Without that edit the command above runs only
+`recipes/probe/probe-flag-sweep.yaml`). Without that edit the command above runs only
 the built-in axis.
 
 Tracked in issue #195.

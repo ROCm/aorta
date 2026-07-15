@@ -21,12 +21,12 @@ export MIRAGE_AORTA_IMAGE=docker.io/vllm/vllm-openai-rocm:latest
 
 | Command | Workload | Recipe | Notes |
 |---------|----------|--------|-------|
-| `gpu-smoke` | `gpu_smoke` | `recipes/gpu-smoke-emulated.yaml` | single-process |
-| `probe` | `_subprocess` | `recipes/example-probe-smoke.yaml` | wraps argv in mirage |
-| `inference-smoke` | `inference` | `recipes/inference-smoke-emulated.yaml` | single-process |
-| `training-ddp-smoke` | `training` (ddp) | `recipes/training-ddp-smoke-emulated.yaml` | world_size=1 singleton |
-| `training-fsdp-smoke` | `training` (fsdp) | `recipes/training-fsdp-smoke-emulated.yaml` | world_size=1 singleton |
-| `llm-determinism` | `llm_determinism` | `recipes/llm-determinism-emulated.yaml` | world_size=1; slow under rocjitsu |
+| `gpu-smoke` | `gpu_smoke` | `recipes/emulated/gpu-smoke-emulated.yaml` | single-process |
+| `probe` | `_subprocess` | `recipes/probe/example-probe-smoke.yaml` | wraps argv in mirage |
+| `inference-smoke` | `inference` | `recipes/emulated/inference-smoke-emulated.yaml` | single-process |
+| `training-ddp-smoke` | `training` (ddp) | `recipes/emulated/training-ddp-smoke-emulated.yaml` | world_size=1 singleton |
+| `training-fsdp-smoke` | `training` (fsdp) | `recipes/emulated/training-fsdp-smoke-emulated.yaml` | world_size=1 singleton |
+| `llm-determinism` | `llm_determinism` | `recipes/emulated/llm-determinism-emulated.yaml` | world_size=1; slow under rocjitsu |
 
 The `training` and `llm_determinism` recipes are single-rank singleton smokes
 (they exercise the lifecycle + JSON schema, not multi-rank collectives). A real
