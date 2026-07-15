@@ -105,6 +105,7 @@ transfer (no added sync). Most-used knobs:
 | `NANLOG_BOUNDS` | Per-tensor in-range check `substr:lo:hi;...` (out-of-range → `kind="oob"`) | (empty) |
 | `NANLOG_SPARSE` | Cheap host-side KJT metadata at the sparse stage | `0` (off) |
 | `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each layer (high overhead) | `0` (off) |
+| `NANLOG_TRACK_LAYER_STRIDE` | Re-scan every Kth layer when `NANLOG_TRACK_EVERY_LAYER=1` (coarser = less overhead) | `1` |
 
 Channel notes:
 
