@@ -3656,6 +3656,43 @@ class TestTorchNativeLibDir:
         monkeypatch.setattr(env_mod, "_PROC_SELF_MAPS", fake_maps)
         assert env_mod._loaded_lib_path_from_maps((soname,)) == Path(spaced)
 
+    def test_maps_parse_skips_deleted_mapping(self, tmp_path, monkeypatch):
+        """A mapping whose backing file was unlinked after dlopen is
+        rendered by the kernel as '<pathname> (deleted)'. That literal
+        string is never a real, scannable path, so it must be skipped
+        rather than returned as a false 'hit'.
+        """
+        soname = env_mod.PYTORCH_HIP_LIB_NAME
+        real_lib = tmp_path / "buck-out" / "lib" / soname
+        real_lib.parent.mkdir(parents=True)
+        real_lib.write_bytes(b"x")
+        maps = (
+            "555555554000-555555555000 r--p 00000000 08:01 100 /usr/bin/python3\n"
+            f"7ffff7a00000-7ffff7b00000 r-xp 00000000 08:01 200 {real_lib} (deleted)\n"
+        )
+        fake_maps = tmp_path / "maps"
+        fake_maps.write_text(maps)
+        monkeypatch.setattr(env_mod, "_PROC_SELF_MAPS", fake_maps)
+        assert env_mod._loaded_lib_path_from_maps((soname,)) is None
+
+    def test_native_lib_dir_ignores_stale_maps_hit(self, tmp_path, monkeypatch):
+        """Even if _loaded_lib_path_from_maps somehow returns a path that
+        no longer exists on disk (e.g. a build-artifact dir that was
+        cleaned up post-load), _torch_native_lib_dir must not trust it
+        and scan a torn-down directory silently.
+        """
+        import types
+
+        fake_torch = types.SimpleNamespace(
+            __file__=str(tmp_path / "linktree" / "torch" / "__init__.py")
+        )
+        stale_lib = tmp_path / "buck-out" / "lib" / env_mod.PYTORCH_HIP_LIB_NAME
+        # Note: parent dir intentionally not created -- nothing exists on disk.
+        monkeypatch.setattr(
+            env_mod, "_loaded_lib_path_from_maps", lambda sonames: stale_lib
+        )
+        assert env_mod._torch_native_lib_dir(fake_torch) is None
+
 
 # ---------------------------------------------------------------------------
 # FBGEMM

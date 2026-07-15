@@ -3184,6 +3184,13 @@ def _loaded_lib_path_from_maps(sonames: tuple[str, ...]) -> Path | None:
     later. Linux-only; returns ``None`` off Linux, when the file is
     unreadable, or when nothing matches. Never raises -- this is a
     best-effort fallback for Buck/monorepo torch layouts.
+
+    Skips mappings the kernel has marked ``" (deleted)"`` -- a mapped
+    file that was unlinked after being ``dlopen``'d (routine for a
+    build-artifact directory that gets cleaned up post-load). Matching
+    one of those would return a ``Path`` whose string literally ends in
+    ``" (deleted)"``, which never exists on disk and would make the
+    caller trust a stale/torn-down directory silently.
     """
     try:
         text = _PROC_SELF_MAPS.read_text(encoding="utf-8", errors="replace")
@@ -3199,6 +3206,8 @@ def _loaded_lib_path_from_maps(sonames: tuple[str, ...]) -> Path | None:
         if len(parts) < 6:
             continue
         path_str = parts[5]
+        if path_str.endswith(" (deleted)"):
+            continue
         if not path_str.startswith("/"):
             continue
         name = Path(path_str).name
@@ -3225,6 +3234,12 @@ def _torch_native_lib_dir(torch_mod: Any | None) -> Path | None:
     build-artifact directory rather than laid out under the Python
     package -- the fbcode ``//caffe2:torch`` case. Returns ``None`` when
     neither locates a directory. Never raises.
+
+    The maps-derived hit is only trusted if it still exists on disk --
+    ``_loaded_lib_path_from_maps`` already filters out mappings marked
+    ``" (deleted)"``, but this is a defensive second check so a caller
+    of this function never scans a torn-down build-artifact directory
+    without knowing it.
     """
     if torch_mod is not None:
         torch_file = getattr(torch_mod, "__file__", None)
@@ -3237,7 +3252,11 @@ def _torch_native_lib_dir(torch_mod: Any | None) -> Path | None:
                 pass
     loaded = _loaded_lib_path_from_maps(_TORCH_LOADED_LIB_SONAMES)
     if loaded is not None:
-        return loaded.parent
+        try:
+            if loaded.exists():
+                return loaded.parent
+        except OSError:
+            pass
     return None
 
 

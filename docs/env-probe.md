@@ -229,7 +229,11 @@ process: the probe now falls back to `/proc/self/maps` to recover the
 real lib directory, populating the bundled-CK symbol count, the AOTriton
 bundle fields, and the `libtorch_hip_symbol_counts` / `torch_lib_bundled`
 facts for Buck builds. No field shapes change; the fallback is Linux-only
-and silently inert elsewhere.
+and silently inert elsewhere. Mappings the kernel has marked
+`" (deleted)"` (the backing file was unlinked after being `dlopen`'d,
+e.g. a build-artifact directory cleaned up post-load) are skipped
+rather than treated as a match, since that path no longer exists on
+disk.
 
 `runtime_context.type` is one of `"docker" | "podman" | "singularity" | "baremetal"`. Adding values is a schema change.
 
