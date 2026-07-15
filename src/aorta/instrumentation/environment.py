@@ -22,6 +22,21 @@ Captured blocks:
   ``pytorch_bundled`` (CK symbol count inside ``libtorch_hip.so``).
 * ``tensile`` -- optional pip version + combined kernel-DB fingerprint
   across hipBLASLt and rocBLAS.
+* ``tensile_catalog`` -- the *recipe book*: installed-library identity
+  for the hipBLASLt/rocBLAS Tensile install, consolidating the existing
+  version + lib_hash + kernel-DB fingerprints AND a deepened per-file
+  enumeration of the frozen Tensile solution menu (logic files:
+  ``TensileLibrary`` / ``*.dat`` / ``*.yaml``) -- per-file content
+  hashes, a count, and gfx-arch coverage -- so a two-host diff localizes
+  *which* logic file differs. This is the menu (what is installed), NOT
+  the runtime-selected solution ID (``381881`` / ``368xxx``). No GPU
+  compute.
+* ``miopen_catalog`` -- the same recipe-book treatment for MIOpen's
+  on-disk convolution kernel/find/perf databases
+  (``/opt/rocm/share/miopen/db/``). Honors ``MIOPEN_SYSTEM_DB_PATH``.
+* ``rocfft_catalog`` -- fingerprint of rocFFT's *optional* ahead-of-time
+  ``rocfft_kernel_cache.db`` when present (absence is the common case,
+  recorded as ``absent`` rather than partial).
 * ``triton``, ``fbgemm``, ``aiter`` -- Python-package version probes.
   ``fbgemm`` also surfaces the ``-DUSE_FBGEMM`` / ``-DUSE_FBGEMM_GENAI``
   build-time flags from ``torch.__config__.show()``.
@@ -63,7 +78,48 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.8"
+SCHEMA_VERSION = "1.9"
+# 1.8 -> 1.9 (issue #54 + follow-ups): static kernel-catalog "recipe
+# books" for the on-disk, runtime-selected GPU-compute catalogs.
+#   - New top-level ``tensile_catalog`` block (issue #54), always present
+#     (defaulted via ``_empty_tensile_catalog()``). A clearly-labeled
+#     grouping of *installed-library identity* for the hipBLASLt/rocBLAS
+#     Tensile install -- explicitly NOT the runtime-selected solution ID
+#     (``381881`` / ``368xxx``), which requires a workload and is out of
+#     scope for the no-compute probe. Reuses the existing
+#     ``hipblaslt``/``rocblas``/``tensile`` captures for the version +
+#     lib_hash + kernel-DB filename fingerprints (no regression) and
+#     deepens them with a per-file ``menu`` enumeration of the frozen
+#     solution library (``TensileLibrary`` / ``*.dat`` / ``*.yaml`` /
+#     ``*.co`` / ``*.hsaco``): per-file content sha256 + size, a
+#     ``logic_file_count``, ``gfx_arch_coverage``, and a
+#     ``combined_content_hash``, so a two-host diff localizes *which*
+#     logic file differs. Partial-not-silent: each ``menu`` carries
+#     ``status`` + ``reason``; a dir that can't be located/listed is
+#     ``partial`` (distinct from a present-but-empty menu, which is
+#     ``ok`` with ``logic_file_count: 0``), and partial reasons thread
+#     into ``partial_reasons``.
+#   - New top-level ``miopen_catalog`` block (issue #54 follow-up). MIOpen
+#     is the convolution analogue of Tensile; this mirrors
+#     ``tensile_catalog`` for the databases under
+#     ``/opt/rocm/share/miopen/db/``: reuses the ``miopen`` capture
+#     (package_version / lib_hash / kernel_db_revision -- no regression)
+#     and deepens it with a per-file ``menu`` enumeration of the
+#     ``*.kdb`` / ``*.fdb.txt`` / ``*.db.txt`` / ``*.db`` selectable DBs
+#     plus the ``*.ktn.model`` / ``*.tn.model`` heuristic tuning models.
+#     Honors the ``MIOPEN_SYSTEM_DB_PATH`` override (records
+#     ``db_dir`` / ``db_dir_source``) and surfaces ``MIOPEN_USER_DB_PATH``.
+#   - New top-level ``rocfft_catalog`` block (issue #54 follow-up). rocFFT
+#     compiles most kernels at runtime, so by default there is no frozen
+#     catalog; this fingerprints the *optional* ahead-of-time
+#     ``rocfft_kernel_cache.db`` when present (presence + path + size +
+#     content sha256). Absence is the documented common case ->
+#     ``status: "absent"`` with NO partial reason; present-but-unreadable
+#     -> ``status: "partial"`` with a reason.
+#   - All three are new top-level dataclass fields with default factories,
+#     so 1.7/1.8 readers loading a 1.9 snapshot drop the unknown keys and
+#     1.9 readers loading an older snapshot get the empty defaults.
+#
 # 1.7 -> 1.8 (Buck-target torch recovery + package commits):
 #   - ``triton`` and ``fbgemm`` blocks each gained a ``commit`` key
 #     (nested, additive). Best-effort git SHA parsed from a
@@ -433,6 +489,25 @@ ROCBLAS_TENSILE_DIR = Path(
     "/opt/rocm/lib/rocblas/library"
 )  # rocBLAS Tensile kernel database
 
+# Static Tensile catalog (issue #54). The "menu" enumeration walks the
+# Tensile library dir and fingerprints each file individually. Suffixes
+# cover the frozen solution menu: ``.dat`` (modern binary logic),
+# ``.yaml`` (older text logic), and the ``.co`` / ``.hsaco`` code-object
+# blobs that ship alongside. The ``.txt`` entry captures manifest/index
+# text files (e.g. ``TensileManifest.txt``): they are neither logic nor
+# code-object files, but their identity still matters for a complete
+# catalog fingerprint, so they are included via ``.txt``.
+TENSILE_MENU_SUFFIXES: tuple[str, ...] = (".dat", ".yaml", ".co", ".hsaco", ".txt")
+# A file counts as a Tensile "logic" file (the actual solution menu, as
+# opposed to a raw code-object blob) when it carries one of these
+# suffixes. ``logic_file_count`` counts only these.
+TENSILE_LOGIC_SUFFIXES: tuple[str, ...] = (".dat", ".yaml")
+# gfx arch token embedded in Tensile filenames, e.g.
+# ``TensileLibrary_lazy_gfx942.dat`` -> ``gfx942``. Used for
+# ``gfx_arch_coverage``; case-insensitive because some toolchains emit
+# mixed case in the hex suffix (gfx90a vs GFX90A).
+_GFX_ARCH_RE = re.compile(r"gfx[0-9a-f]+", re.IGNORECASE)
+
 # Composable Kernel (CK) is shipped header-only via the
 # composablekernel-dev package -- there is no libck.so to hash. CK_TILE
 # is a sub-component of CK with no separate version header; we record
@@ -488,6 +563,58 @@ MIOPEN_VERSION_HEADER = Path("/opt/rocm/include/miopen/version.h")
 MIOPEN_LIB_DIR = Path("/opt/rocm/lib")  # libMIOpen.so* lives here (capital M, capital O)
 MIOPEN_KERNEL_DB_DIR = Path("/opt/rocm/share/miopen/db")
 MIOPEN_KERNEL_DB_SUFFIXES: tuple[str, ...] = (".txt",)  # .fdb.txt also matches via final suffix
+
+# MIOpen static catalog (issue #54 follow-up). The "menu" enumeration
+# walks the MIOpen db dir and fingerprints each file. MIOpen uses
+# multi-part suffixes (``gfx942.HIP.fdb.txt``) so matching is by
+# ``endswith`` of the full token, NOT pathlib's single ``.suffix``.
+# Catalog = the selectable databases + the heuristic tuning models:
+#   * ``.kdb``            -- precompiled kernel binaries (binary)
+#   * ``.fdb.txt``        -- find-db (algorithm/solver selection -- the
+#                            decision-tree layer the runtime selects from)
+#   * ``.db.txt`` / ``.db`` -- perf-db (tuned solver parameters)
+#   * ``.ktn.model`` / ``.tn.model`` -- KernelTuningNet heuristic models
+MIOPEN_CATALOG_SUFFIXES: tuple[str, ...] = (
+    ".kdb",
+    ".fdb.txt",
+    ".db.txt",
+    ".db",
+    ".ktn.model",
+    ".tn.model",
+)
+# Of those, the ones that ARE the runtime-selectable kernel/find/perf
+# databases (counted as ``logic_file_count``). The ``*.model`` files are
+# heuristic tuning nets -- catalog members, but not the DBs themselves.
+MIOPEN_LOGIC_SUFFIXES: tuple[str, ...] = (".kdb", ".fdb.txt", ".db.txt", ".db")
+# Runtime overrides for the MIOpen db locations (already in
+# CANONICAL_ENV_VARS). MIOPEN_SYSTEM_DB_PATH relocates the read-only
+# system db dir the probe enumerates; MIOPEN_USER_DB_PATH points at the
+# writable user perf-db and is recorded for transparency.
+MIOPEN_SYSTEM_DB_PATH_ENV = "MIOPEN_SYSTEM_DB_PATH"
+MIOPEN_USER_DB_PATH_ENV = "MIOPEN_USER_DB_PATH"
+
+# rocFFT optional ahead-of-time kernel cache (issue #54 follow-up).
+# rocFFT compiles most kernels at runtime (RTC); an offline-built cache
+# is an opt-in SQLite file. Per rocFFT's runtime-compilation design
+# (rtc_cache.cpp), there are TWO distinct cache paths and only one is
+# "installed identity":
+#   * ROCFFT_RTC_SYS_CACHE_PATH -- the pre-built, READ-ONLY system cache
+#     override. This is the installed artifact this catalog fingerprints.
+#   * ROCFFT_RTC_CACHE_PATH -- the READ-WRITE, per-process user cache,
+#     populated on demand at runtime. NOT installed-library identity --
+#     its contents are workload-dependent and not reproducible across
+#     runs, so it must not be fingerprinted as a static catalog. We only
+#     record its configured value (env_overrides) for visibility.
+# Default (no override) search order mirrors rtc_cache.cpp:
+# ``{librocfft.so dir}/rocfft_kernel_cache.db`` then
+# ``{librocfft.so dir}/rocfft/rocfft_kernel_cache.db``. Absence is normal
+# (recorded as ``absent``, not partial). SQLite internals aren't cheaply
+# enumerable without a dependency, so we fingerprint the whole file
+# (content hash).
+ROCFFT_KERNEL_CACHE_NAME = "rocfft_kernel_cache.db"
+ROCFFT_RTC_SYS_CACHE_PATH_ENV = "ROCFFT_RTC_SYS_CACHE_PATH"
+ROCFFT_RTC_CACHE_PATH_ENV = "ROCFFT_RTC_CACHE_PATH"
+ROCFFT_LIB_DIR = Path("/opt/rocm/lib")
 
 # RCCL is AMD's NCCL-compatible collective comms library. Header is at
 # /opt/rocm/include/rccl/rccl.h (same name as upstream NCCL's). Version
@@ -781,6 +908,22 @@ class EnvSnapshot:
     # NIC probing. Populated by ``_capture_nics()`` in collect_env() /
     # ``_disaster_snapshot()``.
     nics: dict = field(default_factory=dict)
+    # tensile_catalog / miopen_catalog / rocfft_catalog: issue #54 +
+    # follow-ups (schema 1.9). Static kernel-catalog "recipe books" --
+    # installed-library identity for the on-disk, runtime-selected
+    # GPU-compute catalogs, NOT the runtime pick. Defaulted (empty
+    # catalogs) so pre-1.9 constructors and ``from_dict()`` on older
+    # snapshots don't raise. See ``_build_tensile_catalog`` /
+    # ``_build_miopen_catalog`` / ``_build_rocfft_catalog``.
+    tensile_catalog: dict = field(
+        default_factory=lambda: _empty_tensile_catalog()
+    )
+    miopen_catalog: dict = field(
+        default_factory=lambda: _empty_miopen_catalog()
+    )
+    rocfft_catalog: dict = field(
+        default_factory=lambda: _empty_rocfft_catalog()
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to the env.json shape. Round-trip pair with from_dict."""
@@ -817,6 +960,9 @@ class EnvSnapshot:
         kwargs.setdefault("library_introspection", [])
         kwargs.setdefault("library_introspection_alternates", [])
         kwargs.setdefault("nics", {})
+        kwargs.setdefault("tensile_catalog", _empty_tensile_catalog())
+        kwargs.setdefault("miopen_catalog", _empty_miopen_catalog())
+        kwargs.setdefault("rocfft_catalog", _empty_rocfft_catalog())
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -865,9 +1011,16 @@ class EnvSnapshot:
         # on the runtime: line was redundant.
 
         def short_hash(value: str | None) -> str:
-            """Truncate ``filenames-sha256:abcdef…``-style hashes for display."""
+            """Truncate ``filenames-sha256:abcdef…``-style hashes for display.
+
+            A missing hash renders as ``"-"``, not the literal string
+            ``"None"`` -- the same ambiguity ``pkg_state()`` avoids for
+            package versions. Without this, a not-captured catalog menu
+            would render as ``tensile[hb=None rb=None]``, which reads as
+            a real (if odd) value rather than "nothing captured here".
+            """
             if not value:
-                return str(value)
+                return "-"
             if ":" in value:
                 kind, hex_part = value.split(":", 1)
                 if len(hex_part) > 8:
@@ -883,6 +1036,28 @@ class EnvSnapshot:
             obvious without needing to read the schema.
             """
             return version if version else "(not installed)"
+
+        # Static kernel-catalog "recipe book" fingerprints (schema 1.9).
+        # Surface the per-menu content hash so the brief reflects the
+        # installed catalog identity without an operator having to jq.
+        tc = self.tensile_catalog or {}
+        mc = self.miopen_catalog or {}
+        rf = self.rocfft_catalog or {}
+        tc_hb = ((tc.get("hipblaslt") or {}).get("menu") or {}).get(
+            "combined_content_hash"
+        )
+        tc_rb = ((tc.get("rocblas") or {}).get("menu") or {}).get(
+            "combined_content_hash"
+        )
+        mc_hash = (mc.get("menu") or {}).get("combined_content_hash")
+        rf_cache = rf.get("kernel_cache") or {}
+        if rf_cache.get("present"):
+            _rf_sha = rf_cache.get("sha256")
+            # present-but-unhashable (partial) -> avoid the ambiguous
+            # "present None"; show an explicit unreadable marker.
+            rf_cell = f"present {short_hash(_rf_sha)}" if _rf_sha else "present (unreadable)"
+        else:
+            rf_cell = rf.get("status") or "?"
 
         return "\n".join(
             (
@@ -923,6 +1098,12 @@ class EnvSnapshot:
                 f"  tensile:   kernel_db={short_hash(tensile.get('kernel_db_combined_hash'))}  "
                 f"[Tensile pip pkg: {pkg_state(tensile.get('package_version'))}; "
                 f"build-time tool, normal]",
+                # Static "recipe book" identity (the installed kernel
+                # catalogs, NOT the runtime pick): per-menu content hash
+                # for hipBLASLt/rocBLAS Tensile + MIOpen, and the rocFFT
+                # AOT cache state. Full per-file detail lives in the JSON.
+                f"  catalog:   tensile[hb={short_hash(tc_hb)} rb={short_hash(tc_rb)}]  "
+                f"miopen={short_hash(mc_hash)}  rocfft={rf_cell}",
                 f"  triton:    {pkg_state(triton.get('package_version'))}",
                 # FBGEMM has TWO surfaces and they're different artifacts:
                 #   1) FBGEMM the C++ lib is vendored inside the PyTorch
@@ -1594,11 +1775,21 @@ def collect_env(
             reasons, hip_symbol_cache=hip_symbol_cache
         )
         tensile = _capture_tensile(reasons)
+        # Static "recipe book": reuses the hipblaslt/rocblas/tensile
+        # captures above (no regression) + deepens with per-file menu
+        # enumeration.
+        tensile_catalog = _build_tensile_catalog(
+            hipblaslt, rocblas, tensile, reasons
+        )
         triton = _capture_triton(reasons)
         fbgemm = _capture_fbgemm(reasons)
         aiter = _capture_aiter(reasons)
         aotriton = _capture_aotriton(reasons)
         miopen = _capture_miopen(reasons)
+        # Static MIOpen "recipe book" (reuses miopen capture) + rocFFT
+        # optional AOT kernel cache fingerprint (absent on most installs).
+        miopen_catalog = _build_miopen_catalog(miopen, reasons)
+        rocfft_catalog = _build_rocfft_catalog(reasons)
         rccl = _capture_rccl(reasons)
         nics = _capture_nics(reasons)
         gpu_arch = _capture_gpu_arch(reasons)
@@ -1638,6 +1829,9 @@ def collect_env(
             rocblas=rocblas,
             composable_kernel=composable_kernel,
             tensile=tensile,
+            tensile_catalog=tensile_catalog,
+            miopen_catalog=miopen_catalog,
+            rocfft_catalog=rocfft_catalog,
             triton=triton,
             fbgemm=fbgemm,
             aiter=aiter,
@@ -1737,6 +1931,9 @@ def _disaster_snapshot(
             "pytorch_use_ck_gemm": None,
         },
         tensile={"package_version": None, "kernel_db_combined_hash": None},
+        tensile_catalog=_empty_tensile_catalog(),
+        miopen_catalog=_empty_miopen_catalog(),
+        rocfft_catalog=_empty_rocfft_catalog(),
         triton={"package_version": None, "commit": None},
         fbgemm={
             "package_version": None,
@@ -3498,6 +3695,559 @@ def _combined_kernel_db_fingerprint(
     pairs.sort()
     digest = hashlib.sha256("\n".join(pairs).encode("utf-8")).hexdigest()
     return f"filenames-sha256:{digest}"
+
+
+# ---------------------------------------------------------------------------
+# Static Tensile catalog (issue #54) -- the "recipe book"
+#
+# Everything below describes *installed-library identity*: which Tensile
+# solution menu is baked into / shipped alongside the hipBLASLt / rocBLAS
+# install on disk. It is deliberately NOT the runtime-selected solution
+# ID (the `#381881` / `#368xxx` seen in workload logs) -- that is chosen
+# per-GEMM at runtime against live device properties and requires running
+# a workload, which is out of scope for the no-compute `env probe`.
+# ---------------------------------------------------------------------------
+
+# Customer-facing one-liner, surfaced in the block so a reader of the raw
+# env.json understands the scope without the docs in hand.
+TENSILE_CATALOG_DOC = (
+    "Installed-library identity (the 'recipe book'): which hipBLASLt/"
+    "rocBLAS Tensile solution menu is installed on disk. Does NOT capture "
+    "the runtime-selected solution ID (e.g. 381881/368xxx) -- that needs a "
+    "runtime trace (separate capability). Two hosts can report the same "
+    "hipBLASLt commit yet ship a materially different Tensile menu; this "
+    "block makes that diffable from the installed files alone."
+)
+
+
+def _extract_gfx_archs(names: list[str]) -> list[str]:
+    """Return the sorted, deduped set of gfx arch tokens in ``names``.
+
+    Tensile encodes the target arch in the logic filename, e.g.
+    ``TensileLibrary_lazy_gfx942.dat`` -> ``gfx942``. Lower-cased so a
+    mixed-case ``GFX90A`` collapses with ``gfx90a``. Empty list when no
+    filename carries a recognizable token (e.g. an arch-agnostic master
+    library only) -- distinct from ``None`` (couldn't read the dir).
+    """
+    archs: set[str] = set()
+    for name in names:
+        for match in _GFX_ARCH_RE.findall(name):
+            archs.add(match.lower())
+    return sorted(archs)
+
+
+def _empty_menu() -> dict[str, Any]:
+    """All-null ``menu`` sub-block shape, shared by every catalog."""
+    return {
+        "status": "partial",
+        "reason": None,
+        "dir": None,
+        "logic_file_count": None,
+        "file_count": None,
+        "gfx_arch_coverage": None,
+        "files": None,
+        "combined_content_hash": None,
+    }
+
+
+def _enumerate_catalog_dir(
+    directory: Path,
+    classify,
+    *,
+    kind: str,
+) -> dict[str, Any]:
+    """Enumerate an on-disk kernel/solution catalog directory.
+
+    Generic engine behind every ``*_catalog`` menu (Tensile, MIOpen,
+    ...). Deepens a filename-only fingerprint: opens each matched file
+    and records a **content** sha256 + size, so a two-host diff localizes
+    *which* file changed rather than only "the filename set differs".
+    Still no GPU compute -- pure file reads in the install.
+
+    ``classify(filename) -> (include: bool, suffix_label: str | None,
+    is_logic: bool)`` selects which files belong to the catalog, labels
+    each file's (possibly multi-part) suffix, and flags whether it is one
+    of the runtime-selectable databases (counted as ``logic_file_count``)
+    vs. a supporting blob (code object, heuristic model). ``kind`` is a
+    short noun used in the partial reasons (e.g. ``"Tensile library"``).
+
+    Returns the shared ``menu`` shape (see ``_empty_menu``). Partial-not-
+    silent contract: a dir that can't be located/listed yields
+    ``status="partial"`` with a ``reason`` -- distinct from a present-but-
+    empty dir, which is ``status="ok"`` with ``logic_file_count=0`` (a
+    host that genuinely ships an empty catalog). A per-file hash that
+    fails (unreadable file) is recorded with ``sha256=None`` and
+    downgrades the block to ``partial`` rather than dropping the file.
+
+    Classification happens by filename first, before any ``stat()``.
+    A name that ``classify()`` says belongs to the catalog is never
+    silently skipped just because ``is_dir()``/``is_file()`` raised
+    (e.g. a broken symlink, or a permission-denied entry): it is kept
+    as an entry so the hashing step below fails soft (``sha256=None``)
+    and correctly downgrades the block to ``partial`` with a reason,
+    instead of vanishing from ``files`` and leaving a clean ``status:
+    "ok"`` that silently omitted it. Only entries confirmed (not merely
+    assumed) to be directories are excluded.
+    """
+    base = _empty_menu()
+    base["dir"] = str(directory)
+    if not directory.is_dir():
+        base["reason"] = f"{kind} dir missing/unreadable: {directory}"
+        return base
+    try:
+        raw = list(directory.iterdir())
+    except OSError as exc:
+        log.debug("%s listing failed for %s: %s", kind, directory, exc)
+        base["reason"] = f"{kind} dir not listable: {directory} ({exc})"
+        return base
+
+    entries: list[tuple[Path, str | None, bool]] = []
+    for p in raw:
+        include, suffix_label, is_logic = classify(p.name)
+        if not include:
+            continue
+        try:
+            is_dir = p.is_dir()
+        except OSError:
+            # Can't confirm directory-ness (broken symlink, permission
+            # denied, ...) -- do NOT assume it's a harmless directory.
+            # Keep it as a catalog entry so hashing below surfaces the
+            # failure instead of silently dropping a matched filename.
+            is_dir = False
+        if is_dir:
+            continue
+        entries.append((p, suffix_label, is_logic))
+
+    entries.sort(key=lambda t: t[0].name)
+    files: list[dict[str, Any]] = []
+    any_hash_failed = False
+    for p, suffix_label, is_logic in entries:
+        sha = _hash_file_path(p)
+        if sha is None:
+            any_hash_failed = True
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = None
+        files.append(
+            {
+                "name": p.name,
+                "size": size,
+                "suffix": suffix_label,
+                "is_logic": is_logic,
+                "sha256": sha,
+            }
+        )
+
+    names = [f["name"] for f in files]
+    logic_count = sum(1 for f in files if f["is_logic"])
+    # Deterministic combined content fingerprint over (name, sha256)
+    # pairs -- a single value to eyeball when diffing whole menus, while
+    # the per-file ``files`` list localizes the change. Only emit it when
+    # EVERY file hashed cleanly: a value computed over a missing hash is
+    # not a true content fingerprint (it would hash the literal "None"),
+    # so it must be ``None`` rather than a misleading ``content-sha256:``.
+    if any_hash_failed:
+        combined_content_hash = None
+    else:
+        pair_lines = [f"{f['name']}\t{f['sha256']}" for f in files]
+        digest = hashlib.sha256("\n".join(pair_lines).encode("utf-8")).hexdigest()
+        combined_content_hash = f"content-sha256:{digest}"
+
+    base.update(
+        {
+            "status": "partial" if any_hash_failed else "ok",
+            "reason": (
+                f"one or more {kind} files were unreadable"
+                if any_hash_failed
+                else None
+            ),
+            "logic_file_count": logic_count,
+            "file_count": len(files),
+            "gfx_arch_coverage": _extract_gfx_archs(names),
+            "files": files,
+            "combined_content_hash": combined_content_hash,
+        }
+    )
+    return base
+
+
+def _suffix_classifier(
+    suffixes: tuple[str, ...],
+    logic_suffixes: tuple[str, ...],
+):
+    """Build a ``classify`` callable matching on (multi-part) suffixes.
+
+    Matches by ``endswith`` (longest suffix first) so MIOpen's
+    ``gfx942.HIP.fdb.txt`` is labeled ``.fdb.txt`` rather than pathlib's
+    bare ``.txt``. Tensile's single-part suffixes work the same way.
+    """
+    ordered = sorted(suffixes, key=len, reverse=True)
+
+    def classify(name: str) -> tuple[bool, str | None, bool]:
+        low = name.lower()
+        for suf in ordered:
+            if low.endswith(suf):
+                return (True, suf, suf in logic_suffixes)
+        return (False, None, False)
+
+    return classify
+
+
+def _enumerate_tensile_menu(
+    directory: Path,
+    *,
+    suffixes: tuple[str, ...] = TENSILE_MENU_SUFFIXES,
+    logic_suffixes: tuple[str, ...] = TENSILE_LOGIC_SUFFIXES,
+) -> dict[str, Any]:
+    """Enumerate the frozen Tensile solution menu in ``directory``.
+
+    Thin wrapper over ``_enumerate_catalog_dir`` with Tensile's suffix
+    classifier. Kept as a named function so existing tests/callers keep
+    their call shape.
+    """
+    return _enumerate_catalog_dir(
+        directory,
+        _suffix_classifier(suffixes, logic_suffixes),
+        kind="Tensile library",
+    )
+
+
+def _empty_tensile_catalog() -> dict[str, Any]:
+    """All-null ``tensile_catalog`` for the default / disaster snapshot.
+
+    Same shape ``_build_tensile_catalog`` returns when nothing is
+    readable, so the schema is stable across hosts and the dataclass
+    default never diverges from a real (empty) capture.
+    """
+
+    def _empty_lib() -> dict[str, Any]:
+        menu = _empty_menu()
+        menu["reason"] = "tensile_catalog not captured"
+        return {
+            "package_version": None,
+            "lib_hash": None,
+            "kernel_db_revision": None,
+            "menu": menu,
+        }
+
+    return {
+        "doc": TENSILE_CATALOG_DOC,
+        "status": "partial",
+        "hipblaslt": _empty_lib(),
+        "rocblas": _empty_lib(),
+        "combined": {
+            "package_version": None,
+            "kernel_db_combined_hash": None,
+        },
+    }
+
+
+def _build_tensile_catalog(
+    hipblaslt: dict[str, Any],
+    rocblas: dict[str, Any],
+    tensile: dict[str, Any],
+    reasons: list[str],
+) -> dict[str, Any]:
+    """Assemble the labeled, deepened static ``tensile_catalog`` block.
+
+    No regression: the version / lib_hash / kernel-DB filename
+    fingerprint fields are taken verbatim from the already-captured
+    ``hipblaslt`` / ``rocblas`` / ``tensile`` blocks (so the legacy
+    top-level blocks and this one never disagree). The *new* work is the
+    ``menu`` sub-block per library -- the deepened per-file enumeration.
+
+    Every partial ``menu`` threads its reason into ``partial_reasons``
+    (prefixed ``tensile_catalog.<lib>.menu``) so a probe that couldn't
+    read the menu is distinguishable from one that read an empty menu.
+    """
+    hipblaslt_menu = _enumerate_tensile_menu(HIPBLASLT_TENSILE_DIR)
+    rocblas_menu = _enumerate_tensile_menu(ROCBLAS_TENSILE_DIR)
+
+    for lib_name, menu in (("hipblaslt", hipblaslt_menu), ("rocblas", rocblas_menu)):
+        if menu["status"] == "partial":
+            reasons.append(
+                f"tensile_catalog.{lib_name}.menu: "
+                f"{menu['reason'] or 'menu enumeration incomplete'}"
+            )
+
+    block_status = (
+        "ok"
+        if hipblaslt_menu["status"] == "ok" and rocblas_menu["status"] == "ok"
+        else "partial"
+    )
+
+    return {
+        "doc": TENSILE_CATALOG_DOC,
+        "status": block_status,
+        "hipblaslt": {
+            "package_version": hipblaslt.get("package_version"),
+            "lib_hash": hipblaslt.get("lib_hash"),
+            "kernel_db_revision": hipblaslt.get("kernel_db_revision"),
+            "menu": hipblaslt_menu,
+        },
+        "rocblas": {
+            "package_version": rocblas.get("package_version"),
+            "lib_hash": rocblas.get("lib_hash"),
+            "kernel_db_revision": rocblas.get("kernel_db_revision"),
+            "menu": rocblas_menu,
+        },
+        "combined": {
+            "package_version": tensile.get("package_version"),
+            "kernel_db_combined_hash": tensile.get("kernel_db_combined_hash"),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Static MIOpen catalog (issue #54 follow-up) -- conv kernel "recipe book"
+#
+# MIOpen is the convolution analogue of Tensile/hipBLASLt: it ships a
+# frozen, on-disk, runtime-selected set of databases under
+# /opt/rocm/share/miopen/db/. As with Tensile, this is installed-library
+# identity (which find-db/perf-db/kernel-db is on disk), NOT the runtime
+# solver pick (which needs a workload).
+# ---------------------------------------------------------------------------
+
+MIOPEN_CATALOG_DOC = (
+    "Installed-library identity (the 'recipe book') for MIOpen's "
+    "convolution databases on disk: find-db (solver selection), perf-db "
+    "(tuned params), kernel-db (precompiled kernels), and heuristic "
+    "tuning models. Does NOT capture the runtime-selected solver for a "
+    "given conv -- that needs a runtime trace. Enumerated from the "
+    "effective system db dir (honoring MIOPEN_SYSTEM_DB_PATH)."
+)
+
+
+def _resolve_miopen_db_dir() -> tuple[Path, str]:
+    """Return (effective_db_dir, source) honoring MIOPEN_SYSTEM_DB_PATH.
+
+    The runtime reads the read-only system databases from
+    ``$MIOPEN_SYSTEM_DB_PATH`` when set, else the packaged
+    ``MIOPEN_KERNEL_DB_DIR``. We enumerate whichever the runtime would
+    actually use, and record which so a cross-host diff can spot an
+    override pointing at a different catalog.
+    """
+    override = os.environ.get(MIOPEN_SYSTEM_DB_PATH_ENV)
+    if override:
+        return Path(override), MIOPEN_SYSTEM_DB_PATH_ENV
+    return MIOPEN_KERNEL_DB_DIR, "default"
+
+
+def _empty_miopen_catalog() -> dict[str, Any]:
+    """All-null ``miopen_catalog`` for the default / disaster snapshot."""
+    menu = _empty_menu()
+    menu["reason"] = "miopen_catalog not captured"
+    return {
+        "doc": MIOPEN_CATALOG_DOC,
+        "status": "partial",
+        "package_version": None,
+        "lib_hash": None,
+        "kernel_db_revision": None,
+        "db_dir": None,
+        "db_dir_source": None,
+        "env_overrides": {
+            MIOPEN_SYSTEM_DB_PATH_ENV: None,
+            MIOPEN_USER_DB_PATH_ENV: None,
+        },
+        "menu": menu,
+    }
+
+
+def _build_miopen_catalog(
+    miopen: dict[str, Any],
+    reasons: list[str],
+) -> dict[str, Any]:
+    """Assemble the labeled, deepened static ``miopen_catalog`` block.
+
+    No regression: package_version / lib_hash / kernel_db_revision are
+    taken verbatim from the already-captured ``miopen`` block. The new
+    work is the per-file ``menu`` enumeration of the MIOpen db dir.
+    """
+    db_dir, source = _resolve_miopen_db_dir()
+    menu = _enumerate_catalog_dir(
+        db_dir,
+        _suffix_classifier(MIOPEN_CATALOG_SUFFIXES, MIOPEN_LOGIC_SUFFIXES),
+        kind="MIOpen db",
+    )
+    if menu["status"] == "partial":
+        reasons.append(
+            f"miopen_catalog.menu: {menu['reason'] or 'menu enumeration incomplete'}"
+        )
+    # The legacy top-level ``miopen`` block always fingerprints the
+    # packaged MIOPEN_KERNEL_DB_DIR (no regression there -- it doesn't
+    # honor MIOPEN_SYSTEM_DB_PATH). This catalog's ``menu``/``db_dir``
+    # DO honor the override, so ``kernel_db_revision`` must be recomputed
+    # against that same effective directory when an override is active;
+    # otherwise this block would describe two different directories at
+    # once. When there's no override, reuse ``miopen``'s value verbatim
+    # (same directory, no need to hash twice).
+    kernel_db_revision = (
+        miopen.get("kernel_db_revision")
+        if source == "default"
+        else _kernel_db_filename_fingerprint(
+            db_dir, suffixes=MIOPEN_KERNEL_DB_SUFFIXES
+        )
+    )
+    return {
+        "doc": MIOPEN_CATALOG_DOC,
+        "status": menu["status"],
+        "package_version": miopen.get("package_version"),
+        "lib_hash": miopen.get("lib_hash"),
+        "kernel_db_revision": kernel_db_revision,
+        "db_dir": str(db_dir),
+        "db_dir_source": source,
+        "env_overrides": {
+            MIOPEN_SYSTEM_DB_PATH_ENV: os.environ.get(MIOPEN_SYSTEM_DB_PATH_ENV),
+            MIOPEN_USER_DB_PATH_ENV: os.environ.get(MIOPEN_USER_DB_PATH_ENV),
+        },
+        "menu": menu,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Static rocFFT catalog (issue #54 follow-up) -- optional AOT kernel cache
+#
+# rocFFT compiles most kernels at runtime (RTC), so by default there is
+# NO frozen on-disk catalog. It supports an optional ahead-of-time
+# kernel cache (a SQLite file). When present, that file is a frozen,
+# selectable artifact that can drift between hosts -- so we fingerprint
+# it. Absence is the documented common case (status="absent", silent).
+# ---------------------------------------------------------------------------
+
+ROCFFT_CATALOG_DOC = (
+    "Installed-library identity for rocFFT's OPTIONAL ahead-of-time "
+    "kernel cache (rocfft_kernel_cache.db) -- the READ-ONLY system cache, "
+    "NOT the read-write runtime user cache (ROCFFT_RTC_CACHE_PATH). "
+    "rocFFT usually compiles kernels at runtime, so absence is normal "
+    "(status='absent', not a failure). When present, the cache is a "
+    "frozen on-disk artifact and is fingerprinted by content hash. Does "
+    "NOT capture runtime-compiled kernels."
+)
+
+
+def _rocfft_cache_candidates() -> list[tuple[Path, str]]:
+    """Ordered (path, source) candidates for the rocFFT AOT *system* cache.
+
+    Mirrors rocFFT's own read-only-cache resolution (``rtc_cache.cpp``):
+    ``ROCFFT_RTC_SYS_CACHE_PATH`` override first, then the default
+    install locations relative to the rocFFT lib dir --
+    ``rocfft_kernel_cache.db`` directly, or nested under ``rocfft/``
+    (both layouts have shipped). Deliberately does NOT consult
+    ``ROCFFT_RTC_CACHE_PATH`` -- that is the read-write, per-process
+    *user* cache, populated on demand at runtime; fingerprinting it as
+    installed-library identity would conflate a mutable runtime artifact
+    with a static one.
+    """
+    candidates: list[tuple[Path, str]] = []
+    override = os.environ.get(ROCFFT_RTC_SYS_CACHE_PATH_ENV)
+    if override:
+        p = Path(override)
+        # The env var may point at a file directly or at a containing dir.
+        candidates.append((p, ROCFFT_RTC_SYS_CACHE_PATH_ENV))
+        candidates.append(
+            (p / ROCFFT_KERNEL_CACHE_NAME, ROCFFT_RTC_SYS_CACHE_PATH_ENV)
+        )
+    candidates.append((ROCFFT_LIB_DIR / ROCFFT_KERNEL_CACHE_NAME, "rocm_lib"))
+    candidates.append(
+        (ROCFFT_LIB_DIR / "rocfft" / ROCFFT_KERNEL_CACHE_NAME, "rocm_lib")
+    )
+    return candidates
+
+
+def _empty_rocfft_catalog() -> dict[str, Any]:
+    """Not-captured ``rocfft_catalog`` for the default / disaster snapshot.
+
+    Status is ``"partial"`` with a "not captured" reason -- deliberately
+    NOT ``"absent"``. ``"absent"`` is reserved for ``_build_rocfft_catalog``
+    after it has actually probed and found no cache; the default/backfill/
+    disaster shape must be distinguishable from that "we checked, nothing
+    there" outcome (mirrors the ``"X not captured"`` reason the Tensile/
+    MIOpen empty menus use).
+    """
+    return {
+        "doc": ROCFFT_CATALOG_DOC,
+        "status": "partial",
+        # Record both override values even when no cache is found, so a
+        # host that configured either is distinguishable from one that
+        # never set them (mirrors miopen_catalog.env_overrides). Only
+        # ROCFFT_RTC_SYS_CACHE_PATH affects which file is resolved above;
+        # ROCFFT_RTC_CACHE_PATH is recorded for visibility only -- it is
+        # the mutable runtime user cache, not installed identity.
+        "env_overrides": {
+            ROCFFT_RTC_SYS_CACHE_PATH_ENV: None,
+            ROCFFT_RTC_CACHE_PATH_ENV: None,
+        },
+        "kernel_cache": {
+            "present": False,
+            "path": None,
+            "source": None,
+            "size": None,
+            "sha256": None,
+            "reason": "rocfft_catalog not captured",
+        },
+    }
+
+
+def _build_rocfft_catalog(reasons: list[str]) -> dict[str, Any]:
+    """Assemble the static ``rocfft_catalog`` block.
+
+    Absence is silent (no partial_reason) -- rocFFT shipping no AOT cache
+    is the norm. Only a cache that is *present but unreadable* downgrades
+    to ``partial`` and records a reason, so "we found a cache we couldn't
+    hash" is distinguishable from "there is no cache".
+    """
+    block = _empty_rocfft_catalog()
+    # We are now actually probing -- promote the "not captured" default to
+    # a clean "absent" (no reason). A real "checked, no cache" outcome
+    # must be distinguishable from the not-captured default/backfill.
+    block["status"] = "absent"
+    block["kernel_cache"]["reason"] = None
+    # Capture both override values regardless of whether a cache is
+    # found, so cross-host diffs surface a configured-but-empty RTC
+    # cache path for either variable.
+    block["env_overrides"] = {
+        ROCFFT_RTC_SYS_CACHE_PATH_ENV: os.environ.get(ROCFFT_RTC_SYS_CACHE_PATH_ENV),
+        ROCFFT_RTC_CACHE_PATH_ENV: os.environ.get(ROCFFT_RTC_CACHE_PATH_ENV),
+    }
+    for path, source in _rocfft_cache_candidates():
+        try:
+            is_file = path.is_file()
+        except OSError:
+            is_file = False
+        if not is_file:
+            continue
+        sha = _hash_file_path(path)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+        if sha is None:
+            reasons.append(
+                f"rocfft_catalog.kernel_cache: present but unreadable at {path}"
+            )
+            block["status"] = "partial"
+            block["kernel_cache"] = {
+                "present": True,
+                "path": str(path),
+                "source": source,
+                "size": size,
+                "sha256": None,
+                "reason": "cache file present but could not be hashed",
+            }
+            return block
+        block["status"] = "ok"
+        block["kernel_cache"] = {
+            "present": True,
+            "path": str(path),
+            "source": source,
+            "size": size,
+            "sha256": sha,
+            "reason": None,
+        }
+        return block
+    # No candidate matched -- documented common case, stays "absent".
+    return block
 
 
 # ---------------------------------------------------------------------------

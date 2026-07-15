@@ -107,6 +107,10 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
     )
     monkeypatch.setattr(env_mod, "MIOPEN_LIB_DIR", tmp_path / "no_miopen_libs")
     monkeypatch.setattr(env_mod, "MIOPEN_KERNEL_DB_DIR", tmp_path / "no_miopen_db")
+    monkeypatch.setattr(env_mod, "ROCFFT_LIB_DIR", tmp_path / "no_rocfft")
+    monkeypatch.delenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, raising=False)
+    monkeypatch.delenv(env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV, raising=False)
+    monkeypatch.delenv(env_mod.ROCFFT_RTC_CACHE_PATH_ENV, raising=False)
     monkeypatch.setattr(
         env_mod, "RCCL_VERSION_HEADER", tmp_path / "no_rccl.h"
     )
@@ -163,6 +167,7 @@ class TestPathConstants:
             "MIOPEN_VERSION_HEADER",
             "MIOPEN_LIB_DIR",
             "MIOPEN_KERNEL_DB_DIR",
+            "ROCFFT_LIB_DIR",
             "RCCL_VERSION_HEADER",
             "RCCL_LIB_DIR",
             "SYS_CLASS_NET",
@@ -208,6 +213,7 @@ class TestPathConstants:
             "MIOPEN_VERSION_HEADER",
             "MIOPEN_LIB_DIR",
             "MIOPEN_KERNEL_DB_DIR",
+            "ROCFFT_LIB_DIR",
             "RCCL_VERSION_HEADER",
             "RCCL_LIB_DIR",
             "SYS_CLASS_NET",
@@ -249,6 +255,9 @@ REQUIRED_TOP_KEYS = {
     "rocblas",
     "composable_kernel",
     "tensile",
+    "tensile_catalog",
+    "miopen_catalog",
+    "rocfft_catalog",
     "triton",
     "fbgemm",
     "aiter",
@@ -277,7 +286,7 @@ class TestSchemaCompleteness:
     ):
         snapshot = collect_env()
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
-        assert snapshot.schema_version == "1.8"
+        assert snapshot.schema_version == "1.9"
         assert snapshot.system_health is None
         assert snapshot.rocm == {
             "version": None,
@@ -531,6 +540,27 @@ class TestEnvSnapshot:
         del d["partial_reasons"]
         rebuilt = EnvSnapshot.from_dict(d)
         assert rebuilt.partial_reasons == []
+
+    @pytest.mark.parametrize(
+        "key,empty_factory",
+        [
+            ("tensile_catalog", env_mod._empty_tensile_catalog),
+            ("miopen_catalog", env_mod._empty_miopen_catalog),
+            ("rocfft_catalog", env_mod._empty_rocfft_catalog),
+        ],
+    )
+    def test_from_dict_backfills_missing_catalog_key(self, key, empty_factory):
+        """A pre-1.9 env.json predates the three catalog blocks entirely.
+
+        ``docs/env-probe.md`` promises that ``from_dict()`` back-fills the
+        "not captured" empty shape for each; this is the regression guard
+        for that promise (nothing previously exercised the deletion case,
+        only the "key present with real data" round-trip).
+        """
+        d = _example_snapshot().to_dict()
+        del d[key]
+        rebuilt = EnvSnapshot.from_dict(d)
+        assert getattr(rebuilt, key) == empty_factory()
 
     def test_summary_does_not_duplicate_partial_marker(self):
         """The brief returned by ``summary()`` is the *body* of what the
@@ -3379,6 +3409,542 @@ class TestTensileBlock:
         assert any(
             r.startswith("tensile.kernel_db_combined_hash:") for r in reasons
         )
+
+
+# ---------------------------------------------------------------------------
+# Static Tensile catalog (issue #54)
+# ---------------------------------------------------------------------------
+
+
+def _make_tensile_install(directory: Path, *, archs=("gfx942",), content=b"menu"):
+    """Stand up a synthetic Tensile library dir and return it.
+
+    Mirrors a modern hipBLASLt/rocBLAS layout: per-arch ``.dat`` logic
+    files, a ``TensileManifest.txt``, and a ``.hsaco`` code object.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for arch in archs:
+        (directory / f"TensileLibrary_lazy_{arch}.dat").write_bytes(
+            content + arch.encode()
+        )
+        (directory / f"Kernels.so-000-{arch}.hsaco").write_bytes(b"obj-" + arch.encode())
+    (directory / "TensileManifest.txt").write_text("\n".join(archs) + "\n")
+    return directory
+
+
+class TestTensileMenuEnumeration:
+    def test_missing_dir_is_partial_not_silent(self, tmp_path: Path):
+        menu = env_mod._enumerate_tensile_menu(tmp_path / "does_not_exist")
+        assert menu["status"] == "partial"
+        assert menu["reason"] is not None
+        assert menu["files"] is None
+        # A "couldn't read" probe must be distinguishable from an empty menu.
+        assert menu["logic_file_count"] is None
+
+    def test_present_but_empty_is_ok_with_zero_count(self, tmp_path: Path):
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        menu = env_mod._enumerate_tensile_menu(empty)
+        assert menu["status"] == "ok"
+        assert menu["logic_file_count"] == 0
+        assert menu["file_count"] == 0
+        assert menu["gfx_arch_coverage"] == []
+
+    def test_enumerates_count_archs_and_per_file_hashes(self, tmp_path: Path):
+        d = _make_tensile_install(tmp_path / "lib", archs=("gfx942", "gfx90a"))
+        menu = env_mod._enumerate_tensile_menu(d)
+        assert menu["status"] == "ok"
+        # Two .dat logic files (one per arch); .hsaco + .txt are not "logic".
+        assert menu["logic_file_count"] == 2
+        assert menu["file_count"] == 5  # 2 dat + 2 hsaco + 1 manifest
+        assert menu["gfx_arch_coverage"] == ["gfx90a", "gfx942"]
+        # Every file carries a content hash + size; logic flag set right.
+        for f in menu["files"]:
+            assert f["sha256"].startswith("sha256:")
+            assert isinstance(f["size"], int)
+        logic = [f for f in menu["files"] if f["is_logic"]]
+        assert {f["suffix"] for f in logic} == {".dat"}
+
+    def test_hashes_are_stable_across_calls(self, tmp_path: Path):
+        d = _make_tensile_install(tmp_path / "lib")
+        first = env_mod._enumerate_tensile_menu(d)
+        second = env_mod._enumerate_tensile_menu(d)
+        assert first == second
+        assert first["combined_content_hash"] == second["combined_content_hash"]
+
+    def test_two_install_diff_surfaces_changed_logic_file(self, tmp_path: Path):
+        """The core acceptance scenario: same filenames, changed bytes."""
+        host_a = _make_tensile_install(tmp_path / "a", content=b"menuA")
+        host_b = _make_tensile_install(tmp_path / "b", content=b"menuB")
+        menu_a = env_mod._enumerate_tensile_menu(host_a)
+        menu_b = env_mod._enumerate_tensile_menu(host_b)
+
+        # The shallow filename fingerprint can't tell these apart...
+        assert env_mod._kernel_db_filename_fingerprint(
+            host_a
+        ) == env_mod._kernel_db_filename_fingerprint(host_b)
+        # ...but the deepened per-file content enumeration does.
+        assert menu_a["combined_content_hash"] != menu_b["combined_content_hash"]
+
+        by_name_a = {f["name"]: f["sha256"] for f in menu_a["files"]}
+        by_name_b = {f["name"]: f["sha256"] for f in menu_b["files"]}
+        changed = [n for n in by_name_a if by_name_a[n] != by_name_b[n]]
+        # Diff localizes exactly the logic + code-object files (manifest
+        # content is identical), not just "something differs".
+        assert "TensileLibrary_lazy_gfx942.dat" in changed
+        assert "TensileManifest.txt" not in changed
+
+    def test_extract_gfx_archs_dedups_and_lowercases(self):
+        names = ["TensileLibrary_GFX90A.dat", "x_gfx90a.dat", "y_gfx942.co", "none.dat"]
+        assert env_mod._extract_gfx_archs(names) == ["gfx90a", "gfx942"]
+
+    def test_combined_hash_is_none_when_a_file_hash_fails(self, tmp_path, monkeypatch):
+        """A combined hash over a missing per-file hash isn't a true
+        content fingerprint -- it must be None, not a content-sha256:
+        value (Copilot review on PR #228).
+        """
+        d = _make_tensile_install(tmp_path / "lib", archs=("gfx942",))
+        victim = "TensileLibrary_lazy_gfx942.dat"
+        real_hash = env_mod._hash_file_path
+
+        def flaky_hash(path):
+            if path.name == victim:
+                return None  # simulate an unreadable file
+            return real_hash(path)
+
+        monkeypatch.setattr(env_mod, "_hash_file_path", flaky_hash)
+        menu = env_mod._enumerate_tensile_menu(d)
+        assert menu["status"] == "partial"
+        assert menu["combined_content_hash"] is None
+        # The unreadable file is still listed (not dropped), with sha256 None.
+        victim_entry = [f for f in menu["files"] if f["name"] == victim][0]
+        assert victim_entry["sha256"] is None
+
+    def test_broken_symlink_matching_catalog_suffix_is_not_silently_dropped(
+        self, tmp_path: Path
+    ):
+        """A broken symlink whose name matches a catalog suffix must be
+        listed in ``files`` with ``sha256: None`` and downgrade the menu
+        to ``partial`` -- not silently vanish from the enumeration.
+
+        The original implementation skipped any entry whose ``is_file()``
+        raised ``OSError`` (which a broken symlink does) before it ever
+        reached the hashing step that would otherwise catch this, so a
+        host with one broken/dangling logic file could report a clean
+        ``status: "ok"`` with a ``combined_content_hash`` that silently
+        omitted it.
+        """
+        d = _make_tensile_install(tmp_path / "lib", archs=("gfx942",))
+        broken = d / "TensileLibrary_lazy_gfx90a.dat"
+        broken.symlink_to(d / "does_not_exist.dat")
+
+        menu = env_mod._enumerate_tensile_menu(d)
+        assert menu["status"] == "partial"
+        assert menu["reason"] is not None
+        names = [f["name"] for f in menu["files"]]
+        assert broken.name in names, "matched filename must not be silently dropped"
+        broken_entry = [f for f in menu["files"] if f["name"] == broken.name][0]
+        assert broken_entry["sha256"] is None
+        assert menu["combined_content_hash"] is None
+
+
+class TestTensileCatalogBlock:
+    def test_default_and_disaster_shapes_match_built_block(self, tmp_path: Path):
+        built = env_mod._build_tensile_catalog(
+            {"package_version": None, "lib_hash": None, "kernel_db_revision": None},
+            {"package_version": None, "lib_hash": None, "kernel_db_revision": None},
+            {"package_version": None, "kernel_db_combined_hash": None},
+            [],
+        )
+        empty = env_mod._empty_tensile_catalog()
+        assert set(built.keys()) == set(empty.keys())
+        assert set(built["hipblaslt"].keys()) == set(empty["hipblaslt"].keys())
+        assert set(built["hipblaslt"]["menu"].keys()) == set(
+            empty["hipblaslt"]["menu"].keys()
+        )
+
+    def test_preserves_existing_identity_fields_no_regression(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            env_mod, "HIPBLASLT_TENSILE_DIR", _make_tensile_install(tmp_path / "hb")
+        )
+        monkeypatch.setattr(
+            env_mod, "ROCBLAS_TENSILE_DIR", _make_tensile_install(tmp_path / "rb")
+        )
+        hipblaslt = {
+            "package_version": "1.2.0",
+            "lib_hash": "sha256:aa",
+            "kernel_db_revision": "filenames-sha256:bb",
+        }
+        rocblas = {
+            "package_version": "5.0.2",
+            "lib_hash": "sha256:cc",
+            "kernel_db_revision": "filenames-sha256:dd",
+        }
+        tensile = {
+            "package_version": None,
+            "kernel_db_combined_hash": "filenames-sha256:ee",
+        }
+        block = env_mod._build_tensile_catalog(hipblaslt, rocblas, tensile, [])
+        # Existing hashes flow through verbatim -- no regression.
+        assert block["hipblaslt"]["lib_hash"] == "sha256:aa"
+        assert block["hipblaslt"]["kernel_db_revision"] == "filenames-sha256:bb"
+        assert block["rocblas"]["lib_hash"] == "sha256:cc"
+        assert block["combined"]["kernel_db_combined_hash"] == "filenames-sha256:ee"
+        assert block["status"] == "ok"
+
+    def test_partial_threads_reason_into_partial_reasons(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            env_mod, "HIPBLASLT_TENSILE_DIR", _make_tensile_install(tmp_path / "hb")
+        )
+        monkeypatch.setattr(
+            env_mod, "ROCBLAS_TENSILE_DIR", tmp_path / "missing_rocblas"
+        )
+        reasons: list[str] = []
+        block = env_mod._build_tensile_catalog(
+            {"package_version": None, "lib_hash": None, "kernel_db_revision": None},
+            {"package_version": None, "lib_hash": None, "kernel_db_revision": None},
+            {"package_version": None, "kernel_db_combined_hash": None},
+            reasons,
+        )
+        assert block["status"] == "partial"
+        assert block["rocblas"]["menu"]["status"] == "partial"
+        assert block["hipblaslt"]["menu"]["status"] == "ok"
+        assert any(
+            r.startswith("tensile_catalog.rocblas.menu:") for r in reasons
+        )
+
+    def test_doc_is_labeled_as_installed_identity_not_runtime(self):
+        doc = env_mod._empty_tensile_catalog()["doc"]
+        assert "recipe book" in doc.lower()
+        assert "381881" in doc or "368xxx" in doc  # explicitly disclaims the runtime pick
+
+    def test_block_present_in_collect_env_snapshot(self, all_disabled):
+        snap = collect_env()
+        d = snap.to_dict()
+        assert "tensile_catalog" in d
+        assert set(d["tensile_catalog"].keys()) == {
+            "doc",
+            "status",
+            "hipblaslt",
+            "rocblas",
+            "combined",
+        }
+
+
+# ---------------------------------------------------------------------------
+# Static MIOpen catalog (issue #54 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _make_miopen_db(directory: Path, *, archs=("gfx942_120",), content=b"db"):
+    """Stand up a synthetic MIOpen db dir (find-db, perf-db, model, kdb)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for arch in archs:
+        (directory / f"{arch}.HIP.fdb.txt").write_bytes(content + b"-fdb")
+        (directory / f"{arch}.db.txt").write_bytes(content + b"-perf")
+        (directory / f"{arch}.kdb").write_bytes(content + b"-kdb")
+    (directory / "gfx908.tn.model").write_bytes(b"heuristic-model")
+    return directory
+
+
+class TestMiopenCatalogBlock:
+    def test_enumerates_dbs_archs_and_logic_count(self, tmp_path, monkeypatch):
+        d = _make_miopen_db(tmp_path / "db", archs=("gfx942_120", "gfx90a_104"))
+        monkeypatch.setattr(env_mod, "MIOPEN_KERNEL_DB_DIR", d)
+        monkeypatch.delenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, raising=False)
+        block = env_mod._build_miopen_catalog(
+            {"package_version": "3.5.0", "lib_hash": "sha256:aa",
+             "kernel_db_revision": "filenames-sha256:bb"},
+            [],
+        )
+        assert block["status"] == "ok"
+        # 2 archs x (fdb + perf + kdb) = 6 logic dbs; +1 model = 7 files.
+        assert block["menu"]["logic_file_count"] == 6
+        assert block["menu"]["file_count"] == 7
+        assert block["menu"]["gfx_arch_coverage"] == ["gfx908", "gfx90a", "gfx942"]
+        # No regression: identity fields pass through verbatim.
+        assert block["lib_hash"] == "sha256:aa"
+        assert block["kernel_db_revision"] == "filenames-sha256:bb"
+        assert block["db_dir_source"] == "default"
+        # The .model file is catalog-but-not-logic.
+        model = [f for f in block["menu"]["files"] if f["name"].endswith(".model")][0]
+        assert model["is_logic"] is False
+        assert model["suffix"] == ".tn.model"
+
+    def test_multipart_suffix_labeled_correctly(self, tmp_path, monkeypatch):
+        d = _make_miopen_db(tmp_path / "db")
+        monkeypatch.setattr(env_mod, "MIOPEN_KERNEL_DB_DIR", d)
+        monkeypatch.delenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, raising=False)
+        block = env_mod._build_miopen_catalog({}, [])
+        suffixes = {f["name"]: f["suffix"] for f in block["menu"]["files"]}
+        # find-db keeps its full multi-part suffix, not pathlib's bare .txt
+        assert suffixes["gfx942_120.HIP.fdb.txt"] == ".fdb.txt"
+        assert suffixes["gfx942_120.db.txt"] == ".db.txt"
+        assert suffixes["gfx942_120.kdb"] == ".kdb"
+
+    def test_system_db_path_override_is_honored_and_recorded(self, tmp_path, monkeypatch):
+        override = _make_miopen_db(tmp_path / "override_db")
+        monkeypatch.setattr(env_mod, "MIOPEN_KERNEL_DB_DIR", tmp_path / "default_unused")
+        monkeypatch.setenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, str(override))
+        block = env_mod._build_miopen_catalog({}, [])
+        assert block["db_dir"] == str(override)
+        assert block["db_dir_source"] == env_mod.MIOPEN_SYSTEM_DB_PATH_ENV
+        assert block["status"] == "ok"
+        assert block["env_overrides"][env_mod.MIOPEN_SYSTEM_DB_PATH_ENV] == str(override)
+
+    def test_kernel_db_revision_follows_system_db_path_override(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: ``kernel_db_revision`` must describe the SAME
+        directory as ``db_dir``/``menu`` when ``MIOPEN_SYSTEM_DB_PATH``
+        is set. Copying the legacy top-level ``miopen`` block's value
+        verbatim would silently describe the packaged default dir while
+        ``db_dir``/``menu`` describe the override -- one block, two
+        different directories.
+        """
+        default_dir = _make_miopen_db(tmp_path / "default_db", archs=("gfx908_60",))
+        override_dir = _make_miopen_db(
+            tmp_path / "override_db", archs=("gfx942_120", "gfx90a_104")
+        )
+        monkeypatch.setattr(env_mod, "MIOPEN_KERNEL_DB_DIR", default_dir)
+        monkeypatch.setenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, str(override_dir))
+
+        # The stale value a naive "copy the top-level field verbatim"
+        # implementation would have used.
+        stale_kernel_db_revision = env_mod._kernel_db_filename_fingerprint(
+            default_dir, suffixes=env_mod.MIOPEN_KERNEL_DB_SUFFIXES
+        )
+        block = env_mod._build_miopen_catalog(
+            {"kernel_db_revision": stale_kernel_db_revision}, []
+        )
+
+        expected = env_mod._kernel_db_filename_fingerprint(
+            override_dir, suffixes=env_mod.MIOPEN_KERNEL_DB_SUFFIXES
+        )
+        assert block["db_dir"] == str(override_dir)
+        assert block["kernel_db_revision"] == expected
+        assert block["kernel_db_revision"] != stale_kernel_db_revision
+
+    def test_kernel_db_revision_reuses_top_level_value_when_no_override(
+        self, tmp_path, monkeypatch
+    ):
+        """No-regression case: without an override, reuse the already-
+        computed top-level ``miopen.kernel_db_revision`` verbatim rather
+        than fingerprinting the directory a second time.
+        """
+        d = _make_miopen_db(tmp_path / "db")
+        monkeypatch.setattr(env_mod, "MIOPEN_KERNEL_DB_DIR", d)
+        monkeypatch.delenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, raising=False)
+        sentinel = "filenames-sha256:sentinel-from-top-level-miopen-block"
+        block = env_mod._build_miopen_catalog(
+            {"kernel_db_revision": sentinel}, []
+        )
+        assert block["db_dir_source"] == "default"
+        assert block["kernel_db_revision"] == sentinel
+
+    def test_missing_dir_is_partial_and_threads_reason(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(env_mod, "MIOPEN_KERNEL_DB_DIR", tmp_path / "nope")
+        monkeypatch.delenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, raising=False)
+        reasons: list[str] = []
+        block = env_mod._build_miopen_catalog({}, reasons)
+        assert block["status"] == "partial"
+        assert any(r.startswith("miopen_catalog.menu:") for r in reasons)
+
+    def test_two_install_diff_localizes_changed_db(self, tmp_path, monkeypatch):
+        a = _make_miopen_db(tmp_path / "a", content=b"hostA")
+        b = _make_miopen_db(tmp_path / "b", content=b"hostB")
+        ma = env_mod._enumerate_catalog_dir(
+            a, env_mod._suffix_classifier(
+                env_mod.MIOPEN_CATALOG_SUFFIXES, env_mod.MIOPEN_LOGIC_SUFFIXES),
+            kind="MIOpen db")
+        mb = env_mod._enumerate_catalog_dir(
+            b, env_mod._suffix_classifier(
+                env_mod.MIOPEN_CATALOG_SUFFIXES, env_mod.MIOPEN_LOGIC_SUFFIXES),
+            kind="MIOpen db")
+        assert ma["combined_content_hash"] != mb["combined_content_hash"]
+
+    def test_block_present_and_shaped_in_snapshot(self, all_disabled):
+        d = collect_env().to_dict()
+        assert set(d["miopen_catalog"].keys()) == {
+            "doc", "status", "package_version", "lib_hash", "kernel_db_revision",
+            "db_dir", "db_dir_source", "env_overrides", "menu",
+        }
+
+
+# ---------------------------------------------------------------------------
+# Static rocFFT catalog (issue #54 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestRocfftCatalogBlock:
+    def test_absent_when_no_cache_is_silent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(env_mod, "ROCFFT_LIB_DIR", tmp_path / "nope")
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV, raising=False)
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_CACHE_PATH_ENV, raising=False)
+        reasons: list[str] = []
+        block = env_mod._build_rocfft_catalog(reasons)
+        assert block["status"] == "absent"
+        assert block["kernel_cache"]["present"] is False
+        # Absence is the documented common case -- NOT partial.
+        assert reasons == []
+
+    def test_present_cache_is_fingerprinted(self, tmp_path, monkeypatch):
+        (tmp_path / env_mod.ROCFFT_KERNEL_CACHE_NAME).write_bytes(b"sqlite-bytes")
+        monkeypatch.setattr(env_mod, "ROCFFT_LIB_DIR", tmp_path)
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV, raising=False)
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_CACHE_PATH_ENV, raising=False)
+        block = env_mod._build_rocfft_catalog([])
+        assert block["status"] == "ok"
+        assert block["kernel_cache"]["present"] is True
+        assert block["kernel_cache"]["sha256"].startswith("sha256:")
+        assert block["kernel_cache"]["source"] == "rocm_lib"
+        assert block["kernel_cache"]["size"] == len(b"sqlite-bytes")
+
+    def test_nested_rocfft_subdir_layout_resolves(self, tmp_path, monkeypatch):
+        """Some installs ship the cache under ``lib/rocfft/`` rather than
+        directly in ``lib/`` -- both are real default layouts per
+        rocFFT's ``rtc_cache.cpp`` search order.
+        """
+        nested = tmp_path / "rocfft" / env_mod.ROCFFT_KERNEL_CACHE_NAME
+        nested.parent.mkdir(parents=True)
+        nested.write_bytes(b"nested-cache")
+        monkeypatch.setattr(env_mod, "ROCFFT_LIB_DIR", tmp_path)
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV, raising=False)
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_CACHE_PATH_ENV, raising=False)
+        block = env_mod._build_rocfft_catalog([])
+        assert block["status"] == "ok"
+        assert block["kernel_cache"]["path"] == str(nested)
+        assert block["kernel_cache"]["source"] == "rocm_lib"
+
+    def test_rtc_sys_cache_path_env_override_wins(self, tmp_path, monkeypatch):
+        """ROCFFT_RTC_SYS_CACHE_PATH is the read-only system-cache override
+        -- the one that matters for installed-library identity.
+        """
+        cache = tmp_path / "custom" / env_mod.ROCFFT_KERNEL_CACHE_NAME
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b"override-cache")
+        monkeypatch.setattr(env_mod, "ROCFFT_LIB_DIR", tmp_path / "rocm_unused")
+        monkeypatch.setenv(env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV, str(cache.parent))
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_CACHE_PATH_ENV, raising=False)
+        block = env_mod._build_rocfft_catalog([])
+        assert block["status"] == "ok"
+        assert block["kernel_cache"]["path"] == str(cache)
+        assert block["kernel_cache"]["source"] == env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV
+
+    def test_rtc_cache_path_env_alone_is_not_used_for_resolution(
+        self, tmp_path, monkeypatch
+    ):
+        """ROCFFT_RTC_CACHE_PATH is the read-write, per-process USER cache
+        -- mutable and workload-dependent, not installed-library identity.
+        A cache file sitting there must NOT be fingerprinted as the
+        static catalog, even though it is recorded for visibility.
+        """
+        user_cache_dir = tmp_path / "user_cache"
+        user_cache_dir.mkdir()
+        (user_cache_dir / env_mod.ROCFFT_KERNEL_CACHE_NAME).write_bytes(b"mutable")
+        monkeypatch.setattr(env_mod, "ROCFFT_LIB_DIR", tmp_path / "no_system_cache")
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV, raising=False)
+        monkeypatch.setenv(env_mod.ROCFFT_RTC_CACHE_PATH_ENV, str(user_cache_dir))
+        block = env_mod._build_rocfft_catalog([])
+        # No system cache found -- must stay "absent", NOT resolve the
+        # mutable user cache as installed identity.
+        assert block["status"] == "absent"
+        assert block["kernel_cache"]["present"] is False
+        # Still recorded for visibility.
+        assert block["env_overrides"][env_mod.ROCFFT_RTC_CACHE_PATH_ENV] == str(
+            user_cache_dir
+        )
+
+    def test_override_recorded_even_when_cache_absent(self, tmp_path, monkeypatch):
+        """Configured RTC-cache paths are captured even with no cache file.
+
+        Distinguishes "override set, but no cache shipped" from "override
+        never set" -- the case Copilot flagged on PR #228. Covers both
+        the system-cache and user-cache override variables.
+        """
+        monkeypatch.setattr(env_mod, "ROCFFT_LIB_DIR", tmp_path / "nope")
+        monkeypatch.setenv(
+            env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV, "/some/configured/sys/dir"
+        )
+        monkeypatch.setenv(env_mod.ROCFFT_RTC_CACHE_PATH_ENV, "/some/configured/dir")
+        block = env_mod._build_rocfft_catalog([])
+        assert block["status"] == "absent"
+        assert block["kernel_cache"]["present"] is False
+        assert block["env_overrides"][env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV] == (
+            "/some/configured/sys/dir"
+        )
+        assert block["env_overrides"][env_mod.ROCFFT_RTC_CACHE_PATH_ENV] == (
+            "/some/configured/dir"
+        )
+
+    def test_not_captured_default_distinct_from_probed_absent(self, tmp_path, monkeypatch):
+        """The default/backfill shape must be distinguishable from a probe
+        that ran and found no cache (Copilot review on PR #228).
+        """
+        # Default / disaster / from_dict backfill shape: "not captured".
+        default = env_mod._empty_rocfft_catalog()
+        assert default["status"] == "partial"
+        assert default["kernel_cache"]["reason"] == "rocfft_catalog not captured"
+        # A real probe that finds nothing: clean "absent", no reason.
+        monkeypatch.setattr(env_mod, "ROCFFT_LIB_DIR", tmp_path / "nope")
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV, raising=False)
+        monkeypatch.delenv(env_mod.ROCFFT_RTC_CACHE_PATH_ENV, raising=False)
+        probed = env_mod._build_rocfft_catalog([])
+        assert probed["status"] == "absent"
+        assert probed["kernel_cache"]["reason"] is None
+
+    def test_block_present_and_shaped_in_snapshot(self, all_disabled):
+        d = collect_env().to_dict()
+        assert set(d["rocfft_catalog"].keys()) == {
+            "doc", "status", "env_overrides", "kernel_cache",
+        }
+        assert set(d["rocfft_catalog"]["env_overrides"].keys()) == {
+            env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV,
+            env_mod.ROCFFT_RTC_CACHE_PATH_ENV,
+        }
+
+    def test_summary_renders_present_unreadable_not_present_none(self, all_disabled):
+        """A present-but-unhashable cache must not render as "present None"
+        in the CLI brief (Copilot review on PR #228).
+        """
+        d = collect_env().to_dict()
+        d["rocfft_catalog"] = {
+            "doc": "x",
+            "status": "partial",
+            "env_overrides": {
+                env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV: None,
+                env_mod.ROCFFT_RTC_CACHE_PATH_ENV: None,
+            },
+            "kernel_cache": {
+                "present": True, "path": "/x", "source": "rocm_lib",
+                "size": 10, "sha256": None,
+                "reason": "cache file present but could not be hashed",
+            },
+        }
+        snap = env_mod.EnvSnapshot.from_dict(d)
+        catalog_line = [l for l in snap.summary().splitlines() if "catalog:" in l][0]
+        assert "rocfft=present (unreadable)" in catalog_line
+        assert "present None" not in catalog_line
+
+    def test_summary_renders_dash_not_none_for_not_captured_hashes(self):
+        """A not-captured catalog (e.g. a pre-1.9 snapshot backfilled via
+        ``from_dict``) must render its missing per-menu hashes as ``-``,
+        not the literal string ``"None"`` -- the same ambiguity
+        ``pkg_state()`` avoids elsewhere.
+        """
+        d = _example_snapshot().to_dict()
+        del d["tensile_catalog"]
+        del d["miopen_catalog"]
+        del d["rocfft_catalog"]
+        snap = env_mod.EnvSnapshot.from_dict(d)
+        catalog_line = [l for l in snap.summary().splitlines() if "catalog:" in l][0]
+        assert "None" not in catalog_line
+        assert "tensile[hb=- rb=-]" in catalog_line
+        assert "miopen=-" in catalog_line
 
 
 # ---------------------------------------------------------------------------

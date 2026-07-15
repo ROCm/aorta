@@ -125,6 +125,7 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
         ("MIOPEN_VERSION_HEADER", "no_miopen_version.h"),
         ("MIOPEN_LIB_DIR", "no_miopen_libs"),
         ("MIOPEN_KERNEL_DB_DIR", "no_miopen_db"),
+        ("ROCFFT_LIB_DIR", "no_rocfft"),
         ("RCCL_VERSION_HEADER", "no_rccl.h"),
         ("RCCL_LIB_DIR", "no_rccl_libs"),
         ("DOCKERENV_MARKER", "no_dockerenv"),
@@ -133,6 +134,13 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
         ("SELF_CGROUP_FILE", "no_self_cgroup"),
     ):
         monkeypatch.setattr(env_mod, attr, tmp_path / leaf)
+    # Catalog probes also read env-var overrides; clear them so these
+    # tests never touch a host ROCFFT_RTC_SYS_CACHE_PATH / ROCFFT_RTC_CACHE_PATH
+    # / MIOPEN_SYSTEM_DB_PATH and stay hermetic (mirrors
+    # test_environment.py::all_disabled).
+    monkeypatch.delenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, raising=False)
+    monkeypatch.delenv(env_mod.ROCFFT_RTC_SYS_CACHE_PATH_ENV, raising=False)
+    monkeypatch.delenv(env_mod.ROCFFT_RTC_CACHE_PATH_ENV, raising=False)
     # Disable every external binary lookup. Tests that DO want buck2
     # present override this via their own ``bs_mod.detect_build_system``
     # monkeypatch (i.e., they bypass shutil.which entirely).

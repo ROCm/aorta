@@ -29,6 +29,40 @@ its commit, package version, library hash, and Tensile kernel
 fingerprint as first-class fields, so two trials whose hipBLASLt
 identities differ become trivially diffable.
 
+### Catalog vs. runtime trace -- what `env probe` does and doesn't capture
+
+The **catalog** (what `env probe` captures, under `tensile_catalog` /
+`miopen_catalog` / `rocfft_catalog`) identifies the *recipe book*: which
+hipBLASLt/rocBLAS Tensile, MIOpen, or rocFFT kernel/solution menu is
+installed on disk. It does **not** tell you which recipe the runtime
+actually picked for a given GEMM/conv/FFT -- the per-call solution ID
+(`#381881` / `#368xxx` you see in workload logs); that requires a
+runtime trace (a separate capability, deferred to the runtime
+follow-up).
+
+Kernel selection happens in two layers:
+
+1. **The frozen menu (layer 1, captured here).** At build/install time
+   the library bakes a solution library / logic files into / alongside
+   the `.so` -- the full menu of recipes plus a decision tree. This menu
+   does not change at runtime; it is files on disk, fully visible without
+   running anything. The `*_catalog` blocks fingerprint **and enumerate**
+   it.
+2. **The runtime pick (layer 2, NOT captured here).** The actual choice
+   happens per-call at runtime, querying live device properties -- so a
+   driver/firmware/KFD change can flip the pick even with an identical
+   `.so`. Out of scope for the no-compute probe.
+
+**Why this matters:** two hosts can report the *same* hipBLASLt commit
+(e.g. the historically-broken `7e32d53eb1`) yet ship a **materially
+different** Tensile install -- a vendor build can patch or select
+different kernels even when nominally pointing at that commit. A bare
+version/commit string would call these "the same"; the deepened
+`tensile_catalog.<lib>.menu` per-file content hashes make the difference
+**diffable from the installed files alone**. (The solution-ID half --
+which kernel each host's runtime actually selected -- belongs to the
+runtime follow-up.)
+
 ## Quick start
 
 ```bash
@@ -95,7 +129,7 @@ operator can act on them without `jq`'ing the JSON. A closing
 end-of-output. Sample:
 
 ```text
-Wrote env probe to /tmp/env.json (schema_version=1.8) [PARTIAL]
+Wrote env probe to /tmp/env.json (schema_version=1.9) [PARTIAL]
   runtime:   baremetal / python=venv
   build_sys: none
   rocm:      7.2.1 (dev: None)
@@ -109,6 +143,7 @@ Wrote env probe to /tmp/env.json (schema_version=1.8) [PARTIAL]
   host:      kernel=5.15.0-174-generic machine=x86_64  glibc=2.35
   ck:        system=1.2.0/23d531c8  ck_tile=yes  libtorch_hip=4067 ck:: syms
   tensile:   kernel_db=filenames-sha256:743a8d…  [Tensile pip pkg: (not installed); build-time tool, normal]
+  catalog:   tensile[hb=content-sha256:1a2b3c… rb=content-sha256:4d5e6f…]  miopen=content-sha256:7890ab…  rocfft=absent
   triton:    3.5.1+rocm7.2.1.gita272dfa8
   fbgemm:    in PyTorch: USE_FBGEMM=True USE_FBGEMM_GENAI=True  [fbgemm_gpu pip pkg: (not installed); separate from torch's vendored copy]
   aiter:     (not installed) [aiter pip pkg; optional ROCm inference lib]
@@ -185,7 +220,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.8"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.9"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
@@ -201,6 +236,9 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `host` | `dict` | `os.uname()` + `os.confstr("CS_GNU_LIBC_VERSION")` | `kernel_release`, `kernel_version`, `machine`, `glibc_version`. Kernel + glibc drift is the #1 confound for compiled-against-vs-runtime issues with C++ extensions. |
 | `composable_kernel` | `dict` | header at `include/ck/version.h` + `nm -D` of `libtorch_hip.so` piped through `c++filt` + `torch.__config__.show()` flag scan | Two sub-blocks (`system: {version, commit, ck_tile_present}`, `pytorch_bundled: {present, symbol_count}`) plus top-level `pytorch_use_ck_sdpa` / `pytorch_use_ck_gemm` booleans (build-time flags baked into the wheel; NOT runtime env vars). System and bundled CK can drift independently. |
 | `tensile` | `dict` | optional `import Tensile` + sorted-filenames hash over the union of hipBLASLt + rocBLAS kernel DBs | `package_version` (usually `null` outside builders), `kernel_db_combined_hash` |
+| `tensile_catalog` | `dict` | reuses the `hipblaslt`/`rocblas`/`tensile` captures + a new per-file enumeration of `lib/{hipblaslt,rocblas}/library/*` | **The "recipe book" -- installed-library identity, NOT the runtime-selected solution ID.** Top-level `doc` + `status`. Per-library `hipblaslt`/`rocblas` carry the existing `package_version`/`lib_hash`/`kernel_db_revision` (no regression) plus a `menu` sub-block: `status`, `reason`, `dir`, `logic_file_count` (`.dat`/`.yaml`), `file_count`, `gfx_arch_coverage`, `files` (per-file `{name,size,suffix,is_logic,sha256}`), and `combined_content_hash`. `combined` mirrors the `tensile` block. Partial-not-silent: a dir that can't be located/listed is `status:"partial"` (distinct from a present-but-empty menu, which is `ok` with `logic_file_count:0`). Added in schema 1.9 (issue #54). |
+| `miopen_catalog` | `dict` | reuses the `miopen` capture + a per-file enumeration of the MIOpen db dir (`share/miopen/db/`) | **Recipe book for MIOpen's convolution databases** -- same scoping as `tensile_catalog`. `doc` + `status`, the reused `package_version`/`lib_hash`/`kernel_db_revision` (no regression), `db_dir` + `db_dir_source` (`default` or `MIOPEN_SYSTEM_DB_PATH`), `env_overrides`, and a `menu`. `logic_file_count` counts the selectable DBs (`.kdb`/`.fdb.txt`/`.db.txt`/`.db`); `.ktn.model`/`.tn.model` heuristic models are catalog members but not logic. Added in schema 1.9 (issue #54 follow-up). |
+| `rocfft_catalog` | `dict` | optional `rocfft_kernel_cache.db` under `$ROCFFT_RTC_SYS_CACHE_PATH` or `/opt/rocm/lib/[rocfft/]` | Fingerprint of rocFFT's **optional** AOT kernel cache -- the READ-ONLY system cache, not the read-write runtime user cache. rocFFT usually compiles at runtime, so absence is normal: a *probed* "no cache" result is `status:"absent"` with **no** partial reason. (The default/backfill/disaster shape is `status:"partial"` with a "not captured" reason instead, so a snapshot that never probed is distinguishable from one that probed and found nothing.) `doc` + `status` (`ok`/`absent`/`partial`) + `env_overrides` (both `ROCFFT_RTC_SYS_CACHE_PATH` -- the override this catalog actually resolves against -- and `ROCFFT_RTC_CACHE_PATH`, recorded for visibility only since it names the mutable, workload-dependent user cache, not installed identity; both recorded even when no cache is found so a configured-but-empty override is visible) + `kernel_cache` (`present`, `path`, `source`, `size`, `sha256`, `reason`). Added in schema 1.9 (issue #54 follow-up). |
 | `triton` | `dict` | `import triton; triton.__version__` (+ commit parse) | `package_version`, `commit` (schema 1.8). ROCm Triton fork bakes the source commit into `__version__` (e.g. `3.5.1+rocm7.2.1.gita272dfa8` -> `commit: "a272dfa8"`); fb builds versioned `+fb` carry no SHA -> `commit: null`. |
 | `fbgemm` | `dict` | optional `import fbgemm_gpu` (+ commit parse) + parse of `torch.__config__.show()` for `-DUSE_FBGEMM*` defines | `package_version`, `commit` (schema 1.8 -- best-effort git SHA from a setuptools_scm `+g<sha>` local-version segment or a `git_version`/`__commit__` module attr; `null` when fbgemm_gpu is vendored-in-torch rather than separately installed, or carries no SHA), `pytorch_use_fbgemm`, `pytorch_use_fbgemm_genai`. The two booleans capture the build-time decision baked into the PyTorch wheel even when `fbgemm_gpu` isn't a separate pip package. |
 | `aiter` | `dict` | `import aiter; aiter.__version__` + `importlib.metadata.version("amd_aiter" \| "aiter")` + scan of `aiter_meta/hsa/<gfx>/` (or `$AORTA_PYTORCH_SRC/third_party/aiter/hsa/`) | `package_version`, `package_dist_name` (which PyPI dist matched: `amd_aiter` is the canonical AMD-internal ROCm/PyTorch image dist; `aiter` is the upstream name), `commit` (parsed from the setuptools_scm `+g<sha>` local-version segment, matches the image tag's `aiter-<sha>` label), `hsa_tree` (issue #176 -- per-arch fingerprint of pre-built `.co` kernel binaries: file_count, co_count, deterministic combined_sha256). Most installs record `null` for everything; absence is silent. |
@@ -396,7 +434,40 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.8` (current)
+### `1.9` (current)
+
+Static kernel-catalog "recipe books" for the on-disk, runtime-selected
+GPU-compute catalogs (issue #54 + follow-ups). All additive: three new
+top-level blocks, each defaulted so older readers don't raise.
+
+* New top-level **`tensile_catalog`** (issue #54): installed-library
+  identity for the hipBLASLt/rocBLAS Tensile install. Reuses the existing
+  `hipblaslt`/`rocblas`/`tensile` captures (no regression) and deepens
+  them with a per-file `menu` enumeration of the frozen solution library
+  (`TensileLibrary` / `*.dat` / `*.yaml` / `*.co` / `*.hsaco`): per-file
+  content sha256 + size, `logic_file_count`, `gfx_arch_coverage`, and a
+  `combined_content_hash`, so a two-host diff localizes *which* logic
+  file differs. Explicitly NOT the runtime-selected solution ID
+  (`381881`/`368xxx`). Partial-not-silent per menu.
+* New top-level **`miopen_catalog`** (issue #54 follow-up): the same
+  treatment for MIOpen's databases under `/opt/rocm/share/miopen/db/`
+  (`.kdb` kernel-db, `.fdb.txt` find-db, `.db.txt`/`.db` perf-db, plus
+  `.ktn.model`/`.tn.model` heuristic nets). Honors `MIOPEN_SYSTEM_DB_PATH`
+  (records `db_dir`/`db_dir_source`) and surfaces `MIOPEN_USER_DB_PATH`.
+* New top-level **`rocfft_catalog`** (issue #54 follow-up): fingerprints
+  rocFFT's *optional* AOT `rocfft_kernel_cache.db` when present; absence
+  is the common case (`status:"absent"`, no partial reason). Resolves
+  against the read-only `ROCFFT_RTC_SYS_CACHE_PATH` system-cache override
+  (or the default `/opt/rocm/lib[/rocfft]/` locations) -- NOT the
+  mutable, per-process `ROCFFT_RTC_CACHE_PATH` user cache, which is
+  recorded under `env_overrides` for visibility only.
+
+Backwards-compat: all three are new top-level dataclass fields with
+default factories, so a 1.7/1.8 reader loading a 1.9 snapshot drops the
+unknown keys and a 1.9 reader loading an older snapshot gets the empty
+defaults.
+
+### `1.8`
 
 Buck-target torch native-lib recovery + best-effort package commits.
 Additive nested keys only (`triton.commit`, `fbgemm.commit`); no
@@ -740,6 +811,28 @@ For per-library binary-level drift detection, use:
 * `<lib>.applied_prs` -- a forward-compat slot for explicit PR
   detectors when a specific patch warrants tracking.
 
+### `*_catalog` blocks are the recipe book (installed library), not the recipe used
+
+The `tensile_catalog` / `miopen_catalog` / `rocfft_catalog` blocks answer
+exactly one question: *is the installed kernel/solution catalog the same
+on both hosts?* Every field is **installed-library identity** -- the
+frozen on-disk menu. They deliberately do **not** capture the
+runtime-selected solution/solver ID (`#381881` / `#368xxx`), which is
+chosen per-call at runtime against live device properties and needs a
+workload trace (a separate capability).
+
+Two hosts can report the **same** hipBLASLt commit (e.g. `7e32d53eb1`)
+and still ship a **different** Tensile install -- a vendor build can
+patch or select different kernels even when nominally pointing at that
+commit. That is precisely the case `tensile_catalog.<lib>.menu` is built
+to expose: the shallow filename fingerprint (`kernel_db_revision`) can
+match while the per-file `menu.files[*].sha256` differ. Use the menu's
+`combined_content_hash` for a one-shot "are the menus identical?" check,
+and the per-file `files` list to localize *which* logic file changed. The
+same applies to `miopen_catalog` for convolution databases.
+
+### `composable_kernel.system.commit` is a real upstream commit
+
 The `composable_kernel.system.commit` field IS a real upstream commit
 (40-char SHA), because CK ships its own `CK_COMMIT_ID` define populated
 from the upstream submodule.
@@ -821,8 +914,9 @@ Adding a new submodule to track is a deliberate three-step change
 
 1. The corresponding field is set to `None`.
 2. A short reason like `"system_health: rdhc not on PATH"` or
-   `"hipblaslt.commit: /opt/rocm/include/hipblaslt/hipblaslt-version.h
-   missing, empty, or unreadable"` is appended to `partial_reasons`.
+   `"hipblaslt.rocm_release_tweak:
+   /opt/rocm/include/hipblaslt/hipblaslt-version.h not readable"` is
+   appended to `partial_reasons`.
 3. `partial` is set to `True`.
 4. The run continues.
 
@@ -915,6 +1009,16 @@ sources are:
 | `composable_kernel.pytorch_bundled.symbol_count` | `nm -D --defined-only` of `<torch>/lib/libtorch_hip.so` piped through `c++filt`, counting lines containing `ck::`. `null` when torch absent, lib missing, or binutils stripped from the container. |
 | `tensile.package_version` | `import Tensile; Tensile.__version__` (rare; build-time tool) |
 | `tensile.kernel_db_combined_hash` | sorted-filenames sha256 over the union of the hipBLASLt + rocBLAS kernel DBs (each filename namespaced by parent dir basename) |
+| `tensile_catalog.<lib>.{package_version,lib_hash,kernel_db_revision}` | taken verbatim from the matching `hipblaslt`/`rocblas` block (no regression) |
+| `tensile_catalog.<lib>.menu.files[*].sha256` | `sha256` of each `*.dat`/`*.yaml`/`*.co`/`*.hsaco`/`*.txt` file under `/opt/rocm/lib/<lib>/library/` (content hash, not just filename) |
+| `tensile_catalog.<lib>.menu.gfx_arch_coverage` | sorted unique `gfx<arch>` tokens parsed from those filenames (e.g. `TensileLibrary_lazy_gfx942.dat` -> `gfx942`) |
+| `tensile_catalog.<lib>.menu.combined_content_hash` | sha256 over the sorted `(filename, content-sha256)` pairs -- one value to eyeball when diffing whole menus |
+| `miopen_catalog.{package_version,lib_hash,kernel_db_revision}` | taken verbatim from the `miopen` block (no regression) |
+| `miopen_catalog.db_dir` / `.db_dir_source` | the effective MIOpen db dir enumerated -- `$MIOPEN_SYSTEM_DB_PATH` when set (`"MIOPEN_SYSTEM_DB_PATH"`), else `/opt/rocm/share/miopen/db/` (`"default"`) |
+| `miopen_catalog.menu.files[*].sha256` | `sha256` of each `.kdb`/`.fdb.txt`/`.db.txt`/`.db`/`.ktn.model`/`.tn.model` file in the db dir (content hash) |
+| `miopen_catalog.menu.logic_file_count` | count of the selectable DBs (`.kdb`/`.fdb.txt`/`.db.txt`/`.db`); excludes the `*.model` heuristic nets |
+| `rocfft_catalog.kernel_cache.{present,path,source,size,sha256}` | the optional `rocfft_kernel_cache.db` found under `$ROCFFT_RTC_SYS_CACHE_PATH` (`"ROCFFT_RTC_SYS_CACHE_PATH"`) or `/opt/rocm/lib/[rocfft/]` (`"rocm_lib"`); all `null` + `status:"absent"` when no cache exists (the common case). Does **not** resolve against `$ROCFFT_RTC_CACHE_PATH` -- that names the mutable, per-process runtime user cache, not installed identity. |
+| `rocfft_catalog.env_overrides.{ROCFFT_RTC_SYS_CACHE_PATH,ROCFFT_RTC_CACHE_PATH}` | the raw values of both vars (or `null`), recorded even when no cache file is found so a configured-but-empty override is diffable. Only `ROCFFT_RTC_SYS_CACHE_PATH` affects `kernel_cache` resolution above; `ROCFFT_RTC_CACHE_PATH` is recorded for visibility only. |
 | `triton.package_version` | `import triton; triton.__version__` (ROCm fork puts source commit into the version string) |
 | `fbgemm.package_version` | `import fbgemm_gpu; fbgemm_gpu.__version__` (commonly `null` -- FBGEMM is vendored inside PyTorch) |
 | `fbgemm.pytorch_use_fbgemm` / `fbgemm.pytorch_use_fbgemm_genai` | substring search in `torch.__config__.show()` for the `-DUSE_FBGEMM` and `-DUSE_FBGEMM_GENAI` defines. `False` is meaningful (built-without); `null` only when torch is absent. |
@@ -1092,7 +1196,7 @@ jq '.partial_reasons' /tmp/env.json
 # Force the no-rdhc fallback (rdhc isn't on PATH)
 PATH= aorta env probe -o /tmp/env_no_rdhc.json
 jq '.system_health' /tmp/env_no_rdhc.json    # null
-jq '.hipblaslt.commit' /tmp/env_no_rdhc.json # still populated
+jq '.hipblaslt.rocm_release_tweak' /tmp/env_no_rdhc.json # still populated
 
 # Compare across docker images (manual until `aorta env matrix` lands)
 docker run --rm <image-A> aorta env probe -o /workspace/env_a.json
@@ -1209,6 +1313,42 @@ jq '.hipblaslt | {rocm_release_tweak, package_version, lib_hash, kernel_db_revis
 jq '{rocblas, miopen, rccl}' /tmp/env.json
 ```
 
+### Is the installed kernel catalog (recipe book) the same on two hosts?
+
+```bash
+# Tensile menu identity (installed-library identity -- NOT the runtime
+# solution pick, which needs a trace).
+jq '.tensile_catalog | {status,
+  hipblaslt: .hipblaslt.menu.combined_content_hash,
+  rocblas:   .rocblas.menu.combined_content_hash}' /tmp/env.json
+
+# The 7e32d53eb1 trap: two hosts can report the SAME hipBLASLt commit
+# yet ship a different Tensile install. The shallow filename hash can
+# match while the per-file content hashes differ -- compare both.
+diff \
+  <(jq -S '.tensile_catalog.hipblaslt | {kernel_db_revision, menu: .menu.combined_content_hash, archs: .menu.gfx_arch_coverage}' good.json) \
+  <(jq -S '.tensile_catalog.hipblaslt | {kernel_db_revision, menu: .menu.combined_content_hash, archs: .menu.gfx_arch_coverage}' bad.json)
+
+# Localize WHICH Tensile logic file differs (per-file content hashes)
+diff \
+  <(jq -S '.tensile_catalog.hipblaslt.menu.files' good.json) \
+  <(jq -S '.tensile_catalog.hipblaslt.menu.files' bad.json)
+
+# MIOpen convolution db menu identity. Also surfaces which dir was read
+# (a MIOPEN_SYSTEM_DB_PATH override points at a different catalog).
+jq '.miopen_catalog | {status, db_dir, db_dir_source,
+  menu: .menu.combined_content_hash, archs: .menu.gfx_arch_coverage,
+  logic: .menu.logic_file_count}' /tmp/env.json
+
+# rocFFT optional AOT kernel cache -- usually absent (that's fine)
+jq '.rocfft_catalog | {status, present: .kernel_cache.present,
+  path: .kernel_cache.path, sha: .kernel_cache.sha256}' /tmp/env.json
+
+# Did a menu read cleanly, or couldn't we locate/parse it?
+jq '{tensile: .tensile_catalog.status, miopen: .miopen_catalog.menu.status,
+  rocfft: .rocfft_catalog.status}' /tmp/env.json
+```
+
 ### Diff two snapshots
 
 ```bash
@@ -1298,6 +1438,12 @@ jq '{
 * `aorta env matrix` (multi-docker fan-out)
 * `aorta env diff env_a.json env_b.json`
 * GPU kernel introspection (anything that runs HIP work)
+* **Runtime kernel solution-ID capture** (`381881` / `368xxx`):
+  enabling `HIPBLASLT_LOG_MASK` / `CHECK_NUMERICS`, parsing
+  `hipblaslt.log`, and `hipblaslt-bench` replay. The `*_catalog` blocks
+  capture only the *installed menu* (layer 1); which recipe the runtime
+  actually picks (layer 2) needs a workload and belongs to the runtime
+  follow-up.
 * Workload config (`AMP_DTYPE`, `MODEL_DTYPE`, ...) -- captured by
   `aorta run` in the trial result (Task B1), not by env probe
 
