@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Checkout AORTA repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ROCm/aorta
           ref : prosenj_gh_action
@@ -94,14 +94,14 @@ jobs:
           "
 
       - name: Upload sweep results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: gemm-sweep-results
           path: aorta/${{ steps.setup.outputs.sweep_dir }}
           retention-days: 30
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.10'
           cache: 'pip'
@@ -156,7 +156,7 @@ jobs:
           docker compose -f ${{ env.DOCKER_COMPOSE_FILE }} down
 
       - name: Upload analysis results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: gemm-analysis-results
           path: |
@@ -167,7 +167,7 @@ jobs:
 
 
       - name: Checkout aorta-report repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ROCm/aorta-report
           ref: main

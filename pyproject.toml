@@ -1,10 +1,14 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=64", "setuptools_scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aorta"
-version = "0.2.0"
+name = "amd-aorta"
+# The version is not hard-coded here: it is derived from git tags at build time
+# by setuptools_scm (see [tool.setuptools_scm]). ``dynamic`` tells setuptools the
+# version is supplied by the build backend, so there is a single source of truth
+# (the ``vX.Y.Z`` tag) that both released wheels and local/editable installs read.
+dynamic = ["version"]
 description = "PyTorch compute-communication overlap debugging toolkit with GPU hardware queue evaluation"
 readme = "README.md"
 license = {text = "MIT"}
@@ -47,8 +51,14 @@ aorta = "aorta.cli:main"
 # reserved argv config key is only injected by ``aorta probe``.
 [project.entry-points."aorta.workloads"]
 _subprocess = "aorta.workloads._subprocess:SubprocessWorkload"
+hrx = "aorta.workloads.hrx:HrxWorkload"
+hrx_perf = "aorta.workloads.hrx_perf:HrxPerfWorkload"
+inference = "aorta.workloads.inference:InferenceWorkload"
 llm_determinism = "aorta.workloads.llm_determinism:LlmDeterminismWorkload"
 race = "aorta.workloads.race:RaceWorkload"
+# Single-process GPU smoke test (no torchrun); ideal for emulated/CI runs.
+gpu_smoke = "aorta.workloads.gpu_smoke:GpuSmokeWorkload"
+training = "aorta.workloads.training:TrainingWorkload"
 
 [project.optional-dependencies]
 # For analysis/visualization scripts
@@ -75,7 +85,7 @@ hw-queue = [
 
 # For hw_queue_eval profiling features
 hw-queue-profiling = [
-    "aorta[hw-queue]",
+    "amd-aorta[hw-queue]",
     "matplotlib>=3.5.0",
     "seaborn>=0.12.0",
 ]
@@ -90,12 +100,19 @@ agent = [
 # (or sudo); no Python deps beyond the base.
 ebpf = []
 
-# Development dependencies
-dev = [
+# Test-only tooling (pytest + plugins). Kept separate from `dev` so the CI
+# test jobs can install a slim environment without the lint/type tooling.
+tests = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
     "pytest-timeout>=2.1.0",
     "pytest-xdist>=3.3.0",
+    "pytest-forked>=1.6.0",  # per-test process isolation for the CPU CI gate
+]
+
+# Development dependencies (tests + lint/type tooling)
+dev = [
+    "amd-aorta[tests]",
     "pre-commit>=3.0.0",
     "black>=23.0.0",
     "isort>=5.12.0",
@@ -105,12 +122,12 @@ dev = [
 
 # Full installation
 all = [
-    "aorta[analysis]",
-    "aorta[report]",
-    "aorta[hw-queue]",
-    "aorta[hw-queue-profiling]",
-    "aorta[agent]",
-    "aorta[dev]",
+    "amd-aorta[analysis]",
+    "amd-aorta[report]",
+    "amd-aorta[hw-queue]",
+    "amd-aorta[hw-queue-profiling]",
+    "amd-aorta[agent]",
+    "amd-aorta[dev]",
 ]
 
 [project.urls]
@@ -118,12 +135,53 @@ Homepage = "https://github.com/ROCm/aorta"
 Documentation = "https://github.com/ROCm/aorta#readme"
 Repository = "https://github.com/ROCm/aorta"
 
+[tool.setuptools_scm]
+# Single source of truth for the version: the ``vX.Y.Z`` git tags.
+#   * a checkout sitting exactly on a tag builds a clean ``X.Y.Z``;
+#   * a checkout ahead of the latest tag builds ``X.Y.(Z+1).devN+g<sha>`` so a
+#     local ``pip install .`` / ``pip install git+...`` always reflects the most
+#     recent release (plus how far past it the tree is), never a stale literal.
+# Only exact ``vMAJOR.MINOR.PATCH`` tags are matched (same shape as
+# ``scripts/bump_version.py``), so neither the rolling ``dev-wheels`` nightly tag
+# nor a stray ``v1`` / ``v1beta`` / ``v0.2.0rc1`` / ``v1.2.3.4`` tag can be
+# mistaken for a release. The ``--match`` glob is only a coarse first pass (glob
+# ``*`` also spans dots, so it alone still admits ``v0.2.0rc1`` and
+# ``v1.2.3.4``); ``--exclude`` drops any tag carrying a non-digit/non-dot
+# character or a fourth numeric segment, and ``tag_regex`` then anchors the
+# extracted version to exactly three numeric components with no leading zeros
+# (so it round-trips through the integer parsing in ``bump_version.py`` and the
+# release gate unchanged). A tree with no git
+# metadata (e.g. an unpacked sdist without .git) falls back to the literal below;
+# built sdists/wheels embed the resolved version in their metadata, so installing
+# from those still reports the correct version.
+tag_regex = "^v(?P<version>(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*))$"
+git_describe_command = [
+    "git",
+    "describe",
+    "--dirty",
+    "--tags",
+    "--long",
+    "--match",
+    "v[0-9]*.[0-9]*.[0-9]*",
+    "--exclude",
+    "v*[!0-9.]*",
+    "--exclude",
+    "v*.*.*.*",
+]
+fallback_version = "0.0.0+unknown"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["aorta*"]
 
 [tool.setuptools.package-data]
-aorta = ["py.typed", "ebpf/scripts/*.bt", "ebpf/scripts/PROVENANCE.md"]
+aorta = [
+    "py.typed",
+    "ebpf/scripts/*.bt",
+    "ebpf/scripts/PROVENANCE.md",
+    "workloads/hrx_kernels/*.cpp",
+    "workloads/hrx_kernels/README.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

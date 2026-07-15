@@ -1,0 +1,58 @@
+# Singleton TRAINING (FSDP) smoke on an emulated MI350X (mirage + rocjitsu).
+#
+# Same singleton contract as training-ddp-smoke-emulated.yaml: `training`
+# declares `min_world_size = 1`, so a one-rank run (WORLD_SIZE=1) is a valid
+# smoke under a single emulated GPU. It exercises the `parallelism: fsdp`
+# lifecycle + JSON schema, NOT a multi-rank FSDP performance signal (that needs
+# `mirage run --daemon --gpus-per-node N` + torchrun — a later phase). The
+# transformer topology is kept tiny for a fast rocjitsu run.
+#
+# Recommended (container — fast torch path):
+#
+#   export MIRAGE_BIN=/path/to/mirage
+#   ./scripts/emulation/run_mirage_container.sh training-fsdp-smoke
+#
+# Validate only (no GPUs / no mirage needed):
+#
+#   aorta triage run --recipe recipes/training-fsdp-smoke-emulated.yaml --dry-run
+#
+# Expected result: the cell PASSES.
+schema_version: 1
+
+ticket: EMU-TRAINING-FSDP-001
+workload: training
+
+trials: 1
+steps: 2
+
+workload_config:
+  parallelism: fsdp
+  seed: 1234
+  device: auto
+  dtype: float32
+  batch_size: 2
+  seq_len: 32
+  warmup_steps: 1
+
+  model:
+    kind: transformer
+    hidden_size: 128
+    num_layers: 2
+    num_heads: 4
+    ffn_size: 512
+    vocab_size: 1024
+
+  optimizer:
+    kind: adamw
+    lr: 0.0001
+    weight_decay: 0.01
+
+  checks:
+    fail_on_nan_loss: true
+    fail_on_nan_grad: true
+    fail_on_nonfinite_output: true
+
+cells:
+  - name: emulated-rocjitsu
+    mitigations: [none]
+    environment: emulated-rocjitsu

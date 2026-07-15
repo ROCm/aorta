@@ -7,6 +7,7 @@ shape), and the Tier-1 verdict rule.
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,70 @@ from aorta.workloads._subprocess import (
     CONFIG_KEY_PROBE_EXTRAS,
     CONFIG_KEY_SUBPROCESS_ARGV,
     SubprocessWorkload,
+    _coerce_disable_tokens,
+    _tier1_only_fallback_verdict,
 )
+
+# ---- Issue #230: classifier-crash fallback honours exec_failed ----------
+
+
+def test_fallback_verdict_exec_failed_resolves_to_error(tmp_path):
+    # When the full classifier crashes AND the command never launched,
+    # the Tier-1-only fallback must emit tier1:exec_failed -> error
+    # (not exit_nonzero -> fail) from the synthetic 127 exit code.
+    verdict, _ = _tier1_only_fallback_verdict(
+        exit_code=127,
+        timed_out=False,
+        trial_dir=tmp_path,
+        exec_failed=True,
+        classifier_exc=RuntimeError("boom"),
+    )
+    assert verdict.verdict == "error"
+    assert "tier1:exec_failed" in verdict.error_detectors_fired
+    assert "tier1:exit_nonzero" not in verdict.failure_detectors_fired
+
+
+def test_fallback_verdict_nonzero_exit_resolves_to_fail(tmp_path):
+    # A genuine non-zero child exit (launched) still resolves to fail.
+    verdict, _ = _tier1_only_fallback_verdict(
+        exit_code=1,
+        timed_out=False,
+        trial_dir=tmp_path,
+        exec_failed=False,
+        classifier_exc=RuntimeError("boom"),
+    )
+    assert verdict.verdict == "fail"
+    assert "tier1:exit_nonzero" in verdict.failure_detectors_fired
+
+
+# ---- Issue #229: disable-token payload coercion --------------------------
+
+
+def test_coerce_disable_tokens_none_is_empty():
+    assert _coerce_disable_tokens(None, "disable_detectors") == frozenset()
+
+
+def test_coerce_disable_tokens_accepts_sequence():
+    assert _coerce_disable_tokens(["tier2:hang", "tier3"], "disable_detectors") == frozenset(
+        {"tier2:hang", "tier3"}
+    )
+
+
+@pytest.mark.parametrize("bad", ["tier3", 5, {"a": 1}])
+def test_coerce_disable_tokens_rejects_non_sequence(bad):
+    # A bare string would otherwise iterate per-character into a set of
+    # letters; fail fast like the sibling tier3_vram_growth knob.
+    with pytest.raises(TypeError, match="disable_detectors"):
+        _coerce_disable_tokens(bad, "disable_detectors")
+
+
+@pytest.mark.parametrize("bad", [["tier3", 5], ("tier2:hang", None), [b"tier3"]])
+def test_coerce_disable_tokens_rejects_non_string_elements(bad):
+    # A non-string token would survive into the set and later crash
+    # sorted(disabled_detectors) (mixed types) or silently no-op against
+    # the string detector IDs -- reject per-entry, fail fast.
+    with pytest.raises(TypeError, match="must all be strings"):
+        _coerce_disable_tokens(bad, "disable_detectors")
 
 # ---- FR 1.17 (entry-point resolution) ------------------------------------
 
@@ -138,20 +202,105 @@ def test_env_file_failure_result_includes_env(tmp_path):
     wl.setup()
     wl.run()
     doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
-    assert doc["verdict"] == "fail"
+    # Issue #230: a rejected probe.env is an infra/config error (no valid
+    # observation), not a fail.
+    assert doc["verdict"] == "error"
     assert doc["failure_type"] == "env_file_validation_failed"
     assert doc["env"] == {"BAD_VALUE": "line1\nline2"}
+    # Schema parity with the normal probe path: the failure artifact carries
+    # the same detector/capture/tier-timing/vram keys (empty, but present) so
+    # downstream parsers never special-case env-file errors.
+    for key in ("warn_detectors_fired", "capture", "tier_durations_ms", "peak_vram_mib"):
+        assert key in doc, f"env-file failure result.json missing {key!r}"
+    assert doc["warn_detectors_fired"] == []
+    assert doc["capture"] == {}
+    assert doc["tier_durations_ms"] == {}
+    assert doc["peak_vram_mib"] is None
 
 
-def test_missing_executable_yields_fail(tmp_path):
-    """argv[0] not found surfaces as a Tier-1 fail with exit_code=127."""
+def test_missing_executable_yields_error(tmp_path):
+    """argv[0] not found surfaces as an ``error`` verdict (issue #230).
+
+    A command-not-found never launched, so it produced no valid
+    observation -- ``tier1:exec_failed`` -> ``error`` (not ``fail``). The
+    synthetic exit_code 127 is still recorded for the operator.
+    """
     wl = _make_workload(tmp_path, ["definitely-not-a-real-binary-9d8f7s6"])
     wl.setup()
     result = wl.run()
     doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
-    assert doc["verdict"] == "fail"
+    assert doc["verdict"] == "error"
     assert doc["exit_code"] == 127
+    assert "tier1:exec_failed" in doc["error_detectors_fired"]
+    assert doc["failure_detectors_fired"] == []
     assert result.passed is False
+
+
+@pytest.mark.parametrize(
+    "extras",
+    [
+        {"disable_detector_tiers": ["tier1"]},
+        {"disable_detectors": ["tier1:exit_nonzero"]},
+    ],
+)
+def test_disabled_tier1_does_not_pass_unlaunched_command(tmp_path, extras):
+    """A command that never launches must not pass even if Tier 1 is disabled.
+
+    Regression for oyazdanb's #234 review: honouring a Tier-1 disable on
+    the exec-failure path would let a command-not-found resolve to a green
+    verdict -- a run that did no real work yet looks like a pass. The
+    workload forces Tier 1 back on for the unlaunched path; the disable
+    still applies to launched trials (asserted in the sibling test).
+
+    With the three-way verdict (#230) the unlaunched path fires
+    ``tier1:exec_failed`` -> ``error`` (not ``exit_nonzero`` -> ``fail``),
+    so the guard now asserts a non-green ``error`` verdict.
+    """
+    wl = _make_workload(tmp_path, ["definitely-not-a-real-binary-9d8f7s6"], **extras)
+    wl.setup()
+    result = wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "error"
+    assert doc["exit_code"] == 127
+    assert "tier1:exec_failed" in doc["error_detectors_fired"]
+    assert "tier1:exit_nonzero" not in doc["failure_detectors_fired"]
+    assert result.passed is False
+    # Capture must echo the *effective* disabled set the classifier honoured,
+    # not the requested one -- else the artifact would claim tier1 was
+    # disabled while tier1:exit_nonzero shows as fired (Copilot #234 review).
+    capture = doc["capture"]
+    assert "tier1" not in capture.get("disabled_detector_tiers", [])
+    assert "tier1:exit_nonzero" not in capture.get("disabled_detectors", [])
+
+
+@pytest.mark.parametrize(
+    "extras",
+    [
+        {"disable_detector_tiers": ["tier1"]},
+        {"disable_detectors": ["tier1:exit_nonzero"]},
+    ],
+)
+def test_disabled_tier1_still_passes_launched_nonzero_exit(tmp_path, extras):
+    """The Tier-1 disable still applies on a launched trial.
+
+    Pins the lower bound of the unlaunched-path guard above: a child that
+    actually ran and exited non-zero is silenced by the disable as the
+    operator intended (the override is scoped to the exec-failure path).
+    """
+    wl = _make_workload(tmp_path, ["false"], **extras)  # launches, exits 1
+    wl.setup()
+    result = wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "pass"
+    assert "tier1:exit_nonzero" not in doc["failure_detectors_fired"]
+    assert result.passed is True
+    # On a launched trial the disable is honoured, so the effective set
+    # equals the requested set and is recorded in capture for audit.
+    capture = doc["capture"]
+    recorded = capture.get("disabled_detector_tiers", []) + capture.get(
+        "disabled_detectors", []
+    )
+    assert recorded == list(extras.values())[0]
 
 
 def test_exec_time_failure_flags_main_work_not_started(tmp_path):
@@ -204,10 +353,47 @@ def test_successful_trial_flags_main_work_started(tmp_path):
     assert result.failure_details[0]["type"] == "subprocess_nonzero_exit"
 
 
-def test_non_executable_script_yields_fail(tmp_path):
+def test_failure_detail_type_is_detector_failure_on_clean_exit(tmp_path):
+    """Issue #229: a trial that exits 0 but is failed by a non-Tier-1
+    detector (here a Tier-4 NaN log pattern) must NOT be labelled
+    ``subprocess_nonzero_exit`` -- that contradicts ``exit_code == 0``.
+
+    This is the exact minimal repro from the issue body. The failure came
+    purely from the classifier, so the type is ``detector_failure``.
+    """
+    wl = _make_workload(tmp_path, ["bash", "-c", "echo 'loss is NaN'; exit 0"])
+    wl.setup()
+    result = wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    # The classifier failed the trial on Tier 4, despite a clean exit.
+    assert doc["exit_code"] == 0
+    assert doc["verdict"] == "fail"
+    assert "tier4:nan_signature" in doc["failure_detectors_fired"]
+    # The failure-detail type now agrees with the actual exit state.
+    assert result.failure_details[0]["exit_code"] == 0
+    assert result.failure_details[0]["type"] == "detector_failure", (
+        "failure_details[].type must not say 'subprocess_nonzero_exit' when "
+        "exit_code == 0 (issue #229)"
+    )
+
+
+def test_failure_detail_type_is_timeout_when_timed_out(tmp_path):
+    """Issue #229: a timed-out trial reports ``subprocess_timeout`` rather
+    than ``subprocess_nonzero_exit`` -- the child did not voluntarily exit
+    with a non-zero status; it was killed by the per-trial timeout."""
+    wl = _make_workload(tmp_path, ["sleep", "30"], timeout_per_trial=0.5)
+    wl.setup()
+    result = wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["timed_out"] is True
+    assert result.failure_details[0]["timed_out"] is True
+    assert result.failure_details[0]["type"] == "subprocess_timeout"
+
+
+def test_non_executable_script_yields_error(tmp_path):
     """A user command pointing at a file without the +x bit must land
-    as a Tier-1 fail (exit_code=126), NOT escape to the dispatcher as
-    ``infrastructure_failed``.
+    as an ``error`` verdict (exit_code=126; issue #230), NOT escape to
+    the dispatcher as ``infrastructure_failed``.
 
     Regression for PR #194 review: previously only ``FileNotFoundError``
     was caught. ``PermissionError`` (EACCES, raised by ``Popen`` when
@@ -227,8 +413,9 @@ def test_non_executable_script_yields_fail(tmp_path):
         "captured as a Tier-1 fail (regression of PR #194 review fix)"
     )
     doc = json.loads(result_path.read_text(encoding="utf-8"))
-    assert doc["verdict"] == "fail"
+    assert doc["verdict"] == "error"
     assert doc["exit_code"] == 126
+    assert "tier1:exec_failed" in doc["error_detectors_fired"]
     assert result.passed is False
     # stderr.log should carry the diagnostic so the operator knows
     # which exec-time error fired.
@@ -236,11 +423,11 @@ def test_non_executable_script_yields_fail(tmp_path):
     assert "Permission" in stderr_text or "permitted" in stderr_text.lower()
 
 
-def test_popen_oserror_yields_fail(tmp_path, monkeypatch):
+def test_popen_oserror_yields_error(tmp_path, monkeypatch):
     """A generic ``OSError`` from ``Popen`` (e.g. ENOEXEC "Exec format
-    error" for a shebang-less script) also lands as a Tier-1 fail
-    with the artifact tree intact, rather than escaping to the
-    dispatcher.
+    error" for a shebang-less script) also lands as an ``error`` verdict
+    (issue #230) with the artifact tree intact, rather than escaping to
+    the dispatcher.
 
     Regression for PR #194 review: only ``FileNotFoundError`` and
     ``PermissionError`` were named explicitly in the previous handler;
@@ -260,9 +447,10 @@ def test_popen_oserror_yields_fail(tmp_path, monkeypatch):
         "result.json missing: bare OSError escaped instead of being " "captured as a Tier-1 fail"
     )
     doc = json.loads(result_path.read_text(encoding="utf-8"))
-    assert doc["verdict"] == "fail"
+    assert doc["verdict"] == "error"
     # Exit code falls back to 1 for non-{FileNotFound,Permission} OSError.
     assert doc["exit_code"] == 1
+    assert "tier1:exec_failed" in doc["error_detectors_fired"]
     assert result.passed is False
     stderr_text = (tmp_path / "trial_0" / "stderr.log").read_text(encoding="utf-8")
     assert "Exec format error" in stderr_text
@@ -284,12 +472,26 @@ def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
     """
     import subprocess as _subprocess
 
+    from aorta.workloads import _subprocess as workload_mod
+
+    # The amd-smi pre/post snapshots in run() shell out via subprocess.run
+    # (which uses ``with Popen(...)``). Neutralise the Tier-3 poll so the
+    # global Popen patch below only governs the workload's own child launch
+    # -- the fake Popen has no context-manager protocol.
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", lambda _state: None)
+
     real_popen = _subprocess.Popen
 
     class _RacingPopen:
         def __init__(self, *args, **kwargs):
             self._real = real_popen(
-                ["true"], **{k: v for k, v in kwargs.items() if k in ("stdout", "stderr", "env")}
+                ["true"],
+                start_new_session=True,
+                **{
+                    k: v
+                    for k, v in kwargs.items()
+                    if k in ("stdout", "stderr", "env")
+                },
             )
             self.pid = self._real.pid
             self._wait_calls = 0
@@ -300,10 +502,12 @@ def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
                 # First ``proc.wait(timeout=...)`` -- pretend the
                 # child is still running so the timeout branch fires.
                 raise _subprocess.TimeoutExpired(cmd="true", timeout=timeout)
-            # Second ``proc.wait()`` after kill() -- child is gone.
+            # Second ``proc.wait()`` inside the teardown -- child is gone.
             raise ProcessLookupError(3, "No such process")
 
-        def kill(self):
+        def send_signal(self, sig):
+            # The teardown fallback path (when the process group is gone)
+            # signals the direct child; the child already exited -> ESRCH.
             raise ProcessLookupError(3, "No such process")
 
     monkeypatch.setattr(_subprocess, "Popen", _RacingPopen)
@@ -314,10 +518,276 @@ def test_timeout_kill_race_does_not_crash(tmp_path, monkeypatch):
     # proc.kill() would propagate ProcessLookupError out of run().
     result = wl.run()
     doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
-    assert doc["verdict"] == "fail"
+    # Issue #230: a timeout with no recognised hang is an ``error`` (the
+    # trial never produced a valid observation), not a ``fail``. A timeout
+    # the hang monitor DOES latch co-fires tier2:hang and stays ``fail``
+    # (see test_timed_out_keeps_latched_hang_flag).
+    assert doc["verdict"] == "error"
+    assert "tier1:timeout" in doc["error_detectors_fired"]
     assert doc["timed_out"] is True
     assert doc["exit_code"] == -1
     assert result.passed is False
+
+
+# ---- #220 (orphaned child teardown on timeout / interrupt) ---------------
+
+
+def test_child_started_in_new_session(tmp_path, monkeypatch):
+    """The child must lead its own session so the whole tree is reapable.
+
+    Without ``start_new_session=True`` a ``sudo -> bash -> docker run -> python3``
+    tree cannot be torn down via ``os.killpg`` and survives an interrupted /
+    timed-out trial, keeping its GPUs pinned (#220).
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    captured: dict = {}
+    real_popen = workload_mod.subprocess.Popen
+
+    def _spy_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(workload_mod.subprocess, "Popen", _spy_popen)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    wl.run()
+    assert captured.get("start_new_session") is True
+
+
+def test_terminate_process_tree_escalates_term_then_kill(monkeypatch):
+    """SIGTERM first, then SIGKILL after the grace period, on the group."""
+    from aorta.workloads import _subprocess as workload_mod
+
+    signals: list[int] = []
+    fake_pgid = 424242
+
+    monkeypatch.setattr(workload_mod.os, "getpgid", lambda pid: fake_pgid)
+    # Ensure the self-group guard does not trip (pgid != our group).
+    monkeypatch.setattr(workload_mod.os, "getpgrp", lambda: fake_pgid + 1)
+    monkeypatch.setattr(
+        workload_mod.os, "killpg", lambda pgid, sig: signals.append(sig)
+    )
+
+    class _Stubborn:
+        pid = 777
+
+        def __init__(self):
+            self._waits = 0
+
+        def wait(self, timeout=None):
+            self._waits += 1
+            if self._waits == 1:
+                # Ignored SIGTERM -> force the SIGKILL escalation.
+                raise workload_mod.subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+            return -9
+
+    workload_mod._terminate_process_tree(_Stubborn(), grace_sec=0.01)
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_terminate_process_tree_refuses_own_group(monkeypatch):
+    """Safety net: never signal the aorta process's own group via killpg."""
+    from aorta.workloads import _subprocess as workload_mod
+
+    killpg_calls: list = []
+    sent: list = []
+    our_group = 555
+
+    monkeypatch.setattr(workload_mod.os, "getpgid", lambda pid: our_group)
+    monkeypatch.setattr(workload_mod.os, "getpgrp", lambda: our_group)
+    monkeypatch.setattr(
+        workload_mod.os, "killpg", lambda pgid, sig: killpg_calls.append(sig)
+    )
+
+    class _Child:
+        pid = 888
+
+        def send_signal(self, sig):
+            sent.append(sig)
+
+        def wait(self, timeout=None):
+            return 0
+
+    workload_mod._terminate_process_tree(_Child(), grace_sec=0.01)
+    assert killpg_calls == [], "must not killpg our own process group"
+    assert sent == [signal.SIGTERM], "must fall back to signalling the child"
+
+
+def test_terminate_process_tree_warns_on_non_esrch_killpg(monkeypatch, caplog):
+    """A non-ESRCH killpg failure (e.g. EPERM) must be surfaced, not swallowed.
+
+    The expected ESRCH race stays silent, but an EPERM means the group could
+    not be torn down and the tree may leak (#220). The operator needs that
+    visibility, and teardown still falls back to signalling the direct child.
+    """
+    import logging
+
+    from aorta.workloads import _subprocess as workload_mod
+
+    fake_pgid = 626262
+    sent: list = []
+
+    monkeypatch.setattr(workload_mod.os, "getpgid", lambda pid: fake_pgid)
+    monkeypatch.setattr(workload_mod.os, "getpgrp", lambda: fake_pgid + 1)
+
+    def _eperm_killpg(pgid, sig):
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(workload_mod.os, "killpg", _eperm_killpg)
+
+    class _Child:
+        pid = 999
+
+        def send_signal(self, sig):
+            sent.append(sig)
+
+        def wait(self, timeout=None):
+            return 0
+
+    with caplog.at_level(logging.WARNING, logger=workload_mod.log.name):
+        workload_mod._terminate_process_tree(_Child(), grace_sec=0.01)
+
+    assert any("killpg" in r.message for r in caplog.records), (
+        "non-ESRCH killpg failure must be logged at WARNING"
+    )
+    assert sent == [signal.SIGTERM], "must still fall back to the direct child"
+
+
+def test_terminate_process_tree_escalates_to_kill_on_interrupt(monkeypatch):
+    """A Ctrl-C during the SIGTERM grace wait must still SIGKILL, then re-raise.
+
+    Regression for the #220 follow-up: if ``KeyboardInterrupt`` propagated out
+    of the first ``proc.wait()`` the function would skip the SIGKILL
+    escalation and re-orphan a SIGTERM-ignoring group (e.g. a stubborn
+    ``docker run`` client). It must force-kill the group before propagating.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    signals: list[int] = []
+    fake_pgid = 313131
+
+    monkeypatch.setattr(workload_mod.os, "getpgid", lambda pid: fake_pgid)
+    monkeypatch.setattr(workload_mod.os, "getpgrp", lambda: fake_pgid + 1)
+    monkeypatch.setattr(
+        workload_mod.os, "killpg", lambda pgid, sig: signals.append(sig)
+    )
+
+    class _InterruptingChild:
+        pid = 999
+
+        def __init__(self):
+            self._waits = 0
+
+        def wait(self, timeout=None):
+            self._waits += 1
+            if self._waits == 1:
+                # Operator hits Ctrl-C again while we wait out the grace.
+                raise KeyboardInterrupt()
+            return -9
+
+    with pytest.raises(KeyboardInterrupt):
+        workload_mod._terminate_process_tree(_InterruptingChild(), grace_sec=0.01)
+    assert signals == [signal.SIGTERM, signal.SIGKILL], (
+        "interrupt during grace must still escalate to SIGKILL before re-raising"
+    )
+
+
+def test_keyboard_interrupt_reaps_tree_and_reraises(tmp_path, monkeypatch):
+    """Ctrl-C during a trial must reap the child tree, then re-raise.
+
+    Regression for #220: an interrupted probe previously left the wrapped
+    child tree running. The workload must signal the group and propagate the
+    ``KeyboardInterrupt`` so the run aborts as the operator intended.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    real_popen = workload_mod.subprocess.Popen
+    torn_down: list = []
+
+    class _InterruptingPopen:
+        def __init__(self, *args, **kwargs):
+            self._real = real_popen(
+                ["true"],
+                start_new_session=True,
+                **{
+                    k: v
+                    for k, v in kwargs.items()
+                    if k in ("stdout", "stderr", "env")
+                },
+            )
+            self.pid = self._real.pid
+
+        def wait(self, timeout=None):
+            raise KeyboardInterrupt()
+
+    def _spy_teardown(proc, grace_sec=workload_mod._TERMINATE_GRACE_SEC):
+        torn_down.append(proc)
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", lambda _state: None)
+    monkeypatch.setattr(workload_mod.subprocess, "Popen", _InterruptingPopen)
+    monkeypatch.setattr(workload_mod, "_terminate_process_tree", _spy_teardown)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    with pytest.raises(KeyboardInterrupt):
+        wl.run()
+    assert len(torn_down) == 1, "child tree must be torn down on interrupt"
+
+
+def test_keyboard_interrupt_during_monitor_start_reaps_tree(tmp_path, monkeypatch):
+    """Ctrl-C during HangMonitor.start() (before proc.wait) must still reap.
+
+    Regression for the #222 follow-up: the monitor wiring + start() now live
+    in the same try as proc.wait(), so an interrupt landing between Popen and
+    the wait reaches the ``except KeyboardInterrupt`` teardown instead of
+    orphaning the child tree.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    real_popen = workload_mod.subprocess.Popen
+    torn_down: list = []
+
+    class _OkPopen:
+        def __init__(self, *args, **kwargs):
+            self._real = real_popen(
+                ["true"],
+                start_new_session=True,
+                **{
+                    k: v
+                    for k, v in kwargs.items()
+                    if k in ("stdout", "stderr", "env")
+                },
+            )
+            self.pid = self._real.pid
+
+        def wait(self, timeout=None):  # should never be reached
+            return self._real.wait(timeout=timeout)
+
+    class _InterruptingMonitor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise KeyboardInterrupt()
+
+        def stop(self):
+            pass
+
+    def _spy_teardown(proc, grace_sec=workload_mod._TERMINATE_GRACE_SEC):
+        torn_down.append(proc)
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", lambda _state: None)
+    monkeypatch.setattr(workload_mod.subprocess, "Popen", _OkPopen)
+    monkeypatch.setattr(workload_mod, "HangMonitor", _InterruptingMonitor)
+    monkeypatch.setattr(workload_mod, "_terminate_process_tree", _spy_teardown)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    with pytest.raises(KeyboardInterrupt):
+        wl.run()
+    assert len(torn_down) == 1, "tree must be reaped even if Ctrl-C precedes proc.wait()"
 
 
 # ---- FR 2.9 (Phase 2 result.json shape) ----------------------------------
@@ -413,6 +883,102 @@ def test_tier3_actually_runs_per_trial(tmp_path, monkeypatch):
         "Tier 3 vram-growth detector did not fire even though the workload "
         "supplied pre/post snapshots crossing the growth threshold; the "
         "SubprocessWorkload Tier-3 wiring is silently disabled"
+    )
+
+
+def test_disable_tier3_skips_probes(tmp_path, monkeypatch):
+    """Issue #229 review: disabling the ``tier3`` tier must skip the
+    side-effecting amd-smi / dmesg probes in the workload, not merely
+    drop their verdict contribution. Spy on both and assert neither runs.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    calls = {"poll": 0, "dmesg": 0}
+
+    def _spy_poll(_state):
+        calls["poll"] += 1
+        return None
+
+    def _spy_dmesg(_state, **_kw):
+        calls["dmesg"] += 1
+        return []
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", _spy_poll)
+    monkeypatch.setattr(workload_mod, "scan_dmesg", _spy_dmesg)
+
+    wl = _make_workload(tmp_path, ["true"], disable_detector_tiers=["tier3"])
+    wl.setup()
+    wl.run()
+    assert calls == {"poll": 0, "dmesg": 0}, (
+        "disabling tier3 still ran the amd-smi/dmesg probes; the knob only "
+        "filtered the verdict instead of skipping the collection"
+    )
+
+
+def test_tier3_probes_run_when_not_disabled(tmp_path, monkeypatch):
+    # Counterpart to the disable test: with tier3 active the probes run.
+    # Spy on BOTH probes so the test stays hermetic -- the real scan_dmesg()
+    # shells out to `dmesg` (host-permission dependent, flaky/slow).
+    from aorta.workloads import _subprocess as workload_mod
+
+    calls = {"poll": 0, "dmesg": 0}
+
+    def _spy_poll(_state):
+        calls["poll"] += 1
+        return None
+
+    def _spy_dmesg(_state, **_kw):
+        calls["dmesg"] += 1
+        return []
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", _spy_poll)
+    monkeypatch.setattr(workload_mod, "scan_dmesg", _spy_dmesg)
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    wl.run()
+    assert calls["poll"] >= 1
+    assert calls["dmesg"] >= 1
+
+
+def test_tier3_probes_skipped_when_not_launched(tmp_path, monkeypatch):
+    """Copilot #234 review: an exec-time Popen failure (the subprocess
+    never launched) must skip the Tier-3 *post*-snapshot + dmesg scan.
+
+    A command-not-found trial did no GPU work, so running those probes only
+    adds overhead / permission noise and risks misattributing an unrelated
+    host kernel/GPU event to a trial that never ran. The pre-snapshot still
+    fires once -- it happens before the Popen attempt, so ``launched`` is
+    not yet known -- but the post-launch collection is gated on ``launched``.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    calls = {"poll": 0, "dmesg": 0}
+
+    def _spy_poll(_state):
+        calls["poll"] += 1
+        return None
+
+    def _spy_dmesg(_state, **_kw):
+        calls["dmesg"] += 1
+        return []
+
+    monkeypatch.setattr(workload_mod, "poll_amd_smi", _spy_poll)
+    monkeypatch.setattr(workload_mod, "scan_dmesg", _spy_dmesg)
+
+    # Tier 3 stays enabled: the gate under test is the unlaunched flag, not
+    # an operator disable (covered by test_disable_tier3_skips_probes).
+    wl = _make_workload(tmp_path, ["definitely-not-a-real-binary-9d8f7s6"])
+    wl.setup()
+    wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["exit_code"] == 127  # exec-time (ENOENT) failure path
+    assert calls["poll"] == 1, (
+        "expected only the pre-snapshot to run; the post-snapshot must be "
+        "skipped when the subprocess never launched"
+    )
+    assert calls["dmesg"] == 0, (
+        "scan_dmesg ran for a subprocess that never launched; an unrelated "
+        "kernel event could be misattributed to a command-not-found trial"
     )
 
 
@@ -528,6 +1094,62 @@ def test_classifier_crash_still_writes_result_json(tmp_path, monkeypatch):
     assert "synthetic classifier crash" in doc["capture"]["classifier_error"]
     # The workload result still reports the failure (not a hang) so
     # the dispatcher records a failed trial deterministically.
+    assert result.passed is False
+
+
+def test_classifier_crash_fallback_honours_tier1_disable(tmp_path, monkeypatch):
+    """The Tier-1-only crash fallback must honour the disable knob too.
+
+    Bugbot #234 follow-up: a launched trial with Tier 1 silenced should
+    stay ``pass`` even when ``classify_trial`` crashes -- the fallback
+    applies the same disabled set, so a disabled ``tier1:exit_nonzero``
+    is not re-fired behind the operator's back.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    def _exploding_classify(_ctx):
+        raise RuntimeError("synthetic classifier crash")
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _exploding_classify)
+    wl = _make_workload(tmp_path, ["false"], disable_detectors=["tier1:exit_nonzero"])
+    wl.setup()
+    result = wl.run()
+
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "pass"
+    assert "tier1:exit_nonzero" not in doc["failure_detectors_fired"]
+    assert "classifier_error" in doc["capture"]
+    assert result.passed is True
+
+
+def test_classifier_crash_fallback_still_fails_unlaunched_with_tier1_disabled(
+    tmp_path, monkeypatch
+):
+    """A command that never launches must not pass in the crash fallback too.
+
+    The exec-failure path forces Tier 1 back on (the ``effective_*`` set),
+    and that same set feeds the fallback, so a command-not-found can't
+    resolve green even when Tier 1 is disabled and the classifier crashed.
+    With the three-way verdict (#230) the fallback fires
+    ``tier1:exec_failed`` -> ``error`` for the unlaunched path.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    def _exploding_classify(_ctx):
+        raise RuntimeError("synthetic classifier crash")
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _exploding_classify)
+    wl = _make_workload(
+        tmp_path,
+        ["definitely-not-a-real-binary-9d8f7s6"],
+        disable_detector_tiers=["tier1"],
+    )
+    wl.setup()
+    result = wl.run()
+
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "error"
+    assert "tier1:exec_failed" in doc["error_detectors_fired"]
     assert result.passed is False
 
 
@@ -653,3 +1275,129 @@ def test_read_log_text_uses_replace_not_backslashreplace(tmp_path):
         "backslashreplace and a binary-heavy log can quadruple the "
         "regex-input size, defeating the cap."
     )
+
+
+# ---- Latched-hang reconciliation against exit (false-positive fix) -------
+
+
+def _force_latched_hang(monkeypatch):
+    """Replace ``HangMonitor`` with a stub whose ``hang_detected`` is True.
+
+    The real monitor's stdout/io legs are blind to work delegated to a
+    child process tree (``sudo`` -> ``bash`` -> ``docker run`` ->
+    container -> ``python3``): the wrapper goes silent and does almost
+    no I/O of its own, so the monitor latches ``hang_detected`` on a
+    perfectly healthy run. This stub reproduces that latch
+    deterministically -- no real subprocess hang, no /proc polling, no
+    amd-smi -- so the reconciliation logic in ``run()`` can be pinned.
+    """
+    from aorta.workloads import _subprocess as workload_mod
+
+    real_monitor = workload_mod.HangMonitor
+
+    class _AlwaysHangMonitor(real_monitor):  # type: ignore[misc, valid-type]
+        def start(self) -> None:
+            self.hang_detected = True
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(workload_mod, "HangMonitor", _AlwaysHangMonitor)
+
+
+def _spy_classify_hang(monkeypatch, captured: dict):
+    """Spy on ``classify_trial`` to capture the ``hang_detected`` it sees."""
+    from aorta.workloads import _subprocess as workload_mod
+
+    real_classify = workload_mod.classify_trial
+
+    def _spy(ctx):
+        captured["hang_detected"] = ctx.hang_detected
+        return real_classify(ctx)
+
+    monkeypatch.setattr(workload_mod, "classify_trial", _spy)
+
+
+def test_clean_exit_discards_latched_hang_flag(tmp_path, monkeypatch):
+    """A wrapped command that exits 0 within the timeout is NEVER
+    classified ``tier2:hang``, even when the in-flight monitor latched
+    ``hang_detected`` (issue: false-positive ``tier2:hang`` on
+    docker/sudo-delegated workloads). A voluntary exit 0 within the
+    timeout cannot have been hung, so the advisory flag is dropped
+    before it reaches the classifier.
+    """
+    captured: dict = {}
+    _force_latched_hang(monkeypatch)
+    _spy_classify_hang(monkeypatch, captured)
+
+    wl = _make_workload(tmp_path, ["true"])
+    wl.setup()
+    result = wl.run()
+
+    assert captured["hang_detected"] is False, (
+        "latched hang flag reached classify_trial despite a clean exit 0 "
+        "within the timeout -- the reconciliation gate is missing"
+    )
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "pass"
+    assert doc["exit_code"] == 0
+    assert doc["timed_out"] is False
+    assert "tier2:hang" not in doc["failure_detectors_fired"]
+    # Durable breadcrumb: the verdict is a clean pass, but the discarded
+    # latch is recorded for the #224 follow-up to study.
+    assert doc["capture"].get("tier2_hang_latched_but_reconciled") is True
+    assert result.passed is True
+
+
+def test_nonzero_exit_keeps_latched_hang_flag(tmp_path, monkeypatch):
+    """A latched hang flag survives when the process exits non-zero.
+
+    Reconciliation only discards the flag for a *clean* exit
+    (``exit_code == 0 and not timed_out``). A non-zero exit is a real
+    failure, so the hang signal is preserved and ``tier2:hang`` still
+    surfaces -- the fix must not blanket-suppress the detector.
+    """
+    captured: dict = {}
+    _force_latched_hang(monkeypatch)
+    _spy_classify_hang(monkeypatch, captured)
+
+    wl = _make_workload(tmp_path, ["false"])
+    wl.setup()
+    result = wl.run()
+
+    assert captured["hang_detected"] is True, (
+        "the reconciliation gate over-reached: it discarded the latched "
+        "hang flag on a non-zero exit, where the signal is still meaningful"
+    )
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["verdict"] == "fail"
+    assert doc["exit_code"] != 0
+    assert "tier2:hang" in doc["failure_detectors_fired"]
+    # No reconciliation happened -> no breadcrumb on a preserved-flag fail.
+    assert "tier2_hang_latched_but_reconciled" not in doc["capture"]
+    assert result.passed is False
+
+
+def test_timed_out_keeps_latched_hang_flag(tmp_path, monkeypatch):
+    """A latched hang flag survives a genuine timeout.
+
+    When ``proc.wait(timeout=...)`` fires, the process is killed
+    (``exit_code == -1``, ``timed_out == True``) -- a real hang. The
+    reconciliation gate keys off ``exit_code == 0 and not timed_out``,
+    so a timed-out trial keeps ``tier2:hang``.
+    """
+    captured: dict = {}
+    _force_latched_hang(monkeypatch)
+    _spy_classify_hang(monkeypatch, captured)
+
+    wl = _make_workload(tmp_path, ["sleep", "30"], timeout_per_trial=0.2)
+    wl.setup()
+    result = wl.run()
+
+    assert captured["hang_detected"] is True
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc["timed_out"] is True
+    assert doc["verdict"] == "fail"
+    assert "tier2:hang" in doc["failure_detectors_fired"]
+    assert "tier2_hang_latched_but_reconciled" not in doc["capture"]
+    assert result.passed is False

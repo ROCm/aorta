@@ -58,9 +58,14 @@ _TRIAL_RESULT_GLOB = "*/trial_*/result.json"
 
 
 def _aorta_version() -> str:
-    """Return the installed ``aorta`` package version (best-effort)."""
+    """Return the installed ``amd-aorta`` package version (best-effort).
+
+    Queries the canonical *distribution* name (``amd-aorta``), not the import
+    package name (``aorta``), so it resolves from installed dist metadata rather
+    than downgrading to ``"unknown"`` on a real install.
+    """
     try:
-        return _pkg_version("aorta")
+        return _pkg_version("amd-aorta")
     except PackageNotFoundError:
         return "unknown"
     except Exception:  # pragma: no cover - defensive

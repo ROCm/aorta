@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -13,7 +14,7 @@ import yaml
 import aorta.triage.runner as runner
 from aorta.instrumentation.environment import EnvSnapshot
 from aorta.triage.output import NO_TICKET_SLUG, resolve_run_dir, safe_slug
-from aorta.triage.recipe import Recipe, build_recipe_from_flags
+from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, build_recipe_from_flags
 
 # ---- Fixtures -------------------------------------------------------------
 
@@ -214,6 +215,23 @@ def test_resolve_run_dir_rejects_unknown_layout(tmp_path):
         resolve_run_dir(tmp_path, r, layout="")  # type: ignore[arg-type]
 
 
+def test_cell_directory_rejects_unknown_layout():
+    """Regression for PR #241 review: ``_cell_directory`` shares the
+    ``layout`` contract with ``resolve_run_dir`` but used to treat it as a
+    free-form str, so a typo (``"flatresume"``) silently rendered a
+    triage-style ``cells/<slug>/`` link for a probe run. It must reject
+    unknown values too.
+    """
+    from aorta.triage.output import _cell_directory
+
+    assert _cell_directory("a-b", "flat_resume") == "a-b/"
+    assert _cell_directory("a-b", "timestamped") == "cells/a-b/"
+    with pytest.raises(ValueError, match="layout must be"):
+        _cell_directory("a-b", "flatresume")
+    with pytest.raises(ValueError, match="layout must be"):
+        _cell_directory("a-b", "")
+
+
 def test_default_layout_is_byte_equivalent_to_timestamped(tmp_path):
     """Existing callers see no behaviour change -- the default is 'timestamped'."""
     r = _simple_recipe(ticket="PROJ-1")
@@ -285,10 +303,218 @@ def test_isolated_env_writes_placeholder_not_runner_snapshot(
     assert env_json.exists()
     placeholder = json.loads(env_json.read_text())
     assert placeholder["snapshot_captured"] is False
-    assert "B1" in placeholder["skip_reason"]
+    assert "_probe_main" in placeholder["skip_reason"]
     assert placeholder["descriptor"]["docker"] == "rocm/pytorch:nightly"
     md = (run_dir / "matrix.md").read_text()
-    assert "skipped" in md.lower()
+    assert "no in-container snapshot captured" in md.lower()
+
+
+def test_isolated_env_promotes_in_container_snapshot(
+    tmp_path, patched_env, monkeypatch
+):
+    """A wrapper-written in-container env.json is promoted over the placeholder.
+
+    Simulates the ``_aorta_env_probe`` contract: the runner hands the cell
+    ``{"src", "out"}`` via ``RunRequest.env_probe``; a real wrapper would
+    bind-mount ``src`` and write a snapshot to ``out`` from inside the
+    container. Here the stubbed ``run_trials`` plays the wrapper by writing
+    a real snapshot to the requested ``out`` path.
+    """
+
+    def fake_run_trials(request):
+        assert request.env_probe is not None
+        src = Path(request.env_probe["src"])
+        assert src.is_absolute() and src.is_dir()
+        out = Path(request.env_probe["out"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps({"schema_version": "1.7", "python_version": "3.12-in-container"}),
+            encoding="utf-8",
+        )
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    snap = json.loads(env_json.read_text())
+    # Promoted, not the placeholder.
+    assert "snapshot_captured" not in snap
+    assert snap["python_version"] == "3.12-in-container"
+
+
+def test_isolated_env_probe_retries_on_next_cell(tmp_path, patched_env, monkeypatch):
+    """If the first cell's container never writes a snapshot, the next cell retries.
+
+    The env is probed once successfully across the two cells that share it;
+    the first cell's ``run_trials`` writes nothing (container failed to
+    start), the second writes the real snapshot.
+    """
+    calls = {"n": 0}
+
+    def fake_run_trials(request):
+        calls["n"] += 1
+        # Only the second cell (same env) produces the snapshot.
+        if calls["n"] == 2 and request.env_probe is not None:
+            out = Path(request.env_probe["out"])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(
+                json.dumps({"schema_version": "1.7", "python_version": "late"}),
+                encoding="utf-8",
+            )
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none,tf32_off",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    snap = json.loads(env_json.read_text())
+    assert snap["python_version"] == "late"
+
+
+def test_isolated_env_rejects_non_object_snapshot(tmp_path, patched_env, monkeypatch):
+    """A syntactically-valid but non-object env.json is not promoted.
+
+    The wrapper writes a JSON array (wrong shape); the runner must reject it
+    and fall back to the placeholder rather than hand downstream a bad shape.
+    """
+
+    def fake_run_trials(request):
+        out = Path(request.env_probe["out"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["snapshot_captured"] is False
+
+
+def test_isolated_env_rejects_snapshot_without_schema_version(
+    tmp_path, patched_env, monkeypatch
+):
+    """A JSON object lacking schema_version is not a valid snapshot.
+
+    Guards against a partial/buggy wrapper write (e.g. ``{}`` or a
+    half-populated dict) being promoted as if it were a real EnvSnapshot.
+    """
+
+    def fake_run_trials(request):
+        out = Path(request.env_probe["out"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"python_version": "3.12"}), encoding="utf-8")
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["snapshot_captured"] is False
+
+
+def test_isolated_env_rejects_symlink_snapshot_and_preserves_target(
+    tmp_path, patched_env, monkeypatch
+):
+    """A container-controlled env.json symlink must not be read or overwritten."""
+    victim = tmp_path / "host_victim.txt"
+    victim.write_text("do not clobber", encoding="utf-8")
+
+    def fake_run_trials(request):
+        out = Path(request.env_probe["out"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            out.symlink_to(victim)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"symlink creation unavailable on this platform: {exc}")
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setattr(runner, "run_trials", fake_run_trials)
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+
+    assert not env_json.is_symlink()
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["snapshot_captured"] is False
+    assert victim.read_text(encoding="utf-8") == "do not clobber"
+
+    doc = json.loads((run_dir / "matrix.json").read_text())
+    assert any("symlink" in warning.lower() for warning in doc["warnings"])
+
+
+def test_isolated_env_snapshot_rejects_symlink_at_open_time(
+    tmp_path, monkeypatch
+):
+    """O_NOFOLLOW closes the race between checking and opening env.json."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("os.O_NOFOLLOW is unavailable on this platform")
+
+    victim = tmp_path / "host_victim.json"
+    victim.write_text(json.dumps({"schema_version": "1.7"}), encoding="utf-8")
+    link = tmp_path / "env.json"
+    try:
+        link.symlink_to(victim)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation unavailable on this platform: {exc}")
+
+    # Simulate the old check-then-read race: the pre-read symlink check sees
+    # "not a symlink", but the open-time no-follow guard must still reject it.
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+
+    warnings: list[str] = []
+    assert runner._is_real_env_snapshot(link, "container-env", warnings) is False
+    assert any("symlink" in warning.lower() for warning in warnings)
+
+
+def test_isolated_env_falls_back_to_placeholder_when_no_snapshot(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Wrapper never writes a snapshot -> honest placeholder at the end."""
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="image:rocm/pytorch:nightly",
+        trials=1,
+        steps=10,
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["snapshot_captured"] is False
 
 
 def test_per_env_probe_once_per_unique_env(tmp_path, patched_env, patched_run_trials):
@@ -384,10 +610,258 @@ def test_matrix_md_failures_column_renders_failed_over_total(tmp_path, patched_e
     r = _simple_recipe(ticket="T-1")
     run_dir = runner.run_recipe(r, output_dir=tmp_path)
     md = (run_dir / "matrix.md").read_text()
-    # The baseline row's numeric cell: 0 failures of 2 trials.
+    # The baseline row's numeric cell: 0 failures of 2 valid trials.
     assert "0 / 2" in md
-    # Legend line documents what "Failures" means.
-    assert "`Failures` is `failed_count / trial_count`" in md
+    # Legend line documents what "Failures" means (issue #230: denominator
+    # is valid trials = passed + failed, errors excluded).
+    assert "`Failures` is `failed_count / valid_trials`" in md
+
+
+# ---- perf.md report ------------------------------------------------------
+
+
+def _fake_trial_with_metrics(
+    metrics: dict, step_times_ms: list[float] | None = None
+) -> _FakeTrial:
+    return _FakeTrial(
+        result={
+            "passed": True,
+            # Explicit ``is None`` (not ``or``) so a caller can model a trial
+            # that reported metrics but an empty ``step_times_ms`` ([] stays [],
+            # a realistic did_not_run / missing-per-step-timing shape) instead
+            # of it silently becoming the [100.0] default.
+            "step_times_ms": [100.0] if step_times_ms is None else step_times_ms,
+            "metrics": metrics,
+        }
+    )
+
+
+def test_perf_report_written_every_run(tmp_path, patched_env, patched_run_trials):
+    """perf.md is written next to matrix.md/json on a plain run, with the
+    always-on step-timing table and no throughput table (no metrics)."""
+    r = _simple_recipe(ticket="T-1")
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    perf = run_dir / "perf.md"
+    assert perf.exists()
+    text = perf.read_text()
+    assert "# Performance Report - fsdp" in text
+    assert "**Ticket**: T-1" in text
+    assert "## Step timing (ms)" in text
+    # Percentile columns present.
+    for col in ("Mean", "Std", "p50", "p90", "p99", "Max", "Wall (s)", "Source"):
+        assert col in text
+    assert "none-local" in text and "tf32_off-local" in text
+    # No workload emitted numeric metrics -> throughput table omitted.
+    assert "## Workload metrics" not in text
+
+
+def test_matrix_md_points_to_perf_report(tmp_path, patched_env, patched_run_trials):
+    run_dir = runner.run_recipe(_simple_recipe(), output_dir=tmp_path)
+    md = (run_dir / "matrix.md").read_text()
+    assert "perf.md" in md
+
+
+def test_perf_report_includes_workload_metrics(tmp_path, patched_env, monkeypatch):
+    """When a workload reports numeric metrics, perf.md gains a throughput
+    table and matrix.json carries the aggregated metrics_summary."""
+    trials = [
+        _fake_trial_with_metrics({"gflops": 100.0}),
+        _fake_trial_with_metrics({"gflops": 300.0}),
+    ]
+    monkeypatch.setattr(runner, "run_trials", MagicMock(return_value=trials))
+    run_dir = runner.run_recipe(_simple_recipe(ticket="T-1"), output_dir=tmp_path)
+
+    text = (run_dir / "perf.md").read_text()
+    assert "## Workload metrics" in text
+    assert "gflops" in text
+    # mean of 100 and 300 -> 200.000 (thousands-separated formatter).
+    assert "200.000" in text
+
+    doc = json.loads((run_dir / "matrix.json").read_text())
+    base = next(c for c in doc["cells"] if c["name"] == "none-local")
+    assert base["metrics_summary"]["gflops"]["mean"] == 200.0
+    assert base["metrics_summary"]["gflops"]["n"] == 2.0
+
+
+def test_perf_report_marks_did_not_run_timing_na(tmp_path, patched_env, monkeypatch):
+    """A cell whose trials never started shows n/a timing (source=missing),
+    not a misleading 0.000. The baseline cell still runs so the matrix
+    completes (an all-did_not_run recipe has no usable baseline)."""
+    # run_trials is called once per cell in recipe order: none-local (baseline)
+    # then tf32_off-local. Only the second cell "did not run".
+    monkeypatch.setattr(
+        runner,
+        "run_trials",
+        MagicMock(side_effect=[[_fake_trial(), _fake_trial()], [_fake_trial_did_not_run()]]),
+    )
+    run_dir = runner.run_recipe(_simple_recipe(), output_dir=tmp_path)
+    text = (run_dir / "perf.md").read_text()
+    assert "n/a" in text
+    assert "missing" in text
+
+
+def test_perf_report_error_cell_wall_is_error_not_zero(tmp_path):
+    """An error cell renders EVERY measured column -- including Wall -- as
+    'error', never a misleading 0.000 (error rows force wall to 0.0)."""
+    from aorta.triage.matrix import CellStats
+    from aorta.triage.output import write_perf_report
+
+    def _cell(name, *, error=None, wall=1.0, source="per_step"):
+        return CellStats(
+            name=name,
+            mitigations=("none",),
+            environment="local",
+            extra_env={},
+            resolved_env_vars={},
+            trials=2,
+            passed_count=2,
+            failed_count=0,
+            mean_step_time_ms=10.0,
+            std_step_time_ms=0.0,
+            min_step_time_ms=10.0,
+            max_step_time_ms=10.0,
+            p50_step_time_ms=10.0,
+            p90_step_time_ms=10.0,
+            p99_step_time_ms=10.0,
+            mean_wall_clock_sec=wall,
+            step_time_source=source,
+            step_times_ms=[10.0, 10.0] if error is None else [],
+            error=error,
+            error_count=0 if error is None else 2,
+        )
+
+    baseline = _cell("none-local")
+    errored = _cell("boom-local", error="docker pull failed", wall=0.0, source="missing")
+    out = tmp_path / "perf.md"
+    write_perf_report(
+        out,
+        build_recipe_from_flags(
+            workload="echo", mitigation_axis="none", environment_axis="local",
+            trials=2, steps=1,
+        ),
+        [baseline, errored],
+        baseline=baseline,
+        run_timestamp="2026-01-01T00:00:00Z",
+    )
+    text = out.read_text()
+    # Isolate the error cell's table row and assert Wall is 'error', not 0.000.
+    err_row = next(ln for ln in text.splitlines() if ln.startswith("| boom-local"))
+    assert "0.000" not in err_row
+    assert err_row.count("error") >= 8  # every measured column + source
+
+
+def test_perf_report_missing_source_row_keeps_real_wall(tmp_path):
+    """A non-error ``Source = missing`` row shows ``n/a`` for the per-step
+    columns but a *real* ``Wall (s)`` value -- wall clock is measured even when
+    per-step timing is absent, so the Notes wording (n/a per-step, Wall still
+    shown) must match what the row actually prints."""
+    from aorta.triage.matrix import CellStats
+    from aorta.triage.output import write_perf_report
+
+    def _cell(name, *, wall, source, step_times):
+        return CellStats(
+            name=name,
+            mitigations=("none",),
+            environment="local",
+            extra_env={},
+            resolved_env_vars={},
+            trials=2,
+            passed_count=2,
+            failed_count=0,
+            mean_step_time_ms=10.0,
+            std_step_time_ms=0.0,
+            min_step_time_ms=10.0,
+            max_step_time_ms=10.0,
+            p50_step_time_ms=10.0,
+            p90_step_time_ms=10.0,
+            p99_step_time_ms=10.0,
+            mean_wall_clock_sec=wall,
+            step_time_source=source,
+            step_times_ms=step_times,
+            error=None,
+            error_count=0,
+        )
+
+    baseline = _cell("none-local", wall=1.0, source="per_step", step_times=[10.0, 10.0])
+    # Real end-to-end wall clock, but no usable per-step series -> source missing.
+    missing = _cell("slow-local", wall=42.5, source="missing", step_times=[])
+    out = tmp_path / "perf.md"
+    write_perf_report(
+        out,
+        build_recipe_from_flags(
+            workload="echo", mitigation_axis="none", environment_axis="local",
+            trials=2, steps=1,
+        ),
+        [baseline, missing],
+        baseline=baseline,
+        run_timestamp="2026-01-01T00:00:00Z",
+    )
+    text = out.read_text()
+    missing_row = next(ln for ln in text.splitlines() if ln.startswith("| slow-local"))
+    # Per-step columns render n/a; Wall is the genuine measurement, not n/a.
+    assert "n/a" in missing_row
+    assert "42.500" in missing_row
+    # The Notes must not claim the whole row is n/a timing.
+    assert "n/a` for the per-step columns" in text
+
+
+def test_perf_report_metric_columns_sorted(tmp_path):
+    """The workload-metrics table columns are sorted, so perf.md is byte-stable
+    regardless of the order metric keys were first seen across cells / trials."""
+    from aorta.triage.matrix import CellStats
+    from aorta.triage.output import write_perf_report
+
+    def _cell(name, metrics):
+        return CellStats(
+            name=name,
+            mitigations=("none",),
+            environment="local",
+            extra_env={},
+            resolved_env_vars={},
+            trials=1,
+            passed_count=1,
+            failed_count=0,
+            mean_step_time_ms=10.0,
+            std_step_time_ms=0.0,
+            min_step_time_ms=10.0,
+            max_step_time_ms=10.0,
+            p50_step_time_ms=10.0,
+            p90_step_time_ms=10.0,
+            p99_step_time_ms=10.0,
+            mean_wall_clock_sec=1.0,
+            step_time_source="per_step",
+            step_times_ms=[10.0],
+            metrics_summary=metrics,
+        )
+
+    def _agg(mean):
+        return {"mean": mean, "min": mean, "max": mean, "n": 1.0}
+
+    # Deliberately insert keys in a non-alphabetical order, and give each cell
+    # a different insertion order + a key the other lacks. Without sorting the
+    # header order would depend on this iteration order.
+    baseline = _cell("none-local", {"triad_gbps": _agg(1.0), "gflops": _agg(2.0)})
+    other = _cell("tf32_off-local", {"mean_step_ms": _agg(3.0), "gflops": _agg(4.0)})
+    out = tmp_path / "perf.md"
+    write_perf_report(
+        out,
+        build_recipe_from_flags(
+            workload="echo", mitigation_axis="none", environment_axis="local",
+            trials=1, steps=1,
+        ),
+        [baseline, other],
+        baseline=baseline,
+        run_timestamp="2026-01-01T00:00:00Z",
+    )
+    text = out.read_text()
+    # Scope to the workload-metrics section: the step-timing table also has a
+    # ``| Cell ...`` header (Trials/Iters/... -- deliberately unsorted), so pick
+    # the first ``| Cell`` row *after* the metrics heading.
+    metrics_section = text.split("## Workload metrics", 1)[1]
+    header = next(ln for ln in metrics_section.splitlines() if ln.startswith("| Cell "))
+    cols = [c.strip() for c in header.strip().strip("|").split("|")][1:]
+    assert cols == sorted(cols)
+    assert cols == ["gflops", "mean_step_ms", "triad_gbps"]
 
 
 def test_resolved_recipe_is_loadable_by_load_recipe(tmp_path, patched_env, patched_run_trials):
@@ -465,6 +939,89 @@ def test_resolved_recipe_round_trips_workload_config(
     assert reloaded.workload_config == {"shampoo_api": "new", "warmup": 5}
     assert reloaded.cells[0].workload_config == {}
     assert reloaded.cells[1].workload_config == {"shampoo_api": "old"}
+
+
+def test_resolved_recipe_round_trips_collect(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Collector settings must survive load -> run -> reload for replay."""
+    from aorta.triage.recipe import load_recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(
+            Cell(name="inherit", mitigations=("none",), environment="local"),
+            Cell(
+                name="disable",
+                mitigations=("none",),
+                environment="local",
+                collect=(),
+                collect_options={},
+            ),
+            Cell(
+                name="override",
+                mitigations=("none",),
+                environment="local",
+                collect=("layer_numerics",),
+                collect_options={"layer_numerics": {"NANLOG_SAMPLE_EVERY": "10"}},
+            ),
+        ),
+        ticket="COLLECT-RT",
+        confound=ConfoundCfg(baseline_cell="inherit"),
+        collect=("layer_numerics", "rocprof"),
+        collect_options={"layer_numerics": {"NANLOG_PRE_CONTEXT": "20"}},
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    resolved_path = run_dir / "recipe.resolved.yaml"
+    doc = yaml.safe_load(resolved_path.read_text())
+
+    assert doc["collect"] == {
+        "layer_numerics": {"NANLOG_PRE_CONTEXT": "20"},
+        "rocprof": None,
+    }
+    cells = {cell["name"]: cell for cell in doc["cells"]}
+    assert "collect" not in cells["inherit"]
+    assert cells["disable"]["collect"] == []
+    assert cells["override"]["collect"] == {
+        "layer_numerics": {"NANLOG_SAMPLE_EVERY": "10"}
+    }
+
+    reloaded = load_recipe(resolved_path)
+    assert reloaded.collect == ("layer_numerics", "rocprof")
+    assert reloaded.collect_options == {
+        "layer_numerics": {"NANLOG_PRE_CONTEXT": "20"}
+    }
+    assert reloaded.cells[0].collect is None
+    assert reloaded.cells[1].collect == ()
+    assert reloaded.cells[2].collect == ("layer_numerics",)
+    assert reloaded.cells[2].collect_options == {
+        "layer_numerics": {"NANLOG_SAMPLE_EVERY": "10"}
+    }
+
+
+def test_resolved_recipe_round_trips_stop_after(
+    tmp_path, patched_env, patched_run_trials
+):
+    """An active stop_after rule must survive load -> run -> reload, so a rerun
+    from recipe.resolved.yaml keeps the stopping behaviour (issue #232)."""
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, StopAfter, load_recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(Cell(name="a", mitigations=("none",), environment="local"),),
+        ticket="SA-RT",
+        confound=ConfoundCfg(baseline_cell="a"),
+        stop_after=StopAfter(events=2, max_trials=5, event_verdict="fail"),
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    reloaded = load_recipe(run_dir / "recipe.resolved.yaml")
+    assert reloaded.stop_after == StopAfter(events=2, max_trials=5, event_verdict="fail")
 
 
 # ---- Config column (diffs-only workload_config) --------------------------

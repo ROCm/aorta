@@ -9,9 +9,14 @@ the flag-mode CLI funnel into. Given a validated :class:`Recipe`, it:
    ``_inline_<hash>`` envs) so B1's registry resolver picks them up.
 3. Captures the host :func:`aorta.instrumentation.environment.collect_env`
    snapshot once -> ``host_env.json``.
-4. For each unique environment in ``recipe.cells``, captures a
-   per-environment ``collect_env`` snapshot once, *right before that env's
-   first cell runs* -> ``environments/<name>/env.json``.
+4. Captures a per-environment snapshot once per unique env ->
+   ``environments/<name>/env.json``. Local (non-isolated) envs are probed
+   in-process *right before* that env's first cell runs. Isolated
+   (docker/venv) envs are probed by the workload wrapper *inside the isolated
+   environment* (the container, or the activated venv) via the
+   ``_aorta_env_probe`` contract; the runner promotes that snapshot *after*
+   the cell runs (retrying on later cells of the same env) and falls back to
+   a placeholder if none is produced.
 5. Builds a :class:`aorta.run.RunRequest` per cell and calls
    :func:`aorta.run.run_trials` **in-process**. Per-cell exceptions are
    caught and surfaced as an ``error`` row so other cells still run.
@@ -28,6 +33,7 @@ Per the acceptance criteria in issue #151, this module MUST NOT use
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -59,12 +65,15 @@ from aorta.triage.matrix import (
     aggregate_cell,
 )
 from aorta.triage.output import (
+    PERF_REPORT_FILENAME,
     acquire_flat_resume_lock,
+    format_run_summary,
     format_timestamp,
     resolve_run_dir,
     safe_slug,
     write_matrix_json,
     write_matrix_md,
+    write_perf_report,
     write_resolved_recipe,
 )
 from aorta.triage.recipe import InlineEnv, Recipe, RecipeCellError
@@ -93,6 +102,21 @@ def _is_rank_zero() -> bool:
         return True
 
 
+def _verbose_active() -> bool:
+    """True when ``-v`` / ``-vv`` installed the aorta stderr progress handler.
+
+    Lets the end-of-run summary (issue #280) suppress its "re-run with -v"
+    tip when the operator already streamed live progress. Mirrors the marker
+    attribute :func:`aorta.run.cli_helpers.configure_verbose_logging` stamps
+    on the handler it installs, so the two stay in lockstep without importing
+    the CLI layer.
+    """
+    return any(
+        getattr(handler, "_aorta_verbose", False)
+        for handler in logging.getLogger("aorta").handlers
+    )
+
+
 class MatrixIncompleteError(Exception):
     """Raised AFTER ``run_recipe`` successfully writes matrix.md /
     matrix.json when the run completed but classification could not
@@ -108,6 +132,27 @@ class MatrixIncompleteError(Exception):
     def __init__(self, message: str, run_dir: Path) -> None:
         super().__init__(message)
         self.run_dir = run_dir
+
+
+class MatrixStrictError(Exception):
+    """Raised AFTER ``run_recipe`` writes its artifacts when ``strict=True``
+    and one or more cells never produced a valid observation -- i.e. the whole
+    cell errored (``CellStats.error is not None``) or every trial in the cell
+    classified as ``did_not_run`` (:func:`is_did_not_run_cell`).
+
+    This is deliberately narrower than "a cell failed": a cell that *reproduces*
+    a bug (``passed=False`` with trials that actually ran) is an expected matrix
+    outcome and does NOT trip strict mode -- otherwise every A/B repro run would
+    exit non-zero. Strict only catches cells whose result is meaningless because
+    they never ran (e.g. an ``hrx_on`` cell whose ``LD_PRELOAD`` was rejected at
+    setup). The matrix artifacts ARE present (the exception carries ``run_dir``);
+    the exception signals the degradation to the CLI so it can exit non-zero.
+    """
+
+    def __init__(self, message: str, run_dir: Path, cells: list[str]) -> None:
+        super().__init__(message)
+        self.run_dir = run_dir
+        self.cells = cells
 
 
 def _merge_sidecar_files(
@@ -243,10 +288,12 @@ def _is_isolated_environment(
     their :class:`aorta.registry.Environment` descriptor sets ``docker`` or
     ``venv`` -- in either case, a runner-process ``collect_env()`` call would
     record the host's state, not the trial's, and therefore the resulting
-    ``environments/<name>/env.json`` would be misleading. B1 doesn't actually
-    perform docker / venv isolation today (in-process execution); the fix
-    when it does is to capture inside the isolated env. Until then, gate the
-    runner-process probe on this predicate.
+    ``environments/<name>/env.json`` would be misleading. Isolated envs
+    instead rely on the workload wrapper to capture an in-container snapshot
+    via the ``_aorta_env_probe`` contract, which the runner promotes after
+    the cell runs (falling back to a placeholder if none appears). This
+    predicate gates that path: True routes the env to wrapper-driven probing,
+    False to the in-process ``collect_env()``.
 
     ``sidecar_files`` MUST be threaded through so envs defined only in a
     ``--mitigations-file`` JSON are visible to the registry resolver. Without
@@ -301,11 +348,23 @@ def _write_isolated_env_placeholder(
         except RegistryError as exc:  # pragma: no cover - guarded by predicate
             descriptor["_lookup_error"] = f"{type(exc).__name__}: {exc}"
     skip_reason = (
-        "B1 currently runs trials in the runner process, so a runner-time "
-        "collect_env() snapshot would record the host's state instead of the "
-        "isolated docker/venv environment the descriptor advertises. The "
-        "snapshot is intentionally skipped to avoid a misleading artifact; "
-        "host_env.json next to this file captures the runner's view."
+        "No in-isolated-env snapshot was produced for this isolated "
+        "docker/venv environment. A runner-process collect_env() would record "
+        "the host's state instead of the isolated env's, so it is "
+        "intentionally not written. To capture the real environment, have the "
+        "workload wrapper read the reserved config['_aorta_env_probe'] "
+        "{'src', 'out'} HOST paths and, as the first step inside the isolated "
+        "env, run 'PYTHONPATH=SRC python -m aorta.instrumentation._probe_main "
+        "OUT' where SRC/OUT are the paths as seen FROM INSIDE that env. "
+        "For docker: bind-mount 'src' and the parent of 'out', then set "
+        "SRC/OUT to the container mount points -- NOT the host 'src'/'out' "
+        "values, which do not exist inside the container. For venv: SRC/OUT "
+        "are the host 'src'/'out' values directly (same filesystem, no mount). "
+        "PYTHONPATH is required unless aorta is installed in the isolated env. "
+        "The runner then promotes that file in place of this placeholder. The "
+        "run root's host_env.json (../../host_env.json relative to this file) "
+        "captures "
+        "the runner's view."
     )
     placeholder = {
         "name": env_name,
@@ -313,12 +372,131 @@ def _write_isolated_env_placeholder(
         "skip_reason": skip_reason,
         "descriptor": descriptor,
     }
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(placeholder, indent=2), encoding="utf-8")
+    _write_json_atomic_replace(target, placeholder)
     warnings.append(
-        f"environment {env_name!r}: per-env probe skipped (isolated env, B1 in-process). "
+        f"environment {env_name!r}: no in-container snapshot captured (isolated env). "
         "See the env's env.json for the descriptor and the host-level snapshot in host_env.json."
     )
+
+
+def _write_json_atomic_replace(target: Path, payload: dict[str, Any]) -> None:
+    """Write JSON by replacing ``target`` instead of following it.
+
+    Isolated-env wrappers write into a host-mounted output directory. If a
+    wrapper leaves ``env.json`` as a symlink, a direct ``write_text`` fallback
+    would follow the link and overwrite whatever host path it points at. A
+    random temp file plus ``os.replace`` replaces the directory entry itself.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            tmp_path = Path(fh.name)
+            fh.write(json.dumps(payload, indent=2))
+        os.replace(tmp_path, target)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
+
+
+def _read_json_no_follow(target: Path) -> Any:
+    """Read JSON without following a final-path symlink when supported."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        fd = os.open(target, os.O_RDONLY | nofollow)
+        try:
+            fh = os.fdopen(fd, "r", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+        with fh:
+            return json.load(fh)
+
+    # Windows does not expose O_NOFOLLOW. Keep the explicit symlink rejection
+    # there; POSIX runners use the atomic open path above.
+    if target.is_symlink():
+        raise OSError(errno.ELOOP, "symlink not allowed", str(target))
+    with target.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _aorta_src_root() -> Path:
+    """Absolute path to the aorta ``src`` tree on the runner host.
+
+    A self-isolating wrapper bind-mounts this into its container so the
+    dependency-free ``python -m aorta.instrumentation._probe_main`` entry
+    resolves without installing aorta in the image. Derived from the
+    installed package location (``.../src/aorta/__init__.py`` -> ``.../src``)
+    so it works for an editable install; a non-editable install returns the
+    site-packages root, which is equally mountable.
+    """
+    import aorta
+
+    return Path(aorta.__file__).resolve().parent.parent
+
+
+def _is_real_env_snapshot(target: Path, env_name: str, warnings: list[str]) -> bool:
+    """True iff ``target`` holds a wrapper-produced in-container snapshot.
+
+    Called AFTER an isolated env's cell has run. A real snapshot is a JSON
+    *object* carrying a non-empty ``schema_version`` string (the shape
+    ``EnvSnapshot.to_dict()`` always produces) that is NOT one of our own
+    placeholders -- the placeholder carries ``"snapshot_captured": false``, so
+    a later retry reading it back would otherwise mistake it for a genuine
+    capture. Non-object JSON (arrays, strings, numbers) and objects missing
+    ``schema_version`` (``{}``, partial/buggy writes) are rejected: promoting
+    them would hand downstream consumers a shape they don't expect.
+
+    A file that is missing, unreadable, or the wrong shape returns False so the
+    env keeps retrying on later cells and, failing that, gets a placeholder at
+    the end. A *malformed* file (unreadable, non-object, or missing
+    schema_version) appends a warning -- and on retry across N cells for the
+    same still-broken env this can log N times, which is acceptable (the signal
+    is per-cell and points at a real problem). The benign cases -- file not yet
+    written, or a prior placeholder read back -- return False silently, since
+    they are the expected "not captured yet" states, not errors.
+    """
+    try:
+        doc = _read_json_no_follow(target)
+    except FileNotFoundError:
+        return False
+    except (OSError, json.JSONDecodeError) as exc:
+        if isinstance(exc, OSError) and exc.errno == errno.ELOOP:
+            warnings.append(
+                f"environment {env_name!r}: in-container snapshot at {target} "
+                "is a symlink; will retry / fall back to placeholder."
+            )
+            return False
+        warnings.append(
+            f"environment {env_name!r}: in-container snapshot at {target} "
+            f"is unreadable ({type(exc).__name__}); will retry / fall back to placeholder."
+        )
+        return False
+    if not isinstance(doc, dict):
+        warnings.append(
+            f"environment {env_name!r}: in-container snapshot at {target} "
+            f"is not a JSON object ({type(doc).__name__}); will retry / fall back to placeholder."
+        )
+        return False
+    if doc.get("snapshot_captured") is False:
+        return False
+    if not isinstance(doc.get("schema_version"), str) or not doc["schema_version"]:
+        warnings.append(
+            f"environment {env_name!r}: in-container snapshot at {target} "
+            "lacks a non-empty schema_version (not an EnvSnapshot shape); "
+            "will retry / fall back to placeholder."
+        )
+        return False
+    return True
 
 
 def _resolve_cell_env_vars(
@@ -388,6 +566,81 @@ def _collect_trial_paths(results_dir: Path) -> list[str]:
     return [str(p) for p in found]
 
 
+def _stop_after_note(stop_after: Any, trials: list[TrialResult]) -> str:
+    """Render the matrix annotation for a ``stop_after`` cell (issue #232).
+
+    Distinguishes "cap reached" (ran the full ``max_trials`` budget) from
+    "stopped early" (hit the event target first) so a reader can tell a
+    confirmed-rare bug from an exhausted budget. ``cap reached`` is
+    checked first: a target hit on the very last allowed trial still ran
+    the whole budget, so it is not "early".
+    """
+    from aorta.run.dispatcher import _trial_is_event
+
+    events = sum(1 for t in trials if _trial_is_event(t, stop_after.event_verdict))
+    trials_run = len(trials)
+    verb = stop_after.event_verdict
+    if trials_run >= stop_after.max_trials:
+        return f"cap reached: {events} {verb} event(s) in {trials_run} trial(s)"
+    if events >= stop_after.events:
+        return f"stopped early: {events} {verb} event(s) in {trials_run} trial(s)"
+    return f"{events} {verb} event(s) in {trials_run} trial(s)"
+
+
+def _resume_stop_after_cell(
+    cell: Any,
+    cell_dir: Path,
+    cap: int,
+    stop_after: Any,
+    resolved_env_vars: dict[str, str],
+) -> tuple[list[TrialResult], None, dict[str, str], list[str], bool] | None:
+    """Resume short-circuit for a ``stop_after`` cell (issue #232).
+
+    Returns the hydrated ``(trials, error, env, paths, resumed)`` tuple iff
+    the on-disk trial prefix ALREADY satisfies the stopping rule -- i.e. the
+    contiguous run of complete ``trial_<i>`` directories from index 0
+    either hit the event target or reached the cap. Otherwise returns
+    ``None`` so the caller re-runs the cell from scratch (re-running is
+    bounded: the dispatcher applies the same early-stop).
+
+    Unlike the fixed-``trials`` resume path this never requires all of
+    ``range(cap)`` to be present, because a cell that stopped early has
+    fewer than ``cap`` trials on disk by design.
+    """
+    from aorta.probe.resume import is_trial_complete
+    from aorta.run.dispatcher import _trial_is_event
+
+    contiguous = 0
+    while contiguous < cap and is_trial_complete(cell_dir / f"trial_{contiguous}"):
+        contiguous += 1
+    if contiguous == 0:
+        return None
+
+    hydrated_by_index = _hydrate_trials_by_index(_collect_trial_paths(cell_dir))
+    required = set(range(contiguous))
+    if not required.issubset(hydrated_by_index.keys()):
+        # A complete-looking trial dir whose dispatcher JSON didn't
+        # hydrate -- treat the cell as not-resumable so matrix counts
+        # stay consistent (mirror the fixed-trials path's subset check).
+        return None
+    hydrated = [hydrated_by_index[i].trial for i in range(contiguous)]
+    trial_paths = [hydrated_by_index[i].path for i in range(contiguous)]
+    events = sum(1 for t in hydrated if _trial_is_event(t, stop_after.event_verdict))
+    if events >= stop_after.events or contiguous >= cap:
+        log.info(
+            "cell %r: stop_after already satisfied on resume -- %d %r event(s) "
+            "in %d trial(s) (target %d, cap %d); skipping",
+            cell.name,
+            events,
+            stop_after.event_verdict,
+            contiguous,
+            stop_after.events,
+            cap,
+        )
+        return hydrated, None, resolved_env_vars, trial_paths, True
+    return None
+
+
 @dataclass(frozen=True)
 class _HydratedTrial:
     """One successfully hydrated dispatcher JSON, keyed by parsed trial index.
@@ -455,15 +708,14 @@ def _hydrate_trials_by_index(trial_paths: list[str]) -> dict[int, _HydratedTrial
 
 
 def _trial_passed_for_log(trial: Any) -> bool:
-    """Mirror of ``aorta.triage.matrix._trial_passed`` for the per-cell
-    log line.
+    """Per-cell-log pass predicate, kept consistent with the matrix
+    ``passed_count``.
 
-    Kept local rather than imported from the matrix module's private
-    namespace so the runner doesn't depend on a leading-underscore
-    callable (Python convention: private to defining module). The
-    semantic is identical -- a trial passes iff ``exit_status == "ok"``
-    AND the wrapped ``WorkloadResult.passed`` is not False -- so the
-    log line and the matrix.md row agree on what counts as a pass.
+    Kept local rather than reaching into another module's private
+    namespace (Python convention: private to defining module). A trial
+    passes iff ``exit_status == "ok"`` AND the wrapped
+    ``WorkloadResult.passed`` is not False, so the log line and the
+    matrix.md row agree on what counts as a pass.
     """
     if getattr(trial, "exit_status", None) != "ok":
         return False
@@ -641,8 +893,14 @@ def _run_one_cell(
     layout: Literal["timestamped", "flat_resume"] = "timestamped",
     resume_existing: bool = False,
     subprocess_argv: tuple[str, ...] | None = None,
-) -> tuple[list[TrialResult], str | None, dict[str, str], list[str]]:
-    """Execute a single cell through B1 and return (trials, error, env_vars, trial_paths).
+    env_probe: dict[str, str] | None = None,
+) -> tuple[list[TrialResult], str | None, dict[str, str], list[str], bool]:
+    """Execute a single cell through B1 and return (trials, error, env_vars, trial_paths, resumed).
+
+    ``resumed`` is True only when the whole cell was hydrated from a prior
+    run's on-disk artifacts via the ``flat_resume`` resume short-circuit
+    (no trials re-executed); False for freshly-run cells and for every
+    timestamped-layout cell (which never resumes).
 
     Exception handling scope is deliberately wide: any failure originating
     from B1 (unknown mitigation, workload crash in ``setup``, docker pull
@@ -677,6 +935,11 @@ def _run_one_cell(
 
     resolved_env_vars = _resolve_cell_env_vars(cell.mitigations, cell.extra_env, sidecar_files)
     effective_trials = cell.effective_trials(recipe.trials)
+    # Issue #232: a ``stop_after`` rule turns ``max_trials`` into the hard
+    # cap and lets the dispatcher break early once the event target is met.
+    # Without it, ``cap == effective_trials`` and behaviour is unchanged.
+    stop_after = recipe.stop_after
+    cap = stop_after.max_trials if stop_after is not None else effective_trials
 
     # Resume short-circuit: if every trial directory under this cell
     # carries a valid result.json + non-empty verdict, the cell is
@@ -693,7 +956,19 @@ def _run_one_cell(
     # the dispatcher's ``trial_<N>.json``; or schema drift). Re-running
     # a complete cell is wasteful but preserves matrix correctness;
     # silently returning [] would not.
-    if resume_existing and layout == "flat_resume":
+    if resume_existing and layout == "flat_resume" and stop_after is not None:
+        # stop_after cells legitimately run FEWER than ``cap`` trials (they
+        # stop early at the event target), so the "all of range(cap) must
+        # be present" check below cannot apply. Resume only when the
+        # on-disk prefix already satisfies the stopping rule; otherwise
+        # fall through to a full re-run (the dispatcher will itself stop
+        # early, so re-running is bounded by ``cap``).
+        resumed_result = _resume_stop_after_cell(
+            cell, cell_dir, cap, stop_after, resolved_env_vars
+        )
+        if resumed_result is not None:
+            return resumed_result
+    elif resume_existing and layout == "flat_resume":
         from aorta.probe.resume import is_trial_complete
 
         completed = sum(
@@ -731,7 +1006,7 @@ def _run_one_cell(
                     cell.name,
                     effective_trials,
                 )
-                return hydrated, None, resolved_env_vars, trial_paths
+                return hydrated, None, resolved_env_vars, trial_paths, True
             # Subset check failed -> at least one required index is missing.
             # The single-branch log subsumes the previous two-branch shape
             # (separate "indices missing" vs "count short" cases): with the
@@ -784,7 +1059,21 @@ def _run_one_cell(
             "hang_window_sec": probe_extras.hang_window_sec,
             "hang_grace_period_at_start": probe_extras.hang_grace_period_at_start,
             "tier3_vram_growth": probe_extras.tier3_vram_growth,
+            # Issue #229: operator detector-disable knobs threaded to the
+            # workload so the classifier can skip them per trial.
+            "disable_detectors": tuple(probe_extras.disable_detectors),
+            "disable_detector_tiers": tuple(probe_extras.disable_detector_tiers),
         }
+        # Issue #231: verdict-keyed artifact retention. Forwarded as a plain
+        # verdict->level mapping so SubprocessWorkload needn't import the
+        # RetainPolicy type; absent (None) when the recipe omits ``retain``,
+        # which the workload treats as keep-everything.
+        if probe_extras.retain is not None:
+            probe_extras_payload["retain"] = {
+                "on_fail": probe_extras.retain.on_fail,
+                "on_pass": probe_extras.retain.on_pass,
+                "on_error": probe_extras.retain.on_error,
+            }
 
     # save_logs is forced True for probe-mode cells because
     # SubprocessWorkload reads ``_aorta_log_prefix`` to derive its
@@ -794,7 +1083,7 @@ def _run_one_cell(
 
     request = RunRequest(
         workload=recipe.workload,
-        trials=effective_trials,
+        trials=cap,
         environment=cell.environment,
         mitigations=tuple(cell.mitigations),
         extra_env=dict(cell.extra_env),
@@ -805,16 +1094,20 @@ def _run_one_cell(
         save_logs=save_logs,
         subprocess_argv=subprocess_argv,
         probe_extras=probe_extras_payload,
+        stop_after=stop_after,
+        collect=tuple(cell.effective_collect(recipe.collect)),
+        collect_options=dict(cell.effective_collect_options(recipe.collect_options)),
+        env_probe=env_probe,
     )
 
     try:
         trials = run_trials(request)
     except Exception as exc:
         log.warning("cell %r failed with %s: %s", cell.name, type(exc).__name__, exc, exc_info=True)
-        return [], f"{type(exc).__name__}: {exc}", resolved_env_vars, []
+        return [], f"{type(exc).__name__}: {exc}", resolved_env_vars, [], False
 
     trial_paths = _collect_trial_paths(cell_dir)
-    return trials, None, resolved_env_vars, trial_paths
+    return trials, None, resolved_env_vars, trial_paths, False
 
 
 def _preflight_validate(recipe: Recipe) -> None:
@@ -864,6 +1157,11 @@ def _print_dry_run(
         )
         click.echo(f"Argv (forwarded byte-for-byte): {argv_display}")
         click.echo(f"Env-passthrough mode: {recipe.probe_extras.env_passthrough_mode}")
+        disabled = list(recipe.probe_extras.disable_detector_tiers) + list(
+            recipe.probe_extras.disable_detectors
+        )
+        if disabled:
+            click.echo(f"Disabled detectors: {', '.join(disabled)}")
         for cell in recipe.cells:
             env_bundle = recipe.probe_extras.cell_envs.get(cell.name, {})
             env_str = " ".join(f"{k}={v}" for k, v in sorted(env_bundle.items())) or "(no env)"
@@ -879,6 +1177,10 @@ def _print_dry_run(
         # the workload would be constructed with -- cell-scope wins on key
         # collision, non-collision keys union with recipe-scope.
         effective_workload_config = {**recipe.workload_config, **cell.workload_config}
+        effective_collect = cell.effective_collect(recipe.collect)
+        # Flag cells that declare an explicit collector override so an
+        # operator can spot per-cell on/off at a glance.
+        collect_note = " (cell override)" if cell.collect is not None else ""
         click.echo(
             f"  - {cell.name}: mitigations={list(cell.mitigations)} "
             f"environment={cell.environment} "
@@ -886,6 +1188,7 @@ def _print_dry_run(
             f"steps={cell.effective_steps(recipe.steps)}"
             + (f" extra_env={cell.extra_env}" if cell.extra_env else "")
             + (f" workload_config={effective_workload_config}" if effective_workload_config else "")
+            + (f" collect={list(effective_collect)}{collect_note}" if effective_collect or cell.collect is not None else "")
         )
     if recipe.inline_environments:
         click.echo("Inline docker environments:")
@@ -905,8 +1208,14 @@ def run_recipe(
     layout: Literal["timestamped", "flat_resume"] = "timestamped",
     resume_existing: bool = False,
     subprocess_argv: tuple[str, ...] | None = None,
+    strict: bool = False,
 ) -> Path:
-    """Execute a recipe and write matrix.md / matrix.json / recipe.resolved.yaml.
+    """Execute a recipe and write matrix.md / matrix.json / perf.md / recipe.resolved.yaml.
+
+    ``perf.md`` is a per-run performance report written next to
+    ``matrix.md`` / ``matrix.json`` on every run (pure formatting of the
+    already-collected per-trial timing + metrics; no flag, no extra
+    measurement).
 
     Args:
         recipe: Pre-validated recipe (from :func:`aorta.triage.recipe.load_recipe`
@@ -938,6 +1247,11 @@ def run_recipe(
             cell's :class:`SubprocessWorkload` via the typed
             ``RunRequest.subprocess_argv`` field. Required for probe-mode;
             ignored in triage-mode.
+        strict: When True, raise :class:`MatrixStrictError` (after writing
+            artifacts) if any cell errored or every trial in it did_not_run.
+            A cell that merely reproduces a bug (ran but ``passed=False``) does
+            NOT trip this. Off by default so the matrix flow keeps tolerating
+            per-cell failures.
 
     Returns:
         The run directory path (``<output-dir>/<ticket>/<workload>/<timestamp>``
@@ -996,6 +1310,8 @@ def run_recipe(
             layout=layout,
             resume_existing=resume_existing,
             subprocess_argv=subprocess_argv,
+            strict=strict,
+            should_write=should_write,
         )
 
 
@@ -1008,6 +1324,8 @@ def _run_recipe_locked(
     layout: Literal["timestamped", "flat_resume"],
     resume_existing: bool,
     subprocess_argv: tuple[str, ...] | None,
+    strict: bool = False,
+    should_write: bool = True,
 ) -> Path:
     """Body of :func:`run_recipe` after the flat_resume lock is held.
 
@@ -1015,6 +1333,10 @@ def _run_recipe_locked(
     ``contextlib.ExitStack`` block at the top of :func:`run_recipe` and
     the matrix-loop body doesn't need to be re-indented inside a ``with``.
     Not part of the public API -- callers go through :func:`run_recipe`.
+
+    ``should_write`` mirrors :func:`run_recipe`'s rank-0 gate: only rank 0
+    owns the real output tree, so only rank 0 prints the end-of-run summary
+    (a ``torchrun`` launch otherwise emits one copy per rank).
     """
     # Operator sidecars come from two places: ones the Recipe was built
     # against (``recipe.sidecar_files``, populated by ``load_recipe`` /
@@ -1041,13 +1363,25 @@ def _run_recipe_locked(
     _capture_env(run_dir / "host_env.json", scope="host", warnings=warnings)
 
     # Per-environment probes, captured once per unique env in the order
-    # cells reference them. ``seen`` preserves first-use ordering so the
-    # probe lands right before the env's first cell runs (matches the
-    # "captured once per unique --environment-axis value" acceptance
-    # criterion).
+    # cells reference them. Non-isolated (local) envs are probed in-process
+    # right before their first cell -- the runner process IS the trial env,
+    # so its snapshot is truthful and needs no container.
+    #
+    # Isolated (docker/venv) envs cannot be probed from the runner process
+    # (that would record host state under a docker label). Instead the
+    # wrapper writes an in-container snapshot to ``environments/<env>/env.json``
+    # via the ``_aorta_env_probe`` contract, and we promote it AFTER the
+    # cell runs. ``captured_envs`` tracks which isolated envs already have a
+    # real snapshot so later cells reusing the same env don't re-probe;
+    # ``pending_envs`` tracks isolated envs still awaiting one (retried on
+    # each subsequent cell of that env until success), and any left pending
+    # at the end get a placeholder.
     seen_envs: set[str] = set()
+    captured_envs: set[str] = set()
+    pending_envs: dict[str, tuple[Path, str]] = {}
 
     env_dir = run_dir / "environments"
+    aorta_src = str(_aorta_src_root())
 
     # Env-slug collision + baseline resolution were already enforced by
     # _preflight_validate at the very top of run_recipe (so dry-run sees the
@@ -1064,26 +1398,46 @@ def _run_recipe_locked(
         recipe.steps,
         run_dir,
     )
+    # Isolation status is per-environment (a registry lookup), so cache it by
+    # env name: matrices where many cells share one env would otherwise repeat
+    # the resolution once per cell.
+    isolation_cache: dict[str, bool] = {}
+
     for cell_idx, cell in enumerate(recipe.cells, start=1):
-        if cell.environment not in seen_envs:
-            env_json_path = env_dir / safe_slug(cell.environment) / "env.json"
-            if _is_isolated_environment(
+        env_json_path = env_dir / safe_slug(cell.environment) / "env.json"
+        if cell.environment not in isolation_cache:
+            isolation_cache[cell.environment] = _is_isolated_environment(
                 cell.environment, recipe.inline_environments, sidecar_files
-            ):
-                _write_isolated_env_placeholder(
-                    env_json_path,
-                    cell.environment,
-                    recipe.inline_environments,
-                    warnings,
-                    sidecar_files,
-                )
-            else:
+            )
+        is_isolated = isolation_cache[cell.environment]
+        # Local envs: probe in-process once, before the env's first cell.
+        # Isolated envs: defer to the wrapper (post-cell promotion below).
+        if cell.environment not in seen_envs:
+            if not is_isolated:
                 _capture_env(
                     env_json_path,
                     scope=f"environment:{cell.environment}",
                     warnings=warnings,
                 )
             seen_envs.add(cell.environment)
+
+        # Hand the wrapper the probe contract while this isolated env still
+        # lacks a real snapshot. Once captured, stop requesting it so later
+        # cells (same image, different mitigations) don't overwrite it.
+        # Not separately rank-gated: on non-rank-0 ``env_json_path`` is rooted
+        # in the discarded scratch ``run_dir`` (see run_recipe), so a promoted
+        # snapshot there is thrown away with the tempdir like every other
+        # artifact. Wrappers that fan out per rank should themselves gate the
+        # in-container probe to rank 0 to avoid N redundant collect_env calls.
+        env_probe_arg: dict[str, str] | None = None
+        if is_isolated and cell.environment not in captured_envs:
+            # Create the parent now so the wrapper bind-mounts an existing
+            # host dir. Otherwise ``docker run -v <out_dir>:...`` would have
+            # the daemon create it as root, and the probe (or a later
+            # placeholder write) could fail on permissions.
+            env_json_path.parent.mkdir(parents=True, exist_ok=True)
+            env_probe_arg = {"src": aorta_src, "out": str(env_json_path)}
+            pending_envs[cell.environment] = (env_json_path, cell.environment)
 
         log.info(
             "cell %d/%d: %s (mitigations=%s environment=%s) -- starting %d trial(s)",
@@ -1095,7 +1449,7 @@ def _run_recipe_locked(
             cell.effective_trials(recipe.trials),
         )
         cell_t0 = time.perf_counter()
-        trials, error, resolved_env_vars, trial_paths = _run_one_cell(
+        trials, error, resolved_env_vars, trial_paths, resumed = _run_one_cell(
             cell,
             recipe,
             run_dir,
@@ -1103,8 +1457,19 @@ def _run_recipe_locked(
             layout=layout,
             resume_existing=resume_existing,
             subprocess_argv=subprocess_argv,
+            env_probe=env_probe_arg,
         )
         cell_elapsed = time.perf_counter() - cell_t0
+
+        # Promote the wrapper's in-container snapshot if this cell produced
+        # one. Retries across cells reusing the env: only cells still in
+        # ``pending_envs`` requested a probe, so a container that failed to
+        # start on cell N gets another chance on cell N+1 of the same env.
+        if cell.environment in pending_envs:
+            probe_target, probe_env = pending_envs[cell.environment]
+            if _is_real_env_snapshot(probe_target, probe_env, warnings):
+                captured_envs.add(cell.environment)
+                del pending_envs[cell.environment]
         if error is not None:
             log.info(
                 "cell %d/%d: %s -- ERROR (%s) in %.1fs",
@@ -1115,8 +1480,7 @@ def _run_recipe_locked(
                 cell_elapsed,
             )
         else:
-            # Use the canonical pass/fail predicate from
-            # ``aorta.triage.matrix._trial_passed`` so the per-cell log line
+            # Use the local pass/fail predicate so the per-cell log line
             # agrees with the matrix-level passed_count: a trial is "passed"
             # iff its exit_status is "ok" AND its WorkloadResult.passed is
             # not False. Reading only ``result.get("passed")`` ignores the
@@ -1126,11 +1490,13 @@ def _run_recipe_locked(
             # both halves of the predicate are needed.
             passed = sum(1 for t in trials if _trial_passed_for_log(t))
             summary, suffix = _format_cell_summary(trials, passed)
+            done_verb = "resumed (cached, no re-run) in" if resumed else "done in"
             log.info(
-                "cell %d/%d: %s -- done in %.1fs %s%s",
+                "cell %d/%d: %s -- %s %.1fs %s%s",
                 cell_idx,
                 total_cells,
                 cell.name,
+                done_verb,
                 cell_elapsed,
                 summary,
                 suffix,
@@ -1145,6 +1511,11 @@ def _run_recipe_locked(
         # ``_aorta_save_logs``) which are runtime/platform-supplied and
         # deliberately not surfaced in the matrix. Stays {} when neither
         # scope sets workload_config.
+        stop_after_note = (
+            _stop_after_note(recipe.stop_after, trials)
+            if recipe.stop_after is not None and error is None
+            else None
+        )
         stats = aggregate_cell(
             name=cell.name,
             mitigations=tuple(cell.mitigations),
@@ -1156,8 +1527,23 @@ def _run_recipe_locked(
             trial_paths=trial_paths,
             error=error,
             workload_config={**recipe.workload_config, **cell.workload_config},
+            stop_after_note=stop_after_note,
+            resumed=resumed,
         )
         cell_stats.append(stats)
+
+    # Isolated envs whose containers never produced an in-container snapshot
+    # (wrapper didn't opt in, or every cell of that env failed to start the
+    # container) get an honest placeholder now -- one per env, matching the
+    # per-unique-environment artifact contract.
+    for probe_target, probe_env in pending_envs.values():
+        _write_isolated_env_placeholder(
+            probe_target,
+            probe_env,
+            recipe.inline_environments,
+            warnings,
+            sidecar_files,
+        )
 
     # Did-not-run baseline disqualification (issue #173). Three cases,
     # all of them produce matrix.md / matrix.json so the operator can
@@ -1248,6 +1634,7 @@ def _run_recipe_locked(
         confound_tags=confound_tags,
         warnings=warnings,
         run_timestamp=ts,
+        layout=layout,
     )
     write_matrix_json(
         run_dir / "matrix.json",
@@ -1258,6 +1645,13 @@ def _run_recipe_locked(
         run_timestamp=ts,
         warnings=warnings,
         sidecar_files=sidecar_files,
+    )
+    write_perf_report(
+        run_dir / PERF_REPORT_FILENAME,
+        recipe=recipe,
+        cell_stats=cell_stats,
+        baseline=baseline_stats,
+        run_timestamp=ts,
     )
     write_resolved_recipe(
         run_dir / "recipe.resolved.yaml",
@@ -1278,13 +1672,61 @@ def _run_recipe_locked(
             f"to rerun: cd {run_dir} && aorta triage run --recipe recipe.resolved.yaml {flags}"
         )
 
+    # Concise end-of-run summary (issue #280): otherwise ``aorta sweep run`` is
+    # silent during the run and prints only ``Wrote matrix to ...`` at the end,
+    # leaving operators with no signal of which cells failed or where the
+    # captured output landed. Rank-0 only (same gate as the artifact writes),
+    # and printed before the ``MatrixIncompleteError`` raise so a degraded run
+    # -- exactly when the operator most needs to know what failed -- still
+    # reports. Best-effort: a formatting bug must never mask the run's outcome.
+    if should_write:
+        try:
+            for line in format_run_summary(
+                cell_stats,
+                run_dir,
+                layout=layout,
+                verbose_active=_verbose_active(),
+            ):
+                click.echo(line)
+        except Exception:  # pragma: no cover - defensive; summary is advisory
+            log.warning("failed to render end-of-run summary", exc_info=True)
+
     if incomplete_reason is not None:
         # Artifacts are written; raise so the CLI can print the failure
         # message and exit non-zero. Tests / programmatic callers can
         # ``except MatrixIncompleteError`` to inspect ``run_dir``.
         raise MatrixIncompleteError(incomplete_reason, run_dir)
 
+    if strict:
+        # A cell is "invalid" only if it never produced a usable observation:
+        # the whole cell errored, or every trial did_not_run. A cell that ran
+        # but reported passed=False (a real bug repro) is an expected matrix
+        # outcome and must NOT trip strict mode. Checked after the incomplete
+        # guard so a degraded baseline keeps its more-specific message.
+        invalid = [
+            s.name for s in cell_stats if s.error is not None or is_did_not_run_cell(s)
+        ]
+        if invalid:
+            # Emit the concrete per-cell artifact paths (slugified exactly as
+            # they land on disk, see _run_one_cell / _cells_dir) rather than a
+            # ``<cell>``/``<workload>`` placeholder, so an operator can
+            # copy/paste straight to the offending trials -- cell names are
+            # slugified on disk, so the verbatim name wouldn't resolve.
+            inspect_paths = "; ".join(
+                f"cells/{safe_slug(name)}/{recipe.workload}/trial_*.json"
+                for name in invalid
+            )
+            raise MatrixStrictError(
+                f"strict mode: {len(invalid)} of {len(cell_stats)} cell(s) never "
+                f"produced a valid result (errored or did_not_run): "
+                f"{', '.join(invalid)}. Inspect {inspect_paths} for the cause (a "
+                f"common one is a rejected LD_PRELOAD / setup failure). Drop "
+                f"--strict to treat these as tolerated per-cell failures.",
+                run_dir,
+                invalid,
+            )
+
     return run_dir
 
 
-__all__ = ["MatrixIncompleteError", "run_recipe"]
+__all__ = ["MatrixIncompleteError", "MatrixStrictError", "run_recipe"]

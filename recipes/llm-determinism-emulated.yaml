@@ -1,0 +1,60 @@
+# Singleton LLM-DETERMINISM smoke on an emulated MI350X (mirage + rocjitsu).
+#
+# `llm_determinism` is a DISTRIBUTED workload with `min_world_size = 1`, so a
+# one-rank run (WORLD_SIZE=1) is a valid singleton smoke: it wraps one tiny
+# repeated transformer block with FSDP2 and does a per-rank one-step replay
+# checksum compare. This is a functional (replayability) smoke on a single
+# emulated GPU, NOT a multi-rank determinism signal — the real 8/40-GPU capture
+# run needs `mirage run --daemon --gpus-per-node N` + torchrun (a later phase).
+#
+# rocjitsu (CPU emulation) is SLOW for this torch-heavy workload; use a long
+# timeout. rocjitsu-dbt (translation onto a physical GPU) is faster where the
+# host hardware supports it.
+#
+# Recommended (container — the supported torch path):
+#
+#   export MIRAGE_BIN=/path/to/mirage
+#   ./scripts/emulation/run_mirage_container.sh llm-determinism
+#
+# Override with a full multi-cell recipe on the host:
+#
+#   LLM_RECIPE=recipes/example-llm-determinism.yaml \
+#     ./scripts/emulation/run_mirage_container.sh llm-determinism
+#
+# Validate only (no GPUs / no mirage needed):
+#
+#   aorta triage run --recipe recipes/llm-determinism-emulated.yaml --dry-run
+#
+# Sizes are kept tiny (few layers, short seq) so a smoke finishes even under
+# rocjitsu. Expected result: the cell PASSES (per-rank replay checksums match).
+schema_version: 1
+
+ticket: EMU-LLM-DET-001
+workload: llm_determinism
+
+trials: 1
+steps: 1
+
+confound:
+  threshold: 1.15
+
+workload_config:
+  hidden_size: 256
+  ffn_size: 512
+  num_heads: 4
+  seq_len: 64
+  batch_size: 1
+  dtype: bf16
+  seed: 1234
+  checksum_mode: per_rank
+
+cells:
+  - name: emulated-rocjitsu
+    mitigations: [none]
+    environment: emulated-rocjitsu
+    workload_config:
+      num_layers: 2
+      # Relative so it resolves under the run cwd in both places: inside the
+      # container the boot script `cd /out` first (-> /out/llm_det_capture/...),
+      # and on the host it lands under wherever `aorta` was invoked.
+      capture_dir: ./llm_det_capture/emulated-rocjitsu

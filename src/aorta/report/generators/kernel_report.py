@@ -7,9 +7,9 @@ Reads ``rank_*_metrics.jsonl`` files in a run directory and emits:
     preceding kernel-event counts).
   - An HTML report rendering the same data alongside a small Markdown-
     style narrative. The HTML is intentionally dependency-free so the
-    generator works with the base ``aorta`` install.
+    generator works with the base install (``pip install amd-aorta``).
 
-The generator depends only on the standard library; ``aorta[report]``'s
+The generator depends only on the standard library; ``amd-aorta[report]``'s
 heavy plotting stack (matplotlib, pandas) is *not* required for kernel
 reports.
 """

@@ -1,7 +1,7 @@
 """LLM proposers for the probe agent loop.
 
 ``FakeLLMProposer`` round-robins registered mitigations (offline tests).
-``LiteLLMProposer`` calls LiteLLM when ``aorta[agent]`` is installed.
+``LiteLLMProposer`` calls LiteLLM when ``amd-aorta[agent]`` is installed.
 """
 
 from __future__ import annotations
@@ -181,7 +181,7 @@ class FakeLLMProposer:
 
 
 class LiteLLMProposer:
-    """LiteLLM-backed proposer (requires ``pip install 'aorta[agent]'``)."""
+    """LiteLLM-backed proposer (requires ``pip install 'amd-aorta[agent]'``)."""
 
     def __init__(self, *, model: str = "gpt-4o-mini") -> None:
         self._model = model
@@ -215,8 +215,8 @@ class LiteLLMProposer:
                 "Install it with either:\n"
                 "  pip install litellm\n"
                 "  pip install -e '.[agent]'   # from the aorta repo root (editable + extra)\n"
-                "If pip says the 'agent' extra does not exist, your installed aorta "
-                "package is stale — reinstall from this repo with -e '.[agent]'."
+                "If pip says the 'agent' extra does not exist, your installed amd-aorta "
+                "distribution is stale — reinstall from this repo with -e '.[agent]'."
             ) from exc
 
         system = (

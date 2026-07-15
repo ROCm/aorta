@@ -110,6 +110,7 @@ class TestRunRequest:
         assert req.config_overrides == {}
         assert req.results_dir == Path("results")
         assert req.collect == ()
+        assert req.collect_options == {}
 
     def test_custom_values(self):
         """RunRequest accepts custom values."""
@@ -123,6 +124,7 @@ class TestRunRequest:
             config_overrides={"batch_size": 32},
             results_dir=Path("/tmp/results"),
             collect=("rocprof",),
+            collect_options={"rocprof": {"FORMAT": "json"}},
         )
         assert req.workload == "fsdp"
         assert req.trials == 3
@@ -133,6 +135,7 @@ class TestRunRequest:
         assert req.config_overrides == {"batch_size": 32}
         assert req.results_dir == Path("/tmp/results")
         assert req.collect == ("rocprof",)
+        assert req.collect_options == {"rocprof": {"FORMAT": "json"}}
 
     def test_is_frozen(self):
         """RunRequest is immutable."""
@@ -152,22 +155,26 @@ class TestRunRequest:
         """
         extra_env_in = {"FOO": "1"}
         config_in = {"steps": 10, "nested": {"k": "v"}}
+        collect_options_in = {"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}}
 
         req = RunRequest(
             workload="w",
             trials=1,
             extra_env=extra_env_in,
             config_overrides=config_in,
+            collect_options=collect_options_in,
         )
 
         extra_env_in["FOO"] = "999"
         extra_env_in["NEW"] = "added"
         config_in["steps"] = 999
         config_in["nested"]["k"] = "modified"
+        collect_options_in["layer_numerics"]["NANLOG_SAMPLE_EVERY"] = "999"
 
         assert req.extra_env == {"FOO": "1"}
         assert req.config_overrides["steps"] == 10
         assert req.config_overrides["nested"]["k"] == "v"
+        assert req.collect_options["layer_numerics"]["NANLOG_SAMPLE_EVERY"] == "1"
 
 
 class TestRunTrials:
@@ -205,6 +212,62 @@ class TestRunTrials:
             )
             with pytest.raises(ValueError, match="Invalid extra_env keys"):
                 run_trials(req)
+
+    def test_rejects_malformed_env_probe(self, tmp_path):
+        """``env_probe`` must be {'src', 'out'} with str values.
+
+        The triage runner always passes the right shape, but RunRequest is a
+        public API -- a bad shape must fail fast here, not later at JSON
+        serialization of TrialResult.config.
+        """
+        for bad in (
+            {"src": "/a"},                       # missing 'out'
+            {"src": "/a", "out": "/b", "x": 1},  # extra key
+            {"src": "/a", "out": Path("/b")},    # non-str value
+            ["src", "out"],                      # not a dict (would AttributeError)
+            42,                                  # not even iterable (would TypeError)
+        ):
+            req = RunRequest(
+                workload="anything",
+                trials=1,
+                env_probe=bad,
+                results_dir=tmp_path,
+            )
+            with pytest.raises(ValueError, match="env_probe must be a dict"):
+                run_trials(req)
+
+    def test_rejects_collect_options_without_enabled_collector(self, tmp_path):
+        req = RunRequest(
+            workload="anything",
+            trials=1,
+            collect=("rocprof",),
+            collect_options={"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}},
+            results_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match="not enabled in collect"):
+            run_trials(req)
+
+    def test_rejects_non_mapping_collect_options(self, tmp_path):
+        req = RunRequest(
+            workload="anything",
+            trials=1,
+            collect=("layer_numerics",),
+            collect_options=["layer_numerics"],  # type: ignore[arg-type]
+            results_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match="collect_options must be a mapping"):
+            run_trials(req)
+
+    def test_rejects_non_string_collect_option_values(self, tmp_path):
+        req = RunRequest(
+            workload="anything",
+            trials=1,
+            collect=("layer_numerics",),
+            collect_options={"layer_numerics": {"NANLOG_SAMPLE_EVERY": 1}},  # type: ignore[dict-item]
+            results_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match=r"dict\[str, str\]"):
+            run_trials(req)
 
     def test_rejects_reserved_aorta_prefix_in_config_overrides(self, tmp_path):
         """``_aorta_*`` keys are reserved for platform-supplied values
@@ -351,6 +414,258 @@ class TestRunTrials:
             "cell_name": "none-none",
             "timeout_per_trial": None,
         }
+
+    def test_collect_injected_into_config(self, tmp_path):
+        """``RunRequest.collect`` lands at ``config['_aorta_collect']`` as a list.
+
+        This is the single seam a workload reads to decide whether to
+        attach a collector (e.g. the recom_repro wrapper launching the
+        layer_numerics logger). Injected AFTER ``config_overrides`` merge,
+        so the reserved-``_aorta_*`` rejection guards the slot.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_capturing"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_capturing",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+            )
+            run_trials(req)
+        # Stored as a plain list (JSON-safe), not the source tuple.
+        assert captured_config["_aorta_collect"] == ["layer_numerics"]
+
+    def test_collect_absent_when_empty(self, tmp_path):
+        """No ``_aorta_collect`` key when ``RunRequest.collect`` is empty.
+
+        Every existing run (no ``--collect``) must round-trip with the key
+        absent so the JSON-serialised trial result shape is unchanged.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "nocollect"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(workload="nocollect", trials=1, results_dir=tmp_path)
+            run_trials(req)
+        assert "_aorta_collect" not in captured_config
+
+    def test_collect_options_injected_into_config(self, tmp_path):
+        """``RunRequest.collect_options`` lands at
+        ``config['_aorta_collect_options']`` so a workload can read its
+        collector's knobs (e.g. layer_numerics NANLOG_* overrides)."""
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_opts"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_opts",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+                collect_options={"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}},
+            )
+            run_trials(req)
+        assert captured_config["_aorta_collect_options"] == {
+            "layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}
+        }
+
+    def test_collect_options_absent_when_empty(self, tmp_path):
+        """No ``_aorta_collect_options`` key when the mapping is empty --
+        back-compat for list-form / no-collector runs."""
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "noopts"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="noopts",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+            )
+            run_trials(req)
+        assert "_aorta_collect_options" not in captured_config
+
+    def test_collect_dir_injected_when_collector_active(self, tmp_path):
+        """A collector run gets ``config['_aorta_collect_dir']`` (an absolute
+        per-trial path stem) WITHOUT needing ``save_logs`` -- so collector
+        artifacts can land in the results tree regardless of the log-capture knob."""
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_dir"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_dir",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+                # note: save_logs NOT set
+            )
+            run_trials(req)
+        collect_dir = captured_config["_aorta_collect_dir"]
+        assert Path(collect_dir).is_absolute()
+        assert collect_dir.endswith("trial_d0_m0_t0")
+        # No log prefix, because save_logs was not requested -- proves the two
+        # are decoupled.
+        assert "_aorta_log_prefix" not in captured_config
+
+    def test_collect_dir_absent_without_collector(self, tmp_path):
+        """No ``_aorta_collect_dir`` for a run with no collector -- back-compat
+        (the key only appears when a collector was requested)."""
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "nocollectdir"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(workload="nocollectdir", trials=1, results_dir=tmp_path)
+            run_trials(req)
+        assert "_aorta_collect_dir" not in captured_config
+
+    def test_collect_survives_trial_json_roundtrip(self, tmp_path):
+        """``_aorta_collect`` is a plain list, so the trial JSON dump needs
+        no sanitizer for it (unlike ``_aorta_probe_extras``)."""
+        import json
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                pass
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_json"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_json",
+                trials=1,
+                results_dir=tmp_path,
+                collect=("layer_numerics", "rocprof"),
+            )
+            run_trials(req)
+
+        written = list(tmp_path.rglob("trial_*.json"))
+        assert written, "expected a per-trial JSON to be written"
+        loaded = json.loads(written[0].read_text(encoding="utf-8"))
+        assert loaded["config"]["_aorta_collect"] == ["layer_numerics", "rocprof"]
 
     def test_cleanup_error_is_logged_not_swallowed(self, tmp_path, caplog):
         """A failing ``cleanup()`` is logged so leaked resources are visible."""
@@ -1031,6 +1346,8 @@ class TestConfigOverrides:
             "docker": "img@sha256:deadbeef",
             "venv": None,
             "buck_target": None,
+            "emulator": None,
+            "mirage_profile": None,
             "source_package": "test",
         }
         assert captured_config["_aorta_environment"] == expected
@@ -1096,6 +1413,8 @@ class TestConfigOverrides:
             "docker": None,
             "venv": None,
             "buck_target": "//workloads/recom_repro:recom_repro",
+            "emulator": None,
+            "mirage_profile": None,
             "source_package": "test",
         }
         assert captured_config["_aorta_environment"] == expected
@@ -1423,6 +1742,8 @@ class TestBuckTargetOverride:
             "venv": "/opt/venv",
             # buck_target was overridden
             "buck_target": "//:aorta",
+            "emulator": None,
+            "mirage_profile": None,
             # source_package survived
             "source_package": "custom_pkg",
         }
@@ -1730,6 +2051,8 @@ class TestImageOverride:
             "venv": "/opt/venv",
             # buck_target survived the docker overlay
             "buck_target": "//workloads/recom_repro:recom_repro",
+            "emulator": None,
+            "mirage_profile": None,
             # source_package survived
             "source_package": "custom_pkg",
         }

@@ -9,9 +9,16 @@ import pytest
 from aorta.probe.classifier.tier5_custom import CompiledPattern, CustomScanResult
 from aorta.probe.classifier.verdict import (
     DETECTOR_MISSING_PASS_SIGNAL,
+    VALID_VERDICTS,
     VerdictInputs,
     resolve,
 )
+
+
+def test_valid_verdicts_is_the_three_way_vocabulary():
+    """The canonical verdict set downstream layers validate against is exactly
+    {pass, fail, error} -- no more, no less (issue #230)."""
+    assert VALID_VERDICTS == {"pass", "fail", "error"}
 
 
 def _required_pattern(raw_id: str) -> CompiledPattern:
@@ -163,6 +170,62 @@ def test_required_for_pass_no_required_patterns_no_meta():
     """When the recipe declares no required patterns, meta detector is never injected."""
     verdict = resolve(_inputs())
     assert DETECTOR_MISSING_PASS_SIGNAL not in verdict.failure_detectors_fired
+
+
+# ---- Three-way verdict: error (issue #230) ------------------------------
+
+
+def test_timeout_alone_is_error():
+    """A timeout with no recognised hang is an ``error`` (no valid obs)."""
+    verdict = resolve(_inputs(tier1=["tier1:timeout"]))
+    assert verdict.verdict == "error"
+    assert verdict.error_detectors_fired == ["tier1:timeout"]
+    assert verdict.failure_detectors_fired == []
+
+
+def test_exec_failed_is_error():
+    """A launch failure (``tier1:exec_failed``) is an ``error``."""
+    verdict = resolve(_inputs(tier1=["tier1:exec_failed"]))
+    assert verdict.verdict == "error"
+    assert verdict.error_detectors_fired == ["tier1:exec_failed"]
+    assert verdict.failure_detectors_fired == []
+
+
+def test_timeout_with_hang_is_fail_not_error():
+    """fail > error: a recognised hang co-firing with a timeout wins."""
+    verdict = resolve(_inputs(tier1=["tier1:timeout"], tier2=["tier2:hang"]))
+    assert verdict.verdict == "fail"
+    # The timeout still surfaces in the error list for the operator, but the
+    # hang (a genuine failure) drives the verdict.
+    assert verdict.failure_detectors_fired == ["tier2:hang"]
+    assert verdict.error_detectors_fired == ["tier1:timeout"]
+
+
+def test_fail_beats_error_across_tiers():
+    """A real failure anywhere outranks a co-firing error detector."""
+    verdict = resolve(
+        _inputs(tier1=["tier1:exec_failed"], tier4=["tier4:hip_error"])
+    )
+    assert verdict.verdict == "fail"
+    assert verdict.failure_detectors_fired == ["tier4:hip_error"]
+    assert verdict.error_detectors_fired == ["tier1:exec_failed"]
+
+
+def test_exit_nonzero_stays_fail_not_error():
+    """A plain non-zero exit is a *valid* observation of a failure -> fail."""
+    verdict = resolve(_inputs(tier1=["tier1:exit_nonzero"]))
+    assert verdict.verdict == "fail"
+    assert verdict.error_detectors_fired == []
+
+
+def test_partition_helper_splits_by_error_set():
+    from aorta.probe.classifier.verdict import partition_detectors
+
+    failures, errors = partition_detectors(
+        ["tier1:timeout", "tier1:exit_nonzero", "tier1:exec_failed", "tier4:nan"]
+    )
+    assert failures == ["tier1:exit_nonzero", "tier4:nan"]
+    assert errors == ["tier1:timeout", "tier1:exec_failed"]
 
 
 def test_returned_lists_are_fresh_copies():

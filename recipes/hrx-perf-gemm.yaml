@@ -1,0 +1,60 @@
+# HRX perf -- compute-bound SGEMM, HRX-on vs stock-ROCm A/B.
+#
+# Measures how fast a big tiled SGEMM (C = A*B, N x N floats) runs under the HRX
+# HIP-compatibility layer vs the stock ROCm HIP runtime. The `hrx_perf` workload
+# builds the bench with hipcc at setup and execs it; each timed iteration is
+# measured host-side (launch + hipDeviceSynchronize), so per-step time includes
+# runtime/launch overhead -- where HRX can differ from stock HIP.
+#
+# HOW TO READ THE RESULT
+#   The matrix's per-cell "Mean step (ms)" is the mean timed iteration; the
+#   Confound column reports hrx_on's step time as a ratio of the hrx_off
+#   baseline (e.g. "speed (+8%)" means HRX was 8% slower per iteration).
+#   Achieved GFLOP/s is in each trial's result.json metrics (metrics.gflops)
+#   and matrix.json.
+#
+# PREREQUISITES
+#   * A ROCm/hipcc toolchain (the workload compiles the bench).
+#   * An installed HRX public dist. Replace /path/to/hrx-root in the hrx_on
+#     cell below with its prefix (the dir containing lib/libamdhip64.so). Paths
+#     under extra_env are passed verbatim (no shell expansion) -- use ABSOLUTE
+#     paths. A wrong/placeholder path fails setup instead of silently measuring
+#     stock HIP.
+#
+# Run (ticket comes from `ticket:` below; add --strict to fail if a cell errors
+# or never runs):
+#   aorta sweep run --recipe recipes/hrx-perf-gemm.yaml --output ./triage_results --strict
+# Read:
+#   cat triage_results/HRX-PERF-GEMM/hrx_perf/*/matrix.md
+
+schema_version: 1
+
+ticket: HRX-PERF-GEMM
+workload: hrx_perf
+
+trials: 3
+steps: 1
+
+save_logs: true
+
+workload_config:
+  bench: gemm
+  gpu_arch: gfx942
+  size: 4096
+  iters: 50
+  warmup: 10
+  timeout_sec: 600
+
+cells:
+  - name: hrx_off
+    mitigations: [none]
+    environment: local
+
+  - name: hrx_on
+    mitigations: [none]
+    environment: local
+    # EDIT: replace /path/to/hrx-root with your installed HRX prefix.
+    extra_env:
+      HRX_GPU_DRIVER: "amdgpu"
+      LD_LIBRARY_PATH: "/path/to/hrx-root/lib"
+      LD_PRELOAD: "/path/to/hrx-root/lib/libamdhip64.so"

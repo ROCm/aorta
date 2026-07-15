@@ -1,0 +1,212 @@
+name: Release
+
+# Build the wheel + sdist once, attach them to a GitHub Release, and publish the
+# same artifacts to PyPI (so customers can `pip install amd-aorta`). The release
+# version is derived from the git tag by setuptools_scm (see
+# [tool.setuptools_scm] in pyproject.toml) -- it is never hard-coded here and is
+# never committed back to a branch, so there is a single source of truth (the
+# vX.Y.Z tag) and this workflow never has to push to a protected branch.
+#
+# Two ways to cut a release:
+#   * push a version tag:  git tag vX.Y.Z && git push origin vX.Y.Z
+#     (builds X.Y.Z straight from the tag)
+#   * run this workflow manually (Actions -> Release -> Run workflow):
+#       - bump = patch/minor/major (or an explicit version) -> the workflow
+#         computes the next version from the latest tag, builds it, and (only
+#         after a successful build) creates and pushes the new vX.Y.Z tag.
+on:
+  push:
+    tags:
+      # Coarse first-pass filter for vMAJOR.MINOR.PATCH tags. This is a glob,
+      # not a regex: the `*`s aren't end-anchored, so it rejects shapes like
+      # v1 / v1beta but still admits rc-style / 4-segment tags such as
+      # v0.2.0rc1 / v1.2.3.4. Those are caught (and the run failed) by the
+      # stable-version gate in "Resolve release version" below, which is the
+      # real safety net; this filter just trims the most obvious noise.
+      - "v[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump above the latest release tag (ignored if 'version' is set)."
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      version:
+        description: "Explicit MAJOR.MINOR.PATCH to release (overrides 'bump'; leave blank to use 'bump')."
+        required: false
+        default: ""
+
+permissions:
+  contents: write  # required to create the release and push the new tag (manual runs)
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # full history + tags so setuptools_scm can derive the version
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Resolve release version
+        id: version
+        env:
+          # Bind inputs to env vars rather than interpolating them straight into
+          # the shell, to avoid script injection (bump_version.py also validates).
+          BUMP: ${{ github.event.inputs.bump }}
+          EXPLICIT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            # A manual run creates a NEW tag, so it must run on a branch: a tag
+            # ref has no "next version" to bump toward and can't own a new tag.
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              echo "::error::A manual release must run on a branch, not a tag ref (${GITHUB_REF_NAME}). Re-run from the default branch, or push a vX.Y.Z tag instead."
+              exit 1
+            fi
+            # release.yml is the STABLE channel (marks the GitHub Release
+            # "Latest" and publishes to PyPI), so a manual run must originate
+            # from the default branch -- never an unmerged feature branch.
+            # Tag-push releases are unaffected: they take the else branch below.
+            if [ "${GITHUB_REF}" != "refs/heads/${{ github.event.repository.default_branch }}" ]; then
+              echo "::error::Manual releases must run from the default branch (${{ github.event.repository.default_branch }}), not ${GITHUB_REF_NAME}."
+              exit 1
+            fi
+            if [ -n "${EXPLICIT_VERSION}" ]; then
+              pkg_version="$(python scripts/bump_version.py --set "${EXPLICIT_VERSION}")" \
+                || { echo "::error::Could not resolve explicit version '${EXPLICIT_VERSION}' (see log)."; exit 1; }
+            else
+              pkg_version="$(python scripts/bump_version.py "${BUMP}")" \
+                || { echo "::error::Could not compute a '${BUMP}' bump from the latest tag (see log)."; exit 1; }
+            fi
+          else
+            # Tag push: the tag IS the version.
+            pkg_version="${GITHUB_REF_NAME#v}"
+          fi
+
+          # release.yml is the STABLE channel: it marks the GitHub Release
+          # "Latest" and publishes to PyPI. Pre-release / rc builds
+          # (X.Y.ZrcYYYYMMDD) belong to nightly.yml's rolling dev-wheels channel.
+          # Reject any suffixed / non-MAJOR.MINOR.PATCH version (and leading-zero
+          # segments like 01.02.003, which normalize away and wouldn't match the
+          # built wheel's version) so an rc or ambiguous value can never ship as a
+          # stable release.
+          if ! printf '%s' "${pkg_version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::Release version '${pkg_version}' is not a stable MAJOR.MINOR.PATCH release; use nightly.yml for pre-release rc builds."
+            exit 1
+          fi
+          tag="v${pkg_version}"
+          if ! git check-ref-format "refs/tags/${tag}"; then
+            echo "::error::Version '${pkg_version}' yields an invalid git tag '${tag}'; choose a tag-safe version."
+            exit 1
+          fi
+          echo "version=${pkg_version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          # Pin the version setuptools_scm stamps into the build. On a tag push
+          # this equals the tag; on a manual run it pins the not-yet-created tag's
+          # version (the tag is pushed only after the build succeeds, below) and
+          # also strips any dirty/local segment so the wheel version is exactly
+          # X.Y.Z.
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AMD_AORTA=${pkg_version}" >> "$GITHUB_ENV"
+          echo "Resolved release version ${pkg_version} (tag ${tag})."
+
+      # Manual runs mint a NEW tag, so fail fast here if it already exists (an
+      # already-released version must never be re-released) -- but defer the tag
+      # push until after the build succeeds (below) so a failed build never
+      # leaves an orphaned remote tag that blocks reruns.
+      - name: Verify tag is available for manual release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          # Only a real 404 means "tag is free". Any other gh failure (auth,
+          # network, GitHub 5xx) must abort with a clear error rather than be
+          # silently read as "tag absent" and fail later at push time.
+          if err="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" 2>&1 >/dev/null)"; then
+            echo "::error::Tag ${tag} already exists. Bump the version before cutting a new release."
+            exit 1
+          elif ! printf '%s' "${err}" | grep -q "HTTP 404"; then
+            echo "::error::Could not verify whether tag ${tag} exists: ${err}"
+            exit 1
+          fi
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      # Fail fast if the built artifacts don't carry the resolved version (e.g. a
+      # setuptools_scm misconfiguration), so a release can never disagree with the
+      # metadata customers install. Read the version from the wheel's embedded
+      # METADATA (the source of truth pip installs) rather than pattern-matching a
+      # single filename, so a future build/platform tag or extra wheel can't make
+      # this pass/fail on the wrong signal.
+      - name: Verify built version matches
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: python scripts/check_wheel_version.py "${EXPECTED_VERSION}"
+
+      # Only now that the build has succeeded do we create and push the tag, so
+      # a build failure on a manual run leaves nothing to clean up before retry.
+      - name: Create and push tag for manual release
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          git tag "${tag}"
+          git push origin "${tag}"
+
+      # Share the built artifacts with the publish job so PyPI gets the exact
+      # same wheel + sdist that were attached to the GitHub Release (build once).
+      - name: Upload built distributions
+        uses: actions/upload-artifact@v6
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Create GitHub Release with artifacts
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "AORTA ${{ steps.version.outputs.version }}"
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          make_latest: "true"  # mark this the "Latest" release
+          generate_release_notes: true
+
+  # Publish the same artifacts to PyPI via Trusted Publishing (OIDC) so customers
+  # can `pip install amd-aorta`. Requires a one-time PyPI trusted-publisher setup for
+  # this repo + workflow + the `pypi` environment (see docs/releasing.md).
+  publish-pypi:
+    needs: build-and-release
+    # Trusted Publishing is scoped to the canonical repo + `pypi` environment, so
+    # this job can only succeed on ROCm/aorta. Skip it on forks to avoid noisy
+    # OIDC failures (the GitHub Release job above still runs everywhere).
+    if: github.repository == 'ROCm/aorta'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/amd-aorta
+    permissions:
+      id-token: write  # OIDC token for Trusted Publishing; no API token stored
+      contents: read   # let download-artifact fetch the dist bundle under the restricted token
+    steps:
+      - name: Download built distributions
+        uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

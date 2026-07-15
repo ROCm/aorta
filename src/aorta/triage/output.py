@@ -48,12 +48,23 @@ import yaml
 
 from aorta.registry import get_environment
 from aorta.triage.confound import CONFOUND_DID_NOT_RUN, ConfoundTag
-from aorta.triage.matrix import CellStats
+from aorta.triage.matrix import UNRELIABLE_ERROR_RATE_THRESHOLD, CellStats
 from aorta.triage.recipe import Recipe
 
 log = logging.getLogger(__name__)
 
 NO_TICKET_SLUG = "_no_ticket_"
+
+# Human-readable performance summary written next to matrix.md / matrix.json
+# on every run (see :func:`write_perf_report`). Kept as one constant so the
+# writer and the matrix.md pointer note can't drift.
+PERF_REPORT_FILENAME = "perf.md"
+
+# The run-directory layouts ``resolve_run_dir`` / ``_cell_directory`` accept.
+# Kept as one source of truth so the two runtime guards can't drift (a value
+# accepted by one but silently mishandled by the other would render wrong
+# ``Directory`` links). Mirrors the ``Literal`` on the public signatures.
+_VALID_LAYOUTS = ("timestamped", "flat_resume")
 
 # ``flat_resume`` lockfile name. Lives at ``<run_dir>/.aorta-probe.lock``; the
 # leading dot keeps it out of casual ``ls`` output and matches the convention
@@ -68,6 +79,22 @@ _SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]")
 # components on every filesystem we care about.  Keep them out of the output
 # tree so a ticket like ".." can't move the run directory up a level.
 _RESERVED_SLUGS = frozenset({".", ".."})
+
+
+def _collect_doc(
+    collect: tuple[str, ...],
+    collect_options: dict[str, dict[str, str]] | None = None,
+) -> list[str] | dict[str, dict[str, str] | None]:
+    """Return the reloadable YAML shape for a ``collect:`` field.
+
+    List form keeps option-free collectors compact. Mapping form is needed when
+    any enabled collector has options; option-less collectors are emitted with
+    ``null`` so they stay enabled on reload.
+    """
+    options = collect_options or {}
+    if not options:
+        return list(collect)
+    return {name: (dict(options[name]) if name in options else None) for name in collect}
 
 
 def safe_slug(value: str) -> str:
@@ -136,7 +163,7 @@ def resolve_run_dir(
     # would otherwise silently land in the timestamped branch. Reject
     # unknown values at runtime so probe-mode callers can't
     # accidentally get the wrong output tree.
-    if layout not in ("timestamped", "flat_resume"):
+    if layout not in _VALID_LAYOUTS:
         raise ValueError(
             f"resolve_run_dir: layout must be 'timestamped' or 'flat_resume', "
             f"got {layout!r}"
@@ -396,16 +423,47 @@ def _format_failure_rate(cell: CellStats) -> str:
 
 
 def _format_failures(cell: CellStats) -> str:
-    """Render the Failures column as ``failed / trials`` (e.g. ``3 / 8``).
+    """Render the Failures column as ``failed / valid`` (e.g. ``3 / 8``).
+
+    The denominator is the count of *valid* trials (``passed + failed``)
+    so the column matches the ``Failure rate`` percentage exactly --
+    error trials are excluded from both (issue #230). For a cell with no
+    error trials ``passed + failed == trials``, so the rendering is
+    byte-identical to the pre-#230 ``failed / trials`` form.
 
     Both numerator and denominator are spelled out so the column header
-    ("Failures") and the value together read as "3 failures out of 8 trials"
-    -- the previous "Trials" header on this same value confused readers
-    into reading 3/8 as a trial-count column (issue #160 review round 6).
+    ("Failures") and the value together read as "3 failures out of 8 valid
+    trials" -- the previous "Trials" header on this same value confused
+    readers into reading 3/8 as a trial-count column (issue #160 review
+    round 6).
+
+    When every trial errored (no whole-cell ``error`` but zero valid
+    trials), a bare ``0 / 0`` reads as a degenerate count, so the column
+    is annotated ``0 / 0 (no valid trials)`` to make clear there was no
+    valid observation to compute a failure rate over (issue #230 review).
     """
     if cell.error is not None:
         return "n/a"
-    return f"{cell.failed_count} / {cell.trials}"
+    valid = cell.passed_count + cell.failed_count
+    if valid == 0:
+        return "0 / 0 (no valid trials)"
+    return f"{cell.failed_count} / {valid}"
+
+
+def _format_errors(cell: CellStats) -> str:
+    """Render the Errors column as ``error / trials`` (issue #230).
+
+    Appended with ``(unreliable)`` when the cell's error rate crosses the
+    advisory threshold -- the event rate is computed over too few valid
+    trials to trust. Whole-cell error rows render ``n/a`` (their numerics
+    are already n/a).
+    """
+    if cell.error is not None:
+        return "n/a"
+    base = f"{cell.error_count} / {cell.trials}"
+    if cell.is_unreliable:
+        return f"{base} (unreliable)"
+    return base
 
 
 def _format_step_ms(cell: CellStats) -> str:
@@ -512,6 +570,169 @@ def _render_failure_hints(cell_stats: list[CellStats]) -> list[str]:
     return lines
 
 
+def _cell_directory(name: str, layout: Literal["timestamped", "flat_resume"]) -> str:
+    """Per-cell artifact directory, rendered relative to ``matrix.md``.
+
+    Probe runs (issue #188 ``flat_resume`` layout) put cell artifacts at
+    ``<run_dir>/<safe_slug(name)>/`` -- a sibling of ``matrix.md`` -- so the
+    relative path is just ``<slug>/``. Triage runs nest them under
+    ``cells/<slug>/``. The trailing slash marks the value as a directory.
+    The final segment is the recipe cell name (``<mitigation>-<diagnostic>``
+    in probe mode), so the on-disk folder stays the canonical join key while
+    the table itself reads the two axes from their own columns (#229).
+
+    ``layout`` is validated against the same set as :func:`resolve_run_dir`
+    so a typo (e.g. ``"flatresume"``) raises instead of silently rendering a
+    triage-style ``cells/<slug>/`` link for a probe run.
+    """
+    if layout not in _VALID_LAYOUTS:
+        raise ValueError(
+            f"_cell_directory: layout must be 'timestamped' or 'flat_resume', "
+            f"got {layout!r}"
+        )
+    slug = safe_slug(name)
+    if layout == "flat_resume":
+        return f"{slug}/"
+    return f"cells/{slug}/"
+
+
+def _cell_is_clean(cell: CellStats) -> bool:
+    """True when a cell has no whole-cell error and no failing/erroring trials.
+
+    A "clean" cell is one an operator never needs to open: it ran, and every
+    trial passed. Anything else (a whole-cell ``error``, at least one failing
+    trial, or at least one infra-``error`` trial) is worth a line in the
+    end-of-run summary so the failure and its artifacts are one glance away.
+    """
+    return cell.error is None and cell.failed_count == 0 and cell.error_count == 0
+
+
+def _oneline(text: str) -> str:
+    """Collapse a possibly multi-line message into a single summary line.
+
+    Cell-level ``error`` strings are ``f"{type(exc).__name__}: {exc}"`` and an
+    exception message can carry newlines; the summary is one line per cell, so
+    fold internal whitespace to single spaces.
+    """
+    return " ".join(text.split())
+
+
+def format_run_summary(
+    cell_stats: list[CellStats],
+    run_dir: Path,
+    *,
+    layout: Literal["timestamped", "flat_resume"] = "timestamped",
+    verbose_active: bool = False,
+) -> list[str]:
+    """Build the concise end-of-run sweep summary (issue #280).
+
+    ``aorta sweep run`` is otherwise silent during a run and prints only a
+    single ``Wrote matrix to ...`` line at the end, so an operator has no way
+    to see which cells failed or where their captured output landed without
+    opening ``matrix.md`` and digging through per-cell log files. This renders
+    a short, always-on report the runner echoes to stdout:
+
+    * one totals line (cells, how many clean / with failing trials / with
+      errors), suffixed with the count of cells that were **resumed** from a
+      prior run's cached artifacts when any were (issue #282);
+    * one line per **non-clean** cell -- ``cell did not run (...)`` when the
+      whole cell errored before any trial (``cell.error`` set), otherwise its
+      failed/errored trial counts out of the cell's trial budget -- plus the
+      workload's own one-line failure ``hint`` when it emitted one, a
+      ``[resumed]`` marker when the cell's trials came from cache, and the
+      cell's artifact directory (relative to ``run_dir``, correct for both the
+      timestamped triage layout and the flat-resume probe layout) so the logs
+      and per-trial JSON are one ``cd`` away; and
+    * a footer pointing at ``matrix.md`` for the full table, a "how to force a
+      fresh run" note when any cell was resumed, plus a ``-v`` tip when the run
+      was not already verbose.
+
+    Resume is why an ``exit 1`` command can still report a green cell: the
+    ``flat_resume`` layout reuses ``<output>/<ticket>/`` across invocations, so
+    a cell whose trials are already complete on disk is served from cache and
+    the new command never runs. Calling that out here means an operator does
+    not have to open the per-trial logs to tell a cached pass from a fresh one.
+
+    Scales with the number of cells, not trials, so a long sweep still ends in
+    a scannable report; an all-passing run with nothing resumed collapses to
+    the single totals line. Returns the lines (no trailing newline); the caller
+    joins + echoes them.
+    """
+    total = len(cell_stats)
+    non_clean = [c for c in cell_stats if not _cell_is_clean(c)]
+    resumed_count = sum(1 for c in cell_stats if c.resumed)
+    resumed_suffix = (
+        f" {resumed_count} resumed from a prior run (no trials re-executed)."
+        if resumed_count
+        else ""
+    )
+    # Actionable when a cache hit surprised the operator: how to force fresh.
+    resumed_note = (
+        f"Note: resumed cells reused cached artifacts under {run_dir}; delete "
+        "that directory or use a new --ticket/--output to force a fresh run."
+        if resumed_count
+        else None
+    )
+
+    if not non_clean:
+        # Happy path: one totals line (plus the resume note only when a cache
+        # hit means "passed" might not mean "freshly re-verified").
+        lines = [f"Sweep summary: all {total} cell(s) passed.{resumed_suffix}"]
+        if resumed_note is not None:
+            lines.append(resumed_note)
+        return lines
+
+    # The three buckets PARTITION the cells (clean + with_failures + with_errors
+    # == total): each non-clean cell falls in exactly one, mirroring its per-cell
+    # tag below. A cell with any genuine failing trial is counted "with failing
+    # trials" ([fail]) even if it also has errored trials; a cell is counted
+    # "with errors" only when the whole cell errored (``error`` set) or it has
+    # errored trials and NO failing trial ([error]). Without the
+    # ``failed_count == 0`` guard a mixed fail+error cell would be counted twice
+    # and the buckets could sum past ``total`` (Copilot, #281).
+    clean_count = total - len(non_clean)
+    with_failures = sum(1 for c in cell_stats if c.error is None and c.failed_count > 0)
+    with_errors = sum(
+        1
+        for c in cell_stats
+        if c.error is not None or (c.error_count > 0 and c.failed_count == 0)
+    )
+
+    lines = [
+        f"Sweep summary: {total} cell(s) -- {clean_count} clean, "
+        f"{with_failures} with failing trials, {with_errors} with errors."
+        f"{resumed_suffix}"
+    ]
+    for cell in non_clean:
+        rel_dir = _cell_directory(cell.name, layout)
+        hint = cell.failure_hints[0][0] if cell.failure_hints else None
+        if cell.error is not None:
+            # Whole cell never ran (unknown mitigation, docker pull failure, ...).
+            detail = f"cell did not run ({_oneline(cell.error)})"
+            tag = "[error]"
+        else:
+            parts = []
+            if cell.failed_count:
+                parts.append(f"{cell.failed_count} failed")
+            if cell.error_count:
+                parts.append(f"{cell.error_count} errored")
+            detail = f"{', '.join(parts)} of {cell.trials} trial(s)"
+            # A cell with any genuine failure is a [fail]; one with only infra
+            # errors (no failing trial) is an [error] -- the bug never got a
+            # valid observation there.
+            tag = "[fail]" if cell.failed_count else "[error]"
+        hint_str = f" ({_oneline(hint)})" if hint else ""
+        resumed_mark = " [resumed]" if cell.resumed else ""
+        lines.append(f"  {tag} {cell.name}: {detail}{hint_str}{resumed_mark} -> {rel_dir}")
+
+    lines.append(f"Full matrix: {run_dir / 'matrix.md'}")
+    if resumed_note is not None:
+        lines.append(resumed_note)
+    if not verbose_active:
+        lines.append("Tip: re-run with -v to stream per-cell progress live.")
+    return lines
+
+
 def write_matrix_md(
     path: Path,
     recipe: Recipe,
@@ -520,8 +741,17 @@ def write_matrix_md(
     confound_tags: dict[str, tuple[ConfoundTag, float | None]],
     warnings: list[str],
     run_timestamp: str,
+    layout: Literal["timestamped", "flat_resume"] = "timestamped",
 ) -> None:
-    """Render matrix.md in the format from issue #151 §"matrix.md target format"."""
+    """Render matrix.md in the format from issue #151 §"matrix.md target format".
+
+    In probe mode (``recipe.probe_extras is not None``) the identity columns
+    are the two recipe axes -- ``Mitigation`` and ``Diagnostic`` -- plus a
+    trailing ``Directory`` column with the per-cell artifact path, instead of
+    the triage-mode fused ``Cell`` / ``Mitigations`` columns. This keeps the
+    on-disk ``<mitigation>-<diagnostic>`` folder name (the agent's join key)
+    while removing the ambiguous fused name from the rendered table (#229).
+    """
     lines: list[str] = []
     lines.append(f"# Triage Matrix - {recipe.workload}")
     lines.append("")
@@ -540,7 +770,16 @@ def write_matrix_md(
     else:
         recipe_line += "(flag-mode; in-memory)"
     lines.append(recipe_line + "  ")
-    lines.append(f"**Trials per cell**: {recipe.trials}  ")
+    # With a ``stop_after`` rule the per-cell budget is the hard cap
+    # (``max_trials``), not ``recipe.trials`` (often ``1`` on probe
+    # recipes); render it as "up to N" so the header matches the real
+    # budget. Legacy runs with no rule stay byte-equivalent.
+    trial_budget = (
+        f"up to {recipe.stop_after.max_trials}"
+        if recipe.stop_after is not None
+        else str(recipe.trials)
+    )
+    lines.append(f"**Trials per cell**: {trial_budget}  ")
     lines.append(f"**Steps per trial**: {recipe.steps}  ")
     lines.append(f"**Run timestamp**: {run_timestamp}  ")
     baseline_step = (
@@ -577,40 +816,92 @@ def write_matrix_md(
     # matrix.md layout is byte-equivalent.
     show_top_failure = any(c.top_failure_detector_id for c in cell_stats)
     show_top_warn = any(c.top_warn_detector_id for c in cell_stats)
-    header_cells: list[str] = [
-        "Cell",
-        "Mitigations",
-        "Environment",
-    ]
+    # Issue #232: the "Stop after" column appears whenever the recipe
+    # carries a stop_after rule, so legacy / fixed-trials runs stay
+    # byte-equivalent. It distinguishes "stopped early" from "cap reached".
+    # Gate on the recipe (configuration) rather than on any cell's
+    # ``stop_after_note``: the note is only populated for cells that ran
+    # cleanly (``error is None``), so an all-errored run would otherwise
+    # hide the column even though the rule was active (and matrix.json
+    # still carries ``stop_after``). Errored cells render "—" in the
+    # column.
+    show_stop_after = recipe.stop_after is not None
+    # Issue #230: the "Errors" column appears only when at least one cell
+    # had an infra-error trial, so legacy / error-free runs stay
+    # byte-equivalent. It surfaces error trials excluded from the failure
+    # rate and flags cells whose error rate makes the rate untrustworthy.
+    show_errors = any(c.error_count for c in cell_stats)
+    # Issue #229: probe-mode runs synthesise cells as the cartesian product
+    # of ``mitigation_axis x diagnostic_axis`` and store both axes on
+    # ``cell.mitigations = (mitigation, diagnostic)``. Splitting them into
+    # their own columns (named after the recipe axes) -- plus a trailing
+    # ``Directory`` column -- removes the ambiguous fused ``<mit>-<diag>``
+    # identifier (a bare trailing ``-none`` when the diagnostic axis is
+    # unused) from the table without renaming the on-disk folder.
+    is_probe = recipe.probe_extras is not None
+    header_cells: list[str] = (
+        ["Mitigation", "Diagnostic", "Environment"]
+        if is_probe
+        else ["Cell", "Mitigations", "Environment"]
+    )
     if show_config:
         header_cells.append("Config")
     header_cells.extend(["Failure rate", "Failures"])
+    if show_errors:
+        header_cells.append("Errors")
     if show_top_failure:
         header_cells.append("Top failure")
     if show_top_warn:
         header_cells.append("Top warn")
+    if show_stop_after:
+        header_cells.append("Stop after")
     if show_iters:
         header_cells.append("Iters")
     header_cells.extend(["Mean step (ms)", "Confound"])
+    if is_probe:
+        header_cells.append("Directory")
     header = tuple(header_cells)
     rows: list[tuple[str, ...]] = [header]
     for cell in cell_stats:
         tag, _ = confound_tags.get(cell.name, (cell.error and "error" or "-", None))
-        row: list[str] = [
-            cell.name,
-            _format_mitigations(cell.mitigations),
-            cell.environment,
-        ]
+        if is_probe:
+            # probe.recipe_builder guarantees a (mitigation, diagnostic) pair;
+            # if that invariant is ever violated, warn so it isn't hidden, but
+            # still render "—" rather than abort the whole matrix at the end of
+            # a (potentially long) run -- output paths stay tolerant here, like
+            # the resume/manifest guards (#237).
+            if len(cell.mitigations) != 2:
+                log.warning(
+                    "probe cell %r has %d mitigation axis value(s), expected the "
+                    "(mitigation, diagnostic) pair; rendering missing axes as '—'",
+                    cell.name,
+                    len(cell.mitigations),
+                )
+            mitigation = cell.mitigations[0] if cell.mitigations else "—"
+            diagnostic = cell.mitigations[1] if len(cell.mitigations) > 1 else "—"
+            row: list[str] = [mitigation, diagnostic, cell.environment]
+        else:
+            row = [
+                cell.name,
+                _format_mitigations(cell.mitigations),
+                cell.environment,
+            ]
         if show_config:
             row.append(_format_workload_config(cell, varying_config_keys))
         row.extend([_format_failure_rate(cell), _format_failures(cell)])
+        if show_errors:
+            row.append(_format_errors(cell))
         if show_top_failure:
             row.append(cell.top_failure_detector_id or "—")
         if show_top_warn:
             row.append(cell.top_warn_detector_id or "—")
+        if show_stop_after:
+            row.append(cell.stop_after_note or "—")
         if show_iters:
             row.append(cell.iters_display)
         row.extend([_format_step_ms(cell), _format_confound(tag)])
+        if is_probe:
+            row.append(_cell_directory(cell.name, layout))
         rows.append(tuple(row))
     widths = [max(len(r[i]) for r in rows) for i in range(len(header))]
 
@@ -626,10 +917,21 @@ def write_matrix_md(
     lines.extend(_render_failure_hints(cell_stats))
     lines.append("## Notes")
     lines.append("")
-    lines.append(
-        "- Cell name comes from the recipe; mitigations + environment columns "
-        "disambiguate when names get terse."
-    )
+    if is_probe:
+        lines.append(
+            "- `Mitigation` / `Diagnostic` come from the recipe's "
+            "`mitigation_axis` / `diagnostic_axis`; each cell is one "
+            "`(mitigation, diagnostic)` pair. `Directory` is the cell's "
+            "artifact directory (logs + per-trial `result.json`), relative to "
+            "this file; its final segment is the `<mitigation>-<diagnostic>` "
+            "cell name (#229). `none` in either axis means that axis was not "
+            "varied for the cell."
+        )
+    else:
+        lines.append(
+            "- Cell name comes from the recipe; mitigations + environment columns "
+            "disambiguate when names get terse."
+        )
     lines.append("- Confound column legend:")
     lines.append("  - `(baseline)` -- the cell against which all step-time ratios are computed.")
     lines.append("  - `-` -- the mitigation appears to work without a speed cost. Trust this cell.")
@@ -697,20 +999,44 @@ def write_matrix_md(
             "when no cell sets `workload_config`, or when every cell agrees on every key."
         )
     lines.append(
-        "- `Failures` is `failed_count / trial_count` (e.g. `3 / 8` = three failed out "
-        "of eight). `Failure rate` is the same data as a percentage and counts every "
-        "trial whose `exit_status != ok` or whose `WorkloadResult.passed` is False; "
-        "neither is NaN-specific. Use `matrix.json::cells[*].exit_status_counts` to "
-        "break failures down by mode: `workload_failed` (run() reported "
-        "passed=False), `workload_setup_failed` (setup() raised, so the "
-        "workload never reached the measurement -- a 100% setup-fail row is "
-        "NOT a 100% reproduction), `infrastructure_failed` (construction or "
-        "run() itself raised), `unknown`, etc."
+        "- `Failures` is `failed_count / valid_trials` where `valid_trials = "
+        "passed + failed` (e.g. `3 / 8` = three failed out of eight valid trials). "
+        "`Failure rate` is the same data as a percentage. Both **exclude `error` "
+        "trials** -- trials that never validly ran (infra crash, launch failure, "
+        "timeout with no recognised hang) -- from the denominator so an infra "
+        "flake can't make the bug look rarer or more reproducible than it is "
+        "(issue #230). Neither is NaN-specific. Use "
+        "`matrix.json::cells[*].exit_status_counts` to break failures down by "
+        "mode: `workload_failed` (run() reported passed=False), "
+        "`workload_setup_failed` (setup() raised, so the workload never reached "
+        "the measurement -- a 100% setup-fail row is NOT a 100% reproduction), "
+        "`infrastructure_failed` (construction or run() itself raised), "
+        "`unknown`, etc."
     )
+    if show_errors:
+        lines.append(
+            "- `Errors` is `error_count / trial_count` -- trials that produced no "
+            "valid observation of the thing under test (a probe `error` verdict: "
+            "launch failure or a timeout with no recognised hang; or a triage "
+            "`infrastructure_failed` / `workload_setup_failed`). Error trials are "
+            "excluded from `Failure rate`. A cell tagged `(unreliable)` had an "
+            f"error rate \u2265 {int(round(UNRELIABLE_ERROR_RATE_THRESHOLD * 100))}% "
+            "-- its failure rate rests on too few valid trials to trust; inspect "
+            "the per-trial JSON before drawing conclusions. The column is hidden "
+            "entirely when no cell had an error trial."
+        )
     lines.append(
         "- Only `mean step (ms)` is shown here. Per-cell `std`, `min`, `max`, "
         "`p50`, `p90`, `p99`, raw step-time arrays, exit-status histogram, and "
         "per-trial JSON paths are in `matrix.json`."
+    )
+    lines.append(
+        f"- **Performance numbers**: see `{PERF_REPORT_FILENAME}` (alongside this "
+        "file) for the per-cell timing percentiles (mean / std / min / max / p50 / "
+        "p90 / p99 step ms + mean wall clock) and any workload-reported throughput "
+        "metrics (e.g. `gflops` / `gbps`). It is written for every run from data "
+        "already collected here; the same aggregates are in "
+        "`matrix.json::cells[*].metrics_summary`."
     )
     lines.append(
         "- `recipe.resolved.yaml` (alongside this file) is a strict, reloadable "
@@ -747,7 +1073,16 @@ def write_matrix_json(
         "schema_version": 1,
         "workload": recipe.workload,
         "ticket": recipe.ticket,
-        "trials_per_cell": recipe.trials,
+        # The per-cell trial budget. With a ``stop_after`` rule the budget is
+        # the cap (``max_trials``) -- which cells may stop short of -- not the
+        # fixed ``recipe.trials`` (often ``1`` on probe recipes), so report the
+        # cap to keep the summary truthful. Per-cell ``trials:`` overrides and
+        # realised counts live on each cell entry's ``trials`` field.
+        "trials_per_cell": (
+            recipe.stop_after.max_trials
+            if recipe.stop_after is not None
+            else recipe.trials
+        ),
         "steps_per_trial": recipe.steps,
         "run_timestamp": run_timestamp,
         "baseline_cell": baseline_name,
@@ -755,6 +1090,18 @@ def write_matrix_json(
             "threshold": recipe.confound.threshold,
             "baseline_cell_configured": recipe.confound.baseline_cell,
         },
+        # Issue #232: the collect-until-N rule in force for this run (None
+        # for legacy fixed-trials runs). Per-cell realised outcomes live on
+        # each cell's ``stop_after_note`` / ``trials`` fields.
+        "stop_after": (
+            {
+                "events": recipe.stop_after.events,
+                "max_trials": recipe.stop_after.max_trials,
+                "event_verdict": recipe.stop_after.event_verdict,
+            }
+            if recipe.stop_after is not None
+            else None
+        ),
         "warnings": list(warnings),
         "recipe_source": {
             "path": str(recipe.source_path) if recipe.source_path else None,
@@ -765,7 +1112,13 @@ def write_matrix_json(
     for cell in cell_stats:
         tag, ratio = confound_tags.get(cell.name, ("-", None))
         entry = asdict(cell)
+        # ``failure_rate`` is the event rate (failed / valid trials, errors
+        # excluded -- issue #230); ``error_rate`` and ``unreliable`` surface
+        # the error share and the advisory flag. ``error_count`` is a
+        # dataclass field so ``asdict`` already included it.
         entry["failure_rate"] = cell.failure_rate
+        entry["error_rate"] = cell.error_rate
+        entry["unreliable"] = cell.is_unreliable
         entry["confound"] = tag
         entry["step_time_ratio"] = ratio
         try:
@@ -782,6 +1135,170 @@ def write_matrix_json(
         doc["cells"].append(entry)
 
     path.write_text(json.dumps(doc, indent=2, sort_keys=False), encoding="utf-8")
+
+
+def _fmt_perf_fixed3(value: float) -> str:
+    """Format a numeric figure for perf.md as a fixed 3-decimal string.
+
+    Unit-agnostic: used for both the millisecond step-time columns and the
+    seconds-valued ``Wall (s)`` column, so the unit lives in the table header,
+    not the formatter.
+    """
+    return f"{value:.3f}"
+
+
+def _fmt_perf_metric(value: float) -> str:
+    """Format a workload metric value (thousands-separated, 3 decimals)."""
+    return f"{value:,.3f}"
+
+
+def _perf_table(rows: list[tuple[str, ...]]) -> list[str]:
+    """Render a GitHub-flavoured markdown table with padded columns."""
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+
+    def _row(cells: tuple[str, ...]) -> str:
+        return "| " + " | ".join(c.ljust(widths[i]) for i, c in enumerate(cells)) + " |"
+
+    out = [_row(rows[0]), "|" + "|".join("-" * (w + 2) for w in widths) + "|"]
+    out.extend(_row(r) for r in rows[1:])
+    return out
+
+
+def write_perf_report(
+    path: Path,
+    recipe: Recipe,
+    cell_stats: list[CellStats],
+    baseline: CellStats,
+    run_timestamp: str,
+) -> None:
+    """Render ``perf.md`` -- the per-run performance summary next to matrix.md.
+
+    Written on **every** run: it is pure formatting of data aorta already
+    collected (per-step time samples + wall clock + any workload-reported
+    ``metrics``), so it adds no measurement cost. It always carries a step-
+    timing percentile table; a second throughput table appears only when at
+    least one cell reported numeric ``metrics`` (e.g. ``gflops`` / ``gbps``),
+    which ``matrix.md`` never surfaced. The same aggregates live in
+    ``matrix.json::cells[*].metrics_summary`` for machine consumers.
+    """
+    lines: list[str] = []
+    lines.append(f"# Performance Report - {recipe.workload}")
+    lines.append("")
+    lines.append(f"**Ticket**: {recipe.ticket or '(none)'}  ")
+    lines.append(f"**Workload**: {recipe.workload}  ")
+    lines.append(f"**Run timestamp**: {run_timestamp}  ")
+    lines.append(f"**Baseline cell**: {baseline.name}  ")
+    lines.append("")
+    lines.append(
+        "Generated for every run from the same per-trial data behind "
+        "`matrix.md` -- these are unchanged aggregates, not a second "
+        "measurement. See `matrix.md` for pass/fail + confound classification "
+        "and `matrix.json::cells[*]` for the raw per-trial series."
+    )
+    lines.append("")
+
+    # --- Step-timing percentiles (always) --------------------------------
+    lines.append("## Step timing (ms)")
+    lines.append("")
+    timing_header = (
+        "Cell", "Trials", "Iters", "Mean", "Std", "Min",
+        "p50", "p90", "p99", "Max", "Wall (s)", "Source",
+    )
+    timing_rows: list[tuple[str, ...]] = [timing_header]
+    for cell in cell_stats:
+        label = cell.name + (" (baseline)" if cell.name == baseline.name else "")
+        if cell.error is not None:
+            # Every measured column is "error" for an error cell -- including
+            # Wall, which would otherwise print a misleading 0.000 (error rows
+            # force mean_wall_clock_sec to 0.0, not a real measurement).
+            timing_rows.append(
+                (label, str(cell.trials), cell.iters_display,
+                 "error", "error", "error", "error", "error", "error",
+                 "error", "error", "error")
+            )
+            continue
+        # A cell with no usable per-step timing (setup-only crash / did-not-run)
+        # reports mean_step_time_ms == 0.0 with source "missing"; render the
+        # step columns as n/a rather than a misleading 0.000.
+        if cell.step_time_source == "missing" or not cell.step_times_ms:
+            step_cells = ("n/a",) * 7
+        else:
+            step_cells = (
+                _fmt_perf_fixed3(cell.mean_step_time_ms),
+                _fmt_perf_fixed3(cell.std_step_time_ms),
+                _fmt_perf_fixed3(cell.min_step_time_ms),
+                _fmt_perf_fixed3(cell.p50_step_time_ms),
+                _fmt_perf_fixed3(cell.p90_step_time_ms),
+                _fmt_perf_fixed3(cell.p99_step_time_ms),
+                _fmt_perf_fixed3(cell.max_step_time_ms),
+            )
+        # Reorder step_cells (mean, std, min, p50, p90, p99, max) into the
+        # header order (Mean, Std, Min, p50, p90, p99, Max) -- identical here,
+        # kept explicit so a header edit is a one-place change.
+        mean, std, mn, p50, p90, p99, mx = step_cells
+        timing_rows.append(
+            (label, str(cell.trials), cell.iters_display,
+             mean, std, mn, p50, p90, p99, mx,
+             _fmt_perf_fixed3(cell.mean_wall_clock_sec), cell.step_time_source)
+        )
+    lines.extend(_perf_table(timing_rows))
+    lines.append("")
+
+    # --- Workload throughput / metrics (conditional) ---------------------
+    # Sort the column keys so perf.md is byte-stable across runs: the union
+    # of metric names is otherwise ordered by cell-iteration / dict-insertion
+    # order, which can shift between workloads / Python versions and produce
+    # noisy diffs when comparing two runs of the same recipe.
+    metric_key_set: set[str] = set()
+    for cell in cell_stats:
+        metric_key_set.update(cell.metrics_summary)
+    metric_keys: list[str] = sorted(metric_key_set)
+    if metric_keys:
+        lines.append("## Workload metrics (mean across trials)")
+        lines.append("")
+        metrics_header = ("Cell", *metric_keys)
+        metrics_rows: list[tuple[str, ...]] = [metrics_header]
+        for cell in cell_stats:
+            label = cell.name + (" (baseline)" if cell.name == baseline.name else "")
+            row = [label]
+            for key in metric_keys:
+                agg = cell.metrics_summary.get(key)
+                row.append(_fmt_perf_metric(agg["mean"]) if agg else "—")
+            metrics_rows.append(tuple(row))
+        lines.extend(_perf_table(metrics_rows))
+        lines.append("")
+        lines.append(
+            "> Each value is the mean of the metric across the cell's trials. "
+            "Per-metric `min` / `max` / trial-count `n` are in "
+            "`matrix.json::cells[*].metrics_summary`. `—` = the cell did not "
+            "report that metric."
+        )
+        lines.append("")
+
+    lines.append("## Notes")
+    lines.append("")
+    lines.append(
+        "- This file is written for **every** run (no flag) so any run "
+        "directory is self-describing for performance -- it reuses the "
+        "per-trial data already collected, so it costs no extra measurement."
+    )
+    lines.append(
+        "- `Trials` is the number of trials aggregated for the cell. `Iters` "
+        "mirrors `matrix.md`: iterations executed vs. configured. `Source` is "
+        "the step-time fidelity (`per_step` > `elapsed_per_iter` > "
+        "`wall_clock_total` > `missing`); rows with `Source = missing` show "
+        "`n/a` for the per-step columns (`Mean`..`Max`) because any per-step "
+        "number would fold in setup/teardown. `Wall (s)` is still the real "
+        "end-to-end wall clock and is always shown (it reads `error` only for "
+        "error cells)."
+    )
+    lines.append(
+        "- Percentiles are over the concatenated per-step samples across the "
+        "cell's trials, matching `matrix.json::cells[*]`. `matrix.md` shows "
+        "only the mean + a confound ratio vs the baseline cell."
+    )
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def write_resolved_recipe(
@@ -801,6 +1318,16 @@ def write_resolved_recipe(
     Per-cell debug expansions (the ``Environment`` descriptor and the unioned
     mitigation env-var bundle) live in ``matrix.json`` instead, where they
     belong as run-time state.
+
+    An active ``stop_after`` rule (issue #232) is re-emitted so a rerun from
+    the resolved YAML preserves the stopping behaviour rather than silently
+    reverting to fixed ``trials``.
+
+    Collector settings are also re-emitted at recipe and cell scope so replay
+    preserves which collector artifacts were requested. Cell-level ``collect``
+    is omitted only when the cell inherits the recipe default; explicit
+    ``collect: []`` disables collection on reload just as it did in the
+    original run.
 
     For runs that used ``--mitigations-file``, the resolved YAML still
     references those mitigation/environment names by name -- it is **not**
@@ -846,6 +1373,14 @@ def write_resolved_recipe(
             # YAML preserves both scopes (recipe-scope key below) so a
             # round-trip load+run produces the same effective config.
             cell_doc["workload_config"] = dict(cell.workload_config)
+        if cell.collect is not None:
+            # Preserve explicit cell-level collector intent. Omitted means
+            # inherit the recipe-level ``collect``; ``[]`` means disable for
+            # this cell.
+            cell_doc["collect"] = _collect_doc(
+                cell.collect,
+                cell.collect_options,
+            )
         resolved_cells.append(cell_doc)
 
     doc: dict[str, Any] = {
@@ -861,10 +1396,21 @@ def write_resolved_recipe(
         # recipes that never used the field round-trip to byte-equivalent
         # YAML. Cell-scope values are written per cell above.
         doc["workload_config"] = dict(recipe.workload_config)
+    if recipe.collect:
+        doc["collect"] = _collect_doc(recipe.collect, recipe.collect_options)
     doc["confound"] = {
         "threshold": recipe.confound.threshold,
         "baseline_cell": recipe.confound.baseline_cell,
     }
+    if recipe.stop_after is not None:
+        # Re-emit the active stop_after rule so a rerun from this resolved
+        # YAML preserves the stopping behaviour. Without it the rerun would
+        # silently fall back to fixed ``trials`` (often 1 in probe mode).
+        doc["stop_after"] = {
+            "events": recipe.stop_after.events,
+            "max_trials": recipe.stop_after.max_trials,
+            "event_verdict": recipe.stop_after.event_verdict,
+        }
     doc["cells"] = resolved_cells
 
     path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
@@ -904,6 +1450,7 @@ def resolved_cell_environment(
 
 __all__ = [
     "NO_TICKET_SLUG",
+    "format_run_summary",
     "format_timestamp",
     "resolve_run_dir",
     "resolved_cell_environment",

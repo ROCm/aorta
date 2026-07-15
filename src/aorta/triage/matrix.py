@@ -26,16 +26,29 @@ compare cells whose timing came from different fallback levels (mixing
 "per_step" against "wall_clock_total" is comparing different kinds of
 numbers; see :func:`aorta.triage.confound.classify`).
 
-A trial is counted as a failure (``failed_count += 1``) if either its
-``exit_status != "ok"`` OR the wrapped ``WorkloadResult.passed`` is False.
-The aggregator does NOT inspect *why* a trial failed (NaN vs corruption vs
-divergence vs infrastructure crash); that's :class:`WorkloadResult` /
-``exit_status`` territory and is preserved separately via the
-``exit_status_counts`` histogram so callers can distinguish e.g.
-``workload_failed`` (run() returned passed=False) from
-``workload_setup_failed`` (setup() raised, never reached the
-measurement) from ``infrastructure_failed`` (construction or run()
-itself raised) when triaging.
+Each trial is sorted into one of three verdicts via the shared
+:func:`aorta.run.results.trial_verdict` predicate (issue #230):
+
+* ``pass`` -- ran clean.
+* ``fail`` -- the event of interest manifested (``passed=False`` from a
+  workload that actually ran, or a probe classifier ``fail``).
+* ``error`` -- the trial never validly ran: an infra crash
+  (``infrastructure_failed`` / ``workload_setup_failed``) or a probe
+  classifier ``error`` (launch failure, timeout with no recognised
+  hang). Counted in ``error_count``.
+
+The cell's ``failure_rate`` (event rate) is ``failed / (passed + failed)``
+-- **error trials are excluded from the denominator** so an infra flake
+doesn't make the bug look rarer or more reproducible than it is.
+``error_rate`` (``error / trials``) is surfaced separately.
+
+The aggregator does NOT inspect *why* a fail happened (NaN vs corruption
+vs divergence); that's :class:`WorkloadResult` / ``exit_status`` territory
+and is preserved separately via the ``exit_status_counts`` histogram so
+callers can distinguish e.g. ``workload_failed`` (run() returned
+passed=False) from ``workload_setup_failed`` (setup() raised, never
+reached the measurement) from ``infrastructure_failed`` (construction or
+run() itself raised) when triaging.
 """
 
 from __future__ import annotations
@@ -46,7 +59,16 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from aorta.run.results import trial_verdict
+
 StepTimeSource = Literal["per_step", "elapsed_per_iter", "wall_clock_total", "missing"]
+
+# Issue #230: a cell whose error_rate (infra-error trials / total) meets
+# this threshold is flagged "unreliable" in matrix.md -- its event-rate
+# is computed over too few valid trials to trust. Same spirit as the
+# speed-confound flag: a loud advisory, not a hard gate. Module-level
+# (not recipe-configurable) for now; revisit if operators need to tune it.
+UNRELIABLE_ERROR_RATE_THRESHOLD = 0.10
 
 # Per-trial outcome enum. Snake-case so the JSON key, the Confound tag, and
 # the matrix.md / terminal display string are all the same string -- avoids
@@ -173,21 +195,85 @@ class CellStats:
     # NO cell carries data — so triage-mode runs stay byte-equivalent.
     top_failure_detector_id: str | None = None
     top_warn_detector_id: str | None = None
+    # Issue #232: human-readable stop_after outcome for the cell, e.g.
+    # "stopped early: 3 fail event(s) in 24 trial(s)" vs
+    # "cap reached: 0 fail event(s) in 160 trial(s)".
+    # ``None`` for cells with no stop_after rule, and also for cells that
+    # errored before a note could be computed. The matrix renderer shows
+    # the "Stop after" column whenever the recipe carries a stop_after
+    # rule (config-gated, not note-gated, so an all-errored run still
+    # surfaces it); cells without a note render "—". Legacy runs with no
+    # stop_after rule stay byte-equivalent.
+    stop_after_note: str | None = None
+    # Issue #230: trials that never validly ran (infra crash / probe
+    # ``error`` verdict). Excluded from the ``failure_rate`` denominator;
+    # surfaced via ``error_rate`` and the matrix.md "Errors" column.
+    error_count: int = 0
+    # Aggregated workload-reported performance metrics. Each entry is one
+    # scalar key from a trial's ``result["metrics"]`` (e.g. ``gflops``,
+    # ``gbps``, ``mean_step_ms``), aggregated across the cell's trials into
+    # ``{"mean", "min", "max", "n"}`` where ``n`` is the number of trials
+    # that reported that key. Only int/float scalars are aggregated -- list
+    # / dict / bool values (e.g. the ``failure_detectors_fired`` channel) are
+    # skipped, so a workload that emits no numeric metrics leaves this ``{}``.
+    # Surfaced in ``perf.md`` and ``matrix.json`` so throughput numbers
+    # (which ``matrix.md`` never showed) are recoverable without opening each
+    # per-trial JSON. Empty for error cells.
+    metrics_summary: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Issue #282: True when this cell's trials were hydrated from a prior
+    # run's on-disk artifacts (probe ``flat_resume`` layout) instead of
+    # being re-executed -- the resume short-circuit in
+    # :func:`aorta.triage.runner._run_one_cell`. Always False for the
+    # timestamped triage layout (which never resumes) and for freshly-run
+    # cells. Surfaced in matrix.json and the end-of-run summary so an
+    # operator can tell a cached result from a fresh one without opening
+    # the per-trial logs.
+    resumed: bool = False
 
     @property
     def failure_rate(self) -> float:
-        """Fraction of trials that failed for ANY reason. 0.0 for an empty cell.
+        """Event rate: ``failed / (passed + failed)``. 0.0 when no valid trials.
 
-        Counts every trial whose ``exit_status != "ok"`` or whose wrapped
-        ``WorkloadResult.passed`` is False. This is *not* a NaN-specific
-        rate -- :class:`aorta.run.WorkloadResult.failure_count` is generic
-        (NaN / corruption / divergence / infrastructure crash) and the
-        aggregator does not try to disambiguate. Callers that need to
-        distinguish failure modes should read ``exit_status_counts``.
+        Issue #230: ``error`` trials (infra crash, probe ``error`` verdict)
+        are **excluded from the denominator** -- a bug-rate of "2/128" is
+        meaningless if 40 of those 128 were infra errors that never reached
+        the code path under test. For a cell with no error trials this is
+        identical to ``failed / trials`` (the pre-#230 definition), so
+        legacy matrices are unchanged.
+
+        This is *not* a NaN-specific rate -- :class:`WorkloadResult.failure_count`
+        is generic (NaN / corruption / divergence). Callers that need to
+        distinguish failure modes should read ``exit_status_counts``;
+        callers that need the error share should read :attr:`error_rate`.
+        """
+        valid = self.passed_count + self.failed_count
+        if valid == 0:
+            return 0.0
+        return self.failed_count / valid
+
+    @property
+    def error_rate(self) -> float:
+        """Fraction of ALL trials that errored (infra, no valid observation).
+
+        ``error_count / trials``; 0.0 for an empty cell. Denominator is the
+        *total* trial count (not valid trials) -- this is the share of the
+        cell's runs that were wasted on infrastructure breakage.
         """
         if self.trials == 0:
             return 0.0
-        return self.failed_count / self.trials
+        return self.error_count / self.trials
+
+    @property
+    def is_unreliable(self) -> bool:
+        """True when the cell's error rate makes its event rate untrustworthy.
+
+        Fires when ``error_rate >= UNRELIABLE_ERROR_RATE_THRESHOLD`` (and at
+        least one trial errored). Whole-cell error rows (``error is not
+        None``) are not flagged here -- they already render ``n/a``.
+        """
+        return self.error is None and self.error_count > 0 and (
+            self.error_rate >= UNRELIABLE_ERROR_RATE_THRESHOLD
+        )
 
 
 def _step_times_from_trial(trial: Any, effective_steps: int) -> tuple[list[float], StepTimeSource]:
@@ -444,19 +530,6 @@ def _aggregate_failure_hints(trials: list[Any]) -> list[tuple[str, int]]:
     return [(hint, counts[hint]) for hint in order]
 
 
-def _trial_passed(trial: Any) -> bool:
-    """A trial passed iff its exit_status is ok AND its WorkloadResult.passed is True."""
-    status = getattr(trial, "exit_status", None)
-    if status != "ok":
-        return False
-    result = getattr(trial, "result", None)
-    if isinstance(result, dict):
-        passed = result.get("passed")
-        if passed is False:
-            return False
-    return True
-
-
 def _percentile(samples: list[float], q: float) -> float:
     if not samples:
         return 0.0
@@ -471,6 +544,66 @@ def _percentile(samples: list[float], q: float) -> float:
     return data[f] + (data[c] - data[f]) * (k - f)
 
 
+def _aggregate_metrics(trials: list[Any]) -> dict[str, dict[str, float]]:
+    """Aggregate scalar ``result["metrics"]`` values across a cell's trials.
+
+    Only trials that represent a **valid, successful observation** are
+    aggregated -- ``trial_verdict(trial) == "pass"``. ``perf.md`` presents these
+    as performance numbers, so metrics from failed / errored trials (partial
+    output, a preflight failure that still emitted some numeric fields, a
+    ``PERF_FAIL`` checksum) would be misleading and are skipped. A cell whose
+    trials all failed therefore contributes no metrics (empty summary).
+
+    For every metric key whose value is a real int/float scalar (``bool`` is
+    excluded -- it is an ``int`` subclass but not a measurement), collect the
+    per-trial values and reduce them to ``{"mean", "min", "max", "n"}``. Keys
+    whose value is a list / dict / string / bool in any trial are ignored for
+    that trial (so the ``failure_detectors_fired`` list channel never leaks
+    into the perf summary); a key that is scalar in some trials and non-scalar
+    in others is aggregated over just the scalar occurrences. Non-finite floats
+    (NaN / +-Inf) are also skipped -- they are not usable measurements and would
+    serialize as invalid JSON (``NaN`` / ``Infinity``) in ``matrix.json``.
+    Returns ``{}`` when no passing trial reported any numeric metric -- the
+    common case for correctness / triage workloads, which then render no
+    throughput table.
+    """
+    collected: dict[str, list[float]] = {}
+    for trial in trials:
+        # Only successful trials yield trustworthy perf numbers (see docstring).
+        if trial_verdict(trial) != "pass":
+            continue
+        result = getattr(trial, "result", None)
+        if not isinstance(result, dict):
+            continue
+        metrics = result.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        for key, value in metrics.items():
+            # ``bool`` is an ``int`` subclass; a True/False flag is not a
+            # performance measurement, so exclude it explicitly.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            # Skip non-finite values (NaN / +-Inf): they are not usable perf
+            # numbers and json.dumps would serialize them as ``NaN`` /
+            # ``Infinity``, which is invalid JSON for strict parsers. They are
+            # realistically reachable -- e.g. a workload that initializes a
+            # metric to ``float("nan")`` and reports it.
+            if not math.isfinite(value):
+                continue
+            collected.setdefault(str(key), []).append(float(value))
+    summary: dict[str, dict[str, float]] = {}
+    for key, values in collected.items():
+        if not values:
+            continue
+        summary[key] = {
+            "mean": float(statistics.fmean(values)),
+            "min": float(min(values)),
+            "max": float(max(values)),
+            "n": float(len(values)),
+        }
+    return summary
+
+
 def aggregate_cell(
     name: str,
     mitigations: tuple[str, ...],
@@ -482,6 +615,8 @@ def aggregate_cell(
     trial_paths: list[str] | None = None,
     error: str | None = None,
     workload_config: dict[str, Any] | None = None,
+    stop_after_note: str | None = None,
+    resumed: bool = False,
 ) -> CellStats:
     """Aggregate a list of TrialResult-shaped objects into a :class:`CellStats`.
 
@@ -509,6 +644,10 @@ def aggregate_cell(
             the returned :class:`CellStats` so matrix.md and matrix.json
             can surface workload-knob differences across cells. ``None``
             and ``{}`` both collapse to an empty dict on the result.
+        resumed: True when the cell's trials were hydrated from a prior
+            run's on-disk artifacts (probe ``flat_resume`` resume
+            short-circuit) rather than re-executed. Recorded on the
+            returned :class:`CellStats` (issue #282).
 
     Returns:
         :class:`CellStats` populated from the trials.
@@ -546,11 +685,19 @@ def aggregate_cell(
             workload_config=workload_config,
             top_failure_detector_id=None,
             top_warn_detector_id=None,
+            stop_after_note=stop_after_note,
+            error_count=0,
+            resumed=resumed,
         )
 
     trial_count = len(trials)
-    passed = sum(1 for t in trials if _trial_passed(t))
-    failed = trial_count - passed
+    # Three-way split (issue #230): pass / fail / error. ``failed`` is
+    # genuine failures only; infra errors land in ``errored`` and are
+    # excluded from the event-rate denominator (see CellStats.failure_rate).
+    verdicts = [trial_verdict(t) for t in trials]
+    passed = sum(1 for v in verdicts if v == "pass")
+    errored = sum(1 for v in verdicts if v == "error")
+    failed = trial_count - passed - errored
 
     all_step_times: list[float] = []
     wall_clocks: list[float] = []
@@ -635,6 +782,10 @@ def aggregate_cell(
         workload_config=workload_config,
         top_failure_detector_id=top_failure_id,
         top_warn_detector_id=top_warn_id,
+        stop_after_note=stop_after_note,
+        error_count=errored,
+        metrics_summary=_aggregate_metrics(trials),
+        resumed=resumed,
     )
 
 

@@ -29,7 +29,7 @@ python -m pytest tests/ -q
 ## 3. Validate a recipe without running it
 
 ```bash
-aorta triage run --recipe <recipe> --dry-run
+aorta sweep run --recipe <recipe> --dry-run
 ```
 
 ## 4. Run on the cluster
@@ -41,7 +41,7 @@ env:
 ```bash
 torchrun --nnodes=<N> --nproc-per-node=<GPUS_PER_NODE> \
   --rdzv-backend=c10d --rdzv-endpoint=<HEAD_HOST>:<PORT> \
-  $(command -v aorta) triage run --recipe <recipe>
+  $(command -v aorta) sweep run --recipe <recipe>
 ```
 
 Launch contract (read once):
@@ -49,7 +49,7 @@ Launch contract (read once):
 - Distributed workloads call `dist.init_process_group(backend="nccl")` with no
   args, reading the standard env: `RANK`, `WORLD_SIZE`, `MASTER_ADDR`,
   `MASTER_PORT`, `LOCAL_RANK` (used to bind the GPU). Any launcher that sets
-  these works (torchrun shown; under Slurm drive the same `aorta triage run`
+  these works (torchrun shown; under Slurm drive the same `aorta sweep run`
   line via `srun` / `torchrun`).
 - Run the **same** command on every rank. Only rank 0 writes result artifacts;
   other ranks participate in the collectives.
@@ -75,8 +75,11 @@ cat triage_results/<TICKET>/<workload>/<timestamp>/matrix.md
 The run directory `triage_results/<TICKET>/<workload>/<timestamp>/` contains
 `matrix.md` (summary table), `matrix.json` (full per-cell stats),
 `recipe.resolved.yaml`, and `cells/<cell>/.../trial_*.json` (per-trial detail).
-The `<TICKET>` comes from the recipe's `ticket:` field; the CLI prints
-`Wrote matrix to <run_dir>` on rank 0 when finished.
+The `<TICKET>` comes from the recipe's `ticket:` field. On rank 0 when
+finished the CLI prints a concise pass/fail/error summary of the cells
+(pointing at each non-clean cell's artifacts) followed by the
+`Wrote matrix to <run_dir>` line; pass `-v` to also stream per-trial
+progress to stderr while the matrix runs.
 
 ## Tip: smoke-test a recipe before the full matrix
 

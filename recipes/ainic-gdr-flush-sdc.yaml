@@ -23,10 +23,10 @@
 # Usage
 # -----
 #   # Dry-run validation:
-#   aorta triage run --recipe recipes/ainic-gdr-flush-sdc.yaml --dry-run
+#   aorta sweep run --recipe recipes/ainic-gdr-flush-sdc.yaml --dry-run
 #
 #   # Full matrix (requires 10-12 MI355X nodes, all AINIC interconnect):
-#   aorta triage run --recipe recipes/ainic-gdr-flush-sdc.yaml
+#   aorta sweep run --recipe recipes/ainic-gdr-flush-sdc.yaml
 #
 # Required environment
 # --------------------
@@ -39,9 +39,8 @@
 #
 # References
 # ----------
-#   Developer on the user team, brain dump (Jun 3 2026 onsite):
-#     Path b -- GPU HBM write -> CPU proxy signal -> AINIC PCIe read
-#   User team 2K GPU overnight confirmation: NCCL_GDR_FLUSH_DISABLE=0 cleans corruption
+#   Root cause analysis: path b -- GPU HBM write -> CPU proxy signal -> AINIC PCIe read
+#   2K GPU overnight confirmation: NCCL_GDR_FLUSH_DISABLE=0 cleans corruption
 #   Doc: sdc_writeup/executive_summary.md
 
 schema_version: 1
@@ -50,7 +49,7 @@ ticket: AINIC-SDC-001
 workload: race
 
 # 16 trials per cell: corruption hits iter-0 on new QPs; 16 trials gives
-# statistical confidence given the ~35% per-attempt rate at the user team's scale.
+# statistical confidence given the ~35% per-attempt rate at this scale.
 trials: 16
 
 # 200 steps: only iter-0 is vulnerable, but run 200 steps to confirm
@@ -115,7 +114,7 @@ workload_config:
   # the AINIC collectives) instead of the forward-rerun timing proxy. Grads are
   # discarded -- not routed through reduce_scatter, no optimizer step -- so the
   # per-layer checksum detector + rank-fill/reduce_scatter-sum invariants are
-  # preserved. The war room asked for real gradients; flip to false for the
+  # preserved. real_backward=true uses real gradient kernels; flip to false for the
   # cheaper timing-proxy backward.
   real_backward: true
 
@@ -153,8 +152,8 @@ cells:
   #                                    flush itself would reintroduce the race)
   #
   # Expected: zero corruption. ~18% allreduce throughput penalty vs baseline
-  # (330->270 GB/s observed at the user team's 2K scale).
-  # Confirmed clean: user team 2K GPU overnight run, multiple restarts (Jun 3 2026).
+  # (330->270 GB/s observed at 2K scale).
+  # Confirmed clean: 2K GPU overnight run, multiple restarts.
   - name: gdr-flush
     mitigations: [none]
     environment: local

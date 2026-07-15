@@ -1,7 +1,13 @@
 # Triage recipes
 
-A triage **recipe** is the authoritative description of a `aorta triage run
---mode matrix` invocation: which `(mitigation x environment)` cells to run,
+> **Renamed (issue #248):** `aorta triage` and `aorta probe` are now the
+> single command **`aorta sweep`**. Use `aorta sweep run` everywhere this
+> guide says `aorta triage run`, and `aorta sweep run ... -- <cmd>` for the
+> subprocess (former `aorta probe`) flow. The old commands still work as
+> deprecated aliases that print a notice and delegate to the same engine.
+
+A triage **recipe** is the authoritative description of an `aorta sweep run --mode matrix`
+invocation: which `(mitigation x environment)` cells to run,
 per-cell trial / step counts, the ticket the matrix belongs to, and the
 speed-confound detection config.
 
@@ -18,6 +24,7 @@ workload: fsdp                       # required; resolved via aorta.workloads en
 trials: 8                            # required; per-cell trial count
 steps: 5000                          # required; per-cell step count
 save_logs: false                     # optional; when true, dispatcher writes per-trial stdout/stderr files
+collect: [layer_numerics]            # optional; default collectors; does NOT require save_logs
 
 confound:
   threshold: 1.15                    # default; > 1.15 -> "speed (+N%)" flag
@@ -32,6 +39,7 @@ cells:
   - name: tf32_off-local
     mitigations: [tf32_off]
     environment: local
+    collect: []                      # optional per-cell override; disables collection here
 
   - name: stack-tf32-xnack-local     # mitigation stacking (env vars unioned in list order)
     mitigations: [tf32_off, xnack]
@@ -110,6 +118,30 @@ cells:
   `results_dir`. The dispatcher already holds the
   `<prefix>.{stdout,stderr}.log` paths open, so wrappers must NOT
   write to them directly.
+- **`collect`** -- optional `list[str]` or mapping, default absent (no
+  collectors). Names one or more cross-cutting collectors to attach to every
+  cell (e.g. `[layer_numerics]` for the per-layer NaN/magnitude logger).
+  List form enables collectors with default options; mapping form passes
+  per-collector options:
+
+  ```yaml
+  # list form (default options):
+  collect: [layer_numerics]
+
+  # mapping form (per-collector options):
+  collect:
+    layer_numerics:
+      NANLOG_SAMPLE_EVERY: "10"
+  ```
+
+  Cells may also set `collect:`. An absent cell key inherits the recipe-level
+  collectors, a present value replaces the recipe-level collectors for that
+  cell, and `collect: []` disables collectors for that cell. The same mapping
+  form is accepted at cell scope. CLI `--collect` is an operator override and
+  applies to every cell, clearing any per-cell collector overrides.
+
+  Unknown collector names are rejected at load time (validated against
+  `aorta.run.collectors.KNOWN_RECIPES`).
 - **`workload_config`** -- optional `dict[str, Any]`, allowed at both
   recipe scope (top level) and per cell. Forwarded to the workload
   constructor through the dispatcher's `Request.config_overrides`. Use
@@ -172,25 +204,30 @@ workload_config:
 `same_stream_mode`, `stop_on_first_corruption`, `log_interval`).
 
 Because `race` is `launch_mode: distributed`, it MUST be launched under
-torchrun (a bare `aorta triage run` starts one process, WORLD_SIZE=1, and is
+torchrun (a bare `aorta sweep run` starts one process, WORLD_SIZE=1, and is
 refused by launch-mode validation). Use the `aorta` console script as
 torchrun's target -- `-m aorta` is not a runnable module:
 
 ```bash
 # validate only (no GPUs / no launcher):
-aorta triage run --recipe recipes/example-fsdp-smoke.yaml --dry-run
+aorta sweep run --recipe recipes/example-fsdp-smoke.yaml --dry-run
 
 # single node, 2 ranks (bump --nproc_per_node to your GPU count):
-torchrun --standalone --nproc_per_node=2 $(which aorta) triage run \
+torchrun --standalone --nproc_per_node=2 $(which aorta) sweep run \
   --recipe recipes/example-fsdp-smoke.yaml
 
-# multi-node (1 rank/host x N hosts -- the AINIC topology):
+# multi-node, 1 rank per host (AINIC/Pollara -- 1 process owns all GPUs on the node):
 torchrun --nnodes=N --nproc_per_node=1 --rdzv-backend=c10d \
-  --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) triage run \
+  --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
+  --recipe recipes/example-fsdp-smoke.yaml
+
+# multi-node, 1 rank per GPU (IB / NVLink / generic fabric):
+torchrun --nnodes=N --nproc_per_node=8 --rdzv-backend=c10d \
+  --rdzv-endpoint=$MASTER_ADDR:29500 $(which aorta) sweep run \
   --recipe recipes/example-fsdp-smoke.yaml
 ```
 
-Each rank runs the full `triage run`; the ranks find each other in
+Each rank runs the full `sweep run`; the ranks find each other in
 `dist.init_process_group()`. Cells run in-process per rank (sequentially),
 and results are written by **rank 0 only** (the dispatcher gates writes on
 `RANK`), so multi-rank launches don't clobber each other. This is the same
@@ -205,6 +242,26 @@ launch model as the `llm_determinism` workload.
 > Note `verify_iterations` defaults to `10000` and `simulate_compute` to
 > `True`; cap these for smoke runs or a trial takes hours.
 
+### Race smoke recipes
+
+| Recipe | Purpose | Fabric |
+|---|---|---|
+| `recipes/race_smoke.yaml` | Fabric-agnostic sanity check (1 trial, 5 iters, model_dim=512). Works on NVLink, IB, AINIC, or SHM. | Any |
+| `recipes/ainic-smoke.yaml` | Same but forces `NCCL_NET_GDR_LEVEL=SYS` + dmabuf + GDR read to validate the AINIC/Pollara GDR path specifically. | AINIC only |
+
+Confirmed working on a single node with 8 GPUs (one rank per GPU):
+
+```bash
+# single node, 8 GPUs:
+torchrun --standalone --nproc_per_node=8 $(which aorta) sweep run \
+  --recipe recipes/race_smoke.yaml
+
+# AINIC cluster, multi-node (1 rank per host via Slurm):
+# see rccl_ainic/run-cell.sbatch
+```
+
+A green run proves: `compute_type=transformer`, `layers_verified > 0`, `layer_checksum_mismatches == 0`, `passed=true`. Use `recipes/ainic-gdr-flush-sdc.yaml` for the full SDC triage matrix.
+
 ## Output layout
 
 ```
@@ -216,7 +273,7 @@ launch model as the `llm_determinism` workload.
         matrix.json
         recipe.resolved.yaml                    # post-resolution snapshot
         host_env.json                           # collect_env() once per run
-        environments/<env-name>/env.json        # once per unique environment
+        environments/<env-name>/env.json        # once per unique environment (see "Environment snapshots")
         inline_environments.sidecar.json        # only when inline docker is used
         sidecars/<basename>                     # one copy per --mitigations-file
         cells/<cell-name>/<workload>/trial_*.json
@@ -264,11 +321,80 @@ write to `cells/<cell-name>/`, and B1 ends up writing
 real paths; a future B1 follow-up can drop this level of nesting via a
 `skip_workload_subdir` kwarg on `RunRequest`.
 
+## Environment snapshots
+
+Every run records the environment each cell ran in under
+`environments/<env-name>/env.json`, once per unique environment:
+
+- **Local (non-isolated) envs** are probed in-process: the runner calls
+  `collect_env()` directly, because the runner process *is* the trial
+  environment. The snapshot is written before the env's first cell runs.
+- **Isolated envs** (a registry `Environment` with a `docker:` or `venv:`
+  field, or an inline-docker cell) cannot be probed from the runner
+  process -- that would record the *host's* Python / ROCm / hipBLASLt
+  state, not the isolated env's. Instead the **workload wrapper** captures a
+  snapshot from *inside the isolated env* (the container, or the activated
+  venv), and the runner promotes it. If the wrapper produces nothing, the
+  runner writes a placeholder with `"snapshot_captured": false` and the env
+  descriptor. The docker example below is the common case; a venv wrapper
+  runs the same probe command in its activated venv using the host
+  `src`/`out` paths directly (no bind-mount).
+
+### Wrapper contract for in-container snapshots
+
+For isolated envs the dispatcher injects a reserved
+`config["_aorta_env_probe"]` dict with two keys:
+
+- `src` -- absolute path to the aorta `src` tree on the runner host. Bind-mount
+  this into the container so the dependency-free probe entry resolves without
+  installing aorta in the image.
+- `out` -- absolute host path (`environments/<env-name>/env.json`) the runner
+  will read after the cell runs. Bind-mount its parent and write there.
+
+A self-isolating wrapper (e.g. `recom_repro` invoking `docker run`) opts in
+by reading the reserved config key and running the probe as the first step
+inside the container. There are no `AORTA_PROBE_SRC` / `AORTA_ENV_OUT`
+environment variables -- the paths arrive only through
+`config["_aorta_env_probe"]`, and the wrapper is responsible for turning them
+into bind-mounts on the `docker run` it builds:
+
+```python
+# inside the wrapper's run(), before building argv:
+probe = self.config.get("_aorta_env_probe")   # None for non-isolated envs
+mounts, probe_prefix = [], ""
+if probe is not None:
+    src, out = probe["src"], probe["out"]      # host paths from the runner
+    out_dir = os.path.dirname(out)
+    mounts = ["-v", f"{src}:/opt/aorta_src:ro", "-v", f"{out_dir}:/aorta_out"]
+    probe_prefix = (
+        "PYTHONPATH=/opt/aorta_src python -m aorta.instrumentation._probe_main "
+        f"/aorta_out/{os.path.basename(out)} && "
+    )
+
+argv = [
+    "docker", "run", *mounts, image,
+    "bash", "-c", f"{probe_prefix}{workload_cmd}",
+]
+```
+
+`aorta.instrumentation._probe_main` imports only stdlib plus the
+`collect_env()` module (no Click), so it runs under a bare container Python
+with no `pip install`. It writes exactly the same `env.json` shape as
+`aorta env probe -o`, so a promoted in-container snapshot is
+indistinguishable on disk from a local-env one.
+
+Probing is **per unique environment**, not per cell: the first cell of each
+isolated env requests a probe, and subsequent cells reusing that env keep
+requesting one until a valid snapshot is captured (so a cell whose container
+fails to start doesn't permanently lose the snapshot). Once captured, later
+cells stop requesting it. An env that never produces a valid snapshot gets the
+placeholder at the end of the run.
+
 ## Re-running a past matrix
 
 Every run writes `recipe.resolved.yaml` alongside the matrix. The file is
 **a strict, schema-valid recipe** -- you can pass it back to
-`aorta triage run --recipe ...` directly. Inline-docker cells are
+`aorta sweep run --recipe ...` directly. Inline-docker cells are
 re-emitted in the `{ docker: <ref> }` shorthand so the same
 `_inline_<hash>` is re-derived without needing to ship a sidecar JSON
 next to the file.
@@ -280,7 +406,7 @@ so the run directory is self-contained for replay. The runner also prints
 the exact rerun command on stdout when sidecars are involved, e.g.:
 
 ```
-cd <run_dir> && aorta triage run --recipe recipe.resolved.yaml \
+cd <run_dir> && aorta sweep run --recipe recipe.resolved.yaml \
   --mitigations-file sidecars/foo.json
 ```
 
@@ -304,7 +430,7 @@ audit data is still preserved next to the run.
 The equivalent of `recipes/example-fsdp-smoke.yaml` as flag-mode CLI:
 
 ```
-aorta triage run --mode matrix \
+aorta sweep run --mode matrix \
   --workload fsdp \
   --mitigation-axis none,tf32_off,xnack \
   --environment-axis local \
@@ -333,7 +459,7 @@ packaging artifacts for sharing.
 Dry-run smoke:
 
 ```
-aorta probe --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
+aorta sweep run --recipe recipes/probe-template-bash.yaml --dry-run -- echo hi
 ```
 
 See `docs/probe-188/handout-templates.md` for per-template walkthroughs.

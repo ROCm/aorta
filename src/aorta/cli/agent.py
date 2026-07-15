@@ -61,10 +61,12 @@ def _echo_agent_result(result: object) -> None:
 def _retarget_probe_usage(message: str) -> str:
     """Rewrite shared probe-helper usage strings for the ``agent`` command.
 
-    ``require_double_dash_separator`` / ``validate_trailing_argv`` live in
-    ``aorta.probe.cli_helpers`` and hard-code ``Usage: aorta probe ...``.
-    Reused verbatim, ``aorta agent`` would print the wrong command name, so
-    we translate at the CLI boundary rather than forking the helpers.
+    ``require_double_dash_separator`` lives in ``aorta.probe.cli_helpers``
+    and hard-codes ``Usage: aorta probe ...``. Reused verbatim, ``aorta
+    agent`` would print the wrong command name, so we translate at the CLI
+    boundary rather than forking that helper. (``validate_trailing_argv``
+    takes an explicit ``command_label``, so ``aorta agent`` is passed there
+    directly; this fallback still covers any other probe-helper strings.)
     """
     return message.replace("aorta probe", "aorta agent")
 
@@ -163,7 +165,7 @@ class _AgentCommand(click.Command):
     type=click.Choice(["fake", "litellm"]),
     default="fake",
     show_default=True,
-    help="Proposer backend: fake (offline) or litellm (requires aorta[agent]).",
+    help="Proposer backend: fake (offline) or litellm (requires amd-aorta[agent]).",
 )
 @click.option(
     "--llm-model",
@@ -227,7 +229,7 @@ def agent(
     """Closed-loop mitigation search via the probe engine."""
     configure_verbose_logging(verbose)
     try:
-        clean_argv = validate_trailing_argv(argv)
+        clean_argv = validate_trailing_argv(argv, command_label="aorta agent")
         policy = AgentPolicy(
             max_iterations=max_iterations,
             max_walltime_sec=max_walltime_sec,

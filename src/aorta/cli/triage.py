@@ -1,12 +1,19 @@
-"""`aorta triage` - mitigation x environment matrix runner.
+"""`aorta triage` - DEPRECATED alias for the workload flow of `aorta sweep`.
 
-Two equivalent entry points (both converge on :func:`aorta.triage.run_recipe`):
+`aorta triage` has been merged into the unified `aorta sweep` command
+(issue #248). It keeps working as a thin deprecation shim: every command
+here prints a stderr notice naming the `aorta sweep` replacement and then
+delegates to the shared ``execute_*`` functions that `aorta sweep` also
+calls -- so behaviour stays byte-identical.
 
-* ``aorta triage run --recipe <file>`` -- primary mode. Recipe file is the
-  source of truth; validated at load time.
-* ``aorta triage run --mode matrix --workload ... --mitigation-axis ...
-  --environment-axis ...`` -- flag shim. Internally builds a :class:`Recipe`
-  via :func:`aorta.triage.recipe.build_recipe_from_flags` and dispatches.
+The shared engine entry points (both converge on
+:func:`aorta.triage.run_recipe`):
+
+* ``--recipe <file>`` -- primary mode. Recipe file is the source of truth;
+  validated at load time.
+* ``--mode matrix --workload ... --mitigation-axis ... --environment-axis
+  ...`` -- flag shim. Internally builds a :class:`Recipe` via
+  :func:`aorta.triage.recipe.build_recipe_from_flags` and dispatches.
 
 Discovery subcommands delegate to B3's resolver so users can see which
 mitigations / environments come from ``aorta`` vs a plugin / sidecar.
@@ -14,23 +21,31 @@ mitigations / environments come from ``aorta`` vs a plugin / sidecar.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import click
 
+from aorta.cli._deprecation import emit_deprecation
 from aorta.registry import (
     RegistryError,
     load_environments,
     load_mitigations,
 )
-from aorta.run.cli_helpers import configure_verbose_logging
+from aorta.run.cli_helpers import configure_verbose_logging, parse_csv
 from aorta.triage.recipe import (
     RecipeCellError,
     RecipeSchemaError,
+    _parse_collect,
     build_recipe_from_flags,
     load_recipe,
 )
-from aorta.triage.runner import MatrixIncompleteError, _is_rank_zero, run_recipe
+from aorta.triage.runner import (
+    MatrixIncompleteError,
+    MatrixStrictError,
+    _is_rank_zero,
+    run_recipe,
+)
 
 
 @click.group()
@@ -144,18 +159,40 @@ def triage() -> None:
     ),
 )
 @click.option(
+    "--collect",
+    default="",
+    help=(
+        "Comma-separated collector recipe names to attach to every cell "
+        "(e.g. 'layer_numerics' for the per-layer NaN logger). Cross-cutting "
+        "capture, not a matrix axis -- allowed together with --recipe, where "
+        "it overrides any recipe-pinned 'collect:'. Names are validated "
+        "against the known collector recipes."
+    ),
+)
+@click.option(
+    "--strict",
+    is_flag=True,
+    help=(
+        "Exit non-zero if any cell errored or never ran (every trial "
+        "did_not_run, e.g. a setup failure). A cell that RAN but reported a "
+        "failure (a real bug repro) does NOT trip this -- that's an expected "
+        "matrix outcome. The matrix is still written. Useful in CI to catch a "
+        "cell that silently didn't run (e.g. a rejected LD_PRELOAD)."
+    ),
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
     help=(
-        "Stream per-cell progress to stderr while the matrix runs. "
+        "Stream live per-cell progress to stderr while the matrix runs. "
         "-v = INFO (matrix preamble, per-cell start/finish, timings, "
         "trials passed). -vv = DEBUG (aorta platform internals). "
         "Scope is the aorta.* logger hierarchy; workload code in "
-        "sibling packages is unaffected. Default is silent: only "
-        "the final 'Wrote matrix to ...' line prints. Useful for "
-        "long matrix runs where you'd otherwise have no signal that "
-        "anything is happening."
+        "sibling packages is unaffected. A concise end-of-run summary "
+        "(which cells failed + where their artifacts are) and the final "
+        "'Wrote matrix to ...' line print to stdout regardless of this "
+        "flag; -v adds the live blow-by-blow for long runs."
     ),
 )
 def triage_run(
@@ -172,10 +209,63 @@ def triage_run(
     confound_threshold: float | None,
     output_dir: Path,
     mitigation_files: tuple[Path, ...],
+    collect: str,
+    strict: bool,
     verbose: int,
 ) -> None:
     """Run the triage matrix: sweep mitigations x environments x trials, write matrix.md + matrix.json."""
+    emit_deprecation("aorta triage run", "aorta sweep run")
     configure_verbose_logging(verbose)
+    execute_triage_run(
+        recipe=recipe,
+        dry_run=dry_run,
+        mode=mode,
+        workload=workload,
+        mitigation_axis=mitigation_axis,
+        environment_axis=environment_axis,
+        trials=trials,
+        steps=steps,
+        ticket=ticket,
+        baseline_cell=baseline_cell,
+        confound_threshold=confound_threshold,
+        output_dir=output_dir,
+        mitigation_files=mitigation_files,
+        collect=collect,
+        strict=strict,
+    )
+
+
+def execute_triage_run(
+    *,
+    recipe: Path | None,
+    dry_run: bool,
+    mode: str,
+    workload: str | None,
+    mitigation_axis: str | None,
+    environment_axis: str | None,
+    trials: int | None,
+    steps: int | None,
+    ticket: str | None,
+    baseline_cell: str | None,
+    confound_threshold: float | None,
+    output_dir: Path,
+    mitigation_files: tuple[Path, ...],
+    collect: str = "",
+    strict: bool = False,
+) -> None:
+    """Workload-flow body shared by ``aorta sweep run`` and ``aorta triage run``.
+
+    Logging is configured by the Click handler before this is called;
+    keeping it out of here lets ``aorta sweep run`` own verbose setup once
+    regardless of which flow it dispatches to.
+
+    ``collect`` is a comma-separated list of collector recipe names
+    (cross-cutting capture, e.g. ``layer_numerics``). It is allowed
+    alongside ``--recipe`` -- unlike the flag-mode axis args -- because it
+    is not a matrix axis. When passed with ``--recipe`` it OVERRIDES any
+    ``collect:`` the recipe pins; when the flag is empty a recipe-pinned
+    value is preserved.
+    """
     # Defence-in-depth: Click's ``Choice(["matrix"])`` already enforces this,
     # but the CLI advertises ``--mode optimize`` as a future P1 addition (per
     # D11) and the dispatch site for that branch does not exist yet. Assert
@@ -195,6 +285,30 @@ def triage_run(
         )
         try:
             r = load_recipe(recipe, sidecar_files=mitigation_files or None)
+            # --collect is not a flag-mode axis arg, so it's allowed with
+            # --recipe. When provided, it overrides a recipe-pinned collect
+            # NAME list; validate via the same loader path the recipe uses.
+            # Per-collector options are recipe-file-only (the mapping form).
+            # When the CLI overrides the collector names, keep only options
+            # for collectors that are still enabled and clear per-cell
+            # overrides so the operator-requested collectors apply everywhere.
+            cli_collect = parse_csv(collect)
+            if cli_collect:
+                collect_names, _ = _parse_collect("--collect", list(cli_collect))
+                collect_options = {
+                    name: opts
+                    for name, opts in r.collect_options.items()
+                    if name in collect_names
+                }
+                r = dataclasses.replace(
+                    r,
+                    collect=collect_names,
+                    collect_options=collect_options,
+                    cells=tuple(
+                        dataclasses.replace(cell, collect=None, collect_options=None)
+                        for cell in r.cells
+                    ),
+                )
         except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
             raise click.ClickException(str(exc)) from exc
     else:
@@ -224,6 +338,7 @@ def triage_run(
                 baseline_cell=baseline_cell,
                 confound_threshold=1.15 if confound_threshold is None else confound_threshold,
                 sidecar_files=mitigation_files or None,
+                collect=parse_csv(collect),
             )
         except (RecipeSchemaError, RecipeCellError, RegistryError) as exc:
             raise click.ClickException(str(exc)) from exc
@@ -242,15 +357,17 @@ def triage_run(
             r,
             output_dir=output_dir,
             dry_run=dry_run,
+            strict=strict,
         )
-    except MatrixIncompleteError as exc:
+    except (MatrixIncompleteError, MatrixStrictError) as exc:
         # Artifacts ARE written for inspection -- print where they
         # landed first, then raise ClickException so the CLI exits
         # non-zero with the degradation reason. This is distinct from
         # RecipeCellError below: that's pre-execution validation
         # failure (no artifacts), this is post-execution degradation
         # (matrix.md / matrix.json present but classification couldn't
-        # anchor). Only rank 0 wrote artifacts, so only rank 0 reports.
+        # anchor, or --strict caught an errored/did_not_run cell). Only
+        # rank 0 wrote artifacts, so only rank 0 reports.
         if _is_rank_zero():
             click.echo(f"Wrote matrix to {exc.run_dir}")
         raise click.ClickException(str(exc)) from exc
@@ -313,6 +430,12 @@ def _reject_flag_mode_args(
 )
 def list_mitigations(files: tuple[Path, ...]) -> None:
     """List every registered mitigation with its source_package and env-var bundle."""
+    emit_deprecation("aorta triage list-mitigations", "aorta sweep list-mitigations")
+    execute_list_mitigations(files)
+
+
+def execute_list_mitigations(files: tuple[Path, ...]) -> None:
+    """Print the mitigation registry; shared by ``aorta sweep`` + ``aorta triage``."""
     # Wrap RegistryError the same way `triage run` and `aorta run` do: a
     # malformed or colliding --mitigations-file should surface as a one-line
     # ClickException, not a Python traceback.
@@ -339,6 +462,12 @@ def list_mitigations(files: tuple[Path, ...]) -> None:
 )
 def list_environments(files: tuple[Path, ...]) -> None:
     """List every registered environment with its source_package and docker/venv."""
+    emit_deprecation("aorta triage list-environments", "aorta sweep list-environments")
+    execute_list_environments(files)
+
+
+def execute_list_environments(files: tuple[Path, ...]) -> None:
+    """Print the environment registry; shared by ``aorta sweep`` + ``aorta triage``."""
     try:
         registry = load_environments(extra_files=list(files) or None)
     except RegistryError as exc:

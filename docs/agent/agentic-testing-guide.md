@@ -38,7 +38,7 @@ external LLM is involved.
 | Setting | LLM used? | How decisions are made |
 |---------|-----------|-------------------------|
 | Default (`--llm-backend fake`) | **No** | Deterministic `FakeLLMProposer`: heuristics on detector IDs + round-robin through registered mitigations |
-| `--llm-backend litellm` | **Yes** | LiteLLM calls your configured model; requires `pip install 'aorta[agent]'` and provider API keys |
+| `--llm-backend litellm` | **Yes** | LiteLLM calls your configured model; requires `pip install 'amd-aorta[agent]'` and provider API keys |
 
 The CLI default is **`fake`** so tests, CI, and local smoke runs work with
 **zero API calls** and fully reproducible behavior.
@@ -87,7 +87,7 @@ sequenceDiagram
 Install optional LLM support:
 
 ```bash
-pip install 'aorta[agent]'
+pip install 'amd-aorta[agent]'
 export OPENAI_API_KEY=...   # or other provider LiteLLM supports
 ```
 
@@ -244,7 +244,7 @@ Re-run the repro with mitigation `tf32_off` applied (see cell `tf32_off-none` pr
 Command:
 
 ```bash
-pip install 'aorta[agent]'
+pip install 'amd-aorta[agent]'
 export OPENAI_API_KEY=sk-...
 
 PYTHONPATH=src aorta agent \

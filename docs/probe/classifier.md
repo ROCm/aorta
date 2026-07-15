@@ -24,10 +24,19 @@ Source: `src/aorta/probe/classifier/tier1_process.py`.
 | `tier1:sigbus` | `returncode == -signal.SIGBUS` |
 | `tier1:timeout` | `Popen.wait(timeout=recipe.timeout_per_trial)` raised `TimeoutExpired` |
 | `tier1:coredump` | Any `core.*` (or bare `core`) file exists directly under `<trial_dir>/` post-exit |
+| `tier1:exec_failed` | The wrapped command never launched — `Popen` raised ENOENT / EACCES / ENOEXEC |
 
-Encounter order: timeout > signal > exit_nonzero, then coredump
-appended regardless. The verdict resolver preserves this order in
-`failure_detectors_fired`.
+Encounter order: when the command never launched, `exec_failed` fires
+alone and suppresses every other detector (including coredump).
+Otherwise (the command launched) the order is timeout > signal >
+exit_nonzero, with coredump appended after whichever of those fired.
+The verdict resolver preserves this order.
+
+`tier1:timeout` and `tier1:exec_failed` are **error detectors** (issue
+#230): a trial whose only fired detectors are these resolves to
+`verdict = "error"` (no valid observation), not `"fail"`. They land in
+`error_detectors_fired`, not `failure_detectors_fired`. See
+[Verdict Precedence](#verdict-precedence).
 
 **Coredump caveat.** The dispatcher does **not** force
 `cwd=<trial_dir>` on the workload's `Popen` -- the user's `--`
@@ -179,20 +188,34 @@ pattern does **not** fire, the verdict resolver injects
 
 | ID | Source |
 |---|---|
-| `meta:missing_pass_signal` | Verdict resolver (`src/aorta/probe/classifier/verdict.py`). Synthesised when a `required_for_pass` pattern did not fire. |
+| `meta:missing_pass_signal` | Verdict resolver (`src/aorta/probe/classifier/verdict.py`). Synthesised when a `required_for_pass` pattern did not fire. A genuine **failure**. |
+| `meta:env_file_validation_failed` | `SubprocessWorkload` when a `probe.env` (`env_passthrough_mode: file`) bundle is rejected before launch. An **error** (config/infra; the command never ran). |
 
 ## Verdict Precedence
 
-Implemented in `src/aorta/probe/classifier/verdict.py::resolve`.
+Implemented in `src/aorta/probe/classifier/verdict.py::resolve`. The
+verdict is three-way (issue #230): **`fail` > `error` > `pass`**.
 
-1. Any Tier 1–4 detector OR any `on_match: fail` custom pattern
-   fires → `verdict = "fail"`.
-2. `failure_detectors_fired` lists ALL fired in encounter order:
-   T1 → T2 → T3 → T4 → custom-fail → `meta:missing_pass_signal`.
-3. A `required_for_pass: true` pattern that did NOT fire adds
-   `meta:missing_pass_signal` to `failure_detectors_fired` and flips
-   the verdict to `fail`.
-4. Otherwise → `verdict = "pass"`.
+1. **`fail`** — the event of interest manifested. Any Tier 1–4 detector
+   (other than the error detectors below) OR any `on_match: fail` custom
+   pattern fires. A `required_for_pass: true` pattern that did NOT fire
+   adds `meta:missing_pass_signal` and is a `fail`.
+2. **`error`** — the trial produced **no valid observation**: its only
+   fired detectors are error detectors
+   (`ERROR_DETECTOR_IDS = {tier1:timeout, tier1:exec_failed}`, plus the
+   `meta:env_file_validation_failed` path). An infra crash, a launch
+   failure, or a timeout the hang monitor did **not** recognise as a hang.
+   Excluded from the matrix event-rate denominator.
+3. **`pass`** — nothing fired.
+
+Precedence is **fail > error > pass**: a timeout that the monitor *does*
+recognise as a hang fires both `tier1:timeout` (error) and `tier2:hang`
+(fail) → the hang wins → `fail`. Only when error detectors fired and no
+failure detector did is the verdict `error`.
+
+`failure_detectors_fired` and `error_detectors_fired` each list the
+matching fired detectors in encounter order
+(T1 → T2 → T3 → T4 → custom-fail → `meta:*`).
 
 `on_match: warn` contributes only to `warn_detectors_fired`;
 `on_match: info` only to `capture`. Neither changes the verdict.
@@ -201,7 +224,7 @@ Implemented in `src/aorta/probe/classifier/verdict.py::resolve`.
 
 ```jsonc
 {
-  "verdict": "pass" | "fail",
+  "verdict": "pass" | "fail" | "error",
   "exit_code": int,
   "walltime_sec": float,
   "peak_vram_mib": int | null,
@@ -209,6 +232,7 @@ Implemented in `src/aorta/probe/classifier/verdict.py::resolve`.
   "cell_name": string,
   "trial_index": int,
   "failure_detectors_fired": [string, ...],
+  "error_detectors_fired": [string, ...],   // issue #230 — infra-error signals
   "warn_detectors_fired": [string, ...],
   "capture": {string: (string | float | int)},
   "tier_durations_ms": {"tier1": float, "tier2": float, "tier3": float, "tier4": float, "tier5": float},

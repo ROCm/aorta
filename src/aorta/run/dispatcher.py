@@ -23,7 +23,7 @@ from aorta.instrumentation.environment import collect_env
 from aorta.registry import Environment, get_environment, get_mitigation
 from aorta.run.collectors import KNOWN_RECIPES
 from aorta.run.discovery import get_workload_class
-from aorta.run.results import TrialResult
+from aorta.run.results import TrialResult, trial_verdict
 from aorta.run.validation import validate_launch_mode
 from aorta.workloads import Workload, WorkloadResult
 
@@ -104,7 +104,10 @@ class RunRequest:
         steps: Number of steps per trial (workload-specific).
         config_overrides: Additional workload configuration.
         results_dir: Directory to write per-trial JSON files.
-        collect: Collector recipe names (MVP: validated but no-op).
+        collect: Collector recipe names, threaded to
+            ``config['_aorta_collect']`` for the workload to act on.
+        collect_options: Per-collector option dicts (name -> {knob: value}),
+            threaded to ``config['_aorta_collect_options']`` when non-empty.
         sidecar_files: JSON sidecar files describing ad-hoc mitigations
             and/or environments (B3.1).  Forwarded to
             ``aorta.registry.get_mitigation`` /
@@ -242,26 +245,55 @@ class RunRequest:
     config_overrides: dict[str, Any] = field(default_factory=dict)
     results_dir: Path = field(default_factory=lambda: Path("results"))
     collect: tuple[str, ...] = field(default_factory=tuple)
+    # Per-collector options keyed by collector name -> dict[str, str] of
+    # knobs (e.g. {"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}}). Threaded
+    # into config["_aorta_collect_options"] when non-empty so a workload (or a
+    # shared collector helper) can apply them. Empty (default) = no options,
+    # key absent from config -- back-compat with every existing run.
+    collect_options: dict[str, dict[str, str]] = field(default_factory=dict)
     sidecar_files: tuple[Path, ...] = field(default_factory=tuple)
     dataset_index: int = 0
     mitigation_index: int = 0
     save_logs: bool = False
     subprocess_argv: tuple[str, ...] | None = None
     probe_extras: dict[str, Any] | None = None
+    # Issue #232: collect-until-N stopping rule. When set (a
+    # :class:`aorta.triage.recipe.StopAfter`), ``trials`` is the hard cap
+    # (``max_trials``) and the loop breaks early once ``events``
+    # qualifying verdicts are observed. Typed as ``Any`` to keep this
+    # module's import graph cycle-free (same rationale as
+    # ``Recipe.probe_extras``); the loop only duck-types ``.events`` /
+    # ``.event_verdict``. ``kw_only`` so positional callers are unaffected.
+    stop_after: Any | None = field(default=None, kw_only=True)
+    # In-container env-probe contract for isolated (docker/venv) envs.
+    # The triage runner sets this to ``{"src": <host aorta src>, "out":
+    # <environments/<env>/env.json>}`` so a self-isolating wrapper can
+    # bind-mount the aorta source and drop a real snapshot the runner
+    # then promotes (else it falls back to a placeholder). ``None`` (the
+    # default) means "no in-container probe requested" -- every
+    # pre-existing caller and every non-isolated env round-trips with the
+    # ``_aorta_env_probe`` key absent. ``kw_only`` so positional callers
+    # are unaffected, matching ``stop_after`` above.
+    env_probe: dict[str, str] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         # Defensively deep-copy mutable dict fields.  ``frozen=True``
         # blocks attribute reassignment, so we use
         # ``object.__setattr__`` to install the copies.
-        for field_name in ("extra_env", "config_overrides"):
+        for field_name in ("extra_env", "config_overrides", "collect_options"):
             object.__setattr__(self, field_name, copy.deepcopy(getattr(self, field_name)))
-        # ``probe_extras`` is the same pattern as the two dict fields
-        # above -- frozen blocks attribute reassignment but does not
+        # ``probe_extras`` is the same pattern as the dict fields above --
+        # frozen blocks attribute reassignment but does not
         # stop the caller from mutating the nested dict. Deep-copy on
         # construction so an in-flight request can never be mutated
         # out from under the dispatcher. ``None`` short-circuits.
         if self.probe_extras is not None:
             object.__setattr__(self, "probe_extras", copy.deepcopy(self.probe_extras))
+        # ``env_probe`` is the same optional-dict pattern as ``probe_extras``:
+        # deep-copy so a caller cannot mutate the {src, out} paths after
+        # construction and steer an in-flight probe. ``None`` short-circuits.
+        if self.env_probe is not None:
+            object.__setattr__(self, "env_probe", copy.deepcopy(self.env_probe))
 
 
 def run_trials(request: RunRequest) -> list[TrialResult]:
@@ -305,6 +337,27 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             f"Unknown collector recipes: {sorted(invalid_collectors)}. "
             f"Valid: {sorted(KNOWN_RECIPES)}"
         )
+    if not isinstance(request.collect_options, dict):
+        raise ValueError(
+            "collect_options must be a mapping of collector name -> dict[str, str]"
+        )
+    stale_collect_options = sorted(set(request.collect_options) - set(request.collect))
+    if stale_collect_options:
+        raise ValueError(
+            "collect_options provided for collectors not enabled in collect: "
+            f"{stale_collect_options}"
+        )
+    bad_collect_options = [
+        name
+        for name, opts in request.collect_options.items()
+        if not isinstance(opts, dict)
+        or not all(isinstance(k, str) and isinstance(v, str) for k, v in opts.items())
+    ]
+    if bad_collect_options:
+        raise ValueError(
+            "collect_options entries must be dict[str, str]; invalid collectors: "
+            f"{bad_collect_options}"
+        )
 
     # 3. Validate ``extra_env`` keys.  The CLI validates this at parse
     #    time, but library callers (B2, future programmatic users) pass
@@ -317,6 +370,24 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             f"Invalid extra_env keys {bad_keys}: each key must match "
             "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
         )
+
+    # Validate ``env_probe`` shape early.  The triage runner is the only
+    # in-tree producer and always passes ``{"src": str, "out": str}``, but
+    # ``RunRequest`` is a public library API -- a programmatic caller passing
+    # a bad shape (missing keys, Path values) would otherwise only fail much
+    # later when the value is injected into ``TrialResult.config`` and
+    # JSON-serialized, with a confusing ``TypeError``.  Fail fast with an
+    # actionable message instead.
+    if request.env_probe is not None:
+        if (
+            not isinstance(request.env_probe, dict)
+            or set(request.env_probe) != {"src", "out"}
+            or not all(isinstance(v, str) for v in request.env_probe.values())
+        ):
+            raise ValueError(
+                "env_probe must be a dict with exactly {'src', 'out'} string "
+                f"values; got {request.env_probe!r}."
+            )
 
     # 4. Reject reserved ``_aorta_*`` keys in ``config_overrides``.
     #    The dispatcher writes platform-supplied values (currently
@@ -414,6 +485,11 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             request.steps if request.steps is not None else "(workload default)",
         )
     results: list[TrialResult] = []
+    # Issue #232: ``request.trials`` is the hard cap (``max_trials`` when a
+    # stop_after rule is attached). ``events_seen`` tracks qualifying
+    # verdicts so the loop can break early once the target is met.
+    stop_after = request.stop_after
+    events_seen = 0
     for trial_idx in range(request.trials):
         if should_write:
             logger.info("trial %d/%d: starting", trial_idx + 1, request.trials)
@@ -440,8 +516,67 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
                 result.exit_status,
             )
         results.append(result)
+        if stop_after is not None and _trial_is_event(result, stop_after.event_verdict):
+            events_seen += 1
+            if events_seen >= stop_after.events:
+                if should_write:
+                    # "early" only when trials remain in the budget; hitting
+                    # the target on the final allowed trial is a cap reach,
+                    # not an early stop -- don't mislead operator logs.
+                    stopped_early = len(results) < request.trials
+                    logger.info(
+                        "stop_after: %d %r event(s) observed in %d trial(s) "
+                        "(target %d, cap %d) -- %s",
+                        events_seen,
+                        stop_after.event_verdict,
+                        len(results),
+                        stop_after.events,
+                        request.trials,
+                        "stopping cell early" if stopped_early else "cap reached",
+                    )
+                break
 
     return results
+
+
+def _trial_is_event(result: TrialResult, event_verdict: str) -> bool:
+    """Decide whether ``result`` counts as a ``stop_after`` event.
+
+    Uses the shared three-way :func:`aorta.run.results.trial_verdict`
+    predicate (issue #230) so the stop-count and the matrix pass / fail /
+    error columns can never disagree:
+
+    * ``event_verdict == "fail"`` -> the bug reproduced (genuine failure).
+    * ``event_verdict == "pass"`` -> a clean trial.
+    * ``event_verdict == "error"`` -> the trial never validly ran (infra
+      crash, launch failure, timeout with no recognised hang). Useful to
+      bail out of a sweep that's mostly flaking on infrastructure.
+
+    Note this is a behaviour refinement over the pre-#230 predicate
+    (``fail`` == any non-``ok`` exit): infra errors no longer count as
+    ``fail`` events -- they count as ``error`` events instead.
+
+    Raises:
+        ValueError: if ``event_verdict`` is not one of the canonical
+            :data:`aorta.triage.recipe._STOP_AFTER_EVENT_VERDICTS`
+            values. The recipe loader validates this up front, so a bad
+            value here means a programmatic caller bypassed the loader;
+            fail loudly rather than silently treat an unknown/typo'd
+            verdict as ``"fail"``.
+    """
+    # Validate against the canonical vocabulary the recipe schema exports
+    # rather than re-hardcoding the verdict set here. Imported locally
+    # because a module-level ``aorta.triage`` import would invert the
+    # layering (aorta.triage.runner imports this function) -- same
+    # rationale as ``RunRequest.stop_after`` being typed ``Any``.
+    from aorta.triage.recipe import _STOP_AFTER_EVENT_VERDICTS
+
+    if not isinstance(event_verdict, str) or event_verdict not in _STOP_AFTER_EVENT_VERDICTS:
+        raise ValueError(
+            f"event_verdict must be one of {sorted(_STOP_AFTER_EVENT_VERDICTS)}, "
+            f"got {event_verdict!r}"
+        )
+    return trial_verdict(result) == event_verdict
 
 
 def _run_single_trial(
@@ -509,6 +644,20 @@ def _run_single_trial(
     # a caller-supplied value.
     config["_aorta_environment"] = asdict(env_descriptor)
 
+    # In-container env-probe contract (isolated docker/venv envs only).
+    # The triage runner supplies ``{"src": ..., "out": ...}`` so a
+    # self-isolating wrapper can bind-mount the aorta source at ``src``
+    # and, as the first step inside its ``docker run``, write a real
+    # ``env.json`` to the host path ``out`` -- captured INSIDE the
+    # container, so ``sys.prefix`` / ROCm / hipBLASLt reflect the image
+    # rather than the runner's venv. The runner promotes that file if it
+    # appears, else falls back to the placeholder. Same reserved-``_aorta_*``
+    # convention + non-None-only injection as the keys above; the platform
+    # launches nothing, the wrapper acts. Non-isolated envs and every
+    # pre-existing caller leave this None so the key stays absent.
+    if request.env_probe is not None:
+        config["_aorta_env_probe"] = dict(request.env_probe)
+
     # Subprocess-shaped workloads (currently SubprocessWorkload, wired
     # by ``aorta probe``) receive their opaque user argv via a typed
     # ``RunRequest.subprocess_argv`` field rather than via
@@ -533,6 +682,51 @@ def _run_single_trial(
     # ignore it.
     if request.probe_extras is not None:
         config["_aorta_probe_extras"] = dict(request.probe_extras)
+
+    # Thread the validated collector recipe names into the workload config
+    # under a reserved key so a workload can decide whether to attach a
+    # collector (e.g. the recom_repro wrapper rewrites its launch argv to
+    # run the entry through the layer_numerics NaN logger when
+    # "layer_numerics" is present). Same reserved-``_aorta_*`` convention
+    # as ``_aorta_environment`` above; ``run_trials`` rejects user-supplied
+    # ``_aorta_*`` keys in ``config_overrides`` so this can't clobber a
+    # caller value. Injected only when non-empty so existing trials (no
+    # ``--collect``) round-trip with the key absent -- back-compat. Stored
+    # as a plain ``list[str]`` (JSON-safe; the trial-JSON dump needs no
+    # sanitizer for it, unlike ``_aorta_probe_extras``). The platform
+    # itself launches no collector for subprocess workloads -- it threads
+    # the names, the wrapper acts on them.
+    if request.collect:
+        config["_aorta_collect"] = list(request.collect)
+
+    # Per-collector options (the mapping form of ``collect:``). Same reserved
+    # ``_aorta_*`` convention + non-empty-only injection as ``_aorta_collect``
+    # above. A plain nested ``dict[str, dict[str, str]]`` is JSON-safe, so the
+    # trial-JSON dump needs no sanitizer. A workload (or a shared collector
+    # helper) reads its own collector's options and applies them.
+    if request.collect_options:
+        config["_aorta_collect_options"] = {
+            name: dict(opts) for name, opts in request.collect_options.items()
+        }
+
+    # When a collector is active, thread the per-trial output path stem so a
+    # workload can write collector artifacts (e.g. the layer_numerics NaN
+    # logger's summary/jsonl) into the results tree -- WITHOUT requiring
+    # ``save_logs``. Previously a subprocess wrapper had to piggy-back on
+    # ``_aorta_log_prefix``, which the dispatcher only sets when
+    # ``save_logs=True``; that coupled an unrelated debug knob to collector
+    # output landing in the right place (and being picked up by ``aorta
+    # bundle``). This is an absolute path stem with no extension, same
+    # shape/derivation as ``_aorta_log_prefix`` (``.absolute()`` so a relative
+    # ``results_dir`` still yields a usable path for a subprocess with a
+    # different cwd). Only set on rank 0 (matches the trial-JSON / log-capture
+    # write gate) and only when a collector was requested, so non-collector
+    # runs are unchanged.
+    if request.collect and should_write:
+        trial_basename = (
+            f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
+        )
+        config["_aorta_collect_dir"] = str((results_dir / trial_basename).absolute())
 
     # Snapshot the env BEFORE applying mitigation / extra_env so the
     # ``finally`` block can restore both the dispatcher's overlay and

@@ -1,0 +1,67 @@
+# Single-process INFERENCE smoke on an emulated MI350X (mirage + rocjitsu).
+#
+# `inference` is a SINGLE-PROCESS workload (launch_mode = "single_process",
+# min_world_size = 1): no torchrun wrapper and no torch.distributed init, so it
+# runs cleanly under one emulated GPU. Sizes are kept tiny so the cell finishes
+# quickly even under rocjitsu CPU emulation.
+#
+# Recommended (container — fast torch path):
+#
+#   export MIRAGE_BIN=/path/to/mirage
+#   ./scripts/emulation/run_mirage_container.sh inference-smoke
+#
+# Host one-liner (slow under rocjitsu CPU emulation; prefer container above):
+#
+#   mirage profile create mi350x --emulator rocjitsu --agent MI350X --no-input
+#   mirage run --profile mi350x -- \
+#     aorta triage run --recipe recipes/inference-smoke-emulated.yaml
+#
+# Validate only (no GPUs / no mirage needed):
+#
+#   aorta triage run --recipe recipes/inference-smoke-emulated.yaml --dry-run
+#
+# Expected result: the cell PASSES.
+schema_version: 1
+
+ticket: EMU-INFERENCE-001
+workload: inference
+
+trials: 1
+steps: 2
+
+workload_config:
+  mode: offline_batch
+  seed: 1234
+  device: auto
+  dtype: float32
+  warmup_steps: 1
+
+  request:
+    batch_size: 2
+    prompt_len: 32
+    generate_tokens: 8
+
+  model:
+    kind: decoder_transformer
+    hidden_size: 128
+    num_layers: 2
+    num_heads: 4
+    ffn_size: 512
+    vocab_size: 1024
+
+  serving:
+    kv_cache: true
+    continuous_batch:
+      enabled: false
+      max_active_requests: 8
+      arrival_pattern: fixed
+
+  checks:
+    fail_on_nan_logits: true
+    fail_on_nonfinite_output: true
+    compare_logits_checksum: true
+
+cells:
+  - name: emulated-rocjitsu
+    mitigations: [none]
+    environment: emulated-rocjitsu

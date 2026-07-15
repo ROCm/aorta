@@ -1,0 +1,58 @@
+# Smoke-test recipe for the `training` workload with `parallelism: fsdp`.
+#
+# `training` is a DISTRIBUTED workload but declares `min_world_size = 1`, so a
+# bare `aorta run` (WORLD_SIZE=1) is a valid singleton smoke. It is NOT a
+# meaningful distributed-performance signal — use it to exercise the lifecycle
+# and JSON schema. For a real multi-rank FSDP path, launch under torchrun
+# (use the `aorta` console script; `-m aorta` is NOT a runnable module):
+#
+#   # validate only (no GPUs / no launcher needed):
+#   aorta triage run --recipe recipes/example-training-fsdp-smoke.yaml --dry-run
+#
+#   # bare one-rank smoke:
+#   aorta run --workload training --trials 1 --steps 2
+#
+#   # single node, 2 ranks:
+#   torchrun --standalone --nproc_per_node=2 $(which aorta) triage run \
+#     --recipe recipes/example-training-fsdp-smoke.yaml
+#
+# Results are written by rank 0 only (dispatcher gates on RANK), so multi-rank
+# launches don't clobber each other. Sizes are kept tiny so a smoke finishes
+# in seconds.
+schema_version: 1
+ticket: EXAMPLE-TRAINING-FSDP
+workload: training
+trials: 1
+steps: 4
+
+workload_config:
+  parallelism: fsdp        # ddp|fsdp
+  seed: 1234
+  device: auto             # auto|cuda|cpu
+  dtype: bfloat16          # bfloat16|float16|float32
+  batch_size: 2
+  seq_len: 128
+  warmup_steps: 1
+
+  model:
+    kind: transformer      # mlp|transformer|moe_transformer
+    hidden_size: 256
+    num_layers: 2
+    num_heads: 4
+    ffn_size: 1024
+    vocab_size: 1024
+
+  optimizer:
+    kind: adamw
+    lr: 0.0001
+    weight_decay: 0.01
+
+  checks:
+    fail_on_nan_loss: true
+    fail_on_nan_grad: true
+    fail_on_nonfinite_output: true
+
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local

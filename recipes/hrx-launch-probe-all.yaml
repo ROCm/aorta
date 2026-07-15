@@ -1,0 +1,103 @@
+# HRX HIP-launch probe -- full A/B sweep across ALL launch paths.
+#
+# Runs every HRX HIP kernel-launch probe (issue #273) against both the stock
+# ROCm HIP runtime and the HRX HIP-compatibility layer. This is the "run all
+# the hrx tests with both nohrx and hrx cells" recipe: 5 probe variants x 2
+# runtime states = 10 cells.
+#
+# There is no CLI flag to sweep the probe axis -- each variant is a cell whose
+# per-cell `workload_config.probe` overrides the recipe-level default. The
+# `hrx_on_*` cells add `extra_env` to LD_PRELOAD HRX's libamdhip64 at the
+# probe's exec(); the `hrx_off_*` cells run stock ROCm HIP (the baseline).
+#
+# A green run shows each hrx_on_* cell matching its hrx_off_* twin with verdict
+# FULLY_WORKS; the #156-class bug shows up as an hrx_on_* cell reporting
+# OUTPUT_NOT_WRITTEN while its hrx_off_* twin stays FULLY_WORKS.
+#
+# PREREQUISITES
+#   * A ROCm/hipcc toolchain (the workload compiles the probes).
+#   * An installed HRX public dist. Replace /path/to/hrx-root below with its
+#     prefix (the dir that contains lib/libamdhip64.so). extra_env values are
+#     passed verbatim (no shell expansion), so the paths MUST be ABSOLUTE.
+#
+# Run (the ticket comes from `ticket:` below -- do NOT also pass --ticket, it
+# conflicts with --recipe):
+#   aorta sweep run --recipe recipes/hrx-launch-probe-all.yaml --output ./triage_results
+# Read:
+#   cat triage_results/HRX-273-ALL/hrx/*/matrix.md
+
+schema_version: 1
+
+ticket: HRX-273-ALL
+workload: hrx
+
+trials: 1
+steps: 1
+
+save_logs: true
+
+# Recipe-scope defaults; each cell overrides `probe` on top of this.
+workload_config:
+  gpu_arch: gfx942
+  timeout_sec: 120
+
+cells:
+  # --- static launch -------------------------------------------------------
+  - name: hrx_off_static
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: static}
+  - name: hrx_on_static
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: static}
+    # EDIT: replace /path/to/hrx-root with your installed HRX prefix. The other
+    # hrx_on_* cells reuse this block via the *hrx_on_env YAML alias.
+    extra_env: &hrx_on_env
+      HRX_GPU_DRIVER: "amdgpu"
+      LD_LIBRARY_PATH: "/path/to/hrx-root/lib"
+      LD_PRELOAD: "/path/to/hrx-root/lib/libamdhip64.so"
+
+  # --- module (hipModuleLaunchKernel) --------------------------------------
+  - name: hrx_off_module
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: module}
+  - name: hrx_on_module
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: module}
+    extra_env: *hrx_on_env
+
+  # --- graph_add (hipGraphAddKernelNode) -----------------------------------
+  - name: hrx_off_graph_add
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: graph_add}
+  - name: hrx_on_graph_add
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: graph_add}
+    extra_env: *hrx_on_env
+
+  # --- graph_setparams (hipGraphKernelNodeSetParams) -----------------------
+  - name: hrx_off_graph_setparams
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: graph_setparams}
+  - name: hrx_on_graph_setparams
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: graph_setparams}
+    extra_env: *hrx_on_env
+
+  # --- graph_execsetparams (hipGraphExecKernelNodeSetParams) ---------------
+  - name: hrx_off_graph_execsetparams
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: graph_execsetparams}
+  - name: hrx_on_graph_execsetparams
+    mitigations: [none]
+    environment: local
+    workload_config: {probe: graph_execsetparams}
+    extra_env: *hrx_on_env

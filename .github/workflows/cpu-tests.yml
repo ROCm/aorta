@@ -1,0 +1,88 @@
+name: CPU Tests
+
+# PR merge gate: run the CPU-runnable slice of the pytest suite on every pull
+# request (and on pushes to main). GPU-only tests (markers `gpu` / `rocm`) are
+# deselected here and will get their own workflow once a GPU/self-hosted runner
+# is available -- see docs/ci-testing-plan.md.
+#
+# Mark the `tests` jobs as required status checks on `main` so a red suite
+# blocks merge.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# Least privilege: this gate only checks out code and runs tests.
+permissions:
+  contents: read
+
+# A newer push to the same PR/branch cancels the older, still-running gate:
+# the only thing that matters is whether the tip commit is green.
+concurrency:
+  group: cpu-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: pytest (CPU, py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          # Track the input this job actually resolves from: the package
+          # metadata (extras). This job never installs requirements-dev.txt.
+          cache-dependency-path: pyproject.toml
+
+      # The aorta.ebpf runner tests configure an explicit bpftrace_path and the
+      # runner validates that a real file exists there before building the
+      # command (the subprocess itself is mocked in the tests). apt installs the
+      # binary at /usr/bin/bpftrace, which is exactly the path those tests use.
+      - name: Install bpftrace (for aorta.ebpf tests)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bpftrace
+
+      # CPU-only PyTorch: several test modules import torch at collection time,
+      # but no CPU test needs a GPU. Pull from the CPU wheel index so we don't
+      # drag in CUDA/ROCm runtimes.
+      - name: Install CPU PyTorch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      # tests -> pytest + xdist + forked (isolation) + timeout/cov plugins only
+      #          (the slim test extra; no black/isort/mypy/ruff/pre-commit, which
+      #          this pytest-only job never uses).
+      # hw-queue -> numpy/pandas/tabulate needed by hw_queue_eval tests
+      # triton -> the env-probe contract tests treat a "clean full probe" as
+      #           non-partial only when triton is importable.
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[tests,hw-queue]"
+          pip install triton
+
+      # -n auto (pytest-xdist) parallelizes across cores for speed. --forked is
+      # intentionally NOT used: the two cross-file state leaks that made
+      # single-interpreter runs order-dependent were fixed in #270 --
+      #   1. the aorta.ebpf runner tests leaked a patched `subprocess.Popen`
+      #      (hand-entered mock.patch that never restored when start() raised);
+      #      now restored via monkeypatch.
+      #   2. the dispatcher/discovery tests patch `importlib.metadata.entry_points`
+      #      with a mock; if Triton's first import happened under that mock its
+      #      backend discovery corrupted `sys.modules`; tests/conftest.py now
+      #      pre-imports Triton so the mock can't poison it.
+      # The suite is deterministic in one interpreter, so per-test forking is no
+      # longer needed for correctness -- and dropping it makes the gate faster.
+      - name: Run CPU test suite
+        run: pytest -m "not gpu and not rocm" -n auto

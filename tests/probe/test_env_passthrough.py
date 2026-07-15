@@ -188,8 +188,8 @@ def test_env_file_rejects_newline_in_value(tmp_path):
     ``result.json`` was on disk, which made ``flat_resume``'s
     ``is_trial_complete`` predicate re-run the broken cell on every
     subsequent ``aorta probe`` invocation. The new contract synthesises
-    a ``result.json`` (verdict=fail, ``failure_type=env_file_validation_failed``)
-    so resume sees the cell as complete and the operator gets a
+    a ``result.json`` (verdict=error, ``failure_type=env_file_validation_failed``;
+    issue #230) so resume sees the cell as complete and the operator gets a
     grep-able cause in the artifact tree.
     """
     wl = _make_workload(
@@ -210,7 +210,8 @@ def test_env_file_rejects_newline_in_value(tmp_path):
     import json
 
     doc = json.loads(result_path.read_text(encoding="utf-8"))
-    assert doc["verdict"] == "fail"
+    # Issue #230: env-file validation rejection is an infra/config error.
+    assert doc["verdict"] == "error"
     assert doc["failure_type"] == "env_file_validation_failed"
     assert "newline" in doc["error_message"]
     assert doc["env_passthrough_mode"] == "file"
@@ -239,7 +240,7 @@ def test_env_file_rejects_newline_in_value(tmp_path):
     ],
 )
 def test_env_file_rejects_unsafe_chars_in_key(tmp_path, bad_key):
-    """Hostile sidecar keys -> Tier-1 fail artifact.
+    """Hostile sidecar keys -> ``error``-verdict artifact (issue #230).
 
     Original regression (PR #194 round 4): hostile mitigation sidecars
     could smuggle ``\\n``, ``\\r``, or ``=`` into env *keys* to inject
@@ -249,7 +250,7 @@ def test_env_file_rejects_unsafe_chars_in_key(tmp_path, bad_key):
     on-disk KEY=VALUE row shape.
 
     Pre-fix behaviour was a raw ``ValueError`` escape; post-fix the
-    rejection is recorded as ``verdict=fail`` /
+    rejection is recorded as ``verdict=error`` /
     ``failure_type=env_file_validation_failed`` in ``result.json`` so
     flat_resume can move past the broken cell.
     """
@@ -266,7 +267,7 @@ def test_env_file_rejects_unsafe_chars_in_key(tmp_path, bad_key):
     import json
 
     doc = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
-    assert doc["verdict"] == "fail"
+    assert doc["verdict"] == "error"
     assert doc["failure_type"] == "env_file_validation_failed"
     assert "env key" in doc["error_message"]
     assert result.passed is False
