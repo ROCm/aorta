@@ -11,6 +11,8 @@ What it records, per watched layer, per step:
   - tf32_path: whether this layer ran on the fp32 + allow_tf32 (TF32) path
   - matmul_calls_so_far: a running counter (no GPU sync) that can be used to
     cross-reference a matmul-level "call #N" from a separate GEMM-output tool
+  - t: time.monotonic() at record time; subtract two records for elapsed seconds
+    (per-process clock, not comparable across ranks)
   - identity: layer name, direction (fwd/bwd), rank/gpu/host/pid
 
 How it stays out of the way (important):
@@ -567,6 +569,7 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
         "dtype": str(t.dtype),
         "tf32_path": _is_tf32_path(t),
         "matmul_calls_so_far": _matmul_calls,
+        "t": time.monotonic(),
     }
     if extra:
         rec.update(extra)

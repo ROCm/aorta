@@ -1,5 +1,9 @@
 # layer_numerics — per-layer NaN / magnitude logger
 
+> User-facing how-to (standalone usage, options, Stage 1/2 workflow, analysis,
+> troubleshooting): [`docs/layer-numerics.md`](../../../../docs/layer-numerics.md).
+> This file is developer notes + provenance.
+
 Workload-agnostic instrumentation sidecar that traces a NaN/Inf back to the
 **layer and step where it first appears**, and captures the finite-magnitude
 run-up leading to it (a value growing large → huge → NaN over steps, which a
@@ -47,7 +51,7 @@ Both forms are byte-equivalent (`__main__.py` just `runpy`-execs the script).
 
 ### 2. As the `layer_numerics` collector (sweeps)
 
-Attach it to every cell of a mitigation × environment sweep:
+Request it on a mitigation × environment sweep:
 
 ```bash
 aorta sweep run --recipe <recipe>.yaml \
@@ -55,9 +59,16 @@ aorta sweep run --recipe <recipe>.yaml \
   --collect layer_numerics
 ```
 
-Each cell's outputs land under `<cell>/layer_numerics/` and are included by
-`aorta bundle`. The collector applies a default `NANLOG_*` bundle (see
-[`build_env`](__init__.py)); recipe/CLI overrides win.
+**Opt-in required.** The sweep engine validates the collector name and threads
+it (plus any `NANLOG_*` options) into the workload config under
+`_aorta_collect` / `_aorta_collect_options`; it does **not** launch the logger
+itself. A workload must read those keys and run its entry through the logger for
+output to be produced. The built-in workloads do not do this, so `--collect
+layer_numerics` on a built-in workload validates and runs without producing
+logger output — use the standalone path above for a guaranteed capture. A
+workload that opts in can point the logger at `<cell>/layer_numerics/` (via
+[`build_env`](__init__.py), which fills `NANLOG_DIR` and a default `NANLOG_*`
+bundle) so outputs are picked up by `aorta bundle`; recipe/CLI overrides win.
 
 ### Example: track an embedding input across pipeline stages
 
@@ -74,6 +85,9 @@ collect:
     NANLOG_SPARSE: "1"                         # cheap KJT metadata at the sparse stage
     NANLOG_PRE_CONTEXT: "10"                   # dump 10-step run-up on first OOB
     NANLOG_SAMPLE_EVERY: "50"
+    NANLOG_ADDR: "1"                           # record GPU memory addresses (no repro impact)
+    NANLOG_LOCATE: "1"                         # record how many rows hold a bad value
+    # NANLOG_ALLOC_SNAPSHOT: "1"              # allocator trace on first bad — high overhead, do not use on timing-sensitive repro
 ```
 
 Find the first out-of-range hit:
