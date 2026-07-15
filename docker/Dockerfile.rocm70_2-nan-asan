@@ -1,0 +1,86 @@
+# ROCm 7.0.2 residual-NaN repro image, instrumented with AddressSanitizer.
+#
+# Base: the customer-aligned nan-repro image that ships the custom
+#       hipBLASLt 1.4.0 build. It is Ubuntu 24.04 (noble) with ROCm 7.0.2
+#       build 56 from the internal OSDB apt pool.
+#
+# WHY WE EXTRACT INSTEAD OF apt install
+# -------------------------------------
+# ROCm only publishes ASAN-instrumented libraries (`*-asan`) for jammy
+# (Ubuntu 22.04); the noble (24.04) apt tree has none, and the `rocm-asan`
+# metapackage would drag the whole *jammy* ROCm stack onto the noble base
+# and clash with the custom build. So we DOWNLOAD only the jammy `*-asan`
+# leaf packages and unpack their `.so` files into /opt/rocm/lib/asan with
+# `dpkg-deb -x` -- no dpkg DB changes, no maintainer scripts, no dependency
+# resolution. The custom noble ROCm 7.0.2 build-56 stack in the base is left
+# byte-for-byte untouched. The ASAN build number (70002-56) matches the base
+# ROCm build exactly, and noble's libstdc++ is forward-compatible with the
+# jammy-built instrumented libraries.
+#
+# BUILD (host networking is required -- the default docker bridge has no
+# outbound network on this host):
+#   docker build --network=host -f Dockerfile.rocm70_2-nan-asan \
+#     -t aorta:nan-repro-hipblaslt-1.4.0-asan .
+#
+# Override the apt source if the base ROCm build is bumped:
+#   --build-arg ASAN_APT_URL=https://repo.radeon.com/rocm/apt/7.0.2 \
+#   --build-arg ASAN_APT_DIST=jammy
+
+ARG BASE_IMAGE=rocm/pytorch-private:nan-repro-production-aligned-hipblaslt-1.4.0
+FROM ${BASE_IMAGE}
+
+ARG ASAN_APT_URL=https://repo.radeon.com/rocm/apt/7.0.2
+ARG ASAN_APT_DIST=jammy
+
+# The compute-relevant subset of the `*-asan` closure for a hipBLASLt/rocBLAS
+# residual-NaN repro (Distributed Shampoo -> GEMM + linear-algebra + RCCL).
+# Vision/graph/conv/FFT/sparse asan packages are intentionally omitted to
+# bound image size; add them here if a run needs them.
+ARG ASAN_PACKAGES="comgr-asan hsa-rocr-asan hsa-amd-aqlprofile-asan hip-runtime-amd-asan rocblas-asan hipblas-asan hipblaslt-asan rocsolver-asan hipsolver-asan rocrand-asan hiprand-asan rccl-asan roctracer-asan rocprofiler-asan"
+
+USER root
+
+RUN set -eux; \
+    mkdir -p /tmp/asan-debs; cd /tmp/asan-debs; \
+    # Swap in ONLY the jammy asan source so we never touch the base's apt
+    # config or hit the (flaky) internal OSDB repo during the download.
+    mv /etc/apt/sources.list.d /etc/apt/sources.list.d.aorta-bak 2>/dev/null || true; \
+    mkdir -p /etc/apt/sources.list.d; \
+    if [ -f /etc/apt/sources.list ]; then mv /etc/apt/sources.list /etc/apt/sources.list.aorta-bak; fi; \
+    : > /etc/apt/sources.list; \
+    echo "deb [arch=amd64 trusted=yes] ${ASAN_APT_URL} ${ASAN_APT_DIST} main" \
+      > /etc/apt/sources.list.d/rocm-asan.list; \
+    apt-get update -o Acquire::AllowInsecureRepositories=true; \
+    apt-get download -o Acquire::AllowInsecureRepositories=true --allow-unauthenticated ${ASAN_PACKAGES}; \
+    for d in *.deb; do echo "unpacking $d"; dpkg-deb -x "$d" /; done; \
+    # Restore the base apt configuration exactly as it was.
+    rm -f /etc/apt/sources.list.d/rocm-asan.list; rmdir /etc/apt/sources.list.d 2>/dev/null || rm -rf /etc/apt/sources.list.d; \
+    mv /etc/apt/sources.list.d.aorta-bak /etc/apt/sources.list.d 2>/dev/null || true; \
+    rm -f /etc/apt/sources.list; \
+    mv /etc/apt/sources.list.aorta-bak /etc/apt/sources.list 2>/dev/null || true; \
+    rm -rf /tmp/asan-debs /var/lib/apt/lists/*; \
+    ls /opt/rocm/lib/asan/libhipblaslt.so.* >/dev/null; \
+    ls /opt/rocm/lib/asan/librocblas.so.* >/dev/null; \
+    echo "asan libs installed: $(ls /opt/rocm/lib/asan | wc -l) files"; \
+    ls /opt/rocm/lib/asan | head
+
+# Make the instrumented libraries win at load time. run_docker.sh (the
+# recom_repro launcher) overrides LD_LIBRARY_PATH inside the container, so we
+# cannot rely on it alone: register the asan dir with the dynamic linker at
+# high priority (00- prefix => searched before the base /opt/rocm/lib entry)
+# and rebuild the cache.
+RUN echo "/opt/rocm/lib/asan" > /etc/ld.so.conf.d/00-rocm-asan.conf && ldconfig
+
+# ASAN runtime environment. LD_PRELOAD forces the host ASAN runtime
+# (shipped in the base's rocm-llvm) to initialise first even when
+# LD_LIBRARY_PATH is overridden -- this is the "ASan runtime does not come
+# first in initial library list" workaround. HSA_XNACK requests GPU-side
+# (device) ASAN; on an xnack- target it degrades gracefully to host-side
+# coverage only.
+ENV LD_LIBRARY_PATH=/opt/rocm/lib/asan:/opt/rocm/lib
+ENV LD_PRELOAD=/opt/rocm/lib/llvm/lib/clang/20/lib/linux/libclang_rt.asan-x86_64.so
+ENV HSA_XNACK=1
+ENV ASAN_OPTIONS=detect_leaks=0:halt_on_error=0:abort_on_error=0:exitcode=0:print_stats=0:handle_segv=1:protect_shadow_gap=0:new_delete_type_mismatch=0:detect_odr_violation=0
+ENV HSA_TOOLS_LIB=
+
+CMD ["/bin/bash"]

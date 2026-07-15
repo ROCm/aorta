@@ -45,10 +45,11 @@ echo "  2) Dockerfile.rocm70_9-1-shampoo      - ROCm 7.0.9.1 with Shampoo optimi
 echo "  3) Dockerfile.rocm70_2-ubuntu-pytorch - ROCm 7.0.2 Ubuntu PyTorch build"
 echo "  4) Dockerfile.rocm70_2-ubuntu-nan     - ROCm 7.0.2 with NaN debugging tools"
 echo "  5) Dockerfile.rocm-ubuntu-ebpf        - ROCm 7.2 with eBPF tracing tools (bpftrace, bcc)"
+echo "  6) Dockerfile.rocm70_2-nan-asan       - ROCm 7.0.2 nan-repro (hipBLASLt 1.4.0) + AddressSanitizer"
 echo ""
 
 while true; do
-    read -p "Enter choice [1-5]: " dockerfile_choice
+    read -p "Enter choice [1-6]: " dockerfile_choice
     case $dockerfile_choice in
         1)
             DOCKERFILE="Dockerfile.rocm70_9-1"
@@ -75,8 +76,13 @@ while true; do
             VARIANT="rocm-ubuntu-ebpf"
             break
             ;;
+        6)
+            DOCKERFILE="Dockerfile.rocm70_2-nan-asan"
+            VARIANT="nan-repro-hipblaslt-1.4.0-asan"
+            break
+            ;;
         *)
-            echo -e "${RED}Invalid choice. Please enter 1-5.${NC}"
+            echo -e "${RED}Invalid choice. Please enter 1-6.${NC}"
             ;;
     esac
 done
