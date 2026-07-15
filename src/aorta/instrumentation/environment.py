@@ -3191,7 +3191,9 @@ def _loaded_lib_path_from_maps(sonames: tuple[str, ...]) -> Path | None:
     for line in text.splitlines():
         # maps line: "addr perms offset dev inode   pathname". The
         # pathname is optional (anonymous maps) and is the 6th field.
-        parts = line.split()
+        # Bound the split so a pathname containing spaces (e.g.
+        # "/opt/my libs/libtorch_hip.so") stays intact as the remainder.
+        parts = line.split(maxsplit=5)
         if len(parts) < 6:
             continue
         path_str = parts[5]
@@ -3656,9 +3658,9 @@ def _capture_aiter(reasons: list[str]) -> dict[str, Any]:
         )
 
     if version:
-        m = re.search(r"\+g([0-9a-f]{7,40})", version)
-        if m:
-            result["commit"] = m.group(1)
+        commit = _extract_commit_from_version(version)
+        if commit:
+            result["commit"] = commit
 
     result["package_version"] = version
     result["package_dist_name"] = dist_name

@@ -3633,6 +3633,22 @@ class TestTorchNativeLibDir:
         assert out == "ck::tensor_operation::Foo\n"
         assert not any("not found" in r for r in reasons), reasons
 
+    def test_maps_parse_handles_spaced_pathname(self, tmp_path, monkeypatch):
+        """A mapped pathname containing spaces must be recovered intact;
+        the maps pathname is the trailing field, so a bounded split keeps
+        it whole instead of truncating at the first space.
+        """
+        soname = env_mod.PYTORCH_HIP_LIB_NAME
+        spaced = f"/opt/my libs/{soname}"
+        maps = (
+            "555555554000-555555555000 r--p 00000000 08:01 100 /usr/bin/python3\n"
+            f"7ffff7a00000-7ffff7b00000 r-xp 00000000 08:01 200 {spaced}\n"
+        )
+        fake_maps = tmp_path / "maps"
+        fake_maps.write_text(maps)
+        monkeypatch.setattr(env_mod, "_PROC_SELF_MAPS", fake_maps)
+        assert env_mod._loaded_lib_path_from_maps((soname,)) == Path(spaced)
+
 
 # ---------------------------------------------------------------------------
 # FBGEMM
