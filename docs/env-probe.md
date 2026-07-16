@@ -509,7 +509,9 @@ don't raise.
   driver, then GPU/fabric hardware, then compute libraries, then build,
   then pytorch — instead of dataclass declaration order, so related
   environment facts sit next to each other for readability and diffing.
-  Key *set* is unchanged; only ordering moved.
+  `partial` / `partial_reasons` moved to the **end** of the object (a
+  probe-status trailer) so the potentially long reasons list doesn't push
+  the identity blocks down. Key *set* is unchanged; only ordering moved.
 
 ### `1.9`
 

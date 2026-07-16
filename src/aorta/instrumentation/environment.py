@@ -1021,8 +1021,6 @@ class EnvSnapshot:
         # meta
         "schema_version",
         "captured_at",
-        "partial",
-        "partial_reasons",
         # host / kernel / runtime placement
         "host",
         "runtime_context",
@@ -1060,6 +1058,12 @@ class EnvSnapshot:
         # misc / process-level
         "env_vars",
         "system_health",
+        # probe-status trailer: kept last so the (potentially long)
+        # partial_reasons list doesn't push the identity blocks down --
+        # a reader opening env.json sees the environment facts first and
+        # the fallback log at the bottom.
+        "partial",
+        "partial_reasons",
     )
 
     def to_dict(self) -> dict[str, Any]:
