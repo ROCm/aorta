@@ -70,6 +70,16 @@ def test_watch_spec_names_scope(monkeypatch, tmp_path_factory):
     assert nl._CHANNELS == frozenset({"input", "act"})
 
 
+def test_grad_tensor_maps_to_all_gradient_channels(monkeypatch, tmp_path_factory):
+    """`tensors:[grad]` is the umbrella for ALL gradients: activation-input grad
+    (igrad) AND parameter grads (wgrad/bgrad) -- so a one-shot NaN hunt gets them."""
+    spec = {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output", "grad"]}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._CHANNELS == frozenset({"act", "igrad", "wgrad", "bgrad"})
+    # param-grad channels are recognized as such (drives the optimizer step-hook)
+    assert nl._GRAD_CHANNELS == frozenset({"wgrad", "bgrad"})
+
+
 def test_watch_spec_runtime_capture(monkeypatch, tmp_path_factory):
     """End-to-end: a watch spec actually hooks and writes input/act records."""
     spec = {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["input", "output"]}],

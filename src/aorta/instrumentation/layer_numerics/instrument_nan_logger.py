@@ -56,8 +56,9 @@ Settings (environment variables):
                              "follow": [{"tensor": "embedding_features",
                                          "at": "stage", "bounds": [0,60]}],
                              "sample_every": 50, "pre_context": 10}'
-                         tensors: input,output,weight,bias,grad. at: "stride:N" (every
-                         Nth module in scope; 1=every) or "stage" (pipeline stages).
+                         tensors: input,output,weight,bias,grad ("grad" = all of
+                         igrad+wgrad+bgrad). at: "stride:N" (every Nth module in
+                         scope; 1=every) or "stage" (pipeline stages).
                          When NANLOG_SPEC is unset, the flat vars below are read
                          directly (legacy, still supported).
   NANLOG_DIR             output dir for the JSONL + summary (default ./nan_logger_out)
@@ -226,8 +227,15 @@ import torch  # noqa: E402
 # watch group OR a single follow); the engine has one global scope/tensor set, so
 # genuinely per-group-differing tensors or watch+stride-follow with DIFFERENT
 # scopes are merged with a warning (see _apply_spec).
+# Each spec `tensors` token maps to one or more flat channels. "grad" is the
+# umbrella for ALL gradients — activation-input grad (igrad) AND parameter grads
+# (wgrad/bgrad) — so a customer asking for "grad" gets everything a NaN hunt wants.
 _SPEC_TENSOR_TO_CHANNEL = {
-    "input": "input", "output": "act", "weight": "weight", "bias": "bias", "grad": "igrad",
+    "input": ("input",),
+    "output": ("act",),
+    "weight": ("weight",),
+    "bias": ("bias",),
+    "grad": ("igrad", "wgrad", "bgrad"),
 }
 
 
@@ -353,7 +361,8 @@ def _translate_spec(spec: dict) -> None:
         if unknown:
             raise ValueError(f"watch[].tensors has unknown names {unknown}; "
                              f"valid: {list(_SPEC_TENSOR_TO_CHANNEL)}")
-        channels += [_SPEC_TENSOR_TO_CHANNEL[t] for t in tensor_names]
+        for t in tensor_names:
+            channels += _SPEC_TENSOR_TO_CHANNEL[t]
 
     raw_follow = spec.get("follow") or []
     if not isinstance(raw_follow, list):
