@@ -60,7 +60,10 @@ def build_env(
         overrides: Recipe- or operator-supplied ``NANLOG_*`` values that win
             over the defaults (e.g. ``{"NANLOG_WATCH_NAMES": "encoder.blocks"}``).
             ``NANLOG_DIR`` in ``overrides`` wins over the computed default,
-            for the rare case an operator wants the output elsewhere.
+            for the rare case an operator wants the output elsewhere. The
+            recommended structured form is a single ``NANLOG_SPEC`` JSON value
+            (see the ``instrument_nan_logger.py`` docstring); when present it
+            WINS over the flat ``NANLOG_*`` defaults at logger import.
 
     Returns:
         A flat ``dict[str, str]`` the caller merges into the subprocess

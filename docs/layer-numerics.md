@@ -86,57 +86,61 @@ nanlog: attached layer hooks to N module(s) (types=[...], names=[...]); channels
 before the logger armed, or it is not reachable through the hook path (see
 [Troubleshooting](#troubleshooting)).
 
-## Options
+## Configuration (`NANLOG_SPEC`, recommended)
 
-All configuration is via `NANLOG_*` environment variables. The authoritative,
-exhaustive reference is the module docstring at the top of
-[`instrument_nan_logger.py`](../src/aorta/instrumentation/layer_numerics/instrument_nan_logger.py).
-All heavy features default **OFF** and feed the same single per-step host
-transfer (no added sync). Most-used knobs:
+The clearest way to configure the logger is a single structured JSON value,
+`NANLOG_SPEC`. It unifies the many flat flags onto three axes and two
+observation kinds:
 
-| Var | Purpose | Default |
+- **`watch`** — observe a module's **own** tensors.
+- **`follow`** — trace **one named tensor** across positions.
+
+| Axis | Question | Values |
 |---|---|---|
-| `NANLOG_DIR` | Output dir for the JSONL + summary | `nan_logger_out` |
-| `NANLOG_CHANNELS` | Capture channels: `act,input,igrad,weight,bias,wgrad,bgrad` | `act,igrad` |
-| `NANLOG_WATCH_NAMES` | Substrings matched against module paths (target a block/layer) | (empty) |
-| `NANLOG_WATCH_TYPES` | Module class names to watch (e.g. `Linear`) | `Linear` (unless `WATCH_NAMES` set) |
-| `NANLOG_PRE_CONTEXT` | Buffer the last K clean steps; dump on first-bad for the full run-up | `0` (off) |
-| `NANLOG_SAMPLE_EVERY` | Write a clean record 1 step in N (bad steps always written) | `50` |
-| `NANLOG_HUGE_THRESHOLD` | `\|x\| > T` counts as "huge" | `1e10` |
-| `NANLOG_BAD_VALUES` | Record the first bad element's flat idx / row / col / value | `0` (off) |
-| `NANLOG_ADDR` | Record `data_ptr` + backing-storage extent per tensor | `0` (off) |
-| `NANLOG_DUMP_TENSOR` | Save the full bad tensor to a `.pt` file on first detection | `0` (off) |
-| `NANLOG_ALLOC_SNAPSHOT` | Dump a caching-allocator event trace on first bad (~10% step overhead) | `0` (off) |
-| **Pipeline / bounds** | | |
-| `NANLOG_PIPELINE` | Track tensors at the TorchRec stage boundaries | `0` (off) |
-| `NANLOG_TRACK_ATTR` | Batch attribute(s) to follow as tracked tensors | `embedding_features` |
-| `NANLOG_BOUNDS` | Per-tensor in-range check `substr:lo:hi;...` (out-of-range → `kind="oob"`) | (empty) |
-| `NANLOG_SPARSE` | Cheap host-side KJT metadata at the sparse stage | `0` (off) |
-| `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each layer (high overhead) | `0` (off) |
-| `NANLOG_TRACK_LAYER_STRIDE` | Re-scan every Kth layer when `NANLOG_TRACK_EVERY_LAYER=1` (coarser = less overhead) | `1` |
+| `scope` | which modules | `names: [substr,…]` and/or `types: [ClassName,…]` |
+| `tensors` | which of a module's tensors | `input, output, weight, bias, grad` |
+| `at` | when / how often | `stride:N` (every Nth module in scope; `1`=every) · `stage` (pipeline stages) |
 
-Channel notes:
+```bash
+NANLOG_SPEC='{
+  "watch":  [{"scope": {"types": ["MLP","AttentionBlock"]}, "tensors": ["input","output"]}],
+  "follow": [{"tensor": "embedding_features", "at": "stage", "bounds": [0,60]}],
+  "sample_every": 50, "pre_context": 10
+}' \
+  python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
+```
 
-- `weight`/`bias` are read at the **start** of the step, so they hold the
-  **previous** step's value (`value_is_from_prev_step=true`).
-- `wgrad`/`bgrad` are read at the optimizer step boundary (current step) and
-  require a `torch.optim.Optimizer`. If the update is fused into backward, a
-  one-time warning is logged — use `weight`/`bias` instead.
+Common patterns (each cell is a complete, copy-paste `NANLOG_SPEC` value):
 
-## Two tracking modes
+| Goal | Spec |
+|---|---|
+| Standard tensors by block | `{"watch":[{"scope":{"types":["AttentionBlock","MLP"]},"tensors":["input","output","weight","bias","grad"]}]}` |
+| Selected tensors from one scope | `{"watch":[{"scope":{"names":["emb_proj"]},"tensors":["input","output"]}]}` |
+| Follow a tensor through the pipeline | `{"follow":[{"tensor":"embedding_features","at":"stage"}]}` |
+| Follow a tensor every N layers | `{"follow":[{"tensor":"embedding_features","at":"stride:8","scope":{"names":["emb_proj"]}}]}` |
+| Follow a tensor at named layers only | `{"follow":[{"tensor":"embedding_features","at":"stride:1","scope":{"names":["emb_proj.projections.0"]}}]}` |
 
-**Layer channels** (default). Hooks the watched `nn.Module`s and records their
-activations / grads / params, configured by `NANLOG_CHANNELS` +
-`NANLOG_WATCH_*`.
+When `NANLOG_SPEC` is set it **wins**; when it is unset, the flat `NANLOG_*`
+vars below are read directly (still fully supported). A malformed spec logs a
+warning and falls back to the flat vars — it never takes the run down.
 
-**Pipeline-stage tracking** (`NANLOG_PIPELINE=1`, TorchRec). Follows named
-tensors *by object* off the TorchRec batch (default `embedding_features`) and
-scans them at each pipeline stage — `copy`, `sparse_start`, `sparse_wait`, and
-`forward` — **before** the layers read them. Each record is tagged with its
-`phase` and a `batch_id` (assigned at `copy_batch_to_gpu`, re-read at every later
-stage) so one batch's records line up across steps. This catches corruption that
-arrives *upstream* of the layers, which the layer hooks alone cannot see. Needs
-no `WATCH_NAMES`.
+## The two things you can capture
+
+Everything the logger does is one of two kinds — the `watch` and `follow` keys of
+`NANLOG_SPEC` map directly onto them:
+
+- **`watch` — a module's own tensors.** Hooks the modules you name (by class
+  `types` or path `names`) and records their `input` / `output` / `weight` /
+  `bias` / `grad`. This is the "which layer went bad" view.
+- **`follow` — one named tensor across positions.** Follows a batch tensor
+  (default `embedding_features`) and re-checks it at each TorchRec pipeline stage
+  (`at: stage` → `copy`, `sparse_start`, `sparse_wait`, `forward`) or at each
+  module (`at: stride:N`). Each record is tagged with its `phase` and a `batch_id`
+  so one batch's records line up across steps. This catches corruption that
+  arrives *upstream* of the layers, which watching alone cannot see.
+
+Add a `bounds: [lo, hi]` to a `follow` entry to flag out-of-range values
+(`kind="oob"`) — a two-sided check the one-sided "huge" threshold misses.
 
 ## Stage 1 / Stage 2 workflow
 
@@ -146,17 +150,12 @@ only after the first pass localizes the problem.
 ### Stage 1 — cheap, timing-safe scan
 
 Find **which stage** a tracked tensor first goes bad (e.g. leaves an expected
-range). Uses only the sync-free bounds check and pre-context buffer, so it is
-safe to run on a timing-sensitive repro:
+range). Follows the tensor at each pipeline stage with only the sync-free bounds
+check and pre-context buffer, so it is safe to run on a timing-sensitive repro:
 
 ```bash
 NANLOG_DIR=/output/layer_numerics \
-NANLOG_PIPELINE=1 \
-NANLOG_TRACK_ATTR=embedding_features \
-NANLOG_BOUNDS=embedding_features:0:60 \
-NANLOG_BAD_VALUES=1 \
-NANLOG_PRE_CONTEXT=10 \
-NANLOG_SAMPLE_EVERY=50 \
+NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","at":"stage","bounds":[0,60]}],"pre_context":10,"sample_every":50}' \
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
 ```
 
@@ -176,18 +175,12 @@ add heavier GPU work or a host sync that can **hide** a timing-sensitive bug, so
 never enable them alongside the Stage 1 scan.
 
 If the first hit was at `phase=forward`, re-scan per layer to bracket the layer
-(coarse stride first):
+(coarse stride first — `stride:5` re-checks every 5th module in the suspect
+block):
 
 ```bash
 NANLOG_DIR=/output/layer_numerics_stage2 \
-NANLOG_PIPELINE=1 \
-NANLOG_TRACK_ATTR=embedding_features \
-NANLOG_BOUNDS=embedding_features:0:60 \
-NANLOG_BAD_VALUES=1 \
-NANLOG_TRACK_EVERY_LAYER=1 \
-NANLOG_TRACK_LAYER_STRIDE=5 \
-NANLOG_WATCH_NAMES=<suspect.block> \
-NANLOG_PRE_CONTEXT=10 \
+NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","at":"stride:5","scope":{"names":["<suspect.block>"]},"bounds":[0,60]}],"pre_context":10}' \
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
 ```
 
@@ -196,29 +189,17 @@ Or as a `collect:` block in a recipe:
 ```yaml
 collect:
   layer_numerics:
-    NANLOG_PIPELINE: "1"
-    NANLOG_TRACK_ATTR: "embedding_features"
-    NANLOG_BOUNDS: "embedding_features:0:60"
-    NANLOG_BAD_VALUES: "1"
-    NANLOG_TRACK_EVERY_LAYER: "1"
-    NANLOG_TRACK_LAYER_STRIDE: "5"
-    NANLOG_WATCH_NAMES: "<suspect.block>"
-    NANLOG_PRE_CONTEXT: "10"
+    NANLOG_SPEC: '{"follow":[{"tensor":"embedding_features","at":"stride:5","scope":{"names":["<suspect.block>"]},"bounds":[0,60]}],"pre_context":10}'
 ```
 
-If the first hit was at a sparse stage, watch the sparse modules and capture
-cheap KJT metadata:
+If the first hit was at a sparse stage, watch the sparse modules' own tensors and
+capture cheap KJT metadata (the `NANLOG_SPARSE` knob has no `NANLOG_SPEC` axis —
+add it as a flat var alongside the spec):
 
 ```bash
 NANLOG_DIR=/output/layer_numerics_stage2 \
-NANLOG_PIPELINE=1 \
-NANLOG_TRACK_ATTR=embedding_features \
-NANLOG_BOUNDS=embedding_features:0:60 \
-NANLOG_BAD_VALUES=1 \
+NANLOG_SPEC='{"watch":[{"scope":{"names":["<sparse.module.names>"]},"tensors":["input","output"]}],"follow":[{"tensor":"embedding_features","at":"stage","bounds":[0,60]}],"pre_context":10}' \
 NANLOG_SPARSE=1 \
-NANLOG_CHANNELS=input,act \
-NANLOG_WATCH_NAMES=<sparse.module.names> \
-NANLOG_PRE_CONTEXT=10 \
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
 ```
 
@@ -326,11 +307,7 @@ or per-recipe / per-cell via the `collect:` mapping (see
 ```yaml
 collect:
   layer_numerics:
-    NANLOG_PIPELINE: "1"
-    NANLOG_TRACK_ATTR: "embedding_features"
-    NANLOG_BOUNDS: "embedding_features:0:60"
-    NANLOG_PRE_CONTEXT: "10"
-    NANLOG_SAMPLE_EVERY: "50"
+    NANLOG_SPEC: '{"follow":[{"tensor":"embedding_features","at":"stage","bounds":[0,60]}],"pre_context":10,"sample_every":50}'
 ```
 
 > **Important — opt-in required.** The sweep engine validates the collector name
@@ -343,6 +320,46 @@ collect:
 > Passing `--dry-run` or a successful run does **not** imply capture occurred;
 > confirm the `NANLOG_DIR` artifacts exist. For a guaranteed capture today, use
 > the [standalone path](#standalone-usage-supported-path).
+
+## Reference: flat `NANLOG_*` vars
+
+`NANLOG_SPEC` (above) is the recommended interface. Under the hood it translates
+into the flat `NANLOG_*` environment variables below, which you can also set
+directly — useful for a bare-checkout handoff, or for the few knobs that have no
+`NANLOG_SPEC` axis (`NANLOG_SPARSE`, `NANLOG_ADDR`, `NANLOG_DUMP_TENSOR`,
+`NANLOG_ALLOC_SNAPSHOT`). If both are set, `NANLOG_SPEC` wins. The authoritative,
+exhaustive reference is the module docstring at the top of
+[`instrument_nan_logger.py`](../src/aorta/instrumentation/layer_numerics/instrument_nan_logger.py).
+All heavy features default **OFF** and feed the same single per-step host transfer
+(no added sync).
+
+| Var | Purpose | Default | `NANLOG_SPEC` equivalent |
+|---|---|---|---|
+| `NANLOG_DIR` | Output dir for the JSONL + summary | `nan_logger_out` | `dir` |
+| `NANLOG_CHANNELS` | Capture channels: `act,input,igrad,weight,bias,wgrad,bgrad` | `act,igrad` | `watch[].tensors` |
+| `NANLOG_WATCH_NAMES` | Substrings matched against module paths | (empty) | `scope.names` |
+| `NANLOG_WATCH_TYPES` | Module class names to watch | `Linear` (unless `WATCH_NAMES` set) | `scope.types` |
+| `NANLOG_PRE_CONTEXT` | Buffer the last K clean steps; dump on first-bad | `0` (off) | `pre_context` |
+| `NANLOG_SAMPLE_EVERY` | Write a clean record 1 step in N (bad always written) | `50` | `sample_every` |
+| `NANLOG_HUGE_THRESHOLD` | `\|x\| > T` counts as "huge" | `1e10` | — |
+| `NANLOG_BAD_VALUES` | Record the first bad element's flat idx / row / col / value | `0` (off) | — |
+| `NANLOG_ADDR` | Record `data_ptr` + backing-storage extent per tensor | `0` (off) | — |
+| `NANLOG_DUMP_TENSOR` | Save the full bad tensor to a `.pt` on first detection | `0` (off) | — |
+| `NANLOG_ALLOC_SNAPSHOT` | Dump a caching-allocator event trace on first bad (~10% overhead) | `0` (off) | — |
+| `NANLOG_PIPELINE` | Track tensors at the TorchRec stage boundaries | `0` (off) | `follow[].at: stage` |
+| `NANLOG_TRACK_ATTR` | Batch attribute(s) to follow as tracked tensors | `embedding_features` | `follow[].tensor` |
+| `NANLOG_BOUNDS` | Per-tensor in-range check `substr:lo:hi;...` (→ `kind="oob"`) | (empty) | `follow[].bounds` |
+| `NANLOG_SPARSE` | Cheap host-side KJT metadata at the sparse stage | `0` (off) | — |
+| `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each layer | `0` (off) | `follow[].at: stride:N` |
+| `NANLOG_TRACK_LAYER_STRIDE` | Re-scan every Kth layer when re-scan is on | `1` | `follow[].at: stride:N` |
+
+Channel notes:
+
+- `weight`/`bias` are read at the **start** of the step, so they hold the
+  **previous** step's value (`value_is_from_prev_step=true`).
+- `wgrad`/`bgrad` are read at the optimizer step boundary (current step) and
+  require a `torch.optim.Optimizer`. If the update is fused into backward, a
+  one-time warning is logged — use `weight`/`bias` instead.
 
 ## See also
 

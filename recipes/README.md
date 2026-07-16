@@ -145,6 +145,11 @@ cells:
   collect:
     layer_numerics:
       NANLOG_SAMPLE_EVERY: "10"
+
+  # recommended: one structured NANLOG_SPEC value (see docs/layer-numerics.md):
+  collect:
+    layer_numerics:
+      NANLOG_SPEC: '{"follow":[{"tensor":"embedding_features","at":"stage","bounds":[0,60]}],"sample_every":50}'
   ```
 
   Cells may also set `collect:`. An absent cell key inherits the recipe-level

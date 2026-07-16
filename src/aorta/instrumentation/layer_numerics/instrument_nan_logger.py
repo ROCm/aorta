@@ -44,6 +44,22 @@ How to run:
   _attach(model) yourself right after construction if you need that.
 
 Settings (environment variables):
+  NANLOG_SPEC            structured JSON config (recommended). When set, it WINS and
+                         is translated into the flat NANLOG_* vars below. Unifies the
+                         flat flags onto three axes -- scope (which modules), tensors
+                         (which of a module's tensors), at (when/how often) -- and two
+                         observation kinds: `watch` (a module's OWN tensors) and
+                         `follow` (trace ONE named tensor across positions). Example:
+                           NANLOG_SPEC='{
+                             "watch":  [{"scope": {"types": ["MLP","AttentionBlock"]},
+                                         "tensors": ["input","output"]}],
+                             "follow": [{"tensor": "embedding_features",
+                                         "at": "stage", "bounds": [0,60]}],
+                             "sample_every": 50, "pre_context": 10}'
+                         tensors: input,output,weight,bias,grad. at: "stride:N" (every
+                         Nth module in scope; 1=every) or "stage" (pipeline stages).
+                         When NANLOG_SPEC is unset, the flat vars below are read
+                         directly (legacy, still supported).
   NANLOG_DIR             output dir for the JSONL + summary (default ./nan_logger_out)
   NANLOG_HUGE_THRESHOLD  "huge" cutoff, |x| > T             (default 1e10)
   NANLOG_SAMPLE_EVERY    write a record for a CLEAN layer 1 step in N (default 50;
@@ -191,6 +207,243 @@ if __name__ == "__main__" and len(sys.argv) < 2:
     sys.exit(2)
 
 import torch  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# NANLOG_SPEC front-end (structured config)
+# ---------------------------------------------------------------------------
+# One JSON env var that unifies the flat NANLOG_* flags onto three axes:
+#   scope   {names:[substr,...], types:[ClassName,...]}  -- which modules
+#   tensors [input,output,weight,bias,grad]              -- which of a module's tensors
+#   at      "stride:N" | "stage"                         -- when/how often
+# and two observation kinds:
+#   watch   [{scope, tensors, at?}, ...]   -- a module's OWN tensors
+#   follow  [{tensor, at, scope?, bounds?}, ...] -- trace ONE named tensor across positions
+# plus cross-cutting: sample_every, pre_context, dir.
+#
+# When set, NANLOG_SPEC WINS: it is translated into the flat NANLOG_* vars the
+# engine below already reads (the engine is unchanged). Standalone-safe: no aorta
+# import, env-only. Faithful for every documented scenario (each uses a single
+# watch group OR a single follow); the engine has one global scope/tensor set, so
+# genuinely per-group-differing tensors or watch+stride-follow with DIFFERENT
+# scopes are merged with a warning (see _apply_spec).
+_SPEC_TENSOR_TO_CHANNEL = {
+    "input": "input", "output": "act", "weight": "weight", "bias": "bias", "grad": "igrad",
+}
+
+
+def _spec_warn(msg: str) -> None:
+    sys.stderr.write(f"nanlog: SPEC: {msg}\n")
+    sys.stderr.flush()
+
+
+def _spec_set(env_key: str, value: str) -> None:
+    """Set a derived flat var (NANLOG_SPEC wins, so overwrite)."""
+    os.environ[env_key] = value
+
+
+def _parse_stride(at: str) -> str | None:
+    """Return the N of a well-formed "stride:N" (N a positive int) as a string, else
+    None (warned by the caller). Guards the engine's `int(NANLOG_TRACK_LAYER_STRIDE)`
+    against a malformed spec value crashing the logger at import."""
+    n_str = at.split(":", 1)[1].strip()
+    try:
+        if int(n_str) >= 1:
+            return n_str
+    except ValueError:
+        pass
+    return None
+
+
+# --- Spec validation helpers -------------------------------------------------
+# All raise ValueError on a malformed shape/value so _apply_spec's rollback fires
+# and the whole spec is discarded ATOMICALLY (never half-applied). Validating up
+# front is the point: a sidecar must not broaden capture, disable a requested
+# check, or crash later on a value that passed through untyped.
+def _spec_string_list(value, path: str) -> list:
+    """A list of non-empty strings (an absent value is []). A bare string is a common
+    mistake (it would iterate into per-character filters), so it is rejected."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise ValueError(f"{path} must be a list of non-empty strings")
+    return [v.strip() for v in value]
+
+
+def _spec_int(spec: dict, key: str, minimum: int) -> int | None:
+    """An int >= minimum, or None if the key is absent. Rejects bools, non-ints, and
+    out-of-range values (e.g. sample_every=0 would divide-by-zero in the drain)."""
+    if key not in spec:
+        return None
+    v = spec[key]
+    if isinstance(v, bool) or not isinstance(v, int) or v < minimum:
+        raise ValueError(f"{key} must be an integer >= {minimum}, got {v!r}")
+    return v
+
+
+def _spec_bounds(value, path: str):
+    """A [lo, hi] pair of numbers, or None if absent. A present-but-malformed bounds
+    is an error (silently dropping it would leave a requested OOB check un-run)."""
+    if value is None:
+        return None
+    if (not isinstance(value, (list, tuple)) or len(value) != 2
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in value)):
+        raise ValueError(f"{path} must be a [lo, hi] pair of numbers")
+    return (value[0], value[1])
+
+
+def _apply_spec(spec_json: str) -> tuple:
+    """Translate NANLOG_SPEC JSON into flat NANLOG_* vars. Never raises: any malformed
+    spec (bad JSON, wrong shapes, bad values) warns and leaves the flat vars (legacy
+    path) in place — a sidecar must never take the training job down.
+
+    Returns (applied, error): applied=True only when the spec was fully translated;
+    on rejection applied=False and error is the reason string, so the summary can
+    record spec_applied honestly rather than implying the structured config ran."""
+    try:
+        spec = json.loads(spec_json)
+        if not isinstance(spec, dict):
+            raise ValueError("top level must be an object")
+    except Exception as e:
+        _spec_warn(f"ignoring NANLOG_SPEC ({e}); falling back to flat NANLOG_* vars")
+        return False, str(e)
+    # Snapshot NANLOG_* so a crash mid-translation rolls back to the ORIGINAL flat
+    # vars, rather than leaving a half-derived config (e.g. PIPELINE/TRACK_ATTR set
+    # but the scope that follows never applied). A sidecar must fall back cleanly.
+    before = {k: v for k, v in os.environ.items() if k.startswith("NANLOG_")}
+    try:
+        _translate_spec(spec)
+    except Exception as e:
+        for key in [k for k in os.environ if k.startswith("NANLOG_") and k not in before]:
+            del os.environ[key]
+        os.environ.update(before)
+        _spec_warn(f"NANLOG_SPEC translation failed ({e!r}); falling back to flat "
+                   "NANLOG_* vars; check the spec shape against the docstring")
+        return False, str(e)
+    return True, None
+
+
+def _translate_spec(spec: dict) -> None:
+    """Body of the spec->flat-var translation. May raise on a truly malformed shape;
+    _apply_spec catches and falls back. Skips non-dict watch/follow entries with a
+    warning rather than crashing on the common 'list of strings' mistake."""
+    names: list = []
+    types: list = []
+    channels: list = []
+
+    watch = spec.get("watch") or []
+    if not isinstance(watch, list):
+        raise ValueError("`watch` must be a list")
+    if not all(isinstance(g, dict) for g in watch):
+        raise ValueError("each `watch` entry must be a mapping")
+    if len(watch) > 1 and len({tuple(sorted(g.get("tensors", []))) for g in watch}) > 1:
+        _spec_warn("multiple watch groups with different `tensors` are merged into one "
+                   "global set (engine limitation); split into separate runs for exact per-group capture")
+    for g in watch:
+        sc = g.get("scope") or {}
+        if not isinstance(sc, dict):
+            raise ValueError("watch[].scope must be a mapping")
+        names += _spec_string_list(sc.get("names"), "watch[].scope.names")
+        types += _spec_string_list(sc.get("types"), "watch[].scope.types")
+        # A watch group must name valid tensors; otherwise NANLOG_CHANNELS would not
+        # be overwritten and the run would inherit ambient flat channels (SPEC must win).
+        tensor_names = _spec_string_list(g.get("tensors"), "watch[].tensors")
+        if not tensor_names:
+            raise ValueError("watch[].tensors must be a non-empty list")
+        unknown = [t for t in tensor_names if t not in _SPEC_TENSOR_TO_CHANNEL]
+        if unknown:
+            raise ValueError(f"watch[].tensors has unknown names {unknown}; "
+                             f"valid: {list(_SPEC_TENSOR_TO_CHANNEL)}")
+        channels += [_SPEC_TENSOR_TO_CHANNEL[t] for t in tensor_names]
+
+    raw_follow = spec.get("follow") or []
+    if not isinstance(raw_follow, list):
+        raise ValueError("`follow` must be a list")
+    if not all(isinstance(f, dict) for f in raw_follow):
+        raise ValueError("each `follow` entry must be a mapping")
+    # A follow entry MUST name a non-empty `tensor`; without it there is no target,
+    # and letting it fall back to the engine default ("embedding_features") would
+    # capture the WRONG tensor under a green artifact.
+    for f in raw_follow:
+        tensor = f.get("tensor")
+        if not isinstance(tensor, str) or not tensor.strip():
+            raise ValueError(f"follow[].tensor must be a non-empty string, got {tensor!r}")
+    follow = raw_follow
+    if len(follow) > 1:
+        _spec_warn("multiple `follow` entries: only the first cadence/scope is honored "
+                   "(engine has one follow path); tensors are unioned into TRACK_ATTR")
+    if follow:
+        _spec_set("NANLOG_PIPELINE", "1")
+        track_attrs = [f["tensor"].strip() for f in follow]
+        _spec_set("NANLOG_TRACK_ATTR", ",".join(track_attrs))
+        f0 = follow[0]
+        at = f0.get("at", "stage")
+        if at == "stage":
+            pass  # pipeline stage scan; scope does not apply to stages
+        elif isinstance(at, str) and at.startswith("stride:"):
+            n_str = _parse_stride(at)
+            if n_str is None:
+                raise ValueError(f"follow[].at {at!r} must be 'stride:N' with N>=1")
+            _spec_set("NANLOG_TRACK_EVERY_LAYER", "1")
+            _spec_set("NANLOG_TRACK_LAYER_STRIDE", n_str)
+            fsc = f0.get("scope") or {}
+            if not isinstance(fsc, dict):
+                raise ValueError("follow[].scope must be a mapping")
+            if names and (fsc.get("names") or fsc.get("types")):
+                _spec_warn("both watch scope and follow-stride scope set; they share the "
+                           "engine's single module filter and are merged")
+            names += _spec_string_list(fsc.get("names"), "follow[].scope.names")
+            types += _spec_string_list(fsc.get("types"), "follow[].scope.types")
+        else:
+            raise ValueError(f"follow[].at {at!r} must be 'stage' or 'stride:N'")
+        # Bounds are PER-ENTRY: each tensor takes its OWN [lo,hi]. A present-but-malformed
+        # bounds raises (silently dropping it would leave a requested OOB check un-run).
+        bounds_entries = []
+        for f in follow:
+            b = _spec_bounds(f.get("bounds"), "follow[].bounds")
+            if b is not None:
+                bounds_entries.append(f"{f['tensor'].strip()}:{b[0]}:{b[1]}")
+        if bounds_entries:
+            _spec_set("NANLOG_BOUNDS", ";".join(bounds_entries))
+
+    if names:
+        _spec_set("NANLOG_WATCH_NAMES", ",".join(names))
+    if types:
+        _spec_set("NANLOG_WATCH_TYPES", ",".join(types))
+    if channels:
+        _spec_set("NANLOG_CHANNELS", ",".join(dict.fromkeys(channels)))
+    elif follow:
+        # SPEC wins: a follow-only spec must NOT inherit flat layer-channel /
+        # watch-type defaults (e.g. the collector's 7-channel + Linear bundle),
+        # which would hook Linear layers the user never asked to watch. Clear the
+        # layer channels; if no scope was given either, clear the watch types too
+        # so the engine's "Linear" default does not re-arm module hooks. A stride
+        # follow keeps its scope (names/types set above) for the re-scan.
+        _spec_set("NANLOG_CHANNELS", "")
+        if not names and not types:
+            _spec_set("NANLOG_WATCH_TYPES", "")
+    # Cross-cutting numeric fields: validate HERE (not deferred to the engine's
+    # int(...) at import, which would crash) — sample_every=0 would also divide by
+    # zero in the per-step drain. sample_every>=1, pre_context>=0.
+    sample_every = _spec_int(spec, "sample_every", minimum=1)
+    if sample_every is not None:
+        _spec_set("NANLOG_SAMPLE_EVERY", str(sample_every))
+    pre_context = _spec_int(spec, "pre_context", minimum=0)
+    if pre_context is not None:
+        _spec_set("NANLOG_PRE_CONTEXT", str(pre_context))
+    if "dir" in spec:
+        if not isinstance(spec["dir"], str) or not spec["dir"].strip():
+            raise ValueError("`dir` must be a non-empty string")
+        _spec_set("NANLOG_DIR", spec["dir"])
+
+
+# spec_present: NANLOG_SPEC was set. spec_applied: it was successfully translated
+# (False when a malformed spec rolled back to the flat vars). Kept distinct so the
+# summary never implies the structured config ran when the run used flat fallback.
+_SPEC_PRESENT = bool(os.environ.get("NANLOG_SPEC", "").strip())
+_SPEC_APPLIED = False
+_SPEC_ERROR = None
+if _SPEC_PRESENT:
+    _SPEC_APPLIED, _SPEC_ERROR = _apply_spec(os.environ["NANLOG_SPEC"])
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -359,8 +612,13 @@ if _unknown_channels:
          f"valid: {list(_ALL_CHANNELS)}")
 
 if not _WATCH_TYPES and not _WATCH_NAMES:
-    _log("WARNING: both NANLOG_WATCH_TYPES and NANLOG_WATCH_NAMES are empty; "
-         "no modules will be watched")
+    # Empty watch scope is EXPECTED for a pipeline stage-only follow (it captures at
+    # copy/sparse/forward stage boundaries, not via layer hooks), so don't cry
+    # "misconfigured" there. A stride follow (_TRACK_EVERY_LAYER) DOES need a scope
+    # to know which layers to re-scan, so still warn in that case.
+    if not (_PIPELINE and not _TRACK_EVERY_LAYER):
+        _log("WARNING: both NANLOG_WATCH_TYPES and NANLOG_WATCH_NAMES are empty; "
+             "no modules will be watched")
 
 # Warn once when a scope knob silently no-ops without its prerequisite.
 if _TRACK_EVERY_LAYER and not _PIPELINE:
@@ -941,7 +1199,11 @@ def _attach(root: torch.nn.Module) -> int:
     _is_watched), and build the static param-scan plan. Returns the number of
     watched modules; also records their names in _watched_names for the summary."""
     n = 0
-    want_fwd = bool(_CHANNELS & {"act", "input"})
+    # A stride follow (_TRACK_EVERY_LAYER) does its per-layer re-scan INSIDE the
+    # forward hook, so install forward hooks even when no layer channels are set
+    # (e.g. a follow-only spec that cleared NANLOG_CHANNELS) — otherwise the
+    # re-scan silently never fires.
+    want_fwd = bool(_CHANNELS & {"act", "input"}) or _TRACK_EVERY_LAYER
     want_bwd = "igrad" in _CHANNELS
     for layer_name, module in root.named_modules():
         if not _is_watched(layer_name, module):
@@ -977,6 +1239,10 @@ def _install_autohook() -> None:
             return
         _start_alloc_recording()
         n = _attach(self)
+        if n == 0 and (_WATCH_TYPES or _WATCH_NAMES):
+            _log(f"WARNING: 0 modules matched (types={list(_WATCH_TYPES)}, "
+                 f"names={list(_WATCH_NAMES)}); no per-layer records will be written. "
+                 "Check your scope filters (names are substrings, types are class names).")
         # Drive one drain+step per training iteration off the root forward.
         self.register_forward_pre_hook(_root_pre_hook)
         _root_installed = True
@@ -1441,6 +1707,9 @@ def _write_summary() -> None:
         "steps_seen": _step,
         "records_written": _records_written,
         "matmul_calls_total": _matmul_calls,
+        "spec_present": _SPEC_PRESENT,
+        "spec_applied": _SPEC_APPLIED,
+        "spec_error": _SPEC_ERROR,
         "first_bad": _first_bad,
         "huge_threshold": _HUGE,
         "pre_context": _PRE_CONTEXT,

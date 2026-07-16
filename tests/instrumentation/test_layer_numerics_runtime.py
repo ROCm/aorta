@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 
 import pytest
 
@@ -30,6 +31,12 @@ def _load_logger(env: dict, monkeypatch, tmp_path_factory) -> object:
     effect; a per-load output dir keeps the JSONL/summary isolated.
     """
     out = tmp_path_factory.mktemp("nanlog")
+    # Clean NANLOG_* slate: the spec front-end derives flat vars into os.environ,
+    # which would otherwise leak across loads in this one process (a real run is a
+    # fresh process). Mirrors the isolation in test_layer_numerics_spec.py.
+    for key in list(os.environ):
+        if key.startswith("NANLOG_"):
+            monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("NANLOG_DIR", str(out))
     monkeypatch.setenv("RANK", "0")
     for key, val in env.items():
