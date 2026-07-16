@@ -121,6 +121,8 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
     )
     monkeypatch.setattr(env_mod, "CGROUP_FILE", tmp_path / "no_cgroup")
     monkeypatch.setattr(env_mod, "SELF_CGROUP_FILE", tmp_path / "no_self_cgroup")
+    monkeypatch.setattr(env_mod, "KFD_DEVICE_NODE", tmp_path / "no_kfd")
+    monkeypatch.setattr(env_mod, "KFD_SYSFS_DIR", tmp_path / "no_kfd_sysfs")
     monkeypatch.setattr(env_mod.shutil, "which", lambda name: None)
     # Force pytorch import to fail so its fallback path is exercised too
     real_import = __builtins__["__import__"] if isinstance(
@@ -156,6 +158,8 @@ class TestPathConstants:
             "ROCM_VERSION_FILE",
             "ROCM_VERSION_DEV_FILE",
             "KMD_VERSION_FILE",
+            "KFD_DEVICE_NODE",
+            "KFD_SYSFS_DIR",
             "HIPBLASLT_VERSION_HEADER",
             "HIPBLASLT_LIB_DIR",
             "HIPBLASLT_TENSILE_DIR",
@@ -202,6 +206,8 @@ class TestPathConstants:
             "ROCM_VERSION_FILE",
             "ROCM_VERSION_DEV_FILE",
             "KMD_VERSION_FILE",
+            "KFD_DEVICE_NODE",
+            "KFD_SYSFS_DIR",
             "HIPBLASLT_VERSION_HEADER",
             "HIPBLASLT_LIB_DIR",
             "HIPBLASLT_TENSILE_DIR",
@@ -277,6 +283,7 @@ REQUIRED_TOP_KEYS = {
     "library_introspection_alternates",
     "pytorch_sdpa",
     "nics",
+    "amdgpu_driver",
 }
 
 
@@ -286,7 +293,7 @@ class TestSchemaCompleteness:
     ):
         snapshot = collect_env()
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
-        assert snapshot.schema_version == "1.9"
+        assert snapshot.schema_version == "1.10"
         assert snapshot.system_health is None
         assert snapshot.rocm == {
             "version": None,
@@ -504,6 +511,18 @@ def _example_snapshot(**overrides) -> object:
             "cx7": {"present": True, "driver_version": None, "firmware": None,
                     "rdma_devices": [], "links": []},
         },
+        "amdgpu_driver": {
+            "scope": "host_kernel",
+            "status": "present",
+            "package_name": "amdgpu-dkms",
+            "package_version": "1:6.14.14-2212064.24.04",
+            "package_manager": "dpkg",
+            "module_version": "6.14.14",
+            "module_srcversion": "A1B2C3D4E5F6A7B8C9D0",
+            "kmd_version": "6.16.13",
+            "kfd_device_present": True,
+            "kfd_sysfs_present": True,
+        },
     }
     base.update(overrides)
     return EnvSnapshot(**base)
@@ -547,6 +566,7 @@ class TestEnvSnapshot:
             ("tensile_catalog", env_mod._empty_tensile_catalog),
             ("miopen_catalog", env_mod._empty_miopen_catalog),
             ("rocfft_catalog", env_mod._empty_rocfft_catalog),
+            ("amdgpu_driver", env_mod._empty_amdgpu_driver),
         ],
     )
     def test_from_dict_backfills_missing_catalog_key(self, key, empty_factory):
@@ -1029,6 +1049,13 @@ class TestCollectEnvContract:
             env_mod, "PODMAN_CONTAINERENV_MARKER", tmp_path / "no_podmanenv"
         )
         monkeypatch.setattr(env_mod, "CGROUP_FILE", tmp_path / "no_cgroup")
+        # Redirect KFD paths off the real filesystem: on a host that
+        # actually has an AMD GPU, /dev/kfd exists and the fake dpkg/rpm/
+        # modinfo below never resolve a package -- without this, the
+        # amdgpu_driver conflict check would fire a real partial reason
+        # and break the "clean probe -> partial is False" contract.
+        monkeypatch.setattr(env_mod, "KFD_DEVICE_NODE", tmp_path / "no_kfd")
+        monkeypatch.setattr(env_mod, "KFD_SYSFS_DIR", tmp_path / "no_kfd_sysfs")
 
         # rdhc happy path: pretend it's installed and writes valid JSON
         monkeypatch.setattr(env_mod.shutil, "which", lambda name: "/usr/bin/" + name)
@@ -4622,6 +4649,287 @@ class TestHostBlock:
         reasons: list[str] = []
         block = env_mod._capture_host(reasons)
         assert block["glibc_version"] == "2.42"
+
+
+# ---------------------------------------------------------------------------
+# amdgpu_driver (host-kernel scope KFD/AMDGPU driver identity, schema 1.10)
+# ---------------------------------------------------------------------------
+
+
+class TestQueryPackageVersion:
+    """_query_package_version(): portable dpkg-then-rpm, no shell pipe."""
+
+    @staticmethod
+    def _tools(present, outputs):
+        """(fake_which, fake_run) for the given present tools + argv->(_rc, out) map."""
+
+        def fake_which(name):
+            return f"/usr/bin/{name}" if name in present else None
+
+        def fake_run(cmd, **kwargs):
+            rc, out = outputs.get(tuple(cmd), (1, ""))
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=rc, stdout=out, stderr=""
+            )
+
+        return fake_which, fake_run
+
+    def test_dpkg_hit_wins_and_reports_manager(self, isolated_env, monkeypatch):
+        fw, fr = self._tools(
+            {"dpkg-query", "rpm"},
+            {
+                ("dpkg-query", "-W", "-f=${Version}", "amdgpu-dkms"): (
+                    0,
+                    "1:6.14.14-2212064.24.04\n",
+                ),
+            },
+        )
+        monkeypatch.setattr(env_mod.shutil, "which", fw)
+        monkeypatch.setattr(env_mod.subprocess, "run", fr)
+        assert env_mod._query_package_version("amdgpu-dkms") == (
+            "1:6.14.14-2212064.24.04",
+            "dpkg",
+        )
+
+    def test_falls_back_to_rpm_when_dpkg_absent(self, isolated_env, monkeypatch):
+        # No dpkg-query on PATH (RHEL); rpm answers with VERSION-RELEASE.
+        fw, fr = self._tools(
+            {"rpm"},
+            {
+                ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", "amdgpu-kmod"): (
+                    0,
+                    "6.14.14-2212064.el9\n",
+                ),
+            },
+        )
+        monkeypatch.setattr(env_mod.shutil, "which", fw)
+        monkeypatch.setattr(env_mod.subprocess, "run", fr)
+        assert env_mod._query_package_version("amdgpu-kmod") == (
+            "6.14.14-2212064.el9",
+            "rpm",
+        )
+
+    def test_dpkg_present_but_package_missing_falls_to_rpm(
+        self, isolated_env, monkeypatch
+    ):
+        # dpkg-query runs but exits non-zero (package not installed under
+        # dpkg); rpm then finds it. Exercises the "manager present, package
+        # absent" branch rather than "manager absent".
+        fw, fr = self._tools(
+            {"dpkg-query", "rpm"},
+            {
+                ("dpkg-query", "-W", "-f=${Version}", "amdgpu-dkms"): (1, ""),
+                ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", "amdgpu-dkms"): (
+                    0,
+                    "6.14.14-2212064.el9\n",
+                ),
+            },
+        )
+        monkeypatch.setattr(env_mod.shutil, "which", fw)
+        monkeypatch.setattr(env_mod.subprocess, "run", fr)
+        assert env_mod._query_package_version("amdgpu-dkms") == (
+            "6.14.14-2212064.el9",
+            "rpm",
+        )
+
+    def test_rpm_not_installed_marker_is_rejected(self, isolated_env, monkeypatch):
+        # Some rpm builds exit 0 and print "<pkg> is not installed" to
+        # stdout -- must NOT be read as a version.
+        fw, fr = self._tools(
+            {"rpm"},
+            {
+                ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", "amdgpu-dkms"): (
+                    0,
+                    "package amdgpu-dkms is not installed\n",
+                ),
+            },
+        )
+        monkeypatch.setattr(env_mod.shutil, "which", fw)
+        monkeypatch.setattr(env_mod.subprocess, "run", fr)
+        assert env_mod._query_package_version("amdgpu-dkms") is None
+
+    def test_no_package_manager_returns_none(self, isolated_env, monkeypatch):
+        fw, fr = self._tools(set(), {})
+        monkeypatch.setattr(env_mod.shutil, "which", fw)
+        monkeypatch.setattr(env_mod.subprocess, "run", fr)
+        assert env_mod._query_package_version("amdgpu-dkms") is None
+
+    def test_timeout_is_fail_soft(self, isolated_env, monkeypatch):
+        def boom(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, 5)
+
+        monkeypatch.setattr(
+            env_mod.shutil, "which", lambda n: f"/usr/bin/{n}"
+        )
+        monkeypatch.setattr(env_mod.subprocess, "run", boom)
+        # Both managers time out -> None, no raise.
+        assert env_mod._query_package_version("amdgpu-dkms") is None
+
+
+_MODINFO_AMDGPU = (
+    "filename:       /lib/modules/6.8.0/updates/dkms/amdgpu.ko\n"
+    "version:        6.14.14\n"
+    "srcversion:     A1B2C3D4E5F6A7B8C9D0\n"
+    "license:        GPL and additional rights\n"
+)
+
+
+class TestModinfoField:
+    def test_parses_named_field(self, isolated_env, monkeypatch):
+        monkeypatch.setattr(env_mod.shutil, "which", lambda n: "/sbin/modinfo")
+        monkeypatch.setattr(
+            env_mod.subprocess,
+            "run",
+            lambda cmd, **k: subprocess.CompletedProcess(
+                cmd, 0, stdout=_MODINFO_AMDGPU, stderr=""
+            ),
+        )
+        assert env_mod._modinfo_field("amdgpu", "version") == "6.14.14"
+        assert (
+            env_mod._modinfo_field("amdgpu", "srcversion")
+            == "A1B2C3D4E5F6A7B8C9D0"
+        )
+
+    def test_absent_modinfo_returns_none(self, isolated_env, monkeypatch):
+        monkeypatch.setattr(env_mod.shutil, "which", lambda n: None)
+        assert env_mod._modinfo_field("amdgpu", "version") is None
+
+    def test_nonzero_exit_returns_none(self, isolated_env, monkeypatch):
+        # modinfo exits non-zero when the module isn't found (GPU-less box).
+        monkeypatch.setattr(env_mod.shutil, "which", lambda n: "/sbin/modinfo")
+        monkeypatch.setattr(
+            env_mod.subprocess,
+            "run",
+            lambda cmd, **k: subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="modinfo: ERROR: Module amdgpu not found.\n"
+            ),
+        )
+        assert env_mod._modinfo_field("amdgpu", "version") is None
+
+
+class TestAmdgpuDriver:
+    """_capture_amdgpu_driver(): host-scope, degrades cleanly with no GPU."""
+
+    def test_block_keys_stable(self, all_disabled):
+        snapshot = collect_env()
+        assert set(snapshot.amdgpu_driver.keys()) == {
+            "scope",
+            "status",
+            "package_name",
+            "package_version",
+            "package_manager",
+            "module_version",
+            "module_srcversion",
+            "kmd_version",
+            "kfd_device_present",
+            "kfd_sysfs_present",
+        }
+        assert snapshot.amdgpu_driver["scope"] == "host_kernel"
+
+    def test_no_gpu_is_documented_absence_not_partial(
+        self, isolated_env, monkeypatch
+    ):
+        # Nothing resolvable: no package manager, no modinfo, no KFD nodes,
+        # no kmd_version. This is the dev-machine / CPU-runner case.
+        monkeypatch.setattr(env_mod.shutil, "which", lambda n: None)
+        monkeypatch.setattr(env_mod, "_path_exists", lambda p: False)
+        reasons: list[str] = []
+        block = env_mod._capture_amdgpu_driver({"kmd_version": None}, reasons)
+        assert block["status"] == "absent"
+        assert block["package_version"] is None
+        assert block["kfd_device_present"] is False
+        # The whole point: a GPU-less host must NOT pollute partial_reasons.
+        assert reasons == []
+
+    def test_present_full_capture(self, isolated_env, monkeypatch):
+        monkeypatch.setattr(
+            env_mod,
+            "_query_package_version",
+            lambda pkg: ("1:6.14.14-2212064.24.04", "dpkg")
+            if pkg == "amdgpu-dkms"
+            else None,
+        )
+        monkeypatch.setattr(
+            env_mod,
+            "_modinfo_field",
+            lambda mod, field: {
+                "version": "6.14.14",
+                "srcversion": "A1B2C3D4E5F6A7B8C9D0",
+            }.get(field),
+        )
+        monkeypatch.setattr(env_mod, "_path_exists", lambda p: True)
+        reasons: list[str] = []
+        block = env_mod._capture_amdgpu_driver({"kmd_version": "6.16.13"}, reasons)
+        assert block["status"] == "present"
+        assert block["package_name"] == "amdgpu-dkms"
+        assert block["package_version"] == "1:6.14.14-2212064.24.04"
+        assert block["package_manager"] == "dpkg"
+        assert block["module_version"] == "6.14.14"
+        assert block["module_srcversion"] == "A1B2C3D4E5F6A7B8C9D0"
+        # kmd_version is REUSED from the passed rocm block (no second read).
+        assert block["kmd_version"] == "6.16.13"
+        assert block["kfd_device_present"] is True
+        assert reasons == []
+
+    def test_kmd_version_reused_from_rocm_block(self, isolated_env, monkeypatch):
+        # Even with everything else absent, a kmd_version in the rocm block
+        # flows through and makes the block "present".
+        monkeypatch.setattr(env_mod, "_query_package_version", lambda pkg: None)
+        monkeypatch.setattr(env_mod, "_modinfo_field", lambda mod, field: None)
+        monkeypatch.setattr(env_mod, "_path_exists", lambda p: False)
+        reasons: list[str] = []
+        block = env_mod._capture_amdgpu_driver({"kmd_version": "6.16.13"}, reasons)
+        assert block["kmd_version"] == "6.16.13"
+        assert block["status"] == "present"
+
+    def test_loaded_but_unpackaged_records_conflict_reason(
+        self, isolated_env, monkeypatch
+    ):
+        # KFD node + modinfo present, but no dpkg/rpm package resolvable:
+        # an unusual, diagnosable state that DOES earn one partial reason.
+        monkeypatch.setattr(env_mod, "_query_package_version", lambda pkg: None)
+        monkeypatch.setattr(
+            env_mod,
+            "_modinfo_field",
+            lambda mod, field: "6.14.14" if field == "version" else None,
+        )
+        monkeypatch.setattr(env_mod, "_path_exists", lambda p: True)
+        reasons: list[str] = []
+        block = env_mod._capture_amdgpu_driver({"kmd_version": None}, reasons)
+        assert block["status"] == "present"
+        assert block["package_version"] is None
+        assert any(
+            r.startswith("amdgpu_driver.package_version") for r in reasons
+        )
+
+    def test_kfd_presence_uses_module_constants(self, isolated_env, monkeypatch):
+        # kfd_device_present / kfd_sysfs_present must key off the module
+        # path constants so tests (and future path moves) stay in sync.
+        seen: list = []
+
+        def fake_exists(p):
+            seen.append(p)
+            return p == env_mod.KFD_DEVICE_NODE
+
+        monkeypatch.setattr(env_mod, "_query_package_version", lambda pkg: None)
+        monkeypatch.setattr(env_mod, "_modinfo_field", lambda mod, field: None)
+        monkeypatch.setattr(env_mod, "_path_exists", fake_exists)
+        reasons: list[str] = []
+        block = env_mod._capture_amdgpu_driver({"kmd_version": None}, reasons)
+        assert block["kfd_device_present"] is True
+        assert block["kfd_sysfs_present"] is False
+        assert env_mod.KFD_DEVICE_NODE in seen
+        assert env_mod.KFD_SYSFS_DIR in seen
+
+    def test_empty_matches_capture_all_absent(self, isolated_env, monkeypatch):
+        # _empty_amdgpu_driver() must be byte-identical to a real all-absent
+        # capture, so the dataclass default never diverges from reality.
+        monkeypatch.setattr(env_mod, "_query_package_version", lambda pkg: None)
+        monkeypatch.setattr(env_mod, "_modinfo_field", lambda mod, field: None)
+        monkeypatch.setattr(env_mod, "_path_exists", lambda p: False)
+        reasons: list[str] = []
+        block = env_mod._capture_amdgpu_driver({"kmd_version": None}, reasons)
+        assert block == env_mod._empty_amdgpu_driver()
 
 
 # ---------------------------------------------------------------------------

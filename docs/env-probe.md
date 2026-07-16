@@ -226,6 +226,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
 | `system_health` | `dict \| null` | `rdhc --quick --json` (subprocess) | verbatim parsed JSON; `null` when rdhc absent / sudo unavailable / timeout / malformed |
 | `rocm` | `dict[str, str \| null]` | `/opt/rocm/.info/version{,_dev}`, `/sys/module/amdgpu/version` | `version`, `version_dev`, `kmd_version` |
+| `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (`amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — KMD loaded (`/dev/kfd` or `modinfo` present) but no dpkg/rpm package resolvable — records a `partial_reason`. Package lookup is a portable dpkg-then-rpm query parsed in Python (no shell pipe). |
 | `hip` | `dict[str, str \| null]` | `hipconfig --version/--platform/--compiler/--runtime/--cpp_config` | five subprocesses; `--version` and `--platform` cannot be combined (no delimiter) |
 | `hipblaslt` | `dict` | header parse + `sha256(libhipblaslt.so)` + sorted-filenames hash of `lib/hipblaslt/library/*` | `rocm_release_tweak` (NOT a per-hipBLASLt commit -- it's the ROCm release identifier shared across every library in a release; see note below), `package_version`, `lib_hash`, `kernel_db_revision`, `applied_prs: {}` |
 | `rocblas` | `dict` | header parse + `sha256(librocblas.so)` + sorted-filenames hash of `lib/rocblas/library/*` | Same shape as `hipblaslt`. Header lives at `include/rocblas/internal/rocblas-version.h`. |
@@ -434,7 +435,50 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.9` (current)
+### `1.10` (current)
+
+Host/container runtime split, part 1: KFD/AMDGPU kernel-mode-driver
+identity. Additive — one new top-level block, defaulted so older readers
+don't raise.
+
+* New top-level **`amdgpu_driver`** block, always present (defaulted via
+  `_empty_amdgpu_driver()`). **Host-kernel scope — three fields only**:
+  `kfd_device_present`, `kfd_sysfs_present`, and `kmd_version` reflect the
+  host kernel a container shares, so they report the *host's* driver even
+  when the probe runs inside a container — the deliberate counterpart to
+  `rocm`/`hip`, which read the container's `/opt/rocm` userspace. This is
+  what lets a single in-process probe separate a "host runtime" signal
+  from a "container runtime" signal without a second invocation or
+  privileged access.
+* **Not host-guaranteed**: `package_name`/`package_version`/
+  `package_manager` (dpkg/rpm) and `module_version`/`module_srcversion`
+  (`modinfo`) read the *current filesystem's* package database and
+  `/lib/modules`. From inside a container these reflect the container's
+  own view — typically null, since the amdgpu driver package is normally
+  installed only on the host — even while `kfd_device_present` and
+  `kmd_version` correctly show the host driver as present. Treat these
+  two field groups as filesystem-scoped, not host-scoped.
+* Fields: `scope` (constant `"host_kernel"` — describes the block's
+  intent, not a per-field guarantee; see the two bullets above), `status`
+  (`"present"`/`"absent"`), `package_name` / `package_version` /
+  `package_manager` (portable **dpkg-then-rpm** query over `amdgpu-dkms`
+  then `amdgpu-kmod`, parsed in Python — no shell pipeline), `module_version`
+  / `module_srcversion` (`modinfo amdgpu`), `kmd_version` (reused verbatim
+  from `rocm.kmd_version` so the two blocks never disagree),
+  `kfd_device_present` / `kfd_sysfs_present` (`/dev/kfd` + `/sys/class/kfd`
+  existence checks — no `open()`, no `ioctl`, no GPU compute).
+* **Documented absence, not partial**: a GPU-less host records
+  `status:"absent"` with an empty `partial_reasons`, mirroring the `nics`
+  vendor-absent precedent. The only reason this block ever appends is a
+  *conflict*: the KMD is demonstrably loaded (`/dev/kfd` or `modinfo`
+  present) yet no dpkg/rpm package can be named — an unusual, diagnosable
+  state (out-of-band driver install, stripped package DB).
+* Backwards-compat: `EnvSnapshot.amdgpu_driver` uses a `default_factory`,
+  so a ≤1.9 snapshot round-trips via `from_dict()` (back-filled with the
+  empty/absent block). A 1.9 reader indexing `amdgpu_driver` on a pre-1.10
+  snapshot gets that back-filled block, not a `KeyError`.
+
+### `1.9`
 
 Static kernel-catalog "recipe books" for the on-disk, runtime-selected
 GPU-compute catalogs (issue #54 + follow-ups). All additive: three new
@@ -981,6 +1025,10 @@ sources are:
 | `rocm.version` | `/opt/rocm/.info/version` |
 | `rocm.version_dev` | `/opt/rocm/.info/version-dev` (often empty on developer builds) |
 | `rocm.kmd_version` | `/sys/module/amdgpu/version` (kernel module sysfs) |
+| `amdgpu_driver.package_version` / `.package_name` / `.package_manager` | `dpkg-query -W -f='${Version}' amdgpu-dkms` (Debian/Ubuntu), falling back to `rpm -q --qf '%{VERSION}-%{RELEASE}' amdgpu-dkms` then `amdgpu-kmod` (RHEL/SLES). First hit wins; `null` when no package manager names the driver. |
+| `amdgpu_driver.module_version` / `.module_srcversion` | `modinfo amdgpu` `version:` / `srcversion:` fields (module metadata; does not load the module or touch the GPU). `srcversion` is a source hash — it changes on a rebuild even when `version` doesn't. |
+| `amdgpu_driver.kmd_version` | reused verbatim from `rocm.kmd_version` (`/sys/module/amdgpu/version`) — no second read, so the two blocks can never disagree |
+| `amdgpu_driver.kfd_device_present` / `.kfd_sysfs_present` | existence of `/dev/kfd` / `/sys/class/kfd` (pure `Path.exists()`, never opened) |
 | `hip.*` | `hipconfig --version` / `--platform` / `--compiler` / `--runtime` / `--cpp_config` |
 | `hipblaslt.rocm_release_tweak` | `HIPBLASLT_VERSION_TWEAK` define in `/opt/rocm/include/hipblaslt/hipblaslt-version.h` |
 | `hipblaslt.package_version` | `HIPBLASLT_VERSION_{MAJOR,MINOR,PATCH}` defines in the same header |

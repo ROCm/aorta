@@ -78,7 +78,36 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.9"
+SCHEMA_VERSION = "1.10"
+# 1.9 -> 1.10 (host/container runtime split, part 1): KFD/AMDGPU
+# kernel-mode-driver identity.
+#   - New top-level ``amdgpu_driver`` block, always present (defaulted via
+#     ``_empty_amdgpu_driver()``). HOST-KERNEL SCOPE for ``kfd_device_present``
+#     / ``kfd_sysfs_present`` / ``kmd_version``: the amdgpu KMD and KFD live
+#     in the host kernel a container shares, so these three fields report
+#     the *host's* driver even from inside a container -- complementary to
+#     ``rocm``/``hip`` which read the container's ``/opt/rocm`` userspace.
+#     ``package_name`` / ``package_version`` / ``package_manager`` and
+#     ``module_version`` / ``module_srcversion`` are NOT host-guaranteed:
+#     dpkg/rpm and ``modinfo`` read the *current filesystem's* package DB
+#     and ``/lib/modules``, which is the container's own view when probed
+#     from inside one, and will commonly be null there even though the
+#     three host-kernel fields above are populated. Fields: ``scope``
+#     (constant ``"host_kernel"`` -- describes the block's intent, not a
+#     per-field guarantee; see caveat above), ``status``
+#     (``"present"``/``"absent"``), ``package_name`` / ``package_version``
+#     / ``package_manager`` (portable dpkg-then-rpm query over
+#     ``amdgpu-dkms`` / ``amdgpu-kmod``), ``module_version`` /
+#     ``module_srcversion`` (``modinfo amdgpu``), ``kmd_version`` (reused
+#     verbatim from ``rocm.kmd_version``), ``kfd_device_present`` /
+#     ``kfd_sysfs_present`` (``/dev/kfd`` + ``/sys/class/kfd`` existence).
+#     A GPU-less host is a DOCUMENTED ABSENCE (``status="absent"``, no
+#     ``partial``); only a KMD-loaded-but-unpackaged conflict records a
+#     reason. Additive: ``EnvSnapshot.amdgpu_driver`` uses a
+#     ``default_factory`` so a <=1.9 snapshot still round-trips via
+#     ``from_dict``. 1.9 readers indexing ``amdgpu_driver`` on a pre-1.10
+#     snapshot get the back-filled empty block.
+#
 # 1.8 -> 1.9 (issue #54 + follow-ups): static kernel-catalog "recipe
 # books" for the on-disk, runtime-selected GPU-compute catalogs.
 #   - New top-level ``tensile_catalog`` block (issue #54), always present
@@ -462,6 +491,32 @@ ROCM_VERSION_DEV_FILE = Path("/opt/rocm/.info/version-dev")    # full build, e.g
 # Linux kernel-side AMDGPU module version (KMD = kernel-mode driver).
 # Provided by the kernel since the amdgpu module exposes a sysfs `version`.
 KMD_VERSION_FILE = Path("/sys/module/amdgpu/version")          # e.g. "6.16.13"
+
+# KFD / AMDGPU kernel-mode-driver identity (schema 1.10, host-kernel scope).
+# CRITICAL host/container semantic: the amdgpu KMD and the KFD (Kernel
+# Fusion Driver) live in the HOST kernel, which a container SHARES. So
+# these paths report the *host's* driver even when the probe runs inside
+# a container -- the opposite of /opt/rocm (userspace, reflects the
+# container filesystem). That asymmetry is exactly what makes a single
+# in-process probe able to separate a "host runtime" signal from a
+# "container runtime" signal without a second invocation.
+#
+# /dev/kfd is the compute device node the ROCm userspace opens; its
+# presence means the driver is loaded AND exposed to this
+# process/container. /sys/class/kfd is the sysfs face of the same driver.
+# Both are pure existence checks -- no open(), no ioctl, no GPU compute.
+KFD_DEVICE_NODE = Path("/dev/kfd")
+KFD_SYSFS_DIR = Path("/sys/class/kfd")
+# AMDGPU kernel module name for ``modinfo`` -- gives a package-database-
+# independent build identity (``version`` + ``srcversion``) that works
+# even in stripped containers with no dpkg/rpm metadata.
+AMDGPU_MODULE_NAME = "amdgpu"
+# Debian/Ubuntu (dpkg) is the flagship ROCm target -- every Dockerfile in
+# docker/ is Ubuntu-based. RHEL/SLES (rpm) is the secondary target. The
+# candidate package names AMD ships the KMD under, most specific first:
+# amdgpu-dkms (DKMS source build, the common case) then amdgpu-kmod
+# (prebuilt kmod, RHEL). We deliberately do NOT match amdgpu-*firmware.
+AMDGPU_PACKAGE_CANDIDATES: tuple[str, ...] = ("amdgpu-dkms", "amdgpu-kmod")
 
 # hipBLASLt build identity sources. The version header ships in the
 # hipblaslt-dev package; on hosts without it, _capture_hipblaslt's commit
@@ -924,6 +979,14 @@ class EnvSnapshot:
     rocfft_catalog: dict = field(
         default_factory=lambda: _empty_rocfft_catalog()
     )
+    # amdgpu_driver: host/container split part 1 (schema 1.10). Host-kernel
+    # scope KFD/AMDGPU driver identity. Defaulted (empty/absent block) so
+    # pre-1.10 constructors and ``from_dict()`` on older snapshots don't
+    # raise. Populated by ``_capture_amdgpu_driver()`` in collect_env() /
+    # ``_disaster_snapshot()``.
+    amdgpu_driver: dict = field(
+        default_factory=lambda: _empty_amdgpu_driver()
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to the env.json shape. Round-trip pair with from_dict."""
@@ -963,6 +1026,7 @@ class EnvSnapshot:
         kwargs.setdefault("tensile_catalog", _empty_tensile_catalog())
         kwargs.setdefault("miopen_catalog", _empty_miopen_catalog())
         kwargs.setdefault("rocfft_catalog", _empty_rocfft_catalog())
+        kwargs.setdefault("amdgpu_driver", _empty_amdgpu_driver())
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -996,6 +1060,7 @@ class EnvSnapshot:
         nics = self.nics or {}
         gpu_arch = self.gpu_arch or {}
         host = self.host or {}
+        amdgpu = self.amdgpu_driver or {}
         # Use ``is not None`` -- RDHC may return an empty dict on a healthy
         # host with nothing to report, which is still a successful capture
         # and must NOT be summarised as "unavailable".
@@ -1083,6 +1148,15 @@ class EnvSnapshot:
                 f"  host:      kernel={host.get('kernel_release') or '?'} "
                 f"machine={host.get('machine') or '?'}  "
                 f"glibc={host.get('glibc_version') or '?'}",
+                # amdgpu_driver is HOST-KERNEL scope: even inside a
+                # container this reflects the shared host driver, unlike the
+                # rocm/hip lines above (container userspace). "absent" is
+                # the normal reading on a GPU-less box.
+                f"  amdgpu:    {amdgpu.get('status') or '?'} "
+                f"pkg={amdgpu.get('package_name') or '?'}={amdgpu.get('package_version') or '?'} "
+                f"({amdgpu.get('package_manager') or '?'})  "
+                f"kmd={amdgpu.get('kmd_version') or '?'}  "
+                f"kfd={'yes' if amdgpu.get('kfd_device_present') else 'no'}",
                 # CK has two layers -- system headers (composablekernel-dev
                 # apt pkg) and the copy compiled into libtorch_hip.so via
                 # PyTorch's third_party/composable_kernel submodule. Both
@@ -1760,6 +1834,10 @@ def collect_env(
         runtime_context = _detect_runtime_context()  # never partial; always populates
         system_health = _run_rdhc(reasons)
         rocm = _capture_rocm_version_files(reasons)
+        # Host-kernel scope: reuses rocm's kmd_version read (no second file
+        # read) + package/modinfo/KFD-node probes. Absent on GPU-less hosts
+        # without a partial (documented absence).
+        amdgpu_driver = _capture_amdgpu_driver(rocm, reasons)
         hip = _capture_hip_toolchain(reasons)
         hipblaslt = _capture_hipblaslt(reasons)
         rocblas = _capture_rocblas(reasons)
@@ -1827,6 +1905,7 @@ def collect_env(
             hip=hip,
             hipblaslt=hipblaslt,
             rocblas=rocblas,
+            amdgpu_driver=amdgpu_driver,
             composable_kernel=composable_kernel,
             tensile=tensile,
             tensile_catalog=tensile_catalog,
@@ -1899,6 +1978,7 @@ def _disaster_snapshot(
         captured_at=captured_at,
         system_health=None,
         rocm={"version": None, "version_dev": None, "kmd_version": None},
+        amdgpu_driver=_empty_amdgpu_driver(),
         hip={
             "version": None,
             "platform": None,
@@ -6881,6 +6961,231 @@ def _capture_gpu_arch(reasons: list[str]) -> dict[str, Any]:
         "gfx_targets": sorted(set(targets)),
         "agent_arch_counts": dict(sorted(counts.items())),
     }
+
+
+def _query_package_version(package: str) -> tuple[str, str] | None:
+    """Look up an installed system package's version, distro-portable.
+
+    Tries Debian/Ubuntu ``dpkg-query`` first (the flagship ROCm target;
+    every Dockerfile in ``docker/`` is Ubuntu-based), then RHEL/SLES
+    ``rpm``. Returns ``(version, package_manager)`` on the first hit, or
+    ``None`` when the package is not installed under any known manager.
+
+    Matches the module's subprocess contract exactly: ``shutil.which()``
+    gate, ``subprocess.run([...], check=False, timeout=SHORT_TIMEOUT_SEC)``,
+    parsing in Python -- NO shell pipeline. (The RHEL-only
+    ``rpm -qa | grep | sed`` one-liner some operators reach for is both
+    non-portable and outside this contract; a direct ``-qf`` query is the
+    portable, testable equivalent.) Never raises.
+    """
+    # dpkg-query -W -f='${Version}' <pkg>: prints the version on stdout and
+    # exits 0 when installed; exits non-zero (and prints to stderr) when
+    # not. The -f template avoids the two-column default output.
+    if shutil.which("dpkg-query") is not None:
+        try:
+            proc = subprocess.run(
+                ["dpkg-query", "-W", "-f=${Version}", package],
+                capture_output=True,
+                text=True,
+                timeout=SHORT_TIMEOUT_SEC,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.debug("dpkg-query failed for %s: %s", package, exc)
+        else:
+            if proc.returncode == 0:
+                ver = (proc.stdout or "").strip()
+                if ver:
+                    return (ver, "dpkg")
+
+    # rpm -q --qf '%{VERSION}-%{RELEASE}' <pkg>: same idea for RHEL/SLES.
+    # Including RELEASE captures the distro build/patch suffix that the
+    # candidate `sed 's/\.el.*//'` deliberately discarded -- we keep it,
+    # since that suffix is exactly the kind of host-to-host drift the probe
+    # exists to surface.
+    if shutil.which("rpm") is not None:
+        try:
+            proc = subprocess.run(
+                ["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", package],
+                capture_output=True,
+                text=True,
+                timeout=SHORT_TIMEOUT_SEC,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            log.debug("rpm -q failed for %s: %s", package, exc)
+        else:
+            # rpm exits 0 and prints "<pkg> is not installed" to STDOUT for
+            # a missing package on some builds, so gate on returncode AND a
+            # non-empty version that doesn't carry the not-installed marker.
+            if proc.returncode == 0:
+                ver = (proc.stdout or "").strip()
+                if ver and "is not installed" not in ver:
+                    return (ver, "rpm")
+
+    return None
+
+
+# ``modinfo amdgpu`` prints ``field:   value`` lines; we want version and
+# srcversion. srcversion is a hash of the module source -- it changes on a
+# rebuild even when the human version string does not, so it is the finer
+# drift signal of the two.
+_MODINFO_FIELD_RE = re.compile(r"^([a-z_]+):\s*(.*)$")
+
+
+def _modinfo_field(module: str, field: str) -> str | None:
+    """Return one ``modinfo <module>`` field value, or None. Fail-soft.
+
+    ``modinfo`` reads the module file on disk (or the running kernel's
+    metadata) -- it does NOT load the module or touch the GPU. which()-gated
+    like every other subprocess here.
+    """
+    if shutil.which("modinfo") is None:
+        return None
+    try:
+        proc = subprocess.run(
+            ["modinfo", module],
+            capture_output=True,
+            text=True,
+            timeout=SHORT_TIMEOUT_SEC,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        log.debug("modinfo %s failed: %s", module, exc)
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in (proc.stdout or "").splitlines():
+        m = _MODINFO_FIELD_RE.match(line)
+        if m and m.group(1) == field:
+            return m.group(2).strip() or None
+    return None
+
+
+def _empty_amdgpu_driver() -> dict[str, Any]:
+    """All-null ``amdgpu_driver`` block for the default / disaster snapshot.
+
+    Same shape ``_capture_amdgpu_driver`` returns when nothing is
+    readable, so the schema is stable across hosts and the dataclass
+    default never diverges from a real (empty) capture. ``status`` is
+    ``"absent"`` -- the honest reading of "we detected no amdgpu signal".
+    """
+    return {
+        "scope": "host_kernel",
+        "status": "absent",
+        "package_name": None,
+        "package_version": None,
+        "package_manager": None,
+        "module_version": None,
+        "module_srcversion": None,
+        "kmd_version": None,
+        "kfd_device_present": False,
+        "kfd_sysfs_present": False,
+    }
+
+
+def _capture_amdgpu_driver(
+    rocm: dict[str, str | None], reasons: list[str]
+) -> dict[str, Any]:
+    """Capture the KFD / AMDGPU kernel-mode-driver identity.
+
+    See the ``KFD_DEVICE_NODE`` constant block for the host/container
+    semantic. Only ``kfd_device_present``, ``kfd_sysfs_present``, and
+    ``kmd_version`` are HOST-KERNEL SCOPE: they reflect the kernel a
+    container shares with its host, so they report the host's driver even
+    from inside a container -- complementary to ``rocm``/``hip`` which read
+    the container's own ``/opt/rocm`` userspace.
+
+    ``package_name`` / ``package_version`` / ``package_manager`` and
+    ``module_version`` / ``module_srcversion`` are NOT host-guaranteed:
+    dpkg/rpm and ``modinfo`` read the *current filesystem's* package
+    database and ``/lib/modules``, so from inside a container these
+    reflect the container's (usually driver-less) view, not the host's,
+    even though the KFD/kmd fields above are still host-accurate.
+
+    Sources, all fail-soft and none requiring a GPU:
+
+    * ``package_version`` / ``package_manager`` / ``package_name`` --
+      ``_query_package_version`` over ``AMDGPU_PACKAGE_CANDIDATES``
+      (dpkg then rpm).
+    * ``module_version`` / ``module_srcversion`` -- ``modinfo amdgpu``.
+    * ``kmd_version`` -- reused verbatim from the already-captured ``rocm``
+      block's ``/sys/module/amdgpu/version`` read (no second file read, so
+      the two blocks can never disagree).
+    * ``kfd_device_present`` / ``kfd_sysfs_present`` -- existence of
+      ``/dev/kfd`` and ``/sys/class/kfd``.
+
+    DOCUMENTED ABSENCE, NOT partial: on a GPU-less host (this dev machine)
+    every signal is missing -> ``status="absent"`` with NO ``partial``
+    reason, mirroring the ``nics`` vendor-absent precedent. We only record
+    a reason when there is a genuine capture *conflict* (a KMD signal
+    exists but the package DB can't name it), which is worth an operator's
+    attention.
+    """
+    block = _empty_amdgpu_driver()
+
+    for candidate in AMDGPU_PACKAGE_CANDIDATES:
+        found = _query_package_version(candidate)
+        if found is not None:
+            block["package_version"], block["package_manager"] = found
+            block["package_name"] = candidate
+            break
+
+    block["module_version"] = _modinfo_field(AMDGPU_MODULE_NAME, "version")
+    block["module_srcversion"] = _modinfo_field(
+        AMDGPU_MODULE_NAME, "srcversion"
+    )
+    # Reuse the rocm block's kmd_version rather than re-reading the sysfs
+    # file, so amdgpu_driver.kmd_version == rocm.kmd_version always.
+    block["kmd_version"] = (rocm or {}).get("kmd_version")
+
+    block["kfd_device_present"] = _path_exists(KFD_DEVICE_NODE)
+    block["kfd_sysfs_present"] = _path_exists(KFD_SYSFS_DIR)
+
+    # "present" iff ANY host-kernel amdgpu signal was observed. On a
+    # GPU-less CPU box all of these are falsey -> absent (documented, no
+    # partial). /dev/kfd or a loaded module or a package hit each prove
+    # the driver stack is on this host.
+    any_signal = any(
+        (
+            block["package_version"],
+            block["module_version"],
+            block["module_srcversion"],
+            block["kmd_version"],
+            block["kfd_device_present"],
+            block["kfd_sysfs_present"],
+        )
+    )
+    block["status"] = "present" if any_signal else "absent"
+
+    # Conflict signal worth a partial: the driver is demonstrably loaded
+    # (KFD node or module metadata present) but no package manager could
+    # name the package. That is an unusual, diagnosable state (out-of-band
+    # driver install, stripped package DB) -- not the ordinary GPU-less or
+    # stripped-container absence, so it earns one reason.
+    kmd_loaded = (
+        block["kfd_device_present"]
+        or block["module_version"] is not None
+        or block["module_srcversion"] is not None
+    )
+    if kmd_loaded and block["package_version"] is None:
+        reasons.append(
+            "amdgpu_driver.package_version: amdgpu KMD is loaded "
+            "(KFD node or amdgpu module metadata present) but no dpkg/rpm "
+            f"package ({'/'.join(AMDGPU_PACKAGE_CANDIDATES)}) could be "
+            "resolved"
+        )
+
+    return block
+
+
+def _path_exists(path: Path) -> bool:
+    """``path.exists()`` that never raises (PermissionError, OSError -> False)."""
+    try:
+        return path.exists()
+    except OSError as exc:
+        log.debug("exists() check failed for %s: %s", path, exc)
+        return False
 
 
 def _capture_host(reasons: list[str]) -> dict[str, Any]:
