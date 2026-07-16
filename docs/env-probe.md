@@ -129,7 +129,7 @@ operator can act on them without `jq`'ing the JSON. A closing
 end-of-output. Sample:
 
 ```text
-Wrote env probe to /tmp/env.json (schema_version=1.9) [PARTIAL]
+Wrote env probe to /tmp/env.json (schema_version=1.10) [PARTIAL]
   runtime:   baremetal / python=venv
   build_sys: none
   rocm:      7.2.1 (dev: None)
@@ -220,13 +220,13 @@ unexpected failure. Callers always get back a valid, fully-shaped
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.9"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.10"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
 | `system_health` | `dict \| null` | `rdhc --quick --json` (subprocess) | verbatim parsed JSON; `null` when rdhc absent / sudo unavailable / timeout / malformed |
 | `rocm` | `dict[str, str \| null]` | `/opt/rocm/.info/version{,_dev}`, `/sys/module/amdgpu/version` | `version`, `version_dev`, `kmd_version` |
-| `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (`amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — KMD loaded (`/dev/kfd` or `modinfo` present) but no dpkg/rpm package resolvable — records a `partial_reason`. Package lookup is a portable dpkg-then-rpm query parsed in Python (no shell pipe). |
+| `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (stable candidate family `amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_full_name` (complete canonical identity — apt `name=version` or rpm NVRA — capturing kernel-suffixed package names like `amdgpu-kmod-6.9.0-…_g9b20106afb70-6.14.14.000000-2226257.1.x86_64` that `package_name` alone drops; the single field two host snapshots diff on), `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_full_name`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — amdgpu module loaded (`modinfo` metadata present) but no dpkg/rpm package resolvable — records a `partial_reason`; `/dev/kfd` alone never does, since a passthrough container legitimately has the host's KFD node without a container-local package. Package lookup is a portable, **glob-capable** dpkg-then-rpm query parsed in Python (no shell pipe), so kernel-suffixed RPM names are matched. |
 | `hip` | `dict[str, str \| null]` | `hipconfig --version/--platform/--compiler/--runtime/--cpp_config` | five subprocesses; `--version` and `--platform` cannot be combined (no delimiter) |
 | `hipblaslt` | `dict` | header parse + `sha256(libhipblaslt.so)` + sorted-filenames hash of `lib/hipblaslt/library/*` | `rocm_release_tweak` (NOT a per-hipBLASLt commit -- it's the ROCm release identifier shared across every library in a release; see note below), `package_version`, `lib_hash`, `kernel_db_revision`, `applied_prs: {}` |
 | `rocblas` | `dict` | header parse + `sha256(librocblas.so)` + sorted-filenames hash of `lib/rocblas/library/*` | Same shape as `hipblaslt`. Header lives at `include/rocblas/internal/rocblas-version.h`. |
@@ -237,8 +237,8 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `host` | `dict` | `os.uname()` + `os.confstr("CS_GNU_LIBC_VERSION")` | `kernel_release`, `kernel_version`, `machine`, `glibc_version`. Kernel + glibc drift is the #1 confound for compiled-against-vs-runtime issues with C++ extensions. |
 | `composable_kernel` | `dict` | header at `include/ck/version.h` + `nm -D` of `libtorch_hip.so` piped through `c++filt` + `torch.__config__.show()` flag scan | Two sub-blocks (`system: {version, commit, ck_tile_present}`, `pytorch_bundled: {present, symbol_count}`) plus top-level `pytorch_use_ck_sdpa` / `pytorch_use_ck_gemm` booleans (build-time flags baked into the wheel; NOT runtime env vars). System and bundled CK can drift independently. |
 | `tensile` | `dict` | optional `import Tensile` + sorted-filenames hash over the union of hipBLASLt + rocBLAS kernel DBs | `package_version` (usually `null` outside builders), `kernel_db_combined_hash` |
-| `tensile_catalog` | `dict` | reuses the `hipblaslt`/`rocblas`/`tensile` captures + a new per-file enumeration of `lib/{hipblaslt,rocblas}/library/*` | **The "recipe book" -- installed-library identity, NOT the runtime-selected solution ID.** Top-level `doc` + `status`. Per-library `hipblaslt`/`rocblas` carry the existing `package_version`/`lib_hash`/`kernel_db_revision` (no regression) plus a `menu` sub-block: `status`, `reason`, `dir`, `logic_file_count` (`.dat`/`.yaml`), `file_count`, `gfx_arch_coverage`, `files` (per-file `{name,size,suffix,is_logic,sha256}`), and `combined_content_hash`. `combined` mirrors the `tensile` block. Partial-not-silent: a dir that can't be located/listed is `status:"partial"` (distinct from a present-but-empty menu, which is `ok` with `logic_file_count:0`). Added in schema 1.9 (issue #54). |
-| `miopen_catalog` | `dict` | reuses the `miopen` capture + a per-file enumeration of the MIOpen db dir (`share/miopen/db/`) | **Recipe book for MIOpen's convolution databases** -- same scoping as `tensile_catalog`. `doc` + `status`, the reused `package_version`/`lib_hash`/`kernel_db_revision` (no regression), `db_dir` + `db_dir_source` (`default` or `MIOPEN_SYSTEM_DB_PATH`), `env_overrides`, and a `menu`. `logic_file_count` counts the selectable DBs (`.kdb`/`.fdb.txt`/`.db.txt`/`.db`); `.ktn.model`/`.tn.model` heuristic models are catalog members but not logic. Added in schema 1.9 (issue #54 follow-up). |
+| `tensile_catalog` | `dict` | reuses the `hipblaslt`/`rocblas`/`tensile` captures + a new per-file enumeration of `lib/{hipblaslt,rocblas}/library/*` | **The "recipe book" -- installed-library identity, NOT the runtime-selected solution ID.** Top-level `doc` + `status`. Per-library `hipblaslt`/`rocblas` carry the existing `package_version`/`lib_hash`/`kernel_db_revision` (no regression) plus a `menu` sub-block: `status`, `reason`, `dir`, `logic_file_count` (`.dat`/`.yaml`), `file_count`, `gfx_arch_coverage`, `files` (per-file `{name,size,suffix,is_logic,sha256}`), and `combined_content_hash`. `combined` mirrors the `tensile` block. **`files` is `null` by default (compact mode)** — the per-file lists dominate env.json size (~25k lines on a populated host), so the default probe drops them while keeping every count and `combined_content_hash` (a diff still detects a changed catalog); run `aorta env probe --extended` to retain the full per-file list for localizing *which* file changed. Partial-not-silent: a dir that can't be located/listed is `status:"partial"` (distinct from a present-but-empty menu, which is `ok` with `logic_file_count:0`). Added in schema 1.9 (issue #54); compact default added in schema 1.10. |
+| `miopen_catalog` | `dict` | reuses the `miopen` capture + a per-file enumeration of the MIOpen db dir (`share/miopen/db/`) | **Recipe book for MIOpen's convolution databases** -- same scoping as `tensile_catalog`. `doc` + `status`, the reused `package_version`/`lib_hash`/`kernel_db_revision` (no regression), `db_dir` + `db_dir_source` (`default` or `MIOPEN_SYSTEM_DB_PATH`), `env_overrides`, and a `menu`. `logic_file_count` counts the selectable DBs (`.kdb`/`.fdb.txt`/`.db.txt`/`.db`); `.ktn.model`/`.tn.model` heuristic models are catalog members but not logic. **`menu.files` is `null` by default (compact mode)** — same size rationale as `tensile_catalog`; use `aorta env probe --extended` to retain the per-file list. Added in schema 1.9 (issue #54 follow-up); compact default added in schema 1.10. |
 | `rocfft_catalog` | `dict` | optional `rocfft_kernel_cache.db` under `$ROCFFT_RTC_SYS_CACHE_PATH` or `/opt/rocm/lib/[rocfft/]` | Fingerprint of rocFFT's **optional** AOT kernel cache -- the READ-ONLY system cache, not the read-write runtime user cache. rocFFT usually compiles at runtime, so absence is normal: a *probed* "no cache" result is `status:"absent"` with **no** partial reason. (The default/backfill/disaster shape is `status:"partial"` with a "not captured" reason instead, so a snapshot that never probed is distinguishable from one that probed and found nothing.) `doc` + `status` (`ok`/`absent`/`partial`) + `env_overrides` (both `ROCFFT_RTC_SYS_CACHE_PATH` -- the override this catalog actually resolves against -- and `ROCFFT_RTC_CACHE_PATH`, recorded for visibility only since it names the mutable, workload-dependent user cache, not installed identity; both recorded even when no cache is found so a configured-but-empty override is visible) + `kernel_cache` (`present`, `path`, `source`, `size`, `sha256`, `reason`). Added in schema 1.9 (issue #54 follow-up). |
 | `triton` | `dict` | `import triton; triton.__version__` (+ commit parse) | `package_version`, `commit` (schema 1.8). ROCm Triton fork bakes the source commit into `__version__` (e.g. `3.5.1+rocm7.2.1.gita272dfa8` -> `commit: "a272dfa8"`); fb builds versioned `+fb` carry no SHA -> `commit: null`. |
 | `fbgemm` | `dict` | optional `import fbgemm_gpu` (+ commit parse) + parse of `torch.__config__.show()` for `-DUSE_FBGEMM*` defines | `package_version`, `commit` (schema 1.8 -- best-effort git SHA from a setuptools_scm `+g<sha>` local-version segment or a `git_version`/`__commit__` module attr; `null` when fbgemm_gpu is vendored-in-torch rather than separately installed, or carries no SHA), `pytorch_use_fbgemm`, `pytorch_use_fbgemm_genai`. The two booleans capture the build-time decision baked into the PyTorch wheel even when `fbgemm_gpu` isn't a separate pip package. |
@@ -460,23 +460,56 @@ don't raise.
   two field groups as filesystem-scoped, not host-scoped.
 * Fields: `scope` (constant `"host_kernel"` — describes the block's
   intent, not a per-field guarantee; see the two bullets above), `status`
-  (`"present"`/`"absent"`), `package_name` / `package_version` /
-  `package_manager` (portable **dpkg-then-rpm** query over `amdgpu-dkms`
-  then `amdgpu-kmod`, parsed in Python — no shell pipeline), `module_version`
+  (`"present"`/`"absent"`), `package_name` (stable candidate family) /
+  `package_version` / `package_full_name` / `package_manager` (portable,
+  **glob-capable dpkg-then-rpm** query over `amdgpu-dkms` then
+  `amdgpu-kmod`, parsed in Python — no shell pipeline), `module_version`
   / `module_srcversion` (`modinfo amdgpu`), `kmd_version` (reused verbatim
   from `rocm.kmd_version` so the two blocks never disagree),
   `kfd_device_present` / `kfd_sysfs_present` (`/dev/kfd` + `/sys/class/kfd`
   existence checks — no `open()`, no `ioctl`, no GPU compute).
+* **`package_full_name`** is the complete canonical package identity — apt
+  `name=version` on Debian, or the rpm NVRA
+  (`amdgpu-kmod-6.9.0-…_g9b20106afb70-6.14.14.000000-2226257.1.x86_64`) on
+  RHEL/SLES. Some vendors bake the kernel release into the RPM *package
+  name*, which an exact `rpm -q amdgpu-kmod` misses entirely; the query
+  uses a glob (`rpm -qa 'amdgpu-kmod*'`) to catch these and reconstructs
+  the full identity so two host snapshots can be diffed on one field.
+  `package_name` stays the stable family label (`amdgpu-dkms`/`amdgpu-kmod`)
+  so it remains a clean grouping key across hosts with different suffixes.
 * **Documented absence, not partial**: a GPU-less host records
   `status:"absent"` with an empty `partial_reasons`, mirroring the `nics`
   vendor-absent precedent. The only reason this block ever appends is a
-  *conflict*: the KMD is demonstrably loaded (`/dev/kfd` or `modinfo`
-  present) yet no dpkg/rpm package can be named — an unusual, diagnosable
-  state (out-of-band driver install, stripped package DB).
+  *same-filesystem conflict*: the amdgpu module is demonstrably loaded
+  (`modinfo` metadata present) yet no dpkg/rpm package on the same
+  filesystem can be named — an unusual, diagnosable state (out-of-band
+  driver install, stripped package DB). `/dev/kfd` alone never triggers a
+  reason: it is host-kernel state passed into a container, so a container
+  with the host's KFD node but no container-local package is the normal
+  case, not a conflict.
 * Backwards-compat: `EnvSnapshot.amdgpu_driver` uses a `default_factory`,
   so a ≤1.9 snapshot round-trips via `from_dict()` (back-filled with the
   empty/absent block). A 1.9 reader indexing `amdgpu_driver` on a pre-1.10
   snapshot gets that back-filled block, not a `KeyError`.
+* **Compact catalog default + `--extended`.** The default `aorta env probe`
+  now drops the per-file `menu.files` lists from `tensile_catalog` and
+  `miopen_catalog` (setting them to `null`) — these dominated env.json
+  size (~25k lines on a populated host). Every summary field is kept:
+  `status`, `dir`, `file_count`, `logic_file_count`, `gfx_arch_coverage`,
+  and `combined_content_hash`, so a two-host diff still detects *that* a
+  catalog changed. `aorta env probe --extended` (or `collect_env(detail=
+  "full")`) restores the complete per-file lists for forensic follow-up
+  (localizing *which* recipe/db file changed). The files are hashed either
+  way — `combined_content_hash` requires it — so `--extended` only controls
+  retention of the per-file breakdown, not probe work. This is a shape
+  change to the *default output*, not a schema-field removal: the `files`
+  key is still present (as `null`), so readers indexing it are unaffected.
+* **Thematic output order.** `env.json` keys (and the CLI brief lines) are
+  now grouped by theme — host/kernel, then ROCm runtime + `amdgpu_driver`
+  driver, then GPU/fabric hardware, then compute libraries, then build,
+  then pytorch — instead of dataclass declaration order, so related
+  environment facts sit next to each other for readability and diffing.
+  Key *set* is unchanged; only ordering moved.
 
 ### `1.9`
 

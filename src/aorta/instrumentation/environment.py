@@ -73,7 +73,7 @@ import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 log = logging.getLogger(__name__)
 
@@ -87,19 +87,24 @@ SCHEMA_VERSION = "1.10"
 #     in the host kernel a container shares, so these three fields report
 #     the *host's* driver even from inside a container -- complementary to
 #     ``rocm``/``hip`` which read the container's ``/opt/rocm`` userspace.
-#     ``package_name`` / ``package_version`` / ``package_manager`` and
-#     ``module_version`` / ``module_srcversion`` are NOT host-guaranteed:
-#     dpkg/rpm and ``modinfo`` read the *current filesystem's* package DB
-#     and ``/lib/modules``, which is the container's own view when probed
-#     from inside one, and will commonly be null there even though the
-#     three host-kernel fields above are populated. Fields: ``scope``
-#     (constant ``"host_kernel"`` -- describes the block's intent, not a
-#     per-field guarantee; see caveat above), ``status``
-#     (``"present"``/``"absent"``), ``package_name`` / ``package_version``
-#     / ``package_manager`` (portable dpkg-then-rpm query over
-#     ``amdgpu-dkms`` / ``amdgpu-kmod``), ``module_version`` /
-#     ``module_srcversion`` (``modinfo amdgpu``), ``kmd_version`` (reused
-#     verbatim from ``rocm.kmd_version``), ``kfd_device_present`` /
+#     ``package_name`` / ``package_version`` / ``package_full_name`` /
+#     ``package_manager`` and ``module_version`` / ``module_srcversion``
+#     are NOT host-guaranteed: dpkg/rpm and ``modinfo`` read the *current
+#     filesystem's* package DB and ``/lib/modules``, which is the
+#     container's own view when probed from inside one, and will commonly
+#     be null there even though the three host-kernel fields above are
+#     populated. Fields: ``scope`` (constant ``"host_kernel"`` -- describes
+#     the block's intent, not a per-field guarantee; see caveat above),
+#     ``status`` (``"present"``/``"absent"``), ``package_name`` (stable
+#     candidate family) / ``package_version`` / ``package_full_name``
+#     (complete canonical identity -- apt ``name=version`` or rpm NVRA --
+#     capturing kernel-suffixed names like
+#     ``amdgpu-kmod-6.9.0-..._g9b20106afb70-...`` that a bare candidate
+#     name misses) / ``package_manager`` (portable, glob-capable
+#     dpkg-then-rpm query over ``amdgpu-dkms`` / ``amdgpu-kmod``),
+#     ``module_version`` / ``module_srcversion`` (``modinfo amdgpu``),
+#     ``kmd_version`` (reused verbatim from ``rocm.kmd_version``),
+#     ``kfd_device_present`` /
 #     ``kfd_sysfs_present`` (``/dev/kfd`` + ``/sys/class/kfd`` existence).
 #     A GPU-less host is a DOCUMENTED ABSENCE (``status="absent"``, no
 #     ``partial``); only a KMD-loaded-but-unpackaged conflict records a
@@ -107,6 +112,18 @@ SCHEMA_VERSION = "1.10"
 #     ``default_factory`` so a <=1.9 snapshot still round-trips via
 #     ``from_dict``. 1.9 readers indexing ``amdgpu_driver`` on a pre-1.10
 #     snapshot get the back-filled empty block.
+#   - Compact catalog default: ``collect_env(detail="compact")`` (the
+#     default) drops the per-file ``menu.files`` lists in
+#     ``tensile_catalog`` / ``miopen_catalog`` (set to ``None``) -- they
+#     dominated env.json size (~25k lines). All counts + the per-menu
+#     ``combined_content_hash`` are kept, so a diff still detects a changed
+#     catalog. ``detail="full"`` (CLI ``--extended``) retains the full
+#     lists. NOT a schema-field change: the ``files`` key stays present as
+#     ``None``, so ``from_dict`` and key-set readers are unaffected.
+#   - Output-order regroup: ``to_dict()`` emits keys via a curated
+#     ``_OUTPUT_KEY_ORDER`` (thematic grouping) instead of dataclass
+#     declaration order. Key SET is unchanged; only ordering moved, so it
+#     is not a compatibility-affecting change.
 #
 # 1.8 -> 1.9 (issue #54 + follow-ups): static kernel-catalog "recipe
 # books" for the on-disk, runtime-selected GPU-compute catalogs.
@@ -988,9 +1005,80 @@ class EnvSnapshot:
         default_factory=lambda: _empty_amdgpu_driver()
     )
 
+    # Curated emit order for ``to_dict()`` / ``env.json`` (JSON is written
+    # sort_keys=False, so THIS is the artifact's key order). Grouped so
+    # related environment facts sit next to each other for readability and
+    # diffing, instead of dataclass declaration order -- which is
+    # constrained by Python's "fields with defaults must come last" rule
+    # and so cannot itself express these groups (e.g. amdgpu_driver, an
+    # additive/defaulted field, must be declared near the end but belongs
+    # next to rocm semantically). Groups: meta -> host/runtime -> ROCm
+    # runtime + driver -> GPU hardware -> compute libraries -> build ->
+    # pytorch -> misc. Any field NOT listed here is still emitted (appended
+    # in declaration order) so a newly added field can never silently drop
+    # out of the JSON.
+    _OUTPUT_KEY_ORDER: ClassVar[tuple[str, ...]] = (
+        # meta
+        "schema_version",
+        "captured_at",
+        "partial",
+        "partial_reasons",
+        # host / kernel / runtime placement
+        "host",
+        "runtime_context",
+        "docker",
+        # ROCm runtime + the host-kernel driver that pairs with it
+        "rocm",
+        "amdgpu_driver",
+        "hip",
+        # GPU + fabric hardware
+        "gpu_arch",
+        "nics",
+        # compute libraries (identity + static kernel catalogs together)
+        "hipblaslt",
+        "rocblas",
+        "composable_kernel",
+        "tensile",
+        "tensile_catalog",
+        "miopen",
+        "miopen_catalog",
+        "rocfft_catalog",
+        "rccl",
+        "triton",
+        "fbgemm",
+        "aiter",
+        "aotriton",
+        # build system + buck introspection
+        "build_system",
+        "library_introspection",
+        "library_introspection_alternates",
+        # pytorch
+        "python_version",
+        "pytorch_version",
+        "pytorch_build",
+        "pytorch_sdpa",
+        # misc / process-level
+        "env_vars",
+        "system_health",
+    )
+
     def to_dict(self) -> dict[str, Any]:
-        """Serialise to the env.json shape. Round-trip pair with from_dict."""
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        """Serialise to the env.json shape. Round-trip pair with from_dict.
+
+        Keys are emitted in ``_OUTPUT_KEY_ORDER`` (thematic grouping), then
+        any remaining dataclass field not named there (declaration order),
+        so the set of keys always equals the full field set regardless of
+        the curated list.
+        """
+        values = {f.name: getattr(self, f.name) for f in fields(self)}
+        ordered: dict[str, Any] = {}
+        for key in self._OUTPUT_KEY_ORDER:
+            if key in values:
+                ordered[key] = values.pop(key)
+        # Defensive: emit any field missing from the curated order rather
+        # than dropping it (guards against a future added field).
+        ordered.update(values)
+        return ordered
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> EnvSnapshot:
@@ -1124,39 +1212,43 @@ class EnvSnapshot:
         else:
             rf_cell = rf.get("status") or "?"
 
+        # Line order mirrors the thematic grouping of ``_OUTPUT_KEY_ORDER``
+        # / env.json: host+runtime, then the ROCm runtime and its
+        # host-kernel driver, then GPU/fabric hardware, then compute
+        # libraries, then build, then pytorch, then process-level (rdhc).
+        # Keeping the brief and the JSON in the same order means an operator
+        # reads them the same way and can diff either without re-mapping.
         return "\n".join(
             (
                 f"  runtime:   {rt.get('type', '?')} / python={rt.get('python_env', '?')}",
-                f"  build_sys: {self._summary_build_system_line(bs)}",
+                f"  host:      kernel={host.get('kernel_release') or '?'} "
+                f"machine={host.get('machine') or '?'}  "
+                f"glibc={host.get('glibc_version') or '?'}",
                 f"  rocm:      {rocm.get('version', '?')} (dev: {rocm.get('version_dev', '?')})",
+                # amdgpu_driver is HOST-KERNEL scope: even inside a
+                # container this reflects the shared host driver, unlike the
+                # rocm/hip lines around it (container userspace). Placed
+                # right after rocm so the runtime/driver split reads
+                # together. "absent" is the normal reading on a GPU-less box.
+                f"  amdgpu:    {amdgpu.get('status') or '?'} "
+                f"pkg={amdgpu.get('package_full_name') or (str(amdgpu.get('package_name') or '?') + '=' + str(amdgpu.get('package_version') or '?'))} "
+                f"({amdgpu.get('package_manager') or '?'})  "
+                f"kmd={amdgpu.get('kmd_version') or '?'}  "
+                f"kfd={'yes' if amdgpu.get('kfd_device_present') else 'no'}",
                 f"  hip:       {hip.get('version', '?')} ({hip.get('platform', '?')})",
-                # ROCm release tweak (HIPBLASLT_VERSION_TWEAK et al.)
-                # is the same string across every library in a release,
-                # not a per-library upstream commit. lib_hash is the
-                # per-binary signal (in the JSON, not the brief).
-                f"  hipblaslt: {hipblaslt.get('package_version', '?')} rocm_release_tweak={hipblaslt.get('rocm_release_tweak', '?')}",
-                f"  rocblas:   {rocblas.get('package_version', '?')} rocm_release_tweak={rocblas.get('rocm_release_tweak', '?')}",
-                f"  miopen:    {miopen.get('package_version', '?')} rocm_release_tweak={miopen.get('rocm_release_tweak', '?')}",
-                f"  rccl:      {rccl.get('version', '?')} (code={rccl.get('version_code', '?')}) net_plugin={rccl.get('net_plugin_mode', '?')}{(' [' + os.path.basename(rccl['plugin_path']) + ']') if rccl.get('plugin_path') else ''}",
-                f"  nics:      {self._summary_nics_line(nics)}",
                 # gpu_arch: dedup'd targets are the meaningful diff
                 # signal (homogeneous vs mixed-arch hosts); count tells
                 # how many GPUs were detected. Both null when the
                 # rocm_agent_enumerator probe failed.
                 f"  gpu_arch:  {gpu_arch.get('gfx_targets') or '?'} "
                 f"(counts={gpu_arch.get('agent_arch_counts') or '?'})",
-                f"  host:      kernel={host.get('kernel_release') or '?'} "
-                f"machine={host.get('machine') or '?'}  "
-                f"glibc={host.get('glibc_version') or '?'}",
-                # amdgpu_driver is HOST-KERNEL scope: even inside a
-                # container this reflects the shared host driver, unlike the
-                # rocm/hip lines above (container userspace). "absent" is
-                # the normal reading on a GPU-less box.
-                f"  amdgpu:    {amdgpu.get('status') or '?'} "
-                f"pkg={amdgpu.get('package_name') or '?'}={amdgpu.get('package_version') or '?'} "
-                f"({amdgpu.get('package_manager') or '?'})  "
-                f"kmd={amdgpu.get('kmd_version') or '?'}  "
-                f"kfd={'yes' if amdgpu.get('kfd_device_present') else 'no'}",
+                f"  nics:      {self._summary_nics_line(nics)}",
+                # ROCm release tweak (HIPBLASLT_VERSION_TWEAK et al.)
+                # is the same string across every library in a release,
+                # not a per-library upstream commit. lib_hash is the
+                # per-binary signal (in the JSON, not the brief).
+                f"  hipblaslt: {hipblaslt.get('package_version', '?')} rocm_release_tweak={hipblaslt.get('rocm_release_tweak', '?')}",
+                f"  rocblas:   {rocblas.get('package_version', '?')} rocm_release_tweak={rocblas.get('rocm_release_tweak', '?')}",
                 # CK has two layers -- system headers (composablekernel-dev
                 # apt pkg) and the copy compiled into libtorch_hip.so via
                 # PyTorch's third_party/composable_kernel submodule. Both
@@ -1172,12 +1264,14 @@ class EnvSnapshot:
                 f"  tensile:   kernel_db={short_hash(tensile.get('kernel_db_combined_hash'))}  "
                 f"[Tensile pip pkg: {pkg_state(tensile.get('package_version'))}; "
                 f"build-time tool, normal]",
+                f"  miopen:    {miopen.get('package_version', '?')} rocm_release_tweak={miopen.get('rocm_release_tweak', '?')}",
                 # Static "recipe book" identity (the installed kernel
                 # catalogs, NOT the runtime pick): per-menu content hash
                 # for hipBLASLt/rocBLAS Tensile + MIOpen, and the rocFFT
                 # AOT cache state. Full per-file detail lives in the JSON.
                 f"  catalog:   tensile[hb={short_hash(tc_hb)} rb={short_hash(tc_rb)}]  "
                 f"miopen={short_hash(mc_hash)}  rocfft={rf_cell}",
+                f"  rccl:      {rccl.get('version', '?')} (code={rccl.get('version_code', '?')}) net_plugin={rccl.get('net_plugin_mode', '?')}{(' [' + os.path.basename(rccl['plugin_path']) + ']') if rccl.get('plugin_path') else ''}",
                 f"  triton:    {pkg_state(triton.get('package_version'))}",
                 # FBGEMM has TWO surfaces and they're different artifacts:
                 #   1) FBGEMM the C++ lib is vendored inside the PyTorch
@@ -1208,7 +1302,9 @@ class EnvSnapshot:
                 f"present={aotriton.get('bundled_present')} "
                 f"images_dir={aotriton.get('bundled_images_dir_present')}  "
                 f"[AOTRITON_INSTALLED_PREFIX={aotriton.get('installed_prefix') or '(unset)'}]",
-                f"  rdhc:      {sysh}",
+                # build system group.
+                f"  build_sys: {self._summary_build_system_line(bs)}",
+                # pytorch group.
                 f"  python:    {self.python_version} | pytorch: {self.pytorch_version}",
                 f"  torch build: {self._summary_pytorch_build_line()}",
                 f"  torch flags: {self._summary_pytorch_build_flags_line()}",
@@ -1218,6 +1314,8 @@ class EnvSnapshot:
                 f"  ninja hipcc: {self._summary_pytorch_ninja_hipcc_line()}",
                 f"  aiter hsa:   {self._summary_aiter_hsa_tree_line()}",
                 f"  sdpa:        {self._summary_pytorch_sdpa_line()}",
+                # process-level health, last (misc group).
+                f"  rdhc:      {sysh}",
             )
         )
 
@@ -1791,6 +1889,7 @@ class _ProbeStdioRedirect:
 def collect_env(
     buck_target: str | None = None,
     buck_timeout: int = 10,
+    detail: str = "compact",
 ) -> EnvSnapshot:
     """Capture the current process environment as an :class:`EnvSnapshot`.
 
@@ -1822,7 +1921,26 @@ def collect_env(
     both lists stay empty and the existing per-library top-level
     blocks remain authoritative. ``buck_timeout`` caps the cquery
     subprocess (seconds; default 10).
+
+    ``detail`` controls the size of the static kernel-catalog blocks:
+
+    * ``"compact"`` (default) -- the ``tensile_catalog`` / ``miopen_catalog``
+      per-file ``menu.files`` lists are dropped (set to ``None``). These
+      lists are the dominant source of env.json size (thousands of entries
+      on a populated host -> ~25k JSON lines). Every summary/fingerprint
+      field is kept -- ``status``, ``dir``, ``file_count``,
+      ``logic_file_count``, ``gfx_arch_coverage``, ``combined_content_hash``
+      -- so a two-host diff still detects THAT a catalog differs. This is
+      the right default for the per-trial artifact.
+    * ``"full"`` -- retains the complete per-file lists for forensic
+      follow-up (localizing exactly WHICH recipe/db file changed). Selected
+      by ``aorta env probe --extended``.
+
+    Any other value is treated as ``"compact"``. Note the files are hashed
+    either way (``combined_content_hash`` requires it); ``detail`` only
+    controls whether the per-file breakdown is retained in the snapshot.
     """
+    include_files = detail == "full"
     reasons: list[str] = []
     # Capture fds 1/2 at the OS level for the probe body so that the benign
     # HIP/C-runtime device-enumeration noise the in-process ``import torch``
@@ -1857,7 +1975,7 @@ def collect_env(
         # captures above (no regression) + deepens with per-file menu
         # enumeration.
         tensile_catalog = _build_tensile_catalog(
-            hipblaslt, rocblas, tensile, reasons
+            hipblaslt, rocblas, tensile, reasons, include_files=include_files
         )
         triton = _capture_triton(reasons)
         fbgemm = _capture_fbgemm(reasons)
@@ -1866,7 +1984,9 @@ def collect_env(
         miopen = _capture_miopen(reasons)
         # Static MIOpen "recipe book" (reuses miopen capture) + rocFFT
         # optional AOT kernel cache fingerprint (absent on most installs).
-        miopen_catalog = _build_miopen_catalog(miopen, reasons)
+        miopen_catalog = _build_miopen_catalog(
+            miopen, reasons, include_files=include_files
+        )
         rocfft_catalog = _build_rocfft_catalog(reasons)
         rccl = _capture_rccl(reasons)
         nics = _capture_nics(reasons)
@@ -3835,6 +3955,7 @@ def _enumerate_catalog_dir(
     classify,
     *,
     kind: str,
+    include_files: bool = True,
 ) -> dict[str, Any]:
     """Enumerate an on-disk kernel/solution catalog directory.
 
@@ -3843,6 +3964,17 @@ def _enumerate_catalog_dir(
     and records a **content** sha256 + size, so a two-host diff localizes
     *which* file changed rather than only "the filename set differs".
     Still no GPU compute -- pure file reads in the install.
+
+    ``include_files`` controls only whether the per-file ``files`` list is
+    RETAINED in the returned menu, not whether the work happens: every
+    file is still hashed either way, because ``combined_content_hash``,
+    ``file_count``, ``logic_file_count``, and ``gfx_arch_coverage`` are all
+    derived from that pass. In compact mode (``include_files=False``) the
+    per-file list -- the dominant source of env.json bloat, thousands of
+    entries on a populated host -- is dropped to ``None`` while every
+    summary/fingerprint field is preserved, so a two-host diff still
+    detects THAT a catalog changed via ``combined_content_hash`` (only
+    localizing WHICH file needs ``--extended``).
 
     ``classify(filename) -> (include: bool, suffix_label: str | None,
     is_logic: bool)`` selects which files belong to the catalog, labels
@@ -3945,7 +4077,10 @@ def _enumerate_catalog_dir(
             "logic_file_count": logic_count,
             "file_count": len(files),
             "gfx_arch_coverage": _extract_gfx_archs(names),
-            "files": files,
+            # Compact mode drops the per-file list (the bloat) but keeps
+            # every count/coverage/fingerprint above so the menu still
+            # diffs meaningfully. --extended restores the full list.
+            "files": files if include_files else None,
             "combined_content_hash": combined_content_hash,
         }
     )
@@ -3979,17 +4114,20 @@ def _enumerate_tensile_menu(
     *,
     suffixes: tuple[str, ...] = TENSILE_MENU_SUFFIXES,
     logic_suffixes: tuple[str, ...] = TENSILE_LOGIC_SUFFIXES,
+    include_files: bool = True,
 ) -> dict[str, Any]:
     """Enumerate the frozen Tensile solution menu in ``directory``.
 
     Thin wrapper over ``_enumerate_catalog_dir`` with Tensile's suffix
     classifier. Kept as a named function so existing tests/callers keep
-    their call shape.
+    their call shape. ``include_files`` is forwarded verbatim (see
+    ``_enumerate_catalog_dir``).
     """
     return _enumerate_catalog_dir(
         directory,
         _suffix_classifier(suffixes, logic_suffixes),
         kind="Tensile library",
+        include_files=include_files,
     )
 
 
@@ -4028,6 +4166,8 @@ def _build_tensile_catalog(
     rocblas: dict[str, Any],
     tensile: dict[str, Any],
     reasons: list[str],
+    *,
+    include_files: bool = True,
 ) -> dict[str, Any]:
     """Assemble the labeled, deepened static ``tensile_catalog`` block.
 
@@ -4040,9 +4180,17 @@ def _build_tensile_catalog(
     Every partial ``menu`` threads its reason into ``partial_reasons``
     (prefixed ``tensile_catalog.<lib>.menu``) so a probe that couldn't
     read the menu is distinguishable from one that read an empty menu.
+
+    ``include_files=False`` (compact, the default probe mode) drops the
+    per-menu ``files`` lists while keeping their fingerprints; see
+    ``_enumerate_catalog_dir``.
     """
-    hipblaslt_menu = _enumerate_tensile_menu(HIPBLASLT_TENSILE_DIR)
-    rocblas_menu = _enumerate_tensile_menu(ROCBLAS_TENSILE_DIR)
+    hipblaslt_menu = _enumerate_tensile_menu(
+        HIPBLASLT_TENSILE_DIR, include_files=include_files
+    )
+    rocblas_menu = _enumerate_tensile_menu(
+        ROCBLAS_TENSILE_DIR, include_files=include_files
+    )
 
     for lib_name, menu in (("hipblaslt", hipblaslt_menu), ("rocblas", rocblas_menu)):
         if menu["status"] == "partial":
@@ -4137,18 +4285,25 @@ def _empty_miopen_catalog() -> dict[str, Any]:
 def _build_miopen_catalog(
     miopen: dict[str, Any],
     reasons: list[str],
+    *,
+    include_files: bool = True,
 ) -> dict[str, Any]:
     """Assemble the labeled, deepened static ``miopen_catalog`` block.
 
     No regression: package_version / lib_hash / kernel_db_revision are
     taken verbatim from the already-captured ``miopen`` block. The new
     work is the per-file ``menu`` enumeration of the MIOpen db dir.
+
+    ``include_files=False`` (compact, the default probe mode) drops the
+    per-file ``menu.files`` list while keeping its fingerprints; see
+    ``_enumerate_catalog_dir``.
     """
     db_dir, source = _resolve_miopen_db_dir()
     menu = _enumerate_catalog_dir(
         db_dir,
         _suffix_classifier(MIOPEN_CATALOG_SUFFIXES, MIOPEN_LOGIC_SUFFIXES),
         kind="MIOpen db",
+        include_files=include_files,
     )
     if menu["status"] == "partial":
         reasons.append(
@@ -6963,65 +7118,113 @@ def _capture_gpu_arch(reasons: list[str]) -> dict[str, Any]:
     }
 
 
-def _query_package_version(package: str) -> tuple[str, str] | None:
-    """Look up an installed system package's version, distro-portable.
+def _query_amdgpu_package() -> dict[str, str] | None:
+    """Resolve the installed amdgpu KMD package identity, distro-portable.
 
     Tries Debian/Ubuntu ``dpkg-query`` first (the flagship ROCm target;
     every Dockerfile in ``docker/`` is Ubuntu-based), then RHEL/SLES
-    ``rpm``. Returns ``(version, package_manager)`` on the first hit, or
-    ``None`` when the package is not installed under any known manager.
+    ``rpm``, over ``AMDGPU_PACKAGE_CANDIDATES`` (``amdgpu-dkms`` then
+    ``amdgpu-kmod``). Returns the first hit as::
+
+        {"name": <candidate family>, "version": <VERSION-RELEASE>,
+         "manager": "dpkg"|"rpm", "full_name": <canonical identity>}
+
+    or ``None`` when no candidate is installed under any known manager.
+
+    KERNEL-SUFFIXED PACKAGE NAMES: some vendors (e.g. Meta's fbk kernels)
+    ship the prebuilt kmod with the *kernel release baked into the RPM
+    name* -- ``amdgpu-kmod-6.9.0-0_fbk10_..._g9b20106afb70`` rather than a
+    plain ``amdgpu-kmod``. An exact ``rpm -q amdgpu-kmod`` misses these
+    entirely. So we query with a **glob** (``rpm -qa 'amdgpu-kmod*'`` /
+    ``dpkg-query -W 'amdgpu-kmod*'``) and reconstruct the complete package
+    identity in ``full_name`` -- the single field two host snapshots can be
+    diffed on (equivalent to the operator's
+    ``rpm -qa | grep amdgpu-... | sed`` one-liner, but portable and with no
+    shell pipe). ``name`` stays the stable candidate *family* label so it
+    remains a clean grouping key across hosts with different kernel suffixes.
 
     Matches the module's subprocess contract exactly: ``shutil.which()``
     gate, ``subprocess.run([...], check=False, timeout=SHORT_TIMEOUT_SEC)``,
-    parsing in Python -- NO shell pipeline. (The RHEL-only
-    ``rpm -qa | grep | sed`` one-liner some operators reach for is both
-    non-portable and outside this contract; a direct ``-qf`` query is the
-    portable, testable equivalent.) Never raises.
+    parsing in Python -- NO shell pipeline. Never raises.
     """
-    # dpkg-query -W -f='${Version}' <pkg>: prints the version on stdout and
-    # exits 0 when installed; exits non-zero (and prints to stderr) when
-    # not. The -f template avoids the two-column default output.
-    if shutil.which("dpkg-query") is not None:
-        try:
-            proc = subprocess.run(
-                ["dpkg-query", "-W", "-f=${Version}", package],
-                capture_output=True,
-                text=True,
-                timeout=SHORT_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.debug("dpkg-query failed for %s: %s", package, exc)
-        else:
-            if proc.returncode == 0:
-                ver = (proc.stdout or "").strip()
-                if ver:
-                    return (ver, "dpkg")
+    for candidate in AMDGPU_PACKAGE_CANDIDATES:
+        # dpkg-query -W -f='${Package}\t${Version}\n' '<candidate>*': the
+        # glob catches kernel-suffixed names; the -f template gives us the
+        # real installed package name plus version, tab-delimited. Debian's
+        # amdgpu-dkms is arch-independent, so name=version is the canonical
+        # apt-style identity.
+        if shutil.which("dpkg-query") is not None:
+            try:
+                proc = subprocess.run(
+                    ["dpkg-query", "-W", "-f=${Package}\t${Version}\n",
+                     f"{candidate}*"],
+                    capture_output=True,
+                    text=True,
+                    timeout=SHORT_TIMEOUT_SEC,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                log.debug("dpkg-query failed for %s: %s", candidate, exc)
+            else:
+                if proc.returncode == 0:
+                    for line in (proc.stdout or "").splitlines():
+                        parts = line.split("\t")
+                        if len(parts) != 2:
+                            continue
+                        name, version = parts[0].strip(), parts[1].strip()
+                        if not name or not version or "firmware" in name:
+                            continue
+                        if name != candidate and not name.startswith(
+                            candidate + "-"
+                        ):
+                            continue
+                        return {
+                            "name": candidate,
+                            "version": version,
+                            "manager": "dpkg",
+                            "full_name": f"{name}={version}",
+                        }
 
-    # rpm -q --qf '%{VERSION}-%{RELEASE}' <pkg>: same idea for RHEL/SLES.
-    # Including RELEASE captures the distro build/patch suffix that the
-    # candidate `sed 's/\.el.*//'` deliberately discarded -- we keep it,
-    # since that suffix is exactly the kind of host-to-host drift the probe
-    # exists to surface.
-    if shutil.which("rpm") is not None:
-        try:
-            proc = subprocess.run(
-                ["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", package],
-                capture_output=True,
-                text=True,
-                timeout=SHORT_TIMEOUT_SEC,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            log.debug("rpm -q failed for %s: %s", package, exc)
-        else:
-            # rpm exits 0 and prints "<pkg> is not installed" to STDOUT for
-            # a missing package on some builds, so gate on returncode AND a
-            # non-empty version that doesn't carry the not-installed marker.
-            if proc.returncode == 0:
-                ver = (proc.stdout or "").strip()
-                if ver and "is not installed" not in ver:
-                    return (ver, "rpm")
+        # rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n'
+        # '<candidate>*': -qa + glob lists every installed package matching
+        # the pattern (an exact -q would miss the kernel-suffixed names).
+        # full_name is the canonical NVRA, e.g.
+        # amdgpu-kmod-6.9.0-..._g9b20106afb70-6.14.14.000000-2226257.1.x86_64
+        if shutil.which("rpm") is not None:
+            try:
+                proc = subprocess.run(
+                    ["rpm", "-qa", "--qf",
+                     "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+                     f"{candidate}*"],
+                    capture_output=True,
+                    text=True,
+                    timeout=SHORT_TIMEOUT_SEC,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                log.debug("rpm -qa failed for %s: %s", candidate, exc)
+            else:
+                if proc.returncode == 0:
+                    for line in (proc.stdout or "").splitlines():
+                        parts = line.split("\t")
+                        if len(parts) != 3:
+                            continue
+                        name, ver_rel, arch = (p.strip() for p in parts)
+                        if not name or not ver_rel or "firmware" in name:
+                            continue
+                        if name != candidate and not name.startswith(
+                            candidate + "-"
+                        ):
+                            continue
+                        full = f"{name}-{ver_rel}"
+                        if arch:
+                            full = f"{full}.{arch}"
+                        return {
+                            "name": candidate,
+                            "version": ver_rel,
+                            "manager": "rpm",
+                            "full_name": full,
+                        }
 
     return None
 
@@ -7075,6 +7278,7 @@ def _empty_amdgpu_driver() -> dict[str, Any]:
         "status": "absent",
         "package_name": None,
         "package_version": None,
+        "package_full_name": None,
         "package_manager": None,
         "module_version": None,
         "module_srcversion": None,
@@ -7096,18 +7300,22 @@ def _capture_amdgpu_driver(
     from inside a container -- complementary to ``rocm``/``hip`` which read
     the container's own ``/opt/rocm`` userspace.
 
-    ``package_name`` / ``package_version`` / ``package_manager`` and
-    ``module_version`` / ``module_srcversion`` are NOT host-guaranteed:
-    dpkg/rpm and ``modinfo`` read the *current filesystem's* package
-    database and ``/lib/modules``, so from inside a container these
-    reflect the container's (usually driver-less) view, not the host's,
-    even though the KFD/kmd fields above are still host-accurate.
+    ``package_name`` / ``package_version`` / ``package_full_name`` /
+    ``package_manager`` and ``module_version`` / ``module_srcversion`` are
+    NOT host-guaranteed: dpkg/rpm and ``modinfo`` read the *current
+    filesystem's* package database and ``/lib/modules``, so from inside a
+    container these reflect the container's (usually driver-less) view, not
+    the host's, even though the KFD/kmd fields above are still host-accurate.
 
     Sources, all fail-soft and none requiring a GPU:
 
-    * ``package_version`` / ``package_manager`` / ``package_name`` --
-      ``_query_package_version`` over ``AMDGPU_PACKAGE_CANDIDATES``
-      (dpkg then rpm).
+    * ``package_name`` / ``package_version`` / ``package_full_name`` /
+      ``package_manager`` -- ``_query_amdgpu_package`` (glob-capable
+      dpkg-then-rpm query over ``AMDGPU_PACKAGE_CANDIDATES``).
+      ``package_full_name`` is the complete canonical identity (apt
+      ``name=version`` or rpm NVRA), which captures kernel-suffixed
+      package names like ``amdgpu-kmod-6.9.0-..._g9b20106afb70-...`` that
+      ``package_name`` (the stable candidate family) deliberately does not.
     * ``module_version`` / ``module_srcversion`` -- ``modinfo amdgpu``.
     * ``kmd_version`` -- reused verbatim from the already-captured ``rocm``
       block's ``/sys/module/amdgpu/version`` read (no second file read, so
@@ -7118,18 +7326,21 @@ def _capture_amdgpu_driver(
     DOCUMENTED ABSENCE, NOT partial: on a GPU-less host (this dev machine)
     every signal is missing -> ``status="absent"`` with NO ``partial``
     reason, mirroring the ``nics`` vendor-absent precedent. We only record
-    a reason when there is a genuine capture *conflict* (a KMD signal
-    exists but the package DB can't name it), which is worth an operator's
-    attention.
+    a reason when there is a genuine *same-filesystem* conflict: the
+    ``amdgpu`` module is loaded (``modinfo`` metadata present) but the
+    package DB on the same filesystem can't name it. A container with
+    ``/dev/kfd`` passed through but no amdgpu package installed is the
+    NORMAL case, not a conflict, so ``kfd_device_present`` alone never
+    triggers a reason.
     """
     block = _empty_amdgpu_driver()
 
-    for candidate in AMDGPU_PACKAGE_CANDIDATES:
-        found = _query_package_version(candidate)
-        if found is not None:
-            block["package_version"], block["package_manager"] = found
-            block["package_name"] = candidate
-            break
+    pkg = _query_amdgpu_package()
+    if pkg is not None:
+        block["package_name"] = pkg["name"]
+        block["package_version"] = pkg["version"]
+        block["package_manager"] = pkg["manager"]
+        block["package_full_name"] = pkg["full_name"]
 
     block["module_version"] = _modinfo_field(AMDGPU_MODULE_NAME, "version")
     block["module_srcversion"] = _modinfo_field(
@@ -7158,20 +7369,24 @@ def _capture_amdgpu_driver(
     )
     block["status"] = "present" if any_signal else "absent"
 
-    # Conflict signal worth a partial: the driver is demonstrably loaded
-    # (KFD node or module metadata present) but no package manager could
-    # name the package. That is an unusual, diagnosable state (out-of-band
-    # driver install, stripped package DB) -- not the ordinary GPU-less or
-    # stripped-container absence, so it earns one reason.
-    kmd_loaded = (
-        block["kfd_device_present"]
-        or block["module_version"] is not None
+    # Conflict signal worth a partial: the amdgpu module is demonstrably
+    # loaded on THIS filesystem (modinfo read /lib/modules) but no package
+    # manager on the SAME filesystem could name it. That is an unusual,
+    # diagnosable state (out-of-band driver install, stripped package DB)
+    # -- not the ordinary GPU-less or stripped-container absence, so it
+    # earns one reason. Deliberately does NOT key off kfd_device_present:
+    # /dev/kfd is host-kernel state (mountable into a container), so a
+    # container with /dev/kfd passed through but no amdgpu package
+    # installed is the NORMAL case, not a conflict. modinfo and dpkg/rpm
+    # both read the current filesystem, so their disagreement is real.
+    module_loaded = (
+        block["module_version"] is not None
         or block["module_srcversion"] is not None
     )
-    if kmd_loaded and block["package_version"] is None:
+    if module_loaded and block["package_version"] is None:
         reasons.append(
-            "amdgpu_driver.package_version: amdgpu KMD is loaded "
-            "(KFD node or amdgpu module metadata present) but no dpkg/rpm "
+            "amdgpu_driver.package_version: amdgpu module is loaded "
+            "(modinfo metadata present) but no dpkg/rpm "
             f"package ({'/'.join(AMDGPU_PACKAGE_CANDIDATES)}) could be "
             "resolved"
         )

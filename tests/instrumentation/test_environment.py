@@ -516,6 +516,7 @@ def _example_snapshot(**overrides) -> object:
             "status": "present",
             "package_name": "amdgpu-dkms",
             "package_version": "1:6.14.14-2212064.24.04",
+            "package_full_name": "amdgpu-dkms=1:6.14.14-2212064.24.04",
             "package_manager": "dpkg",
             "module_version": "6.14.14",
             "module_srcversion": "A1B2C3D4E5F6A7B8C9D0",
@@ -1446,13 +1447,15 @@ class TestCliIsThinWrapper:
         # * PR #177 added --summary / --field output modes plus the
         #   ``_lookup_field`` helper (dotted-path resolution with
         #   friendly errors that list available keys).
+        # * The compact/--extended catalog-detail work added one more
+        #   click option block + its detail= wiring into collect_env().
         #
         # The real "no-probing-in-CLI" guard is
         # `test_cli_does_no_probing_imports` below -- this one is a
         # soft canary against the file ballooning beyond pure wiring.
         line_count = sum(1 for _ in cli_path.read_text().splitlines())
-        assert line_count <= 350, (
-            f"cli/env.py is {line_count} lines; soft budget is 350. "
+        assert line_count <= 375, (
+            f"cli/env.py is {line_count} lines; soft budget is 375. "
             "If you need more, check that the new code is genuinely "
             "wiring/error-handling and not probing -- "
             "test_cli_does_no_probing_imports is the strict guard."
@@ -1709,6 +1712,43 @@ class TestCliSummaryAndFieldFlags:
             assert "Wrote env probe to" not in result.output
             # File MUST NOT be written -- the whole point of the flag.
             assert not (Path.cwd() / "env.json").exists()
+
+    def test_default_probe_writes_compact_catalog(
+        self, all_disabled, tmp_path: Path,
+    ):
+        # Default `probe` (no --extended) writes a JSON whose catalog
+        # menus carry no per-file lists -- the size fix. all_disabled
+        # yields empty catalogs (files already None), so this asserts the
+        # key is present-and-null rather than counting entries.
+        import json as _json
+        from click.testing import CliRunner
+        cli_mod = self._cli_mod()
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            out = Path.cwd() / "env.json"
+            result = runner.invoke(cli_mod.env, ["probe", "-o", str(out)])
+            assert result.exit_code == 0, result.output
+            doc = _json.loads(out.read_text(encoding="utf-8"))
+            assert doc["tensile_catalog"]["hipblaslt"]["menu"]["files"] is None
+            assert doc["miopen_catalog"]["menu"]["files"] is None
+
+    def test_extended_flag_is_accepted(
+        self, all_disabled, tmp_path: Path,
+    ):
+        # --extended must parse and still produce a valid snapshot. (Under
+        # all_disabled the catalogs are empty so files stays None either
+        # way; this guards the flag wiring, not populated-catalog output,
+        # which TestCatalogCompactDetail covers at the library layer.)
+        from click.testing import CliRunner
+        cli_mod = self._cli_mod()
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            out = Path.cwd() / "env.json"
+            result = runner.invoke(
+                cli_mod.env, ["probe", "--extended", "-o", str(out)]
+            )
+            assert result.exit_code == 0, result.output
+            assert out.exists()
 
     def test_field_flag_returns_top_level_scalar_as_json(
         self, all_disabled, tmp_path: Path,
@@ -3575,6 +3615,92 @@ class TestTensileMenuEnumeration:
         assert menu["combined_content_hash"] is None
 
 
+class TestCatalogCompactDetail:
+    """Compact mode drops the per-file lists but keeps every fingerprint."""
+
+    def test_enumerate_compact_drops_files_keeps_summary(self, tmp_path: Path):
+        d = _make_tensile_install(tmp_path / "lib", archs=("gfx942", "gfx90a"))
+        full = env_mod._enumerate_tensile_menu(d, include_files=True)
+        compact = env_mod._enumerate_tensile_menu(d, include_files=False)
+        # The heavy per-file list is gone in compact...
+        assert full["files"] is not None and len(full["files"]) > 0
+        assert compact["files"] is None
+        # ...but every summary + fingerprint field is preserved and equal.
+        for key in (
+            "status",
+            "dir",
+            "file_count",
+            "logic_file_count",
+            "gfx_arch_coverage",
+            "combined_content_hash",
+        ):
+            assert compact[key] == full[key], key
+        # The whole point: the menu-level content hash is unchanged, so a
+        # two-host diff still detects THAT the catalog changed.
+        assert compact["combined_content_hash"] is not None
+
+    def test_tensile_catalog_compact_drops_both_menus(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            env_mod, "HIPBLASLT_TENSILE_DIR", _make_tensile_install(tmp_path / "hb")
+        )
+        monkeypatch.setattr(
+            env_mod, "ROCBLAS_TENSILE_DIR", _make_tensile_install(tmp_path / "rb")
+        )
+        empty_lib = {
+            "package_version": None,
+            "lib_hash": None,
+            "kernel_db_revision": None,
+        }
+        block = env_mod._build_tensile_catalog(
+            dict(empty_lib),
+            dict(empty_lib),
+            {"package_version": None, "kernel_db_combined_hash": None},
+            [],
+            include_files=False,
+        )
+        assert block["hipblaslt"]["menu"]["files"] is None
+        assert block["rocblas"]["menu"]["files"] is None
+        # Fingerprints survive so the compact block still diffs.
+        assert block["hipblaslt"]["menu"]["combined_content_hash"] is not None
+        assert block["hipblaslt"]["menu"]["file_count"] > 0
+
+    def test_miopen_catalog_compact_drops_menu_files(
+        self, tmp_path: Path, monkeypatch
+    ):
+        db = _make_miopen_db(tmp_path / "db")
+        monkeypatch.setattr(env_mod, "MIOPEN_KERNEL_DB_DIR", db)
+        monkeypatch.delenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, raising=False)
+        block = env_mod._build_miopen_catalog({}, [], include_files=False)
+        assert block["menu"]["files"] is None
+        assert block["menu"]["combined_content_hash"] is not None
+        assert block["menu"]["file_count"] > 0
+
+    def test_collect_env_defaults_to_compact(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The default probe (no detail arg) must not carry per-file lists.
+        monkeypatch.setattr(
+            env_mod, "HIPBLASLT_TENSILE_DIR", _make_tensile_install(tmp_path / "hb")
+        )
+        monkeypatch.setattr(
+            env_mod, "ROCBLAS_TENSILE_DIR", _make_tensile_install(tmp_path / "rb")
+        )
+        monkeypatch.setattr(
+            env_mod, "MIOPEN_KERNEL_DB_DIR", _make_miopen_db(tmp_path / "db")
+        )
+        monkeypatch.delenv(env_mod.MIOPEN_SYSTEM_DB_PATH_ENV, raising=False)
+        snap = env_mod.collect_env()
+        assert snap.tensile_catalog["hipblaslt"]["menu"]["files"] is None
+        assert snap.tensile_catalog["rocblas"]["menu"]["files"] is None
+        assert snap.miopen_catalog["menu"]["files"] is None
+        # detail="full" restores them.
+        snap_full = env_mod.collect_env(detail="full")
+        assert snap_full.tensile_catalog["hipblaslt"]["menu"]["files"] is not None
+        assert snap_full.miopen_catalog["menu"]["files"] is not None
+
+
 class TestTensileCatalogBlock:
     def test_default_and_disaster_shapes_match_built_block(self, tmp_path: Path):
         built = env_mod._build_tensile_catalog(
@@ -4656,8 +4782,8 @@ class TestHostBlock:
 # ---------------------------------------------------------------------------
 
 
-class TestQueryPackageVersion:
-    """_query_package_version(): portable dpkg-then-rpm, no shell pipe."""
+class TestQueryAmdgpuPackage:
+    """_query_amdgpu_package(): glob-capable dpkg-then-rpm, no shell pipe."""
 
     @staticmethod
     def _tools(present, outputs):
@@ -4674,85 +4800,141 @@ class TestQueryPackageVersion:
 
         return fake_which, fake_run
 
-    def test_dpkg_hit_wins_and_reports_manager(self, isolated_env, monkeypatch):
+    def test_dpkg_hit_wins_and_reports_full_name(self, isolated_env, monkeypatch):
         fw, fr = self._tools(
             {"dpkg-query", "rpm"},
             {
-                ("dpkg-query", "-W", "-f=${Version}", "amdgpu-dkms"): (
+                ("dpkg-query", "-W", "-f=${Package}\t${Version}\n",
+                 "amdgpu-dkms*"): (
                     0,
-                    "1:6.14.14-2212064.24.04\n",
+                    "amdgpu-dkms\t1:6.14.14-2212064.24.04\n",
                 ),
             },
         )
         monkeypatch.setattr(env_mod.shutil, "which", fw)
         monkeypatch.setattr(env_mod.subprocess, "run", fr)
-        assert env_mod._query_package_version("amdgpu-dkms") == (
-            "1:6.14.14-2212064.24.04",
-            "dpkg",
-        )
+        assert env_mod._query_amdgpu_package() == {
+            "name": "amdgpu-dkms",
+            "version": "1:6.14.14-2212064.24.04",
+            "manager": "dpkg",
+            "full_name": "amdgpu-dkms=1:6.14.14-2212064.24.04",
+        }
 
     def test_falls_back_to_rpm_when_dpkg_absent(self, isolated_env, monkeypatch):
-        # No dpkg-query on PATH (RHEL); rpm answers with VERSION-RELEASE.
+        # No dpkg-query on PATH (RHEL); rpm answers with NAME/VER-REL/ARCH.
         fw, fr = self._tools(
             {"rpm"},
             {
-                ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", "amdgpu-kmod"): (
+                ("rpm", "-qa", "--qf",
+                 "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+                 "amdgpu-dkms*"): (0, ""),
+                ("rpm", "-qa", "--qf",
+                 "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+                 "amdgpu-kmod*"): (
                     0,
-                    "6.14.14-2212064.el9\n",
+                    "amdgpu-kmod\t6.14.14-2212064.el9\tx86_64\n",
                 ),
             },
         )
         monkeypatch.setattr(env_mod.shutil, "which", fw)
         monkeypatch.setattr(env_mod.subprocess, "run", fr)
-        assert env_mod._query_package_version("amdgpu-kmod") == (
-            "6.14.14-2212064.el9",
-            "rpm",
+        assert env_mod._query_amdgpu_package() == {
+            "name": "amdgpu-kmod",
+            "version": "6.14.14-2212064.el9",
+            "manager": "rpm",
+            "full_name": "amdgpu-kmod-6.14.14-2212064.el9.x86_64",
+        }
+
+    def test_kernel_suffixed_rpm_name_is_matched(self, isolated_env, monkeypatch):
+        # The reported real-world case: the fbk kernel bakes the release
+        # into the RPM package NAME, so an exact `rpm -q amdgpu-kmod` finds
+        # nothing. The glob `amdgpu-kmod*` catches it, and full_name
+        # reconstructs the complete NVRA an operator would diff on.
+        real_name = (
+            "amdgpu-kmod-6.9.0-0_fbk10_brcmrdma13_141_g9b20106afb70"
+        )
+        fw, fr = self._tools(
+            {"rpm"},
+            {
+                ("rpm", "-qa", "--qf",
+                 "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+                 "amdgpu-dkms*"): (0, ""),
+                ("rpm", "-qa", "--qf",
+                 "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+                 "amdgpu-kmod*"): (
+                    0,
+                    f"{real_name}\t6.14.14.000000-2226257.1\tx86_64\n",
+                ),
+            },
+        )
+        monkeypatch.setattr(env_mod.shutil, "which", fw)
+        monkeypatch.setattr(env_mod.subprocess, "run", fr)
+        result = env_mod._query_amdgpu_package()
+        assert result["name"] == "amdgpu-kmod"  # stable family label
+        assert result["manager"] == "rpm"
+        assert result["version"] == "6.14.14.000000-2226257.1"
+        assert result["full_name"] == (
+            "amdgpu-kmod-6.9.0-0_fbk10_brcmrdma13_141_g9b20106afb70"
+            "-6.14.14.000000-2226257.1.x86_64"
         )
 
     def test_dpkg_present_but_package_missing_falls_to_rpm(
         self, isolated_env, monkeypatch
     ):
-        # dpkg-query runs but exits non-zero (package not installed under
-        # dpkg); rpm then finds it. Exercises the "manager present, package
-        # absent" branch rather than "manager absent".
+        # dpkg-query runs but returns no matching line (package not
+        # installed under dpkg); rpm then finds it. Exercises the "manager
+        # present, package absent" branch rather than "manager absent".
         fw, fr = self._tools(
             {"dpkg-query", "rpm"},
             {
-                ("dpkg-query", "-W", "-f=${Version}", "amdgpu-dkms"): (1, ""),
-                ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", "amdgpu-dkms"): (
+                ("dpkg-query", "-W", "-f=${Package}\t${Version}\n",
+                 "amdgpu-dkms*"): (1, ""),
+                ("dpkg-query", "-W", "-f=${Package}\t${Version}\n",
+                 "amdgpu-kmod*"): (1, ""),
+                ("rpm", "-qa", "--qf",
+                 "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+                 "amdgpu-dkms*"): (
                     0,
-                    "6.14.14-2212064.el9\n",
+                    "amdgpu-dkms\t6.14.14-2212064.el9\tnoarch\n",
                 ),
             },
         )
         monkeypatch.setattr(env_mod.shutil, "which", fw)
         monkeypatch.setattr(env_mod.subprocess, "run", fr)
-        assert env_mod._query_package_version("amdgpu-dkms") == (
-            "6.14.14-2212064.el9",
-            "rpm",
-        )
+        assert env_mod._query_amdgpu_package() == {
+            "name": "amdgpu-dkms",
+            "version": "6.14.14-2212064.el9",
+            "manager": "rpm",
+            "full_name": "amdgpu-dkms-6.14.14-2212064.el9.noarch",
+        }
 
-    def test_rpm_not_installed_marker_is_rejected(self, isolated_env, monkeypatch):
-        # Some rpm builds exit 0 and print "<pkg> is not installed" to
-        # stdout -- must NOT be read as a version.
+    def test_firmware_package_is_ignored(self, isolated_env, monkeypatch):
+        # The glob amdgpu-dkms* / amdgpu-kmod* would never match firmware,
+        # but a defensive "firmware" filter guards against a candidate list
+        # change; assert a firmware line in the output is skipped.
         fw, fr = self._tools(
             {"rpm"},
             {
-                ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", "amdgpu-dkms"): (
+                ("rpm", "-qa", "--qf",
+                 "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+                 "amdgpu-dkms*"): (
                     0,
-                    "package amdgpu-dkms is not installed\n",
+                    "amdgpu-dkms-firmware\t6.14.14-1\tnoarch\n",
                 ),
+                ("rpm", "-qa", "--qf",
+                 "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+                 "amdgpu-kmod*"): (0, ""),
             },
         )
         monkeypatch.setattr(env_mod.shutil, "which", fw)
         monkeypatch.setattr(env_mod.subprocess, "run", fr)
-        assert env_mod._query_package_version("amdgpu-dkms") is None
+        assert env_mod._query_amdgpu_package() is None
 
     def test_no_package_manager_returns_none(self, isolated_env, monkeypatch):
         fw, fr = self._tools(set(), {})
         monkeypatch.setattr(env_mod.shutil, "which", fw)
         monkeypatch.setattr(env_mod.subprocess, "run", fr)
-        assert env_mod._query_package_version("amdgpu-dkms") is None
+        assert env_mod._query_amdgpu_package() is None
 
     def test_timeout_is_fail_soft(self, isolated_env, monkeypatch):
         def boom(cmd, **kwargs):
@@ -4762,8 +4944,8 @@ class TestQueryPackageVersion:
             env_mod.shutil, "which", lambda n: f"/usr/bin/{n}"
         )
         monkeypatch.setattr(env_mod.subprocess, "run", boom)
-        # Both managers time out -> None, no raise.
-        assert env_mod._query_package_version("amdgpu-dkms") is None
+        # Every query times out -> None, no raise.
+        assert env_mod._query_amdgpu_package() is None
 
 
 _MODINFO_AMDGPU = (
@@ -4817,6 +4999,7 @@ class TestAmdgpuDriver:
             "status",
             "package_name",
             "package_version",
+            "package_full_name",
             "package_manager",
             "module_version",
             "module_srcversion",
@@ -4844,10 +5027,13 @@ class TestAmdgpuDriver:
     def test_present_full_capture(self, isolated_env, monkeypatch):
         monkeypatch.setattr(
             env_mod,
-            "_query_package_version",
-            lambda pkg: ("1:6.14.14-2212064.24.04", "dpkg")
-            if pkg == "amdgpu-dkms"
-            else None,
+            "_query_amdgpu_package",
+            lambda: {
+                "name": "amdgpu-dkms",
+                "version": "1:6.14.14-2212064.24.04",
+                "manager": "dpkg",
+                "full_name": "amdgpu-dkms=1:6.14.14-2212064.24.04",
+            },
         )
         monkeypatch.setattr(
             env_mod,
@@ -4863,6 +5049,7 @@ class TestAmdgpuDriver:
         assert block["status"] == "present"
         assert block["package_name"] == "amdgpu-dkms"
         assert block["package_version"] == "1:6.14.14-2212064.24.04"
+        assert block["package_full_name"] == "amdgpu-dkms=1:6.14.14-2212064.24.04"
         assert block["package_manager"] == "dpkg"
         assert block["module_version"] == "6.14.14"
         assert block["module_srcversion"] == "A1B2C3D4E5F6A7B8C9D0"
@@ -4871,10 +5058,40 @@ class TestAmdgpuDriver:
         assert block["kfd_device_present"] is True
         assert reasons == []
 
+    def test_kernel_suffixed_rpm_full_name_flows_into_block(
+        self, isolated_env, monkeypatch
+    ):
+        # End-to-end at the capture layer: the resolver returns a
+        # kernel-suffixed rpm identity and the block preserves the full
+        # NVRA in package_full_name while package_name stays the family.
+        full = (
+            "amdgpu-kmod-6.9.0-0_fbk10_brcmrdma13_141_g9b20106afb70"
+            "-6.14.14.000000-2226257.1.x86_64"
+        )
+        monkeypatch.setattr(
+            env_mod,
+            "_query_amdgpu_package",
+            lambda: {
+                "name": "amdgpu-kmod",
+                "version": "6.14.14.000000-2226257.1",
+                "manager": "rpm",
+                "full_name": full,
+            },
+        )
+        monkeypatch.setattr(env_mod, "_modinfo_field", lambda mod, field: None)
+        monkeypatch.setattr(env_mod, "_path_exists", lambda p: False)
+        reasons: list[str] = []
+        block = env_mod._capture_amdgpu_driver({"kmd_version": None}, reasons)
+        assert block["package_name"] == "amdgpu-kmod"
+        assert block["package_full_name"] == full
+        assert block["status"] == "present"
+        # A resolvable package means NO conflict reason.
+        assert reasons == []
+
     def test_kmd_version_reused_from_rocm_block(self, isolated_env, monkeypatch):
         # Even with everything else absent, a kmd_version in the rocm block
         # flows through and makes the block "present".
-        monkeypatch.setattr(env_mod, "_query_package_version", lambda pkg: None)
+        monkeypatch.setattr(env_mod, "_query_amdgpu_package", lambda: None)
         monkeypatch.setattr(env_mod, "_modinfo_field", lambda mod, field: None)
         monkeypatch.setattr(env_mod, "_path_exists", lambda p: False)
         reasons: list[str] = []
@@ -4887,7 +5104,7 @@ class TestAmdgpuDriver:
     ):
         # KFD node + modinfo present, but no dpkg/rpm package resolvable:
         # an unusual, diagnosable state that DOES earn one partial reason.
-        monkeypatch.setattr(env_mod, "_query_package_version", lambda pkg: None)
+        monkeypatch.setattr(env_mod, "_query_amdgpu_package", lambda: None)
         monkeypatch.setattr(
             env_mod,
             "_modinfo_field",
@@ -4902,6 +5119,28 @@ class TestAmdgpuDriver:
             r.startswith("amdgpu_driver.package_version") for r in reasons
         )
 
+    def test_kfd_passthrough_container_is_not_a_conflict(
+        self, isolated_env, monkeypatch
+    ):
+        # The normal ROCm-container case: /dev/kfd is mounted from the host
+        # kernel, but the container filesystem has no amdgpu package and no
+        # /lib/modules entry (modinfo returns None). This is NOT a conflict
+        # -- /dev/kfd is host state while dpkg/rpm + modinfo read the
+        # container filesystem -- so it must NOT pollute partial_reasons.
+        monkeypatch.setattr(env_mod, "_query_amdgpu_package", lambda: None)
+        monkeypatch.setattr(env_mod, "_modinfo_field", lambda mod, field: None)
+        monkeypatch.setattr(
+            env_mod,
+            "_path_exists",
+            lambda p: p == env_mod.KFD_DEVICE_NODE,
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_amdgpu_driver({"kmd_version": None}, reasons)
+        assert block["kfd_device_present"] is True
+        assert block["package_version"] is None
+        assert block["status"] == "present"
+        assert reasons == []
+
     def test_kfd_presence_uses_module_constants(self, isolated_env, monkeypatch):
         # kfd_device_present / kfd_sysfs_present must key off the module
         # path constants so tests (and future path moves) stay in sync.
@@ -4911,7 +5150,7 @@ class TestAmdgpuDriver:
             seen.append(p)
             return p == env_mod.KFD_DEVICE_NODE
 
-        monkeypatch.setattr(env_mod, "_query_package_version", lambda pkg: None)
+        monkeypatch.setattr(env_mod, "_query_amdgpu_package", lambda: None)
         monkeypatch.setattr(env_mod, "_modinfo_field", lambda mod, field: None)
         monkeypatch.setattr(env_mod, "_path_exists", fake_exists)
         reasons: list[str] = []
@@ -4924,7 +5163,7 @@ class TestAmdgpuDriver:
     def test_empty_matches_capture_all_absent(self, isolated_env, monkeypatch):
         # _empty_amdgpu_driver() must be byte-identical to a real all-absent
         # capture, so the dataclass default never diverges from reality.
-        monkeypatch.setattr(env_mod, "_query_package_version", lambda pkg: None)
+        monkeypatch.setattr(env_mod, "_query_amdgpu_package", lambda: None)
         monkeypatch.setattr(env_mod, "_modinfo_field", lambda mod, field: None)
         monkeypatch.setattr(env_mod, "_path_exists", lambda p: False)
         reasons: list[str] = []
