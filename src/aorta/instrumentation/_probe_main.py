@@ -16,6 +16,10 @@ indistinguishable from a local-env one on disk.
 
 With no argument (or ``-``) the JSON goes to stdout, so the module also
 works as ``docker exec ... > env.json`` without a bind mount.
+
+Pass ``--extended`` to retain the full per-file kernel-catalog lists
+(matching ``aorta env probe --extended``); the default is the compact
+snapshot that drops those lists to keep the artifact small.
 """
 
 from __future__ import annotations
@@ -27,11 +31,22 @@ from aorta.instrumentation.environment import collect_env
 
 
 def main(argv: list[str]) -> int:
-    """Capture the snapshot and write it to ``argv[1]`` (or stdout)."""
-    snapshot_dict = collect_env().to_dict()
+    """Capture the snapshot and write it to the output path (or stdout).
+
+    Recognizes a ``--extended`` flag (anywhere in argv) for the full
+    per-file catalog detail; the first remaining non-flag argument is the
+    output path (``-`` or absent -> stdout).
+    """
+    args = argv[1:]
+    extended = "--extended" in args
+    positional = [a for a in args if a != "--extended"]
+
+    snapshot_dict = collect_env(
+        detail="full" if extended else "compact"
+    ).to_dict()
     text = json.dumps(snapshot_dict, indent=2)
 
-    out = argv[1] if len(argv) > 1 and argv[1] != "-" else None
+    out = positional[0] if positional and positional[0] != "-" else None
     if out is None:
         sys.stdout.write(text + "\n")
         return 0

@@ -71,6 +71,17 @@ def env() -> None:
     ),
 )
 @click.option(
+    "--extended",
+    is_flag=True,
+    help=(
+        "Keep the full per-file kernel-catalog lists (tensile_catalog / "
+        "miopen_catalog menu.files) in the JSON. Default (compact) drops "
+        "them -- they dominate env.json size -- but keeps every count and "
+        "content hash, so a diff still detects a changed catalog; "
+        "--extended localizes which file changed."
+    ),
+)
+@click.option(
     "--buck-target",
     type=str,
     default=None,
@@ -101,6 +112,7 @@ def probe(
     verbose: bool,
     summary: bool,
     field_path: str | None,
+    extended: bool,
     buck_target: str | None,
     buck_timeout: int,
 ) -> None:
@@ -117,8 +129,13 @@ def probe(
     # Capture once; both short-circuit modes and the default mode read
     # from this single snapshot. Buck-related kwargs flow through to
     # collect_env() regardless of output mode -- the buck audit cost
-    # is paid only when --buck-target is set.
-    snapshot = collect_env(buck_target=buck_target, buck_timeout=buck_timeout)
+    # is paid only when --buck-target is set. detail="full" only when
+    # --extended: keeps the heavy per-file catalog lists in the snapshot.
+    snapshot = collect_env(
+        buck_target=buck_target,
+        buck_timeout=buck_timeout,
+        detail="full" if extended else "compact",
+    )
     snapshot_dict = snapshot.to_dict()
 
     # --field: print one value as JSON and exit. Skips the file write
