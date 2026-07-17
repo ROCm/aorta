@@ -24,10 +24,13 @@ from typing import Any
 
 import click
 
-# Single source of truth for the --execution-context choices, shared with
-# the dependency-free _probe_main entry point so the two never drift. This
-# is a stdlib-only constant tuple (no probing side effects at import).
-from aorta.instrumentation.environment import EXECUTION_CONTEXT_INVOCATIONS
+# --execution-context choices. Mirrors EXECUTION_CONTEXT_INVOCATIONS in
+# aorta.instrumentation.environment (the canonical source). We hard-code the
+# literal here rather than importing it, so that `aorta env --help` / CLI
+# startup does NOT eagerly import the large environment probing module (it
+# is imported lazily inside probe() only when the command actually runs).
+# tests/instrumentation/test_environment.py asserts these stay in sync.
+_EXECUTION_CONTEXT_CHOICES = ["direct", "buck2_run", "buck2_action"]
 
 
 @click.group()
@@ -114,7 +117,7 @@ def env() -> None:
 )
 @click.option(
     "--execution-context",
-    type=click.Choice(list(EXECUTION_CONTEXT_INVOCATIONS)),
+    type=click.Choice(_EXECUTION_CONTEXT_CHOICES),
     default="direct",
     show_default=True,
     help=(

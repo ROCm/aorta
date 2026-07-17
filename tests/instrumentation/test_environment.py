@@ -1502,6 +1502,53 @@ class TestCliIsThinWrapper:
         text = cli_path.read_text()
         assert "collect_env" in text
 
+    def test_cli_does_not_eager_import_environment(self, cli_path: Path):
+        """The CLI must NOT import the heavy environment probing module at
+        module top level -- that would pull subprocess/hashlib/platform into
+        every ``aorta env --help`` / startup and defeat the thin-wrapper
+        goal. ``environment`` may only be imported lazily inside handlers.
+
+        Parse the AST and check only module-level ``import`` nodes, so a
+        mere mention of the module in a docstring or comment does not trip.
+        """
+        import ast
+
+        tree = ast.parse(cli_path.read_text())
+        for node in tree.body:  # module-level statements only
+            if isinstance(node, ast.ImportFrom) and node.module and (
+                "aorta.instrumentation.environment" in node.module
+            ):
+                raise AssertionError(
+                    f"cli/env.py imports environment at module top "
+                    f"(from {node.module}); import it lazily inside the handler."
+                )
+            if isinstance(node, ast.Import) and any(
+                "aorta.instrumentation.environment" in alias.name
+                for alias in node.names
+            ):
+                raise AssertionError(
+                    "cli/env.py imports environment at module top; "
+                    "import it lazily inside the handler."
+                )
+
+    def test_cli_execution_context_choices_match_canonical(self, cli_path: Path):
+        """The hard-coded --execution-context choices in the CLI must stay in
+        sync with the canonical EXECUTION_CONTEXT_INVOCATIONS. The CLI
+        hard-codes (rather than imports) the list to avoid the eager
+        environment import guarded above, so this is the drift guard.
+        """
+        spec = importlib.util.spec_from_file_location("aorta.cli.env", cli_path)
+        cli_mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cli_mod
+        spec.loader.exec_module(cli_mod)
+        assert (
+            cli_mod._EXECUTION_CONTEXT_CHOICES
+            == list(env_mod.EXECUTION_CONTEXT_INVOCATIONS)
+        ), (
+            "cli/env.py _EXECUTION_CONTEXT_CHOICES drifted from "
+            "EXECUTION_CONTEXT_INVOCATIONS; keep them identical."
+        )
+
     def test_cli_creates_missing_parent_directory(self, all_disabled, tmp_path: Path):
         """Regression guard: ``-o newdir/env.json`` must work for a non-existent
         parent. With ``click.Path(writable=True)`` Click would reject that
