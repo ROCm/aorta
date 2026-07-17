@@ -15,15 +15,9 @@ training/repro script is required**. All per-layer reductions run on the GPU and
 are drained to the host in **one batched transfer per step**, so no per-GEMM sync
 is introduced and timing-sensitive behavior is preserved.
 
-## Notes
-
-- **Keep it standalone-runnable.** `instrument_nan_logger.py` is run both as the
-  collector and directly as a self-contained script (handoff to partners running a
-  repro). Preserve that: no imports of the rest of `aorta`, configuration stays via
-  `NANLOG_*` env vars only.
-- It has been used to isolate a training-time NaN to a corrupted **input** arriving
-  from upstream of the flagged layer (the layer's own weights/grads stayed clean),
-  distinguishing an injected out-of-range value from a numerical blowup.
+Provenance: used in anger to isolate a training-time NaN to a corrupted **input**
+arriving from upstream of the flagged layer (the layer's own weights/grads stayed
+clean) — distinguishing an injected out-of-range value from a numerical blowup.
 
 ## Two ways to run
 
@@ -36,8 +30,7 @@ needed:
 ```bash
 HIP_VISIBLE_DEVICES=0 NUM_STEPS=1000 \
   NANLOG_DIR=/output/layer_numerics \
-  NANLOG_WATCH_NAMES=encoder.blocks \
-  NANLOG_PRE_CONTEXT=10 \
+  NANLOG_SPEC='{"watch":[{"scope":{"names":["encoder.blocks"]},"tensors":["output"]}],"pre_context":10}' \
   python instrument_nan_logger.py /path/to/standalone_single_file.py
 ```
 
@@ -70,96 +63,48 @@ workload that opts in can point the logger at `<cell>/layer_numerics/` (via
 [`build_env`](__init__.py), which fills `NANLOG_DIR` and a default `NANLOG_*`
 bundle) so outputs are picked up by `aorta bundle`; recipe/CLI overrides win.
 
-### Example: track an embedding input across pipeline stages
+## Configuration
 
-Scan named batch tensors at every TorchRec stage (`copy` / `sparse_start` /
-`sparse_wait` / `forward`) and flag out-of-range values — no layer noise:
+All configuration is `NANLOG_*` environment variables — `NANLOG_SPEC` (structured,
+recommended) or the flat vars it maps to. The how-to, the full option list, and
+worked Stage 1 / Stage 2 examples live in the user doc:
+[`docs/layer-numerics.md`](../../../../docs/layer-numerics.md). The authoritative,
+exhaustive reference is the module docstring at the top of
+[`instrument_nan_logger.py`](instrument_nan_logger.py). Don't duplicate the option
+table here — keep it in one place.
 
-```yaml
-collect:
-  layer_numerics:
-    NANLOG_PIPELINE: "1"                       # copy + sparse_start + sparse_wait + forward
-    NANLOG_TRACK_ATTR: "embedding_features"    # batch attribute to follow
-    NANLOG_BOUNDS: "embedding_features:0:60"   # out-of-range -> kind="oob"
-    NANLOG_BAD_VALUES: "1"                     # first bad row/col/value
-    NANLOG_SPARSE: "1"                         # cheap KJT metadata at the sparse stage
-    NANLOG_PRE_CONTEXT: "10"                   # dump 10-step run-up on first OOB
-    NANLOG_SAMPLE_EVERY: "50"
-    NANLOG_ADDR: "1"                           # record GPU memory addresses (no repro impact)
-    NANLOG_LOCATE: "1"                         # record how many rows hold a bad value
-    # NANLOG_ALLOC_SNAPSHOT: "1"              # allocator trace on first bad — high overhead, do not use on timing-sensitive repro
-```
+The spec JSON can be supplied three ways, in order of precedence: the `--config
+<path>` CLI flag beats `NANLOG_SPEC_FILE=<path>` (env), which beats inline
+`NANLOG_SPEC` (env). The summary JSON records which won in a `spec_source` field.
+See [`docs/layer-numerics.md`](../../../../docs/layer-numerics.md) for the how-to.
 
-Find the first out-of-range hit:
+`NANLOG_SPEC` is a thin front-end: at import it validates the JSON and translates
+it into the flat vars the engine already reads (a malformed spec warns and falls
+back). Keeping the engine flat-var-only is what preserves the standalone contract.
 
-```bash
-jq -c 'select(.oob_count>0) | {step,batch_id,phase,layer_name,first_bad_value}' \
-  <results>/*/layer_numerics/layers_rank0.jsonl | head
-```
+Collector defaults (applied by [`build_env`](__init__.py)): all seven channels,
+`NANLOG_PRE_CONTEXT=10`, `NANLOG_SAMPLE_EVERY=50`. `NANLOG_DIR` is filled per-cell
+so `aorta bundle` picks up the output; recipe/CLI overrides win.
 
-## Output
+## Design invariants (do not break)
 
-Written under `NANLOG_DIR` (the collector points this at
-`<results_dir>/layer_numerics`):
-
-- `summary_rank<N>.json` — the headline: `first_bad` fingerprint
-  (step / layer / direction / kind / `matmul_calls_so_far`), and
-  when bounds are set `first_oob` / `oob_records` / `peak_finite_min` / `peak_finite_max`,
-  plus totals. (`tf32_path` is printed on the "FIRST BAD" stderr line, not
-  stored in the summary JSON.)
-- `layers_rank<N>.jsonl` — the full per-(layer, step, channel) trajectory. Each
-  record carries `phase` and `batch_id` (see below).
-
-## Two tracking modes
-
-**Layer channels** (default). Hooks watched `nn.Module`s and records their
-activations / grads / params — configured by `NANLOG_CHANNELS` + `NANLOG_WATCH_*`.
-
-**Pipeline-stage tracking** (`NANLOG_PIPELINE=1`). Follows named tensors *by object*
-off the TorchRec batch (default `embedding_features`) and scans them at each pipeline
-stage — `copy`, `sparse_start`, `sparse_wait`, and `forward` — **before** the layers
-read them. Each record is tagged with its `phase` and a `batch_id` (assigned at
-`copy_batch_to_gpu`, re-read at every later stage) so one batch's records line up
-across steps. This catches corruption that arrives *upstream* of the layers, which
-the layer hooks alone cannot see. Needs no `WATCH_NAMES`.
-
-## Tunables (`NANLOG_*`)
-
-All configuration is via environment variables; the authoritative reference is the
-module docstring at the top of
-[`instrument_nan_logger.py`](instrument_nan_logger.py). All heavy features default
-OFF and feed one batched host transfer per step (no per-GEMM sync). Most-used knobs:
-
-| Var | Purpose | Default |
-|---|---|---|
-| `NANLOG_DIR` | Output dir for the JSONL + summary | `nan_logger_out` |
-| `NANLOG_CHANNELS` | Layer channels (`act,input,igrad,weight,bias,wgrad,bgrad`) | `act,igrad` |
-| `NANLOG_WATCH_NAMES` | Substrings matched against module paths (target a block/layer) | (empty) |
-| `NANLOG_WATCH_TYPES` | Module class names to watch (e.g. `Linear`, `MoELayer`) | `Linear` (unless `WATCH_NAMES` set) |
-| `NANLOG_PRE_CONTEXT` | Buffer the last K clean steps; dump on first-bad for full run-up | `0` (off) |
-| `NANLOG_SAMPLE_EVERY` | Write a clean record 1 step in N (bad always written) | `50` |
-| `NANLOG_HUGE_THRESHOLD` | `\|x\| > T` counts as "huge" | `1e10` |
-| `NANLOG_ADDR` | Record data_ptr + backing-storage extent per tensor | `0` (off) |
-| **Pipeline / bounds** | | |
-| `NANLOG_PIPELINE` | Track tensors at the TorchRec stage boundaries | `0` (off) |
-| `NANLOG_TRACK_ATTR` | Batch attribute(s) to follow as tracked tensors | `embedding_features` |
-| `NANLOG_BOUNDS` | Per-tensor in-range check `substr:lo:hi;...` (out-of-range → `kind="oob"`) | (empty) |
-| `NANLOG_BAD_VALUES` | First bad element's flat idx / row / col / value | `0` (off) |
-| `NANLOG_SPARSE` | Cheap host-side KJT metadata at the sparse stage | `0` (off) |
-| `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each layer (strided) — high overhead | `0` (off) |
-
-Collector defaults (applied by `build_env`): `NANLOG_CHANNELS` = all seven,
-`NANLOG_PRE_CONTEXT=10`, `NANLOG_SAMPLE_EVERY=50`. Any `NANLOG_*` can be overridden
-per-collector in a recipe's `collect:` mapping.
+- **One host sync per step.** All per-layer reductions run on the GPU and drain in
+  a single batched transfer per step — no per-GEMM `.item()`. This is what keeps a
+  timing-sensitive repro reproducible; any change that adds a sync on the hot path
+  defeats the tool's purpose.
+- **Standalone-runnable.** No imports of the rest of `aorta`; the engine reads
+  config from `NANLOG_*` env vars only (the `--config` flag and `NANLOG_SPEC_FILE`
+  are thin front-ends that resolve to those vars). The script is handed to partners
+  as a bare file.
+- **Fail-soft.** A sidecar must never take the training job down: bad config warns
+  and falls back, hooks catch their own errors.
 
 ## Notes / limitations
 
-- Locates the first **layer/stage/step** to go bad; it does not, by itself, prove a
-  kernel-level timing race (that needs per-GEMM ordering, which would change timing).
-- `weight`/`bias` channels are read at the start of the step, so they hold the
-  **previous** step's value (`value_is_from_prev_step=true`); `wgrad`/`bgrad` are
-  read at the optimizer step boundary (current step). Grad channels require a
-  `torch.optim.Optimizer`; if the update is fused into backward, a one-time warning
-  is logged — use `weight`/`bias` instead.
+- `weight`/`bias` are read at the start of the step, so they hold the **previous**
+  step's value (`value_is_from_prev_step=true`); `wgrad`/`bgrad` are read at the
+  optimizer step boundary (current step) and need a `torch.optim.Optimizer`. If the
+  update is fused into backward, a one-time warning is logged — use `weight`/`bias`.
 - A stage read runs on a non-default stream; a "clean at copy" is stream-ordering
   dependent — treat it as suggestive until confirmed (see the module docstring).
+- `tf32_path` is printed on the "FIRST BAD" stderr line, not stored in the summary.

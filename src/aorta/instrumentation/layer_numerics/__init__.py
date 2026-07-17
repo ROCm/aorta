@@ -13,10 +13,10 @@ collector. Dispatcher validation accepts the collector name today; follow-up
 wiring will launch the script (:data:`SCRIPT_PATH`) as a ``runpy`` front-end
 around a workload's entry script with the :func:`build_env` env bundle applied.
 
-The script is a verbatim upstream drop (see ``README.md`` for provenance);
-all tunables are ``NANLOG_*`` environment variables, so this package adds
-no logic on top of it -- only a discoverable script path and the default
-env bundle the collector applies.
+All tunables are ``NANLOG_*`` environment variables -- ``NANLOG_SPEC`` (a
+structured JSON front-end validated at import) or the flat vars it maps to.
+This package adds no logic on top of the script; it exposes a discoverable
+script path and the default env bundle the collector applies.
 """
 
 from __future__ import annotations
@@ -60,7 +60,10 @@ def build_env(
         overrides: Recipe- or operator-supplied ``NANLOG_*`` values that win
             over the defaults (e.g. ``{"NANLOG_WATCH_NAMES": "encoder.blocks"}``).
             ``NANLOG_DIR`` in ``overrides`` wins over the computed default,
-            for the rare case an operator wants the output elsewhere.
+            for the rare case an operator wants the output elsewhere. The
+            recommended structured form is a single ``NANLOG_SPEC`` JSON value
+            (see the ``instrument_nan_logger.py`` docstring); when present it
+            WINS over the flat ``NANLOG_*`` defaults at logger import.
 
     Returns:
         A flat ``dict[str, str]`` the caller merges into the subprocess
