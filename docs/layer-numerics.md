@@ -89,7 +89,7 @@ before the logger armed, or it is not reachable through the hook path (see
 ## Configuration (`NANLOG_SPEC`, recommended)
 
 The clearest way to configure the logger is a single structured JSON value,
-`NANLOG_SPEC`. It unifies the many flat flags onto three axes and two
+`NANLOG_SPEC`. It unifies the many flat flags onto a small set of axes and two
 observation kinds:
 
 - **`watch`** — observe a module's **own** tensors.
@@ -98,13 +98,16 @@ observation kinds:
 | Axis | Question | Values |
 |---|---|---|
 | `scope` | which modules | `names: [substr,…]` and/or `types: [ClassName,…]` |
-| `tensors` | which of a module's tensors | `input, output, weight, bias, grad` |
-| `at` | when / how often | `stride:N` (every Nth module in scope; `1`=every) · `stage` (pipeline stages) |
+| `tensors` | which of a module's tensors | `input, output, weight, bias, igrad, grad` |
+| `stages` | (follow) check at the pipeline stage boundaries | `true` (`copy`/`sparse_start`/`sparse_wait`/`forward`) |
+| `stride` | (follow) also check every Nth module in `scope` | `N` (default `1`; requires `scope`). Set `stages`, `scope`, or both; neither ⇒ stages only |
+| `stride` | (watch) hook only every Nth matched module | `N` (integer `>= 1`, default `1`); thins a broad watch whose per-module reduction volume is too high |
+| `diagnostics` | (top-level) how-much-detail toggles applied to **every** captured record | `addr, locate, bad_values, dump_tensor, alloc_snapshot` (see below) |
 
 ```bash
 NANLOG_SPEC='{
   "watch":  [{"scope": {"types": ["MLP","AttentionBlock"]}, "tensors": ["input","output"]}],
-  "follow": [{"tensor": "embedding_features", "at": "stage", "bounds": [0,60]}],
+  "follow": [{"tensor": "embedding_features", "stages": true, "bounds": [0,60]}],
   "sample_every": 50, "pre_context": 10
 }' \
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
@@ -116,9 +119,12 @@ Common patterns (each cell is a complete, copy-paste `NANLOG_SPEC` value):
 |---|---|
 | Standard tensors by block | `{"watch":[{"scope":{"types":["AttentionBlock","MLP"]},"tensors":["input","output","weight","bias","grad"]}]}` |
 | Selected tensors from one scope | `{"watch":[{"scope":{"names":["emb_proj"]},"tensors":["input","output"]}]}` |
-| Follow a tensor through the pipeline | `{"follow":[{"tensor":"embedding_features","at":"stage"}]}` |
-| Follow a tensor every N layers | `{"follow":[{"tensor":"embedding_features","at":"stride:8","scope":{"names":["emb_proj"]}}]}` |
-| Follow a tensor at named layers only | `{"follow":[{"tensor":"embedding_features","at":"stride:1","scope":{"names":["emb_proj.projections.0"]}}]}` |
+| Activation-input grad only (no param grads) | `{"watch":[{"scope":{"types":["Linear"]},"tensors":["igrad"]}]}` |
+| Thin a broad watch to every 4th Linear | `{"watch":[{"scope":{"types":["Linear"]},"tensors":["output"],"stride":4}]}` |
+| Extra per-record detail via diagnostics | `{"watch":[{"scope":{"types":["MLP"]},"tensors":["output"]}],"diagnostics":["addr","bad_values"]}` |
+| Follow a tensor through the pipeline | `{"follow":[{"tensor":"embedding_features","stages":true}]}` |
+| Follow a tensor every N layers | `{"follow":[{"tensor":"embedding_features","scope":{"names":["emb_proj"]},"stride":8}]}` |
+| Follow a tensor at named layers only | `{"follow":[{"tensor":"embedding_features","scope":{"names":["emb_proj.projections.0"]}}]}` |
 
 When `NANLOG_SPEC` is set it **wins**; when it is unset, the flat `NANLOG_*`
 vars below are read directly (still fully supported). A malformed spec logs a
@@ -138,7 +144,7 @@ Put the spec in `spec.json`:
 
 ```json
 {
-  "follow": [{"tensor": "embedding_features", "at": "stage", "bounds": [0, 60]}],
+  "follow": [{"tensor": "embedding_features", "stages": true, "bounds": [0, 60]}],
   "pre_context": 10,
   "sample_every": 50
 }
@@ -173,16 +179,56 @@ Everything the logger does is one of two kinds — the `watch` and `follow` keys
 
 - **`watch` — a module's own tensors.** Hooks the modules you name (by class
   `types` or path `names`) and records their `input` / `output` / `weight` /
-  `bias` / `grad`. This is the "which layer went bad" view.
+  `bias` / `igrad` / `grad`. This is the "which layer went bad" view. `grad` is
+  the umbrella for **all** gradients (input-grad + both param grads); `igrad` is
+  the input-grad piece alone, for when you want the activation-input gradient
+  without the weight/bias grads. Add `"stride": N` (integer `>= 1`, default `1`)
+  to hook only every Nth matched module in traversal order — a way to thin a
+  broad watch whose per-module reduction volume is too high (e.g.
+  `{"scope":{"types":["Linear"]},"tensors":["output"],"stride":4}` hooks every
+  4th `Linear`). This watch `stride` is separate from a `follow` entry's own
+  `stride`. If the same spec also uses a scoped `follow`, the logger **ignores**
+  `watch[].stride` and warns, because the follow re-scan runs inside those module
+  hooks and thinning them would drop follow evidence.
 - **`follow` — one named tensor across positions.** Follows a batch tensor
-  (default `embedding_features`) and re-checks it at each TorchRec pipeline stage
-  (`at: stage` → `copy`, `sparse_start`, `sparse_wait`, `forward`) or at each
-  module (`at: stride:N`). Each record is tagged with its `phase` and a `batch_id`
-  so one batch's records line up across steps. This catches corruption that
-  arrives *upstream* of the layers, which watching alone cannot see.
+  (default `embedding_features`) and re-checks it at the TorchRec pipeline stage
+  boundaries (`stages: true` → `copy`, `sparse_start`, `sparse_wait`, `forward`)
+  and/or at each module in a `scope` (`stride: N` for every Nth match, default
+  `1`). Set `stages`, `scope`, or both — with neither, it checks stages only.
+  Each record is tagged with its `phase` and a `batch_id` so one batch's records
+  line up across steps. This catches corruption that arrives *upstream* of the
+  layers, which watching alone cannot see.
+  > Note: a scoped re-scan rides the pipeline hook, so it **also** emits the
+  > stage-boundary records even when `stages` is omitted or `false` — you will see
+  > `phase` records at the stages regardless. Stage records can't be suppressed
+  > independently of a scoped re-scan today.
 
 Add a `bounds: [lo, hi]` to a `follow` entry to flag out-of-range values
 (`kind="oob"`) — a two-sided check the one-sided "huge" threshold misses.
+
+### Diagnostics — how much detail per record
+
+A top-level `"diagnostics": [...]` list adds "how much detail" toggles that
+apply to **every** captured record, independent of `watch` / `follow`. Valid
+names:
+
+- `addr` — GPU `data_ptr` + backing-storage extent per tensor.
+- `locate` — how many rows hold a bad value.
+- `bad_values` — the first bad element's flat idx / row / col / value.
+- `dump_tensor` — save the full bad tensor to a `.pt` file (one-shot, on first
+  detection).
+- `alloc_snapshot` — caching-allocator event trace on first bad (~10% overhead).
+
+These correspond one-to-one to the flat `NANLOG_ADDR` / `NANLOG_LOCATE` /
+`NANLOG_BAD_VALUES` / `NANLOG_DUMP_TENSOR` / `NANLOG_ALLOC_SNAPSHOT` vars. The
+output dir stays env-only (`NANLOG_DIR`) — it is **not** a diagnostic.
+
+```json
+{
+  "watch": [{"scope": {"types": ["MLP"]}, "tensors": ["output"]}],
+  "diagnostics": ["addr", "bad_values"]
+}
+```
 
 ## Stage 1 / Stage 2 workflow
 
@@ -197,7 +243,7 @@ check and pre-context buffer, so it is safe to run on a timing-sensitive repro:
 
 ```bash
 NANLOG_DIR=/output/layer_numerics \
-NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","at":"stage","bounds":[0,60]}],"pre_context":10,"sample_every":50}' \
+NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","stages":true,"bounds":[0,60]}],"pre_context":10,"sample_every":50}' \
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
 ```
 
@@ -217,12 +263,12 @@ add heavier GPU work or a host sync that can **hide** a timing-sensitive bug, so
 never enable them alongside the Stage 1 scan.
 
 If the first hit was at `phase=forward`, re-scan per layer to bracket the layer
-(coarse stride first — `stride:5` re-checks every 5th module in the suspect
+(coarse stride first — `"stride":5` re-checks every 5th module in the suspect
 block):
 
 ```bash
 NANLOG_DIR=/output/layer_numerics_stage2 \
-NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","at":"stride:5","scope":{"names":["<suspect.block>"]},"bounds":[0,60]}],"pre_context":10}' \
+NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","scope":{"names":["<suspect.block>"]},"stride":5,"bounds":[0,60]}],"pre_context":10}' \
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
 ```
 
@@ -231,7 +277,7 @@ Or as a `collect:` block in a recipe:
 ```yaml
 collect:
   layer_numerics:
-    NANLOG_SPEC: '{"follow":[{"tensor":"embedding_features","at":"stride:5","scope":{"names":["<suspect.block>"]},"bounds":[0,60]}],"pre_context":10}'
+    NANLOG_SPEC: '{"follow":[{"tensor":"embedding_features","scope":{"names":["<suspect.block>"]},"stride":5,"bounds":[0,60]}],"pre_context":10}'
 ```
 
 If the first hit was at a sparse stage, watch the sparse modules' own tensors and
@@ -240,7 +286,7 @@ add it as a flat var alongside the spec):
 
 ```bash
 NANLOG_DIR=/output/layer_numerics_stage2 \
-NANLOG_SPEC='{"watch":[{"scope":{"names":["<sparse.module.names>"]},"tensors":["input","output"]}],"follow":[{"tensor":"embedding_features","at":"stage","bounds":[0,60]}],"pre_context":10}' \
+NANLOG_SPEC='{"watch":[{"scope":{"names":["<sparse.module.names>"]},"tensors":["input","output"]}],"follow":[{"tensor":"embedding_features","stages":true,"bounds":[0,60]}],"pre_context":10}' \
 NANLOG_SPARSE=1 \
   python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
 ```
@@ -349,7 +395,7 @@ or per-recipe / per-cell via the `collect:` mapping (see
 ```yaml
 collect:
   layer_numerics:
-    NANLOG_SPEC: '{"follow":[{"tensor":"embedding_features","at":"stage","bounds":[0,60]}],"pre_context":10,"sample_every":50}'
+    NANLOG_SPEC: '{"follow":[{"tensor":"embedding_features","stages":true,"bounds":[0,60]}],"pre_context":10,"sample_every":50}'
 ```
 
 > **Important — opt-in required.** The sweep engine validates the collector name
@@ -385,16 +431,17 @@ All heavy features default **OFF** and feed the same single per-step host transf
 | `NANLOG_PRE_CONTEXT` | Buffer the last K clean steps; dump on first-bad | `0` (off) | `pre_context` |
 | `NANLOG_SAMPLE_EVERY` | Write a clean record 1 step in N (bad always written) | `50` | `sample_every` |
 | `NANLOG_HUGE_THRESHOLD` | `\|x\| > T` counts as "huge" | `1e10` | — |
-| `NANLOG_BAD_VALUES` | Record the first bad element's flat idx / row / col / value | `0` (off) | — |
-| `NANLOG_ADDR` | Record `data_ptr` + backing-storage extent per tensor | `0` (off) | — |
-| `NANLOG_DUMP_TENSOR` | Save the full bad tensor to a `.pt` on first detection | `0` (off) | — |
-| `NANLOG_ALLOC_SNAPSHOT` | Dump a caching-allocator event trace on first bad (~10% overhead) | `0` (off) | — |
-| `NANLOG_PIPELINE` | Track tensors at the TorchRec stage boundaries | `0` (off) | `follow[].at: stage` |
+| `NANLOG_BAD_VALUES` | Record the first bad element's flat idx / row / col / value | `0` (off) | `diagnostics:[bad_values]` |
+| `NANLOG_ADDR` | Record `data_ptr` + backing-storage extent per tensor | `0` (off) | `diagnostics:[addr]` |
+| `NANLOG_LOCATE` | Record how many rows hold a bad value | `0` (off) | `diagnostics:[locate]` |
+| `NANLOG_DUMP_TENSOR` | Save the full bad tensor to a `.pt` on first detection | `0` (off) | `diagnostics:[dump_tensor]` |
+| `NANLOG_ALLOC_SNAPSHOT` | Dump a caching-allocator event trace on first bad (~10% overhead) | `0` (off) | `diagnostics:[alloc_snapshot]` |
+| `NANLOG_PIPELINE` | Track tensors at the TorchRec stage boundaries | `0` (off) | `follow[].stages: true` |
 | `NANLOG_TRACK_ATTR` | Batch attribute(s) to follow as tracked tensors | `embedding_features` | `follow[].tensor` |
 | `NANLOG_BOUNDS` | Per-tensor in-range check `substr:lo:hi;...` (→ `kind="oob"`) | (empty) | `follow[].bounds` |
 | `NANLOG_SPARSE` | Cheap host-side KJT metadata at the sparse stage | `0` (off) | — |
-| `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each layer | `0` (off) | `follow[].at: stride:N` |
-| `NANLOG_TRACK_LAYER_STRIDE` | Re-scan every Kth layer when re-scan is on | `1` | `follow[].at: stride:N` |
+| `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each layer | `0` (off) | `follow[].scope` (+ `stride`) |
+| `NANLOG_TRACK_LAYER_STRIDE` | Re-scan every Kth layer when re-scan is on | `1` | `follow[].stride` |
 
 Channel notes:
 

@@ -63,6 +63,82 @@ def test_watch_spec_maps_tensors_to_channels(monkeypatch, tmp_path_factory):
     assert nl._CHANNELS == frozenset({"input", "act", "weight"})
 
 
+def test_igrad_token_is_activation_input_grad_only(monkeypatch, tmp_path_factory):
+    """`igrad` selects ONLY the activation-input grad; `grad` is the wider umbrella."""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps(
+            {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output", "igrad"]}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._CHANNELS == frozenset({"act", "igrad"})   # no wgrad/bgrad
+    assert nl._GRAD_CHANNELS == frozenset()              # no param-grad channels
+
+
+def test_watch_stride(monkeypatch, tmp_path_factory):
+    """`watch[].stride: N` -> NANLOG_WATCH_STRIDE=N; _attach hooks every Nth match."""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps(
+            {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output"], "stride": 3}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._WATCH_STRIDE == 3
+    model = torch.nn.Sequential(*[torch.nn.Linear(4, 4) for _ in range(7)])
+    assert nl._attach(model) == 3   # ceil(7/3): modules 0,3,6
+    # the resolved stride is recorded in the summary so a thinned run is auditable
+    nl._write_summary()
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    assert smy["watch_stride"] == 3
+
+
+def test_watch_stride_ignored_when_scoped_follow_needs_all_hooks(monkeypatch, tmp_path_factory):
+    """A scoped follow re-scans inside the forward hook, so watch[].stride must NOT
+    thin the hooks (that would drop follow evidence). The watch stride is ignored
+    (falls back to 1) with a warning; the follow re-scan is preserved."""
+    spec = {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output"], "stride": 4}],
+            "follow": [{"tensor": "ef", "scope": {"types": ["MLP"]}, "stride": 1}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is True
+    assert nl._WATCH_STRIDE == 1          # watch stride dropped, not honored
+    assert nl._TRACK_EVERY_LAYER is True  # follow re-scan still armed
+
+
+def test_watch_stride_applied_with_stages_only_follow(monkeypatch, tmp_path_factory):
+    """A stages-only follow uses no forward hooks, so watch[].stride is safe to apply."""
+    spec = {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output"], "stride": 4}],
+            "follow": [{"tensor": "ef", "stages": True}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._WATCH_STRIDE == 4          # applied: no module-hook follow to protect
+    assert nl._TRACK_EVERY_LAYER is False
+
+
+def test_diagnostics_block(monkeypatch, tmp_path_factory):
+    """`diagnostics: [...]` enables the matching flat toggles; unlisted ones stay off."""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps(
+            {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output"]}],
+             "diagnostics": ["addr", "bad_values", "alloc_snapshot"]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._CAPTURE_ADDR is True
+    assert nl._BAD_VALUES is True
+    assert nl._ALLOC_SNAPSHOT is True
+    assert nl._LOCATE is False          # not listed
+    assert nl._DUMP_TENSOR is False     # not listed
+
+
+@pytest.mark.parametrize("spec", [
+    {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output"], "stride": 0}]},   # <1
+    {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output"], "stride": "3"}]}, # non-int
+    {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output"], "bogus": 1}]},    # unknown key
+    {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output"]}], "diagnostics": ["bogus"]},
+    {"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["output"]}], "diagnostics": "addr"},  # not a list
+])
+def test_new_watch_diag_invalid_rolls_back(spec, monkeypatch, tmp_path_factory):
+    """Malformed watch stride / unknown watch key / bad diagnostics roll the spec back."""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps(spec), "NANLOG_CHANNELS": "act,igrad"},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is False
+    assert nl._CHANNELS == frozenset({"act", "igrad"})
+
+
 def test_watch_spec_names_scope(monkeypatch, tmp_path_factory):
     spec = {"watch": [{"scope": {"names": ["emb_proj"]}, "tensors": ["input", "output"]}]}
     nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
@@ -99,7 +175,7 @@ def test_watch_spec_runtime_capture(monkeypatch, tmp_path_factory):
 # follow: at:stage -> PIPELINE, bounds -> BOUNDS
 # ---------------------------------------------------------------------------
 def test_follow_stage_spec(monkeypatch, tmp_path_factory):
-    spec = {"follow": [{"tensor": "embedding_features", "at": "stage", "bounds": [0, 60]}]}
+    spec = {"follow": [{"tensor": "embedding_features", "stages": True, "bounds": [0, 60]}]}
     nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
     assert nl._PIPELINE is True
     assert nl._TRACK_ATTR == ("embedding_features",)
@@ -109,14 +185,82 @@ def test_follow_stage_spec(monkeypatch, tmp_path_factory):
 
 
 def test_follow_stride_spec(monkeypatch, tmp_path_factory):
-    """`at:stride:8` -> TRACK_EVERY_LAYER + stride 8; follow scope merges into WATCH_*."""
-    spec = {"follow": [{"tensor": "embedding_features", "at": "stride:8",
-                        "scope": {"names": ["emb_proj"]}}]}
+    """follow `scope` + `stride:8` -> TRACK_EVERY_LAYER + stride 8; scope -> WATCH_*."""
+    spec = {"follow": [{"tensor": "embedding_features", "scope": {"names": ["emb_proj"]}, "stride": 8}]}
     nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
     assert nl._PIPELINE is True
     assert nl._TRACK_EVERY_LAYER is True
     assert nl._TRACK_LAYER_STRIDE == 8
     assert nl._WATCH_NAMES == ("emb_proj",)
+
+
+# ---------------------------------------------------------------------------
+# follow cadence: explicit `stages` + `scope`/`stride` (replaces the `at` overload)
+# ---------------------------------------------------------------------------
+def test_follow_stages_only(monkeypatch, tmp_path_factory):
+    """`stages: true` alone -> pipeline stage scan, no per-module re-scan."""
+    spec = {"follow": [{"tensor": "ef", "stages": True, "bounds": [0, 60]}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    assert nl._TRACK_EVERY_LAYER is False
+    assert nl._BOUNDS_ACTIVE is True
+
+
+def test_follow_default_is_stages_only(monkeypatch, tmp_path_factory):
+    """A follow entry with neither `stages` nor `scope` defaults to stages-only."""
+    spec = {"follow": [{"tensor": "ef"}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    assert nl._TRACK_EVERY_LAYER is False
+
+
+def test_follow_stages_and_scope(monkeypatch, tmp_path_factory):
+    """`stages:true` + `scope` -> BOTH the pipeline stages AND a per-module re-scan
+    at every module in scope (stride defaults to 1)."""
+    spec = {"follow": [{"tensor": "ef", "stages": True,
+                        "scope": {"types": ["MLP"]}, "bounds": [0, 60]}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    assert nl._TRACK_EVERY_LAYER is True
+    assert nl._TRACK_LAYER_STRIDE == 1
+    assert nl._WATCH_TYPES == ("MLP",)
+
+
+def test_follow_scope_with_stride(monkeypatch, tmp_path_factory):
+    """`scope` + `stride:N` -> re-scan every Nth module in scope."""
+    spec = {"follow": [{"tensor": "ef", "scope": {"names": ["emb"]}, "stride": 8}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._TRACK_EVERY_LAYER is True
+    assert nl._TRACK_LAYER_STRIDE == 8
+    assert nl._WATCH_NAMES == ("emb",)
+
+
+def test_follow_at_key_is_rejected(monkeypatch, tmp_path_factory):
+    """The old `at` key was removed: it is now an unknown follow key and rolls the
+    whole spec back (no silent back-compat)."""
+    spec = {"follow": [{"tensor": "ef", "at": "stage"}]}
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps(spec), "NANLOG_CHANNELS": "act,igrad"},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is False
+    assert nl._CHANNELS == frozenset({"act", "igrad"})
+
+
+@pytest.mark.parametrize("follow_entry", [
+    {"tensor": "ef", "at": "stage"},                        # removed `at` key -> unknown
+    {"tensor": "ef", "stride": 4},                          # stride without scope
+    {"tensor": "ef", "stages": False},                      # captures nothing
+    {"tensor": "ef", "stages": "yes"},                      # non-bool stages
+    {"tensor": "ef", "scope": {"types": ["MLP"]}, "stride": 0},   # stride < 1
+])
+def test_follow_cadence_invalid_rolls_back(follow_entry, monkeypatch, tmp_path_factory):
+    """Malformed / contradictory follow cadence rejects the whole spec (flat fallback)."""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps({"follow": [follow_entry]}),
+         "NANLOG_CHANNELS": "act,igrad"},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is False
+    assert nl._CHANNELS == frozenset({"act", "igrad"})
 
 
 @pytest.mark.parametrize("watch_scope", [
@@ -128,16 +272,16 @@ def test_watch_plus_follow_stride_warns_on_merged_scope(watch_scope, monkeypatch
     filter, so the merge warning must fire for BOTH names-only and types-only watch
     scopes (PR #292 review: types-only was silently missed)."""
     spec = {"watch": [{"scope": watch_scope, "tensors": ["input"]}],
-            "follow": [{"tensor": "ef", "at": "stride:4", "scope": {"names": ["emb"]}}]}
+            "follow": [{"tensor": "ef", "scope": {"names": ["emb"]}, "stride": 4}]}
     _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
-    assert "both watch scope and follow-stride scope set" in capsys.readouterr().err
+    assert "both watch scope and follow scope set" in capsys.readouterr().err
 
 
 def test_follow_entry_without_tensor_does_not_capture_default(monkeypatch, tmp_path_factory):
     """A follow entry with no `tensor` is malformed; it must NOT silently fall through
     to the engine default (embedding_features). With no valid follow entry and no flat
     vars asking for pipeline, the run rolls back to flat defaults (pipeline off)."""
-    spec = {"follow": [{"at": "stage"}]}   # no tensor
+    spec = {"follow": [{"stages": True}]}   # no tensor
     nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
     assert nl._PIPELINE is False           # rolled back; not a real capture
     assert nl._TRACK_ATTR == ("embedding_features",)  # the flat DEFAULT, not spec-driven
@@ -146,7 +290,7 @@ def test_follow_entry_without_tensor_does_not_capture_default(monkeypatch, tmp_p
 def test_follow_mixed_valid_and_tensorless_rolls_back(monkeypatch, tmp_path_factory):
     """A tensorless entry makes the WHOLE spec invalid (atomic validation): the run
     rolls back to flat vars rather than silently applying only the valid entry."""
-    spec = {"follow": [{"at": "stage"}, {"tensor": "ef", "at": "stage"}]}
+    spec = {"follow": [{"stages": True}, {"tensor": "ef", "stages": True}]}
     nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
     assert nl._PIPELINE is False           # rolled back; not a partial apply
     assert nl._TRACK_ATTR == ("embedding_features",)  # flat default, not "ef"
@@ -164,7 +308,7 @@ def test_follow_per_entry_bounds(monkeypatch, tmp_path_factory):
 def test_follow_stage_no_watch_warning(monkeypatch, tmp_path_factory, capsys):
     """A follow-stage spec (empty watch scope by design) must NOT print the
     'no modules will be watched' warning; a stride follow with no scope still does."""
-    stage = {"follow": [{"tensor": "ef", "at": "stage"}]}
+    stage = {"follow": [{"tensor": "ef", "stages": True}]}
     _load_logger({"NANLOG_SPEC": json.dumps(stage)}, monkeypatch, tmp_path_factory)
     assert "no modules will be watched" not in capsys.readouterr().err
 
@@ -176,7 +320,7 @@ def test_follow_only_clears_inherited_layer_defaults(monkeypatch, tmp_path_facto
     """With the collector's 7-channel + Linear defaults already in env, a follow-only
     stage spec must clear the layer channels AND the Linear watch default, so it does
     not silently hook Linear layers the user never asked to watch."""
-    spec = {"follow": [{"tensor": "embedding_features", "at": "stage"}]}
+    spec = {"follow": [{"tensor": "embedding_features", "stages": True}]}
     nl = _load_logger(
         {"NANLOG_SPEC": json.dumps(spec),
          "NANLOG_CHANNELS": "act,input,igrad,weight,bias,wgrad,bgrad"},
@@ -189,7 +333,7 @@ def test_follow_only_clears_inherited_layer_defaults(monkeypatch, tmp_path_facto
 def test_follow_stride_clears_channels_but_keeps_scope(monkeypatch, tmp_path_factory):
     """A stride follow clears inherited layer channels but keeps its own scope, and
     the engine still installs forward hooks (the re-scan runs inside the fwd hook)."""
-    spec = {"follow": [{"tensor": "ef", "at": "stride:2", "scope": {"types": ["Linear"]}}]}
+    spec = {"follow": [{"tensor": "ef", "scope": {"types": ["Linear"]}, "stride": 2}]}
     nl = _load_logger(
         {"NANLOG_SPEC": json.dumps(spec), "NANLOG_CHANNELS": "act,igrad"},
         monkeypatch, tmp_path_factory)
@@ -206,7 +350,7 @@ def test_watch_plus_follow_does_not_clear_watch_channels(monkeypatch, tmp_path_f
     """The clear only applies to follow-ONLY specs: a watch group present means its
     channels are honored, not wiped."""
     spec = {"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["input"]}],
-            "follow": [{"tensor": "ef", "at": "stage"}]}
+            "follow": [{"tensor": "ef", "stages": True}]}
     nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
     assert nl._CHANNELS == frozenset({"input"})
     assert nl._WATCH_TYPES == ("MLP",)
@@ -243,11 +387,11 @@ def test_no_spec_uses_flat_vars(monkeypatch, tmp_path_factory):
 # ---------------------------------------------------------------------------
 # malformed spec must never crash import (sidecar contract)
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("at", ["stride:", "stride:abc", "stride:0", "stride:-3"])
-def test_malformed_stride_rolls_back(at, monkeypatch, tmp_path_factory):
-    """A bad stride value must not crash the int() at config time; it rolls back to
-    flat vars (stride 1, no per-layer re-scan armed)."""
-    spec = {"follow": [{"tensor": "ef", "at": at}]}
+@pytest.mark.parametrize("stride", [0, -3, "8", 1.5, True])
+def test_malformed_stride_rolls_back(stride, monkeypatch, tmp_path_factory):
+    """A bad `stride` value (non-int, <1, bool) rolls back to flat vars rather than
+    crashing the int() at config time or arming a bogus re-scan."""
+    spec = {"follow": [{"tensor": "ef", "scope": {"names": ["x"]}, "stride": stride}]}
     nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
     assert nl._TRACK_LAYER_STRIDE == 1
     assert nl._TRACK_EVERY_LAYER is False
@@ -285,9 +429,9 @@ def test_malformed_entry_shapes_do_not_crash(spec, monkeypatch, tmp_path_factory
     {"sample_every": "abc"},                                              # non-int
     {"sample_every": 0},                                                  # < 1 (div-by-zero risk)
     {"pre_context": -1},                                                  # < 0
-    {"follow": [{"tensor": "ef", "at": "stage", "bounds": {"lo": 0, "hi": 1}}]},  # bounds dict
-    {"follow": [{"tensor": "ef", "at": "stage", "bounds": [0]}]},         # bounds wrong length
-    {"follow": [{"tensor": "ef", "at": "stage", "bounds": ["x", "y"]}]},  # bounds non-numeric
+    {"follow": [{"tensor": "ef", "stages": True, "bounds": {"lo": 0, "hi": 1}}]},  # bounds dict
+    {"follow": [{"tensor": "ef", "stages": True, "bounds": [0]}]},         # bounds wrong length
+    {"follow": [{"tensor": "ef", "stages": True, "bounds": ["x", "y"]}]},  # bounds non-numeric
     # a 2nd watch group with a non-list `tensors` must give the clean tensors error,
     # not a TypeError from the multi-group merge check (regression, PR #292 review).
     {"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["input"]},
@@ -296,20 +440,20 @@ def test_malformed_entry_shapes_do_not_crash(spec, monkeypatch, tmp_path_factory
     # default -- it is malformed and must roll back (PR #292 review).
     {"watch": [{"scope": [], "tensors": ["input"]}]},           # falsy list scope
     {"watch": [{"scope": "", "tensors": ["input"]}]},           # falsy str scope
-    {"follow": [{"tensor": "ef", "at": "stride:1", "scope": ""}]},   # falsy follow scope
+    {"follow": [{"tensor": "ef", "scope": "", "stride": 1}]},   # falsy follow scope
     {"watch": None},                                            # explicit null
     {"follow": None},
     # non-finite bounds would make the OOB check meaningless while looking applied.
-    {"follow": [{"tensor": "ef", "at": "stage", "bounds": [float("nan"), 60]}]},
-    {"follow": [{"tensor": "ef", "at": "stage", "bounds": [0, float("inf")]}]},
-    {"follow": [{"tensor": "ef", "at": "stage", "bounds": [float("-inf"), 60]}]},
+    {"follow": [{"tensor": "ef", "stages": True, "bounds": [float("nan"), 60]}]},
+    {"follow": [{"tensor": "ef", "stages": True, "bounds": [0, float("inf")]}]},
+    {"follow": [{"tensor": "ef", "stages": True, "bounds": [float("-inf"), 60]}]},
     # a malformed field on a NON-FIRST follow entry must still reject the whole spec
     # (atomic validation), even though only the first entry's cadence is honored
     # (PR #292 review).
-    {"follow": [{"tensor": "a", "at": "stage"}, {"tensor": "b", "at": "bogus"}]},
-    {"follow": [{"tensor": "a", "at": "stage"}, {"tensor": "b", "at": "stride:0"}]},
-    {"follow": [{"tensor": "a", "at": "stage"}, {"tensor": "b", "at": "stage", "scope": []}]},
-    {"follow": [{"tensor": "a", "at": "stage"}, {"tensor": "b", "at": "stage", "bounds": [1, 2, 3]}]},
+    {"follow": [{"tensor": "a", "stages": True}, {"tensor": "b", "at": "bogus"}]},  # leftover `at` key
+    {"follow": [{"tensor": "a", "stages": True}, {"tensor": "b", "scope": {"names": ["x"]}, "stride": 0}]},
+    {"follow": [{"tensor": "a", "stages": True}, {"tensor": "b", "stages": True, "scope": []}]},
+    {"follow": [{"tensor": "a", "stages": True}, {"tensor": "b", "stages": True, "bounds": [1, 2, 3]}]},
 ])
 def test_invalid_spec_rolls_back_to_flat_vars(spec, monkeypatch, tmp_path_factory):
     """Every malformed shape/value rejects the WHOLE spec and falls back to the flat
@@ -343,7 +487,7 @@ def test_mid_translation_crash_rolls_back_to_flat_vars(monkeypatch, tmp_path_fac
     """A spec that derives some flat vars and THEN crashes (scope is a string, not a
     mapping) must roll back fully to the original flat vars — no half-applied
     NANLOG_PIPELINE / TRACK_ATTR / stride survives."""
-    spec = {"follow": [{"tensor": "ef", "at": "stride:8", "scope": "bad"}]}
+    spec = {"follow": [{"tensor": "ef", "scope": "bad", "stride": 8}]}
     nl = _load_logger(
         {"NANLOG_SPEC": json.dumps(spec),
          "NANLOG_CHANNELS": "act,igrad", "NANLOG_PIPELINE": "0"},
@@ -397,7 +541,7 @@ def test_spec_stage_clears_stale_flat_track_every_layer(monkeypatch, tmp_path_fa
     """A stage follow must not keep a lingering flat NANLOG_TRACK_EVERY_LAYER=1."""
     nl = _load_logger(
         {"NANLOG_TRACK_EVERY_LAYER": "1",
-         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}]})},
+         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "stages": True}]})},
         monkeypatch, tmp_path_factory)
     assert nl._TRACK_EVERY_LAYER is False
 
@@ -406,7 +550,7 @@ def test_spec_without_bounds_clears_stale_flat_bounds(monkeypatch, tmp_path_fact
     """A follow spec with no bounds must not keep a lingering flat NANLOG_BOUNDS."""
     nl = _load_logger(
         {"NANLOG_BOUNDS": "ef:0:60",
-         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}]})},
+         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "stages": True}]})},
         monkeypatch, tmp_path_factory)
     assert nl._BOUNDS_ACTIVE is False
 
@@ -415,7 +559,7 @@ def test_follow_only_spec_clears_stale_flat_watch_names(monkeypatch, tmp_path_fa
     """A follow-only spec must not keep a lingering flat NANLOG_WATCH_NAMES."""
     nl = _load_logger(
         {"NANLOG_WATCH_NAMES": "emb_proj",
-         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}]})},
+         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "stages": True}]})},
         monkeypatch, tmp_path_factory)
     assert nl._WATCH_NAMES == ()
     assert nl._WATCH_TYPES == ()   # and the Linear default does not re-arm
@@ -465,7 +609,7 @@ def test_spec_dir_key_is_rejected(monkeypatch, tmp_path_factory):
     """`dir` is not a valid spec key -- output location is the separate NANLOG_DIR env
     var. A spec `dir` must roll back (not silently redirect artifacts)."""
     nl = _load_logger(
-        {"NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}], "dir": "/tmp/x"})},
+        {"NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "stages": True}], "dir": "/tmp/x"})},
         monkeypatch, tmp_path_factory)
     assert nl._SPEC_APPLIED is False
     assert "dir" in (nl._SPEC_ERROR or "")
@@ -475,7 +619,7 @@ def test_spec_dir_key_is_rejected(monkeypatch, tmp_path_factory):
 def test_inline_spec_still_works(monkeypatch, tmp_path_factory):
     """The original inline NANLOG_SPEC path is unchanged (lowest precedence)."""
     nl = _load_logger(
-        {"NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}]})},
+        {"NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "stages": True}]})},
         monkeypatch, tmp_path_factory)
     assert nl._SPEC_APPLIED is True
     assert nl._SPEC_SOURCE == "NANLOG_SPEC"

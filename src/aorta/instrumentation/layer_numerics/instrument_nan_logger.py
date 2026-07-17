@@ -45,20 +45,28 @@ How to run:
 
 Settings (environment variables):
   NANLOG_SPEC            structured JSON config (recommended). When set, it WINS and
-                         is translated into the flat NANLOG_* vars below. Unifies the
-                         flat flags onto three axes -- scope (which modules), tensors
-                         (which of a module's tensors), at (when/how often) -- and two
+                         is translated into the flat NANLOG_* vars below. Two
                          observation kinds: `watch` (a module's OWN tensors) and
                          `follow` (trace ONE named tensor across positions). Example:
                            NANLOG_SPEC='{
                              "watch":  [{"scope": {"types": ["MLP","AttentionBlock"]},
                                          "tensors": ["input","output"]}],
                              "follow": [{"tensor": "embedding_features",
-                                         "at": "stage", "bounds": [0,60]}],
+                                         "stages": true, "bounds": [0,60]}],
                              "sample_every": 50, "pre_context": 10}'
-                         tensors: input,output,weight,bias,grad ("grad" = all of
-                         igrad+wgrad+bgrad). at: "stride:N" (every Nth module in
-                         scope; 1=every) or "stage" (pipeline stages).
+                         watch: scope {names/types} + tensors + optional stride.
+                           tensors: input,output,weight,bias,igrad,grad
+                             ("igrad" = activation-input grad only; "grad" =
+                             igrad+wgrad+bgrad). "stride": N hooks every Nth matched
+                             module (default 1 = all), to thin a broad watch.
+                         follow: `tensor` + WHERE to check it, as two independent knobs:
+                           "stages": true  -> at the pipeline stage boundaries
+                           "scope": {...}  -> ALSO at those modules; "stride": N picks
+                                              every Nth matched module (default 1).
+                           Set either or both (default: stages only).
+                         diagnostics: optional list of "how much detail" toggles
+                           applied to every record: addr, locate, bad_values,
+                           dump_tensor, alloc_snapshot.
                          The same JSON can instead come from a file, by precedence:
                          `--config <file>` CLI flag > NANLOG_SPEC_FILE=<file> env >
                          inline NANLOG_SPEC. NANLOG_DIR stays a separate var either
@@ -264,15 +272,18 @@ import torch  # noqa: E402
 # ---------------------------------------------------------------------------
 # NANLOG_SPEC front-end (structured config)
 # ---------------------------------------------------------------------------
-# One JSON env var that unifies the flat NANLOG_* flags onto three axes:
+# One JSON env var, two observation kinds:
+#   watch   [{scope, tensors, stride?}, ...]      -- a module's OWN tensors
+#   follow  [{tensor, stages?, scope?, stride?, bounds?}, ...]
+#                                                 -- trace ONE named tensor across positions
+# building blocks:
 #   scope   {names:[substr,...], types:[ClassName,...]}  -- which modules
-#   tensors [input,output,weight,bias,grad]              -- which of a module's tensors
-#   at      "stride:N" | "stage"                         -- when/how often
-# and two observation kinds:
-#   watch   [{scope, tensors, at?}, ...]   -- a module's OWN tensors
-#   follow  [{tensor, at, scope?, bounds?}, ...] -- trace ONE named tensor across positions
-# plus cross-cutting: sample_every, pre_context. (Output dir is the separate
-# NANLOG_DIR env var, never a spec key.)
+#   tensors [input,output,weight,bias,igrad,grad]        -- which of a module's tensors
+#   stages  bool  -- (follow) check at the pipeline stage boundaries
+#   stride  int   -- every Nth matched module (default 1); watch: thin the hooks,
+#                    follow: re-scan cadence at scoped modules
+# plus cross-cutting: sample_every, pre_context, diagnostics[]. (Output dir is the
+# separate NANLOG_DIR env var, never a spec key.)
 #
 # When set, NANLOG_SPEC WINS: it is translated into the flat NANLOG_* vars the
 # engine below already reads (the engine is unchanged). Standalone-safe: no aorta
@@ -282,13 +293,27 @@ import torch  # noqa: E402
 # scopes are merged with a warning (see _apply_spec).
 # Each spec `tensors` token maps to one or more flat channels. "grad" is the
 # umbrella for ALL gradients — activation-input grad (igrad) AND parameter grads
-# (wgrad/bgrad) — so asking for "grad" gets everything a NaN hunt wants.
+# (wgrad/bgrad) — so asking for "grad" gets everything a NaN hunt wants. "igrad"
+# selects ONLY the activation-input gradient, for when the param grads aren't wanted.
 _SPEC_TENSOR_TO_CHANNEL = {
     "input": ("input",),
     "output": ("act",),
     "weight": ("weight",),
     "bias": ("bias",),
+    "igrad": ("igrad",),
     "grad": ("igrad", "wgrad", "bgrad"),
+}
+
+# Optional `diagnostics` block: "how much detail" toggles that apply to every
+# captured record, independent of watch/follow. Spec name -> flat env var it sets.
+# These are cross-cutting (not per-entry), so they live in a top-level list rather
+# than on a watch/follow entry.
+_SPEC_DIAG_KEYS = {
+    "addr": "NANLOG_ADDR",                    # GPU data_ptr + storage extent per tensor
+    "locate": "NANLOG_LOCATE",                # how many rows hold a bad value
+    "bad_values": "NANLOG_BAD_VALUES",        # first bad element idx/row/col/value
+    "dump_tensor": "NANLOG_DUMP_TENSOR",      # save the full bad tensor to .pt (one-shot)
+    "alloc_snapshot": "NANLOG_ALLOC_SNAPSHOT",  # allocator event trace on first bad
 }
 
 
@@ -300,19 +325,6 @@ def _spec_warn(msg: str) -> None:
 def _spec_set(env_key: str, value: str) -> None:
     """Set a derived flat var (NANLOG_SPEC wins, so overwrite)."""
     os.environ[env_key] = value
-
-
-def _parse_stride(at: str) -> str | None:
-    """Return the N of a well-formed "stride:N" (N a positive int) as a string, else
-    None (warned by the caller). Guards the engine's `int(NANLOG_TRACK_LAYER_STRIDE)`
-    against a malformed spec value crashing the logger at import."""
-    n_str = at.split(":", 1)[1].strip()
-    try:
-        if int(n_str) >= 1:
-            return n_str
-    except ValueError:
-        pass
-    return None
 
 
 # --- Spec validation helpers -------------------------------------------------
@@ -341,13 +353,45 @@ def _spec_int(spec: dict, key: str, minimum: int) -> int | None:
     return v
 
 
-def _validate_follow_at(at) -> None:
-    """A follow `at` must be 'stage' or 'stride:N' (N>=1). Raises otherwise."""
-    if at == "stage":
-        return
-    if isinstance(at, str) and at.startswith("stride:") and _parse_stride(at) is not None:
-        return
-    raise ValueError(f"follow[].at {at!r} must be 'stage' or 'stride:N' with N>=1")
+def _resolve_follow_cadence(f: dict) -> tuple:
+    """Normalize a follow entry's cadence into (stages: bool, stride: int|None),
+    where stride is the "also re-scan every Nth watched module" cadence (None = don't
+    re-scan at modules). WHERE to check the followed tensor is two independent knobs:
+
+        "stages": true   -> capture at the pipeline stage boundaries (copy/sparse/fwd)
+        "scope":  {...}   -> ALSO capture at those modules (names/types)
+        "stride": N       -> every Nth matched module (default 1; requires `scope`)
+
+    Set either or both. Default (neither key) is stages-only, the common case.
+    Raises ValueError on a malformed/contradictory entry so the whole spec rolls back.
+    """
+    # Reject unknown keys so a typo or a leftover `at` from the old schema fails loudly
+    # instead of silently falling through to the stages-only default.
+    _FOLLOW_KEYS = {"tensor", "stages", "scope", "stride", "bounds"}
+    unknown = [k for k in f if k not in _FOLLOW_KEYS]
+    if unknown:
+        raise ValueError(f"unknown follow[] key(s) {sorted(unknown)}; "
+                         f"valid: {sorted(_FOLLOW_KEYS)}")
+    # `stages` defaults to True unless a `scope` is given without it (then the intent
+    # is module-capture; the caller opts into stages explicitly with stages:true).
+    stages = f.get("stages", "scope" not in f)
+    if not isinstance(stages, bool):
+        raise ValueError(f"follow[].stages must be true/false, got {stages!r}")
+    stride = None
+    if "stride" in f:
+        v = f["stride"]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+            raise ValueError(f"follow[].stride must be an integer >= 1, got {v!r}")
+        stride = v
+    if "scope" in f and stride is None:
+        stride = 1   # a scope with no stride means "every matched module"
+    if stride is not None and "scope" not in f:
+        raise ValueError("follow[].stride needs a `scope` naming which modules to "
+                         "re-scan (types/names)")
+    if not stages and stride is None:
+        raise ValueError("follow[] captures nothing: set `stages: true` and/or a "
+                         "`scope` to re-scan at modules")
+    return stages, stride
 
 
 def _spec_optional_mapping(container: dict, key: str, path: str) -> dict:
@@ -413,9 +457,13 @@ def _apply_spec(spec_json: str) -> tuple:
 # the wrapper owns output routing and sets it independently of the spec.
 _SPEC_OWNED_VARS = {
     "NANLOG_WATCH_NAMES": "", "NANLOG_WATCH_TYPES": "", "NANLOG_CHANNELS": "",
+    "NANLOG_WATCH_STRIDE": "1",
     "NANLOG_PIPELINE": "0", "NANLOG_TRACK_ATTR": "", "NANLOG_TRACK_EVERY_LAYER": "0",
     "NANLOG_TRACK_LAYER_STRIDE": "1", "NANLOG_BOUNDS": "",
     "NANLOG_SAMPLE_EVERY": "", "NANLOG_PRE_CONTEXT": "",
+    # diagnostics block (see _SPEC_DIAG_KEYS)
+    "NANLOG_ADDR": "0", "NANLOG_LOCATE": "0", "NANLOG_BAD_VALUES": "0",
+    "NANLOG_DUMP_TENSOR": "0", "NANLOG_ALLOC_SNAPSHOT": "0",
 }
 
 
@@ -446,7 +494,13 @@ def _translate_spec(spec: dict) -> None:
     if not all(isinstance(g, dict) for g in watch):
         raise ValueError("each `watch` entry must be a mapping")
     per_group_tensors = []   # validated tensor lists, for the multi-group merge warning
+    watch_strides = []       # validated per-group strides, for the merge check below
+    _WATCH_KEYS = {"scope", "tensors", "stride"}
     for g in watch:
+        unknown_k = [k for k in g if k not in _WATCH_KEYS]
+        if unknown_k:
+            raise ValueError(f"unknown watch[] key(s) {sorted(unknown_k)}; "
+                             f"valid: {sorted(_WATCH_KEYS)}")
         sc = _spec_optional_mapping(g, "scope", "watch[].scope")
         names += _spec_string_list(sc.get("names"), "watch[].scope.names")
         types += _spec_string_list(sc.get("types"), "watch[].scope.types")
@@ -464,9 +518,21 @@ def _translate_spec(spec: dict) -> None:
         for t in tensor_names:
             channels += _SPEC_TENSOR_TO_CHANNEL[t]
         per_group_tensors.append(tuple(sorted(tensor_names)))
+        # Per-group `stride` (hook only every Nth matched module). An omitted stride
+        # means 1 (every module) -- record that explicitly so the merge below always
+        # picks the FINEST requested; otherwise a group asking for the default 1 would
+        # be ignored and a larger stride from a sibling group would thin it.
+        sv = g.get("stride", 1)
+        if isinstance(sv, bool) or not isinstance(sv, int) or sv < 1:
+            raise ValueError(f"watch[].stride must be an integer >= 1, got {sv!r}")
+        watch_strides.append(sv)
     if len(per_group_tensors) > 1 and len(set(per_group_tensors)) > 1:
         _spec_warn("multiple watch groups with different `tensors` are merged into one "
                    "global set (engine limitation); split into separate runs for exact per-group capture")
+    # NOTE: watch[].stride is NOT applied here -- it is deferred until after the follow
+    # cadence is known, because a scoped follow re-scans INSIDE the forward hook and a
+    # watch stride that skips hook registration would silently thin that follow's
+    # per-module capture. See the deferred application after the follow block below.
 
     raw_follow = spec["follow"] if "follow" in spec else []
     if not isinstance(raw_follow, list):
@@ -474,15 +540,15 @@ def _translate_spec(spec: dict) -> None:
     if not all(isinstance(f, dict) for f in raw_follow):
         raise ValueError("each `follow` entry must be a mapping")
     # Validate EVERY follow entry up front, not just the first -- otherwise a
-    # malformed `at`/`scope` on a non-first entry would be silently accepted while
-    # the spec still applies, contradicting the atomic-validation contract. (Only the
-    # first entry's cadence/scope is *honored* by the single-follow engine, but a
-    # malformed later entry still signals a user mistake and must roll back.)
+    # malformed field on a non-first entry would be silently accepted while the spec
+    # still applies, contradicting the atomic-validation contract. (Only the first
+    # entry's cadence/scope is *honored* by the single-follow engine, but a malformed
+    # later entry still signals a user mistake and must roll back.)
     for f in raw_follow:
         tensor = f.get("tensor")
         if not isinstance(tensor, str) or not tensor.strip():
             raise ValueError(f"follow[].tensor must be a non-empty string, got {tensor!r}")
-        _validate_follow_at(f.get("at", "stage"))
+        _resolve_follow_cadence(f)                             # validates stages/stride/at
         _spec_optional_mapping(f, "scope", "follow[].scope")   # rejects non-dict scope
         _spec_bounds(f.get("bounds"), "follow[].bounds")       # rejects malformed bounds
     follow = raw_follow
@@ -490,27 +556,30 @@ def _translate_spec(spec: dict) -> None:
         _spec_warn("multiple `follow` entries: only the first cadence/scope is honored "
                    "(engine has one follow path); tensors are unioned into TRACK_ATTR")
     if follow:
-        _spec_set("NANLOG_PIPELINE", "1")
+        f0 = follow[0]
+        stages, stride = _resolve_follow_cadence(f0)
+        # `stages` -> the pipeline stage scan (NANLOG_PIPELINE). Also required as the
+        # engine's transport for the per-module re-scan, so it is on whenever a stride
+        # is requested too. Consequence: a scoped follow still emits stage records even
+        # when `stages` is false/omitted -- warn (worded for both cases) rather than
+        # silently over-capture.
+        if stride is not None and not stages:
+            _spec_warn("a scoped `follow` still emits pipeline-stage records even with "
+                       "`stages` false or omitted (the per-module re-scan rides the same "
+                       "pipeline hook); stage records cannot be suppressed independently today")
+        _spec_set("NANLOG_PIPELINE", "1" if (stages or stride is not None) else "0")
         track_attrs = [f["tensor"].strip() for f in follow]
         _spec_set("NANLOG_TRACK_ATTR", ",".join(track_attrs))
-        f0 = follow[0]
-        at = f0.get("at", "stage")
-        if at == "stage":
-            pass  # pipeline stage scan; scope does not apply to stages
-        elif isinstance(at, str) and at.startswith("stride:"):
-            n_str = _parse_stride(at)
-            if n_str is None:
-                raise ValueError(f"follow[].at {at!r} must be 'stride:N' with N>=1")
+        if stride is not None:
+            # Re-scan the followed tensor at every Nth module in the follow's scope.
             _spec_set("NANLOG_TRACK_EVERY_LAYER", "1")
-            _spec_set("NANLOG_TRACK_LAYER_STRIDE", n_str)
+            _spec_set("NANLOG_TRACK_LAYER_STRIDE", str(stride))
             fsc = _spec_optional_mapping(f0, "scope", "follow[].scope")
             if (names or types) and (fsc.get("names") or fsc.get("types")):
-                _spec_warn("both watch scope and follow-stride scope set; they share the "
+                _spec_warn("both watch scope and follow scope set; they share the "
                            "engine's single module filter and are merged")
             names += _spec_string_list(fsc.get("names"), "follow[].scope.names")
             types += _spec_string_list(fsc.get("types"), "follow[].scope.types")
-        else:
-            raise ValueError(f"follow[].at {at!r} must be 'stage' or 'stride:N'")
         # Bounds are PER-ENTRY: each tensor takes its OWN [lo,hi]. A present-but-malformed
         # bounds raises (silently dropping it would leave a requested OOB check un-run).
         bounds_entries = []
@@ -520,6 +589,28 @@ def _translate_spec(spec: dict) -> None:
                 bounds_entries.append(f"{f['tensor'].strip()}:{b[0]}:{b[1]}")
         if bounds_entries:
             _spec_set("NANLOG_BOUNDS", ";".join(bounds_entries))
+
+    # Deferred watch[].stride. Every group contributes a stride (1 when omitted), so
+    # the finest requested is min(watch_strides); this is only meaningful when some
+    # group asked for >1. The follow per-module re-scan runs INSIDE the forward hook,
+    # and _attach installs that hook only on modules that survive the watch stride --
+    # so a watch stride would silently thin a scoped follow's capture and could hide
+    # the layer where corruption starts. When a scoped follow needs every matched
+    # module's hook, IGNORE the watch stride (with a warning) rather than lose follow
+    # evidence; otherwise apply the finest.
+    effective_watch_stride = min(watch_strides) if watch_strides else 1
+    if effective_watch_stride > 1:
+        follow_needs_all_hooks = bool(
+            follow and _resolve_follow_cadence(follow[0])[1] is not None)
+        if follow_needs_all_hooks:
+            _spec_warn("watch[].stride ignored: a scoped `follow` re-scans inside the "
+                       "forward hook, so every matched module must keep its hook; "
+                       "thinning it would drop follow evidence")
+        else:
+            if len(set(watch_strides)) > 1:
+                _spec_warn("multiple watch groups set different `stride`s; the engine has "
+                           "one global watch stride, so the smallest (finest) is used")
+            _spec_set("NANLOG_WATCH_STRIDE", str(effective_watch_stride))
 
     if names:
         _spec_set("NANLOG_WATCH_NAMES", ",".join(names))
@@ -546,6 +637,18 @@ def _translate_spec(spec: dict) -> None:
     pre_context = _spec_int(spec, "pre_context", minimum=0)
     if pre_context is not None:
         _spec_set("NANLOG_PRE_CONTEXT", str(pre_context))
+    # Optional `diagnostics`: a list of "how much detail" toggles that apply to every
+    # captured record (independent of watch/follow). Each name maps to a flat var.
+    if "diagnostics" in spec:
+        diag = spec["diagnostics"]
+        if not isinstance(diag, list) or not all(isinstance(d, str) for d in diag):
+            raise ValueError("`diagnostics` must be a list of strings")
+        unknown_d = [d for d in diag if d not in _SPEC_DIAG_KEYS]
+        if unknown_d:
+            raise ValueError(f"unknown diagnostics {sorted(unknown_d)}; "
+                             f"valid: {sorted(_SPEC_DIAG_KEYS)}")
+        for d in diag:
+            _spec_set(_SPEC_DIAG_KEYS[d], "1")
     # `dir` is intentionally NOT honored: the output location is always the separate
     # NANLOG_DIR env var (the sweep/collector wrapper owns it and routes artifacts
     # into the trial result tree). A spec `dir` would let a recipe redirect output
@@ -608,6 +711,9 @@ _types_default = "" if _WATCH_NAMES else "Linear"
 _WATCH_TYPES = tuple(
     s.strip() for s in os.environ.get("NANLOG_WATCH_TYPES", _types_default).split(",") if s.strip()
 )
+# Hook only every Nth matched module (1 = every, the default). Thins a broad watch
+# whose per-module reduction volume is too high; applied in _attach.
+_WATCH_STRIDE = max(1, int(os.environ.get("NANLOG_WATCH_STRIDE", "1")))
 # Capture channels (comma list). Each is an independently switchable observation
 # adding its own on-GPU reductions; default to the cheap act+igrad pair. See the
 # module docstring for the per-channel semantics.
@@ -1353,8 +1459,14 @@ def _attach(root: torch.nn.Module) -> int:
     # re-scan silently never fires.
     want_fwd = bool(_CHANNELS & {"act", "input"}) or _TRACK_EVERY_LAYER
     want_bwd = "igrad" in _CHANNELS
+    match_idx = 0   # counts modules matching the scope, for NANLOG_WATCH_STRIDE
     for layer_name, module in root.named_modules():
         if not _is_watched(layer_name, module):
+            continue
+        # Watch stride: hook only every Nth matched module (in traversal order).
+        take = (match_idx % _WATCH_STRIDE == 0)
+        match_idx += 1
+        if not take:
             continue
         if want_fwd:
             module.register_forward_hook(_fwd_hook(layer_name))
@@ -1866,6 +1978,7 @@ def _write_summary() -> None:
         "pre_context_flushed": _pre_flushed,
         "watch_types": list(_WATCH_TYPES),
         "watch_names": list(_WATCH_NAMES),
+        "watch_stride": _WATCH_STRIDE,
         "watched_count": len(_watched_names),
         "watched_names": list(_watched_names),
         "channels": sorted(_CHANNELS),
