@@ -477,6 +477,9 @@ def test_inline_spec_still_works(monkeypatch, tmp_path_factory):
     (["prog", "t.py", "--config", "train.yaml"], None, ["prog", "t.py", "--config", "train.yaml"]),
     (["prog", "--config", "s.json", "t.py", "--config", "train.yaml"], "s.json",
      ["prog", "t.py", "--config", "train.yaml"]),
+    # whitespace around the path is trimmed.
+    (["prog", "--config", "  s.json  ", "t.py"], "s.json", ["prog", "t.py"]),
+    (["prog", "--config=  s.json  ", "t.py"], "s.json", ["prog", "t.py"]),
 ])
 def test_extract_config_arg(argv, expect_cfg, expect_out, monkeypatch, tmp_path_factory):
     """`--config <file>` / `--config=<file>` is pulled out of argv (setting the config
@@ -486,6 +489,22 @@ def test_extract_config_arg(argv, expect_cfg, expect_out, monkeypatch, tmp_path_
     out = nl._extract_config_arg(argv)
     assert nl._CONFIG_FILE_ARG == expect_cfg
     assert out == expect_out
+
+
+@pytest.mark.parametrize("argv", [
+    ["prog", "--config=", "t.py"],       # empty =value
+    ["prog", "--config", "", "t.py"],    # empty space-value
+    ["prog", "--config", "   ", "t.py"], # whitespace-only
+    ["prog", "--config"],                # missing value entirely
+])
+def test_extract_config_arg_empty_is_usage_error(argv, monkeypatch, tmp_path_factory):
+    """An empty/whitespace `--config` value is a usage error (exit 2), not a silent
+    fall-through that looks like 'no spec requested'."""
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+    nl._CONFIG_FILE_ARG = None
+    with pytest.raises(SystemExit) as e:
+        nl._extract_config_arg(argv)
+    assert e.value.code == 2
 
 
 def test_config_source_precedence_and_file_read(monkeypatch, tmp_path_factory, tmp_path):

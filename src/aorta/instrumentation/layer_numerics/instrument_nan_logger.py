@@ -228,13 +228,18 @@ def _extract_config_arg(argv: list) -> list:
     while i < len(argv):
         a = argv[i]
         if a == "--config":
-            if i + 1 >= len(argv):
-                sys.stderr.write("nanlog: --config requires a file path\n")
+            val = argv[i + 1].strip() if i + 1 < len(argv) else ""
+            if not val:
+                sys.stderr.write("nanlog: --config requires a non-empty file path\n")
                 sys.exit(2)
-            _CONFIG_FILE_ARG = argv[i + 1]
+            _CONFIG_FILE_ARG = val
             i += 2
         elif a.startswith("--config="):
-            _CONFIG_FILE_ARG = a.split("=", 1)[1]
+            val = a.split("=", 1)[1].strip()
+            if not val:
+                sys.stderr.write("nanlog: --config= requires a non-empty file path\n")
+                sys.exit(2)
+            _CONFIG_FILE_ARG = val
             i += 1
         else:
             # First non-logger token = the target script. Stop parsing; the target
