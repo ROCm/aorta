@@ -82,6 +82,13 @@ See [`docs/layer-numerics.md`](../../../../docs/layer-numerics.md) for the how-t
 it into the flat vars the engine already reads (a malformed spec warns and falls
 back). Keeping the engine flat-var-only is what preserves the standalone contract.
 
+Recent schema additions (full how-to in [`docs/layer-numerics.md`](../../../../docs/layer-numerics.md)):
+a `watch` entry's `tensors` list also accepts `igrad` (the activation-input grad
+alone, vs. `grad` which is all gradients); a `watch` entry may set `"stride": N`
+(`>= 1`, default `1`) to hook only every Nth matched module; and a top-level
+`"diagnostics": [...]` list (`addr`, `locate`, `bad_values`, `dump_tensor`,
+`alloc_snapshot`) toggles per-record detail across every captured record.
+
 Collector defaults (applied by [`build_env`](__init__.py)): all seven channels,
 `NANLOG_PRE_CONTEXT=10`, `NANLOG_SAMPLE_EVERY=50`. `NANLOG_DIR` is filled per-cell
 so `aorta bundle` picks up the output; recipe/CLI overrides win.
