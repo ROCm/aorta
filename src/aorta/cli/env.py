@@ -24,6 +24,11 @@ from typing import Any
 
 import click
 
+# Single source of truth for the --execution-context choices, shared with
+# the dependency-free _probe_main entry point so the two never drift. This
+# is a stdlib-only constant tuple (no probing side effects at import).
+from aorta.instrumentation.environment import EXECUTION_CONTEXT_INVOCATIONS
+
 
 @click.group()
 def env() -> None:
@@ -107,6 +112,22 @@ def env() -> None:
     show_default=True,
     help="Per-call timeout (seconds, must be >= 1) for `buck2 cquery 'deps(...)'`.",
 )
+@click.option(
+    "--execution-context",
+    type=click.Choice(list(EXECUTION_CONTEXT_INVOCATIONS)),
+    default="direct",
+    show_default=True,
+    help=(
+        "Self-declared label for HOW the probe was launched, stamped into "
+        "execution_context.probe_invocation. Use buck2_action when running "
+        "the probe as a Buck2 action/genrule so it captures the executor's "
+        "environment. Captures nothing new -- but if you claim a "
+        "container/RE capture (non-'direct') and no isolation is detected "
+        "AND neither $AORTA_RE_IMAGE nor $AORTA_DOCKER_IMAGE is set, a "
+        "loud warning is printed to stderr (you may have probed the wrong "
+        "place)."
+    ),
+)
 def probe(
     output: Path,
     verbose: bool,
@@ -115,9 +136,13 @@ def probe(
     extended: bool,
     buck_target: str | None,
     buck_timeout: int,
+    execution_context: str,
 ) -> None:
     """Capture trial-environment state to env.json (issue #147)."""
-    from aorta.instrumentation.environment import collect_env
+    from aorta.instrumentation.environment import (
+        collect_env,
+        execution_context_warning,
+    )
 
     # --summary and --field both bypass the file write -- only one
     # output mode at a time makes sense.
@@ -135,8 +160,20 @@ def probe(
         buck_target=buck_target,
         buck_timeout=buck_timeout,
         detail="full" if extended else "compact",
+        probe_invocation=execution_context,
     )
     snapshot_dict = snapshot.to_dict()
+
+    # Validation guardrail (shared predicate with _probe_main): if the caller
+    # claims a container/RE capture but we saw zero isolation signal and no
+    # launcher image env var, they may have probed the host shell instead of
+    # the workload's context. Warn loudly to stderr (never a hard error --
+    # the snapshot is still valid and written).
+    _ec_warning = execution_context_warning(
+        execution_context, snapshot.container_detected
+    )
+    if _ec_warning is not None:
+        click.echo(_ec_warning, err=True)
 
     # --field: print one value as JSON and exit. Skips the file write
     # entirely; pair with `jq` / `xargs` for scripting.

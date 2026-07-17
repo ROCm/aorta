@@ -129,8 +129,8 @@ operator can act on them without `jq`'ing the JSON. A closing
 end-of-output. Sample:
 
 ```text
-Wrote env probe to /tmp/env.json (schema_version=1.10) [PARTIAL]
-  runtime:   baremetal / python=venv
+Wrote env probe to /tmp/env.json (schema_version=1.11) [PARTIAL]
+  runtime:   baremetal / python=venv  container_detected=no  probe=direct
   build_sys: none
   rocm:      7.2.1 (dev: None)
   hip:       7.2.53211-e1a6bc5663 (amd)
@@ -220,7 +220,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.10"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.11"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
@@ -244,7 +244,9 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `fbgemm` | `dict` | optional `import fbgemm_gpu` (+ commit parse) + parse of `torch.__config__.show()` for `-DUSE_FBGEMM*` defines | `package_version`, `commit` (schema 1.8 -- best-effort git SHA from a setuptools_scm `+g<sha>` local-version segment or a `git_version`/`__commit__` module attr; `null` when fbgemm_gpu is vendored-in-torch rather than separately installed, or carries no SHA), `pytorch_use_fbgemm`, `pytorch_use_fbgemm_genai`. The two booleans capture the build-time decision baked into the PyTorch wheel even when `fbgemm_gpu` isn't a separate pip package. |
 | `aiter` | `dict` | `import aiter; aiter.__version__` + `importlib.metadata.version("amd_aiter" \| "aiter")` + scan of `aiter_meta/hsa/<gfx>/` (or `$AORTA_PYTORCH_SRC/third_party/aiter/hsa/`) | `package_version`, `package_dist_name` (which PyPI dist matched: `amd_aiter` is the canonical AMD-internal ROCm/PyTorch image dist; `aiter` is the upstream name), `commit` (parsed from the setuptools_scm `+g<sha>` local-version segment, matches the image tag's `aiter-<sha>` label), `hsa_tree` (issue #176 -- per-arch fingerprint of pre-built `.co` kernel binaries: file_count, co_count, deterministic combined_sha256). Most installs record `null` for everything; absence is silent. |
 | `aotriton` | `dict` | scan of `<torch>/lib/libaotriton_v2.so*` filenames + `sha256` of the resolved file + presence of `<torch>/lib/aotriton.images/` + `$AOTRITON_INSTALLED_PREFIX` | Default ROCm Flash Attention backend. Bundled in the wheel via `cmake/External/aotriton.cmake` (NOT a `third_party/` git submodule). Fields: `bundled_present`, `bundled_version`, `bundled_lib_hash`, `bundled_images_dir_present`, `installed_prefix`. CK is the alternative backend (toggled via `TORCH_ROCM_FA_PREFER_CK=1`). |
-| `runtime_context` | `dict` | `/.dockerenv`, `/run/.containerenv`, `$SINGULARITY_NAME`, `/proc/1/cgroup`, `sys.prefix`, `$CONDA_DEFAULT_ENV` | `type`, `python_env`, `venv_path`, `conda_env_name` |
+| `runtime_context` | `dict` | `/.dockerenv`, `/run/.containerenv`, `$SINGULARITY_NAME`, `/proc/1/cgroup`, `sys.prefix`, `$CONDA_DEFAULT_ENV` | `type`, `python_env`, `venv_path`, `conda_env_name`. **`type` only ever returns `docker`/`podman`/`singularity`/`baremetal`** — an unnamed sandbox (RE worker, containerd k8s pod) falls through to `baremetal`; use `container_detected` (below) for the runtime-agnostic "am I isolated?" answer. |
+| `container_detected` | `bool` | named-runtime match + `/proc/self/ns/mnt` vs `/proc/1/ns/mnt` (private mount ns) + container/k8s tokens in `/proc/self/cgroup` | Schema 1.11. Runtime-**agnostic** isolation smoke test: `true` on *any* sandbox signal even when the runtime can't be named. Fixes the `runtime_context.type == "baremetal"` false negative for RE-workers / k8s pods. `container_detected:true` + `type:"baremetal"` is the honest reading of an unnamed sandbox. Fail-soft; `false` means "no isolation signal observed," not "definitely bare metal." |
+| `execution_context` | `dict` | `--execution-context` CLI flag (self-declared) | Schema 1.11. `probe_invocation` (`"direct"` \| `"buck2_run"` \| `"buck2_action"`; `"direct"` by default) records **how the probe was launched** — set `buck2_action` when running the probe as a Buck2 action so it captures the executor's env, not the invoking shell's. `likely_execution_platform` (`str \| null`) is reserved for phase-2 Buck2 work and is always `null` today. See the design note `docs/env-probe-container-execution-context.md`. The flag also **warns to stderr** when a non-`direct` context is claimed but `container_detected` is `false` and neither `$AORTA_RE_IMAGE` nor `$AORTA_DOCKER_IMAGE` is set (you may have probed the wrong place). |
 | `docker` | `dict \| null` | `$AORTA_DOCKER_IMAGE` / `$AORTA_DOCKER_DIGEST` env vars + `/proc/self/cgroup` | `null` on baremetal; image+digest provided by the launcher (the only reliable way from inside a container) |
 | `env_vars` | `dict[str, str \| null]` | explicit canonical list (currently 58 names; see `CANONICAL_ENV_VARS` in `environment.py` for the live set) | GPU scoping + HSA / runtime + GPU queue / codegen + NCCL/RCCL + AINIC net-plugin/fabric tuning + gfx950 fence-ordering knob + FBGEMM + MIOpen + SDPA backend selection + GEMM backend preference + hipBLASLt autotune + PyTorch / inductor. Build-time cmake flags (`USE_ROCM_CK_SDPA`, `USE_ROCM_CK_GEMM`, `USE_FBGEMM*`) are NOT in this list -- they're surfaced under their respective library blocks instead, parsed from `torch.__config__.show()`. |
 | `python_version` | `str` | `platform.python_version()` | always populated |
@@ -435,7 +437,38 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.10` (current)
+### `1.11` (current)
+
+Container & execution-context visibility, phase 1. Additive — two new
+top-level fields, both defaulted so older readers don't raise. See the
+design note `docs/env-probe-container-execution-context.md`.
+
+* New top-level **`container_detected`** (`bool`). A runtime-**agnostic**
+  isolation smoke test: `true` on any generic sandbox signal (a named
+  runtime match, a private mount namespace via `/proc/self/ns/mnt` vs
+  `/proc/1/ns/mnt`, or a container/k8s token in `/proc/self/cgroup`).
+  Fixes the long-standing false negative where an RE worker or containerd
+  k8s pod — which have none of the `docker`/`podman`/`singularity` markers
+  `runtime_context.type` knows — reported as `"baremetal"`, the opposite of
+  the truth. `container_detected:true` + `type:"baremetal"` is the honest
+  reading of an unnamed sandbox. Fail-soft; defaulted `false`.
+* New top-level **`execution_context`** block: `probe_invocation`
+  (`"direct"`/`"buck2_run"`/`"buck2_action"`, **self-declared** via the new
+  `aorta env probe --execution-context` flag; `"direct"` by default) and
+  `likely_execution_platform` (`null` today; reserved for phase-2 Buck2
+  work). Defaulted via `_empty_execution_context()`.
+* New CLI flag **`--execution-context`** (also accepted by
+  `python -m aorta.instrumentation._probe_main`). Captures nothing new — it
+  labels the snapshot and **warns to stderr** when a non-`direct` context
+  is claimed but `container_detected` is `false` and neither
+  `$AORTA_RE_IMAGE` nor `$AORTA_DOCKER_IMAGE` is set (the "you probed the
+  host shell, not where the job ran" guardrail). Never a hard error.
+* **Remaining (phase 2, Buck2 / remote-execution):**
+  `likely_execution_platform` population, the `$AORTA_RE_IMAGE` launcher
+  convention, and a `probe_namespace` diff key are deferred pending
+  on-cluster empirics — see the design note's Open Questions.
+
+### `1.10`
 
 Host/container runtime split, part 1: KFD/AMDGPU kernel-mode-driver
 identity. Additive — one new top-level block, defaulted so older readers

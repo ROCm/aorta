@@ -78,7 +78,28 @@ from typing import Any, ClassVar
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.10"
+SCHEMA_VERSION = "1.11"
+# 1.10 -> 1.11 (container & execution-context visibility, phase 1):
+#   - New top-level ``container_detected`` (bool). A runtime-AGNOSTIC
+#     isolation smoke test (``_detect_container_detected()``): True on any
+#     generic sandbox signal -- a named runtime match, a private mount
+#     namespace (``/proc/self/ns/mnt`` != ``/proc/1/ns/mnt``), or a
+#     container/k8s token in ``/proc/self/cgroup``. Fixes the
+#     RE-worker / k8s-pod false negative where ``runtime_context.type``
+#     falls through to ``"baremetal"`` (it only knows docker/podman/
+#     singularity). ``container_detected=True`` + ``type="baremetal"`` is
+#     the honest reading of an unnamed sandbox. Defaulted ``False``.
+#   - New top-level ``execution_context`` block (defaulted via
+#     ``_empty_execution_context()``): ``probe_invocation`` (``direct`` /
+#     ``buck2_run`` / ``buck2_action``, SELF-DECLARED via the new
+#     ``aorta env probe --execution-context`` flag; ``direct`` by default)
+#     and ``likely_execution_platform`` (reserved for phase-2 Buck2 work;
+#     always ``None`` today). Additive: both fields use ``default_factory``
+#     so <=1.10 snapshots round-trip via ``from_dict()``.
+#   - See docs/env-probe-container-execution-context.md (design note). The
+#     Buck2 / remote-execution pieces (likely_execution_platform,
+#     $AORTA_RE_IMAGE, probe_namespace) remain phase-2 follow-ups.
+#
 # 1.9 -> 1.10 (host/container runtime split, part 1): KFD/AMDGPU
 # kernel-mode-driver identity.
 #   - New top-level ``amdgpu_driver`` block, always present (defaulted via
@@ -859,6 +880,17 @@ DOCKERENV_MARKER = Path("/.dockerenv")
 PODMAN_CONTAINERENV_MARKER = Path("/run/.containerenv")
 CGROUP_FILE = Path("/proc/1/cgroup")
 SELF_CGROUP_FILE = Path("/proc/self/cgroup")
+# Generic isolation signals for ``container_detected`` (schema 1.11). These
+# are RUNTIME-AGNOSTIC -- they fire on any mount/cgroup isolation, not just
+# the named docker/podman/singularity runtimes ``_detect_container_type()``
+# knows -- so an RE worker or k8s pod (which have none of the named markers
+# and would otherwise read as "baremetal") is still flagged. The ns/mnt
+# magic symlinks resolve to ``mnt:[<inode>]``; a different inode from PID
+# 1's means a private mount namespace (the defining trait of an OCI
+# sandbox). Distinct constants so tests can monkeypatch without touching
+# real /proc.
+INIT_MNT_NS = Path("/proc/1/ns/mnt")
+SELF_MNT_NS = Path("/proc/self/ns/mnt")
 
 
 # ---------------------------------------------------------------------------
@@ -1004,6 +1036,19 @@ class EnvSnapshot:
     amdgpu_driver: dict = field(
         default_factory=lambda: _empty_amdgpu_driver()
     )
+    # container_detected / execution_context: container & execution-context
+    # visibility (schema 1.11). ``container_detected`` is a single boolean
+    # smoke-detector that is True on ANY generic isolation signal, catching
+    # the RE-worker / k8s-pod sandboxes that ``runtime_context.type`` misses
+    # (they fall through to ``"baremetal"``). ``execution_context`` carries
+    # the self-declared ``probe_invocation`` label set by
+    # ``--execution-context`` (``direct`` by default). Both defaulted so
+    # pre-1.11 snapshots round-trip via ``from_dict()``. See
+    # ``_detect_container_detected()`` and ``_empty_execution_context()``.
+    container_detected: bool = False
+    execution_context: dict = field(
+        default_factory=lambda: _empty_execution_context()
+    )
 
     # Curated emit order for ``to_dict()`` / ``env.json`` (JSON is written
     # sort_keys=False, so THIS is the artifact's key order). Grouped so
@@ -1024,6 +1069,8 @@ class EnvSnapshot:
         # host / kernel / runtime placement
         "host",
         "runtime_context",
+        "container_detected",
+        "execution_context",
         "docker",
         # ROCm runtime + the host-kernel driver that pairs with it
         "rocm",
@@ -1119,6 +1166,8 @@ class EnvSnapshot:
         kwargs.setdefault("miopen_catalog", _empty_miopen_catalog())
         kwargs.setdefault("rocfft_catalog", _empty_rocfft_catalog())
         kwargs.setdefault("amdgpu_driver", _empty_amdgpu_driver())
+        kwargs.setdefault("container_detected", False)
+        kwargs.setdefault("execution_context", _empty_execution_context())
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -1134,6 +1183,7 @@ class EnvSnapshot:
         for line-width; the full values live in the JSON.
         """
         rt = self.runtime_context or {}
+        ec = self.execution_context or {}
         bs = self.build_system or {"kind": "none"}
         rocm = self.rocm or {}
         hip = self.hip or {}
@@ -1224,7 +1274,9 @@ class EnvSnapshot:
         # reads them the same way and can diff either without re-mapping.
         return "\n".join(
             (
-                f"  runtime:   {rt.get('type', '?')} / python={rt.get('python_env', '?')}",
+                f"  runtime:   {rt.get('type', '?')} / python={rt.get('python_env', '?')}"
+                f"  container_detected={'yes' if self.container_detected else 'no'}"
+                f"  probe={ec.get('probe_invocation', '?')}",
                 f"  host:      kernel={host.get('kernel_release') or '?'} "
                 f"machine={host.get('machine') or '?'}  "
                 f"glibc={host.get('glibc_version') or '?'}",
@@ -1894,6 +1946,7 @@ def collect_env(
     buck_target: str | None = None,
     buck_timeout: int = 10,
     detail: str = "compact",
+    probe_invocation: str = "direct",
 ) -> EnvSnapshot:
     """Capture the current process environment as an :class:`EnvSnapshot`.
 
@@ -1954,6 +2007,18 @@ def collect_env(
     _probe_stdio.start()
     try:
         runtime_context = _detect_runtime_context()  # never partial; always populates
+        # container_detected: runtime-agnostic isolation smoke test that
+        # catches RE/k8s sandboxes runtime_context.type misses (schema
+        # 1.11). execution_context: self-declared probe_invocation label.
+        container_detected = _detect_container_detected()
+        execution_context = _empty_execution_context()
+        if probe_invocation in EXECUTION_CONTEXT_INVOCATIONS:
+            execution_context["probe_invocation"] = probe_invocation
+        else:
+            reasons.append(
+                f"execution_context.probe_invocation: unknown value "
+                f"{probe_invocation!r}; recorded as 'direct'"
+            )
         system_health = _run_rdhc(reasons)
         rocm = _capture_rocm_version_files(reasons)
         # Host-kernel scope: reuses rocm's kmd_version read (no second file
@@ -2044,6 +2109,8 @@ def collect_env(
             gpu_arch=gpu_arch,
             host=host,
             runtime_context=runtime_context,
+            container_detected=container_detected,
+            execution_context=execution_context,
             docker=docker,
             env_vars=env_vars,
             python_version=platform.python_version(),
@@ -2068,6 +2135,7 @@ def collect_env(
                 f"collect_env: unexpected failure "
                 f"({type(exc).__name__}: {exc})"
             ),
+            probe_invocation=probe_invocation,
         )
     finally:
         # Idempotent: a no-op if the except branch already restored stdio.
@@ -2075,9 +2143,17 @@ def collect_env(
 
 
 def _disaster_snapshot(
-    preceding_reasons: list[str], unexpected_reason: str
+    preceding_reasons: list[str],
+    unexpected_reason: str,
+    probe_invocation: str = "direct",
 ) -> EnvSnapshot:
     """Return a minimally-shaped EnvSnapshot when collect_env crashes.
+
+    ``probe_invocation`` is threaded through from ``collect_env`` so a
+    crash artifact still records HOW the probe was launched -- a disaster
+    snapshot from a ``buck2_action`` run must not silently rewrite itself
+    to ``"direct"``, which would misdirect triage. An unrecognized value
+    falls back to ``"direct"`` (same rule as the happy path).
 
     Used by the never-raises top-level guard. Every field gets a sane
     null/empty default so downstream consumers (B1, B2, jq pipelines)
@@ -2194,6 +2270,14 @@ def _disaster_snapshot(
             "venv_path": None,
             "conda_env_name": None,
         },
+        # Best-effort even in the disaster path (the detector is fail-soft
+        # and cheap); falls back to False if it too raises.
+        container_detected=_detect_container_detected_safe(),
+        # Preserve the caller's probe_invocation so a crashed buck2_action
+        # probe isn't relabelled "direct" (misleading triage). Validate
+        # here too, since the crash may have happened before collect_env's
+        # own validation ran.
+        execution_context=_disaster_execution_context(probe_invocation),
         host={
             "kernel_release": None,
             "kernel_version": None,
@@ -3013,6 +3097,172 @@ def _detect_python_env() -> str:
     if getattr(sys, "base_prefix", sys.prefix) != sys.prefix:
         return "venv"
     return "system"
+
+
+# Valid probe-invocation labels for ``--execution-context`` /
+# ``execution_context.probe_invocation`` (schema 1.11). ``direct`` is the
+# default (a plain ``aorta env probe``). The two ``buck2_*`` values are
+# SELF-DECLARED by the caller -- phase 1 does not auto-detect them (see the
+# design note's Open Q1); they exist so a Buck2 wrapper can label its
+# snapshot and the CLI can validate the claim.
+EXECUTION_CONTEXT_INVOCATIONS: tuple[str, ...] = (
+    "direct",
+    "buck2_run",
+    "buck2_action",
+)
+
+
+def execution_context_warning(
+    probe_invocation: str, container_detected: bool
+) -> str | None:
+    """Return the claim-vs-reality warning string, or ``None`` if no warning.
+
+    Single source of truth for BOTH probe entry points -- the Click CLI
+    (``aorta env probe``) and the dependency-free
+    ``aorta.instrumentation._probe_main`` -- so the two can never drift on
+    when to warn or what to say. Stdlib-only (reads ``os.environ``), no
+    Click dependency, so ``_probe_main`` can call it too.
+
+    Warns when the caller CLAIMS a non-``direct`` (container / RE) capture
+    but we saw zero isolation signal (``container_detected`` False) and the
+    launcher asserted no image via ``$AORTA_RE_IMAGE`` / ``$AORTA_DOCKER_IMAGE``
+    -- i.e. "you may be probing the host shell, not where the workload ran."
+    ``direct`` never warns.
+    """
+    if probe_invocation == "direct":
+        return None
+    if container_detected:
+        return None
+    if os.environ.get("AORTA_RE_IMAGE") or os.environ.get("AORTA_DOCKER_IMAGE"):
+        return None
+    return (
+        f"WARNING: --execution-context {probe_invocation} claims a "
+        "container/remote-execution capture, but no isolation signal was "
+        "detected (container_detected=false) and neither $AORTA_RE_IMAGE "
+        "nor $AORTA_DOCKER_IMAGE is set. You may be probing the host shell "
+        "rather than where the workload actually ran."
+    )
+
+
+def _empty_execution_context() -> dict[str, Any]:
+    """Default ``execution_context`` block (schema 1.11).
+
+    ``probe_invocation`` defaults to ``"direct"`` -- a plain, unlabelled
+    ``aorta env probe``. ``likely_execution_platform`` is reserved for the
+    phase-2 Buck2 work (resolved RE platform label) and is always ``None``
+    today. Shaped like every other block so the default and a real capture
+    never diverge and pre-1.11 ``from_dict()`` round-trips cleanly.
+    """
+    return {
+        "probe_invocation": "direct",
+        "likely_execution_platform": None,
+    }
+
+
+def _disaster_execution_context(probe_invocation: str) -> dict[str, Any]:
+    """``execution_context`` for the disaster path, preserving the label.
+
+    Same shape as ``_empty_execution_context()`` but keeps the caller's
+    ``probe_invocation`` (validated; unknown -> ``"direct"``) so a crash
+    artifact from a Buck2 action is not silently relabelled.
+    """
+    block = _empty_execution_context()
+    if probe_invocation in EXECUTION_CONTEXT_INVOCATIONS:
+        block["probe_invocation"] = probe_invocation
+    return block
+
+
+def _detect_container_detected() -> bool:
+    """Runtime-agnostic "am I inside *any* isolation boundary?" smoke test.
+
+    Complements ``_detect_container_type()``: that function names the
+    runtime but only knows docker/podman/singularity and falls through to
+    ``"baremetal"`` for everything else -- so a remote-execution worker or
+    a containerd-managed k8s pod (which have none of those markers) reads
+    as bare metal, the OPPOSITE of the truth. This returns ``True`` on ANY
+    of several generic isolation signals, even when the runtime can't be
+    named, so ``container_detected=True`` + ``runtime_context.type=
+    "baremetal"`` is the honest reading of such a sandbox.
+
+    Signals (any one is sufficient; each is fail-soft):
+
+    * A named runtime already matched (``_detect_container_type() !=
+      "baremetal"``) -- docker/podman/singularity are containers by
+      definition, so never report less than that function does.
+    * ``/.dockerenv`` / ``/run/.containerenv`` markers (belt-and-braces;
+      subsumed by the above but cheap and explicit).
+    * The current process's mount namespace differs from PID 1's
+      (``/proc/self/ns/mnt`` resolves to a different ``mnt:[<inode>]``
+      than ``/proc/1/ns/mnt``). NOTE: this only fires when PID 1 is
+      OUTSIDE the probe's namespace -- e.g. an RE worker or ``unshare -m``
+      sandbox that shares the HOST pid namespace so ``/proc/1`` is host
+      init. A STANDARD container (docker/podman/OCI) has its own pid
+      namespace where PID 1 IS the container's init, so it shares the
+      probe's mount namespace and this signal does NOT fire -- that case
+      is caught by the marker files and cgroup tokens instead. So this is
+      an extra signal for the shared-pid-namespace sandbox, not the
+      primary container check.
+    * A container/sandbox token in the process cgroup path
+      (``/proc/self/cgroup``): ``docker`` / ``containerd`` / ``kubepods``
+      / ``libpod`` / ``lxc`` / ``crio`` -- the cgroup-v2 shapes RE and
+      k8s runtimes leave behind.
+
+    Never raises; a signal that can't be read simply doesn't fire. False
+    only means "no isolation signal observed," never "definitely bare
+    metal" -- but a false negative here is strictly less misleading than
+    the ``"baremetal"`` type string it backstops.
+    """
+    if _detect_container_type() != "baremetal":
+        return True
+    if DOCKERENV_MARKER.exists() or PODMAN_CONTAINERENV_MARKER.exists():
+        return True
+    if _mount_namespace_differs_from_init():
+        return True
+    cgroup = _read_text_file(SELF_CGROUP_FILE) or ""
+    tokens = ("docker", "containerd", "kubepods", "libpod", "lxc", "crio")
+    if any(tok in cgroup for tok in tokens):
+        return True
+    return False
+
+
+def _detect_container_detected_safe() -> bool:
+    """``_detect_container_detected()`` that never raises (disaster path)."""
+    try:
+        return _detect_container_detected()
+    except Exception as exc:  # noqa: BLE001 -- disaster path must not throw
+        log.debug("container_detected probe failed: %s", exc)
+        return False
+
+
+def _mount_namespace_differs_from_init() -> bool:
+    """True iff this process has a different mount namespace than PID 1.
+
+    Compares the ``/proc/<pid>/ns/mnt`` magic symlinks, which resolve to
+    ``mnt:[<inode>]``: same inode => same namespace; different inode =>
+    this process is in a different mount namespace than ``/proc/1``.
+    (Raw ``mountinfo`` text can differ between two processes in the SAME
+    namespace, so the inode comparison, not the text, is used here.)
+
+    IMPORTANT scope: this returns True only when PID 1 is OUTSIDE the
+    probe's mount namespace. That happens for a sandbox sharing the HOST
+    pid namespace (some RE workers, ``unshare -m``), where ``/proc/1`` is
+    host init. A STANDARD container has its OWN pid namespace, so PID 1 is
+    the container's init and shares the probe's mount namespace -> this
+    returns False for the common container case (which the marker/cgroup
+    signals catch instead). It is a supplementary signal, not the primary
+    container detector.
+
+    Fail-soft: on non-Linux, or when either symlink is unreadable
+    (permission, PID 1 not inspectable), returns ``False`` -- we do not
+    claim isolation we can't observe.
+    """
+    try:
+        self_ns = os.readlink(str(SELF_MNT_NS))
+        init_ns = os.readlink(str(INIT_MNT_NS))
+    except OSError as exc:
+        log.debug("mount-ns readlink failed: %s", exc)
+        return False
+    return bool(self_ns) and bool(init_ns) and self_ns != init_ns
 
 
 # ---------------------------------------------------------------------------
