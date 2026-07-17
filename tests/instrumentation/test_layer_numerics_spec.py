@@ -119,6 +119,20 @@ def test_follow_stride_spec(monkeypatch, tmp_path_factory):
     assert nl._WATCH_NAMES == ("emb_proj",)
 
 
+@pytest.mark.parametrize("watch_scope", [
+    {"names": ["blk"]},   # names-only watch scope
+    {"types": ["MLP"]},   # types-only watch scope (regression: warning missed this)
+])
+def test_watch_plus_follow_stride_warns_on_merged_scope(watch_scope, monkeypatch, tmp_path_factory, capsys):
+    """A watch scope AND a follow-stride scope share the engine's single module
+    filter, so the merge warning must fire for BOTH names-only and types-only watch
+    scopes (PR #292 review: types-only was silently missed)."""
+    spec = {"watch": [{"scope": watch_scope, "tensors": ["input"]}],
+            "follow": [{"tensor": "ef", "at": "stride:4", "scope": {"names": ["emb"]}}]}
+    _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert "both watch scope and follow-stride scope set" in capsys.readouterr().err
+
+
 def test_follow_entry_without_tensor_does_not_capture_default(monkeypatch, tmp_path_factory):
     """A follow entry with no `tensor` is malformed; it must NOT silently fall through
     to the engine default (embedding_features). With no valid follow entry and no flat

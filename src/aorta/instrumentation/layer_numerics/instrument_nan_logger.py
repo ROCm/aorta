@@ -504,7 +504,7 @@ def _translate_spec(spec: dict) -> None:
             _spec_set("NANLOG_TRACK_EVERY_LAYER", "1")
             _spec_set("NANLOG_TRACK_LAYER_STRIDE", n_str)
             fsc = _spec_optional_mapping(f0, "scope", "follow[].scope")
-            if names and (fsc.get("names") or fsc.get("types")):
+            if (names or types) and (fsc.get("names") or fsc.get("types")):
                 _spec_warn("both watch scope and follow-stride scope set; they share the "
                            "engine's single module filter and are merged")
             names += _spec_string_list(fsc.get("names"), "follow[].scope.names")
