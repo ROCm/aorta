@@ -124,6 +124,48 @@ When `NANLOG_SPEC` is set it **wins**; when it is unset, the flat `NANLOG_*`
 vars below are read directly (still fully supported). A malformed spec logs a
 warning and falls back to the flat vars — it never takes the run down.
 
+### Supplying the spec from a file
+
+Inlining a large JSON blob in an env var is awkward. The same spec JSON can come
+from a file instead, in two ways:
+
+- `--config <path>` (or `--config=<path>`) — a CLI flag to the logger. The flag
+  and its value are stripped from argv before your script runs, so the target
+  never sees them.
+- `NANLOG_SPEC_FILE=<path>` — an env var pointing to the JSON file.
+
+Put the spec in `spec.json`:
+
+```json
+{
+  "follow": [{"tensor": "embedding_features", "at": "stage", "bounds": [0, 60]}],
+  "pre_context": 10,
+  "sample_every": 50
+}
+```
+
+then point the logger at it with the CLI flag:
+
+```bash
+NANLOG_DIR=/output/layer_numerics \
+  python -m aorta.instrumentation.layer_numerics --config spec.json /path/to/your_script.py
+```
+
+or via the env var:
+
+```bash
+NANLOG_DIR=/output/layer_numerics \
+NANLOG_SPEC_FILE=spec.json \
+  python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
+```
+
+Precedence when more than one is set: `--config` (CLI) beats `NANLOG_SPEC_FILE`
+(env) beats inline `NANLOG_SPEC` (env). A config file that can't be read logs a
+warning and falls back to the flat `NANLOG_*` vars — it never takes the run down.
+The output dir stays a **separate** `NANLOG_DIR` — it is not read from the config
+file. The summary JSON records which input won in a `spec_source` field
+(`"NANLOG_SPEC"`, `"NANLOG_SPEC_FILE=<path>"`, or `"--config=<path>"`).
+
 ## The two things you can capture
 
 Everything the logger does is one of two kinds — the `watch` and `follow` keys of
@@ -335,7 +377,8 @@ All heavy features default **OFF** and feed the same single per-step host transf
 
 | Var | Purpose | Default | `NANLOG_SPEC` equivalent |
 |---|---|---|---|
-| `NANLOG_DIR` | Output dir for the JSONL + summary | `nan_logger_out` | `dir` |
+| `NANLOG_DIR` | Output dir for the JSONL + summary | `nan_logger_out` | — (env-only; `dir` is **not** a spec key) |
+| `NANLOG_SPEC_FILE` | Path to a JSON file whose contents are used as the spec (`--config` overrides it) | (empty) | (whole spec) |
 | `NANLOG_CHANNELS` | Capture channels: `act,input,igrad,weight,bias,wgrad,bgrad` | `act,igrad` | `watch[].tensors` |
 | `NANLOG_WATCH_NAMES` | Substrings matched against module paths | (empty) | `scope.names` |
 | `NANLOG_WATCH_TYPES` | Module class names to watch | `Linear` (unless `WATCH_NAMES` set) | `scope.types` |

@@ -212,6 +212,31 @@ _COLLECT_RECIPE = os.environ.get("AORTA_LN_COLLECT_RECIPE")
 _COLLECT_SIDECAR = os.environ.get("AORTA_LN_COLLECT_SIDECAR")
 
 
+def _recipe_uses_spec(recipe_path: str) -> bool:
+    """True if the recipe's layer_numerics collector options set NANLOG_SPEC, checked
+    at both recipe-level and per-cell `collect:` blocks. Parses the YAML so a comment
+    mentioning NANLOG_SPEC doesn't count. If PyYAML is unavailable it FAILS the test
+    (rather than substring-guessing) -- set AORTA_LN_COLLECT_EXPECTS_SPEC=1/0 to state
+    the expectation explicitly and skip the parse."""
+    try:
+        import yaml
+    except Exception:
+        pytest.fail("PyYAML not available to parse the collect recipe; install it or "
+                    "set AORTA_LN_COLLECT_EXPECTS_SPEC=1/0 to state the expectation")
+
+    def _collect_has_spec(collect) -> bool:
+        opts = collect.get("layer_numerics") if isinstance(collect, dict) else None
+        return isinstance(opts, dict) and "NANLOG_SPEC" in opts
+
+    doc = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
+    if _collect_has_spec(doc.get("collect", {})):
+        return True
+    for cell in doc.get("cells", []) or []:
+        if isinstance(cell, dict) and _collect_has_spec(cell.get("collect", {})):
+            return True
+    return False
+
+
 @skip_no_env
 @pytest.mark.skipif(not _HAVE_AORTA, reason="aorta CLI not on PATH")
 @pytest.mark.skipif(
@@ -227,8 +252,15 @@ def test_collect_path_produces_artifacts(tmp_path):
     """
     _require_valid_config()
     # A flat-var recipe legitimately produces spec_applied=false; only require
-    # spec_applied=true when the recipe under test actually sets NANLOG_SPEC.
-    expects_spec = "NANLOG_SPEC" in Path(_COLLECT_RECIPE).read_text(encoding="utf-8")
+    # spec_applied=true when the recipe under test actually sets NANLOG_SPEC. Detect
+    # that by parsing the recipe's collect.layer_numerics block (top-level + per-cell),
+    # NOT a substring match -- a comment mentioning NANLOG_SPEC must not flip it. An
+    # explicit AORTA_LN_COLLECT_EXPECTS_SPEC=1/0 overrides the auto-detection.
+    override = os.environ.get("AORTA_LN_COLLECT_EXPECTS_SPEC")
+    if override is not None:
+        expects_spec = override == "1"
+    else:
+        expects_spec = _recipe_uses_spec(_COLLECT_RECIPE)
 
     log = tmp_path / "sweep.log"
     argv = ["aorta", "sweep", "run", "--recipe", _COLLECT_RECIPE,

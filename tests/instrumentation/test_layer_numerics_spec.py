@@ -365,3 +365,141 @@ def test_summary_reports_spec_applied_true_on_success(monkeypatch, tmp_path_fact
     assert smy["spec_present"] is True
     assert smy["spec_applied"] is True
     assert smy["spec_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# SPEC WINS: a stale flat follow/bounds/scope var must NOT leak into a spec run
+# ---------------------------------------------------------------------------
+def test_spec_clears_stale_flat_pipeline(monkeypatch, tmp_path_factory):
+    """A watch-only spec must not inherit a lingering flat NANLOG_PIPELINE=1."""
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1",
+         "NANLOG_SPEC": json.dumps({"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["input"]}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is False
+
+
+def test_spec_stage_clears_stale_flat_track_every_layer(monkeypatch, tmp_path_factory):
+    """A stage follow must not keep a lingering flat NANLOG_TRACK_EVERY_LAYER=1."""
+    nl = _load_logger(
+        {"NANLOG_TRACK_EVERY_LAYER": "1",
+         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._TRACK_EVERY_LAYER is False
+
+
+def test_spec_without_bounds_clears_stale_flat_bounds(monkeypatch, tmp_path_factory):
+    """A follow spec with no bounds must not keep a lingering flat NANLOG_BOUNDS."""
+    nl = _load_logger(
+        {"NANLOG_BOUNDS": "ef:0:60",
+         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._BOUNDS_ACTIVE is False
+
+
+def test_follow_only_spec_clears_stale_flat_watch_names(monkeypatch, tmp_path_factory):
+    """A follow-only spec must not keep a lingering flat NANLOG_WATCH_NAMES."""
+    nl = _load_logger(
+        {"NANLOG_WATCH_NAMES": "emb_proj",
+         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._WATCH_NAMES == ()
+    assert nl._WATCH_TYPES == ()   # and the Linear default does not re-arm
+
+
+# ---------------------------------------------------------------------------
+# spec source: file (NANLOG_SPEC_FILE) + precedence
+# ---------------------------------------------------------------------------
+def test_spec_file_env_applies(monkeypatch, tmp_path_factory, tmp_path):
+    """NANLOG_SPEC_FILE points at a JSON file whose contents are used as the spec."""
+    spec_file = tmp_path / "spec.json"
+    spec_file.write_text(json.dumps(
+        {"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["input", "output"]}]}))
+    nl = _load_logger({"NANLOG_SPEC_FILE": str(spec_file)}, monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is True
+    assert nl._SPEC_SOURCE.startswith("NANLOG_SPEC_FILE=")
+    assert nl._CHANNELS == frozenset({"act", "input"})
+
+
+def test_spec_file_beats_inline(monkeypatch, tmp_path_factory, tmp_path):
+    """When both NANLOG_SPEC_FILE and inline NANLOG_SPEC are set, the file wins."""
+    spec_file = tmp_path / "spec.json"
+    spec_file.write_text(json.dumps({"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["weight"]}]}))
+    nl = _load_logger(
+        {"NANLOG_SPEC_FILE": str(spec_file),
+         "NANLOG_SPEC": json.dumps({"watch": [{"scope": {"types": ["Linear"]}, "tensors": ["input"]}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._CHANNELS == frozenset({"weight"})   # from the file, not inline
+
+
+def test_missing_spec_file_falls_back_but_records_source(monkeypatch, tmp_path_factory):
+    """A NANLOG_SPEC_FILE that can't be read falls back to flat vars, but the artifact
+    still records that a spec WAS requested (present=true) + why it fell back, so the
+    summary never hides the fallback."""
+    nl = _load_logger(
+        {"NANLOG_SPEC_FILE": "/no/such/spec.json",
+         "NANLOG_CHANNELS": "act", "NANLOG_WATCH_TYPES": "Linear"},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_PRESENT is True        # requested, even though unreadable
+    assert nl._SPEC_APPLIED is False
+    assert nl._SPEC_SOURCE.startswith("NANLOG_SPEC_FILE=")
+    assert nl._SPEC_ERROR and "cannot read" in nl._SPEC_ERROR
+    assert nl._CHANNELS == frozenset({"act"})   # flat fallback intact
+
+
+def test_spec_dir_key_is_rejected(monkeypatch, tmp_path_factory):
+    """`dir` is not a valid spec key -- output location is the separate NANLOG_DIR env
+    var. A spec `dir` must roll back (not silently redirect artifacts)."""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}], "dir": "/tmp/x"})},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is False
+    assert "dir" in (nl._SPEC_ERROR or "")
+    assert nl._PIPELINE is False   # whole spec rolled back
+
+
+def test_inline_spec_still_works(monkeypatch, tmp_path_factory):
+    """The original inline NANLOG_SPEC path is unchanged (lowest precedence)."""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "at": "stage"}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is True
+    assert nl._SPEC_SOURCE == "NANLOG_SPEC"
+    assert nl._PIPELINE is True
+
+
+@pytest.mark.parametrize("argv,expect_cfg,expect_out", [
+    (["prog", "--config", "s.json", "t.py", "--m", "x"], "s.json", ["prog", "t.py", "--m", "x"]),
+    (["prog", "--config=s.json", "t.py", "a"], "s.json", ["prog", "t.py", "a"]),
+    (["prog", "t.py", "a"], None, ["prog", "t.py", "a"]),
+    # the target script's OWN --config (after the target path) must pass through
+    # untouched -- the logger only consumes a LEADING --config.
+    (["prog", "t.py", "--config", "train.yaml"], None, ["prog", "t.py", "--config", "train.yaml"]),
+    (["prog", "--config", "s.json", "t.py", "--config", "train.yaml"], "s.json",
+     ["prog", "t.py", "--config", "train.yaml"]),
+])
+def test_extract_config_arg(argv, expect_cfg, expect_out, monkeypatch, tmp_path_factory):
+    """`--config <file>` / `--config=<file>` is pulled out of argv (setting the config
+    path) and the target + its args are left intact for the script."""
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+    nl._CONFIG_FILE_ARG = None
+    out = nl._extract_config_arg(argv)
+    assert nl._CONFIG_FILE_ARG == expect_cfg
+    assert out == expect_out
+
+
+def test_config_source_precedence_and_file_read(monkeypatch, tmp_path_factory, tmp_path):
+    """--config (via _CONFIG_FILE_ARG) beats NANLOG_SPEC_FILE beats inline NANLOG_SPEC,
+    and its file contents are what gets read."""
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps({"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["output"]}]}))
+    nl = _load_logger({"NANLOG_SPEC": json.dumps({"sample_every": 7})},
+                      monkeypatch, tmp_path_factory)
+    # simulate the --config extraction having run, then re-resolve + apply
+    nl._CONFIG_FILE_ARG = str(cfg)
+    text, source, error = nl._resolve_spec_source()
+    assert source.startswith("--config=")
+    assert error is None
+    applied, err = nl._apply_spec(text)
+    assert applied is True and err is None
+    assert nl._SPEC_TENSOR_TO_CHANNEL["output"] == ("act",)   # sanity on the mapping

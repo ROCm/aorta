@@ -73,6 +73,11 @@ exhaustive reference is the module docstring at the top of
 [`instrument_nan_logger.py`](instrument_nan_logger.py). Don't duplicate the option
 table here — keep it in one place.
 
+The spec JSON can be supplied three ways, in order of precedence: the `--config
+<path>` CLI flag beats `NANLOG_SPEC_FILE=<path>` (env), which beats inline
+`NANLOG_SPEC` (env). The summary JSON records which won in a `spec_source` field.
+See [`docs/layer-numerics.md`](../../../../docs/layer-numerics.md) for the how-to.
+
 `NANLOG_SPEC` is a thin front-end: at import it validates the JSON and translates
 it into the flat vars the engine already reads (a malformed spec warns and falls
 back). Keeping the engine flat-var-only is what preserves the standalone contract.
@@ -87,8 +92,10 @@ so `aorta bundle` picks up the output; recipe/CLI overrides win.
   a single batched transfer per step — no per-GEMM `.item()`. This is what keeps a
   timing-sensitive repro reproducible; any change that adds a sync on the hot path
   defeats the tool's purpose.
-- **Standalone-runnable.** No imports of the rest of `aorta`; config stays via
-  `NANLOG_*` env vars only. The script is handed to partners as a bare file.
+- **Standalone-runnable.** No imports of the rest of `aorta`; the engine reads
+  config from `NANLOG_*` env vars only (the `--config` flag and `NANLOG_SPEC_FILE`
+  are thin front-ends that resolve to those vars). The script is handed to partners
+  as a bare file.
 - **Fail-soft.** A sidecar must never take the training job down: bad config warns
   and falls back, hooks catch their own errors.
 

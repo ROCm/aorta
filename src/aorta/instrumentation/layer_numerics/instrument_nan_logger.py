@@ -59,8 +59,15 @@ Settings (environment variables):
                          tensors: input,output,weight,bias,grad ("grad" = all of
                          igrad+wgrad+bgrad). at: "stride:N" (every Nth module in
                          scope; 1=every) or "stage" (pipeline stages).
-                         When NANLOG_SPEC is unset, the flat vars below are read
+                         The same JSON can instead come from a file, by precedence:
+                         `--config <file>` CLI flag > NANLOG_SPEC_FILE=<file> env >
+                         inline NANLOG_SPEC. NANLOG_DIR stays a separate var either
+                         way; the summary records the winner in `spec_source`.
+                         When no spec is supplied, the flat vars below are read
                          directly (legacy, still supported).
+  NANLOG_SPEC_FILE       path to a JSON file whose contents are used as NANLOG_SPEC
+                         (see precedence above). A file that can't be read warns and
+                         falls back to the flat vars.
   NANLOG_DIR             output dir for the JSONL + summary (default ./nan_logger_out)
   NANLOG_HUGE_THRESHOLD  "huge" cutoff, |x| > T             (default 1e10)
   NANLOG_SAMPLE_EVERY    write a record for a CLEAN layer 1 step in N (default 50;
@@ -201,10 +208,50 @@ import time
 from collections import deque
 from pathlib import Path
 
+# Optional `--config <file>` (or `--config=<file>`): a path to a JSON spec file,
+# equivalent to setting NANLOG_SPEC to that file's contents. Parsed and stripped
+# from argv HERE -- before the config block below runs and before the target
+# script sees argv -- so the target never receives our flag. CLI beats the
+# NANLOG_SPEC_FILE / NANLOG_SPEC env vars (see _resolve_spec_source).
+_CONFIG_FILE_ARG = None
+
+
+def _extract_config_arg(argv: list) -> list:
+    """Pull a LEADING `--config <file>` / `--config=<file>` out of argv, set
+    _CONFIG_FILE_ARG, and return argv without it. Only logger flags BEFORE the target
+    script are parsed: the first non-`--config` token is the target, and everything
+    from there on (including a later `--config` the target itself uses) is left
+    untouched -- so wrapping a script that takes its own --config is safe."""
+    global _CONFIG_FILE_ARG
+    out = [argv[0]]
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--config":
+            if i + 1 >= len(argv):
+                sys.stderr.write("nanlog: --config requires a file path\n")
+                sys.exit(2)
+            _CONFIG_FILE_ARG = argv[i + 1]
+            i += 2
+        elif a.startswith("--config="):
+            _CONFIG_FILE_ARG = a.split("=", 1)[1]
+            i += 1
+        else:
+            # First non-logger token = the target script. Stop parsing; the target
+            # and all its args (which may include their own --config) pass through.
+            out.extend(argv[i:])
+            break
+    return out
+
+
+if __name__ == "__main__":
+    sys.argv = _extract_config_arg(sys.argv)
+
 # Keep the no-arg usage path dependency-light: print usage and exit before importing
 # torch, so `python instrument_nan_logger.py` works in a minimal env without torch.
 if __name__ == "__main__" and len(sys.argv) < 2:
-    sys.stderr.write("usage: python instrument_nan_logger.py <target_script.py> [args...]\n")
+    sys.stderr.write("usage: python instrument_nan_logger.py [--config spec.json] "
+                     "<target_script.py> [args...]\n")
     sys.exit(2)
 
 import torch  # noqa: E402
@@ -219,7 +266,8 @@ import torch  # noqa: E402
 # and two observation kinds:
 #   watch   [{scope, tensors, at?}, ...]   -- a module's OWN tensors
 #   follow  [{tensor, at, scope?, bounds?}, ...] -- trace ONE named tensor across positions
-# plus cross-cutting: sample_every, pre_context, dir.
+# plus cross-cutting: sample_every, pre_context. (Output dir is the separate
+# NANLOG_DIR env var, never a spec key.)
 #
 # When set, NANLOG_SPEC WINS: it is translated into the flat NANLOG_* vars the
 # engine below already reads (the engine is unchanged). Standalone-safe: no aorta
@@ -354,11 +402,33 @@ def _apply_spec(spec_json: str) -> tuple:
     return True, None
 
 
+# Flat vars the spec is authoritative over: when NANLOG_SPEC applies, each is reset
+# to its OFF/empty baseline first, so a lingering flat var (e.g. NANLOG_PIPELINE=1)
+# can never leak into a run whose spec didn't request it. NANLOG_DIR is NOT here --
+# the wrapper owns output routing and sets it independently of the spec.
+_SPEC_OWNED_VARS = {
+    "NANLOG_WATCH_NAMES": "", "NANLOG_WATCH_TYPES": "", "NANLOG_CHANNELS": "",
+    "NANLOG_PIPELINE": "0", "NANLOG_TRACK_ATTR": "", "NANLOG_TRACK_EVERY_LAYER": "0",
+    "NANLOG_TRACK_LAYER_STRIDE": "1", "NANLOG_BOUNDS": "",
+    "NANLOG_SAMPLE_EVERY": "", "NANLOG_PRE_CONTEXT": "",
+}
+
+
 def _translate_spec(spec: dict) -> None:
     """Body of the spec->flat-var translation. Raises ValueError on any malformed
     shape/value (wrong type, unknown tensor, bad number/bounds); _apply_spec catches
     it and rolls the whole spec back to the flat vars atomically -- so a bad spec
     never half-applies, and never crashes the run."""
+    # SPEC WINS: reset every spec-owned flat var to baseline first, so a stale flat
+    # var the spec doesn't set (e.g. NANLOG_PIPELINE=1, NANLOG_BOUNDS=...) can't leak
+    # through. Anything the spec DOES request is re-set below. Empty SAMPLE_EVERY/
+    # PRE_CONTEXT means "spec didn't set it" -> the engine's own default applies.
+    for _k, _v in _SPEC_OWNED_VARS.items():
+        if _v == "":
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+
     names: list = []
     types: list = []
     channels: list = []
@@ -471,20 +541,49 @@ def _translate_spec(spec: dict) -> None:
     pre_context = _spec_int(spec, "pre_context", minimum=0)
     if pre_context is not None:
         _spec_set("NANLOG_PRE_CONTEXT", str(pre_context))
+    # `dir` is intentionally NOT honored: the output location is always the separate
+    # NANLOG_DIR env var (the sweep/collector wrapper owns it and routes artifacts
+    # into the trial result tree). A spec `dir` would let a recipe redirect output
+    # outside that tree -- a green run whose artifacts `aorta bundle` never sees.
     if "dir" in spec:
-        if not isinstance(spec["dir"], str) or not spec["dir"].strip():
-            raise ValueError("`dir` must be a non-empty string")
-        _spec_set("NANLOG_DIR", spec["dir"])
+        raise ValueError("`dir` is not a valid NANLOG_SPEC key; set the output "
+                         "location via the NANLOG_DIR environment variable instead")
 
 
-# spec_present: NANLOG_SPEC was set. spec_applied: it was successfully translated
-# (False when a malformed spec rolled back to the flat vars). Kept distinct so the
-# summary never implies the structured config ran when the run used flat fallback.
-_SPEC_PRESENT = bool(os.environ.get("NANLOG_SPEC", "").strip())
+def _resolve_spec_source() -> tuple:
+    """Resolve the structured spec's JSON text and where it came from, honoring
+    precedence: --config file > NANLOG_SPEC_FILE env > inline NANLOG_SPEC env.
+
+    Returns (json_text, source_label, error). When a spec was REQUESTED but its file
+    can't be read, json_text is None but source_label + error are still populated, so
+    the summary records the requested source and why it fell back (the artifact must
+    never hide that a structured config was asked for). (None, None, None) if unset."""
+    file_path = _CONFIG_FILE_ARG or os.environ.get("NANLOG_SPEC_FILE", "").strip() or None
+    if file_path:
+        src = "--config" if _CONFIG_FILE_ARG else "NANLOG_SPEC_FILE"
+        label = f"{src}={file_path}"
+        try:
+            return Path(file_path).read_text(encoding="utf-8"), label, None
+        except OSError as e:
+            msg = f"cannot read spec file {file_path} ({e})"
+            _spec_warn(f"{msg}; falling back to flat NANLOG_* vars")
+            return None, label, msg
+    inline = os.environ.get("NANLOG_SPEC", "").strip()
+    if inline:
+        return os.environ["NANLOG_SPEC"], "NANLOG_SPEC", None
+    return None, None, None
+
+
+# spec_present: a structured spec was REQUESTED (inline, env-file, or --config) --
+# true even if its file was unreadable, so the artifact never hides the request.
+# spec_applied: it was successfully translated (False when malformed/unreadable ->
+# flat fallback). spec_source records which input was requested; spec_error the reason
+# for any fallback.
+_SPEC_TEXT, _SPEC_SOURCE, _SPEC_ERROR = _resolve_spec_source()
+_SPEC_PRESENT = _SPEC_SOURCE is not None
 _SPEC_APPLIED = False
-_SPEC_ERROR = None
-if _SPEC_PRESENT:
-    _SPEC_APPLIED, _SPEC_ERROR = _apply_spec(os.environ["NANLOG_SPEC"])
+if _SPEC_TEXT is not None:
+    _SPEC_APPLIED, _SPEC_ERROR = _apply_spec(_SPEC_TEXT)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -853,6 +952,9 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
     """
     global _matmul_calls
     if not torch.is_tensor(t) or t.numel() == 0:
+        return
+    # Meta tensors have no backing data; _device_stats (torch.isfinite etc.) raises.
+    if t.device.type == "meta":
         return
     if role in _FLOW_ROLES:
         _matmul_calls += 1
@@ -1637,6 +1739,7 @@ def _capture_forward_batch(inp) -> None:
             _layer_scan_targets = targets
     except Exception as e:
         _log(f"WARNING: forward-batch capture failed: {e!r}")
+        _batch_id = None   # don't let forward records inherit a stale stage batch_id
 
 
 def _checkpoint(batch, phase: str) -> None:
@@ -1751,6 +1854,7 @@ def _write_summary() -> None:
         "spec_present": _SPEC_PRESENT,
         "spec_applied": _SPEC_APPLIED,
         "spec_error": _SPEC_ERROR,
+        "spec_source": _SPEC_SOURCE,
         "first_bad": _first_bad,
         "huge_threshold": _HUGE,
         "pre_context": _PRE_CONTEXT,
