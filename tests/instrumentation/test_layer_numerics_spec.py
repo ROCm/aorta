@@ -289,6 +289,13 @@ def test_malformed_entry_shapes_do_not_crash(spec, monkeypatch, tmp_path_factory
     {"follow": [{"tensor": "ef", "at": "stage", "bounds": [float("nan"), 60]}]},
     {"follow": [{"tensor": "ef", "at": "stage", "bounds": [0, float("inf")]}]},
     {"follow": [{"tensor": "ef", "at": "stage", "bounds": [float("-inf"), 60]}]},
+    # a malformed field on a NON-FIRST follow entry must still reject the whole spec
+    # (atomic validation), even though only the first entry's cadence is honored
+    # (PR #292 review).
+    {"follow": [{"tensor": "a", "at": "stage"}, {"tensor": "b", "at": "bogus"}]},
+    {"follow": [{"tensor": "a", "at": "stage"}, {"tensor": "b", "at": "stride:0"}]},
+    {"follow": [{"tensor": "a", "at": "stage"}, {"tensor": "b", "at": "stage", "scope": []}]},
+    {"follow": [{"tensor": "a", "at": "stage"}, {"tensor": "b", "at": "stage", "bounds": [1, 2, 3]}]},
 ])
 def test_invalid_spec_rolls_back_to_flat_vars(spec, monkeypatch, tmp_path_factory):
     """Every malformed shape/value rejects the WHOLE spec and falls back to the flat

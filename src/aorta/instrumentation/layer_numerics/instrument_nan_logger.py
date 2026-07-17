@@ -288,6 +288,15 @@ def _spec_int(spec: dict, key: str, minimum: int) -> int | None:
     return v
 
 
+def _validate_follow_at(at) -> None:
+    """A follow `at` must be 'stage' or 'stride:N' (N>=1). Raises otherwise."""
+    if at == "stage":
+        return
+    if isinstance(at, str) and at.startswith("stride:") and _parse_stride(at) is not None:
+        return
+    raise ValueError(f"follow[].at {at!r} must be 'stage' or 'stride:N' with N>=1")
+
+
 def _spec_optional_mapping(container: dict, key: str, path: str) -> dict:
     """Return container[key] as a dict, or {} if the key is ABSENT. A present but
     non-dict value (including falsy [], "", 0, None) is an error -- otherwise an
@@ -389,13 +398,18 @@ def _translate_spec(spec: dict) -> None:
         raise ValueError("`follow` must be a list")
     if not all(isinstance(f, dict) for f in raw_follow):
         raise ValueError("each `follow` entry must be a mapping")
-    # A follow entry MUST name a non-empty `tensor`; without it there is no target,
-    # and letting it fall back to the engine default ("embedding_features") would
-    # capture the WRONG tensor under a green artifact.
+    # Validate EVERY follow entry up front, not just the first -- otherwise a
+    # malformed `at`/`scope` on a non-first entry would be silently accepted while
+    # the spec still applies, contradicting the atomic-validation contract. (Only the
+    # first entry's cadence/scope is *honored* by the single-follow engine, but a
+    # malformed later entry still signals a user mistake and must roll back.)
     for f in raw_follow:
         tensor = f.get("tensor")
         if not isinstance(tensor, str) or not tensor.strip():
             raise ValueError(f"follow[].tensor must be a non-empty string, got {tensor!r}")
+        _validate_follow_at(f.get("at", "stage"))
+        _spec_optional_mapping(f, "scope", "follow[].scope")   # rejects non-dict scope
+        _spec_bounds(f.get("bounds"), "follow[].bounds")       # rejects malformed bounds
     follow = raw_follow
     if len(follow) > 1:
         _spec_warn("multiple `follow` entries: only the first cadence/scope is honored "
