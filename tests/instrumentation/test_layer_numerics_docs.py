@@ -16,7 +16,7 @@ _DOC = Path(__file__).resolve().parents[2] / "docs" / "layer-numerics.md"
 
 
 def test_docs_spec_examples_are_valid_json():
-    """Every NANLOG_SPEC example in the customer doc must parse as JSON — both the
+    """Every NANLOG_SPEC example in the user doc must parse as JSON — both the
     ``NANLOG_SPEC='...'`` command forms and the backticked ``{...}`` table cells —
     so a user who copies one gets the intended config, not a silent fallback."""
     text = _DOC.read_text(encoding="utf-8")

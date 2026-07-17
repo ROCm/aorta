@@ -229,7 +229,7 @@ import torch  # noqa: E402
 # scopes are merged with a warning (see _apply_spec).
 # Each spec `tensors` token maps to one or more flat channels. "grad" is the
 # umbrella for ALL gradients — activation-input grad (igrad) AND parameter grads
-# (wgrad/bgrad) — so a customer asking for "grad" gets everything a NaN hunt wants.
+# (wgrad/bgrad) — so asking for "grad" gets everything a NaN hunt wants.
 _SPEC_TENSOR_TO_CHANNEL = {
     "input": ("input",),
     "output": ("act",),
@@ -288,14 +288,29 @@ def _spec_int(spec: dict, key: str, minimum: int) -> int | None:
     return v
 
 
+def _spec_optional_mapping(container: dict, key: str, path: str) -> dict:
+    """Return container[key] as a dict, or {} if the key is ABSENT. A present but
+    non-dict value (including falsy [], "", 0, None) is an error -- otherwise an
+    explicit malformed scope would collapse to "not provided" and silently fall
+    through to the engine's default filter, capturing the wrong modules."""
+    if key not in container:
+        return {}
+    value = container[key]
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be a mapping")
+    return value
+
+
 def _spec_bounds(value, path: str):
-    """A [lo, hi] pair of numbers, or None if absent. A present-but-malformed bounds
-    is an error (silently dropping it would leave a requested OOB check un-run)."""
+    """A [lo, hi] pair of finite numbers, or None if absent. A present-but-malformed
+    bounds is an error (silently dropping it would leave a requested OOB check un-run;
+    a NaN/Inf bound would make the range test meaningless while looking applied)."""
     if value is None:
         return None
     if (not isinstance(value, (list, tuple)) or len(value) != 2
-            or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in value)):
-        raise ValueError(f"{path} must be a [lo, hi] pair of numbers")
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                       and math.isfinite(float(x)) for x in value)):
+        raise ValueError(f"{path} must be a finite [lo, hi] pair of numbers")
     return (value[0], value[1])
 
 
@@ -331,29 +346,30 @@ def _apply_spec(spec_json: str) -> tuple:
 
 
 def _translate_spec(spec: dict) -> None:
-    """Body of the spec->flat-var translation. May raise on a truly malformed shape;
-    _apply_spec catches and falls back. Skips non-dict watch/follow entries with a
-    warning rather than crashing on the common 'list of strings' mistake."""
+    """Body of the spec->flat-var translation. Raises ValueError on any malformed
+    shape/value (wrong type, unknown tensor, bad number/bounds); _apply_spec catches
+    it and rolls the whole spec back to the flat vars atomically -- so a bad spec
+    never half-applies, and never crashes the run."""
     names: list = []
     types: list = []
     channels: list = []
 
-    watch = spec.get("watch") or []
+    # Distinguish "key absent" (-> []) from "present but not a list" (-> error). An
+    # explicit `watch: null`/`0`/`""` is a mistake, not "no watch groups".
+    watch = spec["watch"] if "watch" in spec else []
     if not isinstance(watch, list):
         raise ValueError("`watch` must be a list")
     if not all(isinstance(g, dict) for g in watch):
         raise ValueError("each `watch` entry must be a mapping")
-    if len(watch) > 1 and len({tuple(sorted(g.get("tensors", []))) for g in watch}) > 1:
-        _spec_warn("multiple watch groups with different `tensors` are merged into one "
-                   "global set (engine limitation); split into separate runs for exact per-group capture")
+    per_group_tensors = []   # validated tensor lists, for the multi-group merge warning
     for g in watch:
-        sc = g.get("scope") or {}
-        if not isinstance(sc, dict):
-            raise ValueError("watch[].scope must be a mapping")
+        sc = _spec_optional_mapping(g, "scope", "watch[].scope")
         names += _spec_string_list(sc.get("names"), "watch[].scope.names")
         types += _spec_string_list(sc.get("types"), "watch[].scope.types")
         # A watch group must name valid tensors; otherwise NANLOG_CHANNELS would not
         # be overwritten and the run would inherit ambient flat channels (SPEC must win).
+        # Validate the type/values HERE (before any use) so a bad shape gives the clear
+        # "watch[].tensors must be ..." error, not a downstream TypeError.
         tensor_names = _spec_string_list(g.get("tensors"), "watch[].tensors")
         if not tensor_names:
             raise ValueError("watch[].tensors must be a non-empty list")
@@ -363,8 +379,12 @@ def _translate_spec(spec: dict) -> None:
                              f"valid: {list(_SPEC_TENSOR_TO_CHANNEL)}")
         for t in tensor_names:
             channels += _SPEC_TENSOR_TO_CHANNEL[t]
+        per_group_tensors.append(tuple(sorted(tensor_names)))
+    if len(per_group_tensors) > 1 and len(set(per_group_tensors)) > 1:
+        _spec_warn("multiple watch groups with different `tensors` are merged into one "
+                   "global set (engine limitation); split into separate runs for exact per-group capture")
 
-    raw_follow = spec.get("follow") or []
+    raw_follow = spec["follow"] if "follow" in spec else []
     if not isinstance(raw_follow, list):
         raise ValueError("`follow` must be a list")
     if not all(isinstance(f, dict) for f in raw_follow):
@@ -394,9 +414,7 @@ def _translate_spec(spec: dict) -> None:
                 raise ValueError(f"follow[].at {at!r} must be 'stride:N' with N>=1")
             _spec_set("NANLOG_TRACK_EVERY_LAYER", "1")
             _spec_set("NANLOG_TRACK_LAYER_STRIDE", n_str)
-            fsc = f0.get("scope") or {}
-            if not isinstance(fsc, dict):
-                raise ValueError("follow[].scope must be a mapping")
+            fsc = _spec_optional_mapping(f0, "scope", "follow[].scope")
             if names and (fsc.get("names") or fsc.get("types")):
                 _spec_warn("both watch scope and follow-stride scope set; they share the "
                            "engine's single module filter and are merged")

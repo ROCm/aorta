@@ -274,6 +274,21 @@ def test_malformed_entry_shapes_do_not_crash(spec, monkeypatch, tmp_path_factory
     {"follow": [{"tensor": "ef", "at": "stage", "bounds": {"lo": 0, "hi": 1}}]},  # bounds dict
     {"follow": [{"tensor": "ef", "at": "stage", "bounds": [0]}]},         # bounds wrong length
     {"follow": [{"tensor": "ef", "at": "stage", "bounds": ["x", "y"]}]},  # bounds non-numeric
+    # a 2nd watch group with a non-list `tensors` must give the clean tensors error,
+    # not a TypeError from the multi-group merge check (regression, PR #292 review).
+    {"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["input"]},
+               {"scope": {"types": ["Linear"]}, "tensors": None}]},
+    # explicit falsy scope must NOT collapse to "absent" and inherit the Linear
+    # default -- it is malformed and must roll back (PR #292 review).
+    {"watch": [{"scope": [], "tensors": ["input"]}]},           # falsy list scope
+    {"watch": [{"scope": "", "tensors": ["input"]}]},           # falsy str scope
+    {"follow": [{"tensor": "ef", "at": "stride:1", "scope": ""}]},   # falsy follow scope
+    {"watch": None},                                            # explicit null
+    {"follow": None},
+    # non-finite bounds would make the OOB check meaningless while looking applied.
+    {"follow": [{"tensor": "ef", "at": "stage", "bounds": [float("nan"), 60]}]},
+    {"follow": [{"tensor": "ef", "at": "stage", "bounds": [0, float("inf")]}]},
+    {"follow": [{"tensor": "ef", "at": "stage", "bounds": [float("-inf"), 60]}]},
 ])
 def test_invalid_spec_rolls_back_to_flat_vars(spec, monkeypatch, tmp_path_factory):
     """Every malformed shape/value rejects the WHOLE spec and falls back to the flat
@@ -290,6 +305,17 @@ def test_invalid_spec_rolls_back_to_flat_vars(spec, monkeypatch, tmp_path_factor
     assert nl._PIPELINE is False
     assert nl._BOUNDS_ACTIVE is False
     assert nl._SAMPLE_EVERY == 50
+
+
+def test_multigroup_bad_tensors_gives_clean_error(monkeypatch, tmp_path_factory):
+    """A 2nd watch group with a non-list `tensors` must fail with the clear
+    'watch[].tensors must be ...' message, not a TypeError from the merge check."""
+    spec = {"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["input"]},
+                      {"scope": {"types": ["Linear"]}, "tensors": None}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is False
+    assert "watch[].tensors" in (nl._SPEC_ERROR or "")
+    assert "NoneType" not in (nl._SPEC_ERROR or "")
 
 
 def test_mid_translation_crash_rolls_back_to_flat_vars(monkeypatch, tmp_path_factory):

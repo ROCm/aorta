@@ -13,10 +13,10 @@ collector. Dispatcher validation accepts the collector name today; follow-up
 wiring will launch the script (:data:`SCRIPT_PATH`) as a ``runpy`` front-end
 around a workload's entry script with the :func:`build_env` env bundle applied.
 
-The script is a verbatim upstream drop (see ``README.md`` for provenance);
-all tunables are ``NANLOG_*`` environment variables, so this package adds
-no logic on top of it -- only a discoverable script path and the default
-env bundle the collector applies.
+All tunables are ``NANLOG_*`` environment variables -- ``NANLOG_SPEC`` (a
+structured JSON front-end validated at import) or the flat vars it maps to.
+This package adds no logic on top of the script; it exposes a discoverable
+script path and the default env bundle the collector applies.
 """
 
 from __future__ import annotations
