@@ -198,6 +198,10 @@ Everything the logger does is one of two kinds — the `watch` and `follow` keys
   Each record is tagged with its `phase` and a `batch_id` so one batch's records
   line up across steps. This catches corruption that arrives *upstream* of the
   layers, which watching alone cannot see.
+  > Note: a scoped re-scan rides the pipeline hook, so it **also** emits the
+  > stage-boundary records even when `stages` is omitted or `false` — you will see
+  > `phase` records at the stages regardless. Stage records can't be suppressed
+  > independently of a scoped re-scan today.
 
 Add a `bounds: [lo, hi]` to a `follow` entry to flag out-of-range values
 (`kind="oob"`) — a two-sided check the one-sided "huge" threshold misses.

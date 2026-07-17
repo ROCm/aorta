@@ -518,12 +518,14 @@ def _translate_spec(spec: dict) -> None:
         for t in tensor_names:
             channels += _SPEC_TENSOR_TO_CHANNEL[t]
         per_group_tensors.append(tuple(sorted(tensor_names)))
-        # Optional per-group `stride`: hook only every Nth matched module.
-        if "stride" in g:
-            sv = g["stride"]
-            if isinstance(sv, bool) or not isinstance(sv, int) or sv < 1:
-                raise ValueError(f"watch[].stride must be an integer >= 1, got {sv!r}")
-            watch_strides.append(sv)
+        # Per-group `stride` (hook only every Nth matched module). An omitted stride
+        # means 1 (every module) -- record that explicitly so the merge below always
+        # picks the FINEST requested; otherwise a group asking for the default 1 would
+        # be ignored and a larger stride from a sibling group would thin it.
+        sv = g.get("stride", 1)
+        if isinstance(sv, bool) or not isinstance(sv, int) or sv < 1:
+            raise ValueError(f"watch[].stride must be an integer >= 1, got {sv!r}")
+        watch_strides.append(sv)
     if len(per_group_tensors) > 1 and len(set(per_group_tensors)) > 1:
         _spec_warn("multiple watch groups with different `tensors` are merged into one "
                    "global set (engine limitation); split into separate runs for exact per-group capture")
@@ -558,13 +560,13 @@ def _translate_spec(spec: dict) -> None:
         stages, stride = _resolve_follow_cadence(f0)
         # `stages` -> the pipeline stage scan (NANLOG_PIPELINE). Also required as the
         # engine's transport for the per-module re-scan, so it is on whenever a stride
-        # is requested too. Consequence: a scoped follow with stages:false still emits
-        # the stage records (the engine can't separate the two today) -- warn rather
-        # than silently over-capture.
+        # is requested too. Consequence: a scoped follow still emits stage records even
+        # when `stages` is false/omitted -- warn (worded for both cases) rather than
+        # silently over-capture.
         if stride is not None and not stages:
-            _spec_warn("follow with stages:false + a scope still emits pipeline-stage "
-                       "records (the per-module re-scan rides the same pipeline hook); "
-                       "stage records cannot be suppressed independently today")
+            _spec_warn("a scoped `follow` still emits pipeline-stage records even with "
+                       "`stages` false or omitted (the per-module re-scan rides the same "
+                       "pipeline hook); stage records cannot be suppressed independently today")
         _spec_set("NANLOG_PIPELINE", "1" if (stages or stride is not None) else "0")
         track_attrs = [f["tensor"].strip() for f in follow]
         _spec_set("NANLOG_TRACK_ATTR", ",".join(track_attrs))
@@ -588,13 +590,16 @@ def _translate_spec(spec: dict) -> None:
         if bounds_entries:
             _spec_set("NANLOG_BOUNDS", ";".join(bounds_entries))
 
-    # Deferred watch[].stride. The follow per-module re-scan runs INSIDE the forward
-    # hook, and _attach installs that hook only on modules that survive the watch
-    # stride -- so a watch stride would silently thin a scoped follow's capture and
-    # could hide the layer where corruption starts. When a scoped follow needs every
-    # matched module's hook, IGNORE the watch stride (with a warning) rather than lose
-    # follow evidence; otherwise apply it (finest, if groups disagree).
-    if watch_strides:
+    # Deferred watch[].stride. Every group contributes a stride (1 when omitted), so
+    # the finest requested is min(watch_strides); this is only meaningful when some
+    # group asked for >1. The follow per-module re-scan runs INSIDE the forward hook,
+    # and _attach installs that hook only on modules that survive the watch stride --
+    # so a watch stride would silently thin a scoped follow's capture and could hide
+    # the layer where corruption starts. When a scoped follow needs every matched
+    # module's hook, IGNORE the watch stride (with a warning) rather than lose follow
+    # evidence; otherwise apply the finest.
+    effective_watch_stride = min(watch_strides) if watch_strides else 1
+    if effective_watch_stride > 1:
         follow_needs_all_hooks = bool(
             follow and _resolve_follow_cadence(follow[0])[1] is not None)
         if follow_needs_all_hooks:
@@ -605,7 +610,7 @@ def _translate_spec(spec: dict) -> None:
             if len(set(watch_strides)) > 1:
                 _spec_warn("multiple watch groups set different `stride`s; the engine has "
                            "one global watch stride, so the smallest (finest) is used")
-            _spec_set("NANLOG_WATCH_STRIDE", str(min(watch_strides)))
+            _spec_set("NANLOG_WATCH_STRIDE", str(effective_watch_stride))
 
     if names:
         _spec_set("NANLOG_WATCH_NAMES", ",".join(names))
