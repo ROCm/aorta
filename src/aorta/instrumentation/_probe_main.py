@@ -20,6 +20,11 @@ works as ``docker exec ... > env.json`` without a bind mount.
 Pass ``--extended`` to retain the full per-file kernel-catalog lists
 (matching ``aorta env probe --extended``); the default is the compact
 snapshot that drops those lists to keep the artifact small.
+
+Pass ``--execution-context <direct|buck2_run|buck2_action>`` to stamp
+``execution_context.probe_invocation`` (matching the CLI flag). Since this
+entry point is the in-container / in-action probe, ``buck2_action`` is the
+common value here.
 """
 
 from __future__ import annotations
@@ -27,23 +32,76 @@ from __future__ import annotations
 import json
 import sys
 
-from aorta.instrumentation.environment import collect_env
+from aorta.instrumentation.environment import (
+    EXECUTION_CONTEXT_INVOCATIONS,
+    collect_env,
+    execution_context_warning,
+)
 
 
 def main(argv: list[str]) -> int:
     """Capture the snapshot and write it to the output path (or stdout).
 
-    Recognizes a ``--extended`` flag (anywhere in argv) for the full
-    per-file catalog detail; the first remaining non-flag argument is the
-    output path (``-`` or absent -> stdout).
+    Recognizes ``--extended`` (full per-file catalog detail) and
+    ``--execution-context <label>`` anywhere in argv; the first remaining
+    non-flag argument is the output path (``-`` or absent -> stdout).
     """
     args = argv[1:]
     extended = "--extended" in args
-    positional = [a for a in args if a != "--extended"]
+    probe_invocation = "direct"
+    positional: list[str] = []
+    i = 0
+    rest = [a for a in args if a != "--extended"]
+    allowed = ", ".join(EXECUTION_CONTEXT_INVOCATIONS)
+    while i < len(rest):
+        a = rest[i]
+        if a == "--execution-context":
+            # Strict, matching Click's Choice: a missing or unknown value
+            # must be a hard error, NOT a silent fall-through. Otherwise
+            # `--execution-context /out/env.json` (forgotten value) would
+            # eat the output path as the label, leave positional empty, and
+            # dump JSON to stdout while exiting 0 -- silently failing to
+            # write the very artifact this entry point exists to produce.
+            if i + 1 >= len(rest) or rest[i + 1] not in EXECUTION_CONTEXT_INVOCATIONS:
+                got = rest[i + 1] if i + 1 < len(rest) else "(missing)"
+                sys.stderr.write(
+                    f"aorta env probe: --execution-context requires one of: "
+                    f"{allowed} (got {got!r})\n"
+                )
+                return 2
+            probe_invocation = rest[i + 1]
+            i += 2
+            continue
+        if a.startswith("--execution-context="):
+            probe_invocation = a.split("=", 1)[1]
+            if probe_invocation not in EXECUTION_CONTEXT_INVOCATIONS:
+                sys.stderr.write(
+                    f"aorta env probe: --execution-context requires one of: "
+                    f"{allowed} (got {probe_invocation!r})\n"
+                )
+                return 2
+            i += 1
+            continue
+        positional.append(a)
+        i += 1
 
-    snapshot_dict = collect_env(
-        detail="full" if extended else "compact"
-    ).to_dict()
+    snapshot = collect_env(
+        detail="full" if extended else "compact",
+        probe_invocation=probe_invocation,
+    )
+
+    # Same claim-vs-reality guardrail as the Click CLI (aorta env probe),
+    # via the SHARED predicate so the two entry points never drift. This
+    # dependency-free entry point is the one most likely used inside a Buck2
+    # action / container, so it needs the warning even more. Fail-soft:
+    # stderr only, never a non-zero exit.
+    _ec_warning = execution_context_warning(
+        probe_invocation, snapshot.container_detected
+    )
+    if _ec_warning is not None:
+        sys.stderr.write(_ec_warning + "\n")
+
+    snapshot_dict = snapshot.to_dict()
     text = json.dumps(snapshot_dict, indent=2)
 
     out = positional[0] if positional and positional[0] != "-" else None
