@@ -1710,6 +1710,19 @@ class TestCliSummaryAndFieldFlags:
     """
 
     @staticmethod
+    def _split_stderr_runner():
+        """A CliRunner whose result exposes stderr separately, across Click
+        versions. Click < 8.2 combines the streams unless given
+        ``mix_stderr=False``; Click >= 8.2 removed that kwarg (streams are
+        always separate). Pass it only when the running Click accepts it."""
+        from click.testing import CliRunner
+
+        try:
+            return CliRunner(mix_stderr=False)
+        except TypeError:
+            return CliRunner()
+
+    @staticmethod
     def _cli_mod():
         cli_path = Path(env_mod.__file__).parent.parent / "cli" / "env.py"
         spec = importlib.util.spec_from_file_location(
@@ -1746,15 +1759,14 @@ class TestCliSummaryAndFieldFlags:
         # Claiming buck2_action on a host with no isolation signal and no
         # launcher image env var must warn loudly (the core misdiagnosis
         # guardrail) -- but still exit 0 and write the file. The warning
-        # must land on STDERR so it never corrupts stdout scripting; use
-        # mix_stderr=False to assert the stream explicitly.
-        from click.testing import CliRunner
+        # must land on STDERR so it never corrupts stdout scripting; use a
+        # split-stderr runner to assert the stream explicitly.
         cli_mod = self._cli_mod()
         # Force container_detected False regardless of the test host.
         monkeypatch.setattr(
             env_mod, "_detect_container_detected", lambda: False
         )
-        runner = CliRunner(mix_stderr=False)
+        runner = self._split_stderr_runner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
             out = Path.cwd() / "env.json"
             result = runner.invoke(
