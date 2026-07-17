@@ -139,6 +139,7 @@ class TestThroughputMetrics:
 class TestMetricsCollector:
     """Tests for MetricsCollector."""
 
+    @pytest.mark.gpu
     def test_collector_basic(self):
         """Test basic metrics collection."""
         import torch
@@ -157,6 +158,7 @@ class TestMetricsCollector:
         times = collector.get_iteration_times()
         assert len(times) == 5
 
+    @pytest.mark.gpu
     def test_collector_compute_latency(self):
         """Test latency computation."""
         import torch
@@ -179,6 +181,7 @@ class TestMetricsCollector:
         assert latency.count == 10
         assert latency.mean_ms > 0
 
+    @pytest.mark.gpu
     def test_collector_clear(self):
         """Test clearing collected data."""
         import torch

@@ -1,0 +1,20 @@
+# CI GPU image: same layers as Dockerfile.rocm70_9-1 but pins the ROCm PyTorch
+# base by digest so GPU CI runs are reproducible.
+#
+# Base: rocm/pytorch ROCm 7.2, Ubuntu 22.04, Python 3.10, PyTorch 2.9.1
+# Digest resolved: 2026-07-17 via `docker manifest inspect`
+FROM rocm/pytorch@sha256:c48071d7a2c4ebd286c95917aa2cf6980bb23b6791d688cd9934bf02dbe145a8
+
+USER root
+
+RUN pip install git+https://github.com/AMD-AGI/TraceLens.git || true
+RUN pip install git+https://github.com/AMD-AGI/Magpie.git || true
+RUN pip install openpyxl seaborn
+
+ENV ROCM_HOME=/opt/rocm
+ENV PATH=$ROCM_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$LD_LIBRARY_PATH
+
+WORKDIR /workspace/aorta
+
+CMD ["/bin/bash"]

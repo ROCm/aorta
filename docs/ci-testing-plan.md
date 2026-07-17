@@ -2,25 +2,29 @@
 
 Tracking issue: [#264](https://github.com/ROCm/aorta/issues/264)
 
-This document describes how automated tests gate pull requests in this repo,
-and the phased plan for growing that coverage from CPU-only today to GPU
-hardware once a suitable runner exists.
+This document describes how automated tests gate pull requests in this repo.
+Phase 1 (CPU) and Phase 2 (GPU on a self-hosted MI350 runner) together cover
+the full `tests/` suite with no overlap.
 
 ## Goal
 
 Every pull request must run the automated test suite, and a PR must not merge
-while those tests are red. We start with the large CPU-runnable slice of the
-existing `tests/` suite (Phase 1), and add GPU-hardware coverage later on a
-self-hosted runner (Phase 2).
+while those tests are red. Phase 1 runs the CPU-runnable slice on GitHub-hosted
+runners; Phase 2 runs the GPU complement on the self-hosted MI350 runner
+(`smci350-rck-g03-f16-12.rck.dcgpu`).
 
-## Current CI (before this plan)
+## Current CI
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `pre-commit.yml` | PR + push to `main` | Runs `pre-commit` hooks (whitespace, EOF, YAML) |
+| `cpu-tests.yml` | PR + push to `main` | CPU pytest gate (`not gpu and not rocm`) on `ubuntu-latest` |
+| `gpu-tests.yml` | PR (GPU paths) + nightly + dispatch | GPU pytest gate + nightly workload regression on `[self-hosted, gpu]` |
 | `nightly.yml` | cron + dispatch | Builds/publishes rolling dev wheels |
 | `release.yml` / `cleanup_releases.yml` | tags / cron | Release packaging + asset pruning |
 | `gemm-sweep-analysis.yml`, `rccl-warp-speed-analysis.yml` | cron / dispatch | Scheduled analysis jobs |
+
+## Historical context (before Phase 1)
 
 Notably, **the `tests/` suite was not run in CI**. `pre-commit.yml` only lints;
 it never executes pytest. A PR could break ~2,000 tests and still merge.
@@ -135,36 +139,129 @@ checks to pass before merging`, then select:
 (The workflow runs on PRs regardless; branch protection is what makes a red run
 *block* the merge.)
 
-## Phase 2 - GPU test gate (planned, needs a GPU runner)
+## Phase 2 - GPU test gate (implemented)
 
 Tracked in [#268](https://github.com/ROCm/aorta/issues/268).
-Blocked on: a GPU/self-hosted CI runner being wired up (e.g. MI300X/MI350X).
+Runner: `smci350-rck-g03-f16-12.rck.dcgpu` (MI350 / gfx950), labels
+`self-hosted`, `gpu`.
 
-When that runner exists, add a `gpu-tests.yml` workflow:
+Workflow: [`.github/workflows/gpu-tests.yml`](../.github/workflows/gpu-tests.yml)
 
-- **Runner:** `runs-on: [self-hosted, gpu]` (label the runner accordingly).
-- **Selection:** `pytest -m "gpu or rocm"` -- the complement of the Phase-1
-  selection, so the two gates together cover the full suite with no overlap.
-- **Real-hardware surfaces** currently only smoke-tested or mocked on CPU:
-  - `aorta.ebpf` against a real `bpftrace` + BPF (needs `CAP_BPF`/`CAP_PERFMON`
-    or root on the runner).
-  - torch GPU workloads (`race`, `training`, `inference`, `llm_determinism`)
-    on real devices.
-  - `gpu_control` lock-clock / power-limit against real `rocm-smi`.
-- **Triggers:** start on `workflow_dispatch` + nightly `schedule` to protect
-  scarce GPU capacity; promote to a required `pull_request` check for
-  GPU-touching paths once it is proven stable.
-- **Regression gates:** fold in the nightly `aorta run` / `aorta triage`
-  regression pattern (pin docker images by digest) once the runner and images
-  are reachable from CI.
+### Marker reconciliation
+
+The GPU gate selects tests with `pytest -m "gpu or rocm"`. Before Phase 2,
+most GPU-only tests (`tests/hw_queue_eval/*`) gated on
+`skipif(not torch.cuda.is_available())` without a `gpu` marker, so they were
+incorrectly included in the CPU gate (where they skipped at runtime). Those
+modules now carry `@pytest.mark.gpu` alongside the existing skip.
+
+[`tests/test_marker_partition.py`](../tests/test_marker_partition.py) asserts
+that the CPU and GPU marker selections partition the suite (no overlap, no
+gaps). New GPU tests must carry `@pytest.mark.gpu` or `@pytest.mark.rocm`.
+
+### Jobs
+
+| Job | Triggers | What it runs |
+| --- | --- | --- |
+| `pytest (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | `pytest -m "gpu or rocm" -n auto` inside a digest-pinned ROCm container |
+| `workload regression (GPU, MI350)` | nightly cron + `workflow_dispatch` only | Real-hardware workload smokes from [`config/ci/gpu_regression_smokes.yaml`](../config/ci/gpu_regression_smokes.yaml) via [`scripts/ci/run_gpu_regression_smokes.sh`](../scripts/ci/run_gpu_regression_smokes.sh) |
+
+### Execution environment (docker)
+
+GPU CI runs inside a privileged ROCm PyTorch container (same device/capability
+model as the existing analysis workflows):
+
+- Compose file: [`docker/docker-compose.build.yaml`](../docker/docker-compose.build.yaml)
+- CI env file: [`docker/.env.ci`](../docker/.env.ci) (committed; pins base image digest)
+- CI Dockerfile: [`docker/Dockerfile.ci-gpu`](../docker/Dockerfile.ci-gpu)
+- Container name: `aorta-ci-gpu`
+- Workspace mount: repo root at `/workspace/aorta`
+
+The base image is pinned by digest:
+
+```
+rocm/pytorch@sha256:c48071d7a2c4ebd286c95917aa2cf6980bb23b6791d688cd9934bf02dbe145a8
+```
+
+(tag: `rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1`). Bump the digest in
+`Dockerfile.ci-gpu` / `.env.ci` when intentionally upgrading the CI stack.
+
+### Triggers and frequency
+
+| Event | GPU pytest job | Workload regression job |
+| --- | --- | --- |
+| `pull_request` (GPU-touching paths) | yes | no |
+| nightly cron (`0 8 * * *` UTC) | yes | yes |
+| `workflow_dispatch` | yes | yes |
+
+PR path filter (GPU-touching changes only):
+
+- `src/aorta/race/**`, `src/aorta/ebpf/**`, `src/aorta/hw_queue_eval/**`,
+  `src/aorta/workloads/**`, `src/aorta/utils/gpu_control.py`
+- matching tests, `config/ci/**`, `recipes/ci/**`, `scripts/ci/**`, `docker/**`,
+  `.github/workflows/gpu-tests.yml`
+
+**Concurrency:** one GPU workflow run per ref; newer pushes cancel superseded PR
+runs so the single runner is not starved by stale jobs.
+
+### Running the GPU gate locally
+
+On a ROCm box with the repo mounted into the CI container:
+
+```bash
+cd docker
+docker compose --env-file .env.ci -f docker-compose.build.yaml up -d --build
+docker exec aorta-ci-gpu bash -lc '
+  cd /workspace/aorta &&
+  pip install -e ".[tests,hw-queue]" &&
+  pytest -m "gpu or rocm" -n auto
+'
+docker compose --env-file .env.ci -f docker-compose.build.yaml down -v
+```
+
+Workload regression smokes (inside the same container):
+
+```bash
+docker exec aorta-ci-gpu bash -lc '
+  cd /workspace/aorta &&
+  pip install -e ".[tests,hw-queue]" &&
+  bash scripts/ci/run_gpu_regression_smokes.sh
+'
+```
+
+### Extending workload regression coverage
+
+Add entries to [`config/ci/gpu_regression_smokes.yaml`](../config/ci/gpu_regression_smokes.yaml).
+Each entry lists a command argv and optional `min_gpus`. The runner script skips
+entries when insufficient GPUs are present. No workflow edits are required when
+adding new workloads -- register the workload via the `aorta.workloads`
+entry-point group and add a smoke recipe/command to the manifest.
+
+Current smokes: `gpu_smoke` (recipe + CLI), `inference` smoke, `race` smoke
+(requires 2 GPUs).
+
+### Making the GPU gate a required check
+
+After a stable soak on the runner, add **`pytest (GPU, MI350)`** as a **required
+status check** on `main`:
+
+`Settings -> Branches -> Branch protection rules -> main -> Require status checks
+to pass before merging`, then select:
+
+- `pytest (GPU, MI350)`
+
+Because PR triggers are path-filtered, only PRs touching GPU-relevant paths will
+report this check. Other PRs can merge without it (same pattern as optional
+checks that did not run). Repo admins enable this once nightly + PR runs are
+reliably green.
 
 ### Cost / capacity notes
 
-- Keep GPU runs off the hot PR path initially (dispatch + nightly) so a queue of
-  PRs cannot starve the single GPU runner.
-- Consider a `paths:` filter so GPU CI only triggers for changes under GPU-
-  relevant directories (`src/aorta/race/**`, `src/aorta/ebpf/**`,
-  `src/aorta/utils/gpu_control.py`, workloads) once it becomes a PR check.
+- PR GPU runs are limited to GPU-touching paths so doc-only PRs do not consume
+  the runner.
+- Nightly runs catch drift without blocking every PR.
+- The workload regression job is nightly/dispatch-only so multi-minute workload
+  smokes do not extend PR latency.
 
 ## Follow-up strategy
 
@@ -173,20 +270,21 @@ issues so each can be picked up independently:
 
 | Follow-up | Tracked in |
 | --- | --- |
-| Phase 2 GPU test gate on a self-hosted runner | [#268](https://github.com/ROCm/aorta/issues/268) |
-| ~~Fix cross-file state pollution so the suite runs without `--forked`~~ (done: [#270](https://github.com/ROCm/aorta/issues/270)) | [#270](https://github.com/ROCm/aorta/issues/270) |
+| ~~Phase 2 GPU test gate on a self-hosted runner~~ (done) | [#268](https://github.com/ROCm/aorta/issues/268) |
+| Mirror GPU CI in `aorta-internal` (CPU + GPU gates, workload regression) | [#72](https://github.com/ROCm/aorta-internal/issues/72) |
+| ~~Fix cross-file state pollution so the suite runs without `--forked`~~ (done) | [#270](https://github.com/ROCm/aorta/issues/270) |
 
 Done: [#269](https://github.com/ROCm/aorta/issues/269) modernized
 `test_sweep_cli.py` for `click>=8.2` and removed the `click<8.2` CI pin.
 
-Not an issue: making the `pytest (CPU, py3.x)` jobs **required status checks** on
-`main` is a repo/admin setting (see "Making it a required check" above), not a
-code change -- with `cpu-tests.yml` present on `main`, it is configured once in
-the repository's branch-protection settings.
+Not an issue: making the `pytest (CPU, py3.x)` and **`pytest (GPU, MI350)`**
+jobs **required status checks** on `main` is a repo/admin setting (see
+"Making it a required check" / "Making the GPU gate a required check" above),
+not a code change.
 
 ## Summary
 
 | Phase | Runner | Selection | Status |
 | --- | --- | --- | --- |
 | 1 - CPU gate | `ubuntu-latest` (3.10-3.12) | `not gpu and not rocm`, `-n auto` | Implemented (`cpu-tests.yml`) |
-| 2 - GPU gate | `[self-hosted, gpu]` | `gpu or rocm` + real-hw + regression | Planned (needs runner) |
+| 2 - GPU gate | `[self-hosted, gpu]` | `gpu or rocm`, `-n auto` + nightly workload regression | Implemented (`gpu-tests.yml`) |

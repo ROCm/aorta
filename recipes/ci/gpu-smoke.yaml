@@ -1,0 +1,22 @@
+# Real-hardware GPU smoke recipe for CI regression gates.
+#
+# Single-process ``gpu_smoke`` workload: exercises a trivial HIP kernel through
+# the full ``aorta sweep run`` path on real ROCm hardware.
+#
+#   aorta sweep run --recipe recipes/ci/gpu-smoke.yaml
+schema_version: 1
+
+ticket: CI-GPU-SMOKE
+workload: gpu_smoke
+
+trials: 1
+steps: 1
+
+workload_config:
+  n: 8
+  dtype: float32
+
+cells:
+  - name: baseline-local
+    mitigations: [none]
+    environment: local

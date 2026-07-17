@@ -1,0 +1,121 @@
+name: GPU Tests
+
+# Phase 2 GPU merge gate: run the GPU-runnable slice of the pytest suite on the
+# self-hosted MI350 runner inside a digest-pinned ROCm PyTorch container.
+# Complements cpu-tests.yml (`not gpu and not rocm`) with no overlap -- see
+# docs/ci-testing-plan.md and issue #268.
+#
+# After a stable soak period, mark `pytest (GPU, MI350)` as a required status
+# check on `main` (branch protection) so GPU-touching PRs cannot merge red.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly full GPU run (offset from nightly.yml at 11:00 UTC).
+    - cron: "0 8 * * *"
+  pull_request:
+    paths:
+      - "src/aorta/race/**"
+      - "src/aorta/ebpf/**"
+      - "src/aorta/hw_queue_eval/**"
+      - "src/aorta/workloads/**"
+      - "src/aorta/utils/gpu_control.py"
+      - "tests/hw_queue_eval/**"
+      - "tests/instrumentation/test_environment.py"
+      - "tests/test_marker_partition.py"
+      - "config/ci/**"
+      - "recipes/ci/**"
+      - "scripts/ci/**"
+      - "docker/**"
+      - ".github/workflows/gpu-tests.yml"
+
+permissions:
+  contents: read
+
+# Protect the single GPU runner: one workflow run at a time per ref; newer PR
+# pushes cancel the superseded run.
+concurrency:
+  group: gpu-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOCKER_COMPOSE_FILE: docker/docker-compose.build.yaml
+  DOCKER_ENV_FILE: docker/.env.ci
+  CONTAINER_NAME: aorta-ci-gpu
+
+jobs:
+  gpu-tests:
+    name: pytest (GPU, MI350)
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Log in to container registry
+        run: docker login -u rocmshared -p ${{ secrets.ROCM_SHARED_KEY }}
+
+      - name: Build and start ROCm CI container
+        working-directory: docker
+        run: |
+          docker compose --env-file .env.ci -f docker-compose.build.yaml build
+          docker compose --env-file .env.ci -f docker-compose.build.yaml up -d
+
+      - name: Install package and run GPU test suite
+        run: |
+          docker exec "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            python -m pip install --upgrade pip
+            pip install -e ".[tests,hw-queue]"
+            pytest -m "gpu or rocm" -n auto --junitxml=gpu-results.xml
+          '
+
+      - name: Upload GPU test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-results-${{ github.run_id }}
+          path: gpu-results.xml
+          if-no-files-found: ignore
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: docker compose --env-file .env.ci -f docker-compose.build.yaml down -v
+
+  gpu-regression:
+    name: workload regression (GPU, MI350)
+    runs-on: [self-hosted, gpu]
+    needs: gpu-tests
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Log in to container registry
+        run: docker login -u rocmshared -p ${{ secrets.ROCM_SHARED_KEY }}
+
+      - name: Build and start ROCm CI container
+        working-directory: docker
+        run: |
+          docker compose --env-file .env.ci -f docker-compose.build.yaml build
+          docker compose --env-file .env.ci -f docker-compose.build.yaml up -d
+
+      - name: Install package and run workload regression smokes
+        run: |
+          docker exec "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            python -m pip install --upgrade pip
+            pip install -e ".[tests,hw-queue]"
+            bash scripts/ci/run_gpu_regression_smokes.sh
+          '
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: docker compose --env-file .env.ci -f docker-compose.build.yaml down -v

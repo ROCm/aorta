@@ -1,0 +1,50 @@
+# GPU CI regression smoke manifest.
+#
+# Add new workload smoke entries here; scripts/ci/run_gpu_regression_smokes.sh
+# runs every entry whose ``min_gpus`` requirement is met. No workflow edits needed
+# when extending coverage.
+#
+# Fields:
+#   name        - short label for logs
+#   command     - argv executed inside the CI container (working dir: /workspace/aorta)
+#   min_gpus    - optional; skip when torch.cuda.device_count() is lower (default 1)
+
+smokes:
+  - name: gpu_smoke_recipe
+    command:
+      - aorta
+      - sweep
+      - run
+      - --recipe
+      - recipes/ci/gpu-smoke.yaml
+
+  - name: gpu_smoke_cli
+    command:
+      - aorta
+      - run
+      - --workload
+      - gpu_smoke
+      - --trials
+      - "1"
+      - --steps
+      - "1"
+
+  - name: inference_smoke
+    command:
+      - aorta
+      - sweep
+      - run
+      - --recipe
+      - recipes/inference/example-inference-smoke.yaml
+
+  - name: race_smoke
+    min_gpus: 2
+    command:
+      - torchrun
+      - --standalone
+      - --nproc_per_node=2
+      - aorta
+      - sweep
+      - run
+      - --recipe
+      - recipes/race/race_smoke.yaml
