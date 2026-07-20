@@ -2,8 +2,10 @@
 # base by digest so GPU CI runs are reproducible.
 #
 # Base: rocm/pytorch ROCm 7.2, Ubuntu 22.04, Python 3.10, PyTorch 2.9.1
-# Digest resolved: 2026-07-17 via `docker manifest inspect`
-FROM rocm/pytorch@sha256:c48071d7a2c4ebd286c95917aa2cf6980bb23b6791d688cd9934bf02dbe145a8
+# Digest resolved via:
+#   docker buildx imagetools inspect rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1
+# Use the Manifest Digest (not the config blob digest from docker manifest inspect).
+FROM rocm/pytorch@sha256:376bfab5f4f680c8b4b843c6d0c5d1f0a04e5a84ec3e86728db8d11d79a9d1e3
 
 USER root
 
