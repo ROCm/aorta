@@ -55,11 +55,11 @@ jobs:
 
       - name: Verify Docker access
         run: |
-          docker info >/dev/null
+          bash scripts/ci/docker_cmd.sh info >/dev/null
           bash scripts/ci/docker_compose.sh version
 
       - name: Log in to container registry
-        run: echo "${{ secrets.ROCM_SHARED_KEY }}" | docker login -u rocmshared --password-stdin
+        run: echo "${{ secrets.ROCM_SHARED_KEY }}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin
 
       - name: Build and start ROCm CI container
         working-directory: docker
@@ -69,7 +69,7 @@ jobs:
 
       - name: Install package and run GPU test suite
         run: |
-          docker exec "${{ env.CONTAINER_NAME }}" bash -lc '
+          bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
             set -euo pipefail
             cd /workspace/aorta
             python -m pip install --upgrade pip
@@ -103,11 +103,11 @@ jobs:
 
       - name: Verify Docker access
         run: |
-          docker info >/dev/null
+          bash scripts/ci/docker_cmd.sh info >/dev/null
           bash scripts/ci/docker_compose.sh version
 
       - name: Log in to container registry
-        run: echo "${{ secrets.ROCM_SHARED_KEY }}" | docker login -u rocmshared --password-stdin
+        run: echo "${{ secrets.ROCM_SHARED_KEY }}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin
 
       - name: Build and start ROCm CI container
         working-directory: docker
@@ -117,7 +117,7 @@ jobs:
 
       - name: Install package and run workload regression smokes
         run: |
-          docker exec "${{ env.CONTAINER_NAME }}" bash -lc '
+          bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
             set -euo pipefail
             cd /workspace/aorta
             python -m pip install --upgrade pip

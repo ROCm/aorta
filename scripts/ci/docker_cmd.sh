@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wrapper for docker compose on self-hosted GPU runners.
+# Run docker with the resolved invocation (direct or sudo -n).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -7,4 +7,4 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${ROOT}/scripts/ci/docker_env.sh"
 
 # shellcheck disable=SC2086
-exec ${AORTA_COMPOSE} "$@"
+exec ${AORTA_DOCKER} "$@"
