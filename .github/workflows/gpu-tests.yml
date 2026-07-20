@@ -58,8 +58,13 @@ jobs:
           bash scripts/ci/docker_cmd.sh info >/dev/null
           bash scripts/ci/docker_compose.sh version
 
+      # rocm/pytorch is public on Docker Hub; login avoids rate limits but is
+      # not required to build. Continue if ROCM_SHARED_KEY is expired/missing.
       - name: Log in to container registry
-        run: echo "${{ secrets.ROCM_SHARED_KEY }}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin
+        run: |
+          if ! echo "${{ secrets.ROCM_SHARED_KEY }}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
+            echo "::warning::Docker Hub login failed (ROCM_SHARED_KEY may be expired). Continuing with anonymous pulls."
+          fi
 
       - name: Build and start ROCm CI container
         working-directory: docker
@@ -106,8 +111,13 @@ jobs:
           bash scripts/ci/docker_cmd.sh info >/dev/null
           bash scripts/ci/docker_compose.sh version
 
+      # rocm/pytorch is public on Docker Hub; login avoids rate limits but is
+      # not required to build. Continue if ROCM_SHARED_KEY is expired/missing.
       - name: Log in to container registry
-        run: echo "${{ secrets.ROCM_SHARED_KEY }}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin
+        run: |
+          if ! echo "${{ secrets.ROCM_SHARED_KEY }}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
+            echo "::warning::Docker Hub login failed (ROCM_SHARED_KEY may be expired). Continuing with anonymous pulls."
+          fi
 
       - name: Build and start ROCm CI container
         working-directory: docker
