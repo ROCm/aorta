@@ -72,6 +72,9 @@ def isolated_env(monkeypatch):
     monkeypatch.delenv("SINGULARITY_NAME", raising=False)
     monkeypatch.delenv("AORTA_DOCKER_IMAGE", raising=False)
     monkeypatch.delenv("AORTA_DOCKER_DIGEST", raising=False)
+    # AORTA_RE_IMAGE also suppresses the --execution-context warning, so a
+    # host/CI that sets it must not silently defuse the warning tests.
+    monkeypatch.delenv("AORTA_RE_IMAGE", raising=False)
     return monkeypatch
 
 
@@ -180,6 +183,8 @@ class TestPathConstants:
             "PODMAN_CONTAINERENV_MARKER",
             "CGROUP_FILE",
             "SELF_CGROUP_FILE",
+            "INIT_MNT_NS",
+            "SELF_MNT_NS",
         ],
     )
     def test_path_is_absolute(self, constant_name: str):
@@ -228,6 +233,8 @@ class TestPathConstants:
             "PODMAN_CONTAINERENV_MARKER",
             "CGROUP_FILE",
             "SELF_CGROUP_FILE",
+            "INIT_MNT_NS",
+            "SELF_MNT_NS",
         }, (
             "FS path constants set drifted; update test_path_is_absolute "
             "parametrize list AND the provenance comments in "
@@ -284,6 +291,8 @@ REQUIRED_TOP_KEYS = {
     "pytorch_sdpa",
     "nics",
     "amdgpu_driver",
+    "container_detected",
+    "execution_context",
 }
 
 
@@ -293,7 +302,7 @@ class TestSchemaCompleteness:
     ):
         snapshot = collect_env()
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
-        assert snapshot.schema_version == "1.10"
+        assert snapshot.schema_version == "1.11"
         assert snapshot.system_health is None
         assert snapshot.rocm == {
             "version": None,
@@ -524,6 +533,11 @@ def _example_snapshot(**overrides) -> object:
             "kfd_device_present": True,
             "kfd_sysfs_present": True,
         },
+        "container_detected": True,
+        "execution_context": {
+            "probe_invocation": "buck2_action",
+            "likely_execution_platform": None,
+        },
     }
     base.update(overrides)
     return EnvSnapshot(**base)
@@ -568,6 +582,7 @@ class TestEnvSnapshot:
             ("miopen_catalog", env_mod._empty_miopen_catalog),
             ("rocfft_catalog", env_mod._empty_rocfft_catalog),
             ("amdgpu_driver", env_mod._empty_amdgpu_driver),
+            ("execution_context", env_mod._empty_execution_context),
         ],
     )
     def test_from_dict_backfills_missing_catalog_key(self, key, empty_factory):
@@ -582,6 +597,15 @@ class TestEnvSnapshot:
         del d[key]
         rebuilt = EnvSnapshot.from_dict(d)
         assert getattr(rebuilt, key) == empty_factory()
+
+    def test_from_dict_backfills_missing_container_detected(self):
+        # A pre-1.11 env.json predates container_detected (a bare bool, so
+        # it isn't in the factory-parametrized test above). from_dict must
+        # default it to False rather than raising.
+        d = _example_snapshot().to_dict()
+        del d["container_detected"]
+        rebuilt = EnvSnapshot.from_dict(d)
+        assert rebuilt.container_detected is False
 
     def test_summary_does_not_duplicate_partial_marker(self):
         """The brief returned by ``summary()`` is the *body* of what the
@@ -1449,13 +1473,16 @@ class TestCliIsThinWrapper:
         #   friendly errors that list available keys).
         # * The compact/--extended catalog-detail work added one more
         #   click option block + its detail= wiring into collect_env().
+        # * The --execution-context work (schema 1.11) added one more click
+        #   option block plus a stderr validation-warning envelope (still
+        #   pure wiring/validation -- no probing).
         #
         # The real "no-probing-in-CLI" guard is
         # `test_cli_does_no_probing_imports` below -- this one is a
         # soft canary against the file ballooning beyond pure wiring.
         line_count = sum(1 for _ in cli_path.read_text().splitlines())
-        assert line_count <= 375, (
-            f"cli/env.py is {line_count} lines; soft budget is 375. "
+        assert line_count <= 410, (
+            f"cli/env.py is {line_count} lines; soft budget is 410. "
             "If you need more, check that the new code is genuinely "
             "wiring/error-handling and not probing -- "
             "test_cli_does_no_probing_imports is the strict guard."
@@ -1474,6 +1501,53 @@ class TestCliIsThinWrapper:
         """Sanity check: the CLI references the library function."""
         text = cli_path.read_text()
         assert "collect_env" in text
+
+    def test_cli_does_not_eager_import_environment(self, cli_path: Path):
+        """The CLI must NOT import the heavy environment probing module at
+        module top level -- that would pull subprocess/hashlib/platform into
+        every ``aorta env --help`` / startup and defeat the thin-wrapper
+        goal. ``environment`` may only be imported lazily inside handlers.
+
+        Parse the AST and check only module-level ``import`` nodes, so a
+        mere mention of the module in a docstring or comment does not trip.
+        """
+        import ast
+
+        tree = ast.parse(cli_path.read_text())
+        for node in tree.body:  # module-level statements only
+            if isinstance(node, ast.ImportFrom) and node.module and (
+                "aorta.instrumentation.environment" in node.module
+            ):
+                raise AssertionError(
+                    f"cli/env.py imports environment at module top "
+                    f"(from {node.module}); import it lazily inside the handler."
+                )
+            if isinstance(node, ast.Import) and any(
+                "aorta.instrumentation.environment" in alias.name
+                for alias in node.names
+            ):
+                raise AssertionError(
+                    "cli/env.py imports environment at module top; "
+                    "import it lazily inside the handler."
+                )
+
+    def test_cli_execution_context_choices_match_canonical(self, cli_path: Path):
+        """The hard-coded --execution-context choices in the CLI must stay in
+        sync with the canonical EXECUTION_CONTEXT_INVOCATIONS. The CLI
+        hard-codes (rather than imports) the list to avoid the eager
+        environment import guarded above, so this is the drift guard.
+        """
+        spec = importlib.util.spec_from_file_location("aorta.cli.env", cli_path)
+        cli_mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cli_mod
+        spec.loader.exec_module(cli_mod)
+        assert (
+            cli_mod._EXECUTION_CONTEXT_CHOICES
+            == list(env_mod.EXECUTION_CONTEXT_INVOCATIONS)
+        ), (
+            "cli/env.py _EXECUTION_CONTEXT_CHOICES drifted from "
+            "EXECUTION_CONTEXT_INVOCATIONS; keep them identical."
+        )
 
     def test_cli_creates_missing_parent_directory(self, all_disabled, tmp_path: Path):
         """Regression guard: ``-o newdir/env.json`` must work for a non-existent
@@ -1683,6 +1757,19 @@ class TestCliSummaryAndFieldFlags:
     """
 
     @staticmethod
+    def _split_stderr_runner():
+        """A CliRunner whose result exposes stderr separately, across Click
+        versions. Click < 8.2 combines the streams unless given
+        ``mix_stderr=False``; Click >= 8.2 removed that kwarg (streams are
+        always separate). Pass it only when the running Click accepts it."""
+        from click.testing import CliRunner
+
+        try:
+            return CliRunner(mix_stderr=False)
+        except TypeError:
+            return CliRunner()
+
+    @staticmethod
     def _cli_mod():
         cli_path = Path(env_mod.__file__).parent.parent / "cli" / "env.py"
         spec = importlib.util.spec_from_file_location(
@@ -1712,6 +1799,67 @@ class TestCliSummaryAndFieldFlags:
             assert "Wrote env probe to" not in result.output
             # File MUST NOT be written -- the whole point of the flag.
             assert not (Path.cwd() / "env.json").exists()
+
+    def test_execution_context_claim_without_isolation_warns(
+        self, all_disabled, tmp_path: Path, monkeypatch,
+    ):
+        # Claiming buck2_action on a host with no isolation signal and no
+        # launcher image env var must warn loudly (the core misdiagnosis
+        # guardrail) -- but still exit 0 and write the file. The warning
+        # must land on STDERR so it never corrupts stdout scripting; use a
+        # split-stderr runner to assert the stream explicitly.
+        cli_mod = self._cli_mod()
+        # Force container_detected False regardless of the test host.
+        monkeypatch.setattr(
+            env_mod, "_detect_container_detected", lambda: False
+        )
+        runner = self._split_stderr_runner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            out = Path.cwd() / "env.json"
+            result = runner.invoke(
+                cli_mod.env,
+                ["probe", "--execution-context", "buck2_action", "-o", str(out)],
+            )
+            assert result.exit_code == 0, result.stdout
+            assert "WARNING" in result.stderr
+            assert "WARNING" not in result.stdout
+            assert out.exists()
+
+    def test_execution_context_claim_with_image_does_not_warn(
+        self, all_disabled, tmp_path: Path, monkeypatch,
+    ):
+        # Same claim, but $AORTA_DOCKER_IMAGE is set -> no warning (the
+        # launcher asserted the context, which is the sanctioned pattern).
+        from click.testing import CliRunner
+        cli_mod = self._cli_mod()
+        monkeypatch.setattr(
+            env_mod, "_detect_container_detected", lambda: False
+        )
+        monkeypatch.setenv("AORTA_DOCKER_IMAGE", "rocm/pytorch:tag")
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            out = Path.cwd() / "env.json"
+            result = runner.invoke(
+                cli_mod.env,
+                ["probe", "--execution-context", "buck2_action", "-o", str(out)],
+            )
+            assert result.exit_code == 0, result.output
+            assert "WARNING" not in result.output
+
+    def test_direct_execution_context_never_warns(
+        self, all_disabled, tmp_path: Path, monkeypatch,
+    ):
+        from click.testing import CliRunner
+        cli_mod = self._cli_mod()
+        monkeypatch.setattr(
+            env_mod, "_detect_container_detected", lambda: False
+        )
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            out = Path.cwd() / "env.json"
+            result = runner.invoke(cli_mod.env, ["probe", "-o", str(out)])
+            assert result.exit_code == 0, result.output
+            assert "WARNING" not in result.output
 
     def test_default_probe_writes_compact_catalog(
         self, all_disabled, tmp_path: Path,
@@ -2598,6 +2746,246 @@ class TestRuntimeContext:
         assert rt["python_env"] == "conda"
         assert rt["conda_env_name"] == "rocm-7.2"
         assert rt["venv_path"] is None
+
+
+# ---------------------------------------------------------------------------
+# container_detected + execution_context (schema 1.11)
+# ---------------------------------------------------------------------------
+
+
+class TestContainerDetected:
+    """_detect_container_detected(): runtime-agnostic isolation smoke test."""
+
+    def test_baremetal_no_signal_is_false(self, all_disabled, monkeypatch):
+        # No named runtime, no markers, and mount-ns check disabled ->
+        # the honest "no isolation observed" answer.
+        monkeypatch.setattr(
+            env_mod, "_mount_namespace_differs_from_init", lambda: False
+        )
+        assert env_mod._detect_container_detected() is False
+
+    def test_named_runtime_implies_true(self, all_disabled, tmp_path, monkeypatch):
+        # docker marker -> _detect_container_type() != baremetal -> True.
+        marker = tmp_path / ".dockerenv"
+        marker.write_text("")
+        monkeypatch.setattr(env_mod, "DOCKERENV_MARKER", marker)
+        monkeypatch.setattr(
+            env_mod, "_mount_namespace_differs_from_init", lambda: False
+        )
+        assert env_mod._detect_container_detected() is True
+
+    def test_private_mount_namespace_implies_true(
+        self, all_disabled, monkeypatch
+    ):
+        # No named runtime, but a private mount namespace -> True. This is
+        # the RE-worker / stripped-sandbox case runtime_context.type misses.
+        monkeypatch.setattr(
+            env_mod, "_mount_namespace_differs_from_init", lambda: True
+        )
+        assert env_mod._detect_container_detected() is True
+
+    def test_kubepods_cgroup_token_implies_true(
+        self, all_disabled, tmp_path, monkeypatch
+    ):
+        # A k8s pod: runtime_context.type falls through to baremetal (no
+        # docker/podman/singularity), but the cgroup carries a kubepods
+        # token -> container_detected True. The core false-negative fix.
+        self_cgroup = tmp_path / "self_cgroup"
+        self_cgroup.write_text("0::/kubepods.slice/kubepods-besteffort-pod123.slice\n")
+        monkeypatch.setattr(env_mod, "SELF_CGROUP_FILE", self_cgroup)
+        monkeypatch.setattr(
+            env_mod, "_mount_namespace_differs_from_init", lambda: False
+        )
+        # type still reads baremetal (no named runtime)...
+        assert env_mod._detect_container_type() == "baremetal"
+        # ...but the isolation smoke test correctly fires.
+        assert env_mod._detect_container_detected() is True
+
+    def test_safe_wrapper_swallows_exceptions(self, monkeypatch):
+        def boom():
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(env_mod, "_detect_container_detected", boom)
+        # The disaster-path wrapper must never raise.
+        assert env_mod._detect_container_detected_safe() is False
+
+
+class TestExecutionContext:
+    """execution_context.probe_invocation stamping via collect_env()."""
+
+    def test_default_is_direct(self, all_disabled):
+        snap = collect_env()
+        assert snap.execution_context["probe_invocation"] == "direct"
+        assert snap.execution_context["likely_execution_platform"] is None
+
+    def test_valid_label_is_stamped(self, all_disabled):
+        snap = collect_env(probe_invocation="buck2_action")
+        assert snap.execution_context["probe_invocation"] == "buck2_action"
+
+    def test_unknown_label_falls_back_to_direct_with_reason(self, all_disabled):
+        snap = collect_env(probe_invocation="nonsense")
+        assert snap.execution_context["probe_invocation"] == "direct"
+        assert snap.partial is True
+        assert any(
+            r.startswith("execution_context.probe_invocation")
+            for r in snap.partial_reasons
+        )
+
+    def test_warning_predicate_direct_never_warns(self, all_disabled):
+        # Shared helper used by BOTH the CLI and _probe_main.
+        assert env_mod.execution_context_warning("direct", False) is None
+        assert env_mod.execution_context_warning("direct", True) is None
+
+    def test_warning_predicate_claim_without_isolation_warns(self, all_disabled):
+        msg = env_mod.execution_context_warning("buck2_action", False)
+        assert msg is not None and msg.startswith("WARNING:")
+
+    def test_warning_predicate_suppressed_by_container_detected(
+        self, all_disabled
+    ):
+        assert env_mod.execution_context_warning("buck2_action", True) is None
+
+    def test_warning_predicate_suppressed_by_image_env(
+        self, all_disabled, monkeypatch
+    ):
+        monkeypatch.setenv("AORTA_DOCKER_IMAGE", "img:tag")
+        assert env_mod.execution_context_warning("buck2_action", False) is None
+        monkeypatch.delenv("AORTA_DOCKER_IMAGE", raising=False)
+        monkeypatch.setenv("AORTA_RE_IMAGE", "re:tag")
+        assert env_mod.execution_context_warning("buck2_action", False) is None
+
+    def test_disaster_snapshot_preserves_probe_invocation(
+        self, all_disabled, monkeypatch
+    ):
+        # If an internal probe crashes, collect_env falls back to the
+        # disaster snapshot -- which must still record the caller's
+        # probe_invocation rather than silently relabelling it "direct".
+        def boom(*args, **kwargs):
+            raise RuntimeError("forced probe crash")
+
+        # _run_rdhc runs early in the probe body; make it explode so the
+        # top-level guard builds a disaster snapshot.
+        monkeypatch.setattr(env_mod, "_run_rdhc", boom)
+        snap = collect_env(probe_invocation="buck2_action")
+        assert snap.partial is True
+        assert snap.execution_context["probe_invocation"] == "buck2_action"
+        # And a garbage label in the crash path still normalizes to direct.
+        snap2 = collect_env(probe_invocation="nonsense")
+        assert snap2.execution_context["probe_invocation"] == "direct"
+
+
+class TestProbeMainExecutionContext:
+    """_probe_main mirrors the CLI --execution-context flag + warning."""
+
+    @staticmethod
+    def _probe_main_mod():
+        # Load by file path (like _cli_mod above) so these tests pass from a
+        # clean checkout without aorta installed / PYTHONPATH set -- the rest
+        # of this module deliberately loads environment.py by path too.
+        probe_main_path = Path(env_mod.__file__).parent / "_probe_main.py"
+        spec = importlib.util.spec_from_file_location(
+            "aorta.instrumentation._probe_main", probe_main_path
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _write(self, tmp_path, argv_extra, monkeypatch, container=False):
+        monkeypatch.setattr(
+            env_mod, "_detect_container_detected", lambda: container
+        )
+        probe_main = self._probe_main_mod()
+        out = str(tmp_path / "env.json")
+        rc = probe_main.main(["_probe_main", *argv_extra, out])
+        return rc, out
+
+    def test_stamps_probe_invocation(self, all_disabled, tmp_path, monkeypatch):
+        rc, out = self._write(
+            tmp_path, ["--execution-context", "buck2_action"], monkeypatch
+        )
+        assert rc == 0
+        doc = json.loads(Path(out).read_text(encoding="utf-8"))
+        assert doc["execution_context"]["probe_invocation"] == "buck2_action"
+
+    def test_warns_on_claim_without_isolation(
+        self, all_disabled, tmp_path, monkeypatch, capsys
+    ):
+        # The dependency-free entry point must emit the same claim-vs-reality
+        # warning as the Click CLI -- it is the one most likely used inside a
+        # Buck2 action / container.
+        rc, _ = self._write(
+            tmp_path, ["--execution-context", "buck2_action"], monkeypatch,
+            container=False,
+        )
+        assert rc == 0
+        assert "WARNING" in capsys.readouterr().err
+
+    def test_no_warning_when_container_detected(
+        self, all_disabled, tmp_path, monkeypatch, capsys
+    ):
+        rc, _ = self._write(
+            tmp_path, ["--execution-context", "buck2_action"], monkeypatch,
+            container=True,
+        )
+        assert rc == 0
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_no_warning_for_direct(
+        self, all_disabled, tmp_path, monkeypatch, capsys
+    ):
+        rc, _ = self._write(tmp_path, [], monkeypatch, container=False)
+        assert rc == 0
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_no_warning_when_re_image_set(
+        self, all_disabled, tmp_path, monkeypatch, capsys
+    ):
+        # $AORTA_RE_IMAGE (the phase-2 launcher convention) suppresses the
+        # warning the same way $AORTA_DOCKER_IMAGE does.
+        monkeypatch.setenv("AORTA_RE_IMAGE", "re-worker-image:tag")
+        rc, _ = self._write(
+            tmp_path, ["--execution-context", "buck2_action"], monkeypatch,
+            container=False,
+        )
+        assert rc == 0
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_missing_flag_value_is_hard_error_not_silent_stdout(
+        self, all_disabled, tmp_path, monkeypatch, capsys
+    ):
+        # Forgotten value: `--execution-context <outpath>` must NOT eat the
+        # output path as the label and dump JSON to stdout while exiting 0.
+        monkeypatch.setattr(
+            env_mod, "_detect_container_detected", lambda: False
+        )
+        probe_main = self._probe_main_mod()
+        out = tmp_path / "env.json"
+        # Only the flag + the intended output path; the path is not a valid
+        # label, so the parser must reject rather than consume it.
+        rc = probe_main.main(["_probe_main", "--execution-context", str(out)])
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert "--execution-context requires one of" in captured.err
+        # The artifact must NOT have been written, and JSON must NOT have
+        # been dumped to stdout under the guise of success.
+        assert not out.exists()
+        assert "schema_version" not in captured.out
+
+    def test_invalid_flag_value_is_hard_error(
+        self, all_disabled, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            env_mod, "_detect_container_detected", lambda: False
+        )
+        probe_main = self._probe_main_mod()
+        out = tmp_path / "env.json"
+        rc = probe_main.main(
+            ["_probe_main", "--execution-context", "nonsense", str(out)]
+        )
+        assert rc == 2
+        assert "--execution-context requires one of" in capsys.readouterr().err
+        assert not out.exists()
 
 
 # ---------------------------------------------------------------------------
