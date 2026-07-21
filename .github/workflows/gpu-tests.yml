@@ -66,12 +66,15 @@ jobs:
           ws="${{ github.workspace }}"
           [ -d "$ws" ] || exit 0
           uidgid="$(id -u):$(id -g)"
+          # Pinned by digest for supply-chain safety / reproducibility on the
+          # self-hosted runner (busybox:1.37).
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
           # Repo scripts aren't checked out yet, so resolve docker access inline.
           # Support runners with direct docker, sudo docker, or only host sudo.
           if docker info >/dev/null 2>&1; then
-            docker run --rm -v "$ws":/ws busybox chown -R "$uidgid" /ws || true
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
           elif sudo -n docker info >/dev/null 2>&1; then
-            sudo docker run --rm -v "$ws":/ws busybox chown -R "$uidgid" /ws || true
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
           else
             sudo chown -R "$uidgid" "$ws" || true
           fi
@@ -134,12 +137,15 @@ jobs:
           ws="${{ github.workspace }}"
           [ -d "$ws" ] || exit 0
           uidgid="$(id -u):$(id -g)"
+          # Pinned by digest for supply-chain safety / reproducibility on the
+          # self-hosted runner (busybox:1.37).
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
           # Repo scripts aren't checked out yet, so resolve docker access inline.
           # Support runners with direct docker, sudo docker, or only host sudo.
           if docker info >/dev/null 2>&1; then
-            docker run --rm -v "$ws":/ws busybox chown -R "$uidgid" /ws || true
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
           elif sudo -n docker info >/dev/null 2>&1; then
-            sudo docker run --rm -v "$ws":/ws busybox chown -R "$uidgid" /ws || true
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
           else
             sudo chown -R "$uidgid" "$ws" || true
           fi

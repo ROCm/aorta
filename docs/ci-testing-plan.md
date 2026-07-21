@@ -296,4 +296,4 @@ not a code change.
 | Phase | Runner | Selection | Status |
 | --- | --- | --- | --- |
 | 1 - CPU gate | `ubuntu-latest` (3.10-3.12) | `not gpu and not rocm`, `-n auto` | Implemented (`cpu-tests.yml`) |
-| 2 - GPU gate | `[self-hosted, gpu]` | `gpu or rocm`, `-n auto` + nightly workload regression | Implemented (`gpu-tests.yml`) |
+| 2 - GPU gate | `[self-hosted, gpu]` | `gpu or rocm`, `-n 4` + nightly workload regression | Implemented (`gpu-tests.yml`) |
