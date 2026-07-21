@@ -8,9 +8,14 @@
 #   name        - short label for logs
 #   command     - argv executed inside the CI container (working dir: /workspace/aorta)
 #   min_gpus    - optional; skip when torch.cuda.device_count() is lower (default 1)
+#   pr          - optional bool; when true the smoke also runs on the PR gate
+#                 (AORTA_CI_TIER=pr). Keep the PR set fast and single-GPU so
+#                 GPU-touching PRs stay protected without starving the runner.
+#                 Nightly / workflow_dispatch (AORTA_CI_TIER=full) run everything.
 
 smokes:
   - name: gpu_smoke_recipe
+    pr: true
     command:
       - aorta
       - sweep
@@ -19,6 +24,7 @@ smokes:
       - recipes/ci/gpu-smoke.yaml
 
   - name: gpu_smoke_cli
+    pr: true
     command:
       - aorta
       - run
@@ -30,6 +36,7 @@ smokes:
       - "1"
 
   - name: inference_smoke
+    pr: true
     command:
       - aorta
       - sweep
@@ -37,6 +44,8 @@ smokes:
       - --recipe
       - recipes/inference/example-inference-smoke.yaml
 
+  # Distributed (2-GPU) reproducer: nightly / dispatch only -- too heavy for the
+  # per-PR path and needs a second GPU.
   - name: race_smoke
     min_gpus: 2
     command:

@@ -164,7 +164,7 @@ gaps). New GPU tests must carry `@pytest.mark.gpu` or `@pytest.mark.rocm`.
 | Job | Triggers | What it runs |
 | --- | --- | --- |
 | `pytest (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | `pytest -m "gpu or rocm" -n auto` inside a digest-pinned ROCm container |
-| `workload regression (GPU, MI350)` | nightly cron + `workflow_dispatch` only | Real-hardware workload smokes from [`config/ci/gpu_regression_smokes.yaml`](../config/ci/gpu_regression_smokes.yaml) via [`scripts/ci/run_gpu_regression_smokes.sh`](../scripts/ci/run_gpu_regression_smokes.sh) |
+| `workload regression (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | Real-hardware workload smokes from [`config/ci/gpu_regression_smokes.yaml`](../config/ci/gpu_regression_smokes.yaml) via [`scripts/ci/run_gpu_regression_smokes.sh`](../scripts/ci/run_gpu_regression_smokes.sh). PRs run the fast single-GPU `pr` tier; nightly / dispatch run the full manifest |
 
 ### Execution environment (docker)
 
@@ -180,7 +180,7 @@ model as the existing analysis workflows):
 The base image is pinned by digest:
 
 ```
-rocm/pytorch@sha256:c48071d7a2c4ebd286c95917aa2cf6980bb23b6791d688cd9934bf02dbe145a8
+rocm/pytorch@sha256:376bfab5f4f680c8b4b843c6d0c5d1f0a04e5a84ec3e86728db8d11d79a9d1e3
 ```
 
 (tag: `rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1`). Bump the digest in
@@ -190,9 +190,15 @@ rocm/pytorch@sha256:c48071d7a2c4ebd286c95917aa2cf6980bb23b6791d688cd9934bf02dbe1
 
 | Event | GPU pytest job | Workload regression job |
 | --- | --- | --- |
-| `pull_request` (GPU-touching paths) | yes | no |
-| nightly cron (`0 8 * * *` UTC) | yes | yes |
-| `workflow_dispatch` | yes | yes |
+| `pull_request` (GPU-touching paths) | yes | yes (`pr` tier: fast, single-GPU) |
+| nightly cron (`0 8 * * *` UTC) | yes | yes (full manifest) |
+| `workflow_dispatch` | yes | yes (full manifest) |
+
+The regression tier is chosen by the workflow via `AORTA_CI_TIER` (`pr` on
+pull requests, `full` otherwise). Mark a manifest entry with `pr: true` to
+include it in the PR gate; keep heavier / multi-GPU smokes (e.g. the 2-GPU
+`race_smoke`) out of the PR tier so PRs stay fast and never starve the single
+runner.
 
 PR path filter (GPU-touching changes only):
 
@@ -232,23 +238,25 @@ docker exec aorta-ci-gpu bash -lc '
 ### Extending workload regression coverage
 
 Add entries to [`config/ci/gpu_regression_smokes.yaml`](../config/ci/gpu_regression_smokes.yaml).
-Each entry lists a command argv and optional `min_gpus`. The runner script skips
-entries when insufficient GPUs are present. No workflow edits are required when
-adding new workloads -- register the workload via the `aorta.workloads`
-entry-point group and add a smoke recipe/command to the manifest.
+Each entry lists a command argv and optional `min_gpus` / `pr`. The runner
+script skips entries when insufficient GPUs are present, and (on the PR gate)
+skips entries not marked `pr: true`. No workflow edits are required when adding
+new workloads -- register the workload via the `aorta.workloads` entry-point
+group and add a smoke recipe/command to the manifest.
 
-Current smokes: `gpu_smoke` (recipe + CLI), `inference` smoke, `race` smoke
-(requires 2 GPUs).
+Current smokes: `gpu_smoke` (recipe + CLI, PR tier), `inference` smoke (PR
+tier), `race` smoke (nightly only, requires 2 GPUs).
 
 ### Making the GPU gate a required check
 
-After a stable soak on the runner, add **`pytest (GPU, MI350)`** as a **required
-status check** on `main`:
+After a stable soak on the runner, add the GPU jobs as **required status
+checks** on `main`:
 
 `Settings -> Branches -> Branch protection rules -> main -> Require status checks
 to pass before merging`, then select:
 
 - `pytest (GPU, MI350)`
+- `workload regression (GPU, MI350)`
 
 Because PR triggers are path-filtered, only PRs touching GPU-relevant paths will
 report this check. Other PRs can merge without it (same pattern as optional

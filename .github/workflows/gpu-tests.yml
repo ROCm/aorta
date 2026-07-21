@@ -99,7 +99,8 @@ jobs:
     name: workload regression (GPU, MI350)
     runs-on: [self-hosted, gpu]
     needs: gpu-tests
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Runs on every trigger. PRs run the fast, single-GPU "pr" tier; nightly /
+    # dispatch run the full manifest (AORTA_CI_TIER below).
     timeout-minutes: 120
 
     steps:
@@ -125,9 +126,21 @@ jobs:
           bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml build
           bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml up -d
 
+      # PR gate runs the fast single-GPU subset; nightly / dispatch run everything.
+      - name: Select regression tier
+        id: tier
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "value=pr" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=full" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install package and run workload regression smokes
         run: |
-          bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
+          bash scripts/ci/docker_cmd.sh exec \
+            -e AORTA_CI_TIER=${{ steps.tier.outputs.value }} \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
             set -euo pipefail
             cd /workspace/aorta
             python -m pip install --upgrade pip
