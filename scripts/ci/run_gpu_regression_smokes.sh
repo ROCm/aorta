@@ -45,6 +45,7 @@ fi
 python - "${MANIFEST}" "${GPU_COUNT}" "${TIER}" <<'PY'
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -80,6 +81,24 @@ for idx, entry in enumerate(smokes):
     # YAML may parse argv tokens as ints/floats/bools (e.g. an unquoted 1);
     # coerce every token to str so subprocess.run / ' '.join never raise.
     command = [str(token) for token in raw_command]
+
+    # Resolve the `aorta` console-script token to its absolute path. We run argv
+    # with no shell, so `$(which aorta)` can't be used in the manifest; more
+    # importantly, `torchrun ... aorta sweep run ...` passes `aorta` as
+    # torchrun's training_script, which must be a real file path (torchrun would
+    # otherwise look for ./aorta). Resolving here fixes both argv[0] and the
+    # torchrun training_script cases.
+    aorta_path = shutil.which("aorta")
+    resolved = []
+    for token in command:
+        if token == "aorta":
+            if not aorta_path:
+                raise SystemExit(f"smoke '{name}': 'aorta' not found on PATH")
+            resolved.append(aorta_path)
+        else:
+            resolved.append(token)
+    command = resolved
+
     min_gpus = int(entry.get("min_gpus", 1))
     is_pr = bool(entry.get("pr", False))
 

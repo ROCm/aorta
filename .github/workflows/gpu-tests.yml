@@ -79,32 +79,15 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v5
 
-      - name: Verify Docker access
-        run: |
-          bash scripts/ci/docker_cmd.sh info >/dev/null
-          bash scripts/ci/docker_compose.sh version
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
 
-      # rocm/pytorch is public on Docker Hub, so login is optional: it only
-      # avoids pull rate limits. Skip cleanly when the secret is unavailable
-      # (e.g. events without secret access) and never hard-fail the job on login.
-      - name: Log in to container registry
-        env:
-          ROCM_SHARED_KEY: ${{ secrets.ROCM_SHARED_KEY }}
-        run: |
-          if [ -z "${ROCM_SHARED_KEY}" ]; then
-            echo "ROCM_SHARED_KEY not set; using anonymous pulls (base image is public)."
-            exit 0
-          fi
-          if ! printf '%s' "${ROCM_SHARED_KEY}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
-            echo "::warning::Docker Hub login failed (ROCM_SHARED_KEY may be expired). Continuing with anonymous pulls."
-          fi
-
-      - name: Build and start ROCm CI container
-        working-directory: docker
-        run: |
-          bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml build
-          bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml up -d
-
+      # -n 4 (not -n auto): the runner has one target GPU, so one xdist worker
+      # per CPU core would spin up dozens of HIP contexts contending for a
+      # single device (OOM / flakiness). A small bounded pool keeps parallelism
+      # without oversubscribing the GPU.
       - name: Install package and run GPU test suite
         run: |
           bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
@@ -112,7 +95,7 @@ jobs:
             cd /workspace/aorta
             python -m pip install --upgrade pip
             pip install -e ".[tests,hw-queue]"
-            pytest -m "gpu or rocm" -n auto --junitxml=gpu-results.xml
+            pytest -m "gpu or rocm" -n 4 --junitxml=gpu-results.xml
           '
 
       - name: Upload GPU test results
@@ -164,31 +147,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v5
 
-      - name: Verify Docker access
-        run: |
-          bash scripts/ci/docker_cmd.sh info >/dev/null
-          bash scripts/ci/docker_compose.sh version
-
-      # rocm/pytorch is public on Docker Hub, so login is optional: it only
-      # avoids pull rate limits. Skip cleanly when the secret is unavailable
-      # (e.g. events without secret access) and never hard-fail the job on login.
-      - name: Log in to container registry
-        env:
-          ROCM_SHARED_KEY: ${{ secrets.ROCM_SHARED_KEY }}
-        run: |
-          if [ -z "${ROCM_SHARED_KEY}" ]; then
-            echo "ROCM_SHARED_KEY not set; using anonymous pulls (base image is public)."
-            exit 0
-          fi
-          if ! printf '%s' "${ROCM_SHARED_KEY}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
-            echo "::warning::Docker Hub login failed (ROCM_SHARED_KEY may be expired). Continuing with anonymous pulls."
-          fi
-
-      - name: Build and start ROCm CI container
-        working-directory: docker
-        run: |
-          bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml build
-          bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml up -d
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
 
       # PR gate runs the fast single-GPU subset; nightly / dispatch run everything.
       - name: Select regression tier

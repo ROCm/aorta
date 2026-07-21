@@ -1,0 +1,45 @@
+name: ROCm CI setup
+description: >-
+  Shared setup for the GPU CI jobs: verify docker access, log in to the
+  container registry (optional), and build/start the pinned ROCm CI container.
+  Assumes the repo is already checked out (this is a local action).
+
+inputs:
+  rocm-shared-key:
+    description: >-
+      Docker Hub token for the rocmshared account. Optional: when empty the
+      base image (public) is pulled anonymously.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Verify Docker access
+      shell: bash
+      run: |
+        bash scripts/ci/docker_cmd.sh info >/dev/null
+        bash scripts/ci/docker_compose.sh version
+
+    # rocm/pytorch is public on Docker Hub, so login is optional: it only
+    # avoids pull rate limits. Skip cleanly when the secret is unavailable and
+    # never hard-fail the job on login.
+    - name: Log in to container registry
+      shell: bash
+      env:
+        ROCM_SHARED_KEY: ${{ inputs.rocm-shared-key }}
+      run: |
+        if [ -z "${ROCM_SHARED_KEY}" ]; then
+          echo "ROCM_SHARED_KEY not set; using anonymous pulls (base image is public)."
+          exit 0
+        fi
+        if ! printf '%s' "${ROCM_SHARED_KEY}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
+          echo "::warning::Docker Hub login failed (ROCM_SHARED_KEY may be expired). Continuing with anonymous pulls."
+        fi
+
+    - name: Build and start ROCm CI container
+      shell: bash
+      working-directory: docker
+      run: |
+        bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml build
+        bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml up -d

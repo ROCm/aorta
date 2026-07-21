@@ -146,7 +146,7 @@ class TestMetricsCollector:
         from aorta.hw_queue_eval.core.metrics import MetricsCollector
 
         if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
+            pytest.skip("No GPU available (torch.cuda.is_available() is False; CUDA/ROCm)")
 
         collector = MetricsCollector(num_streams=2)
 
@@ -165,7 +165,7 @@ class TestMetricsCollector:
         from aorta.hw_queue_eval.core.metrics import MetricsCollector
 
         if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
+            pytest.skip("No GPU available (torch.cuda.is_available() is False; CUDA/ROCm)")
 
         collector = MetricsCollector(num_streams=1)
 
@@ -188,7 +188,7 @@ class TestMetricsCollector:
         from aorta.hw_queue_eval.core.metrics import MetricsCollector
 
         if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
+            pytest.skip("No GPU available (torch.cuda.is_available() is False; CUDA/ROCm)")
 
         collector = MetricsCollector(num_streams=1)
 

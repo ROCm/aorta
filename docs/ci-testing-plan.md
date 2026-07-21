@@ -163,7 +163,7 @@ gaps). New GPU tests must carry `@pytest.mark.gpu` or `@pytest.mark.rocm`.
 
 | Job | Triggers | What it runs |
 | --- | --- | --- |
-| `pytest (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | `pytest -m "gpu or rocm" -n auto` inside a digest-pinned ROCm container |
+| `pytest (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | `pytest -m "gpu or rocm" -n 4` inside a digest-pinned ROCm container (bounded workers so xdist doesn't oversubscribe the single GPU) |
 | `workload regression (GPU, MI350)` | `pull_request` (GPU-touching paths), nightly cron, `workflow_dispatch` | Real-hardware workload smokes from [`config/ci/gpu_regression_smokes.yaml`](../config/ci/gpu_regression_smokes.yaml) via [`scripts/ci/run_gpu_regression_smokes.sh`](../scripts/ci/run_gpu_regression_smokes.sh). PRs run the fast single-GPU `pr` tier; nightly / dispatch run the full manifest |
 
 ### Execution environment (docker)
@@ -220,7 +220,7 @@ docker compose --env-file .env.ci -f docker-compose.build.yaml up -d --build
 docker exec aorta-ci-gpu bash -lc '
   cd /workspace/aorta &&
   pip install -e ".[tests,hw-queue]" &&
-  pytest -m "gpu or rocm" -n auto
+  pytest -m "gpu or rocm" -n 4
 '
 docker compose --env-file .env.ci -f docker-compose.build.yaml down -v
 ```
