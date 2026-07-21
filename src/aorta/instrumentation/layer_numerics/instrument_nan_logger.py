@@ -168,6 +168,16 @@ Settings (environment variables):
                          re-scan the tracked flow objects at each stage, before the
                          forward reads them. Warns once and stays inactive if the
                          stage methods are absent. Same per-step drain (default 0).
+  NANLOG_STAGE_READS     "1" (with NANLOG_PIPELINE=1) -> run each copy/sparse/forward
+                         stage read on a dedicated side CUDA stream with a one-way
+                         event dependency, so the stage read does NOT serialize the
+                         copy/compute overlap (which the default inline read does, and
+                         which hides a timing-sensitive cross-stream race). Gives
+                         timing-safe copy/sparse STAGE brackets. Falls back to the
+                         inline read + warns once if the side stream can't be created;
+                         the summary's stage_reads_active records which happened. The
+                         side stream is synchronized once per step in the drain, so the
+                         single batched host transfer stays the only host sync (def 0).
   NANLOG_TRACK_ATTR      comma list of batch attribute/key names to follow as flow
                          tensors (default "embedding_features"); a name may resolve
                          to a Tensor, list/tuple/dict of Tensors, or a KJT (its
@@ -213,6 +223,7 @@ Settings (environment variables):
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -281,7 +292,7 @@ import torch  # noqa: E402
 # ---------------------------------------------------------------------------
 # One JSON env var, two observation kinds:
 #   watch   [{scope, tensors, stride?}, ...]      -- a module's OWN tensors
-#   follow  [{tensor, stages?, scope?, stride?, bounds?, pipeline?}, ...]
+#   follow  [{tensor, stages?, scope?, stride?, bounds?, pipeline?, stage_reads?}, ...]
 #                                                 -- trace ONE named tensor across positions
 # building blocks:
 #   scope   {names:[substr,...], types:[ClassName,...]}  -- which modules
@@ -294,6 +305,10 @@ import torch  # noqa: E402
 #                    wrappers, so the copy/compute overlap is never serialized (the
 #                    mode for a timing-sensitive race the wrappers would suppress);
 #                    incompatible with stages:true, requires a scope for block capture
+#   stage_reads bool -- (follow, default false) keep the stage wrappers but run each
+#                    copy/sparse/forward stage read on a side CUDA stream (one-way event
+#                    dependency), so the stage read no longer serializes the overlap ->
+#                    timing-safe copy/sparse STAGE brackets. Requires pipeline:true.
 # plus cross-cutting: sample_every, pre_context, diagnostics[]. (Output dir is the
 # separate NANLOG_DIR env var, never a spec key.)
 #
@@ -366,8 +381,8 @@ def _spec_int(spec: dict, key: str, minimum: int) -> int | None:
 
 
 def _resolve_follow_cadence(f: dict) -> tuple:
-    """Normalize a follow entry's cadence into (stages, stride, pipeline), where
-    stride is the "also re-scan every Nth watched module" cadence (None = don't
+    """Normalize a follow entry's cadence into (stages, stride, pipeline, stage_reads),
+    where stride is the "also re-scan every Nth watched module" cadence (None = don't
     re-scan at modules). WHERE to check the followed tensor is two independent knobs:
 
         "stages": true   -> capture at the pipeline stage boundaries (copy/sparse/fwd)
@@ -382,11 +397,19 @@ def _resolve_follow_cadence(f: dict) -> tuple:
     for a timing-sensitive race the stage wrappers would suppress. `stages: true`
     REQUIRES the wrappers, so `pipeline: false` + `stages: true` is contradictory.
 
+    `stage_reads` (default false) keeps the stage wrappers BUT moves each stage read of
+    the tracked tensor off the pipeline's stream onto a dedicated side stream, so the
+    copy/sparse checkpoints no longer serialize the copy/compute overlap. It exists to
+    get timing-safe copy/sparse stage brackets on a race the default (inline) stage read
+    hides. It REQUIRES the wrappers (pipeline: true) -- it is meaningless with
+    pipeline: false (there are no stage wrappers to move the read off of).
+
     Raises ValueError on a malformed/contradictory entry so the whole spec rolls back.
     """
     # Reject unknown keys so a typo or a leftover `at` from the old schema fails loudly
     # instead of silently falling through to the stages-only default.
-    _FOLLOW_KEYS = {"tensor", "stages", "scope", "stride", "bounds", "pipeline"}
+    _FOLLOW_KEYS = {"tensor", "stages", "scope", "stride", "bounds", "pipeline",
+                    "stage_reads"}
     unknown = [k for k in f if k not in _FOLLOW_KEYS]
     if unknown:
         raise ValueError(f"unknown follow[] key(s) {sorted(unknown)}; "
@@ -399,6 +422,9 @@ def _resolve_follow_cadence(f: dict) -> tuple:
     pipeline = f.get("pipeline", True)
     if not isinstance(pipeline, bool):
         raise ValueError(f"follow[].pipeline must be true/false, got {pipeline!r}")
+    stage_reads = f.get("stage_reads", False)
+    if not isinstance(stage_reads, bool):
+        raise ValueError(f"follow[].stage_reads must be true/false, got {stage_reads!r}")
     stride = None
     if "stride" in f:
         v = f["stride"]
@@ -421,7 +447,14 @@ def _resolve_follow_cadence(f: dict) -> tuple:
                          "(stage capture requires the pipeline wrappers); to follow at "
                          "blocks only, drop `stages` and give a `scope`, or keep "
                          "`stages` and use the default pipeline: true")
-    return stages, stride, pipeline
+    # `stage_reads` only changes HOW the stage wrappers read; with pipeline: false there
+    # are no wrappers, so it is meaningless there. Require the wrappers explicitly.
+    if stage_reads and not pipeline:
+        raise ValueError("follow[].stage_reads true needs the pipeline wrappers "
+                         "(pipeline must be true); it moves the copy/sparse stage read "
+                         "off the pipeline stream, so there is nothing to move with "
+                         "pipeline: false")
+    return stages, stride, pipeline, stage_reads
 
 
 def _spec_optional_mapping(container: dict, key: str, path: str) -> dict:
@@ -489,6 +522,7 @@ _SPEC_OWNED_VARS = {
     "NANLOG_WATCH_NAMES": "", "NANLOG_WATCH_TYPES": "", "NANLOG_CHANNELS": "",
     "NANLOG_WATCH_STRIDE": "1",
     "NANLOG_PIPELINE": "0", "NANLOG_PIPELINE_OFF_FOLLOW": "0",
+    "NANLOG_STAGE_READS": "0",
     "NANLOG_TRACK_ATTR": "", "NANLOG_TRACK_EVERY_LAYER": "0",
     "NANLOG_TRACK_LAYER_STRIDE": "1", "NANLOG_BOUNDS": "",
     "NANLOG_SAMPLE_EVERY": "", "NANLOG_PRE_CONTEXT": "",
@@ -588,7 +622,7 @@ def _translate_spec(spec: dict) -> None:
                    "(engine has one follow path); tensors are unioned into TRACK_ATTR")
     if follow:
         f0 = follow[0]
-        stages, stride, pipeline = _resolve_follow_cadence(f0)
+        stages, stride, pipeline, stage_reads = _resolve_follow_cadence(f0)
         # `stages` -> the pipeline stage-method wrappers (NANLOG_PIPELINE). Historically
         # these were also the transport for the per-module re-scan, so any scoped follow
         # armed them too -- which serializes the copy/compute overlap and can suppress a
@@ -613,6 +647,11 @@ def _translate_spec(spec: dict) -> None:
         # silently opted into this timing-sensitive mode. Only a validated
         # `pipeline: false` follow sets it.
         _spec_set("NANLOG_PIPELINE_OFF_FOLLOW", "1" if (not arm_wrappers) else "0")
+        # Stage-reads: move the copy/sparse stage reads off the pipeline stream onto a
+        # side stream so they don't serialize the overlap. Only meaningful when the
+        # wrappers are actually armed (validation already rejects stage_reads without
+        # pipeline; guard on arm_wrappers too so it can't leak on with no wrappers).
+        _spec_set("NANLOG_STAGE_READS", "1" if (stage_reads and arm_wrappers) else "0")
         track_attrs = [f["tensor"].strip() for f in follow]
         _spec_set("NANLOG_TRACK_ATTR", ",".join(track_attrs))
         if stride is not None:
@@ -814,6 +853,13 @@ _PIPELINE = os.environ.get("NANLOG_PIPELINE", "0") == "1"
 # mode, which historically warned and no-op'd. Keep that contract -- only the spec
 # turns this on.
 _PIPELINE_OFF_FOLLOW = os.environ.get("NANLOG_PIPELINE_OFF_FOLLOW", "0") == "1"
+# Stage-reads: keep the stage wrappers, but run the copy/sparse/forward stage read of
+# the tracked tensor on a DEDICATED side stream with a one-way event dependency, so the
+# read does not serialize the copy/compute overlap the way the default inline read does.
+# The wrappers still fire (we need the timing point + batch handle); only the reduction
+# moves off the pipeline stream. Purpose: timing-safe copy/sparse stage brackets for a
+# race the inline stage read hides. Requires NANLOG_PIPELINE=1 (spec enforces this).
+_STAGE_READS = os.environ.get("NANLOG_STAGE_READS", "0") == "1"
 _TRACK_ATTR = tuple(
     s.strip() for s in os.environ.get("NANLOG_TRACK_ATTR", "embedding_features").split(",")
     if s.strip()
@@ -1173,7 +1219,26 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
     # For the one-shot dump, hold a DETACHED ref so we don't keep the autograd graph
     # alive across the step (memory / allocator-reuse perturbation).
     held = t.detach() if (_DUMP_TENSOR and not _tensor_dumped) else None
-    _pending.append((rec, _device_stats(t, bound), held))
+    # Stage-reads: run this reduction on the side stream (created on t's OWN device) so
+    # it doesn't serialize the copy/compute overlap. _stage_read_stream applies the
+    # one-way dependency (side waits for the current stream, current never waits back);
+    # record_stream tells the caching allocator not to hand t's block to another op on
+    # the training stream while the side-stream read is in flight (which would reduce a
+    # DIFFERENT tensor's data -> a false clean/NaN). Off / non-CUDA / no side stream ->
+    # the context is a no-op and the read runs inline (historical behavior).
+    # _checkpoint is the sole writer of _stage_read_in_progress; here we only read it.
+    use_side = _stage_read_in_progress and t.is_cuda
+    if use_side:
+        with _stage_read_stream(t.device):
+            if _stage_stream is not None:
+                try:
+                    t.record_stream(_stage_stream)
+                except Exception:
+                    pass
+            stats = _device_stats(t, bound)
+    else:
+        stats = _device_stats(t, bound)
+    _pending.append((rec, stats, held))
 
 
 # ---------------------------------------------------------------------------
@@ -1206,6 +1271,20 @@ def _drain_step() -> None:
         keys = keys + ["bad_rows"]
     if _BAD_VALUES:
         keys = keys + ["first_bad_flat", "first_bad_val", "first_bad_row", "first_bad_col"]
+    # With stage reads, some of this step's reductions (stats[k]) were produced on the
+    # side stream. Everything below -- the .to(float64) casts, the stack, the .cpu()
+    # copy -- runs on the current stream. Insert a DEVICE-SIDE dependency FIRST so those
+    # casts wait for the side stream: a host .synchronize() AFTER enqueuing the casts is
+    # too late (the cast kernels are already queued on the current stream with no
+    # ordering vs. the side stream and could read not-yet-written scalars). wait_stream
+    # is enqueue-time and one-way, so it costs no host sync of its own -- the single
+    # .cpu().tolist() below stays the only host transfer. No-op when stage reads are off.
+    if _stage_reads_active and _stage_stream is not None:
+        # Under the side stream's OWN device: the casts/stack/.cpu() below run on that
+        # device's current stream, and the wait must be issued there too (an unpinned
+        # wait on a multi-GPU rank could target the wrong device's stream or raise).
+        with torch.cuda.device(_stage_stream_device):
+            torch.cuda.current_stream().wait_stream(_stage_stream)
     flat = []
     for _rec, stats, _held_t in pending:
         for k in keys:
@@ -1637,6 +1716,112 @@ _pipeline_checkpoints = 0     # stage-wrapper checkpoints that stashed something
 _forward_checkpoints = 0      # forward-entry checkpoints that stashed something (pipeline-off follow)
 _pipeline_warned = False
 
+# Side stream for NANLOG_STAGE_READS: the stage read runs here, not on the pipeline
+# stream, so it doesn't serialize the copy/compute overlap. Created lazily on first
+# use (CUDA must be initialized); None if unavailable / creation failed (then we fall
+# back to the inline read and warn once). _stage_reads_active reflects what ACTUALLY
+# happened, for the summary. _stage_read_in_progress is set by _checkpoint (SOLE writer)
+# around its emit loop and READ by _stash to decide whether to route the reduction to
+# the side stream; the context manager must not touch it (see _stage_read_stream).
+_stage_stream = None
+# The device _stage_stream lives on (the tracked tensor's device at creation). Every
+# wait_stream against the side stream must be issued under this device -- on a
+# multi-GPU ROCm rank the ambient current device can differ, and an unpinned
+# current_stream()/wait_stream would order against the WRONG device's stream or raise
+# a cross-device error. Set alongside _stage_stream.
+_stage_stream_device = None
+_stage_reads_active = False
+# Count of side-stream reads performed (one per tracked tensor per stage, i.e. it
+# increments per _stash, NOT per stage checkpoint -- a 31-tensor batch adds 31 per
+# copy/sparse/forward). An audit signal that the side path actually ran.
+_stage_read_count = 0
+_stage_stream_warned = False
+_stage_read_in_progress = False
+
+
+def _get_stage_stream(device=None):
+    """Lazily create the side CUDA stream for stage reads, on `device` (the tracked
+    tensor's device -- NOT whatever the current device happens to be, which on a
+    multi-GPU rank may differ). Returns the stream, or None if stage reads are off /
+    CUDA is unavailable / creation failed (caller falls back to an inline read). Never
+    raises."""
+    global _stage_stream, _stage_stream_device, _stage_reads_active, _stage_stream_warned
+    if not _STAGE_READS:
+        return None
+    if _stage_stream is not None:
+        return _stage_stream
+    try:
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA not available")
+        # Normalize to an integer device INDEX (not a torch.device): torch.cuda.device()
+        # accepts an int, downstream code / the summary compare it numerically, and a
+        # torch.device with .index=None (e.g. "cuda") would otherwise leak through.
+        if device is None:
+            dev_idx = torch.cuda.current_device()
+        else:
+            d = torch.device(device)
+            dev_idx = d.index if d.index is not None else torch.cuda.current_device()
+        # Pin the stream to that device so the wait/reduction never cross GPUs.
+        with torch.cuda.device(dev_idx):
+            _stage_stream = torch.cuda.Stream()
+        _stage_stream_device = dev_idx
+        _stage_reads_active = True
+        _log("stage_reads: side stream created; copy/sparse/forward stage reads run "
+             "off the pipeline stream (one-way dependency). NOTE: this assumes the "
+             "current stream at the stage wrapper carries the stage's work -- validate "
+             "the NaN capture rate against a baseline (see docs).")
+        return _stage_stream
+    except Exception as e:  # noqa: BLE001 -- a sidecar must never take the run down
+        if not _stage_stream_warned:
+            _stage_stream_warned = True
+            _log(f"WARNING: stage_reads requested but the side stream could not be "
+                 f"created ({e!r}); falling back to inline stage reads (these DO "
+                 f"serialize the pipeline and can hide a timing race).")
+        return None
+
+
+@contextlib.contextmanager
+def _stage_read_stream(device=None):
+    """Context manager: run the enclosed reduction on the side stream with a one-way
+    dependency on the CURRENT stream. The side stream waits for the current stream's
+    already-enqueued work; the current stream never waits back (so no ordering
+    dependency is inserted into the overlap). Falls back to a no-op (inline read on the
+    current stream) when the side stream is unavailable.
+
+    IMPORTANT / assumption: this waits on `torch.cuda.current_stream()` at the moment
+    the stage wrapper fires. That is correct ONLY if the stage's work (the H2D copy /
+    sparse dist) is ordered on the current stream by the time _checkpoint runs. TorchRec
+    runs stages on its own internal streams, so on some versions the current stream may
+    NOT be the stage's stream -- in which case the side read can execute before the
+    stage's writes land and mis-report "clean" at that stage. We cannot verify torchrec's
+    stream layout in-house; this is why the mode ships as CUSTOMER-VALIDATED (compare the
+    NaN rate to a baseline). The reduction is best-effort, not a guaranteed post-stage
+    snapshot.
+
+    _drain_step synchronizes the side stream before the host read-back, so the scalars
+    are ready without inserting a per-stage host sync.
+
+    Ownership: `_stage_read_in_progress` is set/reset by `_checkpoint` (the sole writer)
+    around the whole emit loop; this context ONLY reads the side stream. It must not
+    touch that flag -- doing so previously reset it after the first tensor, so only one
+    of a batch's N tracked tensors got the side stream and the rest silently serialized.
+    """
+    global _stage_read_count
+    stream = _get_stage_stream(device)
+    if stream is None:
+        yield
+        return
+    # Issue the wait + enqueue under the side stream's OWN device: on a multi-GPU rank
+    # the ambient device can differ, and an unpinned current_stream()/wait_stream would
+    # order against the wrong device's stream or raise cross-device.
+    with torch.cuda.device(_stage_stream_device):
+        cur = torch.cuda.current_stream()
+        stream.wait_stream(cur)          # side waits for the current stream's enqueued work
+        with torch.cuda.stream(stream):  # reductions enqueue on the side stream
+            yield
+    _stage_read_count += 1
+    # NOTE: cur does NOT wait on `stream` -- that one-way dependency is the whole point.
+
 
 _kjt_types_cache = None
 
@@ -1957,6 +2142,7 @@ def _checkpoint(batch, phase: str) -> None:
     capture (phase='forward' only, which is the sole caller when the stage wrappers
     are off in a pipeline-off follow). Never raises into the training run."""
     global _phase, _batch_id, _pipeline_checkpoints, _forward_checkpoints
+    global _stage_read_in_progress
     if batch is None:
         return
     _phase = phase
@@ -1966,6 +2152,14 @@ def _checkpoint(batch, phase: str) -> None:
         _batch_id = None
     seen: set = set()
     n = 0
+    # With NANLOG_STAGE_READS, mark that the emits below are a stage read: _stash then
+    # routes each tensor's reduction onto the side stream (on the tensor's own device,
+    # with a one-way dependency + record_stream), so the read doesn't serialize the
+    # copy/compute overlap. Off -> the flag stays False and reads run inline (historical
+    # behavior). Doing it per-tensor in _stash (not around the whole loop here) keeps the
+    # stream pinned to each tensor's device and the record_stream call co-located.
+    prev_flag = _stage_read_in_progress
+    _stage_read_in_progress = _STAGE_READS
     try:
         found_named = False
         for name in _TRACK_ATTR:
@@ -1982,6 +2176,8 @@ def _checkpoint(batch, phase: str) -> None:
     except Exception as e:
         _log(f"WARNING: pipeline checkpoint ({phase}) failed: {e!r}")
         return
+    finally:
+        _stage_read_in_progress = prev_flag
     if n:
         # Split the counters by what ACTUALLY produced this checkpoint, so each is a
         # truthful signal:
@@ -2105,9 +2301,22 @@ def _write_summary() -> None:
         "pipeline_mint_phase": _pipeline_mint_phase,
         "pipeline_checkpoints": _pipeline_checkpoints,
         "forward_checkpoints": _forward_checkpoints,
+        # Stage-reads auditability: whether the timing-safe side-stream stage read was
+        # requested, whether the side stream was actually created (falls back to inline +
+        # warns if not), and how many stage reads ran on it. A run that requested it but
+        # shows stage_reads_active=false read INLINE and may have hidden the race -- the
+        # whole reason this is surfaced.
+        "stage_reads": _STAGE_READS,
+        "stage_reads_active": _stage_reads_active,
+        "stage_read_count": _stage_read_count,
         "follow_fwd": _FOLLOW_FWD,
+        # Keyed on what ACTUALLY ran (_pipeline_installed), not what was requested
+        # (_PIPELINE): a degraded run (NANLOG_PIPELINE=1 but torchrec absent -> wrappers
+        # no-op) has no stage brackets, so it must NOT claim stage_wrappers*. It still
+        # captures at forward entry via the root pre-hook, so it reads as forward_blocks.
         "follow_mode": (
-            "stage_wrappers" if _PIPELINE
+            "stage_wrappers_side_read" if (_pipeline_installed and _stage_reads_active)
+            else "stage_wrappers" if _pipeline_installed
             else "forward_blocks" if _FOLLOW_FWD
             else "off"
         ),

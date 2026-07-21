@@ -226,6 +226,141 @@ def test_pipeline_forward_stage_and_batch_id(monkeypatch, tmp_path_factory):
     assert copy_recs and all(r["batch_id"] is not None for r in copy_recs)
 
 
+def test_stage_reads_still_capture_all_stages(monkeypatch, tmp_path_factory):
+    """With NANLOG_STAGE_READS=1 the copy/sparse/forward stage reads still produce the
+    same records (the side stream only changes WHERE the reduction runs, not WHAT is
+    captured). The tracked tensors are put on the SAME device the side stream needs
+    (cuda when available, else cpu), so the summary assertions below actually reflect
+    which path ran -- the side stream only engages for a CUDA tensor (t.is_cuda), so a
+    CPU tensor on a CUDA box would (correctly) fall back to inline, not exercise the
+    feature. On a CPU box this exercises the inline fallback: capture must be identical
+    either way and the run must not crash."""
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1", "NANLOG_STAGE_READS": "1",
+         "NANLOG_TRACK_ATTR": "embedding_features",
+         "NANLOG_BOUNDS": "embedding_features:0:60", "NANLOG_SAMPLE_EVERY": "1"},
+        monkeypatch, tmp_path_factory)
+    assert nl._STAGE_READS is True
+    nl._pipeline_installed = True
+    nl._pipeline_mint_phase = "copy"
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [
+                (torch.rand(4, 8, device=dev) * 60.0) for _ in range(3)]
+
+    for _ in range(2):
+        b = Batch()
+        nl._checkpoint(b, "copy")
+        nl._checkpoint(b, "sparse_start")
+        nl._checkpoint(b, "sparse_wait")
+        nl._root_pre_hook(None, (b,))
+    nl._root_pre_hook(None, (Batch(),))
+    nl._write_summary()
+
+    track = [r for r in _records(nl) if r["role"] in ("track", "sparse")]
+    phases = {r["phase"] for r in track}
+    assert {"copy", "sparse_start", "sparse_wait", "forward"} <= phases
+    # stats came through regardless of which stream the reduction ran on
+    assert all("nan_count" in r for r in track)
+
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    assert smy["stage_reads"] is True
+    # With CUDA tensors on a CUDA box the side stream engages; on CPU it falls back to
+    # inline. Both are honestly reported.
+    if torch.cuda.is_available():
+        assert smy["stage_reads_active"] is True
+        assert smy["follow_mode"] == "stage_wrappers_side_read"
+        assert smy["stage_read_count"] > 0
+    else:
+        assert smy["stage_reads_active"] is False   # fell back to inline, honestly
+        assert smy["follow_mode"] == "stage_wrappers"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for side stream")
+def test_stage_reads_drain_reads_side_stream_values_correctly(
+    monkeypatch, tmp_path_factory
+):
+    """BLOCKER regression: the drain must not read the side-stream reduction outputs
+    before they are computed. Feed a tensor with a KNOWN nan/oob content, run the stage
+    read on the side stream, drain, and assert the emitted counts match the tensor
+    exactly -- i.e. the drain's device-side wait_stream ordered the casts after the
+    side-stream reductions (a missing/late wait would give wrong or stale counts)."""
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1", "NANLOG_STAGE_READS": "1",
+         "NANLOG_TRACK_ATTR": "embedding_features",
+         "NANLOG_BOUNDS": "embedding_features:0:60", "NANLOG_SAMPLE_EVERY": "1"},
+        monkeypatch, tmp_path_factory)
+    assert nl._STAGE_READS is True
+    nl._pipeline_installed = True
+    nl._pipeline_mint_phase = "copy"
+
+    # Known content: 2 NaNs and 1 out-of-range (100 > 60) among finite values.
+    ef = torch.tensor([[float("nan"), float("nan"), 100.0, 5.0]], device="cuda")
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = ef
+
+    nl._checkpoint(Batch(), "copy")     # reduction runs on the side stream
+    nl._root_pre_hook(None, (Batch(),))  # drain the step (device-side wait then read-back)
+    nl._write_summary()
+
+    recs = [r for r in _records(nl) if r["role"] == "track" and r["phase"] == "copy"]
+    assert recs, "no copy-stage track record"
+    r = recs[0]
+    assert r["nan_count"] == 2       # exact -- proves the drain waited for the side stream
+    assert r["oob_count"] == 1
+    assert nl._stage_reads_active is True
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs >=2 GPUs")
+def test_stage_reads_cross_device_ambient_differs_from_stream(
+    monkeypatch, tmp_path_factory
+):
+    """Copilot #297 review (#1/#2): the side stream is created on the tracked tensor's
+    device, but the wait_stream calls (context manager + drain) previously used an
+    UNPINNED current_stream(). On a multi-GPU rank where the ambient current device
+    differs from the stream's device, that orders against the wrong device's stream or
+    raises cross-device. This is the real ROCm case (8x MI350X ranks on non-zero
+    devices).
+
+    Put the tracked tensor on cuda:1 while the AMBIENT device is cuda:0, run a stage
+    read + drain, and assert it neither raises nor mis-reports -- i.e. the device-pinned
+    waits ordered correctly across the device mismatch."""
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1", "NANLOG_STAGE_READS": "1",
+         "NANLOG_TRACK_ATTR": "embedding_features",
+         "NANLOG_BOUNDS": "embedding_features:0:60", "NANLOG_SAMPLE_EVERY": "1"},
+        monkeypatch, tmp_path_factory)
+    nl._pipeline_installed = True
+    nl._pipeline_mint_phase = "copy"
+
+    # Tensor on device 1; known content (2 NaN, 1 oob).
+    ef = torch.tensor([[float("nan"), float("nan"), 100.0, 5.0]], device="cuda:1")
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = ef
+
+    # Ambient device deliberately 0 (!= the tensor's device 1) for the whole flow.
+    with torch.cuda.device(0):
+        nl._checkpoint(Batch(), "copy")
+        nl._root_pre_hook(None, (Batch(),))
+    nl._write_summary()
+
+    recs = [r for r in _records(nl) if r["role"] == "track" and r["phase"] == "copy"]
+    assert recs, "no copy-stage track record"
+    r = recs[0]
+    assert r["nan_count"] == 2       # correct across the device mismatch -> pin worked
+    assert r["oob_count"] == 1
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    assert smy["stage_reads_active"] is True
+    # the side stream lives on the tensor's device, not the ambient device
+    assert nl._stage_stream_device == 1
+
+
 def test_pipeline_requested_but_wrappers_not_installed_mints_at_forward(
     monkeypatch, tmp_path_factory
 ):

@@ -91,7 +91,11 @@ alone, vs. `grad` which is all gradients); a `watch` entry may set `"stride": N`
 `follow` entry may set `"pipeline": false` to follow the tensor through its `scope`
 blocks (and at forward entry) **without** installing the copy/sparse stage wrappers
 — the timing-safe mode for a cross-stream race the wrappers would otherwise suppress
-(requires a `scope`, incompatible with `stages: true`; summary records `follow_mode`).
+(requires a `scope`, incompatible with `stages: true`; summary records `follow_mode`);
+and a `follow` entry may set `"stage_reads": true` (with `pipeline: true`) to KEEP the
+stage wrappers but run each copy/sparse/forward stage read on a side CUDA stream, so
+the stage reads give timing-safe **stage** brackets without serializing the overlap
+(summary records `stage_reads_active` — `false` means it fell back to the inline read).
 
 Collector defaults (applied by [`build_env`](__init__.py)): all seven channels,
 `NANLOG_PRE_CONTEXT=10`, `NANLOG_SAMPLE_EVERY=50`. `NANLOG_DIR` is filled per-cell
