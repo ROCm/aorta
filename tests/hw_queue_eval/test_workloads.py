@@ -16,7 +16,9 @@ pytestmark = [
     pytest.mark.gpu,
     pytest.mark.skipif(
         not torch.cuda.is_available(),
-        reason="CUDA not available",
+        # torch.cuda.is_available() is PyTorch's generic GPU check (CUDA/HIP),
+        # so keep the reason hardware-agnostic for clearer ROCm/MI350 triage.
+        reason="No GPU available (torch.cuda.is_available() is False; CUDA/ROCm)",
     ),
 ]
 

@@ -47,6 +47,12 @@ jobs:
   gpu-tests:
     name: pytest (GPU, MI350)
     runs-on: [self-hosted, gpu]
+    # Security: never run untrusted fork-PR code on the self-hosted GPU runner.
+    # Only same-repo PRs (plus schedule / dispatch) reach the runner. Fork PRs
+    # also lack the ROCM_SHARED_KEY secret, so they could not authenticate anyway.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 60
 
     steps:
@@ -71,11 +77,18 @@ jobs:
           bash scripts/ci/docker_cmd.sh info >/dev/null
           bash scripts/ci/docker_compose.sh version
 
-      # rocm/pytorch is public on Docker Hub; login avoids rate limits but is
-      # not required to build. Continue if ROCM_SHARED_KEY is expired/missing.
+      # rocm/pytorch is public on Docker Hub, so login is optional: it only
+      # avoids pull rate limits. Skip cleanly when the secret is unavailable
+      # (e.g. events without secret access) and never hard-fail the job on login.
       - name: Log in to container registry
+        env:
+          ROCM_SHARED_KEY: ${{ secrets.ROCM_SHARED_KEY }}
         run: |
-          if ! echo "${{ secrets.ROCM_SHARED_KEY }}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
+          if [ -z "${ROCM_SHARED_KEY}" ]; then
+            echo "ROCM_SHARED_KEY not set; using anonymous pulls (base image is public)."
+            exit 0
+          fi
+          if ! printf '%s' "${ROCM_SHARED_KEY}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
             echo "::warning::Docker Hub login failed (ROCM_SHARED_KEY may be expired). Continuing with anonymous pulls."
           fi
 
@@ -97,7 +110,7 @@ jobs:
 
       - name: Upload GPU test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: gpu-test-results-${{ github.run_id }}
           path: gpu-results.xml
@@ -113,7 +126,11 @@ jobs:
     runs-on: [self-hosted, gpu]
     needs: gpu-tests
     # Runs on every trigger. PRs run the fast, single-GPU "pr" tier; nightly /
-    # dispatch run the full manifest (AORTA_CI_TIER below).
+    # dispatch run the full manifest (AORTA_CI_TIER below). Same fork-PR guard
+    # as gpu-tests: no untrusted fork code on the self-hosted runner.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 120
 
     steps:
@@ -138,11 +155,18 @@ jobs:
           bash scripts/ci/docker_cmd.sh info >/dev/null
           bash scripts/ci/docker_compose.sh version
 
-      # rocm/pytorch is public on Docker Hub; login avoids rate limits but is
-      # not required to build. Continue if ROCM_SHARED_KEY is expired/missing.
+      # rocm/pytorch is public on Docker Hub, so login is optional: it only
+      # avoids pull rate limits. Skip cleanly when the secret is unavailable
+      # (e.g. events without secret access) and never hard-fail the job on login.
       - name: Log in to container registry
+        env:
+          ROCM_SHARED_KEY: ${{ secrets.ROCM_SHARED_KEY }}
         run: |
-          if ! echo "${{ secrets.ROCM_SHARED_KEY }}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
+          if [ -z "${ROCM_SHARED_KEY}" ]; then
+            echo "ROCM_SHARED_KEY not set; using anonymous pulls (base image is public)."
+            exit 0
+          fi
+          if ! printf '%s' "${ROCM_SHARED_KEY}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
             echo "::warning::Docker Hub login failed (ROCM_SHARED_KEY may be expired). Continuing with anonymous pulls."
           fi
 

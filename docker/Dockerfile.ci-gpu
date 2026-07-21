@@ -1,5 +1,11 @@
-# CI GPU image: same layers as Dockerfile.rocm70_9-1 but pins the ROCm PyTorch
-# base by digest so GPU CI runs are reproducible.
+# CI GPU image for the aorta GPU test gate + workload regression smokes.
+#
+# Reproducibility: the ROCm PyTorch base is pinned by manifest digest and the
+# only extra dependencies are a couple of pinned PyPI packages. The GPU pytest
+# gate and the current workload smokes (gpu_smoke / inference / race) do not
+# need TraceLens / Magpie, so those unpinned git installs from the general-
+# purpose image are intentionally omitted here to keep the CI image reproducible
+# and fast to build.
 #
 # Base: rocm/pytorch ROCm 7.2, Ubuntu 22.04, Python 3.10, PyTorch 2.9.1
 # Digest resolved via:
@@ -9,9 +15,9 @@ FROM rocm/pytorch@sha256:376bfab5f4f680c8b4b843c6d0c5d1f0a04e5a84ec3e86728db8d11
 
 USER root
 
-RUN pip install git+https://github.com/AMD-AGI/TraceLens.git || true
-RUN pip install git+https://github.com/AMD-AGI/Magpie.git || true
-RUN pip install openpyxl seaborn
+# Fail the build if these can't be installed (no `|| true`): a broken CI image
+# should surface here, not as a confusing runtime error later.
+RUN python -m pip install --no-cache-dir "openpyxl>=3.0.0" "seaborn>=0.12.0"
 
 ENV ROCM_HOME=/opt/rocm
 ENV PATH=$ROCM_HOME/bin:$PATH

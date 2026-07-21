@@ -268,8 +268,9 @@ reliably green.
 - PR GPU runs are limited to GPU-touching paths so doc-only PRs do not consume
   the runner.
 - Nightly runs catch drift without blocking every PR.
-- The workload regression job is nightly/dispatch-only so multi-minute workload
-  smokes do not extend PR latency.
+- The workload regression job runs on PRs too, but only the fast single-GPU
+  `pr` tier; the heavier full manifest (e.g. the 2-GPU `race` smoke) is reserved
+  for nightly / dispatch so PR latency stays low.
 
 ## Follow-up strategy
 

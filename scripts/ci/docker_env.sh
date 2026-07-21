@@ -6,7 +6,11 @@
 #   source scripts/ci/docker_env.sh
 #   $AORTA_DOCKER info
 #   bash scripts/ci/docker_compose.sh up -d
-set -euo pipefail
+#
+# This file is meant to be *sourced*, so it deliberately does NOT run
+# `set -euo pipefail` (that would mutate the caller's shell options). The
+# wrapper scripts (docker_cmd.sh / docker_compose.sh) set strict mode
+# themselves before sourcing this helper.
 
 _aorta_resolve_docker() {
   if [ -n "${AORTA_DOCKER:-}" ]; then

@@ -54,9 +54,20 @@ if not smokes:
     raise SystemExit(f"No smokes declared in {manifest_path}")
 
 ran = 0
-for entry in smokes:
-    name = entry["name"]
-    command = entry["command"]
+for idx, entry in enumerate(smokes):
+    if not isinstance(entry, dict):
+        raise SystemExit(f"smoke entry #{idx} is not a mapping: {entry!r}")
+    if "name" not in entry or "command" not in entry:
+        raise SystemExit(f"smoke entry #{idx} must have 'name' and 'command': {entry!r}")
+
+    name = str(entry["name"])
+    raw_command = entry["command"]
+    if not isinstance(raw_command, list) or not raw_command:
+        raise SystemExit(f"smoke '{name}': 'command' must be a non-empty list")
+
+    # YAML may parse argv tokens as ints/floats/bools (e.g. an unquoted 1);
+    # coerce every token to str so subprocess.run / ' '.join never raise.
+    command = [str(token) for token in raw_command]
     min_gpus = int(entry.get("min_gpus", 1))
     is_pr = bool(entry.get("pr", False))
 
