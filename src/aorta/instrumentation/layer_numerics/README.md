@@ -85,9 +85,13 @@ back). Keeping the engine flat-var-only is what preserves the standalone contrac
 Recent schema additions (full how-to in [`docs/layer-numerics.md`](../../../../docs/layer-numerics.md)):
 a `watch` entry's `tensors` list also accepts `igrad` (the activation-input grad
 alone, vs. `grad` which is all gradients); a `watch` entry may set `"stride": N`
-(`>= 1`, default `1`) to hook only every Nth matched module; and a top-level
+(`>= 1`, default `1`) to hook only every Nth matched module; a top-level
 `"diagnostics": [...]` list (`addr`, `locate`, `bad_values`, `dump_tensor`,
-`alloc_snapshot`) toggles per-record detail across every captured record.
+`alloc_snapshot`) toggles per-record detail across every captured record; and a
+`follow` entry may set `"pipeline": false` to follow the tensor through its `scope`
+blocks (and at forward entry) **without** installing the copy/sparse stage wrappers
+— the timing-safe mode for a cross-stream race the wrappers would otherwise suppress
+(requires a `scope`, incompatible with `stages: true`; summary records `follow_mode`).
 
 Collector defaults (applied by [`build_env`](__init__.py)): all seven channels,
 `NANLOG_PRE_CONTEXT=10`, `NANLOG_SAMPLE_EVERY=50`. `NANLOG_DIR` is filled per-cell

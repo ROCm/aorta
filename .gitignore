@@ -69,6 +69,10 @@ actual_outputs/
 *.sublime-workspace
 *.sublime-project
 
+# Claude Code local state (settings, permission allowlists, cache, worktrees).
+# Always local/per-developer -- never commit to the shared repo.
+.claude/
+
 # OS generated files
 .DS_Store
 Thumbs.db
