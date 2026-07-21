@@ -490,7 +490,7 @@ All heavy features default **OFF** and feed the same single per-step host transf
 | `NANLOG_BOUNDS` | Per-tensor in-range check `substr:lo:hi;...` (→ `kind="oob"`) | (empty) | `follow[].bounds` |
 | `NANLOG_SPARSE` | Cheap host-side KJT metadata at the sparse stage | `0` (off) | — |
 | `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each scoped block. Rides an **active follow** — with `NANLOG_PIPELINE=1` (stage+block). **Setting this flat var alone (no `NANLOG_PIPELINE`, no spec) is a warned no-op**, so a legacy run is never silently switched into forward-capture mode; the wrapper-free block follow is opt-in via a `pipeline:false` spec. | `0` (off) | `follow[].scope` (+ `stride`) |
-| `NANLOG_PIPELINE_OFF_FOLLOW` | **Spec-internal, not a public flat knob.** Set only by a validated `follow[].pipeline:false`; enables the forward+block follow without the stage wrappers. Documented for artifact readers, not for direct use. | `0` (off) | `follow[].pipeline: false` |
+| `NANLOG_PIPELINE_OFF_FOLLOW` | **Spec-internal, not a supported public flat knob.** The engine does read it from the environment (so it *can* be set by hand), but it is **intended to be set only** by a validated `follow[].pipeline:false`; enables the forward+block follow without the stage wrappers. Documented for artifact readers — prefer the `pipeline:false` spec over setting it directly. | `0` (off) | `follow[].pipeline: false` |
 | `NANLOG_TRACK_LAYER_STRIDE` | Re-scan every Kth layer when re-scan is on | `1` | `follow[].stride` |
 
 Channel notes:

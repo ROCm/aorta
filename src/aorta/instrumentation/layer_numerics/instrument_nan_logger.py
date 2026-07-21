@@ -418,8 +418,9 @@ def _resolve_follow_cadence(f: dict) -> tuple:
     # that rides the forward hook, not the stage wrappers.
     if not pipeline and stages:
         raise ValueError("follow[].pipeline false is incompatible with stages: true "
-                         "(stage capture requires the pipeline wrappers); drop stages "
-                         "or set a `scope` for a forward/block-only follow")
+                         "(stage capture requires the pipeline wrappers); to follow at "
+                         "blocks only, drop `stages` and give a `scope`, or keep "
+                         "`stages` and use the default pipeline: true")
     return stages, stride, pipeline
 
 
