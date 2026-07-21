@@ -1753,10 +1753,18 @@ def _get_stage_stream(device=None):
     try:
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA not available")
-        # Pin the stream to the tensor's device so the wait/reduction never cross GPUs.
-        with torch.cuda.device(device) if device is not None else contextlib.nullcontext():
+        # Normalize to an integer device INDEX (not a torch.device): torch.cuda.device()
+        # accepts an int, downstream code / the summary compare it numerically, and a
+        # torch.device with .index=None (e.g. "cuda") would otherwise leak through.
+        if device is None:
+            dev_idx = torch.cuda.current_device()
+        else:
+            d = torch.device(device)
+            dev_idx = d.index if d.index is not None else torch.cuda.current_device()
+        # Pin the stream to that device so the wait/reduction never cross GPUs.
+        with torch.cuda.device(dev_idx):
             _stage_stream = torch.cuda.Stream()
-        _stage_stream_device = device if device is not None else torch.cuda.current_device()
+        _stage_stream_device = dev_idx
         _stage_reads_active = True
         _log("stage_reads: side stream created; copy/sparse/forward stage reads run "
              "off the pipeline stream (one-way dependency). NOTE: this assumes the "
@@ -2302,9 +2310,13 @@ def _write_summary() -> None:
         "stage_reads_active": _stage_reads_active,
         "stage_read_count": _stage_read_count,
         "follow_fwd": _FOLLOW_FWD,
+        # Keyed on what ACTUALLY ran (_pipeline_installed), not what was requested
+        # (_PIPELINE): a degraded run (NANLOG_PIPELINE=1 but torchrec absent -> wrappers
+        # no-op) has no stage brackets, so it must NOT claim stage_wrappers*. It still
+        # captures at forward entry via the root pre-hook, so it reads as forward_blocks.
         "follow_mode": (
-            "stage_wrappers_side_read" if (_PIPELINE and _stage_reads_active)
-            else "stage_wrappers" if _PIPELINE
+            "stage_wrappers_side_read" if (_pipeline_installed and _stage_reads_active)
+            else "stage_wrappers" if _pipeline_installed
             else "forward_blocks" if _FOLLOW_FWD
             else "off"
         ),

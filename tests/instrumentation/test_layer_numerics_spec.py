@@ -395,12 +395,32 @@ def test_follow_pipeline_false_summary_mode(monkeypatch, tmp_path_factory):
 
 
 def test_follow_stage_summary_mode(monkeypatch, tmp_path_factory):
-    """A stage-wrapper follow records follow_mode=stage_wrappers."""
+    """A stage-wrapper follow records follow_mode=stage_wrappers -- but only when the
+    wrappers were ACTUALLY installed. follow_mode keys on _pipeline_installed (what ran),
+    not the requested _PIPELINE, so simulate the install (no torchrec in this env)."""
     spec = {"follow": [{"tensor": "ef", "stages": True}]}
     nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    nl._pipeline_installed = True   # torchrec would set this; forced here
     nl._write_summary()
     smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
     assert smy["follow_mode"] == "stage_wrappers"
+
+
+def test_follow_stage_requested_but_not_installed_is_forward_blocks(
+    monkeypatch, tmp_path_factory
+):
+    """Copilot #297 review: a stages follow REQUESTED (pipeline true) but where the
+    wrappers never installed (torchrec absent -> _pipeline_installed false) must NOT
+    claim stage bracketing. follow_mode falls to forward_blocks (it still captures at
+    forward entry), never stage_wrappers*."""
+    spec = {"follow": [{"tensor": "ef", "stages": True}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    assert nl._pipeline_installed is False   # wrappers never installed
+    nl._write_summary()
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    assert smy["follow_mode"] == "forward_blocks"
 
 
 def test_follow_pipeline_false_runtime_capture(monkeypatch, tmp_path_factory):
