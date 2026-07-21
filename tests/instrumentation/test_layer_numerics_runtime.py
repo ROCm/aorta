@@ -226,6 +226,90 @@ def test_pipeline_forward_stage_and_batch_id(monkeypatch, tmp_path_factory):
     assert copy_recs and all(r["batch_id"] is not None for r in copy_recs)
 
 
+def test_stage_reads_still_capture_all_stages(monkeypatch, tmp_path_factory):
+    """With NANLOG_STAGE_READS=1 the copy/sparse/forward stage reads still produce the
+    same records (the side stream only changes WHERE the reduction runs, not WHAT is
+    captured). On a CPU box the side stream is unavailable, so this also exercises the
+    inline fallback: capture must be identical either way, and the run must not crash."""
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1", "NANLOG_STAGE_READS": "1",
+         "NANLOG_TRACK_ATTR": "embedding_features",
+         "NANLOG_BOUNDS": "embedding_features:0:60", "NANLOG_SAMPLE_EVERY": "1"},
+        monkeypatch, tmp_path_factory)
+    assert nl._STAGE_READS is True
+    nl._pipeline_installed = True
+    nl._pipeline_mint_phase = "copy"
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.rand(4, 8) * 60.0 for _ in range(3)]
+
+    for _ in range(2):
+        b = Batch()
+        nl._checkpoint(b, "copy")
+        nl._checkpoint(b, "sparse_start")
+        nl._checkpoint(b, "sparse_wait")
+        nl._root_pre_hook(None, (b,))
+    nl._root_pre_hook(None, (Batch(),))
+    nl._write_summary()
+
+    track = [r for r in _records(nl) if r["role"] in ("track", "sparse")]
+    phases = {r["phase"] for r in track}
+    assert {"copy", "sparse_start", "sparse_wait", "forward"} <= phases
+    # stats came through regardless of which stream the reduction ran on
+    assert all("nan_count" in r for r in track)
+
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    assert smy["stage_reads"] is True
+    # follow_mode reflects whether the side stream actually engaged on this box:
+    # "stage_wrappers_side_read" when CUDA is present, plain "stage_wrappers" on CPU
+    # (inline fallback). Either is a valid, honestly-reported outcome.
+    if torch.cuda.is_available():
+        assert smy["stage_reads_active"] is True
+        assert smy["follow_mode"] == "stage_wrappers_side_read"
+        assert smy["stage_read_count"] > 0
+    else:
+        assert smy["stage_reads_active"] is False   # fell back to inline, honestly
+        assert smy["follow_mode"] == "stage_wrappers"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for side stream")
+def test_stage_reads_drain_reads_side_stream_values_correctly(
+    monkeypatch, tmp_path_factory
+):
+    """BLOCKER regression: the drain must not read the side-stream reduction outputs
+    before they are computed. Feed a tensor with a KNOWN nan/oob content, run the stage
+    read on the side stream, drain, and assert the emitted counts match the tensor
+    exactly -- i.e. the drain's device-side wait_stream ordered the casts after the
+    side-stream reductions (a missing/late wait would give wrong or stale counts)."""
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1", "NANLOG_STAGE_READS": "1",
+         "NANLOG_TRACK_ATTR": "embedding_features",
+         "NANLOG_BOUNDS": "embedding_features:0:60", "NANLOG_SAMPLE_EVERY": "1"},
+        monkeypatch, tmp_path_factory)
+    assert nl._STAGE_READS is True
+    nl._pipeline_installed = True
+    nl._pipeline_mint_phase = "copy"
+
+    # Known content: 2 NaNs and 1 out-of-range (100 > 60) among finite values.
+    ef = torch.tensor([[float("nan"), float("nan"), 100.0, 5.0]], device="cuda")
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = ef
+
+    nl._checkpoint(Batch(), "copy")     # reduction runs on the side stream
+    nl._root_pre_hook(None, (Batch(),))  # drain the step (device-side wait then read-back)
+    nl._write_summary()
+
+    recs = [r for r in _records(nl) if r["role"] == "track" and r["phase"] == "copy"]
+    assert recs, "no copy-stage track record"
+    r = recs[0]
+    assert r["nan_count"] == 2       # exact -- proves the drain waited for the side stream
+    assert r["oob_count"] == 1
+    assert nl._stage_reads_active is True
+
+
 def test_pipeline_requested_but_wrappers_not_installed_mints_at_forward(
     monkeypatch, tmp_path_factory
 ):

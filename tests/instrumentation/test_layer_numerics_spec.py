@@ -294,6 +294,69 @@ def test_follow_pipeline_false_default_stride_is_one(monkeypatch, tmp_path_facto
     assert nl._WATCH_TYPES == ("MLP",)
 
 
+# ---------------------------------------------------------------------------
+# follow stage_reads -> timing-safe copy/sparse stage reads on a side stream
+# ---------------------------------------------------------------------------
+def test_follow_stage_reads_arms_pipeline_and_side_read(monkeypatch, tmp_path_factory):
+    """`stages:true` + `stage_reads:true` keeps the pipeline wrappers ON (we need the
+    copy/sparse timing points) but flags the reads to run off the pipeline stream."""
+    spec = {"follow": [{"tensor": "embedding_features", "stages": True,
+                        "stage_reads": True, "bounds": [0, 60]}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is True
+    assert nl._PIPELINE is True           # wrappers armed -- stage reads need them
+    assert nl._STAGE_READS is True        # reads flagged for the side stream
+    assert nl._PIPELINE_OFF_FOLLOW is False
+
+
+def test_follow_stage_reads_defaults_false(monkeypatch, tmp_path_factory):
+    """A plain stages follow does not flag stage_reads (historical inline behavior)."""
+    spec = {"follow": [{"tensor": "ef", "stages": True}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    assert nl._STAGE_READS is False
+
+
+def test_follow_stage_reads_with_scope_keeps_wrappers(monkeypatch, tmp_path_factory):
+    """stage_reads + a scoped follow (pipeline defaults true, wrappers armed via scope)
+    is valid: the stage reads move to the side stream AND the per-block re-scan runs."""
+    spec = {"follow": [{"tensor": "ef", "stage_reads": True,
+                        "scope": {"types": ["MLP"]}}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is True
+    assert nl._PIPELINE is True
+    assert nl._STAGE_READS is True
+    assert nl._TRACK_EVERY_LAYER is True
+
+
+@pytest.mark.parametrize("follow_entry", [
+    {"tensor": "ef", "pipeline": False, "scope": {"types": ["MLP"]}, "stage_reads": True},
+    {"tensor": "ef", "stage_reads": "yes", "stages": True},   # non-bool
+])
+def test_follow_stage_reads_invalid_rolls_back(follow_entry, monkeypatch, tmp_path_factory):
+    """stage_reads needs the pipeline wrappers (pipeline:true). With pipeline:false it is
+    meaningless and rejected; a non-bool value is rejected too. Both roll the whole spec
+    back to the flat vars. (Note: stages:false + scope keeps pipeline:true by default, so
+    the wrappers ARE armed via the scope -- that combination is valid, not a rejection.)"""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps({"follow": [follow_entry]}),
+         "NANLOG_CHANNELS": "act,igrad"},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is False
+    assert nl._STAGE_READS is False
+    assert nl._CHANNELS == frozenset({"act", "igrad"})
+
+
+def test_spec_clears_stale_flat_stage_reads(monkeypatch, tmp_path_factory):
+    """A spec that doesn't ask for stage_reads must clear a lingering flat
+    NANLOG_STAGE_READS=1, so it can't leak on."""
+    nl = _load_logger(
+        {"NANLOG_STAGE_READS": "1",
+         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "stages": True}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._STAGE_READS is False
+
+
 def test_follow_pipeline_true_is_default_and_unchanged(monkeypatch, tmp_path_factory):
     """Omitting `pipeline` keeps the historical behavior: stage wrappers ON."""
     spec = {"follow": [{"tensor": "ef", "scope": {"types": ["MLP"]}, "stride": 5}]}
