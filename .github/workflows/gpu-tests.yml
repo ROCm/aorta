@@ -65,9 +65,16 @@ jobs:
         run: |
           ws="${{ github.workspace }}"
           [ -d "$ws" ] || exit 0
-          docker run --rm -v "$ws":/ws busybox chown -R "$(id -u):$(id -g)" /ws \
-            || sudo chown -R "$(id -u):$(id -g)" "$ws" \
-            || true
+          uidgid="$(id -u):$(id -g)"
+          # Repo scripts aren't checked out yet, so resolve docker access inline.
+          # Support runners with direct docker, sudo docker, or only host sudo.
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws busybox chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws busybox chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
 
       - name: Check out code
         uses: actions/checkout@v5
@@ -143,9 +150,16 @@ jobs:
         run: |
           ws="${{ github.workspace }}"
           [ -d "$ws" ] || exit 0
-          docker run --rm -v "$ws":/ws busybox chown -R "$(id -u):$(id -g)" /ws \
-            || sudo chown -R "$(id -u):$(id -g)" "$ws" \
-            || true
+          uidgid="$(id -u):$(id -g)"
+          # Repo scripts aren't checked out yet, so resolve docker access inline.
+          # Support runners with direct docker, sudo docker, or only host sudo.
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws busybox chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws busybox chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
 
       - name: Check out code
         uses: actions/checkout@v5

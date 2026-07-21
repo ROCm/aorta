@@ -34,6 +34,14 @@ PY
 
 echo "GPU regression smokes: tier=${TIER}, detected ${GPU_COUNT} GPU(s)"
 
+# These are GPU regression smokes: zero visible GPUs means a broken runner /
+# container device mapping (e.g. missing /dev/kfd, /dev/dri). Fail loudly rather
+# than silently "passing" by skipping every entry.
+if [[ "${GPU_COUNT}" -lt 1 ]]; then
+  echo "ERROR: no GPUs detected in the CI container; check device passthrough (/dev/kfd, /dev/dri)." >&2
+  exit 1
+fi
+
 python - "${MANIFEST}" "${GPU_COUNT}" "${TIER}" <<'PY'
 from __future__ import annotations
 
@@ -48,8 +56,12 @@ gpu_count = int(sys.argv[2])
 tier = sys.argv[3]
 
 manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-smokes = manifest.get("smokes") or []
+if not isinstance(manifest, dict):
+    raise SystemExit(
+        f"Manifest {manifest_path} must be a YAML mapping, got {type(manifest).__name__}"
+    )
 
+smokes = manifest.get("smokes") or []
 if not smokes:
     raise SystemExit(f"No smokes declared in {manifest_path}")
 
