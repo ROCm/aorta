@@ -50,6 +50,19 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # The CI container runs as root and writes root-owned build artifacts
+      # (.egg-info / __pycache__ / .pytest_cache) into the mounted checkout.
+      # actions/checkout's `git clean` then runs as the runner user and cannot
+      # delete them, failing the checkout. Reclaim ownership first via a
+      # throwaway root container (repo scripts aren't checked out yet here).
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          docker run --rm -v "$ws":/ws busybox chown -R "$(id -u):$(id -g)" /ws \
+            || sudo chown -R "$(id -u):$(id -g)" "$ws" \
+            || true
+
       - name: Check out code
         uses: actions/checkout@v5
 
@@ -104,6 +117,19 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      # The CI container runs as root and writes root-owned build artifacts
+      # (.egg-info / __pycache__ / .pytest_cache) into the mounted checkout.
+      # actions/checkout's `git clean` then runs as the runner user and cannot
+      # delete them, failing the checkout. Reclaim ownership first via a
+      # throwaway root container (repo scripts aren't checked out yet here).
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          docker run --rm -v "$ws":/ws busybox chown -R "$(id -u):$(id -g)" /ws \
+            || sudo chown -R "$(id -u):$(id -g)" "$ws" \
+            || true
+
       - name: Check out code
         uses: actions/checkout@v5
 
