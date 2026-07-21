@@ -1625,6 +1625,13 @@ def _install_optimizer_autohook() -> None:
 # tensor-flow tracker — EF is only the default target (NANLOG_TRACK_ATTR).
 # ---------------------------------------------------------------------------
 _pipeline_installed = False
+# The EARLIEST pipeline stage whose wrapper was actually installed, in execution
+# order (copy -> sparse_start -> sparse_wait). That wrapper is the first to see each
+# batch, so it -- not a hardcoded "copy" -- is the phase allowed to MINT a batch_id.
+# None until _install_pipeline_hook patches at least one method. Guards the case
+# where a torchrec API change drops copy_batch_to_gpu but keeps sparse_*: minting
+# must then happen at sparse_start, or every stage record would carry batch_id=null.
+_pipeline_mint_phase = None
 _pipeline_checkpoints = 0     # stage-wrapper checkpoints that stashed something (_PIPELINE only)
 _forward_checkpoints = 0      # forward-entry checkpoints that stashed something (pipeline-off follow)
 _pipeline_warned = False
@@ -1793,14 +1800,16 @@ def _resolve_batch_id(batch, phase: str):
     if existing is not None:
         return existing
     # Which phase is allowed to MINT a fresh id (the batch's first sighting)? Key off
-    # whether the stage wrappers were ACTUALLY installed (_pipeline_installed), not
-    # merely requested (_PIPELINE): when the wrappers run, `copy` is the first sighting
-    # (a non-copy first sighting means we started mid-pipeline and must not fabricate an
-    # id). When they are NOT installed -- a pipeline-off follow, OR a degraded run where
-    # NANLOG_PIPELINE=1 was requested but torchrec was unavailable / its API changed so
-    # `copy` never fires -- `forward` IS the first sighting and mints the id; otherwise
-    # every record would carry batch_id=null.
-    _mint_phase = "copy" if _pipeline_installed else "forward"
+    # what the wrappers ACTUALLY installed, not what was requested (_PIPELINE):
+    #   - Wrappers installed -> the EARLIEST patched stage (_pipeline_mint_phase, in
+    #     copy/sparse_start/sparse_wait execution order) is the first to see each batch.
+    #     Using it -- not a hardcoded "copy" -- handles a torchrec API change that drops
+    #     copy_batch_to_gpu but keeps sparse_*, where "copy" never fires and hardcoding
+    #     it would leave every stage record's batch_id null.
+    #   - Wrappers NOT installed (pipeline-off follow, OR a degraded NANLOG_PIPELINE=1
+    #     run where torchrec was unavailable) -> `forward` is the first sighting.
+    # A first sighting at any OTHER phase means we started mid-pipeline; don't fabricate.
+    _mint_phase = _pipeline_mint_phase if _pipeline_installed else "forward"
     if phase != _mint_phase:
         # A non-minting phase with no id: either a mid-pipeline start, or (wrappers off)
         # a stray non-forward phase. Don't fabricate an id; leave it null.
@@ -1993,7 +2002,7 @@ def _install_pipeline_hook() -> None:
     checkpoint of the tracked flow objects with the right `phase`. Defensive: if the
     installed torchrec exposes none of the known stage methods, warn once and leave
     the layer hooks untouched. Same auto-attach philosophy as the DMP __init__ patch."""
-    global _pipeline_installed, _pipeline_warned
+    global _pipeline_installed, _pipeline_warned, _pipeline_mint_phase
     if not _PIPELINE or _pipeline_installed:
         return
     try:
@@ -2015,6 +2024,7 @@ def _install_pipeline_hook() -> None:
         ("wait_sparse_data_dist", "sparse_wait", False),
     ]
     patched = []
+    patched_phases = []   # in execution order; first entry = earliest stage that fires
     for meth_name, phase, from_return in specs:
         orig = getattr(_TP, meth_name, None)
         if orig is None or not callable(orig):
@@ -2042,6 +2052,7 @@ def _install_pipeline_hook() -> None:
 
         setattr(_TP, meth_name, make(orig, phase, from_return))
         patched.append(meth_name)
+        patched_phases.append(phase)
 
     if not patched:
         _pipeline_warned = True
@@ -2050,6 +2061,10 @@ def _install_pipeline_hook() -> None:
              f"wait_sparse_data_dist); checkpoints inactive. torchrec API changed?")
         return
     _pipeline_installed = True
+    # The earliest patched stage (specs is in execution order) is the first to see
+    # each batch, so it is the batch_id-minting phase -- NOT a hardcoded "copy",
+    # which may not have been patched if torchrec dropped copy_batch_to_gpu.
+    _pipeline_mint_phase = patched_phases[0]
     _log(f"pipeline tracking armed: patched {patched}; track_attr={list(_TRACK_ATTR)}; "
          f"track_max={_TRACK_MAX}; sparse={_SPARSE}; sparse_heavy={_SPARSE_HEAVY}; "
          f"track_every_layer={_TRACK_EVERY_LAYER}; track_layer_stride={_TRACK_LAYER_STRIDE}")
@@ -2086,6 +2101,7 @@ def _write_summary() -> None:
         "alloc_snapshot_dumped": _snapshot_dumped,
         "pipeline": _PIPELINE,
         "pipeline_installed": _pipeline_installed,
+        "pipeline_mint_phase": _pipeline_mint_phase,
         "pipeline_checkpoints": _pipeline_checkpoints,
         "forward_checkpoints": _forward_checkpoints,
         "follow_fwd": _FOLLOW_FWD,

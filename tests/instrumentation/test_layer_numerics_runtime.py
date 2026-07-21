@@ -192,10 +192,12 @@ def test_pipeline_forward_stage_and_batch_id(monkeypatch, tmp_path_factory):
          "NANLOG_BOUNDS": "embedding_features:0:60", "NANLOG_SAMPLE_EVERY": "1"},
         monkeypatch, tmp_path_factory)
     # This test drives the stage checkpoints (copy/sparse_*) by hand instead of
-    # installing the real TorchRec wrappers, so mark them installed -- batch-id
-    # minting keys off _pipeline_installed (what actually ran), not the requested
-    # _PIPELINE, so `copy` is the id-minting first sighting here.
+    # installing the real TorchRec wrappers, so simulate that install: mark them
+    # installed and set the mint phase to the earliest stage this test fires (`copy`).
+    # Batch-id minting keys off _pipeline_installed + _pipeline_mint_phase (what
+    # actually ran), not the requested _PIPELINE.
     nl._pipeline_installed = True
+    nl._pipeline_mint_phase = "copy"
 
     class Batch:
         def __init__(self):
@@ -262,6 +264,45 @@ def test_pipeline_requested_but_wrappers_not_installed_mints_at_forward(
     assert smy["pipeline_installed"] is False
     assert smy["pipeline_checkpoints"] == 0
     assert smy["forward_checkpoints"] > 0
+
+
+def test_pipeline_mints_at_earliest_installed_stage_when_copy_absent(
+    monkeypatch, tmp_path_factory
+):
+    """Copilot PR #296 follow-up: _pipeline_installed can be true even when
+    copy_batch_to_gpu was NOT patched (a torchrec API change that keeps only sparse_*).
+    Then `copy` never fires, so minting must happen at the EARLIEST stage that WAS
+    installed (here sparse_start), not a hardcoded `copy` -- otherwise every stage
+    record's batch_id stays null."""
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1", "NANLOG_TRACK_ATTR": "embedding_features",
+         "NANLOG_SAMPLE_EVERY": "1"},
+        monkeypatch, tmp_path_factory)
+    # Simulate an install where copy_batch_to_gpu was absent: only sparse_* patched,
+    # so the earliest firing stage -- and thus the mint phase -- is sparse_start.
+    nl._pipeline_installed = True
+    nl._pipeline_mint_phase = "sparse_start"
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.rand(4, 8) for _ in range(3)]
+
+    for _ in range(2):
+        b = Batch()
+        # No `copy` checkpoint -- that wrapper was never installed.
+        nl._checkpoint(b, "sparse_start")
+        nl._checkpoint(b, "sparse_wait")
+        nl._root_pre_hook(None, (b,))       # forward-entry checkpoint
+    nl._root_pre_hook(None, (Batch(),))     # drain the last step
+    nl._write_summary()
+
+    track = [r for r in _records(nl) if r["role"] in ("track", "sparse")]
+    # sparse_start (the earliest installed stage) mints a non-null batch_id.
+    start_recs = [r for r in track if r["phase"] == "sparse_start"]
+    assert start_recs and all(r["batch_id"] is not None for r in start_recs)
+    # and the later same-batch stages share it (they read the minted id back).
+    wait_recs = [r for r in track if r["phase"] == "sparse_wait"]
+    assert wait_recs and all(r["batch_id"] is not None for r in wait_recs)
 
 
 def test_pipeline_off_produces_no_track_records(monkeypatch, tmp_path_factory):
