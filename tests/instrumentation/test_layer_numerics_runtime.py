@@ -191,6 +191,11 @@ def test_pipeline_forward_stage_and_batch_id(monkeypatch, tmp_path_factory):
         {"NANLOG_PIPELINE": "1", "NANLOG_TRACK_ATTR": "embedding_features",
          "NANLOG_BOUNDS": "embedding_features:0:60", "NANLOG_SAMPLE_EVERY": "1"},
         monkeypatch, tmp_path_factory)
+    # This test drives the stage checkpoints (copy/sparse_*) by hand instead of
+    # installing the real TorchRec wrappers, so mark them installed -- batch-id
+    # minting keys off _pipeline_installed (what actually ran), not the requested
+    # _PIPELINE, so `copy` is the id-minting first sighting here.
+    nl._pipeline_installed = True
 
     class Batch:
         def __init__(self):
@@ -217,6 +222,46 @@ def test_pipeline_forward_stage_and_batch_id(monkeypatch, tmp_path_factory):
     # a single copy checkpoint's records share one non-null batch_id
     copy_recs = [r for r in track if r["phase"] == "copy"]
     assert copy_recs and all(r["batch_id"] is not None for r in copy_recs)
+
+
+def test_pipeline_requested_but_wrappers_not_installed_mints_at_forward(
+    monkeypatch, tmp_path_factory
+):
+    """Degraded case (Copilot PR #296 review): NANLOG_PIPELINE=1 was requested but the
+    stage wrappers never installed (torchrec absent / API changed), so `copy` never
+    fires. Batch-id minting and the checkpoint counters must key off what ACTUALLY ran
+    (_pipeline_installed), not the request (_PIPELINE): the forward-entry checkpoint
+    must still mint a non-null batch_id, and it must count as a forward checkpoint, not
+    a phantom stage (pipeline) checkpoint."""
+    nl = _load_logger(
+        {"NANLOG_PIPELINE": "1", "NANLOG_TRACK_ATTR": "embedding_features",
+         "NANLOG_SAMPLE_EVERY": "1"},
+        monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True             # requested
+    assert nl._pipeline_installed is False  # but wrappers never installed (no torchrec)
+
+    class Batch:
+        def __init__(self):
+            self.embedding_features = [torch.rand(4, 8) for _ in range(3)]
+
+    # Only the forward-entry path runs (the stage wrappers that would call
+    # _checkpoint(b, "copy") were never installed).
+    for _ in range(2):
+        nl._root_pre_hook(None, (Batch(),))
+    nl._root_pre_hook(None, (Batch(),))     # drain the last step
+    nl._write_summary()
+
+    recs = _records(nl)
+    fwd = [r for r in recs if r["role"] == "track" and r["phase"] == "forward"]
+    assert fwd, "forward-entry follow wrote no track records in the degraded run"
+    # batch_id is minted at forward (not left null just because `copy` never came).
+    assert all(r["batch_id"] is not None for r in fwd)
+
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    # No phantom stage checkpoints; the forward-entry capture is counted honestly.
+    assert smy["pipeline_installed"] is False
+    assert smy["pipeline_checkpoints"] == 0
+    assert smy["forward_checkpoints"] > 0
 
 
 def test_pipeline_off_produces_no_track_records(monkeypatch, tmp_path_factory):

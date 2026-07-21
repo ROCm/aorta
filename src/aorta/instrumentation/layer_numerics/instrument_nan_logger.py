@@ -1792,12 +1792,15 @@ def _resolve_batch_id(batch, phase: str):
     existing = _batch_id_by_obj.get(id(batch))
     if existing is not None:
         return existing
-    # Which phase is allowed to MINT a fresh id (the batch's first sighting)? With the
-    # stage wrappers on, that is `copy` -- a non-copy first sighting means we started
-    # mid-pipeline and must not fabricate an id. With the wrappers off (pipeline-off
-    # follow), `copy` never fires, so `forward` IS the first sighting and mints the id;
-    # otherwise every record would carry batch_id=null.
-    _mint_phase = "copy" if _PIPELINE else "forward"
+    # Which phase is allowed to MINT a fresh id (the batch's first sighting)? Key off
+    # whether the stage wrappers were ACTUALLY installed (_pipeline_installed), not
+    # merely requested (_PIPELINE): when the wrappers run, `copy` is the first sighting
+    # (a non-copy first sighting means we started mid-pipeline and must not fabricate an
+    # id). When they are NOT installed -- a pipeline-off follow, OR a degraded run where
+    # NANLOG_PIPELINE=1 was requested but torchrec was unavailable / its API changed so
+    # `copy` never fires -- `forward` IS the first sighting and mints the id; otherwise
+    # every record would carry batch_id=null.
+    _mint_phase = "copy" if _pipeline_installed else "forward"
     if phase != _mint_phase:
         # A non-minting phase with no id: either a mid-pipeline start, or (wrappers off)
         # a stray non-forward phase. Don't fabricate an id; leave it null.
@@ -1970,11 +1973,16 @@ def _checkpoint(batch, phase: str) -> None:
         _log(f"WARNING: pipeline checkpoint ({phase}) failed: {e!r}")
         return
     if n:
-        # Count the stage-wrapper checkpoints (copy/sparse/forward with the wrappers
-        # installed) separately from the forward-entry-only checkpoint of a
-        # pipeline-off follow, so a `pipeline: false` summary never reports nonzero
-        # pipeline_checkpoints (which would imply stage instrumentation ran).
-        if _PIPELINE:
+        # Split the counters by what ACTUALLY produced this checkpoint, so each is a
+        # truthful signal:
+        #   pipeline_checkpoints -> a real stage-wrapper checkpoint: the wrappers were
+        #     installed AND this is a stage phase (copy/sparse_*), NOT the forward-entry
+        #     capture. Gating on _pipeline_installed (not the requested _PIPELINE) means
+        #     a degraded run (NANLOG_PIPELINE=1 but torchrec absent -> wrappers no-op)
+        #     never reports phantom stage checkpoints.
+        #   forward_checkpoints -> the forward-entry capture (rides the root pre-hook,
+        #     not the wrappers), in BOTH the pipeline-off follow and the wrapper-on case.
+        if _pipeline_installed and phase != "forward":
             _pipeline_checkpoints += 1
         else:
             _forward_checkpoints += 1
