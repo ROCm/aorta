@@ -29,8 +29,11 @@ on:
       - "docker/**"
       - ".github/workflows/gpu-tests.yml"
 
+# contents: read to check out; actions: read for artifact upload (matches the
+# other artifact-uploading workflows in this repo).
 permissions:
   contents: read
+  actions: read
 
 # Protect the single GPU runner: one workflow run at a time per ref; newer PR
 # pushes cancel the superseded run.
@@ -39,8 +42,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DOCKER_COMPOSE_FILE: docker/docker-compose.build.yaml
-  DOCKER_ENV_FILE: docker/.env.ci
   CONTAINER_NAME: aorta-ci-gpu
 
 jobs:
