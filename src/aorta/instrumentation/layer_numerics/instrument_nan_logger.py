@@ -1280,7 +1280,11 @@ def _drain_step() -> None:
     # is enqueue-time and one-way, so it costs no host sync of its own -- the single
     # .cpu().tolist() below stays the only host transfer. No-op when stage reads are off.
     if _stage_reads_active and _stage_stream is not None:
-        torch.cuda.current_stream().wait_stream(_stage_stream)
+        # Under the side stream's OWN device: the casts/stack/.cpu() below run on that
+        # device's current stream, and the wait must be issued there too (an unpinned
+        # wait on a multi-GPU rank could target the wrong device's stream or raise).
+        with torch.cuda.device(_stage_stream_device):
+            torch.cuda.current_stream().wait_stream(_stage_stream)
     flat = []
     for _rec, stats, _held_t in pending:
         for k in keys:
@@ -1720,6 +1724,12 @@ _pipeline_warned = False
 # around its emit loop and READ by _stash to decide whether to route the reduction to
 # the side stream; the context manager must not touch it (see _stage_read_stream).
 _stage_stream = None
+# The device _stage_stream lives on (the tracked tensor's device at creation). Every
+# wait_stream against the side stream must be issued under this device -- on a
+# multi-GPU ROCm rank the ambient current device can differ, and an unpinned
+# current_stream()/wait_stream would order against the WRONG device's stream or raise
+# a cross-device error. Set alongside _stage_stream.
+_stage_stream_device = None
 _stage_reads_active = False
 # Count of side-stream reads performed (one per tracked tensor per stage, i.e. it
 # increments per _stash, NOT per stage checkpoint -- a 31-tensor batch adds 31 per
@@ -1735,7 +1745,7 @@ def _get_stage_stream(device=None):
     multi-GPU rank may differ). Returns the stream, or None if stage reads are off /
     CUDA is unavailable / creation failed (caller falls back to an inline read). Never
     raises."""
-    global _stage_stream, _stage_reads_active, _stage_stream_warned
+    global _stage_stream, _stage_stream_device, _stage_reads_active, _stage_stream_warned
     if not _STAGE_READS:
         return None
     if _stage_stream is not None:
@@ -1746,6 +1756,7 @@ def _get_stage_stream(device=None):
         # Pin the stream to the tensor's device so the wait/reduction never cross GPUs.
         with torch.cuda.device(device) if device is not None else contextlib.nullcontext():
             _stage_stream = torch.cuda.Stream()
+        _stage_stream_device = device if device is not None else torch.cuda.current_device()
         _stage_reads_active = True
         _log("stage_reads: side stream created; copy/sparse/forward stage reads run "
              "off the pipeline stream (one-way dependency). NOTE: this assumes the "
@@ -1792,10 +1803,14 @@ def _stage_read_stream(device=None):
     if stream is None:
         yield
         return
-    cur = torch.cuda.current_stream()
-    stream.wait_stream(cur)          # side waits for the current stream's enqueued work
-    with torch.cuda.stream(stream):  # reductions enqueue on the side stream
-        yield
+    # Issue the wait + enqueue under the side stream's OWN device: on a multi-GPU rank
+    # the ambient device can differ, and an unpinned current_stream()/wait_stream would
+    # order against the wrong device's stream or raise cross-device.
+    with torch.cuda.device(_stage_stream_device):
+        cur = torch.cuda.current_stream()
+        stream.wait_stream(cur)          # side waits for the current stream's enqueued work
+        with torch.cuda.stream(stream):  # reductions enqueue on the side stream
+            yield
     _stage_read_count += 1
     # NOTE: cur does NOT wait on `stream` -- that one-way dependency is the whole point.
 
