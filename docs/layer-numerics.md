@@ -101,6 +101,7 @@ observation kinds:
 | `tensors` | which of a module's tensors | `input, output, weight, bias, igrad, grad` |
 | `stages` | (follow) check at the pipeline stage boundaries | `true` (`copy`/`sparse_start`/`sparse_wait`/`forward`) |
 | `stride` | (follow) also check every Nth module in `scope` | `N` (default `1`; requires `scope`). Set `stages`, `scope`, or both; neither ⇒ stages only |
+| `pipeline` | (follow) install the copy/sparse stage wrappers | `true` (default) / `false` — `false` follows at forward entry + `scope` blocks only, **without** the stage wrappers (timing-safe; see below). Requires a `scope`; incompatible with `stages: true` |
 | `stride` | (watch) hook only every Nth matched module | `N` (integer `>= 1`, default `1`); thins a broad watch whose per-module reduction volume is too high |
 | `diagnostics` | (top-level) how-much-detail toggles applied to **every** captured record | `addr, locate, bad_values, dump_tensor, alloc_snapshot` (see below) |
 
@@ -125,6 +126,7 @@ Common patterns (each cell is a complete, copy-paste `NANLOG_SPEC` value):
 | Follow a tensor through the pipeline | `{"follow":[{"tensor":"embedding_features","stages":true}]}` |
 | Follow a tensor every N layers | `{"follow":[{"tensor":"embedding_features","scope":{"names":["emb_proj"]},"stride":8}]}` |
 | Follow a tensor at named layers only | `{"follow":[{"tensor":"embedding_features","scope":{"names":["emb_proj.projections.0"]}}]}` |
+| Follow through blocks WITHOUT the stage wrappers (timing-safe) | `{"follow":[{"tensor":"embedding_features","pipeline":false,"scope":{"names":["emb_proj"]},"bounds":[0,60]}]}` |
 
 When `NANLOG_SPEC` is set it **wins**; when it is unset, the flat `NANLOG_*`
 vars below are read directly (still fully supported). A malformed spec logs a
@@ -198,10 +200,40 @@ Everything the logger does is one of two kinds — the `watch` and `follow` keys
   Each record is tagged with its `phase` and a `batch_id` so one batch's records
   line up across steps. This catches corruption that arrives *upstream* of the
   layers, which watching alone cannot see.
-  > Note: a scoped re-scan rides the pipeline hook, so it **also** emits the
-  > stage-boundary records even when `stages` is omitted or `false` — you will see
-  > `phase` records at the stages regardless. Stage records can't be suppressed
-  > independently of a scoped re-scan today.
+  > Note: by default a scoped re-scan rides the pipeline stage wrappers, so it
+  > **also** emits the stage-boundary records even when `stages` is omitted or
+  > `false` — you will see `phase` records at the stages regardless. To drop the
+  > stage wrappers entirely, set `pipeline: false` (next).
+
+#### `pipeline: false` — follow through blocks without the stage wrappers
+
+By default any `follow` installs the TorchRec stage-method wrappers
+(`copy_batch_to_gpu` / `start_sparse_data_dist` / `wait_sparse_data_dist`) — that
+is what produces the `copy`/`sparse_start`/`sparse_wait` records. Those wrappers
+**serialize the overlapped copy/compute** the batch pipeline runs, which can
+**suppress a timing-sensitive cross-stream race** (the buffer never gets corrupted
+because the overlap the race needs is gone). If a `follow`/`stages` sweep comes
+back with **0 NaN on a bug you can otherwise reproduce**, this is the likely cause.
+
+Set `"pipeline": false` on the follow entry to keep the per-block re-scan (at each
+module in `scope`) and the forward-entry checkpoint, but **not** install the stage
+wrappers. The re-scan rides the ordinary forward hooks — the same timing-safe
+mechanism `watch` uses — so the copy/compute overlap is preserved and the race
+still fires:
+
+```bash
+NANLOG_DIR=/output/layer_numerics \
+NANLOG_SPEC='{"follow":[{"tensor":"embedding_features","pipeline":false,"scope":{"names":["emb_proj"]},"bounds":[0,60]}],"pre_context":10}' \
+  python -m aorta.instrumentation.layer_numerics /path/to/your_script.py
+```
+
+Constraints: `pipeline: false` **requires a `scope`** (there are no stages left to
+capture at, so a block scope is what it checks) and is **incompatible with
+`stages: true`** (stage capture *is* the wrappers) — either combination rolls the
+spec back. What you give up vs. the default: the `copy` / `sparse_start` /
+`sparse_wait` stage records (the upstream-of-forward checkpoints). What you keep:
+the block-by-block trajectory of the followed tensor. The summary records
+`follow_mode` (`stage_wrappers` / `forward_blocks` / `off`) so a run is auditable.
 
 Add a `bounds: [lo, hi]` to a `follow` entry to flag out-of-range values
 (`kind="oob"`) — a two-sided check the one-sided "huge" threshold misses.
@@ -302,9 +334,26 @@ Written under `NANLOG_DIR`:
 - `summary_rank<N>.json` — the headline: the `first_bad` fingerprint
   (step / layer / direction / kind / `matmul_calls_so_far`), and when bounds are
   set `first_oob` / `oob_records` / `peak_finite_min` / `peak_finite_max`, plus
-  totals.
+  totals. For a `follow`, it also records **how** the tensor was tracked so a run
+  is auditable:
+  - `follow_mode` — `"stage_wrappers"` (stage boundaries + any blocks, the
+    default), `"forward_blocks"` (a `pipeline:false` follow: forward entry + blocks,
+    **no** stage wrappers), or `"off"` (no follow).
+  - `pipeline` / `pipeline_installed` — whether the copy/sparse stage wrappers were
+    requested / actually installed. Both `false` in a `pipeline:false` run.
+  - `pipeline_checkpoints` — count of **stage-wrapper** checkpoints
+    (`copy`/`sparse_start`/`sparse_wait`) that captured the tensor. Always `0` in a
+    `pipeline:false` run (no wrappers ran) — so a nonzero value here is proof the
+    stage instrumentation was active.
+  - `forward_checkpoints` — count of **forward-entry** checkpoints (the read of the
+    tensor at the top of the forward pass, which rides the root pre-hook, not the
+    stage wrappers). This is the "yes, the pipeline-off follow captured something"
+    signal for a `forward_blocks` run, kept separate from `pipeline_checkpoints` so
+    a timing-safe run never looks like it used stage instrumentation.
 - `layers_rank<N>.jsonl` — the full per-(layer, step, channel) trajectory. Each
-  record carries `phase` and `batch_id` when pipeline tracking is on.
+  record carries `phase` and `batch_id` when a follow is active (`phase="forward"`
+  for the forward-entry checkpoint; `checkpoint=<block name>` for a per-block
+  re-scan).
 - `bad_tensor_step*_rank<N>.pt` — the full bad tensor (only with
   `NANLOG_DUMP_TENSOR=1`, on first detection).
 - `alloc_snapshot_step*_rank<N>.pickle` — caching-allocator event trace (only
@@ -436,11 +485,12 @@ All heavy features default **OFF** and feed the same single per-step host transf
 | `NANLOG_LOCATE` | Record how many rows hold a bad value | `0` (off) | `diagnostics:[locate]` |
 | `NANLOG_DUMP_TENSOR` | Save the full bad tensor to a `.pt` on first detection | `0` (off) | `diagnostics:[dump_tensor]` |
 | `NANLOG_ALLOC_SNAPSHOT` | Dump a caching-allocator event trace on first bad (~10% overhead) | `0` (off) | `diagnostics:[alloc_snapshot]` |
-| `NANLOG_PIPELINE` | Track tensors at the TorchRec stage boundaries | `0` (off) | `follow[].stages: true` |
+| `NANLOG_PIPELINE` | Install the TorchRec stage-method wrappers (copy/sparse checkpoints) | `0` (off) | `follow[].stages: true`; suppressed by `follow[].pipeline: false` |
 | `NANLOG_TRACK_ATTR` | Batch attribute(s) to follow as tracked tensors | `embedding_features` | `follow[].tensor` |
 | `NANLOG_BOUNDS` | Per-tensor in-range check `substr:lo:hi;...` (→ `kind="oob"`) | (empty) | `follow[].bounds` |
 | `NANLOG_SPARSE` | Cheap host-side KJT metadata at the sparse stage | `0` (off) | — |
-| `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each layer | `0` (off) | `follow[].scope` (+ `stride`) |
+| `NANLOG_TRACK_EVERY_LAYER` | Re-scan tracked tensors at each scoped block. Rides an **active follow** — with `NANLOG_PIPELINE=1` (stage+block). **Setting this flat var alone (no `NANLOG_PIPELINE`, no spec) is a warned no-op**, so a legacy run is never silently switched into forward-capture mode; the wrapper-free block follow is opt-in via a `pipeline:false` spec. | `0` (off) | `follow[].scope` (+ `stride`) |
+| `NANLOG_PIPELINE_OFF_FOLLOW` | **Spec-internal, not a supported public flat knob.** The engine does read it from the environment (so it *can* be set by hand), but it is **intended to be set only** by a validated `follow[].pipeline:false`; enables the forward+block follow without the stage wrappers. Documented for artifact readers — prefer the `pipeline:false` spec over setting it directly. | `0` (off) | `follow[].pipeline: false` |
 | `NANLOG_TRACK_LAYER_STRIDE` | Re-scan every Kth layer when re-scan is on | `1` | `follow[].stride` |
 
 Channel notes:

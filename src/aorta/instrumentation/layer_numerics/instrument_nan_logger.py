@@ -172,7 +172,8 @@ Settings (environment variables):
                          tensors (default "embedding_features"); a name may resolve
                          to a Tensor, list/tuple/dict of Tensors, or a KJT (its
                          values() is tracked). Falls back to a bounded auto-discovery
-                         walk if none are found. Only with NANLOG_PIPELINE=1.
+                         walk if none are found. Active only when a follow is armed
+                         (NANLOG_PIPELINE=1, or a `pipeline: false` follow spec).
   NANLOG_TRACK_MAX       hard cap on how many tensor objects the tracker follows
                          (default 64).
   NANLOG_SPARSE          "1" -> at the pipeline stages, capture cheap host-side
@@ -187,7 +188,13 @@ Settings (environment variables):
                          layer's forward hook (record carries checkpoint=<layer_name>),
                          bracketing the corruption to a layer interval within forward.
                          Multiplies the per-step reduction count; can perturb a
-                         timing-sensitive bug. Requires NANLOG_PIPELINE=1 (default 0).
+                         timing-sensitive bug. Rides an active follow: with
+                         NANLOG_PIPELINE=1 it is the stage+block follow. The
+                         wrapper-free forward+block follow is NOT reachable by setting
+                         this flat var alone (that stays a warned no-op, to avoid
+                         silently changing a legacy run's timing profile) -- request it
+                         explicitly via a `pipeline: false` follow spec, which sets
+                         NANLOG_PIPELINE_OFF_FOLLOW. (default 0).
   NANLOG_TRACK_LAYER_STRIDE  re-scan every Kth watched layer (default 1). Only with
                          NANLOG_TRACK_EVERY_LAYER=1.
   NANLOG_BOUNDS          per-tensor in-range check "substr:lo:hi;substr:lo:hi": a
@@ -274,7 +281,7 @@ import torch  # noqa: E402
 # ---------------------------------------------------------------------------
 # One JSON env var, two observation kinds:
 #   watch   [{scope, tensors, stride?}, ...]      -- a module's OWN tensors
-#   follow  [{tensor, stages?, scope?, stride?, bounds?}, ...]
+#   follow  [{tensor, stages?, scope?, stride?, bounds?, pipeline?}, ...]
 #                                                 -- trace ONE named tensor across positions
 # building blocks:
 #   scope   {names:[substr,...], types:[ClassName,...]}  -- which modules
@@ -282,6 +289,11 @@ import torch  # noqa: E402
 #   stages  bool  -- (follow) check at the pipeline stage boundaries
 #   stride  int   -- every Nth matched module (default 1); watch: thin the hooks,
 #                    follow: re-scan cadence at scoped modules
+#   pipeline bool -- (follow, default true) install the copy/sparse stage wrappers.
+#                    false -> follow at forward entry + scoped blocks ONLY, no stage
+#                    wrappers, so the copy/compute overlap is never serialized (the
+#                    mode for a timing-sensitive race the wrappers would suppress);
+#                    incompatible with stages:true, requires a scope for block capture
 # plus cross-cutting: sample_every, pre_context, diagnostics[]. (Output dir is the
 # separate NANLOG_DIR env var, never a spec key.)
 #
@@ -354,8 +366,8 @@ def _spec_int(spec: dict, key: str, minimum: int) -> int | None:
 
 
 def _resolve_follow_cadence(f: dict) -> tuple:
-    """Normalize a follow entry's cadence into (stages: bool, stride: int|None),
-    where stride is the "also re-scan every Nth watched module" cadence (None = don't
+    """Normalize a follow entry's cadence into (stages, stride, pipeline), where
+    stride is the "also re-scan every Nth watched module" cadence (None = don't
     re-scan at modules). WHERE to check the followed tensor is two independent knobs:
 
         "stages": true   -> capture at the pipeline stage boundaries (copy/sparse/fwd)
@@ -363,11 +375,18 @@ def _resolve_follow_cadence(f: dict) -> tuple:
         "stride": N       -> every Nth matched module (default 1; requires `scope`)
 
     Set either or both. Default (neither key) is stages-only, the common case.
+
+    `pipeline` (default true) controls whether the TorchRec stage-method wrappers
+    (copy/sparse) are installed. `pipeline: false` keeps the follow at forward entry
+    + scoped blocks ONLY, so the copy/compute overlap is never serialized -- the mode
+    for a timing-sensitive race the stage wrappers would suppress. `stages: true`
+    REQUIRES the wrappers, so `pipeline: false` + `stages: true` is contradictory.
+
     Raises ValueError on a malformed/contradictory entry so the whole spec rolls back.
     """
     # Reject unknown keys so a typo or a leftover `at` from the old schema fails loudly
     # instead of silently falling through to the stages-only default.
-    _FOLLOW_KEYS = {"tensor", "stages", "scope", "stride", "bounds"}
+    _FOLLOW_KEYS = {"tensor", "stages", "scope", "stride", "bounds", "pipeline"}
     unknown = [k for k in f if k not in _FOLLOW_KEYS]
     if unknown:
         raise ValueError(f"unknown follow[] key(s) {sorted(unknown)}; "
@@ -377,6 +396,9 @@ def _resolve_follow_cadence(f: dict) -> tuple:
     stages = f.get("stages", "scope" not in f)
     if not isinstance(stages, bool):
         raise ValueError(f"follow[].stages must be true/false, got {stages!r}")
+    pipeline = f.get("pipeline", True)
+    if not isinstance(pipeline, bool):
+        raise ValueError(f"follow[].pipeline must be true/false, got {pipeline!r}")
     stride = None
     if "stride" in f:
         v = f["stride"]
@@ -391,7 +413,15 @@ def _resolve_follow_cadence(f: dict) -> tuple:
     if not stages and stride is None:
         raise ValueError("follow[] captures nothing: set `stages: true` and/or a "
                          "`scope` to re-scan at modules")
-    return stages, stride
+    # `pipeline: false` disables the stage wrappers, so it cannot coexist with a
+    # `stages` capture (which IS the wrappers). A scoped/strided follow is fine --
+    # that rides the forward hook, not the stage wrappers.
+    if not pipeline and stages:
+        raise ValueError("follow[].pipeline false is incompatible with stages: true "
+                         "(stage capture requires the pipeline wrappers); to follow at "
+                         "blocks only, drop `stages` and give a `scope`, or keep "
+                         "`stages` and use the default pipeline: true")
+    return stages, stride, pipeline
 
 
 def _spec_optional_mapping(container: dict, key: str, path: str) -> dict:
@@ -458,7 +488,8 @@ def _apply_spec(spec_json: str) -> tuple:
 _SPEC_OWNED_VARS = {
     "NANLOG_WATCH_NAMES": "", "NANLOG_WATCH_TYPES": "", "NANLOG_CHANNELS": "",
     "NANLOG_WATCH_STRIDE": "1",
-    "NANLOG_PIPELINE": "0", "NANLOG_TRACK_ATTR": "", "NANLOG_TRACK_EVERY_LAYER": "0",
+    "NANLOG_PIPELINE": "0", "NANLOG_PIPELINE_OFF_FOLLOW": "0",
+    "NANLOG_TRACK_ATTR": "", "NANLOG_TRACK_EVERY_LAYER": "0",
     "NANLOG_TRACK_LAYER_STRIDE": "1", "NANLOG_BOUNDS": "",
     "NANLOG_SAMPLE_EVERY": "", "NANLOG_PRE_CONTEXT": "",
     # diagnostics block (see _SPEC_DIAG_KEYS)
@@ -557,17 +588,31 @@ def _translate_spec(spec: dict) -> None:
                    "(engine has one follow path); tensors are unioned into TRACK_ATTR")
     if follow:
         f0 = follow[0]
-        stages, stride = _resolve_follow_cadence(f0)
-        # `stages` -> the pipeline stage scan (NANLOG_PIPELINE). Also required as the
-        # engine's transport for the per-module re-scan, so it is on whenever a stride
-        # is requested too. Consequence: a scoped follow still emits stage records even
-        # when `stages` is false/omitted -- warn (worded for both cases) rather than
-        # silently over-capture.
-        if stride is not None and not stages:
+        stages, stride, pipeline = _resolve_follow_cadence(f0)
+        # `stages` -> the pipeline stage-method wrappers (NANLOG_PIPELINE). Historically
+        # these were also the transport for the per-module re-scan, so any scoped follow
+        # armed them too -- which serializes the copy/compute overlap and can suppress a
+        # timing-sensitive race. `pipeline: false` opts out: the re-scan rides the forward
+        # hook (installed via TRACK_EVERY_LAYER) and the forward-entry checkpoint rides the
+        # root pre-hook, neither of which needs the stage wrappers. When the wrappers ARE
+        # on for a scoped follow (the default), warn that stage records still appear.
+        arm_wrappers = pipeline and (stages or stride is not None)
+        if stride is not None and not stages and arm_wrappers:
             _spec_warn("a scoped `follow` still emits pipeline-stage records even with "
-                       "`stages` false or omitted (the per-module re-scan rides the same "
-                       "pipeline hook); stage records cannot be suppressed independently today")
-        _spec_set("NANLOG_PIPELINE", "1" if (stages or stride is not None) else "0")
+                       "`stages` false or omitted (the per-module re-scan shares the "
+                       "pipeline wrappers); pass `pipeline: false` to drop the stage "
+                       "wrappers and follow at forward entry + blocks only (timing-safe "
+                       "for a race the wrappers would suppress)")
+        _spec_set("NANLOG_PIPELINE", "1" if arm_wrappers else "0")
+        # Pipeline-OFF follow: a valid follow that deliberately does NOT arm the stage
+        # wrappers (pipeline:false). This is an EXPLICIT, spec-derived state -- it is
+        # what enables the forward-entry + block capture (_FOLLOW_FWD) without the
+        # wrappers. Deriving it here (not inferring it from TRACK_EVERY_LAYER at the
+        # engine) is deliberate: a flat NANLOG_TRACK_EVERY_LAYER=1 without
+        # NANLOG_PIPELINE=1 must stay a warned no-op, so a legacy flat-var run is never
+        # silently opted into this timing-sensitive mode. Only a validated
+        # `pipeline: false` follow sets it.
+        _spec_set("NANLOG_PIPELINE_OFF_FOLLOW", "1" if (not arm_wrappers) else "0")
         track_attrs = [f["tensor"].strip() for f in follow]
         _spec_set("NANLOG_TRACK_ATTR", ",".join(track_attrs))
         if stride is not None:
@@ -761,6 +806,14 @@ _DUMP_TENSOR = os.environ.get("NANLOG_DUMP_TENSOR", "0") == "1"
 # Pipeline-stage tracking: scan the NANLOG_TRACK_ATTR tensors at the TorchRec stage
 # boundaries (copy/sparse/forward), tagging each record with its `phase`.
 _PIPELINE = os.environ.get("NANLOG_PIPELINE", "0") == "1"
+# Pipeline-OFF follow: an EXPLICIT, spec-derived opt-in (set only by a validated
+# follow[].pipeline == false in NANLOG_SPEC) to follow the tracked tensor at forward
+# entry + scoped blocks WITHOUT the stage wrappers. It is NOT inferred from
+# TRACK_EVERY_LAYER: doing so would silently opt a legacy flat-var run
+# (NANLOG_TRACK_EVERY_LAYER=1 without NANLOG_PIPELINE=1) into this timing-sensitive
+# mode, which historically warned and no-op'd. Keep that contract -- only the spec
+# turns this on.
+_PIPELINE_OFF_FOLLOW = os.environ.get("NANLOG_PIPELINE_OFF_FOLLOW", "0") == "1"
 _TRACK_ATTR = tuple(
     s.strip() for s in os.environ.get("NANLOG_TRACK_ATTR", "embedding_features").split(",")
     if s.strip()
@@ -773,6 +826,15 @@ _SPARSE_HEAVY = os.environ.get("NANLOG_SPARSE_HEAVY", "0") == "1"
 # to a within-forward layer interval. Multiplies the per-step reduction count.
 _TRACK_EVERY_LAYER = os.environ.get("NANLOG_TRACK_EVERY_LAYER", "0") == "1"
 _TRACK_LAYER_STRIDE = max(1, int(os.environ.get("NANLOG_TRACK_LAYER_STRIDE", "1")))
+# Follow the tracked tensor at forward entry (and, with TRACK_EVERY_LAYER, at each
+# scoped block) via the root pre-hook + forward hooks. This is the gate for the
+# forward-entry checkpoint. It is on in exactly two cases, BOTH explicit: the
+# stage-wrapper follow (_PIPELINE) implies it, and the spec-derived pipeline-off
+# follow (_PIPELINE_OFF_FOLLOW) requests it without the wrappers. It is deliberately
+# NOT gated on _TRACK_EVERY_LAYER: a flat NANLOG_TRACK_EVERY_LAYER=1 without a follow
+# stays a warned no-op (see the warning below) so a legacy flat-var run is never
+# silently switched into forward-capture mode.
+_FOLLOW_FWD = _PIPELINE or _PIPELINE_OFF_FOLLOW
 # Two-sided in-range check: per-tensor [lo,hi] via "substr:lo:hi;..." patterns (first
 # substring match wins); out-of-range elements are `bad` with kind="oob". Bare
 # NANLOG_BOUND_LO/HI is the match-all fallback. Catches small OOB the huge threshold
@@ -863,19 +925,23 @@ if _unknown_channels:
          f"valid: {list(_ALL_CHANNELS)}")
 
 if not _WATCH_TYPES and not _WATCH_NAMES:
-    # Empty watch scope is EXPECTED for a pipeline stage-only follow (it captures at
+    # Empty watch scope is EXPECTED for a stage-only follow (it captures at
     # copy/sparse/forward stage boundaries, not via layer hooks), so don't cry
-    # "misconfigured" there. A stride follow (_TRACK_EVERY_LAYER) DOES need a scope
-    # to know which layers to re-scan, so still warn in that case.
-    if not (_PIPELINE and not _TRACK_EVERY_LAYER):
+    # "misconfigured" there. A per-block re-scan (_TRACK_EVERY_LAYER) DOES need a
+    # scope to know which layers to re-scan, so still warn in that case. (A
+    # pipeline-off follow always carries a scope by construction -- validation
+    # requires one -- so it never reaches this warning with an empty scope.)
+    if not (_FOLLOW_FWD and not _TRACK_EVERY_LAYER):
         _log("WARNING: both NANLOG_WATCH_TYPES and NANLOG_WATCH_NAMES are empty; "
              "no modules will be watched")
 
-# Warn once when a scope knob silently no-ops without its prerequisite.
-if _TRACK_EVERY_LAYER and not _PIPELINE:
-    _log("WARNING: NANLOG_TRACK_EVERY_LAYER=1 has no effect without NANLOG_PIPELINE=1 "
-         "(the per-layer re-scan targets are captured by the pipeline hook); set "
-         "NANLOG_PIPELINE=1 to enable per-layer tracking.")
+# Warn once when a scope knob silently no-ops without its prerequisite. The per-layer
+# re-scan rides the forward hook, so it needs a follow to be active (stage-wrapper OR
+# pipeline-off) -- i.e. _FOLLOW_FWD -- not the stage wrappers specifically.
+if _TRACK_EVERY_LAYER and not _FOLLOW_FWD:
+    _log("WARNING: NANLOG_TRACK_EVERY_LAYER=1 has no effect without an active follow "
+         "(NANLOG_PIPELINE=1 or a pipeline-off follow spec); the per-layer re-scan "
+         "targets are captured at forward entry.")
 if os.environ.get("NANLOG_TRACK_LAYER_STRIDE") is not None and not _TRACK_EVERY_LAYER:
     _log("WARNING: NANLOG_TRACK_LAYER_STRIDE is set but NANLOG_TRACK_EVERY_LAYER is "
          "off, so the stride is ignored; set NANLOG_TRACK_EVERY_LAYER=1 to use it.")
@@ -1560,7 +1626,15 @@ def _install_optimizer_autohook() -> None:
 # tensor-flow tracker — EF is only the default target (NANLOG_TRACK_ATTR).
 # ---------------------------------------------------------------------------
 _pipeline_installed = False
-_pipeline_checkpoints = 0     # count of stage checkpoints that stashed something
+# The EARLIEST pipeline stage whose wrapper was actually installed, in execution
+# order (copy -> sparse_start -> sparse_wait). That wrapper is the first to see each
+# batch, so it -- not a hardcoded "copy" -- is the phase allowed to MINT a batch_id.
+# None until _install_pipeline_hook patches at least one method. Guards the case
+# where a torchrec API change drops copy_batch_to_gpu but keeps sparse_*: minting
+# must then happen at sparse_start, or every stage record would carry batch_id=null.
+_pipeline_mint_phase = None
+_pipeline_checkpoints = 0     # stage-wrapper checkpoints that stashed something (_PIPELINE only)
+_forward_checkpoints = 0      # forward-entry checkpoints that stashed something (pipeline-off follow)
 _pipeline_warned = False
 
 
@@ -1726,9 +1800,20 @@ def _resolve_batch_id(batch, phase: str):
     existing = _batch_id_by_obj.get(id(batch))
     if existing is not None:
         return existing
-    if phase != "copy":
-        # A non-copy phase with no id means we started mid-pipeline (missed this
-        # batch's copy). Don't fabricate an id; leave it null.
+    # Which phase is allowed to MINT a fresh id (the batch's first sighting)? Key off
+    # what the wrappers ACTUALLY installed, not what was requested (_PIPELINE):
+    #   - Wrappers installed -> the EARLIEST patched stage (_pipeline_mint_phase, in
+    #     copy/sparse_start/sparse_wait execution order) is the first to see each batch.
+    #     Using it -- not a hardcoded "copy" -- handles a torchrec API change that drops
+    #     copy_batch_to_gpu but keeps sparse_*, where "copy" never fires and hardcoding
+    #     it would leave every stage record's batch_id null.
+    #   - Wrappers NOT installed (pipeline-off follow, OR a degraded NANLOG_PIPELINE=1
+    #     run where torchrec was unavailable) -> `forward` is the first sighting.
+    # A first sighting at any OTHER phase means we started mid-pipeline; don't fabricate.
+    _mint_phase = _pipeline_mint_phase if _pipeline_installed else "forward"
+    if phase != _mint_phase:
+        # A non-minting phase with no id: either a mid-pipeline start, or (wrappers off)
+        # a stray non-forward phase. Don't fabricate an id; leave it null.
         return None
     _batch_counter += 1
     bid = _batch_counter
@@ -1829,15 +1914,21 @@ def _capture_forward_batch(inp) -> None:
     re-scan IS on, also hold the tracked objects in _layer_scan_targets so each layer
     hook can re-scan the SAME objects. Host-side only; the reductions join the drain.
 
+    Gated on _FOLLOW_FWD, not _PIPELINE: in the pipeline-off follow mode the stage
+    wrappers are absent but the forward-entry checkpoint (and the per-block re-scan it
+    arms) is exactly the capture we want, so it must still run here.
+
     The forward-entry _checkpoint resolves _batch_id to batch N. This is REQUIRED
-    whenever pipeline tracking is on: otherwise the forward/layer records inherit the
+    whenever a follow is active: otherwise the forward/layer records inherit the
     stale _batch_id the LAST stage wrapper left set (start_sparse_data_dist for batch
     N+1 in the standard prefetch order), tagging the emb_proj input record where
-    first_bad fires with the WRONG batch. _batch_id ends up batch N (or None on a
-    mid-pipeline start / re-wrapped batch), never a stale stage value."""
+    first_bad fires with the WRONG batch. With the wrappers off there is no stale
+    stage value, and this forward-entry checkpoint is what mints the id (see
+    _resolve_batch_id). _batch_id ends up batch N (or None on a mid-pipeline start /
+    re-wrapped batch), never a stale stage value."""
     global _layer_scan_targets, _batch_id
     _layer_scan_targets = []
-    if not _PIPELINE:
+    if not _FOLLOW_FWD:
         return
     # The batch is usually the first positional arg to the root forward.
     batch = inp[0] if isinstance(inp, (tuple, list)) and inp else inp
@@ -1862,8 +1953,10 @@ def _capture_forward_batch(inp) -> None:
 def _checkpoint(batch, phase: str) -> None:
     """Set the phase + batch_id, discover the tracked flow objects on `batch`, and
     stash a re-scan of each. Sync-free (reductions join the per-step drain). Called
-    from the wrapped pipeline stage methods. Never raises into the training run."""
-    global _phase, _batch_id, _pipeline_checkpoints
+    from the wrapped pipeline stage methods (all phases) AND from the forward-entry
+    capture (phase='forward' only, which is the sole caller when the stage wrappers
+    are off in a pipeline-off follow). Never raises into the training run."""
+    global _phase, _batch_id, _pipeline_checkpoints, _forward_checkpoints
     if batch is None:
         return
     _phase = phase
@@ -1890,7 +1983,19 @@ def _checkpoint(batch, phase: str) -> None:
         _log(f"WARNING: pipeline checkpoint ({phase}) failed: {e!r}")
         return
     if n:
-        _pipeline_checkpoints += 1
+        # Split the counters by what ACTUALLY produced this checkpoint, so each is a
+        # truthful signal:
+        #   pipeline_checkpoints -> a real stage-wrapper checkpoint: the wrappers were
+        #     installed AND this is a stage phase (copy/sparse_*), NOT the forward-entry
+        #     capture. Gating on _pipeline_installed (not the requested _PIPELINE) means
+        #     a degraded run (NANLOG_PIPELINE=1 but torchrec absent -> wrappers no-op)
+        #     never reports phantom stage checkpoints.
+        #   forward_checkpoints -> the forward-entry capture (rides the root pre-hook,
+        #     not the wrappers), in BOTH the pipeline-off follow and the wrapper-on case.
+        if _pipeline_installed and phase != "forward":
+            _pipeline_checkpoints += 1
+        else:
+            _forward_checkpoints += 1
 
 
 def _install_pipeline_hook() -> None:
@@ -1898,7 +2003,7 @@ def _install_pipeline_hook() -> None:
     checkpoint of the tracked flow objects with the right `phase`. Defensive: if the
     installed torchrec exposes none of the known stage methods, warn once and leave
     the layer hooks untouched. Same auto-attach philosophy as the DMP __init__ patch."""
-    global _pipeline_installed, _pipeline_warned
+    global _pipeline_installed, _pipeline_warned, _pipeline_mint_phase
     if not _PIPELINE or _pipeline_installed:
         return
     try:
@@ -1920,6 +2025,7 @@ def _install_pipeline_hook() -> None:
         ("wait_sparse_data_dist", "sparse_wait", False),
     ]
     patched = []
+    patched_phases = []   # in execution order; first entry = earliest stage that fires
     for meth_name, phase, from_return in specs:
         orig = getattr(_TP, meth_name, None)
         if orig is None or not callable(orig):
@@ -1947,6 +2053,7 @@ def _install_pipeline_hook() -> None:
 
         setattr(_TP, meth_name, make(orig, phase, from_return))
         patched.append(meth_name)
+        patched_phases.append(phase)
 
     if not patched:
         _pipeline_warned = True
@@ -1955,6 +2062,10 @@ def _install_pipeline_hook() -> None:
              f"wait_sparse_data_dist); checkpoints inactive. torchrec API changed?")
         return
     _pipeline_installed = True
+    # The earliest patched stage (specs is in execution order) is the first to see
+    # each batch, so it is the batch_id-minting phase -- NOT a hardcoded "copy",
+    # which may not have been patched if torchrec dropped copy_batch_to_gpu.
+    _pipeline_mint_phase = patched_phases[0]
     _log(f"pipeline tracking armed: patched {patched}; track_attr={list(_TRACK_ATTR)}; "
          f"track_max={_TRACK_MAX}; sparse={_SPARSE}; sparse_heavy={_SPARSE_HEAVY}; "
          f"track_every_layer={_TRACK_EVERY_LAYER}; track_layer_stride={_TRACK_LAYER_STRIDE}")
@@ -1991,7 +2102,15 @@ def _write_summary() -> None:
         "alloc_snapshot_dumped": _snapshot_dumped,
         "pipeline": _PIPELINE,
         "pipeline_installed": _pipeline_installed,
+        "pipeline_mint_phase": _pipeline_mint_phase,
         "pipeline_checkpoints": _pipeline_checkpoints,
+        "forward_checkpoints": _forward_checkpoints,
+        "follow_fwd": _FOLLOW_FWD,
+        "follow_mode": (
+            "stage_wrappers" if _PIPELINE
+            else "forward_blocks" if _FOLLOW_FWD
+            else "off"
+        ),
         "track_attr": list(_TRACK_ATTR),
         "track_max": _TRACK_MAX,
         "sparse": _SPARSE,
