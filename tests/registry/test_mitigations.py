@@ -102,6 +102,26 @@ def test_non_dict_payload_raises(fake_eps):
         load_mitigations()
 
 
+def test_plugin_mitigation_rejects_invalid_name(fake_eps):
+    """An entry-point mitigation with a malformed env-var NAME fails loading.
+
+    Mitigation bundles are a declaration boundary too -- without this the bad
+    name only fails later inside the dispatcher's os.environ.update.
+    """
+    fake_eps([("bad", {"BAD KEY": "1"}, "plugin_x")])
+    with pytest.raises(RegistryError, match="invalid environment-variable name"):
+        load_mitigations()
+
+
+def test_plugin_mitigation_rejects_nul_value(fake_eps):
+    """An entry-point mitigation with a NUL VALUE fails loading, without echoing
+    the (possibly secret) value."""
+    fake_eps([("bad", {"TOKEN": "a\x00b"}, "plugin_x")])
+    with pytest.raises(RegistryError, match="NUL") as exc:
+        load_mitigations()
+    assert "a\x00b" not in str(exc.value)
+
+
 @pytest.mark.parametrize(
     ("name", "expected_env"),
     sorted(PROBE_FLAG_BUILTIN_EXPECTED.items()),

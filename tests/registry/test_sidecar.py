@@ -220,6 +220,26 @@ def test_mitigation_payload_must_be_object(tmp_sidecar):
         load_sidecar_mitigations(p)
 
 
+def test_sidecar_mitigation_rejects_invalid_name(tmp_sidecar):
+    """A sidecar mitigation bundle with a malformed env-var NAME must fail load.
+
+    Mitigation bundles are a declaration boundary too: without this the bad
+    name only fails later in the dispatcher's os.environ.update.
+    """
+    p = tmp_sidecar({"version": 1, "mitigations": {"foo": {"BAD KEY": "1"}}})
+    with pytest.raises(RegistryError, match="invalid environment-variable name"):
+        load_sidecar_mitigations(p)
+
+
+def test_sidecar_mitigation_rejects_nul_value(tmp_sidecar):
+    """A sidecar mitigation bundle with a NUL VALUE must fail load, without
+    echoing the (possibly secret) value."""
+    p = tmp_sidecar({"version": 1, "mitigations": {"foo": {"TOKEN": "a\x00b"}}})
+    with pytest.raises(RegistryError, match="NUL") as exc:
+        load_sidecar_mitigations(p)
+    assert "a\x00b" not in str(exc.value)
+
+
 def test_environment_value_must_be_string_or_null(tmp_sidecar):
     p = tmp_sidecar({"version": 1, "environments": {"e": {"docker": 123}}})
     with pytest.raises(

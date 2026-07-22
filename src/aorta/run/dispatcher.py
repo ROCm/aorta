@@ -446,12 +446,13 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     # 7-env. Validate the resolved environment's baseline ``env`` mapping.
     #     ``Environment.env`` is the lowest layer of the platform env
     #     contract and is applied to ``os.environ`` before the workload runs
-    #     (see ``_run_single_trial``). The registry loaders already enforce
-    #     ``str`` keys/values, but not POSIX env-var *name shape* -- so a
-    #     malformed key (e.g. ``"1BAD"`` or ``"has space"``) would otherwise
-    #     only surface deep inside ``os.environ.update`` with the opaque
-    #     ``ValueError: illegal environment variable name``. Re-validate here,
-    #     before any trial runs, for parity with the ``extra_env`` check above.
+    #     (see ``_run_single_trial``). The registry loaders already validate
+    #     name shape + NUL for env declared through them; this re-check is
+    #     defense-in-depth for ``Environment`` objects constructed
+    #     programmatically (which bypass the loaders), so a malformed key or
+    #     value never reaches ``os.environ.update`` with the opaque
+    #     ``ValueError: illegal environment variable name``. Same rule set as
+    #     the ``extra_env`` check above.
     _validate_env_mapping("Environment.env", env_descriptor.env)
 
     # 7a. Apply the per-axis runtime overrides (if any) AFTER

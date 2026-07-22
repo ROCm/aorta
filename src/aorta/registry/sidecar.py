@@ -123,6 +123,18 @@ def _validate_mitigation_payload(path: Path, name: str, payload: object) -> dict
                 f"sidecar {path}: mitigations.{name}.{k}: env var value must "
                 f"be string, got {type(v).__name__}"
             )
+        if not is_valid_env_name(k):
+            raise RegistryError(
+                f"sidecar {path}: mitigations.{name}: invalid "
+                f"environment-variable name {k!r}; expected "
+                "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
+            )
+        if value_has_nul(v):
+            # Value NOT echoed -- it may be a secret.
+            raise RegistryError(
+                f"sidecar {path}: mitigations.{name}.{k}: value contains a "
+                "NUL byte and cannot be stored in an environment variable."
+            )
     return dict(payload)
 
 

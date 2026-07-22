@@ -13,6 +13,7 @@ the existing `aorta.workloads` extension-point pattern.
 from importlib.metadata import entry_points
 from pathlib import Path
 
+from aorta._env_rules import is_valid_env_name, value_has_nul
 from aorta.registry.errors import (
     RegistryCollisionError,
     RegistryError,
@@ -133,6 +134,22 @@ def load_mitigations(
                 f"dict[str, str]; got {type(env).__name__}"
                 + (f" with non-string entries {dict(env)!r}" if isinstance(env, dict) else "")
             )
+        # Enforce the env-var name/NUL rules at this declaration boundary too --
+        # a plugin mitigation bundle otherwise reaches ``os.environ.update`` in
+        # the dispatcher and only fails there. Values are NOT echoed.
+        for k, v in env.items():
+            if not is_valid_env_name(k):
+                raise RegistryError(
+                    f"plugin '{plugin_name}' mitigation '{ep.name}': invalid "
+                    f"environment-variable name {k!r}; expected "
+                    "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
+                )
+            if value_has_nul(v):
+                raise RegistryError(
+                    f"plugin '{plugin_name}' mitigation '{ep.name}': value for "
+                    f"key {k!r} contains a NUL byte and cannot be stored in an "
+                    "environment variable."
+                )
         if ep.name in registry:
             existing = registry[ep.name].source_package
             raise RegistryCollisionError(
