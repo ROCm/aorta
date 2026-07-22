@@ -52,6 +52,18 @@ def _validate_env_mapping(label: str, env: object) -> None:
                 f"{label} value for key {key!r} must be str, "
                 f"got {type(value).__name__}"
             )
+        if "\x00" in value:
+            # A NUL byte is a valid Python str character but cannot be stored
+            # in an OS environment variable. ``os.environ.update`` applies the
+            # overlay entry-by-entry, so a NUL value part-way through would
+            # raise AFTER earlier entries are already set -- and the overlay is
+            # applied via a single ``update`` that lives OUTSIDE the try/finally
+            # restore block, so those earlier entries would leak into later
+            # matrix cells. Reject before any mutation. Value is NOT echoed.
+            raise ValueError(
+                f"{label} value for key {key!r} contains a NUL byte and cannot "
+                "be stored in an environment variable."
+            )
         if not _ENV_KEY_RE.fullmatch(key):
             raise ValueError(
                 f"Invalid {label} keys [{key!r}]: each key must match "

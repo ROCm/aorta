@@ -309,6 +309,73 @@ def test_isolated_env_writes_placeholder_not_runner_snapshot(
     assert "no in-container snapshot captured" in md.lower()
 
 
+def test_isolated_inline_env_placeholder_records_baseline_env(
+    tmp_path, patched_env, patched_run_trials
+):
+    """The inline-env placeholder descriptor must include its baseline ``env``.
+
+    An operator debugging a failed isolated probe is pointed at this env.json;
+    dropping ``Environment.env`` would hide baseline vars (e.g. a required
+    ``BASELINE_FLAG``) that may be exactly what explains the failure.
+    """
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: inline-with-baseline
+    mitigations: [none]
+    environment:
+      docker: "rocm/pytorch:nightly"
+      env: { BASELINE_FLAG: "required" }
+"""
+    from aorta.triage.recipe import load_recipe
+
+    p = tmp_path / "recipe.yaml"
+    p.write_text(text, encoding="utf-8")
+    r = load_recipe(p)
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["descriptor"]["docker"] == "rocm/pytorch:nightly"
+    assert placeholder["descriptor"]["env"] == {"BASELINE_FLAG": "required"}
+
+
+def test_isolated_registered_env_placeholder_records_baseline_env(
+    tmp_path, patched_env, patched_run_trials
+):
+    """A registered (sidecar) docker env's placeholder also records its ``env``."""
+    sidecar = tmp_path / "envs.sidecar.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "environments": {
+                    "cust_img": {
+                        "docker": "myorg/img@sha256:abc",
+                        "env": {"REG_BASELINE": "on"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="cust_img",
+        trials=1,
+        steps=10,
+        sidecar_files=(sidecar,),
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / "cust_img" / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["descriptor"]["docker"] == "myorg/img@sha256:abc"
+    assert placeholder["descriptor"]["env"] == {"REG_BASELINE": "on"}
+
+
 def test_isolated_env_promotes_in_container_snapshot(
     tmp_path, patched_env, monkeypatch
 ):

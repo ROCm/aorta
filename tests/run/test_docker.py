@@ -71,3 +71,13 @@ def test_invalid_key_name_raises_value_error():
         docker_env_flags({"1BAD": "x"})
     with pytest.raises(ValueError, match="POSIX"):
         docker_env_flags({"has space": "x"})
+
+
+def test_nul_value_rejected_without_echoing_value():
+    # A NUL byte cannot survive an execve'd ``docker run -e`` argument; reject
+    # it for parity with the dispatcher's os.environ validation. The value must
+    # not be echoed in the error (it may be a secret).
+    with pytest.raises(ValueError, match="NUL") as exc:
+        docker_env_flags({"TOKEN": "abc\x00def"})
+    assert "abc" not in str(exc.value) and "def" not in str(exc.value)
+    assert "TOKEN" in str(exc.value)

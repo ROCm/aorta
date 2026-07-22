@@ -39,13 +39,20 @@ def docker_env_flags(env: dict[str, str]) -> list[str]:
         A flat ``list[str]`` of alternating ``"-e"`` / ``"KEY=VALUE"`` tokens,
         ready to splice into a ``docker run`` argv. Deterministic: keys are
         emitted in sorted order so the same mapping always yields byte-identical
-        output (stable argv for logging, diffing, and test assertions).
+        output (stable for diffing and test assertions).
+
+        SECURITY: the ``KEY=VALUE`` tokens contain the RAW environment values,
+        which may be secrets (tokens, endpoints). Do NOT log the returned list
+        or any completed ``docker run`` argv built from it, and do not persist
+        it to run artifacts unless those artifacts are already treated as
+        sensitive.
 
     Raises:
         TypeError: ``env`` is not a mapping, or any key/value is not a ``str``.
         ValueError: a key is not a valid POSIX env-var name
-            (``[A-Za-z_][A-Za-z0-9_]*``). The offending key is named; VALUES
-            are never echoed in the error (they may be secrets).
+            (``[A-Za-z_][A-Za-z0-9_]*``), or a value contains a NUL byte. The
+            offending key is named; VALUES are never echoed in the error (they
+            may be secrets).
     """
     if not isinstance(env, dict):
         raise TypeError(
@@ -66,6 +73,14 @@ def docker_env_flags(env: dict[str, str]) -> list[str]:
             raise TypeError(
                 f"docker_env_flags() env value for key {key!r} must be str, "
                 f"got {type(value).__name__}"
+            )
+        if "\x00" in value:
+            # A NUL byte cannot round-trip through a ``docker run -e`` argument
+            # (execve rejects it), so reject it here for parity with the
+            # dispatcher's ``os.environ`` validation. Value is NOT echoed.
+            raise ValueError(
+                f"docker_env_flags() env value for key {key!r} contains a NUL "
+                "byte and cannot be passed as an environment variable."
             )
         if not _ENV_KEY_RE.fullmatch(key):
             raise ValueError(

@@ -746,6 +746,95 @@ def test_recipe_level_extra_env_non_string_value_rejected(tmp_path):
         load_recipe(_write_yaml(tmp_path, text))
 
 
+# ---- env-var NAME validation at load time ---------------------------------
+#
+# An invalid env-var NAME (e.g. ``"BAD KEY"``) must fail recipe loading, not
+# slip through to run time. Before this, a malformed name passed loading and
+# ``--dry-run``; the real run then set no vars per cell while the default CLI
+# still exited zero and printed "Wrote matrix". The recipe parser now enforces
+# the same ``_ENV_KEY_RE`` shape the dispatcher does, at all three env surfaces.
+
+
+def test_recipe_level_extra_env_invalid_name_rejected(tmp_path):
+    text = _MINIMAL_YAML + 'extra_env:\n  "BAD KEY": "1"\n'
+    with pytest.raises(RecipeSchemaError, match="invalid environment-variable name"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_cell_level_extra_env_invalid_name_rejected(tmp_path):
+    text = _MINIMAL_YAML.replace(
+        "    environment: local\n",
+        '    environment: local\n    extra_env:\n      "BAD KEY": "1"\n',
+    )
+    with pytest.raises(RecipeSchemaError, match="invalid environment-variable name"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_inline_env_invalid_name_rejected(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: bad-inline-env
+    mitigations: [none]
+    environment:
+      docker: "x/y:1"
+      env: { "BAD KEY": "1" }
+"""
+    with pytest.raises(RecipeSchemaError, match="invalid environment-variable name"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+# ---- Recipe.extra_env is keyword-only (public-API back-compat) ------------
+#
+# ``Recipe`` is public through ``aorta.triage``. ``extra_env`` was inserted
+# before the pre-existing ``stop_after`` / ``probe_extras`` fields, so it MUST
+# be keyword-only -- otherwise existing positional callers would silently
+# rebind a ``StopAfter`` into ``extra_env``.
+
+
+def test_recipe_extra_env_is_keyword_only():
+    import dataclasses
+
+    fld = next(f for f in dataclasses.fields(Recipe) if f.name == "extra_env")
+    assert fld.kw_only is True
+
+
+def test_recipe_positional_stop_after_still_binds_to_stop_after():
+    """A positional call that previously set ``stop_after`` must still do so.
+
+    Reproduces a pre-existing positional constructor shape: everything through
+    ``collect_options`` positionally, then ``stop_after`` positionally. Because
+    ``extra_env`` is keyword-only it is skipped by position, so the positional
+    ``StopAfter`` binds to ``stop_after`` (not ``extra_env``) as before.
+    """
+    from aorta.triage.recipe import StopAfter
+
+    sa = StopAfter(events=1, max_trials=3)
+    r = Recipe(
+        1,              # schema_version
+        "fsdp",         # workload
+        2,              # trials
+        100,            # steps
+        (),             # cells
+        None,           # ticket
+        ConfoundCfg(),  # confound
+        (),             # inline_environments
+        (),             # sidecar_files
+        None,           # source_path
+        "abc",          # source_sha256
+        {},             # workload_config
+        False,          # save_logs
+        (),             # collect
+        {},             # collect_options
+        sa,             # stop_after  <-- positional, MUST NOT land in extra_env
+    )
+    assert r.stop_after is sa
+    assert r.extra_env == {}
+
+
 # ---- workload_config ------------------------------------------------------
 
 

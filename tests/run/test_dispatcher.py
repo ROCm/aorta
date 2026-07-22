@@ -2752,3 +2752,30 @@ class TestAortaTrialEnv:
                 ) as exc:
                     run_trials(req)
         assert "123456789" not in str(exc.value)
+
+    def test_nul_value_rejected_before_os_environ_mutated(self, tmp_path):
+        """A NUL-containing overlay value fails BEFORE any var is applied.
+
+        ``os.environ.update`` applies the overlay entry-by-entry and lives
+        outside the try/finally restore block, so a NUL value part-way through
+        would raise AFTER earlier entries were already set -- leaking them into
+        later matrix cells. The dispatcher rejects NUL up front, so a valid
+        canary declared alongside a NUL value must NEVER reach ``os.environ``.
+        """
+        canary = "AORTA_NUL_CANARY_SHOULD_NOT_BE_SET"
+        assert canary not in os.environ  # pre-condition
+
+        mock_eps = self._make_ep(PassingWorkload, name="nul_reject")
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="nul_reject",
+                trials=1,
+                extra_env={canary: "ok", "BAD": "has\x00nul"},
+                results_dir=tmp_path,
+            )
+            with pytest.raises(ValueError, match="NUL") as exc:
+                run_trials(req)
+
+        # Value never echoed, and the canary never leaked into the process env.
+        assert "has\x00nul" not in str(exc.value)
+        assert canary not in os.environ

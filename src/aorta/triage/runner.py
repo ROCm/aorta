@@ -346,6 +346,11 @@ def _write_isolated_env_placeholder(
     descriptor: dict[str, Any] = {"name": env_name}
     if inline_match is not None:
         descriptor["docker"] = inline_match.docker
+        # Record the inline baseline ``env`` too -- it is part of what the
+        # isolated env would actually apply, so an operator debugging a failed
+        # isolated probe from this placeholder sees the complete descriptor
+        # (a missing ``BASELINE_FLAG`` may be exactly what explains the failure).
+        descriptor["env"] = dict(inline_match.env)
         descriptor["source"] = "inline"
     else:
         extra = list(sidecar_files) if sidecar_files else None
@@ -353,6 +358,7 @@ def _write_isolated_env_placeholder(
             env_desc = get_environment(env_name, extra_files=extra)
             descriptor["docker"] = env_desc.docker
             descriptor["venv"] = env_desc.venv
+            descriptor["env"] = dict(env_desc.env)
             descriptor["source_package"] = env_desc.source_package
         except RegistryError as exc:  # pragma: no cover - guarded by predicate
             descriptor["_lookup_error"] = f"{type(exc).__name__}: {exc}"

@@ -159,6 +159,11 @@ _RESERVED_WORKLOAD_CONFIG_PREFIX = "_aorta_"
 # without an extra layer of slugging that would silently rename cells.
 _CELL_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 _RESERVED_CELL_NAMES = frozenset({".", "..", "matrix.md", "matrix.json"})
+# POSIX env-var name shape -- kept byte-identical to the dispatcher's
+# ``aorta.run.dispatcher._ENV_KEY_RE`` so a name that fails at run time also
+# fails at recipe-load time. Duplicated (not imported) to keep this module's
+# import graph free of the run-orchestration package.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class RecipeSchemaError(ValueError):
@@ -459,7 +464,14 @@ class Recipe:
     # Empty dict (default) is behaviourally identical to today's recipes. Kept
     # as a distinct field (rather than pre-merged into each cell) so the
     # resolved recipe can re-emit both scopes for faithful replay.
-    extra_env: dict[str, str] = field(default_factory=dict)
+    #
+    # ``kw_only=True``: ``Recipe`` is public through ``aorta.triage``, and this
+    # field is inserted BEFORE the pre-existing ``stop_after`` / ``probe_extras``
+    # fields. A positional insert would silently rebind existing positional
+    # callers (a ``StopAfter`` would land in ``extra_env`` and fail the dict
+    # merge). Keyword-only keeps every existing positional constructor call
+    # binding to the same fields it did before.
+    extra_env: dict[str, str] = field(default_factory=dict, kw_only=True)
     # Issue #232: collect-until-N stopping rule applied per cell. ``None``
     # preserves the legacy fixed-``trials`` behaviour. When set, the cell
     # runs up to ``stop_after.max_trials`` trials, stopping early once
@@ -720,6 +732,18 @@ def _parse_str_str_mapping(path_hint: str, raw: Any) -> dict[str, str]:
             raise RecipeSchemaError(
                 f"{path_hint}[{k!r}]: keys and values must be strings, "
                 f"got {type(k).__name__} -> {type(v).__name__}"
+            )
+        # Validate the env-var *name shape* at recipe-load time, using the same
+        # rule the dispatcher enforces (``_ENV_KEY_RE``). Without this a
+        # malformed name (e.g. ``"BAD KEY"``) passes loading and ``--dry-run``
+        # and only fails per-cell inside ``os.environ.update`` at run time --
+        # after the default CLI has already exited zero and printed
+        # "Wrote matrix". Fail early so a bad global/cell/inline env name is
+        # caught before any artifact is written.
+        if not _ENV_KEY_RE.fullmatch(k):
+            raise RecipeSchemaError(
+                f"{path_hint}[{k!r}]: invalid environment-variable name; "
+                "expected [A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
             )
         out[k] = v
     return out
