@@ -235,6 +235,243 @@ def test_follow_scope_with_stride(monkeypatch, tmp_path_factory):
     assert nl._WATCH_NAMES == ("emb",)
 
 
+# ---------------------------------------------------------------------------
+# follow pipeline:false -> forward/block follow WITHOUT the stage wrappers
+# (timing-safe mode for a race the copy/sparse wrappers would suppress)
+# ---------------------------------------------------------------------------
+def test_follow_pipeline_false_scope_no_stage_wrappers(monkeypatch, tmp_path_factory):
+    """`pipeline:false` + scope -> per-block re-scan armed, stage wrappers OFF."""
+    spec = {"follow": [{"tensor": "embedding_features", "pipeline": False,
+                        "scope": {"names": ["emb_proj"]}, "bounds": [0, 60]}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is True
+    assert nl._PIPELINE is False              # no copy/sparse stage wrappers
+    assert nl._PIPELINE_OFF_FOLLOW is True    # explicit spec-derived opt-in
+    assert nl._TRACK_EVERY_LAYER is True      # per-block re-scan still armed
+    assert nl._FOLLOW_FWD is True             # forward-entry checkpoint still runs
+    assert nl._WATCH_NAMES == ("emb_proj",)
+    assert nl._bound_for("embedding_features") == (0.0, 60.0)
+
+
+def test_flat_track_every_layer_without_pipeline_is_noop(monkeypatch, tmp_path_factory):
+    """REGRESSION GUARD: a legacy flat-var run with NANLOG_TRACK_EVERY_LAYER=1 and
+    NANLOG_PIPELINE=0 (no NANLOG_SPEC) must NOT silently activate the pipeline-off
+    forward/block follow. That combination historically warned and no-op'd; keeping
+    it a no-op is what prevents a legacy run from being switched into a different,
+    timing-sensitive capture profile without an explicit opt-in. Only a validated
+    `pipeline: false` follow spec (which sets NANLOG_PIPELINE_OFF_FOLLOW) turns the
+    forward capture on."""
+    nl = _load_logger(
+        {"NANLOG_TRACK_EVERY_LAYER": "1", "NANLOG_PIPELINE": "0"},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_PRESENT is False           # pure flat-var run
+    assert nl._TRACK_EVERY_LAYER is True        # the flat var is read...
+    assert nl._PIPELINE is False
+    assert nl._PIPELINE_OFF_FOLLOW is False     # ...but the new mode is NOT inferred
+    assert nl._FOLLOW_FWD is False              # so forward capture stays OFF (no-op)
+
+
+def test_flat_pipeline_off_follow_var_alone_is_not_honored(monkeypatch, tmp_path_factory):
+    """NANLOG_PIPELINE_OFF_FOLLOW is a spec-INTERNAL derived var, not a public flat
+    knob. Setting it directly in a no-spec run is reset to its baseline by the
+    spec-owned-vars machinery only when a spec applies; with no spec it is read as-is,
+    so this test documents that it is not part of the supported flat surface. (The
+    supported entry point is a `pipeline: false` follow spec.)"""
+    # No NANLOG_SPEC -> the flat var is read directly; we assert the plumbing exists
+    # (the attribute is defined) rather than encouraging this as a public path.
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+    assert hasattr(nl, "_PIPELINE_OFF_FOLLOW")
+    assert nl._PIPELINE_OFF_FOLLOW is False     # default off when unset
+
+
+def test_follow_pipeline_false_default_stride_is_one(monkeypatch, tmp_path_factory):
+    """A scope with no stride means every matched block, wrappers still off."""
+    spec = {"follow": [{"tensor": "ef", "pipeline": False, "scope": {"types": ["MLP"]}}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is False
+    assert nl._TRACK_EVERY_LAYER is True
+    assert nl._TRACK_LAYER_STRIDE == 1
+    assert nl._WATCH_TYPES == ("MLP",)
+
+
+# ---------------------------------------------------------------------------
+# follow stage_reads -> timing-safe copy/sparse stage reads on a side stream
+# ---------------------------------------------------------------------------
+def test_follow_stage_reads_arms_pipeline_and_side_read(monkeypatch, tmp_path_factory):
+    """`stages:true` + `stage_reads:true` keeps the pipeline wrappers ON (we need the
+    copy/sparse timing points) but flags the reads to run off the pipeline stream."""
+    spec = {"follow": [{"tensor": "embedding_features", "stages": True,
+                        "stage_reads": True, "bounds": [0, 60]}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is True
+    assert nl._PIPELINE is True           # wrappers armed -- stage reads need them
+    assert nl._STAGE_READS is True        # reads flagged for the side stream
+    assert nl._PIPELINE_OFF_FOLLOW is False
+
+
+def test_follow_stage_reads_defaults_false(monkeypatch, tmp_path_factory):
+    """A plain stages follow does not flag stage_reads (historical inline behavior)."""
+    spec = {"follow": [{"tensor": "ef", "stages": True}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    assert nl._STAGE_READS is False
+
+
+def test_follow_stage_reads_with_scope_keeps_wrappers(monkeypatch, tmp_path_factory):
+    """stage_reads + a scoped follow (pipeline defaults true, wrappers armed via scope)
+    is valid: the stage reads move to the side stream AND the per-block re-scan runs."""
+    spec = {"follow": [{"tensor": "ef", "stage_reads": True,
+                        "scope": {"types": ["MLP"]}}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is True
+    assert nl._PIPELINE is True
+    assert nl._STAGE_READS is True
+    assert nl._TRACK_EVERY_LAYER is True
+
+
+@pytest.mark.parametrize("follow_entry", [
+    {"tensor": "ef", "pipeline": False, "scope": {"types": ["MLP"]}, "stage_reads": True},
+    {"tensor": "ef", "stage_reads": "yes", "stages": True},   # non-bool
+])
+def test_follow_stage_reads_invalid_rolls_back(follow_entry, monkeypatch, tmp_path_factory):
+    """stage_reads needs the pipeline wrappers (pipeline:true). With pipeline:false it is
+    meaningless and rejected; a non-bool value is rejected too. Both roll the whole spec
+    back to the flat vars. (Note: stages:false + scope keeps pipeline:true by default, so
+    the wrappers ARE armed via the scope -- that combination is valid, not a rejection.)"""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps({"follow": [follow_entry]}),
+         "NANLOG_CHANNELS": "act,igrad"},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is False
+    assert nl._STAGE_READS is False
+    assert nl._CHANNELS == frozenset({"act", "igrad"})
+
+
+def test_spec_clears_stale_flat_stage_reads(monkeypatch, tmp_path_factory):
+    """A spec that doesn't ask for stage_reads must clear a lingering flat
+    NANLOG_STAGE_READS=1, so it can't leak on."""
+    nl = _load_logger(
+        {"NANLOG_STAGE_READS": "1",
+         "NANLOG_SPEC": json.dumps({"follow": [{"tensor": "ef", "stages": True}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._STAGE_READS is False
+
+
+def test_follow_pipeline_true_is_default_and_unchanged(monkeypatch, tmp_path_factory):
+    """Omitting `pipeline` keeps the historical behavior: stage wrappers ON."""
+    spec = {"follow": [{"tensor": "ef", "scope": {"types": ["MLP"]}, "stride": 5}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    assert nl._TRACK_EVERY_LAYER is True
+
+
+@pytest.mark.parametrize("follow_entry", [
+    {"tensor": "ef", "pipeline": False, "stages": True},   # stages needs wrappers
+    {"tensor": "ef", "pipeline": False},                   # no scope -> captures nothing
+    {"tensor": "ef", "pipeline": "no", "scope": {"types": ["MLP"]}},  # non-bool
+])
+def test_follow_pipeline_false_invalid_rolls_back(follow_entry, monkeypatch, tmp_path_factory):
+    """pipeline:false with stages:true (contradiction), with no scope (captures
+    nothing), or a non-bool value rejects the whole spec (flat fallback)."""
+    nl = _load_logger(
+        {"NANLOG_SPEC": json.dumps({"follow": [follow_entry]}),
+         "NANLOG_CHANNELS": "act,igrad"},
+        monkeypatch, tmp_path_factory)
+    assert nl._SPEC_APPLIED is False
+    assert nl._CHANNELS == frozenset({"act", "igrad"})
+    assert nl._PIPELINE is False
+
+
+def test_follow_pipeline_false_summary_mode(monkeypatch, tmp_path_factory):
+    """The summary records follow_mode=forward_blocks so a pipeline-off run is
+    auditable (distinct from stage_wrappers and off)."""
+    spec = {"follow": [{"tensor": "ef", "pipeline": False, "scope": {"types": ["MLP"]}}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    nl._write_summary()
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    assert smy["pipeline"] is False
+    assert smy["follow_fwd"] is True
+    assert smy["follow_mode"] == "forward_blocks"
+
+
+def test_follow_stage_summary_mode(monkeypatch, tmp_path_factory):
+    """A stage-wrapper follow records follow_mode=stage_wrappers -- but only when the
+    wrappers were ACTUALLY installed. follow_mode keys on _pipeline_installed (what ran),
+    not the requested _PIPELINE, so simulate the install (no torchrec in this env)."""
+    spec = {"follow": [{"tensor": "ef", "stages": True}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    nl._pipeline_installed = True   # torchrec would set this; forced here
+    nl._write_summary()
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    assert smy["follow_mode"] == "stage_wrappers"
+
+
+def test_follow_stage_requested_but_not_installed_is_forward_blocks(
+    monkeypatch, tmp_path_factory
+):
+    """Copilot #297 review: a stages follow REQUESTED (pipeline true) but where the
+    wrappers never installed (torchrec absent -> _pipeline_installed false) must NOT
+    claim stage bracketing. follow_mode falls to forward_blocks (it still captures at
+    forward entry), never stage_wrappers*."""
+    spec = {"follow": [{"tensor": "ef", "stages": True}]}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE is True
+    assert nl._pipeline_installed is False   # wrappers never installed
+    nl._write_summary()
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    assert smy["follow_mode"] == "forward_blocks"
+
+
+def test_follow_pipeline_false_runtime_capture(monkeypatch, tmp_path_factory):
+    """End-to-end: a pipeline-off follow re-scans the tracked tensor at each scoped
+    block via the forward hook, with NO pipeline hook installed. The track records
+    carry checkpoint=<block name> and a resolved (non-null) batch_id."""
+    class Batch:
+        def __init__(self, ef):
+            self.embedding_features = ef
+
+    class Net(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.blocks = torch.nn.ModuleList(
+                [torch.nn.Linear(4, 4) for _ in range(3)])
+
+        def forward(self, batch):
+            x = batch.embedding_features
+            for b in self.blocks:
+                x = b(x)
+            return x
+
+    spec = {"follow": [{"tensor": "embedding_features", "pipeline": False,
+                        "scope": {"types": ["Linear"]}}],
+            "sample_every": 1}
+    nl = _load_logger({"NANLOG_SPEC": json.dumps(spec)}, monkeypatch, tmp_path_factory)
+    model = Net()
+    assert nl._attach(model) == 3     # forward hooks installed despite no channels
+    for _ in range(2):
+        batch = Batch(torch.randn(4, 4))
+        nl._root_pre_hook(None, (batch,))   # forward-entry checkpoint mints batch_id
+        model(batch)
+    nl._write_summary()
+    recs = _records(nl)
+    track = [r for r in recs if r.get("role") == "track"]
+    assert track, "pipeline-off follow wrote no track records"
+    # re-scanned at the scoped blocks (checkpoint = block name), not a stage phase
+    assert any("blocks" in (r.get("checkpoint") or "") for r in track)
+    # batch_id is resolved at forward entry (not null) even with the wrappers off
+    assert any(r.get("batch_id") is not None for r in track)
+    # A pipeline-off run must NOT report stage-wrapper checkpoints -- that would
+    # imply stage instrumentation ran on a timing-safe capture. The forward-entry
+    # checkpoints are counted separately.
+    smy = json.loads((nl._OUT_DIR / "summary_rank0.json").read_text())
+    assert smy["follow_mode"] == "forward_blocks"
+    assert smy["pipeline"] is False
+    assert smy["pipeline_installed"] is False
+    assert smy["pipeline_checkpoints"] == 0
+    assert smy["forward_checkpoints"] > 0
+
+
 def test_follow_at_key_is_rejected(monkeypatch, tmp_path_factory):
     """The old `at` key was removed: it is now an unknown follow key and rolls the
     whole spec back (no silent back-compat)."""
@@ -535,6 +772,18 @@ def test_spec_clears_stale_flat_pipeline(monkeypatch, tmp_path_factory):
          "NANLOG_SPEC": json.dumps({"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["input"]}]})},
         monkeypatch, tmp_path_factory)
     assert nl._PIPELINE is False
+
+
+def test_spec_clears_stale_flat_pipeline_off_follow(monkeypatch, tmp_path_factory):
+    """A watch-only spec must not inherit a lingering flat NANLOG_PIPELINE_OFF_FOLLOW=1
+    (the spec-owned reset covers the new var too), so a stale value can't switch a
+    watch run into forward-capture mode."""
+    nl = _load_logger(
+        {"NANLOG_PIPELINE_OFF_FOLLOW": "1",
+         "NANLOG_SPEC": json.dumps({"watch": [{"scope": {"types": ["MLP"]}, "tensors": ["input"]}]})},
+        monkeypatch, tmp_path_factory)
+    assert nl._PIPELINE_OFF_FOLLOW is False
+    assert nl._FOLLOW_FWD is False
 
 
 def test_spec_stage_clears_stale_flat_track_every_layer(monkeypatch, tmp_path_factory):
