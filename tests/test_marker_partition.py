@@ -25,8 +25,11 @@ def _collect_nodeids(markexpr: str | None = None) -> set[str]:
     # Override the repo-level ``addopts`` (``-o addopts=``) so this nested
     # collection is not sensitive to future pytest.ini changes (e.g. ``-v`` /
     # colored output) that would perturb the ``-q`` node-id formatting parsed
-    # below. Use a relative ``tests`` path (with cwd=REPO_ROOT) so node ids are
-    # stable, and force color off.
+    # below. Re-add ``--strict-markers`` explicitly (clearing addopts also drops
+    # the repo's strict-marker policy) since this guard is about marker hygiene:
+    # an unknown/typo'd marker should fail here with actionable output. Use a
+    # relative ``tests`` path (with cwd=REPO_ROOT) so node ids are stable, and
+    # force color off.
     cmd = [
         sys.executable,
         "-m",
@@ -36,6 +39,7 @@ def _collect_nodeids(markexpr: str | None = None) -> set[str]:
         "-q",
         "-o",
         "addopts=",
+        "--strict-markers",
         "-p",
         "no:cacheprovider",
         "--color=no",

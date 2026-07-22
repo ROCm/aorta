@@ -10,8 +10,8 @@ the full `tests/` suite with no overlap.
 
 Every pull request must run the automated test suite, and a PR must not merge
 while those tests are red. Phase 1 runs the CPU-runnable slice on GitHub-hosted
-runners; Phase 2 runs the GPU complement on the self-hosted MI350 runner
-(`smci350-rck-g03-f16-12.rck.dcgpu`).
+runners; Phase 2 runs the GPU complement on a self-hosted MI350 runner
+(labels `self-hosted`, `gpu`).
 
 ## Current CI
 
@@ -142,8 +142,7 @@ checks to pass before merging`, then select:
 ## Phase 2 - GPU test gate (implemented)
 
 Tracked in [#268](https://github.com/ROCm/aorta/issues/268).
-Runner: `smci350-rck-g03-f16-12.rck.dcgpu` (MI350 / gfx950), labels
-`self-hosted`, `gpu`.
+Runner: a self-hosted MI350 (gfx950) machine, labels `self-hosted`, `gpu`.
 
 Workflow: [`.github/workflows/gpu-tests.yml`](../.github/workflows/gpu-tests.yml)
 
