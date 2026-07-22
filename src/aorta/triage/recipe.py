@@ -56,6 +56,10 @@ _TRIAGE_TOP_LEVEL = frozenset(
         # Cross-cutting collector names attached to every cell (e.g.
         # layer_numerics). Not a matrix axis.
         "collect",
+        # Recipe-level env-var overlay applied to every cell, BELOW cell-level
+        # ``extra_env`` in precedence (see the dispatcher's effective-overlay
+        # contract). Not a matrix axis.
+        "extra_env",
         # Issue #232: collect-until-N stopping rule (valid in both modes).
         "stop_after",
     }
@@ -131,7 +135,7 @@ _VALID_CELL_KEYS = frozenset(
         "collect",
     }
 )
-_VALID_INLINE_ENV_KEYS = frozenset({"docker"})
+_VALID_INLINE_ENV_KEYS = frozenset({"docker", "env"})
 
 # Keys that workload_config (recipe- or cell-scope) is NOT allowed to set.
 # - "steps" is a first-class recipe/cell field; the dispatcher writes
@@ -167,16 +171,23 @@ class RecipeCellError(ValueError):
 
 @dataclass(frozen=True)
 class InlineEnv:
-    """An environment declared inline in a recipe as ``{docker: <ref>}``.
+    """An environment declared inline in a recipe as ``{docker: <ref>}`` (with
+    an optional ``{env: {...}}`` baseline env-var mapping).
 
     Auto-named ``_inline_<hash>`` where ``<hash>`` is the first 8 chars of
-    blake2b over the image ref. Two cells that reference the same image ref
-    produce the same auto-name (deterministic), so the environment probe for
-    that ref is captured exactly once.
+    blake2b over the image ref AND any non-empty inline ``env`` content. Two
+    cells that reference the same image ref (and same ``env``) produce the same
+    auto-name (deterministic), so the environment probe for that ref is captured
+    exactly once. When ``env`` is absent or empty the hash is over the image ref
+    alone -- so legacy ``{docker: <ref>}`` cells keep their historical
+    auto-name. Two cells with the same image but *different* ``env`` mappings
+    therefore hash to different auto-names and cannot silently collapse into one
+    environment.
     """
 
     name: str
     docker: str
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -440,6 +451,15 @@ class Recipe:
     # ``{"layer_numerics": {"NANLOG_SAMPLE_EVERY": "1"}}``. Empty dict
     # (default) is identical to today's recipes.
     collect_options: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Recipe-level env-var overlay applied to every cell. Sits ABOVE mitigations
+    # and Environment.env but BELOW each cell's own ``extra_env`` in the
+    # platform env-precedence contract (see the dispatcher). The runner merges
+    # ``{**recipe.extra_env, **cell.extra_env}`` into the single
+    # ``RunRequest.extra_env`` so a cell can override a recipe-wide value.
+    # Empty dict (default) is behaviourally identical to today's recipes. Kept
+    # as a distinct field (rather than pre-merged into each cell) so the
+    # resolved recipe can re-emit both scopes for faithful replay.
+    extra_env: dict[str, str] = field(default_factory=dict)
     # Issue #232: collect-until-N stopping rule applied per cell. ``None``
     # preserves the legacy fixed-``trials`` behaviour. When set, the cell
     # runs up to ``stop_after.max_trials`` trials, stopping early once
@@ -454,15 +474,30 @@ class Recipe:
     probe_extras: Any | None = None
 
 
-def inline_env_name(docker_ref: str) -> str:
+def inline_env_name(docker_ref: str, env: dict[str, str] | None = None) -> str:
     """Deterministic auto-name for an inline docker environment.
 
-    The first 8 hex chars of blake2b(image-ref). Matches the spec in issue
-    #151 so two cells with the same ``docker_ref`` share a single
-    auto-registered environment and therefore a single env-probe.
+    The first 8 hex chars of blake2b over the image ref and any non-empty
+    inline ``env`` mapping. Matches the spec in issue #151 so two cells with
+    the same ``docker_ref`` (and same ``env``) share a single auto-registered
+    environment and therefore a single env-probe.
+
+    Backward-compatibility: when ``env`` is ``None`` or empty the digest is
+    taken over the image ref ALONE -- byte-for-byte the legacy pre-``env``
+    hash -- so every existing ``{docker: <ref>}`` cell keeps its historical
+    ``_inline_<hash>`` name. A non-empty ``env`` folds a canonical
+    (sorted-key) JSON encoding of the mapping into the hash, so the same image
+    with two different ``env`` mappings produces two distinct auto-names and
+    cannot silently collapse into one environment.
     """
-    digest = hashlib.blake2b(docker_ref.encode("utf-8"), digest_size=4).hexdigest()
-    return f"_inline_{digest}"
+    h = hashlib.blake2b(docker_ref.encode("utf-8"), digest_size=4)
+    if env:
+        # Canonical encoding: sorted keys, no incidental whitespace, so the
+        # hash depends only on the mapping's content, not dict ordering.
+        canonical = json.dumps(env, sort_keys=True, separators=(",", ":"))
+        h.update(b"\x00")  # domain separator between ref and env
+        h.update(canonical.encode("utf-8"))
+    return f"_inline_{h.hexdigest()}"
 
 
 def _ensure_type(path_hint: str, value: Any, expected: type, label: str) -> None:
@@ -644,17 +679,50 @@ def _parse_environment(path_hint: str, raw: Any, inline_envs: dict[str, InlineEn
             f"{path_hint}.environment.docker: must be a non-empty string, "
             f"got {type(ref).__name__} ({ref!r})"
         )
-    auto_name = inline_env_name(ref)
+    env_mapping = _parse_str_str_mapping(
+        f"{path_hint}.environment.env", raw.get("env")
+    )
+    auto_name = inline_env_name(ref, env_mapping)
     existing = inline_envs.get(auto_name)
     if existing is None:
-        inline_envs[auto_name] = InlineEnv(name=auto_name, docker=ref)
-    elif existing.docker != ref:
+        inline_envs[auto_name] = InlineEnv(name=auto_name, docker=ref, env=env_mapping)
+    elif existing.docker != ref or existing.env != env_mapping:
+        # Hash collision on distinct content -- ``env`` folds into the hash, so
+        # this can only fire on a genuine blake2b collision (astronomically
+        # unlikely), but surface it rather than silently coalescing two
+        # different environments into one.
         raise RecipeSchemaError(
             f"{path_hint}.environment: inline-env hash collision for "
-            f"{auto_name!r}: {existing.docker!r} vs {ref!r}. "
+            f"{auto_name!r}: ({existing.docker!r}, env={existing.env!r}) vs "
+            f"({ref!r}, env={env_mapping!r}). "
             "Rename one ref or register a named environment explicitly."
         )
     return auto_name
+
+
+def _parse_str_str_mapping(path_hint: str, raw: Any) -> dict[str, str]:
+    """Validate a ``dict[str, str]`` mapping (recipe/inline ``env`` / ``extra_env``).
+
+    ``None`` / missing -> ``{}`` so callers can pass ``data.get(key)`` without
+    branching. Keys and values must both be strings -- YAML/JSON numbers and
+    booleans are rejected rather than silently coerced, matching the registry
+    loaders so the same value fails everywhere consistently.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RecipeSchemaError(
+            f"{path_hint}: must be a mapping of str -> str, got {type(raw).__name__}"
+        )
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise RecipeSchemaError(
+                f"{path_hint}[{k!r}]: keys and values must be strings, "
+                f"got {type(k).__name__} -> {type(v).__name__}"
+            )
+        out[k] = v
+    return out
 
 
 def _parse_workload_config(path_hint: str, raw: Any) -> dict[str, Any]:
@@ -803,22 +871,7 @@ def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
 
     environment = _parse_environment(path_hint, raw["environment"], inline_envs)
 
-    extra_env_raw = raw.get("extra_env", {})
-    if extra_env_raw is None:
-        extra_env_raw = {}
-    if not isinstance(extra_env_raw, dict):
-        raise RecipeSchemaError(
-            f"{path_hint}.extra_env: must be a mapping of str -> str, got "
-            f"{type(extra_env_raw).__name__}"
-        )
-    extra_env: dict[str, str] = {}
-    for k, v in extra_env_raw.items():
-        if not isinstance(k, str) or not isinstance(v, str):
-            raise RecipeSchemaError(
-                f"{path_hint}.extra_env[{k!r}]: keys and values must be strings, "
-                f"got {type(k).__name__} -> {type(v).__name__}"
-            )
-        extra_env[k] = v
+    extra_env = _parse_str_str_mapping(f"{path_hint}.extra_env", raw.get("extra_env"))
 
     trials = raw.get("trials")
     if trials is not None and (
@@ -1186,6 +1239,7 @@ def _build_recipe(
 
     confound = _parse_confound("recipe", data.get("confound"))
     workload_config = _parse_workload_config("recipe", data.get("workload_config"))
+    recipe_extra_env = _parse_str_str_mapping("recipe.extra_env", data.get("extra_env"))
     stop_after = _parse_stop_after("recipe", data.get("stop_after"))
 
     raw_save_logs = data.get("save_logs", False)
@@ -1249,6 +1303,7 @@ def _build_recipe(
         save_logs=raw_save_logs,
         collect=collect,
         collect_options=collect_options,
+        extra_env=recipe_extra_env,
         stop_after=stop_after,
     )
 

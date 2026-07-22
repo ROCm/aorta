@@ -222,7 +222,16 @@ def _write_inline_sidecar(run_dir: Path, inline_envs: tuple[InlineEnv, ...]) -> 
     path = run_dir / _INLINE_SIDECAR_NAME
     doc = {
         "version": 1,
-        "environments": {env.name: {"docker": env.docker} for env in inline_envs},
+        "environments": {
+            env.name: (
+                # Only emit ``env`` when non-empty so a legacy inline docker
+                # env round-trips to the same sidecar payload as before.
+                {"docker": env.docker, "env": dict(env.env)}
+                if env.env
+                else {"docker": env.docker}
+            )
+            for env in inline_envs
+        },
     }
     path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     return path
@@ -503,16 +512,33 @@ def _resolve_cell_env_vars(
     cell_mitigations: tuple[str, ...],
     cell_extra_env: dict[str, str],
     sidecar_files: tuple[Path, ...] | None,
+    environment: str | None = None,
 ) -> dict[str, str]:
-    """Compute the unioned env-var bundle B1 will apply for a cell.
+    """Compute the unioned env-var bundle the dispatcher will apply for a cell.
 
-    B1 also unions internally; we duplicate the computation here so
+    The dispatcher also unions internally; we duplicate the computation here so
     matrix.json can record the resolved env-var set alongside the aggregated
-    stats, without having to rely on B1 threading them through
+    stats, without having to rely on the dispatcher threading them through
     TrialResult.
+
+    Precedence (lowest to highest) matches the platform env contract:
+    ``Environment.env < mitigations < extra_env`` (``cell_extra_env`` here is
+    already the recipe-level + cell-level merge). ``environment`` is optional so
+    legacy callers that only care about the mitigation+extra_env layers still
+    work; when provided, the named environment's baseline ``env`` seeds the
+    bundle so the recorded set matches what the workload actually observes.
     """
     extra = list(sidecar_files) if sidecar_files else None
     env: dict[str, str] = {}
+    if environment is not None:
+        try:
+            env.update(get_environment(environment, extra_files=extra).env)
+        except RegistryError:
+            # Unknown envs are caught earlier by _validate_names_resolve; a
+            # lookup failure here (e.g. an inline env not in the sidecar yet)
+            # falls back to omitting the baseline layer rather than aborting
+            # the audit computation.
+            pass
     for name in cell_mitigations:
         env.update(get_mitigation(name, extra_files=extra))
     env.update(cell_extra_env)
@@ -933,7 +959,13 @@ def _run_one_cell(
         cell_dir = _cells_dir(run_dir) / safe_slug(cell.name)
     cell_dir.mkdir(parents=True, exist_ok=True)
 
-    resolved_env_vars = _resolve_cell_env_vars(cell.mitigations, cell.extra_env, sidecar_files)
+    # Recipe-level extra_env is the base; cell-level merges over it (cell wins
+    # on key collision). This single merged mapping is the request ``extra_env``
+    # layer the dispatcher applies above mitigations / Environment.env.
+    merged_extra_env = {**recipe.extra_env, **cell.extra_env}
+    resolved_env_vars = _resolve_cell_env_vars(
+        cell.mitigations, merged_extra_env, sidecar_files, environment=cell.environment
+    )
     effective_trials = cell.effective_trials(recipe.trials)
     # Issue #232: a ``stop_after`` rule turns ``max_trials`` into the hard
     # cap and lets the dispatcher break early once the event target is met.
@@ -1086,7 +1118,7 @@ def _run_one_cell(
         trials=cap,
         environment=cell.environment,
         mitigations=tuple(cell.mitigations),
-        extra_env=dict(cell.extra_env),
+        extra_env=merged_extra_env,
         steps=cell.effective_steps(recipe.steps),
         config_overrides=merged_workload_config,
         results_dir=cell_dir,

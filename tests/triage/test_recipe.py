@@ -575,6 +575,112 @@ cells:
     assert r.cells[0].environment != r.cells[2].environment
 
 
+# ---- inline docker env field (#A6) ----------------------------------------
+#
+# An inline environment may include an ``env`` dict alongside ``docker``.
+# The hash covers both the ref and the env content, so two cells with the
+# same image but different ``env`` mappings are distinct environments.
+
+
+def test_inline_docker_env_field_preserved(tmp_path):
+    """Env vars declared in an inline environment reach the ``InlineEnv.env``
+    field and are not silently dropped."""
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: baseline
+    mitigations: [none]
+    environment: local
+  - name: with-env
+    mitigations: [none]
+    environment:
+      docker: "rocm/pytorch:nightly"
+      env:
+        TORCH_LOGS: "+recompiles"
+        TORCHDYNAMO_VERBOSE: "1"
+"""
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert len(r.inline_environments) == 1
+    inline = r.inline_environments[0]
+    assert inline.docker == "rocm/pytorch:nightly"
+    assert inline.env == {"TORCH_LOGS": "+recompiles", "TORCHDYNAMO_VERBOSE": "1"}
+
+
+def test_inline_docker_env_changes_auto_name(tmp_path):
+    """Two cells with the same docker ref but different ``env`` dicts must
+    produce different auto-names and register as separate environments.
+
+    Without this, a cell that declares ``env: {A: 1}`` could silently collapse
+    into another cell's environment that had ``env: {A: 99}``, applying the
+    wrong baseline vars at runtime.
+    """
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: no-env
+    mitigations: [none]
+    environment: { docker: "x/y:1" }
+  - name: with-env
+    mitigations: [none]
+    environment:
+      docker: "x/y:1"
+      env: { EXTRA_FLAG: "1" }
+"""
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert len(r.inline_environments) == 2
+    names = {e.name for e in r.inline_environments}
+    assert len(names) == 2
+    assert r.cells[0].environment != r.cells[1].environment
+
+
+def test_inline_docker_same_env_deduplicates(tmp_path):
+    """Two cells with identical docker ref AND identical env dict must share a
+    single auto-name (dedup) so the environment probe is captured only once."""
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: a
+    mitigations: [none]
+    environment:
+      docker: "x/y:1"
+      env: { FOO: "bar" }
+  - name: b
+    mitigations: [tf32_off]
+    environment:
+      docker: "x/y:1"
+      env: { FOO: "bar" }
+"""
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert len(r.inline_environments) == 1
+    assert r.cells[0].environment == r.cells[1].environment
+
+
+def test_inline_docker_env_requires_string_values(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: bad-env
+    mitigations: [none]
+    environment:
+      docker: "x/y:1"
+      env: { FOO: 1 }
+"""
+    with pytest.raises(RecipeSchemaError, match=r"environment\.env"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
 # ---- extra_env ------------------------------------------------------------
 
 
@@ -592,6 +698,50 @@ def test_extra_env_must_be_strings(tmp_path):
         "    environment: local\n",
         "    environment: local\n    extra_env:\n      MY_FLAG: 1\n",
     )
+    with pytest.raises(RecipeSchemaError, match="extra_env"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+# ---- recipe-level extra_env -----------------------------------------------
+#
+# ``Recipe.extra_env`` is a top-level overlay applied to EVERY cell, sitting
+# ABOVE mitigations but BELOW each cell's own ``extra_env``.  The runner
+# merges ``{**recipe.extra_env, **cell.extra_env}`` into the single
+# ``RunRequest.extra_env`` so a recipe can provide a global baseline without
+# repeating it on every cell.
+
+
+def test_recipe_level_extra_env_parsed(tmp_path):
+    """A top-level ``extra_env`` key on the recipe is loaded into ``Recipe.extra_env``.
+
+    This is distinct from the cell-level ``extra_env``: it lives at the recipe
+    root and applies to all cells.  The runner merges them; the loader's job
+    is to faithfully parse the key and expose it on the ``Recipe`` dataclass.
+    """
+    text = _MINIMAL_YAML + 'extra_env:\n  GLOBAL_FLAG: "1"\n  NANLOG_TRACE: "on"\n'
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.extra_env == {"GLOBAL_FLAG": "1", "NANLOG_TRACE": "on"}
+
+
+def test_recipe_level_extra_env_defaults_empty(tmp_path):
+    """A recipe with no top-level ``extra_env`` key has ``Recipe.extra_env == {}``.
+
+    Back-compat: every existing recipe has no ``extra_env`` key at the root;
+    the loader must not raise and must produce an empty dict, so the runner's
+    ``{**recipe.extra_env, **cell.extra_env}`` merge is a no-op for these recipes.
+    """
+    r = load_recipe(_write_yaml(tmp_path, _MINIMAL_YAML))
+    assert r.extra_env == {}
+
+
+def test_recipe_level_extra_env_non_string_value_rejected(tmp_path):
+    """A non-string value in the top-level ``extra_env`` raises ``RecipeSchemaError``.
+
+    Mirrors the cell-level validation: ``extra_env`` is a ``dict[str, str]``
+    contract; an integer or list value must be caught at load time with a
+    clear error rather than silently propagating a bad type into the runner.
+    """
+    text = _MINIMAL_YAML + "extra_env:\n  MY_FLAG: 1\n"
     with pytest.raises(RecipeSchemaError, match="extra_env"):
         load_recipe(_write_yaml(tmp_path, text))
 

@@ -903,6 +903,26 @@ def test_cli_list_environments():
     assert "local" in result.output
 
 
+def test_cli_list_environments_shows_baseline_env(tmp_path):
+    sidecar = tmp_path / "environment-env.json"
+    sidecar.write_text(
+        '{"version": 1, "environments": {'
+        '"env-list-test": {"env": {"BASELINE_FLAG": "enabled"}}'
+        "}}",
+        encoding="utf-8",
+    )
+
+    cli = CliRunner()
+    result = cli.invoke(
+        triage,
+        ["list-environments", "--mitigations-file", str(sidecar)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "ENV" in result.output
+    assert "BASELINE_FLAG=enabled" in result.output
+
+
 def test_cli_list_mitigations_wraps_registry_error_in_click_exception(tmp_path):
     """Malformed --mitigations-file -> clean ClickException, not a Python traceback.
 
@@ -1067,3 +1087,104 @@ def test_nonzero_rank_does_not_collide_with_rank_zero(
     leaves = list((out / "RANK-1" / "fsdp").iterdir())
     assert len(leaves) == 1
     assert leaves[0].name == "2026-01-01T00-00-00"
+
+
+# ---- extra_env recipe-level + cell-level merge ----------------------------
+#
+# The runner merges ``{**recipe.extra_env, **cell.extra_env}`` into
+# ``RunRequest.extra_env``, giving the cell-scope the win on key collision.
+# This merge is the lowest-level seam of the env-precedence contract that
+# the runner owns (above it: the dispatcher's mitigation and Environment.env
+# layers; below it: nothing).  Pin all three observable behaviours: recipe
+# only, cell only, and collision (cell wins).
+
+
+def test_extra_env_recipe_scope_reaches_run_request(
+    tmp_path, patched_env, patched_run_trials
+):
+    """A recipe-level ``extra_env`` with no per-cell override reaches every
+    cell's ``RunRequest.extra_env`` unchanged."""
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(Cell(name="a", mitigations=("none",), environment="local"),),
+        ticket="EE-1",
+        confound=ConfoundCfg(baseline_cell="a"),
+        extra_env={"GLOBAL_FLAG": "1", "NANLOG_TRACE": "on"},
+    )
+    runner.run_recipe(r, output_dir=tmp_path)
+    req: RunRequest = patched_run_trials.call_args_list[0].args[0]
+    assert req.extra_env == {"GLOBAL_FLAG": "1", "NANLOG_TRACE": "on"}
+
+
+def test_extra_env_cell_scope_only_reaches_run_request(
+    tmp_path, patched_env, patched_run_trials
+):
+    """A cell-level ``extra_env`` with no recipe-level extra_env reaches only
+    that cell's ``RunRequest.extra_env``."""
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(
+            Cell(name="a", mitigations=("none",), environment="local"),
+            Cell(
+                name="b",
+                mitigations=("tf32_off",),
+                environment="local",
+                extra_env={"CELL_FLAG": "cell_only"},
+            ),
+        ),
+        ticket="EE-2",
+        confound=ConfoundCfg(baseline_cell="a"),
+    )
+    runner.run_recipe(r, output_dir=tmp_path)
+    reqs = [c.args[0] for c in patched_run_trials.call_args_list]
+    assert reqs[0].extra_env == {}
+    assert reqs[1].extra_env == {"CELL_FLAG": "cell_only"}
+
+
+def test_extra_env_cell_wins_on_collision_with_recipe(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Cell-scope wins on key collision; non-collision keys union (mirrors
+    ``test_workload_config_cell_overrides_recipe_and_merges``)."""
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(
+            Cell(name="a", mitigations=("none",), environment="local"),
+            Cell(
+                name="b",
+                mitigations=("tf32_off",),
+                environment="local",
+                # SHARED_KEY collides; CELL_ONLY is new.
+                extra_env={"SHARED_KEY": "cell_wins", "CELL_ONLY": "yes"},
+            ),
+        ),
+        ticket="EE-3",
+        confound=ConfoundCfg(baseline_cell="a"),
+        # Recipe-level: SHARED_KEY also set, RECIPE_ONLY not in cell.
+        extra_env={"SHARED_KEY": "recipe_value", "RECIPE_ONLY": "always"},
+    )
+    runner.run_recipe(r, output_dir=tmp_path)
+    reqs = [c.args[0] for c in patched_run_trials.call_args_list]
+    # Cell a has no extra_env; inherits recipe only.
+    assert reqs[0].extra_env == {"SHARED_KEY": "recipe_value", "RECIPE_ONLY": "always"}
+    # Cell b: SHARED_KEY -> cell wins; RECIPE_ONLY unions in; CELL_ONLY unions in.
+    assert reqs[1].extra_env == {
+        "SHARED_KEY": "cell_wins",
+        "RECIPE_ONLY": "always",
+        "CELL_ONLY": "yes",
+    }

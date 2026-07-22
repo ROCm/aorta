@@ -24,7 +24,11 @@ _VALID_TOP_LEVEL = frozenset({"version", "mitigations", "environments"})
 # allow-lists are intentionally identical so sidecar payloads and entry-point
 # payloads accept the same schema. `buck_target` peers `docker` / `venv` per #182;
 # `emulator` / `mirage_profile` add the GPU-emulated (mirage) baseline axis.
+# `env` (a nested `dict[str, str]` baseline env-var overlay) is a valid top-level
+# key too, validated separately because its value shape differs from the
+# `str | None` recipe keys; `_ALLOWED_ENV_TOP_LEVEL` is the full allow-list.
 _VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target", "emulator", "mirage_profile"})
+_ALLOWED_ENV_TOP_LEVEL = _VALID_ENV_KEYS | {"env"}
 
 
 def _source_tag(path: Path) -> str:
@@ -111,14 +115,17 @@ def _validate_mitigation_payload(path: Path, name: str, payload: object) -> dict
                 f"string, got {type(k).__name__} ({k!r})"
             )
         if not isinstance(v, str):
+            # Do NOT echo the value -- env-var values may carry secrets
+            # (tokens, endpoints). Report only the offending key + type,
+            # matching the dispatcher / recipe env validators.
             raise RegistryError(
                 f"sidecar {path}: mitigations.{name}.{k}: env var value must "
-                f"be string, got {type(v).__name__} ({v!r})"
+                f"be string, got {type(v).__name__}"
             )
     return dict(payload)
 
 
-def _validate_environment_payload(path: Path, name: str, payload: object) -> dict[str, str | None]:
+def _validate_environment_payload(path: Path, name: str, payload: object) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise RegistryError(
             f"sidecar {path}: environments.{name}: must be an object, "
@@ -128,21 +135,60 @@ def _validate_environment_payload(path: Path, name: str, payload: object) -> dic
     if non_string_keys:
         raise RegistryError(
             f"sidecar {path}: environments.{name}: non-string keys "
-            f"{[repr(k) for k in non_string_keys]}; allowed: {sorted(_VALID_ENV_KEYS)}"
+            f"{[repr(k) for k in non_string_keys]}; allowed: {sorted(_ALLOWED_ENV_TOP_LEVEL)}"
         )
-    invalid = set(payload) - _VALID_ENV_KEYS
+    invalid = set(payload) - _ALLOWED_ENV_TOP_LEVEL
     if invalid:
         raise RegistryError(
             f"sidecar {path}: environments.{name}: invalid keys "
-            f"{sorted(invalid)}; allowed: {sorted(_VALID_ENV_KEYS)}"
+            f"{sorted(invalid)}; allowed: {sorted(_ALLOWED_ENV_TOP_LEVEL)}"
         )
     for k, v in payload.items():
+        # ``env`` is a nested mapping validated below; the other keys are the
+        # ``str | None`` recipe slots.
+        if k == "env":
+            continue
         if v is not None and not isinstance(v, str):
             raise RegistryError(
                 f"sidecar {path}: environments.{name}.{k}: value must be "
                 f"string or null, got {type(v).__name__} ({v!r})"
             )
+    if "env" in payload:
+        payload = {**payload, "env": _validate_sidecar_env_mapping(path, name, payload["env"])}
     return dict(payload)
+
+
+def _validate_sidecar_env_mapping(path: Path, name: str, raw: object) -> dict[str, str]:
+    """Validate an ``env`` baseline mapping in a sidecar environment payload.
+
+    Keys AND values must be strings (no number/boolean coercion), matching the
+    entry-point loader and recipe ``extra_env`` rules so the same YAML/JSON
+    value fails everywhere consistently.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RegistryError(
+            f"sidecar {path}: environments.{name}.env: must be an object of "
+            f"env vars, got {type(raw).__name__}"
+        )
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str):
+            raise RegistryError(
+                f"sidecar {path}: environments.{name}.env: env var name must be "
+                f"string, got {type(k).__name__} ({k!r})"
+            )
+        if not isinstance(v, str):
+            # Do NOT echo the value -- env-var values may carry secrets
+            # (tokens, endpoints). Report only the offending key + type,
+            # matching the dispatcher / recipe env validators.
+            raise RegistryError(
+                f"sidecar {path}: environments.{name}.env.{k}: env var value must "
+                f"be string, got {type(v).__name__}"
+            )
+        out[k] = v
+    return out
 
 
 def load_sidecar_mitigations(path: Path) -> dict[str, Mitigation]:
@@ -198,11 +244,12 @@ def load_sidecar_environments(path: Path) -> dict[str, Environment]:
         spec = _validate_environment_payload(path, name, payload)
         out[name] = Environment(
             name=name,
-            docker=spec.get("docker"),
-            venv=spec.get("venv"),
-            buck_target=spec.get("buck_target"),
-            emulator=spec.get("emulator"),
-            mirage_profile=spec.get("mirage_profile"),
+            docker=spec.get("docker"),  # type: ignore[arg-type]
+            venv=spec.get("venv"),  # type: ignore[arg-type]
+            buck_target=spec.get("buck_target"),  # type: ignore[arg-type]
+            emulator=spec.get("emulator"),  # type: ignore[arg-type]
+            mirage_profile=spec.get("mirage_profile"),  # type: ignore[arg-type]
             source_package=src,
+            env=spec.get("env") or {},  # type: ignore[arg-type]
         )
     return out

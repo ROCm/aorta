@@ -1348,12 +1348,17 @@ def write_resolved_recipe(
     """
     del sidecar_files  # see docstring; kept for caller-stable signature
 
-    inline_docker = {e.name: e.docker for e in recipe.inline_environments}
+    inline_by_name = {e.name: e for e in recipe.inline_environments}
 
     resolved_cells: list[dict[str, Any]] = []
     for cell in recipe.cells:
-        if cell.environment in inline_docker:
-            cell_env: Any = {"docker": inline_docker[cell.environment]}
+        if cell.environment in inline_by_name:
+            inline = inline_by_name[cell.environment]
+            cell_env: Any = {"docker": inline.docker}
+            # Re-emit inline baseline env only when non-empty so a legacy
+            # ``{docker: <ref>}`` cell round-trips to the identical shorthand.
+            if inline.env:
+                cell_env["env"] = dict(inline.env)
         else:
             cell_env = cell.environment
         cell_doc: dict[str, Any] = {
@@ -1396,6 +1401,13 @@ def write_resolved_recipe(
         # recipes that never used the field round-trip to byte-equivalent
         # YAML. Cell-scope values are written per cell above.
         doc["workload_config"] = dict(recipe.workload_config)
+    if recipe.extra_env:
+        # Recipe-scope env-var overlay -- emitted only when non-empty so
+        # recipes that never used the field round-trip to byte-equivalent YAML.
+        # Cell-scope extra_env is written per cell above; the runner merges
+        # recipe-scope under cell-scope at execution time, so preserving both
+        # scopes here keeps a round-trip load+run's effective env identical.
+        doc["extra_env"] = dict(recipe.extra_env)
     if recipe.collect:
         doc["collect"] = _collect_doc(recipe.collect, recipe.collect_options)
     doc["confound"] = {
@@ -1429,12 +1441,14 @@ def resolved_cell_environment(
     the shorthand needed to re-derive the same ``_inline_<hash>``.
     """
     extra = list(sidecar_files) if sidecar_files else None
-    inline_docker = {e.name: e.docker for e in inline_environments}
-    if cell_environment in inline_docker:
+    inline_by_name = {e.name: e for e in inline_environments}
+    if cell_environment in inline_by_name:
+        inline = inline_by_name[cell_environment]
         return {
             "name": cell_environment,
-            "docker": inline_docker[cell_environment],
+            "docker": inline.docker,
             "venv": None,
+            "env": dict(inline.env),
             "source_package": "_inline_",
             "inline": True,
         }
@@ -1443,6 +1457,7 @@ def resolved_cell_environment(
         "name": env_desc.name,
         "docker": env_desc.docker,
         "venv": env_desc.venv,
+        "env": dict(env_desc.env),
         "source_package": env_desc.source_package,
         "inline": False,
     }

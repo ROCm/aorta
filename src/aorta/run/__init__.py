@@ -8,6 +8,8 @@ Public API:
     run_trials(request: RunRequest) -> list[TrialResult]
     RunRequest: Configuration for a run
     TrialResult: Per-trial result wrapper
+    docker_env_flags(env): Deterministic Docker ``-e KEY=VALUE`` tokens for
+        the controlled ``config["_aorta_trial_env"]`` overlay
 
 Example:
     from aorta.run import run_trials, RunRequest
@@ -23,6 +25,7 @@ Example:
 """
 
 from aorta.run.dispatcher import RunRequest, run_trials
+from aorta.run.docker import docker_env_flags
 from aorta.run.results import TrialResult
 
-__all__ = ["RunRequest", "TrialResult", "run_trials"]
+__all__ = ["RunRequest", "TrialResult", "docker_env_flags", "run_trials"]

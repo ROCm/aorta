@@ -13,7 +13,6 @@ from aorta.registry import (
     load_sidecar_mitigations,
 )
 
-
 # ---------- mitigations: merge into resolver ----------
 
 
@@ -247,3 +246,75 @@ def test_missing_file_reports_path(tmp_path):
     p = tmp_path / "nonexistent.json"
     with pytest.raises(RegistryError, match="cannot read file"):
         load_sidecar_mitigations(p)
+
+
+# ---- sidecar environment env field ----------------------------------------
+#
+# ``Environment.env`` is the lowest layer of the platform env-precedence
+# contract. These tests confirm the sidecar loader round-trips the field and
+# defaults gracefully when it is absent -- mirroring the plugin EP loader
+# tests in test_environments.py.
+
+
+def test_sidecar_environment_with_env_field_round_trips(tmp_sidecar, fake_env_eps):
+    """A sidecar environment that declares ``env`` must produce the correct
+    ``Environment.env`` mapping after loading.
+
+    The sidecar loader validates ``env`` independently of the ``str | None``
+    recipe slots -- this test pins that the validated mapping reaches the
+    ``Environment`` dataclass intact.
+    """
+    fake_env_eps([])
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "sidecar-with-env": {
+                "docker": "img@sha256:abc",
+                "env": {"FOO": "1", "BAR": "val"},
+            },
+        },
+    })
+    envs = load_environments(extra_files=[p])
+    assert envs["sidecar-with-env"].env == {"FOO": "1", "BAR": "val"}
+
+
+def test_sidecar_environment_env_field_absent_defaults_empty(tmp_sidecar, fake_env_eps):
+    """A sidecar environment that omits ``env`` must produce
+    ``Environment.env == {}``.
+
+    Back-compat: every existing sidecar payload has no ``env`` key; the
+    loader must not raise and must produce an empty dict so the dispatcher's
+    overlay merge is a no-op for these environments.
+    """
+    fake_env_eps([])
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "sidecar-no-env": {"docker": "img@sha256:abc"},
+        },
+    })
+    envs = load_environments(extra_files=[p])
+    assert envs["sidecar-no-env"].env == {}
+
+
+@pytest.mark.parametrize(
+    "bad_env",
+    [
+        ["FOO=1"],
+        {"FOO": 1},
+    ],
+)
+def test_sidecar_environment_env_field_rejects_malformed_values(
+    tmp_sidecar, bad_env
+):
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "bad-env": {
+                "docker": "img@sha256:abc",
+                "env": bad_env,
+            },
+        },
+    })
+    with pytest.raises(RegistryError, match=r"environments\.bad-env\.env"):
+        load_sidecar_environments(p)

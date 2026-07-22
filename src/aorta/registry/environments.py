@@ -1,19 +1,22 @@
 """Environments registry: built-ins + entry-point discovery + collision detection.
 
 Mirrors the mitigations registry. Plugin payloads are validated against
-`_VALID_ENV_KEYS` — `docker`, `venv`, `buck_target`, `emulator`, and
-`mirage_profile` are accepted. ROCm version is intentionally not a valid key
-(see `Environment` docstring).
+`_ALLOWED_ENV_TOP_LEVEL` — `docker`, `venv`, `buck_target`, `emulator`,
+`mirage_profile` (each `str | None`) and `env` (a nested `dict[str, str]` of
+baseline environment variables) are accepted. ROCm version is intentionally not
+a valid key (see `Environment` docstring).
 
 Plugin authors register one entry-point per environment in their `pyproject.toml`
 under the `aorta.environments` group. The entry-point name IS the environment
-name; the loaded object is the recipe (`dict[str, str | None]` with any of the
-keys `docker`, `venv`, `buck_target`, `emulator`, `mirage_profile`). Mirrors
-the `aorta.workloads` extension-point pattern.
+name; the loaded object is the recipe (`dict` with any of the keys `docker`,
+`venv`, `buck_target`, `emulator`, `mirage_profile` mapping to `str | None`,
+plus an optional `env` mapping to `dict[str, str]`). Mirrors the
+`aorta.workloads` extension-point pattern.
 """
 
 from importlib.metadata import entry_points
 from pathlib import Path
+from typing import TypedDict
 
 from aorta.registry.errors import (
     RegistryCollisionError,
@@ -28,13 +31,57 @@ _GROUP = "aorta.environments"
 # `emulator` / `mirage_profile` add a GPU-emulated baseline axis (mirage +
 # rocjitsu) so workloads can run with no physical GPU. Order in the frozenset
 # is irrelevant; spelled this way for grep-ability.
+#
+# NOTE: `env` (baseline env-var mapping) is a valid top-level key too, but it
+# is validated separately (`_validate_env_mapping`) because its value is a
+# nested `dict[str, str]`, not the `str | None` shape the recipe keys share.
+# `_VALID_ENV_KEYS` therefore lists only the `str | None` recipe keys; the
+# allowed-key check unions in `env` explicitly.
 _VALID_ENV_KEYS = frozenset({"docker", "venv", "buck_target", "emulator", "mirage_profile"})
+_ALLOWED_ENV_TOP_LEVEL = _VALID_ENV_KEYS | {"env"}
+
+
+class _EnvironmentPayload(TypedDict, total=False):
+    docker: str | None
+    venv: str | None
+    buck_target: str | None
+    emulator: str | None
+    mirage_profile: str | None
+    env: dict[str, str]
+
+
+def _validate_env_mapping(source_hint: str, name: str, raw: object) -> dict[str, str]:
+    """Validate an environment payload's ``env`` mapping into ``dict[str, str]``.
+
+    ``env`` is the baseline env-var overlay for an environment (lowest layer of
+    the platform env contract). Keys AND values must be strings -- numbers /
+    booleans are rejected rather than silently ``str()``-coerced, mirroring the
+    mitigation-sidecar and recipe ``extra_env`` rules so the same value in a
+    YAML/JSON number position fails everywhere consistently. Returns a fresh
+    ``dict`` (the ``Environment`` constructor deep-copies again defensively).
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RegistryError(
+            f"{source_hint} environment '{name}': 'env' must be a mapping of "
+            f"str -> str, got {type(raw).__name__}"
+        )
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise RegistryError(
+                f"{source_hint} environment '{name}': 'env' keys and values must "
+                f"be strings, got {type(k).__name__} -> {type(v).__name__}"
+            )
+        out[k] = v
+    return out
 
 # Built-in environments. `local` and `default` are both "current process, no
 # overrides" — `default` is reserved as a site-configurable alias. Customer
 # docker recipes ship from downstream private packages via the
 # `aorta.environments` entry-point group, NOT here.
-BUILTIN_ENVIRONMENTS: dict[str, dict[str, str | None]] = {
+BUILTIN_ENVIRONMENTS: dict[str, _EnvironmentPayload] = {
     "local":   {},
     "default": {},
     # GPU-emulated baseline: run the workload under the mirage control plane +
@@ -70,8 +117,9 @@ def load_environments(
         RegistryCollisionError: two contributors registered the same environment name.
         RegistryError: a plugin's payload was not a dict, contained keys outside
             ``_VALID_ENV_KEYS`` (``docker``, ``venv``, ``buck_target``,
-            ``emulator``, ``mirage_profile``), or had non-``str | None`` values;
-            or a sidecar file failed schema validation.
+            ``emulator``, ``mirage_profile``, ``env``), had non-``str | None``
+            launch-hint values, had a malformed ``dict[str, str]`` ``env``
+            mapping, or a sidecar file failed schema validation.
     """
     registry: dict[str, Environment] = {
         name: Environment(
@@ -82,6 +130,7 @@ def load_environments(
             emulator=spec.get("emulator"),
             mirage_profile=spec.get("mirage_profile"),
             source_package="aorta",
+            env=_validate_env_mapping("built-in", name, spec.get("env")),
         )
         for name, spec in BUILTIN_ENVIRONMENTS.items()
     }
@@ -99,21 +148,29 @@ def load_environments(
             raise RegistryError(
                 f"plugin '{plugin_name}' environment '{ep.name}' has non-string "
                 f"keys {[repr(k) for k in non_string_keys]}; allowed keys: "
-                f"{sorted(_VALID_ENV_KEYS)}"
+                f"{sorted(_ALLOWED_ENV_TOP_LEVEL)}"
             )
-        invalid = set(spec) - _VALID_ENV_KEYS
+        invalid = set(spec) - _ALLOWED_ENV_TOP_LEVEL
         if invalid:
             raise RegistryError(
                 f"plugin '{plugin_name}' environment '{ep.name}' has invalid "
-                f"keys {sorted(invalid)}; allowed keys: {sorted(_VALID_ENV_KEYS)}"
+                f"keys {sorted(invalid)}; allowed keys: {sorted(_ALLOWED_ENV_TOP_LEVEL)}"
             )
-        bad_values = {k: v for k, v in spec.items() if v is not None and not isinstance(v, str)}
+        # ``env`` is validated separately (nested mapping); exclude it from the
+        # ``str | None`` recipe-key value check so a valid ``env`` dict doesn't
+        # trip the "non-string values" guard.
+        bad_values = {
+            k: v
+            for k, v in spec.items()
+            if k != "env" and v is not None and not isinstance(v, str)
+        }
         if bad_values:
             raise RegistryError(
                 f"plugin '{plugin_name}' environment '{ep.name}' has non-string values "
                 f"{ {k: type(v).__name__ for k, v in bad_values.items()} }; "
                 f"each value must be `str | None`"
             )
+        env_mapping = _validate_env_mapping(f"plugin '{plugin_name}'", ep.name, spec.get("env"))
         if ep.name in registry:
             existing = registry[ep.name].source_package
             raise RegistryCollisionError(
@@ -128,6 +185,7 @@ def load_environments(
             emulator=spec.get("emulator"),
             mirage_profile=spec.get("mirage_profile"),
             source_package=plugin_name,
+            env=env_mapping,
         )
 
     check_sidecar_basenames(extra_files)

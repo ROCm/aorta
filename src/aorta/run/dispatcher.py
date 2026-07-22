@@ -36,6 +36,29 @@ logger = logging.getLogger(__name__)
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _validate_env_mapping(label: str, env: object) -> None:
+    """Validate a controlled environment overlay without exposing values."""
+    if not isinstance(env, dict):
+        raise ValueError(
+            f"{label} must be a dict[str, str], got {type(env).__name__}"
+        )
+    for key, value in env.items():
+        if not isinstance(key, str):
+            raise ValueError(
+                f"{label} keys must be str, got {type(key).__name__}"
+            )
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{label} value for key {key!r} must be str, "
+                f"got {type(value).__name__}"
+            )
+        if not _ENV_KEY_RE.fullmatch(key):
+            raise ValueError(
+                f"Invalid {label} keys [{key!r}]: each key must match "
+                "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
+            )
+
+
 @dataclass(frozen=True)
 class RunRequest:
     """Configuration for a run_trials() invocation.
@@ -359,17 +382,10 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             f"{bad_collect_options}"
         )
 
-    # 3. Validate ``extra_env`` keys.  The CLI validates this at parse
-    #    time, but library callers (B2, future programmatic users) pass
-    #    ``extra_env`` directly -- without parity here, a bad key would
-    #    only fail mid-trial inside ``os.environ.update`` with the much
-    #    less friendly ``ValueError: illegal environment variable name``.
-    bad_keys = [k for k in request.extra_env if not _ENV_KEY_RE.match(k)]
-    if bad_keys:
-        raise ValueError(
-            f"Invalid extra_env keys {bad_keys}: each key must match "
-            "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
-        )
+    # 3. Validate ``extra_env``. The CLI and recipe loader validate their
+    #    inputs, but library callers can construct ``RunRequest`` directly.
+    #    Fail before mutating ``os.environ`` and never include values in errors.
+    _validate_env_mapping("extra_env", request.extra_env)
 
     # Validate ``env_probe`` shape early.  The triage runner is the only
     # in-tree producer and always passes ``{"src": str, "out": str}``, but
@@ -415,6 +431,17 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     sidecar_files = list(request.sidecar_files) or None
     env_descriptor = get_environment(request.environment, extra_files=sidecar_files)
 
+    # 7-env. Validate the resolved environment's baseline ``env`` mapping.
+    #     ``Environment.env`` is the lowest layer of the platform env
+    #     contract and is applied to ``os.environ`` before the workload runs
+    #     (see ``_run_single_trial``). The registry loaders already enforce
+    #     ``str`` keys/values, but not POSIX env-var *name shape* -- so a
+    #     malformed key (e.g. ``"1BAD"`` or ``"has space"``) would otherwise
+    #     only surface deep inside ``os.environ.update`` with the opaque
+    #     ``ValueError: illegal environment variable name``. Re-validate here,
+    #     before any trial runs, for parity with the ``extra_env`` check above.
+    _validate_env_mapping("Environment.env", env_descriptor.env)
+
     # 7a. Apply the per-axis runtime overrides (if any) AFTER
     #     resolving the named environment, so the named env's other
     #     fields (``venv`` / ``source_package`` / the axes not being
@@ -450,6 +477,7 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     mitigation_env: dict[str, str] = {}
     for name in request.mitigations:
         mitigation_env.update(get_mitigation(name, extra_files=sidecar_files))
+    _validate_env_mapping("mitigation environment", mitigation_env)
 
     # 9. Determine if we should write (rank 0 only for distributed).
     #    Only rank 0 needs the output directory; creating it on every
@@ -728,19 +756,48 @@ def _run_single_trial(
         )
         config["_aorta_collect_dir"] = str((results_dir / trial_basename).absolute())
 
-    # Snapshot the env BEFORE applying mitigation / extra_env so the
-    # ``finally`` block can restore both the dispatcher's overlay and
-    # any workload-side mutations introduced by ``setup()`` / ``run()``.
+    # Compute the effective controlled overlay in the platform env-precedence
+    # order (lowest to highest):
+    #
+    #     Environment.env  <  mitigations  <  request.extra_env
+    #
+    # ``request.extra_env`` already carries the recipe-level + cell-level (or
+    # direct-CLI ``--extra-env``) merge -- the runner unions those before
+    # constructing the request, and direct ``aorta run --extra-env`` lands here
+    # too -- so this single mapping is the top layer. The overlay contains ONLY
+    # variables contributed by these three controlled sources; it is NEVER
+    # populated from the ambient ``os.environ``. This is the exact bundle
+    # threaded to workloads as ``config['_aorta_trial_env']`` (below) so a
+    # Docker-aware wrapper can forward precisely these vars into its container.
+    effective_overlay: dict[str, str] = {}
+    effective_overlay.update(env_descriptor.env)
+    effective_overlay.update(mitigation_env)
+    effective_overlay.update(request.extra_env)
+
+    # Thread the controlled overlay into the workload config under a reserved
+    # key so a self-isolating wrapper (docker/venv/buck) can forward exactly
+    # these vars -- and only these -- across the isolation boundary via the
+    # shared ``aorta.run.docker_env_flags`` helper. Injected AFTER the
+    # ``config_overrides`` spread (like the other ``_aorta_*`` keys) so the
+    # reserved-key rejection at the top of ``run_trials`` guards the slot.
+    # Always a plain ``dict[str, str]`` (JSON-safe; recorded verbatim in the
+    # trial-JSON ``config``). Empty when no controlled source contributed --
+    # back-compat with every existing run. Values are deliberately NOT logged.
+    config["_aorta_trial_env"] = dict(effective_overlay)
+
+    # Snapshot the env BEFORE applying the overlay so the ``finally`` block can
+    # restore both the dispatcher's overlay and any workload-side mutations
+    # introduced by ``setup()`` / ``run()``.
     pre_trial_env = dict(os.environ)
 
-    # Apply mitigation env + extra_env BEFORE the env snapshot.  The
-    # snapshot is supposed to describe the actual environment the
-    # workload ran under -- including operator overrides like
-    # ``HSA_XNACK=1`` from a mitigation or one-off ``DISABLE_TF32=1``
-    # from ``--extra-env``.  Capturing pre-override loses that signal
-    # for reproducibility / debugging.
-    os.environ.update(mitigation_env)
-    os.environ.update(request.extra_env)
+    # Apply the effective overlay BEFORE the env snapshot.  The snapshot is
+    # supposed to describe the actual environment the workload ran under --
+    # including the environment's baseline vars, operator overrides like
+    # ``HSA_XNACK=1`` from a mitigation, and one-off ``DISABLE_TF32=1`` from
+    # ``--extra-env``.  Capturing pre-override loses that signal for
+    # reproducibility / debugging. A single ``update`` from the pre-merged
+    # overlay applies all three layers in their resolved precedence.
+    os.environ.update(effective_overlay)
 
     # Capture environment snapshot AFTER env-var application.
     # ``collect_env`` is fail-soft and never raises (see A1 docs).

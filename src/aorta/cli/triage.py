@@ -461,7 +461,7 @@ def execute_list_mitigations(files: tuple[Path, ...]) -> None:
     help="JSON sidecar to merge into the listing (repeatable).",
 )
 def list_environments(files: tuple[Path, ...]) -> None:
-    """List every registered environment with its source_package and docker/venv."""
+    """List every registered environment and its baseline recipe."""
     emit_deprecation("aorta triage list-environments", "aorta sweep list-environments")
     execute_list_environments(files)
 
@@ -475,10 +475,16 @@ def execute_list_environments(files: tuple[Path, ...]) -> None:
     name_w = max(len("NAME"), *(len(n) for n in registry))
     src_w = max(len("SOURCE"), *(len(e.source_package) for e in registry.values()))
     docker_w = max(len("DOCKER"), *(len(e.docker or "-") for e in registry.values()))
-    click.echo(f"{'NAME'.ljust(name_w)}  {'SOURCE'.ljust(src_w)}  {'DOCKER'.ljust(docker_w)}  VENV")
+    venv_w = max(len("VENV"), *(len(e.venv or "-") for e in registry.values()))
+    click.echo(
+        f"{'NAME'.ljust(name_w)}  {'SOURCE'.ljust(src_w)}  "
+        f"{'DOCKER'.ljust(docker_w)}  {'VENV'.ljust(venv_w)}  ENV"
+    )
     for name in sorted(registry):
         e = registry[name]
+        env_str = " ".join(f"{k}={v}" for k, v in sorted(e.env.items())) or "(none)"
         click.echo(
             f"{name.ljust(name_w)}  {e.source_package.ljust(src_w)}  "
-            f"{(e.docker or '-').ljust(docker_w)}  {e.venv or '-'}"
+            f"{(e.docker or '-').ljust(docker_w)}  "
+            f"{(e.venv or '-').ljust(venv_w)}  {env_str}"
         )

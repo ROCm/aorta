@@ -1024,6 +1024,54 @@ def test_resolved_recipe_round_trips_stop_after(
     assert reloaded.stop_after == StopAfter(events=2, max_trials=5, event_verdict="fail")
 
 
+def test_resolved_recipe_round_trips_extra_env(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Both recipe-scope and cell-scope ``extra_env`` must survive
+    load → run → reload so a replay from ``recipe.resolved.yaml`` applies the
+    same env-var overrides as the original run.
+
+    Mirrors ``test_resolved_recipe_round_trips_workload_config`` for the
+    env-precedence contract (A6 checklist item).
+    """
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, load_recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(
+            Cell(name="a", mitigations=("none",), environment="local"),
+            Cell(
+                name="b",
+                mitigations=("tf32_off",),
+                environment="local",
+                extra_env={"CELL_KEY": "cell_value"},
+            ),
+        ),
+        ticket="EE-RT",
+        confound=ConfoundCfg(baseline_cell="a"),
+        extra_env={"GLOBAL_KEY": "global_value", "SHARED_KEY": "recipe"},
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    resolved_path = run_dir / "recipe.resolved.yaml"
+
+    # Verify the YAML doc contains both scopes before reloading.
+    import yaml as _yaml
+    doc = _yaml.safe_load(resolved_path.read_text())
+    assert doc["extra_env"] == {"GLOBAL_KEY": "global_value", "SHARED_KEY": "recipe"}
+    cells_by_name = {c["name"]: c for c in doc["cells"]}
+    assert "extra_env" not in cells_by_name["a"]
+    assert cells_by_name["b"]["extra_env"] == {"CELL_KEY": "cell_value"}
+
+    # Reload and verify the Recipe dataclass fields are intact.
+    reloaded = load_recipe(resolved_path)
+    assert reloaded.extra_env == {"GLOBAL_KEY": "global_value", "SHARED_KEY": "recipe"}
+    assert reloaded.cells[0].extra_env == {}
+    assert reloaded.cells[1].extra_env == {"CELL_KEY": "cell_value"}
+
+
 # ---- Config column (diffs-only workload_config) --------------------------
 #
 # The column surfaces per-cell workload_config keys whose value varies

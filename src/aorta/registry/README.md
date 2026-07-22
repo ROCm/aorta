@@ -4,9 +4,11 @@ Two small registries that ship with aorta:
 
 - **Mitigations** (`name → env vars`) — process-level flags applied just before
   the workload subprocess launches. Examples: `tf32_off`, `xnack`.
-- **Environments** (`name → docker / venv / buck_target recipe`) — baseline
+- **Environments** (`name → launch hints + baseline env vars`) — baseline
   state of the process, container, or Buck-built binary the workload runs in.
-  Examples: `local`, `default`.
+  Launch hints include `docker`, `venv`, and `buck_target`; `env` is an
+  optional `dict[str, str]` intrinsic to that environment. Examples: `local`,
+  `default`.
 
 Both follow the same shape: built-ins ship from this package; external
 contributions arrive via Python entry-points and are merged at runtime.
@@ -124,7 +126,10 @@ the same collision rule.
     "amp_bf16": { "AMP_DTYPE": "bfloat16" }
   },
   "environments": {
-    "my_local_image": { "docker": "myorg/private:test@sha256:..." },
+    "my_local_image": {
+      "docker": "myorg/private:test@sha256:...",
+      "env": { "TORCH_ROCM_FA_PREFER_CK": "1" }
+    },
     "host_venv_3_12": { "venv":   "/home/me/.venvs/aorta-3.12" }
   }
 }
@@ -198,12 +203,36 @@ workloads via the `aorta.workloads` entry-point group.
 
 ## Adding an environment
 
-Same two paths, with `aorta.environments` as the entry-point group. Plugin
-payloads must use only the keys `docker`, `venv`, or `buck_target`; anything
-else (e.g. `rocm`) raises `RegistryError` at load time. ROCm version is
-implicit in the docker image digest, the host the venv runs on, or the Buck
-checkout's captured revision — capture it from `aorta env probe` at runtime,
-not via static declaration.
+Same two paths, with `aorta.environments` as the entry-point group. Plugin and
+sidecar payloads may use `docker`, `venv`, `buck_target`, `emulator`,
+`mirage_profile`, and `env`. The launch-hint values are `str | None`; `env`
+must be a `dict[str, str]`. Numeric and boolean values are rejected rather than
+coerced. Omitting `env` remains compatible and produces an empty mapping.
+Anything outside this allow-list (for example `rocm`) raises `RegistryError`
+at load time. ROCm version is implicit in the docker image digest, the host the
+venv runs on, or the Buck checkout's captured revision — capture it from
+`aorta env probe` at runtime, not via static declaration.
+
+Entry-point example:
+
+```toml
+[project.entry-points."aorta.environments"]
+nightly = "my_package.environments:NIGHTLY"
+```
+
+```python
+# my_package/environments.py
+NIGHTLY = {
+    "docker": "myorg/pytorch@sha256:...",
+    "env": {
+        "TORCH_ROCM_FA_PREFER_CK": "1",
+    },
+}
+```
+
+`Environment.env` is the lowest-precedence layer. Mitigations override it,
+recipe-level `extra_env` overrides mitigations, and cell-level or direct-CLI
+`extra_env` wins last.
 
 ### Tier hints: how the workload consumes the resolved environment
 
@@ -216,7 +245,10 @@ config["_aorta_environment"] = {
     "docker": "...",         # or None
     "venv": "...",           # or None
     "buck_target": "...",    # or None
+    "emulator": "...",        # or None
+    "mirage_profile": "...",  # or None
     "source_package": "...",
+    "env": {"KEY": "VALUE"},
 }
 ```
 
@@ -240,6 +272,27 @@ elif image:
 else:
     argv = [sys.executable, str(entry)]
 ```
+
+The dispatcher separately injects the fully resolved controlled overlay as
+`config["_aorta_trial_env"]`. Docker-aware plugin wrappers should forward that
+mapping with the shared helper rather than reading the complete host
+environment:
+
+```python
+from aorta.run import docker_env_flags
+
+trial_env = self.config.get("_aorta_trial_env", {})
+argv = [
+    "docker",
+    "run",
+    *docker_env_flags(trial_env),
+    # wrapper-owned mounts, devices, IPC, entrypoint, image, and command...
+]
+```
+
+The helper sorts keys, validates `dict[str, str]`, and never reads
+`os.environ`. Do not log `_aorta_trial_env` values. AORTA's dispatcher does not
+launch Docker; wrappers retain ownership of the complete launch command.
 
 Adding a fourth tier later (e.g. Bazel) follows the same pattern: extend
 `Environment`, extend `_VALID_ENV_KEYS`, document the read pattern here.

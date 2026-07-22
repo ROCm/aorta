@@ -618,7 +618,7 @@ def sweep_list_mitigations(files: tuple[Path, ...]) -> None:
     help="JSON sidecar to merge into the listing (repeatable).",
 )
 def sweep_list_environments(files: tuple[Path, ...]) -> None:
-    """List every registered environment with its source_package and docker/venv."""
+    """List every registered environment and its baseline recipe."""
     execute_list_environments(files)
 
 

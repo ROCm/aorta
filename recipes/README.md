@@ -38,6 +38,8 @@ workload: fsdp                       # required; resolved via aorta.workloads en
 trials: 8                            # required; per-cell trial count
 steps: 5000                          # required; per-cell step count
 save_logs: false                     # optional; when true, dispatcher writes per-trial stdout/stderr files
+extra_env:                           # optional; applies to every cell
+  GLOBAL_DEBUG_FLAG: "1"             # values must be strings
 
 confound:
   threshold: 1.15                    # default; > 1.15 -> "speed (+N%)" flag
@@ -62,7 +64,10 @@ cells:
 
   - name: try-nightly                # inline docker shorthand
     mitigations: [none]
-    environment: { docker: "rocm/pytorch:nightly" }
+    environment:
+      docker: "rocm/pytorch:nightly"
+      env:                            # optional baseline intrinsic to this environment
+        TORCH_ROCM_FA_PREFER_CK: "1"
 
   - name: custom-env-override        # one-off env var override for this cell only
     mitigations: [tf32_off]
@@ -101,15 +106,21 @@ cells:
   intentionally override.
 - **`cells[*].environment`** -- required. Either:
   - a registered environment name (resolved via `aorta.registry.get_environment()`), OR
-  - a mapping `{ docker: "<image-ref>" }` -- inline docker shorthand.
-    Auto-named `_inline_<hash>` where `<hash>` is the first 8 hex chars of
-    `blake2b(image-ref)`. Deterministic: two cells with the same ref share
-    the same auto-name and the same per-environment env-probe. No other
-    keys accepted.
+  - a mapping `{docker: "<image-ref>", env: {KEY: "VALUE"}}` -- inline
+    docker shorthand with optional baseline environment variables.
+    Auto-named `_inline_<hash>`. For legacy mappings with no `env` (or an
+    empty mapping), the hash remains the first 8 hex chars of
+    `blake2b(image-ref)`. Non-empty `env` content is included canonically in
+    the identity, so the same image with different baseline variables cannot
+    silently collapse into one environment. No other keys are accepted.
+- **Top-level `extra_env`** -- optional `dict[str, str]`. Applied to every
+  cell after `Environment.env` and mitigations. Probe-mode recipes reject this
+  triage-only key and retain their separate environment-passthrough contract.
 - **`cells[*].extra_env`** -- optional `dict[str, str]`. Applied AFTER the
-  mitigation bundle, so it can override a registered mitigation's env var
-  for one-off experiments without polluting the registry. Recorded in
-  `matrix.json` for audit.
+  recipe-level mapping, so it can override a recipe default or registered
+  mitigation for one-off experiments without polluting the registry. Recorded
+  in `matrix.json` for audit. All environment mappings require string keys and
+  values; quote YAML numbers and booleans.
 - **`save_logs`** -- optional `bool`, default `false`. When `true`, the
   dispatcher captures the workload's in-process `stdout` / `stderr`
   writes into `trial_d{d}_m{m}_t{t}.{stdout,stderr}.log` files alongside
@@ -174,7 +185,8 @@ cells:
 - **`workload_config`** -- optional `dict[str, Any]`, allowed at both
   recipe scope (top level) and per cell. Forwarded to the workload
   constructor through the dispatcher's `Request.config_overrides`. Use
-  this for workload-specific knobs that aren't env vars -- e.g.
+  this for workload-specific knobs that aren't env vars; it does not enter
+  `os.environ` or `_aorta_trial_env`. For example,
   `shampoo_api: old` on the `recom_repro` workload to select the V1
   flat-kwarg SHAMPOO entry script (both `new` and `old` import from the
   OSS `distributed_shampoo` package; they differ in constructor shape).
@@ -202,6 +214,23 @@ cells:
 
 Every validation error reports a path like `cells[2].mitigations` so the
 failure is localisable without reading the loader source.
+
+The complete environment-variable precedence is:
+
+```text
+Environment.env
+< mitigations
+< recipe-level extra_env
+< cell-level extra_env
+```
+
+Direct `aorta run --extra-env` occupies the same highest-precedence request
+layer as the recipe runner's merged recipe/cell values. The dispatcher applies
+the controlled overlay to host workloads and injects the exact same mapping as
+`config["_aorta_trial_env"]` for self-isolating wrappers. It never adds
+unrelated ambient host variables, and it does not launch Docker. Docker-aware
+wrappers can use `aorta.run.docker_env_flags`; see
+[`docs/configuration.md`](../docs/configuration.md#workload-owned-docker-launches).
 
 ## Workloads
 
@@ -331,8 +360,9 @@ A green run proves: `compute_type=transformer`, `layers_verified > 0`, `layer_ch
   rows are marked `n/a` in `matrix.md` -- so a workload that only exposes
   wall-clock can't be silently compared against one that emits per-step
   timing.
-- `resolved_env_vars` -- the env-var bundle as actually applied (mitigation
-  union + `extra_env`).
+- `resolved_env_vars` -- the controlled env-var bundle as actually applied
+  (`Environment.env`, mitigation union, and merged recipe/cell `extra_env` in
+  precedence order).
 - `resolved_environment` -- the resolved `Environment` descriptor.
 - `workload_config` -- the merged per-cell `workload_config` dict (recipe
   scope union cell scope, cell wins on collision). Empty `{}` when neither
