@@ -126,13 +126,27 @@ def load_mitigations(
     for ep in entry_points(group=_GROUP):
         env = ep.load()
         plugin_name = ep.dist.name
-        if not isinstance(env, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in env.items()
-        ):
+        if not isinstance(env, dict):
             raise RegistryError(
                 f"plugin '{plugin_name}' mitigation '{ep.name}' must resolve to "
                 f"dict[str, str]; got {type(env).__name__}"
-                + (f" with non-string entries {dict(env)!r}" if isinstance(env, dict) else "")
+            )
+        invalid_entries = [
+            (
+                key if isinstance(key, str) else f"<{type(key).__name__} key>",
+                type(key).__name__,
+                type(value).__name__,
+            )
+            for key, value in env.items()
+            if not isinstance(key, str) or not isinstance(value, str)
+        ]
+        if invalid_entries:
+            # Values may be credentials. Report only the key (or key type) and
+            # key/value types; never repr the payload or an offending value.
+            raise RegistryError(
+                f"plugin '{plugin_name}' mitigation '{ep.name}' must resolve to "
+                "dict[str, str]; invalid entries "
+                f"(key, key type, value type): {invalid_entries!r}"
             )
         # Enforce the env-var name/NUL rules at this declaration boundary too --
         # a plugin mitigation bundle otherwise reaches ``os.environ.update`` in

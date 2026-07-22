@@ -90,10 +90,24 @@ def test_collision_plugin_vs_builtin_raises(fake_eps):
         load_mitigations()
 
 
-def test_non_string_env_value_raises(fake_eps):
-    fake_eps([("bad", {"K": 123}, "plugin_x")])
-    with pytest.raises(RegistryError, match="plugin_x.*bad.*dict\\[str, str\\]"):
+def test_invalid_env_entry_types_raise_without_echoing_values(fake_eps):
+    secret = "super-secret-token"
+    fake_eps(
+        [
+            (
+                "bad",
+                {"TOKEN": secret, "K": {"credential": secret}, 7: secret},
+                "plugin_x",
+            )
+        ]
+    )
+    with pytest.raises(RegistryError, match="plugin_x.*bad.*dict\\[str, str\\]") as exc:
         load_mitigations()
+    message = str(exc.value)
+    assert "K" in message
+    assert "dict" in message
+    assert "<int key>" in message
+    assert secret not in message
 
 
 def test_non_dict_payload_raises(fake_eps):
