@@ -99,8 +99,20 @@ for idx, entry in enumerate(smokes):
             resolved.append(token)
     command = resolved
 
-    min_gpus = int(entry.get("min_gpus", 1))
-    is_pr = bool(entry.get("pr", False))
+    # Validate types strictly: YAML `pr: "false"` would be a truthy string under
+    # bool(), silently running an excluded smoke; `min_gpus: "2"` would compare
+    # wrong. Require a real bool / int (bool is a subclass of int, so exclude it
+    # explicitly for min_gpus).
+    min_gpus_raw = entry.get("min_gpus", 1)
+    if isinstance(min_gpus_raw, bool) or not isinstance(min_gpus_raw, int):
+        raise SystemExit(
+            f"smoke '{name}': 'min_gpus' must be an integer, got {min_gpus_raw!r}"
+        )
+    min_gpus = min_gpus_raw
+
+    is_pr = entry.get("pr", False)
+    if not isinstance(is_pr, bool):
+        raise SystemExit(f"smoke '{name}': 'pr' must be a boolean, got {is_pr!r}")
 
     if tier == "pr" and not is_pr:
         print(f"SKIP {name}: not in the PR tier (pr: false)")
