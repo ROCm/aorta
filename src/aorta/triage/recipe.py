@@ -732,8 +732,12 @@ def _parse_str_str_mapping(path_hint: str, raw: Any) -> dict[str, str]:
     out: dict[str, str] = {}
     for k, v in raw.items():
         if not isinstance(k, str) or not isinstance(v, str):
+            # String keys are safe to identify, but a malformed non-string YAML
+            # key can itself carry sensitive content (for example ``!!binary``).
+            # Report only its type, never its repr.
+            key_hint = repr(k) if isinstance(k, str) else f"<{type(k).__name__} key>"
             raise RecipeSchemaError(
-                f"{path_hint}[{k!r}]: keys and values must be strings, "
+                f"{path_hint}[{key_hint}]: keys and values must be strings, "
                 f"got {type(k).__name__} -> {type(v).__name__}"
             )
         if not is_valid_env_name(k):

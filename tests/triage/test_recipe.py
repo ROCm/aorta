@@ -746,6 +746,16 @@ def test_recipe_level_extra_env_non_string_value_rejected(tmp_path):
         load_recipe(_write_yaml(tmp_path, text))
 
 
+def test_recipe_level_extra_env_non_string_key_is_redacted(tmp_path):
+    """A secret-bearing YAML key reports only its type, not its decoded content."""
+    text = _MINIMAL_YAML + """extra_env:
+  !!binary c3VwZXItc2VjcmV0LWtleQ==: "value"
+"""
+    with pytest.raises(RecipeSchemaError, match="<bytes key>") as exc:
+        load_recipe(_write_yaml(tmp_path, text))
+    assert "super-secret-key" not in str(exc.value)
+
+
 # ---- env-var NAME validation at load time ---------------------------------
 #
 # An invalid env-var NAME (e.g. ``"BAD KEY"``) must fail recipe loading, not
