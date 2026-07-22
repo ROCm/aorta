@@ -29,6 +29,7 @@ from typing import Any
 
 import yaml
 
+from aorta._env_rules import is_valid_env_name, value_has_nul
 from aorta.registry import (
     get_environment,
     get_mitigation,
@@ -159,11 +160,6 @@ _RESERVED_WORKLOAD_CONFIG_PREFIX = "_aorta_"
 # without an extra layer of slugging that would silently rename cells.
 _CELL_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 _RESERVED_CELL_NAMES = frozenset({".", "..", "matrix.md", "matrix.json"})
-# POSIX env-var name shape -- kept byte-identical to the dispatcher's
-# ``aorta.run.dispatcher._ENV_KEY_RE`` so a name that fails at run time also
-# fails at recipe-load time. Duplicated (not imported) to keep this module's
-# import graph free of the run-orchestration package.
-_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class RecipeSchemaError(ValueError):
@@ -719,6 +715,13 @@ def _parse_str_str_mapping(path_hint: str, raw: Any) -> dict[str, str]:
     branching. Keys and values must both be strings -- YAML/JSON numbers and
     booleans are rejected rather than silently coerced, matching the registry
     loaders so the same value fails everywhere consistently.
+
+    Env-var NAME shape and NUL-in-VALUE are validated here too (via the shared
+    ``aorta._env_rules`` predicates), so a malformed name (e.g. ``"BAD KEY"``)
+    or an unusable value (a NUL byte) fails at recipe-load time / ``--dry-run``
+    instead of slipping through to a per-cell failure at run time -- the
+    "green command, zero work" outcome, where a non-strict sweep still writes a
+    matrix and exits zero while every cell errored.
     """
     if raw is None:
         return {}
@@ -733,17 +736,16 @@ def _parse_str_str_mapping(path_hint: str, raw: Any) -> dict[str, str]:
                 f"{path_hint}[{k!r}]: keys and values must be strings, "
                 f"got {type(k).__name__} -> {type(v).__name__}"
             )
-        # Validate the env-var *name shape* at recipe-load time, using the same
-        # rule the dispatcher enforces (``_ENV_KEY_RE``). Without this a
-        # malformed name (e.g. ``"BAD KEY"``) passes loading and ``--dry-run``
-        # and only fails per-cell inside ``os.environ.update`` at run time --
-        # after the default CLI has already exited zero and printed
-        # "Wrote matrix". Fail early so a bad global/cell/inline env name is
-        # caught before any artifact is written.
-        if not _ENV_KEY_RE.fullmatch(k):
+        if not is_valid_env_name(k):
             raise RecipeSchemaError(
                 f"{path_hint}[{k!r}]: invalid environment-variable name; "
                 "expected [A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
+            )
+        if value_has_nul(v):
+            # Value NOT echoed -- it may be a secret.
+            raise RecipeSchemaError(
+                f"{path_hint}[{k!r}]: value contains a NUL byte and cannot "
+                "be stored in an environment variable."
             )
         out[k] = v
     return out

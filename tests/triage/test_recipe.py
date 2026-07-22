@@ -787,6 +787,49 @@ cells:
         load_recipe(_write_yaml(tmp_path, text))
 
 
+# ---- env-var VALUE (NUL) validation at load time --------------------------
+#
+# A NUL byte is a valid Python str character but cannot be stored in an OS
+# environment variable. Like an invalid name, it must fail at load time (and
+# thus ``--dry-run``) instead of only failing per-cell at run time while a
+# non-strict sweep still writes a matrix and exits zero. The NUL is written via
+# YAML's ``\0`` double-quoted escape.
+
+
+def test_recipe_level_extra_env_nul_value_rejected(tmp_path):
+    text = _MINIMAL_YAML + 'extra_env:\n  TOKEN: "before\\0after"\n'
+    with pytest.raises(RecipeSchemaError, match="NUL") as exc:
+        load_recipe(_write_yaml(tmp_path, text))
+    # Value must not be echoed (it may be a secret).
+    assert "before" not in str(exc.value) and "after" not in str(exc.value)
+
+
+def test_cell_level_extra_env_nul_value_rejected(tmp_path):
+    text = _MINIMAL_YAML.replace(
+        "    environment: local\n",
+        '    environment: local\n    extra_env:\n      TOKEN: "a\\0b"\n',
+    )
+    with pytest.raises(RecipeSchemaError, match="NUL"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
+def test_inline_env_nul_value_rejected(tmp_path):
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: nul-inline-env
+    mitigations: [none]
+    environment:
+      docker: "x/y:1"
+      env: { TOKEN: "a\\0b" }
+"""
+    with pytest.raises(RecipeSchemaError, match="NUL"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
 # ---- Recipe.extra_env is keyword-only (public-API back-compat) ------------
 #
 # ``Recipe`` is public through ``aorta.triage``. ``extra_env`` was inserted

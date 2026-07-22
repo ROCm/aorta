@@ -13,12 +13,12 @@ import copy
 import json
 import logging
 import os
-import re
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from aorta._env_rules import is_valid_env_name, value_has_nul
 from aorta.instrumentation.environment import collect_env
 from aorta.registry import Environment, get_environment, get_mitigation
 from aorta.run.collectors import KNOWN_RECIPES
@@ -29,15 +29,15 @@ from aorta.workloads import Workload, WorkloadResult
 
 logger = logging.getLogger(__name__)
 
-# Conservative POSIX env-var name shape: must start with a letter or
-# underscore and contain only [A-Za-z0-9_].  The CLI also enforces this
-# at parse time; library callers pass ``extra_env`` directly so we
-# re-validate here for parity.
-_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 
 def _validate_env_mapping(label: str, env: object) -> None:
-    """Validate a controlled environment overlay without exposing values."""
+    """Validate a controlled environment overlay without exposing values.
+
+    Name shape and NUL-in-value rules come from the shared ``aorta._env_rules``
+    predicates (the single source of truth also used by the recipe parser and
+    the registry loaders). The CLI enforces the same at parse time; library
+    callers pass ``extra_env`` directly so we re-validate here for parity.
+    """
     if not isinstance(env, dict):
         raise ValueError(
             f"{label} must be a dict[str, str], got {type(env).__name__}"
@@ -52,7 +52,7 @@ def _validate_env_mapping(label: str, env: object) -> None:
                 f"{label} value for key {key!r} must be str, "
                 f"got {type(value).__name__}"
             )
-        if "\x00" in value:
+        if value_has_nul(value):
             # A NUL byte is a valid Python str character but cannot be stored
             # in an OS environment variable. ``os.environ.update`` applies the
             # overlay entry-by-entry, so a NUL value part-way through would
@@ -64,7 +64,7 @@ def _validate_env_mapping(label: str, env: object) -> None:
                 f"{label} value for key {key!r} contains a NUL byte and cannot "
                 "be stored in an environment variable."
             )
-        if not _ENV_KEY_RE.fullmatch(key):
+        if not is_valid_env_name(key):
             raise ValueError(
                 f"Invalid {label} keys [{key!r}]: each key must match "
                 "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."

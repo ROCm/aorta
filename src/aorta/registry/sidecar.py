@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from aorta._env_rules import is_valid_env_name, value_has_nul
 from aorta.registry.errors import RegistryError
 from aorta.registry.types import Environment, Mitigation
 
@@ -163,7 +164,11 @@ def _validate_sidecar_env_mapping(path: Path, name: str, raw: object) -> dict[st
 
     Keys AND values must be strings (no number/boolean coercion), matching the
     entry-point loader and recipe ``extra_env`` rules so the same YAML/JSON
-    value fails everywhere consistently.
+    value fails everywhere consistently. Env-var NAME shape and NUL-in-VALUE are
+    enforced too (via the shared ``aorta._env_rules`` predicates): a named
+    sidecar environment bypasses the recipe parser, so without this a malformed
+    name or NUL value would pass loading / ``--dry-run`` and only fail per-cell
+    at run time.
     """
     if raw is None:
         return {}
@@ -186,6 +191,18 @@ def _validate_sidecar_env_mapping(path: Path, name: str, raw: object) -> dict[st
             raise RegistryError(
                 f"sidecar {path}: environments.{name}.env.{k}: env var value must "
                 f"be string, got {type(v).__name__}"
+            )
+        if not is_valid_env_name(k):
+            raise RegistryError(
+                f"sidecar {path}: environments.{name}.env: invalid "
+                f"environment-variable name {k!r}; expected "
+                "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
+            )
+        if value_has_nul(v):
+            # Value NOT echoed -- it may be a secret.
+            raise RegistryError(
+                f"sidecar {path}: environments.{name}.env.{k}: value contains a "
+                "NUL byte and cannot be stored in an environment variable."
             )
         out[k] = v
     return out

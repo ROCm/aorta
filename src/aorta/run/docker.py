@@ -15,14 +15,11 @@ policy -- this helper is env-forwarding only.
 
 from __future__ import annotations
 
-import re
-
-# Same POSIX env-var name shape the dispatcher enforces on ``extra_env`` /
-# ``Environment.env`` (``aorta.run.dispatcher._ENV_KEY_RE``). Duplicated here
-# (rather than imported) so this leaf helper has no dependency on the
-# dispatcher module -- a wrapper can import ``docker_env_flags`` without pulling
-# in the whole run-orchestration graph.
-_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Name-shape and NUL rules come from the shared ``aorta._env_rules`` leaf module
+# -- the single source of truth also used by the dispatcher, the recipe parser,
+# and the registry loaders. ``_env_rules`` has NO aorta imports, so a wrapper can
+# import ``docker_env_flags`` without pulling in the run-orchestration graph.
+from aorta._env_rules import is_valid_env_name, value_has_nul
 
 
 def docker_env_flags(env: dict[str, str]) -> list[str]:
@@ -74,7 +71,7 @@ def docker_env_flags(env: dict[str, str]) -> list[str]:
                 f"docker_env_flags() env value for key {key!r} must be str, "
                 f"got {type(value).__name__}"
             )
-        if "\x00" in value:
+        if value_has_nul(value):
             # A NUL byte cannot round-trip through a ``docker run -e`` argument
             # (execve rejects it), so reject it here for parity with the
             # dispatcher's ``os.environ`` validation. Value is NOT echoed.
@@ -82,7 +79,7 @@ def docker_env_flags(env: dict[str, str]) -> list[str]:
                 f"docker_env_flags() env value for key {key!r} contains a NUL "
                 "byte and cannot be passed as an environment variable."
             )
-        if not _ENV_KEY_RE.fullmatch(key):
+        if not is_valid_env_name(key):
             raise ValueError(
                 f"docker_env_flags() invalid env-var name {key!r}: must match "
                 "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."

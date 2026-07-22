@@ -1714,6 +1714,47 @@ def test_dry_run_rejects_unresolvable_baseline():
         runner.run_recipe(r, output_dir="ignored", dry_run=True)
 
 
+def test_dry_run_rejects_named_sidecar_env_with_bad_name(tmp_path):
+    """A named sidecar Environment.env with an invalid name must fail --dry-run
+    without creating artifacts.
+
+    This is the boundary the recipe parser can't cover: the cell references a
+    NAMED environment, so the bad ``env`` only surfaces when the registry loads
+    the sidecar. That happens as early as recipe construction (name-resolution
+    preflight), before ``run_recipe`` / dry-run can print a summary -- so the
+    "green command, zero work" matrix can never be produced. No artifacts are
+    created under the ticket.
+    """
+    from aorta.registry import RegistryError as _RegErr
+
+    sidecar = tmp_path / "envs.sidecar.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "environments": {
+                    "cust_img": {
+                        "docker": "myorg/img@sha256:abc",
+                        "env": {"BAD KEY": "1"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(_RegErr, match="invalid environment-variable name"):
+        build_recipe_from_flags(
+            workload="fsdp",
+            mitigation_axis="none",
+            environment_axis="cust_img",
+            trials=1,
+            steps=10,
+            ticket="T-1",
+            sidecar_files=(sidecar,),
+        )
+    assert not (tmp_path / "T-1").exists()
+
+
 def test_dry_run_rejects_env_slug_collision(tmp_path):
     """Dry-run must surface env-slug collisions before printing the summary."""
     from aorta.registry import RegistryError as _RegErr

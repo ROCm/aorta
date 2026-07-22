@@ -211,6 +211,30 @@ def test_env_field_rejects_non_mapping_and_non_string_entries(fake_env_eps):
             load_environments()
 
 
+def test_env_field_rejects_invalid_name_from_plugin(fake_env_eps):
+    """An entry-point Environment.env with a malformed NAME fails loading.
+
+    Named environments bypass the recipe parser, so the name-shape rule must be
+    enforced in the registry loader to avoid a per-cell-only run-time failure.
+    """
+    fake_env_eps([
+        ("bad-name", {"docker": "img@sha256:abc", "env": {"BAD KEY": "1"}}, "plugin_x"),
+    ])
+    with pytest.raises(RegistryError, match="invalid environment-variable name"):
+        load_environments()
+
+
+def test_env_field_rejects_nul_value_from_plugin(fake_env_eps):
+    """An entry-point Environment.env with a NUL VALUE fails loading, without
+    echoing the (possibly secret) value."""
+    fake_env_eps([
+        ("nul-env", {"docker": "img@sha256:abc", "env": {"TOKEN": "a\x00b"}}, "plugin_x"),
+    ])
+    with pytest.raises(RegistryError, match="NUL") as exc:
+        load_environments()
+    assert "a\x00b" not in str(exc.value)
+
+
 def test_environment_defensively_copies_env_mapping():
     source = {"FOO": "original"}
     env = Environment(name="copy-test", env=source)

@@ -18,6 +18,7 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import TypedDict
 
+from aorta._env_rules import is_valid_env_name, value_has_nul
 from aorta.registry.errors import (
     RegistryCollisionError,
     RegistryError,
@@ -57,8 +58,12 @@ def _validate_env_mapping(source_hint: str, name: str, raw: object) -> dict[str,
     the platform env contract). Keys AND values must be strings -- numbers /
     booleans are rejected rather than silently ``str()``-coerced, mirroring the
     mitigation-sidecar and recipe ``extra_env`` rules so the same value in a
-    YAML/JSON number position fails everywhere consistently. Returns a fresh
-    ``dict`` (the ``Environment`` constructor deep-copies again defensively).
+    YAML/JSON number position fails everywhere consistently. Env-var NAME shape
+    and NUL-in-VALUE are enforced here too (via the shared ``aorta._env_rules``
+    predicates): a NAMED environment bypasses the recipe parser entirely, so
+    without this a malformed name or NUL value would pass loading / ``--dry-run``
+    and only fail per-cell at run time. Returns a fresh ``dict`` (the
+    ``Environment`` constructor deep-copies again defensively).
     """
     if raw is None:
         return {}
@@ -73,6 +78,19 @@ def _validate_env_mapping(source_hint: str, name: str, raw: object) -> dict[str,
             raise RegistryError(
                 f"{source_hint} environment '{name}': 'env' keys and values must "
                 f"be strings, got {type(k).__name__} -> {type(v).__name__}"
+            )
+        if not is_valid_env_name(k):
+            raise RegistryError(
+                f"{source_hint} environment '{name}': 'env' has invalid "
+                f"environment-variable name {k!r}; expected "
+                "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
+            )
+        if value_has_nul(v):
+            # Value NOT echoed -- it may be a secret.
+            raise RegistryError(
+                f"{source_hint} environment '{name}': 'env' value for key {k!r} "
+                "contains a NUL byte and cannot be stored in an environment "
+                "variable."
             )
         out[k] = v
     return out

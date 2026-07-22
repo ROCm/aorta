@@ -318,3 +318,39 @@ def test_sidecar_environment_env_field_rejects_malformed_values(
     })
     with pytest.raises(RegistryError, match=r"environments\.bad-env\.env"):
         load_sidecar_environments(p)
+
+
+def test_sidecar_environment_env_field_rejects_invalid_name(tmp_sidecar):
+    """A named sidecar Environment.env with a malformed NAME must fail loading.
+
+    A named environment bypasses the recipe parser entirely, so this is the
+    only place the name-shape rule can be enforced before run time.
+    """
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "bad-name-env": {
+                "docker": "img@sha256:abc",
+                "env": {"BAD KEY": "1"},
+            },
+        },
+    })
+    with pytest.raises(RegistryError, match="invalid environment-variable name"):
+        load_sidecar_environments(p)
+
+
+def test_sidecar_environment_env_field_rejects_nul_value(tmp_sidecar):
+    """A named sidecar Environment.env with a NUL VALUE must fail loading,
+    without echoing the (possibly secret) value."""
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "nul-env": {
+                "docker": "img@sha256:abc",
+                "env": {"TOKEN": "before\x00after"},
+            },
+        },
+    })
+    with pytest.raises(RegistryError, match="NUL") as exc:
+        load_sidecar_environments(p)
+    assert "before" not in str(exc.value) and "after" not in str(exc.value)
