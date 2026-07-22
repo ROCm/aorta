@@ -139,13 +139,14 @@ class TestThroughputMetrics:
 class TestMetricsCollector:
     """Tests for MetricsCollector."""
 
+    @pytest.mark.gpu
     def test_collector_basic(self):
         """Test basic metrics collection."""
         import torch
         from aorta.hw_queue_eval.core.metrics import MetricsCollector
 
         if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
+            pytest.skip("No GPU available (torch.cuda.is_available() is False; CUDA/ROCm)")
 
         collector = MetricsCollector(num_streams=2)
 
@@ -157,13 +158,14 @@ class TestMetricsCollector:
         times = collector.get_iteration_times()
         assert len(times) == 5
 
+    @pytest.mark.gpu
     def test_collector_compute_latency(self):
         """Test latency computation."""
         import torch
         from aorta.hw_queue_eval.core.metrics import MetricsCollector
 
         if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
+            pytest.skip("No GPU available (torch.cuda.is_available() is False; CUDA/ROCm)")
 
         collector = MetricsCollector(num_streams=1)
 
@@ -179,13 +181,14 @@ class TestMetricsCollector:
         assert latency.count == 10
         assert latency.mean_ms > 0
 
+    @pytest.mark.gpu
     def test_collector_clear(self):
         """Test clearing collected data."""
         import torch
         from aorta.hw_queue_eval.core.metrics import MetricsCollector
 
         if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
+            pytest.skip("No GPU available (torch.cuda.is_available() is False; CUDA/ROCm)")
 
         collector = MetricsCollector(num_streams=1)
 

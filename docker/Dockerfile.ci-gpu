@@ -1,0 +1,28 @@
+# CI GPU image for the aorta GPU test gate + workload regression smokes.
+#
+# Reproducibility: the ROCm PyTorch base is pinned by manifest digest and the
+# only extra dependencies are a couple of exact-pinned PyPI packages. The GPU
+# pytest gate and the current workload smokes (gpu_smoke / inference / race) do
+# not need TraceLens / Magpie, so those unpinned git installs from the general-
+# purpose image are intentionally omitted here to keep the CI image reproducible
+# and fast to build.
+#
+# Base: rocm/pytorch ROCm 7.2, Ubuntu 22.04, Python 3.10, PyTorch 2.9.1
+# Digest resolved via:
+#   docker buildx imagetools inspect rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1
+# Use the Manifest Digest (not the config blob digest from docker manifest inspect).
+FROM rocm/pytorch@sha256:376bfab5f4f680c8b4b843c6d0c5d1f0a04e5a84ec3e86728db8d11d79a9d1e3
+
+USER root
+
+# Exact pins for reproducible CI image builds; fail the build if these can't be
+# installed (no `|| true`) so a broken image surfaces here, not at runtime.
+RUN python -m pip install --no-cache-dir "openpyxl==3.1.5" "seaborn==0.13.2"
+
+ENV ROCM_HOME=/opt/rocm
+ENV PATH=$ROCM_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$LD_LIBRARY_PATH
+
+WORKDIR /workspace/aorta
+
+CMD ["/bin/bash"]

@@ -11,11 +11,17 @@ Tests:
 import pytest
 import torch
 
-# Skip all tests if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA not available"
-)
+# GPU CI gate: tagged ``gpu`` so ``pytest -m "gpu or rocm"`` selects this
+# module; skip at runtime when no device is present (CPU gate deselects via marker).
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(
+        not torch.cuda.is_available(),
+        # torch.cuda.is_available() is PyTorch's generic GPU check (CUDA/HIP),
+        # so keep the reason hardware-agnostic for clearer ROCm/MI350 triage.
+        reason="No GPU available (torch.cuda.is_available() is False; CUDA/ROCm)",
+    ),
+]
 
 
 class TestHarnessConfig:

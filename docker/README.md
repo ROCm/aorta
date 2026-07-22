@@ -42,8 +42,18 @@ docker compose -f docker-compose.build.yaml up -d
 | `Dockerfile.rocm70_2-ubuntu-pytorch` | ROCm 7.0.2 Ubuntu PyTorch | Legacy ROCm 7.0.2 support |
 | `Dockerfile.rocm70_2-ubuntu-nan` | ROCm 7.0.2 + NaN debugging | Debugging NaN issues |
 | `Dockerfile.rocm-ubuntu-ebpf` | ROCm 7.2 + eBPF tracing (bpftrace, bcc) | eBPF-based GPU queue/memory tracing |
+| `Dockerfile.ci-gpu` | ROCm 7.2 PyTorch base pinned by digest | GPU CI on self-hosted runners (see `.env.ci`) |
 
-## Configuration Variables
+## CI configuration (`.env.ci`)
+
+GPU CI uses a committed env file (not gitignored) so runs are reproducible:
+
+```bash
+docker compose --env-file .env.ci -f docker-compose.build.yaml up -d --build
+```
+
+See [`.env.ci`](.env.ci), [`Dockerfile.ci-gpu`](Dockerfile.ci-gpu), and
+[`docs/ci-testing-plan.md`](../docs/ci-testing-plan.md) (Phase 2).
 
 ### Required
 
