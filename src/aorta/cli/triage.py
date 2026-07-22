@@ -27,6 +27,7 @@ from pathlib import Path
 import click
 
 from aorta.cli._deprecation import emit_deprecation
+from aorta.cli._env_display import format_env_bundle
 from aorta.registry import (
     RegistryError,
     load_environments,
@@ -448,7 +449,7 @@ def execute_list_mitigations(files: tuple[Path, ...]) -> None:
     click.echo(f"{'NAME'.ljust(name_w)}  {'SOURCE'.ljust(src_w)}  ENV")
     for name in sorted(registry):
         m = registry[name]
-        env_str = " ".join(f"{k}={v}" for k, v in sorted(m.env.items())) or "(none)"
+        env_str = format_env_bundle(m.env)
         click.echo(f"{name.ljust(name_w)}  {m.source_package.ljust(src_w)}  {env_str}")
 
 
@@ -482,7 +483,7 @@ def execute_list_environments(files: tuple[Path, ...]) -> None:
     )
     for name in sorted(registry):
         e = registry[name]
-        env_str = " ".join(f"{k}={v}" for k, v in sorted(e.env.items())) or "(none)"
+        env_str = format_env_bundle(e.env)
         click.echo(
             f"{name.ljust(name_w)}  {e.source_package.ljust(src_w)}  "
             f"{(e.docker or '-').ljust(docker_w)}  "

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import click
 
+from aorta.cli._env_display import format_env_bundle
 from aorta.registry import load_mitigations
 
 
@@ -29,5 +30,5 @@ def list_(files: tuple[Path, ...]) -> None:
     click.echo(f"{'NAME'.ljust(name_w)}  {'SOURCE'.ljust(src_w)}  ENV")
     for name in sorted(registry):
         m = registry[name]
-        env_str = " ".join(f"{k}={v}" for k, v in sorted(m.env.items())) or "(none)"
+        env_str = format_env_bundle(m.env)
         click.echo(f"{name.ljust(name_w)}  {m.source_package.ljust(src_w)}  {env_str}")

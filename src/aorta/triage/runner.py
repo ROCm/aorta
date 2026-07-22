@@ -539,12 +539,19 @@ def _resolve_cell_env_vars(
     if environment is not None:
         try:
             env.update(get_environment(environment, extra_files=extra).env)
-        except RegistryError:
+        except RegistryError as exc:
             # Unknown envs are caught earlier by _validate_names_resolve; a
             # lookup failure here (e.g. an inline env not in the sidecar yet)
             # falls back to omitting the baseline layer rather than aborting
-            # the audit computation.
-            pass
+            # the audit computation. Keep the warning value-redacted: registry
+            # payloads may contain credentials, so report only the environment
+            # name and exception type rather than the exception text.
+            log.warning(
+                "environment %r could not be resolved while computing "
+                "resolved_env_vars (%s); omitting its baseline Environment.env layer",
+                environment,
+                type(exc).__name__,
+            )
     for name in cell_mitigations:
         env.update(get_mitigation(name, extra_files=extra))
     env.update(cell_extra_env)

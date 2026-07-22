@@ -1188,3 +1188,28 @@ def test_extra_env_cell_wins_on_collision_with_recipe(
         "RECIPE_ONLY": "always",
         "CELL_ONLY": "yes",
     }
+
+
+def test_resolved_env_lookup_failure_warns_without_echoing_error_text(monkeypatch, caplog):
+    """A fail-soft baseline lookup must not silently weaken the audit bundle."""
+    from aorta.registry import RegistryError
+
+    def fail_lookup(*args, **kwargs):
+        raise RegistryError("secret-value-must-not-be-logged")
+
+    monkeypatch.setattr(runner, "get_environment", fail_lookup)
+
+    with caplog.at_level("WARNING", logger="aorta.triage.runner"):
+        resolved = runner._resolve_cell_env_vars(
+            (),
+            {"EXTRA": "kept"},
+            None,
+            environment="broken-env",
+        )
+
+    assert resolved == {"EXTRA": "kept"}
+    warning = "\n".join(record.getMessage() for record in caplog.records)
+    assert "broken-env" in warning
+    assert "RegistryError" in warning
+    assert "omitting its baseline Environment.env layer" in warning
+    assert "secret-value-must-not-be-logged" not in warning

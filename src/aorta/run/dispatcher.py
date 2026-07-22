@@ -803,11 +803,12 @@ def _run_single_trial(
     # introduced by ``setup()`` / ``run()``.
     pre_trial_env = dict(os.environ)
 
-    # Apply the effective overlay BEFORE the env snapshot.  The snapshot is
-    # supposed to describe the actual environment the workload ran under --
-    # including the environment's baseline vars, operator overrides like
-    # ``HSA_XNACK=1`` from a mitigation, and one-off ``DISABLE_TF32=1`` from
-    # ``--extra-env``.  Capturing pre-override loses that signal for
+    # Apply the effective overlay BEFORE collecting ``env_snapshot`` below.
+    # Unlike ``pre_trial_env`` above (the pre-overlay restore point), that
+    # snapshot is supposed to describe the actual environment the workload ran
+    # under -- including the environment's baseline vars, operator overrides
+    # like ``HSA_XNACK=1`` from a mitigation, and one-off ``DISABLE_TF32=1``
+    # from ``--extra-env``. Capturing it pre-override loses that signal for
     # reproducibility / debugging. A single ``update`` from the pre-merged
     # overlay applies all three layers in their resolved precedence.
     os.environ.update(effective_overlay)

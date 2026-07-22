@@ -4,6 +4,7 @@ from pathlib import Path
 
 import click
 
+from aorta.cli._env_display import format_env_bundle
 from aorta.registry import load_environments
 
 
@@ -34,7 +35,7 @@ def list_(files: tuple[Path, ...]) -> None:
     )
     for name in sorted(registry):
         e = registry[name]
-        env_str = " ".join(f"{k}={v}" for k, v in sorted(e.env.items())) or "(none)"
+        env_str = format_env_bundle(e.env)
         click.echo(
             f"{name.ljust(name_w)}  {e.source_package.ljust(src_w)}  "
             f"{(e.docker or '-').ljust(docker_w)}  "
