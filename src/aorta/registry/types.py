@@ -1,6 +1,7 @@
 """Data types for the mitigations + environments registry."""
 
-from dataclasses import dataclass
+import copy
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,15 @@ class Environment:
     `_aorta_environment`; an emulation-aware launch backend decides how to
     launch (e.g. `mirage run --profile <p> -- <argv>`, or an `LD_PRELOAD` env
     overlay). The platform itself launches nothing.
+
+    `env` is a mapping of baseline environment variables intrinsic to this
+    environment -- the lowest layer of the platform-wide env contract
+    (`Environment.env < mitigations < recipe extra_env < cell/CLI extra_env`;
+    see the dispatcher). Empty by default so every plugin / sidecar that omits
+    it round-trips unchanged. Values are kept strictly `str`; the loaders do
+    NOT coerce YAML/JSON numbers or booleans. Defensively deep-copied on
+    construction (`frozen=True` blocks attribute reassignment but not mutation
+    of the mapping in place), mirroring the `RunRequest` pattern.
     """
 
     name: str
@@ -57,3 +67,11 @@ class Environment:
     emulator: str | None = None
     mirage_profile: str | None = None
     source_package: str = "aorta"
+    env: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # ``frozen=True`` blocks reassigning ``self.env`` but not mutating the
+        # passed-in dict in place. Deep-copy via ``object.__setattr__`` so a
+        # caller cannot mutate an environment's baseline env after construction
+        # (same defensive pattern as ``RunRequest.__post_init__``).
+        object.__setattr__(self, "env", copy.deepcopy(self.env))

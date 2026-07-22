@@ -2,12 +2,12 @@
 
 import pytest
 
+from aorta.registry.environments import get_environment, load_environments
 from aorta.registry.errors import (
     RegistryCollisionError,
     RegistryError,
     UnknownEnvironmentError,
 )
-from aorta.registry.environments import get_environment, load_environments
 from aorta.registry.types import Environment
 
 
@@ -149,6 +149,7 @@ def test_environment_constructs_with_buck_target_only():
         "emulator": None,
         "mirage_profile": None,
         "source_package": "aorta",
+        "env": {},
     }
 
 
@@ -160,3 +161,85 @@ def test_buck_target_with_non_string_value_raises(fake_env_eps):
     fake_env_eps([("bad", {"buck_target": 123}, "plugin_x")])
     with pytest.raises(RegistryError, match="plugin_x.*bad.*non-string"):
         load_environments()
+
+
+# ---- env field (per-environment baseline vars) ----------------------------
+#
+# ``Environment.env`` is the lowest layer of the platform env-precedence
+# contract.  These tests pin that the field round-trips faithfully through
+# the plugin loader and defaults to an empty dict when absent in the plugin
+# payload.
+
+
+def test_env_field_round_trips_from_plugin(fake_env_eps):
+    """A plugin that declares ``env: {FOO: "1"}`` must produce an
+    ``Environment`` with ``env["FOO"] == "1"``.
+
+    This is the primary seam that lets a private plugin (e.g. recom_repro)
+    declare baseline env vars without hard-coding them in a wrapper.
+    """
+    fake_env_eps([
+        ("with-env", {"docker": "img@sha256:abc", "env": {"FOO": "1", "BAR": "2"}}, "plugin_x"),
+    ])
+    result = load_environments()
+    env = result["with-env"]
+    assert env.env == {"FOO": "1", "BAR": "2"}
+
+
+def test_env_field_absent_defaults_to_empty_dict(fake_env_eps):
+    """A plugin that omits ``env`` must produce ``Environment.env == {}``.
+
+    Back-compat: every existing plugin payload has no ``env`` key; the
+    loader must not inject a ``None`` or raise -- the field must default
+    to an empty dict so the dispatcher's ``effective_overlay.update(env_descriptor.env)``
+    is a no-op for these environments.
+    """
+    fake_env_eps([
+        ("no-env", {"docker": "img@sha256:abc"}, "plugin_x"),
+    ])
+    result = load_environments()
+    env = result["no-env"]
+    assert env.env == {}
+
+
+def test_env_field_rejects_non_mapping_and_non_string_entries(fake_env_eps):
+    for bad_env in (["FOO=1"], {"FOO": 1}, {1: "value"}):
+        fake_env_eps([
+            ("bad-env", {"docker": "img@sha256:abc", "env": bad_env}, "plugin_x"),
+        ])
+        with pytest.raises(RegistryError, match=r"plugin_x.*bad-env.*env"):
+            load_environments()
+
+
+def test_env_field_rejects_invalid_name_from_plugin(fake_env_eps):
+    """An entry-point Environment.env with a malformed NAME fails loading.
+
+    Named environments bypass the recipe parser, so the name-shape rule must be
+    enforced in the registry loader to avoid a per-cell-only run-time failure.
+    """
+    fake_env_eps([
+        ("bad-name", {"docker": "img@sha256:abc", "env": {"BAD KEY": "1"}}, "plugin_x"),
+    ])
+    with pytest.raises(RegistryError, match="invalid environment-variable name"):
+        load_environments()
+
+
+def test_env_field_rejects_nul_value_from_plugin(fake_env_eps):
+    """An entry-point Environment.env with a NUL VALUE fails loading, without
+    echoing the (possibly secret) value."""
+    fake_env_eps([
+        ("nul-env", {"docker": "img@sha256:abc", "env": {"TOKEN": "a\x00b"}}, "plugin_x"),
+    ])
+    with pytest.raises(RegistryError, match="NUL") as exc:
+        load_environments()
+    assert "a\x00b" not in str(exc.value)
+
+
+def test_environment_defensively_copies_env_mapping():
+    source = {"FOO": "original"}
+    env = Environment(name="copy-test", env=source)
+
+    source["FOO"] = "mutated"
+    source["NEW"] = "added"
+
+    assert env.env == {"FOO": "original"}

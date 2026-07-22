@@ -309,6 +309,73 @@ def test_isolated_env_writes_placeholder_not_runner_snapshot(
     assert "no in-container snapshot captured" in md.lower()
 
 
+def test_isolated_inline_env_placeholder_records_baseline_env(
+    tmp_path, patched_env, patched_run_trials
+):
+    """The inline-env placeholder descriptor must include its baseline ``env``.
+
+    An operator debugging a failed isolated probe is pointed at this env.json;
+    dropping ``Environment.env`` would hide baseline vars (e.g. a required
+    ``BASELINE_FLAG``) that may be exactly what explains the failure.
+    """
+    text = """\
+schema_version: 1
+workload: fsdp
+trials: 1
+steps: 10
+cells:
+  - name: inline-with-baseline
+    mitigations: [none]
+    environment:
+      docker: "rocm/pytorch:nightly"
+      env: { BASELINE_FLAG: "required" }
+"""
+    from aorta.triage.recipe import load_recipe
+
+    p = tmp_path / "recipe.yaml"
+    p.write_text(text, encoding="utf-8")
+    r = load_recipe(p)
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / r.cells[0].environment / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["descriptor"]["docker"] == "rocm/pytorch:nightly"
+    assert placeholder["descriptor"]["env"] == {"BASELINE_FLAG": "required"}
+
+
+def test_isolated_registered_env_placeholder_records_baseline_env(
+    tmp_path, patched_env, patched_run_trials
+):
+    """A registered (sidecar) docker env's placeholder also records its ``env``."""
+    sidecar = tmp_path / "envs.sidecar.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "environments": {
+                    "cust_img": {
+                        "docker": "myorg/img@sha256:abc",
+                        "env": {"REG_BASELINE": "on"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    r = build_recipe_from_flags(
+        workload="fsdp",
+        mitigation_axis="none",
+        environment_axis="cust_img",
+        trials=1,
+        steps=10,
+        sidecar_files=(sidecar,),
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    env_json = run_dir / "environments" / "cust_img" / "env.json"
+    placeholder = json.loads(env_json.read_text())
+    assert placeholder["descriptor"]["docker"] == "myorg/img@sha256:abc"
+    assert placeholder["descriptor"]["env"] == {"REG_BASELINE": "on"}
+
+
 def test_isolated_env_promotes_in_container_snapshot(
     tmp_path, patched_env, monkeypatch
 ):
@@ -1024,6 +1091,54 @@ def test_resolved_recipe_round_trips_stop_after(
     assert reloaded.stop_after == StopAfter(events=2, max_trials=5, event_verdict="fail")
 
 
+def test_resolved_recipe_round_trips_extra_env(
+    tmp_path, patched_env, patched_run_trials
+):
+    """Both recipe-scope and cell-scope ``extra_env`` must survive
+    load → run → reload so a replay from ``recipe.resolved.yaml`` applies the
+    same env-var overrides as the original run.
+
+    Mirrors ``test_resolved_recipe_round_trips_workload_config`` for the
+    env-precedence contract (A6 checklist item).
+    """
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, load_recipe
+
+    r = Recipe(
+        schema_version=1,
+        workload="fsdp",
+        trials=1,
+        steps=10,
+        cells=(
+            Cell(name="a", mitigations=("none",), environment="local"),
+            Cell(
+                name="b",
+                mitigations=("tf32_off",),
+                environment="local",
+                extra_env={"CELL_KEY": "cell_value"},
+            ),
+        ),
+        ticket="EE-RT",
+        confound=ConfoundCfg(baseline_cell="a"),
+        extra_env={"GLOBAL_KEY": "global_value", "SHARED_KEY": "recipe"},
+    )
+    run_dir = runner.run_recipe(r, output_dir=tmp_path)
+    resolved_path = run_dir / "recipe.resolved.yaml"
+
+    # Verify the YAML doc contains both scopes before reloading.
+    import yaml as _yaml
+    doc = _yaml.safe_load(resolved_path.read_text())
+    assert doc["extra_env"] == {"GLOBAL_KEY": "global_value", "SHARED_KEY": "recipe"}
+    cells_by_name = {c["name"]: c for c in doc["cells"]}
+    assert "extra_env" not in cells_by_name["a"]
+    assert cells_by_name["b"]["extra_env"] == {"CELL_KEY": "cell_value"}
+
+    # Reload and verify the Recipe dataclass fields are intact.
+    reloaded = load_recipe(resolved_path)
+    assert reloaded.extra_env == {"GLOBAL_KEY": "global_value", "SHARED_KEY": "recipe"}
+    assert reloaded.cells[0].extra_env == {}
+    assert reloaded.cells[1].extra_env == {"CELL_KEY": "cell_value"}
+
+
 # ---- Config column (diffs-only workload_config) --------------------------
 #
 # The column surfaces per-cell workload_config keys whose value varies
@@ -1597,6 +1712,47 @@ def test_dry_run_rejects_unresolvable_baseline():
     )
     with pytest.raises(RecipeCellError, match="cannot resolve baseline cell"):
         runner.run_recipe(r, output_dir="ignored", dry_run=True)
+
+
+def test_dry_run_rejects_named_sidecar_env_with_bad_name(tmp_path):
+    """A named sidecar Environment.env with an invalid name must fail --dry-run
+    without creating artifacts.
+
+    This is the boundary the recipe parser can't cover: the cell references a
+    NAMED environment, so the bad ``env`` only surfaces when the registry loads
+    the sidecar. That happens as early as recipe construction (name-resolution
+    preflight), before ``run_recipe`` / dry-run can print a summary -- so the
+    "green command, zero work" matrix can never be produced. No artifacts are
+    created under the ticket.
+    """
+    from aorta.registry import RegistryError as _RegErr
+
+    sidecar = tmp_path / "envs.sidecar.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "environments": {
+                    "cust_img": {
+                        "docker": "myorg/img@sha256:abc",
+                        "env": {"BAD KEY": "1"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(_RegErr, match="invalid environment-variable name"):
+        build_recipe_from_flags(
+            workload="fsdp",
+            mitigation_axis="none",
+            environment_axis="cust_img",
+            trials=1,
+            steps=10,
+            ticket="T-1",
+            sidecar_files=(sidecar,),
+        )
+    assert not (tmp_path / "T-1").exists()
 
 
 def test_dry_run_rejects_env_slug_collision(tmp_path):

@@ -213,6 +213,17 @@ class TestRunTrials:
             with pytest.raises(ValueError, match="Invalid extra_env keys"):
                 run_trials(req)
 
+    def test_rejects_non_string_extra_env_without_echoing_value(self, tmp_path):
+        req = RunRequest(
+            workload="anything",
+            trials=1,
+            extra_env={"TOKEN": 123456789},  # type: ignore[dict-item]
+            results_dir=tmp_path,
+        )
+        with pytest.raises(ValueError, match="extra_env value for key 'TOKEN'") as exc:
+            run_trials(req)
+        assert "123456789" not in str(exc.value)
+
     def test_rejects_malformed_env_probe(self, tmp_path):
         """``env_probe`` must be {'src', 'out'} with str values.
 
@@ -1349,6 +1360,7 @@ class TestConfigOverrides:
             "emulator": None,
             "mirage_profile": None,
             "source_package": "test",
+            "env": {},
         }
         assert captured_config["_aorta_environment"] == expected
         assert results[0].execution_env == expected
@@ -1416,6 +1428,7 @@ class TestConfigOverrides:
             "emulator": None,
             "mirage_profile": None,
             "source_package": "test",
+            "env": {},
         }
         assert captured_config["_aorta_environment"] == expected
         assert results[0].execution_env == expected
@@ -1746,6 +1759,7 @@ class TestBuckTargetOverride:
             "mirage_profile": None,
             # source_package survived
             "source_package": "custom_pkg",
+            "env": {},
         }
         assert captured_config["_aorta_environment"] == expected
         assert results[0].execution_env == expected
@@ -2055,6 +2069,7 @@ class TestImageOverride:
             "mirage_profile": None,
             # source_package survived
             "source_package": "custom_pkg",
+            "env": {},
         }
         assert captured_config["_aorta_environment"] == expected
         assert results[0].execution_env == expected
@@ -2239,6 +2254,58 @@ class TestEnvironmentRestoration:
             else:
                 os.environ["TEST_RESTORE_VAR"] = original_value
 
+    def test_environment_restored_after_workload_crash(self, tmp_path):
+        """Environment vars applied before a trial must be restored even when
+        the workload raises in ``run()``.
+
+        The dispatcher applies the controlled overlay to ``os.environ`` before
+        each trial, so a workload crash must not leave those vars in place for
+        subsequent trials or other code that shares the process environment.
+        """
+        original_value = os.environ.get("AORTA_CRASH_RESTORE_CANARY")
+
+        class CrashingEnvWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                pass
+
+            def run(self):
+                raise RuntimeError("intentional workload crash")
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "crashing_env"
+        mock_ep.load.return_value = CrashingEnvWorkload
+
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        try:
+            with patch("importlib.metadata.entry_points", return_value=mock_eps):
+                req = RunRequest(
+                    workload="crashing_env",
+                    trials=1,
+                    extra_env={"AORTA_CRASH_RESTORE_CANARY": "injected"},
+                    results_dir=tmp_path,
+                )
+                # run_trials catches workload exceptions and records them as
+                # infrastructure_failed -- it must not propagate the RuntimeError.
+                results = run_trials(req)
+
+            assert len(results) == 1
+            assert results[0].exit_status == "infrastructure_failed"
+            # The injected var must be gone from the process environment.
+            assert os.environ.get("AORTA_CRASH_RESTORE_CANARY") == original_value
+        finally:
+            if original_value is None:
+                os.environ.pop("AORTA_CRASH_RESTORE_CANARY", None)
+            else:
+                os.environ["AORTA_CRASH_RESTORE_CANARY"] = original_value
+
 
 class NoisyWorkload(Workload):
     """Workload that writes a marker to stdout + stderr and records the
@@ -2387,3 +2454,328 @@ class TestSaveLogs:
         assert "AORTA_LEAK_PROBE" not in os.environ, "env overlay leaked when log-open failed"
         assert "_aorta_save_logs" not in NoisyWorkload.seen_config
         assert "_aorta_log_prefix" not in NoisyWorkload.seen_config
+
+
+class TestAortaTrialEnv:
+    """Tests for the ``_aorta_trial_env`` config key and the 3-layer env-precedence contract.
+
+    The platform env contract (from lowest to highest precedence):
+
+        Environment.env  <  mitigations  <  request.extra_env
+
+    ``_aorta_trial_env`` is the effective controlled overlay injected into
+    ``config`` so Docker-aware wrappers can forward ONLY these vars across
+    isolation boundaries without reading ``os.environ``.
+    """
+
+    def _make_ep(self, workload_cls, name="env_probe"):
+        mock_ep = MagicMock()
+        mock_ep.name = name
+        mock_ep.load.return_value = workload_cls
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+        return mock_eps
+
+    def test_aorta_trial_env_injected_into_config(self, tmp_path):
+        """``config['_aorta_trial_env']`` carries the merged controlled overlay.
+
+        When a mitigation and an extra_env var are both active, both must
+        appear in ``_aorta_trial_env``.  This pins the injection seam that
+        Docker-aware wrappers read to build their ``-e`` flags.
+        """
+        captured_config: dict = {}
+
+        class CaptureWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def __init__(self, config):
+                super().__init__(config)
+                captured_config.update(config)
+
+            def setup(self):
+                pass
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_eps = self._make_ep(CaptureWorkload, name="trial_env_inject")
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="trial_env_inject",
+                trials=1,
+                mitigations=("tf32_off",),
+                extra_env={"CUSTOM_AORTA_VAR": "hello"},
+                results_dir=tmp_path,
+            )
+            run_trials(req)
+
+        trial_env = captured_config.get("_aorta_trial_env")
+        assert trial_env is not None, "_aorta_trial_env must always be present in config"
+        # tf32_off contributes DISABLE_TF32=1
+        assert trial_env.get("DISABLE_TF32") == "1"
+        # extra_env contributes CUSTOM_AORTA_VAR=hello
+        assert trial_env.get("CUSTOM_AORTA_VAR") == "hello"
+
+    def test_aorta_trial_env_contains_only_controlled_overlay(self, tmp_path):
+        """Ambient ``os.environ`` vars must NOT appear in ``_aorta_trial_env``.
+
+        The overlay is built exclusively from the three controlled sources.
+        An ambient var that was already present in the process environment
+        before the trial ran must be invisible to ``_aorta_trial_env`` --
+        otherwise the Docker wrapper would forward variables it didn't own.
+        """
+        captured_config: dict = {}
+
+        class CaptureWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def __init__(self, config):
+                super().__init__(config)
+                captured_config.update(config)
+
+            def setup(self):
+                pass
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_eps = self._make_ep(CaptureWorkload, name="ambient_exclusion")
+        # Inject an ambient variable that no controlled source owns.
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            with patch.dict(os.environ, {"AORTA_AMBIENT_ONLY": "ambient"}):
+                req = RunRequest(
+                    workload="ambient_exclusion",
+                    trials=1,
+                    results_dir=tmp_path,
+                )
+                run_trials(req)
+
+        trial_env = captured_config["_aorta_trial_env"]
+        assert "AORTA_AMBIENT_ONLY" not in trial_env, (
+            "ambient os.environ var must not bleed into _aorta_trial_env"
+        )
+
+    def test_aorta_trial_env_empty_when_no_controlled_sources(self, tmp_path):
+        """``_aorta_trial_env`` is an empty dict (not absent) when no controlled
+        source contributes any var.
+
+        Back-compat: every existing run with the default ``none`` mitigation,
+        no ``extra_env``, and the built-in ``local`` environment (no ``env``
+        field) must see ``_aorta_trial_env == {}`` in the trial JSON.
+        """
+        captured_config: dict = {}
+
+        class CaptureWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def __init__(self, config):
+                super().__init__(config)
+                captured_config.update(config)
+
+            def setup(self):
+                pass
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_eps = self._make_ep(CaptureWorkload, name="empty_overlay")
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="empty_overlay",
+                trials=1,
+                results_dir=tmp_path,
+                # No mitigations override, no extra_env, default "local" env
+            )
+            run_trials(req)
+
+        trial_env = captured_config.get("_aorta_trial_env")
+        assert trial_env is not None, "_aorta_trial_env must be present even when empty"
+        assert trial_env == {}, f"expected empty overlay, got {trial_env!r}"
+
+    def test_environment_env_applied_to_os_environ(self, tmp_path):
+        """``Environment.env`` vars appear in ``os.environ`` during workload execution.
+
+        ``Environment.env`` is the lowest layer: it is applied to the process
+        environment before ``setup()`` runs, so workloads that read
+        ``os.environ`` directly (rather than the config slot) still receive
+        the baseline vars.
+        """
+        captured_env: dict = {}
+
+        class EnvCaptureWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_env.update(dict(os.environ))
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        from aorta.registry import Environment
+
+        patched_env = Environment(
+            name="local",
+            env={"AORTA_TEST_ENV_LAYER": "from_environment_env"},
+        )
+
+        mock_eps = self._make_ep(EnvCaptureWorkload, name="env_env_applied")
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            with patch("aorta.run.dispatcher.get_environment", return_value=patched_env):
+                req = RunRequest(
+                    workload="env_env_applied",
+                    trials=1,
+                    results_dir=tmp_path,
+                )
+                run_trials(req)
+
+        assert captured_env.get("AORTA_TEST_ENV_LAYER") == "from_environment_env", (
+            "Environment.env must be applied to os.environ before workload runs"
+        )
+
+    def test_full_precedence_env_env_lowest(self, tmp_path):
+        """Mitigation wins over ``Environment.env`` when both set the same var.
+
+        Precedence: Environment.env (lowest) < mitigations < extra_env (highest).
+        When ``Environment.env`` sets ``DISABLE_TF32=env_layer`` and the
+        ``tf32_off`` mitigation sets ``DISABLE_TF32=1``, the workload must
+        see ``1`` (the mitigation value).
+        """
+        captured_env: dict = {}
+
+        class EnvCaptureWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_env.update(dict(os.environ))
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        from aorta.registry import Environment
+
+        # Environment.env sets the lowest-precedence value.
+        patched_env = Environment(
+            name="local",
+            env={"DISABLE_TF32": "env_layer"},
+        )
+
+        mock_eps = self._make_ep(EnvCaptureWorkload, name="precedence_probe")
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            with patch("aorta.run.dispatcher.get_environment", return_value=patched_env):
+                req = RunRequest(
+                    workload="precedence_probe",
+                    trials=1,
+                    # tf32_off sets DISABLE_TF32=1 -- must override env_layer.
+                    mitigations=("tf32_off",),
+                    results_dir=tmp_path,
+                )
+                run_trials(req)
+
+        assert captured_env.get("DISABLE_TF32") == "1", (
+            "mitigation must take precedence over Environment.env for the same key"
+        )
+
+    def test_invalid_environment_env_key_rejected(self, tmp_path):
+        """A malformed key in ``Environment.env`` raises ``ValueError`` before
+        any trial runs.
+
+        ``Environment.env`` keys are validated at ``run_trials()`` entry, not
+        deep inside ``os.environ.update`` -- so the caller sees a clear
+        platform error instead of the opaque OS-level exception.
+        """
+        from aorta.registry import Environment
+
+        patched_env = Environment(
+            name="local",
+            # Keys are NOT validated by the dataclass itself (it's just a dict
+            # field) -- the dispatcher catches them at run_trials() time.
+            env={"1BADKEY": "val"},
+        )
+
+        mock_ep = MagicMock()
+        mock_ep.name = "invalid_env_key"
+        mock_ep.load.return_value = PassingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            with patch("aorta.run.dispatcher.get_environment", return_value=patched_env):
+                req = RunRequest(
+                    workload="invalid_env_key",
+                    trials=1,
+                    results_dir=tmp_path,
+                )
+                with pytest.raises(ValueError, match="Invalid Environment.env keys"):
+                    run_trials(req)
+
+    def test_non_string_environment_env_value_rejected_without_echoing_value(
+        self, tmp_path
+    ):
+        """Direct library callers get the same strict value validation as loaders."""
+        from aorta.registry import Environment
+
+        patched_env = Environment(
+            name="local",
+            env={"TOKEN": 123456789},  # type: ignore[dict-item]
+        )
+        mock_eps = self._make_ep(PassingWorkload, name="invalid_env_value")
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            with patch("aorta.run.dispatcher.get_environment", return_value=patched_env):
+                req = RunRequest(
+                    workload="invalid_env_value",
+                    trials=1,
+                    results_dir=tmp_path,
+                )
+                with pytest.raises(
+                    ValueError, match="Environment.env value for key 'TOKEN'"
+                ) as exc:
+                    run_trials(req)
+        assert "123456789" not in str(exc.value)
+
+    def test_nul_value_rejected_before_os_environ_mutated(self, tmp_path):
+        """A NUL-containing overlay value fails BEFORE any var is applied.
+
+        ``os.environ.update`` applies the overlay entry-by-entry and lives
+        outside the try/finally restore block, so a NUL value part-way through
+        would raise AFTER earlier entries were already set -- leaking them into
+        later matrix cells. The dispatcher rejects NUL up front, so a valid
+        canary declared alongside a NUL value must NEVER reach ``os.environ``.
+        """
+        canary = "AORTA_NUL_CANARY_SHOULD_NOT_BE_SET"
+        assert canary not in os.environ  # pre-condition
+
+        mock_eps = self._make_ep(PassingWorkload, name="nul_reject")
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="nul_reject",
+                trials=1,
+                extra_env={canary: "ok", "BAD": "has\x00nul"},
+                results_dir=tmp_path,
+            )
+            with pytest.raises(ValueError, match="NUL") as exc:
+                run_trials(req)
+
+        # Value never echoed, and the canary never leaked into the process env.
+        assert "has\x00nul" not in str(exc.value)
+        assert canary not in os.environ

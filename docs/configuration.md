@@ -2,6 +2,56 @@
 
 All configuration knobs can be adjusted via `config/default.yaml` or dotted `--override` arguments when invoking `train.py` or the launch scripts.
 
+## Trial environment variables
+
+AORTA uses one controlled environment-variable overlay for host workloads and
+workload-owned isolation backends. Its precedence, from lowest to highest, is:
+
+```text
+Environment.env
+< named mitigations
+< recipe-level extra_env
+< cell-level extra_env or direct aorta run --extra-env
+```
+
+| Surface | Purpose |
+| --- | --- |
+| `Environment.env` | Baseline variables intrinsic to a registered or inline environment. |
+| Mitigations | Named runtime or diagnostic variable bundles. |
+| Recipe `extra_env` | Variables applied to every cell in a matrix recipe. |
+| Cell `extra_env` | Per-cell overrides; wins over recipe-level values. |
+| `workload_config` | Workload-specific configuration, not environment variables. It is passed to the workload constructor and does not enter the environment overlay. |
+
+All environment mappings are `dict[str, str]`; numeric and boolean YAML/JSON
+values are rejected rather than coerced. For host workloads, the dispatcher
+applies the effective overlay before environment capture and workload
+`setup()`/`run()`, then restores the process environment after each trial.
+Unrelated variables inherited through `os.environ` are never added to the
+controlled overlay.
+
+### Workload-owned Docker launches
+
+The dispatcher records the effective controlled overlay in
+`config["_aorta_trial_env"]`. The key is always present as a plain
+`dict[str, str]`, including `{}` when no controlled source contributed. A
+Docker-aware workload wrapper can forward it with the public helper:
+
+```python
+from aorta.run import docker_env_flags
+
+trial_env = config.get("_aorta_trial_env", {})
+argv = ["docker", "run", *docker_env_flags(trial_env), image, *inner_command]
+```
+
+`docker_env_flags()` emits deterministic, key-sorted `-e KEY=VALUE` tokens,
+validates names and string values, and never reads `os.environ`. Treat values
+as potentially sensitive and do not log `_aorta_trial_env`.
+
+The dispatcher does not launch Docker. Workload wrappers continue to own image
+selection, mounts, devices, IPC/shared-memory settings, entrypoints, and inner
+commands. Top-level recipe `extra_env` is a matrix/triage feature; probe-mode
+recipes retain their separate environment-passthrough contract.
+
 ## Configuration Reference
 
 | Category | Knob | Expected Behaviour |

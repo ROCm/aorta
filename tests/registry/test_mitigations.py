@@ -90,16 +90,50 @@ def test_collision_plugin_vs_builtin_raises(fake_eps):
         load_mitigations()
 
 
-def test_non_string_env_value_raises(fake_eps):
-    fake_eps([("bad", {"K": 123}, "plugin_x")])
-    with pytest.raises(RegistryError, match="plugin_x.*bad.*dict\\[str, str\\]"):
+def test_invalid_env_entry_types_raise_without_echoing_values(fake_eps):
+    secret = "super-secret-token"
+    fake_eps(
+        [
+            (
+                "bad",
+                {"TOKEN": secret, "K": {"credential": secret}, 7: secret},
+                "plugin_x",
+            )
+        ]
+    )
+    with pytest.raises(RegistryError, match="plugin_x.*bad.*dict\\[str, str\\]") as exc:
         load_mitigations()
+    message = str(exc.value)
+    assert "K" in message
+    assert "dict" in message
+    assert "<int key>" in message
+    assert secret not in message
 
 
 def test_non_dict_payload_raises(fake_eps):
     fake_eps([("bad", "not-a-dict", "plugin_x")])
     with pytest.raises(RegistryError, match="plugin_x.*bad.*str"):
         load_mitigations()
+
+
+def test_plugin_mitigation_rejects_invalid_name(fake_eps):
+    """An entry-point mitigation with a malformed env-var NAME fails loading.
+
+    Mitigation bundles are a declaration boundary too -- without this the bad
+    name only fails later inside the dispatcher's os.environ.update.
+    """
+    fake_eps([("bad", {"BAD KEY": "1"}, "plugin_x")])
+    with pytest.raises(RegistryError, match="invalid environment-variable name"):
+        load_mitigations()
+
+
+def test_plugin_mitigation_rejects_nul_value(fake_eps):
+    """An entry-point mitigation with a NUL VALUE fails loading, without echoing
+    the (possibly secret) value."""
+    fake_eps([("bad", {"TOKEN": "a\x00b"}, "plugin_x")])
+    with pytest.raises(RegistryError, match="NUL") as exc:
+        load_mitigations()
+    assert "a\x00b" not in str(exc.value)
 
 
 @pytest.mark.parametrize(

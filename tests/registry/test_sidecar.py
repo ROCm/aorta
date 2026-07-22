@@ -13,7 +13,6 @@ from aorta.registry import (
     load_sidecar_mitigations,
 )
 
-
 # ---------- mitigations: merge into resolver ----------
 
 
@@ -221,6 +220,26 @@ def test_mitigation_payload_must_be_object(tmp_sidecar):
         load_sidecar_mitigations(p)
 
 
+def test_sidecar_mitigation_rejects_invalid_name(tmp_sidecar):
+    """A sidecar mitigation bundle with a malformed env-var NAME must fail load.
+
+    Mitigation bundles are a declaration boundary too: without this the bad
+    name only fails later in the dispatcher's os.environ.update.
+    """
+    p = tmp_sidecar({"version": 1, "mitigations": {"foo": {"BAD KEY": "1"}}})
+    with pytest.raises(RegistryError, match="invalid environment-variable name"):
+        load_sidecar_mitigations(p)
+
+
+def test_sidecar_mitigation_rejects_nul_value(tmp_sidecar):
+    """A sidecar mitigation bundle with a NUL VALUE must fail load, without
+    echoing the (possibly secret) value."""
+    p = tmp_sidecar({"version": 1, "mitigations": {"foo": {"TOKEN": "a\x00b"}}})
+    with pytest.raises(RegistryError, match="NUL") as exc:
+        load_sidecar_mitigations(p)
+    assert "a\x00b" not in str(exc.value)
+
+
 def test_environment_value_must_be_string_or_null(tmp_sidecar):
     p = tmp_sidecar({"version": 1, "environments": {"e": {"docker": 123}}})
     with pytest.raises(
@@ -247,3 +266,111 @@ def test_missing_file_reports_path(tmp_path):
     p = tmp_path / "nonexistent.json"
     with pytest.raises(RegistryError, match="cannot read file"):
         load_sidecar_mitigations(p)
+
+
+# ---- sidecar environment env field ----------------------------------------
+#
+# ``Environment.env`` is the lowest layer of the platform env-precedence
+# contract. These tests confirm the sidecar loader round-trips the field and
+# defaults gracefully when it is absent -- mirroring the plugin EP loader
+# tests in test_environments.py.
+
+
+def test_sidecar_environment_with_env_field_round_trips(tmp_sidecar, fake_env_eps):
+    """A sidecar environment that declares ``env`` must produce the correct
+    ``Environment.env`` mapping after loading.
+
+    The sidecar loader validates ``env`` independently of the ``str | None``
+    recipe slots -- this test pins that the validated mapping reaches the
+    ``Environment`` dataclass intact.
+    """
+    fake_env_eps([])
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "sidecar-with-env": {
+                "docker": "img@sha256:abc",
+                "env": {"FOO": "1", "BAR": "val"},
+            },
+        },
+    })
+    envs = load_environments(extra_files=[p])
+    assert envs["sidecar-with-env"].env == {"FOO": "1", "BAR": "val"}
+
+
+def test_sidecar_environment_env_field_absent_defaults_empty(tmp_sidecar, fake_env_eps):
+    """A sidecar environment that omits ``env`` must produce
+    ``Environment.env == {}``.
+
+    Back-compat: every existing sidecar payload has no ``env`` key; the
+    loader must not raise and must produce an empty dict so the dispatcher's
+    overlay merge is a no-op for these environments.
+    """
+    fake_env_eps([])
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "sidecar-no-env": {"docker": "img@sha256:abc"},
+        },
+    })
+    envs = load_environments(extra_files=[p])
+    assert envs["sidecar-no-env"].env == {}
+
+
+@pytest.mark.parametrize(
+    "bad_env",
+    [
+        ["FOO=1"],
+        {"FOO": 1},
+    ],
+)
+def test_sidecar_environment_env_field_rejects_malformed_values(
+    tmp_sidecar, bad_env
+):
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "bad-env": {
+                "docker": "img@sha256:abc",
+                "env": bad_env,
+            },
+        },
+    })
+    with pytest.raises(RegistryError, match=r"environments\.bad-env\.env"):
+        load_sidecar_environments(p)
+
+
+def test_sidecar_environment_env_field_rejects_invalid_name(tmp_sidecar):
+    """A named sidecar Environment.env with a malformed NAME must fail loading.
+
+    A named environment bypasses the recipe parser entirely, so this is the
+    only place the name-shape rule can be enforced before run time.
+    """
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "bad-name-env": {
+                "docker": "img@sha256:abc",
+                "env": {"BAD KEY": "1"},
+            },
+        },
+    })
+    with pytest.raises(RegistryError, match="invalid environment-variable name"):
+        load_sidecar_environments(p)
+
+
+def test_sidecar_environment_env_field_rejects_nul_value(tmp_sidecar):
+    """A named sidecar Environment.env with a NUL VALUE must fail loading,
+    without echoing the (possibly secret) value."""
+    p = tmp_sidecar({
+        "version": 1,
+        "environments": {
+            "nul-env": {
+                "docker": "img@sha256:abc",
+                "env": {"TOKEN": "before\x00after"},
+            },
+        },
+    })
+    with pytest.raises(RegistryError, match="NUL") as exc:
+        load_sidecar_environments(p)
+    assert "before" not in str(exc.value) and "after" not in str(exc.value)
