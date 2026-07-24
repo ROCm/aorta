@@ -139,14 +139,21 @@ flowchart TB
 
 ## 8. Automated ROCm + dependency bumps
 
-The pinned stack (ROCm base image, PyTorch/ROCm, hipBLASLt, and the other pinned
-libraries) is kept current **automatically**, so we never manually chase
-versions and every bump is a tested, reviewable change.
+The pinned stack is kept current **automatically**, so we never manually chase
+versions and every bump is a tested, reviewable change. "The pinned stack" means
+everything CI's reproducibility depends on:
+
+- the ROCm base image (by digest), PyTorch/ROCm, and hipBLASLt;
+- **the Python requirements — `requirements.txt` and `requirements-dev.txt` are
+  kept as exact version pins** (a reproducible, fully-pinned set), not floating
+  ranges, so a CI run is byte-reproducible and a dependency change is an explicit,
+  reviewed diff.
 
 - **Watcher workflow (scheduled):** detects newer versions of the ROCm base
-  image digest, torch (ROCm index), and the pinned libs, and **opens a bump PR**
-  updating the pinned values (`docker/Dockerfile.*`, `.env.ci` / index URL,
-  requirements).
+  image digest, torch (ROCm index), hipBLASLt, **and the pinned
+  `requirements*.txt` packages**, and **opens a bump PR** updating the pinned
+  values (`docker/Dockerfile.*`, `.env.ci` / index URL, `requirements.txt`,
+  `requirements-dev.txt`).
 - **CI validates the bump PR:** runs the GPU gate + the matrix evaluation on the
   *new* stack, so correctness and performance impact are visible before merge.
 - **Baselines refresh in the same PR:** a ROCm / hipBLASLt change legitimately
@@ -184,3 +191,6 @@ The PR gate stays as-is (minor tidy only) throughout.
   baselines.
 - Confirm the ~2h nightly budget holds once real matrix timings are measured;
   trim axes if needed.
+- Convert `requirements.txt` / `requirements-dev.txt` to exact version pins as
+  the baseline state the automated bump flow maintains (decide whether to keep
+  loose ranges in packaging metadata while CI installs from a pinned lock).
