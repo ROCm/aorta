@@ -137,6 +137,33 @@ flowchart TB
   failing entries with artifact links; comment/close when green. The dashboard
   reflects the same status.
 
+## 8. Automated ROCm + dependency bumps
+
+The pinned stack (ROCm base image, PyTorch/ROCm, hipBLASLt, and the other pinned
+libraries) is kept current **automatically**, so we never manually chase
+versions and every bump is a tested, reviewable change.
+
+- **Watcher workflow (scheduled):** detects newer versions of the ROCm base
+  image digest, torch (ROCm index), and the pinned libs, and **opens a bump PR**
+  updating the pinned values (`docker/Dockerfile.*`, `.env.ci` / index URL,
+  requirements).
+- **CI validates the bump PR:** runs the GPU gate + the matrix evaluation on the
+  *new* stack, so correctness and performance impact are visible before merge.
+- **Baselines refresh in the same PR:** a ROCm / hipBLASLt change legitimately
+  moves numerics and step times, so the bump PR also regenerates candidate
+  baselines. The **baseline diff is the impact of the bump** -- exactly what the
+  reviewer inspects. (Automated bump and baseline re-bless are the same flow,
+  because a ROCm change and a numerics change are indistinguishable otherwise.)
+- **Human approves; no blind auto-merge.** The bot proposes, a reviewer blesses.
+  (A future refinement may auto-merge only when every entry stays within
+  tolerance.)
+- **ROCm as recorded metadata:** every nightly result records the ROCm / torch /
+  hipBLASLt versions it ran against; the dashboard annotates trend charts at
+  bump points so a shift can be attributed to the bump vs an aorta change.
+- **Optional candidate-ROCm axis (slower cadence):** to catch problems in an
+  upcoming ROCm before adopting it, the full matrix can run against a candidate
+  ROCm weekly (kept off the daily path for the ~2h/single-runner budget).
+
 ## Phased rollout
 
 | Phase | Deliverable |
@@ -144,7 +171,8 @@ flowchart TB
 | 1 | Nightly harness: install the wheel + run the matrix + correctness baselines (bless the initial set) + write results JSON |
 | 2 | `gh-pages` results branch + GitHub Pages dashboard (correctness + perf trends) |
 | 3 | Auto-issue alerting; broaden matrices to the full target |
-| 4 | (later) optional perf gates once thresholds are established |
+| 4 | Automated ROCm/dependency bump workflow (bump PR + baseline refresh + validation) |
+| 5 | (later) optional perf gates; optional auto-merge of in-tolerance bumps |
 
 The PR gate stays as-is (minor tidy only) throughout.
 
