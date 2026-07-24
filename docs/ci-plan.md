@@ -70,6 +70,12 @@ flowchart TB
   `amd-aorta==X.Y.ZrcYYYYMMDD`, installed from the rolling `dev-wheels`
   prerelease. The repo is checked out only for recipes / manifest / baselines /
   the runner scripts. So CI validates exactly what users `pip install`.
+- **Execution environment: docker (required).** The eval (and the GPU gate) run
+  **inside a pinned ROCm PyTorch docker image**, not natively. This is the
+  mechanism by which the **ROCm version is changed periodically** -- swapping the
+  ROCm stack is a bump of the pinned image digest (Section 8), which is why a
+  container is required rather than a host toolchain. Inside the container we
+  install the nightly wheel + the pinned `requirements.txt`, then run the matrix.
 - **Execution:** run the workload matrix (Section 6), harvesting each run's
   `matrix.json` / trial JSON. Produce, per (workload x config): a correctness
   verdict (vs baseline), perf metrics, and duration.
@@ -191,6 +197,11 @@ The PR gate stays as-is (minor tidy only) throughout.
   baselines.
 - Confirm the ~2h nightly budget holds once real matrix timings are measured;
   trim axes if needed.
+- Convert `requirements.txt` / `requirements-dev.txt` from `>=` ranges to exact
+  (`==`) pins, and pin the `git+https://.../TraceLens.git` dependency to a
+  specific commit, so CI is byte-reproducible and the bump watcher owns updates.
+- All GPU CI (gate + nightly eval) runs inside the pinned ROCm docker image;
+  changing ROCm = an image-digest bump (never a host toolchain change).
 - Convert `requirements.txt` / `requirements-dev.txt` to exact version pins as
   the baseline state the automated bump flow maintains (decide whether to keep
   loose ranges in packaging metadata while CI installs from a pinned lock).
