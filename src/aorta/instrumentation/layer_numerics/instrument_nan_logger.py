@@ -168,16 +168,17 @@ Settings (environment variables):
                          re-scan the tracked flow objects at each stage, before the
                          forward reads them. Warns once and stays inactive if the
                          stage methods are absent. Same per-step drain (default 0).
-  NANLOG_STAGE_READS     "1" (with NANLOG_PIPELINE=1) -> run each copy/sparse/forward
-                         stage read on a dedicated side CUDA stream with a one-way
-                         event dependency, so the stage read does NOT serialize the
-                         copy/compute overlap (which the default inline read does, and
-                         which hides a timing-sensitive cross-stream race). Gives
-                         timing-safe copy/sparse STAGE brackets. Falls back to the
-                         inline read + warns once if the side stream can't be created;
-                         the summary's stage_reads_active records which happened. The
-                         side stream is synchronized once per step in the drain, so the
-                         single batched host transfer stays the only host sync (def 0).
+  NANLOG_STAGE_READS     "1" (with NANLOG_PIPELINE=1) -> copy/sparse observations use
+                         side streams after TorchRec producer events; forward entry is
+                         compute-stream ordered before the model body. An unresolved
+                         upstream producer/context/device or failed side stream SKIPS
+                         that checkpoint and invalidates its evidence. (default 0).
+  NANLOG_POST_STEP       "1" (with PIPELINE=1 + STAGE_READS=1) -> after progress()
+                         enqueues a compute tick, re-scan still-live pre-forward buffers
+                         touched by that tick. Optional C+ bracket; off by default.
+  NANLOG_MAX_STAGE_DEFERRAL_STEPS  discard/invalidate an observation still incomplete
+                         after this many forward steps, bounding retained events/scalars
+                         without blocking the producer (default 8).
   NANLOG_TRACK_ATTR      comma list of batch attribute/key names to follow as flow
                          tensors (default "embedding_features"); a name may resolve
                          to a Tensor, list/tuple/dict of Tensors, or a KJT (its
@@ -217,13 +218,14 @@ Settings (environment variables):
                          (degenerate single-range form of NANLOG_BOUNDS; sensible only
                          when watching one well-bounded target).
 
-  Every record carries a `batch_id`, assigned when a batch enters at
-  copy_batch_to_gpu and re-read at each later checkpoint, so one batch's
-  copy/sparse/forward records can be grouped across steps (null before its copy).
+  Timing-safe pipeline observations carry an externally-managed `batch_id` plus tick/slot
+  metadata, so copy/sparse/forward can be grouped without mutating the customer batch.
+  Legacy pipeline-off/degraded follows retain their historical best-effort batch tagging.
 """
 from __future__ import annotations
 
-import contextlib
+import functools
+import inspect
 import json
 import math
 import os
@@ -231,7 +233,8 @@ import runpy
 import socket
 import sys
 import time
-from collections import deque
+import weakref
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 # Optional `--config <file>` (or `--config=<file>`): a path to a JSON spec file,
@@ -292,7 +295,8 @@ import torch  # noqa: E402
 # ---------------------------------------------------------------------------
 # One JSON env var, two observation kinds:
 #   watch   [{scope, tensors, stride?}, ...]      -- a module's OWN tensors
-#   follow  [{tensor, stages?, scope?, stride?, bounds?, pipeline?, stage_reads?}, ...]
+#   follow  [{tensor, stages?, scope?, stride?, bounds?, pipeline?, stage_reads?,
+#             post_step?}, ...]
 #                                                 -- trace ONE named tensor across positions
 # building blocks:
 #   scope   {names:[substr,...], types:[ClassName,...]}  -- which modules
@@ -305,10 +309,12 @@ import torch  # noqa: E402
 #                    wrappers, so the copy/compute overlap is never serialized (the
 #                    mode for a timing-sensitive race the wrappers would suppress);
 #                    incompatible with stages:true, requires a scope for block capture
-#   stage_reads bool -- (follow, default false) keep the stage wrappers but run each
-#                    copy/sparse/forward stage read on a side CUDA stream (one-way event
-#                    dependency), so the stage read no longer serializes the overlap ->
-#                    timing-safe copy/sparse STAGE brackets. Requires pipeline:true.
+#   stage_reads bool -- (follow, default false) keep the stage wrappers; copy/sparse
+#                    observations use side streams after explicit producer events, while
+#                    forward entry is compute-stream ordered before the model body.
+#                    Requires pipeline:true.
+#   post_step bool -- (follow, default false) additionally observe still-live pre-forward
+#                    buffers after one pipeline progress tick. Requires stage_reads:true.
 # plus cross-cutting: sample_every, pre_context, diagnostics[]. (Output dir is the
 # separate NANLOG_DIR env var, never a spec key.)
 #
@@ -409,7 +415,7 @@ def _resolve_follow_cadence(f: dict) -> tuple:
     # Reject unknown keys so a typo or a leftover `at` from the old schema fails loudly
     # instead of silently falling through to the stages-only default.
     _FOLLOW_KEYS = {"tensor", "stages", "scope", "stride", "bounds", "pipeline",
-                    "stage_reads"}
+                    "stage_reads", "post_step"}
     unknown = [k for k in f if k not in _FOLLOW_KEYS]
     if unknown:
         raise ValueError(f"unknown follow[] key(s) {sorted(unknown)}; "
@@ -425,6 +431,9 @@ def _resolve_follow_cadence(f: dict) -> tuple:
     stage_reads = f.get("stage_reads", False)
     if not isinstance(stage_reads, bool):
         raise ValueError(f"follow[].stage_reads must be true/false, got {stage_reads!r}")
+    post_step = f.get("post_step", False)
+    if not isinstance(post_step, bool):
+        raise ValueError(f"follow[].post_step must be true/false, got {post_step!r}")
     stride = None
     if "stride" in f:
         v = f["stride"]
@@ -454,6 +463,9 @@ def _resolve_follow_cadence(f: dict) -> tuple:
                          "(pipeline must be true); it moves the copy/sparse stage read "
                          "off the pipeline stream, so there is nothing to move with "
                          "pipeline: false")
+    if post_step and not stage_reads:
+        raise ValueError("follow[].post_step true requires stage_reads:true; post-step "
+                         "observations must never run inline on the compute stream")
     return stages, stride, pipeline, stage_reads
 
 
@@ -522,7 +534,7 @@ _SPEC_OWNED_VARS = {
     "NANLOG_WATCH_NAMES": "", "NANLOG_WATCH_TYPES": "", "NANLOG_CHANNELS": "",
     "NANLOG_WATCH_STRIDE": "1",
     "NANLOG_PIPELINE": "0", "NANLOG_PIPELINE_OFF_FOLLOW": "0",
-    "NANLOG_STAGE_READS": "0",
+    "NANLOG_STAGE_READS": "0", "NANLOG_POST_STEP": "0",
     "NANLOG_TRACK_ATTR": "", "NANLOG_TRACK_EVERY_LAYER": "0",
     "NANLOG_TRACK_LAYER_STRIDE": "1", "NANLOG_BOUNDS": "",
     "NANLOG_SAMPLE_EVERY": "", "NANLOG_PRE_CONTEXT": "",
@@ -652,6 +664,10 @@ def _translate_spec(spec: dict) -> None:
         # wrappers are actually armed (validation already rejects stage_reads without
         # pipeline; guard on arm_wrappers too so it can't leak on with no wrappers).
         _spec_set("NANLOG_STAGE_READS", "1" if (stage_reads and arm_wrappers) else "0")
+        _spec_set(
+            "NANLOG_POST_STEP",
+            "1" if (f0.get("post_step", False) and stage_reads and arm_wrappers) else "0",
+        )
         track_attrs = [f["tensor"].strip() for f in follow]
         _spec_set("NANLOG_TRACK_ATTR", ",".join(track_attrs))
         if stride is not None:
@@ -853,13 +869,25 @@ _PIPELINE = os.environ.get("NANLOG_PIPELINE", "0") == "1"
 # mode, which historically warned and no-op'd. Keep that contract -- only the spec
 # turns this on.
 _PIPELINE_OFF_FOLLOW = os.environ.get("NANLOG_PIPELINE_OFF_FOLLOW", "0") == "1"
-# Stage-reads: keep the stage wrappers, but run the copy/sparse/forward stage read of
-# the tracked tensor on a DEDICATED side stream with a one-way event dependency, so the
-# read does not serialize the copy/compute overlap the way the default inline read does.
-# The wrappers still fire (we need the timing point + batch handle); only the reduction
-# moves off the pipeline stream. Purpose: timing-safe copy/sparse stage brackets for a
-# race the inline stage read hides. Requires NANLOG_PIPELINE=1 (spec enforces this).
+# Stage-reads: keep wrappers; copy/sparse reductions run on dedicated side streams after
+# producer events, while forward entry is ordered on the compute stream before the model
+# body (the proven Pass A behavior). Requires NANLOG_PIPELINE=1.
 _STAGE_READS = os.environ.get("NANLOG_STAGE_READS", "0") == "1"
+# Optional C+ observation: after one TrainPipelineSparseDist.progress tick has
+# enqueued forward/backward/optimizer work, re-read pre-forward buffers touched by
+# that tick. This is intentionally stricter than a flat boolean: post-step is only
+# meaningful on the timing-safe stage-read path and must never run inline.
+_POST_STEP_REQUESTED = os.environ.get("NANLOG_POST_STEP", "0") == "1"
+_POST_STEP = _POST_STEP_REQUESTED and _PIPELINE and _STAGE_READS
+_MAX_STAGE_DEFERRAL_STEPS = max(
+    1, int(os.environ.get("NANLOG_MAX_STAGE_DEFERRAL_STEPS", "8"))
+)
+if _POST_STEP_REQUESTED and not _POST_STEP:
+    sys.stderr.write(
+        "nanlog: WARNING: NANLOG_POST_STEP=1 requires NANLOG_PIPELINE=1 and "
+        "NANLOG_STAGE_READS=1; post-step observations disabled\n"
+    )
+    sys.stderr.flush()
 _TRACK_ATTR = tuple(
     s.strip() for s in os.environ.get("NANLOG_TRACK_ATTR", "embedding_features").split(",")
     if s.strip()
@@ -1152,7 +1180,7 @@ _FLOW_ROLES = frozenset({"act", "igrad"})
 
 def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
            param_name: str = "", from_prev_step: bool = False,
-           extra: dict = None) -> None:
+           extra: dict = None):
     """Queue one tensor's on-GPU reduction for this step. No host sync.
 
     Args:
@@ -1175,10 +1203,10 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
     """
     global _matmul_calls
     if not torch.is_tensor(t) or t.numel() == 0:
-        return
+        return None
     # Meta tensors have no backing data; _device_stats (torch.isfinite etc.) raises.
     if t.device.type == "meta":
-        return
+        return None
     if role in _FLOW_ROLES:
         _matmul_calls += 1
     rec = {
@@ -1219,30 +1247,16 @@ def _stash(layer_name: str, direction: str, t: torch.Tensor, role: str = "act",
     # For the one-shot dump, hold a DETACHED ref so we don't keep the autograd graph
     # alive across the step (memory / allocator-reuse perturbation).
     held = t.detach() if (_DUMP_TENSOR and not _tensor_dumped) else None
-    # Stage-reads: run this reduction on the side stream (created on t's OWN device) so
-    # it doesn't serialize the copy/compute overlap. _stage_read_stream applies the
-    # one-way dependency (side waits for the current stream, current never waits back);
-    # record_stream tells the caching allocator not to hand t's block to another op on
-    # the training stream while the side-stream read is in flight (which would reduce a
-    # DIFFERENT tensor's data -> a false clean/NaN). Off / non-CUDA / no side stream ->
-    # the context is a no-op and the read runs inline (historical behavior).
-    # _checkpoint is the sole writer of _stage_read_in_progress; here we only read it.
-    use_side = _stage_read_in_progress and t.is_cuda
-    if use_side:
-        with _stage_read_stream(t.device):
-            if _stage_stream is not None:
-                try:
-                    t.record_stream(_stage_stream)
-                except Exception:
-                    pass
-            stats = _device_stats(t, bound)
-    else:
-        stats = _device_stats(t, bound)
+    # The caller controls the active stream. Ordinary watch/block captures call this on
+    # the compute stream. V6 stage scheduling enters the dedicated side stream only
+    # after it has waited on an explicit producer event, then calls _stash here.
+    stats = _device_stats(t, bound)
     _pending.append((rec, stats, held))
+    return rec
 
 
 # ---------------------------------------------------------------------------
-# Per-step drain (ONE sync for ALL watched tensors this step) — the only host sync
+# Deferred drain: one batched transfer per device for the oldest completed step.
 # ---------------------------------------------------------------------------
 def _write_rec(rec: dict) -> None:
     """Append one record to the JSONL, respecting the hard record cap."""
@@ -1254,15 +1268,45 @@ def _write_rec(rec: dict) -> None:
     _records_written += 1
 
 
-def _drain_step() -> None:
-    """Flush last step's pending reductions with a single batched sync."""
+def _drain_step(force: bool = False) -> bool:
+    """Drain the oldest complete logical step without waiting on live stage reads.
+
+    A root forward pre-hook must not wait for copy/sparse observations enqueued in the
+    same pipeline tick: doing so would recreate producer->logger->forward serialization.
+    Non-forced drains therefore query completion events and leave an incomplete oldest
+    step queued. Shutdown uses `force=True`.
+    """
     global _records_written, _first_bad, _pre_flushed, _tensor_dumped
     global _first_oob, _oob_records, _peak_finite_max, _peak_finite_min
     if not _pending:
-        return
-    pending, _pending[:] = list(_pending), []
+        return False
 
-    # Batch every scalar into one stacked tensor -> ONE .tolist() host transfer.
+    drained_step = _pending[0][0]["step"]
+    end = 0
+    observations = {}
+    while end < len(_pending) and _pending[end][0]["step"] == drained_step:
+        obs = _pending[end][0].get("_stage_observation")
+        if obs is not None:
+            observations[id(obs)] = obs
+        end += 1
+    for obs in observations.values():
+        ready = _observation_ready(obs, force=force)
+        if ready is None:
+            _discard_observation(obs)
+            return _drain_step(force=force) if _pending else False
+        if not ready:
+            if _step - drained_step > _MAX_STAGE_DEFERRAL_STEPS:
+                _invalidate_stage_evidence(
+                    obs.get("phase", "unknown"), "completion_timeout"
+                )
+                _finalize_observation(obs, "completion_timeout")
+                _discard_observation(obs)
+                return _drain_step(force=force) if _pending else False
+            return False
+    pending = list(_pending[:end])
+
+    # Batch every scalar into one transfer PER DEVICE. Normal one-rank/one-GPU use is
+    # still one transfer; grouping also prevents mixed CPU/cuda or cuda:0/cuda:1 stacks.
     keys = ["nan_count", "inf_count", "finite_count", "huge_count",
             "finite_abs_max", "finite_max", "finite_min", "numel"]
     if _BOUNDS_ACTIVE:
@@ -1271,29 +1315,25 @@ def _drain_step() -> None:
         keys = keys + ["bad_rows"]
     if _BAD_VALUES:
         keys = keys + ["first_bad_flat", "first_bad_val", "first_bad_row", "first_bad_col"]
-    # With stage reads, some of this step's reductions (stats[k]) were produced on the
-    # side stream. Everything below -- the .to(float64) casts, the stack, the .cpu()
-    # copy -- runs on the current stream. Insert a DEVICE-SIDE dependency FIRST so those
-    # casts wait for the side stream: a host .synchronize() AFTER enqueuing the casts is
-    # too late (the cast kernels are already queued on the current stream with no
-    # ordering vs. the side stream and could read not-yet-written scalars). wait_stream
-    # is enqueue-time and one-way, so it costs no host sync of its own -- the single
-    # .cpu().tolist() below stays the only host transfer. No-op when stage reads are off.
-    if _stage_reads_active and _stage_stream is not None:
-        # Under the side stream's OWN device: the casts/stack/.cpu() below run on that
-        # device's current stream, and the wait must be issued there too (an unpinned
-        # wait on a multi-GPU rank could target the wrong device's stream or raise).
-        with torch.cuda.device(_stage_stream_device):
-            torch.cuda.current_stream().wait_stream(_stage_stream)
     flat = []
     for _rec, stats, _held_t in pending:
         for k in keys:
             flat.append(stats[k].to(torch.float64).reshape(()))
     try:
-        vals = torch.stack(flat).cpu().tolist() if flat else []
+        vals = [None] * len(flat)
+        by_device = defaultdict(list)
+        for index, scalar in enumerate(flat):
+            by_device[str(scalar.device)].append((index, scalar))
+        for group in by_device.values():
+            indices = [index for index, _scalar in group]
+            group_vals = torch.stack(
+                [scalar for _index, scalar in group]).cpu().tolist()
+            for index, value in zip(indices, group_vals):
+                vals[index] = value
     except Exception as e:
         _log(f"drain failed: {e!r}")
-        return
+        return False
+    del _pending[:end]
 
     worst_abs = -1.0
     worst = None
@@ -1330,7 +1370,12 @@ def _drain_step() -> None:
                 _oob_records += 1
                 if _first_oob is None:
                     _first_oob = {"step": rec["step"], "layer": rec["layer_name"],
-                                  "phase": rec.get("phase"), "oob_count": rec["oob_count"]}
+                                  "phase": rec.get("phase"),
+                                  "batch_id": rec.get("batch_id"),
+                                  "pipeline_tick": rec.get("pipeline_tick"),
+                                  "relative_slot": rec.get("relative_slot"),
+                                  "observation_status": rec.get("observation_status"),
+                                  "oob_count": rec["oob_count"]}
         if _LOCATE:
             rec["bad_rows"] = int(d["bad_rows"])
         bad = (rec["nan_count"] or rec["inf_count"] or rec["huge_count"]
@@ -1347,6 +1392,7 @@ def _drain_step() -> None:
                 rec["first_bad_value"] = "Inf" if val > 0 else "-Inf"
             else:
                 rec["first_bad_value"] = val
+        _release_observation_record(rec)
         step_records.append(rec)
 
         if bad and _first_bad is None:
@@ -1355,6 +1401,11 @@ def _drain_step() -> None:
                     "huge" if rec["huge_count"] else "oob")
             _first_bad = {"step": rec["step"], "layer": rec["layer_name"],
                           "direction": rec["direction"], "kind": kind,
+                          "phase": rec.get("phase"),
+                          "batch_id": rec.get("batch_id"),
+                          "pipeline_tick": rec.get("pipeline_tick"),
+                          "relative_slot": rec.get("relative_slot"),
+                          "observation_status": rec.get("observation_status"),
                           "matmul_calls_so_far": rec["matmul_calls_so_far"]}
             bad_this_step = True
             _log(f"FIRST BAD: step={rec['step']} layer={rec['layer_name']} "
@@ -1386,22 +1437,23 @@ def _drain_step() -> None:
         # so they can be dumped if a bad appears within the next K steps.
         held = []
         for rec in step_records:
-            if rec["bad"] or (_step % _SAMPLE_EVERY == 0):
+            if rec["bad"] or (drained_step % _SAMPLE_EVERY == 0):
                 _write_rec(rec)
             else:
                 held.append(rec)
         if held:
-            _pre_buffer.append((_step, held))
+            _pre_buffer.append((drained_step, held))
     else:
         # Normal path (no pre-context, or already flushed -> write everything).
         for rec in step_records:
-            write = rec["bad"] or _pre_flushed or (_step % _SAMPLE_EVERY == 0)
+            write = rec["bad"] or _pre_flushed or (drained_step % _SAMPLE_EVERY == 0)
             if write and not (_STOP_ON_FIRST and _first_bad and not rec["bad"]):
                 _write_rec(rec)
 
     if _VERBOSE and worst is not None:
-        _log(f"step={_step} worst_bad={worst['layer_name']} "
+        _log(f"step={drained_step} worst_bad={worst['layer_name']} "
              f"abs_max={worst_abs:.3e} dir={worst['direction']}")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1568,11 +1620,13 @@ def _maybe_warn_grad() -> None:
 
 def _root_pre_hook(_module, _inp):
     """Fires once per step at the START of the root forward. Drains the PREVIOUS
-    step's pending reductions (all GPU work from last step is already queued),
-    advances the step counter, then queues this step's param scan (prev-step
-    values). The single host sync per step lives in the drain."""
+    completed step without waiting for live copy/sparse observations, advances the step
+    counter, then queues this step's param scan (prev-step values)."""
     global _step, _phase, _layer_scan_idx
-    _drain_step()
+    # Drain every ready backlog step, stopping at the first live producer observation.
+    # This bounds scalar/event lifetime without waiting for current-tick copy/sparse.
+    while _drain_step():
+        pass
     _step += 1
     _phase = "forward"   # stage wrappers set copy/sparse phases outside forward
     _layer_scan_idx = 0
@@ -1715,112 +1769,167 @@ _pipeline_mint_phase = None
 _pipeline_checkpoints = 0     # stage-wrapper checkpoints that stashed something (_PIPELINE only)
 _forward_checkpoints = 0      # forward-entry checkpoints that stashed something (pipeline-off follow)
 _pipeline_warned = False
+_post_step_executions = 0
 
-# Side stream for NANLOG_STAGE_READS: the stage read runs here, not on the pipeline
-# stream, so it doesn't serialize the copy/compute overlap. Created lazily on first
-# use (CUDA must be initialized); None if unavailable / creation failed (then we fall
-# back to the inline read and warn once). _stage_reads_active reflects what ACTUALLY
-# happened, for the summary. _stage_read_in_progress is set by _checkpoint (SOLE writer)
-# around its emit loop and READ by _stash to decide whether to route the reduction to
-# the side stream; the context manager must not touch it (see _stage_read_stream).
+# Dedicated timing-safe observation streams. V6 waits on explicit producer events and
+# skips unresolved CUDA checkpoints instead of silently running inline.
 _stage_stream = None
-# The device _stage_stream lives on (the tracked tensor's device at creation). Every
-# wait_stream against the side stream must be issued under this device -- on a
-# multi-GPU ROCm rank the ambient current device can differ, and an unpinned
-# current_stream()/wait_stream would order against the WRONG device's stream or raise
-# a cross-device error. Set alongside _stage_stream.
 _stage_stream_device = None
+_stage_streams: dict = {}
+_stage_stream_failures: set = set()
 _stage_reads_active = False
-# Count of side-stream reads performed (one per tracked tensor per stage, i.e. it
-# increments per _stash, NOT per stage checkpoint -- a 31-tensor batch adds 31 per
-# copy/sparse/forward). An audit signal that the side path actually ran.
-_stage_read_count = 0
+_stage_read_count = 0          # tensors reduced on a side stream
 _stage_stream_warned = False
-_stage_read_in_progress = False
+
+# Audit CHECKPOINTS, not individual tensors. Each phase counter can contain
+# attempts/scheduled/trusted/overlapped_next_stage/skipped.
+_stage_phase_counts = defaultdict(Counter)
+_stage_skip_reasons = Counter()
+_stage_evidence_valid = True
+_stage_observations: list = []
+
+
+def _device_index(device=None):
+    if device is None:
+        return torch.cuda.current_device()
+    d = torch.device(device)
+    return d.index if d.index is not None else torch.cuda.current_device()
+
+
+def _stream_device_index(stream):
+    """Best-effort integer device for a CUDA stream; None when unavailable."""
+    if stream is None:
+        return None
+    try:
+        return _device_index(stream.device)
+    except Exception:
+        return None
+
+
+def _invalidate_stage_evidence(phase: str, reason: str) -> None:
+    """Fail open for training, fail closed for timing evidence."""
+    global _stage_evidence_valid
+    _stage_evidence_valid = False
+    _stage_phase_counts[phase]["skipped"] += 1
+    _stage_skip_reasons[f"{phase}:{reason}"] += 1
 
 
 def _get_stage_stream(device=None):
-    """Lazily create the side CUDA stream for stage reads, on `device` (the tracked
-    tensor's device -- NOT whatever the current device happens to be, which on a
-    multi-GPU rank may differ). Returns the stream, or None if stage reads are off /
-    CUDA is unavailable / creation failed (caller falls back to an inline read). Never
-    raises."""
+    """Return the dedicated side stream for `device`, or None.
+
+    V6 never falls back to an inline CUDA read when timing-safe reads were requested:
+    a failed side-stream creation skips and audits that checkpoint.
+    """
     global _stage_stream, _stage_stream_device, _stage_reads_active, _stage_stream_warned
     if not _STAGE_READS:
         return None
-    if _stage_stream is not None:
-        return _stage_stream
     try:
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA not available")
-        # Normalize to an integer device INDEX (not a torch.device): torch.cuda.device()
-        # accepts an int, downstream code / the summary compare it numerically, and a
-        # torch.device with .index=None (e.g. "cuda") would otherwise leak through.
-        if device is None:
-            dev_idx = torch.cuda.current_device()
-        else:
-            d = torch.device(device)
-            dev_idx = d.index if d.index is not None else torch.cuda.current_device()
-        # Pin the stream to that device so the wait/reduction never cross GPUs.
+        dev_idx = _device_index(device)
+        if dev_idx in _stage_streams:
+            return _stage_streams[dev_idx]
+        if dev_idx in _stage_stream_failures:
+            return None
         with torch.cuda.device(dev_idx):
-            _stage_stream = torch.cuda.Stream()
-        _stage_stream_device = dev_idx
+            stream = torch.cuda.Stream()
+        _stage_streams[dev_idx] = stream
+        if _stage_stream is None:  # compatibility aliases for the first device
+            _stage_stream = stream
+            _stage_stream_device = dev_idx
         _stage_reads_active = True
-        _log("stage_reads: side stream created; copy/sparse/forward stage reads run "
-             "off the pipeline stream (one-way dependency). NOTE: this assumes the "
-             "current stream at the stage wrapper carries the stage's work -- validate "
-             "the NaN capture rate against a baseline (see docs).")
-        return _stage_stream
+        _log(f"stage_reads: side stream created on cuda:{dev_idx}; reads wait on "
+             "explicit producer events and never fall back inline")
+        return stream
     except Exception as e:  # noqa: BLE001 -- a sidecar must never take the run down
+        try:
+            _stage_stream_failures.add(_device_index(device))
+        except Exception:
+            pass
         if not _stage_stream_warned:
             _stage_stream_warned = True
-            _log(f"WARNING: stage_reads requested but the side stream could not be "
-                 f"created ({e!r}); falling back to inline stage reads (these DO "
-                 f"serialize the pipeline and can hide a timing race).")
+            _log(f"WARNING: stage_reads side stream unavailable ({e!r}); timing-safe "
+                 "checkpoints on that device will be SKIPPED, not read inline")
         return None
 
 
-@contextlib.contextmanager
-def _stage_read_stream(device=None):
-    """Context manager: run the enclosed reduction on the side stream with a one-way
-    dependency on the CURRENT stream. The side stream waits for the current stream's
-    already-enqueued work; the current stream never waits back (so no ordering
-    dependency is inserted into the overlap). Falls back to a no-op (inline read on the
-    current stream) when the side stream is unavailable.
-
-    IMPORTANT / assumption: this waits on `torch.cuda.current_stream()` at the moment
-    the stage wrapper fires. That is correct ONLY if the stage's work (the H2D copy /
-    sparse dist) is ordered on the current stream by the time _checkpoint runs. TorchRec
-    runs stages on its own internal streams, so on some versions the current stream may
-    NOT be the stage's stream -- in which case the side read can execute before the
-    stage's writes land and mis-report "clean" at that stage. We cannot verify torchrec's
-    stream layout in-house; this is why the mode ships as CUSTOMER-VALIDATED (compare the
-    NaN rate to a baseline). The reduction is best-effort, not a guaranteed post-stage
-    snapshot.
-
-    _drain_step synchronizes the side stream before the host read-back, so the scalars
-    are ready without inserting a per-stage host sync.
-
-    Ownership: `_stage_read_in_progress` is set/reset by `_checkpoint` (the sole writer)
-    around the whole emit loop; this context ONLY reads the side stream. It must not
-    touch that flag -- doing so previously reset it after the first tensor, so only one
-    of a batch's N tracked tensors got the side stream and the rest silently serialized.
-    """
-    global _stage_read_count
-    stream = _get_stage_stream(device)
-    if stream is None:
-        yield
+def _finalize_observation(obs: dict, status: str) -> None:
+    if obs.get("closed"):
         return
-    # Issue the wait + enqueue under the side stream's OWN device: on a multi-GPU rank
-    # the ambient device can differ, and an unpinned current_stream()/wait_stream would
-    # order against the wrong device's stream or raise cross-device.
-    with torch.cuda.device(_stage_stream_device):
-        cur = torch.cuda.current_stream()
-        stream.wait_stream(cur)          # side waits for the current stream's enqueued work
-        with torch.cuda.stream(stream):  # reductions enqueue on the side stream
-            yield
-    _stage_read_count += 1
-    # NOTE: cur does NOT wait on `stream` -- that one-way dependency is the whole point.
+    obs["closed"] = True
+    obs["status"] = status
+    _stage_phase_counts[obs["phase"]][status] += 1
+    for rec in obs.get("records", ()):
+        rec["observation_status"] = status
+
+
+def _close_token_observations(token, next_phase: str) -> None:
+    """Query prior reads at the next same-token boundary without waiting."""
+    if token is None:
+        return
+    for obs in list(getattr(token, "open_observations", ())):
+        if obs.get("closed"):
+            continue
+        try:
+            complete = bool(obs["done_event"].query())
+        except Exception:
+            complete = False
+        obs["closed_by_phase"] = next_phase
+        for rec in obs.get("records", ()):
+            rec["closed_by_phase"] = next_phase
+        _finalize_observation(
+            obs, "trusted" if complete else "overlapped_next_stage")
+    token.open_observations[:] = [
+        o for o in token.open_observations if not o.get("closed")]
+
+
+def _observation_ready(obs: dict, force: bool) -> bool | None:
+    try:
+        if force:
+            obs["done_event"].synchronize()
+            ready = True
+        else:
+            ready = bool(obs["done_event"].query())
+    except Exception as e:
+        _invalidate_stage_evidence(
+            obs.get("phase", "unknown"),
+            f"completion_event_error:{type(e).__name__}",
+        )
+        _finalize_observation(obs, "poll_error")
+        return None
+    if ready and not obs.get("closed"):
+        _finalize_observation(obs, "trusted")
+    return ready
+
+
+def _discard_observation(obs: dict) -> None:
+    record_ids = {id(rec) for rec in obs.get("records", ())}
+    doomed = [item[0] for item in _pending if id(item[0]) in record_ids]
+    _pending[:] = [item for item in _pending if id(item[0]) not in record_ids]
+    for rec in doomed:
+        _release_observation_record(rec)
+
+
+def _release_observation_record(rec: dict) -> None:
+    """Drop event/token references after a drained record no longer needs them."""
+    obs = rec.pop("_stage_observation", None)
+    if obs is None:
+        return
+    obs["remaining_records"] = max(0, obs.get("remaining_records", 1) - 1)
+    if obs["remaining_records"]:
+        return
+    token = obs.get("token")
+    if token is not None:
+        token.open_observations[:] = [
+            item for item in token.open_observations if item is not obs]
+    obs.pop("source_event", None)
+    obs.pop("additional_source_event", None)
+    obs.pop("done_event", None)
+    obs["records"] = []
+    try:
+        _stage_observations.remove(obs)
+    except ValueError:
+        pass
 
 
 _kjt_types_cache = None
@@ -1963,7 +2072,294 @@ def _auto_discover(batch, seen: set) -> int:
     return n
 
 
-def _resolve_batch_id(batch, phase: str):
+def _tracked_entries(batch) -> list:
+    """Return `(name, tensor, role, extra)` entries without launching reductions."""
+    entries = []
+    seen: set = set()
+    kjt_types = _kjt_types()
+
+    def take(name, obj, depth=1):
+        if len(seen) >= _TRACK_MAX or obj is None:
+            return
+        if kjt_types and isinstance(obj, kjt_types):
+            if id(obj) in seen:
+                return
+            seen.add(id(obj))
+            try:
+                vals = obj.values()
+            except Exception:
+                vals = None
+            if (
+                torch.is_tensor(vals)
+                and vals.numel()
+                and vals.device.type != "meta"
+            ):
+                role = "sparse" if _SPARSE else "track"
+                extra = _sparse_extra(obj) if _SPARSE else None
+                entries.append((name, vals, role, extra))
+            return
+        if torch.is_tensor(obj):
+            if id(obj) not in seen and obj.numel() and obj.device.type != "meta":
+                seen.add(id(obj))
+                entries.append((name, obj, "track", None))
+            return
+        if depth < 0:
+            return
+        if isinstance(obj, (list, tuple)):
+            for i, item in enumerate(obj):
+                take(f"{name}[{i}]", item, depth - 1)
+        elif isinstance(obj, dict):
+            for key, item in obj.items():
+                take(f"{name}[{key}]", item, depth - 1)
+
+    found_named = False
+    for name in _TRACK_ATTR:
+        obj = None
+        if hasattr(batch, name):
+            obj = getattr(batch, name)
+        elif isinstance(batch, dict) and name in batch:
+            obj = batch[name]
+        if obj is not None:
+            found_named = True
+            take(name, obj)
+
+    if not found_named:
+        def visit(name, obj, depth):
+            if len(seen) >= _TRACK_MAX:
+                return
+            before = len(entries)
+            take(name, obj, depth)
+            if len(entries) != before or depth <= 0:
+                return
+            if not isinstance(obj, (list, tuple, dict)):
+                for attr in getattr(obj, "__dict__", {}):
+                    if not attr.startswith("_"):
+                        try:
+                            visit(f"{name}.{attr}", getattr(obj, attr), depth - 1)
+                        except Exception:
+                            pass
+
+        visit("batch", batch, 2)
+    return entries
+
+
+class _ObjectRef:
+    """Identity-preserving weak reference, strong only for non-weakrefable objects."""
+
+    def __init__(self, obj):
+        self._strong = None
+        try:
+            self._ref = weakref.ref(obj)
+        except TypeError:
+            self._ref = None
+            self._strong = obj
+
+    def get(self):
+        return self._ref() if self._ref is not None else self._strong
+
+    def matches(self, obj) -> bool:
+        return self.get() is obj
+
+    def clear(self):
+        self._ref = None
+        self._strong = None
+
+
+class _BatchToken:
+    def __init__(self, observer, batch, batch_id: int, tick: int):
+        self.observer = observer
+        self.batch_id = batch_id
+        self.batch_key = id(batch)
+        self.batch_ref = _ObjectRef(batch)
+        self.tensor_signature = tuple(
+            id(entry[1]) for entry in _tracked_entries(batch))
+        self.created_tick = tick
+        self.touched_tick = tick
+        self.forward_seen = False
+        self.context_refs: list = []
+        self.context_keys: set = set()
+        self.open_observations: list = []
+        self.phase_ticks: set = set()
+        self.latest_producer_events: dict = {}
+
+    def batch(self):
+        return self.batch_ref.get()
+
+
+class _PipelineObserver:
+    """Per-pipeline identity/tick state; never mutates customer batches."""
+
+    def __init__(self, pipeline):
+        self.pipeline_ref = _ObjectRef(pipeline)
+        self.tick = 0
+        self.by_batch: dict = {}
+        self.by_context: dict = {}
+        self.by_tensor_signature: dict = {}
+        self.deferred_contexts: dict = {}
+        self.tokens: dict = {}
+        self.touched_this_tick: set = set()
+        self.current_forward_token = None
+        self.progress_depth = 0
+        self.stage_depth = Counter()
+
+    def begin_tick(self):
+        self.tick += 1
+        self.touched_this_tick.clear()
+        self.current_forward_token = None
+        self._prune()
+
+    def _prune(self):
+        stale = [
+            bid for bid, token in self.tokens.items()
+            if token.batch() is None
+            or (token.forward_seen and token.created_tick < self.tick)
+        ]
+        for bid in stale:
+            token = self.tokens.get(bid)
+            if token is not None:
+                self.retire(token)
+
+    def retire(self, token):
+        if token is None:
+            return
+        self.tokens.pop(token.batch_id, None)
+        if self.by_batch.get(token.batch_key) is token:
+            self.by_batch.pop(token.batch_key, None)
+        if (token.tensor_signature
+                and self.by_tensor_signature.get(token.tensor_signature) is token):
+            self.by_tensor_signature.pop(token.tensor_signature, None)
+        for key in token.context_keys:
+            if self.by_context.get(key) is token:
+                self.by_context.pop(key, None)
+        token.context_refs.clear()
+        token.context_keys.clear()
+        token.latest_producer_events.clear()
+        token.batch_ref.clear()
+
+    def token_for_batch(self, batch, create=False):
+        global _batch_counter
+        if batch is None:
+            return None
+        token = self.by_batch.get(id(batch))
+        if token is not None and token.batch_ref.matches(batch):
+            if create and token.forward_seen:
+                self.retire(token)
+            else:
+                return token
+        if not create:
+            try:
+                signature = tuple(id(entry[1]) for entry in _tracked_entries(batch))
+            except Exception:
+                signature = ()
+            token = self.by_tensor_signature.get(signature) if signature else None
+            if token is not None and not token.forward_seen:
+                return token
+        if not create:
+            return None
+        _batch_counter += 1
+        token = _BatchToken(self, batch, _batch_counter, self.tick)
+        self.by_batch[id(batch)] = token
+        if token.tensor_signature:
+            self.by_tensor_signature[token.tensor_signature] = token
+        self.tokens[token.batch_id] = token
+        return token
+
+    def token_for_exact_batch(self, batch):
+        if batch is None:
+            return None
+        token = self.by_batch.get(id(batch))
+        return token if token is not None and token.batch_ref.matches(batch) else None
+
+    def defer_context(self, context):
+        if context is not None:
+            self.deferred_contexts[id(context)] = _ObjectRef(context)
+
+    def consume_deferred_context(self, context) -> bool:
+        if context is None:
+            return False
+        ref = self.deferred_contexts.get(id(context))
+        if ref is None or not ref.matches(context):
+            return False
+        self.deferred_contexts.pop(id(context), None)
+        return True
+
+    def is_deferred_context(self, context) -> bool:
+        if context is None:
+            return False
+        ref = self.deferred_contexts.get(id(context))
+        return ref is not None and ref.matches(context)
+
+    def bind_context(self, token, context):
+        if token is None or context is None:
+            return
+        existing = self.by_context.get(id(context))
+        if existing is not None and existing is not token:
+            _log("WARNING: pipeline context identity reused for a different batch; "
+                 "replacing the stale mapping")
+        self.by_context[id(context)] = token
+        token.context_keys.add(id(context))
+        if not any(ref.matches(context) for ref in token.context_refs):
+            token.context_refs.append(_ObjectRef(context))
+
+    def token_for_context(self, context):
+        if context is None:
+            return None
+        token = self.by_context.get(id(context))
+        if token is None:
+            return None
+        if any(ref.matches(context) for ref in token.context_refs):
+            return token
+        self.by_context.pop(id(context), None)
+        return None
+
+    def touch(self, token):
+        if token is None:
+            return
+        token.touched_tick = self.tick
+        self.touched_this_tick.add(token.batch_id)
+
+    def active_prefetch_tokens(self):
+        out = []
+        for batch_id in tuple(self.touched_this_tick):
+            token = self.tokens.get(batch_id)
+            if token is not None and not token.forward_seen and token.batch() is not None:
+                out.append(token)
+        return out
+
+
+_pipeline_observers: dict = {}
+_active_pipeline_observer = None
+
+
+def _get_pipeline_observer(pipeline):
+    key = id(pipeline)
+    entry = _pipeline_observers.get(key)
+    if entry is not None and entry[0].matches(pipeline):
+        return entry[1]
+    observer = _PipelineObserver(pipeline)
+    _pipeline_observers[key] = (_ObjectRef(pipeline), observer)
+    try:
+        weakref.finalize(pipeline, _pipeline_observers.pop, key, None)
+    except TypeError:
+        pass
+    return observer
+
+
+def _find_token_for_batch(batch):
+    if batch is None:
+        return None
+    if _active_pipeline_observer is not None:
+        # During progress, identity must remain pipeline-local. Falling through to
+        # another pipeline can close/retire the wrong three-in-flight token.
+        return _active_pipeline_observer.token_for_batch(batch, create=False)
+    for _pipe_ref, observer in list(_pipeline_observers.values()):
+        token = observer.token_for_batch(batch, create=False)
+        if token is not None:
+            return token
+    return None
+
+
+def _resolve_batch_id(batch, phase: str, token=None):
     """Return the batch_id for this batch, host-side and sync-free.
 
     At the COPY phase a batch is entering the pipeline for the first time -> assign
@@ -1973,6 +2369,8 @@ def _resolve_batch_id(batch, phase: str):
     share a key. Returns None if the batch can neither be tagged nor found (records
     then carry batch_id=null rather than a wrong guess)."""
     global _batch_counter
+    if token is not None:
+        return token.batch_id
     is_dict = isinstance(batch, dict)
     # Prefer an id already carried on the batch (set at its copy checkpoint). Dict
     # batches carry it as a key; other objects as an attribute.
@@ -2090,6 +2488,161 @@ def _collect_tracked(batch, seen: set, out: list) -> None:
         visit("batch", batch, 2)
 
 
+def _schedule_stage_entries(
+    entries: list,
+    phase: str,
+    token=None,
+    source_stream=None,
+    source_kind: str = "unknown",
+    relative_slot: str | None = None,
+    compute_batch_id=None,
+    additional_wait_events: dict | None = None,
+) -> int:
+    """Schedule one timing-safe observation after an explicit producer event."""
+    global _stage_read_count
+    if not entries:
+        return 0
+
+    tick = (
+        token.observer.tick if token is not None
+        else _active_pipeline_observer.tick if _active_pipeline_observer is not None
+        else None
+    )
+    common = {
+        "pipeline_tick": tick,
+        "relative_slot": relative_slot or phase,
+        "source_stream_kind": source_kind,
+    }
+    if compute_batch_id is not None:
+        common["compute_batch_id"] = compute_batch_id
+
+    # Forward entry deliberately uses the compute stream, matching the proven Pass A
+    # baseline. The reductions are enqueued before the model body, so same-stream order
+    # makes this a trusted pre-forward observation without a host wait.
+    if phase == "forward":
+        count = 0
+        for name, tensor, role, sparse_extra in entries:
+            extra = dict(common)
+            if sparse_extra:
+                extra.update(sparse_extra)
+            extra["observation_status"] = "trusted"
+            rec = _stash(name, "pipeline", tensor, role=role, extra=extra)
+            count += int(rec is not None)
+        if count:
+            _stage_phase_counts[phase]["scheduled"] += 1
+            _stage_phase_counts[phase]["trusted"] += 1
+        return count
+
+    # CPU-only unit/repro paths have no CUDA ordering to preserve. Keep their historical
+    # inline behavior, but label it so it is never mistaken for timing-safe GPU evidence.
+    cpu_entries = [entry for entry in entries if not entry[1].is_cuda]
+    for name, tensor, role, sparse_extra in cpu_entries:
+        extra = dict(common)
+        if sparse_extra:
+            extra.update(sparse_extra)
+        extra["observation_status"] = "inline_cpu"
+        _stash(name, "pipeline", tensor, role=role, extra=extra)
+    if cpu_entries:
+        _stage_phase_counts[phase]["inline_cpu"] += 1
+
+    cuda_groups = defaultdict(list)
+    for entry in entries:
+        tensor = entry[1]
+        if tensor.is_cuda:
+            cuda_groups[_device_index(tensor.device)].append(entry)
+    if not cuda_groups:
+        return len(cpu_entries)
+
+    scheduled = 0
+    for dev_idx, group in cuda_groups.items():
+        actual_source = source_stream
+        if source_stream == "current" or source_kind in {
+                "compute", "compute_current", "post_step"}:
+            with torch.cuda.device(dev_idx):
+                actual_source = torch.cuda.current_stream()
+        if actual_source is None:
+            _invalidate_stage_evidence(phase, "producer_stream_unresolved")
+            continue
+        source_dev = _stream_device_index(actual_source)
+        if source_dev is not None and source_dev != dev_idx:
+            _invalidate_stage_evidence(
+                phase, f"producer_device_{source_dev}_target_{dev_idx}")
+            continue
+        side = _get_stage_stream(dev_idx)
+        if side is None:
+            _invalidate_stage_evidence(phase, "side_stream_unavailable")
+            continue
+        additional_event = (
+            additional_wait_events.get(dev_idx)
+            if additional_wait_events is not None else None
+        )
+        if phase == "post_step" and additional_event is None:
+            _invalidate_stage_evidence(phase, "latest_producer_event_unresolved")
+            continue
+
+        records = []
+        try:
+            with torch.cuda.device(dev_idx):
+                producer_done = torch.cuda.Event()
+                producer_done.record(actual_source)
+                side.wait_event(producer_done)
+                if additional_event is not None:
+                    side.wait_event(additional_event)
+                with torch.cuda.stream(side):
+                    for name, tensor, role, sparse_extra in group:
+                        try:
+                            tensor.record_stream(side)
+                        except Exception as e:
+                            raise RuntimeError(
+                                f"record_stream failed for {name}: {e!r}"
+                            ) from e
+                        extra = dict(common)
+                        if sparse_extra:
+                            extra.update(sparse_extra)
+                        extra["observation_status"] = "scheduled"
+                        rec = _stash(
+                            name, "pipeline", tensor, role=role, extra=extra)
+                        if rec is not None:
+                            records.append(rec)
+                    observation_done = torch.cuda.Event()
+                    observation_done.record(side)
+            if not records:
+                _invalidate_stage_evidence(phase, "no_reducible_tensors")
+                continue
+            if token is not None and phase in {"copy", "sparse_start", "sparse_wait"}:
+                token.latest_producer_events[dev_idx] = producer_done
+            obs = {
+                "phase": phase,
+                "batch_id": token.batch_id if token is not None else _batch_id,
+                "tick": tick,
+                "device": dev_idx,
+                "token": token,
+                "source_event": producer_done,
+                "additional_source_event": additional_event,
+                "done_event": observation_done,
+                "records": records,
+                "closed": False,
+                "status": "scheduled",
+                "remaining_records": len(records),
+            }
+            for rec in records:
+                rec["_stage_observation"] = obs
+            _stage_observations.append(obs)
+            if token is not None:
+                token.open_observations.append(obs)
+            _stage_read_count += len(records)
+            scheduled += len(records)
+            _stage_phase_counts[phase]["scheduled"] += 1
+        except Exception as e:
+            if records:
+                record_ids = {id(rec) for rec in records}
+                _pending[:] = [
+                    item for item in _pending if id(item[0]) not in record_ids]
+            _invalidate_stage_evidence(phase, f"schedule_error:{type(e).__name__}")
+            _log(f"WARNING: timing-safe {phase} observation skipped: {e!r}")
+    return len(cpu_entries) + scheduled
+
+
 def _capture_forward_batch(inp) -> None:
     """From the root forward's positional args, find the batch being processed
     (batch N, the one forward actually reads — distinct from the copy(N+2)/
@@ -2121,10 +2674,29 @@ def _capture_forward_batch(inp) -> None:
         _batch_id = None   # don't let forward records inherit a stale stage batch_id
         return
     try:
+        token = _find_token_for_batch(batch)
+        observer = token.observer if token is not None else _active_pipeline_observer
+        if (_STAGE_READS and _pipeline_installed
+                and _active_pipeline_observer is not None and token is None):
+            _invalidate_stage_evidence("forward", "batch_token_unresolved")
+            _batch_id = None
+            return
+        _close_token_observations(token, "forward")
+        if token is not None:
+            token.forward_seen = True
+            token.observer.touch(token)
+            token.observer.current_forward_token = token
         # Forward-entry checkpoint: scan the 31 ef objects once here (sets _batch_id
         # to batch N and _phase='forward'). Makes 'forward' a stage like copy/sparse
         # without needing NANLOG_WATCH_NAMES or NANLOG_TRACK_EVERY_LAYER.
-        _checkpoint(batch, "forward")
+        _checkpoint(
+            batch,
+            "forward",
+            token=token,
+            observer=observer,
+            source_kind="compute_current",
+            relative_slot="forward_entry",
+        )
         if _TRACK_EVERY_LAYER:
             seen: set = set()
             targets: list = []
@@ -2135,49 +2707,66 @@ def _capture_forward_batch(inp) -> None:
         _batch_id = None   # don't let forward records inherit a stale stage batch_id
 
 
-def _checkpoint(batch, phase: str) -> None:
+def _checkpoint(
+    batch,
+    phase: str,
+    *,
+    token=None,
+    observer=None,
+    source_stream=None,
+    source_kind: str = "unknown",
+    relative_slot: str | None = None,
+    compute_batch_id=None,
+    additional_wait_events: dict | None = None,
+) -> int:
     """Set the phase + batch_id, discover the tracked flow objects on `batch`, and
     stash a re-scan of each. Sync-free (reductions join the per-step drain). Called
     from the wrapped pipeline stage methods (all phases) AND from the forward-entry
     capture (phase='forward' only, which is the sole caller when the stage wrappers
     are off in a pipeline-off follow). Never raises into the training run."""
     global _phase, _batch_id, _pipeline_checkpoints, _forward_checkpoints
-    global _stage_read_in_progress
     if batch is None:
-        return
+        return 0
     _phase = phase
     try:
-        _batch_id = _resolve_batch_id(batch, phase)
+        _batch_id = _resolve_batch_id(batch, phase, token=token)
     except Exception:
         _batch_id = None
-    seen: set = set()
-    n = 0
-    # With NANLOG_STAGE_READS, mark that the emits below are a stage read: _stash then
-    # routes each tensor's reduction onto the side stream (on the tensor's own device,
-    # with a one-way dependency + record_stream), so the read doesn't serialize the
-    # copy/compute overlap. Off -> the flag stays False and reads run inline (historical
-    # behavior). Doing it per-tensor in _stash (not around the whole loop here) keeps the
-    # stream pinned to each tensor's device and the record_stream call co-located.
-    prev_flag = _stage_read_in_progress
-    _stage_read_in_progress = _STAGE_READS
+    if token is not None:
+        tick_key = (phase, token.observer.tick)
+        if tick_key in token.phase_ticks and phase != "post_step":
+            return 0
+        token.phase_ticks.add(tick_key)
+        token.observer.touch(token)
+    if _STAGE_READS:
+        _stage_phase_counts[phase]["attempts"] += 1
     try:
-        found_named = False
-        for name in _TRACK_ATTR:
-            obj = None
-            if hasattr(batch, name):
-                obj = getattr(batch, name)
-            elif isinstance(batch, dict) and name in batch:
-                obj = batch[name]
-            if obj is not None:
-                found_named = True
-                n += _emit_tracked(name, obj, seen)
-        if not found_named:
-            n += _auto_discover(batch, seen)
+        entries = _tracked_entries(batch)
+        if _STAGE_READS:
+            if not entries:
+                _invalidate_stage_evidence(phase, "tracked_target_not_found")
+                return 0
+            n = _schedule_stage_entries(
+                entries,
+                phase,
+                token=token,
+                source_stream=source_stream,
+                source_kind=source_kind,
+                relative_slot=relative_slot,
+                compute_batch_id=compute_batch_id,
+                additional_wait_events=additional_wait_events,
+            )
+        else:
+            n = 0
+            for name, tensor, role, sparse_extra in entries:
+                _stash(
+                    name, "pipeline", tensor, role=role, extra=sparse_extra)
+                n += 1
     except Exception as e:
         _log(f"WARNING: pipeline checkpoint ({phase}) failed: {e!r}")
-        return
-    finally:
-        _stage_read_in_progress = prev_flag
+        if _STAGE_READS:
+            _invalidate_stage_evidence(phase, f"checkpoint_error:{type(e).__name__}")
+        return 0
     if n:
         # Split the counters by what ACTUALLY produced this checkpoint, so each is a
         # truthful signal:
@@ -2188,18 +2777,381 @@ def _checkpoint(batch, phase: str) -> None:
         #     never reports phantom stage checkpoints.
         #   forward_checkpoints -> the forward-entry capture (rides the root pre-hook,
         #     not the wrappers), in BOTH the pipeline-off follow and the wrapper-on case.
-        if _pipeline_installed and phase != "forward":
+        if _pipeline_installed and phase in {"copy", "sparse_start", "sparse_wait"}:
             _pipeline_checkpoints += 1
-        else:
+        elif phase == "forward":
             _forward_checkpoints += 1
+    return n
+
+
+def _has_named_track_attr(obj) -> bool:
+    if obj is None:
+        return False
+    if isinstance(obj, dict):
+        return any(name in obj for name in _TRACK_ATTR)
+    return any(hasattr(obj, name) for name in _TRACK_ATTR)
+
+
+def _looks_like_batch(obj) -> bool:
+    if _has_named_track_attr(obj) or torch.is_tensor(obj):
+        return True
+    if obj is None:
+        return False
+    # Futures/awaitables are copy results, not materialized batches.
+    if type(obj).__name__.lower().endswith("future") or hasattr(obj, "then"):
+        return False
+    try:
+        return bool(_tracked_entries(obj))
+    except Exception:
+        return False
+
+
+def _looks_like_context(obj) -> bool:
+    if obj is None or torch.is_tensor(obj) or _has_named_track_attr(obj):
+        return False
+    name = type(obj).__name__.lower()
+    return "context" in name or hasattr(obj, "index")
+
+
+def _bound_call(orig, self, args, kwargs) -> dict:
+    try:
+        return dict(inspect.signature(orig).bind(self, *args, **kwargs).arguments)
+    except Exception:
+        return {}
+
+
+def _first_bound(bound: dict, names):
+    for name in names:
+        if name in bound:
+            return bound[name]
+    return None
+
+
+def _latest_pipeline_pair(pipeline):
+    """Best-effort post-copy queue lookup for APIs returning None/in-place."""
+    batches = None
+    contexts = None
+    for name in ("batches", "_batches"):
+        value = getattr(pipeline, name, None)
+        if value is not None:
+            batches = value
+            break
+    for name in ("contexts", "_contexts"):
+        value = getattr(pipeline, name, None)
+        if value is not None:
+            contexts = value
+            break
+    try:
+        batch = batches[-1] if batches else None
+    except Exception:
+        batch = None
+    try:
+        context = contexts[-1] if contexts else None
+    except Exception:
+        context = None
+    return (batch if _looks_like_batch(batch) else None), context
+
+
+_NO_STAGE_RESULT = object()
+
+
+def _resolve_stage_objects(
+    pipeline, orig, phase, args, kwargs, result=_NO_STAGE_RESULT
+):
+    """Resolve batch/context without assuming one TorchRec signature."""
+    bound = _bound_call(orig, pipeline, args, kwargs)
+    batch = _first_bound(bound, ("batch", "train_batch", "input_batch"))
+    context = _first_bound(
+        bound, ("context", "ctx", "pipeline_context", "train_context"))
+
+    if phase == "copy":
+        explicit_pair = (
+            isinstance(result, tuple)
+            and len(result) == 2
+            and _looks_like_context(result[1])
+        )
+        if result is _NO_STAGE_RESULT:
+            return (batch if _looks_like_batch(batch) else None), context
+        if explicit_pair:
+            candidate, returned_context = result
+            context = context if context is not None else returned_context
+            batch = candidate if _looks_like_batch(candidate) else None
+        elif _looks_like_batch(result):
+            batch = result
+        # In-place copy commonly returns None; only that named API may consult queues.
+        # A normal copy returning None means exhaustion, and a Future is unresolved.
+        if (not _looks_like_batch(batch)
+                and result is None
+                and "inplace" in getattr(orig, "__name__", "")):
+            queued_batch, queued_context = _latest_pipeline_pair(pipeline)
+            batch = queued_batch
+            context = context if context is not None else queued_context
+    elif phase == "sparse_start":
+        if not _looks_like_batch(batch) and args and _looks_like_batch(args[0]):
+            batch = args[0]
+        if context is None and len(args) > 1:
+            context = args[1]
+        if context is None and result is not None and not _looks_like_batch(result):
+            context = result
+    elif phase == "sparse_wait":
+        # Modern TorchRec passes context only. Older variants may pass the batch.
+        if context is None and args:
+            if _has_named_track_attr(args[0]) or torch.is_tensor(args[0]):
+                batch = args[0]
+            else:
+                context = args[0]
+        if context is None:
+            for name in ("_context", "context"):
+                candidate = getattr(pipeline, name, None)
+                if candidate is not None:
+                    context = candidate
+                    break
+        if batch is None and _looks_like_batch(result):
+            batch = result
+    return (batch if _looks_like_batch(batch) else None), context
+
+
+def _copy_result_state(orig, result) -> str:
+    """Classify no-batch copy results without reusing a stale queue tail."""
+    candidate = result[0] if isinstance(result, tuple) and len(result) == 2 else result
+    if isinstance(result, tuple) and len(result) == 2 and candidate is None:
+        return "exhausted"
+    if type(candidate).__name__.lower().endswith("future") or hasattr(candidate, "then"):
+        return "future"
+    if "inplace" in getattr(orig, "__name__", ""):
+        return "inplace"
+    if candidate is None:
+        return "exhausted"
+    return "materialized"
+
+
+def _producer_stream(pipeline, phase: str):
+    """Strict known-stream adapter. Absence is audited; no arbitrary-name guessing."""
+    attr = "_memcpy_stream" if phase == "copy" else "_data_dist_stream"
+    if not hasattr(pipeline, attr):
+        return None, f"{attr}:missing"
+    stream = getattr(pipeline, attr)
+    # Some TorchRec variants use None to mean the current/default stream explicitly.
+    return ("current" if stream is None else stream), attr
+
+
+_patched_pipeline_classes: set = set()
+
+
+def _make_stage_wrapper(orig, method_name: str, phase: str):
+    @functools.wraps(orig)
+    def wrapper(self, *args, **kwargs):
+        observer = _get_pipeline_observer(self)
+        if observer.stage_depth[phase]:
+            observer.stage_depth[phase] += 1
+            try:
+                return orig(self, *args, **kwargs)
+            finally:
+                observer.stage_depth[phase] -= 1
+        observer.stage_depth[phase] += 1
+        pre_batch = pre_context = None
+        pre_token = None
+        try:
+            pre_batch, pre_context = _resolve_stage_objects(
+                self, orig, phase, args, kwargs)
+            pre_token = (
+                observer.token_for_context(pre_context)
+                or (
+                    observer.token_for_exact_batch(pre_batch)
+                    if phase == "copy"
+                    else observer.token_for_batch(pre_batch, create=False)
+                )
+            )
+            _close_token_observations(pre_token, phase)
+        except Exception as e:
+            _log(f"WARNING: {method_name} pre-observation bookkeeping failed: {e!r}")
+
+        # Preserve the original method's behavior and exception exactly. Decrement
+        # before observing so only the outermost subclass return emits a boundary.
+        try:
+            result = orig(self, *args, **kwargs)
+        finally:
+            observer.stage_depth[phase] -= 1
+
+        try:
+            if phase == "copy":
+                copy_state = _copy_result_state(orig, result)
+                if copy_state == "exhausted":
+                    _stage_phase_counts[phase]["exhausted"] += 1
+                    return result
+                if copy_state == "future":
+                    if isinstance(result, tuple) and len(result) == 2:
+                        observer.defer_context(result[1])
+                    _stage_phase_counts[phase]["attempts"] += 1
+                    _invalidate_stage_evidence(
+                        phase, "threaded_copy_future_unresolved")
+                    return result
+            batch, context = _resolve_stage_objects(
+                self, orig, phase, args, kwargs, result=result)
+            deferred_context = (
+                phase == "sparse_start" and observer.is_deferred_context(context)
+            )
+            exact_copy_token = (
+                observer.token_for_exact_batch(batch) if phase == "copy" else None
+            )
+            if exact_copy_token is not None and exact_copy_token.forward_seen:
+                observer.retire(exact_copy_token)
+                if pre_token is exact_copy_token:
+                    pre_token = None
+                exact_copy_token = None
+            token = (
+                observer.token_for_context(context)
+                or (
+                    exact_copy_token
+                    if phase == "copy"
+                    else observer.token_for_batch(batch, create=False)
+                )
+                or pre_token
+            )
+            if token is None and batch is not None:
+                create = (
+                    phase == "copy"
+                    or _pipeline_mint_phase == phase
+                    or deferred_context
+                )
+                token = observer.token_for_batch(batch, create=create)
+                if token is not None and deferred_context:
+                    observer.consume_deferred_context(context)
+            if token is not None and batch is None:
+                batch = token.batch()
+            observer.bind_context(token, context)
+            observer.touch(token)
+
+            if _STAGE_READS and token is None:
+                _stage_phase_counts[phase]["attempts"] += 1
+                _invalidate_stage_evidence(phase, "batch_or_context_unresolved")
+                return result
+
+            source, source_kind = _producer_stream(self, phase)
+            _checkpoint(
+                batch,
+                phase,
+                token=token,
+                observer=observer,
+                source_stream=source,
+                source_kind=source_kind,
+                relative_slot="h2d" if phase == "copy" else "sparse",
+            )
+        except Exception as e:
+            _log(f"WARNING: pipeline wrapper ({phase}) instrumentation failed: {e!r}")
+            if _STAGE_READS:
+                _invalidate_stage_evidence(
+                    phase, f"wrapper_error:{type(e).__name__}")
+        return result
+
+    wrapper._nanlog_v6_wrapped = True
+    return wrapper
+
+
+def _make_progress_wrapper(orig):
+    @functools.wraps(orig)
+    def wrapper(self, *args, **kwargs):
+        global _active_pipeline_observer, _post_step_executions
+        observer = _get_pipeline_observer(self)
+        if observer.progress_depth:
+            return orig(self, *args, **kwargs)
+        observer.progress_depth += 1
+        observer.begin_tick()
+        previous = _active_pipeline_observer
+        _active_pipeline_observer = observer
+        try:
+            result = orig(self, *args, **kwargs)
+            if _POST_STEP:
+                _post_step_executions += 1
+                compute_token = observer.current_forward_token
+                compute_batch_id = (
+                    compute_token.batch_id if compute_token is not None else None)
+                for token in observer.active_prefetch_tokens():
+                    batch = token.batch()
+                    if batch is None:
+                        _invalidate_stage_evidence(
+                            "post_step", "prefetch_batch_expired")
+                        continue
+                    _close_token_observations(token, "post_step")
+                    _checkpoint(
+                        batch,
+                        "post_step",
+                        token=token,
+                        observer=observer,
+                        source_stream="current",
+                        source_kind="post_step",
+                        relative_slot="post_step_prefetch",
+                        compute_batch_id=compute_batch_id,
+                        additional_wait_events=token.latest_producer_events,
+                    )
+            if observer.current_forward_token is not None:
+                observer.retire(observer.current_forward_token)
+            return result
+        finally:
+            _active_pipeline_observer = previous
+            observer.progress_depth -= 1
+
+    wrapper._nanlog_v6_wrapped = True
+    return wrapper
+
+
+def _make_reset_wrapper(orig):
+    @functools.wraps(orig)
+    def wrapper(self, *args, **kwargs):
+        result = orig(self, *args, **kwargs)
+        observer = _get_pipeline_observer(self)
+        for token in list(observer.tokens.values()):
+            observer.retire(token)
+        observer.touched_this_tick.clear()
+        observer.current_forward_token = None
+        observer.deferred_contexts.clear()
+        return result
+
+    wrapper._nanlog_v6_wrapped = True
+    return wrapper
+
+
+def _patch_pipeline_class(cls) -> list:
+    """Patch methods defined by `cls`; inherited base wrappers remain effective."""
+    global _pipeline_installed, _pipeline_mint_phase
+    key = id(cls)
+    if key in _patched_pipeline_classes:
+        return []
+    patched = []
+    specs = (
+        ("copy_batch_to_gpu", "copy"),
+        ("inplace_copy_batch_to_gpu", "copy"),
+        ("start_sparse_data_dist", "sparse_start"),
+        ("wait_sparse_data_dist", "sparse_wait"),
+    )
+    for method_name, phase in specs:
+        orig = cls.__dict__.get(method_name)
+        if orig is None or not callable(orig):
+            continue
+        if getattr(orig, "_nanlog_v6_wrapped", False):
+            continue
+        setattr(cls, method_name, _make_stage_wrapper(orig, method_name, phase))
+        patched.append(method_name)
+        _pipeline_installed = True
+        if _pipeline_mint_phase is None:
+            _pipeline_mint_phase = phase
+        elif phase == "copy":
+            _pipeline_mint_phase = "copy"
+    progress = cls.__dict__.get("progress")
+    if callable(progress) and not getattr(progress, "_nanlog_v6_wrapped", False):
+        setattr(cls, "progress", _make_progress_wrapper(progress))
+        patched.append("progress")
+    reset = cls.__dict__.get("reset")
+    if callable(reset) and not getattr(reset, "_nanlog_v6_wrapped", False):
+        setattr(cls, "reset", _make_reset_wrapper(reset))
+        patched.append("reset")
+    _patched_pipeline_classes.add(key)
+    return patched
 
 
 def _install_pipeline_hook() -> None:
-    """Monkeypatch TrainPipelineSparseDist stage methods so each fires a sync-free
-    checkpoint of the tracked flow objects with the right `phase`. Defensive: if the
-    installed torchrec exposes none of the known stage methods, warn once and leave
-    the layer hooks untouched. Same auto-attach philosophy as the DMP __init__ patch."""
-    global _pipeline_installed, _pipeline_warned, _pipeline_mint_phase
+    """Install per-instance-aware TorchRec observers without changing stage results."""
+    global _pipeline_installed, _pipeline_warned
     if not _PIPELINE or _pipeline_installed:
         return
     try:
@@ -2210,66 +3162,76 @@ def _install_pipeline_hook() -> None:
              f"imported ({e!r}); pipeline checkpoints inactive. Layer hooks unaffected.")
         return
 
-    # (method name on the pipeline, phase, index of the batch arg in *a, whether
-    # the batch is the RETURN value instead of an argument).
-    #   copy_batch_to_gpu(self, dataloader_iter) -> batch      (batch = return)
-    #   start_sparse_data_dist(self, batch, ...)               (batch = a[0])
-    #   wait_sparse_data_dist(self, batch, ...) OR (self)       (a[0] if present)
-    specs = [
-        ("copy_batch_to_gpu", "copy", True),
-        ("start_sparse_data_dist", "sparse_start", False),
-        ("wait_sparse_data_dist", "sparse_wait", False),
-    ]
-    patched = []
-    patched_phases = []   # in execution order; first entry = earliest stage that fires
-    for meth_name, phase, from_return in specs:
-        orig = getattr(_TP, meth_name, None)
-        if orig is None or not callable(orig):
-            continue
+    patched = _patch_pipeline_class(_TP)
 
-        def make(orig, phase, from_return):
-            def wrapper(self, *a, **k):
-                result = orig(self, *a, **k)
-                try:
-                    if from_return:
-                        # copy_batch_to_gpu returns the batch, or a (batch, context)
-                        # tuple across torchrec versions; unwrap the first element
-                        # only when the named track attr is not on the tuple itself.
-                        batch = result
-                        if (isinstance(batch, tuple) and batch
-                                and not any(hasattr(batch, nm) for nm in _TRACK_ATTR)):
-                            batch = batch[0]
-                    else:
-                        batch = a[0] if a else None
-                    _checkpoint(batch, phase)
-                except Exception as e:
-                    _log(f"WARNING: pipeline wrapper ({phase}) error: {e!r}")
-                return result
-            return wrapper
+    # Patch concrete subclass overrides after construction. Most subclasses call
+    # TrainPipelineSparseDist.__init__; inherited already-wrapped methods need no work.
+    orig_init = _TP.__init__
+    if not getattr(orig_init, "_nanlog_v6_init_wrapped", False):
+        @functools.wraps(orig_init)
+        def init_wrapper(self, *args, **kwargs):
+            result = orig_init(self, *args, **kwargs)
+            try:
+                _get_pipeline_observer(self)
+                if type(self) is not _TP:
+                    subclass_patched = _patch_pipeline_class(type(self))
+                    if subclass_patched:
+                        _log(f"pipeline tracking armed subclass {type(self).__name__}: "
+                             f"{subclass_patched}")
+            except Exception as e:
+                _log(f"WARNING: pipeline observer initialization failed: {e!r}")
+            return result
 
-        setattr(_TP, meth_name, make(orig, phase, from_return))
-        patched.append(meth_name)
-        patched_phases.append(phase)
+        init_wrapper._nanlog_v6_init_wrapped = True
+        _TP.__init__ = init_wrapper
+        patched.append("__init__")
 
-    if not patched:
+    if not _pipeline_installed:
         _pipeline_warned = True
-        _log(f"WARNING: NANLOG_PIPELINE=1 but TrainPipelineSparseDist has none of the "
-             f"known stage methods (copy_batch_to_gpu/start_sparse_data_dist/"
-             f"wait_sparse_data_dist); checkpoints inactive. torchrec API changed?")
+        _log("WARNING: TrainPipelineSparseDist exposes none of the supported stage "
+             "methods; timing-safe pipeline checkpoints inactive")
         return
-    _pipeline_installed = True
-    # The earliest patched stage (specs is in execution order) is the first to see
-    # each batch, so it is the batch_id-minting phase -- NOT a hardcoded "copy",
-    # which may not have been patched if torchrec dropped copy_batch_to_gpu.
-    _pipeline_mint_phase = patched_phases[0]
-    _log(f"pipeline tracking armed: patched {patched}; track_attr={list(_TRACK_ATTR)}; "
-         f"track_max={_TRACK_MAX}; sparse={_SPARSE}; sparse_heavy={_SPARSE_HEAVY}; "
-         f"track_every_layer={_TRACK_EVERY_LAYER}; track_layer_stride={_TRACK_LAYER_STRIDE}")
+    _log(f"pipeline tracking armed: patched {patched}; mint_phase={_pipeline_mint_phase}; "
+         f"track_attr={list(_TRACK_ATTR)}; post_step={_POST_STEP}")
 
 
 def _write_summary() -> None:
     """Write the end-of-run summary (first bad layer + totals)."""
-    _drain_step()  # flush the final step
+    while _pending:
+        if not _drain_step(force=True):
+            break
+    phase_counts = {
+        phase: dict(counts) for phase, counts in _stage_phase_counts.items()
+    }
+    required_phases = (
+        ["copy", "sparse_start", "sparse_wait", "forward"]
+        if _STAGE_READS else []
+    )
+    missing_phases = [
+        phase for phase in required_phases
+        if _stage_phase_counts[phase].get("scheduled", 0) == 0
+        or _stage_phase_counts[phase].get("trusted", 0) == 0
+    ]
+    post_step_observations = (
+        _stage_phase_counts["post_step"].get("scheduled", 0)
+        + _stage_phase_counts["post_step"].get("inline_cpu", 0)
+    )
+    post_step_prerequisites_valid = (
+        not _POST_STEP_REQUESTED or _POST_STEP
+    )
+    post_step_valid = (
+        not _POST_STEP_REQUESTED
+        or (
+            _POST_STEP
+            and _stage_phase_counts["post_step"].get("scheduled", 0) > 0
+            and _stage_phase_counts["post_step"].get("trusted", 0) > 0
+        )
+    )
+    evidence_valid = (
+        _stage_evidence_valid
+        and not missing_phases
+        and post_step_valid
+    )
     summary = {
         "rank": _RANK, "host": _HOST, "pid": _PID,
         "steps_seen": _step,
@@ -2301,21 +3263,40 @@ def _write_summary() -> None:
         "pipeline_mint_phase": _pipeline_mint_phase,
         "pipeline_checkpoints": _pipeline_checkpoints,
         "forward_checkpoints": _forward_checkpoints,
-        # Stage-reads auditability: whether the timing-safe side-stream stage read was
-        # requested, whether the side stream was actually created (falls back to inline +
-        # warns if not), and how many stage reads ran on it. A run that requested it but
-        # shows stage_reads_active=false read INLINE and may have hidden the race -- the
-        # whole reason this is surfaced.
+        # V6 auditability: timing-safe CUDA reads skip rather than silently running
+        # inline when a producer/context/device/side stream cannot be resolved.
         "stage_reads": _STAGE_READS,
         "stage_reads_active": _stage_reads_active,
         "stage_read_count": _stage_read_count,
+        "stage_stream_devices": sorted(_stage_streams),
+        "max_stage_deferral_steps": _MAX_STAGE_DEFERRAL_STEPS,
+        "stage_evidence_valid": evidence_valid,
+        "stage_required_phases": required_phases,
+        "stage_missing_phases": missing_phases,
+        "stage_phase_counts": phase_counts,
+        "stage_skip_reasons": dict(_stage_skip_reasons),
+        "post_step_requested": _POST_STEP_REQUESTED,
+        "post_step": _POST_STEP,
+        "post_step_executions": _post_step_executions,
+        "post_step_observations": post_step_observations,
+        "post_step_active": post_step_observations > 0,
+        "post_step_prerequisites_valid": post_step_prerequisites_valid,
+        "post_step_valid": post_step_valid,
+        "pipeline_observer_count": len(_pipeline_observers),
+        "pipeline_ticks": max(
+            (observer.tick for _ref, observer in _pipeline_observers.values()),
+            default=0,
+        ),
         "follow_fwd": _FOLLOW_FWD,
         # Keyed on what ACTUALLY ran (_pipeline_installed), not what was requested
         # (_PIPELINE): a degraded run (NANLOG_PIPELINE=1 but torchrec absent -> wrappers
         # no-op) has no stage brackets, so it must NOT claim stage_wrappers*. It still
         # captures at forward entry via the root pre-hook, so it reads as forward_blocks.
         "follow_mode": (
-            "stage_wrappers_side_read" if (_pipeline_installed and _stage_reads_active)
+            "stage_wrappers_side_read_invalid"
+            if (_pipeline_installed and _STAGE_READS and not evidence_valid)
+            else "stage_wrappers_side_read"
+            if (_pipeline_installed and _stage_reads_active)
             else "stage_wrappers" if _pipeline_installed
             else "forward_blocks" if _FOLLOW_FWD
             else "off"
@@ -2343,7 +3324,9 @@ def _write_summary() -> None:
         "jsonl": str(_JSONL),
         "notes": (
             "first_bad is the first layer/step that went NaN/Inf/huge/oob, or null if "
-            "none was seen. matmul_calls_so_far counts watched layer tensors (not "
+            "none was seen. A stage phase is where corruption was first OBSERVED, not "
+            "proof that a kernel logically belonging to that phase wrote it. "
+            "matmul_calls_so_far counts watched layer tensors (not "
             "raw GEMMs); it can be lined up with a separate GEMM-output tool's "
             "'call #N' if one is also running."
         ),
