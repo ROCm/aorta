@@ -1872,8 +1872,16 @@ def _close_token_observations(token, next_phase: str) -> None:
             continue
         try:
             complete = bool(obs["done_event"].query())
-        except Exception:
-            complete = False
+        except Exception as e:
+            _invalidate_stage_evidence(
+                obs.get("phase", "unknown"),
+                f"completion_event_query_error:{type(e).__name__}",
+            )
+            obs["closed_by_phase"] = next_phase
+            for rec in obs.get("records", ()):
+                rec["closed_by_phase"] = next_phase
+            _finalize_observation(obs, "poll_error")
+            continue
         obs["closed_by_phase"] = next_phase
         for rec in obs.get("records", ()):
             rec["closed_by_phase"] = next_phase
@@ -2203,7 +2211,11 @@ class _PipelineObserver:
         self.stage_depth = Counter()
 
     def begin_tick(self):
+        global _pipeline_tick_high_watermark
         self.tick += 1
+        _pipeline_tick_high_watermark = max(
+            _pipeline_tick_high_watermark, self.tick
+        )
         self.touched_this_tick.clear()
         self.current_forward_token = None
         self._prune()
@@ -2328,15 +2340,19 @@ class _PipelineObserver:
 
 
 _pipeline_observers: dict = {}
+_pipeline_observers_created = 0
+_pipeline_tick_high_watermark = 0
 _active_pipeline_observer = None
 
 
 def _get_pipeline_observer(pipeline):
+    global _pipeline_observers_created
     key = id(pipeline)
     entry = _pipeline_observers.get(key)
     if entry is not None and entry[0].matches(pipeline):
         return entry[1]
     observer = _PipelineObserver(pipeline)
+    _pipeline_observers_created += 1
     _pipeline_observers[key] = (_ObjectRef(pipeline), observer)
     try:
         weakref.finalize(pipeline, _pipeline_observers.pop, key, None)
@@ -3064,26 +3080,29 @@ def _make_progress_wrapper(orig):
             if _POST_STEP:
                 _post_step_executions += 1
                 compute_token = observer.current_forward_token
-                compute_batch_id = (
-                    compute_token.batch_id if compute_token is not None else None)
-                for token in observer.active_prefetch_tokens():
-                    batch = token.batch()
-                    if batch is None:
-                        _invalidate_stage_evidence(
-                            "post_step", "prefetch_batch_expired")
-                        continue
-                    _close_token_observations(token, "post_step")
-                    _checkpoint(
-                        batch,
-                        "post_step",
-                        token=token,
-                        observer=observer,
-                        source_stream="current",
-                        source_kind="post_step",
-                        relative_slot="post_step_prefetch",
-                        compute_batch_id=compute_batch_id,
-                        additional_wait_events=token.latest_producer_events,
-                    )
+                if compute_token is None:
+                    _invalidate_stage_evidence(
+                        "post_step", "compute_batch_unresolved")
+                else:
+                    compute_batch_id = compute_token.batch_id
+                    for token in observer.active_prefetch_tokens():
+                        batch = token.batch()
+                        if batch is None:
+                            _invalidate_stage_evidence(
+                                "post_step", "prefetch_batch_expired")
+                            continue
+                        _close_token_observations(token, "post_step")
+                        _checkpoint(
+                            batch,
+                            "post_step",
+                            token=token,
+                            observer=observer,
+                            source_stream="current",
+                            source_kind="post_step",
+                            relative_slot="post_step_prefetch",
+                            compute_batch_id=compute_batch_id,
+                            additional_wait_events=token.latest_producer_events,
+                        )
             if observer.current_forward_token is not None:
                 observer.retire(observer.current_forward_token)
             return result
@@ -3098,8 +3117,10 @@ def _make_progress_wrapper(orig):
 def _make_reset_wrapper(orig):
     @functools.wraps(orig)
     def wrapper(self, *args, **kwargs):
-        result = orig(self, *args, **kwargs)
         observer = _get_pipeline_observer(self)
+        for token in list(observer.tokens.values()):
+            _close_token_observations(token, "reset")
+        result = orig(self, *args, **kwargs)
         for token in list(observer.tokens.values()):
             observer.retire(token)
         observer.touched_this_tick.clear()
@@ -3282,11 +3303,10 @@ def _write_summary() -> None:
         "post_step_active": post_step_observations > 0,
         "post_step_prerequisites_valid": post_step_prerequisites_valid,
         "post_step_valid": post_step_valid,
-        "pipeline_observer_count": len(_pipeline_observers),
-        "pipeline_ticks": max(
-            (observer.tick for _ref, observer in _pipeline_observers.values()),
-            default=0,
-        ),
+        # Cumulative counters survive weak-registry cleanup when the pipeline object is
+        # destroyed before the atexit summary runs.
+        "pipeline_observer_count": _pipeline_observers_created,
+        "pipeline_ticks": _pipeline_tick_high_watermark,
         "follow_fwd": _FOLLOW_FWD,
         # Keyed on what ACTUALLY ran (_pipeline_installed), not what was requested
         # (_PIPELINE): a degraded run (NANLOG_PIPELINE=1 but torchrec absent -> wrappers

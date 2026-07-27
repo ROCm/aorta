@@ -13,6 +13,7 @@ Skipped cleanly when torch is unavailable.
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import os
@@ -315,7 +316,7 @@ def test_v6_pipeline_wrappers_resolve_context_and_keep_batch_external(
     assert smy["stage_phase_counts"]["sparse_wait"]["inline_cpu"] == 1
 
 
-def test_v6_optional_post_step_scans_prefetch_token(
+def test_v6_post_step_without_compute_token_fails_closed(
     monkeypatch, tmp_path_factory
 ):
     nl = _load_logger(
@@ -364,14 +365,14 @@ def test_v6_optional_post_step_scans_prefetch_token(
     nl._write_summary()
 
     post = [r for r in _records(nl) if r["phase"] == "post_step"]
-    assert post
-    assert all(r["relative_slot"] == "post_step_prefetch" for r in post)
-    assert all(r["pipeline_tick"] == 1 for r in post)
+    assert not post
     smy = _summary(nl)
     assert smy["post_step"] is True
-    assert smy["post_step_active"] is True
+    assert smy["post_step_active"] is False
     assert smy["post_step_executions"] == 1
-    assert smy["stage_phase_counts"]["post_step"]["inline_cpu"] == 1
+    assert smy["post_step_valid"] is False
+    assert smy["stage_evidence_valid"] is False
+    assert smy["stage_skip_reasons"]["post_step:compute_batch_unresolved"] == 1
 
 
 def test_v6_post_step_links_prefetch_buffer_to_compute_batch(
@@ -1063,10 +1064,51 @@ def test_v6_pipeline_reset_retires_unforwarded_tokens(
     # object() is not recognized as a context, so create the token directly to isolate
     # reset lifecycle behavior.
     observer = nl._get_pipeline_observer(pipeline)
-    observer.token_for_batch(Batch(), create=True)
+    token = observer.token_for_batch(Batch(), create=True)
+
+    class IncompleteEvent:
+        def query(self):
+            return False
+
+    record = {"observation_status": "scheduled"}
+    observation = {
+        "phase": "copy",
+        "done_event": IncompleteEvent(),
+        "records": [record],
+        "closed": False,
+    }
+    token.open_observations.append(observation)
     assert observer.tokens
     pipeline.reset()
     assert not observer.tokens and not observer.by_batch
+    assert record["observation_status"] == "overlapped_next_stage"
+    assert record["closed_by_phase"] == "reset"
+
+
+def test_v6_summary_keeps_tick_counters_after_pipeline_gc(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+
+    class Pipeline:
+        pass
+
+    pipeline = Pipeline()
+    key = id(pipeline)
+    observer = nl._get_pipeline_observer(pipeline)
+    for _ in range(20):
+        observer.begin_tick()
+    assert nl._pipeline_observers_created == 1
+    assert nl._pipeline_tick_high_watermark == 20
+
+    del pipeline
+    gc.collect()
+    assert key not in nl._pipeline_observers
+
+    nl._write_summary()
+    smy = _summary(nl)
+    assert smy["pipeline_observer_count"] == 1
+    assert smy["pipeline_ticks"] == 20
 
 
 def test_stage_reads_still_capture_all_stages(monkeypatch, tmp_path_factory):
@@ -1456,6 +1498,40 @@ def test_v6_marks_read_overlapping_next_stage_without_blocking_producer(
     nl._close_token_observations(token, "sparse_start")
     assert record["observation_status"] == "overlapped_next_stage"
     assert record["closed_by_phase"] == "sparse_start"
+
+
+def test_v6_event_query_error_invalidates_evidence(
+    monkeypatch, tmp_path_factory
+):
+    nl = _load_logger({}, monkeypatch, tmp_path_factory)
+
+    class Pipeline:
+        pass
+
+    class Batch:
+        pass
+
+    class BrokenEvent:
+        def query(self):
+            raise RuntimeError("event query failed")
+
+    observer = nl._get_pipeline_observer(Pipeline())
+    token = observer.token_for_batch(Batch(), create=True)
+    record = {"observation_status": "scheduled"}
+    token.open_observations.append({
+        "phase": "copy",
+        "done_event": BrokenEvent(),
+        "records": [record],
+        "closed": False,
+    })
+
+    nl._close_token_observations(token, "sparse_start")
+    assert record["observation_status"] == "poll_error"
+    assert record["closed_by_phase"] == "sparse_start"
+    assert nl._stage_evidence_valid is False
+    assert nl._stage_skip_reasons[
+        "copy:completion_event_query_error:RuntimeError"
+    ] == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
