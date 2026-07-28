@@ -17,6 +17,33 @@
 # ROCm build exactly, and noble's libstdc++ is forward-compatible with the
 # jammy-built instrumented libraries.
 #
+# hipBLASLt ASAN BUILD (AMD-confirmed by Sahil, 2026-07-16)
+# ---------------------------------------------------------
+# The only published ASAN hipBLASLt lives at
+#   https://repo.radeon.com/rocm/apt/7.0.2/pool/main/h/hipblaslt-asan/
+# and is exactly ONE deb: `hipblaslt-asan_1.0.0.70002-56~22.04_amd64.deb`
+# (version 1.0.0, jammy). There is NO 24.04 build "on any of the builds"
+# (Sahil), which is why we extract the jammy .so. `apt-get download
+# hipblaslt-asan` from the 7.0.2/jammy pool resolves to exactly this deb.
+#
+# TWO CAVEATS THIS BUILD DOES NOT SOLVE (both verified on an MI350 box):
+#  1. SONAME SHADOW: the asan hipBLASLt is `libhipblaslt.so.1 ->
+#     libhipblaslt.so.1.0.70002` with SONAME `libhipblaslt.so.1` -- the SAME
+#     soname as the base's custom `libhipblaslt.so.1 -> .so.1.4.70002`. With
+#     /opt/rocm/lib/asan searched first, the loader resolves the GEMM library
+#     to the STOCK 1.0.0 asan build, shadowing the custom 1.4.0 that actually
+#     produces the residual NaN. So this deb instruments a *different* library
+#     than the one under investigation (see INCLUDE_HIPBLASLT_ASAN below).
+#  2. HIP-INIT ABORT: engaging the ASAN runtime at all (LD_PRELOAD of
+#     libclang_rt.asan, required for any instrumented lib) crashes at HIP init
+#     -- OOM in the asan HIP runtime, or a null-deref SEGV in the stock HIP
+#     runtime -- because the base PyTorch/HIP stack is NOT ASAN-instrumented.
+#     Sahil (2026-07-16): "PyTorch was not instrumented with ASAN on ROCm
+#     7.0.2. We did that recently for Fremont but is not fully productionized."
+#     So a real GPU run under ASAN stays BLOCKED until a device-ASAN PyTorch
+#     (the Fremont build, or a 7.0.2 rebuild of it) is available. The asan
+#     hipBLASLt here cannot be exercised on-GPU with this base.
+#
 # BUILD (host networking is required -- the default docker bridge has no
 # outbound network on this host):
 #   docker build --network=host -f Dockerfile.rocm70_2-nan-asan \
@@ -38,6 +65,14 @@ ARG ASAN_APT_DIST=jammy
 # bound image size; add them here if a run needs them.
 ARG ASAN_PACKAGES="comgr-asan hsa-rocr-asan hsa-amd-aqlprofile-asan hip-runtime-amd-asan rocblas-asan hipblas-asan hipblaslt-asan rocsolver-asan hipsolver-asan rocrand-asan hiprand-asan rccl-asan roctracer-asan rocprofiler-asan"
 
+# Include the mentioned stock hipBLASLt ASAN build (caveat #1 above: it
+# SHADOWS the custom 1.4.0). Default 1 = include it (per the request to wire
+# in the mentioned build). Set to 0 to drop `hipblaslt-asan` from the overlay
+# so the base's custom `libhipblaslt.so.1.4.70002` stays the resolved GEMM
+# library -- do this once an ASAN build of the *custom 1.4.0* exists, or when
+# you want the NaN to reproduce against the real library.
+ARG INCLUDE_HIPBLASLT_ASAN=1
+
 USER root
 
 RUN set -eux; \
@@ -51,7 +86,13 @@ RUN set -eux; \
     echo "deb [arch=amd64 trusted=yes] ${ASAN_APT_URL} ${ASAN_APT_DIST} main" \
       > /etc/apt/sources.list.d/rocm-asan.list; \
     apt-get update -o Acquire::AllowInsecureRepositories=true; \
-    apt-get download -o Acquire::AllowInsecureRepositories=true --allow-unauthenticated ${ASAN_PACKAGES}; \
+    pkgs="${ASAN_PACKAGES}"; \
+    if [ "${INCLUDE_HIPBLASLT_ASAN}" != "1" ]; then \
+      echo "INCLUDE_HIPBLASLT_ASAN=${INCLUDE_HIPBLASLT_ASAN}: dropping hipblaslt-asan (custom 1.4.0 stays authoritative)"; \
+      pkgs="$(echo "$pkgs" | sed 's/hipblaslt-asan//')"; \
+    fi; \
+    apt-get download -o Acquire::AllowInsecureRepositories=true --allow-unauthenticated ${pkgs}; \
+    echo "resolved hipBLASLt asan deb: $(ls hipblaslt-asan_*.deb 2>/dev/null || echo '<excluded>')"; \
     for d in *.deb; do echo "unpacking $d"; dpkg-deb -x "$d" /; done; \
     # Restore the base apt configuration exactly as it was.
     rm -f /etc/apt/sources.list.d/rocm-asan.list; rmdir /etc/apt/sources.list.d 2>/dev/null || rm -rf /etc/apt/sources.list.d; \
@@ -59,7 +100,7 @@ RUN set -eux; \
     rm -f /etc/apt/sources.list; \
     mv /etc/apt/sources.list.aorta-bak /etc/apt/sources.list 2>/dev/null || true; \
     rm -rf /tmp/asan-debs /var/lib/apt/lists/*; \
-    ls /opt/rocm/lib/asan/libhipblaslt.so.* >/dev/null; \
+    if [ "${INCLUDE_HIPBLASLT_ASAN}" = "1" ]; then ls /opt/rocm/lib/asan/libhipblaslt.so.* >/dev/null; fi; \
     ls /opt/rocm/lib/asan/librocblas.so.* >/dev/null; \
     echo "asan libs installed: $(ls /opt/rocm/lib/asan | wc -l) files"; \
     ls /opt/rocm/lib/asan | head
