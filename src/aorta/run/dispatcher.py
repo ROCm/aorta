@@ -12,22 +12,79 @@ import contextlib
 import copy
 import json
 import logging
+import math
 import os
+import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from aorta._env_rules import is_valid_env_name, value_has_nul
 from aorta.instrumentation.environment import collect_env
 from aorta.registry import Environment, get_environment, get_mitigation
+from aorta.run._process import TrialWorkerError, launch_trial_worker
 from aorta.run.collectors import KNOWN_RECIPES
-from aorta.run.discovery import get_workload_class
+from aorta.run.discovery import get_workload_class, get_workload_policy
 from aorta.run.results import TrialResult, trial_verdict
-from aorta.run.validation import validate_launch_mode
+from aorta.run.validation import (
+    TrialIsolation,
+    resolve_trial_isolation,
+    resolve_trial_isolation_policy,
+    validate_launch_mode,
+)
 from aorta.workloads import Workload, WorkloadResult
 
 logger = logging.getLogger(__name__)
+
+_LAUNCHER_IDENTITY_KEYS = frozenset({
+    "RANK",
+    "WORLD_SIZE",
+    "LOCAL_RANK",
+    "LOCAL_WORLD_SIZE",
+    "GROUP_RANK",
+    "GROUP_WORLD_SIZE",
+    "ROLE_NAME",
+    "ROLE_RANK",
+    "ROLE_WORLD_SIZE",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+    "AORTA_TRIAL_MASTER_PORT_BASE",
+})
+_ISOLATION_RUN_GENERATION = 0
+
+
+def _next_isolation_generation() -> int:
+    global _ISOLATION_RUN_GENERATION
+    generation = _ISOLATION_RUN_GENERATION
+    _ISOLATION_RUN_GENERATION += 1
+    return generation
+
+
+def _isolated_fallback_port(
+    isolation_generation: int,
+    trial_idx: int,
+) -> str:
+    raw = os.environ.get("AORTA_TRIAL_MASTER_PORT_BASE")
+    if raw is None:
+        raise RuntimeError(
+            "distributed process isolation without a torchrun agent store "
+            "requires AORTA_TRIAL_MASTER_PORT_BASE to reserve a unique port "
+            "range for this launcher job"
+        )
+    try:
+        base = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"AORTA_TRIAL_MASTER_PORT_BASE must be an integer, got {raw!r}"
+        ) from exc
+    port = base + (isolation_generation * 97 + trial_idx) % 1000
+    if port < 1024 or port > 65535:
+        raise RuntimeError(
+            f"derived isolated worker port {port} is outside 1024..65535"
+        )
+    return str(port)
 
 
 def _validate_env_mapping(label: str, env: object) -> None:
@@ -69,6 +126,32 @@ def _validate_env_mapping(label: str, env: object) -> None:
                 f"Invalid {label} keys [{key!r}]: each key must match "
                 "[A-Za-z_][A-Za-z0-9_]* (POSIX env-var name shape)."
             )
+
+
+def _validate_json_native(value: Any, path: str = "config_overrides") -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path} contains a non-finite float")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_native(item, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"{path} keys must be strings for process isolation, "
+                    f"got {type(key).__name__}"
+                )
+            _validate_json_native(item, f"{path}.{key}")
+        return
+    raise ValueError(
+        f"{path} must contain only JSON-native values; "
+        f"got {type(value).__name__}"
+    )
 
 
 @dataclass(frozen=True)
@@ -136,6 +219,9 @@ class RunRequest:
             ``mitigations``).
         mitigations: Tuple of mitigation names to apply.
         extra_env: Additional environment variables (override mitigations).
+        trial_isolation: ``auto`` follows workload metadata; ``process`` uses
+            a fresh interpreter per trial; ``in_process`` keeps the legacy
+            lifecycle when permitted by the workload.
         steps: Number of steps per trial (workload-specific).
         config_overrides: Additional workload configuration.
         results_dir: Directory to write per-trial JSON files.
@@ -276,6 +362,11 @@ class RunRequest:
     buck_target: str | None = field(default=None, kw_only=True)
     mitigations: tuple[str, ...] = ("none",)
     extra_env: dict[str, str] = field(default_factory=dict)
+    trial_isolation: Literal["auto", "in_process", "process"] = field(
+        default="auto",
+        kw_only=True,
+    )
+    cell_name: str | None = field(default=None, kw_only=True)
     steps: int | None = None
     config_overrides: dict[str, Any] = field(default_factory=dict)
     results_dir: Path = field(default_factory=lambda: Path("results"))
@@ -431,11 +522,35 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             "'_aorta_' prefix (platform-supplied; not a user override)."
         )
 
-    # 5. Discover workload
-    workload_cls = get_workload_class(request.workload)
+    # 5. Resolve isolation from entry-point metadata without importing workload
+    # code. This is load-bearing for process mode: the controlled overlay must
+    # be in the worker environment before plugin/native-library imports.
+    policy = get_workload_policy(request.workload)
+    effective_trial_isolation: TrialIsolation = resolve_trial_isolation_policy(
+        request.workload,
+        policy,
+        request.trial_isolation,
+    )
 
-    # 6. Validate launch mode BEFORE setup()
-    validate_launch_mode(workload_cls)
+    # 6. In-process execution still discovers and validates the class here.
+    # Process execution defers all implementation imports to the configured
+    # worker, which repeats launch/class-metadata validation after startup.
+    workload_cls: type[Workload] | None = None
+    if effective_trial_isolation == "in_process":
+        workload_cls = get_workload_class(request.workload)
+        validate_launch_mode(workload_cls)
+        class_isolation = resolve_trial_isolation(
+            workload_cls,
+            request.trial_isolation,
+        )
+        if class_isolation != effective_trial_isolation:
+            raise ValueError(
+                f"Workload {request.workload!r} isolation policy resolves to "
+                f"{effective_trial_isolation!r}, but its class metadata resolves "
+                f"to {class_isolation!r}; register matching metadata in the "
+                "'aorta.workload_policies' entry-point group"
+            )
+    request = replace(request, trial_isolation=effective_trial_isolation)
 
     # 7. Resolve environment.  Forward ``sidecar_files`` so any
     #    operator-supplied JSON sidecars (B3.1) are merged with
@@ -492,6 +607,32 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
         mitigation_env.update(get_mitigation(name, extra_files=sidecar_files))
     _validate_env_mapping("mitigation environment", mitigation_env)
 
+    effective_overlay: dict[str, str] = {}
+    effective_overlay.update(env_descriptor.env)
+    effective_overlay.update(mitigation_env)
+    effective_overlay.update(request.extra_env)
+    if effective_trial_isolation == "process":
+        unsafe_identity = sorted(
+            key
+            for key in effective_overlay
+            if (
+                (key.upper() if os.name == "nt" else key)
+                in _LAUNCHER_IDENTITY_KEYS
+                or (key.upper() if os.name == "nt" else key).startswith(
+                    "TORCHELASTIC_"
+                )
+            )
+        )
+        if unsafe_identity:
+            raise ValueError(
+                "process-isolated trials cannot override launcher identity "
+                f"variables {unsafe_identity}; set them in torchrun/srun instead"
+            )
+        if request.probe_extras is not None or request.subprocess_argv is not None:
+            raise ValueError(
+                "process trial isolation is not supported for probe/subprocess workloads"
+            )
+
     # 9. Determine if we should write (rank 0 only for distributed).
     #    Only rank 0 needs the output directory; creating it on every
     #    rank causes shared-FS contention and weakens the rank-0-only
@@ -510,6 +651,11 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     results_dir = request.results_dir / request.workload
     if should_write:
         results_dir.mkdir(parents=True, exist_ok=True)
+    isolation_generation = (
+        _next_isolation_generation()
+        if effective_trial_isolation == "process"
+        else None
+    )
 
     # 10. Run trials
     # Gate progress logs on rank 0 -- the same predicate that gates JSON
@@ -535,15 +681,33 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
         if should_write:
             logger.info("trial %d/%d: starting", trial_idx + 1, request.trials)
         trial_t0 = time.perf_counter()
-        result = _run_single_trial(
-            trial_idx=trial_idx,
-            workload_cls=workload_cls,
-            request=request,
-            env_descriptor=env_descriptor,
-            mitigation_env=mitigation_env,
-            results_dir=results_dir,
-            should_write=should_write,
-        )
+        if effective_trial_isolation == "process":
+            assert isolation_generation is not None
+            try:
+                result = _run_single_trial_in_process_worker(
+                    trial_idx=trial_idx,
+                    request=request,
+                    env_descriptor=env_descriptor,
+                    mitigation_env=mitigation_env,
+                    effective_overlay=effective_overlay,
+                    isolation_generation=isolation_generation,
+                    results_dir=results_dir,
+                    should_write=should_write,
+                )
+            except TrialWorkerError as exc:
+                exc.completed_results = tuple(results)
+                raise
+        else:
+            assert workload_cls is not None
+            result = _run_single_trial(
+                trial_idx=trial_idx,
+                workload_cls=workload_cls,
+                request=request,
+                env_descriptor=env_descriptor,
+                mitigation_env=mitigation_env,
+                results_dir=results_dir,
+                should_write=should_write,
+            )
         if should_write:
             # ``TrialResult.result`` is the WorkloadResult-as-dict; .get() so
             # workloads that omit ``passed`` still classify cleanly.
@@ -578,6 +742,101 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
                 break
 
     return results
+
+
+def _run_single_trial_in_process_worker(
+    *,
+    trial_idx: int,
+    request: RunRequest,
+    env_descriptor: Environment,
+    mitigation_env: dict[str, str],
+    effective_overlay: dict[str, str],
+    isolation_generation: int,
+    results_dir: Path,
+    should_write: bool,
+) -> TrialResult:
+    trial_id = (
+        f"{request.workload}_d{request.dataset_index}_"
+        f"m{request.mitigation_index}_t{trial_idx}"
+    )
+    _validate_json_native(request.config_overrides)
+    run_request = {
+        "workload": request.workload,
+        "environment": request.environment,
+        "image": request.image,
+        "buck_target": request.buck_target,
+        "mitigations": list(request.mitigations),
+        "extra_env": dict(request.extra_env),
+        "trial_isolation": "process",
+        "cell_name": request.cell_name,
+        "steps": request.steps,
+        "config_overrides": copy.deepcopy(request.config_overrides),
+        "results_dir": str(request.results_dir),
+        "collect": list(request.collect),
+        "collect_options": copy.deepcopy(request.collect_options),
+        "sidecar_files": [str(path) for path in request.sidecar_files],
+        "dataset_index": request.dataset_index,
+        "mitigation_index": request.mitigation_index,
+        "save_logs": request.save_logs,
+        "env_probe": copy.deepcopy(request.env_probe),
+    }
+    # Fail before spawning with an actionable error rather than letting the
+    # worker fail while serializing its request.
+    try:
+        json.dumps(run_request)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "process-isolated workload config must be JSON-compatible"
+        ) from exc
+
+    child_env = dict(os.environ)
+    child_env.update(effective_overlay)
+    try:
+        world_size = int(child_env.get("WORLD_SIZE", "1"))
+    except ValueError as exc:
+        raise ValueError(
+            f"WORLD_SIZE must be an integer, got {child_env.get('WORLD_SIZE')!r}"
+        ) from exc
+    if (
+        world_size > 1
+        and child_env.get("TORCHELASTIC_USE_AGENT_STORE", "").lower()
+        != "true"
+    ):
+        child_env["MASTER_PORT"] = _isolated_fallback_port(
+            isolation_generation,
+            trial_idx,
+        )
+    worker_started = time.perf_counter()
+    result_dict = launch_trial_worker(
+        {
+            "trial_idx": trial_idx,
+            "run_request": run_request,
+            "env_descriptor": asdict(env_descriptor),
+            "mitigation_env": dict(mitigation_env),
+            "results_dir": str(results_dir),
+            "should_write": should_write,
+            "store_prefix": (
+                f"aorta/{os.environ.get('TORCHELASTIC_RUN_ID', 'static')}/"
+                f"{os.environ.get('TORCHELASTIC_RESTART_COUNT', '0')}/"
+                f"{isolation_generation}/"
+                f"{request.cell_name or 'direct'}/{trial_id}"
+            ),
+        },
+        child_env=child_env,
+        trial_id=trial_id,
+    )
+    result = replace(
+        TrialResult.from_dict(result_dict),
+        wall_clock_sec=time.perf_counter() - worker_started,
+    )
+    if should_write:
+        _write_trial_result(
+            result=result,
+            request=request,
+            trial_idx=trial_idx,
+            results_dir=results_dir,
+        )
+    return result
 
 
 def _trial_is_event(result: TrialResult, event_verdict: str) -> bool:
@@ -628,6 +887,11 @@ def _run_single_trial(
     mitigation_env: dict[str, str],
     results_dir: Path,
     should_write: bool,
+    persist_result: bool = True,
+    result_transform: (
+        Callable[[WorkloadResult, str], tuple[WorkloadResult, str]] | None
+    ) = None,
+    skip_cleanup_on_error: bool = False,
 ) -> TrialResult:
     """Execute a single trial.
 
@@ -684,6 +948,7 @@ def _run_single_trial(
     # in ``config_overrides`` so this assignment can't silently clobber
     # a caller-supplied value.
     config["_aorta_environment"] = asdict(env_descriptor)
+    config["_aorta_trial_isolation"] = request.trial_isolation
 
     # In-container env-probe contract (isolated docker/venv envs only).
     # The triage runner supplies ``{"src": ..., "out": ...}`` so a
@@ -819,8 +1084,13 @@ def _run_single_trial(
 
     # Instantiate and run workload
     exit_status: str = "ok"
-    workload_result: WorkloadResult
+    workload_result = WorkloadResult(
+        passed=False,
+        failure_count=1,
+        failure_details=[{"error": "trial interrupted before workload result"}],
+    )
     workload: Workload | None = None
+    transform_error: BaseException | None = None
 
     # ``save_logs`` opens per-trial log files and redirects
     # ``sys.stdout`` / ``sys.stderr`` for the duration of
@@ -951,11 +1221,24 @@ def _run_single_trial(
             )
 
         finally:
+            if result_transform is not None and sys.exc_info()[0] is None:
+                try:
+                    workload_result, exit_status = result_transform(
+                        workload_result,
+                        exit_status,
+                    )
+                except BaseException as exc:
+                    transform_error = exc
             # Always attempt cleanup if the workload was constructed, even
             # when setup()/run() raised -- otherwise we leak GPU memory,
             # process groups, file handles, etc.  Cleanup failures are not
             # allowed to mask the original exception/exit_status.
-            if workload is not None:
+            cleanup_is_unsafe = skip_cleanup_on_error and (
+                transform_error is not None
+                or exit_status
+                in {"workload_setup_failed", "infrastructure_failed"}
+            )
+            if workload is not None and not cleanup_is_unsafe:
                 try:
                     workload.cleanup()
                 except Exception as cleanup_exc:
@@ -989,6 +1272,8 @@ def _run_single_trial(
                 # is already correct.
                 if os.environ.get(key) != value:
                     os.environ[key] = value
+            if transform_error is not None:
+                raise transform_error
 
     wall_clock = time.perf_counter() - start_time
 
@@ -1018,33 +1303,31 @@ def _run_single_trial(
     # cell coordinates (``d`` / ``m`` / ``t``) are visible on disk
     # without parsing the JSON -- B2's matrix collator can slice by
     # axis from the filename alone.
-    if should_write:
-        output_path = results_dir / (
-            f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}.json"
+    if should_write and persist_result:
+        _write_trial_result(
+            result=trial_result,
+            request=request,
+            trial_idx=trial_idx,
+            results_dir=results_dir,
         )
-        serialized = trial_result.to_dict()
-        # ``_aorta_probe_extras.custom_patterns`` is a tuple of
-        # :class:`aorta.probe.classifier.tier5_custom.CompiledPattern`
-        # objects carrying a compiled ``re.Pattern`` and a
-        # ``CodeType`` -- neither is JSON-serializable, so leaving
-        # the tuple untouched would crash this ``json.dump`` for
-        # every probe-mode trial that configured custom patterns
-        # (#197 round-7 review). Sanitize down to a JSON-safe
-        # summary list (detector id, regex source, on_match,
-        # required_for_pass, condition source) so the on-disk
-        # ``TrialResult.config`` still tells operators which
-        # patterns the workload ran against; the compiled forms
-        # were only ever needed by ``SubprocessWorkload.run()``,
-        # which has already consumed them by the time we get here.
-        _sanitize_probe_extras_for_json(serialized.get("config"))
-        # ``encoding="utf-8"`` matches the stdout/stderr opens at L601-602
-        # and the rest of the codebase's text-artifact writes -- avoids
-        # platform-default-encoding surprises on Windows / containers
-        # without a configured locale. Per Copilot's PR #197 review.
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(serialized, f, indent=2)
 
     return trial_result
+
+
+def _write_trial_result(
+    *,
+    result: TrialResult,
+    request: RunRequest,
+    trial_idx: int,
+    results_dir: Path,
+) -> None:
+    output_path = results_dir / (
+        f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}.json"
+    )
+    serialized = result.to_dict()
+    _sanitize_probe_extras_for_json(serialized.get("config"))
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(serialized, f, indent=2)
 
 
 def _sanitize_probe_extras_for_json(config: Any) -> None:

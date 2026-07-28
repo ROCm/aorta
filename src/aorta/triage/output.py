@@ -1073,6 +1073,10 @@ def write_matrix_json(
         "schema_version": 1,
         "workload": recipe.workload,
         "ticket": recipe.ticket,
+        "trial_isolation": recipe.trial_isolation,
+        "trial_isolation_requested": (
+            recipe.trial_isolation_requested or recipe.trial_isolation
+        ),
         # The per-cell trial budget. With a ``stop_after`` rule the budget is
         # the cap (``max_trials``) -- which cells may stop short of -- not the
         # fixed ``recipe.trials`` (often ``1`` on probe recipes), so report the
@@ -1394,6 +1398,8 @@ def write_resolved_recipe(
         "trials": recipe.trials,
         "steps": recipe.steps,
     }
+    if recipe.trial_isolation != "auto":
+        doc["trial_isolation"] = recipe.trial_isolation
     if recipe.ticket is not None:
         doc["ticket"] = recipe.ticket
     if recipe.workload_config:

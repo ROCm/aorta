@@ -95,6 +95,13 @@ from aorta.run.dispatcher import RunRequest, run_trials
     "--extra-env", default="", help="Comma-separated KEY=VAL pairs (applied after mitigations)."
 )
 @click.option(
+    "--trial-isolation",
+    type=click.Choice(["auto", "in_process", "process"]),
+    default="auto",
+    show_default=True,
+    help="Trial execution policy; auto follows workload metadata.",
+)
+@click.option(
     "-v",
     "--verbose",
     count=True,
@@ -118,6 +125,7 @@ def run(
     results_dir: Path,
     collect: str,
     extra_env: str,
+    trial_isolation: str,
     verbose: int,
 ) -> None:
     """Run a workload across N trials with optional mitigations.
@@ -137,6 +145,7 @@ def run(
             buck_target=buck_target,
             mitigations=parse_mitigations(mitigations),
             extra_env=parse_extra_env(extra_env),
+            trial_isolation=trial_isolation,  # type: ignore[arg-type]
             steps=steps,
             results_dir=results_dir,
             collect=parse_csv(collect),

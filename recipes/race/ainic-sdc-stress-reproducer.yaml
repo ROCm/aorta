@@ -60,16 +60,18 @@
 # Usage
 # -----
 #   # Dry-run validation (no GPU required):
-#   aorta sweep run --recipe recipes/ainic-sdc-stress-reproducer.yaml --dry-run
+#   aorta sweep run --recipe recipes/race/ainic-sdc-stress-reproducer.yaml --dry-run
 #
 #   # Full matrix (10-40 MI355X nodes, all AINIC interconnect):
-#   aorta sweep run --recipe recipes/ainic-sdc-stress-reproducer.yaml
+#   aorta sweep run --recipe recipes/race/ainic-sdc-stress-reproducer.yaml
 #
 # Required environment
 # --------------------
 #   - MI355X cluster, all cross-node traffic over AINIC (Pollara) RoCEv2
 #   - NCCL_PROTO=Simple  (Simple uses GDRDMA; LL suppresses the bug)
 #   - NCCL_DEBUG=INFO    (TRACE suppresses the bug via printf overhead)
+#   - Race's required process isolation applies each cell env before Python
+#     starts; verify the RCCL log shows `GDR 1` on Simple-protocol cells
 #   - 10-40 nodes; fewer nodes reduce the iter-0 simultaneous DMA fan-out count
 #     but all other stress axes remain active
 #   - All ranks on same cudaDev (1 rank per host, same device index)
@@ -80,7 +82,7 @@
 #   Root cause analysis: path b -- GPU HBM write -> CPU proxy signal -> AINIC PCIe read
 #   2K GPU overnight confirmation: NCCL_GDR_FLUSH_DISABLE=0 cleans corruption
 #   Production training topology: ~6-7 streams/step, all comms on high-priority streams
-#   Companion recipe: recipes/ainic-gdr-flush-sdc.yaml (baseline, fix, controls)
+#   Companion recipe: recipes/race/ainic-gdr-flush-sdc.yaml (baseline, fix, controls)
 #   Aorta race workload: src/aorta/race/modes/fsdp.py
 #   Doc: sdc_writeup/executive_summary.md
 
@@ -176,6 +178,9 @@ cells:
       GPU_MAX_HW_QUEUES: "4"
       NCCL_NCHANNELS_PER_NET_PEER: "4"
       NCCL_MAX_NCHANNELS: "8"
+      NCCL_NET_GDR_LEVEL: "SYS"
+      NCCL_DMABUF_ENABLE: "1"
+      NCCL_NET_GDR_READ: "1"
 
   # ------------------------------------------------------------------
   # Cell 2: GDR flush stressed -- primary fix under maximum pressure
@@ -197,6 +202,9 @@ cells:
       GPU_MAX_HW_QUEUES: "4"
       NCCL_NCHANNELS_PER_NET_PEER: "4"
       NCCL_MAX_NCHANNELS: "8"
+      NCCL_NET_GDR_LEVEL: "SYS"
+      NCCL_DMABUF_ENABLE: "1"
+      NCCL_NET_GDR_READ: "1"
 
   # ------------------------------------------------------------------
   # Cell 3: GPU_MAX_HW_QUEUES=2 workaround -- implicit serialization
@@ -220,6 +228,9 @@ cells:
       RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING: "0"
       NCCL_NCHANNELS_PER_NET_PEER: "4"
       NCCL_MAX_NCHANNELS: "8"
+      NCCL_NET_GDR_LEVEL: "SYS"
+      NCCL_DMABUF_ENABLE: "1"
+      NCCL_NET_GDR_READ: "1"
 
   # ------------------------------------------------------------------
   # Cell 4: Same-stream definitive test
@@ -249,6 +260,9 @@ cells:
       NCCL_DEBUG: "INFO"
       RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING: "0"
       GPU_MAX_HW_QUEUES: "4"
+      NCCL_NET_GDR_LEVEL: "SYS"
+      NCCL_DMABUF_ENABLE: "1"
+      NCCL_NET_GDR_READ: "1"
 
   # ------------------------------------------------------------------
   # Cell 5: LL protocol control -- GDRDMA send path disabled

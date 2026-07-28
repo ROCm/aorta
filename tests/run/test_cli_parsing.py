@@ -173,6 +173,26 @@ class TestCliParsing:
         assert result.exit_code != 0
         assert "Invalid extra-env format" in result.output
 
+    def test_trial_isolation_option_is_exposed(self):
+        runner = CliRunner()
+        result = runner.invoke(run, ["--help"])
+        assert result.exit_code == 0, result.output
+        assert "--trial-isolation" in result.output
+
+    def test_trial_isolation_rejects_unknown_mode(self):
+        runner = CliRunner()
+        result = runner.invoke(
+            run,
+            [
+                "--workload",
+                "race",
+                "--trial-isolation",
+                "thread",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "Invalid value for '--trial-isolation'" in result.output
+
     def test_extra_env_empty_key_rejected(self):
         """``=VALUE`` (empty key) is rejected with a clear error."""
         runner = CliRunner()

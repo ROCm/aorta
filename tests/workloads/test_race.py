@@ -73,6 +73,30 @@ def test_race_config_steps_key_not_warned(caplog):
     assert not hasattr(cfg, "steps")  # not a ReproducerConfig field
 
 
+def test_startup_gpu_queue_env_disables_late_config_overwrite(monkeypatch):
+    monkeypatch.setenv("GPU_MAX_HW_QUEUES", "2")
+    cfg = RaceWorkload({})._race_config_from_dict({"gpu_max_hw_queues": 4})
+    assert cfg.gpu_max_hw_queues is None
+
+
+def test_race_isolated_startup_env_supplies_gpu_queue_default():
+    assert RaceWorkload.isolated_startup_env({}) == {"GPU_MAX_HW_QUEUES": "4"}
+    assert RaceWorkload.isolated_startup_env({"gpu_max_hw_queues": 2}) == {
+        "GPU_MAX_HW_QUEUES": "2"
+    }
+
+
+def test_process_isolated_cleanup_leaves_sync_to_worker(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr("aorta.workloads.race.dist.is_initialized", lambda: True)
+    monkeypatch.setattr(
+        "aorta.workloads.race.dist.barrier",
+        lambda: calls.append("barrier"),
+    )
+    RaceWorkload({"_aorta_trial_isolation": "process"}).cleanup()
+    assert calls == []
+
+
 def test_race_config_from_dict_rejects_bad_mode():
     wl = RaceWorkload({})
     with pytest.raises(ValueError, match="mode must be one of"):

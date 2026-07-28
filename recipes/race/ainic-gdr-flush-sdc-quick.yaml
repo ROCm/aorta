@@ -19,17 +19,15 @@
 #                      create. Time is bought by cutting cells + trials instead.)
 #   real_backward KEPT: full L2/HBM fidelity preserved.
 #
-# PREREQUISITE -- GPUDirect RDMA must be ON. Set these in the LAUNCHER env
-# (export before Python starts), NOT in extra_env: NCCL reads them at library
-# load time (import torch), before the runner applies extra_env, so extra_env is
-# too late for them.
-#   export NCCL_NET_GDR_LEVEL=SYS NCCL_DMABUF_ENABLE=1 NCCL_NET_GDR_READ=1
-# Verify after the run: grep "GDR [01]" <log>  -> want "GDR 1" on the IB cells.
+# Race requires fresh-process trial isolation, so each cell's extra_env is
+# installed before Python imports torch or initializes HIP/RCCL. Verify after
+# the run: grep "GDR [01]" <log> -> want "GDR 1" on the Simple-protocol cells.
 #
 # Run (one rank per GPU; same command on every rank under your launcher):
 #   torchrun --nnodes=<N> --nproc-per-node=<G> --rdzv-backend=c10d \
 #     --rdzv-endpoint=<HEAD>:<PORT> \
-#     $(command -v aorta) triage run --recipe recipes/ainic-gdr-flush-sdc-quick.yaml
+#     $(command -v aorta) sweep run \
+#       --recipe recipes/race/ainic-gdr-flush-sdc-quick.yaml
 # See recipes/README-running-recipes.md for the full launch contract.
 # Verdict (want baseline FAIL, gdr-flush PASS, ll-control PASS):
 #   cat triage_results/AINIC-SDC-001/race/<timestamp>/matrix.md

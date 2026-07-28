@@ -37,6 +37,7 @@ ticket: EXAMPLE-001                  # optional; drives output dir grouping
 workload: fsdp                       # required; resolved via aorta.workloads entry-point group
 trials: 8                            # required; per-cell trial count
 steps: 5000                          # required; per-cell step count
+trial_isolation: auto                # optional: auto | in_process | process
 save_logs: false                     # optional; when true, dispatcher writes per-trial stdout/stderr files
 extra_env:                           # optional; applies to every cell
   GLOBAL_DEBUG_FLAG: "1"             # values must be strings
@@ -121,6 +122,33 @@ cells:
   mitigation for one-off experiments without polluting the registry. Recorded
   in `matrix.json` for audit. All environment mappings require string keys and
   values; quote YAML numbers and booleans.
+
+### Trial isolation and environment timing
+
+`trial_isolation` is a top-level triage field:
+
+- `auto` (default) follows workload metadata.
+- `process` starts a fresh Python interpreter for every trial and installs the
+  controlled environment before imports.
+- `in_process` keeps the legacy lifecycle and is rejected when the workload
+  requires isolation.
+
+Use normal `extra_env` in process-isolated recipes even for import-time native
+settings. For example, `race` requires process isolation, so its AINIC cells can
+vary `NCCL_NET_GDR_LEVEL`, `NCCL_GDR_FLUSH_DISABLE`, `NCCL_PROTO`, and
+`GPU_MAX_HW_QUEUES` safely. In an in-process workload, values cached during
+module/shared-library import still need the launcher environment or an explicit
+`trial_isolation: process` recipe.
+
+Launcher identity (`RANK`, `WORLD_SIZE`, `LOCAL_RANK`, `MASTER_ADDR`,
+`MASTER_PORT`) is never a cell axis and is rejected from a process-isolated
+controlled overlay.
+
+`Environment.env`, mitigations, and recipe/cell `extra_env` keep their existing
+precedence; process isolation changes when the resolved overlay becomes visible,
+not how it is merged. For distributed details, see
+[`README-running-recipes.md`](README-running-recipes.md).
+
 - **`save_logs`** -- optional `bool`, default `false`. When `true`, the
   dispatcher captures the workload's in-process `stdout` / `stderr`
   writes into `trial_d{d}_m{m}_t{t}.{stdout,stderr}.log` files alongside
@@ -286,10 +314,12 @@ torchrun --nnodes=N --nproc_per_node=8 --rdzv-backend=c10d \
 ```
 
 Each rank runs the full `sweep run`; the ranks find each other in
-`dist.init_process_group()`. Cells run in-process per rank (sequentially),
-and results are written by **rank 0 only** (the dispatcher gates writes on
-`RANK`), so multi-rank launches don't clobber each other. This is the same
-launch model as the `llm_determinism` workload.
+`dist.init_process_group()`. The long-lived matrix parent on every rank starts
+a fresh worker for each Race trial; matching workers initialize the trial
+process group, synchronize their result, tear it down, and exit before the next
+trial starts. Results are written by **rank 0 only**, so multi-rank launches do
+not clobber each other. `llm_determinism` uses the same worker model only when
+its recipe requests `trial_isolation: process`.
 
 > [!IMPORTANT]
 > Unknown `workload_config` keys are **dropped with a `WARNING`**, not

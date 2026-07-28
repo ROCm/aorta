@@ -23,10 +23,10 @@
 # Usage
 # -----
 #   # Dry-run validation:
-#   aorta sweep run --recipe recipes/ainic-gdr-flush-sdc.yaml --dry-run
+#   aorta sweep run --recipe recipes/race/ainic-gdr-flush-sdc.yaml --dry-run
 #
-#   # Full matrix (requires 10-12 MI355X nodes, all AINIC interconnect):
-#   aorta sweep run --recipe recipes/ainic-gdr-flush-sdc.yaml
+#   # Full matrix (under torchrun/srun on 10-12 MI355X AINIC nodes):
+#   aorta sweep run --recipe recipes/race/ainic-gdr-flush-sdc.yaml
 #
 # Required environment
 # --------------------
@@ -34,6 +34,8 @@
 #   - NCCL_PROTO=Simple  (Simple protocol uses GDRDMA; LL suppresses the bug)
 #   - NCCL_DEBUG=INFO    (Simple/INFO keeps the proxy hot path fast; NCCL_DEBUG=TRACE
 #     suppresses the bug by widening the timing window via printf overhead)
+#   - Race's required process isolation applies each cell's env before Python
+#     starts; verify the RCCL log shows `GDR 1` on Simple-protocol cells
 #   - 10-12 nodes minimum; 22 nodes matches the confirmed reproducer scale
 #   - All ranks on same cudaDev (1 rank per host, same device index)
 #
@@ -134,10 +136,6 @@ cells:
       NCCL_PROTO: "Simple"
       NCCL_DEBUG: "INFO"
       RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING: "0"
-      # Force GPUDirect RDMA on -- the bug lives in the GDR path. Without these
-      # the banner shows "GDR 0" (NIC goes via host bounce, race cannot occur)
-      # and a clean result is meaningless. SYS = allow GDR regardless of topo
-      # distance; DMABUF_ENABLE=1 because the banner showed dmabuf disabled.
       NCCL_NET_GDR_LEVEL: "SYS"
       NCCL_DMABUF_ENABLE: "1"
       NCCL_NET_GDR_READ: "1"

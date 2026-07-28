@@ -734,6 +734,39 @@ def test_recipe_level_extra_env_defaults_empty(tmp_path):
     assert r.extra_env == {}
 
 
+def test_trial_isolation_defaults_auto(tmp_path):
+    r = load_recipe(_write_yaml(tmp_path, _MINIMAL_YAML))
+    assert r.trial_isolation == "auto"
+
+
+@pytest.mark.parametrize("mode", ["auto", "in_process", "process"])
+def test_trial_isolation_parsed(tmp_path, mode):
+    text = _MINIMAL_YAML + f"trial_isolation: {mode}\n"
+    r = load_recipe(_write_yaml(tmp_path, text))
+    assert r.trial_isolation == mode
+
+
+@pytest.mark.parametrize("bad", ["thread", 1, True, []])
+def test_trial_isolation_invalid_value_rejected(tmp_path, bad):
+    import yaml
+
+    data = yaml.safe_load(_MINIMAL_YAML)
+    data["trial_isolation"] = bad
+    path = tmp_path / "recipe.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(RecipeSchemaError, match="trial_isolation"):
+        load_recipe(path)
+
+
+def test_trial_isolation_is_top_level_only(tmp_path):
+    text = _MINIMAL_YAML.replace(
+        "    environment: local\n",
+        "    environment: local\n    trial_isolation: process\n",
+    )
+    with pytest.raises(RecipeSchemaError, match="unknown keys.*trial_isolation"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
 def test_recipe_level_extra_env_non_string_value_rejected(tmp_path):
     """A non-string value in the top-level ``extra_env`` raises ``RecipeSchemaError``.
 
@@ -852,6 +885,13 @@ def test_recipe_extra_env_is_keyword_only():
     import dataclasses
 
     fld = next(f for f in dataclasses.fields(Recipe) if f.name == "extra_env")
+    assert fld.kw_only is True
+
+
+def test_recipe_trial_isolation_is_keyword_only():
+    import dataclasses
+
+    fld = next(f for f in dataclasses.fields(Recipe) if f.name == "trial_isolation")
     assert fld.kw_only is True
 
 

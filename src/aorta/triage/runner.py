@@ -41,7 +41,7 @@ import re
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -51,6 +51,13 @@ from aorta.instrumentation.environment import EnvSnapshot, collect_env
 from aorta.registry import get_environment, get_mitigation
 from aorta.registry.errors import RegistryError
 from aorta.run import RunRequest, TrialResult, run_trials
+from aorta.run._process import TrialWorkerError
+from aorta.run.discovery import UnknownWorkloadError, get_workload_policy
+from aorta.run.dispatcher import _validate_json_native
+from aorta.run.validation import (
+    IN_PROCESS_ONLY_POLICY,
+    resolve_trial_isolation_policy,
+)
 from aorta.triage.confound import (
     classify_all,
     is_did_not_run_cell,
@@ -1132,6 +1139,8 @@ def _run_one_cell(
         environment=cell.environment,
         mitigations=tuple(cell.mitigations),
         extra_env=merged_extra_env,
+        trial_isolation=recipe.trial_isolation,
+        cell_name=cell.name,
         steps=cell.effective_steps(recipe.steps),
         config_overrides=merged_workload_config,
         results_dir=cell_dir,
@@ -1147,7 +1156,38 @@ def _run_one_cell(
 
     try:
         trials = run_trials(request)
+    except TrialWorkerError as exc:
+        try:
+            distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+        except ValueError:
+            distributed = False
+        if distributed:
+            raise
+        log.warning(
+            "cell %r isolated worker failed with %s: %s",
+            cell.name,
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        completed_trials = list(exc.completed_results)
+        return (
+            completed_trials,
+            f"{type(exc).__name__}: {exc}",
+            resolved_env_vars,
+            _collect_trial_paths(cell_dir),
+            False,
+        )
     except Exception as exc:
+        try:
+            distributed_process_trial = (
+                request.trial_isolation == "process"
+                and int(os.environ.get("WORLD_SIZE", "1")) > 1
+            )
+        except ValueError:
+            distributed_process_trial = False
+        if distributed_process_trial:
+            raise
         log.warning("cell %r failed with %s: %s", cell.name, type(exc).__name__, exc, exc_info=True)
         return [], f"{type(exc).__name__}: {exc}", resolved_env_vars, [], False
 
@@ -1179,6 +1219,37 @@ def _preflight_validate(recipe: Recipe) -> None:
     """
     _check_env_slug_collisions(recipe.cells)
     resolve_baseline(recipe.cells, recipe.confound.baseline_cell)
+
+
+def _resolve_recipe_trial_isolation(recipe: Recipe) -> Recipe:
+    requested = recipe.trial_isolation
+    try:
+        policy = get_workload_policy(recipe.workload)
+    except UnknownWorkloadError:
+        # Preserve the historical library/dry-run seam for synthetic workloads
+        # used with a patched run_trials implementation. Explicit process mode
+        # still requires registered opt-in metadata; real execution validates
+        # unknown auto workloads again in the dispatcher.
+        if requested != "auto":
+            raise
+        policy = IN_PROCESS_ONLY_POLICY
+    effective = resolve_trial_isolation_policy(
+        recipe.workload,
+        policy,
+        requested,
+    )
+    if effective == "process":
+        _validate_json_native(recipe.workload_config, "recipe.workload_config")
+        for cell in recipe.cells:
+            _validate_json_native(
+                cell.workload_config,
+                f"cell {cell.name!r}.workload_config",
+            )
+    return replace(
+        recipe,
+        trial_isolation=effective,
+        trial_isolation_requested=requested,
+    )
 
 
 def _print_dry_run(
@@ -1214,6 +1285,7 @@ def _print_dry_run(
         return
 
     click.echo(f"Dry run: {recipe.workload} / ticket={recipe.ticket or '(none)'}")
+    click.echo(f"Trial isolation: {recipe.trial_isolation}")
     if recipe.workload_config:
         click.echo(f"Recipe workload_config: {recipe.workload_config}")
     click.echo(f"Cells ({len(recipe.cells)}):")
@@ -1307,6 +1379,7 @@ def run_recipe(
     # real run would reject. Otherwise CI / pre-submit checks happily pass on
     # recipes that fail the moment they actually run.
     _preflight_validate(recipe)
+    recipe = _resolve_recipe_trial_isolation(recipe)
 
     if dry_run:
         _print_dry_run(recipe, subprocess_argv=subprocess_argv)

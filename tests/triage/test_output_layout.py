@@ -1139,6 +1139,27 @@ def test_resolved_recipe_round_trips_extra_env(
     assert reloaded.cells[1].extra_env == {"CELL_KEY": "cell_value"}
 
 
+def test_resolved_recipe_records_effective_trial_isolation(
+    tmp_path, patched_env, patched_run_trials
+):
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, load_recipe
+
+    recipe = Recipe(
+        schema_version=1,
+        workload="race",
+        trials=1,
+        steps=1,
+        cells=(Cell(name="race", mitigations=("none",), environment="local"),),
+        confound=ConfoundCfg(baseline_cell="race"),
+    )
+    run_dir = runner.run_recipe(recipe, output_dir=tmp_path)
+    reloaded = load_recipe(run_dir / "recipe.resolved.yaml")
+    matrix = json.loads((run_dir / "matrix.json").read_text(encoding="utf-8"))
+    assert reloaded.trial_isolation == "process"
+    assert matrix["trial_isolation"] == "process"
+    assert matrix["trial_isolation_requested"] == "auto"
+
+
 # ---- Config column (diffs-only workload_config) --------------------------
 #
 # The column surfaces per-cell workload_config keys whose value varies
@@ -1289,6 +1310,27 @@ def test_cell_exception_preserves_matrix(tmp_path, patched_env, monkeypatch):
     assert len(ok_cells) == 1 and ok_cells[0]["name"] == "none-local"
     # The happy cell still ran and classified:
     assert ok_cells[0]["confound"] == "(baseline)"
+
+
+def test_single_rank_worker_failure_preserves_matrix(
+    tmp_path, patched_env, monkeypatch
+):
+    from aorta.run._process import TrialWorkerError
+
+    def worker_failure(request):
+        if request.mitigations == ("tf32_off",):
+            error = TrialWorkerError("worker bootstrap failed")
+            error.completed_results = (_fake_trial(),)
+            raise error
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setattr(runner, "run_trials", worker_failure)
+    run_dir = runner.run_recipe(_simple_recipe(), output_dir=tmp_path)
+    doc = json.loads((run_dir / "matrix.json").read_text(encoding="utf-8"))
+    failed = next(cell for cell in doc["cells"] if cell["name"] == "tf32_off-local")
+    assert "TrialWorkerError" in failed["error"]
+    assert failed["trials"] == 1
 
 
 def test_baseline_cell_error_produces_top_of_file_warning(tmp_path, patched_env, monkeypatch):

@@ -69,6 +69,17 @@ class RaceWorkload(Workload):
     name: ClassVar[str] = "race"
     launch_mode: ClassVar[Literal["single_process", "distributed"]] = "distributed"
     min_world_size: ClassVar[int] = 2
+    trial_isolation_default: ClassVar[Literal["in_process", "process"]] = "process"
+    trial_isolation_required: ClassVar[bool] = True
+    trial_isolation_supported: ClassVar[frozenset[str]] = frozenset({"process"})
+    distributed_result_scope: ClassVar[Literal["global", "rank_local"]] = "rank_local"
+
+    @classmethod
+    def isolated_startup_env(cls, config: dict[str, Any]) -> dict[str, str]:
+        value = config.get("gpu_max_hw_queues", 4)
+        if value is None:
+            return {}
+        return {"GPU_MAX_HW_QUEUES": str(value)}
 
     def _race_config_from_dict(self, d: dict[str, Any]) -> ReproducerConfig:
         known = set(ReproducerConfig.__dataclass_fields__)
@@ -77,6 +88,10 @@ class RaceWorkload(Workload):
                 continue
             log.warning("race: ignoring unknown workload_config key %r", key)
         cfg = ReproducerConfig(**{k: v for k, v in d.items() if k in known})
+        if "GPU_MAX_HW_QUEUES" in os.environ:
+            # A process-startup overlay is already authoritative. Disable the
+            # reproducer's legacy late env write, which occurs after HIP init.
+            cfg.gpu_max_hw_queues = None
         if cfg.mode not in _VALID_MODES:
             raise ValueError(f"mode must be one of {sorted(_VALID_MODES)}, got {cfg.mode!r}")
         if cfg.dtype not in _VALID_DTYPES:
@@ -102,6 +117,15 @@ class RaceWorkload(Workload):
                 f"environment: {_IMPORT_ERROR}. Install torch, or run this "
                 "workload inside the container/venv that provides it."
             ) from _IMPORT_ERROR
+        self._cfg = self._race_config_from_dict(self.config)
+        if self._cfg.gpu_max_hw_queues is not None:
+            # Legacy direct callers may rely on the config default. Apply it
+            # before the first CUDA/HIP query, then disable the reproducer's
+            # later rewrite. Process-startup extra_env remains authoritative.
+            os.environ["GPU_MAX_HW_QUEUES"] = str(
+                self._cfg.gpu_max_hw_queues
+            )
+            self._cfg.gpu_max_hw_queues = None
         if not dist.is_initialized():
             backend = "nccl" if torch.cuda.is_available() else "gloo"
             dist.init_process_group(backend=backend)
@@ -114,7 +138,6 @@ class RaceWorkload(Workload):
                 int(os.environ.get("LOCAL_RANK", self._rank % max(1, torch.cuda.device_count())))
             )
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._cfg = self._race_config_from_dict(self.config)
 
     def run(self) -> WorkloadResult:
         rep = create_reproducer(self._cfg, self._rank, self._world)
@@ -145,6 +168,12 @@ class RaceWorkload(Workload):
         )
 
     def cleanup(self) -> None:
-        if dist.is_initialized():
+        # Isolated workers synchronize and destroy the default group after
+        # collecting rank-local outcomes. Avoid a workload-level barrier on
+        # partial setup failures, where peers may be in different collectives.
+        if (
+            dist.is_initialized()
+            and self.config.get("_aorta_trial_isolation") != "process"
+        ):
             dist.barrier()
         # Process group teardown left to the launcher.

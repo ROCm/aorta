@@ -60,6 +60,15 @@ race = "aorta.workloads.race:RaceWorkload"
 gpu_smoke = "aorta.workloads.gpu_smoke:GpuSmokeWorkload"
 training = "aorta.workloads.training:TrainingWorkload"
 
+# Side-effect-free isolation metadata. The dispatcher reads these entry-point
+# values without importing workload modules, so ``--dry-run`` and ``auto``
+# policy resolution cannot trigger torch/native-library imports. Third-party
+# process-capable workloads register the same group alongside aorta.workloads.
+[project.entry-points."aorta.workload_policies"]
+_subprocess = "aorta.run.validation:IN_PROCESS_REQUIRED_POLICY"
+llm_determinism = "aorta.run.validation:PROCESS_OPTIONAL_POLICY"
+race = "aorta.run.validation:PROCESS_REQUIRED_POLICY"
+
 [project.optional-dependencies]
 # For analysis/visualization scripts
 analysis = [

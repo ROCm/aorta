@@ -10,6 +10,7 @@ from aorta.workloads.llm_determinism import (
     LlmDeterminismConfig,
     _BlockHookManager,
     _compare_block_lists,
+    _reported_passed,
 )
 
 
@@ -22,6 +23,31 @@ def test_config_from_dict_picks_known_keys() -> None:
 def test_config_validation_rejects_garbage(bad: dict) -> None:
     with pytest.raises(ValueError):
         LlmDeterminismConfig.from_dict(bad)
+
+
+@pytest.mark.parametrize(
+    ("local_fail", "global_fail", "process_isolated", "expected"),
+    [
+        (0, 1, True, True),
+        (1, 1, True, False),
+        (0, 1, False, False),
+        (0, 0, False, True),
+    ],
+)
+def test_reported_passed_matches_active_aggregation_path(
+    local_fail: int,
+    global_fail: int,
+    process_isolated: bool,
+    expected: bool,
+) -> None:
+    assert (
+        _reported_passed(
+            local_fail,
+            global_fail,
+            process_isolated=process_isolated,
+        )
+        is expected
+    )
 
 
 def _tiny_model() -> RepeatedBlockModel:
