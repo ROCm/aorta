@@ -53,3 +53,29 @@ entries:
     recipe: recipes/llm-determinism/example-llm-determinism.yaml
     nproc: 2
     min_gpus: 2
+
+  # GPU-count axis: full-node (8-GPU) variants of the distributed workloads.
+  # Skipped automatically when fewer than 8 GPUs are visible.
+  - name: training_ddp_8gpu
+    recipe: recipes/training/example-training-ddp-smoke.yaml
+    nproc: 8
+    min_gpus: 8
+
+  - name: training_fsdp_8gpu
+    recipe: recipes/training/example-training-fsdp-smoke.yaml
+    nproc: 8
+    min_gpus: 8
+
+  - name: race_8gpu
+    recipe: recipes/race/race_smoke.yaml
+    nproc: 8
+    min_gpus: 8
+
+  - name: llm_determinism_8gpu
+    recipe: recipes/llm-determinism/example-llm-determinism.yaml
+    nproc: 8
+    min_gpus: 8
+
+# dtype axis (fp32/fp16/bf16) is a follow-up: the smoke recipes pin one dtype
+# each, so per-dtype coverage needs dtype recipe variants (or workload_config
+# overrides). Add them as new rows here once those recipes exist -- no code change.

@@ -29,6 +29,7 @@ def build_baselines(
     out_dir: Path,
     step_time_margin: float,
     throughput_margin: float,
+    perf_gate: bool,
 ) -> dict[str, Any]:
     ngpu = nightly_eval.gpu_count()
     baselines: dict[str, Any] = {}
@@ -50,18 +51,23 @@ def build_baselines(
                 print(f"WARN {name}::{harvested['cell']}: did not pass; not blessing", flush=True)
                 continue
             key = eval_lib.cell_key(name, harvested["cell"])
-            metrics = harvested["metrics"]
+            # Default: correctness-only baseline (require the cell to pass).
+            # Perf bounds are opt-in (--perf-gate) so the default is "trends now,
+            # perf-gate later" per the CI plan; the comparator enforces bounds
+            # only when they are present in the baseline.
             spec: dict[str, Any] = {"passed": True}
-            st = metrics.get("mean_step_time_ms")
-            if st:
-                spec["step_time_ms"] = {"max": round(st * (1.0 + step_time_margin), 4)}
-            tp = metrics.get("throughput") or {}
-            if tp:
-                spec["throughput"] = {
-                    k: {"min": round(v * (1.0 - throughput_margin), 4)}
-                    for k, v in tp.items()
-                    if v
-                }
+            if perf_gate:
+                metrics = harvested["metrics"]
+                st = metrics.get("mean_step_time_ms")
+                if st:
+                    spec["step_time_ms"] = {"max": round(st * (1.0 + step_time_margin), 4)}
+                tp = metrics.get("throughput") or {}
+                if tp:
+                    spec["throughput"] = {
+                        k: {"min": round(v * (1.0 - throughput_margin), 4)}
+                        for k, v in tp.items()
+                        if v
+                    }
             baselines[key] = spec
 
     return {"version": 1, "baselines": baselines}
@@ -75,11 +81,16 @@ def main() -> int:
                     help="fractional floor below observed throughput")
     ap.add_argument("--work-dir", type=Path, default=nightly_eval.REPO_ROOT / ".refresh-baselines")
     ap.add_argument("--out", type=Path, default=nightly_eval.BASELINES)
+    ap.add_argument("--perf-gate", action="store_true",
+                    help="also emit step-time/throughput bounds (Phase 5 perf gating); "
+                         "default is correctness-only baselines")
     args = ap.parse_args()
 
     matrix_doc = nightly_eval._load_yaml(nightly_eval.MATRIX)
     args.work_dir.mkdir(parents=True, exist_ok=True)
-    doc = build_baselines(matrix_doc, args.work_dir, args.step_time_margin, args.throughput_margin)
+    doc = build_baselines(
+        matrix_doc, args.work_dir, args.step_time_margin, args.throughput_margin, args.perf_gate
+    )
 
     header = (
         "# Expected-outcome baselines for the nightly evaluation.\n"

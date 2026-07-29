@@ -15,8 +15,9 @@ on:
     types: [completed]
 
 permissions:
-  contents: read
+  contents: write      # push results + dashboard to the gh-pages branch
   actions: read
+  issues: write        # auto-file/close the regression issue
 
 concurrency:
   group: nightly-eval-${{ github.workflow }}-${{ github.ref }}
@@ -69,9 +70,24 @@ jobs:
             set -euo pipefail
             cd /workspace/aorta
             python -m pip install --upgrade pip
-            pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}"
+            # Use the committed CI lock as a constraint when present (Phase 4),
+            # so the resolved deps are reproducible; absent => normal resolve.
+            constraint=""
+            [ -f config/ci/requirements.lock ] && constraint="-c config/ci/requirements.lock"
+            pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}" $constraint
             python scripts/ci/nightly_eval.py --out gpu-nightly-results.json
           '
+
+      # The container (root) wrote the results file into the mounted workspace;
+      # reclaim ownership so the host-side steps below can read/commit it.
+      - name: Reclaim results ownership
+        if: always()
+        run: |
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws 2>/dev/null \
+            || sudo -n chown -R "$uidgid" "$ws" 2>/dev/null || true
 
       - name: Upload nightly results
         if: always()
@@ -80,6 +96,48 @@ jobs:
           name: nightly-results-${{ github.run_id }}
           path: gpu-nightly-results.json
           if-no-files-found: warn
+
+      # Phase 3: auto-file/update/close the regression issue based on results.
+      - name: Alert on regression
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -f gpu-nightly-results.json ]; then
+            python3 scripts/ci/alert_issue.py --results gpu-nightly-results.json
+          else
+            echo "no results JSON; skipping alert"
+          fi
+
+      # Phase 2: append results to the gh-pages branch and regenerate the
+      # GitHub Pages dashboard (self-contained HTML). Runs on the host (stdlib
+      # only, no torch), so it's independent of the container.
+      - name: Publish results + dashboard to gh-pages
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [ -f gpu-nightly-results.json ] || { echo "no results JSON; skipping publish"; exit 0; }
+          date="$(date -u +%Y-%m-%d)"
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          tmp="$(mktemp -d)"
+          if git clone --depth 1 --branch gh-pages "$repo_url" "$tmp" 2>/dev/null; then
+            :
+          else
+            git clone --depth 1 "$repo_url" "$tmp"
+            ( cd "$tmp" && git checkout --orphan gh-pages && git rm -rf . >/dev/null 2>&1 || true )
+          fi
+          mkdir -p "$tmp/results"
+          cp gpu-nightly-results.json "$tmp/results/${date}.json"
+          python3 scripts/ci/gen_dashboard.py --results-dir "$tmp/results" --out-dir "$tmp"
+          ( cd "$tmp"
+            touch .nojekyll
+            git add -A
+            git -c user.name=aorta-ci -c user.email=aorta-ci@users.noreply.github.com \
+              commit -m "nightly results ${date}" || { echo "nothing to commit"; exit 0; }
+            git push origin gh-pages )
 
       - name: Tear down ROCm CI container
         if: always()

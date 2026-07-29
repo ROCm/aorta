@@ -1,0 +1,88 @@
+name: Lock requirements
+
+# Dispatch-only: regenerate config/ci/requirements.lock (exact pins) from the
+# resolved environment inside the pinned ROCm container, and open a PR. This is
+# the "generate the lock where it is used" flow -- pins reflect the actual CI
+# ROCm/torch stack, not a host resolve. Pair with a ROCm/dependency bump PR so
+# the lock moves with the stack.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: lock-requirements-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CONTAINER_NAME: aorta-ci-gpu
+  DEV_WHEELS_INDEX: https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
+
+jobs:
+  lock:
+    name: lock requirements (ROCm container)
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+
+    steps:
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
+
+      - name: Install stack and freeze lock
+        run: |
+          bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            python -m pip install --upgrade pip
+            pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}"
+            pip install -r requirements.txt
+            bash scripts/ci/lock_requirements.sh
+          '
+
+      - name: Reclaim results ownership
+        if: always()
+        run: |
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws 2>/dev/null \
+            || sudo -n chown -R "$uidgid" "$ws" 2>/dev/null || true
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
+
+      - name: Open lock PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          add-paths: config/ci/requirements.lock
+          branch: ci/lock-requirements
+          title: "ci: refresh requirements lock"
+          commit-message: "ci: refresh requirements lock from the ROCm container"
+          body: |
+            Regenerated `config/ci/requirements.lock` (exact pins) from the pinned
+            ROCm container by the lock-requirements workflow. Review the diff and
+            merge to adopt. CI installs use this lock as a constraint when present.
