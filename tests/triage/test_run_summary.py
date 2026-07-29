@@ -318,11 +318,11 @@ diagnostic_axis: [none]
 """
 
 
-def test_probe_rerun_surfaces_resumed_cell_in_summary_and_matrix(tmp_path, _hermetic_engine):
-    """Reproduce the reported confusion: a second run against the same
-    ``--output``/``--ticket`` serves the cell from cache, so an ``exit 1``
-    command still shows a green cell. The summary must now say so, and
-    ``matrix.json`` must record ``resumed: true``.
+def test_probe_changed_command_invalidates_resume_in_summary_and_matrix(
+    tmp_path,
+    _hermetic_engine,
+):
+    """A changed effective command must rerun rather than serve stale success.
 
     Uses ``_hermetic_engine`` to stub ``runner.collect_env`` so the test does
     not probe host state; the real subprocess + resume short-circuit still run.
@@ -340,21 +340,19 @@ def test_probe_rerun_surfaces_resumed_cell_in_summary_and_matrix(tmp_path, _herm
     assert first.exit_code == 0, first.output
     assert "resumed from a prior run" not in first.output
 
-    # Second run: SAME output/ticket, but a failing command. The cell is
-    # already complete on disk -> served from cache, the exit-1 never runs.
+    # Second run: SAME output/ticket, but a failing command. The request
+    # fingerprint differs, so the completed success cannot be resumed.
     second = CliRunner().invoke(
         main,
         ["sweep", "run", "--recipe", str(recipe), "--output", str(output),
          "--ticket", "RESUME-VIS", "--", "sh", "-c", "exit 1"],
     )
     assert second.exit_code == 0, second.output
-    # The cache hit is now visible on stdout, with the count and how to
-    # force a fresh run -- no need to open the per-trial logs.
-    assert "1 resumed from a prior run (no trials re-executed)." in second.output
-    assert "Note:" in second.output
-    assert "--ticket" in second.output
+    assert "resumed from a prior run" not in second.output
+    assert "[fail] none-none:" in second.output
 
     # And it is persisted so tooling can tell cached from fresh.
     matrix = json.loads((output / "RESUME-VIS" / "matrix.json").read_text(encoding="utf-8"))
     cells = {c["name"]: c for c in matrix["cells"]}
-    assert cells.get("none-none", {}).get("resumed") is True
+    assert cells["none-none"]["resumed"] is False
+    assert cells["none-none"]["failed_count"] == 1

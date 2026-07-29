@@ -36,8 +36,6 @@
 # Stress axes applied in this recipe:
 #   - warmup_iterations=0: hit QP iter-0 immediately; no warm-up traffic to
 #     fill L2 or to let the NIC driver settle
-#   - reuse_buffers=false: every iteration allocates fresh tensors, forcing
-#     cold L2 state and preventing any accidental residual-data masking
 #   - h2d_prefetch=true: overlaps H2D DMA with the backward pass, maximising
 #     PCIe bus contention on the very interface the NIC reads from
 #   - h2d_tensor_size=10_000_000: 10M x 2 B = 20 MB per H2D transfer;
@@ -51,25 +49,21 @@
 #   - NCCL channel count: 4-8 active comm streams mirroring production topology;
 #     high-priority stream scheduling starves L2->HBM writeback on AMD HW queues
 #
-# Same-stream definitive test (cell 4):
-#   same_stream_mode=true places both H2D and datadist on the same new CUDA
-#   stream.  Same-stream ordering is GUARANTEED by the HIP/CUDA spec; if
-#   corruption still occurs, the bug is in the RCCL/HIP runtime below the
-#   stream abstraction.  This is the highest-priority mechanistic test.
-#
 # Usage
 # -----
 #   # Dry-run validation (no GPU required):
-#   aorta sweep run --recipe recipes/ainic-sdc-stress-reproducer.yaml --dry-run
+#   aorta sweep run --recipe recipes/race/ainic-sdc-stress-reproducer.yaml --dry-run
 #
 #   # Full matrix (10-40 MI355X nodes, all AINIC interconnect):
-#   aorta sweep run --recipe recipes/ainic-sdc-stress-reproducer.yaml
+#   aorta sweep run --recipe recipes/race/ainic-sdc-stress-reproducer.yaml
 #
 # Required environment
 # --------------------
 #   - MI355X cluster, all cross-node traffic over AINIC (Pollara) RoCEv2
 #   - NCCL_PROTO=Simple  (Simple uses GDRDMA; LL suppresses the bug)
 #   - NCCL_DEBUG=INFO    (TRACE suppresses the bug via printf overhead)
+#   - Race's required process isolation applies each cell env before Python
+#     starts; verify the RCCL log shows `GDR 1` on Simple-protocol cells
 #   - 10-40 nodes; fewer nodes reduce the iter-0 simultaneous DMA fan-out count
 #     but all other stress axes remain active
 #   - All ranks on same cudaDev (1 rank per host, same device index)
@@ -80,7 +74,7 @@
 #   Root cause analysis: path b -- GPU HBM write -> CPU proxy signal -> AINIC PCIe read
 #   2K GPU overnight confirmation: NCCL_GDR_FLUSH_DISABLE=0 cleans corruption
 #   Production training topology: ~6-7 streams/step, all comms on high-priority streams
-#   Companion recipe: recipes/ainic-gdr-flush-sdc.yaml (baseline, fix, controls)
+#   Companion recipe: recipes/race/ainic-gdr-flush-sdc.yaml (baseline, fix, controls)
 #   Aorta race workload: src/aorta/race/modes/fsdp.py
 #   Doc: sdc_writeup/executive_summary.md
 
@@ -110,9 +104,10 @@ confound:
 # the race workload drops + warns on unknown keys, so keep this list clean.
 workload_config:
   mode: fsdp
+  expected_local_world_size: 1
 
-  # warmup=0: do not run any "clean" iterations before verification.
-  # Every step uses fresh QPs in iter-0 state (via QP recycling in fsdp mode).
+  # warmup=0: do not run any unverified iterations first. Process isolation
+  # gives each TRIAL a fresh process group/QP set; steps within a trial reuse it.
   warmup_iterations: 0
   verify_iterations: 50
 
@@ -131,10 +126,9 @@ workload_config:
   # exactly the period when AINIC is also reading src HBM for the all_gather.
   h2d_prefetch: true
 
-  # Fresh allocations each iteration: no warm L2, no residual data masking.
-  reuse_buffers: false
   pin_memory: true
 
+  # Workload communication/compute dtype; reduce-scatter oracle is FP32.
   dtype: bfloat16
 
   # 48 GEMM layers -> 48 all_gather calls per forward; 48 independent chances
@@ -144,9 +138,6 @@ workload_config:
   gemm_size: 5120
   gemm_layers: 48
   include_backward_compute: true
-
-  # Default: NOT same-stream (race is across streams); cell 4 overrides this.
-  same_stream_mode: false
 
 cells:
   # ------------------------------------------------------------------
@@ -176,6 +167,9 @@ cells:
       GPU_MAX_HW_QUEUES: "4"
       NCCL_NCHANNELS_PER_NET_PEER: "4"
       NCCL_MAX_NCHANNELS: "8"
+      NCCL_NET_GDR_LEVEL: "SYS"
+      NCCL_DMABUF_ENABLE: "1"
+      NCCL_NET_GDR_READ: "1"
 
   # ------------------------------------------------------------------
   # Cell 2: GDR flush stressed -- primary fix under maximum pressure
@@ -197,6 +191,9 @@ cells:
       GPU_MAX_HW_QUEUES: "4"
       NCCL_NCHANNELS_PER_NET_PEER: "4"
       NCCL_MAX_NCHANNELS: "8"
+      NCCL_NET_GDR_LEVEL: "SYS"
+      NCCL_DMABUF_ENABLE: "1"
+      NCCL_NET_GDR_READ: "1"
 
   # ------------------------------------------------------------------
   # Cell 3: GPU_MAX_HW_QUEUES=2 workaround -- implicit serialization
@@ -220,38 +217,12 @@ cells:
       RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING: "0"
       NCCL_NCHANNELS_PER_NET_PEER: "4"
       NCCL_MAX_NCHANNELS: "8"
+      NCCL_NET_GDR_LEVEL: "SYS"
+      NCCL_DMABUF_ENABLE: "1"
+      NCCL_NET_GDR_READ: "1"
 
   # ------------------------------------------------------------------
-  # Cell 4: Same-stream definitive test
-  # ------------------------------------------------------------------
-  # same_stream_mode=true: H2D copy and datadist all_gather run on the
-  # SAME new CUDA stream.  Same-stream ordering is GUARANTEED by the HIP/CUDA
-  # spec -- the copy completes before the all_gather WQE is posted.
-  # If corruption still occurs, the root cause is below the stream abstraction
-  # (RCCL/HIP runtime bug), not a user-visible cross-stream ordering issue.
-  # This is the highest-value mechanistic data point at small cluster scale.
-  #
-  # Multi-stream vars omitted here intentionally: same_stream_mode collapses
-  # H2D + collective onto one stream regardless of channel count; adding more
-  # channels does not change the ordering guarantee under test.
-  #
-  # GDR flush disabled, GPU_MAX_HW_QUEUES=4: everything else is bug-exposed.
-  # Expected: IF clean -> confirms path b (cross-stream GPU fence issue).
-  #           IF corrupt -> bug is in RCCL/HIP runtime (deeper root cause).
-  - name: same-stream-definitive
-    mitigations: [none]
-    environment: local
-    workload_config:
-      same_stream_mode: true
-    extra_env:
-      NCCL_GDR_FLUSH_DISABLE: "1"
-      NCCL_PROTO: "Simple"
-      NCCL_DEBUG: "INFO"
-      RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING: "0"
-      GPU_MAX_HW_QUEUES: "4"
-
-  # ------------------------------------------------------------------
-  # Cell 5: LL protocol control -- GDRDMA send path disabled
+  # Cell 4: LL protocol control -- GDRDMA send path disabled
   # ------------------------------------------------------------------
   # LL protocol: CPU reads GPU HBM into bounce buffer (implicit fence).
   # GDRDMA is not used; NIC never reads src HBM directly -> race impossible.

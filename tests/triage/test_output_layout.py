@@ -13,7 +13,14 @@ import yaml
 
 import aorta.triage.runner as runner
 from aorta.instrumentation.environment import EnvSnapshot
-from aorta.triage.output import NO_TICKET_SLUG, resolve_run_dir, safe_slug
+from aorta.triage.output import (
+    NO_TICKET_SLUG,
+    _repository_git_sha,
+    _runtime_provenance,
+    _valid_git_sha,
+    resolve_run_dir,
+    safe_slug,
+)
 from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, build_recipe_from_flags
 
 # ---- Fixtures -------------------------------------------------------------
@@ -24,6 +31,32 @@ class _FakeTrial:
     exit_status: str = "ok"
     wall_clock_sec: float = 1.0
     result: dict | None = None
+
+
+def test_repository_git_sha_reads_loose_ref(tmp_path):
+    git_dir = tmp_path / ".git"
+    ref = git_dir / "refs" / "heads" / "topic"
+    ref.parent.mkdir(parents=True)
+    sha = "a" * 40
+    (git_dir / "HEAD").write_text("ref: refs/heads/topic\n", encoding="utf-8")
+    ref.write_text(f"{sha}\n", encoding="utf-8")
+
+    assert _repository_git_sha(tmp_path) == sha
+
+
+def test_valid_git_sha_accepts_only_full_object_id_lengths():
+    assert _valid_git_sha("a" * 40) == "a" * 40
+    assert _valid_git_sha("B" * 64) == "b" * 64
+    assert _valid_git_sha("c" * 50) is None
+
+
+def test_runtime_provenance_records_dirty_state(monkeypatch):
+    monkeypatch.setenv("AORTA_GIT_DIRTY", "true")
+
+    provenance = _runtime_provenance()
+
+    assert provenance["git_dirty"] is True
+    assert len(provenance["source_tree_sha256"]) == 64
 
 
 def _fake_trial(passed: bool = True, step_times_ms: list[float] | None = None) -> _FakeTrial:
@@ -635,6 +668,14 @@ def test_matrix_json_records_baseline_and_confound(tmp_path, patched_env, patche
     doc = json.loads((run_dir / "matrix.json").read_text())
     assert doc["baseline_cell"] == "none-local"
     assert doc["confound"]["threshold"] == 1.15
+    assert set(doc["runtime_provenance"]) == {
+        "package_version",
+        "git_sha",
+        "git_dirty",
+        "source_tree_sha256",
+    }
+    assert len(doc["runtime_provenance"]["source_tree_sha256"]) == 64
+    assert len(doc["recipe_source"]["resolved_sha256"]) == 64
     assert {c["name"] for c in doc["cells"]} == {"none-local", "tf32_off-local"}
     # Baseline cell must carry the baseline tag.
     base = next(c for c in doc["cells"] if c["name"] == "none-local")
@@ -1139,6 +1180,27 @@ def test_resolved_recipe_round_trips_extra_env(
     assert reloaded.cells[1].extra_env == {"CELL_KEY": "cell_value"}
 
 
+def test_resolved_recipe_records_effective_trial_isolation(
+    tmp_path, patched_env, patched_run_trials
+):
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, load_recipe
+
+    recipe = Recipe(
+        schema_version=1,
+        workload="race",
+        trials=1,
+        steps=1,
+        cells=(Cell(name="race", mitigations=("none",), environment="local"),),
+        confound=ConfoundCfg(baseline_cell="race"),
+    )
+    run_dir = runner.run_recipe(recipe, output_dir=tmp_path)
+    reloaded = load_recipe(run_dir / "recipe.resolved.yaml")
+    matrix = json.loads((run_dir / "matrix.json").read_text(encoding="utf-8"))
+    assert reloaded.trial_isolation == "process"
+    assert matrix["trial_isolation"] == "process"
+    assert matrix["trial_isolation_requested"] == "auto"
+
+
 # ---- Config column (diffs-only workload_config) --------------------------
 #
 # The column surfaces per-cell workload_config keys whose value varies
@@ -1289,6 +1351,27 @@ def test_cell_exception_preserves_matrix(tmp_path, patched_env, monkeypatch):
     assert len(ok_cells) == 1 and ok_cells[0]["name"] == "none-local"
     # The happy cell still ran and classified:
     assert ok_cells[0]["confound"] == "(baseline)"
+
+
+def test_single_rank_worker_failure_preserves_matrix(
+    tmp_path, patched_env, monkeypatch
+):
+    from aorta.run._process import TrialWorkerError
+
+    def worker_failure(request):
+        if request.mitigations == ("tf32_off",):
+            error = TrialWorkerError("worker bootstrap failed")
+            error.completed_results = (_fake_trial(),)
+            raise error
+        return [_fake_trial(), _fake_trial()]
+
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setattr(runner, "run_trials", worker_failure)
+    run_dir = runner.run_recipe(_simple_recipe(), output_dir=tmp_path)
+    doc = json.loads((run_dir / "matrix.json").read_text(encoding="utf-8"))
+    failed = next(cell for cell in doc["cells"] if cell["name"] == "tf32_off-local")
+    assert "TrialWorkerError" in failed["error"]
+    assert failed["trials"] == 1
 
 
 def test_baseline_cell_error_produces_top_of_file_warning(tmp_path, patched_env, monkeypatch):

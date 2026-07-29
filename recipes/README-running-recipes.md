@@ -53,17 +53,25 @@ Launch contract (read once):
   line via `srun` / `torchrun`).
 - Run the **same** command on every rank. Only rank 0 writes result artifacts;
   other ranks participate in the collectives.
+- Fresh-process distributed trials treat any worker bootstrap/crash as fatal so
+  peers cannot continue into a different trial generation. Use
+  `srun --kill-on-bad-exit=1` under Slurm. Any launcher without an elastic agent
+  store (including srun and older/static torchrun) must export a job-unique
+  `AORTA_TRIAL_MASTER_PORT_BASE` whose next 1000 ports are reserved for isolated
+  trial rendezvous (for example, `30000`).
 - A recipe's per-cell `extra_env` is applied by the runner (via
-  `os.environ.update`) *before* the workload's `setup()` calls
-  `init_process_group()`. That is in time for most vars — **but not for ones a
-  library caches at load time.** Some `NCCL_*` / `RCCL_*` vars are read once when
-  the library is first loaded (at `import torch`, which happens before the runner
-  applies `extra_env`), so setting them via `extra_env` is too late and they are
-  silently ignored. Set those in the **launcher environment** (export them in the
-  shell/script that runs `torchrun`/`srun`, before Python starts) and verify they
-  took effect in the run log. A second caveat: workloads like `race` do not
-  destroy/re-init the process group between cells, so a `NCCL_*` change in a later
-  cell will not take effect mid-run and can cause a confusing false-green.
+  `os.environ.update`) before workload `setup()`. In legacy `in_process` mode,
+  this is still too late for values cached during Python/native-library import.
+  In `process` mode, AORTA puts the controlled overlay in the worker environment
+  before the fresh interpreter starts, so import-time HIP/RCCL values can vary
+  safely by trial and cell.
+- Workloads declare their default/required isolation policy. `race` requires a
+  fresh process per trial; its AINIC recipe env is therefore active before
+  torch/HIP/RCCL initialization. Other workloads remain in-process unless a
+  recipe requests `trial_isolation: process`.
+- Launcher identity (`RANK`, `WORLD_SIZE`, `LOCAL_RANK`, `MASTER_ADDR`,
+  `MASTER_PORT`, etc.) always belongs to torchrun/srun and cannot be overridden
+  by an isolated cell.
 - Topology (rank count, ranks-per-host) is the launcher's responsibility.
 
 ## 5. Read results

@@ -59,7 +59,12 @@ def test_is_trial_complete_fail_still_counts(tmp_path):
 # ---- End-to-end resume via the CLI ---------------------------------------
 
 
-def _invoke_probe(output: Path, recipe: Path) -> int:
+def _invoke_probe(
+    output: Path,
+    recipe: Path,
+    *,
+    marker: str = "run-marker",
+) -> int:
     runner = CliRunner()
     result = runner.invoke(
         probe,
@@ -73,7 +78,7 @@ def _invoke_probe(output: Path, recipe: Path) -> int:
             "--",
             "sh",
             "-c",
-            "echo run-marker; exit 0",
+            f"echo {marker}; exit 0",
         ],
     )
     if result.exit_code != 0:
@@ -110,6 +115,26 @@ def test_skips_completed_cell(tmp_path):
         f"result.json mtime changed ({first_mtime} -> {second_mtime}); "
         "cell was re-executed when it should have been skipped"
     )
+
+
+def test_changed_command_invalidates_resumed_trial(tmp_path):
+    output = tmp_path / "out"
+    recipe = FIXTURES / "probe_minimal.yaml"
+    assert _invoke_probe(output, recipe, marker="first-command") == 0
+    stdout_path = (
+        output
+        / "RESUME-1"
+        / "none-none"
+        / "trial_0"
+        / "stdout.log"
+    )
+    assert "first-command" in stdout_path.read_text(encoding="utf-8")
+
+    assert _invoke_probe(output, recipe, marker="second-command") == 0
+
+    stdout = stdout_path.read_text(encoding="utf-8")
+    assert "second-command" in stdout
+    assert "first-command" not in stdout
 
 
 def test_skipped_cell_records_real_counts_in_matrix(tmp_path):

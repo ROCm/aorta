@@ -276,6 +276,9 @@ class SubprocessWorkload(Workload):
 
     launch_mode = "single_process"
     min_world_size = 1
+    trial_isolation_default = "in_process"
+    trial_isolation_required = True
+    trial_isolation_supported = frozenset({"in_process"})
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

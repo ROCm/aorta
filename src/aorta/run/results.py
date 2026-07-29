@@ -5,8 +5,20 @@ the execution environment, configuration, and timing.
 """
 
 import copy
+import math
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
+
+_SCHEMA_VERSION = "0.1"
+_EXIT_STATUSES = frozenset(
+    {
+        "ok",
+        "workload_failed",
+        "workload_setup_failed",
+        "infrastructure_failed",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +60,8 @@ class TrialResult:
             ``runtime_context``, ``docker``, ``env_vars``,
             ``partial`` / ``partial_reasons``, etc.).
         result: WorkloadResult serialized to dict.
+        request_fingerprint: SHA-256 of the effective request used to decide
+            whether a persisted trial is safe to resume.
         wall_clock_sec: Total wall clock time for the trial.
         exit_status: Outcome of the trial execution.  Values:
 
@@ -86,7 +100,8 @@ class TrialResult:
     exit_status: Literal[
         "ok", "workload_failed", "workload_setup_failed", "infrastructure_failed"
     ]
-    schema_version: str = "0.1"
+    schema_version: str = _SCHEMA_VERSION
+    request_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         # Defensively deep-copy the mutable dict fields so the caller
@@ -114,17 +129,32 @@ class TrialResult:
             "result": copy.deepcopy(self.result),
             "wall_clock_sec": self.wall_clock_sec,
             "exit_status": self.exit_status,
+            "request_fingerprint": self.request_fingerprint,
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TrialResult":
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        *,
+        strict: bool = False,
+    ) -> "TrialResult":
         """Deserialize from dict.
 
         ``__post_init__`` deep-copies the mutable fields, so subsequent
-        mutation of ``data`` cannot affect the constructed instance.
+        mutation of ``data`` cannot affect the constructed instance. Set
+        ``strict=True`` when hydrating persisted artifacts: it rejects unknown
+        schemas, invalid field types, and pass/status contradictions instead of
+        silently trusting stale or renamed JSON.
         """
+        if not isinstance(data, dict):
+            raise TypeError(
+                f"TrialResult must be a JSON object, got {type(data).__name__}"
+            )
+        if strict:
+            cls._validate_persisted_dict(data)
         return cls(
-            schema_version=data.get("schema_version", "0.1"),
+            schema_version=data.get("schema_version", _SCHEMA_VERSION),
             trial_id=data["trial_id"],
             workload=data["workload"],
             execution_env=data["execution_env"],
@@ -134,7 +164,182 @@ class TrialResult:
             result=data["result"],
             wall_clock_sec=data["wall_clock_sec"],
             exit_status=data["exit_status"],
+            request_fingerprint=data.get("request_fingerprint"),
         )
+
+    @staticmethod
+    def _validate_persisted_dict(data: dict[str, Any]) -> None:
+        required = {
+            "schema_version",
+            "trial_id",
+            "workload",
+            "execution_env",
+            "mitigations_applied",
+            "config",
+            "env",
+            "result",
+            "wall_clock_sec",
+            "exit_status",
+            "request_fingerprint",
+        }
+        missing = sorted(required - set(data))
+        if missing:
+            raise ValueError(f"TrialResult missing required fields: {missing}")
+
+        schema = data["schema_version"]
+        if schema != _SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported TrialResult schema_version={schema!r}; "
+                f"expected {_SCHEMA_VERSION!r}"
+            )
+        for name in ("trial_id", "workload"):
+            if not isinstance(data[name], str) or not data[name]:
+                raise TypeError(f"TrialResult.{name} must be a non-empty string")
+        fingerprint = data["request_fingerprint"]
+        if fingerprint is not None and (
+            not isinstance(fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+        ):
+            raise TypeError(
+                "TrialResult.request_fingerprint must be None or a "
+                "lowercase SHA-256 hex string"
+            )
+        for name in ("execution_env", "config", "env", "result"):
+            if not isinstance(data[name], dict):
+                raise TypeError(f"TrialResult.{name} must be a JSON object")
+        mitigations = data["mitigations_applied"]
+        if not isinstance(mitigations, list) or not all(
+            isinstance(item, str) for item in mitigations
+        ):
+            raise TypeError(
+                "TrialResult.mitigations_applied must be a list[str]"
+            )
+        wall_clock = data["wall_clock_sec"]
+        if (
+            isinstance(wall_clock, bool)
+            or not isinstance(wall_clock, (int, float))
+            or not math.isfinite(float(wall_clock))
+            or wall_clock < 0
+        ):
+            raise ValueError(
+                "TrialResult.wall_clock_sec must be a finite non-negative number"
+            )
+        status = data["exit_status"]
+        if status not in _EXIT_STATUSES:
+            raise ValueError(
+                f"invalid TrialResult.exit_status={status!r}; "
+                f"expected one of {sorted(_EXIT_STATUSES)}"
+            )
+
+        result = data["result"]
+        result_required = {
+            "passed",
+            "failure_count",
+            "first_failure_iteration",
+            "failure_details",
+            "total_iterations",
+            "step_times_ms",
+            "elapsed_sec",
+            "metrics",
+            "main_work_started",
+            "executed_iterations",
+            "configured_iterations",
+        }
+        result_missing = sorted(result_required - set(result))
+        if result_missing:
+            raise ValueError(
+                "TrialResult.result missing required fields: "
+                f"{result_missing}"
+            )
+        passed = result.get("passed")
+        if not isinstance(passed, bool):
+            raise TypeError("TrialResult.result.passed must be a bool")
+        if (status == "ok") != passed:
+            raise ValueError(
+                "TrialResult exit_status/pass contradiction: "
+                f"exit_status={status!r}, passed={passed!r}"
+            )
+        if (
+            isinstance(result["failure_count"], bool)
+            or not isinstance(result["failure_count"], int)
+            or result["failure_count"] < 0
+        ):
+            raise ValueError(
+                "TrialResult.result.failure_count must be a non-negative int"
+            )
+        failure_details = result["failure_details"]
+        if not isinstance(failure_details, list) or not all(
+            isinstance(detail, dict) for detail in failure_details
+        ):
+            raise TypeError(
+                "TrialResult.result.failure_details must be a list[dict]"
+            )
+        if not isinstance(result["metrics"], dict):
+            raise TypeError("TrialResult.result.metrics must be a JSON object")
+        for name in ("total_iterations",):
+            value = result[name]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"TrialResult.result.{name} must be a non-negative int"
+                )
+        for name in (
+            "first_failure_iteration",
+            "executed_iterations",
+            "configured_iterations",
+        ):
+            value = result[name]
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"TrialResult.result.{name} must be a non-negative int or None"
+                )
+        step_times = result["step_times_ms"]
+        if not isinstance(step_times, list) or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+            for value in step_times
+        ):
+            raise ValueError(
+                "TrialResult.result.step_times_ms must be a list of finite "
+                "non-negative numbers"
+            )
+        elapsed = result["elapsed_sec"]
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or not math.isfinite(float(elapsed))
+            or elapsed < 0
+        ):
+            raise ValueError(
+                "TrialResult.result.elapsed_sec must be a finite "
+                "non-negative number"
+            )
+        main_work_started = result["main_work_started"]
+        if main_work_started is not None and not isinstance(
+            main_work_started,
+            bool,
+        ):
+            raise TypeError(
+                "TrialResult.result.main_work_started must be a bool or None"
+            )
+        if passed and (
+            result["failure_count"] != 0
+            or result["first_failure_iteration"] is not None
+            or failure_details
+        ):
+            raise ValueError(
+                "TrialResult result/pass contradiction: a passing result "
+                "contains failure data"
+            )
 
 
 def trial_verdict(trial: Any) -> str:

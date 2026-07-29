@@ -7,6 +7,22 @@ import pytest
 from aorta.run.results import TrialResult, trial_verdict
 
 
+def _complete_result(*, passed: bool = True) -> dict:
+    return {
+        "passed": passed,
+        "failure_count": 0 if passed else 1,
+        "first_failure_iteration": None if passed else 0,
+        "failure_details": [] if passed else [{"error": "failed"}],
+        "total_iterations": 1,
+        "step_times_ms": [1.0],
+        "elapsed_sec": 0.1,
+        "metrics": {},
+        "main_work_started": True,
+        "executed_iterations": 1,
+        "configured_iterations": 1,
+    }
+
+
 class TestTrialVerdict:
     """Three-way shared verdict predicate (issue #230)."""
 
@@ -182,6 +198,7 @@ class TestTrialResult:
             result={},
             wall_clock_sec=1.0,
             exit_status="ok",
+            request_fingerprint="a" * 64,
         )
         data = result.to_dict()
         assert data["mitigations_applied"] == ["none", "tf32_off"]
@@ -202,6 +219,73 @@ class TestTrialResult:
         }
         result = TrialResult.from_dict(data)
         assert result.schema_version == "0.1"
+
+    def test_strict_from_dict_accepts_current_valid_artifact(self):
+        result = TrialResult(
+            trial_id="race_d0_m0_t0",
+            workload="race",
+            execution_env={},
+            mitigations_applied=("none",),
+            config={},
+            env={},
+            result=_complete_result(),
+            wall_clock_sec=1.0,
+            exit_status="ok",
+            request_fingerprint="a" * 64,
+        )
+        assert TrialResult.from_dict(result.to_dict(), strict=True) == result
+
+    @pytest.mark.parametrize(
+        "mutation, message",
+        [
+            (lambda data: data.pop("schema_version"), "missing required"),
+            (
+                lambda data: data.__setitem__("schema_version", "999"),
+                "unsupported.*schema_version",
+            ),
+            (
+                lambda data: data.__setitem__("exit_status", "timeout"),
+                "invalid.*exit_status",
+            ),
+            (
+                lambda data: data["result"].__setitem__("passed", False),
+                "contradiction",
+            ),
+            (
+                lambda data: data["result"].pop("total_iterations"),
+                "result missing required",
+            ),
+            (
+                lambda data: data["result"].__setitem__("failure_count", 1),
+                "result/pass contradiction",
+            ),
+            (
+                lambda data: data.__setitem__("wall_clock_sec", float("nan")),
+                "finite non-negative",
+            ),
+            (
+                lambda data: data.__setitem__("request_fingerprint", "bad"),
+                "request_fingerprint",
+            ),
+        ],
+    )
+    def test_strict_from_dict_rejects_malformed_artifact(self, mutation, message):
+        result = TrialResult(
+            trial_id="race_d0_m0_t0",
+            workload="race",
+            execution_env={},
+            mitigations_applied=("none",),
+            config={},
+            env={},
+            result=_complete_result(),
+            wall_clock_sec=1.0,
+            exit_status="ok",
+            request_fingerprint="a" * 64,
+        )
+        data = result.to_dict()
+        mutation(data)
+        with pytest.raises((TypeError, ValueError), match=message):
+            TrialResult.from_dict(data, strict=True)
 
     def test_trial_result_is_frozen(self):
         """TrialResult is immutable."""

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, ClassVar, Literal
 
 from aorta.workloads._base import Workload, WorkloadResult
@@ -63,12 +64,100 @@ _VALID_COMPUTE_TYPES = {"gemm", "transformer"}
 _RESERVED_KEYS = {"steps"}
 
 
+def _positive_env_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    # Slurm may encode repeated layouts as ``8(x4)``.
+    token = raw.split("(", 1)[0].split(",", 1)[0].strip()
+    try:
+        value = int(token)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _slurm_local_world_size() -> int | None:
+    raw = (
+        os.environ.get("SLURM_STEP_TASKS_PER_NODE")
+        or os.environ.get("SLURM_TASKS_PER_NODE")
+        or os.environ.get("SLURM_NTASKS_PER_NODE")
+    )
+    if raw is None:
+        return None
+    segments: list[tuple[int, int]] = []
+    for token in raw.split(","):
+        match = re.fullmatch(
+            r"\s*(?P<count>\d+)(?:\(x(?P<repeat>\d+)\))?\s*",
+            token,
+        )
+        if match is None:
+            return None
+        count = int(match.group("count"))
+        repeat = int(match.group("repeat") or "1")
+        if count < 1 or repeat < 1:
+            return None
+        segments.append((count, repeat))
+    if len({count for count, _repeat in segments}) == 1:
+        return segments[0][0]
+    raw_node_id = os.environ.get("SLURM_NODEID")
+    try:
+        node_id = int(raw_node_id) if raw_node_id is not None else -1
+    except ValueError:
+        return None
+    if node_id < 0:
+        return None
+    first_node = 0
+    for count, repeat in segments:
+        if first_node <= node_id < first_node + repeat:
+            return count
+        first_node += repeat
+    return None
+
+
+def _detect_local_world_size(world_size: int) -> int | None:
+    for name in (
+        "LOCAL_WORLD_SIZE",
+        "OMPI_COMM_WORLD_LOCAL_SIZE",
+    ):
+        value = _positive_env_int(name)
+        if value is not None:
+            return value
+    slurm_local_world_size = _slurm_local_world_size()
+    if slurm_local_world_size is not None:
+        return slurm_local_world_size
+    if any(
+        name in os.environ
+        for name in (
+            "SLURM_STEP_TASKS_PER_NODE",
+            "SLURM_TASKS_PER_NODE",
+            "SLURM_NTASKS_PER_NODE",
+        )
+    ):
+        return None
+    slurm_nodes = _positive_env_int("SLURM_NNODES")
+    if slurm_nodes is not None and world_size % slurm_nodes == 0:
+        return world_size // slurm_nodes
+    return 1 if world_size == 1 else None
+
+
 class RaceWorkload(Workload):
     """Thin adapter over the `aorta.race` reproducer (modes: default|ddp|fsdp)."""
 
     name: ClassVar[str] = "race"
     launch_mode: ClassVar[Literal["single_process", "distributed"]] = "distributed"
     min_world_size: ClassVar[int] = 2
+    trial_isolation_default: ClassVar[Literal["in_process", "process"]] = "process"
+    trial_isolation_required: ClassVar[bool] = True
+    trial_isolation_supported: ClassVar[frozenset[str]] = frozenset({"process"})
+    distributed_result_scope: ClassVar[Literal["global", "rank_local"]] = "rank_local"
+
+    @classmethod
+    def isolated_startup_env(cls, config: dict[str, Any]) -> dict[str, str]:
+        value = config.get("gpu_max_hw_queues", 4)
+        if value is None:
+            return {}
+        return {"GPU_MAX_HW_QUEUES": str(value)}
 
     def _race_config_from_dict(self, d: dict[str, Any]) -> ReproducerConfig:
         known = set(ReproducerConfig.__dataclass_fields__)
@@ -77,6 +166,10 @@ class RaceWorkload(Workload):
                 continue
             log.warning("race: ignoring unknown workload_config key %r", key)
         cfg = ReproducerConfig(**{k: v for k, v in d.items() if k in known})
+        if "GPU_MAX_HW_QUEUES" in os.environ:
+            # A process-startup overlay is already authoritative. Disable the
+            # reproducer's legacy late env write, which occurs after HIP init.
+            cfg.gpu_max_hw_queues = None
         if cfg.mode not in _VALID_MODES:
             raise ValueError(f"mode must be one of {sorted(_VALID_MODES)}, got {cfg.mode!r}")
         if cfg.dtype not in _VALID_DTYPES:
@@ -93,6 +186,16 @@ class RaceWorkload(Workload):
                 "(only applies to compute_type='transformer')",
                 cfg.compute_type,
             )
+        if cfg.mode == "fsdp" and not cfg.reuse_buffers:
+            raise ValueError(
+                "race FSDP mode does not implement reuse_buffers=false; "
+                "remove the knob or implement per-iteration FSDP allocation"
+            )
+        if cfg.mode == "fsdp" and cfg.same_stream_mode:
+            raise ValueError(
+                "race FSDP mode does not implement same_stream_mode=true; "
+                "the existing same-stream path applies only to mode='default'"
+            )
         return cfg
 
     def setup(self) -> None:
@@ -102,6 +205,15 @@ class RaceWorkload(Workload):
                 f"environment: {_IMPORT_ERROR}. Install torch, or run this "
                 "workload inside the container/venv that provides it."
             ) from _IMPORT_ERROR
+        self._cfg = self._race_config_from_dict(self.config)
+        if self._cfg.gpu_max_hw_queues is not None:
+            # Legacy direct callers may rely on the config default. Apply it
+            # before the first CUDA/HIP query, then disable the reproducer's
+            # later rewrite. Process-startup extra_env remains authoritative.
+            os.environ["GPU_MAX_HW_QUEUES"] = str(
+                self._cfg.gpu_max_hw_queues
+            )
+            self._cfg.gpu_max_hw_queues = None
         if not dist.is_initialized():
             backend = "nccl" if torch.cuda.is_available() else "gloo"
             dist.init_process_group(backend=backend)
@@ -114,9 +226,33 @@ class RaceWorkload(Workload):
                 int(os.environ.get("LOCAL_RANK", self._rank % max(1, torch.cuda.device_count())))
             )
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._cfg = self._race_config_from_dict(self.config)
 
     def run(self) -> WorkloadResult:
+        local_world_size = _detect_local_world_size(self._world)
+        expected_local_world_size = self._cfg.expected_local_world_size
+        topology_matches: bool | None = None
+        if expected_local_world_size is not None:
+            if local_world_size is None:
+                log.warning(
+                    "race topology unknown: recipe expects "
+                    "LOCAL_WORLD_SIZE=%d, but launcher topology could not be "
+                    "derived (WORLD_SIZE=%d)",
+                    expected_local_world_size,
+                    self._world,
+                )
+            else:
+                topology_matches = (
+                    local_world_size == expected_local_world_size
+                )
+                if not topology_matches:
+                    log.warning(
+                        "race topology mismatch: recipe expects "
+                        "LOCAL_WORLD_SIZE=%d, launcher provided %d "
+                        "(WORLD_SIZE=%d)",
+                        expected_local_world_size,
+                        local_world_size,
+                        self._world,
+                    )
         rep = create_reproducer(self._cfg, self._rank, self._world)
         res = rep.run()
         return WorkloadResult(
@@ -136,8 +272,25 @@ class RaceWorkload(Workload):
                 "eff_ffn_size": res.eff_ffn_size,
                 "eff_seq_len": res.eff_seq_len,
                 "eff_batch_size": res.eff_batch_size,
+                "effective_h2d_tensor_size": res.effective_h2d_tensor_size,
+                "declared_h2d_tensor_size": self._cfg.h2d_tensor_size,
+                "reduce_scatter_oracle_dtype": (
+                    res.reduce_scatter_oracle_dtype
+                ),
+                "corruption_details_omitted": (
+                    res.corruption_details_omitted
+                ),
                 "rank": self._rank,
                 "world_size": self._world,
+                "local_world_size": local_world_size,
+                "expected_local_world_size": expected_local_world_size,
+                "topology_matches_recipe": topology_matches,
+                "node_count": (
+                    self._world // local_world_size
+                    if local_world_size is not None
+                    and self._world % local_world_size == 0
+                    else None
+                ),
             },
             main_work_started=True,
             executed_iterations=res.total_iterations,
@@ -145,6 +298,12 @@ class RaceWorkload(Workload):
         )
 
     def cleanup(self) -> None:
-        if dist.is_initialized():
+        # Isolated workers synchronize and destroy the default group after
+        # collecting rank-local outcomes. Avoid a workload-level barrier on
+        # partial setup failures, where peers may be in different collectives.
+        if (
+            dist.is_initialized()
+            and self.config.get("_aorta_trial_isolation") != "process"
+        ):
             dist.barrier()
         # Process group teardown left to the launcher.

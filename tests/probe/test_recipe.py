@@ -113,6 +113,12 @@ cells:
         load_recipe(_write_yaml(tmp_path, text))
 
 
+def test_rejects_trial_isolation_in_probe_mode(tmp_path):
+    text = _PROBE_MINIMAL + "trial_isolation: process\n"
+    with pytest.raises(RecipeSchemaError, match="triage-mode only"):
+        load_recipe(_write_yaml(tmp_path, text))
+
+
 def test_rejects_invalid_mode_value(tmp_path):
     text = """\
 schema_version: 1

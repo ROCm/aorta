@@ -12,6 +12,7 @@ Acceptance criteria (from issue #151 §"Plumbing"):
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -21,7 +22,7 @@ from click.testing import CliRunner
 import aorta.triage.runner as runner
 from aorta.cli.triage import triage
 from aorta.instrumentation.environment import EnvSnapshot
-from aorta.run import RunRequest
+from aorta.run import RunRequest, TrialResult
 from aorta.triage.recipe import build_recipe_from_flags
 
 # ---- Fixtures -------------------------------------------------------------
@@ -1026,6 +1027,43 @@ cells:
     assert "Traceback" not in result.output
 
 
+def test_cli_run_wraps_trial_worker_error_in_click_exception(
+    tmp_path, monkeypatch
+):
+    import importlib
+
+    from aorta.run._process import TrialWorkerError
+
+    cli_module = importlib.import_module("aorta.cli.triage")
+
+    def fail_worker(*_args, **_kwargs):
+        raise TrialWorkerError("worker bootstrap failed")
+
+    monkeypatch.setattr(cli_module, "run_recipe", fail_worker)
+    recipe = tmp_path / "worker-error.yaml"
+    recipe.write_text(
+        """\
+schema_version: 1
+workload: race
+trials: 1
+steps: 1
+confound:
+  baseline_cell: baseline
+cells:
+  - name: baseline
+    mitigations: [none]
+    environment: local
+""",
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(triage, ["run", "--recipe", str(recipe)])
+    assert result.exit_code != 0
+    assert "Error: worker bootstrap failed" in result.output
+    assert "Traceback" not in result.output
+    assert result.exception is not None
+    assert not isinstance(result.exception, TrialWorkerError)
+
+
 # ---- Distributed rank-0 write gate ---------------------------------------
 
 
@@ -1190,6 +1228,112 @@ def test_extra_env_cell_wins_on_collision_with_recipe(
     }
 
 
+def test_race_workload_resolves_required_process_isolation(
+    tmp_path, patched_env, patched_run_trials
+):
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    recipe = Recipe(
+        schema_version=1,
+        workload="race",
+        trials=1,
+        steps=1,
+        cells=(Cell(name="race", mitigations=("none",), environment="local"),),
+        confound=ConfoundCfg(baseline_cell="race"),
+    )
+    runner.run_recipe(recipe, output_dir=tmp_path)
+    request: RunRequest = patched_run_trials.call_args.args[0]
+    assert request.trial_isolation == "process"
+
+
+def test_process_isolation_dry_run_rejects_non_json_config(tmp_path):
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    recipe = Recipe(
+        schema_version=1,
+        workload="race",
+        trials=1,
+        steps=1,
+        cells=(Cell(name="race", mitigations=("none",), environment="local"),),
+        confound=ConfoundCfg(baseline_cell="race"),
+        workload_config={"bad": float("nan")},
+    )
+    with pytest.raises(ValueError, match="non-finite"):
+        runner.run_recipe(recipe, output_dir=tmp_path, dry_run=True)
+    assert not tmp_path.exists() or not any(tmp_path.iterdir())
+
+
+def test_process_isolation_dry_run_rejects_workload_without_opt_in(
+    tmp_path, monkeypatch
+):
+    from aorta.run.validation import IN_PROCESS_ONLY_POLICY
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    recipe = Recipe(
+        schema_version=1,
+        workload="legacy",
+        trials=1,
+        steps=1,
+        cells=(Cell(name="legacy", mitigations=("none",), environment="local"),),
+        confound=ConfoundCfg(baseline_cell="legacy"),
+        trial_isolation="process",
+    )
+    monkeypatch.setattr(
+        runner,
+        "get_workload_policy",
+        lambda _name: IN_PROCESS_ONLY_POLICY,
+    )
+    with pytest.raises(ValueError, match="does not support.*process"):
+        runner.run_recipe(recipe, output_dir=tmp_path, dry_run=True)
+    assert not tmp_path.exists() or not any(tmp_path.iterdir())
+
+
+def test_auto_dry_run_does_not_hide_malformed_workload_policy(
+    tmp_path, monkeypatch
+):
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    recipe = Recipe(
+        schema_version=1,
+        workload="broken",
+        trials=1,
+        steps=1,
+        cells=(Cell(name="broken", mitigations=("none",), environment="local"),),
+        confound=ConfoundCfg(baseline_cell="broken"),
+    )
+
+    def malformed_policy(_name):
+        raise ValueError("unsupported isolation policy target")
+
+    monkeypatch.setattr(runner, "get_workload_policy", malformed_policy)
+    with pytest.raises(ValueError, match="unsupported isolation policy"):
+        runner.run_recipe(recipe, output_dir=tmp_path, dry_run=True)
+    assert not tmp_path.exists() or not any(tmp_path.iterdir())
+
+
+def test_distributed_process_worker_launch_error_is_fatal(
+    tmp_path, patched_env, monkeypatch
+):
+    from aorta.triage.recipe import Cell, ConfoundCfg, Recipe
+
+    recipe = Recipe(
+        schema_version=1,
+        workload="race",
+        trials=1,
+        steps=1,
+        cells=(Cell(name="race", mitigations=("none",), environment="local"),),
+        confound=ConfoundCfg(baseline_cell="race"),
+    )
+    monkeypatch.setenv("WORLD_SIZE", "2")
+
+    def spawn_failure(_request):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(runner, "run_trials", spawn_failure)
+    with pytest.raises(OSError, match="spawn failed"):
+        runner.run_recipe(recipe, output_dir=tmp_path)
+
+
 def test_resolved_env_lookup_failure_warns_without_echoing_error_text(monkeypatch, caplog):
     """A fail-soft baseline lookup must not silently weaken the audit bundle."""
     from aorta.registry import RegistryError
@@ -1213,3 +1357,93 @@ def test_resolved_env_lookup_failure_warns_without_echoing_error_text(monkeypatc
     assert "RegistryError" in warning
     assert "omitting its baseline Environment.env layer" in warning
     assert "secret-value-must-not-be-logged" not in warning
+
+
+def _persisted_trial(trial_id: str) -> TrialResult:
+    return TrialResult(
+        trial_id=trial_id,
+        workload="_subprocess",
+        execution_env={},
+        mitigations_applied=("none",),
+        config={},
+        env={},
+        result={
+            "passed": True,
+            "failure_count": 0,
+            "first_failure_iteration": None,
+            "failure_details": [],
+            "total_iterations": 1,
+            "step_times_ms": [1.0],
+            "elapsed_sec": 0.1,
+            "metrics": {},
+            "main_work_started": True,
+            "executed_iterations": 1,
+            "configured_iterations": 1,
+        },
+        wall_clock_sec=1.0,
+        exit_status="ok",
+        request_fingerprint="a" * 64,
+    )
+
+
+def test_resume_hydration_rejects_filename_body_identity_mismatch(tmp_path):
+    path = tmp_path / "trial_d0_m0_t0.json"
+    path.write_text(
+        json.dumps(_persisted_trial("_subprocess_d0_m0_t1").to_dict()),
+        encoding="utf-8",
+    )
+
+    hydrated = runner._hydrate_trials_by_index(
+        [str(path)],
+        expected_workload="_subprocess",
+    )
+
+    assert hydrated == {}
+
+
+def test_resume_hydration_rejects_foreign_cell_coordinates(tmp_path):
+    path = tmp_path / "trial_d9_m9_t0.json"
+    path.write_text(
+        json.dumps(_persisted_trial("_subprocess_d9_m9_t0").to_dict()),
+        encoding="utf-8",
+    )
+
+    hydrated = runner._hydrate_trials_by_index(
+        [str(path)],
+        expected_workload="_subprocess",
+    )
+
+    assert hydrated == {}
+
+
+def test_resume_hydration_rejects_duplicate_trial_indices(tmp_path):
+    paths = [
+        tmp_path / "trial_d0_m0_t0.json",
+        tmp_path / "trial_0.json",
+    ]
+    body = json.dumps(_persisted_trial("_subprocess_d0_m0_t0").to_dict())
+    for path in paths:
+        path.write_text(body, encoding="utf-8")
+
+    hydrated = runner._hydrate_trials_by_index(
+        [str(path) for path in paths],
+        expected_workload="_subprocess",
+    )
+
+    assert hydrated == {}
+
+
+def test_resume_hydration_rejects_request_fingerprint_mismatch(tmp_path):
+    path = tmp_path / "trial_d0_m0_t0.json"
+    path.write_text(
+        json.dumps(_persisted_trial("_subprocess_d0_m0_t0").to_dict()),
+        encoding="utf-8",
+    )
+
+    hydrated = runner._hydrate_trials_by_index(
+        [str(path)],
+        expected_workload="_subprocess",
+        expected_request_fingerprint="b" * 64,
+    )
+
+    assert hydrated == {}

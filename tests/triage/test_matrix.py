@@ -105,6 +105,35 @@ def test_metrics_summary_empty_when_no_passing_trial():
     assert stats.metrics_summary == {}
 
 
+def test_audit_metadata_survives_failed_trials_and_non_numeric_values():
+    trials = [
+        _trial(
+            passed=False,
+            exit_status="workload_failed",
+            metrics={
+                "declared_h2d_tensor_size": 100,
+                "effective_h2d_tensor_size": 128,
+                "reduce_scatter_oracle_dtype": "float32",
+                "world_size": 8,
+                "local_world_size": None,
+                "topology_matches_recipe": None,
+            },
+        )
+    ]
+
+    stats = _default_call(trials=trials)
+
+    assert stats.metrics_summary == {}
+    assert stats.audit_metadata == {
+        "declared_h2d_tensor_size": 100,
+        "effective_h2d_tensor_size": 128,
+        "reduce_scatter_oracle_dtype": "float32",
+        "world_size": 8,
+        "local_world_size": None,
+        "topology_matches_recipe": None,
+    }
+
+
 def test_mixed_pass_fail_counts_correctly():
     trials = [_trial(passed=True), _trial(passed=False), _trial(passed=True)]
     stats = _default_call(trials=trials)

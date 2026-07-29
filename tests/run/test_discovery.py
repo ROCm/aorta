@@ -1,10 +1,21 @@
 """Tests for workload discovery via entry-points."""
 
+from importlib.metadata import EntryPoint, EntryPoints
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aorta.run.discovery import discover_workloads, get_workload_class
+from aorta.run.discovery import (
+    UnknownWorkloadError,
+    discover_workloads,
+    get_workload_class,
+    get_workload_policy,
+    get_workload_startup_env,
+)
+from aorta.run.validation import (
+    IN_PROCESS_ONLY_POLICY,
+    PROCESS_REQUIRED_POLICY,
+)
 from aorta.workloads import Workload, WorkloadResult
 
 
@@ -174,7 +185,7 @@ class TestGetWorkloadClass:
 
     def test_unknown_workload_raises_value_error(self):
         """Unknown workload name raises ValueError."""
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(UnknownWorkloadError) as exc_info:
             get_workload_class("definitely_not_a_real_workload")
 
         error_msg = str(exc_info.value)
@@ -232,3 +243,90 @@ class TestGetWorkloadClass:
         alpha_pos = error_msg.find("alpha")
         zeta_pos = error_msg.find("zeta")
         assert alpha_pos < zeta_pos
+
+
+class TestGetWorkloadPolicy:
+    def test_unknown_workload_uses_specific_error(self):
+        entries = EntryPoints([])
+        with patch("importlib.metadata.entry_points", return_value=entries):
+            with pytest.raises(UnknownWorkloadError, match="not found"):
+                get_workload_policy("missing")
+
+    def test_policy_resolves_without_loading_workload_module(self):
+        entries = EntryPoints(
+            [
+                EntryPoint(
+                    name="env_sensitive",
+                    value="module_that_must_not_import:Workload",
+                    group="aorta.workloads",
+                ),
+                EntryPoint(
+                    name="env_sensitive",
+                    value="aorta.run.validation:PROCESS_REQUIRED_POLICY",
+                    group="aorta.workload_policies",
+                ),
+            ]
+        )
+        with patch("importlib.metadata.entry_points", return_value=entries):
+            assert get_workload_policy("env_sensitive") == PROCESS_REQUIRED_POLICY
+
+    def test_unregistered_policy_defaults_to_in_process_only(self):
+        entries = EntryPoints(
+            [
+                EntryPoint(
+                    name="legacy",
+                    value="legacy_plugin:LegacyWorkload",
+                    group="aorta.workloads",
+                )
+            ]
+        )
+        with patch("importlib.metadata.entry_points", return_value=entries):
+            assert get_workload_policy("legacy") == IN_PROCESS_ONLY_POLICY
+
+    def test_unknown_policy_target_is_rejected_without_import(self):
+        entries = EntryPoints(
+            [
+                EntryPoint(
+                    name="broken",
+                    value="broken_plugin:BrokenWorkload",
+                    group="aorta.workloads",
+                ),
+                EntryPoint(
+                    name="broken",
+                    value="broken_plugin:UNRECOGNIZED_POLICY",
+                    group="aorta.workload_policies",
+                ),
+            ]
+        )
+        with patch("importlib.metadata.entry_points", return_value=entries):
+            with pytest.raises(ValueError, match="unsupported isolation policy"):
+                get_workload_policy("broken")
+
+
+def test_startup_env_provider_loads_without_workload_entry_point(tmp_path, monkeypatch):
+    module = tmp_path / "startup_provider.py"
+    module.write_text(
+        "def provide(config):\n"
+        "    return {'EARLY_VALUE': str(config.get('value', 4))}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    entries = EntryPoints(
+        [
+            EntryPoint(
+                name="early",
+                value="must_not_import:Workload",
+                group="aorta.workloads",
+            ),
+            EntryPoint(
+                name="early",
+                value="startup_provider:provide",
+                group="aorta.workload_startup_env",
+            ),
+        ]
+    )
+
+    with patch("importlib.metadata.entry_points", return_value=entries):
+        assert get_workload_startup_env("early", {"value": 7}) == {
+            "EARLY_VALUE": "7"
+        }

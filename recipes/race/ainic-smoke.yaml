@@ -2,7 +2,7 @@
 #
 # Purpose: confirm the full real path works end-to-end on a multi-node GPU
 # cluster in SECONDS, instead of waiting for the full 5-cell x 16-trial x
-# 200-iter matrix (ainic-gdr-flush-sdc.yaml). Exercises the SAME code path:
+# 200-iter matrix (recipes/race/ainic-gdr-flush-sdc.yaml). Exercises the SAME code path:
 # real RepeatedTransformerBlock compute, real_backward gradient kernels, the
 # per-layer int16 checksum detector, and real all_gather / reduce_scatter over
 # the fabric -- just sized down (1 cell, 1 trial, 5 iters, smaller model).
@@ -14,8 +14,12 @@
 #   avg_step_time_ms > 0                (real compute, not a no-op)
 #   exit_status == ok, passed == true   (collectives + verify completed)
 #
+# Race's required fresh-process isolation installs this cell's extra_env before
+# Python imports torch. Verify the RCCL log reports `GDR 1`; a `GDR 0` run does
+# not validate the intended AINIC/GDR path.
+#
 # Run (same command on every rank, one rank per GPU):
-#   aorta sweep run --recipe recipes/ainic-smoke.yaml
+#   aorta sweep run --recipe recipes/race/ainic-smoke.yaml
 # Read:
 #   cat triage_results/AINIC-SMOKE/race/*/matrix.md
 #
@@ -39,6 +43,7 @@ workload_config:
   verify_iterations: 5
   stop_on_first_corruption: false
   log_interval: 1
+  # Model/H2D/all-gather dtype; reduce-scatter correctness oracle is FP32.
   dtype: bfloat16
 
   # Smaller shard + model than the full recipe so the smoke run is fast while
@@ -59,9 +64,6 @@ cells:
     extra_env:
       NCCL_PROTO: "Simple"
       NCCL_DEBUG: "INFO"
-      # Force GPUDirect RDMA on so the smoke proves the real GDR path works on
-      # your cluster. Without these the banner shows "GDR 0" (host-bounce path).
-      # A good smoke shows "GDR 1" in the RCCL banner.
       NCCL_NET_GDR_LEVEL: "SYS"
       NCCL_DMABUF_ENABLE: "1"
       NCCL_NET_GDR_READ: "1"

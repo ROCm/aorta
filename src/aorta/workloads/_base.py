@@ -93,10 +93,44 @@ class Workload(ABC):
         `WORLD_SIZE` env var against these declarations before calling
         `setup()` and raises a clear error on mismatch (single_process
         invoked under torchrun, or distributed invoked without).
+
+    Trial-isolation declaration:
+        Workloads default to in-process execution. Workloads whose correctness
+        depends on process-static environment variables may set
+        ``trial_isolation_default = "process"`` and
+        ``trial_isolation_required = True``. Recipes can request a fresh
+        process only for workloads that explicitly include ``"process"`` in
+        ``trial_isolation_supported`` and register matching side-effect-free
+        metadata in the ``aorta.workload_policies`` entry-point group. This
+        opt-in is required because isolated distributed workers own the default
+        process-group lifecycle. Recipes cannot disable isolation when the
+        workload marks it required.
     """
 
     launch_mode: ClassVar[Literal["single_process", "distributed"]] = "single_process"
     min_world_size: ClassVar[int] = 1
+    trial_isolation_default: ClassVar[Literal["in_process", "process"]] = "in_process"
+    trial_isolation_required: ClassVar[bool] = False
+    trial_isolation_supported: ClassVar[frozenset[str]] = frozenset({"in_process"})
+    # Distributed workloads normally return a result already globalized across
+    # ranks. Set ``rank_local`` only when the worker must merge per-rank
+    # failure counts/details before the parent evaluates the trial.
+    distributed_result_scope: ClassVar[Literal["global", "rank_local"]] = "global"
+
+    @classmethod
+    def isolated_distributed_backend(
+        cls,
+        config: dict[str, Any],
+    ) -> Literal["auto", "gloo", "nccl"]:
+        """Select the worker-owned default process-group backend."""
+        del config
+        return "auto"
+
+    @classmethod
+    def isolated_startup_env(cls, config: dict[str, Any]) -> dict[str, str]:
+        """Return workload defaults that must exist before runtime init."""
+        del config
+        return {}
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Store the per-trial config dict.
@@ -124,7 +158,7 @@ class Workload(ABC):
         applicable. At minimum, `passed` must be set.
         """
 
-    def cleanup(self) -> None:
+    def cleanup(self) -> None:  # noqa: B027 - optional lifecycle hook
         """Release resources held by `setup()`. Default no-op."""
 
 
