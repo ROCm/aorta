@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from html import escape as _esc
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         graded = (s.get("pass", 0) + s.get("fail", 0)) or 0
         passrate.append((s.get("pass", 0) / graded) if graded else None)
 
+    # All values below originate from results/*.json (untrusted: error strings,
+    # reasons, version strings) and are HTML-escaped before interpolation.
     rows = []
     for k in sorted(keys):
         e = latest_by_key.get(k, {})
@@ -113,20 +116,20 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         st_txt = f"{st:.3f} ms" if isinstance(st, (int, float)) else "—"
         reasons = "; ".join(e.get("reasons", []) or [])
         rows.append(
-            f"<tr><td class='mono'>{k}</td>"
-            f"<td><span class='badge' style='background:{color}'>{verdict}</span></td>"
-            f"<td>{st_txt}</td>"
+            f"<tr><td class='mono'>{_esc(k)}</td>"
+            f"<td><span class='badge' style='background:{color}'>{_esc(verdict)}</span></td>"
+            f"<td>{_esc(st_txt)}</td>"
             f"<td>{_svg_sparkline(history.get(k, []))}</td>"
-            f"<td class='muted'>{reasons}</td></tr>"
+            f"<td class='muted'>{_esc(reasons)}</td></tr>"
         )
 
     s = latest.get("summary", {})
-    meta = (
+    meta = _esc(
         f"aorta {build.get('amd_aorta_version', '?')} · "
         f"torch {build.get('torch', '?')} · ROCm {build.get('rocm', '?')} · "
         f"HIP {build.get('hip', '?')}"
     )
-    generated = latest.get("generated_at", "")
+    generated = _esc(latest.get("generated_at", ""))
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">

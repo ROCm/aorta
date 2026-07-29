@@ -70,3 +70,28 @@ def test_alert_render_lists_failures():
 def test_alert_no_failures():
     results = _results("2026-07-29T00:00:00Z", [], total=0)
     assert alert_issue.failing_entries(results) == []
+
+
+def test_alert_md_cell_escapes_pipes_and_newlines():
+    assert alert_issue._md_cell("a | b\nc") == "a \\| b c"
+
+
+def test_alert_render_sanitizes_table_cells():
+    results = _results("2026-07-29T00:00:00Z",
+                       [{"entry": "w", "cell": "c", "verdict": "fail",
+                         "reasons": ["boom | pipe\nnewline"], "error": None}],
+                       total=1, fail=1)
+    _, body = alert_issue.render_issue(results, None)
+    # No raw pipe/newline inside the reasons cell that would break the table.
+    reason_line = [ln for ln in body.splitlines() if ln.startswith("| `w::c`")][0]
+    assert "boom \\| pipe newline" in reason_line
+
+
+def test_dashboard_escapes_untrusted_reason():
+    r = _results("2026-07-29T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "fail",
+                   "reasons": ["<script>alert(1)</script>"], "metrics": {"mean_step_time_ms": 1.0}}],
+                 total=1, fail=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html

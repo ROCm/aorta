@@ -31,6 +31,11 @@ def failing_entries(results: dict[str, Any]) -> list[dict[str, Any]]:
     return [e for e in results.get("entries", []) if e.get("verdict") == "fail"]
 
 
+def _md_cell(text: str) -> str:
+    """Sanitize a string for a Markdown table cell: escape pipes, flatten newlines."""
+    return str(text).replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
 def render_issue(results: dict[str, Any], run_url: str | None) -> tuple[str, str]:
     """Return (title, body) for the regression issue."""
     build = results.get("build", {}) or {}
@@ -50,7 +55,8 @@ def render_issue(results: dict[str, Any], run_url: str | None) -> tuple[str, str
     lines += ["", "| workload::cell | reasons |", "| --- | --- |"]
     for e in fails:
         reasons = "; ".join(e.get("reasons", []) or []) or (e.get("error") or "")
-        lines.append(f"| `{e.get('entry')}::{e.get('cell')}` | {reasons} |")
+        key = _md_cell(f"{e.get('entry')}::{e.get('cell')}")
+        lines.append(f"| `{key}` | {_md_cell(reasons)} |")
     lines += ["", "_Filed automatically by nightly-eval; will auto-close when green._"]
     return title, "\n".join(lines)
 

@@ -59,15 +59,16 @@ def build_baselines(
             if perf_gate:
                 metrics = harvested["metrics"]
                 st = metrics.get("mean_step_time_ms")
-                if st:
+                if st is not None:
                     spec["step_time_ms"] = {"max": round(st * (1.0 + step_time_margin), 4)}
                 tp = metrics.get("throughput") or {}
-                if tp:
-                    spec["throughput"] = {
-                        k: {"min": round(v * (1.0 - throughput_margin), 4)}
-                        for k, v in tp.items()
-                        if v
-                    }
+                bounds = {
+                    k: {"min": round(v * (1.0 - throughput_margin), 4)}
+                    for k, v in tp.items()
+                    if v is not None
+                }
+                if bounds:
+                    spec["throughput"] = bounds
             baselines[key] = spec
 
     return {"version": 1, "baselines": baselines}

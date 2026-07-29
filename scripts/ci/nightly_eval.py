@@ -83,6 +83,10 @@ def run_entry(entry: dict[str, Any], out_dir: Path) -> tuple[int, Path | None]:
     nproc = entry.get("nproc")
     aorta = _aorta()
     run_out = out_dir / entry["name"]
+    # Start from a clean per-entry dir so a stale matrix.json from a prior run
+    # can't be picked up if this invocation fails before producing a fresh one.
+    if run_out.exists():
+        shutil.rmtree(run_out)
     run_out.mkdir(parents=True, exist_ok=True)
 
     argv: list[str] = []
