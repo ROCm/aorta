@@ -63,6 +63,35 @@ _VALID_COMPUTE_TYPES = {"gemm", "transformer"}
 _RESERVED_KEYS = {"steps"}
 
 
+def _positive_env_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    # Slurm may encode repeated layouts as ``8(x4)``.
+    token = raw.split("(", 1)[0].split(",", 1)[0].strip()
+    try:
+        value = int(token)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _detect_local_world_size(world_size: int) -> int | None:
+    for name in (
+        "LOCAL_WORLD_SIZE",
+        "OMPI_COMM_WORLD_LOCAL_SIZE",
+        "SLURM_NTASKS_PER_NODE",
+        "SLURM_TASKS_PER_NODE",
+    ):
+        value = _positive_env_int(name)
+        if value is not None:
+            return value
+    slurm_nodes = _positive_env_int("SLURM_NNODES")
+    if slurm_nodes is not None and world_size % slurm_nodes == 0:
+        return world_size // slurm_nodes
+    return 1 if world_size == 1 else None
+
+
 class RaceWorkload(Workload):
     """Thin adapter over the `aorta.race` reproducer (modes: default|ddp|fsdp)."""
 
@@ -108,6 +137,16 @@ class RaceWorkload(Workload):
                 "(only applies to compute_type='transformer')",
                 cfg.compute_type,
             )
+        if cfg.mode == "fsdp" and not cfg.reuse_buffers:
+            raise ValueError(
+                "race FSDP mode does not implement reuse_buffers=false; "
+                "remove the knob or implement per-iteration FSDP allocation"
+            )
+        if cfg.mode == "fsdp" and cfg.same_stream_mode:
+            raise ValueError(
+                "race FSDP mode does not implement same_stream_mode=true; "
+                "the existing same-stream path applies only to mode='default'"
+            )
         return cfg
 
     def setup(self) -> None:
@@ -140,6 +179,31 @@ class RaceWorkload(Workload):
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def run(self) -> WorkloadResult:
+        local_world_size = _detect_local_world_size(self._world)
+        expected_local_world_size = self._cfg.expected_local_world_size
+        topology_matches: bool | None = None
+        if expected_local_world_size is not None:
+            if local_world_size is None:
+                log.warning(
+                    "race topology unknown: recipe expects "
+                    "LOCAL_WORLD_SIZE=%d, but launcher topology could not be "
+                    "derived (WORLD_SIZE=%d)",
+                    expected_local_world_size,
+                    self._world,
+                )
+            else:
+                topology_matches = (
+                    local_world_size == expected_local_world_size
+                )
+                if not topology_matches:
+                    log.warning(
+                        "race topology mismatch: recipe expects "
+                        "LOCAL_WORLD_SIZE=%d, launcher provided %d "
+                        "(WORLD_SIZE=%d)",
+                        expected_local_world_size,
+                        local_world_size,
+                        self._world,
+                    )
         rep = create_reproducer(self._cfg, self._rank, self._world)
         res = rep.run()
         return WorkloadResult(
@@ -159,8 +223,22 @@ class RaceWorkload(Workload):
                 "eff_ffn_size": res.eff_ffn_size,
                 "eff_seq_len": res.eff_seq_len,
                 "eff_batch_size": res.eff_batch_size,
+                "effective_h2d_tensor_size": res.effective_h2d_tensor_size,
+                "declared_h2d_tensor_size": self._cfg.h2d_tensor_size,
+                "reduce_scatter_oracle_dtype": (
+                    res.reduce_scatter_oracle_dtype
+                ),
                 "rank": self._rank,
                 "world_size": self._world,
+                "local_world_size": local_world_size,
+                "expected_local_world_size": expected_local_world_size,
+                "topology_matches_recipe": topology_matches,
+                "node_count": (
+                    self._world // local_world_size
+                    if local_world_size is not None
+                    and self._world % local_world_size == 0
+                    else None
+                ),
             },
             main_work_started=True,
             executed_iterations=res.total_iterations,

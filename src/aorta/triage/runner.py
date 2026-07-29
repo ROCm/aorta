@@ -571,7 +571,9 @@ def _cells_dir(run_dir: Path) -> Path:
     return d
 
 
-_DISPATCHER_TRIAL_RE = re.compile(r"^trial_d\d+_m\d+_t(\d+)$")
+_DISPATCHER_TRIAL_RE = re.compile(
+    r"^trial_d(?P<dataset>\d+)_m(?P<mitigation>\d+)_t(?P<trial>\d+)$"
+)
 _LEGACY_TRIAL_RE = re.compile(r"^trial_(\d+)$")
 
 
@@ -604,7 +606,12 @@ def _collect_trial_paths(results_dir: Path) -> list[str]:
         stem = path.stem
         m = _DISPATCHER_TRIAL_RE.match(stem) or _LEGACY_TRIAL_RE.match(stem)
         if m is not None:
-            return (int(m.group(1)), "")
+            trial_group = (
+                m.group("trial")
+                if "trial" in m.groupdict()
+                else m.group(1)
+            )
+            return (int(trial_group), "")
         # Sentinel: push non-conforming names after every trial_N entry.
         return (10**12, str(path))
 
@@ -639,6 +646,7 @@ def _resume_stop_after_cell(
     cap: int,
     stop_after: Any,
     resolved_env_vars: dict[str, str],
+    expected_workload: str,
 ) -> tuple[list[TrialResult], None, dict[str, str], list[str], bool] | None:
     """Resume short-circuit for a ``stop_after`` cell (issue #232).
 
@@ -662,7 +670,10 @@ def _resume_stop_after_cell(
     if contiguous == 0:
         return None
 
-    hydrated_by_index = _hydrate_trials_by_index(_collect_trial_paths(cell_dir))
+    hydrated_by_index = _hydrate_trials_by_index(
+        _collect_trial_paths(cell_dir),
+        expected_workload=expected_workload,
+    )
     required = set(range(contiguous))
     if not required.issubset(hydrated_by_index.keys()):
         # A complete-looking trial dir whose dispatcher JSON didn't
@@ -702,7 +713,13 @@ class _HydratedTrial:
     trial: TrialResult
 
 
-def _hydrate_trials_by_index(trial_paths: list[str]) -> dict[int, _HydratedTrial]:
+def _hydrate_trials_by_index(
+    trial_paths: list[str],
+    *,
+    expected_workload: str | None = None,
+    expected_dataset_index: int = 0,
+    expected_mitigation_index: int = 0,
+) -> dict[int, _HydratedTrial]:
     """Hydrate dispatcher ``trial_*.json`` files into an index-keyed map.
 
     Each entry appears in the returned dict iff ALL THREE of:
@@ -730,6 +747,7 @@ def _hydrate_trials_by_index(trial_paths: list[str]) -> dict[int, _HydratedTrial
     bearing invariant rather than the filename walk.
     """
     by_index: dict[int, _HydratedTrial] = {}
+    ambiguous_indices: set[int] = set()
     for raw in trial_paths:
         path = Path(raw)
         m = _DISPATCHER_TRIAL_RE.match(path.stem) or _LEGACY_TRIAL_RE.match(path.stem)
@@ -738,16 +756,68 @@ def _hydrate_trials_by_index(trial_paths: list[str]) -> dict[int, _HydratedTrial
             # ``_collect_trial_paths`` already shoves these to the
             # end of the sorted list.
             continue
-        index = int(m.group(1))
+        is_dispatcher_name = "trial" in m.groupdict()
+        index = int(m.group("trial") if is_dispatcher_name else m.group(1))
+        if is_dispatcher_name:
+            dataset_index = int(m.group("dataset"))
+            mitigation_index = int(m.group("mitigation"))
+            if (
+                dataset_index != expected_dataset_index
+                or mitigation_index != expected_mitigation_index
+            ):
+                log.warning(
+                    "resume: trial JSON %s coordinate mismatch "
+                    "(d%d/m%d != d%d/m%d)",
+                    path,
+                    dataset_index,
+                    mitigation_index,
+                    expected_dataset_index,
+                    expected_mitigation_index,
+                )
+                continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("resume: unreadable trial JSON %s (%s)", path, exc)
             continue
         try:
-            trial = TrialResult.from_dict(data)
+            trial = TrialResult.from_dict(data, strict=True)
         except (KeyError, TypeError, ValueError) as exc:
             log.warning("resume: trial JSON %s violates schema (%s)", path, exc)
+            continue
+        if expected_workload is not None and trial.workload != expected_workload:
+            log.warning(
+                "resume: trial JSON %s workload mismatch (%r != %r)",
+                path,
+                trial.workload,
+                expected_workload,
+            )
+            continue
+        identity_workload = expected_workload or trial.workload
+        expected_trial_id = (
+            f"{identity_workload}_d{expected_dataset_index}_"
+            f"m{expected_mitigation_index}_t{index}"
+        )
+        if trial.trial_id != expected_trial_id:
+            log.warning(
+                "resume: trial JSON %s identity mismatch (%r != %r)",
+                path,
+                trial.trial_id,
+                expected_trial_id,
+            )
+            continue
+        if index in ambiguous_indices:
+            continue
+        if index in by_index:
+            log.warning(
+                "resume: duplicate trial index %d in %s and %s; "
+                "refusing ambiguous artifacts",
+                index,
+                by_index[index].path,
+                path,
+            )
+            by_index.pop(index)
+            ambiguous_indices.add(index)
             continue
         by_index[index] = _HydratedTrial(index=index, path=raw, trial=trial)
     return by_index
@@ -1016,7 +1086,12 @@ def _run_one_cell(
         # fall through to a full re-run (the dispatcher will itself stop
         # early, so re-running is bounded by ``cap``).
         resumed_result = _resume_stop_after_cell(
-            cell, cell_dir, cap, stop_after, resolved_env_vars
+            cell,
+            cell_dir,
+            cap,
+            stop_after,
+            resolved_env_vars,
+            recipe.workload,
         )
         if resumed_result is not None:
             return resumed_result
@@ -1038,7 +1113,10 @@ def _run_one_cell(
             # filename-set-based validation would have admitted it.
             # See ``_hydrate_trials_by_index`` for the failure modes
             # silently dropped on the floor.
-            hydrated_by_index = _hydrate_trials_by_index(trial_paths)
+            hydrated_by_index = _hydrate_trials_by_index(
+                trial_paths,
+                expected_workload=recipe.workload,
+            )
             required_indices = set(range(effective_trials))
             if required_indices.issubset(hydrated_by_index.keys()):
                 # Build the canonical (hydrated, trial_paths) pair from
@@ -1754,6 +1832,12 @@ def _run_recipe_locked(
         run_timestamp=ts,
         layout=layout,
     )
+    resolved_recipe_path = run_dir / "recipe.resolved.yaml"
+    write_resolved_recipe(
+        resolved_recipe_path,
+        recipe=recipe,
+        sidecar_files=sidecar_files,
+    )
     write_matrix_json(
         run_dir / "matrix.json",
         recipe=recipe,
@@ -1763,6 +1847,7 @@ def _run_recipe_locked(
         run_timestamp=ts,
         warnings=warnings,
         sidecar_files=sidecar_files,
+        resolved_recipe_path=resolved_recipe_path,
     )
     write_perf_report(
         run_dir / PERF_REPORT_FILENAME,
@@ -1771,12 +1856,6 @@ def _run_recipe_locked(
         baseline=baseline_stats,
         run_timestamp=ts,
     )
-    write_resolved_recipe(
-        run_dir / "recipe.resolved.yaml",
-        recipe=recipe,
-        sidecar_files=sidecar_files,
-    )
-
     if operator_sidecar_paths:
         # Operator-supplied sidecars were snapshotted into the run dir so the
         # archived recipe.resolved.yaml + sidecar copies form a self-contained

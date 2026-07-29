@@ -52,6 +52,7 @@ workload_config:
   verify_iterations: 200
   stop_on_first_corruption: false
   log_interval: 1
+  # Model/H2D/all-gather dtype; reduce-scatter correctness oracle is FP32.
   dtype: bfloat16
   fsdp_shard_size: 1000000
   simulate_compute: true

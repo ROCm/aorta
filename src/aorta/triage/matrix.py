@@ -220,6 +220,10 @@ class CellStats:
     # (which ``matrix.md`` never showed) are recoverable without opening each
     # per-trial JSON. Empty for error cells.
     metrics_summary: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Correctness/audit metadata retained from every trial regardless of
+    # verdict. Unlike metrics_summary this preserves strings, bools, and failed
+    # trial values so corruption reproductions remain attributable.
+    audit_metadata: dict[str, Any] = field(default_factory=dict)
     # Issue #282: True when this cell's trials were hydrated from a prior
     # run's on-disk artifacts (probe ``flat_resume`` layout) instead of
     # being re-executed -- the resume short-circuit in
@@ -604,6 +608,41 @@ def _aggregate_metrics(trials: list[Any]) -> dict[str, dict[str, float]]:
     return summary
 
 
+_AUDIT_METRIC_KEYS = (
+    "declared_h2d_tensor_size",
+    "effective_h2d_tensor_size",
+    "reduce_scatter_oracle_dtype",
+    "world_size",
+    "local_world_size",
+    "expected_local_world_size",
+    "topology_matches_recipe",
+    "node_count",
+)
+
+
+def _aggregate_audit_metadata(trials: list[Any]) -> dict[str, Any]:
+    values_by_key: dict[str, list[Any]] = {}
+    for trial in trials:
+        result = getattr(trial, "result", None)
+        if not isinstance(result, dict):
+            continue
+        metrics = result.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        for key in _AUDIT_METRIC_KEYS:
+            if key not in metrics:
+                continue
+            value = metrics[key]
+            values = values_by_key.setdefault(key, [])
+            if value not in values:
+                values.append(value)
+    return {
+        key: values[0] if len(values) == 1 else values
+        for key, values in values_by_key.items()
+        if values
+    }
+
+
 def aggregate_cell(
     name: str,
     mitigations: tuple[str, ...],
@@ -785,6 +824,7 @@ def aggregate_cell(
         stop_after_note=stop_after_note,
         error_count=errored,
         metrics_summary=_aggregate_metrics(trials),
+        audit_metadata=_aggregate_audit_metadata(trials),
         resumed=resumed,
     )
 

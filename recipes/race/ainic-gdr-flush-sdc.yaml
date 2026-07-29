@@ -76,6 +76,7 @@ confound:
 # ReproducerConfig field -- a clean run logs no "ignoring unknown" warnings.
 workload_config:
   mode: fsdp
+  expected_local_world_size: 1
 
   # iter-0 is the only vulnerable iteration: hit fresh QPs immediately with no
   # warmup, then verify across the run. verify_iterations replaces the old
@@ -87,6 +88,8 @@ workload_config:
   stop_on_first_corruption: false
   log_interval: 10
 
+  # Model/H2D/all-gather dtype. The synthetic rank-coded reduce-scatter
+  # correctness oracle remains FP32 to avoid legal BF16 accumulation rounding.
   dtype: bfloat16
 
   # 1M elements x 2 B = 2 MB shard; 2 MB x (N-1) all_gather fan-out per layer.

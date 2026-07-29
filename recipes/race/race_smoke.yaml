@@ -43,6 +43,7 @@ workload_config:
   verify_iterations: 5
   stop_on_first_corruption: false
   log_interval: 1
+  # Model/H2D/all-gather dtype; reduce-scatter correctness oracle is FP32.
   dtype: bfloat16
 
   # Smaller shard + model than the full recipe so the smoke run is fast while

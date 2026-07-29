@@ -53,6 +53,34 @@ def test_race_workload_requires_process_isolation() -> None:
     assert RaceWorkload.trial_isolation_required is True
 
 
+def test_stress_recipe_omits_unimplemented_fsdp_controls() -> None:
+    document = yaml.safe_load(
+        (_RECIPE_DIR / "ainic-sdc-stress-reproducer.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "reuse_buffers" not in document["workload_config"]
+    assert "same_stream_mode" not in document["workload_config"]
+    assert all(
+        "same_stream_mode" not in cell.get("workload_config", {})
+        for cell in document["cells"]
+    )
+    assert {cell["name"] for cell in document["cells"]} == {
+        "baseline-stressed",
+        "gdr-flush-stressed",
+        "hw-queues-2-masked",
+        "ll-protocol-control",
+    }
+    assert document["workload_config"]["expected_local_world_size"] == 1
+
+
+def test_full_ainic_recipe_records_one_rank_per_host_assumption() -> None:
+    document = yaml.safe_load(
+        (_RECIPE_DIR / "ainic-gdr-flush-sdc.yaml").read_text(encoding="utf-8")
+    )
+    assert document["workload_config"]["expected_local_world_size"] == 1
+
+
 def test_no_race_recipe_attempts_to_disable_required_isolation() -> None:
     for path in (_ROOT / "recipes").rglob("*.yaml"):
         document = yaml.safe_load(path.read_text(encoding="utf-8"))

@@ -34,6 +34,7 @@ Data Flow:
 """
 
 import logging
+from collections import Counter
 from typing import List, Optional
 
 import torch
@@ -45,6 +46,12 @@ from ..base import BaseReproducer
 from ..config import ReproducerConfig
 
 log = logging.getLogger(__name__)
+_REDUCE_SCATTER_ORACLE_DTYPE = torch.float32
+_MAX_EXACT_RANK_FILL = {
+    torch.bfloat16: 256,
+    torch.float16: 2_048,
+    torch.float32: 16_777_216,
+}
 
 
 class FSDPModeReproducer(BaseReproducer):
@@ -99,6 +106,9 @@ class FSDPModeReproducer(BaseReproducer):
         self.eff_ffn_size: Optional[int] = None
         self.eff_seq_len: Optional[int] = None
         self.eff_batch_size: Optional[int] = None
+        self.effective_h2d_tensor_size: int = config.h2d_tensor_size
+        self.reduce_scatter_oracle_dtype: str = "float32"
+        self._iteration_collectives_correct: bool = True
 
         # Real transformer block shared across all layers (shared-weight path)
         self.shared_block: Optional[RepeatedTransformerBlock] = None
@@ -125,9 +135,11 @@ class FSDPModeReproducer(BaseReproducer):
         if self.config.h2d_tensor_size < min_h2d_size:
             log.warning(
                 f"h2d_tensor_size ({self.config.h2d_tensor_size}) < {dim}² "
-                f"({min_h2d_size}). Increasing to {min_h2d_size} for compute."
+                f"({min_h2d_size}). Using effective size {min_h2d_size} for compute."
             )
-            self.config.h2d_tensor_size = min_h2d_size
+            self.effective_h2d_tensor_size = min_h2d_size
+        else:
+            self.effective_h2d_tensor_size = self.config.h2d_tensor_size
 
         # NOTE: We do NOT create a base compute simulator (self.compute stays None).
         # FSDP mode creates per-layer weight_matrices in setup_buffers() because
@@ -138,6 +150,12 @@ class FSDPModeReproducer(BaseReproducer):
         """Allocate FSDP-specific buffers: per-layer shards + reusable collective buffers."""
         cfg = self.config
         ws = self.world_size
+        max_exact_rank_fill = _MAX_EXACT_RANK_FILL[self.dtype]
+        if ws > max_exact_rank_fill:
+            raise ValueError(
+                f"world_size={ws} exceeds the exact rank-fill capacity "
+                f"({max_exact_rank_fill}) of {self.dtype}"
+            )
 
         # Per-layer parameter shards (what each rank "owns")
         self.param_shards = [
@@ -150,12 +168,20 @@ class FSDPModeReproducer(BaseReproducer):
             self.shard_size * ws, dtype=self.dtype, device="cuda"
         )
 
-        # Reusable reduce_scatter buffers
+        # Reusable reduce_scatter correctness buffers. The model/all-gather/H2D
+        # path stays at the requested workload dtype, but the synthetic
+        # rank-coded SUM oracle must be exact. BF16 reduction order legitimately
+        # produces ULP-sized variation at 24+ ranks and cannot be used as a
+        # corruption oracle.
         self.full_grad = torch.empty(
-            self.shard_size * ws, dtype=self.dtype, device="cuda"
+            self.shard_size * ws,
+            dtype=_REDUCE_SCATTER_ORACLE_DTYPE,
+            device="cuda",
         )
         self.grad_shard = torch.empty(
-            self.shard_size, dtype=self.dtype, device="cuda"
+            self.shard_size,
+            dtype=_REDUCE_SCATTER_ORACLE_DTYPE,
+            device="cuda",
         )
 
         # Per-layer GEMM weights (only if compute simulation is enabled)
@@ -266,9 +292,11 @@ class FSDPModeReproducer(BaseReproducer):
 
     def _fill_patterns(self) -> None:
         """Fill buffers with known patterns for verification."""
-        # Each rank fills its shards with its rank number
+        # Keep rank 0 nonzero so stale zero-filled memory cannot pass. Every
+        # supported workload dtype represents these values injectively up to
+        # the world-size guard in setup_buffers().
         for shard in self.param_shards:
-            shard.fill_(float(self.rank))
+            shard.fill_(float(self.rank + 1))
 
         # Each rank fills full_grad with rank + 1 (for reduce_scatter verification)
         self.full_grad.fill_(float(self.rank + 1))
@@ -276,14 +304,12 @@ class FSDPModeReproducer(BaseReproducer):
     @staticmethod
     def _checksum(tensor: torch.Tensor) -> int:
         """
-        Bitwise checksum: reinterpret-cast to an int of the SAME element size
-        and sum.
+        Lightweight bit-pattern fingerprint.
 
-        Every bit pattern contributes to the checksum with zero information loss
-        -- no float rounding, no abs(), and NaN / denorm bit patterns are
-        included. The int view must match the dtype's byte width: 2-byte dtypes
-        (bf16/fp16) -> int16, 4-byte (fp32) -> int32, 1-byte -> int8. Accumulation
-        is done in int64 to avoid overflow.
+        The int view matches the dtype's byte width and accumulation is int64,
+        so floating-point rounding is avoided. This is not collision-free;
+        communication correctness is established by exact rank-fill checks.
+        The fingerprint remains useful for localizing compute divergence.
         """
         itemsize = tensor.element_size()
         int_view = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}.get(itemsize)
@@ -291,7 +317,32 @@ class FSDPModeReproducer(BaseReproducer):
             raise ValueError(f"_checksum: unsupported element size {itemsize} bytes")
         return tensor.view(int_view).to(torch.int64).sum().item()
 
-    def _forward_layer(self, layer_idx: int) -> None:
+    @staticmethod
+    def _mismatch_summary(
+        actual: torch.Tensor,
+        expected: torch.Tensor,
+    ) -> dict[str, int | float]:
+        """Return truthful details for an already-detected tensor mismatch."""
+        mismatch = actual.ne(expected)
+        flat_mismatch = mismatch.reshape(-1)
+        mismatch_indices = flat_mismatch.nonzero(as_tuple=False)
+        first_index = int(mismatch_indices[0].item())
+        actual_flat = actual.reshape(-1)
+        expected_flat = expected.reshape(-1)
+        return {
+            "first_mismatch_index": first_index,
+            "actual": float(actual_flat[first_index].item()),
+            "expected": float(expected_flat[first_index].item()),
+            "mismatch_count": int(flat_mismatch.sum().item()),
+            "max_abs_error": float(
+                (actual.to(torch.float64) - expected.to(torch.float64))
+                .abs()
+                .max()
+                .item()
+            ),
+        }
+
+    def _forward_layer(self, layer_idx: int, iteration: int) -> None:
         """
         Forward pass for a single FSDP layer.
 
@@ -322,6 +373,13 @@ class FSDPModeReproducer(BaseReproducer):
         dist.all_gather_into_tensor(
             self.full_param, self.param_shards[layer_idx]
         )
+
+        if self.in_verification_phase and not self._verify_all_gather(
+            iteration=iteration,
+            layer_idx=layer_idx,
+            phase="forward",
+        ):
+            self._iteration_collectives_correct = False
 
         if use_shared:
             comm_output_cksum = self._checksum(self.full_param)
@@ -422,6 +480,8 @@ class FSDPModeReproducer(BaseReproducer):
 
         Returns True if verification passed (or not in verification phase).
         """
+        self._iteration_collectives_correct = True
+
         # Fill buffers with known patterns
         self._fill_patterns()
 
@@ -437,12 +497,12 @@ class FSDPModeReproducer(BaseReproducer):
         self._h2d_wait()
 
         # ─── Forward: per-layer all_gather + GEMM ────────────────────
-        for l in range(self.num_layers):
-            self._forward_layer(l)
+        for layer_idx in range(self.num_layers):
+            self._forward_layer(layer_idx, iteration)
 
         # ─── Backward: per-layer all_gather + GEMM bwd + reduce_scatter
-        for l in reversed(range(self.num_layers)):
-            self._backward_layer(l)
+        for layer_idx in reversed(range(self.num_layers)):
+            self._backward_layer(layer_idx)
 
         # ─── Optimizer step ──────────────────────────────────────────
         self._run_optimizer_step()
@@ -464,15 +524,15 @@ class FSDPModeReproducer(BaseReproducer):
         self._h2d_wait()
 
         # ─── Forward: per-layer all_gather + GEMM ────────────────────
-        for l in range(self.num_layers):
-            self._forward_layer(l)
+        for layer_idx in range(self.num_layers):
+            self._forward_layer(layer_idx, iteration)
 
         # ─── Prefetch next batch (overlaps with backward) ────────────
         self._h2d_prefetch_next(iteration + 1)
 
         # ─── Backward: per-layer all_gather + GEMM bwd + reduce_scatter
-        for l in reversed(range(self.num_layers)):
-            self._backward_layer(l)
+        for layer_idx in reversed(range(self.num_layers)):
+            self._backward_layer(layer_idx)
 
         # ─── Optimizer step ──────────────────────────────────────────
         self._run_optimizer_step()
@@ -491,18 +551,22 @@ class FSDPModeReproducer(BaseReproducer):
     def _verify(self, iteration: int) -> bool:
         """Verify H2D, last all_gather, last reduce_scatter, and (if shared-weight
         transformer) cross-layer activation consistency."""
-        all_correct = True
+        all_correct = self._iteration_collectives_correct
 
         # Check H2D result
         if not self._verify_h2d(self.batch_gpu, iteration):
             all_correct = False
 
         # Check last all_gather result (full_param from last backward layer = layer 0)
-        if not self._verify_all_gather():
+        if not self._verify_all_gather(
+            iteration=iteration,
+            layer_idx=0,
+            phase="backward_final",
+        ):
             all_correct = False
 
         # Check last reduce_scatter result
-        if not self._verify_reduce_scatter():
+        if not self._verify_reduce_scatter(iteration):
             all_correct = False
 
         # Cross-layer checksum comparison (shared-weight transformer only)
@@ -518,14 +582,14 @@ class FSDPModeReproducer(BaseReproducer):
 
     def _verify_layer_checksums(self, iteration: int) -> bool:
         """
-        Verify that per-kernel int16 checksums are identical across all layers.
+        Verify that per-kernel fingerprints agree with the modal layer value.
 
         With a shared transformer block and a fixed reference input every layer
         runs the same comm kernel (all_gather of rank-filled shard) and the same
         compute kernel (the shared RepeatedTransformerBlock on reference_input).
-        Both the input and output of each kernel are checksummed via
-        reinterpret-cast to int16 → int64 sum, so every bit contributes with zero
-        information loss.
+        Inputs and outputs are fingerprinted via a same-width integer view and
+        int64 sum. This avoids floating-point rounding but is collision-prone;
+        exact rank-fill validation separately establishes all-gather correctness.
 
         Four checksums per layer:
           comm_input    -- param shard before all_gather (should be identical:
@@ -535,49 +599,77 @@ class FSDPModeReproducer(BaseReproducer):
                            (constant across layers)
           compute_output-- transformer block output
 
-        If comm_output diverges but comm_input matches, corruption is in the
-        collective (RCCL / NIC path).  If compute_output diverges but
-        comm_output matches, corruption is in the compute kernel (GPU ALU).
+        Modal consensus prevents one bad layer 0 from being treated as the
+        reference and mislabeling every agreeing later layer. If comm_output
+        diverges but comm_input matches, corruption is in the collective path.
+        If compute_output diverges but comm_output matches, corruption is in
+        the compute path.
         """
-        ref = self.layer_checksums[0]
-        if ref is None:
+        valid_layers = [
+            (index, checksums)
+            for index, checksums in enumerate(self.layer_checksums)
+            if checksums is not None
+        ]
+        if len(valid_layers) < 2:
             return True
 
+        self.layers_verified += len(valid_layers) - 1
         all_correct = True
-        for i in range(1, len(self.layer_checksums)):
-            cmp = self.layer_checksums[i]
-            if cmp is None:
+        mismatched_layers: set[int] = set()
+        for key in ("comm_input", "comm_output", "compute_input", "compute_output"):
+            values = [checksums[key] for _, checksums in valid_layers]
+            counts = Counter(values)
+            reference_value, reference_count = counts.most_common(1)[0]
+            if reference_count * 2 <= len(values):
+                log.error(
+                    f"LAYER_CHECKSUM_AMBIGUOUS ({key}): "
+                    f"rank={self.rank} iter={iteration} groups={dict(counts)}"
+                )
+                self.corruption_details.append({
+                    "type": f"layer_checksum_ambiguous_{key}",
+                    "rank": self.rank,
+                    "iteration": iteration,
+                    "checksum_groups": dict(counts),
+                })
+                all_correct = False
                 continue
-            # Count every cross-layer comparison so a clean (green) run still
-            # proves the detector ran: layers_verified > 0.
-            self.layers_verified += 1
-            layer_has_mismatch = False
-            for key in ("comm_input", "comm_output", "compute_input", "compute_output"):
-                if cmp[key] != ref[key]:
+            reference_index = next(
+                index
+                for index, checksums in valid_layers
+                if checksums[key] == reference_value
+            )
+            for index, checksums in valid_layers:
+                if checksums[key] != reference_value:
                     log.error(
                         f"LAYER_CHECKSUM_MISMATCH ({key}): "
                         f"rank={self.rank} iter={iteration} "
-                        f"layer_0={ref[key]} layer_{i}={cmp[key]}"
+                        f"reference_layer={reference_index} "
+                        f"reference={reference_value} "
+                        f"layer_{index}={checksums[key]}"
                     )
                     self.corruption_details.append({
                         "type": f"layer_checksum_mismatch_{key}",
                         "rank": self.rank,
                         "iteration": iteration,
-                        "layer_ref": 0,
-                        "layer_cmp": i,
-                        "ref_checksum": ref[key],
-                        "cmp_checksum": cmp[key],
+                        "layer_ref": reference_index,
+                        "layer_cmp": index,
+                        "ref_checksum": reference_value,
+                        "cmp_checksum": checksums[key],
                     })
-                    layer_has_mismatch = True
+                    mismatched_layers.add(index)
                     all_correct = False
-            # Count once per CORRUPTED LAYER, not once per key -- a single bad
-            # layer must not inflate the metric up to 4x (one per checksum key).
-            if layer_has_mismatch:
-                self.layer_checksum_mismatches += 1
+
+        self.layer_checksum_mismatches += len(mismatched_layers)
 
         return all_correct
 
-    def _verify_all_gather(self) -> bool:
+    def _verify_all_gather(
+        self,
+        *,
+        iteration: int,
+        layer_idx: int,
+        phase: str,
+    ) -> bool:
         """
         Verify all_gather result.
 
@@ -590,28 +682,33 @@ class FSDPModeReproducer(BaseReproducer):
             start = src_rank * self.shard_size
             end = start + self.shard_size
             chunk = self.full_param[start:end]
-            expected = float(src_rank)
+            expected = float(src_rank + 1)
             expected_tensor = torch.full_like(chunk, expected)
 
-            if not torch.allclose(chunk, expected_tensor, rtol=1e-3, atol=1e-3):
-                actual = chunk[0].item()
+            if not torch.equal(chunk, expected_tensor):
+                summary = self._mismatch_summary(chunk, expected_tensor)
                 log.error(
                     f"ALL_GATHER CORRUPTION (RUNTIME BUG!): "
                     f"rank={self.rank} src_rank={src_rank} "
-                    f"expected={expected} actual={actual}"
+                    f"iter={iteration} layer={layer_idx} phase={phase} "
+                    f"expected={summary['expected']} actual={summary['actual']} "
+                    f"index={summary['first_mismatch_index']} "
+                    f"count={summary['mismatch_count']}"
                 )
                 self.corruption_details.append({
                     "type": "all_gather",
                     "rank": self.rank,
                     "src_rank": src_rank,
-                    "expected": expected,
-                    "actual": actual,
+                    "iteration": iteration,
+                    "layer": layer_idx,
+                    "phase": phase,
+                    **summary,
                 })
                 all_correct = False
 
         return all_correct
 
-    def _verify_reduce_scatter(self) -> bool:
+    def _verify_reduce_scatter(self, iteration: int) -> bool:
         """
         Verify reduce_scatter result.
 
@@ -621,19 +718,21 @@ class FSDPModeReproducer(BaseReproducer):
         expected = float(sum(range(1, self.world_size + 1)))
         expected_tensor = torch.full_like(self.grad_shard, expected)
 
-        if not torch.allclose(
-            self.grad_shard, expected_tensor, rtol=1e-3, atol=1e-3
-        ):
-            actual = self.grad_shard[0].item()
+        if not torch.equal(self.grad_shard, expected_tensor):
+            summary = self._mismatch_summary(self.grad_shard, expected_tensor)
             log.error(
                 f"REDUCE_SCATTER CORRUPTION (RUNTIME BUG!): "
-                f"rank={self.rank} expected={expected} actual={actual}"
+                f"rank={self.rank} iter={iteration} "
+                f"expected={summary['expected']} actual={summary['actual']} "
+                f"index={summary['first_mismatch_index']} "
+                f"count={summary['mismatch_count']}"
             )
             self.corruption_details.append({
                 "type": "reduce_scatter",
                 "rank": self.rank,
-                "expected": expected,
-                "actual": actual,
+                "iteration": iteration,
+                "oracle_dtype": self.reduce_scatter_oracle_dtype,
+                **summary,
             })
             return False
 

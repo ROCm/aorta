@@ -10,7 +10,6 @@ This module defines:
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-
 # =============================================================================
 # Standalone Reproducer Config
 # =============================================================================
@@ -310,6 +309,13 @@ class ReproducerConfig:
     - 4+: Full parallelism (exposes timing-sensitive bugs)
     """
 
+    expected_local_world_size: Optional[int] = None
+    """Expected ranks per host for topology-sensitive recipes.
+
+    ``None`` disables the advisory check. A mismatch is recorded and warned,
+    not rejected, because launchers remain authoritative for topology.
+    """
+
     def __post_init__(self) -> None:
         # Validate here (not only in the RaceWorkload adapter) so EVERY entry
         # point is covered -- the aorta.race CLI and any direct reproducer
@@ -325,6 +331,27 @@ class ReproducerConfig:
             raise ValueError(
                 f"compute_type must be one of {sorted(valid_compute)}, "
                 f"got {self.compute_type!r}"
+            )
+        if self.mode == "fsdp" and not self.reuse_buffers:
+            raise ValueError(
+                "race FSDP mode does not implement reuse_buffers=false; "
+                "remove the knob or implement per-iteration FSDP allocation"
+            )
+        if self.mode == "fsdp" and self.same_stream_mode:
+            raise ValueError(
+                "race FSDP mode does not implement same_stream_mode=true; "
+                "the existing same-stream path applies only to mode='default'"
+            )
+        if (
+            self.expected_local_world_size is not None
+            and (
+                isinstance(self.expected_local_world_size, bool)
+                or not isinstance(self.expected_local_world_size, int)
+                or self.expected_local_world_size < 1
+            )
+        ):
+            raise ValueError(
+                "expected_local_world_size must be a positive int or None"
             )
 
 
@@ -371,6 +398,12 @@ class ReproducerResult:
 
     eff_batch_size: Optional[int] = None
     """Resolved batch size of the reference input (transformer compute)."""
+
+    effective_h2d_tensor_size: Optional[int] = None
+    """H2D element count actually allocated after minimum-size normalization."""
+
+    reduce_scatter_oracle_dtype: Optional[str] = None
+    """Exact synthetic reduce-scatter oracle dtype, when the mode provides one."""
 
 
 # =============================================================================

@@ -12,6 +12,7 @@ Acceptance criteria (from issue #151 §"Plumbing"):
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -21,7 +22,7 @@ from click.testing import CliRunner
 import aorta.triage.runner as runner
 from aorta.cli.triage import triage
 from aorta.instrumentation.environment import EnvSnapshot
-from aorta.run import RunRequest
+from aorta.run import RunRequest, TrialResult
 from aorta.triage.recipe import build_recipe_from_flags
 
 # ---- Fixtures -------------------------------------------------------------
@@ -1356,3 +1357,76 @@ def test_resolved_env_lookup_failure_warns_without_echoing_error_text(monkeypatc
     assert "RegistryError" in warning
     assert "omitting its baseline Environment.env layer" in warning
     assert "secret-value-must-not-be-logged" not in warning
+
+
+def _persisted_trial(trial_id: str) -> TrialResult:
+    return TrialResult(
+        trial_id=trial_id,
+        workload="_subprocess",
+        execution_env={},
+        mitigations_applied=("none",),
+        config={},
+        env={},
+        result={
+            "passed": True,
+            "failure_count": 0,
+            "first_failure_iteration": None,
+            "failure_details": [],
+            "total_iterations": 1,
+            "step_times_ms": [1.0],
+            "elapsed_sec": 0.1,
+            "metrics": {},
+            "main_work_started": True,
+            "executed_iterations": 1,
+            "configured_iterations": 1,
+        },
+        wall_clock_sec=1.0,
+        exit_status="ok",
+    )
+
+
+def test_resume_hydration_rejects_filename_body_identity_mismatch(tmp_path):
+    path = tmp_path / "trial_d0_m0_t0.json"
+    path.write_text(
+        json.dumps(_persisted_trial("_subprocess_d0_m0_t1").to_dict()),
+        encoding="utf-8",
+    )
+
+    hydrated = runner._hydrate_trials_by_index(
+        [str(path)],
+        expected_workload="_subprocess",
+    )
+
+    assert hydrated == {}
+
+
+def test_resume_hydration_rejects_foreign_cell_coordinates(tmp_path):
+    path = tmp_path / "trial_d9_m9_t0.json"
+    path.write_text(
+        json.dumps(_persisted_trial("_subprocess_d9_m9_t0").to_dict()),
+        encoding="utf-8",
+    )
+
+    hydrated = runner._hydrate_trials_by_index(
+        [str(path)],
+        expected_workload="_subprocess",
+    )
+
+    assert hydrated == {}
+
+
+def test_resume_hydration_rejects_duplicate_trial_indices(tmp_path):
+    paths = [
+        tmp_path / "trial_d0_m0_t0.json",
+        tmp_path / "trial_0.json",
+    ]
+    body = json.dumps(_persisted_trial("_subprocess_d0_m0_t0").to_dict())
+    for path in paths:
+        path.write_text(body, encoding="utf-8")
+
+    hydrated = runner._hydrate_trials_by_index(
+        [str(path) for path in paths],
+        expected_workload="_subprocess",
+    )
+
+    assert hydrated == {}

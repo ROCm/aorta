@@ -65,6 +65,12 @@ Any launch without an agent store—including Slurm/srun and older/static
 torchrun configurations—must reserve a job-unique 1000-port range and export
 its first port as `AORTA_TRIAL_MASTER_PORT_BASE`.
 
+For the `race` FSDP harness, the requested workload dtype still controls model,
+H2D, and all-gather tensors. Its synthetic rank-coded reduce-scatter correctness
+oracle uses FP32 so legal BF16 accumulation-order rounding cannot be classified
+as silent corruption. Trial metrics record both the workload dtype and
+`reduce_scatter_oracle_dtype`.
+
 ### Workload-owned Docker launches
 
 The dispatcher records the effective controlled overlay in

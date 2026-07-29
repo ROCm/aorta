@@ -13,7 +13,12 @@ import yaml
 
 import aorta.triage.runner as runner
 from aorta.instrumentation.environment import EnvSnapshot
-from aorta.triage.output import NO_TICKET_SLUG, resolve_run_dir, safe_slug
+from aorta.triage.output import (
+    NO_TICKET_SLUG,
+    _repository_git_sha,
+    resolve_run_dir,
+    safe_slug,
+)
 from aorta.triage.recipe import Cell, ConfoundCfg, Recipe, build_recipe_from_flags
 
 # ---- Fixtures -------------------------------------------------------------
@@ -24,6 +29,17 @@ class _FakeTrial:
     exit_status: str = "ok"
     wall_clock_sec: float = 1.0
     result: dict | None = None
+
+
+def test_repository_git_sha_reads_loose_ref(tmp_path):
+    git_dir = tmp_path / ".git"
+    ref = git_dir / "refs" / "heads" / "topic"
+    ref.parent.mkdir(parents=True)
+    sha = "a" * 40
+    (git_dir / "HEAD").write_text("ref: refs/heads/topic\n", encoding="utf-8")
+    ref.write_text(f"{sha}\n", encoding="utf-8")
+
+    assert _repository_git_sha(tmp_path) == sha
 
 
 def _fake_trial(passed: bool = True, step_times_ms: list[float] | None = None) -> _FakeTrial:
@@ -635,6 +651,8 @@ def test_matrix_json_records_baseline_and_confound(tmp_path, patched_env, patche
     doc = json.loads((run_dir / "matrix.json").read_text())
     assert doc["baseline_cell"] == "none-local"
     assert doc["confound"]["threshold"] == 1.15
+    assert set(doc["runtime_provenance"]) == {"package_version", "git_sha"}
+    assert len(doc["recipe_source"]["resolved_sha256"]) == 64
     assert {c["name"] for c in doc["cells"]} == {"none-local", "tf32_off-local"}
     # Baseline cell must carry the baseline tag.
     base = next(c for c in doc["cells"] if c["name"] == "none-local")
