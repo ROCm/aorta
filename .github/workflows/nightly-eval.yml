@@ -1,0 +1,87 @@
+name: Nightly Evaluation
+
+# Phase 1 of the CI plan (docs/ci-plan.md): after the nightly wheel is published,
+# install THAT wheel and evaluate the workloads against committed expected-outcome
+# baselines, capturing perf metrics as trend data. Runs inside the pinned ROCm
+# docker image on the self-hosted MI350 runner.
+#
+# Correctness fails the job only against a *blessed* baseline; entries without a
+# baseline are recorded (record-only) so nightly isn't red before baselines land.
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Nightly wheels"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: nightly-eval-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CONTAINER_NAME: aorta-ci-gpu
+  DEV_WHEELS_INDEX: https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
+
+jobs:
+  nightly-eval:
+    name: nightly eval (GPU, MI350)
+    runs-on: [self-hosted, gpu]
+    # Only run when the wheel build actually succeeded (or on manual dispatch).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    timeout-minutes: 150
+
+    steps:
+      # Reclaim root-owned artifacts left by the container so checkout's
+      # git-clean (as the runner user) doesn't fail. Pinned busybox by digest.
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
+
+      # Install the RELEASED nightly wheel (not the source tree) so we validate
+      # exactly what users pip install, then run the eval harness.
+      - name: Install nightly wheel and run evaluation
+        run: |
+          bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            python -m pip install --upgrade pip
+            pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}"
+            python scripts/ci/nightly_eval.py --out gpu-nightly-results.json
+          '
+
+      - name: Upload nightly results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-results-${{ github.run_id }}
+          path: gpu-nightly-results.json
+          if-no-files-found: warn
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v

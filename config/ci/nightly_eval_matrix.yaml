@@ -1,0 +1,55 @@
+# Nightly evaluation matrix -- one entry per (workload x config) the nightly
+# eval runs against the released wheel. Each entry runs a recipe via
+# `aorta sweep run --strict` (under torchrun when `nproc` is set), then the
+# harness (scripts/ci/nightly_eval.py) harvests matrix.json and compares each
+# cell against config/ci/regression_baselines.yaml.
+#
+# Fields:
+#   name      - stable id for this entry (used as the baseline key prefix + in results)
+#   recipe    - recipe path (relative to repo root)
+#   nproc     - optional; launch under `torchrun --standalone --nproc_per_node=<n>`
+#   min_gpus  - optional; skip when torch.cuda.device_count() is lower (default 1;
+#               defaults to nproc when nproc is set)
+#
+# Phase 1 wires one config per registered workload (the smoke recipes). Per-workload
+# matrices (dtypes, larger GPU counts) are Phase 3 -- add rows here, no code change.
+version: 1
+
+entries:
+  - name: gpu_smoke
+    recipe: recipes/ci/gpu-smoke.yaml
+
+  - name: inference_offline
+    recipe: recipes/inference/example-inference-smoke.yaml
+
+  - name: inference_continuous
+    recipe: recipes/inference/example-inference-continuous-smoke.yaml
+
+  - name: hrx_launch_probe
+    recipe: recipes/hrx/hrx-launch-probe-smoke.yaml
+
+  - name: hrx_perf_gemm
+    recipe: recipes/hrx/hrx-perf-gemm.yaml
+
+  - name: hrx_perf_triad
+    recipe: recipes/hrx/hrx-perf-triad.yaml
+
+  - name: training_ddp
+    recipe: recipes/training/example-training-ddp-smoke.yaml
+    nproc: 2
+    min_gpus: 2
+
+  - name: training_fsdp
+    recipe: recipes/training/example-training-fsdp-smoke.yaml
+    nproc: 2
+    min_gpus: 2
+
+  - name: race
+    recipe: recipes/race/race_smoke.yaml
+    nproc: 2
+    min_gpus: 2
+
+  - name: llm_determinism
+    recipe: recipes/llm-determinism/example-llm-determinism.yaml
+    nproc: 2
+    min_gpus: 2
