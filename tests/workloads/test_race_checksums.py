@@ -19,6 +19,7 @@ Contract (read from src/aorta/race/modes/fsdp.py):
 import torch
 
 from aorta.race.modes.fsdp import (
+    _MAX_EXACT_REDUCE_SCATTER_WORLD_SIZE,
     _REDUCE_SCATTER_ORACLE_DTYPE,
     FSDPModeReproducer,
 )
@@ -172,6 +173,13 @@ def test_reduce_scatter_oracle_dtype_is_fp32():
     assert _REDUCE_SCATTER_ORACLE_DTYPE == torch.float32
 
 
+def test_reduce_scatter_world_limit_keeps_triangular_sum_exact():
+    limit = _MAX_EXACT_REDUCE_SCATTER_WORLD_SIZE
+    assert limit == 5_792
+    assert limit * (limit + 1) // 2 <= 1 << 24
+    assert (limit + 1) * (limit + 2) // 2 > 1 << 24
+
+
 def test_reduce_scatter_exact_oracle_passes_and_reports_real_mismatch():
     r = object.__new__(FSDPModeReproducer)
     r.rank = 0
@@ -229,3 +237,58 @@ def test_rank_fill_pattern_is_nonzero_for_rank_zero():
 
     assert all(torch.equal(shard, torch.ones_like(shard)) for shard in r.param_shards)
     assert torch.equal(r.full_grad, torch.ones_like(r.full_grad))
+
+
+def test_forward_all_gather_verdict_is_deferred_and_compact():
+    r = object.__new__(FSDPModeReproducer)
+    r.rank = 0
+    r.world_size = 2
+    r.shard_size = 3
+    r.num_layers = 1
+    r.corruption_details = []
+    r.corruption_details_omitted = 0
+    r.full_param = torch.tensor(
+        [1.0, 1.0, 1.0, 2.0, 9.0, 2.0],
+        dtype=torch.bfloat16,
+    )
+    r.expected_full_param = torch.tensor(
+        [1.0, 1.0, 1.0, 2.0, 2.0, 2.0],
+        dtype=torch.bfloat16,
+    )
+    r._all_gather_mismatch_counts = torch.zeros(1, dtype=torch.int64)
+    r._all_gather_first_indices = torch.zeros(1, dtype=torch.int64)
+    r._all_gather_first_actual = torch.zeros(1, dtype=torch.float32)
+    r._all_gather_max_abs_error = torch.zeros(1, dtype=torch.float32)
+
+    r._record_forward_all_gather(layer_idx=0)
+
+    assert r.corruption_details == []
+    assert r._verify_recorded_forward_all_gathers(iteration=5) is False
+    assert r.corruption_details == [
+        {
+            "type": "all_gather",
+            "rank": 0,
+            "src_rank": 1,
+            "iteration": 5,
+            "layer": 0,
+            "phase": "forward",
+            "first_mismatch_index": 1,
+            "first_mismatch_global_index": 4,
+            "actual": 9.0,
+            "expected": 2.0,
+            "mismatch_count": 1,
+            "max_abs_error": 7.0,
+        }
+    ]
+
+
+def test_corruption_details_are_bounded():
+    r = object.__new__(FSDPModeReproducer)
+    r.corruption_details = []
+    r.corruption_details_omitted = 0
+
+    for index in range(300):
+        r._record_corruption_detail({"index": index})
+
+    assert len(r.corruption_details) == 256
+    assert r.corruption_details_omitted == 44

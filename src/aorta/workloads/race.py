@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, ClassVar, Literal
 
 from aorta.workloads._base import Workload, WorkloadResult
@@ -76,16 +77,64 @@ def _positive_env_int(name: str) -> int | None:
     return value if value > 0 else None
 
 
+def _slurm_local_world_size() -> int | None:
+    raw = (
+        os.environ.get("SLURM_STEP_TASKS_PER_NODE")
+        or os.environ.get("SLURM_TASKS_PER_NODE")
+        or os.environ.get("SLURM_NTASKS_PER_NODE")
+    )
+    if raw is None:
+        return None
+    segments: list[tuple[int, int]] = []
+    for token in raw.split(","):
+        match = re.fullmatch(
+            r"\s*(?P<count>\d+)(?:\(x(?P<repeat>\d+)\))?\s*",
+            token,
+        )
+        if match is None:
+            return None
+        count = int(match.group("count"))
+        repeat = int(match.group("repeat") or "1")
+        if count < 1 or repeat < 1:
+            return None
+        segments.append((count, repeat))
+    if len({count for count, _repeat in segments}) == 1:
+        return segments[0][0]
+    raw_node_id = os.environ.get("SLURM_NODEID")
+    try:
+        node_id = int(raw_node_id) if raw_node_id is not None else -1
+    except ValueError:
+        return None
+    if node_id < 0:
+        return None
+    first_node = 0
+    for count, repeat in segments:
+        if first_node <= node_id < first_node + repeat:
+            return count
+        first_node += repeat
+    return None
+
+
 def _detect_local_world_size(world_size: int) -> int | None:
     for name in (
         "LOCAL_WORLD_SIZE",
         "OMPI_COMM_WORLD_LOCAL_SIZE",
-        "SLURM_NTASKS_PER_NODE",
-        "SLURM_TASKS_PER_NODE",
     ):
         value = _positive_env_int(name)
         if value is not None:
             return value
+    slurm_local_world_size = _slurm_local_world_size()
+    if slurm_local_world_size is not None:
+        return slurm_local_world_size
+    if any(
+        name in os.environ
+        for name in (
+            "SLURM_STEP_TASKS_PER_NODE",
+            "SLURM_TASKS_PER_NODE",
+            "SLURM_NTASKS_PER_NODE",
+        )
+    ):
+        return None
     slurm_nodes = _positive_env_int("SLURM_NNODES")
     if slurm_nodes is not None and world_size % slurm_nodes == 0:
         return world_size // slurm_nodes
@@ -227,6 +276,9 @@ class RaceWorkload(Workload):
                 "declared_h2d_tensor_size": self._cfg.h2d_tensor_size,
                 "reduce_scatter_oracle_dtype": (
                     res.reduce_scatter_oracle_dtype
+                ),
+                "corruption_details_omitted": (
+                    res.corruption_details_omitted
                 ),
                 "rank": self._rank,
                 "world_size": self._world,

@@ -6,6 +6,7 @@ the execution environment, configuration, and timing.
 
 import copy
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -59,6 +60,8 @@ class TrialResult:
             ``runtime_context``, ``docker``, ``env_vars``,
             ``partial`` / ``partial_reasons``, etc.).
         result: WorkloadResult serialized to dict.
+        request_fingerprint: SHA-256 of the effective request used to decide
+            whether a persisted trial is safe to resume.
         wall_clock_sec: Total wall clock time for the trial.
         exit_status: Outcome of the trial execution.  Values:
 
@@ -98,6 +101,7 @@ class TrialResult:
         "ok", "workload_failed", "workload_setup_failed", "infrastructure_failed"
     ]
     schema_version: str = _SCHEMA_VERSION
+    request_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         # Defensively deep-copy the mutable dict fields so the caller
@@ -125,6 +129,7 @@ class TrialResult:
             "result": copy.deepcopy(self.result),
             "wall_clock_sec": self.wall_clock_sec,
             "exit_status": self.exit_status,
+            "request_fingerprint": self.request_fingerprint,
         }
 
     @classmethod
@@ -159,6 +164,7 @@ class TrialResult:
             result=data["result"],
             wall_clock_sec=data["wall_clock_sec"],
             exit_status=data["exit_status"],
+            request_fingerprint=data.get("request_fingerprint"),
         )
 
     @staticmethod
@@ -174,6 +180,7 @@ class TrialResult:
             "result",
             "wall_clock_sec",
             "exit_status",
+            "request_fingerprint",
         }
         missing = sorted(required - set(data))
         if missing:
@@ -188,6 +195,15 @@ class TrialResult:
         for name in ("trial_id", "workload"):
             if not isinstance(data[name], str) or not data[name]:
                 raise TypeError(f"TrialResult.{name} must be a non-empty string")
+        fingerprint = data["request_fingerprint"]
+        if fingerprint is not None and (
+            not isinstance(fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+        ):
+            raise TypeError(
+                "TrialResult.request_fingerprint must be None or a "
+                "lowercase SHA-256 hex string"
+            )
         for name in ("execution_env", "config", "env", "result"):
             if not isinstance(data[name], dict):
                 raise TypeError(f"TrialResult.{name} must be a JSON object")

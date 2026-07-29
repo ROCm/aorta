@@ -10,7 +10,7 @@ import logging
 import pytest
 
 from aorta.race.config import ReproducerConfig, ReproducerResult
-from aorta.workloads.race import RaceWorkload
+from aorta.workloads.race import RaceWorkload, _detect_local_world_size
 
 
 class _StubReproducer:
@@ -217,6 +217,7 @@ def test_race_workload_maps_result(monkeypatch):
     assert res.metrics["effective_h2d_tensor_size"] == 1_048_576
     assert res.metrics["declared_h2d_tensor_size"] == 1_000_000
     assert res.metrics["reduce_scatter_oracle_dtype"] == "float32"
+    assert res.metrics["corruption_details_omitted"] == 0
     assert captured["rank"] == 0 and captured["world_size"] == 2
 
 
@@ -299,3 +300,35 @@ def test_race_workload_does_not_assume_one_local_rank(
     assert result.metrics["node_count"] is None
     assert result.metrics["topology_matches_recipe"] is None
     assert any("topology unknown" in record.message for record in caplog.records)
+
+
+def test_heterogeneous_slurm_topology_uses_current_node(monkeypatch):
+    for name in (
+        "LOCAL_WORLD_SIZE",
+        "OMPI_COMM_WORLD_LOCAL_SIZE",
+        "SLURM_STEP_TASKS_PER_NODE",
+        "SLURM_NTASKS_PER_NODE",
+        "SLURM_NNODES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SLURM_TASKS_PER_NODE", "1(x2),2")
+    monkeypatch.setenv("SLURM_NODEID", "2")
+
+    assert _detect_local_world_size(4) == 2
+
+
+def test_heterogeneous_slurm_topology_is_unknown_without_node_id(
+    monkeypatch,
+):
+    for name in (
+        "LOCAL_WORLD_SIZE",
+        "OMPI_COMM_WORLD_LOCAL_SIZE",
+        "SLURM_STEP_TASKS_PER_NODE",
+        "SLURM_NTASKS_PER_NODE",
+        "SLURM_NNODES",
+        "SLURM_NODEID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SLURM_TASKS_PER_NODE", "1(x2),2")
+
+    assert _detect_local_world_size(4) is None

@@ -276,7 +276,7 @@ class DefaultModeReproducer(BaseReproducer):
                     f"rank={self.rank} src_rank={src_rank} "
                     f"expected={expected} actual={actual}"
                 )
-                self.corruption_details.append({
+                self._record_corruption_detail({
                     "type": "all_to_all",
                     "rank": self.rank,
                     "src_rank": src_rank,
@@ -300,7 +300,7 @@ class DefaultModeReproducer(BaseReproducer):
                 f"ALL_REDUCE CORRUPTION (RUNTIME BUG!): "
                 f"rank={self.rank} expected={expected} actual={actual}"
             )
-            self.corruption_details.append({
+            self._record_corruption_detail({
                 "type": "all_reduce",
                 "rank": self.rank,
                 "expected": expected,

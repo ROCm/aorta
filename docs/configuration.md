@@ -49,6 +49,9 @@ class metadata and side-effect-free package metadata:
 ```toml
 [project.entry-points."aorta.workload_policies"]
 my_workload = "aorta.run.validation:PROCESS_OPTIONAL_POLICY"
+
+[project.entry-points."aorta.workload_startup_env"]
+my_workload = "my_package.startup:startup_env"
 ```
 
 Use `PROCESS_REQUIRED_POLICY` when `auto` must always select a fresh worker.
@@ -56,6 +59,10 @@ The dispatcher reads this entry-point value without importing plugin code;
 the loaded class still declares `trial_isolation_supported` (and, when
 required, `trial_isolation_default` / `trial_isolation_required`) as a
 defense-in-depth consistency check inside the worker.
+
+When a workload has config-derived defaults that must exist before its module
+or native libraries import, register a lightweight startup provider returning
+`dict[str, str]`. Keep that provider module free of workload/native imports.
 
 Fresh workers add interpreter/library startup cost. Launcher identity variables
 (`RANK`, `WORLD_SIZE`, `LOCAL_RANK`, `MASTER_ADDR`, and `MASTER_PORT`) remain

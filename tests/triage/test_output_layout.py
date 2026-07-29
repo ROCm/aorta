@@ -16,6 +16,8 @@ from aorta.instrumentation.environment import EnvSnapshot
 from aorta.triage.output import (
     NO_TICKET_SLUG,
     _repository_git_sha,
+    _runtime_provenance,
+    _valid_git_sha,
     resolve_run_dir,
     safe_slug,
 )
@@ -40,6 +42,21 @@ def test_repository_git_sha_reads_loose_ref(tmp_path):
     ref.write_text(f"{sha}\n", encoding="utf-8")
 
     assert _repository_git_sha(tmp_path) == sha
+
+
+def test_valid_git_sha_accepts_only_full_object_id_lengths():
+    assert _valid_git_sha("a" * 40) == "a" * 40
+    assert _valid_git_sha("B" * 64) == "b" * 64
+    assert _valid_git_sha("c" * 50) is None
+
+
+def test_runtime_provenance_records_dirty_state(monkeypatch):
+    monkeypatch.setenv("AORTA_GIT_DIRTY", "true")
+
+    provenance = _runtime_provenance()
+
+    assert provenance["git_dirty"] is True
+    assert len(provenance["source_tree_sha256"]) == 64
 
 
 def _fake_trial(passed: bool = True, step_times_ms: list[float] | None = None) -> _FakeTrial:
@@ -651,7 +668,13 @@ def test_matrix_json_records_baseline_and_confound(tmp_path, patched_env, patche
     doc = json.loads((run_dir / "matrix.json").read_text())
     assert doc["baseline_cell"] == "none-local"
     assert doc["confound"]["threshold"] == 1.15
-    assert set(doc["runtime_provenance"]) == {"package_version", "git_sha"}
+    assert set(doc["runtime_provenance"]) == {
+        "package_version",
+        "git_sha",
+        "git_dirty",
+        "source_tree_sha256",
+    }
+    assert len(doc["runtime_provenance"]["source_tree_sha256"]) == 64
     assert len(doc["recipe_source"]["resolved_sha256"]) == 64
     assert {c["name"] for c in doc["cells"]} == {"none-local", "tf32_off-local"}
     # Baseline cell must carry the baseline tag.

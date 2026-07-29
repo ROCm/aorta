@@ -38,6 +38,14 @@ PROCESS_REQUIRED_POLICY = WorkloadIsolationPolicy(
 )
 
 
+def race_startup_env(config: dict[str, object]) -> dict[str, str]:
+    """Side-effect-free pre-import defaults for the Race workload."""
+    value = config.get("gpu_max_hw_queues", 4)
+    if value is None:
+        return {}
+    return {"GPU_MAX_HW_QUEUES": str(value)}
+
+
 def validate_launch_mode(workload_cls: type[Workload]) -> None:
     """Validate WORLD_SIZE matches workload's launch_mode declaration.
 
@@ -203,5 +211,6 @@ __all__ = [
     "WorkloadIsolationPolicy",
     "resolve_trial_isolation",
     "resolve_trial_isolation_policy",
+    "race_startup_env",
     "validate_launch_mode",
 ]

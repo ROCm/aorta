@@ -405,6 +405,9 @@ class ReproducerResult:
     reduce_scatter_oracle_dtype: Optional[str] = None
     """Exact synthetic reduce-scatter oracle dtype, when the mode provides one."""
 
+    corruption_details_omitted: int = 0
+    """Detailed records omitted after the bounded diagnostic cap."""
+
 
 # =============================================================================
 # Race Injection Config (broader aorta system)

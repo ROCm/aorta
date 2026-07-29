@@ -385,8 +385,8 @@ class DDPModeReproducer(BaseReproducer):
 
         # ─── Per-layer backward + all_reduce ─────────────────────────
         if self.config.simulate_compute and self.weight_matrices:
-            for l in reversed(range(self.num_layers)):
-                self._backward_layer_and_allreduce(l)
+            for layer_idx in reversed(range(self.num_layers)):
+                self._backward_layer_and_allreduce(layer_idx)
 
         # ─── Optimizer step ──────────────────────────────────────────
         self._run_optimizer_step()
@@ -425,8 +425,8 @@ class DDPModeReproducer(BaseReproducer):
 
         # ─── Per-layer backward + all_reduce ─────────────────────────
         if self.config.simulate_compute and self.weight_matrices:
-            for l in reversed(range(self.num_layers)):
-                self._backward_layer_and_allreduce(l)
+            for layer_idx in reversed(range(self.num_layers)):
+                self._backward_layer_and_allreduce(layer_idx)
 
         # ─── Optimizer step ──────────────────────────────────────────
         self._run_optimizer_step()
@@ -503,7 +503,7 @@ class DDPModeReproducer(BaseReproducer):
                     f"rank {r} checksum={cs.item():.6f} differs from "
                     f"rank 0 checksum={reference_checksum.item():.6f}"
                 )
-                self.corruption_details.append({
+                self._record_corruption_detail({
                     "type": "gradient_divergence",
                     "iteration": iteration,
                     "rank": self.rank,

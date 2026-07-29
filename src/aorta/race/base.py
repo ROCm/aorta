@@ -17,6 +17,7 @@ from .compute import BaseCompute, create_compute
 from .config import ReproducerConfig, ReproducerResult
 
 log = logging.getLogger(__name__)
+_MAX_CORRUPTION_DETAILS = 256
 
 
 class BaseReproducer(ABC):
@@ -76,6 +77,7 @@ class BaseReproducer(ABC):
         # State
         self.in_verification_phase: bool = False
         self.corruption_details: List[Dict] = []
+        self.corruption_details_omitted: int = 0
 
         # Detector observability: a clean run is otherwise indistinguishable
         # from a no-op. Subclasses that do per-layer checksum verification
@@ -86,6 +88,14 @@ class BaseReproducer(ABC):
         # Dtype
         self.dtype = self._get_dtype()
         self.effective_h2d_tensor_size: int = config.h2d_tensor_size
+
+    def _record_corruption_detail(self, detail: dict) -> None:
+        if len(self.corruption_details) < _MAX_CORRUPTION_DETAILS:
+            self.corruption_details.append(detail)
+        else:
+            self.corruption_details_omitted = (
+                getattr(self, "corruption_details_omitted", 0) + 1
+            )
 
     def _get_dtype(self) -> torch.dtype:
         """Get torch dtype from config string."""
@@ -410,7 +420,7 @@ class BaseReproducer(ABC):
                 f"H2D CORRUPTION (RUNTIME BUG!): iter={iteration} rank={self.rank} "
                 f"expected={expected} actual={actual}"
             )
-            self.corruption_details.append({
+            self._record_corruption_detail({
                 "type": "h2d",
                 "iteration": iteration,
                 "rank": self.rank,
@@ -565,6 +575,7 @@ class BaseReproducer(ABC):
                 "reduce_scatter_oracle_dtype",
                 None,
             ),
+            corruption_details_omitted=self.corruption_details_omitted,
         )
 
 

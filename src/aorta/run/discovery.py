@@ -14,6 +14,7 @@ from aorta.run.validation import (
     PROCESS_OPTIONAL_POLICY,
     PROCESS_REQUIRED_POLICY,
     WorkloadIsolationPolicy,
+    race_startup_env,
 )
 from aorta.workloads import Workload
 
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _WORKLOAD_GROUP = "aorta.workloads"
 _WORKLOAD_POLICY_GROUP = "aorta.workload_policies"
+_WORKLOAD_STARTUP_ENV_GROUP = "aorta.workload_startup_env"
 _POLICY_TARGETS: dict[str, WorkloadIsolationPolicy] = {
     "aorta.run.validation:IN_PROCESS_ONLY_POLICY": IN_PROCESS_ONLY_POLICY,
     "aorta.run.validation:IN_PROCESS_REQUIRED_POLICY": IN_PROCESS_REQUIRED_POLICY,
@@ -35,6 +37,7 @@ _BUILTIN_POLICY_BY_TARGET: dict[str, WorkloadIsolationPolicy] = {
     "aorta.workloads.llm_determinism:LlmDeterminismWorkload": PROCESS_OPTIONAL_POLICY,
     "aorta.workloads.race:RaceWorkload": PROCESS_REQUIRED_POLICY,
 }
+_RACE_WORKLOAD_TARGET = "aorta.workloads.race:RaceWorkload"
 
 
 class UnknownWorkloadError(ValueError):
@@ -152,9 +155,53 @@ def get_workload_policy(name: str) -> WorkloadIsolationPolicy:
     return IN_PROCESS_ONLY_POLICY
 
 
+def get_workload_startup_env(
+    name: str,
+    config: dict[str, object],
+) -> dict[str, str]:
+    """Resolve built-in pre-import defaults without loading workload code."""
+    catalog = importlib.metadata.entry_points()
+    entries = catalog.select(group=_WORKLOAD_GROUP)
+    matches = [entry for entry in entries if entry.name == name]
+    if not matches:
+        raise UnknownWorkloadError(f"Workload '{name}' not found")
+    providers = [
+        entry
+        for entry in catalog.select(group=_WORKLOAD_STARTUP_ENV_GROUP)
+        if getattr(entry, "group", None) == _WORKLOAD_STARTUP_ENV_GROUP
+        and entry.name == name
+    ]
+    if len(providers) > 1:
+        raise ValueError(
+            f"Workload '{name}' has multiple "
+            f"{_WORKLOAD_STARTUP_ENV_GROUP!r} entries"
+        )
+    if providers:
+        provider = providers[0].load()
+        if not callable(provider):
+            raise ValueError(
+                f"Workload '{name}' startup environment provider is not callable"
+            )
+        result = provider(dict(config))
+        if not isinstance(result, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in result.items()
+        ):
+            raise ValueError(
+                f"Workload '{name}' startup environment provider must "
+                "return dict[str, str]"
+            )
+        return result
+    target = getattr(matches[-1], "value", None)
+    if target != _RACE_WORKLOAD_TARGET:
+        return {}
+    return race_startup_env(config)
+
+
 __all__ = [
     "UnknownWorkloadError",
     "discover_workloads",
     "get_workload_class",
     "get_workload_policy",
+    "get_workload_startup_env",
 ]

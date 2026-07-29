@@ -102,6 +102,7 @@ def _run_request_from_dict(data: dict[str, Any]):
         extra_env=dict(data.get("extra_env", {})),
         trial_isolation=data.get("trial_isolation", "process"),
         cell_name=data.get("cell_name"),
+        request_fingerprint=data.get("request_fingerprint"),
         steps=data.get("steps"),
         config_overrides=dict(data.get("config_overrides", {})),
         results_dir=Path(data["results_dir"]),
@@ -123,42 +124,59 @@ def _synchronize_workload_result(
     *,
     rank_local: bool,
 ):
-    """Synchronize successful rank outcomes before workload cleanup."""
-    if int(os.environ.get("WORLD_SIZE", "1")) > 1 and exit_status in {
-        "workload_setup_failed",
-        "infrastructure_failed",
-    }:
-        raise RuntimeError(
-            f"distributed trial failed before rank synchronization (exit_status={exit_status})"
-        )
+    """Synchronize every rank outcome before workload cleanup."""
+    requested_world_size = int(os.environ.get("WORLD_SIZE", "1"))
     try:
         import torch.distributed as dist
     except Exception:
+        if requested_world_size > 1:
+            raise RuntimeError(
+                "distributed trial cannot synchronize rank outcomes because "
+                "torch.distributed is unavailable"
+            )
         return workload_result, exit_status
     if not dist.is_available() or not dist.is_initialized():
+        if requested_world_size > 1:
+            raise RuntimeError(
+                "distributed trial failed before its worker-owned process "
+                "group was initialized"
+            )
         return workload_result, exit_status
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    local_status_error = exit_status in {
+        "workload_setup_failed",
+        "infrastructure_failed",
+    }
     local_details = (
         list(workload_result.failure_details)
-        if rank_local
+        if rank_local or local_status_error
         else []
     )
+    local_detail_omitted = 0
+    if rank_local and isinstance(workload_result.metrics, dict):
+        raw_omitted = workload_result.metrics.get(
+            "corruption_details_omitted",
+            0,
+        )
+        if isinstance(raw_omitted, int) and raw_omitted > 0:
+            local_detail_omitted = raw_omitted
     local_summary = {
         "exit_status": exit_status,
         "passed": bool(workload_result.passed),
         "failure_count": (
             int(workload_result.failure_count)
-            if rank_local
+            if rank_local or local_status_error
             else 0
         ),
         "first_failure_iteration": (
             workload_result.first_failure_iteration
-            if rank_local
+            if rank_local or local_status_error
             else None
         ),
         "failure_detail_count": len(local_details),
+        "failure_detail_omitted": local_detail_omitted,
         "failure_details": copy.deepcopy(
             local_details[:_MAX_FAILURE_DETAILS_PER_RANK]
         ),
@@ -186,7 +204,12 @@ def _synchronize_workload_result(
         canonical_result["passed"] = (
             passed_count == world_size and canonical_status == "ok"
         )
-        if rank_local:
+        merge_rank_failures = rank_local or any(
+            entry["exit_status"]
+            in {"workload_setup_failed", "infrastructure_failed"}
+            for entry in rank_summaries
+        )
+        if merge_rank_failures:
             canonical_result["failure_count"] = sum(
                 int(entry.get("failure_count", 0))
                 for entry in rank_summaries
@@ -198,7 +221,10 @@ def _synchronize_workload_result(
                 first = entry.get("first_failure_iteration")
                 if isinstance(first, int):
                     first_failures.append(first)
-                total_detail_count += int(entry.get("failure_detail_count", 0))
+                total_detail_count += (
+                    int(entry.get("failure_detail_count", 0))
+                    + int(entry.get("failure_detail_omitted", 0))
+                )
                 for raw_detail in entry.get("failure_details", []) or []:
                     if len(details) >= _MAX_FAILURE_DETAILS_TOTAL:
                         break
@@ -224,6 +250,11 @@ def _synchronize_workload_result(
         )
         if omitted_details:
             metrics["_failure_details_omitted"] = omitted_details
+        if rank_local:
+            metrics["corruption_details_omitted"] = sum(
+                int(entry.get("failure_detail_omitted", 0))
+                for entry in rank_summaries
+            )
         canonical_result["metrics"] = metrics
         broadcast[0] = {
             "result": canonical_result,
@@ -242,6 +273,22 @@ def _synchronize_workload_result(
     from aorta.workloads import WorkloadResult
 
     return WorkloadResult(**result_data), canonical_status
+
+
+def _destroy_worker_process_group() -> None:
+    try:
+        import torch.distributed as dist
+    except Exception:
+        return
+    try:
+        if dist.is_available() and dist.is_initialized():
+            # Do not enter a barrier here. A peer may have failed before it
+            # could initialize or synchronize; process exit is the fallback.
+            dist.destroy_process_group()
+    except Exception:
+        # Teardown is best-effort and must not replace the canonical trial
+        # result or the original worker exception.
+        pass
 
 
 def _main(request_path: Path, response_path: Path) -> int:
@@ -274,6 +321,33 @@ def _main(request_path: Path, response_path: Path) -> int:
                 f"Workload '{workload_cls.__name__}' returned invalid "
                 "isolated_startup_env; expected dict[str, str]"
             )
+        missing_startup_env = {
+            key: value
+            for key, value in startup_env.items()
+            if key not in os.environ
+        }
+        startup_marker = "_AORTA_TRIAL_STARTUP_NONCE"
+        if missing_startup_env:
+            if os.environ.get(startup_marker) == nonce:
+                raise RuntimeError(
+                    "isolated startup environment was not preserved across "
+                    "worker re-exec"
+                )
+            restart_env = dict(os.environ)
+            restart_env.update(missing_startup_env)
+            restart_env[startup_marker] = nonce
+            os.execve(
+                sys.executable,
+                [
+                    sys.executable,
+                    "-m",
+                    "aorta.run._trial_worker",
+                    str(request_path),
+                    str(response_path),
+                ],
+                restart_env,
+            )
+        os.environ.pop(startup_marker, None)
         for key, value in startup_env.items():
             os.environ.setdefault(key, value)
         backend_request = _resolve_backend_request(workload_cls, backend_config)
@@ -302,12 +376,6 @@ def _main(request_path: Path, response_path: Path) -> int:
             ),
             skip_cleanup_on_error=world_size > 1,
         )
-        if world_size > 1:
-            import torch.distributed as dist
-
-            if dist.is_initialized():
-                dist.barrier()
-                dist.destroy_process_group()
         response = {
             "protocol_version": PROTOCOL_VERSION,
             "nonce": nonce,
@@ -331,6 +399,8 @@ def _main(request_path: Path, response_path: Path) -> int:
         }
         write_envelope_atomic(response_path, response)
         return 1
+    finally:
+        _destroy_worker_process_group()
 
 
 if __name__ == "__main__":

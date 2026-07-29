@@ -1382,6 +1382,7 @@ def _persisted_trial(trial_id: str) -> TrialResult:
         },
         wall_clock_sec=1.0,
         exit_status="ok",
+        request_fingerprint="a" * 64,
     )
 
 
@@ -1427,6 +1428,22 @@ def test_resume_hydration_rejects_duplicate_trial_indices(tmp_path):
     hydrated = runner._hydrate_trials_by_index(
         [str(path) for path in paths],
         expected_workload="_subprocess",
+    )
+
+    assert hydrated == {}
+
+
+def test_resume_hydration_rejects_request_fingerprint_mismatch(tmp_path):
+    path = tmp_path / "trial_d0_m0_t0.json"
+    path.write_text(
+        json.dumps(_persisted_trial("_subprocess_d0_m0_t0").to_dict()),
+        encoding="utf-8",
+    )
+
+    hydrated = runner._hydrate_trials_by_index(
+        [str(path)],
+        expected_workload="_subprocess",
+        expected_request_fingerprint="b" * 64,
     )
 
     assert hydrated == {}

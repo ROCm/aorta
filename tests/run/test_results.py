@@ -198,6 +198,7 @@ class TestTrialResult:
             result={},
             wall_clock_sec=1.0,
             exit_status="ok",
+            request_fingerprint="a" * 64,
         )
         data = result.to_dict()
         assert data["mitigations_applied"] == ["none", "tf32_off"]
@@ -230,6 +231,7 @@ class TestTrialResult:
             result=_complete_result(),
             wall_clock_sec=1.0,
             exit_status="ok",
+            request_fingerprint="a" * 64,
         )
         assert TrialResult.from_dict(result.to_dict(), strict=True) == result
 
@@ -261,6 +263,10 @@ class TestTrialResult:
                 lambda data: data.__setitem__("wall_clock_sec", float("nan")),
                 "finite non-negative",
             ),
+            (
+                lambda data: data.__setitem__("request_fingerprint", "bad"),
+                "request_fingerprint",
+            ),
         ],
     )
     def test_strict_from_dict_rejects_malformed_artifact(self, mutation, message):
@@ -274,6 +280,7 @@ class TestTrialResult:
             result=_complete_result(),
             wall_clock_sec=1.0,
             exit_status="ok",
+            request_fingerprint="a" * 64,
         )
         data = result.to_dict()
         mutation(data)

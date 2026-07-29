@@ -34,6 +34,7 @@ Data Flow:
 """
 
 import logging
+import math
 from collections import Counter
 from typing import List, Optional
 
@@ -52,6 +53,9 @@ _MAX_EXACT_RANK_FILL = {
     torch.float16: 2_048,
     torch.float32: 16_777_216,
 }
+_MAX_EXACT_REDUCE_SCATTER_WORLD_SIZE = (
+    math.isqrt(1 + 8 * (1 << 24)) - 1
+) // 2
 
 
 class FSDPModeReproducer(BaseReproducer):
@@ -89,6 +93,11 @@ class FSDPModeReproducer(BaseReproducer):
         self.full_param: Optional[torch.Tensor] = None   # all_gather output
         self.full_grad: Optional[torch.Tensor] = None     # reduce_scatter input
         self.grad_shard: Optional[torch.Tensor] = None    # reduce_scatter output
+        self.expected_full_param: Optional[torch.Tensor] = None
+        self._all_gather_mismatch_counts: Optional[torch.Tensor] = None
+        self._all_gather_first_indices: Optional[torch.Tensor] = None
+        self._all_gather_first_actual: Optional[torch.Tensor] = None
+        self._all_gather_max_abs_error: Optional[torch.Tensor] = None
 
         # Per-layer GEMM weights (only when compute is enabled)
         self.weight_matrices: List[torch.Tensor] = []
@@ -108,7 +117,6 @@ class FSDPModeReproducer(BaseReproducer):
         self.eff_batch_size: Optional[int] = None
         self.effective_h2d_tensor_size: int = config.h2d_tensor_size
         self.reduce_scatter_oracle_dtype: str = "float32"
-        self._iteration_collectives_correct: bool = True
 
         # Real transformer block shared across all layers (shared-weight path)
         self.shared_block: Optional[RepeatedTransformerBlock] = None
@@ -150,11 +158,15 @@ class FSDPModeReproducer(BaseReproducer):
         """Allocate FSDP-specific buffers: per-layer shards + reusable collective buffers."""
         cfg = self.config
         ws = self.world_size
-        max_exact_rank_fill = _MAX_EXACT_RANK_FILL[self.dtype]
-        if ws > max_exact_rank_fill:
+        max_exact_world_size = min(
+            _MAX_EXACT_RANK_FILL[self.dtype],
+            _MAX_EXACT_REDUCE_SCATTER_WORLD_SIZE,
+        )
+        if ws > max_exact_world_size:
             raise ValueError(
-                f"world_size={ws} exceeds the exact rank-fill capacity "
-                f"({max_exact_rank_fill}) of {self.dtype}"
+                f"world_size={ws} exceeds the exact detector capacity "
+                f"({max_exact_world_size}) for {self.dtype} rank fills "
+                "and the FP32 reduce-scatter sum"
             )
 
         # Per-layer parameter shards (what each rank "owns")
@@ -166,6 +178,32 @@ class FSDPModeReproducer(BaseReproducer):
         # Reusable all_gather output: full parameter = shard_size * world_size
         self.full_param = torch.empty(
             self.shard_size * ws, dtype=self.dtype, device="cuda"
+        )
+        self.expected_full_param = torch.empty_like(self.full_param)
+        for src_rank in range(ws):
+            start = src_rank * self.shard_size
+            self.expected_full_param[start:start + self.shard_size].fill_(
+                float(src_rank + 1)
+            )
+        # Compact per-layer evidence is populated on-device immediately after
+        # each forward all-gather. Host inspection is deferred until the
+        # iteration's existing synchronization point, avoiding thousands of
+        # timing-distorting host synchronizations.
+        self._all_gather_mismatch_counts = torch.zeros(
+            self.num_layers,
+            dtype=torch.int64,
+            device="cuda",
+        )
+        self._all_gather_first_indices = torch.zeros_like(
+            self._all_gather_mismatch_counts
+        )
+        self._all_gather_first_actual = torch.zeros(
+            self.num_layers,
+            dtype=torch.float32,
+            device="cuda",
+        )
+        self._all_gather_max_abs_error = torch.zeros_like(
+            self._all_gather_first_actual
         )
 
         # Reusable reduce_scatter correctness buffers. The model/all-gather/H2D
@@ -342,6 +380,89 @@ class FSDPModeReproducer(BaseReproducer):
             ),
         }
 
+    def _expected_all_gather(self) -> torch.Tensor:
+        expected = getattr(self, "expected_full_param", None)
+        if (
+            expected is not None
+            and expected.shape == self.full_param.shape
+            and expected.dtype == self.full_param.dtype
+            and expected.device == self.full_param.device
+        ):
+            return expected
+        return torch.cat(
+            [
+                torch.full(
+                    (self.shard_size,),
+                    float(src_rank + 1),
+                    dtype=self.full_param.dtype,
+                    device=self.full_param.device,
+                )
+                for src_rank in range(self.world_size)
+            ]
+        )
+
+    def _record_forward_all_gather(self, layer_idx: int) -> None:
+        expected = self._expected_all_gather()
+        mismatch = self.full_param.ne(expected)
+        flat_mismatch = mismatch.reshape(-1)
+        mismatch_count = flat_mismatch.sum(dtype=torch.int64)
+        first_index = flat_mismatch.to(torch.int8).argmax()
+        first_actual = torch.gather(
+            self.full_param.reshape(-1),
+            0,
+            first_index.reshape(1),
+        )[0].to(torch.float32)
+        max_abs_error = (
+            (self.full_param - expected).abs().max().to(torch.float32)
+        )
+        self._all_gather_mismatch_counts[layer_idx].copy_(mismatch_count)
+        self._all_gather_first_indices[layer_idx].copy_(first_index)
+        self._all_gather_first_actual[layer_idx].copy_(first_actual)
+        self._all_gather_max_abs_error[layer_idx].copy_(max_abs_error)
+
+    def _verify_recorded_forward_all_gathers(self, iteration: int) -> bool:
+        all_correct = True
+        for layer_idx in range(self.num_layers):
+            mismatch_count = int(
+                self._all_gather_mismatch_counts[layer_idx].item()
+            )
+            if mismatch_count == 0:
+                continue
+            global_index = int(
+                self._all_gather_first_indices[layer_idx].item()
+            )
+            src_rank, local_index = divmod(global_index, self.shard_size)
+            actual = float(
+                self._all_gather_first_actual[layer_idx].item()
+            )
+            expected = float(src_rank + 1)
+            max_abs_error = float(
+                self._all_gather_max_abs_error[layer_idx].item()
+            )
+            log.error(
+                f"ALL_GATHER CORRUPTION (RUNTIME BUG!): "
+                f"rank={self.rank} src_rank={src_rank} "
+                f"iter={iteration} layer={layer_idx} phase=forward "
+                f"expected={expected} actual={actual} "
+                f"index={local_index} count={mismatch_count}"
+            )
+            self._record_corruption_detail({
+                "type": "all_gather",
+                "rank": self.rank,
+                "src_rank": src_rank,
+                "iteration": iteration,
+                "layer": layer_idx,
+                "phase": "forward",
+                "first_mismatch_index": local_index,
+                "first_mismatch_global_index": global_index,
+                "actual": actual,
+                "expected": expected,
+                "mismatch_count": mismatch_count,
+                "max_abs_error": max_abs_error,
+            })
+            all_correct = False
+        return all_correct
+
     def _forward_layer(self, layer_idx: int, iteration: int) -> None:
         """
         Forward pass for a single FSDP layer.
@@ -374,12 +495,8 @@ class FSDPModeReproducer(BaseReproducer):
             self.full_param, self.param_shards[layer_idx]
         )
 
-        if self.in_verification_phase and not self._verify_all_gather(
-            iteration=iteration,
-            layer_idx=layer_idx,
-            phase="forward",
-        ):
-            self._iteration_collectives_correct = False
+        if self.in_verification_phase:
+            self._record_forward_all_gather(layer_idx)
 
         if use_shared:
             comm_output_cksum = self._checksum(self.full_param)
@@ -480,10 +597,10 @@ class FSDPModeReproducer(BaseReproducer):
 
         Returns True if verification passed (or not in verification phase).
         """
-        self._iteration_collectives_correct = True
-
         # Fill buffers with known patterns
         self._fill_patterns()
+        if self.in_verification_phase:
+            self._all_gather_mismatch_counts.zero_()
 
         if self.config.h2d_prefetch:
             return self._run_iteration_prefetch(iteration)
@@ -551,7 +668,7 @@ class FSDPModeReproducer(BaseReproducer):
     def _verify(self, iteration: int) -> bool:
         """Verify H2D, last all_gather, last reduce_scatter, and (if shared-weight
         transformer) cross-layer activation consistency."""
-        all_correct = self._iteration_collectives_correct
+        all_correct = self._verify_recorded_forward_all_gathers(iteration)
 
         # Check H2D result
         if not self._verify_h2d(self.batch_gpu, iteration):
@@ -625,7 +742,7 @@ class FSDPModeReproducer(BaseReproducer):
                     f"LAYER_CHECKSUM_AMBIGUOUS ({key}): "
                     f"rank={self.rank} iter={iteration} groups={dict(counts)}"
                 )
-                self.corruption_details.append({
+                self._record_corruption_detail({
                     "type": f"layer_checksum_ambiguous_{key}",
                     "rank": self.rank,
                     "iteration": iteration,
@@ -647,7 +764,7 @@ class FSDPModeReproducer(BaseReproducer):
                         f"reference={reference_value} "
                         f"layer_{index}={checksums[key]}"
                     )
-                    self.corruption_details.append({
+                    self._record_corruption_detail({
                         "type": f"layer_checksum_mismatch_{key}",
                         "rank": self.rank,
                         "iteration": iteration,
@@ -673,40 +790,38 @@ class FSDPModeReproducer(BaseReproducer):
         """
         Verify all_gather result.
 
-        Each rank filled its shard with float(rank). After all_gather,
-        chunk j of full_param should be float(j).
+        Each rank filled its shard with float(rank + 1). After all_gather,
+        chunk j of full_param should be float(j + 1).
         """
-        all_correct = True
+        expected_tensor = self._expected_all_gather()
+        if torch.equal(self.full_param, expected_tensor):
+            return True
 
-        for src_rank in range(self.world_size):
-            start = src_rank * self.shard_size
-            end = start + self.shard_size
-            chunk = self.full_param[start:end]
-            expected = float(src_rank + 1)
-            expected_tensor = torch.full_like(chunk, expected)
-
-            if not torch.equal(chunk, expected_tensor):
-                summary = self._mismatch_summary(chunk, expected_tensor)
-                log.error(
-                    f"ALL_GATHER CORRUPTION (RUNTIME BUG!): "
-                    f"rank={self.rank} src_rank={src_rank} "
-                    f"iter={iteration} layer={layer_idx} phase={phase} "
-                    f"expected={summary['expected']} actual={summary['actual']} "
-                    f"index={summary['first_mismatch_index']} "
-                    f"count={summary['mismatch_count']}"
-                )
-                self.corruption_details.append({
-                    "type": "all_gather",
-                    "rank": self.rank,
-                    "src_rank": src_rank,
-                    "iteration": iteration,
-                    "layer": layer_idx,
-                    "phase": phase,
-                    **summary,
-                })
-                all_correct = False
-
-        return all_correct
+        summary = self._mismatch_summary(
+            self.full_param,
+            expected_tensor,
+        )
+        global_index = int(summary["first_mismatch_index"])
+        src_rank, local_index = divmod(global_index, self.shard_size)
+        summary["first_mismatch_global_index"] = global_index
+        summary["first_mismatch_index"] = local_index
+        log.error(
+            f"ALL_GATHER CORRUPTION (RUNTIME BUG!): "
+            f"rank={self.rank} src_rank={src_rank} "
+            f"iter={iteration} layer={layer_idx} phase={phase} "
+            f"expected={summary['expected']} actual={summary['actual']} "
+            f"index={local_index} count={summary['mismatch_count']}"
+        )
+        self._record_corruption_detail({
+            "type": "all_gather",
+            "rank": self.rank,
+            "src_rank": src_rank,
+            "iteration": iteration,
+            "layer": layer_idx,
+            "phase": phase,
+            **summary,
+        })
+        return False
 
     def _verify_reduce_scatter(self, iteration: int) -> bool:
         """
@@ -727,7 +842,7 @@ class FSDPModeReproducer(BaseReproducer):
                 f"index={summary['first_mismatch_index']} "
                 f"count={summary['mismatch_count']}"
             )
-            self.corruption_details.append({
+            self._record_corruption_detail({
                 "type": "reduce_scatter",
                 "rank": self.rank,
                 "iteration": iteration,

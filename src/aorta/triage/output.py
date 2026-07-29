@@ -73,7 +73,10 @@ def _valid_git_sha(value: str | None) -> str | None:
     if value is None:
         return None
     candidate = value.strip()
-    if re.fullmatch(r"[0-9a-fA-F]{40,64}", candidate):
+    if re.fullmatch(
+        r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+        candidate,
+    ):
         return candidate.lower()
     return None
 
@@ -126,7 +129,39 @@ def _repository_git_sha(repo_root: Path | None = None) -> str | None:
     return None
 
 
-def _runtime_provenance() -> dict[str, str | None]:
+def _source_tree_sha256() -> str | None:
+    package_root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    try:
+        paths = sorted(
+            path
+            for path in package_root.rglob("*.py")
+            if "__pycache__" not in path.parts
+        )
+        for path in paths:
+            relative = path.relative_to(package_root).as_posix()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _git_dirty_from_env() -> bool | None:
+    raw = os.environ.get("AORTA_GIT_DIRTY")
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes"}:
+        return True
+    if normalized in {"0", "false", "no"}:
+        return False
+    return None
+
+
+def _runtime_provenance() -> dict[str, Any]:
     try:
         package_version = importlib.metadata.version("amd-aorta")
     except importlib.metadata.PackageNotFoundError:
@@ -137,6 +172,8 @@ def _runtime_provenance() -> dict[str, str | None]:
             _valid_git_sha(os.environ.get("AORTA_GIT_SHA"))
             or _repository_git_sha()
         ),
+        "git_dirty": _git_dirty_from_env(),
+        "source_tree_sha256": _source_tree_sha256(),
     }
 
 

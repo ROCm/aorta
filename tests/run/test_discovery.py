@@ -10,6 +10,7 @@ from aorta.run.discovery import (
     discover_workloads,
     get_workload_class,
     get_workload_policy,
+    get_workload_startup_env,
 )
 from aorta.run.validation import (
     IN_PROCESS_ONLY_POLICY,
@@ -300,3 +301,32 @@ class TestGetWorkloadPolicy:
         with patch("importlib.metadata.entry_points", return_value=entries):
             with pytest.raises(ValueError, match="unsupported isolation policy"):
                 get_workload_policy("broken")
+
+
+def test_startup_env_provider_loads_without_workload_entry_point(tmp_path, monkeypatch):
+    module = tmp_path / "startup_provider.py"
+    module.write_text(
+        "def provide(config):\n"
+        "    return {'EARLY_VALUE': str(config.get('value', 4))}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    entries = EntryPoints(
+        [
+            EntryPoint(
+                name="early",
+                value="must_not_import:Workload",
+                group="aorta.workloads",
+            ),
+            EntryPoint(
+                name="early",
+                value="startup_provider:provide",
+                group="aorta.workload_startup_env",
+            ),
+        ]
+    )
+
+    with patch("importlib.metadata.entry_points", return_value=entries):
+        assert get_workload_startup_env("early", {"value": 7}) == {
+            "EARLY_VALUE": "7"
+        }

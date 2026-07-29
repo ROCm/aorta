@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Callable
@@ -26,7 +27,11 @@ from aorta.instrumentation.environment import collect_env
 from aorta.registry import Environment, get_environment, get_mitigation
 from aorta.run._process import TrialWorkerError, launch_trial_worker
 from aorta.run.collectors import KNOWN_RECIPES
-from aorta.run.discovery import get_workload_class, get_workload_policy
+from aorta.run.discovery import (
+    get_workload_class,
+    get_workload_policy,
+    get_workload_startup_env,
+)
 from aorta.run.results import TrialResult, trial_verdict
 from aorta.run.validation import (
     TrialIsolation,
@@ -367,6 +372,7 @@ class RunRequest:
         kw_only=True,
     )
     cell_name: str | None = field(default=None, kw_only=True)
+    request_fingerprint: str | None = field(default=None, kw_only=True)
     steps: int | None = None
     config_overrides: dict[str, Any] = field(default_factory=dict)
     results_dir: Path = field(default_factory=lambda: Path("results"))
@@ -452,6 +458,13 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     #    intended.
     if request.trials < 1:
         raise ValueError(f"trials must be >= 1 (got {request.trials})")
+    if request.request_fingerprint is not None and re.fullmatch(
+        r"[0-9a-f]{64}",
+        request.request_fingerprint,
+    ) is None:
+        raise ValueError(
+            "request_fingerprint must be a lowercase SHA-256 hex string"
+        )
 
     # 2. Validate collector recipe names.  The CLI also validates this
     #    against KNOWN_RECIPES, but ``run_trials`` is a public library
@@ -611,10 +624,19 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     effective_overlay.update(env_descriptor.env)
     effective_overlay.update(mitigation_env)
     effective_overlay.update(request.extra_env)
+    startup_env: dict[str, str] = {}
     if effective_trial_isolation == "process":
+        startup_config = dict(request.config_overrides)
+        if request.steps is not None:
+            startup_config["steps"] = request.steps
+        startup_env = get_workload_startup_env(
+            request.workload,
+            startup_config,
+        )
+        _validate_env_mapping("workload startup environment", startup_env)
         unsafe_identity = sorted(
             key
-            for key in effective_overlay
+            for key in set(effective_overlay) | set(startup_env)
             if (
                 (key.upper() if os.name == "nt" else key)
                 in _LAUNCHER_IDENTITY_KEYS
@@ -690,6 +712,7 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
                     env_descriptor=env_descriptor,
                     mitigation_env=mitigation_env,
                     effective_overlay=effective_overlay,
+                    startup_env=startup_env,
                     isolation_generation=isolation_generation,
                     results_dir=results_dir,
                     should_write=should_write,
@@ -751,6 +774,7 @@ def _run_single_trial_in_process_worker(
     env_descriptor: Environment,
     mitigation_env: dict[str, str],
     effective_overlay: dict[str, str],
+    startup_env: dict[str, str],
     isolation_generation: int,
     results_dir: Path,
     should_write: bool,
@@ -769,6 +793,7 @@ def _run_single_trial_in_process_worker(
         "extra_env": dict(request.extra_env),
         "trial_isolation": "process",
         "cell_name": request.cell_name,
+        "request_fingerprint": request.request_fingerprint,
         "steps": request.steps,
         "config_overrides": copy.deepcopy(request.config_overrides),
         "results_dir": str(request.results_dir),
@@ -790,6 +815,8 @@ def _run_single_trial_in_process_worker(
         ) from exc
 
     child_env = dict(os.environ)
+    for key, value in startup_env.items():
+        child_env.setdefault(key, value)
     child_env.update(effective_overlay)
     try:
         world_size = int(child_env.get("WORLD_SIZE", "1"))
@@ -1297,6 +1324,7 @@ def _run_single_trial(
         result=asdict(workload_result),
         wall_clock_sec=wall_clock,
         exit_status=exit_status,  # type: ignore[arg-type]
+        request_fingerprint=request.request_fingerprint,
     )
 
     # Write JSON (rank 0 only).  Filename mirrors ``trial_id`` so the

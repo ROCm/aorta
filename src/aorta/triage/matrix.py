@@ -612,6 +612,7 @@ _AUDIT_METRIC_KEYS = (
     "declared_h2d_tensor_size",
     "effective_h2d_tensor_size",
     "reduce_scatter_oracle_dtype",
+    "corruption_details_omitted",
     "world_size",
     "local_world_size",
     "expected_local_world_size",

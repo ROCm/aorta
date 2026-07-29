@@ -28,6 +28,14 @@ from aorta.workloads import WorkloadResult
 
 @pytest.fixture
 def isolated_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    (tmp_path / "aorta_isolation_test_startup.py").write_text(
+        "def provide(config):\n"
+        "    return {\n"
+        "        'ISOLATION_IMPORT_VALUE': "
+        "str(config.get('startup_value', 'from-provider'))\n"
+        "    }\n",
+        encoding="utf-8",
+    )
     module = tmp_path / "aorta_isolation_test_plugin.py"
     module.write_text(
         """\
@@ -75,7 +83,10 @@ class IsolatedWorkload(Workload):
         "isolated_test_workload = aorta_isolation_test_plugin:IsolatedWorkload\n"
         "[aorta.workload_policies]\n"
         "isolated_test_workload = "
-        "aorta.run.validation:PROCESS_REQUIRED_POLICY\n",
+        "aorta.run.validation:PROCESS_REQUIRED_POLICY\n"
+        "[aorta.workload_startup_env]\n"
+        "isolated_test_workload = "
+        "aorta_isolation_test_startup:provide\n",
         encoding="utf-8",
     )
 
@@ -114,6 +125,25 @@ def test_process_isolation_sets_env_before_import_and_resets_state(
     assert "ISOLATION_IMPORT_VALUE" not in os.environ
     assert (tmp_path / isolated_plugin / "trial_d0_m0_t0.json").exists()
     assert (tmp_path / isolated_plugin / "trial_d0_m0_t1.json").exists()
+
+
+def test_startup_provider_sets_env_before_workload_import(
+    isolated_plugin: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ISOLATION_IMPORT_VALUE", raising=False)
+    results = run_trials(
+        RunRequest(
+            workload=isolated_plugin,
+            trials=1,
+            trial_isolation="process",
+            config_overrides={"startup_value": "provider-value"},
+            results_dir=tmp_path,
+        )
+    )
+
+    assert results[0].result["metrics"]["import_value"] == "provider-value"
 
 
 def test_auto_backend_honors_device_preference() -> None:
@@ -287,6 +317,51 @@ def test_rank_result_aggregation_surfaces_nonzero_rank_failure(
     }
 
 
+def test_rank_result_aggregation_globalizes_remote_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch.distributed as dist
+
+    rank_zero = WorkloadResult(passed=True, metrics={})
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+
+    def gather_object(value, output, dst):
+        assert dst == 0
+        output[:] = [
+            value,
+            {
+                "exit_status": "workload_setup_failed",
+                "passed": False,
+                "failure_count": 1,
+                "first_failure_iteration": None,
+                "failure_detail_count": 1,
+                "failure_detail_omitted": 0,
+                "failure_details": [
+                    {"error": "rank-one setup", "phase": "setup"}
+                ],
+            },
+        ]
+
+    monkeypatch.setattr(dist, "gather_object", gather_object)
+    monkeypatch.setattr(dist, "broadcast_object_list", lambda _objects, src: None)
+
+    canonical, status = _synchronize_workload_result(
+        rank_zero,
+        "ok",
+        rank_local=True,
+    )
+
+    assert status == "workload_setup_failed"
+    assert canonical.passed is False
+    assert canonical.failure_count == 1
+    assert canonical.failure_details == [
+        {"error": "rank-one setup", "phase": "setup", "rank": 1}
+    ]
+
+
 def test_global_result_scope_does_not_multiply_failure_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -380,7 +455,7 @@ def test_distributed_setup_failure_escalates_without_process_group(
 ) -> None:
     monkeypatch.setenv("WORLD_SIZE", "2")
     result = WorkloadResult(passed=False, failure_count=1)
-    with pytest.raises(RuntimeError, match="before rank synchronization"):
+    with pytest.raises(RuntimeError, match="process group was initialized"):
         _synchronize_workload_result(
             result,
             "workload_setup_failed",
@@ -428,6 +503,141 @@ def test_worker_spawn_oserror_is_wrapped(monkeypatch: pytest.MonkeyPatch) -> Non
             child_env=dict(os.environ),
             trial_id="trial",
         )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="this PyTorch Windows build lacks the TCPStore libuv backend used by torchrun",
+)
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_status"),
+    [
+        ("setup", "workload_setup_failed"),
+        ("run", "infrastructure_failed"),
+    ],
+)
+def test_two_rank_remote_exception_becomes_canonical_error(
+    tmp_path: Path,
+    failure_mode: str,
+    expected_status: str,
+) -> None:
+    pytest.importorskip("torch")
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    (plugin_root / "aorta_isolation_failure_plugin.py").write_text(
+        """\
+from pathlib import Path
+import torch.distributed as dist
+from aorta.workloads import Workload, WorkloadResult
+
+class FailureWorkload(Workload):
+    launch_mode = "distributed"
+    min_world_size = 2
+    trial_isolation_supported = frozenset({"in_process", "process"})
+    distributed_result_scope = "rank_local"
+
+    def setup(self):
+        if self.config["failure_mode"] == "setup" and dist.get_rank() == 1:
+            raise RuntimeError("rank-one setup failed")
+
+    def run(self):
+        if self.config["failure_mode"] == "run" and dist.get_rank() == 1:
+            raise RuntimeError("rank-one run failed")
+        return WorkloadResult(passed=True, main_work_started=True)
+
+    def cleanup(self):
+        Path(self.config["cleanup_dir"], f"cleanup-{dist.get_rank()}").touch()
+""",
+        encoding="utf-8",
+    )
+    dist_info = plugin_root / "aorta_isolation_failure-0.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\n"
+        "Name: aorta-isolation-failure\n"
+        "Version: 0.0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "entry_points.txt").write_text(
+        "[aorta.workloads]\n"
+        "isolated_failure = "
+        "aorta_isolation_failure_plugin:FailureWorkload\n"
+        "[aorta.workload_policies]\n"
+        "isolated_failure = "
+        "aorta.run.validation:PROCESS_OPTIONAL_POLICY\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+    launcher = tmp_path / "launch_failure.py"
+    launcher.write_text(
+        """\
+import json
+import os
+import sys
+from pathlib import Path
+from aorta.run import RunRequest, run_trials
+
+out = Path(sys.argv[1])
+out.mkdir(parents=True, exist_ok=True)
+results = run_trials(RunRequest(
+    workload="isolated_failure",
+    trials=1,
+    trial_isolation="process",
+    config_overrides={
+        "failure_mode": sys.argv[2],
+        "cleanup_dir": str(out),
+    },
+    results_dir=out,
+))
+(out / f"rank{os.environ['RANK']}.json").write_text(
+    json.dumps([result.to_dict() for result in results]),
+    encoding="utf-8",
+)
+""",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["USE_LIBUV"] = "0"
+    env["PYTHONPATH"] = (
+        str(plugin_root)
+        + os.pathsep
+        + str(Path(__file__).resolve().parents[2] / "src")
+        + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc_per_node=2",
+            str(launcher),
+            str(output),
+            failure_mode,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+
+    assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
+    for rank in range(2):
+        result = json.loads(
+            (output / f"rank{rank}.json").read_text(encoding="utf-8")
+        )[0]
+        assert result["exit_status"] == expected_status
+        assert result["result"]["passed"] is False
+        assert result["result"]["failure_count"] == 1
+    assert not list(output.glob("cleanup-*"))
+    persisted = json.loads(
+        next((output / "isolated_failure").glob("trial_*.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert persisted["exit_status"] == expected_status
+    assert persisted["result"]["passed"] is False
 
 
 @pytest.mark.skipif(

@@ -34,15 +34,18 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
+from types import CodeType
 from typing import Any, Literal
 
 import click
@@ -73,6 +76,7 @@ from aorta.triage.matrix import (
 )
 from aorta.triage.output import (
     PERF_REPORT_FILENAME,
+    _runtime_provenance,
     acquire_flat_resume_lock,
     format_run_summary,
     format_timestamp,
@@ -89,6 +93,76 @@ log = logging.getLogger(__name__)
 
 _INLINE_SIDECAR_NAME = "inline_environments.sidecar.json"
 _OPERATOR_SIDECAR_DIR = "sidecars"
+
+
+def _fingerprint_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("request fingerprint contains a non-finite float")
+        return value
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, re.Pattern):
+        return {
+            "regex": value.pattern,
+            "flags": value.flags,
+        }
+    if isinstance(value, CodeType):
+        return {
+            "code": value.co_code.hex(),
+            "consts": _fingerprint_value(value.co_consts),
+            "names": list(value.co_names),
+        }
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _fingerprint_value(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("request fingerprint mapping keys must be strings")
+        return {
+            key: _fingerprint_value(value[key])
+            for key in sorted(value)
+        }
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_fingerprint_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(item, sort_keys=True),
+        )
+    raise TypeError(
+        "request fingerprint contains unsupported "
+        f"{type(value).__name__}"
+    )
+
+
+def _request_fingerprint(payload: dict[str, Any]) -> str:
+    normalized = _fingerprint_value(payload)
+    encoded = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _sidecar_fingerprints(paths: tuple[Path, ...]) -> list[dict[str, str]]:
+    fingerprints: list[dict[str, str]] = []
+    for path in sorted(paths, key=lambda item: str(item)):
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            digest = "unreadable"
+        fingerprints.append({"name": path.name, "sha256": digest})
+    return fingerprints
 
 
 def _is_rank_zero() -> bool:
@@ -647,6 +721,7 @@ def _resume_stop_after_cell(
     stop_after: Any,
     resolved_env_vars: dict[str, str],
     expected_workload: str,
+    expected_request_fingerprint: str,
 ) -> tuple[list[TrialResult], None, dict[str, str], list[str], bool] | None:
     """Resume short-circuit for a ``stop_after`` cell (issue #232).
 
@@ -673,6 +748,7 @@ def _resume_stop_after_cell(
     hydrated_by_index = _hydrate_trials_by_index(
         _collect_trial_paths(cell_dir),
         expected_workload=expected_workload,
+        expected_request_fingerprint=expected_request_fingerprint,
     )
     required = set(range(contiguous))
     if not required.issubset(hydrated_by_index.keys()):
@@ -719,6 +795,7 @@ def _hydrate_trials_by_index(
     expected_workload: str | None = None,
     expected_dataset_index: int = 0,
     expected_mitigation_index: int = 0,
+    expected_request_fingerprint: str | None = None,
 ) -> dict[int, _HydratedTrial]:
     """Hydrate dispatcher ``trial_*.json`` files into an index-keyed map.
 
@@ -804,6 +881,15 @@ def _hydrate_trials_by_index(
                 path,
                 trial.trial_id,
                 expected_trial_id,
+            )
+            continue
+        if (
+            expected_request_fingerprint is not None
+            and trial.request_fingerprint != expected_request_fingerprint
+        ):
+            log.warning(
+                "resume: trial JSON %s request fingerprint mismatch",
+                path,
             )
             continue
         if index in ambiguous_indices:
@@ -1000,6 +1086,42 @@ def _iters_for_log(trials: list[TrialResult]) -> str:
     return f"{lo}/{cfg_value}" if lo == hi else f"{lo}..{hi}/{cfg_value}"
 
 
+def _build_probe_extras_payload(
+    recipe: Recipe,
+    cell: Any,
+    resolved_env_vars: dict[str, str],
+    subprocess_argv: tuple[str, ...] | None,
+) -> dict[str, Any] | None:
+    probe_extras = recipe.probe_extras
+    if subprocess_argv is None or probe_extras is None:
+        return None
+    payload: dict[str, Any] = {
+        "cell_name": cell.name,
+        "env_passthrough_mode": probe_extras.env_passthrough_mode,
+        "timeout_per_trial": probe_extras.timeout_per_trial,
+        "cell_env_vars": dict(resolved_env_vars),
+        "step_time_regex": probe_extras.step_time_regex,
+        "collect_paths": list(probe_extras.collect_paths),
+        "custom_patterns": tuple(probe_extras.custom_patterns),
+        "hang_window_sec": probe_extras.hang_window_sec,
+        "hang_grace_period_at_start": (
+            probe_extras.hang_grace_period_at_start
+        ),
+        "tier3_vram_growth": probe_extras.tier3_vram_growth,
+        "disable_detectors": tuple(probe_extras.disable_detectors),
+        "disable_detector_tiers": tuple(
+            probe_extras.disable_detector_tiers
+        ),
+    }
+    if probe_extras.retain is not None:
+        payload["retain"] = {
+            "on_fail": probe_extras.retain.on_fail,
+            "on_pass": probe_extras.retain.on_pass,
+            "on_error": probe_extras.retain.on_error,
+        }
+    return payload
+
+
 def _run_one_cell(
     cell,
     recipe: Recipe,
@@ -1062,6 +1184,47 @@ def _run_one_cell(
     # Without it, ``cap == effective_trials`` and behaviour is unchanged.
     stop_after = recipe.stop_after
     cap = stop_after.max_trials if stop_after is not None else effective_trials
+    merged_workload_config = {
+        **recipe.workload_config,
+        **cell.workload_config,
+    }
+    probe_extras_payload = _build_probe_extras_payload(
+        recipe,
+        cell,
+        resolved_env_vars,
+        subprocess_argv,
+    )
+    save_logs = recipe.save_logs or (subprocess_argv is not None)
+    effective_steps = cell.effective_steps(recipe.steps)
+    effective_collect = tuple(cell.effective_collect(recipe.collect))
+    effective_collect_options = dict(
+        cell.effective_collect_options(recipe.collect_options)
+    )
+    fingerprint_environment = get_environment(
+        cell.environment,
+        extra_files=(list(sidecar_files) if sidecar_files else None),
+    )
+    request_fingerprint = _request_fingerprint({
+        "fingerprint_version": 1,
+        "workload": recipe.workload,
+        "cell_name": cell.name,
+        "environment": cell.environment,
+        "environment_descriptor": fingerprint_environment,
+        "mitigations": list(cell.mitigations),
+        "extra_env": merged_extra_env,
+        "resolved_env_vars": resolved_env_vars,
+        "trial_isolation": recipe.trial_isolation,
+        "steps": effective_steps,
+        "workload_config": merged_workload_config,
+        "save_logs": save_logs,
+        "subprocess_argv": subprocess_argv,
+        "probe_extras": probe_extras_payload,
+        "collect": effective_collect,
+        "collect_options": effective_collect_options,
+        "env_probe_enabled": env_probe is not None,
+        "sidecars": _sidecar_fingerprints(sidecar_files),
+        "runtime_provenance": _runtime_provenance(),
+    })
 
     # Resume short-circuit: if every trial directory under this cell
     # carries a valid result.json + non-empty verdict, the cell is
@@ -1092,6 +1255,7 @@ def _run_one_cell(
             stop_after,
             resolved_env_vars,
             recipe.workload,
+            request_fingerprint,
         )
         if resumed_result is not None:
             return resumed_result
@@ -1116,6 +1280,7 @@ def _run_one_cell(
             hydrated_by_index = _hydrate_trials_by_index(
                 trial_paths,
                 expected_workload=recipe.workload,
+                expected_request_fingerprint=request_fingerprint,
             )
             required_indices = set(range(effective_trials))
             if required_indices.issubset(hydrated_by_index.keys()):
@@ -1155,62 +1320,6 @@ def _run_one_cell(
                 sorted(hydrated_by_index.keys()),
             )
 
-    # Recipe-scope workload_config is the base; cell-scope merges over it so
-    # the cell wins on key collision and non-collision keys union. Empty
-    # dicts on both sides collapse to ``{}``, which RunRequest.__post_init__
-    # deep-copies and the dispatcher spreads into ``config`` -- so omitting
-    # workload_config from the recipe stays byte-equivalent to today.
-    merged_workload_config = {**recipe.workload_config, **cell.workload_config}
-
-    # Probe-mode extras delivered to ``SubprocessWorkload`` via the
-    # typed ``RunRequest.probe_extras`` field. The runner is the only
-    # producer of this dict; ``SubprocessWorkload`` reads it from the
-    # ``_aorta_probe_extras`` slot the dispatcher injects.
-    probe_extras_payload: dict[str, Any] | None = None
-    probe_extras = recipe.probe_extras
-    if subprocess_argv is not None and probe_extras is not None:
-        probe_extras_payload = {
-            "cell_name": cell.name,
-            "env_passthrough_mode": probe_extras.env_passthrough_mode,
-            "timeout_per_trial": probe_extras.timeout_per_trial,
-            "cell_env_vars": dict(resolved_env_vars),
-            "step_time_regex": probe_extras.step_time_regex,
-            "collect_paths": list(probe_extras.collect_paths),
-            # Phase 2 (issue #188): pre-compiled custom_patterns and
-            # hang knobs forwarded to SubprocessWorkload. The
-            # compiled CompiledPattern objects ride as a tuple --
-            # ``RunRequest.__post_init__`` deep-copies the dict
-            # (and therefore traverses this tuple), but the
-            # CompiledPattern fields are all treated as immutable
-            # post-compile (re.Pattern, CodeType, str, bool) so the
-            # traversal is benign: nothing the dispatcher hands to
-            # the workload can be mutated from outside RunRequest.
-            "custom_patterns": tuple(probe_extras.custom_patterns),
-            "hang_window_sec": probe_extras.hang_window_sec,
-            "hang_grace_period_at_start": probe_extras.hang_grace_period_at_start,
-            "tier3_vram_growth": probe_extras.tier3_vram_growth,
-            # Issue #229: operator detector-disable knobs threaded to the
-            # workload so the classifier can skip them per trial.
-            "disable_detectors": tuple(probe_extras.disable_detectors),
-            "disable_detector_tiers": tuple(probe_extras.disable_detector_tiers),
-        }
-        # Issue #231: verdict-keyed artifact retention. Forwarded as a plain
-        # verdict->level mapping so SubprocessWorkload needn't import the
-        # RetainPolicy type; absent (None) when the recipe omits ``retain``,
-        # which the workload treats as keep-everything.
-        if probe_extras.retain is not None:
-            probe_extras_payload["retain"] = {
-                "on_fail": probe_extras.retain.on_fail,
-                "on_pass": probe_extras.retain.on_pass,
-                "on_error": probe_extras.retain.on_error,
-            }
-
-    # save_logs is forced True for probe-mode cells because
-    # SubprocessWorkload reads ``_aorta_log_prefix`` to derive its
-    # per-trial directory; the dispatcher only injects that key when
-    # save_logs=True.
-    save_logs = recipe.save_logs or (subprocess_argv is not None)
-
     request = RunRequest(
         workload=recipe.workload,
         trials=cap,
@@ -1219,7 +1328,8 @@ def _run_one_cell(
         extra_env=merged_extra_env,
         trial_isolation=recipe.trial_isolation,
         cell_name=cell.name,
-        steps=cell.effective_steps(recipe.steps),
+        request_fingerprint=request_fingerprint,
+        steps=effective_steps,
         config_overrides=merged_workload_config,
         results_dir=cell_dir,
         sidecar_files=sidecar_files,
@@ -1227,8 +1337,8 @@ def _run_one_cell(
         subprocess_argv=subprocess_argv,
         probe_extras=probe_extras_payload,
         stop_after=stop_after,
-        collect=tuple(cell.effective_collect(recipe.collect)),
-        collect_options=dict(cell.effective_collect_options(recipe.collect_options)),
+        collect=effective_collect,
+        collect_options=effective_collect_options,
         env_probe=env_probe,
     )
 
