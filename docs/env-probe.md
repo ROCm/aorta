@@ -130,7 +130,7 @@ end-of-output. Sample:
 
 ```text
 Wrote env probe to /tmp/env.json (schema_version=1.12) [PARTIAL]
-  runtime:   baremetal / python=venv  container_detected=no  probe=direct
+  runtime:   baremetal / python=venv  container_detected=no  probe=direct  ns=mnt:1a2b3c…
   build_sys: none
   rocm:      7.2.1 (dev: None)
   hip:       7.2.53211-e1a6bc5663 (amd)
@@ -247,7 +247,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `runtime_context` | `dict` | `/.dockerenv`, `/run/.containerenv`, `$SINGULARITY_NAME`, `/proc/1/cgroup`, `sys.prefix`, `$CONDA_DEFAULT_ENV` | `type`, `python_env`, `venv_path`, `conda_env_name`. **`type` only ever returns `docker`/`podman`/`singularity`/`baremetal`** — an unnamed sandbox (RE worker, containerd k8s pod) falls through to `baremetal`; use `container_detected` (below) for the runtime-agnostic "am I isolated?" answer. |
 | `container_detected` | `bool` | named-runtime match + `/proc/self/ns/mnt` vs `/proc/1/ns/mnt` (private mount ns) + container/k8s tokens in `/proc/self/cgroup` | Schema 1.11. Runtime-**agnostic** isolation smoke test: `true` on *any* sandbox signal even when the runtime can't be named. Fixes the `runtime_context.type == "baremetal"` false negative for RE-workers / k8s pods. `container_detected:true` + `type:"baremetal"` is the honest reading of an unnamed sandbox. Fail-soft; `false` means "no isolation signal observed," not "definitely bare metal." |
 | `execution_context` | `dict` | `--execution-context` CLI flag (self-declared) | Schema 1.11. `probe_invocation` (`"direct"` \| `"buck2_run"` \| `"buck2_action"`; `"direct"` by default) records **how the probe was launched** — set `buck2_action` when running the probe as a Buck2 action so it captures the executor's env, not the invoking shell's. `likely_execution_platform` (`str \| null`) is reserved for phase-2 Buck2 work and is always `null` today. See the design note `docs/env-probe-container-execution-context.md`. The flag also **warns to stderr** when a non-`direct` context is claimed but `container_detected` is `false` and neither `$AORTA_RE_IMAGE` nor `$AORTA_DOCKER_IMAGE` is set (you may have probed the wrong place). |
-| `probe_namespace` | `str \| null` | `/proc/self/ns/mnt` (primary) or `/proc/self/cgroup` (fallback), **salted with `/proc/sys/kernel/random/boot_id`** and SHA-256'd | Schema 1.12. Coarse "were these two probes captured in the same isolation boundary?" diff key — a lightweight substitute for a full `mountinfo` comparison. Value forms: `mnt:<sha256[:16]>` (boot-salted mount-ns identity), `cgroup:<sha256[:16]>` (boot-salted cgroup-path fallback when `ns/mnt` is unreadable), or `mnt-local:<raw>` / `cgroup-local:<raw>` when `boot_id` is unavailable. **The boot salt is load-bearing**: a bare mount-ns inode (`4026531840`) or cgroup path (`0::/`) is only unique within one kernel boot, so two *unrelated* hosts routinely emit the same raw token — salting makes the key boot-scoped, so equal digests mean "same host, same boot, same namespace" rather than a cross-host coincidence. The `*-local:` forms are explicitly flagged as **not** safe to compare across snapshots from different hosts. `null` when all sources fail. Fail-soft; never raises. |
+| `probe_namespace` | `str \| null` | `/proc/self/ns/mnt` (primary) or `/proc/self/ns/cgroup` (fallback), hashed with `/proc/sys/kernel/random/boot_id` | Schema 1.12. **Mismatch-only namespace observation**, not a durable identity. Value forms: `mnt:<sha256[:16]>` or `cgroup-ns:<sha256[:16]>`; when `boot_id` is unavailable, the source token remains hashed and the prefix becomes `mnt-local:` / `cgroup-ns-local:`. Different values with the same prefix prove a different boot or namespace observation. Equal values are advisory because Linux can recycle non-initial namespace inode numbers after teardown. Different source prefixes are not directly comparable, and `*-local:` values are not cross-host comparable. Missing boot identity, fallback use, and total failure add `partial_reasons`; `null` means neither namespace handle was readable. |
 | `docker` | `dict \| null` | `$AORTA_DOCKER_IMAGE` / `$AORTA_DOCKER_DIGEST` env vars + `/proc/self/cgroup` | `null` on baremetal; image+digest provided by the launcher (the only reliable way from inside a container) |
 | `env_vars` | `dict[str, str \| null]` | explicit canonical list (currently 58 names; see `CANONICAL_ENV_VARS` in `environment.py` for the live set) | GPU scoping + HSA / runtime + GPU queue / codegen + NCCL/RCCL + AINIC net-plugin/fabric tuning + gfx950 fence-ordering knob + FBGEMM + MIOpen + SDPA backend selection + GEMM backend preference + hipBLASLt autotune + PyTorch / inductor. Build-time cmake flags (`USE_ROCM_CK_SDPA`, `USE_ROCM_CK_GEMM`, `USE_FBGEMM*`) are NOT in this list -- they're surfaced under their respective library blocks instead, parsed from `torch.__config__.show()`. |
 | `python_version` | `str` | `platform.python_version()` | always populated |
@@ -444,18 +444,18 @@ Container & execution-context visibility, phase 2 (namespace). Additive —
 one new top-level field, defaulted so older readers don't raise. See the
 design note `docs/env-probe-container-execution-context.md`.
 
-* New top-level **`probe_namespace`** (`str | null`). A coarse "same
-  isolation boundary?" diff key derived from `/proc/self/ns/mnt` (mount-ns
-  identity), or `/proc/self/cgroup` as a fallback, **salted with the
-  per-boot `boot_id` (`/proc/sys/kernel/random/boot_id`) and SHA-256'd** →
-  `mnt:<hash[:16]>` / `cgroup:<hash[:16]>`. The salt is essential: a bare
-  mount-ns inode or cgroup path is only unique within one kernel boot, so
-  two unrelated hosts can share it — salting makes equal values mean "same
-  host + boot + namespace" instead of a coincidence. When `boot_id` is
-  unavailable the raw token is emitted as `mnt-local:` / `cgroup-local:`,
-  explicitly flagged as local-only (never compare across hosts). `null`
-  when all sources fail. Defaulted `null` + `from_dict()` backfill so
-  pre-1.12 snapshots round-trip. Fail-soft; never raises.
+* New top-level **`probe_namespace`** (`str | null`). A mismatch-only
+  namespace observation derived from `/proc/self/ns/mnt`, or
+  `/proc/self/ns/cgroup` as a fallback, hashed with the per-boot `boot_id`
+  (`/proc/sys/kernel/random/boot_id`) → `mnt:<hash[:16]>` /
+  `cgroup-ns:<hash[:16]>`. Different same-kind values prove different
+  observations; equality is advisory because Linux can recycle namespace
+  inode numbers after teardown. When `boot_id` is unavailable the token is
+  still hashed and emitted as `mnt-local:` / `cgroup-ns-local:`; it is not
+  cross-host comparable. Missing boot identity, fallback use, and total
+  failure add partial reasons. `null` means neither namespace handle was
+  readable. Defaulted `null` + `from_dict()` backfill so pre-1.12 snapshots
+  round-trip.
 
 ### `1.11`
 
@@ -486,7 +486,7 @@ design note `docs/env-probe-container-execution-context.md`.
 * **Remaining (phase 2, Buck2 / remote-execution):**
   `likely_execution_platform` population and the `$AORTA_RE_IMAGE` launcher
   convention are deferred pending on-cluster empirics — see the design
-  note's Open Questions. (The `probe_namespace` diff key landed in schema
+  note's Open Questions. (The `probe_namespace` observation landed in schema
   1.12, above.)
 
 ### `1.10`
