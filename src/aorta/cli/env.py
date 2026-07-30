@@ -187,11 +187,11 @@ def probe(
     execution_context: str,
 ) -> None:
     """Capture trial-environment state to env.json (issue #147)."""
+    from aorta.instrumentation.buck_invocation import BuckInvocationContext
     from aorta.instrumentation.environment import (
         collect_env,
         execution_context_warning,
     )
-    from aorta.instrumentation.buck_invocation import BuckInvocationContext
 
     # --summary and --field both bypass the file write -- only one
     # output mode at a time makes sense.
