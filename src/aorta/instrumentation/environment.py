@@ -165,7 +165,7 @@ SCHEMA_VERSION = "1.13"
 #     candidate family) / ``package_version`` / ``package_full_name``
 #     (complete canonical identity -- apt ``name=version`` or rpm NVRA --
 #     capturing kernel-suffixed names like
-#     ``amdgpu-kmod-6.9.0-..._g9b20106afb70-...`` that a bare candidate
+#     ``amdgpu-kmod-<kernel>-<driver-version>.<arch>`` that a bare candidate
 #     name misses) / ``package_manager`` (portable, glob-capable
 #     dpkg-then-rpm query over ``amdgpu-dkms`` / ``amdgpu-kmod``),
 #     ``module_version`` / ``module_srcversion`` (``modinfo amdgpu``),
@@ -250,7 +250,7 @@ SCHEMA_VERSION = "1.13"
 #     pytorch_build.binary_introspection symbol counts / torch_lib_bundled)
 #     now locate torch's native lib dir via ``/proc/self/maps`` when
 #     ``<torch>/lib`` is absent. This populates those previously-null
-#     fields for Buck/monorepo torch targets (e.g. fbcode //caffe2:torch)
+#     fields for Buck/monorepo torch targets (e.g. cell//ml:torch)
 #     whose C++ runtime is dlopen'd from a build-artifact dir rather than
 #     laid out under the Python package. No field shapes change.
 #
@@ -667,7 +667,7 @@ PYTORCH_HIP_LIB_NAME = "libtorch_hip.so"
 
 # Torch's native shared libraries (libtorch_hip.so, libaotriton_v2.so*,
 # ...) normally live in ``<torch.__file__>/../lib`` -- the wheel / source
-# layout. In Buck / monorepo "par" layouts (e.g. fbcode //caffe2:torch)
+# layout. In Buck / monorepo "par" layouts (e.g. cell//ml:torch)
 # the Python package is materialised into a link-tree but the C++ runtime
 # is dlopen'd from a separate build-artifact directory, so
 # ``<torch>/lib`` does not exist on disk and the lib-on-disk probes come
@@ -2263,6 +2263,44 @@ def collect_env(
         _probe_stdio.stop()
 
 
+def capture_to(
+    output: Path | str,
+    *,
+    buck_target: str | None = None,
+    buck_timeout: int = 10,
+    detail: str = "compact",
+    probe_invocation: str = "direct",
+    buck_context: BuckInvocationContext | None = None,
+) -> EnvSnapshot:
+    """Capture and write an ``env.json`` artifact from application code.
+
+    This is the supported integration point for Buck ``.par`` applications
+    that own ``__main__`` and therefore cannot be wrapped by the AORTA CLI.
+    Call it before model/runtime construction so the snapshot describes the
+    same Python process and environment as the workload.
+
+    Collection remains fail-soft through :func:`collect_env`; filesystem
+    errors are raised because silently claiming that an artifact was written
+    would make a customer handoff unusable.
+    """
+    snapshot = collect_env(
+        buck_target=buck_target,
+        buck_timeout=buck_timeout,
+        detail=detail,
+        probe_invocation=probe_invocation,
+        buck_context=buck_context,
+    )
+    output_path = Path(output).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(snapshot.to_dict(), indent=2),
+        encoding="utf-8",
+    )
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        raise OSError(f"env probe output was not created or is empty: {output_path}")
+    return snapshot
+
+
 def _disaster_snapshot(
     preceding_reasons: list[str],
     unexpected_reason: str,
@@ -3394,11 +3432,12 @@ def execution_context_warning(
     when to warn or what to say. Stdlib-only (reads ``os.environ``), no
     Click dependency, so ``_probe_main`` can call it too.
 
-    Warns when the caller CLAIMS a non-``direct`` (container / RE) capture
-    but we saw zero isolation signal (``container_detected`` False) and the
-    launcher asserted no image via ``$AORTA_RE_IMAGE`` / ``$AORTA_DOCKER_IMAGE``
-    -- i.e. "you may be probing the host shell, not where the workload ran."
-    ``direct`` never warns.
+    A local ``buck2 run`` legitimately executes without container isolation,
+    so its warning explains that the snapshot is client-host evidence rather
+    than incorrectly saying the caller claimed remote execution. A
+    ``buck2_action`` label is stronger: without isolation or an asserted
+    image, the action may have been captured in the wrong place. ``direct``
+    never warns.
     """
     if probe_invocation == "direct":
         return None
@@ -3406,12 +3445,18 @@ def execution_context_warning(
         return None
     if os.environ.get("AORTA_RE_IMAGE") or os.environ.get("AORTA_DOCKER_IMAGE"):
         return None
+    if probe_invocation == "buck2_run":
+        return (
+            "NOTICE: --execution-context buck2_run ran without a detected "
+            "isolation boundary (container_detected=false). This is consistent "
+            "with a local `buck2 run`; treat this file as the Buck client-host "
+            "snapshot, not proof of a remote-worker environment."
+        )
     return (
-        f"WARNING: --execution-context {probe_invocation} claims a "
-        "container/remote-execution capture, but no isolation signal was "
-        "detected (container_detected=false) and neither $AORTA_RE_IMAGE "
-        "nor $AORTA_DOCKER_IMAGE is set. You may be probing the host shell "
-        "rather than where the workload actually ran."
+        "WARNING: --execution-context buck2_action claims an in-action "
+        "capture, but no isolation signal was detected "
+        "(container_detected=false) and no launcher image was identified. "
+        "You may be probing the client host rather than the workload action."
     )
 
 
@@ -4237,7 +4282,7 @@ def _torch_native_lib_dir(torch_mod: Any | None) -> Path | None:
     (via :func:`_loaded_lib_path_from_maps`) so the probe still works
     when torch is a Buck target whose C++ runtime is dlopen'd from a
     build-artifact directory rather than laid out under the Python
-    package -- the fbcode ``//caffe2:torch`` case. Returns ``None`` when
+    package -- the monorepo ``cell//ml:torch`` case. Returns ``None`` when
     neither locates a directory. Never raises.
 
     The maps-derived hit is only trusted if it still exists on disk --
@@ -7745,9 +7790,9 @@ def _query_amdgpu_package() -> dict[str, str] | None:
 
     or ``None`` when no candidate is installed under any known manager.
 
-    KERNEL-SUFFIXED PACKAGE NAMES: some vendors (e.g. Meta's fbk kernels)
+    KERNEL-SUFFIXED PACKAGE NAMES: some vendor kernel packages
     ship the prebuilt kmod with the *kernel release baked into the RPM
-    name* -- ``amdgpu-kmod-6.9.0-0_fbk10_..._g9b20106afb70`` rather than a
+    name* -- ``amdgpu-kmod-<kernel>-<driver-version>`` rather than a
     plain ``amdgpu-kmod``. An exact ``rpm -q amdgpu-kmod`` misses these
     entirely. So we query with a **glob** (``rpm -qa 'amdgpu-kmod*'`` /
     ``dpkg-query -W 'amdgpu-kmod*'``) and reconstruct the complete package
@@ -7803,7 +7848,7 @@ def _query_amdgpu_package() -> dict[str, str] | None:
         # '<candidate>*': -qa + glob lists every installed package matching
         # the pattern (an exact -q would miss the kernel-suffixed names).
         # full_name is the canonical NVRA, e.g.
-        # amdgpu-kmod-6.9.0-..._g9b20106afb70-6.14.14.000000-2226257.1.x86_64
+        # amdgpu-kmod-<kernel>-<driver-version>.<arch>
         if shutil.which("rpm") is not None:
             try:
                 proc = subprocess.run(
@@ -7928,7 +7973,7 @@ def _capture_amdgpu_driver(
       dpkg-then-rpm query over ``AMDGPU_PACKAGE_CANDIDATES``).
       ``package_full_name`` is the complete canonical identity (apt
       ``name=version`` or rpm NVRA), which captures kernel-suffixed
-      package names like ``amdgpu-kmod-6.9.0-..._g9b20106afb70-...`` that
+      package names like ``amdgpu-kmod-<kernel>-<driver-version>`` that
       ``package_name`` (the stable candidate family) deliberately does not.
     * ``module_version`` / ``module_srcversion`` -- ``modinfo amdgpu``.
     * ``kmd_version`` -- reused verbatim from the already-captured ``rocm``

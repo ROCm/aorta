@@ -2447,6 +2447,51 @@ class TestProbeWritesUtf8:
         assert "BEST-EFFORT, NOT EXACT" in recipe_result.output
 
 
+class TestCaptureTo:
+    """Programmatic writer for Buck ``.par`` applications that own __main__."""
+
+    def test_writes_complete_json_and_returns_snapshot(
+        self, all_disabled, tmp_path: Path
+    ):
+        output = tmp_path / "nested" / "env.action.json"
+        snapshot = env_mod.capture_to(
+            output,
+            probe_invocation="buck2_run",
+        )
+        assert output.is_file()
+        assert output.stat().st_size > 0
+        on_disk = json.loads(output.read_text(encoding="utf-8"))
+        assert on_disk == snapshot.to_dict()
+
+    def test_forwards_buck_context_without_persisting_config_value(
+        self, all_disabled, tmp_path: Path
+    ):
+        hidden = "private-placeholder"
+        context = env_mod.BuckInvocationContext(
+            config_overrides=(f"build.profile={hidden}",),
+        )
+        output = tmp_path / "env.action.json"
+        snapshot = env_mod.capture_to(
+            output,
+            buck_target="//app:trainer",
+            buck_context=context,
+            probe_invocation="buck2_run",
+        )
+        serialized = output.read_text(encoding="utf-8")
+        assert snapshot.buck_invocation["config_keys"] == ["build.profile"]
+        assert hidden not in serialized
+
+    def test_write_failure_is_not_silenced(
+        self, all_disabled, tmp_path: Path, monkeypatch
+    ):
+        def fail_write(*args, **kwargs):
+            raise OSError("synthetic write failure")
+
+        monkeypatch.setattr(Path, "write_text", fail_write)
+        with pytest.raises(OSError, match="synthetic write failure"):
+            env_mod.capture_to(tmp_path / "env.json")
+
+
 # ---------------------------------------------------------------------------
 # RDHC wrapper
 # ---------------------------------------------------------------------------
@@ -3285,6 +3330,14 @@ class TestExecutionContext:
     def test_warning_predicate_claim_without_isolation_warns(self, all_disabled):
         msg = env_mod.execution_context_warning("buck2_action", False)
         assert msg is not None and msg.startswith("WARNING:")
+
+    def test_buck2_run_without_isolation_is_labeled_client_host(
+        self, all_disabled
+    ):
+        msg = env_mod.execution_context_warning("buck2_run", False)
+        assert msg is not None and msg.startswith("NOTICE:")
+        assert "client-host snapshot" in msg
+        assert "remote-worker" in msg
 
     def test_warning_predicate_suppressed_by_container_detected(
         self, all_disabled
