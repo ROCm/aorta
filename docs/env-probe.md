@@ -4,9 +4,14 @@ Capture a versioned, schema-stable snapshot of the trial environment so
 that cross-environment comparison becomes a `jq` diff instead of a
 multi-day investigation.
 
+For a short customer handoff, including Buck's required client/workload
+snapshot pair, see [Customer Instructions](README_aorta_env_probe.md).
+
 The same code path is used three ways:
 
 * **CLI**: `aorta env probe -o env.json` -- on-demand, by an operator.
+* **Application API**: `capture_to("env.json", ...)` -- in-process capture for
+  Buck `.par` applications that own `__main__`.
 * **B1 (per-trial runner)**: calls `collect_env()` once per trial; the
   snapshot is embedded in `TrialResult.env`.
 * **B2 (matrix runner)**: calls `collect_env()` once per matrix start
@@ -198,9 +203,16 @@ who want to copy-paste without reading `env.json` from disk).
 ## Library API
 
 ```python
-from aorta.instrumentation.environment import collect_env, EnvSnapshot
+from aorta.instrumentation.environment import capture_to, collect_env, EnvSnapshot
 
 snapshot: EnvSnapshot = collect_env()   # NEVER raises
+
+# Buck .par/application path: capture this process and write env.json.
+# Filesystem errors raise; collection itself remains fail-soft.
+workload_snapshot = capture_to(
+    "env.workload.json",
+    probe_invocation="buck2_run",
+)
 
 # Embed in a trial result (B1 pattern)
 trial_result = {
@@ -224,11 +236,11 @@ if snapshot.partial:
 print(snapshot.summary())
 ```
 
-`collect_env()` is the **only** public entrypoint. It NEVER raises:
-each probe is fail-soft, and the orchestrator body has a top-level
-`try/except Exception` plus a disaster-recovery helper for any genuinely
-unexpected failure. Callers always get back a valid, fully-shaped
-`EnvSnapshot` object.
+`collect_env()` is the in-memory entrypoint and NEVER raises: each probe is
+fail-soft, and the orchestrator body has a disaster-recovery helper for any
+genuinely unexpected failure. `capture_to()` uses the same collection path and
+returns the same `EnvSnapshot`, then writes it as UTF-8 JSON. It raises only
+when the output directory/file cannot be created or validated.
 
 ## env.json schema
 
@@ -240,7 +252,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
 | `system_health` | `dict \| null` | `rdhc --quick --json` (subprocess) | verbatim parsed JSON; `null` when rdhc absent / sudo unavailable / timeout / malformed |
 | `rocm` | `dict[str, str \| null]` | `/opt/rocm/.info/version{,_dev}`, `/sys/module/amdgpu/version` | `version`, `version_dev`, `kmd_version` |
-| `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (stable candidate family `amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_full_name` (complete canonical identity — apt `name=version` or rpm NVRA — capturing kernel-suffixed package names like `amdgpu-kmod-6.9.0-…_g9b20106afb70-6.14.14.000000-2226257.1.x86_64` that `package_name` alone drops; the single field two host snapshots diff on), `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_full_name`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — amdgpu module loaded (`modinfo` metadata present) but no dpkg/rpm package resolvable — records a `partial_reason`; `/dev/kfd` alone never does, since a passthrough container legitimately has the host's KFD node without a container-local package. Package lookup is a portable, **glob-capable** dpkg-then-rpm query parsed in Python (no shell pipe), so kernel-suffixed RPM names are matched. |
+| `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (stable candidate family `amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_full_name` (complete canonical identity — apt `name=version` or rpm NVRA — capturing kernel-suffixed package names such as `amdgpu-kmod-<kernel>-<driver-version>.<arch>` that `package_name` alone drops; the single field two host snapshots diff on), `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_full_name`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — amdgpu module loaded (`modinfo` metadata present) but no dpkg/rpm package resolvable — records a `partial_reason`; `/dev/kfd` alone never does, since a passthrough container legitimately has the host's KFD node without a container-local package. Package lookup is a portable, **glob-capable** dpkg-then-rpm query parsed in Python (no shell pipe), so kernel-suffixed RPM names are matched. |
 | `hip` | `dict[str, str \| null]` | `hipconfig --version/--platform/--compiler/--runtime/--cpp_config` | five subprocesses; `--version` and `--platform` cannot be combined (no delimiter) |
 | `hipblaslt` | `dict` | header parse + `sha256(libhipblaslt.so)` + sorted-filenames hash of `lib/hipblaslt/library/*` | `rocm_release_tweak` (NOT a per-hipBLASLt commit -- it's the ROCm release identifier shared across every library in a release; see note below), `package_version`, `lib_hash`, `kernel_db_revision`, `applied_prs: {}` |
 | `rocblas` | `dict` | header parse + `sha256(librocblas.so)` + sorted-filenames hash of `lib/rocblas/library/*` | Same shape as `hipblaslt`. Header lives at `include/rocblas/internal/rocblas-version.h`. |
@@ -570,8 +582,8 @@ don't raise.
   `kfd_device_present` / `kfd_sysfs_present` (`/dev/kfd` + `/sys/class/kfd`
   existence checks — no `open()`, no `ioctl`, no GPU compute).
 * **`package_full_name`** is the complete canonical package identity — apt
-  `name=version` on Debian, or the rpm NVRA
-  (`amdgpu-kmod-6.9.0-…_g9b20106afb70-6.14.14.000000-2226257.1.x86_64`) on
+  `name=version` on Debian, or an rpm NVRA such as
+  `amdgpu-kmod-<kernel>-<driver-version>.<arch>` on
   RHEL/SLES. Some vendors bake the kernel release into the RPM *package
   name*, which an exact `rpm -q amdgpu-kmod` misses entirely; the query
   uses a glob (`rpm -qa 'amdgpu-kmod*'`) to catch these and reconstructs

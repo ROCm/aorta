@@ -7,7 +7,7 @@ per-layer numerics logger. Future submodules (drift watcher, etc.) will live her
 
 | Submodule | Purpose | Public API |
 | --- | --- | --- |
-| [`environment`](environment.py) | ROCm + ML stack version snapshot + container/python env detection. See block list below. | `collect_env(..., buck_context: BuckInvocationContext \| None = None) -> EnvSnapshot` |
+| [`environment`](environment.py) | ROCm + ML stack version snapshot + container/python env detection. See block list below. | `collect_env(...) -> EnvSnapshot`, `capture_to(path, ...) -> EnvSnapshot` |
 | [`layer_numerics`](layer_numerics/README.md) | Per-layer / per-stage NaN, magnitude, and out-of-range logger. Runs standalone as a front-end around a training/repro script (the supported path); also a recognized `layer_numerics` sweep collector — the engine validates the name and threads it into workload config, but a workload must opt in for capture (see [`docs/layer-numerics.md`](../../../docs/layer-numerics.md)). Config via `NANLOG_SPEC` (structured, recommended) or the flat `NANLOG_*` vars. | `build_env(results_dir, overrides=None) -> dict`, `SCRIPT_PATH`, `OUTPUT_SUBDIR` |
 | [`build_system`](build_system.py) | Detects Buck2 build environments (issue #163, A1.2a). Wrapped by `collect_env()` and surfaced as the `build_system` field of `EnvSnapshot`. | `detect_build_system() -> dict` |
 | [`buck_invocation`](buck_invocation.py) | Frozen, ordered Buck invocation context: mode/flag files, `-c` overrides, `-m` modifiers, or explicit default confirmation. Builds atomic argv and a redacted comparison fingerprint; no shell/passthrough string. | `BuckInvocationContext` |
@@ -144,6 +144,20 @@ Documented absences DO NOT trigger `partial`:
 * `docker == None` on baremetal (no container, nothing to record).
 * `env_vars[X] == None` for an unset env var (the documented contract).
 * `runtime_context.venv_path == None` outside a venv.
+
+For a Buck ``.par`` whose application owns ``__main__``, add `aorta_lib` to
+the application's dependencies and call `capture_to()` near the beginning of
+its existing `main()`:
+
+```python
+from aorta.instrumentation.environment import capture_to
+
+capture_to("env.workload.json", probe_invocation="buck2_run")
+```
+
+This captures the workload process. Keep client-side `--buck-target`
+introspection in a separate snapshot; a remote action may not have access to
+the Buck daemon or checkout needed for a nested cquery.
 
 ### env.json schema (v1.13)
 

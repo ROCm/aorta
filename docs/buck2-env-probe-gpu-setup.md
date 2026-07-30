@@ -34,29 +34,29 @@ Download the release binary matching the host architecture from the official
 downloaded version visible in the test report; do not silently substitute a
 different repository-provided binary.
 
-The login host and compute nodes share `/apps/oyazdanb`; `$HOME` is not a
-portable location between them. Install the binary in the shared tree:
+If login and compute nodes use different home directories, choose a filesystem
+visible to both and set it as `SHARED_ROOT`:
 
 ```bash
-mkdir -p /apps/oyazdanb/bin
-install -m 0755 /path/to/downloaded/buck2 /apps/oyazdanb/bin/buck2
-export PATH="/apps/oyazdanb/bin:$PATH"
+SHARED_ROOT="/shared/aorta-support"
+mkdir -p "$SHARED_ROOT/bin"
+install -m 0755 /path/to/downloaded/buck2 "$SHARED_ROOT/bin/buck2"
+export PATH="$SHARED_ROOT/bin:$PATH"
 
 buck2 --version
 ```
 
-Use `/apps/oyazdanb` for the base clone, worktree, Buck binary, and result
-artifacts that must be visible on both host and compute nodes. Do not substitute
-`$HOME` or `/tmp` for shared inputs/outputs.
+Use the same shared root for the base clone, worktree, Buck binary, and result
+artifacts that must be visible on both host and compute nodes.
 
 ## 3. Fetch the branch into a dedicated worktree
 
 ```bash
-AORTA_BASE=/apps/oyazdanb/aorta
-AORTA_WORKTREE=/apps/oyazdanb/aorta-worktrees/buck-invocation-context
-AORTA_BRANCH=users/oyazdanb/buck-invocation-context
+AORTA_BASE="$SHARED_ROOT/aorta"
+AORTA_WORKTREE="$SHARED_ROOT/aorta-worktrees/buck-invocation-context"
+AORTA_BRANCH="<branch-provided-by-aorta-support>"
 
-mkdir -p /apps/oyazdanb/aorta-worktrees
+mkdir -p "$SHARED_ROOT/aorta-worktrees"
 if [ ! -d "$AORTA_BASE/.git" ]; then
   git clone https://github.com/ROCm/aorta.git "$AORTA_BASE"
 fi
@@ -67,7 +67,7 @@ if [ -e "$AORTA_WORKTREE" ]; then
   exit 1
 fi
 git -C "$AORTA_BASE" worktree add --track \
-  -b "$AORTA_BRANCH" \
+  -b aorta-env-probe-customer-test \
   "$AORTA_WORKTREE" \
   "origin/$AORTA_BRANCH"
 
@@ -82,7 +82,7 @@ commands and edits belong in the worktree.
 ## 4. Local Buck2 smoke test
 
 ```bash
-cd /apps/oyazdanb/aorta-worktrees/buck-invocation-context
+cd "$AORTA_WORKTREE"
 
 buck2 root
 buck2 build //:aorta --show-output
@@ -168,9 +168,10 @@ execution semantics and do not expose credentials, hostnames, internal target
 labels, environment values, or private paths in your final response.
 
 Inputs:
-- AORTA base clone: /apps/oyazdanb/aorta
-- AORTA worktree: /apps/oyazdanb/aorta-worktrees/buck-invocation-context
-- AORTA branch: users/oyazdanb/buck-invocation-context
+- Shared filesystem root: <SHARED_ROOT>
+- AORTA base clone: <SHARED_ROOT>/aorta
+- AORTA worktree: <SHARED_ROOT>/aorta-worktrees/buck-invocation-context
+- AORTA branch: <AORTA_BRANCH>
 - Buck repository root: <REPO_ROOT>
 - Buck2 binary (or "not installed"): <BUCK2>
 - Workload target: <WORKLOAD_TARGET>
@@ -187,11 +188,11 @@ Tasks:
 2. Check Linux, Python, /dev/kfd, ROCm visibility, Buck2 version, `buck2 root`,
    configured execution platforms, and whether the supplied targets exist.
 3. If Buck2 is absent, install an approved official release binary at
-   `/apps/oyazdanb/bin/buck2`, prepend `/apps/oyazdanb/bin` to PATH, and report
-   its exact version. `$HOME` is not shared with the compute node. Do not run
-   `buck2 init` inside an existing configured repository.
+   `<SHARED_ROOT>/bin/buck2`, prepend `<SHARED_ROOT>/bin` to PATH, and report
+   its exact version. Do not run `buck2 init` inside an existing configured
+   repository.
 4. Fetch the AORTA branch into the dedicated worktree under
-   `/apps/oyazdanb/aorta-worktrees` exactly as documented above. Do not switch
+   `<SHARED_ROOT>/aorta-worktrees` exactly as documented above. Do not switch
    the base clone or overwrite an existing worktree. Then run the local
    `//:aorta` smoke commands from that worktree.
 5. Build the exact AORTA probe argv using repeatable --buck-mode-file,
