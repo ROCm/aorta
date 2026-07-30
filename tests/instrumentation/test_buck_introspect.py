@@ -28,6 +28,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
@@ -39,9 +40,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_module(rel_path: str, mod_name: str):
-    spec = importlib.util.spec_from_file_location(
-        mod_name, _REPO_ROOT / rel_path
-    )
+    spec = importlib.util.spec_from_file_location(mod_name, _REPO_ROOT / rel_path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
@@ -62,15 +61,119 @@ env_mod = _load_module(
 )
 
 
-FIXTURE_PATH = (
-    Path(__file__).parent.parent / "fixtures" / "buck" / "audit_dependencies.json"
-)
+FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "buck" / "audit_dependencies.json"
 
 
 def _make_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
     return subprocess.CompletedProcess(
         args=["buck2"], returncode=returncode, stdout=stdout, stderr=stderr
     )
+
+
+# ---------------------------------------------------------------------------
+# BuckInvocationContext: typed, ordered, redacted invocation inputs
+# ---------------------------------------------------------------------------
+
+
+class TestBuckInvocationContext:
+    def test_builds_atomic_args_in_required_precedence_order(self):
+        context = bi_mod.BuckInvocationContext(
+            mode_files=("root//mode/debug", "@root//mode/gpu"),
+            config_overrides=(
+                "build.profile=debug",
+                "scheduler.policy=local",
+            ),
+            modifiers=("//constraints:linux", "//constraints:gfx"),
+        )
+
+        assert context.mode_files == (
+            "root//mode/debug",
+            "root//mode/gpu",
+        )
+        assert context.to_buck_args() == [
+            "@root//mode/debug",
+            "@root//mode/gpu",
+            "-c",
+            "build.profile=debug",
+            "-c",
+            "scheduler.policy=local",
+            "-m",
+            "//constraints:linux",
+            "-m",
+            "//constraints:gfx",
+        ]
+        assert context.config_keys == (
+            "build.profile",
+            "scheduler.policy",
+        )
+        assert context.source == "explicit"
+
+    def test_is_frozen_and_coerces_ordered_inputs_to_tuples(self):
+        context = bi_mod.BuckInvocationContext(
+            mode_files=["root//mode/debug"],
+            config_overrides=["build.profile=debug"],
+            modifiers=["//constraints:linux"],
+        )
+        assert isinstance(context.mode_files, tuple)
+        assert isinstance(context.config_overrides, tuple)
+        assert isinstance(context.modifiers, tuple)
+        with pytest.raises(FrozenInstanceError):
+            context.modifiers = ()  # type: ignore[misc]
+
+    def test_default_confirmation_is_distinct_and_mutually_exclusive(self):
+        confirmed = bi_mod.BuckInvocationContext(default_context_confirmed=True)
+        assert confirmed.source == "default_confirmed"
+        assert confirmed.to_buck_args() == []
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            bi_mod.BuckInvocationContext(
+                mode_files=("root//mode/debug",),
+                default_context_confirmed=True,
+            )
+
+    def test_config_override_requires_key_value_shape(self):
+        with pytest.raises(ValueError, match="KEY=VALUE"):
+            bi_mod.BuckInvocationContext(config_overrides=("build.profile",))
+
+    def test_non_string_mode_file_fails_with_validation_error(self):
+        with pytest.raises(ValueError, match="non-empty strings"):
+            bi_mod.BuckInvocationContext(
+                mode_files=(123,),  # type: ignore[arg-type]
+            )
+
+    def test_bare_at_mode_file_is_rejected(self):
+        with pytest.raises(ValueError, match="name a file"):
+            bi_mod.BuckInvocationContext(mode_files=("@",))
+
+    def test_fingerprint_is_stable_and_covers_full_ordered_values(self):
+        first = bi_mod.BuckInvocationContext(
+            mode_files=("root//mode/debug", "root//mode/gpu"),
+            config_overrides=("build.profile=debug", "scheduler.policy=local"),
+            modifiers=("//constraints:linux", "//constraints:gfx"),
+        )
+        same = bi_mod.BuckInvocationContext(
+            mode_files=("root//mode/debug", "root//mode/gpu"),
+            config_overrides=("build.profile=debug", "scheduler.policy=local"),
+            modifiers=("//constraints:linux", "//constraints:gfx"),
+        )
+        value_changed = bi_mod.BuckInvocationContext(
+            mode_files=("root//mode/debug", "root//mode/gpu"),
+            config_overrides=("build.profile=release", "scheduler.policy=local"),
+            modifiers=("//constraints:linux", "//constraints:gfx"),
+        )
+        order_changed = bi_mod.BuckInvocationContext(
+            mode_files=("root//mode/gpu", "root//mode/debug"),
+            config_overrides=("build.profile=debug", "scheduler.policy=local"),
+            modifiers=("//constraints:linux", "//constraints:gfx"),
+        )
+
+        assert first.fingerprint == same.fingerprint
+        assert first.fingerprint.startswith("sha256:")
+        assert len(first.fingerprint) == len("sha256:") + 64
+        # Same persisted config key, different hidden value -> different digest.
+        assert first.config_keys == value_changed.config_keys
+        assert first.fingerprint != value_changed.fingerprint
+        assert first.fingerprint != order_changed.fingerprint
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +234,7 @@ class TestBuck2HappyPath:
     def test_fixture_yields_expected_library_set(self, monkeypatch):
         monkeypatch.setattr(bi_mod.shutil, "which", lambda _name: "/usr/bin/buck2")
         fixture = FIXTURE_PATH.read_text()
-        with patch.object(
-            bi_mod.subprocess, "run", return_value=_make_completed(stdout=fixture)
-        ):
+        with patch.object(bi_mod.subprocess, "run", return_value=_make_completed(stdout=fixture)):
             entries, reasons = bi_mod.introspect_libraries_via_buck(
                 target="//myproj:training_main", repo_revision="cafef00d"
             )
@@ -174,9 +275,7 @@ class TestBuck2HappyPath:
             "run",
             return_value=_make_completed(stdout=json.dumps(payload)),
         ):
-            entries, _ = bi_mod.introspect_libraries_via_buck(
-                target="//foo", repo_revision=None
-            )
+            entries, _ = bi_mod.introspect_libraries_via_buck(target="//foo", repo_revision=None)
         assert entries[0]["revision"] is None
 
     def test_empty_match_set_is_not_partial(self, monkeypatch):
@@ -192,6 +291,70 @@ class TestBuck2HappyPath:
             )
         assert entries == []
         assert reasons == []  # success with no matches != failure
+
+    def test_exact_bound_cquery_argv_includes_ordered_context(self, monkeypatch):
+        monkeypatch.setattr(bi_mod.shutil, "which", lambda _name: "/usr/bin/buck2")
+        context = bi_mod.BuckInvocationContext(
+            mode_files=("root//mode/debug", "root//mode/gpu"),
+            config_overrides=("build.profile=debug", "scheduler.policy=local"),
+            modifiers=("//constraints:linux", "//constraints:gfx"),
+        )
+        configured_root = "root//app:trainer " "(prelude//platforms:default#configured)"
+        run = patch.object(
+            bi_mod.subprocess,
+            "run",
+            return_value=_make_completed(stdout=json.dumps([configured_root])),
+        )
+        with run as mocked_run:
+            result = bi_mod.introspect_libraries_via_buck(
+                target="//app:trainer",
+                repo_revision="abc",
+                context=context,
+            )
+
+        mocked_run.assert_called_once_with(
+            [
+                "/usr/bin/buck2",
+                "cquery",
+                "@root//mode/debug",
+                "@root//mode/gpu",
+                "-c",
+                "build.profile=debug",
+                "-c",
+                "scheduler.policy=local",
+                "-m",
+                "//constraints:linux",
+                "-m",
+                "//constraints:gfx",
+                "deps(%s)",
+                "//app:trainer",
+                "--json",
+            ],
+            cwd=None,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.succeeded is True
+        assert result.configured_root_target == configured_root
+
+    def test_target_query_syntax_is_never_interpolated(self, monkeypatch):
+        monkeypatch.setattr(bi_mod.shutil, "which", lambda _name: "/usr/bin/buck2")
+        target = "//app:trainer) union deps(//other:target"
+        with patch.object(
+            bi_mod.subprocess,
+            "run",
+            return_value=_make_completed(stdout="[]"),
+        ) as mocked_run:
+            bi_mod.introspect_libraries_via_buck(
+                target=target,
+                repo_revision=None,
+            )
+
+        argv = mocked_run.call_args.args[0]
+        assert argv[-3:] == ["deps(%s)", target, "--json"]
+        assert all(target not in arg for arg in argv if arg != target)
 
 
 class TestBuck2FailureModes:
@@ -215,9 +378,7 @@ class TestBuck2FailureModes:
         assert any("timed out after 10s" in r for r in reasons)
 
     def test_oserror_returns_reason(self):
-        with patch.object(
-            bi_mod.subprocess, "run", side_effect=OSError("permission denied")
-        ):
+        with patch.object(bi_mod.subprocess, "run", side_effect=OSError("permission denied")):
             entries, reasons = bi_mod.introspect_libraries_via_buck(
                 target="//foo", repo_revision="r"
             )
@@ -228,9 +389,7 @@ class TestBuck2FailureModes:
         with patch.object(
             bi_mod.subprocess,
             "run",
-            return_value=_make_completed(
-                stdout="", stderr="target //foo not found", returncode=2
-            ),
+            return_value=_make_completed(stdout="", stderr="target //foo not found", returncode=2),
         ):
             entries, reasons = bi_mod.introspect_libraries_via_buck(
                 target="//foo", repo_revision="r"
@@ -249,6 +408,27 @@ class TestBuck2FailureModes:
             )
         assert entries == []
         assert any("(empty)" in r for r in reasons)
+
+    def test_nonzero_exit_redacts_config_override_values(self):
+        context = bi_mod.BuckInvocationContext(
+            config_overrides=("service.token=private-placeholder",)
+        )
+        with patch.object(
+            bi_mod.subprocess,
+            "run",
+            return_value=_make_completed(
+                stderr="invalid service.token=private-placeholder",
+                returncode=1,
+            ),
+        ):
+            result = bi_mod.introspect_libraries_via_buck(
+                target="//app:trainer",
+                repo_revision="r",
+                context=context,
+            )
+
+        assert "private-placeholder" not in result.reasons[0]
+        assert "service.token=<redacted>" in result.reasons[0]
 
     def test_invalid_json_returns_reason(self):
         with patch.object(
@@ -322,9 +502,7 @@ class TestBuck2CqueryShape:
         # _strip_config_suffix is the unit doing the work; pin its
         # behaviour directly so a future change there can't silently
         # break label matching.
-        assert bi_mod._strip_config_suffix(suffixed) == (
-            "//third-party/rocm:hipblaslt-lib"
-        )
+        assert bi_mod._strip_config_suffix(suffixed) == ("//third-party/rocm:hipblaslt-lib")
 
     def test_config_suffix_absent_match_unaffected(self):
         """A label without the suffix (older buck2 audit output, or
@@ -340,10 +518,7 @@ class TestBuck2CqueryShape:
         only the suffixed form (as the schema-1.4 draft did) made
         env.json diffs unstable across repeat probes because the
         suffix hash changes between buck2 daemon restarts."""
-        suffixed = (
-            "//third-party/rocm:hipblaslt_lib "
-            "(prelude//platforms:default#abc123)"
-        )
+        suffixed = "//third-party/rocm:hipblaslt_lib " "(prelude//platforms:default#abc123)"
         payload = [suffixed]
         with patch.object(
             bi_mod.subprocess,
@@ -374,9 +549,7 @@ class TestBuck2CqueryShape:
             "run",
             return_value=_make_completed(stdout=json.dumps(payload)),
         ):
-            entries, _ = bi_mod.introspect_libraries_via_buck(
-                target="//foo", repo_revision="r"
-            )
+            entries, _ = bi_mod.introspect_libraries_via_buck(target="//foo", repo_revision="r")
         assert entries[0]["target"] == unsuffixed
         assert entries[0]["configured_target"] == unsuffixed
 
@@ -393,10 +566,156 @@ class TestCollectEnvIntegration:
     fake any of A1's per-library probes -- we only validate the wiring.
     """
 
+    @staticmethod
+    def _run_capture(
+        *,
+        target="//app:trainer",
+        context=None,
+        build_system=None,
+    ):
+        reasons = []
+        capture = env_mod._run_buck_introspection_safe(
+            buck_target=target,
+            buck_timeout=10,
+            buck_context=context,
+            build_system=build_system
+            or {
+                "kind": "buck2",
+                "revision": "abc",
+                "repo_root": "/repo",
+            },
+            a1_blocks_by_lib={},
+            reasons=reasons,
+        )
+        return capture, reasons
+
+    def test_no_request_has_complete_not_requested_block(self):
+        capture, reasons = self._run_capture(target=None)
+        assert reasons == []
+        assert capture.entries == []
+        assert capture.alternates == []
+        assert capture.invocation == env_mod._empty_buck_invocation()
+
+    def test_unspecified_context_runs_but_is_partial(self, monkeypatch):
+        monkeypatch.setattr(
+            bi_mod,
+            "introspect_libraries_via_buck",
+            lambda **_: bi_mod.BuckIntrospectionResult(
+                entries=[],
+                reasons=[],
+                succeeded=True,
+                configured_root_target=(
+                    "root//app:trainer " "(prelude//platforms:default#configured)"
+                ),
+            ),
+        )
+        capture, reasons = self._run_capture()
+
+        assert capture.invocation["status"] == "success"
+        assert capture.invocation["context_source"] == "unspecified"
+        assert capture.invocation["context_fingerprint"].startswith("sha256:")
+        assert capture.invocation["configured_root_target"].startswith("root//app:trainer ")
+        assert any("default Buck invocation context was not confirmed" in r for r in reasons)
+
+    def test_default_confirmed_context_is_not_partial(self, monkeypatch):
+        monkeypatch.setattr(
+            bi_mod,
+            "introspect_libraries_via_buck",
+            lambda **_: bi_mod.BuckIntrospectionResult(
+                entries=[],
+                reasons=[],
+                succeeded=True,
+                configured_root_target=None,
+            ),
+        )
+        context = bi_mod.BuckInvocationContext(default_context_confirmed=True)
+        capture, reasons = self._run_capture(context=context)
+
+        assert capture.invocation["status"] == "success"
+        assert capture.invocation["context_source"] == "default_confirmed"
+        assert reasons == []
+
+    def test_explicit_metadata_redacts_values_and_preserves_order(self, monkeypatch):
+        monkeypatch.setattr(
+            bi_mod,
+            "introspect_libraries_via_buck",
+            lambda **_: bi_mod.BuckIntrospectionResult(
+                entries=[],
+                reasons=[],
+                succeeded=True,
+                configured_root_target=None,
+            ),
+        )
+        hidden_value = "not-persisted-value"
+        context = bi_mod.BuckInvocationContext(
+            mode_files=("root//mode/debug", "root//mode/gpu"),
+            config_overrides=(
+                f"build.profile={hidden_value}",
+                "scheduler.policy=local",
+            ),
+            modifiers=("//constraints:linux", "//constraints:gfx"),
+        )
+        capture, reasons = self._run_capture(context=context)
+        invocation_json = json.dumps(capture.invocation)
+
+        assert capture.invocation["context_source"] == "explicit"
+        assert capture.invocation["mode_files"] == [
+            "root//mode/debug",
+            "root//mode/gpu",
+        ]
+        assert capture.invocation["config_keys"] == [
+            "build.profile",
+            "scheduler.policy",
+        ]
+        assert capture.invocation["modifiers"] == [
+            "//constraints:linux",
+            "//constraints:gfx",
+        ]
+        assert hidden_value not in invocation_json
+        assert reasons == []
+
+    def test_buck_failure_is_distinct(self, monkeypatch):
+        monkeypatch.setattr(
+            bi_mod,
+            "introspect_libraries_via_buck",
+            lambda **_: bi_mod.BuckIntrospectionResult(
+                entries=[],
+                reasons=["library_introspection: synthetic failure"],
+                succeeded=False,
+                configured_root_target=None,
+            ),
+        )
+        capture, reasons = self._run_capture(
+            context=bi_mod.BuckInvocationContext(default_context_confirmed=True)
+        )
+
+        assert capture.invocation["status"] == "failure"
+        assert "synthetic failure" in reasons[-1]
+
+    def test_buck_not_detected_is_distinct_even_when_query_runs(self, monkeypatch):
+        monkeypatch.setattr(
+            bi_mod,
+            "introspect_libraries_via_buck",
+            lambda **_: bi_mod.BuckIntrospectionResult(
+                entries=[],
+                reasons=[],
+                succeeded=True,
+                configured_root_target=None,
+            ),
+        )
+        capture, reasons = self._run_capture(
+            context=bi_mod.BuckInvocationContext(default_context_confirmed=True),
+            build_system={"kind": "none"},
+        )
+
+        assert capture.invocation["status"] == "buck_not_detected"
+        assert any("build_system.kind='none'" in reason for reason in reasons)
+
     def test_no_buck_target_yields_empty_lists(self):
         snap = env_mod.collect_env()
         assert snap.library_introspection == []
         assert snap.library_introspection_alternates == []
+        assert snap.buck_invocation == env_mod._empty_buck_invocation()
 
     def test_buck_target_populates_library_introspection(self, monkeypatch):
         fake_entries = [
@@ -413,9 +732,7 @@ class TestCollectEnvIntegration:
                 "target": "//pytorch:torch",
             },
         ]
-        monkeypatch.setattr(
-            bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, [])
-        )
+        monkeypatch.setattr(bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, []))
         snap = env_mod.collect_env(buck_target="//foo:bar")
         assert snap.library_introspection == fake_entries
 
@@ -434,9 +751,7 @@ class TestCollectEnvIntegration:
                 "target": "//pytorch:torch",
             },
         ]
-        monkeypatch.setattr(
-            bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, [])
-        )
+        monkeypatch.setattr(bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, []))
         snap = env_mod.collect_env(buck_target="//foo:bar")
         names = [a["name"] for a in snap.library_introspection_alternates]
         # hipblaslt has an A1 block, pytorch does not => only one alt
@@ -450,10 +765,7 @@ class TestCollectEnvIntegration:
             lambda **_: ([], ["library_introspection: synthetic failure"]),
         )
         snap = env_mod.collect_env(buck_target="//foo:bar")
-        assert any(
-            "library_introspection: synthetic failure" in r
-            for r in snap.partial_reasons
-        )
+        assert any("library_introspection: synthetic failure" in r for r in snap.partial_reasons)
 
     def test_unexpected_exception_in_introspection_is_swallowed(self, monkeypatch):
         def boom(**_kwargs):
@@ -463,8 +775,7 @@ class TestCollectEnvIntegration:
         snap = env_mod.collect_env(buck_target="//foo:bar")
         assert snap.library_introspection == []
         assert any(
-            "buck introspection raised" in r and "RuntimeError" in r
-            for r in snap.partial_reasons
+            "buck introspection raised" in r and "RuntimeError" in r for r in snap.partial_reasons
         )
 
     def test_round_trip_preserves_introspection_lists(self, monkeypatch):
@@ -476,32 +787,20 @@ class TestCollectEnvIntegration:
                 "target": "//rocm:rccl_lib",
             }
         ]
-        monkeypatch.setattr(
-            bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, [])
-        )
+        monkeypatch.setattr(bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, []))
         snap = env_mod.collect_env(buck_target="//foo:bar")
         d = snap.to_dict()
         assert d["library_introspection"] == fake_entries
         rebuilt = env_mod.EnvSnapshot.from_dict(d)
         assert rebuilt.library_introspection == fake_entries
-        assert (
-            rebuilt.library_introspection_alternates
-            == snap.library_introspection_alternates
-        )
+        assert rebuilt.library_introspection_alternates == snap.library_introspection_alternates
 
-    def test_disconnect_buck_target_without_buck2_kind_records_reason(
-        self, monkeypatch
-    ):
+    def test_disconnect_buck_target_without_buck2_kind_records_reason(self, monkeypatch):
         # Force build_system to look non-buck so the reconciliation
         # branch fires regardless of whether the host has buck2 installed.
-        monkeypatch.setattr(
-            env_mod, "_detect_build_system_safe", lambda: {"kind": "none"}
-        )
-        monkeypatch.setattr(
-            bi_mod, "introspect_libraries_via_buck", lambda **_: ([], [])
-        )
+        monkeypatch.setattr(env_mod, "_detect_build_system_safe", lambda: {"kind": "none"})
+        monkeypatch.setattr(bi_mod, "introspect_libraries_via_buck", lambda **_: ([], []))
         snap = env_mod.collect_env(buck_target="//foo:bar")
         assert any(
-            "build_system.kind=" in r and "running anyway" in r
-            for r in snap.partial_reasons
+            "build_system.kind=" in r and "running anyway" in r for r in snap.partial_reasons
         )
