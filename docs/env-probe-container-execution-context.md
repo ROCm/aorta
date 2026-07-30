@@ -21,6 +21,21 @@ Phase 1 captures **nothing new about a remote worker** — it only makes the
 "probed the wrong place" failure visible. That is the whole point: it is a
 guardrail, not a data source.
 
+**Landed (phase 2 — namespace; schema 1.12):**
+
+- `probe_namespace` (`str | null`) — a **mismatch-only namespace
+  observation** from `/proc/self/ns/mnt` (or `/proc/self/ns/cgroup` as
+  fallback), hashed with the per-boot `boot_id` →
+  `mnt:<hash[:16]>` / `cgroup-ns:<hash[:16]>`. Different values with the
+  same prefix prove a different boot or namespace observation. Equal values
+  are advisory only: Linux may recycle non-initial namespace inode numbers
+  after teardown, so an artifact cannot prove durable identity across time.
+  When `boot_id` is unreadable, the token remains hashed and is emitted as
+  `mnt-local:` / `cgroup-ns-local:`; it is explicitly not cross-host
+  comparable. Different source prefixes are also not directly comparable.
+  Missing boot identity, fallback use, and total failure are recorded as
+  partial reasons. Additive, defaulted `null`, `from_dict()` backfill.
+
 **Still REMAINING (phase 2 — Buck2 / remote-execution, needs MI350 empirics):**
 
 - `execution_context.likely_execution_platform` — resolved RE platform label.
@@ -32,9 +47,6 @@ guardrail, not a data source.
   exist and be preferable; do not invent the convention until Q1 is answered.
   (The env var is already read by the `--execution-context` warning so the
   convention can be adopted without further code once Q1 is settled.)
-- `probe_namespace` (mount-ns / cgroup hash diff key) — deferred; the phase-1
-  `container_detected` boolean covers the immediate false-negative bug, and
-  the namespace hash is only useful once two-probe RE diffing exists.
 - The Buck2 `genrule`/`sh_test` rule wrapper — documentation-only per the
   external-tool policy; deferred until phase 2.
 - Open Q1, Q2, Q3 below all remain open (Q1/Q2 need a real Buck2 RE cluster;
@@ -135,7 +147,7 @@ New fields (same additive pattern as the amdgpu_driver 1.10 change). The
 | `container_detected` | `bool` | **Single boolean.** `true` on *any* isolation signal: a named-runtime match (`_detect_container_type() != "baremetal"`), a private mount namespace (`/proc/self/ns/mnt` != `/proc/1/ns/mnt`), or a container/k8s token in `/proc/self/cgroup` (`docker`/`containerd`/`kubepods`/`libpod`/`lxc`/`crio`). Fixes the RE-sandbox-as-baremetal false negative. No k8s-vs-containerd distinction. | **1 (done)** |
 | `execution_context.probe_invocation` | `"direct" \| "buck2_run" \| "buck2_action"` | How the probe was launched. Phase 1: **self-declared** via `--execution-context` (defaults to `direct`). Phase 2 may auto-detect via native RE env vars (**see Open Q1**). | **1 (done, self-declared)** |
 | `execution_context.likely_execution_platform` | `str \| null` | Best-effort: from `buck2 audit configurations` / cquery on the target, the resolved platform label. Advisory, not guaranteed (**Open Q2**). Key present today, always `null`. | 2 (remaining) |
-| `probe_namespace` | `str \| null` | Hash of the mount namespace / cgroup path (e.g. `/proc/self/ns/mnt` inode). A coarse "same isolation boundary?" diff key, nothing more. | 2 (remaining) |
+| `probe_namespace` | `str \| null` | **Mismatch-only observation**: boot-scoped hash of `/proc/self/ns/mnt`, falling back to `/proc/self/ns/cgroup`: `mnt:<sha256[:16]>` / `cgroup-ns:<sha256[:16]>`; hashed `*-local:` form when `boot_id` is unavailable. Different same-kind values prove different observations; equality is advisory because namespace inode numbers can be recycled. | **2 (done)** |
 | `$AORTA_RE_IMAGE` convention | env var | Extend the existing `$AORTA_DOCKER_IMAGE` launcher pattern to Buck2: customers set this in their `remote_execution_properties` / action env (**pending Open Q1** — a native marker may exist and be preferable). Already read by the phase-1 warning. | 2 (remaining) |
 
 ### CLI — a labeling+validation flag, not a behavior change
@@ -170,8 +182,11 @@ policy). *(Phase 2.)*
 2. If remote, the probe must run as a Buck2 action/genrule dependency of the
    failing target, not standalone.
 3. Always capture **both** a host-side probe and an in-action probe; diff
-   `runtime_context`, `container_detected`, and `amdgpu_driver.kfd_device_present`
-   as the first triage step.
+   `runtime_context`, `container_detected`, `probe_namespace`, and
+   `amdgpu_driver.kfd_device_present` as the first triage step. A different
+   same-kind `probe_namespace` proves different observations; equality is
+   only advisory and must not be treated as proof that both probes shared a
+   durable namespace.
 
 ### Proposed runbook wording (Residual NaN / repro)
 

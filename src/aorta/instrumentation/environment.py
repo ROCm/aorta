@@ -41,6 +41,9 @@ Captured blocks:
   ``fbgemm`` also surfaces the ``-DUSE_FBGEMM`` / ``-DUSE_FBGEMM_GENAI``
   build-time flags from ``torch.__config__.show()``.
 * ``runtime_context`` -- container runtime + Python env detection.
+* ``container_detected`` / ``execution_context`` -- runtime-agnostic
+  isolation signal + caller-declared probe placement.
+* ``probe_namespace`` -- mismatch-only, hashed namespace observation.
 * ``docker`` -- image + digest when in a container.
 * ``env_vars`` -- canonical list of HSA / RCCL / FBGEMM / PyTorch vars.
 * ``python_version``, ``pytorch_version``.
@@ -78,7 +81,22 @@ from typing import Any, ClassVar
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.11"
+SCHEMA_VERSION = "1.12"
+# 1.11 -> 1.12 (container & execution-context visibility, phase 2 -- namespace):
+#   - New top-level ``probe_namespace`` (``str | None``). A mismatch-only
+#     namespace observation derived from ``/proc/self/ns/mnt`` (primary)
+#     or ``/proc/self/ns/cgroup`` (fallback), hashed with the per-boot
+#     ``boot_id`` -> ``mnt:<sha256[:16]>`` / ``cgroup-ns:<sha256[:16]>``.
+#     Different same-kind values prove that the observations came from
+#     different boots/namespaces. Equality is advisory only: Linux can
+#     recycle non-initial namespace inode numbers after namespace teardown.
+#     When ``boot_id`` is unavailable, the token is still hashed and emitted
+#     as ``mnt-local:`` / ``cgroup-ns-local:``; it is not cross-host
+#     comparable. Missing boot identity, fallback use, and total capture
+#     failure are recorded in ``partial_reasons``. Defaulted ``None`` +
+#     ``from_dict()`` backfill so pre-1.12 snapshots round-trip. See
+#     ``_capture_probe_namespace()``.
+#
 # 1.10 -> 1.11 (container & execution-context visibility, phase 1):
 #   - New top-level ``container_detected`` (bool). A runtime-AGNOSTIC
 #     isolation smoke test (``_detect_container_detected()``): True on any
@@ -891,6 +909,17 @@ SELF_CGROUP_FILE = Path("/proc/self/cgroup")
 # real /proc.
 INIT_MNT_NS = Path("/proc/1/ns/mnt")
 SELF_MNT_NS = Path("/proc/self/ns/mnt")
+# Cgroup-namespace handle used only when the mount-namespace handle is
+# unavailable. Do NOT substitute /proc/self/cgroup: cgroup namespaces make
+# that membership path relative to their own root, so distinct containers
+# commonly expose the same ``0::/`` text.
+SELF_CGROUP_NS = Path("/proc/self/ns/cgroup")
+# Per-boot random identity, unique per (host, boot). Used to SALT the
+# ``probe_namespace`` observation so an inode reused on another boot/host
+# cannot compare equal merely by coincidence. Namespace inode numbers can
+# still be recycled within one boot, so equality remains advisory. Distinct
+# constant so tests can monkeypatch it.
+BOOT_ID_FILE = Path("/proc/sys/kernel/random/boot_id")
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1078,13 @@ class EnvSnapshot:
     execution_context: dict = field(
         default_factory=lambda: _empty_execution_context()
     )
+    # probe_namespace: mismatch-only namespace observation (schema 1.12).
+    # Boot-salted digest of the mount-ns handle (``mnt:<sha256[:16]>``) or
+    # cgroup-ns handle (``cgroup-ns:<sha256[:16]>``); a hashed ``*-local:``
+    # form when boot_id is unavailable. Equal values are advisory because
+    # Linux may recycle namespace inode numbers after teardown. ``None`` when
+    # all sources fail. Defaulted so pre-1.12 snapshots round-trip.
+    probe_namespace: str | None = None
 
     # Curated emit order for ``to_dict()`` / ``env.json`` (JSON is written
     # sort_keys=False, so THIS is the artifact's key order). Grouped so
@@ -1071,6 +1107,7 @@ class EnvSnapshot:
         "runtime_context",
         "container_detected",
         "execution_context",
+        "probe_namespace",
         "docker",
         # ROCm runtime + the host-kernel driver that pairs with it
         "rocm",
@@ -1168,6 +1205,7 @@ class EnvSnapshot:
         kwargs.setdefault("amdgpu_driver", _empty_amdgpu_driver())
         kwargs.setdefault("container_detected", False)
         kwargs.setdefault("execution_context", _empty_execution_context())
+        kwargs.setdefault("probe_namespace", None)
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -1276,7 +1314,8 @@ class EnvSnapshot:
             (
                 f"  runtime:   {rt.get('type', '?')} / python={rt.get('python_env', '?')}"
                 f"  container_detected={'yes' if self.container_detected else 'no'}"
-                f"  probe={ec.get('probe_invocation', '?')}",
+                f"  probe={ec.get('probe_invocation', '?')}"
+                f"  ns={short_hash(self.probe_namespace)}",
                 f"  host:      kernel={host.get('kernel_release') or '?'} "
                 f"machine={host.get('machine') or '?'}  "
                 f"glibc={host.get('glibc_version') or '?'}",
@@ -1999,6 +2038,8 @@ def collect_env(
     """
     include_files = detail == "full"
     reasons: list[str] = []
+    probe_namespace: str | None = None
+    probe_namespace_captured = False
     # Capture fds 1/2 at the OS level for the probe body so that the benign
     # HIP/C-runtime device-enumeration noise the in-process ``import torch``
     # below emits straight to fd 2 never reaches the operator's terminal
@@ -2010,8 +2051,11 @@ def collect_env(
         # container_detected: runtime-agnostic isolation smoke test that
         # catches RE/k8s sandboxes runtime_context.type misses (schema
         # 1.11). execution_context: self-declared probe_invocation label.
+        # probe_namespace: mismatch-only namespace observation (schema 1.12).
         container_detected = _detect_container_detected()
         execution_context = _empty_execution_context()
+        probe_namespace = _capture_probe_namespace(reasons)
+        probe_namespace_captured = True
         if probe_invocation in EXECUTION_CONTEXT_INVOCATIONS:
             execution_context["probe_invocation"] = probe_invocation
         else:
@@ -2111,6 +2155,7 @@ def collect_env(
             runtime_context=runtime_context,
             container_detected=container_detected,
             execution_context=execution_context,
+            probe_namespace=probe_namespace,
             docker=docker,
             env_vars=env_vars,
             python_version=platform.python_version(),
@@ -2136,6 +2181,8 @@ def collect_env(
                 f"({type(exc).__name__}: {exc})"
             ),
             probe_invocation=probe_invocation,
+            probe_namespace=probe_namespace,
+            probe_namespace_captured=probe_namespace_captured,
         )
     finally:
         # Idempotent: a no-op if the except branch already restored stdio.
@@ -2146,6 +2193,8 @@ def _disaster_snapshot(
     preceding_reasons: list[str],
     unexpected_reason: str,
     probe_invocation: str = "direct",
+    probe_namespace: str | None = None,
+    probe_namespace_captured: bool = False,
 ) -> EnvSnapshot:
     """Return a minimally-shaped EnvSnapshot when collect_env crashes.
 
@@ -2154,6 +2203,10 @@ def _disaster_snapshot(
     snapshot from a ``buck2_action`` run must not silently rewrite itself
     to ``"direct"``, which would misdirect triage. An unrecognized value
     falls back to ``"direct"`` (same rule as the happy path).
+
+    ``probe_namespace`` is preserved when the happy path captured it before
+    a later helper failed. When capture was never reached, the disaster path
+    makes one guarded best-effort attempt instead.
 
     Used by the never-raises top-level guard. Every field gets a sane
     null/empty default so downstream consumers (B1, B2, jq pipelines)
@@ -2172,6 +2225,9 @@ def _disaster_snapshot(
         python_version = platform.python_version()
     except Exception:  # noqa: BLE001
         python_version = ""
+    disaster_reasons = [*preceding_reasons, unexpected_reason]
+    if not probe_namespace_captured:
+        probe_namespace = _capture_probe_namespace_safe(disaster_reasons)
 
     return EnvSnapshot(
         schema_version=SCHEMA_VERSION,
@@ -2278,6 +2334,10 @@ def _disaster_snapshot(
         # here too, since the crash may have happened before collect_env's
         # own validation ran.
         execution_context=_disaster_execution_context(probe_invocation),
+        # Preserve a value captured before a later helper crashed; if the
+        # happy path never reached the namespace probe, the safe wrapper
+        # makes one best-effort attempt here.
+        probe_namespace=probe_namespace,
         host={
             "kernel_release": None,
             "kernel_version": None,
@@ -2327,7 +2387,7 @@ def _disaster_snapshot(
         },
         build_system={"kind": "none"},
         partial=True,
-        partial_reasons=[*preceding_reasons, unexpected_reason],
+        partial_reasons=disaster_reasons,
         library_introspection=[],
         library_introspection_alternates=[],
     )
@@ -3263,6 +3323,89 @@ def _mount_namespace_differs_from_init() -> bool:
         log.debug("mount-ns readlink failed: %s", exc)
         return False
     return bool(self_ns) and bool(init_ns) and self_ns != init_ns
+
+
+def _capture_probe_namespace(reasons: list[str]) -> str | None:
+    """Capture a mismatch-only namespace observation (schema 1.12).
+
+    Primary source: the ``mnt:[<inode>]`` token from ``/proc/self/ns/mnt``.
+    Fallback: the ``cgroup:[<inode>]`` token from
+    ``/proc/self/ns/cgroup``. The cgroup *membership text* is deliberately
+    not used: separate private cgroup namespaces commonly report the same
+    relative ``0::/`` path.
+
+    When the per-boot ``boot_id`` is readable, the token is boot-scoped:
+
+        ``mnt:<sha256(kind \\0 boot_id \\0 token)[:16]>``
+        ``cgroup-ns:<sha256(kind \\0 boot_id \\0 token)[:16]>``
+
+    Different values with the same prefix prove a different boot or namespace
+    observation. Equal values are only advisory: Linux can recycle non-initial
+    namespace inode numbers after the old namespace is destroyed, so an
+    artifact cannot prove durable identity across time.
+
+    Without ``boot_id``, the raw token is still hashed and emitted with a
+    ``-local`` prefix. This avoids leaking source text but is not cross-host
+    comparable. Missing boot identity, using the fallback source, and total
+    capture failure are all recorded in ``reasons``.
+    """
+    boot_id = _read_text_file(BOOT_ID_FILE)
+    if not boot_id:
+        reasons.append(
+            "probe_namespace.boot_id: unavailable; fingerprint is local-only"
+        )
+
+    def _key(kind: str, token: str) -> str:
+        if boot_id:
+            material = f"{kind}\0{boot_id}\0{token}"
+            prefix = kind
+        else:
+            material = f"{kind}\0{token}"
+            prefix = f"{kind}-local"
+        digest = hashlib.sha256(material.encode()).hexdigest()[:16]
+        return f"{prefix}:{digest}"
+
+    try:
+        mount_ns = os.readlink(str(SELF_MNT_NS))
+    except OSError as exc:
+        reasons.append(
+            "probe_namespace.mount_namespace: "
+            f"{SELF_MNT_NS} unreadable ({type(exc).__name__}: {exc}); "
+            "trying cgroup namespace"
+        )
+    else:
+        if mount_ns:
+            return _key("mnt", mount_ns)
+        reasons.append(
+            "probe_namespace.mount_namespace: empty namespace handle; "
+            "trying cgroup namespace"
+        )
+
+    try:
+        cgroup_ns = os.readlink(str(SELF_CGROUP_NS))
+    except OSError as exc:
+        reasons.append(
+            "probe_namespace.cgroup_namespace: "
+            f"{SELF_CGROUP_NS} unreadable ({type(exc).__name__}: {exc})"
+        )
+    else:
+        if cgroup_ns:
+            return _key("cgroup-ns", cgroup_ns)
+        reasons.append("probe_namespace.cgroup_namespace: empty namespace handle")
+    return None
+
+
+def _capture_probe_namespace_safe(reasons: list[str]) -> str | None:
+    """Disaster-path wrapper that cannot let namespace capture escape."""
+    try:
+        return _capture_probe_namespace(reasons)
+    except Exception as exc:  # noqa: BLE001 -- disaster path must not throw
+        log.debug("probe_namespace: unexpected capture failure", exc_info=True)
+        reasons.append(
+            f"probe_namespace: unexpected capture failure "
+            f"({type(exc).__name__}: {exc})"
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -124,6 +124,9 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
     )
     monkeypatch.setattr(env_mod, "CGROUP_FILE", tmp_path / "no_cgroup")
     monkeypatch.setattr(env_mod, "SELF_CGROUP_FILE", tmp_path / "no_self_cgroup")
+    monkeypatch.setattr(env_mod, "SELF_MNT_NS", tmp_path / "no_self_mnt_ns")
+    monkeypatch.setattr(env_mod, "SELF_CGROUP_NS", tmp_path / "no_self_cgroup_ns")
+    monkeypatch.setattr(env_mod, "BOOT_ID_FILE", tmp_path / "no_boot_id")
     monkeypatch.setattr(env_mod, "KFD_DEVICE_NODE", tmp_path / "no_kfd")
     monkeypatch.setattr(env_mod, "KFD_SYSFS_DIR", tmp_path / "no_kfd_sysfs")
     monkeypatch.setattr(env_mod.shutil, "which", lambda name: None)
@@ -185,6 +188,8 @@ class TestPathConstants:
             "SELF_CGROUP_FILE",
             "INIT_MNT_NS",
             "SELF_MNT_NS",
+            "SELF_CGROUP_NS",
+            "BOOT_ID_FILE",
         ],
     )
     def test_path_is_absolute(self, constant_name: str):
@@ -235,6 +240,8 @@ class TestPathConstants:
             "SELF_CGROUP_FILE",
             "INIT_MNT_NS",
             "SELF_MNT_NS",
+            "SELF_CGROUP_NS",
+            "BOOT_ID_FILE",
         }, (
             "FS path constants set drifted; update test_path_is_absolute "
             "parametrize list AND the provenance comments in "
@@ -293,6 +300,7 @@ REQUIRED_TOP_KEYS = {
     "amdgpu_driver",
     "container_detected",
     "execution_context",
+    "probe_namespace",
 }
 
 
@@ -302,7 +310,7 @@ class TestSchemaCompleteness:
     ):
         snapshot = collect_env()
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
-        assert snapshot.schema_version == "1.11"
+        assert snapshot.schema_version == SCHEMA_VERSION
         assert snapshot.system_health is None
         assert snapshot.rocm == {
             "version": None,
@@ -320,6 +328,18 @@ class TestSchemaCompleteness:
     def test_schema_version_constant_is_emitted(self, all_disabled):
         snapshot = collect_env()
         assert snapshot.schema_version == SCHEMA_VERSION
+
+    def test_public_docs_match_current_schema_version(self):
+        """The public env-probe docs must advertise the CURRENT SCHEMA_VERSION as
+        the "current" schema -- a stale doc makes operators think live env.json
+        files are wrong or that a new field shouldn't exist yet. Guards against the
+        doc/code drift that shipped probe_namespace while docs still said 1.11."""
+        docs_dir = Path(env_mod.__file__).resolve().parents[3] / "docs"
+        env_probe = (docs_dir / "env-probe.md").read_text(encoding="utf-8")
+        # The schema-version table row and the changelog "(current)" heading must
+        # both name the live constant.
+        assert f'Currently `"{SCHEMA_VERSION}"`' in env_probe
+        assert f"### `{SCHEMA_VERSION}` (current)" in env_probe
 
     def test_captured_at_is_iso8601_utc(self, all_disabled):
         snapshot = collect_env()
@@ -538,6 +558,7 @@ def _example_snapshot(**overrides) -> object:
             "probe_invocation": "buck2_action",
             "likely_execution_platform": None,
         },
+        "probe_namespace": "mnt:0123456789abcdef",
     }
     base.update(overrides)
     return EnvSnapshot(**base)
@@ -607,6 +628,14 @@ class TestEnvSnapshot:
         rebuilt = EnvSnapshot.from_dict(d)
         assert rebuilt.container_detected is False
 
+    def test_from_dict_backfills_missing_probe_namespace(self):
+        # A pre-1.12 env.json predates probe_namespace. from_dict must
+        # default it to None rather than raising.
+        d = _example_snapshot().to_dict()
+        del d["probe_namespace"]
+        rebuilt = EnvSnapshot.from_dict(d)
+        assert rebuilt.probe_namespace is None
+
     def test_summary_does_not_duplicate_partial_marker(self):
         """The brief returned by ``summary()`` is the *body* of what the
         CLI prints. The CLI itself frames the brief with a header line
@@ -662,6 +691,14 @@ class TestEnvSnapshot:
         assert s.count("\n") >= 4
         assert "rocm:" in s
         assert "hipblaslt:" in s
+
+    def test_summary_surfaces_probe_namespace_observation(self):
+        snap = _example_snapshot(probe_namespace="mnt:0123456789abcdef")
+        runtime_line = next(
+            line for line in snap.summary().splitlines()
+            if line.lstrip().startswith("runtime:")
+        )
+        assert "ns=mnt:012345…" in runtime_line
 
     def test_dataclass_is_frozen(self):
         """Callers can safely embed the snapshot without mutation hazards."""
@@ -1310,6 +1347,37 @@ class TestCollectEnvContract:
         assert "simulated probe failure" in recovery_reasons[0]
         # Schema must still be complete -- callers should not see missing keys
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
+
+    def test_disaster_snapshot_preserves_namespace_captured_before_later_failure(
+        self, all_disabled, monkeypatch
+    ):
+        observed = "mnt:0123456789abcdef"
+        monkeypatch.setattr(
+            env_mod, "_capture_probe_namespace", lambda reasons: observed
+        )
+
+        def boom(reasons):
+            raise RuntimeError("failure after namespace capture")
+
+        monkeypatch.setattr(env_mod, "_run_rdhc", boom)
+        snapshot = collect_env()
+        assert snapshot.partial is True
+        assert snapshot.probe_namespace == observed
+
+    def test_disaster_snapshot_probes_namespace_if_happy_path_never_reached(
+        self, monkeypatch
+    ):
+        observed = "cgroup-ns:0123456789abcdef"
+        monkeypatch.setattr(
+            env_mod,
+            "_capture_probe_namespace_safe",
+            lambda reasons: observed,
+        )
+        snapshot = env_mod._disaster_snapshot(
+            preceding_reasons=[],
+            unexpected_reason="collect_env: early failure",
+        )
+        assert snapshot.probe_namespace == observed
 
     def test_disaster_snapshot_emits_complete_schema(self):
         """The disaster path must still produce a full env.json shape."""
@@ -2746,6 +2814,172 @@ class TestRuntimeContext:
         assert rt["python_env"] == "conda"
         assert rt["conda_env_name"] == "rocm-7.2"
         assert rt["venv_path"] is None
+
+
+# ---------------------------------------------------------------------------
+# probe_namespace (schema 1.12)
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureProbeNamespace:
+    @staticmethod
+    def _set_boot_id(monkeypatch, tmp_path, value="boot-aaaa-bbbb"):
+        boot_file = tmp_path / "boot_id"
+        boot_file.write_text(f"{value}\n")
+        monkeypatch.setattr(env_mod, "BOOT_ID_FILE", boot_file)
+
+    def _ns_link(self, tmp_path, target, name):
+        # os.readlink() returns the target string even for a dangling symlink,
+        # so the target need not exist -- that is intentional here.
+        ns_link = tmp_path / name
+        ns_link.symlink_to(target)
+        return ns_link
+
+    def test_returns_boot_salted_mnt_digest_when_proc_ns_readable(
+        self, monkeypatch, tmp_path
+    ):
+        self._set_boot_id(monkeypatch, tmp_path)
+        mount_link = self._ns_link(
+            tmp_path, "mnt:[4026531840]", "self_mnt_ns"
+        )
+        monkeypatch.setattr(env_mod, "SELF_MNT_NS", mount_link)
+        reasons = []
+        result = env_mod._capture_probe_namespace(reasons)
+        # Salted + hashed, NOT the raw inode token.
+        assert result is not None
+        assert result.startswith("mnt:")
+        assert len(result) == len("mnt:") + 16
+        assert "4026531840" not in result
+        assert reasons == []
+
+    def test_same_ns_token_different_boot_ids_differ(self, monkeypatch, tmp_path):
+        """Boot scope prevents cross-boot collisions for the same inode token."""
+        link = self._ns_link(tmp_path, "mnt:[4026531840]", "self_mnt_ns")
+        monkeypatch.setattr(env_mod, "SELF_MNT_NS", link)
+
+        self._set_boot_id(monkeypatch, tmp_path, "boot-host-A")
+        result_a = env_mod._capture_probe_namespace([])
+        self._set_boot_id(monkeypatch, tmp_path, "boot-host-B")
+        result_b = env_mod._capture_probe_namespace([])
+
+        assert result_a != result_b
+        # Same token + boot is a stable observation, but equality remains
+        # advisory because Linux can recycle namespace inode numbers.
+        self._set_boot_id(monkeypatch, tmp_path, "boot-host-A")
+        assert env_mod._capture_probe_namespace([]) == result_a
+
+    def test_local_only_marker_hashes_token_and_records_partial_reason(
+        self, monkeypatch, tmp_path
+    ):
+        """No boot_id emits a hashed local-only value, never the raw token."""
+        monkeypatch.setattr(env_mod, "BOOT_ID_FILE", tmp_path / "no_boot_id")
+        mount_link = self._ns_link(
+            tmp_path, "mnt:[4026531840]", "self_mnt_ns"
+        )
+        monkeypatch.setattr(env_mod, "SELF_MNT_NS", mount_link)
+        reasons = []
+        result = env_mod._capture_probe_namespace(reasons)
+        assert result is not None
+        assert result.startswith("mnt-local:")
+        assert len(result) == len("mnt-local:") + 16
+        assert "4026531840" not in result
+        assert any(r.startswith("probe_namespace.boot_id:") for r in reasons)
+
+    def test_falls_back_to_cgroup_namespace_handle_when_mnt_unreadable(
+        self, monkeypatch, tmp_path
+    ):
+        self._set_boot_id(monkeypatch, tmp_path)
+        monkeypatch.setattr(env_mod, "SELF_MNT_NS", tmp_path / "nonexistent_ns")
+        cgroup_link = self._ns_link(
+            tmp_path, "cgroup:[4026533001]", "self_cgroup_ns"
+        )
+        monkeypatch.setattr(env_mod, "SELF_CGROUP_NS", cgroup_link)
+        reasons = []
+        result = env_mod._capture_probe_namespace(reasons)
+        assert result is not None
+        assert result.startswith("cgroup-ns:")
+        assert len(result) == len("cgroup-ns:") + 16
+        assert "4026533001" not in result
+        assert any(
+            r.startswith("probe_namespace.mount_namespace:") for r in reasons
+        )
+
+    def test_distinct_cgroup_namespace_handles_do_not_collapse(
+        self, monkeypatch, tmp_path
+    ):
+        """Unlike /proc/self/cgroup='0::/', namespace handles distinguish peers."""
+        self._set_boot_id(monkeypatch, tmp_path)
+        monkeypatch.setattr(env_mod, "SELF_MNT_NS", tmp_path / "nonexistent_ns")
+        cgroup_a = self._ns_link(
+            tmp_path, "cgroup:[4026533001]", "self_cgroup_ns_a"
+        )
+        cgroup_b = self._ns_link(
+            tmp_path, "cgroup:[4026533002]", "self_cgroup_ns_b"
+        )
+        monkeypatch.setattr(env_mod, "SELF_CGROUP_NS", cgroup_a)
+        result_a = env_mod._capture_probe_namespace([])
+        monkeypatch.setattr(env_mod, "SELF_CGROUP_NS", cgroup_b)
+        result_b = env_mod._capture_probe_namespace([])
+        assert result_a != result_b
+
+    def test_cgroup_fallback_without_boot_id_is_hashed_and_local(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(env_mod, "BOOT_ID_FILE", tmp_path / "no_boot_id")
+        monkeypatch.setattr(env_mod, "SELF_MNT_NS", tmp_path / "nonexistent_ns")
+        cgroup_link = self._ns_link(
+            tmp_path, "cgroup:[4026533001]", "self_cgroup_ns"
+        )
+        monkeypatch.setattr(env_mod, "SELF_CGROUP_NS", cgroup_link)
+        reasons = []
+        result = env_mod._capture_probe_namespace(reasons)
+        assert result is not None
+        assert result.startswith("cgroup-ns-local:")
+        assert len(result) == len("cgroup-ns-local:") + 16
+        assert "4026533001" not in result
+        assert any(r.startswith("probe_namespace.boot_id:") for r in reasons)
+        assert any(
+            r.startswith("probe_namespace.mount_namespace:") for r in reasons
+        )
+
+    def test_returns_none_when_all_sources_fail(self, monkeypatch, tmp_path):
+        self._set_boot_id(monkeypatch, tmp_path)
+        monkeypatch.setattr(env_mod, "SELF_MNT_NS", tmp_path / "nonexistent_ns")
+        monkeypatch.setattr(
+            env_mod, "SELF_CGROUP_NS", tmp_path / "nonexistent_cgroup_ns"
+        )
+        reasons = []
+        result = env_mod._capture_probe_namespace(reasons)
+        assert result is None
+        assert any(
+            r.startswith("probe_namespace.mount_namespace:") for r in reasons
+        )
+        assert any(
+            r.startswith("probe_namespace.cgroup_namespace:") for r in reasons
+        )
+
+    def test_safe_wrapper_contains_unexpected_failure(self, monkeypatch):
+        def boom(reasons):
+            raise RuntimeError("forced namespace failure")
+
+        monkeypatch.setattr(env_mod, "_capture_probe_namespace", boom)
+        reasons = []
+        assert env_mod._capture_probe_namespace_safe(reasons) is None
+        assert any("unexpected capture failure" in r for r in reasons)
+
+    def test_probe_namespace_in_collect_env_output(self, all_disabled):
+        snap = collect_env()
+        d = snap.to_dict()
+        assert "probe_namespace" in d
+        assert d["probe_namespace"] is None
+        assert any(
+            r.startswith("probe_namespace.mount_namespace:")
+            for r in snap.partial_reasons
+        )
+        assert any(
+            r.startswith("probe_namespace.cgroup_namespace:")
+            for r in snap.partial_reasons
+        )
 
 
 # ---------------------------------------------------------------------------
