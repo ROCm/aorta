@@ -6841,6 +6841,7 @@ class TestGpuArch:
 
         def fake_run(cmd, **kwargs):
             assert cmd[0].endswith("rocm_agent_enumerator")
+            assert kwargs["timeout"] == env_mod.GPU_ARCH_TIMEOUT_SEC
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0,
                 stdout="gfx942\ngfx942\ngfx942\ngfx942\n", stderr="",
@@ -6853,6 +6854,27 @@ class TestGpuArch:
         assert block["gfx_targets"] == ["gfx942"]
         assert block["agent_arch_counts"] == {"gfx942": 4}
         assert reasons == []
+
+    def test_timeout_uses_gpu_specific_budget_and_records_reason(
+        self, isolated_env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            env_mod.shutil, "which",
+            lambda name: "/usr/bin/" + name,
+        )
+
+        def fake_run(cmd, **kwargs):
+            assert kwargs["timeout"] == env_mod.GPU_ARCH_TIMEOUT_SEC
+            raise subprocess.TimeoutExpired(
+                cmd=cmd,
+                timeout=kwargs["timeout"],
+            )
+
+        monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
+        reasons: list[str] = []
+        block = env_mod._capture_gpu_arch(reasons)
+        assert block["agent_count"] is None
+        assert any("exceeded 30s timeout" in reason for reason in reasons)
 
     def test_filters_gfx000_placeholder(self, isolated_env, monkeypatch):
         """Some hosts include a gfx000 placeholder for the host CPU

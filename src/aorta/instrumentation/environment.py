@@ -462,6 +462,11 @@ SHORT_TIMEOUT_SEC = 5.0
 # would look identical to a CPU-only wheel -- so give them headroom.
 NM_TIMEOUT_SEC = 30.0
 
+# ``rocm_agent_enumerator`` can take ~16 seconds on a populated 8-GPU host
+# even when it succeeds normally. Reusing SHORT_TIMEOUT_SEC made a healthy
+# GPU node look architecture-less, so give enumeration its own bounded budget.
+GPU_ARCH_TIMEOUT_SEC = 30.0
+
 # Canonical env var list -- explicit, NOT prefix matching. Workload
 # config (AMP_DTYPE, MODEL_DTYPE, SHAMPOO_PRECONDITIONER_DTYPE) belongs
 # in the trial result emitted by ``aorta run`` (Task B1), so it is
@@ -7677,10 +7682,16 @@ def _capture_gpu_arch(reasons: list[str]) -> dict[str, Any]:
             [bin_path],
             capture_output=True,
             text=True,
-            timeout=SHORT_TIMEOUT_SEC,
+            timeout=GPU_ARCH_TIMEOUT_SEC,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+    except subprocess.TimeoutExpired:
+        reasons.append(
+            f"gpu_arch: {ROCM_AGENT_ENUMERATOR_BIN} exceeded "
+            f"{GPU_ARCH_TIMEOUT_SEC:.0f}s timeout"
+        )
+        return default
+    except (FileNotFoundError, OSError) as exc:
         reasons.append(f"gpu_arch: {ROCM_AGENT_ENUMERATOR_BIN} invocation failed ({exc})")
         return default
 
