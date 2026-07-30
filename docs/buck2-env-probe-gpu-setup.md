@@ -34,16 +34,20 @@ Download the release binary matching the host architecture from the official
 downloaded version visible in the test report; do not silently substitute a
 different repository-provided binary.
 
+The login host and compute nodes share `/apps/oyazdanb`; `$HOME` is not a
+portable location between them. Install the binary in the shared tree:
+
 ```bash
-mkdir -p "$HOME/.local/bin"
-install -m 0755 /path/to/downloaded/buck2 "$HOME/.local/bin/buck2"
-export PATH="$HOME/.local/bin:$PATH"
+mkdir -p /apps/oyazdanb/bin
+install -m 0755 /path/to/downloaded/buck2 /apps/oyazdanb/bin/buck2
+export PATH="/apps/oyazdanb/bin:$PATH"
 
 buck2 --version
 ```
 
-Persist the `PATH` update in the shell profile only after the binary has been
-verified.
+Use `/apps/oyazdanb` for the base clone, worktree, Buck binary, and result
+artifacts that must be visible on both host and compute nodes. Do not substitute
+`$HOME` or `/tmp` for shared inputs/outputs.
 
 ## 3. Fetch the branch into a dedicated worktree
 
@@ -182,9 +186,10 @@ Tasks:
    reported the setup state.
 2. Check Linux, Python, /dev/kfd, ROCm visibility, Buck2 version, `buck2 root`,
    configured execution platforms, and whether the supplied targets exist.
-3. If Buck2 is absent, install an approved official release binary in
-   ~/.local/bin and report its exact version. Do not run `buck2 init` inside an
-   existing configured repository.
+3. If Buck2 is absent, install an approved official release binary at
+   `/apps/oyazdanb/bin/buck2`, prepend `/apps/oyazdanb/bin` to PATH, and report
+   its exact version. `$HOME` is not shared with the compute node. Do not run
+   `buck2 init` inside an existing configured repository.
 4. Fetch the AORTA branch into the dedicated worktree under
    `/apps/oyazdanb/aorta-worktrees` exactly as documented above. Do not switch
    the base clone or overwrite an existing worktree. Then run the local
