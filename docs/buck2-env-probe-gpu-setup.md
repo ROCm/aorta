@@ -45,23 +45,40 @@ buck2 --version
 Persist the `PATH` update in the shell profile only after the binary has been
 verified.
 
-## 3. Fetch the AORTA Buck-support branch
+## 3. Fetch the branch into a dedicated worktree
 
 ```bash
-git clone https://github.com/ROCm/aorta.git "$HOME/aorta"
-cd "$HOME/aorta"
-git fetch origin users/oyazdanb/buck-invocation-context
-git switch --track origin/users/oyazdanb/buck-invocation-context
+AORTA_BASE=/apps/oyazdanb/aorta
+AORTA_WORKTREE=/apps/oyazdanb/aorta-worktrees/buck-invocation-context
+AORTA_BRANCH=users/oyazdanb/buck-invocation-context
+
+mkdir -p /apps/oyazdanb/aorta-worktrees
+if [ ! -d "$AORTA_BASE/.git" ]; then
+  git clone https://github.com/ROCm/aorta.git "$AORTA_BASE"
+fi
+
+git -C "$AORTA_BASE" fetch origin "$AORTA_BRANCH"
+if [ -e "$AORTA_WORKTREE" ]; then
+  echo "STOP: worktree path already exists: $AORTA_WORKTREE"
+  exit 1
+fi
+git -C "$AORTA_BASE" worktree add --track \
+  -b "$AORTA_BRANCH" \
+  "$AORTA_WORKTREE" \
+  "origin/$AORTA_BRANCH"
+
+cd "$AORTA_WORKTREE"
 ```
 
 The public repository already contains `.buckroot`, `.buckconfig`, a bundled
 prelude declaration, toolchains, and the `//:aorta`/`//:aorta_lib` targets.
-Do not run `buck2 init` over this checkout.
+Do not run `buck2 init` over this checkout. Keep the base clone unchanged; all
+commands and edits belong in the worktree.
 
 ## 4. Local Buck2 smoke test
 
 ```bash
-cd "$HOME/aorta"
+cd /apps/oyazdanb/aorta-worktrees/buck-invocation-context
 
 buck2 root
 buck2 build //:aorta --show-output
@@ -147,7 +164,9 @@ execution semantics and do not expose credentials, hostnames, internal target
 labels, environment values, or private paths in your final response.
 
 Inputs:
-- AORTA checkout/branch: <AORTA_REPO>, users/oyazdanb/buck-invocation-context
+- AORTA base clone: /apps/oyazdanb/aorta
+- AORTA worktree: /apps/oyazdanb/aorta-worktrees/buck-invocation-context
+- AORTA branch: users/oyazdanb/buck-invocation-context
 - Buck repository root: <REPO_ROOT>
 - Buck2 binary (or "not installed"): <BUCK2>
 - Workload target: <WORKLOAD_TARGET>
@@ -166,8 +185,10 @@ Tasks:
 3. If Buck2 is absent, install an approved official release binary in
    ~/.local/bin and report its exact version. Do not run `buck2 init` inside an
    existing configured repository.
-4. Fetch the AORTA branch and first run its local `//:aorta` smoke commands
-   from docs/buck2-env-probe-gpu-setup.md.
+4. Fetch the AORTA branch into the dedicated worktree under
+   `/apps/oyazdanb/aorta-worktrees` exactly as documented above. Do not switch
+   the base clone or overwrite an existing worktree. Then run the local
+   `//:aorta` smoke commands from that worktree.
 5. Build the exact AORTA probe argv using repeatable --buck-mode-file,
    --buck-config, and --buck-modifier options. Preserve order and do not use
    shell=True, eval, or one opaque command string.
