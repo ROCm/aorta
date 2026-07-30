@@ -78,7 +78,24 @@ from typing import Any, ClassVar
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.11"
+SCHEMA_VERSION = "1.12"
+# 1.11 -> 1.12 (container & execution-context visibility, phase 2 -- namespace):
+#   - New top-level ``probe_namespace`` (``str | None``). A coarse
+#     "same isolation boundary?" diff key derived from
+#     ``/proc/self/ns/mnt`` (the ``mnt:[<inode>]`` token), SALTED with
+#     the per-boot ``boot_id`` and hashed -> ``mnt:<sha256[:16]>``. The
+#     salt is essential: a bare mount-ns inode is only unique within one
+#     kernel boot, so two unrelated hosts can share it; salting makes the
+#     key boot-scoped so cross-host equality is meaningful, not a
+#     coincidence. Fallback: ``cgroup:<sha256[:16]>`` over the salted
+#     ``/proc/self/cgroup`` path when ``ns/mnt`` is unreadable. When
+#     ``boot_id`` is unavailable the value is emitted as
+#     ``mnt-local:``/``cgroup-local:`` over the raw token -- explicitly
+#     local-only, not for cross-host comparison. ``None`` when all fail.
+#     Defaulted ``None`` + ``from_dict()`` backfill so pre-1.12
+#     snapshots round-trip. Never raises. See
+#     ``_capture_probe_namespace()``.
+#
 # 1.10 -> 1.11 (container & execution-context visibility, phase 1):
 #   - New top-level ``container_detected`` (bool). A runtime-AGNOSTIC
 #     isolation smoke test (``_detect_container_detected()``): True on any
@@ -891,6 +908,12 @@ SELF_CGROUP_FILE = Path("/proc/self/cgroup")
 # real /proc.
 INIT_MNT_NS = Path("/proc/1/ns/mnt")
 SELF_MNT_NS = Path("/proc/self/ns/mnt")
+# Per-boot random identity, unique per (host, boot). Used to SALT the
+# ``probe_namespace`` diff key so a mount-ns inode / cgroup path -- both of
+# which are only unique within one kernel boot -- cannot collide across two
+# unrelated hosts and be misread as "same isolation boundary". Distinct
+# constant so tests can monkeypatch it.
+BOOT_ID_FILE = Path("/proc/sys/kernel/random/boot_id")
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1072,13 @@ class EnvSnapshot:
     execution_context: dict = field(
         default_factory=lambda: _empty_execution_context()
     )
+    # probe_namespace: coarse "same isolation boundary?" diff key (schema
+    # 1.12). Boot-salted digest of the mount-ns inode (``mnt:<sha256[:16]>``)
+    # or, as a fallback, the cgroup path (``cgroup:<sha256[:16]>``); a
+    # ``*-local:<raw>`` form when boot_id is unavailable (local-only, never
+    # compare across hosts). ``None`` when all sources fail. Defaulted so
+    # pre-1.12 snapshots round-trip. See ``_capture_probe_namespace()``.
+    probe_namespace: str | None = None
 
     # Curated emit order for ``to_dict()`` / ``env.json`` (JSON is written
     # sort_keys=False, so THIS is the artifact's key order). Grouped so
@@ -1071,6 +1101,7 @@ class EnvSnapshot:
         "runtime_context",
         "container_detected",
         "execution_context",
+        "probe_namespace",
         "docker",
         # ROCm runtime + the host-kernel driver that pairs with it
         "rocm",
@@ -1168,6 +1199,7 @@ class EnvSnapshot:
         kwargs.setdefault("amdgpu_driver", _empty_amdgpu_driver())
         kwargs.setdefault("container_detected", False)
         kwargs.setdefault("execution_context", _empty_execution_context())
+        kwargs.setdefault("probe_namespace", None)
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -2010,8 +2042,10 @@ def collect_env(
         # container_detected: runtime-agnostic isolation smoke test that
         # catches RE/k8s sandboxes runtime_context.type misses (schema
         # 1.11). execution_context: self-declared probe_invocation label.
+        # probe_namespace: coarse mount-ns identity diff key (schema 1.12).
         container_detected = _detect_container_detected()
         execution_context = _empty_execution_context()
+        probe_namespace = _capture_probe_namespace()
         if probe_invocation in EXECUTION_CONTEXT_INVOCATIONS:
             execution_context["probe_invocation"] = probe_invocation
         else:
@@ -2111,6 +2145,7 @@ def collect_env(
             runtime_context=runtime_context,
             container_detected=container_detected,
             execution_context=execution_context,
+            probe_namespace=probe_namespace,
             docker=docker,
             env_vars=env_vars,
             python_version=platform.python_version(),
@@ -2278,6 +2313,10 @@ def _disaster_snapshot(
         # here too, since the crash may have happened before collect_env's
         # own validation ran.
         execution_context=_disaster_execution_context(probe_invocation),
+        # probe_namespace: best-effort even in the disaster path, but the
+        # function may not have been reachable -- None is the honest answer
+        # when we don't know our namespace identity.
+        probe_namespace=None,
         host={
             "kernel_release": None,
             "kernel_version": None,
@@ -3263,6 +3302,62 @@ def _mount_namespace_differs_from_init() -> bool:
         log.debug("mount-ns readlink failed: %s", exc)
         return False
     return bool(self_ns) and bool(init_ns) and self_ns != init_ns
+
+
+def _capture_probe_namespace() -> str | None:
+    """Coarse "same isolation boundary?" namespace identifier (schema 1.12).
+
+    Primary source: the ``mnt:[<inode>]`` token from ``/proc/self/ns/mnt``.
+    Fallback: the ``/proc/self/cgroup`` path text when the ``ns/mnt`` symlink
+    is unreadable (``/proc`` not mounted, CAP_SYS_PTRACE denied, non-Linux).
+
+    **Cross-host safety.** A mount-namespace inode (``4026531840``) and a
+    cgroup path (``0::/``) are only unique within ONE kernel boot -- two
+    unrelated hosts routinely produce the *same* string. Returning the raw
+    token would let an env diff read two probes on different machines as
+    "same isolation boundary", which is false. So the token is SALTED with the
+    per-boot ``boot_id`` and hashed:
+
+        ``mnt:<sha256(boot_id \\0 token)[:16]>``     (primary, boot-scoped)
+        ``cgroup:<sha256(boot_id \\0 path)[:16]>``   (fallback, boot-scoped)
+
+    Same (host, boot) -> same digest (a valid "same boundary?" key); different
+    boots/hosts -> different digests even for an identical inode. When
+    ``boot_id`` is unavailable the value is emitted with a ``-local`` kind
+    (``mnt-local:`` / ``cgroup-local:``) over the raw token, flagging that it
+    is only meaningful within the capturing host and must NOT be compared for
+    equality across snapshots from different hosts.
+
+    Returns ``None`` when both sources fail. Never raises -- all exceptions
+    are swallowed and logged at DEBUG.
+    """
+    boot_id = None
+    try:
+        boot_id = _read_text_file(BOOT_ID_FILE)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("probe_namespace: boot_id read failed: %s", exc)
+
+    def _key(kind: str, token: str) -> str:
+        # Boot-salted digest is cross-host safe; the raw-token `-local` form is
+        # explicitly marked so it is never mistaken for a portable identity.
+        if boot_id:
+            digest = hashlib.sha256(f"{boot_id}\0{token}".encode()).hexdigest()[:16]
+            return f"{kind}:{digest}"
+        return f"{kind}-local:{token}"
+
+    try:
+        ns = os.readlink(str(SELF_MNT_NS))
+        if ns:
+            return _key("mnt", ns)
+    except OSError as exc:
+        log.debug("probe_namespace: ns/mnt readlink failed: %s", exc)
+    try:
+        cgroup = _read_text_file(SELF_CGROUP_FILE)
+        if cgroup:
+            return _key("cgroup", cgroup)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("probe_namespace: cgroup fallback failed: %s", exc)
+    return None
 
 
 # ---------------------------------------------------------------------------

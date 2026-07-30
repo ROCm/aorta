@@ -21,6 +21,18 @@ Phase 1 captures **nothing new about a remote worker** — it only makes the
 "probed the wrong place" failure visible. That is the whole point: it is a
 guardrail, not a data source.
 
+**Landed (phase 2 — namespace; schema 1.12):**
+
+- `probe_namespace` (`str | null`) — a coarse "same isolation boundary?" diff
+  key from `/proc/self/ns/mnt` (or `/proc/self/cgroup` as fallback), **salted
+  with the per-boot `boot_id` and SHA-256'd** → `mnt:<hash[:16]>` /
+  `cgroup:<hash[:16]>`. The boot salt is what makes cross-snapshot equality
+  meaningful: a raw mount-ns inode / cgroup path is only unique within one
+  kernel boot, so two unrelated hosts can collide on it; salting scopes the
+  key to (host, boot). When `boot_id` is unreadable the raw token is emitted
+  as `mnt-local:` / `cgroup-local:` and is explicitly local-only (not for
+  cross-host comparison). Additive, defaulted `null`, `from_dict()` backfill.
+
 **Still REMAINING (phase 2 — Buck2 / remote-execution, needs MI350 empirics):**
 
 - `execution_context.likely_execution_platform` — resolved RE platform label.
@@ -32,9 +44,6 @@ guardrail, not a data source.
   exist and be preferable; do not invent the convention until Q1 is answered.
   (The env var is already read by the `--execution-context` warning so the
   convention can be adopted without further code once Q1 is settled.)
-- `probe_namespace` (mount-ns / cgroup hash diff key) — deferred; the phase-1
-  `container_detected` boolean covers the immediate false-negative bug, and
-  the namespace hash is only useful once two-probe RE diffing exists.
 - The Buck2 `genrule`/`sh_test` rule wrapper — documentation-only per the
   external-tool policy; deferred until phase 2.
 - Open Q1, Q2, Q3 below all remain open (Q1/Q2 need a real Buck2 RE cluster;
@@ -135,7 +144,7 @@ New fields (same additive pattern as the amdgpu_driver 1.10 change). The
 | `container_detected` | `bool` | **Single boolean.** `true` on *any* isolation signal: a named-runtime match (`_detect_container_type() != "baremetal"`), a private mount namespace (`/proc/self/ns/mnt` != `/proc/1/ns/mnt`), or a container/k8s token in `/proc/self/cgroup` (`docker`/`containerd`/`kubepods`/`libpod`/`lxc`/`crio`). Fixes the RE-sandbox-as-baremetal false negative. No k8s-vs-containerd distinction. | **1 (done)** |
 | `execution_context.probe_invocation` | `"direct" \| "buck2_run" \| "buck2_action"` | How the probe was launched. Phase 1: **self-declared** via `--execution-context` (defaults to `direct`). Phase 2 may auto-detect via native RE env vars (**see Open Q1**). | **1 (done, self-declared)** |
 | `execution_context.likely_execution_platform` | `str \| null` | Best-effort: from `buck2 audit configurations` / cquery on the target, the resolved platform label. Advisory, not guaranteed (**Open Q2**). Key present today, always `null`. | 2 (remaining) |
-| `probe_namespace` | `str \| null` | Hash of the mount namespace / cgroup path (e.g. `/proc/self/ns/mnt` inode). A coarse "same isolation boundary?" diff key, nothing more. | 2 (remaining) |
+| `probe_namespace` | `str \| null` | **Boot-salted** hash of the mount namespace (`/proc/self/ns/mnt`) or cgroup path fallback: `mnt:<sha256[:16]>` / `cgroup:<sha256[:16]>`, salted with `boot_id` so an inode/path that repeats across unrelated hosts can't falsely compare equal; `*-local:<raw>` when `boot_id` is unavailable (local-only). A coarse "same isolation boundary?" diff key, nothing more. | **2 (done)** |
 | `$AORTA_RE_IMAGE` convention | env var | Extend the existing `$AORTA_DOCKER_IMAGE` launcher pattern to Buck2: customers set this in their `remote_execution_properties` / action env (**pending Open Q1** — a native marker may exist and be preferable). Already read by the phase-1 warning. | 2 (remaining) |
 
 ### CLI — a labeling+validation flag, not a behavior change
