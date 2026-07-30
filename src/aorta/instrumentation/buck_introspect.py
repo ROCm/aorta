@@ -162,8 +162,7 @@ def introspect_libraries_via_buck(
         return BuckIntrospectionResult(
             entries=[],
             reasons=[
-                f"library_introspection: buck2 not on PATH; "
-                f"--buck-target {target} ignored"
+                f"library_introspection: buck2 not on PATH; " f"--buck-target {target} ignored"
             ],
             succeeded=False,
             configured_root_target=None,
@@ -221,9 +220,7 @@ def introspect_libraries_via_buck(
         # without re-running by hand.
         # Redact before truncation so a config token crossing the 300-character
         # boundary cannot leave a partial raw value in env.json.
-        stderr = invocation_context.redact_config_overrides(
-            (result.stderr or "").strip()
-        )[:300]
+        stderr = invocation_context.redact_config_overrides((result.stderr or "").strip())[:300]
         return BuckIntrospectionResult(
             entries=[],
             reasons=[

@@ -52,19 +52,14 @@ class BuckInvocationContext:
 
         # Accept either the human-facing ``root//mode/debug`` form or Buck's
         # argv spelling ``@root//mode/debug`` and retain one canonical form.
-        mode_files = tuple(
-            value[1:] if value.startswith("@") else value
-            for value in mode_files
-        )
+        mode_files = tuple(value[1:] if value.startswith("@") else value for value in mode_files)
         if any(not value for value in mode_files):
             raise ValueError("Buck mode file values must name a file after '@'")
 
         for override in config_overrides:
             key, separator, _value = override.partition("=")
             if not separator or not key.strip():
-                raise ValueError(
-                    "Buck config overrides must use KEY=VALUE with a non-empty key"
-                )
+                raise ValueError("Buck config overrides must use KEY=VALUE with a non-empty key")
 
         has_explicit = bool(mode_files or config_overrides or modifiers)
         if self.default_context_confirmed and has_explicit:

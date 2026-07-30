@@ -40,9 +40,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_module(rel_path: str, mod_name: str):
-    spec = importlib.util.spec_from_file_location(
-        mod_name, _REPO_ROOT / rel_path
-    )
+    spec = importlib.util.spec_from_file_location(mod_name, _REPO_ROOT / rel_path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
@@ -63,9 +61,7 @@ env_mod = _load_module(
 )
 
 
-FIXTURE_PATH = (
-    Path(__file__).parent.parent / "fixtures" / "buck" / "audit_dependencies.json"
-)
+FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "buck" / "audit_dependencies.json"
 
 
 def _make_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
@@ -238,9 +234,7 @@ class TestBuck2HappyPath:
     def test_fixture_yields_expected_library_set(self, monkeypatch):
         monkeypatch.setattr(bi_mod.shutil, "which", lambda _name: "/usr/bin/buck2")
         fixture = FIXTURE_PATH.read_text()
-        with patch.object(
-            bi_mod.subprocess, "run", return_value=_make_completed(stdout=fixture)
-        ):
+        with patch.object(bi_mod.subprocess, "run", return_value=_make_completed(stdout=fixture)):
             entries, reasons = bi_mod.introspect_libraries_via_buck(
                 target="//myproj:training_main", repo_revision="cafef00d"
             )
@@ -281,9 +275,7 @@ class TestBuck2HappyPath:
             "run",
             return_value=_make_completed(stdout=json.dumps(payload)),
         ):
-            entries, _ = bi_mod.introspect_libraries_via_buck(
-                target="//foo", repo_revision=None
-            )
+            entries, _ = bi_mod.introspect_libraries_via_buck(target="//foo", repo_revision=None)
         assert entries[0]["revision"] is None
 
     def test_empty_match_set_is_not_partial(self, monkeypatch):
@@ -307,10 +299,7 @@ class TestBuck2HappyPath:
             config_overrides=("build.profile=debug", "scheduler.policy=local"),
             modifiers=("//constraints:linux", "//constraints:gfx"),
         )
-        configured_root = (
-            "root//app:trainer "
-            "(prelude//platforms:default#configured)"
-        )
+        configured_root = "root//app:trainer " "(prelude//platforms:default#configured)"
         run = patch.object(
             bi_mod.subprocess,
             "run",
@@ -389,9 +378,7 @@ class TestBuck2FailureModes:
         assert any("timed out after 10s" in r for r in reasons)
 
     def test_oserror_returns_reason(self):
-        with patch.object(
-            bi_mod.subprocess, "run", side_effect=OSError("permission denied")
-        ):
+        with patch.object(bi_mod.subprocess, "run", side_effect=OSError("permission denied")):
             entries, reasons = bi_mod.introspect_libraries_via_buck(
                 target="//foo", repo_revision="r"
             )
@@ -402,9 +389,7 @@ class TestBuck2FailureModes:
         with patch.object(
             bi_mod.subprocess,
             "run",
-            return_value=_make_completed(
-                stdout="", stderr="target //foo not found", returncode=2
-            ),
+            return_value=_make_completed(stdout="", stderr="target //foo not found", returncode=2),
         ):
             entries, reasons = bi_mod.introspect_libraries_via_buck(
                 target="//foo", repo_revision="r"
@@ -517,9 +502,7 @@ class TestBuck2CqueryShape:
         # _strip_config_suffix is the unit doing the work; pin its
         # behaviour directly so a future change there can't silently
         # break label matching.
-        assert bi_mod._strip_config_suffix(suffixed) == (
-            "//third-party/rocm:hipblaslt-lib"
-        )
+        assert bi_mod._strip_config_suffix(suffixed) == ("//third-party/rocm:hipblaslt-lib")
 
     def test_config_suffix_absent_match_unaffected(self):
         """A label without the suffix (older buck2 audit output, or
@@ -535,10 +518,7 @@ class TestBuck2CqueryShape:
         only the suffixed form (as the schema-1.4 draft did) made
         env.json diffs unstable across repeat probes because the
         suffix hash changes between buck2 daemon restarts."""
-        suffixed = (
-            "//third-party/rocm:hipblaslt_lib "
-            "(prelude//platforms:default#abc123)"
-        )
+        suffixed = "//third-party/rocm:hipblaslt_lib " "(prelude//platforms:default#abc123)"
         payload = [suffixed]
         with patch.object(
             bi_mod.subprocess,
@@ -569,9 +549,7 @@ class TestBuck2CqueryShape:
             "run",
             return_value=_make_completed(stdout=json.dumps(payload)),
         ):
-            entries, _ = bi_mod.introspect_libraries_via_buck(
-                target="//foo", repo_revision="r"
-            )
+            entries, _ = bi_mod.introspect_libraries_via_buck(target="//foo", repo_revision="r")
         assert entries[0]["target"] == unsuffixed
         assert entries[0]["configured_target"] == unsuffixed
 
@@ -627,8 +605,7 @@ class TestCollectEnvIntegration:
                 reasons=[],
                 succeeded=True,
                 configured_root_target=(
-                    "root//app:trainer "
-                    "(prelude//platforms:default#configured)"
+                    "root//app:trainer " "(prelude//platforms:default#configured)"
                 ),
             ),
         )
@@ -637,9 +614,7 @@ class TestCollectEnvIntegration:
         assert capture.invocation["status"] == "success"
         assert capture.invocation["context_source"] == "unspecified"
         assert capture.invocation["context_fingerprint"].startswith("sha256:")
-        assert capture.invocation["configured_root_target"].startswith(
-            "root//app:trainer "
-        )
+        assert capture.invocation["configured_root_target"].startswith("root//app:trainer ")
         assert any("default Buck invocation context was not confirmed" in r for r in reasons)
 
     def test_default_confirmed_context_is_not_partial(self, monkeypatch):
@@ -757,9 +732,7 @@ class TestCollectEnvIntegration:
                 "target": "//pytorch:torch",
             },
         ]
-        monkeypatch.setattr(
-            bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, [])
-        )
+        monkeypatch.setattr(bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, []))
         snap = env_mod.collect_env(buck_target="//foo:bar")
         assert snap.library_introspection == fake_entries
 
@@ -778,9 +751,7 @@ class TestCollectEnvIntegration:
                 "target": "//pytorch:torch",
             },
         ]
-        monkeypatch.setattr(
-            bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, [])
-        )
+        monkeypatch.setattr(bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, []))
         snap = env_mod.collect_env(buck_target="//foo:bar")
         names = [a["name"] for a in snap.library_introspection_alternates]
         # hipblaslt has an A1 block, pytorch does not => only one alt
@@ -794,10 +765,7 @@ class TestCollectEnvIntegration:
             lambda **_: ([], ["library_introspection: synthetic failure"]),
         )
         snap = env_mod.collect_env(buck_target="//foo:bar")
-        assert any(
-            "library_introspection: synthetic failure" in r
-            for r in snap.partial_reasons
-        )
+        assert any("library_introspection: synthetic failure" in r for r in snap.partial_reasons)
 
     def test_unexpected_exception_in_introspection_is_swallowed(self, monkeypatch):
         def boom(**_kwargs):
@@ -807,8 +775,7 @@ class TestCollectEnvIntegration:
         snap = env_mod.collect_env(buck_target="//foo:bar")
         assert snap.library_introspection == []
         assert any(
-            "buck introspection raised" in r and "RuntimeError" in r
-            for r in snap.partial_reasons
+            "buck introspection raised" in r and "RuntimeError" in r for r in snap.partial_reasons
         )
 
     def test_round_trip_preserves_introspection_lists(self, monkeypatch):
@@ -820,32 +787,20 @@ class TestCollectEnvIntegration:
                 "target": "//rocm:rccl_lib",
             }
         ]
-        monkeypatch.setattr(
-            bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, [])
-        )
+        monkeypatch.setattr(bi_mod, "introspect_libraries_via_buck", lambda **_: (fake_entries, []))
         snap = env_mod.collect_env(buck_target="//foo:bar")
         d = snap.to_dict()
         assert d["library_introspection"] == fake_entries
         rebuilt = env_mod.EnvSnapshot.from_dict(d)
         assert rebuilt.library_introspection == fake_entries
-        assert (
-            rebuilt.library_introspection_alternates
-            == snap.library_introspection_alternates
-        )
+        assert rebuilt.library_introspection_alternates == snap.library_introspection_alternates
 
-    def test_disconnect_buck_target_without_buck2_kind_records_reason(
-        self, monkeypatch
-    ):
+    def test_disconnect_buck_target_without_buck2_kind_records_reason(self, monkeypatch):
         # Force build_system to look non-buck so the reconciliation
         # branch fires regardless of whether the host has buck2 installed.
-        monkeypatch.setattr(
-            env_mod, "_detect_build_system_safe", lambda: {"kind": "none"}
-        )
-        monkeypatch.setattr(
-            bi_mod, "introspect_libraries_via_buck", lambda **_: ([], [])
-        )
+        monkeypatch.setattr(env_mod, "_detect_build_system_safe", lambda: {"kind": "none"})
+        monkeypatch.setattr(bi_mod, "introspect_libraries_via_buck", lambda **_: ([], []))
         snap = env_mod.collect_env(buck_target="//foo:bar")
         assert any(
-            "build_system.kind=" in r and "running anyway" in r
-            for r in snap.partial_reasons
+            "build_system.kind=" in r and "running anyway" in r for r in snap.partial_reasons
         )

@@ -196,13 +196,9 @@ def probe(
     # --summary and --field both bypass the file write -- only one
     # output mode at a time makes sense.
     if summary and field_path is not None:
-        raise click.ClickException(
-            "--summary and --field are mutually exclusive"
-        )
+        raise click.ClickException("--summary and --field are mutually exclusive")
 
-    explicit_buck_context = bool(
-        buck_mode_files or buck_configs or buck_modifiers
-    )
+    explicit_buck_context = bool(buck_mode_files or buck_configs or buck_modifiers)
     if (explicit_buck_context or buck_default_context) and buck_target is None:
         raise click.UsageError(
             "--buck-mode-file, --buck-config, --buck-modifier, and "
@@ -225,9 +221,7 @@ def probe(
             else None
         )
     except ValueError as exc:
-        raise click.BadParameter(
-            str(exc), param_hint="Buck context options"
-        ) from exc
+        raise click.BadParameter(str(exc), param_hint="Buck context options") from exc
 
     # Capture once; both short-circuit modes and the default mode read
     # from this single snapshot. Buck-related kwargs flow through to
@@ -248,9 +242,7 @@ def probe(
     # launcher image env var, they may have probed the host shell instead of
     # the workload's context. Warn loudly to stderr (never a hard error --
     # the snapshot is still valid and written).
-    _ec_warning = execution_context_warning(
-        execution_context, snapshot.container_detected
-    )
+    _ec_warning = execution_context_warning(execution_context, snapshot.container_detected)
     if _ec_warning is not None:
         click.echo(_ec_warning, err=True)
 
@@ -308,14 +300,11 @@ def probe(
             encoding="utf-8",
         )
     except OSError as exc:
-        raise click.ClickException(
-            f"Failed to write env probe to {output}: {exc}"
-        ) from exc
+        raise click.ClickException(f"Failed to write env probe to {output}: {exc}") from exc
 
     partial = " [PARTIAL]" if snapshot.partial else ""
     click.echo(
-        f"Wrote env probe to {output} "
-        f"(schema_version={snapshot.schema_version}){partial}"
+        f"Wrote env probe to {output} " f"(schema_version={snapshot.schema_version}){partial}"
     )
     click.echo(snapshot.summary())
 
@@ -337,9 +326,7 @@ def probe(
     # scrolling back up. Matches the marker shown next to the "Wrote
     # env probe..." line.
     if snapshot.partial:
-        click.echo(
-            f"\n[PARTIAL, {len(snapshot.partial_reasons)} reason(s)]"
-        )
+        click.echo(f"\n[PARTIAL, {len(snapshot.partial_reasons)} reason(s)]")
     else:
         click.echo("\n[OK]")
 
@@ -368,9 +355,7 @@ def _lookup_field(snapshot_dict: dict[str, Any], dotted_path: str) -> Any:
     for i, part in enumerate(parts):
         prefix = ".".join(parts[:i]) or "<root>"
         if cur is None:
-            raise click.ClickException(
-                f"Cannot descend into '{part}' at '{prefix}': value is null"
-            )
+            raise click.ClickException(f"Cannot descend into '{part}' at '{prefix}': value is null")
         if not isinstance(cur, dict):
             raise click.ClickException(
                 f"Cannot descend into '{part}' at '{prefix}': "
@@ -381,8 +366,7 @@ def _lookup_field(snapshot_dict: dict[str, Any], dotted_path: str) -> Any:
             shown = ", ".join(available[:10])
             more = f" (+ {len(available) - 10} more)" if len(available) > 10 else ""
             raise click.ClickException(
-                f"Key '{part}' not found at '{prefix}'. "
-                f"Available keys: {shown}{more}"
+                f"Key '{part}' not found at '{prefix}'. " f"Available keys: {shown}{more}"
             )
         cur = cur[part]
     return cur
@@ -440,9 +424,7 @@ def recipe(env_json: Path, fmt: str) -> None:
         # Wrap filesystem, decode, and JSON-parse errors as a single
         # Click error so the operator sees a clean one-liner instead
         # of a Python traceback.
-        raise click.ClickException(
-            f"Failed to read env.json from {env_json}: {exc}"
-        ) from exc
+        raise click.ClickException(f"Failed to read env.json from {env_json}: {exc}") from exc
 
     if not isinstance(env_dict, dict):
         raise click.ClickException(
