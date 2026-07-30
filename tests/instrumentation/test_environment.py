@@ -293,6 +293,7 @@ REQUIRED_TOP_KEYS = {
     "pytorch_version",
     "pytorch_build",
     "build_system",
+    "buck_invocation",
     "library_introspection",
     "library_introspection_alternates",
     "pytorch_sdpa",
@@ -517,6 +518,20 @@ def _example_snapshot(**overrides) -> object:
             "ninja_hipcc": {"_source_file": None, "targets": None},
         },
         "build_system": {"kind": "none"},
+        "buck_invocation": {
+            "status": "success",
+            "target": "//app:trainer",
+            "context_source": "explicit",
+            "mode_files": ["root//mode/debug"],
+            "config_keys": ["build.profile"],
+            "modifiers": ["//constraints:linux"],
+            "context_fingerprint": "sha256:" + "a" * 64,
+            "configured_root_target": (
+                "root//app:trainer "
+                "(prelude//platforms:default#configured)"
+            ),
+            "comparison": "not_compared",
+        },
         "partial": False,
         "partial_reasons": [],
         "library_introspection": [],
@@ -604,6 +619,7 @@ class TestEnvSnapshot:
             ("rocfft_catalog", env_mod._empty_rocfft_catalog),
             ("amdgpu_driver", env_mod._empty_amdgpu_driver),
             ("execution_context", env_mod._empty_execution_context),
+            ("buck_invocation", env_mod._empty_buck_invocation),
         ],
     )
     def test_from_dict_backfills_missing_catalog_key(self, key, empty_factory):
@@ -699,6 +715,17 @@ class TestEnvSnapshot:
             if line.lstrip().startswith("runtime:")
         )
         assert "ns=mnt:012345…" in runtime_line
+
+    def test_summary_surfaces_buck_invocation_status_source_and_fingerprint(self):
+        snap = _example_snapshot()
+        buck_line = next(
+            line
+            for line in snap.summary().splitlines()
+            if line.lstrip().startswith("buck ctx:")
+        )
+        assert "status=success" in buck_line
+        assert "source=explicit" in buck_line
+        assert "fingerprint=sha256:aaaaaa…" in buck_line
 
     def test_dataclass_is_frozen(self):
         """Callers can safely embed the snapshot without mutation hazards."""
@@ -1393,6 +1420,25 @@ class TestCollectEnvContract:
         assert "collect_env: boom" in snap.partial_reasons
         # JSON-native check (no default=str needed)
         json.dumps(d)
+        assert snap.buck_invocation == env_mod._empty_buck_invocation()
+
+    def test_disaster_snapshot_preserves_redacted_buck_request(self):
+        hidden_value = "not-persisted-value"
+        context = env_mod.BuckInvocationContext(
+            config_overrides=(f"build.profile={hidden_value}",),
+        )
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=[],
+            unexpected_reason="collect_env: boom",
+            buck_target="//app:trainer",
+            buck_context=context,
+        )
+
+        assert snap.buck_invocation["status"] == "failure"
+        assert snap.buck_invocation["target"] == "//app:trainer"
+        assert snap.buck_invocation["context_source"] == "explicit"
+        assert snap.buck_invocation["config_keys"] == ["build.profile"]
+        assert hidden_value not in json.dumps(snap.buck_invocation)
 
     def test_disaster_snapshot_nics_block_is_fully_shaped(self):
         """The disaster path shapes nics like every other block (all
@@ -1544,13 +1590,16 @@ class TestCliIsThinWrapper:
         # * The --execution-context work (schema 1.11) added one more click
         #   option block plus a stderr validation-warning envelope (still
         #   pure wiring/validation -- no probing).
+        # * The Buck invocation-context work (schema 1.13) added four Click
+        #   options and their mutual-requirement validation. The typed argv
+        #   construction and fingerprinting remain in the library module.
         #
         # The real "no-probing-in-CLI" guard is
         # `test_cli_does_no_probing_imports` below -- this one is a
         # soft canary against the file ballooning beyond pure wiring.
         line_count = sum(1 for _ in cli_path.read_text().splitlines())
-        assert line_count <= 410, (
-            f"cli/env.py is {line_count} lines; soft budget is 410. "
+        assert line_count <= 500, (
+            f"cli/env.py is {line_count} lines; soft budget is 500. "
             "If you need more, check that the new code is genuinely "
             "wiring/error-handling and not probing -- "
             "test_cli_does_no_probing_imports is the strict guard."
@@ -2096,6 +2145,169 @@ class TestCliSummaryAndFieldFlags:
         # Snapshot is parseable JSON with the expected schema version.
         payload = json.loads(out.read_text())
         assert payload["schema_version"] == env_mod.SCHEMA_VERSION
+
+
+class TestProbeBuckContextOptions:
+    @staticmethod
+    def _cli_mod():
+        cli_path = Path(env_mod.__file__).parent.parent / "cli" / "env.py"
+        spec = importlib.util.spec_from_file_location(
+            "aorta.cli.env", cli_path,
+        )
+        cli_mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cli_mod
+        spec.loader.exec_module(cli_mod)
+        return cli_mod
+
+    @pytest.mark.parametrize(
+        "context_args",
+        [
+            ["--buck-mode-file", "root//mode/debug"],
+            ["--buck-config", "build.profile=debug"],
+            ["--buck-modifier", "//constraints:linux"],
+            ["--buck-default-context"],
+        ],
+    )
+    def test_context_options_require_buck_target(self, context_args):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            ["probe", *context_args, "--summary"],
+        )
+        assert result.exit_code != 0
+        assert "require --buck-target" in result.output
+        assert "Traceback" not in result.output
+
+    def test_default_confirmation_rejects_explicit_context(self):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-default-context",
+                "--buck-modifier",
+                "//constraints:linux",
+                "--summary",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output
+
+    def test_repeatable_options_preserve_each_axis_order(self, monkeypatch):
+        from click.testing import CliRunner
+
+        captured = {}
+
+        def fake_collect_env(**kwargs):
+            captured.update(kwargs)
+            return _example_snapshot()
+
+        monkeypatch.setattr(env_mod, "collect_env", fake_collect_env)
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-mode-file",
+                "root//mode/debug",
+                "--buck-mode-file",
+                "root//mode/gpu",
+                "--buck-config",
+                "build.profile=debug",
+                "--buck-config",
+                "scheduler.policy=local",
+                "--buck-modifier",
+                "//constraints:linux",
+                "--buck-modifier",
+                "//constraints:gfx",
+                "--summary",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        context = captured["buck_context"]
+        assert context.mode_files == (
+            "root//mode/debug",
+            "root//mode/gpu",
+        )
+        assert context.config_overrides == (
+            "build.profile=debug",
+            "scheduler.policy=local",
+        )
+        assert context.modifiers == (
+            "//constraints:linux",
+            "//constraints:gfx",
+        )
+        assert context.to_buck_args() == [
+            "@root//mode/debug",
+            "@root//mode/gpu",
+            "-c",
+            "build.profile=debug",
+            "-c",
+            "scheduler.policy=local",
+            "-m",
+            "//constraints:linux",
+            "-m",
+            "//constraints:gfx",
+        ]
+
+    def test_default_confirmation_and_unspecified_target_are_distinct(
+        self, monkeypatch
+    ):
+        from click.testing import CliRunner
+
+        contexts = []
+
+        def fake_collect_env(**kwargs):
+            contexts.append(kwargs["buck_context"])
+            return _example_snapshot()
+
+        monkeypatch.setattr(env_mod, "collect_env", fake_collect_env)
+        cli_mod = self._cli_mod()
+        runner = CliRunner()
+
+        unspecified = runner.invoke(
+            cli_mod.env,
+            ["probe", "--buck-target", "//app:trainer", "--summary"],
+        )
+        confirmed = runner.invoke(
+            cli_mod.env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-default-context",
+                "--summary",
+            ],
+        )
+
+        assert unspecified.exit_code == 0, unspecified.output
+        assert confirmed.exit_code == 0, confirmed.output
+        assert contexts[0].source == "unspecified"
+        assert contexts[1].source == "default_confirmed"
+
+    def test_invalid_config_shape_is_clean_click_error(self):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-config",
+                "build.profile",
+                "--summary",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "KEY=VALUE" in result.output
+        assert "Traceback" not in result.output
 
 
 class TestProbeBuckTimeoutValidation:

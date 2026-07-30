@@ -44,6 +44,8 @@ Captured blocks:
 * ``container_detected`` / ``execution_context`` -- runtime-agnostic
   isolation signal + caller-declared probe placement.
 * ``probe_namespace`` -- mismatch-only, hashed namespace observation.
+* ``buck_invocation`` -- Buck target + redacted, fingerprinted cquery
+  invocation context when Buck introspection is requested.
 * ``docker`` -- image + digest when in a container.
 * ``env_vars`` -- canonical list of HSA / RCCL / FBGEMM / PyTorch vars.
 * ``python_version``, ``pytorch_version``.
@@ -78,10 +80,35 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, ClassVar
 
+from aorta.instrumentation.buck_invocation import BuckInvocationContext
+
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.12"
+SCHEMA_VERSION = "1.13"
+# 1.12 -> 1.13 (Buck invocation-context provenance):
+#   - New top-level ``buck_invocation`` block, always present and defaulted
+#     via ``_empty_buck_invocation()``. It distinguishes ``not_requested``,
+#     ``buck_not_detected``, ``success``, and ``failure``; records the target,
+#     context source (``none`` / ``unspecified`` / ``default_confirmed`` /
+#     ``explicit``), ordered mode files, ordered config KEYS (never values),
+#     ordered modifiers, an aggregate SHA-256 over the full ordered context
+#     values, the configured root target when cquery exposes it, and the
+#     reserved comparison state ``not_compared``.
+#   - ``collect_env(..., buck_context=BuckInvocationContext(...))`` forwards
+#     mode/flag files, paired ``-c`` overrides, and paired ``-m`` modifiers to
+#     the same bound ``buck2 cquery 'deps(%s)' <target> --json`` invocation.
+#     The target is a query argument, never interpolated into query syntax.
+#   - A target with no explicit context and no default-context confirmation
+#     still runs, but records ``context_source="unspecified"`` plus a partial
+#     reason. A target when ``build_system.kind != "buck2"`` also still runs
+#     for backwards compatibility, but is visibly ``buck_not_detected`` and
+#     partial rather than appearing plausible.
+#   - This records client-side configured-graph invocation provenance only.
+#     It does NOT populate ``execution_context.likely_execution_platform``,
+#     answer the execution-marker/platform questions in the execution-context
+#     design note, or prove where an action actually ran.
+#
 # 1.11 -> 1.12 (container & execution-context visibility, phase 2 -- namespace):
 #   - New top-level ``probe_namespace`` (``str | None``). A mismatch-only
 #     namespace observation derived from ``/proc/self/ns/mnt`` (primary)
@@ -1003,6 +1030,15 @@ class EnvSnapshot:
     build_system: dict = field(
         default_factory=lambda: {"kind": "none"}
     )
+    # buck_invocation: schema 1.13. Provenance for the optional Buck cquery
+    # request, distinct from ``build_system`` detection and from the
+    # process-placement ``execution_context`` block. Config override VALUES
+    # are never persisted; their keys and an aggregate full-context digest
+    # provide a redacted comparison signal. Defaulted so older constructors
+    # and pre-1.13 snapshots remain compatible.
+    buck_invocation: dict = field(
+        default_factory=lambda: _empty_buck_invocation()
+    )
     # library_introspection: A1.2b (issue #163, schema 1.4; field
     # ``configured_target`` added in schema 1.6 / PR #187 review).
     # Always present. Empty list outside buck mode. In buck mode, one
@@ -1132,6 +1168,7 @@ class EnvSnapshot:
         "aotriton",
         # build system + buck introspection
         "build_system",
+        "buck_invocation",
         "library_introspection",
         "library_introspection_alternates",
         # pytorch
@@ -1186,6 +1223,8 @@ class EnvSnapshot:
         * ``library_introspection_alternates`` -> ``[]`` (added in
           schema 1.4; empty list means "nothing was dropped in the
           Buck-vs-A1 merge").
+        * ``buck_invocation`` -> ``status="not_requested"`` (added in
+          schema 1.13; older producers did not record invocation context).
 
         Strictly-required older fields (the schema-1.0/1.1 set) are NOT
         defaulted -- a missing ``rocm`` or ``hipblaslt`` key still
@@ -1196,6 +1235,7 @@ class EnvSnapshot:
         kwargs = {k: v for k, v in d.items() if k in known}
         kwargs.setdefault("partial_reasons", [])
         kwargs.setdefault("build_system", {"kind": "none"})
+        kwargs.setdefault("buck_invocation", _empty_buck_invocation())
         kwargs.setdefault("library_introspection", [])
         kwargs.setdefault("library_introspection_alternates", [])
         kwargs.setdefault("nics", {})
@@ -1223,6 +1263,7 @@ class EnvSnapshot:
         rt = self.runtime_context or {}
         ec = self.execution_context or {}
         bs = self.build_system or {"kind": "none"}
+        buck_invocation = self.buck_invocation or _empty_buck_invocation()
         rocm = self.rocm or {}
         hip = self.hip or {}
         hipblaslt = self.hipblaslt or {}
@@ -1399,6 +1440,9 @@ class EnvSnapshot:
                 f"[AOTRITON_INSTALLED_PREFIX={aotriton.get('installed_prefix') or '(unset)'}]",
                 # build system group.
                 f"  build_sys: {self._summary_build_system_line(bs)}",
+                f"  buck ctx:  status={buck_invocation.get('status') or '?'} "
+                f"source={buck_invocation.get('context_source') or '?'} "
+                f"fingerprint={short_hash(buck_invocation.get('context_fingerprint'))}",
                 # pytorch group.
                 f"  python:    {self.python_version} | pytorch: {self.pytorch_version}",
                 f"  torch build: {self._summary_pytorch_build_line()}",
@@ -1986,6 +2030,7 @@ def collect_env(
     buck_timeout: int = 10,
     detail: str = "compact",
     probe_invocation: str = "direct",
+    buck_context: BuckInvocationContext | None = None,
 ) -> EnvSnapshot:
     """Capture the current process environment as an :class:`EnvSnapshot`.
 
@@ -2005,7 +2050,8 @@ def collect_env(
     for the version probe does NOT initialise CUDA / HIP context.
 
     Buck mode (``buck_target=...``) opts into the A1.2b path: the
-    function additionally runs ``buck2 cquery 'deps(<target>)' --json``,
+    function additionally runs a bound
+    ``buck2 cquery 'deps(%s)' <target> --json``,
     matches transitive deps against
     ``buck_introspect.KNOWN_LIBRARY_PATTERNS``, and populates
     ``library_introspection`` (plus ``library_introspection_alternates``
@@ -2016,7 +2062,11 @@ def collect_env(
     per-run configuration suffix) per schema 1.6. Outside buck mode
     both lists stay empty and the existing per-library top-level
     blocks remain authoritative. ``buck_timeout`` caps the cquery
-    subprocess (seconds; default 10).
+    subprocess (seconds; default 10). ``buck_context`` supplies only typed,
+    ordered Buck inputs (mode/flag files, config overrides, modifiers, or
+    explicit default-context confirmation); there is no shell-string
+    passthrough. Config values reach Buck and the aggregate fingerprint but
+    are never persisted in ``buck_invocation``.
 
     ``detail`` controls the size of the static kernel-catalog blocks:
 
@@ -2120,14 +2170,13 @@ def collect_env(
             "miopen": miopen,
             "rccl": rccl,
         }
-        library_introspection, library_introspection_alternates = (
-            _run_buck_introspection_safe(
-                buck_target=buck_target,
-                buck_timeout=buck_timeout,
-                build_system=build_system,
-                a1_blocks_by_lib=a1_blocks_by_lib,
-                reasons=reasons,
-            )
+        buck_capture = _run_buck_introspection_safe(
+            buck_target=buck_target,
+            buck_timeout=buck_timeout,
+            buck_context=buck_context,
+            build_system=build_system,
+            a1_blocks_by_lib=a1_blocks_by_lib,
+            reasons=reasons,
         )
 
         return EnvSnapshot(
@@ -2162,10 +2211,11 @@ def collect_env(
             pytorch_version=pytorch_version,
             pytorch_build=pytorch_build,
             build_system=build_system,
+            buck_invocation=buck_capture.invocation,
             partial=bool(reasons),
             partial_reasons=reasons,
-            library_introspection=library_introspection,
-            library_introspection_alternates=library_introspection_alternates,
+            library_introspection=buck_capture.entries,
+            library_introspection_alternates=buck_capture.alternates,
             pytorch_sdpa=pytorch_sdpa,
             nics=nics,
         )
@@ -2173,14 +2223,33 @@ def collect_env(
         # Restore stdio before logging so the disaster trace reaches the
         # operator's terminal rather than the captured (and discarded) buffer.
         _probe_stdio.stop()
-        log.info("collect_env() hit unexpected exception", exc_info=True)
+        safe_exc = (
+            buck_context.redact_config_overrides(str(exc))
+            if isinstance(buck_context, BuckInvocationContext)
+            else str(exc)
+        )
+        # An exception raised around subprocess argv construction can include
+        # the argv in its message. Avoid an unredacted traceback when config
+        # overrides are present; the sanitized reason remains actionable.
+        if isinstance(buck_context, BuckInvocationContext) and (
+            buck_context.config_overrides
+        ):
+            log.info(
+                "collect_env() hit unexpected exception (%s: %s)",
+                type(exc).__name__,
+                safe_exc,
+            )
+        else:
+            log.info("collect_env() hit unexpected exception", exc_info=True)
         return _disaster_snapshot(
             preceding_reasons=reasons,
             unexpected_reason=(
                 f"collect_env: unexpected failure "
-                f"({type(exc).__name__}: {exc})"
+                f"({type(exc).__name__}: {safe_exc})"
             ),
             probe_invocation=probe_invocation,
+            buck_target=buck_target,
+            buck_context=buck_context,
             probe_namespace=probe_namespace,
             probe_namespace_captured=probe_namespace_captured,
         )
@@ -2193,6 +2262,8 @@ def _disaster_snapshot(
     preceding_reasons: list[str],
     unexpected_reason: str,
     probe_invocation: str = "direct",
+    buck_target: str | None = None,
+    buck_context: BuckInvocationContext | None = None,
     probe_namespace: str | None = None,
     probe_namespace_captured: bool = False,
 ) -> EnvSnapshot:
@@ -2203,6 +2274,10 @@ def _disaster_snapshot(
     snapshot from a ``buck2_action`` run must not silently rewrite itself
     to ``"direct"``, which would misdirect triage. An unrecognized value
     falls back to ``"direct"`` (same rule as the happy path).
+
+    ``buck_target`` / ``buck_context`` likewise preserve a requested Buck
+    invocation as ``status="failure"`` with redacted context metadata. A
+    crash must not rewrite a requested query as ``not_requested``.
 
     ``probe_namespace`` is preserved when the happy path captured it before
     a later helper failed. When capture was never reached, the disaster path
@@ -2386,6 +2461,12 @@ def _disaster_snapshot(
             "backends_enabled": {name: None for name in _PYTORCH_SDPA_GETTERS},
         },
         build_system={"kind": "none"},
+        buck_invocation=_buck_invocation_block(
+            status="failure" if buck_target is not None else "not_requested",
+            target=buck_target,
+            context=buck_context,
+            configured_root_target=None,
+        ),
         partial=True,
         partial_reasons=disaster_reasons,
         library_introspection=[],
@@ -2411,57 +2492,182 @@ def _detect_build_system_safe() -> dict:
         return {"kind": "none"}
 
 
+@dataclass(frozen=True)
+class _BuckCollectionResult:
+    """Buck library results and their schema-1.13 invocation provenance."""
+
+    entries: list[dict]
+    alternates: list[dict]
+    invocation: dict
+
+
+def _empty_buck_invocation() -> dict[str, Any]:
+    """Default/backfill shape for a snapshot with no Buck target request."""
+
+    return {
+        "status": "not_requested",
+        "target": None,
+        "context_source": "none",
+        "mode_files": [],
+        "config_keys": [],
+        "modifiers": [],
+        "context_fingerprint": None,
+        "configured_root_target": None,
+        "comparison": "not_compared",
+    }
+
+
+def _buck_invocation_block(
+    *,
+    status: str,
+    target: str | None,
+    context: BuckInvocationContext | None,
+    configured_root_target: str | None,
+) -> dict[str, Any]:
+    """Build the redacted, stable schema-1.13 Buck invocation block."""
+
+    if target is None:
+        return _empty_buck_invocation()
+    safe_context = (
+        context if isinstance(context, BuckInvocationContext) else BuckInvocationContext()
+    )
+    return {
+        "status": status,
+        "target": target,
+        "context_source": safe_context.source,
+        "mode_files": list(safe_context.mode_files),
+        # Deliberately never persist ``safe_context.config_overrides``:
+        # values may be credentials or other private configuration.
+        "config_keys": list(safe_context.config_keys),
+        "modifiers": list(safe_context.modifiers),
+        "context_fingerprint": safe_context.fingerprint,
+        "configured_root_target": configured_root_target,
+        "comparison": "not_compared",
+    }
+
+
 def _run_buck_introspection_safe(
     buck_target: str | None,
     buck_timeout: int,
+    buck_context: BuckInvocationContext | None,
     build_system: dict,
     a1_blocks_by_lib: dict[str, dict],
     reasons: list[str],
-) -> tuple[list[dict], list[dict]]:
+) -> _BuckCollectionResult:
     """Run the A1.2b buck-aware library introspection if requested.
 
-    Returns ``(library_introspection, library_introspection_alternates)``.
-    Both are ``[]`` when ``buck_target is None``. When a target is
-    supplied but ``build_system["kind"] != "buck2"``, we still attempt
-    the audit (so an operator can force-run from a non-Buck cwd) but
-    record a partial reason so the disconnect is visible.
+    Returns a dataclass carrying the two existing library lists plus the new
+    invocation block. Both lists are ``[]`` when ``buck_target is None``.
+    When a target is supplied but ``build_system["kind"] != "buck2"``, we
+    still attempt the cquery (so an operator can force-run from a non-Buck
+    cwd) but record a partial reason and ``status="buck_not_detected"``.
 
     Per the env-probe never-raises contract: any unexpected exception
-    is swallowed and surfaced via ``reasons``; both lists are returned
-    empty.
+    is swallowed and surfaced via ``reasons``; both library lists are
+    returned empty and the invocation status is failure-shaped.
     """
     if buck_target is None:
-        return [], []
+        if isinstance(buck_context, BuckInvocationContext) and (
+            buck_context.has_explicit_inputs
+            or buck_context.default_context_confirmed
+        ):
+            reasons.append(
+                "buck_invocation: context options were supplied without "
+                "a Buck target and were ignored"
+            )
+        return _BuckCollectionResult(
+            entries=[],
+            alternates=[],
+            invocation=_empty_buck_invocation(),
+        )
+
+    context = (
+        buck_context
+        if isinstance(buck_context, BuckInvocationContext)
+        else BuckInvocationContext()
+    )
+    if context.source == "unspecified":
+        reasons.append(
+            "buck_invocation: --buck-target was supplied without explicit "
+            "Buck context options or --buck-default-context; the default "
+            "Buck invocation context was not confirmed"
+        )
+
+    kind = build_system.get("kind") if isinstance(build_system, dict) else None
+    repo_revision = (
+        build_system.get("revision") if isinstance(build_system, dict) else None
+    )
+    cwd = build_system.get("repo_root") if isinstance(build_system, dict) else None
+    if kind != "buck2":
+        reasons.append(
+            f"library_introspection: --buck-target {buck_target} supplied but "
+            f"build_system.kind={kind!r}; running anyway"
+        )
+
     try:
         from aorta.instrumentation.buck_introspect import (
             introspect_libraries_via_buck,
         )
 
-        repo_revision = build_system.get("revision") if isinstance(build_system, dict) else None
-        cwd = build_system.get("repo_root") if isinstance(build_system, dict) else None
-        if isinstance(build_system, dict) and build_system.get("kind") != "buck2":
-            reasons.append(
-                f"library_introspection: --buck-target {buck_target} supplied but "
-                f"build_system.kind={build_system.get('kind')!r}; running anyway"
-            )
-        entries, buck_reasons = introspect_libraries_via_buck(
+        result = introspect_libraries_via_buck(
             target=buck_target,
             repo_revision=repo_revision,
             timeout=buck_timeout,
             cwd=cwd,
+            context=context,
         )
+        # Compatibility with tests/downstream monkeypatches written against
+        # the pre-1.13 two-tuple result. Production returns the typed result.
+        if hasattr(result, "entries") and hasattr(result, "reasons"):
+            entries = result.entries
+            buck_reasons = result.reasons
+            succeeded = bool(result.succeeded)
+            configured_root_target = result.configured_root_target
+        else:
+            entries, buck_reasons = result
+            succeeded = not buck_reasons
+            configured_root_target = None
         reasons.extend(buck_reasons)
         alternates = _synthesise_library_alternates(entries, a1_blocks_by_lib)
-        return entries, alternates
+        status = (
+            "buck_not_detected"
+            if kind != "buck2"
+            else ("success" if succeeded else "failure")
+        )
+        return _BuckCollectionResult(
+            entries=entries,
+            alternates=alternates,
+            invocation=_buck_invocation_block(
+                status=status,
+                target=buck_target,
+                context=context,
+                configured_root_target=configured_root_target,
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 -- never-raises gate
+        safe_exc = context.redact_config_overrides(str(exc))
         log.info(
-            "library_introspection: buck introspection raised (%s)", exc, exc_info=True
+            "library_introspection: buck introspection raised (%s)",
+            safe_exc,
+            # Tracebacks can include argv containing raw config values.
+            exc_info=not context.config_overrides,
         )
         reasons.append(
             f"library_introspection: buck introspection raised "
-            f"({type(exc).__name__}: {exc})"
+            f"({type(exc).__name__}: {safe_exc})"
         )
-        return [], []
+        return _BuckCollectionResult(
+            entries=[],
+            alternates=[],
+            invocation=_buck_invocation_block(
+                status=(
+                    "buck_not_detected" if kind != "buck2" else "failure"
+                ),
+                target=buck_target,
+                context=context,
+                configured_root_target=None,
+            ),
+        )
 
 
 def _synthesise_library_alternates(

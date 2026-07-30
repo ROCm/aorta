@@ -140,13 +140,43 @@ The two interesting cross-checks:
 # `python_version` is the Buck-pinned CPython (3.13.6) regardless of your venv
 buck2 run aorta -- env probe --field python_version
 
-# `--buck-target` makes the probe shell back out to `buck2 cquery` for
-# library-identity introspection (issue #163). Empty on pure-Python targets
-# like aorta_lib (no ROCm .so deps); populated when run against a
-# Buck-buildable C++/HIP target.
-buck2 run aorta -- env probe --buck-target aorta_lib --field library_introspection
+# `--buck-target` makes the probe invoke a bound `buck2 cquery 'deps(%s)'`
+# for library-identity introspection. Confirm the default context explicitly.
+# The result is empty on a pure-Python target like aorta_lib (no ROCm .so deps).
+buck2 run aorta -- env probe \
+  --buck-target aorta_lib \
+  --buck-default-context \
+  --field library_introspection
 # -> []
+
+# A configured target can instead reproduce ordered mode/config/modifier
+# inputs. These are generic examples; use the inputs from the invocation
+# being investigated.
+aorta env probe \
+  --buck-target //app:trainer \
+  --buck-mode-file root//mode/debug \
+  --buck-config build.profile=debug \
+  --buck-modifier //constraints:linux \
+  --field buck_invocation
 ```
+
+Schema 1.13 records this client-side query provenance in
+`buck_invocation`: status, target, context source, ordered mode files,
+config keys, ordered modifiers, a full-context SHA-256 fingerprint, the
+configured root target when available, and `comparison: not_compared`.
+Raw `--buck-config` values are passed to Buck and influence the fingerprint
+but are never serialized.
+
+If `--buck-target` is used without explicit context options and without
+`--buck-default-context`, the query still runs but the snapshot is partial:
+`context_source` is `unspecified`, making the unconfirmed default visible.
+Context options require `--buck-target`, and default confirmation cannot be
+combined with explicit options.
+
+`buck_invocation` describes how the configured graph was queried. It does not
+answer the execution-context design's Open Q1 or Q2, populate
+`execution_context.likely_execution_platform`, or prove whether an action
+actually ran locally, remotely, or from cache.
 
 `build_system.repo_root` is the *Buck-root* path -- meaningful even
 when you run inside a container that mounts the repo at a different
@@ -382,6 +412,9 @@ toolchain Python version.
 ## See also
 
 * [Env Probe](env-probe.md) -- the snapshot schema and `jq` cookbook.
+* [Buck2 env-probe setup on a Linux GPU host](buck2-env-probe-gpu-setup.md)
+  -- first-time Buck2 installation, local smoke test, real-RE prerequisites,
+  and a copy-paste agent prompt.
 * [`src/aorta/registry/README.md`](../src/aorta/registry/README.md) --
   mitigation / environment plugin authoring; same entry-point pattern
   as workloads.

@@ -96,12 +96,53 @@ def env() -> None:
     help=(
         "Buck2 label to introspect for library identity (issue #163, "
         "A1.2b). When given, the snapshot's library_introspection list "
-        "is populated from `buck2 cquery 'deps(<label>)' --json` (each "
+        "is populated from bound `buck2 cquery 'deps(%s)' <label> --json` (each "
         "matched entry carries both a stripped `target` and the raw "
         "`configured_target`, schema 1.6). If buck2 isn't on PATH (or "
         "the cquery otherwise fails), the library_introspection list "
         "stays empty and a human-readable reason is recorded in "
         "`partial_reasons`."
+    ),
+)
+@click.option(
+    "--buck-mode-file",
+    "buck_mode_files",
+    type=str,
+    multiple=True,
+    metavar="PATH",
+    help=(
+        "Buck mode/flag file to apply to the cquery (repeatable, ordered). "
+        "Pass a Buck cell path such as root//mode/debug; a leading '@' is "
+        "accepted but not required."
+    ),
+)
+@click.option(
+    "--buck-config",
+    "buck_configs",
+    type=str,
+    multiple=True,
+    metavar="KEY=VALUE",
+    help=(
+        "Buck -c config override for the cquery (repeatable, ordered). "
+        "Only each key and an aggregate context fingerprint are persisted; "
+        "raw values are never written to env.json."
+    ),
+)
+@click.option(
+    "--buck-modifier",
+    "buck_modifiers",
+    type=str,
+    multiple=True,
+    metavar="MODIFIER",
+    help="Buck -m configuration modifier for the cquery (repeatable, ordered).",
+)
+@click.option(
+    "--buck-default-context",
+    is_flag=True,
+    help=(
+        "Confirm that --buck-target should use Buck's default invocation "
+        "context. Mutually exclusive with --buck-mode-file, --buck-config, "
+        "and --buck-modifier."
     ),
 )
 @click.option(
@@ -138,6 +179,10 @@ def probe(
     field_path: str | None,
     extended: bool,
     buck_target: str | None,
+    buck_mode_files: tuple[str, ...],
+    buck_configs: tuple[str, ...],
+    buck_modifiers: tuple[str, ...],
+    buck_default_context: bool,
     buck_timeout: int,
     execution_context: str,
 ) -> None:
@@ -146,6 +191,7 @@ def probe(
         collect_env,
         execution_context_warning,
     )
+    from aorta.instrumentation.buck_invocation import BuckInvocationContext
 
     # --summary and --field both bypass the file write -- only one
     # output mode at a time makes sense.
@@ -153,6 +199,35 @@ def probe(
         raise click.ClickException(
             "--summary and --field are mutually exclusive"
         )
+
+    explicit_buck_context = bool(
+        buck_mode_files or buck_configs or buck_modifiers
+    )
+    if (explicit_buck_context or buck_default_context) and buck_target is None:
+        raise click.UsageError(
+            "--buck-mode-file, --buck-config, --buck-modifier, and "
+            "--buck-default-context require --buck-target"
+        )
+    if buck_default_context and explicit_buck_context:
+        raise click.UsageError(
+            "--buck-default-context is mutually exclusive with "
+            "--buck-mode-file, --buck-config, and --buck-modifier"
+        )
+    try:
+        buck_context = (
+            BuckInvocationContext(
+                mode_files=buck_mode_files,
+                config_overrides=buck_configs,
+                modifiers=buck_modifiers,
+                default_context_confirmed=buck_default_context,
+            )
+            if buck_target is not None
+            else None
+        )
+    except ValueError as exc:
+        raise click.BadParameter(
+            str(exc), param_hint="Buck context options"
+        ) from exc
 
     # Capture once; both short-circuit modes and the default mode read
     # from this single snapshot. Buck-related kwargs flow through to
@@ -162,6 +237,7 @@ def probe(
     snapshot = collect_env(
         buck_target=buck_target,
         buck_timeout=buck_timeout,
+        buck_context=buck_context,
         detail="full" if extended else "compact",
         probe_invocation=execution_context,
     )

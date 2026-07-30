@@ -36,7 +36,27 @@ guardrail, not a data source.
   Missing boot identity, fallback use, and total failure are recorded as
   partial reasons. Additive, defaulted `null`, `from_dict()` backfill.
 
-**Still REMAINING (phase 2 — Buck2 / remote-execution, needs MI350 empirics):**
+**Landed (phase 2 — client invocation context; schema 1.13):**
+
+- Frozen `BuckInvocationContext` covers ordered mode/flag files, `-c` config
+  overrides, `-m` modifiers, and explicit default-context confirmation.
+  Repeatable CLI options reproduce those inputs as atomic argv entries; there
+  is no shell or free-form passthrough string.
+- `buck_invocation` distinguishes no request, Buck not detected, cquery
+  success, and cquery failure. It records the target, context source, ordered
+  mode files, config-key names, ordered modifiers, aggregate full-context
+  SHA-256 fingerprint, configured root target when available, and
+  `comparison: not_compared`. Raw config values are not written to `env.json`.
+- An unconfirmed default context and a target supplied outside a detected Buck
+  checkout are explicit partial states instead of plausible-looking success.
+- The target is bound through `deps(%s)` plus a separate target argument rather
+  than interpolated into Buck query syntax.
+
+This closes the target-only/configuration-loss gap for the configured graph.
+It does **not** prove where an action ran or populate
+`likely_execution_platform`; Q1 and Q2 remain unresolved.
+
+**Still REMAINING (remote-execution placement; Q1/Q2 need on-cluster empirics):**
 
 - `execution_context.likely_execution_platform` — resolved RE platform label.
   **Blocked on Open Q2** (does `buck2 audit configurations`/cquery report the
@@ -65,8 +85,8 @@ interpreter the probe process sees — trustworthy **only if the probe ran insid
 the same execution context as the workload**.
 
 For plain Docker this mostly holds (the playbook is "run the probe inside the
-container"). For **open-source Buck2 (Meta)** it breaks in a way today's schema
-cannot see:
+container"). For **remote-execution Buck2 deployments** it breaks in a way the
+process-local snapshot alone cannot see:
 
 - Buck2 is **remote-execution first**. Per action, Buck2 decides to run it
   **locally** (invoking host, *unsandboxed* — no container at all) or
@@ -112,7 +132,8 @@ Source → classification → Buck2 caveat.
 | `docker.image` / `.digest` | `$AORTA_DOCKER_IMAGE` / `$AORTA_DOCKER_DIGEST` | **externally asserted** | No Buck2 equivalent exists today (see `$AORTA_RE_IMAGE`, phase 2). |
 | `docker.container_id` | `/proc/self/cgroup` | **process** | Same host-kernel dependency; irrelevant to a remote worker. |
 | `build_system` (`kind`, `buck2_version`, `repo_root`, `revision`) | `buck2 --version`/`root`, `hg id`/`git rev-parse` on invoking host | **client-host** | Describes the developer's checkout, not the RE worker's toolchain. Two engineers get identical blocks while builds ran on different images. |
-| `library_introspection` (`buck2 cquery 'deps(target)'`) | configured target graph (labels) | **ambiguous — graph-accurate, execution-silent** | Reliable for declared deps; not for what code actually executed remotely (hybrid/racing/RE-cache). |
+| `buck_invocation` | typed CLI context + bound `buck2 cquery 'deps(%s)' <target>` | **client-host, caller-asserted** | Records which mode/config-key/modifier context configured the graph query. The fingerprint detects ordered full-value drift without exposing config values. It does not prove the workload used that context or where any action executed. |
+| `library_introspection` (`buck2 cquery 'deps(%s)' <target>`) | configured target graph (labels) | **ambiguous — graph-accurate, execution-silent** | Reliable for declared deps under the recorded invocation context; not for what code actually executed remotely (hybrid/racing/RE-cache). |
 | `pytorch_build.*` | `import torch`, `torch.__config__` | **process** | If the shell's torch ≠ the `python_binary`'s torch target, this silently describes the wrong build (the "torch is a Buck target" trap documented in `docs/env-probe.md`, schema 1.8 Buck/monorepo native-lib recovery). |
 | `host` (`kernel_release`, `glibc_version`, `machine`) | `os.uname()`, `os.confstr()` | **host-kernel** | Same wrong-machine risk. |
 | `nics` | `lspci`/`ethtool`/`ibv_devices`/`rdma link` | **host/device** | Misleading if probed off the collectives host. |
@@ -127,7 +148,8 @@ Source → classification → Buck2 caveat.
    as "no isolation," the opposite of the truth, worse than "unknown." *(Phase 1
    `container_detected` mitigates this.)*
 3. **`buck2 cquery` answers "what's declared," not "what ran."** Deterministic
-   for the label graph; blind to local/remote/RE-cache execution.
+   for the label graph. Schema 1.13 records which invocation context configured
+   that query, but remains blind to local/remote/RE-cache execution.
 4. **`build_system.revision`/`buck2_version` describe the client, not the
    executor** — false reassurance that two probes "match."
 5. **No signal at all for local-vs-remote execution** of a given action.
@@ -139,13 +161,14 @@ Source → classification → Buck2 caveat.
 ## Design — additive schema bump
 
 New fields (same additive pattern as the amdgpu_driver 1.10 change). The
-**Phase** column tracks what landed in phase 1 vs. what remains for phase 2
-(see Implementation status above):
+**Phase** column tracks landed work and what remains gated by Q1/Q2 (see
+Implementation status above):
 
 | Field | Type | Meaning | Phase |
 |---|---|---|---|
 | `container_detected` | `bool` | **Single boolean.** `true` on *any* isolation signal: a named-runtime match (`_detect_container_type() != "baremetal"`), a private mount namespace (`/proc/self/ns/mnt` != `/proc/1/ns/mnt`), or a container/k8s token in `/proc/self/cgroup` (`docker`/`containerd`/`kubepods`/`libpod`/`lxc`/`crio`). Fixes the RE-sandbox-as-baremetal false negative. No k8s-vs-containerd distinction. | **1 (done)** |
 | `execution_context.probe_invocation` | `"direct" \| "buck2_run" \| "buck2_action"` | How the probe was launched. Phase 1: **self-declared** via `--execution-context` (defaults to `direct`). Phase 2 may auto-detect via native RE env vars (**see Open Q1**). | **1 (done, self-declared)** |
+| `buck_invocation` | `dict` | Redacted provenance for the bound cquery: status, target, context source, ordered mode files/config keys/modifiers, full-context fingerprint, configured root target when available, and `comparison: not_compared`. | **client context (done, schema 1.13)** |
 | `execution_context.likely_execution_platform` | `str \| null` | Best-effort: from `buck2 audit configurations` / cquery on the target, the resolved platform label. Advisory, not guaranteed (**Open Q2**). Key present today, always `null`. | 2 (remaining) |
 | `probe_namespace` | `str \| null` | **Mismatch-only observation**: boot-scoped hash of `/proc/self/ns/mnt`, falling back to `/proc/self/ns/cgroup`: `mnt:<sha256[:16]>` / `cgroup-ns:<sha256[:16]>`; hashed `*-local:` form when `boot_id` is unavailable. Different same-kind values prove different observations; equality is advisory because namespace inode numbers can be recycled. | **2 (done)** |
 | `$AORTA_RE_IMAGE` convention | env var | Extend the existing `$AORTA_DOCKER_IMAGE` launcher pattern to Buck2: customers set this in their `remote_execution_properties` / action env (**pending Open Q1** — a native marker may exist and be preferable). Already read by the phase-1 warning. | 2 (remaining) |
@@ -166,6 +189,32 @@ Does not change what is captured (all still process-derived). It:
    Implemented in **both** the Click CLI (`aorta env probe`) and the
    dependency-free `_probe_main` entry point, since the latter is the one most
    likely used inside a Buck2 action / container.
+
+### CLI — configured-graph invocation context
+
+```bash
+# Assert that Buck's default context is intentional.
+aorta env probe \
+  --buck-target //app:trainer \
+  --buck-default-context
+
+# Or reproduce explicit inputs in order.
+aorta env probe \
+  --buck-target //app:trainer \
+  --buck-mode-file root//mode/debug \
+  --buck-config build.profile=debug \
+  --buck-modifier //constraints:linux
+```
+
+The explicit form invokes cquery with mode files first, then paired `-c`
+overrides, then paired `-m` modifiers, followed by `deps(%s)` and the target as
+separate argv entries. `--buck-config` values are passed to Buck and included
+in the aggregate fingerprint, but only config keys are serialized.
+
+Omitting both explicit inputs and `--buck-default-context` remains runnable for
+backwards compatibility, with `context_source: unspecified` and a partial
+reason. This section is about graph configuration only: neither form answers
+Q1/Q2 or proves actual execution placement.
 
 ### Durable fix — a Buck2 rule wrapper (documented, not vendored)
 
