@@ -60,7 +60,7 @@ def test_evaluate_record_pass_fail_and_skip(tmp_path, monkeypatch):
             _write_matrix(mpath, [{"name": "baseline-local", "error": None,
                                    "passed_count": 1, "failed_count": 0, "error_count": 0,
                                    "mean_step_time_ms": 4.0, "metrics_summary": {}}])
-        return 0, mpath
+        return 0, mpath, False
 
     monkeypatch.setattr(nightly_eval, "run_entry", fake_run_entry)
     monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {"amd_aorta_version": "x"})
@@ -80,9 +80,31 @@ def test_evaluate_record_pass_fail_and_skip(tmp_path, monkeypatch):
 def test_evaluate_fails_when_no_matrix_json(tmp_path, monkeypatch):
     matrix_doc = {"entries": [{"name": "broken", "recipe": "r.yaml"}]}
     monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 1)
-    monkeypatch.setattr(nightly_eval, "run_entry", lambda entry, out_dir: (17, None))
+    monkeypatch.setattr(nightly_eval, "run_entry", lambda entry, out_dir: (17, None, False))
     monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
 
     doc = nightly_eval.evaluate(matrix_doc, {"baselines": {}}, tmp_path)
     assert doc["summary"]["fail"] == 1
     assert doc["entries"][0]["verdict"] == "fail"
+
+
+def test_evaluate_fails_when_all_entries_skip(tmp_path, monkeypatch):
+    # Zero work (e.g. no GPUs) must FAIL, not go green.
+    matrix_doc = {"entries": [{"name": "race", "recipe": "r.yaml", "nproc": 2, "min_gpus": 2}]}
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 0)
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
+
+    doc = nightly_eval.evaluate(matrix_doc, {"baselines": {}}, tmp_path)
+    assert doc["summary"]["fail"] == 1
+    assert any(e["error"] == "zero_work" for e in doc["entries"])
+
+
+def test_evaluate_timeout_records_failure(tmp_path, monkeypatch):
+    matrix_doc = {"entries": [{"name": "hang", "recipe": "r.yaml"}]}
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(nightly_eval, "run_entry", lambda entry, out_dir: (124, None, True))
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
+
+    doc = nightly_eval.evaluate(matrix_doc, {"baselines": {}}, tmp_path)
+    assert doc["summary"]["fail"] == 1
+    assert doc["entries"][0]["error"] == "timeout"

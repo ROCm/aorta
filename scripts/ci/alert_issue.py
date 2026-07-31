@@ -68,9 +68,26 @@ def _req(method: str, url: str, token: str, payload: dict | None = None) -> Any:
     req.add_header("Accept", "application/vnd.github+json")
     if data:
         req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:  # finite timeout, never hang
         body = resp.read().decode()
         return json.loads(body) if body else {}
+
+
+def _ensure_label(repo: str, token: str) -> None:
+    """Create the tracking label if it doesn't exist.
+
+    Creating an issue does NOT auto-create an unknown repo label, and
+    ``_find_open_issue`` searches by label -- so without this, the first alert
+    could create an unlabeled issue that later runs can never find/close.
+    """
+    try:
+        _req("GET", f"{API}/repos/{repo}/labels/{LABEL}", token)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+        _req("POST", f"{API}/repos/{repo}/labels", token,
+             {"name": LABEL, "color": "d1242f",
+              "description": "Nightly evaluation regression (auto-managed)"})
 
 
 def _find_open_issue(repo: str, token: str) -> dict | None:
@@ -101,6 +118,7 @@ def main() -> int:
     # the nightly job (this step runs under `if: always()`), so swallow URL/HTTP
     # errors with a warning and exit 0. Correctness signal is the eval job itself.
     try:
+        _ensure_label(repo, token)
         existing = _find_open_issue(repo, token)
         if fails:
             title, body = render_issue(results, args.run_url)

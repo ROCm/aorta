@@ -25,14 +25,12 @@ entries:
   - name: inference_continuous
     recipe: recipes/inference/example-inference-continuous-smoke.yaml
 
-  - name: hrx_launch_probe
-    recipe: recipes/hrx/hrx-launch-probe-smoke.yaml
-
-  - name: hrx_perf_gemm
-    recipe: recipes/hrx/hrx-perf-gemm.yaml
-
-  - name: hrx_perf_triad
-    recipe: recipes/hrx/hrx-perf-triad.yaml
+  # NOTE: HRX recipes are intentionally NOT wired here. The shipped
+  # recipes/hrx/*.yaml use literal `/path/to/hrx-root` preload paths and build
+  # for gfx942, and the CI container provisions no HRX runtime -- so on the
+  # gfx950 runner they cannot pass or produce a blessable baseline. Re-add HRX
+  # once dedicated gfx950 CI recipes + an HRX runtime at a stable path exist
+  # (e.g. recipes/ci/hrx-*-gfx950.yaml).
 
   - name: training_ddp
     recipe: recipes/training/example-training-ddp-smoke.yaml

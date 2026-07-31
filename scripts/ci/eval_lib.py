@@ -18,6 +18,29 @@ def cell_key(entry_name: str, cell_name: str) -> str:
     return f"{entry_name}::{cell_name}"
 
 
+# Explicit comparison policy per metric name. Not every metric is a
+# higher-is-better throughput number: latencies are upper-bounded, a checksum
+# must match exactly. Unknown metrics default to "min" (treated as throughput)
+# but that default is only used for trend capture, never to silently gate.
+_METRIC_POLICIES: dict[str, str] = {
+    "gflops": "min",
+    "gbps": "min",
+    "tokens_per_sec": "min",
+    "samples_per_sec": "min",
+    "throughput": "min",
+    "prefill_latency_ms": "max",
+    "decode_latency_ms": "max",
+    "latency_ms": "max",
+    "mean_step_time_ms": "max",
+    "logits_checksum": "equal",
+}
+
+
+def metric_policy(name: str) -> str | None:
+    """Return the comparison policy (min/max/equal) for a metric, or None."""
+    return _METRIC_POLICIES.get(name)
+
+
 def cell_passed(cell: dict[str, Any]) -> bool:
     """A cell 'passed' iff it ran cleanly: no whole-cell error, no failing or
     erroring trials, and at least one trial actually passed.
@@ -37,19 +60,22 @@ def cell_passed(cell: dict[str, Any]) -> bool:
 def extract_metrics(cell: dict[str, Any]) -> dict[str, Any]:
     """Pull the trend-worthy metrics out of a matrix.json cell entry.
 
-    ``metrics_summary`` is ``{metric_name: {mean, ...}}`` (throughput-style
-    metrics a workload reported, e.g. ``gflops`` / ``gbps``); we keep the mean.
+    ``metrics_summary`` is ``{metric_name: {mean, ...}}`` for whatever the
+    workload reported -- throughput, latency, checksums, counts, etc. We keep the
+    mean under ``summary`` (a generic name->value map); the comparison policy for
+    each is decided by ``_METRIC_POLICIES``, not by assuming everything is
+    throughput.
     """
     metrics: dict[str, Any] = {
         "mean_step_time_ms": cell.get("mean_step_time_ms"),
         "mean_wall_clock_sec": cell.get("mean_wall_clock_sec"),
         "step_time_source": cell.get("step_time_source"),
     }
-    throughput: dict[str, float] = {}
+    summary: dict[str, float] = {}
     for name, stats in (cell.get("metrics_summary") or {}).items():
         if isinstance(stats, dict) and stats.get("mean") is not None:
-            throughput[name] = stats["mean"]
-    metrics["throughput"] = throughput
+            summary[name] = stats["mean"]
+    metrics["summary"] = summary
     return metrics
 
 
@@ -84,43 +110,59 @@ def compare_to_baseline(
       * ``pass``   -- baseline present and all checks satisfied.
       * ``fail``   -- baseline present and at least one check failed.
     """
+    # BLOCKER fix: a cell that did not pass is a FAIL regardless of whether a
+    # baseline exists -- never record-only. This must be checked before the
+    # baseline-None short-circuit so a failed unbaselined workload can't slip
+    # through as a benign "record".
+    if not harvested.get("passed", False):
+        detail = harvested.get("error") or "cell failed or did not run"
+        return {"verdict": "fail", "reasons": [str(detail)], "deltas": {}}
+
     if baseline is None:
         return {"verdict": "record", "reasons": ["no baseline (record-only)"], "deltas": {}}
 
     reasons: list[str] = []
     deltas: dict[str, Any] = {}
     metrics = harvested.get("metrics", {})
+    observed_summary = metrics.get("summary") or {}
 
-    # Correctness: require the cell to have passed if the baseline expects it.
-    if baseline.get("passed", True) and not harvested.get("passed", False):
-        err = harvested.get("error")
-        reasons.append(
-            "expected passing cell but it did not pass"
-            + (f" (error: {err})" if err else "")
-        )
-
-    # Step-time ceiling.
+    # Step-time ceiling. A configured max with a missing observation is a FAIL
+    # (we cannot confirm the bound held), not a silent pass.
     st = baseline.get("step_time_ms") or {}
     st_max = st.get("max")
     observed_st = metrics.get("mean_step_time_ms")
-    if st_max is not None and observed_st is not None:
+    if st_max is not None:
         deltas["mean_step_time_ms"] = {"observed": observed_st, "max": st_max}
-        if observed_st > st_max:
+        if observed_st is None:
+            reasons.append(f"mean_step_time_ms missing (expected <= {st_max:.3f})")
+        elif observed_st > st_max:
             reasons.append(f"mean_step_time_ms {observed_st:.3f} > max {st_max:.3f}")
 
-    # Throughput floors.
-    tp_baseline = baseline.get("throughput") or {}
-    observed_tp = metrics.get("throughput") or {}
-    for name, bounds in tp_baseline.items():
-        floor = (bounds or {}).get("min")
-        observed = observed_tp.get(name)
-        if floor is None:
-            continue
-        deltas.setdefault("throughput", {})[name] = {"observed": observed, "min": floor}
+    # Generic metric bounds with explicit policy. Each baseline metric entry is
+    # ``{policy: min|max|equal, value: X, required: bool}``; policy falls back to
+    # _METRIC_POLICIES when omitted. A required (default True) metric that is
+    # absent from the observation is a FAIL.
+    for name, spec in (baseline.get("metrics") or {}).items():
+        spec = spec or {}
+        policy = spec.get("policy") or metric_policy(name) or "min"
+        threshold = spec.get("value")
+        required = spec.get("required", True)
+        observed = observed_summary.get(name)
+        deltas.setdefault("metrics", {})[name] = {
+            "observed": observed, "policy": policy, "value": threshold,
+        }
         if observed is None:
-            reasons.append(f"throughput '{name}' missing (expected >= {floor})")
-        elif observed < floor:
-            reasons.append(f"throughput '{name}' {observed:.3f} < min {floor:.3f}")
+            if required:
+                reasons.append(f"metric '{name}' missing (policy {policy} {threshold})")
+            continue
+        if threshold is None:
+            continue
+        if policy == "min" and observed < threshold:
+            reasons.append(f"metric '{name}' {observed:.4g} < min {threshold:.4g}")
+        elif policy == "max" and observed > threshold:
+            reasons.append(f"metric '{name}' {observed:.4g} > max {threshold:.4g}")
+        elif policy == "equal" and observed != threshold:
+            reasons.append(f"metric '{name}' {observed} != expected {threshold}")
 
     return {
         "verdict": "fail" if reasons else "pass",

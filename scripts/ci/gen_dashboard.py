@@ -80,22 +80,21 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     latest = results[-1] if results else {"build": {}, "summary": {}, "entries": []}
     build = latest.get("build", {}) or {}
 
-    # Collect per (entry::cell) step-time history across builds for sparklines.
-    keys: list[str] = []
-    history: dict[str, list[float | None]] = {}
-    latest_by_key: dict[str, dict[str, Any]] = {}
-    for doc in results:
-        for e in doc.get("entries", []) or []:
-            k = f"{e.get('entry')}::{e.get('cell')}"
-            if k not in history:
-                history[k] = []
-                keys.append(k)
+    # The "Latest" table reflects ONLY the newest build's entries -- a cell that
+    # disappeared from the current matrix must not linger as a stale pass/fail.
+    latest_entries = latest.get("entries", []) or []
+    latest_by_key: dict[str, dict[str, Any]] = {
+        f"{e.get('entry')}::{e.get('cell')}": e for e in latest_entries
+    }
+    keys = list(latest_by_key.keys())
+
+    # Step-time history (across builds) is only charted for currently-present keys.
+    history: dict[str, list[float | None]] = {k: [] for k in keys}
     for doc in results:
         seen: dict[str, float | None] = {}
         for e in doc.get("entries", []) or []:
             k = f"{e.get('entry')}::{e.get('cell')}"
             seen[k] = (e.get("metrics") or {}).get("mean_step_time_ms")
-            latest_by_key[k] = e
         for k in keys:
             history[k].append(seen.get(k))
 

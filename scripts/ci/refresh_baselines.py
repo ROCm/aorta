@@ -33,43 +33,60 @@ def build_baselines(
 ) -> dict[str, Any]:
     ngpu = nightly_eval.gpu_count()
     baselines: dict[str, Any] = {}
+    incomplete: list[str] = []
 
     for entry in matrix_doc.get("entries") or []:
         name = entry["name"]
         min_gpus = int(entry.get("min_gpus", entry.get("nproc", 1)))
         if ngpu < min_gpus:
-            print(f"SKIP {name}: needs {min_gpus} GPU(s), have {ngpu}", flush=True)
+            incomplete.append(f"{name} (skipped: needs {min_gpus} GPU(s), have {ngpu})")
             continue
 
-        rc, matrix_path = nightly_eval.run_entry(entry, out_dir)
+        rc, matrix_path, timed_out = nightly_eval.run_entry(entry, out_dir)
         if matrix_path is None:
-            print(f"WARN {name}: no matrix.json (exit {rc}); not blessing", flush=True)
+            incomplete.append(f"{name} (no matrix.json; {'timeout' if timed_out else f'exit {rc}'})")
             continue
 
         for harvested in eval_lib.harvest_matrix_json(matrix_path):
-            if not harvested["passed"]:
-                print(f"WARN {name}::{harvested['cell']}: did not pass; not blessing", flush=True)
-                continue
             key = eval_lib.cell_key(name, harvested["cell"])
+            if not harvested["passed"]:
+                incomplete.append(f"{key} (did not pass)")
+                continue
             # Default: correctness-only baseline (require the cell to pass).
-            # Perf bounds are opt-in (--perf-gate) so the default is "trends now,
-            # perf-gate later" per the CI plan; the comparator enforces bounds
-            # only when they are present in the baseline.
+            # Perf bounds are opt-in (--perf-gate); metric policies come from
+            # eval_lib._METRIC_POLICIES (min for throughput, max for latency /
+            # step time, equal for checksums).
             spec: dict[str, Any] = {"passed": True}
             if perf_gate:
                 metrics = harvested["metrics"]
                 st = metrics.get("mean_step_time_ms")
                 if st is not None:
                     spec["step_time_ms"] = {"max": round(st * (1.0 + step_time_margin), 4)}
-                tp = metrics.get("throughput") or {}
-                bounds = {
-                    k: {"min": round(v * (1.0 - throughput_margin), 4)}
-                    for k, v in tp.items()
-                    if v is not None
-                }
-                if bounds:
-                    spec["throughput"] = bounds
+                metric_specs: dict[str, Any] = {}
+                for mname, value in (metrics.get("summary") or {}).items():
+                    if value is None:
+                        continue
+                    policy = eval_lib.metric_policy(mname) or "min"
+                    if policy == "min":
+                        bound = round(value * (1.0 - throughput_margin), 4)
+                    elif policy == "max":
+                        bound = round(value * (1.0 + step_time_margin), 4)
+                    else:  # equal
+                        bound = value
+                    metric_specs[mname] = {"policy": policy, "value": bound}
+                if metric_specs:
+                    spec["metrics"] = metric_specs
             baselines[key] = spec
+
+    # MAJOR fix: refuse a partial refresh. Regenerating from a run where some
+    # eligible entries/cells were skipped/failed/missing would drop their gates
+    # from the (fully-replaced) baseline file; merging that PR silently reverts
+    # those workloads to record-only. Fail atomically before writing anything.
+    if incomplete:
+        raise SystemExit(
+            "refusing partial baseline refresh -- these entries/cells did not "
+            "produce a blessable pass:\n  - " + "\n  - ".join(incomplete)
+        )
 
     return {"version": 1, "baselines": baselines}
 

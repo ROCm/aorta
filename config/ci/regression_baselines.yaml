@@ -13,8 +13,13 @@
 #   "<entry>::<cell>":
 #     passed: true                     # require the cell to pass (clean run)
 #     step_time_ms: { max: <float> }   # fail if mean_step_time_ms exceeds max
-#     throughput:                      # fail if a reported metric is below min
-#       gflops: { min: <float> }
-#       gbps:   { min: <float> }
+#                                      #   (a configured max with a MISSING
+#                                      #   observation is also a fail)
+#     metrics:                         # generic metric bounds with explicit policy
+#       gflops:            { policy: min,   value: <float> }   # fail if below
+#       decode_latency_ms: { policy: max,   value: <float> }   # fail if above
+#       logits_checksum:   { policy: equal, value: <number> }  # fail if != value
+#       # `required: false` allows a metric to be absent without failing;
+#       # policy defaults to eval_lib._METRIC_POLICIES when omitted.
 version: 1
 baselines: {}

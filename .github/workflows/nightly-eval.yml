@@ -1,23 +1,21 @@
 name: Nightly Evaluation
 
-# Phase 1 of the CI plan (docs/ci-plan.md): after the nightly wheel is published,
-# install THAT wheel and evaluate the workloads against committed expected-outcome
+# CI plan (docs/ci-plan.md): after the nightly wheel is published, install THAT
+# exact wheel and evaluate the workloads against committed expected-outcome
 # baselines, capturing perf metrics as trend data. Runs inside the pinned ROCm
-# docker image on the self-hosted MI350 runner.
+# docker image on the self-hosted MI350 runner; a separate ubuntu-latest job
+# stores history (ci-results branch) and deploys the GitHub Pages dashboard.
 #
-# Correctness fails the job only against a *blessed* baseline; entries without a
-# baseline are recorded (record-only) so nightly isn't red before baselines land.
+# Correctness fails the job on any failed/errored cell, a missing matrix, a
+# per-entry timeout, a blessed-baseline breach, or a run that did zero work.
+# Cells without a baseline are recorded (record-only) so nightly isn't red before
+# baselines land.
 
 on:
   workflow_dispatch:
   workflow_run:
     workflows: ["Nightly wheels"]
     types: [completed]
-
-permissions:
-  contents: write      # push results + dashboard to the gh-pages branch
-  actions: read
-  issues: write        # auto-file/close the regression issue
 
 concurrency:
   group: nightly-eval-${{ github.workflow }}-${{ github.ref }}
@@ -31,15 +29,16 @@ jobs:
   nightly-eval:
     name: nightly eval (GPU, MI350)
     runs-on: [self-hosted, gpu]
-    # Only run when the wheel build actually succeeded (or on manual dispatch).
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
     timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read      # download the triggering run's dist artifact
+      issues: write      # auto-file/close the regression issue
 
     steps:
-      # Reclaim root-owned artifacts left by the container so checkout's
-      # git-clean (as the runner user) doesn't fail. Pinned busybox by digest.
       - name: Reclaim workspace ownership
         run: |
           ws="${{ github.workspace }}"
@@ -54,32 +53,57 @@ jobs:
             sudo chown -R "$uidgid" "$ws" || true
           fi
 
+      # Check out the exact commit that produced the wheel (workflow_run defaults
+      # to the latest default-branch commit otherwise), so recipes/matrix match.
       - name: Check out code
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # Install the exact wheel this run's trigger built (not "latest from index").
+      - name: Download triggering wheel
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v6
+        with:
+          name: nightly-dist
+          path: dist
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up ROCm CI container
         uses: ./.github/actions/rocm-ci-setup
         with:
           rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
 
-      # Install the RELEASED nightly wheel (not the source tree) so we validate
-      # exactly what users pip install, then run the eval harness.
-      - name: Install nightly wheel and run evaluation
+      - name: Install wheel and run evaluation
+        env:
+          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+          UPSTREAM_HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
-          bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
+          bash scripts/ci/docker_cmd.sh exec \
+            -e UPSTREAM_RUN_ID="${UPSTREAM_RUN_ID}" \
+            -e UPSTREAM_HEAD_SHA="${UPSTREAM_HEAD_SHA}" \
+            -e DEV_WHEELS_INDEX="${{ env.DEV_WHEELS_INDEX }}" \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
             set -euo pipefail
             cd /workspace/aorta
             python -m pip install --upgrade pip
-            # Use the committed CI lock as a constraint when present (Phase 4),
-            # so the resolved deps are reproducible; absent => normal resolve.
             constraint=""
             [ -f config/ci/requirements.lock ] && constraint="-c config/ci/requirements.lock"
-            pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}" $constraint
+            if ls dist/*.whl >/dev/null 2>&1; then
+              whl="$(ls dist/*.whl | head -1)"
+              export WHEEL_FILE="$(basename "$whl")"
+              echo "Installing exact triggering wheel: $WHEEL_FILE"
+              pip install "${whl}[hw-queue]" $constraint
+            else
+              echo "No dist artifact (dispatch run); installing latest rc from the index."
+              pip install --pre "amd-aorta[hw-queue]" -f "$DEV_WHEELS_INDEX" $constraint
+            fi
             python scripts/ci/nightly_eval.py --out gpu-nightly-results.json
           '
 
-      # The container (root) wrote the results file into the mounted workspace;
-      # reclaim ownership so the host-side steps below can read/commit it.
+      # Container (root) wrote files into the mounted workspace; reclaim so the
+      # host-side steps can read/upload them.
       - name: Reclaim results ownership
         if: always()
         run: |
@@ -89,15 +113,20 @@ jobs:
           docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws 2>/dev/null \
             || sudo -n chown -R "$uidgid" "$ws" 2>/dev/null || true
 
-      - name: Upload nightly results
+      # Preserve the debugging evidence, not just the summary: per-entry
+      # matrix.json, resolved recipe, and per-cell trial JSON / logs.
+      - name: Upload nightly results + debug artifacts
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: nightly-results-${{ github.run_id }}
-          path: gpu-nightly-results.json
+          path: |
+            gpu-nightly-results.json
+            .nightly-eval/**/matrix.json
+            .nightly-eval/**/recipe.resolved.yaml
+            .nightly-eval/**/cells/**
           if-no-files-found: warn
 
-      # Phase 3: auto-file/update/close the regression issue based on results.
       - name: Alert on regression
         if: always()
         env:
@@ -111,38 +140,72 @@ jobs:
             echo "no results JSON; skipping alert"
           fi
 
-      # Phase 2: append results to the gh-pages branch and regenerate the
-      # GitHub Pages dashboard (self-contained HTML). Runs on the host (stdlib
-      # only, no torch), so it's independent of the container.
-      - name: Publish results + dashboard to gh-pages
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          [ -f gpu-nightly-results.json ] || { echo "no results JSON; skipping publish"; exit 0; }
-          date="$(date -u +%Y-%m-%d)"
-          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          tmp="$(mktemp -d)"
-          if git clone --depth 1 --branch gh-pages "$repo_url" "$tmp" 2>/dev/null; then
-            :
-          else
-            git clone --depth 1 "$repo_url" "$tmp"
-            ( cd "$tmp" && git checkout --orphan gh-pages && git rm -rf . >/dev/null 2>&1 || true )
-          fi
-          mkdir -p "$tmp/results"
-          cp gpu-nightly-results.json "$tmp/results/${date}.json"
-          # Retention: keep only the most recent 180 result files on the branch
-          # so gh-pages doesn't grow unbounded (dashboard also caps rendering).
-          ls -1 "$tmp"/results/*.json 2>/dev/null | sort | head -n -180 | xargs -r rm -f
-          python3 scripts/ci/gen_dashboard.py --results-dir "$tmp/results" --out-dir "$tmp" --max-builds 180
-          ( cd "$tmp"
-            touch .nojekyll
-            git add -A
-            git -c user.name=aorta-ci -c user.email=aorta-ci@users.noreply.github.com \
-              commit -m "nightly results ${date}" || { echo "nothing to commit"; exit 0; }
-            git push origin gh-pages )
-
       - name: Tear down ROCm CI container
         if: always()
         working-directory: docker
         run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
+
+  # Store history + deploy the dashboard via the official Pages actions. A
+  # GITHUB_TOKEN push to a branch does NOT trigger a branch-sourced Pages build,
+  # so we keep history on a data branch (ci-results) and deploy the generated
+  # site through actions/deploy-pages (repo Pages source must be "GitHub Actions").
+  publish:
+    name: publish dashboard
+    needs: nightly-eval
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push results history to the ci-results branch
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Download results
+        uses: actions/download-artifact@v6
+        with:
+          name: nightly-results-${{ github.run_id }}
+          path: incoming
+
+      - name: Update history + build site
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [ -f incoming/gpu-nightly-results.json ] || { echo "no results JSON; skipping publish"; exit 0; }
+          date="$(date -u +%Y-%m-%d)"
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          tmp="$(mktemp -d)"
+          if git clone --depth 1 --branch ci-results "$repo_url" "$tmp" 2>/dev/null; then
+            :
+          else
+            git clone --depth 1 "$repo_url" "$tmp"
+            ( cd "$tmp" && git checkout --orphan ci-results && git rm -rf . >/dev/null 2>&1 || true )
+          fi
+          mkdir -p "$tmp/results"
+          cp incoming/gpu-nightly-results.json "$tmp/results/${date}.json"
+          # Retention: keep the most recent 180 result files.
+          ls -1 "$tmp"/results/*.json 2>/dev/null | sort | head -n -180 | xargs -r rm -f
+          ( cd "$tmp"
+            git add -A
+            git -c user.name=aorta-ci -c user.email=aorta-ci@users.noreply.github.com \
+              commit -m "nightly results ${date}" || echo "nothing to commit"
+            git push origin ci-results || echo "push skipped" )
+          mkdir -p site
+          python3 scripts/ci/gen_dashboard.py --results-dir "$tmp/results" --out-dir site --max-builds 180
+          touch site/.nojekyll
+
+      - name: Upload Pages artifact
+        if: hashFiles('site/index.html') != ''
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        if: hashFiles('site/index.html') != ''
+        uses: actions/deploy-pages@v4

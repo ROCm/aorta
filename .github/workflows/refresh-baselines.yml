@@ -64,7 +64,11 @@ jobs:
             set -euo pipefail
             cd /workspace/aorta
             python -m pip install --upgrade pip
-            pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}"
+            # Install under the same requirements.lock constraint as nightly-eval,
+            # so baselines are generated on the exact dependency set they gate.
+            constraint=""
+            [ -f config/ci/requirements.lock ] && constraint="-c config/ci/requirements.lock"
+            pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}" $constraint
             python scripts/ci/refresh_baselines.py \
               --step-time-margin "${{ github.event.inputs.step_time_margin || 0.25 }}" \
               --throughput-margin "${{ github.event.inputs.throughput_margin || 0.15 }}"

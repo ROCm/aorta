@@ -1,8 +1,9 @@
 # Nightly evaluation + dashboard (implementation)
 
-Implements Phases 1-5 of [`ci-plan.md`](ci-plan.md). This is the "how it works /
-how to operate it" reference for the nightly evaluation, dashboard, alerting,
-baselines, and automated bumps.
+Implements the CI plan (proposed in
+[ROCm/aorta#300](https://github.com/ROCm/aorta/pull/300); `docs/ci-plan.md` lands
+with that PR). This is the "how it works / how to operate it" reference for the
+nightly evaluation, dashboard, alerting, baselines, and automated bumps.
 
 ## Components
 
@@ -38,10 +39,13 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    `gpu-nightly-results.json` with build/ROCm metadata.
 4. **Alert** (`alert_issue.py`): opens/updates one `nightly-regression` issue on
    failure; comments + closes it when green.
-5. **Publish** (`gen_dashboard.py`): appends `results/<date>.json` to the
-   `gh-pages` branch and regenerates the self-contained dashboard (latest status
-   table + inline-SVG step-time trends + pass-rate trend). Served via GitHub
-   Pages (source = `gh-pages` branch; enable Pages in Settings).
+5. **Publish** (`publish` job on `ubuntu-latest`): appends
+   `results/<date>.json` to the **`ci-results`** data branch (history),
+   regenerates the self-contained dashboard (`gen_dashboard.py`), and deploys it
+   via `actions/upload-pages-artifact` + `actions/deploy-pages`. A GITHUB_TOKEN
+   push to a branch does not trigger a branch-sourced Pages build, so the branch
+   is data-only and the site is deployed through the Pages actions.
+   **Repo Pages source must be "GitHub Actions"** (Settings -> Pages).
 
 ## Correctness vs performance
 
@@ -49,8 +53,10 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
 - **Performance** is **trend-only by default**: baselines are correctness-only
   (`passed: true`); step-time/throughput are captured + charted but not gated.
   To turn on perf gating (Phase 5), regenerate baselines with
-  `refresh_baselines.py --perf-gate` (adds `step_time_ms.max` / `throughput.min`
-  bounds the comparator then enforces).
+  `refresh_baselines.py --perf-gate` (adds `step_time_ms.max` plus per-metric
+  `policy`/`value` bounds -- min for throughput, max for latency/step-time, equal
+  for checksums -- that the comparator then enforces; a required metric that is
+  absent is a failure).
 
 ## Baselines
 
@@ -76,13 +82,14 @@ empty baseline file means **record-only** (nightly won't be red before blessing)
 ## Results retention
 
 The publish step keeps only the **most recent 180** `results/<date>.json` files on
-the `gh-pages` branch (older ones are pruned), and the dashboard renders at most
-the last 180 builds (`gen_dashboard.py --max-builds`). Files are tiny; adjust the
-cap in `nightly-eval.yml` / the flag if a longer window is wanted.
+the `ci-results` data branch (older ones are pruned), and the dashboard renders at
+most the last 180 builds (`gen_dashboard.py --max-builds`). Files are tiny; adjust
+the cap in `nightly-eval.yml` / the flag if a longer window is wanted.
 
 ## Operating checklist
 
-1. Enable GitHub Pages (source: `gh-pages` branch) so the dashboard is served.
+1. Enable GitHub Pages with **source = "GitHub Actions"** (Settings -> Pages) so
+   `deploy-pages` can serve the dashboard.
 2. First nightly runs **record-only**; then run **Refresh baselines** to bless.
 3. (Optional) Run **Lock requirements** to pin the CI dependency set.
 4. (Later) Enable perf gating via `refresh_baselines.py --perf-gate`.
