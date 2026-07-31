@@ -106,6 +106,14 @@ class TestBuckInvocationContext:
             "build.profile",
             "scheduler.policy",
         )
+        assert context.option_order == (
+            "mode",
+            "mode",
+            "config",
+            "config",
+            "modifier",
+            "modifier",
+        )
         assert context.source == "explicit"
 
     def test_is_frozen_and_coerces_ordered_inputs_to_tuples(self):
@@ -161,6 +169,7 @@ class TestBuckInvocationContext:
             "//constraints:gfx",
         ]
         assert context.config_keys == ("build.profile",)
+        assert context.option_order == ("config", "mode", "modifier")
 
     def test_ordered_and_grouped_options_are_mutually_exclusive(self):
         with pytest.raises(ValueError, match="cannot be combined"):
@@ -168,6 +177,22 @@ class TestBuckInvocationContext:
                 mode_files=("root//mode/debug",),
                 ordered_options=(bi_mod.BuckInvocationOption.parse("config=build.profile=debug"),),
             )
+
+    def test_fingerprint_depends_on_effective_argv_not_cli_form(self):
+        grouped = bi_mod.BuckInvocationContext(
+            mode_files=("root//mode/debug",),
+            config_overrides=("build.profile=debug",),
+            modifiers=("//constraints:gfx",),
+        )
+        ordered = bi_mod.BuckInvocationContext(
+            ordered_options=(
+                bi_mod.BuckInvocationOption.parse("mode=root//mode/debug"),
+                bi_mod.BuckInvocationOption.parse("config=build.profile=debug"),
+                bi_mod.BuckInvocationOption.parse("modifier=//constraints:gfx"),
+            )
+        )
+        assert grouped.to_buck_args() == ordered.to_buck_args()
+        assert grouped.fingerprint == ordered.fingerprint
 
     def test_fingerprint_is_stable_and_covers_full_ordered_values(self):
         first = bi_mod.BuckInvocationContext(

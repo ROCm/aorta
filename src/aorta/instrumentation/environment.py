@@ -2584,9 +2584,7 @@ def _buck_invocation_block(
         # values may be credentials or other private configuration.
         "config_keys": list(safe_context.config_keys),
         "modifiers": list(safe_context.effective_modifiers),
-        "option_order": [
-            option.kind for option in safe_context.ordered_options
-        ],
+        "option_order": list(safe_context.option_order),
         "context_fingerprint": safe_context.fingerprint,
         "configured_root_target": configured_root_target,
         "comparison": "not_compared",

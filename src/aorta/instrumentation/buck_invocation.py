@@ -140,6 +140,16 @@ class BuckInvocationContext:
         return self.modifiers
 
     @property
+    def option_order(self) -> tuple[str, ...]:
+        if self.ordered_options:
+            return tuple(option.kind for option in self.ordered_options)
+        return (
+            ("mode",) * len(self.mode_files)
+            + ("config",) * len(self.config_overrides)
+            + ("modifier",) * len(self.modifiers)
+        )
+
+    @property
     def has_explicit_inputs(self) -> bool:
         """Whether at least one mode, config override, or modifier was supplied."""
 
@@ -173,21 +183,13 @@ class BuckInvocationContext:
         confirmation bit make the encoding unambiguous.
         """
 
-        payload: dict[str, object]
-        if self.ordered_options:
-            payload = {
-                "ordered_options": [
-                    {"kind": option.kind, "value": option.value} for option in self.ordered_options
-                ],
-                "default_context_confirmed": self.default_context_confirmed,
-            }
-        else:
-            payload = {
-                "mode_files": list(self.mode_files),
-                "config_overrides": list(self.config_overrides),
-                "modifiers": list(self.modifiers),
-                "default_context_confirmed": self.default_context_confirmed,
-            }
+        # Fingerprint the effective Buck argv, not the CLI representation.
+        # Grouped and exact-order inputs that produce the same Buck command
+        # must compare equal.
+        payload: dict[str, object] = {
+            "buck_argv": self.to_buck_args(),
+            "default_context_confirmed": self.default_context_confirmed,
+        }
         encoded = json.dumps(
             payload,
             ensure_ascii=False,

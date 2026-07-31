@@ -186,6 +186,11 @@ The validator requires the PyTorch Buck identity by default. If the workload
 also requires specific libraries, add repeatable checks such as
 `--require-library rccl` or `--require-library hipblaslt`.
 
+A file labeled `buck2_action` must contain detected isolation evidence. If
+your repository proves placement through separate `what-ran` evidence, the
+support contact may explicitly add `--allow-unisolated-action`; do not use
+that override merely to silence an error.
+
 Do not send the files until the validator prints `PASS`. If it fails, send the
 error lines to your support contact.
 
