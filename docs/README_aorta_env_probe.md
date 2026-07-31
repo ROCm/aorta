@@ -15,8 +15,8 @@ diagnostic commands. On a multi-GPU host, collection can take tens of seconds.
 - Workload built with Buck2: send two files:
   1. `env.buck-client.json` — the dependencies Buck selected for the target
      and settings you used.
-  2. `env.workload.json` — the Python, torch, ROCm, and GPU environment seen by
-     the workload process.
+  2. `env.workload.rank<RANK>.json` — the Python, torch, ROCm, and GPU
+     environment seen by one node-local rank 0 process.
 
 These files answer different questions. A host-side Buck query cannot prove
 what a workload process saw, and a workload process may not be able to run a
@@ -103,19 +103,28 @@ fingerprint but are not stored.
 ## Buck workload — file 2: workload process
 
 A Buck `.par` is the packaged Python executable for the application. It owns
-the application's startup code, so the AORTA CLI cannot wrap it. Add AORTA's
-`aorta_lib` to the existing `python_binary` dependencies. Keep its current
-application entrypoint, torch target, and other dependencies unchanged:
+the application's startup code, so the AORTA CLI cannot wrap it.
+
+First, ask the repository owner to expose the provided AORTA revision as a
+Buck cell or vendored source target. Confirm this command lists `aorta_lib`:
+
+```bash
+buck2 targets <AORTA_CELL>//:
+```
+
+If that target is unavailable, stop and contact support. Do not substitute a
+different AORTA revision.
+
+Add only AORTA's library to the existing application rule. Keep its current
+rule macro, name, `main`/`main_function`, torch target, and all other
+dependencies unchanged:
 
 ```python
-python_binary(
-    name = "application_with_aorta_probe",
-    main_function = "<EXISTING_APPLICATION_MAIN_FUNCTION>",
-    deps = [
-        "<AORTA_CELL>//:aorta_lib",
-        # Keep the existing torch and application dependencies here.
-    ],
-)
+# Inside the existing python_binary(...) or repository-specific Python macro:
+deps = [
+    # Keep every existing dependency.
+    "<AORTA_CELL>//:aorta_lib",
+]
 ```
 
 At the beginning of the application's `main()`, after launcher environment
@@ -130,11 +139,12 @@ from aorta.instrumentation.environment import capture_to
 def main():
     output = os.environ.get("AORTA_ENV_OUTPUT")
     if output:
-        # Rank 0 writes the shared artifact. Every rank exits after capture so
-        # one delayed rank cannot disturb a timing-sensitive distributed run.
-        if os.environ.get("RANK", "0") == "0":
+        # One local-rank-0 process writes per node. {rank} makes filenames
+        # unique across nodes; on a single process it resolves to rank 0.
+        rank = os.environ.get("RANK", "0")
+        if os.environ.get("LOCAL_RANK", "0") == "0":
             capture_to(
-                output,
+                output.format(rank=rank),
                 probe_invocation=os.environ.get(
                     "AORTA_PROBE_INVOCATION",
                     "buck2_run",
@@ -145,10 +155,10 @@ def main():
     # Existing application setup follows.
 ```
 
-Launch the application with:
+### Local workload process launched by `buck2 run`
 
 ```bash
-export AORTA_ENV_OUTPUT=<SHARED_OUTPUT_DIR>/env.workload.json
+export AORTA_ENV_OUTPUT='<SHARED_OUTPUT_DIR>/env.workload.rank{rank}.json'
 export AORTA_PROBE_INVOCATION=buck2_run
 
 buck2 run <APPLICATION_WITH_AORTA_PROBE> -- <EXISTING_APPLICATION_ARGS>
@@ -157,12 +167,24 @@ buck2 run <APPLICATION_WITH_AORTA_PROBE> -- <EXISTING_APPLICATION_ARGS>
 Treat this as a capture-only run. Importing packages and running diagnostic
 commands changes process startup timing; do not use the same run to measure a
 timing-sensitive failure rate. Unset `AORTA_ENV_OUTPUT` for normal workload
-runs.
+runs. On a single node, validate `env.workload.rank0.json`. On a multi-node
+job, validate and send one file per node-local rank 0.
 
-Use `buck2_run` when `buck2 run` launches the `.par` on the client host. Use
-`buck2_action` only when the probe itself runs as a declared build/test action
-and executor placement is independently known. Do not label a normal
-`buck2 run` process as a remote action.
+`buck2 run` starts the packaged executable on the client host after Buck builds
+it. This does not capture a remote build/test worker.
+
+### Remote build/test action
+
+To capture a remote worker, the repository owner must run the same
+capture-enabled binary as a declared build/test action, pass a declared output
+path as `AORTA_ENV_OUTPUT`, and set:
+
+```bash
+export AORTA_PROBE_INVOCATION=buck2_action
+```
+
+Do not use `buck2_action` for a normal `buck2 run`. Executor placement must be
+confirmed separately using the repository's Buck execution evidence.
 
 Do not pass `buck_target` to `capture_to()` inside the workload. The
 client-side file already records the dependency information, while the Buck
@@ -178,13 +200,15 @@ Run the validator included with the same AORTA checkout:
 
 ```bash
 python3 <AORTA_CHECKOUT>/scripts/validate_buck_env_pair.py \
+  --require-library rccl \
+  --require-library hipblaslt \
   env.buck-client.json \
-  env.workload.json
+  env.workload.rank0.json
 ```
 
-The validator requires the PyTorch Buck identity by default. If the workload
-also requires specific libraries, add repeatable checks such as
-`--require-library rccl` or `--require-library hipblaslt`.
+The validator always requires the PyTorch Buck identity. Keep only the
+additional `--require-library` lines for libraries the workload is expected to
+use. For a multi-node capture, rerun the validator for every workload file.
 
 A file labeled `buck2_action` must contain detected isolation evidence. If
 your repository proves placement through separate `what-ran` evidence, the
@@ -199,10 +223,11 @@ error lines to your support contact.
 Send:
 
 1. `env.buck-client.json`
-2. `env.workload.json`
+2. Each `env.workload.rank<RANK>.json` produced by a node-local rank 0.
 3. The exact workload target.
 4. The ordered mode-file and modifier names.
-5. Config key names and `buck_invocation.context_fingerprint`.
+5. Config key names, `buck_invocation.option_order`, and
+   `buck_invocation.context_fingerprint`.
 
 If config values are sensitive, do not send them. The fingerprint lets two
 captures be compared without recording those values.
