@@ -85,7 +85,22 @@ from aorta.instrumentation.buck_invocation import BuckInvocationContext
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.13"
+SCHEMA_VERSION = "1.14"
+# 1.13 -> 1.14 (recsys-stack package identity + recom-NaN env vars):
+#   - New top-level ``torchrec`` block ``{package_version, commit}``, always
+#     present and defaulted so older snapshots / direct constructors remain
+#     compatible. TorchRec is the core library of the MI350X recom-repro
+#     workload (layered on the already-captured fbgemm); its version is
+#     load-bearing for that escalation. Populated by ``_capture_torchrec()``.
+#   - Expanded ``CANONICAL_ENV_VARS`` with the hipBLASLt/rocBLAS/Tensile GEMM
+#     numeric + kernel-path knobs that flip which library / kernels / numeric
+#     path actually run (HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32, ROCBLAS_USE_
+#     HIPBLASLT, {HIPBLASLT,ROCBLAS}_TENSILE_LIBPATH, HIPBLASLT_USE_ROCROLLER
+#     [+NO_CUSTOM_KERNEL], HIPBLASLT_TUNING_OVERRIDE_FILE, ROCBLAS_DEFAULT_
+#     ATOMICS_MODE, ROCBLAS_INTERNAL_FP16_ALT_IMPL[_RNZ], ROCBLAS_STREAM_
+#     ORDER_ALLOC, TENSILE_SOLUTION_INDEX), plus HSA_TOOLS_DISABLE_REGISTER
+#     and LD_LIBRARY_PATH (which .so actually loads). env_vars is an existing
+#     dict field, so these are additive to its contents, not a new key.
 # 1.12 -> 1.13 (Buck invocation-context provenance):
 #   - New top-level ``buck_invocation`` block, always present and defaulted
 #     via ``_empty_buck_invocation()``. It distinguishes ``not_requested``,
@@ -480,6 +495,7 @@ CANONICAL_ENV_VARS: tuple[str, ...] = (
     "HSA_KERNARG_POOL_SIZE",
     "HSA_NO_SCRATCH_RECLAIM",
     "HSA_OVERRIDE_GFX_VERSION",  # forces a different gfx target than the silicon
+    "HSA_TOOLS_DISABLE_REGISTER",  # disables HSA tool (profiler/sanitizer) registration
     # GPU queue / codegen / build target
     "GPU_MAX_HW_QUEUES",
     "AMDGCN_USE_BUFFER_OPS",
@@ -551,6 +567,31 @@ CANONICAL_ENV_VARS: tuple[str, ...] = (
     # PyTorch / inductor
     "TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE",
     "PYTORCH_CUDA_ALLOC_CONF",
+    # Dynamic loader -- which shared object actually loads. LD_LIBRARY_PATH
+    # can silently point hipBLASLt/rocBLAS/RCCL at a different .so than the
+    # installed one ("the version running wasn't the version we thought" --
+    # the failure this tool exists to catch). Verbose and not ROCm-specific,
+    # but load-bearing for a library-identity diff.
+    "LD_LIBRARY_PATH",
+    # hipBLASLt / rocBLAS / Tensile GEMM numeric + kernel-path selection.
+    # These flip WHICH library and WHICH kernels actually run the GEMMs, and
+    # in the xf32/TF32 case the numeric path itself -- the load-bearing knobs
+    # in the MI350X recom-repro NaN escalation. All verified present in the
+    # libhipblaslt.so / librocblas.so string tables. Logging-only knobs
+    # (HIPBLASLT_LOG_*, ROCBLAS_LAYER, TENSILE_DB, *_CHECK_NUMERICS) are
+    # deliberately excluded: they don't change the computed result.
+    "HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32",  # forces xf32/TF32 emulation compute path
+    "HIPBLASLT_TENSILE_LIBPATH",  # overrides the Tensile kernel-DB dir (bypasses tensile_catalog)
+    "HIPBLASLT_USE_ROCROLLER",  # switches to the rocRoller kernel generator
+    "HIPBLASLT_ROCROLLER_NO_CUSTOM_KERNEL",  # rocRoller sub-knob (disables custom kernels)
+    "HIPBLASLT_TUNING_OVERRIDE_FILE",  # native pin (distinct from TORCH_HIPBLASLT_TUNING_OVERRIDE_FILE)
+    "ROCBLAS_USE_HIPBLASLT",  # routes rocBLAS GEMMs through hipBLASLt vs Tensile
+    "ROCBLAS_TENSILE_LIBPATH",  # overrides rocBLAS's Tensile kernel-DB dir
+    "ROCBLAS_DEFAULT_ATOMICS_MODE",  # atomic reductions on/off -> numeric determinism
+    "ROCBLAS_INTERNAL_FP16_ALT_IMPL",  # alternate fp16 implementation
+    "ROCBLAS_INTERNAL_FP16_ALT_IMPL_RNZ",  # alternate fp16 impl, round-nearest-zero variant
+    "ROCBLAS_STREAM_ORDER_ALLOC",  # stream-ordered allocation (interacts w/ cross-stream reuse)
+    "TENSILE_SOLUTION_INDEX",  # pins a specific Tensile solution (forces a kernel)
 )
 
 # Filesystem locations -- collected here so tests can monkeypatch them.
@@ -1126,6 +1167,14 @@ class EnvSnapshot:
     # Linux may recycle namespace inode numbers after teardown. ``None`` when
     # all sources fail. Defaulted so pre-1.12 snapshots round-trip.
     probe_namespace: str | None = None
+    # torchrec: recsys-stack package identity (schema 1.14). TorchRec is the
+    # sharded-embedding / training-pipeline library that sits ON TOP of fbgemm
+    # (which we already capture) -- and it is the core library of the MI350X
+    # recom-repro workload, so its version is load-bearing for that escalation.
+    # Same shape as ``triton`` (``{package_version, commit}``). Defaulted so
+    # pre-1.14 snapshots round-trip via ``from_dict()`` and older direct
+    # constructors don't raise. Populated by ``_capture_torchrec()``.
+    torchrec: dict = field(default_factory=lambda: {"package_version": None, "commit": None})
 
     # Curated emit order for ``to_dict()`` / ``env.json`` (JSON is written
     # sort_keys=False, so THIS is the artifact's key order). Grouped so
@@ -1169,6 +1218,7 @@ class EnvSnapshot:
         "rccl",
         "triton",
         "fbgemm",
+        "torchrec",
         "aiter",
         "aotriton",
         # build system + buck introspection
@@ -1230,6 +1280,9 @@ class EnvSnapshot:
           Buck-vs-A1 merge").
         * ``buck_invocation`` -> ``status="not_requested"`` (added in
           schema 1.13; older producers did not record invocation context).
+        * ``torchrec`` -> ``{"package_version": None, "commit": None}``
+          (added in schema 1.14; older snapshots predate the recsys-stack
+          package block).
 
         Strictly-required older fields (the schema-1.0/1.1 set) are NOT
         defaulted -- a missing ``rocm`` or ``hipblaslt`` key still
@@ -1251,6 +1304,7 @@ class EnvSnapshot:
         kwargs.setdefault("container_detected", False)
         kwargs.setdefault("execution_context", _empty_execution_context())
         kwargs.setdefault("probe_namespace", None)
+        kwargs.setdefault("torchrec", {"package_version": None, "commit": None})
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -2147,6 +2201,7 @@ def collect_env(
         )
         triton = _capture_triton(reasons)
         fbgemm = _capture_fbgemm(reasons)
+        torchrec = _capture_torchrec(reasons)
         aiter = _capture_aiter(reasons)
         aotriton = _capture_aotriton(reasons)
         miopen = _capture_miopen(reasons)
@@ -2200,6 +2255,7 @@ def collect_env(
             rocfft_catalog=rocfft_catalog,
             triton=triton,
             fbgemm=fbgemm,
+            torchrec=torchrec,
             aiter=aiter,
             aotriton=aotriton,
             miopen=miopen,
@@ -2395,6 +2451,7 @@ def _disaster_snapshot(
             "pytorch_use_fbgemm": None,
             "pytorch_use_fbgemm_genai": None,
         },
+        torchrec={"package_version": None, "commit": None},
         aiter={
             "package_version": None,
             "package_dist_name": None,
@@ -5162,6 +5219,44 @@ def _capture_triton(reasons: list[str]) -> dict[str, str | None]:
         # (e.g. "3.5.1+rocm7.2.1.gita272dfa8"); fb builds (e.g. "3.5.0+fb")
         # carry none -> commit stays None.
         "commit": _capture_python_package_commit("triton", version),
+    }
+
+
+def _capture_torchrec(reasons: list[str]) -> dict[str, str | None]:
+    """Capture TorchRec package version (+ best-effort commit from version).
+
+    TorchRec is the sharded-embedding / training-pipeline library layered on
+    top of fbgemm (already captured separately) and is the core library of
+    the MI350X recom-repro workload, so pinning its version matters for that
+    escalation.
+
+    Deliberately reads the version from DISTRIBUTION METADATA
+    (``importlib.metadata.version``) rather than importing torchrec the way
+    ``_capture_triton`` imports triton: importing torchrec eagerly pulls in
+    torch + fbgemm and can touch CUDA on import, which would violate the
+    probe's "no GPU compute" guarantee. Metadata lookup reads
+    ``*.dist-info`` off disk with no import side effects.
+
+    Fail-soft like the other optional-package probes: a *missing* torchrec is
+    the documented common case (most non-recsys installs lack it), so it
+    records NO partial reason -- mirroring the ``suppress_missing`` contract
+    used for fbgemm_gpu / aiter. Only an unexpected metadata error records a
+    reason. Commit is parsed from the version string (pure string work, no
+    import); release wheels (e.g. ``"1.4.0"``) carry no SHA -> ``None``.
+    """
+    import importlib.metadata as importlib_metadata
+
+    try:
+        version = importlib_metadata.version("torchrec")
+    except importlib_metadata.PackageNotFoundError:
+        return {"package_version": None, "commit": None}
+    except Exception as exc:  # noqa: BLE001 -- never let env probe fail
+        log.debug("torchrec metadata lookup failed: %s", exc)
+        reasons.append(f"torchrec.package_version: metadata lookup raised ({type(exc).__name__})")
+        return {"package_version": None, "commit": None}
+    return {
+        "package_version": version,
+        "commit": _extract_commit_from_version(version),
     }
 
 
