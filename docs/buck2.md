@@ -412,6 +412,8 @@ toolchain Python version.
 ## See also
 
 * [Env Probe](env-probe.md) -- the snapshot schema and `jq` cookbook.
+* [Buck2 env-probe customer instructions](buck2-env-probe-customer.md) --
+  customer-safe workload integration, two-file capture, and validation.
 * [Buck2 env-probe setup on a Linux GPU host](buck2-env-probe-gpu-setup.md)
   -- first-time Buck2 installation, local smoke test, real-RE prerequisites,
   and a copy-paste agent prompt.

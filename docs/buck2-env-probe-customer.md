@@ -1,22 +1,22 @@
-# AORTA Environment Probe — Customer Instructions
+# AORTA Env Probe for Buck2 Workloads — Customer Instructions
 
-Source of truth: `docs/README_aorta_env_probe.md` in the AORTA revision
+Source of truth: `docs/buck2-env-probe-customer.md` in the AORTA revision
 provided by your support contact. If this file is exported separately, update
 it from that source rather than editing two copies.
 
-Use this probe to record the software and hardware environment around a GPU
-workload. It launches no GPU kernels and runs no training steps. It reads
-version files, imports Python packages when available, and runs bounded
-diagnostic commands. On a multi-GPU host, collection can take tens of seconds.
+This guide is only for workloads built or launched with Buck2. The probe
+records the Buck dependency selection and the software/hardware environment
+seen by the packaged Python workload. It launches no GPU kernels and runs no
+training steps. On a multi-GPU host, collection can take tens of seconds.
 
 ## What to send
 
-- Workload not built with Buck2: send one `env.host.json`.
-- Workload built with Buck2: send two files:
-  1. `env.buck-client.json` — the dependencies Buck selected for the target
-     and settings you used.
-  2. `env.workload.rank<RANK>.json` — the Python, torch, ROCm, and GPU
-     environment seen by one node-local rank 0 process.
+Send two files:
+
+1. `env.buck-client.json` — the dependencies Buck selected for the target and
+   settings you used.
+2. `env.workload.rank<RANK>.json` — the Python, torch, ROCm, and GPU
+   environment seen by one node-local rank 0 process.
 
 These files answer different questions. A host-side Buck query cannot prove
 what a workload process saw, and a workload process may not be able to run a
@@ -38,22 +38,9 @@ If torch imports from a normal Python environment, verify that first:
 python -c "import torch; print(torch.__version__, torch.version.hip)"
 ```
 
-If torch exists only as a Buck target, use the Buck instructions below. Do not
-inject AORTA into an unrelated Python process with `PYTHONPATH`; that process
-will not contain the workload's torch target.
-
-## Non-Buck workload
-
-Activate the same environment and container used by the workload, then run:
-
-```bash
-aorta env probe \
-  --execution-context direct \
-  -o env.host.json
-```
-
-Send `env.host.json`. Missing optional tools appear in `partial_reasons`; they
-do not prevent the rest of the snapshot from being useful.
+If torch exists only as a Buck target, do not inject AORTA into an unrelated
+Python process with `PYTHONPATH`; that process will not contain the workload's
+torch target.
 
 ## Buck workload — file 1: Buck dependency information
 
