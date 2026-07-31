@@ -1,8 +1,7 @@
-# AORTA Env Probe for Buck2 Workloads — Customer Instructions
+# AORTA Env Probe for Buck2 Workloads
 
-Source of truth: `docs/buck2-env-probe-customer.md` in the AORTA revision
-provided by your support contact. If this file is exported separately, update
-it from that source rather than editing two copies.
+Canonical source: `docs/buck2-env-probe.md` in the selected AORTA revision.
+Refresh exported copies from this file rather than editing two copies.
 
 This guide is only for workloads built or launched with Buck2. The probe
 records the Buck dependency selection and the software/hardware environment
@@ -24,9 +23,8 @@ nested Buck query.
 
 ## Before you start
 
-Use the exact AORTA checkout, branch, release, or source archive provided by
-your support contact. AORTA requires Python 3.10 or newer. For a source
-checkout:
+Use one pinned AORTA checkout, branch, release, or source archive for both
+captures. AORTA requires Python 3.10 or newer. For a source checkout:
 
 ```bash
 python -m pip install -e <AORTA_CHECKOUT>
@@ -198,12 +196,12 @@ additional `--require-library` lines for libraries the workload is expected to
 use. For a multi-node capture, rerun the validator for every workload file.
 
 A file labeled `buck2_action` must contain detected isolation evidence. If
-your repository proves placement through separate `what-ran` evidence, the
-support contact may explicitly add `--allow-unisolated-action`; do not use
+your repository proves placement through separate `what-ran` evidence, an
+AORTA maintainer may explicitly add `--allow-unisolated-action`; do not use
 that override merely to silence an error.
 
-Do not send the files until the validator prints `PASS`. If it fails, send the
-error lines to your support contact.
+Do not use the files until the validator prints `PASS`. If it fails, give the
+error lines to the AORTA maintainer.
 
 ## What to send
 
@@ -246,8 +244,8 @@ mode/config/modifier options.
 
 Confirm `--buck-target` names the real top-level workload target and that all
 configuration options match its normal invocation. If the graph uses library
-labels AORTA does not yet recognize, send a scrubbed list of the relevant label
-names to your support contact.
+labels AORTA does not yet recognize, give the AORTA maintainer a scrubbed list
+of the relevant label names.
 
 ### Warning says this is a client-host snapshot
 

@@ -4,8 +4,8 @@ Capture a versioned, schema-stable snapshot of the trial environment so
 that cross-environment comparison becomes a `jq` diff instead of a
 multi-day investigation.
 
-For a Buck2 customer handoff, including the required client/workload snapshot
-pair, see [Buck2 Customer Instructions](buck2-env-probe-customer.md).
+For Buck2 workloads, including the required client/workload snapshot pair, see
+[Buck2 Env Probe](buck2-env-probe.md).
 
 The same code path is used three ways:
 
