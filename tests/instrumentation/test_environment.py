@@ -280,6 +280,7 @@ REQUIRED_TOP_KEYS = {
     "rocfft_catalog",
     "triton",
     "fbgemm",
+    "torchrec",
     "aiter",
     "aotriton",
     "miopen",
@@ -429,6 +430,10 @@ def _example_snapshot(**overrides) -> object:
             "commit": None,
             "pytorch_use_fbgemm": True,
             "pytorch_use_fbgemm_genai": True,
+        },
+        "torchrec": {
+            "package_version": "1.4.0",
+            "commit": None,
         },
         "aiter": {
             "package_version": None,
@@ -3651,6 +3656,7 @@ class TestEnvVars:
             "HSA_KERNARG_POOL_SIZE",
             "HSA_NO_SCRATCH_RECLAIM",
             "HSA_OVERRIDE_GFX_VERSION",
+            "HSA_TOOLS_DISABLE_REGISTER",
             # GPU queue / codegen / build target
             "GPU_MAX_HW_QUEUES",
             "AMDGCN_USE_BUFFER_OPS",
@@ -3715,6 +3721,22 @@ class TestEnvVars:
             # PyTorch / inductor
             "TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE",
             "PYTORCH_CUDA_ALLOC_CONF",
+            # Dynamic loader
+            "LD_LIBRARY_PATH",
+            # hipBLASLt / rocBLAS / Tensile GEMM numeric + kernel-path selection
+            # (MI350X recom-repro NaN escalation). Logging-only knobs excluded.
+            "HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32",
+            "HIPBLASLT_TENSILE_LIBPATH",
+            "HIPBLASLT_USE_ROCROLLER",
+            "HIPBLASLT_ROCROLLER_NO_CUSTOM_KERNEL",
+            "HIPBLASLT_TUNING_OVERRIDE_FILE",
+            "ROCBLAS_USE_HIPBLASLT",
+            "ROCBLAS_TENSILE_LIBPATH",
+            "ROCBLAS_DEFAULT_ATOMICS_MODE",
+            "ROCBLAS_INTERNAL_FP16_ALT_IMPL",
+            "ROCBLAS_INTERNAL_FP16_ALT_IMPL_RNZ",
+            "ROCBLAS_STREAM_ORDER_ALLOC",
+            "TENSILE_SOLUTION_INDEX",
         }
 
 
@@ -5097,6 +5119,57 @@ class TestTritonBlock:
             "commit": "a272dfa8",
         }
         assert reasons == []
+
+
+# ---------------------------------------------------------------------------
+# TorchRec package identity (schema 1.14)
+# ---------------------------------------------------------------------------
+
+
+class TestTorchrec:
+    def test_torchrec_absent_is_suppressed_no_reason(self, monkeypatch):
+        """A missing torchrec is the documented common case (non-recsys
+        installs lack it) -> no partial reason, mirroring fbgemm_gpu/aiter."""
+        import importlib.metadata as md
+
+        def fake_version(name):
+            raise md.PackageNotFoundError(name)
+
+        monkeypatch.setattr(md, "version", fake_version)
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": None, "commit": None}
+        assert reasons == []
+
+    def test_torchrec_release_wheel_has_no_commit(self, monkeypatch):
+        import importlib.metadata as md
+
+        monkeypatch.setattr(md, "version", lambda name: "1.4.0")
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": "1.4.0", "commit": None}
+        assert reasons == []
+
+    def test_torchrec_dev_build_extracts_commit(self, monkeypatch):
+        import importlib.metadata as md
+
+        monkeypatch.setattr(md, "version", lambda name: "1.5.0.dev0+g0123abc")
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": "1.5.0.dev0+g0123abc", "commit": "0123abc"}
+        assert reasons == []
+
+    def test_torchrec_metadata_error_records_reason(self, monkeypatch):
+        import importlib.metadata as md
+
+        def boom(name):
+            raise RuntimeError("broken dist-info")
+
+        monkeypatch.setattr(md, "version", boom)
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": None, "commit": None}
+        assert any("torchrec" in r for r in reasons)
 
 
 # ---------------------------------------------------------------------------

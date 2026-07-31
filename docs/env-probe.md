@@ -244,7 +244,7 @@ when the output directory/file cannot be created or validated.
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.13"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.14"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
@@ -265,6 +265,7 @@ when the output directory/file cannot be created or validated.
 | `miopen_catalog` | `dict` | reuses the `miopen` capture + a per-file enumeration of the MIOpen db dir (`share/miopen/db/`) | **Recipe book for MIOpen's convolution databases** -- same scoping as `tensile_catalog`. `doc` + `status`, the reused `package_version`/`lib_hash`/`kernel_db_revision` (no regression), `db_dir` + `db_dir_source` (`default` or `MIOPEN_SYSTEM_DB_PATH`), `env_overrides`, and a `menu`. `logic_file_count` counts the selectable DBs (`.kdb`/`.fdb.txt`/`.db.txt`/`.db`); `.ktn.model`/`.tn.model` heuristic models are catalog members but not logic. **`menu.files` is `null` by default (compact mode)** — same size rationale as `tensile_catalog`; use `aorta env probe --extended` to retain the per-file list. Added in schema 1.9 (issue #54 follow-up); compact default added in schema 1.10. |
 | `rocfft_catalog` | `dict` | optional `rocfft_kernel_cache.db` under `$ROCFFT_RTC_SYS_CACHE_PATH` or `/opt/rocm/lib/[rocfft/]` | Fingerprint of rocFFT's **optional** AOT kernel cache -- the READ-ONLY system cache, not the read-write runtime user cache. rocFFT usually compiles at runtime, so absence is normal: a *probed* "no cache" result is `status:"absent"` with **no** partial reason. (The default/backfill/disaster shape is `status:"partial"` with a "not captured" reason instead, so a snapshot that never probed is distinguishable from one that probed and found nothing.) `doc` + `status` (`ok`/`absent`/`partial`) + `env_overrides` (both `ROCFFT_RTC_SYS_CACHE_PATH` -- the override this catalog actually resolves against -- and `ROCFFT_RTC_CACHE_PATH`, recorded for visibility only since it names the mutable, workload-dependent user cache, not installed identity; both recorded even when no cache is found so a configured-but-empty override is visible) + `kernel_cache` (`present`, `path`, `source`, `size`, `sha256`, `reason`). Added in schema 1.9 (issue #54 follow-up). |
 | `triton` | `dict` | `import triton; triton.__version__` (+ commit parse) | `package_version`, `commit` (schema 1.8). ROCm Triton fork bakes the source commit into `__version__` (e.g. `3.5.1+rocm7.2.1.gita272dfa8` -> `commit: "a272dfa8"`); fb builds versioned `+fb` carry no SHA -> `commit: null`. |
+| `torchrec` | `dict` | `importlib.metadata.version("torchrec")` (+ commit parse from the version string) | `package_version`, `commit` (schema 1.14). TorchRec is the sharded-embedding / training-pipeline library layered on top of fbgemm and is the core library of the recom-repro workload; release wheels (e.g. `1.4.0`) carry no SHA so `commit` is usually `null`. Read from distribution metadata (NOT `import torchrec`, which would pull in torch/fbgemm and can touch CUDA on import). Absence is suppressed like `fbgemm_gpu`/`aiter`. |
 | `fbgemm` | `dict` | optional `import fbgemm_gpu` (+ commit parse) + parse of `torch.__config__.show()` for `-DUSE_FBGEMM*` defines | `package_version`, `commit` (schema 1.8 -- best-effort git SHA from a setuptools_scm `+g<sha>` local-version segment or a `git_version`/`__commit__` module attr; `null` when fbgemm_gpu is vendored-in-torch rather than separately installed, or carries no SHA), `pytorch_use_fbgemm`, `pytorch_use_fbgemm_genai`. The two booleans capture the build-time decision baked into the PyTorch wheel even when `fbgemm_gpu` isn't a separate pip package. |
 | `aiter` | `dict` | `import aiter; aiter.__version__` + `importlib.metadata.version("amd_aiter" \| "aiter")` + scan of `aiter_meta/hsa/<gfx>/` (or `$AORTA_PYTORCH_SRC/third_party/aiter/hsa/`) | `package_version`, `package_dist_name` (which PyPI dist matched: `amd_aiter` is the canonical AMD-internal ROCm/PyTorch image dist; `aiter` is the upstream name), `commit` (parsed from the setuptools_scm `+g<sha>` local-version segment, matches the image tag's `aiter-<sha>` label), `hsa_tree` (issue #176 -- per-arch fingerprint of pre-built `.co` kernel binaries: file_count, co_count, deterministic combined_sha256). Most installs record `null` for everything; absence is silent. |
 | `aotriton` | `dict` | scan of `<torch>/lib/libaotriton_v2.so*` filenames + `sha256` of the resolved file + presence of `<torch>/lib/aotriton.images/` + `$AOTRITON_INSTALLED_PREFIX` | Default ROCm Flash Attention backend. Bundled in the wheel via `cmake/External/aotriton.cmake` (NOT a `third_party/` git submodule). Fields: `bundled_present`, `bundled_version`, `bundled_lib_hash`, `bundled_images_dir_present`, `installed_prefix`. CK is the alternative backend (toggled via `TORCH_ROCM_FA_PREFER_CK=1`). |
@@ -463,7 +464,31 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.13` (current)
+### `1.14` (current)
+
+Recsys-stack package identity + recom-NaN environment knobs. Additive — one
+new top-level block plus new `env_vars` entries; older snapshots and direct
+constructors remain compatible.
+
+* New top-level **`torchrec`** block `{package_version, commit}`, defaulted so
+  older snapshots round-trip. TorchRec is the sharded-embedding / training-
+  pipeline library layered on the already-captured fbgemm and is the core
+  library of the MI350X recom-repro workload, so its version is load-bearing
+  for that escalation. Same shape and fail-soft contract as `triton`.
+* Expanded **`CANONICAL_ENV_VARS`** with the hipBLASLt / rocBLAS / Tensile GEMM
+  numeric + kernel-path knobs that flip *which* library, *which* kernels, and
+  (for xf32/TF32) the numeric path itself run the GEMMs:
+  `HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32`, `ROCBLAS_USE_HIPBLASLT`,
+  `HIPBLASLT_TENSILE_LIBPATH`, `ROCBLAS_TENSILE_LIBPATH`,
+  `HIPBLASLT_USE_ROCROLLER` (+ `HIPBLASLT_ROCROLLER_NO_CUSTOM_KERNEL`),
+  `HIPBLASLT_TUNING_OVERRIDE_FILE`, `ROCBLAS_DEFAULT_ATOMICS_MODE`,
+  `ROCBLAS_INTERNAL_FP16_ALT_IMPL` (+ `_RNZ`), `ROCBLAS_STREAM_ORDER_ALLOC`,
+  and `TENSILE_SOLUTION_INDEX`; plus `HSA_TOOLS_DISABLE_REGISTER` and
+  `LD_LIBRARY_PATH` (which `.so` actually loads). Logging-only knobs
+  (`HIPBLASLT_LOG_*`, `ROCBLAS_LAYER`, `TENSILE_DB`, `*_CHECK_NUMERICS`) were
+  deliberately excluded — they don't change the computed result.
+
+### `1.13`
 
 Buck configured-graph invocation provenance. Additive — one new top-level
 block, defaulted so older snapshots and direct constructors remain compatible.
