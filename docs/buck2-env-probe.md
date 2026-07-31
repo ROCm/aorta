@@ -104,11 +104,12 @@ Add only AORTA's library to the existing application rule. Keep its current
 rule macro, name, `main`/`main_function`, torch target, and all other
 dependencies unchanged:
 
-```python
+```diff
 # Inside the existing python_binary(...) or repository-specific Python macro:
 deps = [
-    # Keep every existing dependency.
-    "<AORTA_CELL>//:aorta_lib",
+    "<EXISTING_APPLICATION_DEPENDENCY>",
+    "<EXISTING_TORCH_TARGET>",
++   "<AORTA_CELL>//:aorta_lib",
 ]
 ```
 
@@ -127,7 +128,11 @@ def main():
         # One local-rank-0 process writes per node. {rank} makes filenames
         # unique across nodes; on a single process it resolves to rank 0.
         rank = os.environ.get("RANK", "0")
-        if os.environ.get("LOCAL_RANK", "0") == "0":
+        local_rank = os.environ.get("LOCAL_RANK")
+        is_node_writer = (
+            local_rank == "0" if local_rank is not None else rank == "0"
+        )
+        if is_node_writer:
             capture_to(
                 output.format(rank=rank),
                 probe_invocation=os.environ.get(
@@ -186,15 +191,14 @@ Run the validator included with the same AORTA checkout:
 
 ```bash
 python3 <AORTA_CHECKOUT>/scripts/validate_buck_env_pair.py \
-  --require-library rccl \
-  --require-library hipblaslt \
   env.buck-client.json \
   env.workload.rank0.json
 ```
 
-The validator always requires the PyTorch Buck identity. Keep only the
-additional `--require-library` lines for libraries the workload is expected to
-use. For a multi-node capture, rerun the validator for every workload file.
+The validator always requires the PyTorch Buck identity. For libraries the
+workload is expected to use, add optional checks before the two filenames, for
+example `--require-library rccl` or `--require-library hipblaslt`. For a
+multi-node capture, rerun the validator for every workload file.
 
 A file labeled `buck2_action` must contain detected isolation evidence. If
 your repository proves placement through separate `what-ran` evidence, add

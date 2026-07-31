@@ -43,12 +43,19 @@ visible to both and set it as `SHARED_ROOT`:
 ```bash
 SHARED_ROOT="/shared/aorta-support"
 mkdir -p "$SHARED_ROOT/bin"
-command -v zstd >/dev/null || {
-  echo "Install the zstd package before continuing."
-  exit 1
-}
-zstd -d /path/to/downloaded/buck2-<target>.zst \
-  -o "$SHARED_ROOT/bin/buck2"
+BUCK2_DOWNLOAD="/path/to/downloaded/buck2-or-buck2.zst"
+case "$BUCK2_DOWNLOAD" in
+  *.zst)
+    command -v zstd >/dev/null || {
+      echo "Install the zstd package before continuing."
+      exit 1
+    }
+    zstd -d "$BUCK2_DOWNLOAD" -o "$SHARED_ROOT/bin/buck2"
+    ;;
+  *)
+    install -m 0755 "$BUCK2_DOWNLOAD" "$SHARED_ROOT/bin/buck2"
+    ;;
+esac
 chmod 0755 "$SHARED_ROOT/bin/buck2"
 export PATH="$SHARED_ROOT/bin:$PATH"
 
