@@ -12,12 +12,12 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
 import torch
-import torch.distributed as dist
 
-from .config import ReproducerConfig, ReproducerResult
 from .compute import BaseCompute, create_compute
+from .config import ReproducerConfig, ReproducerResult
 
 log = logging.getLogger(__name__)
+_MAX_CORRUPTION_DETAILS = 256
 
 
 class BaseReproducer(ABC):
@@ -77,6 +77,7 @@ class BaseReproducer(ABC):
         # State
         self.in_verification_phase: bool = False
         self.corruption_details: List[Dict] = []
+        self.corruption_details_omitted: int = 0
 
         # Detector observability: a clean run is otherwise indistinguishable
         # from a no-op. Subclasses that do per-layer checksum verification
@@ -86,6 +87,15 @@ class BaseReproducer(ABC):
 
         # Dtype
         self.dtype = self._get_dtype()
+        self.effective_h2d_tensor_size: int = config.h2d_tensor_size
+
+    def _record_corruption_detail(self, detail: dict) -> None:
+        if len(self.corruption_details) < _MAX_CORRUPTION_DETAILS:
+            self.corruption_details.append(detail)
+        else:
+            self.corruption_details_omitted = (
+                getattr(self, "corruption_details_omitted", 0) + 1
+            )
 
     def _get_dtype(self) -> torch.dtype:
         """Get torch dtype from config string."""
@@ -143,30 +153,31 @@ class BaseReproducer(ABC):
         """
         cfg = self.config
         pin = cfg.pin_memory
+        size = self.effective_h2d_tensor_size
 
         # Always allocate current buffers
         self.batch_cpu = torch.empty(
-            cfg.h2d_tensor_size, dtype=self.dtype,
+            size, dtype=self.dtype,
             pin_memory=pin,
         )
         self.batch_gpu = torch.empty(
-            cfg.h2d_tensor_size, dtype=self.dtype, device="cuda",
+            size, dtype=self.dtype, device="cuda",
         )
 
         if cfg.h2d_prefetch:
             # Double-buffer: allocate next-batch buffers
             self._batch_cpu_next = torch.empty(
-                cfg.h2d_tensor_size, dtype=self.dtype,
+                size, dtype=self.dtype,
                 pin_memory=pin,
             )
             self._batch_gpu_next = torch.empty(
-                cfg.h2d_tensor_size, dtype=self.dtype, device="cuda",
+                size, dtype=self.dtype, device="cuda",
             )
             log.info(
-                f"H2D: double-buffered (prefetch) mode, size={cfg.h2d_tensor_size}"
+                f"H2D: double-buffered (prefetch) mode, size={size}"
             )
         else:
-            log.info(f"H2D: single-buffered mode, size={cfg.h2d_tensor_size}")
+            log.info(f"H2D: single-buffered mode, size={size}")
 
     def _setup_compute(self) -> None:
         """Setup compute simulator if enabled."""
@@ -183,9 +194,11 @@ class BaseReproducer(ABC):
         if self.config.h2d_tensor_size < min_h2d_size:
             log.warning(
                 f"h2d_tensor_size ({self.config.h2d_tensor_size}) < {dim}² ({min_h2d_size}). "
-                f"Increasing to {min_h2d_size} for compute simulation."
+                f"Using effective size {min_h2d_size} for compute simulation."
             )
-            self.config.h2d_tensor_size = min_h2d_size
+            self.effective_h2d_tensor_size = min_h2d_size
+        else:
+            self.effective_h2d_tensor_size = self.config.h2d_tensor_size
 
         requires_grad = self.config.optimizer.lower() != "none"
         self.compute = create_compute(
@@ -273,7 +286,9 @@ class BaseReproducer(ABC):
 
         log.info(
             f"Reproducer setup complete: mode={self.config.mode}, rank={self.rank}, "
-            f"world_size={self.world_size}, h2d_size={self.config.h2d_tensor_size}, "
+            f"world_size={self.world_size}, "
+            f"h2d_size={self.effective_h2d_tensor_size}, "
+            f"h2d_size_declared={self.config.h2d_tensor_size}, "
             f"h2d_prefetch={self.config.h2d_prefetch}, "
             f"dtype={self.config.dtype}, optimizer={self.config.optimizer}"
         )
@@ -405,7 +420,7 @@ class BaseReproducer(ABC):
                 f"H2D CORRUPTION (RUNTIME BUG!): iter={iteration} rank={self.rank} "
                 f"expected={expected} actual={actual}"
             )
-            self.corruption_details.append({
+            self._record_corruption_detail({
                 "type": "h2d",
                 "iteration": iteration,
                 "rank": self.rank,
@@ -554,6 +569,13 @@ class BaseReproducer(ABC):
             eff_ffn_size=getattr(self, "eff_ffn_size", None),
             eff_seq_len=getattr(self, "eff_seq_len", None),
             eff_batch_size=getattr(self, "eff_batch_size", None),
+            effective_h2d_tensor_size=self.effective_h2d_tensor_size,
+            reduce_scatter_oracle_dtype=getattr(
+                self,
+                "reduce_scatter_oracle_dtype",
+                None,
+            ),
+            corruption_details_omitted=self.corruption_details_omitted,
         )
 
 

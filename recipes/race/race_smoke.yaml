@@ -8,7 +8,7 @@
 #
 # Works on any fabric: NVLink (single node), InfiniBand, AINIC (Pollara RoCEv2),
 # or SHM. RCCL auto-negotiates the best transport for the hardware it finds.
-# For AINIC-specific GDR path validation use recipes/ainic-smoke.yaml instead.
+# For AINIC-specific GDR path validation use recipes/race/ainic-smoke.yaml instead.
 #
 # What a green smoke run proves (check metrics in the trial JSON / matrix.json):
 #   compute_type == transformer        (real transformer path, not GEMM fallback)
@@ -18,12 +18,12 @@
 #   exit_status == ok, passed == true  (collectives + verify completed)
 #
 # Run (same command on every rank, one rank per GPU):
-#   aorta sweep run --recipe recipes/race_smoke.yaml
+#   aorta sweep run --recipe recipes/race/race_smoke.yaml
 # Read:
 #   cat triage_results/RACE-SMOKE/race/*/matrix.md
 #
 # NOTE: this is a sanity check, not a reproduction attempt -- too small/short to
-# meaningfully exercise SDC. Use ainic-gdr-flush-sdc.yaml for the full matrix.
+# meaningfully exercise SDC. Use recipes/race/ainic-gdr-flush-sdc.yaml for the full matrix.
 # Minimum 2 ranks required (min_world_size=2 in the race workload).
 
 schema_version: 1
@@ -43,6 +43,7 @@ workload_config:
   verify_iterations: 5
   stop_on_first_corruption: false
   log_interval: 1
+  # Model/H2D/all-gather dtype; reduce-scatter correctness oracle is FP32.
   dtype: bfloat16
 
   # Smaller shard + model than the full recipe so the smoke run is fast while

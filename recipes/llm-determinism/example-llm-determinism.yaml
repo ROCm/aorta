@@ -13,17 +13,16 @@
 #
 # Each cell writes its own capture_dir, so results don't collide.
 #
-# Note on per-cell step times: cells run sequentially in one process and
-# the first cell absorbs FSDP2 / RCCL / hipBLAS warmup, so its step time
-# is typically much higher than later cells. Don't read warmup as a
-# determinism signal — the per-rank checksum compare is what proves
-# replayability.
+# Fresh-process isolation keeps TF32/process-global state independent between
+# cells. Each trial pays its own FSDP2/RCCL/hipBLAS startup cost, so compare
+# checksums rather than startup-dominated wall time.
 # `steps` is a first-class recipe field — the loader rejects it inside
 # workload_config (the dispatcher would silently clobber it otherwise).
 schema_version: 1
 
 ticket: LLM-DET-001
 workload: llm_determinism
+trial_isolation: process
 
 trials: 1
 steps: 1

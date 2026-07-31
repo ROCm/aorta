@@ -34,15 +34,18 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
+from types import CodeType
 from typing import Any, Literal
 
 import click
@@ -51,6 +54,13 @@ from aorta.instrumentation.environment import EnvSnapshot, collect_env
 from aorta.registry import get_environment, get_mitigation
 from aorta.registry.errors import RegistryError
 from aorta.run import RunRequest, TrialResult, run_trials
+from aorta.run._process import TrialWorkerError
+from aorta.run.discovery import UnknownWorkloadError, get_workload_policy
+from aorta.run.dispatcher import _validate_json_native
+from aorta.run.validation import (
+    IN_PROCESS_ONLY_POLICY,
+    resolve_trial_isolation_policy,
+)
 from aorta.triage.confound import (
     classify_all,
     is_did_not_run_cell,
@@ -66,6 +76,7 @@ from aorta.triage.matrix import (
 )
 from aorta.triage.output import (
     PERF_REPORT_FILENAME,
+    _runtime_provenance,
     acquire_flat_resume_lock,
     format_run_summary,
     format_timestamp,
@@ -82,6 +93,76 @@ log = logging.getLogger(__name__)
 
 _INLINE_SIDECAR_NAME = "inline_environments.sidecar.json"
 _OPERATOR_SIDECAR_DIR = "sidecars"
+
+
+def _fingerprint_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("request fingerprint contains a non-finite float")
+        return value
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, re.Pattern):
+        return {
+            "regex": value.pattern,
+            "flags": value.flags,
+        }
+    if isinstance(value, CodeType):
+        return {
+            "code": value.co_code.hex(),
+            "consts": _fingerprint_value(value.co_consts),
+            "names": list(value.co_names),
+        }
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _fingerprint_value(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("request fingerprint mapping keys must be strings")
+        return {
+            key: _fingerprint_value(value[key])
+            for key in sorted(value)
+        }
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_fingerprint_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(item, sort_keys=True),
+        )
+    raise TypeError(
+        "request fingerprint contains unsupported "
+        f"{type(value).__name__}"
+    )
+
+
+def _request_fingerprint(payload: dict[str, Any]) -> str:
+    normalized = _fingerprint_value(payload)
+    encoded = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _sidecar_fingerprints(paths: tuple[Path, ...]) -> list[dict[str, str]]:
+    fingerprints: list[dict[str, str]] = []
+    for path in sorted(paths, key=lambda item: str(item)):
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            digest = "unreadable"
+        fingerprints.append({"name": path.name, "sha256": digest})
+    return fingerprints
 
 
 def _is_rank_zero() -> bool:
@@ -564,7 +645,9 @@ def _cells_dir(run_dir: Path) -> Path:
     return d
 
 
-_DISPATCHER_TRIAL_RE = re.compile(r"^trial_d\d+_m\d+_t(\d+)$")
+_DISPATCHER_TRIAL_RE = re.compile(
+    r"^trial_d(?P<dataset>\d+)_m(?P<mitigation>\d+)_t(?P<trial>\d+)$"
+)
 _LEGACY_TRIAL_RE = re.compile(r"^trial_(\d+)$")
 
 
@@ -597,7 +680,12 @@ def _collect_trial_paths(results_dir: Path) -> list[str]:
         stem = path.stem
         m = _DISPATCHER_TRIAL_RE.match(stem) or _LEGACY_TRIAL_RE.match(stem)
         if m is not None:
-            return (int(m.group(1)), "")
+            trial_group = (
+                m.group("trial")
+                if "trial" in m.groupdict()
+                else m.group(1)
+            )
+            return (int(trial_group), "")
         # Sentinel: push non-conforming names after every trial_N entry.
         return (10**12, str(path))
 
@@ -632,6 +720,8 @@ def _resume_stop_after_cell(
     cap: int,
     stop_after: Any,
     resolved_env_vars: dict[str, str],
+    expected_workload: str,
+    expected_request_fingerprint: str,
 ) -> tuple[list[TrialResult], None, dict[str, str], list[str], bool] | None:
     """Resume short-circuit for a ``stop_after`` cell (issue #232).
 
@@ -655,7 +745,11 @@ def _resume_stop_after_cell(
     if contiguous == 0:
         return None
 
-    hydrated_by_index = _hydrate_trials_by_index(_collect_trial_paths(cell_dir))
+    hydrated_by_index = _hydrate_trials_by_index(
+        _collect_trial_paths(cell_dir),
+        expected_workload=expected_workload,
+        expected_request_fingerprint=expected_request_fingerprint,
+    )
     required = set(range(contiguous))
     if not required.issubset(hydrated_by_index.keys()):
         # A complete-looking trial dir whose dispatcher JSON didn't
@@ -695,7 +789,14 @@ class _HydratedTrial:
     trial: TrialResult
 
 
-def _hydrate_trials_by_index(trial_paths: list[str]) -> dict[int, _HydratedTrial]:
+def _hydrate_trials_by_index(
+    trial_paths: list[str],
+    *,
+    expected_workload: str | None = None,
+    expected_dataset_index: int = 0,
+    expected_mitigation_index: int = 0,
+    expected_request_fingerprint: str | None = None,
+) -> dict[int, _HydratedTrial]:
     """Hydrate dispatcher ``trial_*.json`` files into an index-keyed map.
 
     Each entry appears in the returned dict iff ALL THREE of:
@@ -723,6 +824,7 @@ def _hydrate_trials_by_index(trial_paths: list[str]) -> dict[int, _HydratedTrial
     bearing invariant rather than the filename walk.
     """
     by_index: dict[int, _HydratedTrial] = {}
+    ambiguous_indices: set[int] = set()
     for raw in trial_paths:
         path = Path(raw)
         m = _DISPATCHER_TRIAL_RE.match(path.stem) or _LEGACY_TRIAL_RE.match(path.stem)
@@ -731,16 +833,77 @@ def _hydrate_trials_by_index(trial_paths: list[str]) -> dict[int, _HydratedTrial
             # ``_collect_trial_paths`` already shoves these to the
             # end of the sorted list.
             continue
-        index = int(m.group(1))
+        is_dispatcher_name = "trial" in m.groupdict()
+        index = int(m.group("trial") if is_dispatcher_name else m.group(1))
+        if is_dispatcher_name:
+            dataset_index = int(m.group("dataset"))
+            mitigation_index = int(m.group("mitigation"))
+            if (
+                dataset_index != expected_dataset_index
+                or mitigation_index != expected_mitigation_index
+            ):
+                log.warning(
+                    "resume: trial JSON %s coordinate mismatch "
+                    "(d%d/m%d != d%d/m%d)",
+                    path,
+                    dataset_index,
+                    mitigation_index,
+                    expected_dataset_index,
+                    expected_mitigation_index,
+                )
+                continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("resume: unreadable trial JSON %s (%s)", path, exc)
             continue
         try:
-            trial = TrialResult.from_dict(data)
+            trial = TrialResult.from_dict(data, strict=True)
         except (KeyError, TypeError, ValueError) as exc:
             log.warning("resume: trial JSON %s violates schema (%s)", path, exc)
+            continue
+        if expected_workload is not None and trial.workload != expected_workload:
+            log.warning(
+                "resume: trial JSON %s workload mismatch (%r != %r)",
+                path,
+                trial.workload,
+                expected_workload,
+            )
+            continue
+        identity_workload = expected_workload or trial.workload
+        expected_trial_id = (
+            f"{identity_workload}_d{expected_dataset_index}_"
+            f"m{expected_mitigation_index}_t{index}"
+        )
+        if trial.trial_id != expected_trial_id:
+            log.warning(
+                "resume: trial JSON %s identity mismatch (%r != %r)",
+                path,
+                trial.trial_id,
+                expected_trial_id,
+            )
+            continue
+        if (
+            expected_request_fingerprint is not None
+            and trial.request_fingerprint != expected_request_fingerprint
+        ):
+            log.warning(
+                "resume: trial JSON %s request fingerprint mismatch",
+                path,
+            )
+            continue
+        if index in ambiguous_indices:
+            continue
+        if index in by_index:
+            log.warning(
+                "resume: duplicate trial index %d in %s and %s; "
+                "refusing ambiguous artifacts",
+                index,
+                by_index[index].path,
+                path,
+            )
+            by_index.pop(index)
+            ambiguous_indices.add(index)
             continue
         by_index[index] = _HydratedTrial(index=index, path=raw, trial=trial)
     return by_index
@@ -923,6 +1086,42 @@ def _iters_for_log(trials: list[TrialResult]) -> str:
     return f"{lo}/{cfg_value}" if lo == hi else f"{lo}..{hi}/{cfg_value}"
 
 
+def _build_probe_extras_payload(
+    recipe: Recipe,
+    cell: Any,
+    resolved_env_vars: dict[str, str],
+    subprocess_argv: tuple[str, ...] | None,
+) -> dict[str, Any] | None:
+    probe_extras = recipe.probe_extras
+    if subprocess_argv is None or probe_extras is None:
+        return None
+    payload: dict[str, Any] = {
+        "cell_name": cell.name,
+        "env_passthrough_mode": probe_extras.env_passthrough_mode,
+        "timeout_per_trial": probe_extras.timeout_per_trial,
+        "cell_env_vars": dict(resolved_env_vars),
+        "step_time_regex": probe_extras.step_time_regex,
+        "collect_paths": list(probe_extras.collect_paths),
+        "custom_patterns": tuple(probe_extras.custom_patterns),
+        "hang_window_sec": probe_extras.hang_window_sec,
+        "hang_grace_period_at_start": (
+            probe_extras.hang_grace_period_at_start
+        ),
+        "tier3_vram_growth": probe_extras.tier3_vram_growth,
+        "disable_detectors": tuple(probe_extras.disable_detectors),
+        "disable_detector_tiers": tuple(
+            probe_extras.disable_detector_tiers
+        ),
+    }
+    if probe_extras.retain is not None:
+        payload["retain"] = {
+            "on_fail": probe_extras.retain.on_fail,
+            "on_pass": probe_extras.retain.on_pass,
+            "on_error": probe_extras.retain.on_error,
+        }
+    return payload
+
+
 def _run_one_cell(
     cell,
     recipe: Recipe,
@@ -985,6 +1184,47 @@ def _run_one_cell(
     # Without it, ``cap == effective_trials`` and behaviour is unchanged.
     stop_after = recipe.stop_after
     cap = stop_after.max_trials if stop_after is not None else effective_trials
+    merged_workload_config = {
+        **recipe.workload_config,
+        **cell.workload_config,
+    }
+    probe_extras_payload = _build_probe_extras_payload(
+        recipe,
+        cell,
+        resolved_env_vars,
+        subprocess_argv,
+    )
+    save_logs = recipe.save_logs or (subprocess_argv is not None)
+    effective_steps = cell.effective_steps(recipe.steps)
+    effective_collect = tuple(cell.effective_collect(recipe.collect))
+    effective_collect_options = dict(
+        cell.effective_collect_options(recipe.collect_options)
+    )
+    fingerprint_environment = get_environment(
+        cell.environment,
+        extra_files=(list(sidecar_files) if sidecar_files else None),
+    )
+    request_fingerprint = _request_fingerprint({
+        "fingerprint_version": 1,
+        "workload": recipe.workload,
+        "cell_name": cell.name,
+        "environment": cell.environment,
+        "environment_descriptor": fingerprint_environment,
+        "mitigations": list(cell.mitigations),
+        "extra_env": merged_extra_env,
+        "resolved_env_vars": resolved_env_vars,
+        "trial_isolation": recipe.trial_isolation,
+        "steps": effective_steps,
+        "workload_config": merged_workload_config,
+        "save_logs": save_logs,
+        "subprocess_argv": subprocess_argv,
+        "probe_extras": probe_extras_payload,
+        "collect": effective_collect,
+        "collect_options": effective_collect_options,
+        "env_probe_enabled": env_probe is not None,
+        "sidecars": _sidecar_fingerprints(sidecar_files),
+        "runtime_provenance": _runtime_provenance(),
+    })
 
     # Resume short-circuit: if every trial directory under this cell
     # carries a valid result.json + non-empty verdict, the cell is
@@ -1009,7 +1249,13 @@ def _run_one_cell(
         # fall through to a full re-run (the dispatcher will itself stop
         # early, so re-running is bounded by ``cap``).
         resumed_result = _resume_stop_after_cell(
-            cell, cell_dir, cap, stop_after, resolved_env_vars
+            cell,
+            cell_dir,
+            cap,
+            stop_after,
+            resolved_env_vars,
+            recipe.workload,
+            request_fingerprint,
         )
         if resumed_result is not None:
             return resumed_result
@@ -1031,7 +1277,11 @@ def _run_one_cell(
             # filename-set-based validation would have admitted it.
             # See ``_hydrate_trials_by_index`` for the failure modes
             # silently dropped on the floor.
-            hydrated_by_index = _hydrate_trials_by_index(trial_paths)
+            hydrated_by_index = _hydrate_trials_by_index(
+                trial_paths,
+                expected_workload=recipe.workload,
+                expected_request_fingerprint=request_fingerprint,
+            )
             required_indices = set(range(effective_trials))
             if required_indices.issubset(hydrated_by_index.keys()):
                 # Build the canonical (hydrated, trial_paths) pair from
@@ -1070,69 +1320,16 @@ def _run_one_cell(
                 sorted(hydrated_by_index.keys()),
             )
 
-    # Recipe-scope workload_config is the base; cell-scope merges over it so
-    # the cell wins on key collision and non-collision keys union. Empty
-    # dicts on both sides collapse to ``{}``, which RunRequest.__post_init__
-    # deep-copies and the dispatcher spreads into ``config`` -- so omitting
-    # workload_config from the recipe stays byte-equivalent to today.
-    merged_workload_config = {**recipe.workload_config, **cell.workload_config}
-
-    # Probe-mode extras delivered to ``SubprocessWorkload`` via the
-    # typed ``RunRequest.probe_extras`` field. The runner is the only
-    # producer of this dict; ``SubprocessWorkload`` reads it from the
-    # ``_aorta_probe_extras`` slot the dispatcher injects.
-    probe_extras_payload: dict[str, Any] | None = None
-    probe_extras = recipe.probe_extras
-    if subprocess_argv is not None and probe_extras is not None:
-        probe_extras_payload = {
-            "cell_name": cell.name,
-            "env_passthrough_mode": probe_extras.env_passthrough_mode,
-            "timeout_per_trial": probe_extras.timeout_per_trial,
-            "cell_env_vars": dict(resolved_env_vars),
-            "step_time_regex": probe_extras.step_time_regex,
-            "collect_paths": list(probe_extras.collect_paths),
-            # Phase 2 (issue #188): pre-compiled custom_patterns and
-            # hang knobs forwarded to SubprocessWorkload. The
-            # compiled CompiledPattern objects ride as a tuple --
-            # ``RunRequest.__post_init__`` deep-copies the dict
-            # (and therefore traverses this tuple), but the
-            # CompiledPattern fields are all treated as immutable
-            # post-compile (re.Pattern, CodeType, str, bool) so the
-            # traversal is benign: nothing the dispatcher hands to
-            # the workload can be mutated from outside RunRequest.
-            "custom_patterns": tuple(probe_extras.custom_patterns),
-            "hang_window_sec": probe_extras.hang_window_sec,
-            "hang_grace_period_at_start": probe_extras.hang_grace_period_at_start,
-            "tier3_vram_growth": probe_extras.tier3_vram_growth,
-            # Issue #229: operator detector-disable knobs threaded to the
-            # workload so the classifier can skip them per trial.
-            "disable_detectors": tuple(probe_extras.disable_detectors),
-            "disable_detector_tiers": tuple(probe_extras.disable_detector_tiers),
-        }
-        # Issue #231: verdict-keyed artifact retention. Forwarded as a plain
-        # verdict->level mapping so SubprocessWorkload needn't import the
-        # RetainPolicy type; absent (None) when the recipe omits ``retain``,
-        # which the workload treats as keep-everything.
-        if probe_extras.retain is not None:
-            probe_extras_payload["retain"] = {
-                "on_fail": probe_extras.retain.on_fail,
-                "on_pass": probe_extras.retain.on_pass,
-                "on_error": probe_extras.retain.on_error,
-            }
-
-    # save_logs is forced True for probe-mode cells because
-    # SubprocessWorkload reads ``_aorta_log_prefix`` to derive its
-    # per-trial directory; the dispatcher only injects that key when
-    # save_logs=True.
-    save_logs = recipe.save_logs or (subprocess_argv is not None)
-
     request = RunRequest(
         workload=recipe.workload,
         trials=cap,
         environment=cell.environment,
         mitigations=tuple(cell.mitigations),
         extra_env=merged_extra_env,
-        steps=cell.effective_steps(recipe.steps),
+        trial_isolation=recipe.trial_isolation,
+        cell_name=cell.name,
+        request_fingerprint=request_fingerprint,
+        steps=effective_steps,
         config_overrides=merged_workload_config,
         results_dir=cell_dir,
         sidecar_files=sidecar_files,
@@ -1140,14 +1337,45 @@ def _run_one_cell(
         subprocess_argv=subprocess_argv,
         probe_extras=probe_extras_payload,
         stop_after=stop_after,
-        collect=tuple(cell.effective_collect(recipe.collect)),
-        collect_options=dict(cell.effective_collect_options(recipe.collect_options)),
+        collect=effective_collect,
+        collect_options=effective_collect_options,
         env_probe=env_probe,
     )
 
     try:
         trials = run_trials(request)
+    except TrialWorkerError as exc:
+        try:
+            distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+        except ValueError:
+            distributed = False
+        if distributed:
+            raise
+        log.warning(
+            "cell %r isolated worker failed with %s: %s",
+            cell.name,
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        completed_trials = list(exc.completed_results)
+        return (
+            completed_trials,
+            f"{type(exc).__name__}: {exc}",
+            resolved_env_vars,
+            _collect_trial_paths(cell_dir),
+            False,
+        )
     except Exception as exc:
+        try:
+            distributed_process_trial = (
+                request.trial_isolation == "process"
+                and int(os.environ.get("WORLD_SIZE", "1")) > 1
+            )
+        except ValueError:
+            distributed_process_trial = False
+        if distributed_process_trial:
+            raise
         log.warning("cell %r failed with %s: %s", cell.name, type(exc).__name__, exc, exc_info=True)
         return [], f"{type(exc).__name__}: {exc}", resolved_env_vars, [], False
 
@@ -1179,6 +1407,37 @@ def _preflight_validate(recipe: Recipe) -> None:
     """
     _check_env_slug_collisions(recipe.cells)
     resolve_baseline(recipe.cells, recipe.confound.baseline_cell)
+
+
+def _resolve_recipe_trial_isolation(recipe: Recipe) -> Recipe:
+    requested = recipe.trial_isolation
+    try:
+        policy = get_workload_policy(recipe.workload)
+    except UnknownWorkloadError:
+        # Preserve the historical library/dry-run seam for synthetic workloads
+        # used with a patched run_trials implementation. Explicit process mode
+        # still requires registered opt-in metadata; real execution validates
+        # unknown auto workloads again in the dispatcher.
+        if requested != "auto":
+            raise
+        policy = IN_PROCESS_ONLY_POLICY
+    effective = resolve_trial_isolation_policy(
+        recipe.workload,
+        policy,
+        requested,
+    )
+    if effective == "process":
+        _validate_json_native(recipe.workload_config, "recipe.workload_config")
+        for cell in recipe.cells:
+            _validate_json_native(
+                cell.workload_config,
+                f"cell {cell.name!r}.workload_config",
+            )
+    return replace(
+        recipe,
+        trial_isolation=effective,
+        trial_isolation_requested=requested,
+    )
 
 
 def _print_dry_run(
@@ -1214,6 +1473,7 @@ def _print_dry_run(
         return
 
     click.echo(f"Dry run: {recipe.workload} / ticket={recipe.ticket or '(none)'}")
+    click.echo(f"Trial isolation: {recipe.trial_isolation}")
     if recipe.workload_config:
         click.echo(f"Recipe workload_config: {recipe.workload_config}")
     click.echo(f"Cells ({len(recipe.cells)}):")
@@ -1307,6 +1567,7 @@ def run_recipe(
     # real run would reject. Otherwise CI / pre-submit checks happily pass on
     # recipes that fail the moment they actually run.
     _preflight_validate(recipe)
+    recipe = _resolve_recipe_trial_isolation(recipe)
 
     if dry_run:
         _print_dry_run(recipe, subprocess_argv=subprocess_argv)
@@ -1681,6 +1942,12 @@ def _run_recipe_locked(
         run_timestamp=ts,
         layout=layout,
     )
+    resolved_recipe_path = run_dir / "recipe.resolved.yaml"
+    write_resolved_recipe(
+        resolved_recipe_path,
+        recipe=recipe,
+        sidecar_files=sidecar_files,
+    )
     write_matrix_json(
         run_dir / "matrix.json",
         recipe=recipe,
@@ -1690,6 +1957,7 @@ def _run_recipe_locked(
         run_timestamp=ts,
         warnings=warnings,
         sidecar_files=sidecar_files,
+        resolved_recipe_path=resolved_recipe_path,
     )
     write_perf_report(
         run_dir / PERF_REPORT_FILENAME,
@@ -1698,12 +1966,6 @@ def _run_recipe_locked(
         baseline=baseline_stats,
         run_timestamp=ts,
     )
-    write_resolved_recipe(
-        run_dir / "recipe.resolved.yaml",
-        recipe=recipe,
-        sidecar_files=sidecar_files,
-    )
-
     if operator_sidecar_paths:
         # Operator-supplied sidecars were snapshotted into the run dir so the
         # archived recipe.resolved.yaml + sidecar copies form a self-contained

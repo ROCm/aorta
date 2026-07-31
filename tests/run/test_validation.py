@@ -5,7 +5,13 @@ from unittest.mock import patch
 
 import pytest
 
-from aorta.run.validation import validate_launch_mode
+from aorta.run.validation import (
+    PROCESS_OPTIONAL_POLICY,
+    PROCESS_REQUIRED_POLICY,
+    resolve_trial_isolation,
+    resolve_trial_isolation_policy,
+    validate_launch_mode,
+)
 from aorta.workloads import Workload, WorkloadResult
 
 
@@ -46,6 +52,16 @@ class DistributedWorkload4(Workload):
 
     def run(self) -> WorkloadResult:
         return WorkloadResult(passed=True)
+
+
+class RequiredProcessWorkload(SingleProcessWorkload):
+    trial_isolation_default = "process"
+    trial_isolation_required = True
+    trial_isolation_supported = frozenset({"process"})
+
+
+class ProcessCapableWorkload(SingleProcessWorkload):
+    trial_isolation_supported = frozenset({"in_process", "process"})
 
 
 class TestSingleProcessValidation:
@@ -186,3 +202,57 @@ class TestErrorMessages:
             # Must steer users to the console script, not the non-runnable
             # `-m aorta run` form the message previously suggested.
             assert "$(which aorta) run" in error_msg
+
+
+class TestTrialIsolationValidation:
+    def test_auto_uses_workload_default(self):
+        assert resolve_trial_isolation(SingleProcessWorkload, "auto") == "in_process"
+        assert resolve_trial_isolation(RequiredProcessWorkload, "auto") == "process"
+
+    def test_recipe_can_strengthen_to_process(self):
+        assert resolve_trial_isolation(ProcessCapableWorkload, "process") == "process"
+
+    def test_workload_must_opt_in_to_process(self):
+        with pytest.raises(ValueError, match="does not support.*process"):
+            resolve_trial_isolation(SingleProcessWorkload, "process")
+
+    def test_required_workload_cannot_be_downgraded(self):
+        with pytest.raises(ValueError, match="requires.*process"):
+            resolve_trial_isolation(RequiredProcessWorkload, "in_process")
+
+    def test_side_effect_free_policy_resolves_auto(self):
+        assert (
+            resolve_trial_isolation_policy(
+                "required",
+                PROCESS_REQUIRED_POLICY,
+                "auto",
+            )
+            == "process"
+        )
+        assert (
+            resolve_trial_isolation_policy(
+                "optional",
+                PROCESS_OPTIONAL_POLICY,
+                "auto",
+            )
+            == "in_process"
+        )
+
+    @pytest.mark.parametrize("value", ["thread", "", 1])
+    def test_invalid_request_rejected(self, value):
+        with pytest.raises(ValueError, match="trial_isolation"):
+            resolve_trial_isolation(SingleProcessWorkload, value)
+
+    def test_malformed_plugin_metadata_rejected(self):
+        class BadWorkload(SingleProcessWorkload):
+            trial_isolation_default = "thread"
+
+        with pytest.raises(ValueError, match="invalid trial_isolation_default"):
+            resolve_trial_isolation(BadWorkload, "auto")
+
+    def test_invalid_distributed_result_scope_rejected(self):
+        class BadScopeWorkload(SingleProcessWorkload):
+            distributed_result_scope = "localish"
+
+        with pytest.raises(ValueError, match="distributed_result_scope"):
+            resolve_trial_isolation(BadScopeWorkload, "auto")

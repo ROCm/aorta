@@ -188,12 +188,30 @@ class _BlockHookManager:
         self._handles.clear()
 
 
+def _reported_passed(
+    local_fail: int,
+    global_fail: int,
+    *,
+    process_isolated: bool,
+) -> bool:
+    """Return the pass state expected by the active rank-aggregation path."""
+    # Fresh workers report rank-local outcomes; the worker runtime merges them
+    # after run() returns. Legacy in-process execution has no such merger, so it
+    # must retain the all-reduced global result.
+    effective_fail = local_fail if process_isolated else global_fail
+    return effective_fail == 0
+
+
 class LlmDeterminismWorkload(Workload):
     """Per-block deterministic replay on a single repeated transformer block."""
 
     name: ClassVar[str] = "llm_determinism"
     launch_mode: ClassVar[Literal["single_process", "distributed"]] = "distributed"
     min_world_size: ClassVar[int] = 1  # also runs single-rank for local dev.
+    trial_isolation_supported: ClassVar[frozenset[str]] = frozenset(
+        {"in_process", "process"}
+    )
+    distributed_result_scope: ClassVar[Literal["global", "rank_local"]] = "rank_local"
 
     def setup(self) -> None:
         if _IMPORT_ERROR is not None:
@@ -288,7 +306,13 @@ class LlmDeterminismWorkload(Workload):
             global_fail = int(t.item())
 
         elapsed = time.perf_counter() - t0
-        passed = global_fail == 0
+        passed = _reported_passed(
+            local_fail,
+            global_fail,
+            process_isolated=(
+                self.config.get("_aorta_trial_isolation") == "process"
+            ),
+        )
         metrics: dict[str, Any] = {
             "rank": self._rank,
             "world_size": self._world,
@@ -330,7 +354,10 @@ class LlmDeterminismWorkload(Workload):
         hooks = getattr(self, "_hooks", None)
         if hooks is not None:
             hooks.remove()
-        if dist.is_initialized():
+        if (
+            dist.is_initialized()
+            and self.config.get("_aorta_trial_isolation") != "process"
+        ):
             dist.barrier()
         # Process group teardown left to the launcher.
 

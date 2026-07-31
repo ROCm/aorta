@@ -372,7 +372,13 @@ def execute_triage_run(
         if _is_rank_zero():
             click.echo(f"Wrote matrix to {exc.run_dir}")
         raise click.ClickException(str(exc)) from exc
-    except (RegistryError, RecipeCellError, RecipeSchemaError) as exc:
+    except (
+        RegistryError,
+        RecipeCellError,
+        RecipeSchemaError,
+        ValueError,
+        RuntimeError,
+    ) as exc:
         raise click.ClickException(str(exc)) from exc
     # Under torchrun only rank 0 writes the matrix; non-zero ranks ran the
     # trials into a scratch dir that no longer exists, so they must not claim

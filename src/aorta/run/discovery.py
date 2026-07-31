@@ -8,9 +8,40 @@ Both public workloads (in aorta.workloads.*) and private workloads
 import importlib.metadata
 import logging
 
+from aorta.run.validation import (
+    IN_PROCESS_ONLY_POLICY,
+    IN_PROCESS_REQUIRED_POLICY,
+    PROCESS_OPTIONAL_POLICY,
+    PROCESS_REQUIRED_POLICY,
+    WorkloadIsolationPolicy,
+    race_startup_env,
+)
 from aorta.workloads import Workload
 
 logger = logging.getLogger(__name__)
+
+_WORKLOAD_GROUP = "aorta.workloads"
+_WORKLOAD_POLICY_GROUP = "aorta.workload_policies"
+_WORKLOAD_STARTUP_ENV_GROUP = "aorta.workload_startup_env"
+_POLICY_TARGETS: dict[str, WorkloadIsolationPolicy] = {
+    "aorta.run.validation:IN_PROCESS_ONLY_POLICY": IN_PROCESS_ONLY_POLICY,
+    "aorta.run.validation:IN_PROCESS_REQUIRED_POLICY": IN_PROCESS_REQUIRED_POLICY,
+    "aorta.run.validation:PROCESS_OPTIONAL_POLICY": PROCESS_OPTIONAL_POLICY,
+    "aorta.run.validation:PROCESS_REQUIRED_POLICY": PROCESS_REQUIRED_POLICY,
+}
+# Editable installs created before the policy entry-point group was added still
+# expose the workload targets. Keep built-ins correct without requiring a
+# reinstall; packaged releases use the explicit policy entries below.
+_BUILTIN_POLICY_BY_TARGET: dict[str, WorkloadIsolationPolicy] = {
+    "aorta.workloads._subprocess:SubprocessWorkload": IN_PROCESS_REQUIRED_POLICY,
+    "aorta.workloads.llm_determinism:LlmDeterminismWorkload": PROCESS_OPTIONAL_POLICY,
+    "aorta.workloads.race:RaceWorkload": PROCESS_REQUIRED_POLICY,
+}
+_RACE_WORKLOAD_TARGET = "aorta.workloads.race:RaceWorkload"
+
+
+class UnknownWorkloadError(ValueError):
+    """Raised when no installed workload entry point matches a name."""
 
 
 def discover_workloads() -> dict[str, type[Workload]]:
@@ -28,7 +59,7 @@ def discover_workloads() -> dict[str, type[Workload]]:
     # The project requires Python >= 3.10 (see pyproject.toml), so the
     # ``EntryPoints.select`` API is always available; the older 3.9
     # ``entry_points().get(...)`` form is intentionally not supported.
-    group = importlib.metadata.entry_points().select(group="aorta.workloads")
+    group = importlib.metadata.entry_points().select(group=_WORKLOAD_GROUP)
 
     for ep in group:
         try:
@@ -76,8 +107,101 @@ def get_workload_class(name: str) -> type[Workload]:
     workloads = discover_workloads()
     if name not in workloads:
         available = sorted(workloads.keys())
-        raise ValueError(f"Workload '{name}' not found. Available: {available}")
+        raise UnknownWorkloadError(
+            f"Workload '{name}' not found. Available: {available}"
+        )
     return workloads[name]
 
 
-__all__ = ["discover_workloads", "get_workload_class"]
+def get_workload_policy(name: str) -> WorkloadIsolationPolicy:
+    """Return isolation metadata without importing workload implementation code."""
+    catalog = importlib.metadata.entry_points()
+    workload_entries = list(catalog.select(group=_WORKLOAD_GROUP))
+    matches = [entry for entry in workload_entries if entry.name == name]
+    if not matches:
+        available = sorted({entry.name for entry in workload_entries})
+        raise UnknownWorkloadError(
+            f"Workload '{name}' not found. Available: {available}"
+        )
+
+    policy_entries = [
+        entry
+        for entry in catalog.select(group=_WORKLOAD_POLICY_GROUP)
+        # Test doubles written before this group existed often return their
+        # workload entries for every select() call. Real EntryPoint objects
+        # carry ``group``; filter explicitly so those doubles safely fall back.
+        if getattr(entry, "group", None) == _WORKLOAD_POLICY_GROUP
+        and entry.name == name
+    ]
+    if len(policy_entries) > 1:
+        raise ValueError(
+            f"Workload '{name}' has multiple {_WORKLOAD_POLICY_GROUP!r} entries"
+        )
+    if policy_entries:
+        target = policy_entries[0].value
+        try:
+            return _POLICY_TARGETS[target]
+        except KeyError as exc:
+            raise ValueError(
+                f"Workload '{name}' has unsupported isolation policy target "
+                f"{target!r}; expected one of {sorted(_POLICY_TARGETS)}"
+            ) from exc
+
+    workload_target = getattr(matches[-1], "value", None)
+    if isinstance(workload_target, str):
+        built_in = _BUILTIN_POLICY_BY_TARGET.get(workload_target)
+        if built_in is not None:
+            return built_in
+    return IN_PROCESS_ONLY_POLICY
+
+
+def get_workload_startup_env(
+    name: str,
+    config: dict[str, object],
+) -> dict[str, str]:
+    """Resolve built-in pre-import defaults without loading workload code."""
+    catalog = importlib.metadata.entry_points()
+    entries = catalog.select(group=_WORKLOAD_GROUP)
+    matches = [entry for entry in entries if entry.name == name]
+    if not matches:
+        raise UnknownWorkloadError(f"Workload '{name}' not found")
+    providers = [
+        entry
+        for entry in catalog.select(group=_WORKLOAD_STARTUP_ENV_GROUP)
+        if getattr(entry, "group", None) == _WORKLOAD_STARTUP_ENV_GROUP
+        and entry.name == name
+    ]
+    if len(providers) > 1:
+        raise ValueError(
+            f"Workload '{name}' has multiple "
+            f"{_WORKLOAD_STARTUP_ENV_GROUP!r} entries"
+        )
+    if providers:
+        provider = providers[0].load()
+        if not callable(provider):
+            raise ValueError(
+                f"Workload '{name}' startup environment provider is not callable"
+            )
+        result = provider(dict(config))
+        if not isinstance(result, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in result.items()
+        ):
+            raise ValueError(
+                f"Workload '{name}' startup environment provider must "
+                "return dict[str, str]"
+            )
+        return result
+    target = getattr(matches[-1], "value", None)
+    if target != _RACE_WORKLOAD_TARGET:
+        return {}
+    return race_startup_env(config)
+
+
+__all__ = [
+    "UnknownWorkloadError",
+    "discover_workloads",
+    "get_workload_class",
+    "get_workload_policy",
+    "get_workload_startup_env",
+]

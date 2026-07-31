@@ -34,6 +34,8 @@ from __future__ import annotations
 import contextlib
 import datetime as _dt
 import errno
+import hashlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -65,6 +67,123 @@ PERF_REPORT_FILENAME = "perf.md"
 # accepted by one but silently mishandled by the other would render wrong
 # ``Directory`` links). Mirrors the ``Literal`` on the public signatures.
 _VALID_LAYOUTS = ("timestamped", "flat_resume")
+
+
+def _valid_git_sha(value: str | None) -> str | None:
+    if value is None:
+        return None
+    candidate = value.strip()
+    if re.fullmatch(
+        r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+        candidate,
+    ):
+        return candidate.lower()
+    return None
+
+
+def _repository_git_sha(repo_root: Path | None = None) -> str | None:
+    root = repo_root or Path(__file__).resolve().parents[3]
+    dot_git = root / ".git"
+    try:
+        if dot_git.is_file():
+            marker = dot_git.read_text(encoding="utf-8").strip()
+            if not marker.startswith("gitdir:"):
+                return None
+            git_dir = Path(marker.split(":", 1)[1].strip())
+            if not git_dir.is_absolute():
+                git_dir = (root / git_dir).resolve()
+        elif dot_git.is_dir():
+            git_dir = dot_git
+        else:
+            return None
+
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        direct_sha = _valid_git_sha(head)
+        if direct_sha is not None:
+            return direct_sha
+        if not head.startswith("ref:"):
+            return None
+        ref = head.split(":", 1)[1].strip()
+        common_dir = git_dir
+        common_dir_marker = git_dir / "commondir"
+        if common_dir_marker.is_file():
+            common_dir = (
+                git_dir
+                / common_dir_marker.read_text(encoding="utf-8").strip()
+            ).resolve()
+        loose_ref = common_dir / ref
+        if loose_ref.is_file():
+            return _valid_git_sha(
+                loose_ref.read_text(encoding="utf-8").strip()
+            )
+        packed_refs = common_dir / "packed-refs"
+        if packed_refs.is_file():
+            for line in packed_refs.read_text(encoding="utf-8").splitlines():
+                if line.startswith(("#", "^")):
+                    continue
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref:
+                    return _valid_git_sha(parts[0])
+    except OSError:
+        return None
+    return None
+
+
+def _source_tree_sha256() -> str | None:
+    package_root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    try:
+        paths = sorted(
+            path
+            for path in package_root.rglob("*.py")
+            if "__pycache__" not in path.parts
+        )
+        for path in paths:
+            relative = path.relative_to(package_root).as_posix()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _git_dirty_from_env() -> bool | None:
+    raw = os.environ.get("AORTA_GIT_DIRTY")
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes"}:
+        return True
+    if normalized in {"0", "false", "no"}:
+        return False
+    return None
+
+
+def _runtime_provenance() -> dict[str, Any]:
+    try:
+        package_version = importlib.metadata.version("amd-aorta")
+    except importlib.metadata.PackageNotFoundError:
+        package_version = None
+    return {
+        "package_version": package_version,
+        "git_sha": (
+            _valid_git_sha(os.environ.get("AORTA_GIT_SHA"))
+            or _repository_git_sha()
+        ),
+        "git_dirty": _git_dirty_from_env(),
+        "source_tree_sha256": _source_tree_sha256(),
+    }
+
+
+def _file_sha256(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 # ``flat_resume`` lockfile name. Lives at ``<run_dir>/.aorta-probe.lock``; the
 # leading dot keeps it out of casual ``ls`` output and matches the convention
@@ -1059,6 +1178,7 @@ def write_matrix_json(
     run_timestamp: str,
     warnings: list[str],
     sidecar_files: tuple[Path, ...] | None = None,
+    resolved_recipe_path: Path | None = None,
 ) -> None:
     """Serialise the full per-cell matrix as JSON.
 
@@ -1073,6 +1193,10 @@ def write_matrix_json(
         "schema_version": 1,
         "workload": recipe.workload,
         "ticket": recipe.ticket,
+        "trial_isolation": recipe.trial_isolation,
+        "trial_isolation_requested": (
+            recipe.trial_isolation_requested or recipe.trial_isolation
+        ),
         # The per-cell trial budget. With a ``stop_after`` rule the budget is
         # the cap (``max_trials``) -- which cells may stop short of -- not the
         # fixed ``recipe.trials`` (often ``1`` on probe recipes), so report the
@@ -1106,7 +1230,9 @@ def write_matrix_json(
         "recipe_source": {
             "path": str(recipe.source_path) if recipe.source_path else None,
             "sha256": recipe.source_sha256,
+            "resolved_sha256": _file_sha256(resolved_recipe_path),
         },
+        "runtime_provenance": _runtime_provenance(),
         "cells": [],
     }
     for cell in cell_stats:
@@ -1394,6 +1520,8 @@ def write_resolved_recipe(
         "trials": recipe.trials,
         "steps": recipe.steps,
     }
+    if recipe.trial_isolation != "auto":
+        doc["trial_isolation"] = recipe.trial_isolation
     if recipe.ticket is not None:
         doc["ticket"] = recipe.ticket
     if recipe.workload_config:

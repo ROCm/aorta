@@ -25,7 +25,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -36,6 +36,8 @@ from aorta.registry import (
 )
 
 SCHEMA_VERSION = 1
+_TRIAL_ISOLATION_VALUES = frozenset({"auto", "in_process", "process"})
+TrialIsolationRequest = Literal["auto", "in_process", "process"]
 
 # Top-level keys accepted by the recipe loader regardless of ``mode``.
 # Two banks: triage-mode keys (the historical set, also accepted in
@@ -61,6 +63,7 @@ _TRIAGE_TOP_LEVEL = frozenset(
         # ``extra_env`` in precedence (see the dispatcher's effective-overlay
         # contract). Not a matrix axis.
         "extra_env",
+        "trial_isolation",
         # Issue #232: collect-until-N stopping rule (valid in both modes).
         "stop_after",
     }
@@ -468,6 +471,19 @@ class Recipe:
     # merge). Keyword-only keeps every existing positional constructor call
     # binding to the same fields it did before.
     extra_env: dict[str, str] = field(default_factory=dict, kw_only=True)
+    # Per-trial execution policy. ``auto`` resolves from workload metadata;
+    # ``process`` requests a fresh interpreter; ``in_process`` keeps the
+    # historical lifecycle when the workload does not require isolation.
+    # Keyword-only preserves positional Recipe constructors.
+    trial_isolation: TrialIsolationRequest = field(default="auto", kw_only=True)
+    # Runtime audit-only copy populated by the runner before resolving ``auto``.
+    # Not part of the YAML schema and never emitted into resolved recipes.
+    trial_isolation_requested: str | None = field(
+        default=None,
+        kw_only=True,
+        repr=False,
+        compare=False,
+    )
     # Issue #232: collect-until-N stopping rule applied per cell. ``None``
     # preserves the legacy fixed-``trials`` behaviour. When set, the cell
     # runs up to ``stop_after.max_trials`` trials, stopping early once
@@ -753,6 +769,17 @@ def _parse_str_str_mapping(path_hint: str, raw: Any) -> dict[str, str]:
             )
         out[k] = v
     return out
+
+
+def _parse_trial_isolation(raw: Any) -> TrialIsolationRequest:
+    if raw is None:
+        return "auto"
+    if not isinstance(raw, str) or raw not in _TRIAL_ISOLATION_VALUES:
+        raise RecipeSchemaError(
+            "recipe.trial_isolation: must be one of "
+            f"{sorted(_TRIAL_ISOLATION_VALUES)}, got {raw!r}"
+        )
+    return cast(TrialIsolationRequest, raw)
 
 
 def _parse_workload_config(path_hint: str, raw: Any) -> dict[str, Any]:
@@ -1270,6 +1297,7 @@ def _build_recipe(
     confound = _parse_confound("recipe", data.get("confound"))
     workload_config = _parse_workload_config("recipe", data.get("workload_config"))
     recipe_extra_env = _parse_str_str_mapping("recipe.extra_env", data.get("extra_env"))
+    trial_isolation = _parse_trial_isolation(data.get("trial_isolation"))
     stop_after = _parse_stop_after("recipe", data.get("stop_after"))
 
     raw_save_logs = data.get("save_logs", False)
@@ -1334,6 +1362,7 @@ def _build_recipe(
         collect=collect,
         collect_options=collect_options,
         extra_env=recipe_extra_env,
+        trial_isolation=trial_isolation,
         stop_after=stop_after,
     )
 
