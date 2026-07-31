@@ -116,14 +116,12 @@ Options:
                            stripped `target` and the raw
                            `configured_target`, schema 1.6). Ignored
                            if buck2 isn't on PATH.
-  --buck-mode-file PATH    Buck mode/flag file for the cquery
-                           (repeatable, ordered). A leading '@' is
-                           accepted but not required.
-  --buck-config KEY=VALUE  Buck -c config override for the cquery
-                           (repeatable, ordered). Only keys and an
-                           aggregate fingerprint are persisted.
-  --buck-modifier TEXT     Buck -m modifier for the cquery
-                           (repeatable, ordered).
+  --buck-option TYPE=VALUE Exact ordered Buck input: mode=VALUE,
+                           config=KEY=VALUE, or modifier=VALUE.
+                           Repeat in the workload command's order.
+  --buck-mode-file PATH    Grouped convenience form for mode files.
+  --buck-config KEY=VALUE  Grouped convenience form for -c values.
+  --buck-modifier TEXT     Grouped convenience form for -m values.
   --buck-default-context   Confirm that the target uses Buck's
                            default invocation context. Mutually
                            exclusive with the three explicit context
@@ -280,7 +278,7 @@ when the output directory/file cannot be created or validated.
 | `pytorch_version` | `str \| null` | optional `import torch` (no CUDA/HIP context init) | `null` when torch absent |
 | `pytorch_build` | `dict` | `torch.version.{git_version,hip,cuda,debug}` + install-kind detection + optional `git -C <src>/third_party/<sub> rev-parse HEAD` + parse of `torch.__config__.show()` + `nm -D libtorch_hip.so \| c++filt` symbol grep + scan of `<torch>/lib/` + parse of `<source>/build/CMakeCache.txt` + stream of `<source>/build/build.ninja` (modern `enable_language(HIP)` path) or walk of `<source>/build/**/<target>.dir/**/*.hip.o.cmake` (legacy `FindHIP.cmake` fallback) | `git_commit` is the linchpin -- pins every vendored submodule deterministically. Sub-blocks: `flags` (raw `build_settings`, `cxx_defines`, `cxx_flags_raw`, `cuda_flags_raw`, `gpu_arch_list`), `build_flags` (issue #170 stable 17-key parsed bool/str/None subset, with `CAFFE2_USE_MIOPEN` aliased to `USE_MIOPEN`), `binary_introspection` (`libtorch_hip_symbol_counts`, `torch_lib_bundled`, `cxx_flags_use_defines` -- pure facts, no ON/OFF inference), `cmake_cache` (source/editable installs only -- allowlisted entries from CMakeCache.txt), `ninja_hipcc` (source/editable installs only -- per-target HIPCC defines + codegen flags + offload archs; `_parser` discriminates the two parser strategies). See "PyTorch source-tree submodule probing" below. |
 | `build_system` | `dict` | `buck2 --version` + `buck2 root` + `hg id -i` / `git rev-parse HEAD` | Always present. `{"kind": "buck2", "buck2_version": str, "repo_root": str, "revision": str \| null}` when buck2 is on PATH AND we are demonstrably inside a Buck checkout (both `buck2 --version` and `buck2 root` succeed); `buck2_version` and `repo_root` are guaranteed populated, only `revision` may be `null`. `{"kind": "none"}` in every other case, including the dominant "buck2 is installed but cwd is not inside a Buck checkout" scenario. Added in schema 1.3 for issue #163 (A1.2a) so consumers can branch on Buck2 vs. system-package environments. See "Running inside a Buck environment" below. |
-| `buck_invocation` | `dict` | typed Buck context + bound `buck2 cquery 'deps(%s)' <target> --json` | Schema 1.13, always present. `status` distinguishes `not_requested`, `buck_not_detected`, `success`, and `failure`; `target` records the requested label. `context_source` is `none`, `unspecified`, `default_confirmed`, or `explicit`. Ordered `mode_files`, ordered `config_keys` (**never config values**), ordered `modifiers`, and `context_fingerprint` (`sha256:<hex>` over the full ordered context values) make the client-side query context comparable without disclosing raw overrides. `configured_root_target` retains the configured root label when cquery returns one; `comparison` is currently always `not_compared`. This is configured-graph invocation provenance, not execution placement: it does not answer the design note's Open Q1/Q2, populate `likely_execution_platform`, or prove where an action ran. |
+| `buck_invocation` | `dict` | typed Buck context + bound `buck2 cquery 'deps(%s)' <target> --json` | Schema 1.13, always present. `status` distinguishes `not_requested`, `buck_not_detected`, `success`, and `failure`; `target` records the requested label. `context_source` is `none`, `unspecified`, `default_confirmed`, or `explicit`. Ordered `mode_files`, ordered `config_keys` (**never config values**), ordered `modifiers`, `option_order`, and `context_fingerprint` (`sha256:<hex>` over the full ordered context values) make the client-side query context comparable without disclosing raw overrides. `configured_root_target` retains the configured root label when cquery returns one; `comparison` is currently always `not_compared`. This is configured-graph invocation provenance, not execution placement: it does not answer the design note's Open Q1/Q2, populate `likely_execution_platform`, or prove where an action ran. |
 | `library_introspection` | `list[dict]` | bound `buck2 cquery 'deps(%s)' <target> --json` (only when `--buck-target` is supplied) | Always present. Empty `[]` outside Buck mode. In Buck mode, one entry per matched library: `{"name", "source": "buck", "revision", "target", "configured_target"}`. `target` is the canonical Buck label (stable across daemon restarts); `configured_target` preserves the raw cquery output including its per-run configuration suffix (`(prelude//platforms:default#<hash>)`) for forensics. The matched library set lives in `KNOWN_LIBRARY_PATTERNS` in `src/aorta/instrumentation/buck_introspect.py`. Added in schema 1.4 for issue #163 (A1.2b); migrated from `buck2 audit dependencies` to `buck2 cquery` and split `target` / `configured_target` in schema 1.6 (PR #187). Query binding replaced target interpolation in schema 1.13 without changing entry behavior. |
 | `library_introspection_alternates` | `list[dict]` | synthesised from A1's per-library blocks when a Buck match overlaps | Always present. Empty `[]` outside Buck mode and when no Buck-matched library is also captured by A1. Each entry mirrors the unified shape with `source: "package"` and pulls `revision` / `package_version` / `lib_hash` from the matching A1 block (e.g. `hipblaslt`). Added in schema 1.4 for issue #163 (A1.2b). |
 | `pytorch_sdpa` | `dict` | `torch.backends.cuda.{flash,mem_efficient,math,cudnn}_sdp_enabled()` | `backends_enabled` dict, one bool per SDPA backend + per-getter `null` when missing on older torch. Runtime state, NOT compile-time -- combine with `pytorch_build.binary_introspection.libtorch_hip_symbol_counts` for the full "compiled in AND enabled" picture. Added in schema 1.5 for issue #176 (PR #177). |
@@ -474,14 +472,15 @@ block, defaulted so older snapshots and direct constructors remain compatible.
   request, Buck not detected, cquery success, and cquery failure. It records
   the requested target, context source (`none` / `unspecified` /
   `default_confirmed` / `explicit`), ordered mode files, ordered config
-  **keys only**, ordered modifiers, an aggregate `sha256:` fingerprint over
-  the full ordered context values, the configured root target when available,
-  and `comparison: "not_compared"`.
-* New repeatable CLI options `--buck-mode-file`, `--buck-config`, and
-  `--buck-modifier`, plus `--buck-default-context`. Context options require
-  `--buck-target`; default confirmation is mutually exclusive with explicit
-  options. Buck receives atomic argv entries in mode / paired `-c` / paired
-  `-m` order. There is no shell or arbitrary passthrough string.
+  **keys only**, ordered modifiers, cross-option `option_order`, an aggregate
+  `sha256:` fingerprint over the full ordered context values, the configured
+  root target when available, and `comparison: "not_compared"`.
+* New repeatable CLI option `--buck-option TYPE=VALUE` preserves exact
+  cross-option order for `mode`, `config`, and `modifier` inputs. Grouped
+  convenience options remain available when the normal mode / `-c` / `-m`
+  order is sufficient. Context options require `--buck-target` and cannot be
+  mixed with `--buck-default-context`. There is no shell or arbitrary
+  passthrough string.
 * Cquery now binds the target through `deps(%s)` plus a separate target argv
   entry. Target text is never interpolated into Buck query syntax.
 * `--buck-target` without explicit context or `--buck-default-context` still
@@ -489,7 +488,7 @@ block, defaulted so older snapshots and direct constructors remain compatible.
   "unspecified"` and a clear partial reason. A request when
   `build_system.kind != "buck2"` is similarly partial and records
   `status: "buck_not_detected"`.
-* Raw `--buck-config` values are never persisted. The key is visible and the
+* Raw Buck config values are never persisted. The key is visible and the
   full value participates only in the aggregate fingerprint, so value drift
   remains detectable without disclosure.
 * Scope remains deliberately narrow: this block describes the client-side
@@ -1310,21 +1309,20 @@ aorta env probe \
   --buck-default-context \
   -o /tmp/env.json
 
-# Or reproduce an explicit ordered invocation context. Mode files are
-# forwarded first, followed by paired -c values, then paired -m values.
+# Or reproduce the exact cross-option order used by the workload.
 aorta env probe \
   --buck-target //app:trainer \
-  --buck-mode-file root//mode/debug \
-  --buck-mode-file root//mode/gpu \
-  --buck-config build.profile=debug \
-  --buck-config scheduler.policy=local \
-  --buck-modifier //constraints:linux \
-  --buck-modifier //constraints:gfx \
+  --buck-option mode=root//mode/debug \
+  --buck-option config=build.profile=debug \
+  --buck-option mode=root//mode/gpu \
+  --buck-option config=scheduler.policy=local \
+  --buck-option modifier=//constraints:linux \
+  --buck-option modifier=//constraints:gfx \
   -o /tmp/env.json
 
 # The implementation binds the label as a separate query argument:
-# buck2 cquery @root//mode/debug @root//mode/gpu \
-#   -c build.profile=debug -c scheduler.policy=local \
+# buck2 cquery @root//mode/debug -c build.profile=debug \
+#   @root//mode/gpu -c scheduler.policy=local \
 #   -m //constraints:linux -m //constraints:gfx \
 #   'deps(%s)' //app:trainer --json
 # No shell or free-form passthrough command is involved.
@@ -1350,6 +1348,7 @@ jq '.buck_invocation' /tmp/env.json
 #      "mode_files": ["root//mode/debug", "root//mode/gpu"],
 #      "config_keys": ["build.profile", "scheduler.policy"],
 #      "modifiers": ["//constraints:linux", "//constraints:gfx"],
+#      "option_order": ["mode", "config", "mode", "config", "modifier", "modifier"],
 #      "context_fingerprint": "sha256:<digest>",
 #      "configured_root_target": "root//app:trainer (prelude//platforms:default#...)",
 #      "comparison": "not_compared"

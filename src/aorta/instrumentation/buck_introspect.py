@@ -43,7 +43,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from aorta.instrumentation.buck_invocation import BuckInvocationContext
+from aorta.instrumentation.buck_invocation import (
+    BuckInvocationContext,
+    BuckInvocationOption,
+)
 
 log = logging.getLogger(__name__)
 
@@ -344,6 +347,7 @@ def _match_library(label: str) -> str | None:
 
 __all__ = [
     "BuckIntrospectionResult",
+    "BuckInvocationOption",
     "KNOWN_LIBRARY_PATTERNS",
     "introspect_libraries_via_buck",
 ]

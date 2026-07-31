@@ -44,8 +44,8 @@ guardrail, not a data source.
   is no shell or free-form passthrough string.
 - `buck_invocation` distinguishes no request, Buck not detected, cquery
   success, and cquery failure. It records the target, context source, ordered
-  mode files, config-key names, ordered modifiers, aggregate full-context
-  SHA-256 fingerprint, configured root target when available, and
+  mode files, config-key names, ordered modifiers, cross-option order,
+  aggregate full-context SHA-256 fingerprint, configured root target when available, and
   `comparison: not_compared`. Raw config values are not written to `env.json`.
 - An unconfirmed default context and a target supplied outside a detected Buck
   checkout are explicit partial states instead of plausible-looking success.
@@ -168,7 +168,7 @@ Implementation status above):
 |---|---|---|---|
 | `container_detected` | `bool` | **Single boolean.** `true` on *any* isolation signal: a named-runtime match (`_detect_container_type() != "baremetal"`), a private mount namespace (`/proc/self/ns/mnt` != `/proc/1/ns/mnt`), or a container/k8s token in `/proc/self/cgroup` (`docker`/`containerd`/`kubepods`/`libpod`/`lxc`/`crio`). Fixes the RE-sandbox-as-baremetal false negative. No k8s-vs-containerd distinction. | **1 (done)** |
 | `execution_context.probe_invocation` | `"direct" \| "buck2_run" \| "buck2_action"` | How the probe was launched. Phase 1: **self-declared** via `--execution-context` (defaults to `direct`). Phase 2 may auto-detect via native RE env vars (**see Open Q1**). | **1 (done, self-declared)** |
-| `buck_invocation` | `dict` | Redacted provenance for the bound cquery: status, target, context source, ordered mode files/config keys/modifiers, full-context fingerprint, configured root target when available, and `comparison: not_compared`. | **client context (done, schema 1.13)** |
+| `buck_invocation` | `dict` | Redacted provenance for the bound cquery: status, target, context source, ordered mode files/config keys/modifiers, cross-option order, full-context fingerprint, configured root target when available, and `comparison: not_compared`. | **client context (done, schema 1.13)** |
 | `execution_context.likely_execution_platform` | `str \| null` | Best-effort: from `buck2 audit configurations` / cquery on the target, the resolved platform label. Advisory, not guaranteed (**Open Q2**). Key present today, always `null`. | 2 (remaining) |
 | `probe_namespace` | `str \| null` | **Mismatch-only observation**: boot-scoped hash of `/proc/self/ns/mnt`, falling back to `/proc/self/ns/cgroup`: `mnt:<sha256[:16]>` / `cgroup-ns:<sha256[:16]>`; hashed `*-local:` form when `boot_id` is unavailable. Different same-kind values prove different observations; equality is advisory because namespace inode numbers can be recycled. | **2 (done)** |
 | `$AORTA_RE_IMAGE` convention | env var | Extend the existing `$AORTA_DOCKER_IMAGE` launcher pattern to Buck2: customers set this in their `remote_execution_properties` / action env (**pending Open Q1** — a native marker may exist and be preferable). Already read by the phase-1 warning. | 2 (remaining) |
@@ -201,15 +201,15 @@ aorta env probe \
 # Or reproduce explicit inputs in order.
 aorta env probe \
   --buck-target //app:trainer \
-  --buck-mode-file root//mode/debug \
-  --buck-config build.profile=debug \
-  --buck-modifier //constraints:linux
+  --buck-option mode=root//mode/debug \
+  --buck-option config=build.profile=debug \
+  --buck-option modifier=//constraints:linux
 ```
 
-The explicit form invokes cquery with mode files first, then paired `-c`
-overrides, then paired `-m` modifiers, followed by `deps(%s)` and the target as
-separate argv entries. `--buck-config` values are passed to Buck and included
-in the aggregate fingerprint, but only config keys are serialized.
+The explicit form invokes cquery in the exact `--buck-option` order, followed
+by `deps(%s)` and the target as separate argv entries. Config values are
+passed to Buck and included in the aggregate fingerprint, but only config keys
+and option kinds are serialized.
 
 Omitting both explicit inputs and `--buck-default-context` remains runnable for
 backwards compatibility, with `context_source: unspecified` and a partial

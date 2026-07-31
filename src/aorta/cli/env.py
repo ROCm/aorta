@@ -105,6 +105,18 @@ def env() -> None:
     ),
 )
 @click.option(
+    "--buck-option",
+    "buck_options",
+    type=str,
+    multiple=True,
+    metavar="TYPE=VALUE",
+    help=(
+        "Exact ordered Buck context item (repeatable): mode=VALUE, "
+        "config=KEY=VALUE, or modifier=VALUE. Use this when order across "
+        "option types matters; do not combine it with grouped Buck options."
+    ),
+)
+@click.option(
     "--buck-mode-file",
     "buck_mode_files",
     type=str,
@@ -179,6 +191,7 @@ def probe(
     field_path: str | None,
     extended: bool,
     buck_target: str | None,
+    buck_options: tuple[str, ...],
     buck_mode_files: tuple[str, ...],
     buck_configs: tuple[str, ...],
     buck_modifiers: tuple[str, ...],
@@ -187,7 +200,10 @@ def probe(
     execution_context: str,
 ) -> None:
     """Capture trial-environment state to env.json (issue #147)."""
-    from aorta.instrumentation.buck_invocation import BuckInvocationContext
+    from aorta.instrumentation.buck_invocation import (
+        BuckInvocationContext,
+        BuckInvocationOption,
+    )
     from aorta.instrumentation.environment import (
         collect_env,
         execution_context_warning,
@@ -198,30 +214,47 @@ def probe(
     if summary and field_path is not None:
         raise click.ClickException("--summary and --field are mutually exclusive")
 
-    explicit_buck_context = bool(buck_mode_files or buck_configs or buck_modifiers)
+    grouped_buck_context = bool(buck_mode_files or buck_configs or buck_modifiers)
+    explicit_buck_context = bool(buck_options or grouped_buck_context)
     if (explicit_buck_context or buck_default_context) and buck_target is None:
         raise click.UsageError(
-            "--buck-mode-file, --buck-config, --buck-modifier, and "
-            "--buck-default-context require --buck-target"
+            "--buck-option, --buck-mode-file, --buck-config, "
+            "--buck-modifier, and --buck-default-context require "
+            "--buck-target"
+        )
+    if buck_options and grouped_buck_context:
+        raise click.UsageError(
+            "--buck-option preserves cross-option ordering and cannot be "
+            "combined with --buck-mode-file, --buck-config, or "
+            "--buck-modifier"
         )
     if buck_default_context and explicit_buck_context:
         raise click.UsageError(
             "--buck-default-context is mutually exclusive with "
-            "--buck-mode-file, --buck-config, and --buck-modifier"
+            "--buck-option, --buck-mode-file, --buck-config, and "
+            "--buck-modifier"
         )
     try:
+        ordered_options = tuple(BuckInvocationOption.parse(option) for option in buck_options)
         buck_context = (
             BuckInvocationContext(
                 mode_files=buck_mode_files,
                 config_overrides=buck_configs,
                 modifiers=buck_modifiers,
                 default_context_confirmed=buck_default_context,
+                ordered_options=ordered_options,
             )
             if buck_target is not None
             else None
         )
     except ValueError as exc:
-        raise click.BadParameter(str(exc), param_hint="Buck context options") from exc
+        raise click.BadParameter(
+            str(exc),
+            param_hint=(
+                "--buck-option/--buck-mode-file/--buck-config/"
+                "--buck-modifier/--buck-default-context"
+            ),
+        ) from exc
 
     # Capture once; both short-circuit modes and the default mode read
     # from this single snapshot. Buck-related kwargs flow through to

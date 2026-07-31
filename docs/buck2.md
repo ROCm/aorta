@@ -154,17 +154,17 @@ buck2 run aorta -- env probe \
 # being investigated.
 aorta env probe \
   --buck-target //app:trainer \
-  --buck-mode-file root//mode/debug \
-  --buck-config build.profile=debug \
-  --buck-modifier //constraints:linux \
+  --buck-option mode=root//mode/debug \
+  --buck-option config=build.profile=debug \
+  --buck-option modifier=//constraints:linux \
   --field buck_invocation
 ```
 
 Schema 1.13 records this client-side query provenance in
 `buck_invocation`: status, target, context source, ordered mode files,
-config keys, ordered modifiers, a full-context SHA-256 fingerprint, the
+config keys, ordered modifiers, cross-option order, a full-context SHA-256 fingerprint, the
 configured root target when available, and `comparison: not_compared`.
-Raw `--buck-config` values are passed to Buck and influence the fingerprint
+Raw config values are passed to Buck and influence the fingerprint
 but are never serialized.
 
 If `--buck-target` is used without explicit context options and without

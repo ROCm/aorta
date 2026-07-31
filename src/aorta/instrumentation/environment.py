@@ -92,9 +92,9 @@ SCHEMA_VERSION = "1.13"
 #     ``buck_not_detected``, ``success``, and ``failure``; records the target,
 #     context source (``none`` / ``unspecified`` / ``default_confirmed`` /
 #     ``explicit``), ordered mode files, ordered config KEYS (never values),
-#     ordered modifiers, an aggregate SHA-256 over the full ordered context
-#     values, the configured root target when cquery exposes it, and the
-#     reserved comparison state ``not_compared``.
+#     ordered modifiers, cross-option order, an aggregate SHA-256 over the
+#     full ordered context values, the configured root target when cquery
+#     exposes it, and the reserved comparison state ``not_compared``.
 #   - ``collect_env(..., buck_context=BuckInvocationContext(...))`` forwards
 #     mode/flag files, paired ``-c`` overrides, and paired ``-m`` modifiers to
 #     the same bound ``buck2 cquery 'deps(%s)' <target> --json`` invocation.
@@ -2554,6 +2554,7 @@ def _empty_buck_invocation() -> dict[str, Any]:
         "mode_files": [],
         "config_keys": [],
         "modifiers": [],
+        "option_order": [],
         "context_fingerprint": None,
         "configured_root_target": None,
         "comparison": "not_compared",
@@ -2578,11 +2579,14 @@ def _buck_invocation_block(
         "status": status,
         "target": target,
         "context_source": safe_context.source,
-        "mode_files": list(safe_context.mode_files),
+        "mode_files": list(safe_context.effective_mode_files),
         # Deliberately never persist ``safe_context.config_overrides``:
         # values may be credentials or other private configuration.
         "config_keys": list(safe_context.config_keys),
-        "modifiers": list(safe_context.modifiers),
+        "modifiers": list(safe_context.effective_modifiers),
+        "option_order": [
+            option.kind for option in safe_context.ordered_options
+        ],
         "context_fingerprint": safe_context.fingerprint,
         "configured_root_target": configured_root_target,
         "comparison": "not_compared",

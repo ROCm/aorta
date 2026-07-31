@@ -145,6 +145,30 @@ class TestBuckInvocationContext:
         with pytest.raises(ValueError, match="name a file"):
             bi_mod.BuckInvocationContext(mode_files=("@",))
 
+    def test_ordered_options_preserve_cross_type_precedence(self):
+        context = bi_mod.BuckInvocationContext(
+            ordered_options=(
+                bi_mod.BuckInvocationOption.parse("config=build.profile=debug"),
+                bi_mod.BuckInvocationOption.parse("mode=root//mode/override"),
+                bi_mod.BuckInvocationOption.parse("modifier=//constraints:gfx"),
+            )
+        )
+        assert context.to_buck_args() == [
+            "-c",
+            "build.profile=debug",
+            "@root//mode/override",
+            "-m",
+            "//constraints:gfx",
+        ]
+        assert context.config_keys == ("build.profile",)
+
+    def test_ordered_and_grouped_options_are_mutually_exclusive(self):
+        with pytest.raises(ValueError, match="cannot be combined"):
+            bi_mod.BuckInvocationContext(
+                mode_files=("root//mode/debug",),
+                ordered_options=(bi_mod.BuckInvocationOption.parse("config=build.profile=debug"),),
+            )
+
     def test_fingerprint_is_stable_and_covers_full_ordered_values(self):
         first = bi_mod.BuckInvocationContext(
             mode_files=("root//mode/debug", "root//mode/gpu"),

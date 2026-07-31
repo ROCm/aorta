@@ -127,10 +127,10 @@ input that precedes the workload target:
 ```bash
 aorta env probe \
   --buck-target //example/package:training \
-  --buck-mode-file @mode/opt \
-  --buck-mode-file @mode/inplace \
-  --buck-config example.gpu_backend=amd \
-  --buck-modifier rocm \
+  --buck-option mode=@mode/opt \
+  --buck-option mode=@mode/inplace \
+  --buck-option config=example.gpu_backend=amd \
+  --buck-option modifier=rocm \
   -o env.host.json
 ```
 
@@ -195,9 +195,9 @@ Tasks:
    `<SHARED_ROOT>/aorta-worktrees` exactly as documented above. Do not switch
    the base clone or overwrite an existing worktree. Then run the local
    `//:aorta` smoke commands from that worktree.
-5. Build the exact AORTA probe argv using repeatable --buck-mode-file,
-   --buck-config, and --buck-modifier options. Preserve order and do not use
-   shell=True, eval, or one opaque command string.
+5. Build the exact AORTA probe argv using repeatable
+   `--buck-option TYPE=VALUE` entries. Preserve cross-option order and do not
+   use shell=True, eval, or one opaque command string.
 6. Capture a host-side env.json and an in-action env.json. The in-action probe
    must be a declared Buck dependency; do not inject a host PYTHONPATH.
 7. If and only if strict local and remote execution are available, run

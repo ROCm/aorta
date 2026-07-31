@@ -525,6 +525,7 @@ def _example_snapshot(**overrides) -> object:
             "mode_files": ["root//mode/debug"],
             "config_keys": ["build.profile"],
             "modifiers": ["//constraints:linux"],
+            "option_order": ["mode", "config", "modifier"],
             "context_fingerprint": "sha256:" + "a" * 64,
             "configured_root_target": (
                 "root//app:trainer "
@@ -2148,20 +2149,30 @@ class TestCliSummaryAndFieldFlags:
 
 
 class TestProbeBuckContextOptions:
-    @staticmethod
-    def _cli_mod():
+    _module_load_count = 0
+
+    @classmethod
+    def _cli_mod(cls):
         cli_path = Path(env_mod.__file__).parent.parent / "cli" / "env.py"
+        cls._module_load_count += 1
+        module_name = f"aorta.cli.env_test_{cls._module_load_count}"
         spec = importlib.util.spec_from_file_location(
-            "aorta.cli.env", cli_path,
+            module_name,
+            cli_path,
         )
+        assert spec is not None and spec.loader is not None
         cli_mod = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = cli_mod
-        spec.loader.exec_module(cli_mod)
+        sys.modules[module_name] = cli_mod
+        try:
+            spec.loader.exec_module(cli_mod)
+        finally:
+            sys.modules.pop(module_name, None)
         return cli_mod
 
     @pytest.mark.parametrize(
         "context_args",
         [
+            ["--buck-option", "mode=root//mode/debug"],
             ["--buck-mode-file", "root//mode/debug"],
             ["--buck-config", "build.profile=debug"],
             ["--buck-modifier", "//constraints:linux"],
@@ -2256,6 +2267,60 @@ class TestProbeBuckContextOptions:
             "//constraints:gfx",
         ]
 
+    def test_ordered_option_preserves_cross_type_order(self, monkeypatch):
+        from click.testing import CliRunner
+
+        captured = {}
+
+        def fake_collect_env(**kwargs):
+            captured.update(kwargs)
+            return _example_snapshot()
+
+        monkeypatch.setattr(env_mod, "collect_env", fake_collect_env)
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-option",
+                "config=build.profile=debug",
+                "--buck-option",
+                "mode=root//mode/override",
+                "--buck-option",
+                "modifier=//constraints:gfx",
+                "--summary",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert captured["buck_context"].to_buck_args() == [
+            "-c",
+            "build.profile=debug",
+            "@root//mode/override",
+            "-m",
+            "//constraints:gfx",
+        ]
+
+    def test_ordered_option_rejects_grouped_options(self):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-option",
+                "mode=root//mode/debug",
+                "--buck-config",
+                "build.profile=debug",
+                "--summary",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "cannot be combined" in result.output
+
     def test_default_confirmation_and_unspecified_target_are_distinct(
         self, monkeypatch
     ):
@@ -2307,6 +2372,7 @@ class TestProbeBuckContextOptions:
         )
         assert result.exit_code != 0
         assert "KEY=VALUE" in result.output
+        assert "--buck-config" in result.output
         assert "Traceback" not in result.output
 
 

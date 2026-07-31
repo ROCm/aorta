@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,9 @@ def _nonempty(value: object) -> bool:
 def validate_pair(
     client: dict[str, object],
     workload: dict[str, object],
+    *,
+    required_libraries: tuple[str, ...] = ("pytorch",),
+    allow_unisolated_action: bool = False,
 ) -> list[Finding]:
     """Return actionable errors/warnings for a Buck client/workload pair."""
     findings: list[Finding] = []
@@ -52,8 +56,19 @@ def validate_pair(
         findings.append(Finding("ERROR", "Buck invocation context was not confirmed"))
     if not _nonempty(invocation.get("context_fingerprint")):
         findings.append(Finding("ERROR", "Buck invocation fingerprint is missing"))
-    if not _nonempty(client.get("library_introspection")):
+    library_entries = client.get("library_introspection")
+    if not _nonempty(library_entries):
         findings.append(Finding("ERROR", "no recognized libraries were found in the Buck graph"))
+    entry_list = library_entries if isinstance(library_entries, list) else []
+    library_names = {str(entry.get("name")) for entry in entry_list if isinstance(entry, dict)}
+    for library in required_libraries:
+        if library not in library_names:
+            findings.append(
+                Finding(
+                    "ERROR",
+                    f"required Buck library identity is missing: {library}",
+                )
+            )
 
     pytorch_build = _object(workload.get("pytorch_build"))
     runtime_rocm = (
@@ -75,6 +90,18 @@ def validate_pair(
     probe_invocation = _object(workload.get("execution_context")).get("probe_invocation")
     if probe_invocation not in {"buck2_run", "buck2_action"}:
         findings.append(Finding("ERROR", "workload snapshot was not labeled as Buck-launched"))
+    if (
+        probe_invocation == "buck2_action"
+        and workload.get("container_detected") is not True
+        and not allow_unisolated_action
+    ):
+        findings.append(
+            Finding(
+                "ERROR",
+                "buck2_action snapshot has no detected isolation evidence; "
+                "prove placement separately or relabel it buck2_run",
+            )
+        )
 
     for label, document in (("client", client), ("workload", workload)):
         reasons = document.get("partial_reasons")
@@ -99,16 +126,37 @@ def main() -> int:
     )
     parser.add_argument("client", type=Path, help="env.buck-client.json")
     parser.add_argument("workload", type=Path, help="env.workload.json")
+    parser.add_argument(
+        "--require-library",
+        action="append",
+        default=None,
+        help=(
+            "Buck library identity required in the client graph " "(repeatable; default: pytorch)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-unisolated-action",
+        action="store_true",
+        help=(
+            "Allow buck2_action without container_detected=true when "
+            "placement was proven separately"
+        ),
+    )
     args = parser.parse_args()
 
     try:
-        findings = validate_pair(_load(args.client), _load(args.workload))
+        findings = validate_pair(
+            _load(args.client),
+            _load(args.workload),
+            required_libraries=tuple(args.require_library or ("pytorch",)),
+            allow_unisolated_action=args.allow_unisolated_action,
+        )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        print(f"ERROR: {exc}")
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     for finding in findings:
-        print(f"{finding.severity}: {finding.message}")
+        print(f"{finding.severity}: {finding.message}", file=sys.stderr)
     if any(finding.severity == "ERROR" for finding in findings):
         return 1
     print("PASS: Buck dependency and workload runtime snapshots are usable")

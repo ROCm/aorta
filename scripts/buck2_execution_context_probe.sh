@@ -19,9 +19,7 @@ Usage:
     [--buck2 PATH] \
     [--aorta-probe-target LABEL] \
     [--cache-bust-file RELATIVE_PATH] \
-    [--mode-file @MODE]... \
-    [--config KEY=VALUE]... \
-    [--modifier LABEL]...
+    [--context-option TYPE=VALUE]...
 
 Target contracts:
   --envdump-target
@@ -60,6 +58,7 @@ CACHE_BUST_FILE=""
 MODE_FILES=()
 CONFIG_OVERRIDES=()
 MODIFIERS=()
+ORDERED_CONTEXT=()
 
 while (($#)); do
     case "$1" in
@@ -70,6 +69,7 @@ while (($#)); do
         --buck2) BUCK2="${2:?missing value for --buck2}"; shift 2 ;;
         --aorta-probe-target) AORTA_PROBE_TARGET="${2:?missing value for --aorta-probe-target}"; shift 2 ;;
         --cache-bust-file) CACHE_BUST_FILE="${2:?missing value for --cache-bust-file}"; shift 2 ;;
+        --context-option) ORDERED_CONTEXT+=("${2:?missing value for --context-option}"); shift 2 ;;
         --mode-file) MODE_FILES+=("${2:?missing value for --mode-file}"); shift 2 ;;
         --config) CONFIG_OVERRIDES+=("${2:?missing value for --config}"); shift 2 ;;
         --modifier) MODIFIERS+=("${2:?missing value for --modifier}"); shift 2 ;;
@@ -106,34 +106,69 @@ chmod 700 "$OUT_DIR"
 FINDINGS="$OUT_DIR/q1_q2_findings.txt"
 
 CONTEXT_ARGS=()
-for mode in "${MODE_FILES[@]}"; do
-    [[ "$mode" == @* ]] || mode="@$mode"
-    CONTEXT_ARGS+=("$mode")
-done
-for config in "${CONFIG_OVERRIDES[@]}"; do
-    [[ "$config" == *=* ]] || {
-        echo "ERROR: --config requires KEY=VALUE, got: $config" >&2
-        exit 2
-    }
-    CONTEXT_ARGS+=("-c" "$config")
-done
-for modifier in "${MODIFIERS[@]}"; do
-    CONTEXT_ARGS+=("-m" "$modifier")
-done
+OPTION_ORDER=()
+if ((${#ORDERED_CONTEXT[@]})) &&
+   ((${#MODE_FILES[@]} || ${#CONFIG_OVERRIDES[@]} || ${#MODIFIERS[@]})); then
+    echo "ERROR: --context-option cannot be combined with grouped context options" >&2
+    exit 2
+fi
+if ((${#ORDERED_CONTEXT[@]})); then
+    for option in "${ORDERED_CONTEXT[@]}"; do
+        kind="${option%%=*}"
+        value="${option#*=}"
+        [[ "$kind" != "$option" && -n "$value" ]] || {
+            echo "ERROR: --context-option requires TYPE=VALUE" >&2
+            exit 2
+        }
+        case "$kind" in
+            mode)
+                [[ "$value" == @* ]] || value="@$value"
+                MODE_FILES+=("${value#@}")
+                CONTEXT_ARGS+=("$value")
+                ;;
+            config)
+                [[ "$value" == *=* ]] || {
+                    echo "ERROR: config context requires config=KEY=VALUE" >&2
+                    exit 2
+                }
+                CONFIG_OVERRIDES+=("$value")
+                CONTEXT_ARGS+=("-c" "$value")
+                ;;
+            modifier)
+                MODIFIERS+=("$value")
+                CONTEXT_ARGS+=("-m" "$value")
+                ;;
+            *) echo "ERROR: unknown context type: $kind" >&2; exit 2 ;;
+        esac
+        OPTION_ORDER+=("$kind")
+    done
+else
+    for mode in "${MODE_FILES[@]}"; do
+        [[ "$mode" == @* ]] || mode="@$mode"
+        CONTEXT_ARGS+=("$mode")
+        OPTION_ORDER+=("mode")
+    done
+    for config in "${CONFIG_OVERRIDES[@]}"; do
+        [[ "$config" == *=* ]] || {
+            echo "ERROR: --config requires KEY=VALUE, got: $config" >&2
+            exit 2
+        }
+        CONTEXT_ARGS+=("-c" "$config")
+        OPTION_ORDER+=("config")
+    done
+    for modifier in "${MODIFIERS[@]}"; do
+        CONTEXT_ARGS+=("-m" "$modifier")
+        OPTION_ORDER+=("modifier")
+    done
+fi
 
 context_fingerprint="$(
-    python3 - "${MODE_FILES[@]}" -- "${CONFIG_OVERRIDES[@]}" -- "${MODIFIERS[@]}" <<'PY'
+    python3 - "${CONTEXT_ARGS[@]}" <<'PY'
 import hashlib
 import json
 import sys
 
-parts = [[]]
-for value in sys.argv[1:]:
-    if value == "--":
-        parts.append([])
-    else:
-        parts[-1].append(value)
-payload = {"mode_files": parts[0], "config_overrides": parts[1], "modifiers": parts[2]}
+payload = {"buck_argv": sys.argv[1:]}
 encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
 print("sha256:" + hashlib.sha256(encoded).hexdigest())
 PY
@@ -383,6 +418,7 @@ fi
     echo "mode_file_count=${#MODE_FILES[@]}"
     echo "config_keys=$(IFS=,; echo "${config_keys[*]}")"
     echo "modifier_count=${#MODIFIERS[@]}"
+    echo "option_order=$(IFS=,; echo "${OPTION_ORDER[*]}")"
     echo "local_capture=$LOCAL_CAPTURED"
     echo "local_placement_proven=$LOCAL_PROVEN"
     echo "remote_capture=$REMOTE_CAPTURED"

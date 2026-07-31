@@ -89,9 +89,9 @@ aorta env probe --buck-target //app:trainer --buck-default-context
 # Or reproduce ordered context inputs.
 aorta env probe \
   --buck-target //app:trainer \
-  --buck-mode-file root//mode/debug \
-  --buck-config build.profile=debug \
-  --buck-modifier //constraints:linux
+  --buck-option mode=root//mode/debug \
+  --buck-option config=build.profile=debug \
+  --buck-option modifier=//constraints:linux
 ```
 
 After the run, `cat env.json` reveals the same dict that

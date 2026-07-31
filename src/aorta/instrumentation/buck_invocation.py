@@ -11,6 +11,42 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import Literal
+
+
+@dataclass(frozen=True)
+class BuckInvocationOption:
+    """One ordered Buck configuration input."""
+
+    kind: Literal["mode", "config", "modifier"]
+    value: str
+
+    @classmethod
+    def parse(cls, raw: str) -> BuckInvocationOption:
+        """Parse ``TYPE=VALUE`` from the repeatable CLI option."""
+        kind, separator, value = raw.partition("=")
+        if not separator or kind not in {"mode", "config", "modifier"}:
+            raise ValueError(
+                "Buck options must use mode=VALUE, config=KEY=VALUE, " "or modifier=VALUE"
+            )
+        if not value or "\x00" in value:
+            raise ValueError("Buck option values must be non-empty and contain no NUL")
+        if kind == "mode":
+            value = value[1:] if value.startswith("@") else value
+            if not value:
+                raise ValueError("Buck mode option must name a file after '@'")
+        if kind == "config":
+            key, config_separator, _config_value = value.partition("=")
+            if not config_separator or not key.strip():
+                raise ValueError("Buck config options must use config=KEY=VALUE")
+        return cls(kind=kind, value=value)
+
+    def to_buck_args(self) -> list[str]:
+        if self.kind == "mode":
+            return [f"@{self.value}"]
+        if self.kind == "config":
+            return ["-c", self.value]
+        return ["-m", self.value]
 
 
 @dataclass(frozen=True)
@@ -32,6 +68,7 @@ class BuckInvocationContext:
     config_overrides: tuple[str, ...] = ()
     modifiers: tuple[str, ...] = ()
     default_context_confirmed: bool = False
+    ordered_options: tuple[BuckInvocationOption, ...] = ()
 
     def __post_init__(self) -> None:
         # Coerce list-like callers to tuples so frozen=True is meaningful for
@@ -39,6 +76,7 @@ class BuckInvocationContext:
         mode_files = tuple(self.mode_files)
         config_overrides = tuple(self.config_overrides)
         modifiers = tuple(self.modifiers)
+        ordered_options = tuple(self.ordered_options)
 
         for label, values in (
             ("mode file", mode_files),
@@ -62,6 +100,14 @@ class BuckInvocationContext:
                 raise ValueError("Buck config overrides must use KEY=VALUE with a non-empty key")
 
         has_explicit = bool(mode_files or config_overrides or modifiers)
+        if ordered_options and has_explicit:
+            raise ValueError(
+                "ordered Buck options cannot be combined with grouped mode, "
+                "config, or modifier inputs"
+            )
+        if any(not isinstance(option, BuckInvocationOption) for option in ordered_options):
+            raise ValueError("ordered Buck options must be BuckInvocationOption values")
+        has_explicit = has_explicit or bool(ordered_options)
         if self.default_context_confirmed and has_explicit:
             raise ValueError(
                 "default Buck context confirmation is mutually exclusive "
@@ -71,12 +117,35 @@ class BuckInvocationContext:
         object.__setattr__(self, "mode_files", mode_files)
         object.__setattr__(self, "config_overrides", config_overrides)
         object.__setattr__(self, "modifiers", modifiers)
+        object.__setattr__(self, "ordered_options", ordered_options)
+
+    @property
+    def effective_mode_files(self) -> tuple[str, ...]:
+        if self.ordered_options:
+            return tuple(option.value for option in self.ordered_options if option.kind == "mode")
+        return self.mode_files
+
+    @property
+    def effective_config_overrides(self) -> tuple[str, ...]:
+        if self.ordered_options:
+            return tuple(option.value for option in self.ordered_options if option.kind == "config")
+        return self.config_overrides
+
+    @property
+    def effective_modifiers(self) -> tuple[str, ...]:
+        if self.ordered_options:
+            return tuple(
+                option.value for option in self.ordered_options if option.kind == "modifier"
+            )
+        return self.modifiers
 
     @property
     def has_explicit_inputs(self) -> bool:
         """Whether at least one mode, config override, or modifier was supplied."""
 
-        return bool(self.mode_files or self.config_overrides or self.modifiers)
+        return bool(
+            self.ordered_options or self.mode_files or self.config_overrides or self.modifiers
+        )
 
     @property
     def source(self) -> str:
@@ -92,7 +161,7 @@ class BuckInvocationContext:
     def config_keys(self) -> tuple[str, ...]:
         """Ordered config keys, excluding values that may contain secrets."""
 
-        return tuple(override.partition("=")[0] for override in self.config_overrides)
+        return tuple(override.partition("=")[0] for override in self.effective_config_overrides)
 
     @property
     def fingerprint(self) -> str:
@@ -104,12 +173,21 @@ class BuckInvocationContext:
         confirmation bit make the encoding unambiguous.
         """
 
-        payload = {
-            "mode_files": list(self.mode_files),
-            "config_overrides": list(self.config_overrides),
-            "modifiers": list(self.modifiers),
-            "default_context_confirmed": self.default_context_confirmed,
-        }
+        payload: dict[str, object]
+        if self.ordered_options:
+            payload = {
+                "ordered_options": [
+                    {"kind": option.kind, "value": option.value} for option in self.ordered_options
+                ],
+                "default_context_confirmed": self.default_context_confirmed,
+            }
+        else:
+            payload = {
+                "mode_files": list(self.mode_files),
+                "config_overrides": list(self.config_overrides),
+                "modifiers": list(self.modifiers),
+                "default_context_confirmed": self.default_context_confirmed,
+            }
         encoded = json.dumps(
             payload,
             ensure_ascii=False,
@@ -121,6 +199,10 @@ class BuckInvocationContext:
     def to_buck_args(self) -> list[str]:
         """Build atomic Buck2 argv entries in precedence-preserving order."""
 
+        if self.ordered_options:
+            return [
+                argument for option in self.ordered_options for argument in option.to_buck_args()
+            ]
         args = [f"@{mode_file}" for mode_file in self.mode_files]
         for override in self.config_overrides:
             args.extend(("-c", override))
@@ -134,10 +216,14 @@ class BuckInvocationContext:
         redacted = text
         # Longest first avoids a shorter override partially masking a longer
         # one that shares the same prefix.
-        for override in sorted(self.config_overrides, key=len, reverse=True):
+        for override in sorted(
+            self.effective_config_overrides,
+            key=len,
+            reverse=True,
+        ):
             key = override.partition("=")[0]
             redacted = redacted.replace(override, f"{key}=<redacted>")
         return redacted
 
 
-__all__ = ["BuckInvocationContext"]
+__all__ = ["BuckInvocationContext", "BuckInvocationOption"]

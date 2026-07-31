@@ -77,18 +77,16 @@ aorta env probe \
 aorta env probe \
   --execution-context direct \
   --buck-target <WORKLOAD_TARGET> \
-  --buck-mode-file <MODE_FILE_1> \
-  --buck-mode-file <MODE_FILE_2> \
-  --buck-config <SECTION.KEY=VALUE> \
-  --buck-modifier <MODIFIER> \
+  --buck-option mode=<MODE_FILE_1> \
+  --buck-option config=<SECTION.KEY=VALUE> \
+  --buck-option mode=<MODE_FILE_2> \
+  --buck-option modifier=<MODIFIER> \
   -o env.buck-client.json
 ```
 
-Repeat each option as needed and preserve its order within that option type.
-AORTA applies mode files first, then `-c` values, then `-m` values. If the
-original command intentionally uses a different cross-option order, stop and
-ask your support contact rather than silently rearranging it. Do not paste the
-complete Buck command into one quoted string.
+Repeat `--buck-option` in the exact order used by the workload command. The
+three accepted types are `mode=...`, `config=KEY=VALUE`, and `modifier=...`.
+Do not paste the complete Buck command into one quoted string.
 
 This file should report:
 
@@ -183,6 +181,10 @@ python3 <AORTA_CHECKOUT>/scripts/validate_buck_env_pair.py \
   env.buck-client.json \
   env.workload.json
 ```
+
+The validator requires the PyTorch Buck identity by default. If the workload
+also requires specific libraries, add repeatable checks such as
+`--require-library rccl` or `--require-library hipblaslt`.
 
 Do not send the files until the validator prints `PASS`. If it fails, send the
 error lines to your support contact.
