@@ -8,9 +8,9 @@ records the Buck dependency selection and the software/hardware environment
 seen by the packaged Python workload. It launches no GPU kernels and runs no
 training steps. On a multi-GPU host, collection can take tens of seconds.
 
-## What to send
+## Capture outputs
 
-Send two files:
+Buck workloads use two complementary snapshots:
 
 1. `env.buck-client.json` — the dependencies Buck selected for the target and
    settings you used.
@@ -97,8 +97,8 @@ Buck cell or vendored source target. Confirm this command lists `aorta_lib`:
 buck2 targets <AORTA_CELL>//:
 ```
 
-If that target is unavailable, stop and contact support. Do not substitute a
-different AORTA revision.
+If that target is unavailable, stop and configure the intended AORTA Buck cell
+before continuing. Do not substitute a different AORTA revision.
 
 Add only AORTA's library to the existing application rule. Keep its current
 rule macro, name, `main`/`main_function`, torch target, and all other
@@ -153,7 +153,7 @@ Treat this as a capture-only run. Importing packages and running diagnostic
 commands changes process startup timing; do not use the same run to measure a
 timing-sensitive failure rate. Unset `AORTA_ENV_OUTPUT` for normal workload
 runs. On a single node, validate `env.workload.rank0.json`. On a multi-node
-job, validate and send one file per node-local rank 0.
+job, validate one file per node-local rank 0.
 
 `buck2 run` builds the target and then launches its `RunInfo` command. Its
 build actions may run locally, remotely, or from cache, but this workload
@@ -180,7 +180,7 @@ If the application source cannot be changed, ask the repository owner for a
 temporary capture-only entrypoint with the same AORTA, torch, and application
 dependencies. It should call `capture_to()` and exit without starting training.
 
-## Validate both files before sending
+## Validate the snapshot pair
 
 Run the validator included with the same AORTA checkout:
 
@@ -197,16 +197,16 @@ additional `--require-library` lines for libraries the workload is expected to
 use. For a multi-node capture, rerun the validator for every workload file.
 
 A file labeled `buck2_action` must contain detected isolation evidence. If
-your repository proves placement through separate `what-ran` evidence, an
-AORTA maintainer may explicitly add `--allow-unisolated-action`; do not use
-that override merely to silence an error.
+your repository proves placement through separate `what-ran` evidence, add
+`--allow-unisolated-action`; do not use that override merely to silence an
+error.
 
-Do not use the files until the validator prints `PASS`. If it fails, give the
-error lines to the AORTA maintainer.
+Do not use the files until the validator prints `PASS`. If it fails, correct
+the reported setup or capture error and rerun the probe.
 
-## What to send
+## Generated artifacts
 
-Send:
+Keep these artifacts together for comparison or later analysis:
 
 1. `env.buck-client.json`
 2. Each `env.workload.rank<RANK>.json` produced by a node-local rank 0.
@@ -215,8 +215,8 @@ Send:
 5. Config key names, `buck_invocation.option_order`, and
    `buck_invocation.context_fingerprint`.
 
-If config values are sensitive, do not send them. The fingerprint lets two
-captures be compared without recording those values.
+Raw config values are intentionally omitted. The fingerprint lets two captures
+be compared without recording those values.
 
 ## Expected limitations
 
@@ -245,8 +245,8 @@ mode/config/modifier options.
 
 Confirm `--buck-target` names the real top-level workload target and that all
 configuration options match its normal invocation. If the graph uses library
-labels AORTA does not yet recognize, give the AORTA maintainer a scrubbed list
-of the relevant label names.
+labels AORTA does not yet recognize, update AORTA's recognized-library patterns
+before relying on this validation.
 
 ### Warning says this is a client-host snapshot
 
