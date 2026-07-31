@@ -155,8 +155,9 @@ timing-sensitive failure rate. Unset `AORTA_ENV_OUTPUT` for normal workload
 runs. On a single node, validate `env.workload.rank0.json`. On a multi-node
 job, validate and send one file per node-local rank 0.
 
-`buck2 run` starts the packaged executable on the client host after Buck builds
-it. This does not capture a remote build/test worker.
+`buck2 run` builds the target and then launches its `RunInfo` command. Its
+build actions may run locally, remotely, or from cache, but this workload
+capture does not by itself prove it ran inside a remote build/test action.
 
 ### Remote build/test action
 
@@ -251,3 +252,10 @@ of the relevant label names.
 
 That is expected for a local `buck2 run`. Keep it as the client/runtime
 snapshot and do not claim it represents a remote worker.
+
+## Buck2 references
+
+- [Python binary dependencies and entrypoints](https://buck2.build/docs/prelude/rules/python/python_binary/)
+- [Command-line config and flag-file precedence](https://buck2.build/docs/concepts/buckconfig/)
+- [`buck2 run` and execution policy flags](https://buck2.build/docs/users/commands/run/)
+- [Configured queries and exact attributes](https://buck2.build/docs/users/commands/cquery/)

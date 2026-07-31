@@ -34,13 +34,22 @@ Download the release binary matching the host architecture from the official
 downloaded version visible in the test report; do not silently substitute a
 different repository-provided binary.
 
+Official Linux assets are commonly Zstandard-compressed (`.zst`). Decompress
+the downloaded asset before installing it.
+
 If login and compute nodes use different home directories, choose a filesystem
 visible to both and set it as `SHARED_ROOT`:
 
 ```bash
 SHARED_ROOT="/shared/aorta-support"
 mkdir -p "$SHARED_ROOT/bin"
-install -m 0755 /path/to/downloaded/buck2 "$SHARED_ROOT/bin/buck2"
+command -v zstd >/dev/null || {
+  echo "Install the zstd package before continuing."
+  exit 1
+}
+zstd -d /path/to/downloaded/buck2-<target>.zst \
+  -o "$SHARED_ROOT/bin/buck2"
+chmod 0755 "$SHARED_ROOT/bin/buck2"
 export PATH="$SHARED_ROOT/bin:$PATH"
 
 buck2 --version
@@ -54,7 +63,7 @@ artifacts that must be visible on both host and compute nodes.
 ```bash
 AORTA_BASE="$SHARED_ROOT/aorta"
 AORTA_WORKTREE="$SHARED_ROOT/aorta-worktrees/buck-invocation-context"
-AORTA_BRANCH="<branch-provided-by-aorta-support>"
+AORTA_BRANCH="<aorta-branch-to-test>"
 
 mkdir -p "$SHARED_ROOT/aorta-worktrees"
 if [ ! -d "$AORTA_BASE/.git" ]; then
@@ -67,7 +76,7 @@ if [ -e "$AORTA_WORKTREE" ]; then
   exit 1
 fi
 git -C "$AORTA_BASE" worktree add --track \
-  -b aorta-env-probe-customer-test \
+  -b aorta-env-probe-test \
   "$AORTA_WORKTREE" \
   "origin/$AORTA_BRANCH"
 
