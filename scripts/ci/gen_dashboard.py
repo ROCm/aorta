@@ -169,9 +169,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--out-dir", type=Path, required=True)
+    ap.add_argument("--max-builds", type=int, default=180,
+                    help="render at most the most recent N builds (bounds trend size)")
     args = ap.parse_args()
 
     results = load_results(args.results_dir)
+    if args.max_builds > 0:
+        results = results[-args.max_builds:]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(build_dashboard_html(results), encoding="utf-8")
     (args.out_dir / "data.json").write_text(json.dumps(results, indent=2), encoding="utf-8")

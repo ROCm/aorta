@@ -73,6 +73,13 @@ empty baseline file means **record-only** (nightly won't be red before blessing)
   requirements** to refresh `requirements.lock`. Both open PRs; a human blesses.
   No auto-merge.
 
+## Results retention
+
+The publish step keeps only the **most recent 180** `results/<date>.json` files on
+the `gh-pages` branch (older ones are pruned), and the dashboard renders at most
+the last 180 builds (`gen_dashboard.py --max-builds`). Files are tiny; adjust the
+cap in `nightly-eval.yml` / the flag if a longer window is wanted.
+
 ## Operating checklist
 
 1. Enable GitHub Pages (source: `gh-pages` branch) so the dashboard is served.

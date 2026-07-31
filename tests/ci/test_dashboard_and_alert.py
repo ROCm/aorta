@@ -87,6 +87,16 @@ def test_alert_render_sanitizes_table_cells():
     assert "boom \\| pipe newline" in reason_line
 
 
+def test_find_open_issue_ignores_pull_requests(monkeypatch):
+    # The issues endpoint returns PRs too; a PR carrying the label must be ignored.
+    monkeypatch.setattr(
+        alert_issue, "_req",
+        lambda *a, **k: [{"number": 10, "pull_request": {"url": "x"}}, {"number": 11}],
+    )
+    found = alert_issue._find_open_issue("ROCm/aorta", "tok")
+    assert found is not None and found["number"] == 11
+
+
 def test_dashboard_escapes_untrusted_reason():
     r = _results("2026-07-29T00:00:00Z",
                  [{"entry": "w", "cell": "c", "verdict": "fail",

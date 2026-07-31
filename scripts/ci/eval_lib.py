@@ -95,7 +95,7 @@ def compare_to_baseline(
     if baseline.get("passed", True) and not harvested.get("passed", False):
         err = harvested.get("error")
         reasons.append(
-            f"expected passing cell but it did not pass"
+            "expected passing cell but it did not pass"
             + (f" (error: {err})" if err else "")
         )
 

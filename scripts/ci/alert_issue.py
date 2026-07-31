@@ -74,9 +74,12 @@ def _req(method: str, url: str, token: str, payload: dict | None = None) -> Any:
 
 
 def _find_open_issue(repo: str, token: str) -> dict | None:
-    url = f"{API}/repos/{repo}/issues?state=open&labels={LABEL}&per_page=1"
+    url = f"{API}/repos/{repo}/issues?state=open&labels={LABEL}&per_page=20"
     items = _req("GET", url, token)
-    return items[0] if items else None
+    # The issues endpoint also returns PRs; never act on a PR that happens to
+    # carry the label -- only real issues.
+    issues = [i for i in items if "pull_request" not in i]
+    return issues[0] if issues else None
 
 
 def main() -> int:
@@ -93,25 +96,31 @@ def main() -> int:
 
     results = json.loads(args.results.read_text(encoding="utf-8"))
     fails = failing_entries(results)
-    existing = _find_open_issue(repo, token)
 
-    if fails:
-        title, body = render_issue(results, args.run_url)
-        if existing:
-            _req("PATCH", f"{API}/repos/{repo}/issues/{existing['number']}", token,
-                 {"title": title, "body": body})
-            print(f"Updated regression issue #{existing['number']}", flush=True)
+    # Alerting is best-effort: a transient GitHub API / network blip must not fail
+    # the nightly job (this step runs under `if: always()`), so swallow URL/HTTP
+    # errors with a warning and exit 0. Correctness signal is the eval job itself.
+    try:
+        existing = _find_open_issue(repo, token)
+        if fails:
+            title, body = render_issue(results, args.run_url)
+            if existing:
+                _req("PATCH", f"{API}/repos/{repo}/issues/{existing['number']}", token,
+                     {"title": title, "body": body})
+                print(f"Updated regression issue #{existing['number']}", flush=True)
+            else:
+                _req("POST", f"{API}/repos/{repo}/issues", token,
+                     {"title": title, "body": body, "labels": [LABEL]})
+                print("Filed new regression issue", flush=True)
+        elif existing:
+            _req("POST", f"{API}/repos/{repo}/issues/{existing['number']}/comments", token,
+                 {"body": "Nightly eval is green again — closing."})
+            _req("PATCH", f"{API}/repos/{repo}/issues/{existing['number']}", token, {"state": "closed"})
+            print(f"Closed regression issue #{existing['number']}", flush=True)
         else:
-            _req("POST", f"{API}/repos/{repo}/issues", token,
-                 {"title": title, "body": body, "labels": [LABEL]})
-            print("Filed new regression issue", flush=True)
-    elif existing:
-        _req("POST", f"{API}/repos/{repo}/issues/{existing['number']}/comments", token,
-             {"body": "Nightly eval is green again — closing."})
-        _req("PATCH", f"{API}/repos/{repo}/issues/{existing['number']}", token, {"state": "closed"})
-        print(f"Closed regression issue #{existing['number']}", flush=True)
-    else:
-        print("Nightly eval clean; no open regression issue.", flush=True)
+            print("Nightly eval clean; no open regression issue.", flush=True)
+    except (urllib.error.URLError, urllib.error.HTTPError) as exc:
+        print(f"::warning::alerting skipped (GitHub API error: {exc})", flush=True)
     return 0
 
 

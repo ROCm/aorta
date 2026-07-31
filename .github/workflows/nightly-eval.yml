@@ -131,7 +131,10 @@ jobs:
           fi
           mkdir -p "$tmp/results"
           cp gpu-nightly-results.json "$tmp/results/${date}.json"
-          python3 scripts/ci/gen_dashboard.py --results-dir "$tmp/results" --out-dir "$tmp"
+          # Retention: keep only the most recent 180 result files on the branch
+          # so gh-pages doesn't grow unbounded (dashboard also caps rendering).
+          ls -1 "$tmp"/results/*.json 2>/dev/null | sort | head -n -180 | xargs -r rm -f
+          python3 scripts/ci/gen_dashboard.py --results-dir "$tmp/results" --out-dir "$tmp" --max-builds 180
           ( cd "$tmp"
             touch .nojekyll
             git add -A

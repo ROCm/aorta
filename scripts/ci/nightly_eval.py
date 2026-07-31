@@ -40,12 +40,15 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def gpu_count() -> int:
+    # Only a genuine missing-torch (ImportError) means "0 GPUs". A present-but-
+    # broken torch (bad libs, HIP/CUDA init error) must surface, not be swallowed
+    # into 0 -- otherwise every entry would skip, the nightly would go green while
+    # running nothing, and alerting would close open regression issues.
     try:
         import torch
-
-        return torch.cuda.device_count() if torch.cuda.is_available() else 0
-    except Exception:
+    except ImportError:
         return 0
+    return torch.cuda.device_count() if torch.cuda.is_available() else 0
 
 
 def build_metadata() -> dict[str, Any]:
