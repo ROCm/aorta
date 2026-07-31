@@ -6,7 +6,7 @@ on disk, and parsing pkg-config / Docker image digests. Inside a
 Buck2 monorepo none of those signals exist -- libraries are Buck
 *targets*, not files at well-known FHS paths.
 
-This module wraps ``buck2 cquery 'deps(<target>)' --json`` and
+This module wraps a bound ``buck2 cquery 'deps(%s)' <target> --json`` and
 matches each transitive dep label against a small known-pattern
 list (hipblaslt, pytorch, rccl, rocm). For matches it returns one
 ``library_introspection`` entry per library with ``source: "buck"``
@@ -29,9 +29,9 @@ vendored.
 
 Per the env-probe never-raises contract: every subprocess call is
 guarded; timeouts and OS errors degrade silently. Callers receive a
-``(entries, reasons)`` tuple -- one human-readable string per
-documented failure goes into ``reasons`` so the snapshot's
-``partial_reasons`` field surfaces it for the operator.
+``BuckIntrospectionResult`` dataclass. It remains iterable as
+``(entries, reasons)`` for compatibility; each human-readable reason
+can be surfaced in the snapshot's ``partial_reasons`` field.
 """
 
 from __future__ import annotations
@@ -41,6 +41,12 @@ import logging
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
+
+from aorta.instrumentation.buck_invocation import (
+    BuckInvocationContext,
+    BuckInvocationOption,
+)
 
 log = logging.getLogger(__name__)
 
@@ -90,15 +96,33 @@ KNOWN_LIBRARY_PATTERNS: dict[str, list[re.Pattern]] = {
 _CONFIG_SUFFIX_RE = re.compile(r"\s+\([^)]*\)\s*$")
 
 
+@dataclass(frozen=True)
+class BuckIntrospectionResult:
+    """Fail-soft cquery result plus configured-root metadata."""
+
+    entries: list[dict]
+    reasons: list[str]
+    succeeded: bool
+    configured_root_target: str | None
+
+    def __iter__(self):
+        """Preserve the historical ``entries, reasons = result`` API."""
+
+        yield self.entries
+        yield self.reasons
+
+
 def introspect_libraries_via_buck(
     target: str,
     repo_revision: str | None,
     timeout: int = 10,
     cwd: str | None = None,
-) -> tuple[list[dict], list[str]]:
-    """Run ``buck2 cquery 'deps(<target>)'`` and return matched library entries.
+    context: BuckInvocationContext | None = None,
+) -> BuckIntrospectionResult:
+    """Run bound ``buck2 cquery 'deps(%s)' <target>`` introspection.
 
-    Returns ``(entries, reasons)``:
+    Returns a :class:`BuckIntrospectionResult`. It remains two-value iterable
+    as ``(entries, reasons)`` for compatibility with existing callers:
 
     * ``entries`` -- one dict per matched library, in the unified
       ``library_introspection`` shape: ``{name, source: "buck",
@@ -121,26 +145,47 @@ def introspect_libraries_via_buck(
       succeeded but matched nothing (an empty match set is not a
       failure).
 
-    Never raises. Callers get a fully-shaped tuple even on failure.
+    ``succeeded`` distinguishes a clean cquery (including no library matches)
+    from every fail-soft path. ``configured_root_target`` retains the root
+    label including its cquery configuration suffix when that label can be
+    identified in the returned dependency closure.
+
+    Never raises. Callers get a fully-shaped result even on failure.
 
     The function does NOT validate ``target`` syntax; an invalid label
     will surface as a ``buck2 cquery`` non-zero exit captured in
     ``reasons``.
     """
+    invocation_context = context or BuckInvocationContext()
     buck2 = shutil.which("buck2")
     if buck2 is None:
         # Defensive: collect_env() only calls this when build_system.kind
         # == "buck2", which already implies buck2 is on PATH. If that
         # invariant is violated we still degrade cleanly.
-        return [], [
-            f"library_introspection: buck2 not on PATH; "
-            f"--buck-target {target} ignored"
-        ]
+        return BuckIntrospectionResult(
+            entries=[],
+            reasons=[
+                f"library_introspection: buck2 not on PATH; " f"--buck-target {target} ignored"
+            ],
+            succeeded=False,
+            configured_root_target=None,
+        )
 
     # Use cquery (not uquery) so the deps reflect the configured graph
     # the build would actually use, matching the semantics the prior
     # `audit dependencies --transitive` provided.
-    cmd = [buck2, "cquery", f"deps({target})", "--json"]
+    # Keep every user-controlled value in its own argv element. In particular,
+    # bind the target through Buck's multi-query ``%s`` parameter instead of
+    # interpolating it into the query language, where query syntax in a target
+    # string could alter the expression.
+    cmd = [
+        buck2,
+        "cquery",
+        *invocation_context.to_buck_args(),
+        "deps(%s)",
+        target,
+        "--json",
+    ]
     try:
         result = subprocess.run(
             cmd,
@@ -151,33 +196,56 @@ def introspect_libraries_via_buck(
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return [], [
-            f"library_introspection: buck2 cquery deps({target}) "
-            f"timed out after {timeout}s (raise --buck-timeout if needed)"
-        ]
+        return BuckIntrospectionResult(
+            entries=[],
+            reasons=[
+                f"library_introspection: buck2 cquery deps({target}) "
+                f"timed out after {timeout}s (raise --buck-timeout if needed)"
+            ],
+            succeeded=False,
+            configured_root_target=None,
+        )
     except (FileNotFoundError, OSError) as exc:
-        return [], [
-            f"library_introspection: buck2 cquery deps({target}) "
-            f"failed to launch ({exc})"
-        ]
+        safe_exc = invocation_context.redact_config_overrides(str(exc))
+        return BuckIntrospectionResult(
+            entries=[],
+            reasons=[
+                f"library_introspection: buck2 cquery deps({target}) "
+                f"failed to launch ({safe_exc})"
+            ],
+            succeeded=False,
+            configured_root_target=None,
+        )
 
     if result.returncode != 0:
         # Common cause: target not found, or buck2 misconfiguration.
         # Surface the stderr (truncated) so the operator can debug
         # without re-running by hand.
-        stderr = (result.stderr or "").strip()[:300]
-        return [], [
-            f"library_introspection: buck2 cquery deps({target}) "
-            f"exited {result.returncode} (stderr: {stderr or '(empty)'})"
-        ]
+        # Redact before truncation so a config token crossing the 300-character
+        # boundary cannot leave a partial raw value in env.json.
+        stderr = invocation_context.redact_config_overrides((result.stderr or "").strip())[:300]
+        return BuckIntrospectionResult(
+            entries=[],
+            reasons=[
+                f"library_introspection: buck2 cquery deps({target}) "
+                f"exited {result.returncode} (stderr: {stderr or '(empty)'})"
+            ],
+            succeeded=False,
+            configured_root_target=None,
+        )
 
     try:
         payload = json.loads(result.stdout or "[]")
     except json.JSONDecodeError as exc:
-        return [], [
-            f"library_introspection: buck2 cquery deps({target}) "
-            f"returned non-JSON output ({exc})"
-        ]
+        return BuckIntrospectionResult(
+            entries=[],
+            reasons=[
+                f"library_introspection: buck2 cquery deps({target}) "
+                f"returned non-JSON output ({exc})"
+            ],
+            succeeded=False,
+            configured_root_target=None,
+        )
 
     # `buck2 cquery 'deps(...)' --json` returns a flat list of
     # stringified labels (with a parenthesised configuration suffix per
@@ -193,10 +261,17 @@ def introspect_libraries_via_buck(
             if isinstance(v, list):
                 dep_labels.extend(str(x) for x in v)
     else:
-        return [], [
-            f"library_introspection: buck2 cquery deps({target}) "
-            f"returned unexpected JSON shape ({type(payload).__name__})"
-        ]
+        return BuckIntrospectionResult(
+            entries=[],
+            reasons=[
+                f"library_introspection: buck2 cquery deps({target}) "
+                f"returned unexpected JSON shape ({type(payload).__name__})"
+            ],
+            succeeded=False,
+            configured_root_target=None,
+        )
+
+    configured_root_target = _find_configured_root_target(target, dep_labels)
 
     entries: list[dict] = []
     seen_names: set[str] = set()
@@ -232,12 +307,32 @@ def introspect_libraries_via_buck(
             }
         )
 
-    return entries, []
+    return BuckIntrospectionResult(
+        entries=entries,
+        reasons=[],
+        succeeded=True,
+        configured_root_target=configured_root_target,
+    )
 
 
 def _strip_config_suffix(label: str) -> str:
     """Strip the parenthesised configuration suffix buck2 cquery emits."""
     return _CONFIG_SUFFIX_RE.sub("", label).strip()
+
+
+def _find_configured_root_target(target: str, dep_labels: list[str]) -> str | None:
+    """Find the requested target in a configured ``deps(%s)`` closure."""
+
+    requested = _strip_config_suffix(target)
+    for label in dep_labels:
+        bare = _strip_config_suffix(label)
+        if bare == requested:
+            return label
+        # Cquery commonly qualifies a root-cell ``//pkg:name`` input as
+        # ``root//pkg:name`` in configured output.
+        if requested.startswith("//") and bare.endswith(requested):
+            return label
+    return None
 
 
 def _match_library(label: str) -> str | None:
@@ -248,3 +343,11 @@ def _match_library(label: str) -> str | None:
             if pat.search(bare):
                 return name
     return None
+
+
+__all__ = [
+    "BuckIntrospectionResult",
+    "BuckInvocationOption",
+    "KNOWN_LIBRARY_PATTERNS",
+    "introspect_libraries_via_buck",
+]

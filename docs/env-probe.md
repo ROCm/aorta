@@ -4,9 +4,14 @@ Capture a versioned, schema-stable snapshot of the trial environment so
 that cross-environment comparison becomes a `jq` diff instead of a
 multi-day investigation.
 
+For a short customer handoff, including Buck's required client/workload
+snapshot pair, see [Customer Instructions](README_aorta_env_probe.md).
+
 The same code path is used three ways:
 
 * **CLI**: `aorta env probe -o env.json` -- on-demand, by an operator.
+* **Application API**: `capture_to("env.json", ...)` -- in-process capture for
+  Buck `.par` applications that own `__main__`.
 * **B1 (per-trial runner)**: calls `collect_env()` once per trial; the
   snapshot is embedded in `TrialResult.env`.
 * **B2 (matrix runner)**: calls `collect_env()` once per matrix start
@@ -105,11 +110,22 @@ Options:
   --buck-target TEXT       Buck2 label to introspect for library
                            identity. When given, the snapshot's
                            library_introspection list is populated
-                           from `buck2 cquery 'deps(<label>)' --json`
+                           from a bound `buck2 cquery 'deps(%s)'
+                           <label> --json`
                            (each matched entry carries both a
                            stripped `target` and the raw
                            `configured_target`, schema 1.6). Ignored
                            if buck2 isn't on PATH.
+  --buck-option TYPE=VALUE Exact ordered Buck input: mode=VALUE,
+                           config=KEY=VALUE, or modifier=VALUE.
+                           Repeat in the workload command's order.
+  --buck-mode-file PATH    Grouped convenience form for mode files.
+  --buck-config KEY=VALUE  Grouped convenience form for -c values.
+  --buck-modifier TEXT     Grouped convenience form for -m values.
+  --buck-default-context   Confirm that the target uses Buck's
+                           default invocation context. Mutually
+                           exclusive with the three explicit context
+                           options above.
   --buck-timeout INTEGER   Per-call timeout (seconds, must be >= 1)
                            for `buck2 cquery 'deps(...)'`.
                            [default: 10]
@@ -129,9 +145,10 @@ operator can act on them without `jq`'ing the JSON. A closing
 end-of-output. Sample:
 
 ```text
-Wrote env probe to /tmp/env.json (schema_version=1.12) [PARTIAL]
+Wrote env probe to /tmp/env.json (schema_version=1.13) [PARTIAL]
   runtime:   baremetal / python=venv  container_detected=no  probe=direct  ns=mnt:1a2b3c…
   build_sys: none
+  buck ctx:  status=not_requested source=none fingerprint=-
   rocm:      7.2.1 (dev: None)
   hip:       7.2.53211-e1a6bc5663 (amd)
   hipblaslt: 1.2.2 rocm_release_tweak=dabb6df2b9
@@ -184,9 +201,16 @@ who want to copy-paste without reading `env.json` from disk).
 ## Library API
 
 ```python
-from aorta.instrumentation.environment import collect_env, EnvSnapshot
+from aorta.instrumentation.environment import capture_to, collect_env, EnvSnapshot
 
 snapshot: EnvSnapshot = collect_env()   # NEVER raises
+
+# Buck .par/application path: capture this process and write env.json.
+# Filesystem errors raise; collection itself remains fail-soft.
+workload_snapshot = capture_to(
+    "env.workload.json",
+    probe_invocation="buck2_run",
+)
 
 # Embed in a trial result (B1 pattern)
 trial_result = {
@@ -210,23 +234,23 @@ if snapshot.partial:
 print(snapshot.summary())
 ```
 
-`collect_env()` is the **only** public entrypoint. It NEVER raises:
-each probe is fail-soft, and the orchestrator body has a top-level
-`try/except Exception` plus a disaster-recovery helper for any genuinely
-unexpected failure. Callers always get back a valid, fully-shaped
-`EnvSnapshot` object.
+`collect_env()` is the in-memory entrypoint and NEVER raises: each probe is
+fail-soft, and the orchestrator body has a disaster-recovery helper for any
+genuinely unexpected failure. `capture_to()` uses the same collection path and
+returns the same `EnvSnapshot`, then writes it as UTF-8 JSON. It raises only
+when the output directory/file cannot be created or validated.
 
 ## env.json schema
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.12"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.13"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
 | `system_health` | `dict \| null` | `rdhc --quick --json` (subprocess) | verbatim parsed JSON; `null` when rdhc absent / sudo unavailable / timeout / malformed |
 | `rocm` | `dict[str, str \| null]` | `/opt/rocm/.info/version{,_dev}`, `/sys/module/amdgpu/version` | `version`, `version_dev`, `kmd_version` |
-| `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (stable candidate family `amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_full_name` (complete canonical identity — apt `name=version` or rpm NVRA — capturing kernel-suffixed package names like `amdgpu-kmod-6.9.0-…_g9b20106afb70-6.14.14.000000-2226257.1.x86_64` that `package_name` alone drops; the single field two host snapshots diff on), `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_full_name`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — amdgpu module loaded (`modinfo` metadata present) but no dpkg/rpm package resolvable — records a `partial_reason`; `/dev/kfd` alone never does, since a passthrough container legitimately has the host's KFD node without a container-local package. Package lookup is a portable, **glob-capable** dpkg-then-rpm query parsed in Python (no shell pipe), so kernel-suffixed RPM names are matched. |
+| `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (stable candidate family `amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_full_name` (complete canonical identity — apt `name=version` or rpm NVRA — capturing kernel-suffixed package names such as `amdgpu-kmod-<kernel>-<driver-version>.<arch>` that `package_name` alone drops; the single field two host snapshots diff on), `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_full_name`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — amdgpu module loaded (`modinfo` metadata present) but no dpkg/rpm package resolvable — records a `partial_reason`; `/dev/kfd` alone never does, since a passthrough container legitimately has the host's KFD node without a container-local package. Package lookup is a portable, **glob-capable** dpkg-then-rpm query parsed in Python (no shell pipe), so kernel-suffixed RPM names are matched. |
 | `hip` | `dict[str, str \| null]` | `hipconfig --version/--platform/--compiler/--runtime/--cpp_config` | five subprocesses; `--version` and `--platform` cannot be combined (no delimiter) |
 | `hipblaslt` | `dict` | header parse + `sha256(libhipblaslt.so)` + sorted-filenames hash of `lib/hipblaslt/library/*` | `rocm_release_tweak` (NOT a per-hipBLASLt commit -- it's the ROCm release identifier shared across every library in a release; see note below), `package_version`, `lib_hash`, `kernel_db_revision`, `applied_prs: {}` |
 | `rocblas` | `dict` | header parse + `sha256(librocblas.so)` + sorted-filenames hash of `lib/rocblas/library/*` | Same shape as `hipblaslt`. Header lives at `include/rocblas/internal/rocblas-version.h`. |
@@ -254,7 +278,8 @@ unexpected failure. Callers always get back a valid, fully-shaped
 | `pytorch_version` | `str \| null` | optional `import torch` (no CUDA/HIP context init) | `null` when torch absent |
 | `pytorch_build` | `dict` | `torch.version.{git_version,hip,cuda,debug}` + install-kind detection + optional `git -C <src>/third_party/<sub> rev-parse HEAD` + parse of `torch.__config__.show()` + `nm -D libtorch_hip.so \| c++filt` symbol grep + scan of `<torch>/lib/` + parse of `<source>/build/CMakeCache.txt` + stream of `<source>/build/build.ninja` (modern `enable_language(HIP)` path) or walk of `<source>/build/**/<target>.dir/**/*.hip.o.cmake` (legacy `FindHIP.cmake` fallback) | `git_commit` is the linchpin -- pins every vendored submodule deterministically. Sub-blocks: `flags` (raw `build_settings`, `cxx_defines`, `cxx_flags_raw`, `cuda_flags_raw`, `gpu_arch_list`), `build_flags` (issue #170 stable 17-key parsed bool/str/None subset, with `CAFFE2_USE_MIOPEN` aliased to `USE_MIOPEN`), `binary_introspection` (`libtorch_hip_symbol_counts`, `torch_lib_bundled`, `cxx_flags_use_defines` -- pure facts, no ON/OFF inference), `cmake_cache` (source/editable installs only -- allowlisted entries from CMakeCache.txt), `ninja_hipcc` (source/editable installs only -- per-target HIPCC defines + codegen flags + offload archs; `_parser` discriminates the two parser strategies). See "PyTorch source-tree submodule probing" below. |
 | `build_system` | `dict` | `buck2 --version` + `buck2 root` + `hg id -i` / `git rev-parse HEAD` | Always present. `{"kind": "buck2", "buck2_version": str, "repo_root": str, "revision": str \| null}` when buck2 is on PATH AND we are demonstrably inside a Buck checkout (both `buck2 --version` and `buck2 root` succeed); `buck2_version` and `repo_root` are guaranteed populated, only `revision` may be `null`. `{"kind": "none"}` in every other case, including the dominant "buck2 is installed but cwd is not inside a Buck checkout" scenario. Added in schema 1.3 for issue #163 (A1.2a) so consumers can branch on Buck2 vs. system-package environments. See "Running inside a Buck environment" below. |
-| `library_introspection` | `list[dict]` | `buck2 cquery 'deps(<target>)' --json` (only when `--buck-target` is supplied) | Always present. Empty `[]` outside Buck mode. In Buck mode, one entry per matched library: `{"name", "source": "buck", "revision", "target", "configured_target"}`. `target` is the canonical Buck label (stable across daemon restarts); `configured_target` preserves the raw cquery output including its per-run configuration suffix (`(prelude//platforms:default#<hash>)`) for forensics. The matched library set lives in `KNOWN_LIBRARY_PATTERNS` in `src/aorta/instrumentation/buck_introspect.py`. Added in schema 1.4 for issue #163 (A1.2b); migrated from `buck2 audit dependencies` to `buck2 cquery` and split `target` / `configured_target` in schema 1.6 (PR #187). |
+| `buck_invocation` | `dict` | typed Buck context + bound `buck2 cquery 'deps(%s)' <target> --json` | Schema 1.13, always present. `status` distinguishes `not_requested`, `buck_not_detected`, `success`, and `failure`; `target` records the requested label. `context_source` is `none`, `unspecified`, `default_confirmed`, or `explicit`. Ordered `mode_files`, ordered `config_keys` (**never config values**), ordered `modifiers`, `option_order`, and `context_fingerprint` (`sha256:<hex>` over the full ordered context values) make the client-side query context comparable without disclosing raw overrides. `configured_root_target` retains the configured root label when cquery returns one; `comparison` is currently always `not_compared`. This is configured-graph invocation provenance, not execution placement: it does not answer the design note's Open Q1/Q2, populate `likely_execution_platform`, or prove where an action ran. |
+| `library_introspection` | `list[dict]` | bound `buck2 cquery 'deps(%s)' <target> --json` (only when `--buck-target` is supplied) | Always present. Empty `[]` outside Buck mode. In Buck mode, one entry per matched library: `{"name", "source": "buck", "revision", "target", "configured_target"}`. `target` is the canonical Buck label (stable across daemon restarts); `configured_target` preserves the raw cquery output including its per-run configuration suffix (`(prelude//platforms:default#<hash>)`) for forensics. The matched library set lives in `KNOWN_LIBRARY_PATTERNS` in `src/aorta/instrumentation/buck_introspect.py`. Added in schema 1.4 for issue #163 (A1.2b); migrated from `buck2 audit dependencies` to `buck2 cquery` and split `target` / `configured_target` in schema 1.6 (PR #187). Query binding replaced target interpolation in schema 1.13 without changing entry behavior. |
 | `library_introspection_alternates` | `list[dict]` | synthesised from A1's per-library blocks when a Buck match overlaps | Always present. Empty `[]` outside Buck mode and when no Buck-matched library is also captured by A1. Each entry mirrors the unified shape with `source: "package"` and pulls `revision` / `package_version` / `lib_hash` from the matching A1 block (e.g. `hipblaslt`). Added in schema 1.4 for issue #163 (A1.2b). |
 | `pytorch_sdpa` | `dict` | `torch.backends.cuda.{flash,mem_efficient,math,cudnn}_sdp_enabled()` | `backends_enabled` dict, one bool per SDPA backend + per-getter `null` when missing on older torch. Runtime state, NOT compile-time -- combine with `pytorch_build.binary_introspection.libtorch_hip_symbol_counts` for the full "compiled in AND enabled" picture. Added in schema 1.5 for issue #176 (PR #177). |
 
@@ -262,7 +287,7 @@ unexpected failure. Callers always get back a valid, fully-shaped
 probes (`composable_kernel.pytorch_bundled`, `aotriton`, and
 `pytorch_build.binary_introspection`) normally locate torch's native
 libraries at `<torch.__file__>/../lib`. When torch is a Buck target
-(e.g. `fbcode//caffe2:torch`) its Python package is materialised into a
+(e.g. `root//framework:runtime`) its Python package is materialised into a
 link-tree but the C++ runtime is `dlopen`'d from a separate
 build-artifact directory, so `<torch>/lib/libtorch_hip.so` does not
 exist and those fields previously came back `null`. Because the probe
@@ -438,7 +463,40 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.12` (current)
+### `1.13` (current)
+
+Buck configured-graph invocation provenance. Additive — one new top-level
+block, defaulted so older snapshots and direct constructors remain compatible.
+
+* New top-level **`buck_invocation`** block. Its `status` distinguishes no
+  request, Buck not detected, cquery success, and cquery failure. It records
+  the requested target, context source (`none` / `unspecified` /
+  `default_confirmed` / `explicit`), ordered mode files, ordered config
+  **keys only**, ordered modifiers, cross-option `option_order`, an aggregate
+  `sha256:` fingerprint over the full ordered context values, the configured
+  root target when available, and `comparison: "not_compared"`.
+* New repeatable CLI option `--buck-option TYPE=VALUE` preserves exact
+  cross-option order for `mode`, `config`, and `modifier` inputs. Grouped
+  convenience options remain available when the normal mode / `-c` / `-m`
+  order is sufficient. Context options require `--buck-target` and cannot be
+  mixed with `--buck-default-context`. There is no shell or arbitrary
+  passthrough string.
+* Cquery now binds the target through `deps(%s)` plus a separate target argv
+  entry. Target text is never interpolated into Buck query syntax.
+* `--buck-target` without explicit context or `--buck-default-context` still
+  runs for backwards compatibility, but records `context_source:
+  "unspecified"` and a clear partial reason. A request when
+  `build_system.kind != "buck2"` is similarly partial and records
+  `status: "buck_not_detected"`.
+* Raw Buck config values are never persisted. The key is visible and the
+  full value participates only in the aggregate fingerprint, so value drift
+  remains detectable without disclosure.
+* Scope remains deliberately narrow: this block describes the client-side
+  configured-graph query. It does **not** answer execution-context Open Q1 or
+  Q2, populate `execution_context.likely_execution_platform`, or prove actual
+  local/remote execution placement.
+
+### `1.12`
 
 Container & execution-context visibility, phase 2 (namespace). Additive —
 one new top-level field, defaulted so older readers don't raise. See the
@@ -523,8 +581,8 @@ don't raise.
   `kfd_device_present` / `kfd_sysfs_present` (`/dev/kfd` + `/sys/class/kfd`
   existence checks — no `open()`, no `ioctl`, no GPU compute).
 * **`package_full_name`** is the complete canonical package identity — apt
-  `name=version` on Debian, or the rpm NVRA
-  (`amdgpu-kmod-6.9.0-…_g9b20106afb70-6.14.14.000000-2226257.1.x86_64`) on
+  `name=version` on Debian, or an rpm NVRA such as
+  `amdgpu-kmod-<kernel>-<driver-version>.<arch>` on
   RHEL/SLES. Some vendors bake the kernel release into the RPM *package
   name*, which an exact `rpm -q amdgpu-kmod` misses entirely; the query
   uses a glob (`rpm -qa 'amdgpu-kmod*'`) to catch these and reconstructs
@@ -619,7 +677,7 @@ still round-trips pre-1.8 snapshots.
   `pytorch_build.binary_introspection` symbol counts / `torch_lib_bundled`)
   now locate torch's native lib dir via `/proc/self/maps` when
   `<torch>/lib` is absent, populating those fields for Buck/monorepo
-  torch targets (e.g. `fbcode//caffe2:torch`) whose C++ runtime is
+  torch targets (e.g. `root//framework:runtime`) whose C++ runtime is
   `dlopen`'d from a build-artifact dir.
 
 ### `1.7`
@@ -1200,7 +1258,9 @@ it's running inside a [Buck2](https://buck2.build/) build environment
 and records the result in the top-level `build_system` block. As of
 schema 1.4 (issue #163, A1.2b), it can additionally introspect a
 target's transitive deps to populate the `library_introspection`
-list. As of `aorta env recipe --format buck` (issue #163, A1.2c), the
+list. Schema 1.13 adds the redacted `buck_invocation` block so that
+the mode/config/modifier context used for that cquery is no longer
+implicit. As of `aorta env recipe --format buck` (issue #163, A1.2c), the
 captured `library_introspection` can be re-emitted as a best-effort
 BUCK file fragment for cross-environment handoff.
 
@@ -1241,19 +1301,35 @@ with `revision: null`.
 aorta env probe -o /tmp/env.json
 jq '.library_introspection' /tmp/env.json              # -> []
 jq '.library_introspection_alternates' /tmp/env.json   # -> []
+jq '.buck_invocation.status' /tmp/env.json              # -> "not_requested"
 
-# Inside a Buck checkout, point the probe at a top-level target. We
-# wrap `buck2 cquery 'deps(<target>)' --json` and match each
-# transitive dep label against KNOWN_LIBRARY_PATTERNS. Schema 1.6
-# emits both `target` (the canonical Buck label, stable across
-# daemon restarts) and `configured_target` (the raw cquery output
-# with its per-run configuration suffix; preserved for forensics).
-aorta env probe --buck-target //myproj:training_main -o /tmp/env.json
+# Confirm that this target needs no mode/config/modifier overrides.
+aorta env probe \
+  --buck-target //app:trainer \
+  --buck-default-context \
+  -o /tmp/env.json
+
+# Or reproduce the exact cross-option order used by the workload.
+aorta env probe \
+  --buck-target //app:trainer \
+  --buck-option mode=root//mode/debug \
+  --buck-option config=build.profile=debug \
+  --buck-option mode=root//mode/gpu \
+  --buck-option config=scheduler.policy=local \
+  --buck-option modifier=//constraints:linux \
+  --buck-option modifier=//constraints:gfx \
+  -o /tmp/env.json
+
+# The implementation binds the label as a separate query argument:
+# buck2 cquery @root//mode/debug -c build.profile=debug \
+#   @root//mode/gpu -c scheduler.policy=local \
+#   -m //constraints:linux -m //constraints:gfx \
+#   'deps(%s)' //app:trainer --json
+# No shell or free-form passthrough command is involved.
 jq '.library_introspection' /tmp/env.json
 # -> [
-#   {"name":"hipblaslt","source":"buck","revision":"<repo-sha>","target":"//.../hipblaslt_lib","configured_target":"//.../hipblaslt_lib (prelude//platforms:default#abc...)"},
-#   {"name":"rccl","source":"buck","revision":"<repo-sha>","target":"//.../rccl_lib","configured_target":"//.../rccl_lib (prelude//platforms:default#abc...)"},
-#   {"name":"pytorch","source":"buck","revision":"<repo-sha>","target":"//pytorch:torch","configured_target":"//pytorch:torch (prelude//platforms:default#abc...)"},
+#   {"name":"hipblaslt","source":"buck","revision":"<repo-sha>","target":"//libs:hipblaslt","configured_target":"root//libs:hipblaslt (prelude//platforms:default#abc...)"},
+#   {"name":"rccl","source":"buck","revision":"<repo-sha>","target":"//libs:rccl","configured_target":"root//libs:rccl (prelude//platforms:default#abc...)"},
 #   ...
 # ]
 
@@ -1263,6 +1339,20 @@ jq '.library_introspection' /tmp/env.json
 # label against the system-package version/lib_hash:
 jq '.library_introspection_alternates[] | select(.name=="hipblaslt")' /tmp/env.json
 # -> {"name":"hipblaslt","source":"package","revision":"...","package_version":"...","lib_hash":"..."}
+
+jq '.buck_invocation' /tmp/env.json
+# -> {
+#      "status": "success",
+#      "target": "//app:trainer",
+#      "context_source": "explicit",
+#      "mode_files": ["root//mode/debug", "root//mode/gpu"],
+#      "config_keys": ["build.profile", "scheduler.policy"],
+#      "modifiers": ["//constraints:linux", "//constraints:gfx"],
+#      "option_order": ["mode", "config", "mode", "config", "modifier", "modifier"],
+#      "context_fingerprint": "sha256:<digest>",
+#      "configured_root_target": "root//app:trainer (prelude//platforms:default#...)",
+#      "comparison": "not_compared"
+#    }
 ```
 
 `--buck-timeout` (default 10 s) caps the cquery subprocess. A timeout,
@@ -1272,13 +1362,32 @@ match patterns currently cover `hipblaslt`, `rccl`, `pytorch`, and
 `rocm` runtime; new libraries are added by appending to
 `KNOWN_LIBRARY_PATTERNS` in `src/aorta/instrumentation/buck_introspect.py`.
 
+If `--buck-target` is given without any explicit context options and without
+`--buck-default-context`, the query still runs so older invocations keep
+working. The snapshot records `context_source: "unspecified"` and becomes
+partial with a reason saying the default context was not confirmed. Likewise,
+if `build_system.kind` is not `buck2`, Aorta still attempts the historical
+fail-soft cquery path but records `status: "buck_not_detected"` plus a partial
+reason; the result cannot look like a fully plausible Buck capture.
+
+Only config keys are serialized. Full `KEY=VALUE` strings are used to invoke
+Buck and compute the aggregate context fingerprint, then discarded. Changing
+a value or changing order changes the fingerprint, while the raw value never
+appears in `buck_invocation`.
+
+This metadata answers “which client-side context configured this cquery?” It
+does **not** answer execution-context Open Q1 (native remote-worker markers) or
+Open Q2 (selected execution platform), and it does not prove whether any
+workload action ran locally, remotely, or from cache. See
+[`env-probe-container-execution-context.md`](env-probe-container-execution-context.md).
+
 ### Emitting a Buck recipe (`aorta env recipe --format buck`)
 
 Issue #163 (A1.2c) ships a read-only emitter that turns an env.json
 back into a BUCK file fragment for cross-environment handoff:
 
 ```bash
-aorta env probe --buck-target //myproj:training_main -o /tmp/env.json
+aorta env probe --buck-target //app:trainer --buck-default-context -o /tmp/env.json
 aorta env recipe --format buck /tmp/env.json > BUCK.aorta-recipe
 head -n 20 BUCK.aorta-recipe
 # # ============================================================================

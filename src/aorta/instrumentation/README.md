@@ -7,10 +7,11 @@ per-layer numerics logger. Future submodules (drift watcher, etc.) will live her
 
 | Submodule | Purpose | Public API |
 | --- | --- | --- |
-| [`environment`](environment.py) | ROCm + ML stack version snapshot + container/python env detection. See block list below. | `collect_env(buck_target: str \| None = None, buck_timeout: int = 10) -> EnvSnapshot` |
+| [`environment`](environment.py) | ROCm + ML stack version snapshot + container/python env detection. See block list below. | `collect_env(...) -> EnvSnapshot`, `capture_to(path, ...) -> EnvSnapshot` |
 | [`layer_numerics`](layer_numerics/README.md) | Per-layer / per-stage NaN, magnitude, and out-of-range logger. Runs standalone as a front-end around a training/repro script (the supported path); also a recognized `layer_numerics` sweep collector — the engine validates the name and threads it into workload config, but a workload must opt in for capture (see [`docs/layer-numerics.md`](../../../docs/layer-numerics.md)). Config via `NANLOG_SPEC` (structured, recommended) or the flat `NANLOG_*` vars. | `build_env(results_dir, overrides=None) -> dict`, `SCRIPT_PATH`, `OUTPUT_SUBDIR` |
 | [`build_system`](build_system.py) | Detects Buck2 build environments (issue #163, A1.2a). Wrapped by `collect_env()` and surfaced as the `build_system` field of `EnvSnapshot`. | `detect_build_system() -> dict` |
-| [`buck_introspect`](buck_introspect.py) | Buck-aware library introspection via `buck2 cquery 'deps(<target>)' --json` (issue #163, A1.2b). Triggered by `collect_env(buck_target=...)` (or `aorta env probe --buck-target ...`); populates the `library_introspection` and `library_introspection_alternates` fields of `EnvSnapshot`. | `introspect_libraries_via_buck(target, repo_revision, ...) -> (entries, reasons)` |
+| [`buck_invocation`](buck_invocation.py) | Frozen, ordered Buck invocation context: mode/flag files, `-c` overrides, `-m` modifiers, or explicit default confirmation. Builds atomic argv and a redacted comparison fingerprint; no shell/passthrough string. | `BuckInvocationContext` |
+| [`buck_introspect`](buck_introspect.py) | Buck-aware library introspection via bound `buck2 cquery 'deps(%s)' <target> --json` (issue #163, A1.2b; context provenance schema 1.13). Triggered by `collect_env(buck_target=...)`; populates `buck_invocation`, `library_introspection`, and `library_introspection_alternates`. | `introspect_libraries_via_buck(...) -> BuckIntrospectionResult` |
 | [`recipes/buck`](recipes/buck.py) | BUCK file-fragment emitter for `aorta env recipe --format buck` (issue #163, A1.2c). Reads `build_system` + `library_introspection` from a captured env.json dict and emits one `prebuilt_cxx_library` per `source == "buck"` entry, prefixed with a loud "BEST-EFFORT, NOT EXACT" header. Pure text generation -- never invokes `buck2 build`, never vendors Buck rules. | `emit_buck_recipe(env: dict) -> str` |
 
 **`environment` blocks** (every snapshot includes all of these; missing
@@ -35,6 +36,9 @@ values become `None` plus a `partial_reasons` line):
 * Build system: `build_system` (always present; `{"kind": "buck2",
   ...}` when Buck2 is on PATH and functional, `{"kind": "none"}`
   otherwise). Populated by `aorta.instrumentation.build_system.detect_build_system()`.
+* Buck invocation: `buck_invocation` (always present), which records the
+  redacted client-side cquery context and configured root target. It does not
+  report actual execution placement or resolve execution-context Q1/Q2.
 * Library introspection (Buck mode only): `library_introspection` and
   `library_introspection_alternates` (always present; both `[]`
   outside Buck mode). Populated only when `collect_env(buck_target=...)`
@@ -79,9 +83,15 @@ aorta env probe
 # Custom path; parent dirs are created if missing
 aorta env probe -o runs/exp1/env.json
 
-# Buck mode: also runs `buck2 cquery 'deps(<target>)' --json` and
-# populates library_introspection. The default `--buck-timeout` is 10 s.
-aorta env probe --buck-target //myproj:training_main
+# Buck mode with an explicitly confirmed default context.
+aorta env probe --buck-target //app:trainer --buck-default-context
+
+# Or reproduce ordered context inputs.
+aorta env probe \
+  --buck-target //app:trainer \
+  --buck-option mode=root//mode/debug \
+  --buck-option config=build.profile=debug \
+  --buck-option modifier=//constraints:linux
 ```
 
 After the run, `cat env.json` reveals the same dict that
@@ -135,7 +145,21 @@ Documented absences DO NOT trigger `partial`:
 * `env_vars[X] == None` for an unset env var (the documented contract).
 * `runtime_context.venv_path == None` outside a venv.
 
-### env.json schema (v1.1)
+For a Buck ``.par`` whose application owns ``__main__``, add `aorta_lib` to
+the application's dependencies and call `capture_to()` near the beginning of
+its existing `main()`:
+
+```python
+from aorta.instrumentation.environment import capture_to
+
+capture_to("env.workload.json", probe_invocation="buck2_run")
+```
+
+This captures the workload process. Keep client-side `--buck-target`
+introspection in a separate snapshot; a remote action may not have access to
+the Buck daemon or checkout needed for a nested cquery.
+
+### env.json schema (v1.13)
 
 See `EnvSnapshot` in [`environment.py`](environment.py) for the
 authoritative shape and field-by-field docstrings. Top-level keys:
@@ -148,7 +172,7 @@ tensile           triton            fbgemm          aiter
 aotriton          gpu_arch          host
 runtime_context   docker            env_vars
 python_version    pytorch_version   pytorch_build
-build_system      library_introspection
+build_system      buck_invocation       library_introspection
 library_introspection_alternates
 ```
 
