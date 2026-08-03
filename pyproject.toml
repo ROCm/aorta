@@ -72,6 +72,12 @@ race = "aorta.run.validation:PROCESS_REQUIRED_POLICY"
 [project.entry-points."aorta.workload_startup_env"]
 race = "aorta.run.validation:race_startup_env"
 
+# Analysis tools register here via the aorta.tools entry-point group (see
+# aorta.tools.Tool). Built-in tools live in aorta.tools.*; private tools
+# register the same group from a downstream package's pyproject.toml.
+[project.entry-points."aorta.tools"]
+rocjitsu_sanitizers = "aorta.tools.rocjitsu_sanitizers:RocjitsuSanitizersTool"
+
 [project.optional-dependencies]
 # For analysis/visualization scripts
 analysis = [

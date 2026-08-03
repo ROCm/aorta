@@ -1,0 +1,4 @@
+rank,count,transA,transB,M,N,K,batch_count,compute_type,top_solution_idx
+1,1000,N,T,256,256,256,1,f32_r,100001
+2,900,N,N,512,512,128,1,f32_r,100002
+3,800,T,N,128,1024,256,1,f32_r,100003
