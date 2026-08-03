@@ -177,6 +177,34 @@ class TestRegistryIsAuditable:
         assert "env_knobs" in source
         assert names["TENSILE_DB2"]  # every name maps to a library
 
+    def test_docs_knob_inventory_matches_registry(self):
+        """The docs' knob inventory is GENERATED, and this is the check that keeps
+        it that way. Without it the table is just a second hand-written copy of
+        the manifest -- the exact thing the manifest exists to eliminate."""
+        text = _DOCS.read_text()
+        begin, end = audit.DOCS_TABLE_BEGIN, audit.DOCS_TABLE_END
+        assert begin in text and end in text, "generated inventory block missing from docs"
+        in_docs = text[text.index(begin) : text.index(end) + len(end)]
+
+        assert in_docs == audit.render_docs_table(), (
+            "docs inventory is stale -- regenerate with "
+            "`python scripts/audit_env_knobs.py --emit-docs-table`"
+        )
+
+    def test_emit_docs_table_needs_no_rocm_install(self, monkeypatch, capsys):
+        """The table comes from the manifest, so it must render on a host with no
+        ROCm: --emit-docs-table returns before any library resolution."""
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["audit_env_knobs.py", "--emit-docs-table", "--rocm-lib", "/nonexistent"],
+        )
+
+        assert audit.main() == 0
+
+        out = capsys.readouterr().out
+        assert audit.DOCS_TABLE_BEGIN in out and audit.DOCS_TABLE_END in out
+
     def test_docs_env_var_count_matches_registry(self):
         """The docs' knob count is asserted, not maintained by hand.
 

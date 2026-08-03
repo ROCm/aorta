@@ -1413,6 +1413,59 @@ records, per variable: `name`, `library`, `consumer`, `category`,
 reads a variable. They deliberately do **not** assert that the installed library
 supports it, that the process exported it, or that it changed a run.
 
+### The captured inventory
+
+Generated from the manifest, so it is the set the probe actually reads rather than a
+second copy of it. Regenerate with `python scripts/audit_env_knobs.py
+--emit-docs-table`; `test_docs_knob_inventory_matches_registry` fails if this block and
+the manifest disagree. (The `1.15` changelog table above is a different thing on
+purpose: it records what that release *changed*, which is history and does not
+regenerate.)
+
+<!-- BEGIN GENERATED: env-knob-inventory -->
+
+132 knobs, generated from `ENV_KNOB_REGISTRY` by
+`python scripts/audit_env_knobs.py --emit-docs-table`. `library` is the component that reads the variable; for the GEMM prefixes it is measured from the shipped shared object's string table. A row's presence records that the variable is preserved in a snapshot -- not that the installed library supports it, that the process exported it, or that it affected a run.
+
+| Category | Library | Variables |
+| --- | --- | --- |
+| `gpu_scoping` | hip-runtime | `HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES` |
+| `runtime` | hsa-runtime | `HSA_XNACK`, `HSA_KERNARG_POOL_SIZE`, `HSA_NO_SCRATCH_RECLAIM`, `HSA_OVERRIDE_GFX_VERSION`, `HSA_TOOLS_DISABLE_REGISTER` |
+| `runtime` | hip-runtime | `GPU_MAX_HW_QUEUES`, `HIP_LAUNCH_BLOCKING` |
+| `codegen` | compiler | `AMDGCN_USE_BUFFER_OPS` |
+| `gemm_numeric` | pytorch | `DISABLE_TF32` |
+| `codegen` | pytorch | `PYTORCH_ROCM_ARCH` |
+| `collectives` | rccl | `NCCL_MAX_NCHANNELS`, `NCCL_P2P_LEVEL`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `RCCL_MSCCL_ENABLE` |
+| `fabric` | rccl | `RCCL_AINIC_ROCE`, `NCCL_NET_PLUGIN`, `NCCL_NET`, `RCCL_CTS_OFFLOAD_ENABLED`, `NCCL_IB_GID_INDEX`, `NCCL_IB_ROCE_VERSION_NUM`, `NCCL_IB_TC`, `NCCL_IB_FIFO_TC`, `NCCL_GDR_FLUSH_DISABLE`, `NCCL_GDRCOPY_ENABLE`, `NCCL_IB_USE_INLINE`, `NCCL_IB_PCI_RELAXED_ORDERING`, `NCCL_IB_QPS_PER_CONNECTION`, `NCCL_PXN_DISABLE`, `NCCL_IGNORE_CPU_AFFINITY`, `NCCL_NET_OPTIONAL_RECV_COMPLETION`, `RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING`, `NCCL_IB_TIMEOUT`, `NCCL_IB_SL`, `NCCL_IB_SPLIT_DATA_ON_QPS`, `NCCL_DMABUF_ENABLE`, `NCCL_CUMEM_ENABLE`, `IONIC_LOCKFREE`, `RCCL_DISABLE_RAIL_TREES`, `RCCL_LL128_FORCE_ENABLE`, `NCCL_WORK_FIFO_BYTES`, `RCCL_GFX9_CHEAP_FENCE_OFF` |
+| `embedding_backend` | fbgemm | `FBGEMM_NO_JK`, `FBGEMM_TBE_V2`, `FBGEMM_TBE_ROCM_HIP_BACKWARD_KERNEL`, `FBGEMM_BOUNDS_CHECK_INDICES_V2` |
+| `conv_backend` | miopen | `MIOPEN_SYSTEM_DB_PATH`, `MIOPEN_USER_DB_PATH`, `MIOPEN_DEBUG_DISABLE_FIND_DB`, `MIOPEN_FIND_MODE` |
+| `attention_backend` | pytorch | `TORCH_ROCM_FA_PREFER_CK`, `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL` |
+| `gemm_routing` | pytorch | `TORCH_BLAS_PREFER_HIPBLASLT` |
+| `gemm_solution_selection` | pytorch | `TORCH_HIPBLASLT_TUNING_FILE`, `TORCH_HIPBLASLT_TUNING_OVERRIDE_FILE` |
+| `framework` | pytorch | `TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE`, `PYTORCH_CUDA_ALLOC_CONF` |
+| `loader` | dynamic-loader | `LD_LIBRARY_PATH` |
+| `gemm_loading` | hipblaslt | `HIPBLASLT_TENSILE_LIBPATH`, `HIPBLASLT_EXT_OP_LIBRARY_PATH`, `HIPBLASLT_PRELOAD_KERNELS` |
+| `gemm_loading` | rocblas | `ROCBLAS_TENSILE_LIBPATH` |
+| `gemm_solution_selection` | rocblas | `ROCBLAS_TENSILE_GEMM_OVERRIDE_PATH`, `TENSILE_EXPERIMENTAL_SELECTION`, `TENSILE_TAM_SELECTION_ENABLE` |
+| `gemm_routing` | rocblas | `ROCBLAS_USE_HIPBLASLT`, `ROCBLAS_USE_HIPBLASLT_BATCHED` |
+| `gemm_routing` | hipblaslt | `HIPBLASLT_USE_ROCROLLER`, `HIPBLASLT_ROCROLLER_NO_CUSTOM_KERNEL` |
+| `gemm_solution_selection` | hipblaslt | `HIPBLASLT_TUNING_OVERRIDE_FILE`, `TENSILE_SOLUTION_SELECTION_METHOD`, `TENSILE_PREDICTION_LIB`, `TENSILE_GRIDBASED_KDTREE`, `TENSILE_GRIDBASED_BATCH_EXP` |
+| `gemm_numeric` | hipblaslt | `HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32` |
+| `gemm_numeric` | rocblas | `ROCBLAS_DEFAULT_ATOMICS_MODE`, `ROCBLAS_INTERNAL_FP16_ALT_IMPL`, `ROCBLAS_INTERNAL_FP16_ALT_IMPL_RNZ`, `ROCBLAS_INTERNAL_FORCE_VALU_FOR_DGEMM` |
+| `gemm_workspace` | rocblas | `ROCBLAS_STREAM_ORDER_ALLOC`, `ROCBLAS_DEVICE_MEMORY_SIZE`, `ROCBLAS_INTERNAL_TRSM_REG_KERNEL_MEM_LIMIT` |
+| `gemm_solution_selection` | hipblaslt+rocblas | `TENSILE_SOLUTION_INDEX`, `TENSILE_NAIVE_SEARCH`, `TENSILE_METRIC` |
+| `gemm_launch_geometry` | hipblaslt+rocblas | `TENSILE_STREAMK_DYNAMIC_GRID`, `TENSILE_STREAMK_FIXED_GRID`, `TENSILE_STREAMK_MAX_CUS`, `TENSILE_STREAMK_FULL_TILES`, `TENSILE_STREAMK_GRID_MULTIPLIER` |
+| `gemm_launch_geometry` | hipblaslt | `TENSILE_STREAMK_DATA_PARALLEL`, `TENSILE_STREAMK_DYNAMIC_WGM`, `TENSILE_FIXED_WGM`, `TENSILE_FIXED_WGMXCC`, `TENSILE_FIXED_WGMXCCCHUNK`, `TENSILE_DISABLE_STAGGERU`, `TENSILE_FIXED_STAGGERU`, `TENSILE_FIXED_STAGGERU_MAPPING`, `TENSILE_FIXED_STAGGERU_STRIDE_SHIFT` |
+| `gemm_skip_work` | hipblaslt+rocblas | `TENSILE_DB2` |
+| `gemm_forward_compat` | hipblaslt | `TENSILE_STREAMK5_FORCE_MODE`, `TENSILE_STREAMK_TILES`, `TENSILE_STREAMK_SPLIT` |
+| `gemm_numeric_check` | hipblaslt | `HIPBLASLT_CHECK_NUMERICS`, `HIPBLASLT_CHECK_NUMERICS_SCAN_EVERY`, `HIPBLASLT_CHECK_NUMERICS_SCAN_FROM`, `HIPBLASLT_CHECK_NUMERICS_SCAN_UNTIL`, `HIPBLASLT_CHECK_NUMERICS_STOP_ON_FIRST` |
+| `gemm_numeric_check` | rocblas | `ROCBLAS_CHECK_NUMERICS` |
+| `gemm_diagnostics` | hipblaslt | `HIPBLASLT_LOG_FILE`, `HIPBLASLT_LOG_LEVEL`, `HIPBLASLT_LOG_MASK`, `HIPBLASLT_BENCH_PERF`, `HIPBLASLT_BENCH_PERF_ALL`, `HIPBLASLT_BENCH_PRINT_COMMAND`, `HIPBLASLT_ENABLE_MARKER`, `TENSILE_ENABLE_MARKER`, `TENSILE_ADAPTIVE_GEMM_LOG`, `TENSILE_AUTO_GSU_ALGO`, `TENSILE_BENCHMARK` |
+| `gemm_diagnostics` | rocblas | `ROCBLAS_LAYER`, `ROCBLAS_LOG_PATH`, `ROCBLAS_LOG_TRACE_PATH`, `ROCBLAS_LOG_BENCH_PATH`, `ROCBLAS_LOG_PROFILE_PATH`, `ROCBLAS_VERBOSE_HIPBLASLT_ERROR`, `ROCBLAS_VERBOSE_TENSILE_ERROR`, `ROCBLAS_API_BENCH`, `TENSILE_SOLUTION_SELECTION_TRACE` |
+| `gemm_diagnostics` | hipblaslt+rocblas | `TENSILE_DB` |
+
+<!-- END GENERATED: env-knob-inventory -->
+
 Two different checks keep it honest, and it matters which one proves what:
 
 * **Drift between lists** — `test_canonical_var_names_stable` compares the

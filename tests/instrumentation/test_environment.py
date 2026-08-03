@@ -3928,8 +3928,12 @@ class TestEnvKnobRegistry:
         """A knob the reference build does not ship is recorded as such rather
         than implying it was verified there. This is the honesty half of review
         2: capture does not claim library support."""
-        for name in ("TENSILE_STREAMK5_FORCE_MODE", "TENSILE_STREAMK_TILES",
-                     "TENSILE_STREAMK_SPLIT", "HIPBLASLT_BENCH_PERF_ALL"):
+        for name in (
+            "TENSILE_STREAMK5_FORCE_MODE",
+            "TENSILE_STREAMK_TILES",
+            "TENSILE_STREAMK_SPLIT",
+            "HIPBLASLT_BENCH_PERF_ALL",
+        ):
             knob = env_mod.ENV_KNOBS_BY_NAME[name]
             assert knob.source_reference == env_knobs.ABSENT_FROM_REFERENCE_BUILD, name
 
@@ -3968,6 +3972,13 @@ class TestEnvKnobRegistry:
         captured = env_mod._capture_env_vars()
 
         assert captured["TENSILE_STREAMK5_FORCE_MODE"] == "1"
+
+        # ...and it survives all the way into the artifact, not just the capture
+        # dict: "recorded" only counts if a customer bundle carries it.
+        snap = _example_snapshot(env_vars=captured)
+        as_json = json.loads(json.dumps(snap.to_dict()))
+        assert as_json["env_vars"]["TENSILE_STREAMK5_FORCE_MODE"] == "1"
+        assert EnvSnapshot.from_dict(as_json).env_vars["TENSILE_STREAMK5_FORCE_MODE"] == "1"
 
 
 # ---------------------------------------------------------------------------

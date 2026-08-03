@@ -98,18 +98,63 @@ def extract_names(lib: Path) -> frozenset[str]:
     return frozenset(tok for tok in blob.split() if ENV_NAME_RE.match(tok))
 
 
-def load_registry() -> tuple[dict[str, str], str]:
-    """``{name: library}`` from the registry, plus a description of its source."""
+def _import_registry():
     here = Path(__file__).resolve().parent.parent
     src = here / "src"
     if src.is_dir() and str(src) not in sys.path:
         sys.path.insert(0, str(src))
     from aorta.instrumentation.env_knobs import ENV_KNOB_REGISTRY
 
+    return ENV_KNOB_REGISTRY
+
+
+def load_registry() -> tuple[dict[str, str], str]:
+    """``{name: library}`` from the registry, plus a description of its source."""
+    registry = _import_registry()
     return (
-        {knob.name: knob.library for knob in ENV_KNOB_REGISTRY},
-        f"aorta.instrumentation.env_knobs ({len(ENV_KNOB_REGISTRY)} knobs)",
+        {knob.name: knob.library for knob in registry},
+        f"aorta.instrumentation.env_knobs ({len(registry)} knobs)",
     )
+
+
+# Markers delimiting the generated inventory inside docs/env-probe.md. The table
+# between them is emitted by --emit-docs-table and checked by
+# tests/instrumentation/test_env_knob_audit.py, so the docs cannot drift from the
+# manifest the probe actually reads.
+DOCS_TABLE_BEGIN = "<!-- BEGIN GENERATED: env-knob-inventory -->"
+DOCS_TABLE_END = "<!-- END GENERATED: env-knob-inventory -->"
+
+
+def render_docs_table() -> str:
+    """The captured-knob inventory as a markdown table, grouped by category.
+
+    Generated rather than hand-maintained: a hand-written inventory is a second
+    copy of the manifest, and the whole point of the manifest is that there is
+    only one copy. Needs no ROCm install -- it reads the manifest, not libraries.
+    """
+    registry = _import_registry()
+    by_category: dict[tuple[str, str], list[str]] = {}
+    for knob in registry:
+        by_category.setdefault((knob.category, knob.library), []).append(knob.name)
+
+    lines = [
+        DOCS_TABLE_BEGIN,
+        "",
+        f"{len(registry)} knobs, generated from `ENV_KNOB_REGISTRY` by",
+        "`python scripts/audit_env_knobs.py --emit-docs-table`. `library` is the component"
+        " that reads the variable; for the GEMM prefixes it is measured from the shipped"
+        " shared object's string table. A row's presence records that the variable is"
+        " preserved in a snapshot -- not that the installed library supports it, that the"
+        " process exported it, or that it affected a run.",
+        "",
+        "| Category | Library | Variables |",
+        "| --- | --- | --- |",
+    ]
+    for (category, library), names in by_category.items():
+        rendered = ", ".join(f"`{n}`" for n in names)
+        lines.append(f"| `{category}` | {library} | {rendered} |")
+    lines += ["", DOCS_TABLE_END]
+    return "\n".join(lines)
 
 
 def main() -> int:
@@ -127,7 +172,18 @@ def main() -> int:
         action="store_true",
         help="exit non-zero when a library exposes a knob the registry omits",
     )
+    ap.add_argument(
+        "--emit-docs-table",
+        action="store_true",
+        help="print the generated knob inventory for docs/env-probe.md and exit "
+        "(reads the manifest only; no ROCm install needed)",
+    )
     args = ap.parse_args()
+
+    # Before any library resolution: this mode needs the manifest, nothing else.
+    if args.emit_docs_table:
+        print(render_docs_table())
+        return 0
 
     if args.names_file:
         names = {
