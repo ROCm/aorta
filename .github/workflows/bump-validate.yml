@@ -1,0 +1,32 @@
+name: Bump validation
+
+# Validate stack-bump PRs (ROCm base image / Python deps / CI constraints) with
+# the SAME nightly evaluation matrix + baseline comparison, so the correctness
+# and baseline impact of a bump is visible before approval. Runs only for
+# same-repository PRs (never fork PRs) on the self-hosted GPU runner.
+#
+# Scoped to the stack-defining files to protect the single runner; broader
+# dependency changes are still covered by the nightly run.
+
+on:
+  pull_request:
+    paths:
+      - "docker/**"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - "config/ci/ci-constraints.txt"
+
+concurrency:
+  group: bump-validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: validate stack bump
+    # Same-repo PRs only -- fork code must not run on the self-hosted runner.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/eval-reusable.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+      do_alert: false      # PRs must not file/close the nightly regression issue
+    secrets: inherit

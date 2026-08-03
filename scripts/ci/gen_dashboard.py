@@ -16,9 +16,33 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from html import escape as _esc
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import eval_lib  # for metric_policy display
+    _metric_policy = eval_lib.metric_policy
+except Exception:  # pragma: no cover - dashboard must render even if import fails
+    def _metric_policy(_name: str):  # type: ignore
+        return None
+
+# Display units keyed by metric name (suffix-independent). Unknown -> no unit.
+_METRIC_UNITS = {
+    "gflops": "GFLOP/s",
+    "gbps": "GB/s",
+    "tokens_per_sec": "tok/s",
+    "samples_per_sec": "smp/s",
+    "throughput": "",
+    "prefill_latency_ms": "ms",
+    "decode_latency_ms": "ms",
+    "latency_ms": "ms",
+    "logits_checksum": "",
+    "output_checksum": "",
+    "checksum": "",
+}
 
 _VERDICT_COLOR = {
     "pass": "#2ea043",
@@ -122,6 +146,37 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             f"<td class='muted'>{_esc(reasons)}</td></tr>"
         )
 
+    # Per-metric trends from metrics.summary (the newest build defines the set).
+    metric_pairs: list[tuple[str, str]] = []
+    for k, e in latest_by_key.items():
+        for m in ((e.get("metrics") or {}).get("summary") or {}):
+            metric_pairs.append((k, m))
+    mhist: dict[tuple[str, str], list[float | None]] = {p: [] for p in metric_pairs}
+    for doc in results:
+        seen: dict[tuple[str, str], float | None] = {}
+        for e in doc.get("entries", []) or []:
+            kk = f"{e.get('entry')}::{e.get('cell')}"
+            for mm, val in ((e.get("metrics") or {}).get("summary") or {}).items():
+                seen[(kk, mm)] = val
+        for p in metric_pairs:
+            mhist[p].append(seen.get(p))
+    metric_rows = []
+    for k, m in sorted(metric_pairs):
+        latest_val = ((latest_by_key[k].get("metrics") or {}).get("summary") or {}).get(m)
+        unit = _METRIC_UNITS.get(m, "")
+        val_txt = (
+            f"{latest_val:.4g} {unit}".strip()
+            if isinstance(latest_val, (int, float)) else "—"
+        )
+        policy = _metric_policy(m) or "(trend)"
+        metric_rows.append(
+            f"<tr><td class='mono'>{_esc(k)}</td>"
+            f"<td class='mono'>{_esc(m)}</td>"
+            f"<td>{_esc(policy)}</td>"
+            f"<td>{_esc(val_txt)}</td>"
+            f"<td>{_svg_sparkline(mhist[(k, m)])}</td></tr>"
+        )
+
     s = latest.get("summary", {})
     meta = _esc(
         f"aorta {build.get('amd_aorta_version', '?')} · "
@@ -160,8 +215,21 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     </tbody>
   </table>
   <p class="muted">Verdicts: pass/fail = vs blessed baseline · record = no baseline yet (metrics captured) · skip = insufficient GPUs.</p>
+
+  <h2 style="font-size:1.1rem;margin-top:2rem;">Performance / metric trends</h2>
+  <table>
+    <thead><tr><th>workload::cell</th><th>metric</th><th>policy</th>
+      <th>latest</th><th>trend</th></tr></thead>
+    <tbody>
+      {{metric_table}}
+    </tbody>
+  </table>
 </body></html>
-"""
+""".replace(
+        "{metric_table}",
+        "".join(metric_rows) if metric_rows
+        else "<tr><td colspan=5 class=muted>no workload metrics captured yet</td></tr>",
+    )
 
 
 def main() -> int:

@@ -111,18 +111,42 @@ def run_entry(entry: dict[str, Any], out_dir: Path) -> tuple[int, Path | None, b
 
     print(f"RUN {entry['name']} (timeout {timeout_sec}s): {' '.join(argv)}", flush=True)
     timed_out = False
+    # Run in its own process group/session so a timeout can kill the ENTIRE tree
+    # (torchrun + all rank workers), not just the immediate torchrun process --
+    # orphaned GPU workers would otherwise retain memory/collectives and
+    # contaminate later matrix entries.
+    proc = subprocess.Popen(argv, cwd=REPO_ROOT, start_new_session=True)
     try:
-        # Bound each entry so a hung distributed collective can't consume the
-        # whole workflow timeout and starve later entries / the results write.
-        proc = subprocess.run(argv, cwd=REPO_ROOT, timeout=timeout_sec)
-        rc = proc.returncode
+        rc = proc.wait(timeout=timeout_sec)
     except subprocess.TimeoutExpired:
-        print(f"TIMEOUT {entry['name']} after {timeout_sec}s", flush=True)
+        print(f"TIMEOUT {entry['name']} after {timeout_sec}s; killing process group", flush=True)
         timed_out = True
         rc = 124
+        _kill_process_group(proc)
 
     matrices = sorted(run_out.rglob("matrix.json"), key=lambda p: p.stat().st_mtime)
     return rc, (matrices[-1] if matrices else None), timed_out
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Terminate the whole process group with bounded TERM then KILL escalation."""
+    import os
+    import signal
+
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=30)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def evaluate(matrix_doc: dict[str, Any], baselines: dict[str, Any], out_dir: Path) -> dict[str, Any]:
@@ -146,20 +170,42 @@ def evaluate(matrix_doc: dict[str, Any], baselines: dict[str, Any], out_dir: Pat
         rc, matrix_path, timed_out = run_entry(entry, out_dir)
         dur = (_dt.datetime.now() - start).total_seconds()
 
-        if matrix_path is None:
-            reason = (
-                f"timed out ({entry.get('timeout_sec', 1800)}s)" if timed_out
-                else f"no matrix.json produced (exit {rc})"
-            )
+        # A timeout is authoritative: even if rank 0 wrote a matrix.json before
+        # another worker hung, the entry is a failure -- never harvest it green.
+        if timed_out:
             results.append(
                 {"entry": name, "recipe": entry["recipe"], "cell": None,
-                 "verdict": "fail", "reasons": [reason],
+                 "verdict": "fail",
+                 "reasons": [f"timed out ({entry.get('timeout_sec', 1800)}s)"],
                  "metrics": {}, "deltas": {}, "duration_sec": dur,
-                 "error": "timeout" if timed_out else f"exit {rc}", "matrix_path": None}
+                 "error": "timeout", "matrix_path": None}
             )
             continue
 
-        for harvested in eval_lib.harvest_matrix_json(matrix_path):
+        if matrix_path is None:
+            results.append(
+                {"entry": name, "recipe": entry["recipe"], "cell": None,
+                 "verdict": "fail", "reasons": [f"no matrix.json produced (exit {rc})"],
+                 "metrics": {}, "deltas": {}, "duration_sec": dur,
+                 "error": f"exit {rc}", "matrix_path": None}
+            )
+            continue
+
+        harvested_cells = eval_lib.harvest_matrix_json(matrix_path)
+        if not harvested_cells:
+            # matrix.json with zero cells: the entry produced no observation.
+            # Fail it explicitly so a broken entry can't vanish from the report.
+            results.append(
+                {"entry": name, "recipe": entry["recipe"], "cell": None,
+                 "verdict": "fail", "reasons": ["matrix.json produced no cells"],
+                 "metrics": {}, "deltas": {}, "duration_sec": dur,
+                 "error": "empty_matrix",
+                 "matrix_path": str(matrix_path.relative_to(REPO_ROOT))
+                 if matrix_path.is_relative_to(REPO_ROOT) else str(matrix_path)}
+            )
+            continue
+
+        for harvested in harvested_cells:
             key = eval_lib.cell_key(name, harvested["cell"])
             cmp = eval_lib.compare_to_baseline(harvested, baseline_map.get(key))
             results.append(
@@ -215,7 +261,9 @@ def main() -> int:
         f"fail={s['fail']} record={s['record']} skip={s['skip']}",
         flush=True,
     )
-    # Fail the job only on a real correctness failure against a blessed baseline.
+    # Fail closed: any `fail` verdict fails the job. That includes a failed or
+    # errored cell (even without a baseline), a missing/empty matrix.json, a
+    # per-entry timeout, a blessed-baseline breach, and a run that did zero work.
     return 1 if s["fail"] else 0
 
 

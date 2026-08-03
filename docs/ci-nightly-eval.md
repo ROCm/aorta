@@ -11,7 +11,7 @@ nightly evaluation, dashboard, alerting, baselines, and automated bumps.
 | --- | --- |
 | Eval matrix (workload x config) | `config/ci/nightly_eval_matrix.yaml` |
 | Expected-outcome baselines | `config/ci/regression_baselines.yaml` |
-| CI dependency lock (exact pins) | `config/ci/requirements.lock` (generated) |
+| CI dependency lock (exact pins) | `config/ci/ci-constraints.txt` (generated) |
 | Harvester + comparator (pure) | `scripts/ci/eval_lib.py` |
 | Nightly harness | `scripts/ci/nightly_eval.py` |
 | Baseline refresher | `scripts/ci/refresh_baselines.py` |
@@ -29,13 +29,17 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
 
 1. Build/start the pinned ROCm container (`rocm-ci-setup`).
 2. Install the **released nightly wheel** `amd-aorta[hw-queue]` (constrained by
-   `config/ci/requirements.lock` when present).
+   `config/ci/ci-constraints.txt` when present).
 3. `nightly_eval.py` runs each matrix entry via `aorta sweep run --strict`,
    harvests `matrix.json`, and compares each cell to the baselines:
-   - **record** — no baseline yet (metrics captured, treated as pass),
-   - **pass / fail** — vs a blessed baseline,
+   - **record** — no baseline yet AND the cell passed (metrics captured),
+   - **pass / fail** — vs a blessed baseline (honoring its expected `passed`),
    - **skip** — insufficient GPUs.
-   The job fails only on a **fail** (blessed-baseline breach). Results go to
+   **Fail-closed:** the job fails on any `fail` — a failed/errored cell (even
+   with no baseline), a missing/empty `matrix.json`, a per-entry **timeout**, a
+   blessed-baseline breach, or a run that did **zero work** (all skipped). An
+   empty baseline file therefore protects against crashes/failures immediately;
+   it just doesn't add perf/metric gates until blessed. Results go to
    `gpu-nightly-results.json` with build/ROCm metadata.
 4. **Alert** (`alert_issue.py`): opens/updates one `nightly-regression` issue on
    failure; comments + closes it when green.
@@ -50,8 +54,12 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
 ## Correctness vs performance
 
 - **Correctness** is gated: a cell that should pass but errored/failed => `fail`.
-- **Performance** is **trend-only by default**: baselines are correctness-only
-  (`passed: true`); step-time/throughput are captured + charted but not gated.
+  Default baselines also bless **correctness metrics** (exact-equality checksums
+  such as `logits_checksum`), so a finite-but-wrong output is caught even without
+  perf gating. Baselines honor the expected `passed` outcome (an expected-failure
+  baseline is supported).
+- **Performance** is **trend-only by default**: step-time/throughput/latency are
+  captured + charted but not gated.
   To turn on perf gating (Phase 5), regenerate baselines with
   `refresh_baselines.py --perf-gate` (adds `step_time_ms.max` plus per-metric
   `policy`/`value` bounds -- min for throughput, max for latency/step-time, equal
@@ -76,7 +84,8 @@ empty baseline file means **record-only** (nightly won't be red before blessing)
   (ROCm base image digest) / github-actions updates.
 - After a stack-moving bump, run **Refresh baselines** (numerics/perf move with
   ROCm/hipBLASLt — the baseline diff is the bump's impact) and **Lock
-  requirements** to refresh `requirements.lock`. Both open PRs; a human blesses.
+  requirements** to refresh `config/ci/ci-constraints.txt` (partial pip
+  constraints, not a hash-pinned lock). Both open PRs; a human blesses.
   No auto-merge.
 
 ## Results retention

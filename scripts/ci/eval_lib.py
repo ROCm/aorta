@@ -18,10 +18,12 @@ def cell_key(entry_name: str, cell_name: str) -> str:
     return f"{entry_name}::{cell_name}"
 
 
-# Explicit comparison policy per metric name. Not every metric is a
-# higher-is-better throughput number: latencies are upper-bounded, a checksum
-# must match exactly. Unknown metrics default to "min" (treated as throughput)
-# but that default is only used for trend capture, never to silently gate.
+VALID_POLICIES = ("min", "max", "equal")
+
+# Explicit comparison policy per metric name (allowlist). Unknown metrics are
+# NEVER gated automatically -- they're captured for trends only. `equal` metrics
+# are correctness checks (e.g. a logits checksum must match); `min`/`max` metrics
+# are performance thresholds (throughput floor / latency ceiling).
 _METRIC_POLICIES: dict[str, str] = {
     "gflops": "min",
     "gbps": "min",
@@ -31,14 +33,30 @@ _METRIC_POLICIES: dict[str, str] = {
     "prefill_latency_ms": "max",
     "decode_latency_ms": "max",
     "latency_ms": "max",
-    "mean_step_time_ms": "max",
     "logits_checksum": "equal",
+    "output_checksum": "equal",
+    "checksum": "equal",
 }
 
 
 def metric_policy(name: str) -> str | None:
-    """Return the comparison policy (min/max/equal) for a metric, or None."""
+    """Return the comparison policy (min/max/equal) for a metric, or None if the
+    metric is not in the gating allowlist."""
     return _METRIC_POLICIES.get(name)
+
+
+def is_correctness_metric(name: str) -> bool:
+    """True for allowlisted metrics whose policy is exact-equality (checksums).
+
+    These are correctness gates (a wrong-but-finite output must be caught), so
+    they are blessed in the default baseline mode, not only under --perf-gate.
+    """
+    return _METRIC_POLICIES.get(name) == "equal"
+
+
+def is_performance_metric(name: str) -> bool:
+    """True for allowlisted min/max metrics (throughput floors, latency ceilings)."""
+    return _METRIC_POLICIES.get(name) in ("min", "max")
 
 
 def cell_passed(cell: dict[str, Any]) -> bool:
@@ -110,21 +128,35 @@ def compare_to_baseline(
       * ``pass``   -- baseline present and all checks satisfied.
       * ``fail``   -- baseline present and at least one check failed.
     """
-    # BLOCKER fix: a cell that did not pass is a FAIL regardless of whether a
-    # baseline exists -- never record-only. This must be checked before the
-    # baseline-None short-circuit so a failed unbaselined workload can't slip
-    # through as a benign "record".
-    if not harvested.get("passed", False):
-        detail = harvested.get("error") or "cell failed or did not run"
-        return {"verdict": "fail", "reasons": [str(detail)], "deltas": {}}
+    passed = harvested.get("passed", False)
 
     if baseline is None:
+        # A cell that did not pass is a FAIL even without a baseline -- never
+        # record-only. A passing unbaselined cell is recorded.
+        if not passed:
+            detail = harvested.get("error") or "cell failed or did not run"
+            return {"verdict": "fail", "reasons": [str(detail)], "deltas": {}}
         return {"verdict": "record", "reasons": ["no baseline (record-only)"], "deltas": {}}
 
     reasons: list[str] = []
     deltas: dict[str, Any] = {}
     metrics = harvested.get("metrics", {})
     observed_summary = metrics.get("summary") or {}
+
+    # Honor the baseline's expected outcome. Default is passed=True; an
+    # expected-failure baseline (passed=False) inverts it.
+    expected_pass = baseline.get("passed", True)
+    if expected_pass and not passed:
+        detail = harvested.get("error") or "cell did not pass"
+        return {"verdict": "fail", "reasons": [f"expected pass but {detail}"], "deltas": {}}
+    if not expected_pass and passed:
+        return {"verdict": "fail",
+                "reasons": ["expected failure but cell passed (stale expected-failure baseline?)"],
+                "deltas": {}}
+    if not passed:
+        # Expected failure that did fail: as expected. Metrics from a failed cell
+        # aren't meaningful, so don't check them.
+        return {"verdict": "pass", "reasons": [], "deltas": {}}
 
     # Step-time ceiling. A configured max with a missing observation is a FAIL
     # (we cannot confirm the bound held), not a silent pass.
@@ -138,19 +170,22 @@ def compare_to_baseline(
         elif observed_st > st_max:
             reasons.append(f"mean_step_time_ms {observed_st:.3f} > max {st_max:.3f}")
 
-    # Generic metric bounds with explicit policy. Each baseline metric entry is
+    # Generic metric bounds with an EXPLICIT policy. Each baseline metric entry is
     # ``{policy: min|max|equal, value: X, required: bool}``; policy falls back to
-    # _METRIC_POLICIES when omitted. A required (default True) metric that is
-    # absent from the observation is a FAIL.
+    # the allowlist only. An invalid/unknown policy is a hard error, and a
+    # required (default True) metric absent from the observation is a FAIL.
     for name, spec in (baseline.get("metrics") or {}).items():
         spec = spec or {}
-        policy = spec.get("policy") or metric_policy(name) or "min"
+        policy = spec.get("policy") or metric_policy(name)
         threshold = spec.get("value")
         required = spec.get("required", True)
         observed = observed_summary.get(name)
         deltas.setdefault("metrics", {})[name] = {
             "observed": observed, "policy": policy, "value": threshold,
         }
+        if policy not in VALID_POLICIES:
+            reasons.append(f"metric '{name}' has invalid/unknown policy {policy!r}")
+            continue
         if observed is None:
             if required:
                 reasons.append(f"metric '{name}' missing (policy {policy} {threshold})")

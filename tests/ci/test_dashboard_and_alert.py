@@ -53,6 +53,18 @@ def test_dashboard_empty_history():
     assert "no results yet" in html
 
 
+def test_dashboard_renders_summary_metric_series():
+    r = _results("2026-07-29T00:00:00Z",
+                 [{"entry": "inference_offline", "cell": "baseline-local", "verdict": "pass",
+                   "reasons": [], "metrics": {"mean_step_time_ms": 4.0,
+                                              "summary": {"decode_latency_ms": 12.5}}}],
+                 total=1, **{"pass": 1})
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "Performance / metric trends" in html
+    assert "decode_latency_ms" in html
+    assert "ms" in html  # unit rendered
+
+
 def test_alert_render_lists_failures():
     results = _results("2026-07-29T00:00:00Z",
                        [{"entry": "race", "cell": "smoke", "verdict": "fail",

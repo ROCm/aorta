@@ -43,39 +43,55 @@ def build_baselines(
             continue
 
         rc, matrix_path, timed_out = nightly_eval.run_entry(entry, out_dir)
+        if timed_out:
+            incomplete.append(f"{name} (timed out)")
+            continue
         if matrix_path is None:
-            incomplete.append(f"{name} (no matrix.json; {'timeout' if timed_out else f'exit {rc}'})")
+            incomplete.append(f"{name} (no matrix.json; exit {rc})")
             continue
 
-        for harvested in eval_lib.harvest_matrix_json(matrix_path):
+        harvested_cells = eval_lib.harvest_matrix_json(matrix_path)
+        if not harvested_cells:
+            incomplete.append(f"{name} (matrix.json had no cells)")
+            continue
+
+        for harvested in harvested_cells:
             key = eval_lib.cell_key(name, harvested["cell"])
             if not harvested["passed"]:
                 incomplete.append(f"{key} (did not pass)")
                 continue
-            # Default: correctness-only baseline (require the cell to pass).
-            # Perf bounds are opt-in (--perf-gate); metric policies come from
-            # eval_lib._METRIC_POLICIES (min for throughput, max for latency /
-            # step time, equal for checksums).
+
             spec: dict[str, Any] = {"passed": True}
+            metrics = harvested["metrics"]
+            summary = metrics.get("summary") or {}
+            metric_specs: dict[str, Any] = {}
+
+            # Correctness metrics (equal-policy checksums) are blessed in the
+            # DEFAULT mode too -- a wrong-but-finite output must be caught even
+            # without perf gating.
+            for mname, value in summary.items():
+                if value is not None and eval_lib.is_correctness_metric(mname):
+                    metric_specs[mname] = {"policy": "equal", "value": value}
+
+            # Performance thresholds (min/max) are opt-in via --perf-gate. Only
+            # allowlisted metrics are gated; unknown metrics (step_time_p99,
+            # final_loss, ...) are NEVER auto-gated as min.
             if perf_gate:
-                metrics = harvested["metrics"]
                 st = metrics.get("mean_step_time_ms")
                 if st is not None:
                     spec["step_time_ms"] = {"max": round(st * (1.0 + step_time_margin), 4)}
-                metric_specs: dict[str, Any] = {}
-                for mname, value in (metrics.get("summary") or {}).items():
-                    if value is None:
+                for mname, value in summary.items():
+                    if value is None or not eval_lib.is_performance_metric(mname):
                         continue
-                    policy = eval_lib.metric_policy(mname) or "min"
+                    policy = eval_lib.metric_policy(mname)  # "min" or "max"
                     if policy == "min":
                         bound = round(value * (1.0 - throughput_margin), 4)
-                    elif policy == "max":
+                    else:  # "max"
                         bound = round(value * (1.0 + step_time_margin), 4)
-                    else:  # equal
-                        bound = value
                     metric_specs[mname] = {"policy": policy, "value": bound}
-                if metric_specs:
-                    spec["metrics"] = metric_specs
+
+            if metric_specs:
+                spec["metrics"] = metric_specs
             baselines[key] = spec
 
     # MAJOR fix: refuse a partial refresh. Regenerating from a run where some

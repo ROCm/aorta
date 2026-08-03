@@ -1,10 +1,10 @@
-name: Lock requirements
+name: Refresh CI constraints
 
-# Dispatch-only: regenerate config/ci/requirements.lock (exact pins) from the
-# resolved environment inside the pinned ROCm container, and open a PR. This is
-# the "generate the lock where it is used" flow -- pins reflect the actual CI
-# ROCm/torch stack, not a host resolve. Pair with a ROCm/dependency bump PR so
-# the lock moves with the stack.
+# Dispatch-only: regenerate config/ci/ci-constraints.txt (partial pip
+# constraints, NOT a hash-pinned reproducible lock) from the resolved environment
+# inside the pinned ROCm container, and open a PR. Pins reflect the actual CI
+# ROCm/torch stack (generated where they're used). Pair with a ROCm/dependency
+# bump PR so the constraints move with the stack.
 
 on:
   workflow_dispatch:
@@ -75,14 +75,16 @@ jobs:
         working-directory: docker
         run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
 
-      - name: Open lock PR
+      - name: Open constraints PR
         uses: peter-evans/create-pull-request@v6
         with:
-          add-paths: config/ci/requirements.lock
-          branch: ci/lock-requirements
-          title: "ci: refresh requirements lock"
-          commit-message: "ci: refresh requirements lock from the ROCm container"
+          add-paths: config/ci/ci-constraints.txt
+          branch: ci/refresh-constraints
+          title: "ci: refresh CI dependency constraints"
+          commit-message: "ci: refresh CI dependency constraints from the ROCm container"
           body: |
-            Regenerated `config/ci/requirements.lock` (exact pins) from the pinned
-            ROCm container by the lock-requirements workflow. Review the diff and
-            merge to adopt. CI installs use this lock as a constraint when present.
+            Regenerated `config/ci/ci-constraints.txt` (partial pip constraints,
+            captured inside the pinned ROCm container) by this workflow. This is
+            NOT a hash-pinned reproducible lock -- it reduces drift for packages
+            present at capture time. Review the diff and merge to adopt; CI installs
+            apply it via `pip -c` when present.

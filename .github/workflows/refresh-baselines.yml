@@ -16,6 +16,11 @@ on:
         description: "Fractional floor below observed throughput"
         required: false
         default: "0.15"
+      perf_gate:
+        description: "Also emit performance thresholds (Phase 5 perf gating)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -64,14 +69,15 @@ jobs:
             set -euo pipefail
             cd /workspace/aorta
             python -m pip install --upgrade pip
-            # Install under the same requirements.lock constraint as nightly-eval,
+            # Install under the same ci-constraints.txt as nightly-eval,
             # so baselines are generated on the exact dependency set they gate.
             constraint=""
-            [ -f config/ci/requirements.lock ] && constraint="-c config/ci/requirements.lock"
+            [ -f config/ci/ci-constraints.txt ] && constraint="-c config/ci/ci-constraints.txt"
             pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}" $constraint
             python scripts/ci/refresh_baselines.py \
               --step-time-margin "${{ github.event.inputs.step_time_margin || 0.25 }}" \
-              --throughput-margin "${{ github.event.inputs.throughput_margin || 0.15 }}"
+              --throughput-margin "${{ github.event.inputs.throughput_margin || 0.15 }}" \
+              ${{ github.event.inputs.perf_gate == 'true' && '--perf-gate' || '' }}
           '
 
       # The container wrote regression_baselines.yaml into the mounted workspace;

@@ -163,6 +163,32 @@ def test_compare_fail_when_expected_pass_but_cell_failed():
     assert out["verdict"] == "fail"
 
 
+def test_compare_expected_failure_baseline():
+    baseline = {"passed": False}
+    # Expected to fail and did -> pass.
+    failed = {"passed": False, "error": "boom", "metrics": {"summary": {}}}
+    assert eval_lib.compare_to_baseline(failed, baseline)["verdict"] == "pass"
+    # Expected to fail but passed -> fail (stale expected-failure baseline).
+    passed = {"passed": True, "error": None, "metrics": {"summary": {}}}
+    assert eval_lib.compare_to_baseline(passed, baseline)["verdict"] == "fail"
+
+
+def test_compare_invalid_policy_fails():
+    harvested = {"passed": True, "error": None, "metrics": {"summary": {"x": 1.0}}}
+    baseline = {"passed": True, "metrics": {"x": {"policy": "bogus", "value": 1.0}}}
+    out = eval_lib.compare_to_baseline(harvested, baseline)
+    assert out["verdict"] == "fail"
+    assert any("invalid" in r or "policy" in r for r in out["reasons"])
+
+
+def test_metric_classification():
+    assert eval_lib.is_correctness_metric("logits_checksum") is True
+    assert eval_lib.is_correctness_metric("gflops") is False
+    assert eval_lib.is_performance_metric("gflops") is True
+    assert eval_lib.is_performance_metric("logits_checksum") is False
+    assert eval_lib.is_performance_metric("unknown_metric") is False
+
+
 def test_summarize_counts_verdicts():
     entries = [{"verdict": "pass"}, {"verdict": "fail"}, {"verdict": "record"}, {"verdict": "skip"}]
     s = eval_lib.summarize(entries)

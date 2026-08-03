@@ -108,3 +108,36 @@ def test_evaluate_timeout_records_failure(tmp_path, monkeypatch):
     doc = nightly_eval.evaluate(matrix_doc, {"baselines": {}}, tmp_path)
     assert doc["summary"]["fail"] == 1
     assert doc["entries"][0]["error"] == "timeout"
+
+
+def test_evaluate_timeout_is_authoritative_even_with_matrix(tmp_path, monkeypatch):
+    # rank 0 wrote a matrix.json but a worker hung -> must still fail.
+    matrix_doc = {"entries": [{"name": "hang", "recipe": "r.yaml"}]}
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
+
+    def fake(entry, out_dir):
+        mpath = _write_matrix(out_dir / entry["name"] / "matrix.json",
+                              [{"name": "c", "error": None, "passed_count": 1,
+                                "failed_count": 0, "error_count": 0, "metrics_summary": {}}])
+        return 124, mpath, True
+
+    monkeypatch.setattr(nightly_eval, "run_entry", fake)
+    doc = nightly_eval.evaluate(matrix_doc, {"baselines": {}}, tmp_path)
+    assert doc["summary"]["fail"] == 1
+    assert doc["entries"][0]["error"] == "timeout"
+
+
+def test_evaluate_empty_matrix_entry_fails(tmp_path, monkeypatch):
+    matrix_doc = {"entries": [{"name": "nocells", "recipe": "r.yaml"}]}
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
+
+    def fake(entry, out_dir):
+        mpath = _write_matrix(out_dir / entry["name"] / "matrix.json", [])  # zero cells
+        return 0, mpath, False
+
+    monkeypatch.setattr(nightly_eval, "run_entry", fake)
+    doc = nightly_eval.evaluate(matrix_doc, {"baselines": {}}, tmp_path)
+    assert doc["summary"]["fail"] == 1
+    assert doc["entries"][0]["error"] == "empty_matrix"
