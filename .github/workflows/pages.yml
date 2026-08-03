@@ -34,8 +34,12 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # Always deploy the landing page + dashboard generator from main, even for a
+      # manual workflow_dispatch off another ref, so Pages content is deterministic.
       - name: Check out main
         uses: actions/checkout@v5
+        with:
+          ref: main
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
@@ -50,24 +54,36 @@ jobs:
           destination: ./_site
 
       # History lives on the ci-results data branch (written by nightly-eval's
-      # publish job). It may not exist until the first nightly runs.
-      - name: Check out results history (ci-results)
-        uses: actions/checkout@v5
-        with:
-          ref: ci-results
-          path: ci-results
-        continue-on-error: true
-
+      # publish job); it may not exist until the first nightly runs. Fail closed:
+      # a genuinely-absent branch (ls-remote exit 2) deploys the landing page
+      # only, but a transport/auth error must NOT be swallowed into "no dashboard"
+      # -- that would silently drop the dashboard while history exists.
       - name: Generate nightly dashboard at /ci/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if ls ci-results/results/*.json >/dev/null 2>&1; then
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          set +e
+          git ls-remote --exit-code --heads "$repo_url" ci-results >/dev/null 2>&1
+          lsr=$?
+          set -e
+          if [ "$lsr" -eq 2 ]; then
+            echo "ci-results branch absent; deploying landing page only (dashboard appears after the first nightly)"
+            exit 0
+          elif [ "$lsr" -ne 0 ]; then
+            echo "::error::cannot reach ci-results (git ls-remote exit ${lsr}); failing closed"
+            exit 1
+          fi
+          tmp="$(mktemp -d)"
+          git clone --depth 1 --branch ci-results "$repo_url" "$tmp"
+          if ls "$tmp"/results/*.json >/dev/null 2>&1; then
             mkdir -p _site/ci
             python3 scripts/ci/gen_dashboard.py \
-              --results-dir ci-results/results --out-dir _site/ci --max-builds 180
-            echo "mounted dashboard at /ci/ ($(ls -1 ci-results/results/*.json | wc -l) build(s))"
+              --results-dir "$tmp/results" --out-dir _site/ci --max-builds 180
+            echo "mounted dashboard at /ci/ ($(ls -1 "$tmp"/results/*.json | wc -l) build(s))"
           else
-            echo "no nightly results yet; deploying landing page only (dashboard appears after the first nightly)"
+            echo "ci-results exists but has no results yet; deploying landing page only"
           fi
 
       - name: Upload Pages artifact
