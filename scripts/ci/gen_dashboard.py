@@ -179,11 +179,15 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 
     s = latest.get("summary", {})
     meta = _esc(
-        f"aorta {build.get('amd_aorta_version', '?')} · "
-        f"torch {build.get('torch', '?')} · ROCm {build.get('rocm', '?')} · "
-        f"HIP {build.get('hip', '?')}"
+        f"aorta {build.get('amd_aorta_version') or '?'} · "
+        f"torch {build.get('torch') or '?'} · ROCm {build.get('rocm') or '?'} · "
+        f"HIP {build.get('hip') or '?'}"
     )
     generated = _esc(latest.get("generated_at", ""))
+    metric_table = (
+        "".join(metric_rows) if metric_rows
+        else "<tr><td colspan=5 class=muted>no workload metrics captured yet</td></tr>"
+    )
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -221,15 +225,11 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     <thead><tr><th>workload::cell</th><th>metric</th><th>policy</th>
       <th>latest</th><th>trend</th></tr></thead>
     <tbody>
-      {{metric_table}}
+      {metric_table}
     </tbody>
   </table>
 </body></html>
-""".replace(
-        "{metric_table}",
-        "".join(metric_rows) if metric_rows
-        else "<tr><td colspan=5 class=muted>no workload metrics captured yet</td></tr>",
-    )
+"""
 
 
 def main() -> int:

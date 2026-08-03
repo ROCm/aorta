@@ -141,3 +141,89 @@ def test_evaluate_empty_matrix_entry_fails(tmp_path, monkeypatch):
     doc = nightly_eval.evaluate(matrix_doc, {"baselines": {}}, tmp_path)
     assert doc["summary"]["fail"] == 1
     assert doc["entries"][0]["error"] == "empty_matrix"
+
+
+def test_evaluate_corrupt_matrix_json_fails_with_artifact(tmp_path, monkeypatch):
+    # A truncated matrix.json must produce a per-entry fail (not abort evaluate()
+    # before results JSON is written).
+    matrix_doc = {"entries": [{"name": "corrupt", "recipe": "r.yaml"}]}
+    monkeypatch.setattr(nightly_eval, "gpu_count", lambda: 1)
+    monkeypatch.setattr(nightly_eval, "build_metadata", lambda: {})
+
+    def fake(entry, out_dir):
+        mpath = out_dir / entry["name"] / "matrix.json"
+        mpath.parent.mkdir(parents=True, exist_ok=True)
+        mpath.write_text('{"cells": [', encoding="utf-8")  # truncated JSON
+        return 0, mpath, False
+
+    monkeypatch.setattr(nightly_eval, "run_entry", fake)
+    doc = nightly_eval.evaluate(matrix_doc, {"baselines": {}}, tmp_path)
+    assert doc["summary"]["fail"] == 1
+    assert doc["entries"][0]["error"] == "corrupt_matrix"
+
+
+refresh_baselines = _load("refresh_baselines")
+
+
+def test_refresh_carries_over_baseline_for_gpu_skipped_entry(tmp_path, monkeypatch):
+    # An 8-GPU entry that can't run on a 1-GPU box must NOT poison the refresh:
+    # its existing baseline is carried over instead of dropped to record-only.
+    matrix_doc = {"entries": [
+        {"name": "gpu_smoke", "recipe": "r1.yaml"},
+        {"name": "race_8gpu", "recipe": "r8.yaml", "nproc": 8, "min_gpus": 8},
+    ]}
+    existing = {"race_8gpu::baseline-local": {"passed": True}}
+
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+
+    def fake_run_entry(entry, out_dir):
+        mpath = _write_matrix(out_dir / entry["name"] / "matrix.json",
+                              [{"name": "baseline-local", "error": None, "passed_count": 1,
+                                "failed_count": 0, "error_count": 0, "metrics_summary": {}}])
+        return 0, mpath, False
+
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", fake_run_entry)
+
+    doc = refresh_baselines.build_baselines(
+        matrix_doc, tmp_path, 0.25, 0.15, False, existing_baselines=existing)
+
+    assert doc["baselines"]["race_8gpu::baseline-local"] == {"passed": True}
+    assert "gpu_smoke::baseline-local" in doc["baselines"]
+
+
+def test_refresh_gpu_skipped_without_existing_is_not_fatal(tmp_path, monkeypatch):
+    matrix_doc = {"entries": [
+        {"name": "gpu_smoke", "recipe": "r1.yaml"},
+        {"name": "race_8gpu", "recipe": "r8.yaml", "nproc": 8, "min_gpus": 8},
+    ]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 1)
+
+    def fake_run_entry(entry, out_dir):
+        mpath = _write_matrix(out_dir / entry["name"] / "matrix.json",
+                              [{"name": "baseline-local", "error": None, "passed_count": 1,
+                                "failed_count": 0, "error_count": 0, "metrics_summary": {}}])
+        return 0, mpath, False
+
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", fake_run_entry)
+
+    doc = refresh_baselines.build_baselines(matrix_doc, tmp_path, 0.25, 0.15, False)
+    assert "race_8gpu::baseline-local" not in doc["baselines"]
+    assert "gpu_smoke::baseline-local" in doc["baselines"]
+
+
+def test_refresh_refuses_when_entry_ran_but_failed(tmp_path, monkeypatch):
+    # A genuine did-not-pass (ran but failed) must still refuse atomically.
+    import pytest
+    matrix_doc = {"entries": [{"name": "gpu_smoke", "recipe": "r1.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 8)
+
+    def fake_run_entry(entry, out_dir):
+        mpath = _write_matrix(out_dir / entry["name"] / "matrix.json",
+                              [{"name": "baseline-local", "error": None, "passed_count": 0,
+                                "failed_count": 1, "error_count": 0, "metrics_summary": {}}])
+        return 0, mpath, False
+
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", fake_run_entry)
+
+    with pytest.raises(SystemExit):
+        refresh_baselines.build_baselines(matrix_doc, tmp_path, 0.25, 0.15, False)

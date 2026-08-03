@@ -46,8 +46,8 @@ def render_issue(results: dict[str, Any], run_url: str | None) -> tuple[str, str
         f"Nightly evaluation found **{len(fails)} failing** entr"
         f"{'y' if len(fails) == 1 else 'ies'}.",
         "",
-        f"- Build: aorta `{build.get('amd_aorta_version','?')}`, "
-        f"torch `{build.get('torch','?')}`, ROCm `{build.get('rocm','?')}`",
+        f"- Build: aorta `{build.get('amd_aorta_version') or '?'}`, "
+        f"torch `{build.get('torch') or '?'}`, ROCm `{build.get('rocm') or '?'}`",
         f"- Generated: {results.get('generated_at','')}",
     ]
     if run_url:

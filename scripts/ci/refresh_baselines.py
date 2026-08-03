@@ -30,16 +30,35 @@ def build_baselines(
     step_time_margin: float,
     throughput_margin: float,
     perf_gate: bool,
+    existing_baselines: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    existing_baselines = existing_baselines or {}
     ngpu = nightly_eval.gpu_count()
     baselines: dict[str, Any] = {}
     incomplete: list[str] = []
+    preserved: list[str] = []
+    dropped: list[str] = []
 
     for entry in matrix_doc.get("entries") or []:
         name = entry["name"]
         min_gpus = int(entry.get("min_gpus", entry.get("nproc", 1)))
         if ngpu < min_gpus:
-            incomplete.append(f"{name} (skipped: needs {min_gpus} GPU(s), have {ngpu})")
+            # This runner physically can't exercise the entry (e.g. an 8-GPU
+            # distributed variant on a 1-GPU box). Refusing the whole refresh
+            # here would make baselines un-blessable on smaller runners, so we
+            # instead CARRY OVER any baselines this entry already has (never
+            # silently reverting a live gate to record-only). If it has none
+            # yet, note it as still-unblessed rather than failing.
+            carried = {k: v for k, v in existing_baselines.items()
+                       if k.split("::", 1)[0] == name}
+            if carried:
+                baselines.update(carried)
+                preserved.append(
+                    f"{name} (needs {min_gpus} GPU(s), have {ngpu}; "
+                    f"kept {len(carried)} existing baseline(s))"
+                )
+            else:
+                dropped.append(f"{name} (needs {min_gpus} GPU(s), have {ngpu}; no existing baseline)")
             continue
 
         rc, matrix_path, timed_out = nightly_eval.run_entry(entry, out_dir)
@@ -94,15 +113,24 @@ def build_baselines(
                 spec["metrics"] = metric_specs
             baselines[key] = spec
 
-    # MAJOR fix: refuse a partial refresh. Regenerating from a run where some
-    # eligible entries/cells were skipped/failed/missing would drop their gates
-    # from the (fully-replaced) baseline file; merging that PR silently reverts
-    # those workloads to record-only. Fail atomically before writing anything.
+    # Refuse a partial refresh caused by entries that RAN but didn't produce a
+    # blessable pass (timeout / no matrix.json / empty cells / did-not-pass).
+    # Regenerating from such a run would drop those gates from the (fully
+    # replaced) baseline file, silently reverting those workloads to
+    # record-only. Fail atomically before writing anything. Note: entries the
+    # runner can't physically exercise (insufficient GPUs) are NOT fatal --
+    # their existing baselines are carried over above.
     if incomplete:
         raise SystemExit(
-            "refusing partial baseline refresh -- these entries/cells did not "
-            "produce a blessable pass:\n  - " + "\n  - ".join(incomplete)
+            "refusing partial baseline refresh -- these entries/cells ran but did "
+            "not produce a blessable pass:\n  - " + "\n  - ".join(incomplete)
         )
+
+    for note in preserved:
+        print(f"[refresh] carried over baseline(s): {note}", flush=True)
+    for note in dropped:
+        print(f"[refresh] WARNING still unblessed (insufficient GPUs, no prior baseline): {note}",
+              flush=True)
 
     return {"version": 1, "baselines": baselines}
 
@@ -122,8 +150,15 @@ def main() -> int:
 
     matrix_doc = nightly_eval._load_yaml(nightly_eval.MATRIX)
     args.work_dir.mkdir(parents=True, exist_ok=True)
+
+    existing_baselines: dict[str, Any] = {}
+    if args.out.exists():
+        existing_doc = nightly_eval._load_yaml(args.out) or {}
+        existing_baselines = existing_doc.get("baselines") or {}
+
     doc = build_baselines(
-        matrix_doc, args.work_dir, args.step_time_margin, args.throughput_margin, args.perf_gate
+        matrix_doc, args.work_dir, args.step_time_margin, args.throughput_margin,
+        args.perf_gate, existing_baselines,
     )
 
     header = (

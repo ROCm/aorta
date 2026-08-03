@@ -78,6 +78,14 @@ Actions -> Refresh baselines -> Run workflow
 PR updating `regression_baselines.yaml`. Review the diff and merge to bless. An
 empty baseline file means **record-only** (nightly won't be red before blessing).
 
+The refresh **fails atomically** if any entry *ran* but couldn't be blessed
+(timeout / missing or empty `matrix.json` / a cell that didn't pass) — this
+prevents silently reverting live gates to record-only. Entries the runner
+**can't physically exercise** (e.g. `min_gpus: 8` variants on a smaller box) are
+**not** fatal: their existing baselines are carried over unchanged, so you can
+still refresh single-GPU baselines on a small runner and only re-bless the
+multi-GPU entries on an 8-GPU box.
+
 ## Automated ROCm + dependency bumps
 
 - **Dependabot** (`.github/dependabot.yml`) opens weekly PRs for pip / docker

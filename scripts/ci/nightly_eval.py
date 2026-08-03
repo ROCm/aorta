@@ -191,7 +191,23 @@ def evaluate(matrix_doc: dict[str, Any], baselines: dict[str, Any], out_dir: Pat
             )
             continue
 
-        harvested_cells = eval_lib.harvest_matrix_json(matrix_path)
+        # A truncated/corrupt matrix.json (e.g. a crash mid-write) must not abort
+        # the whole run before results JSON is produced -- otherwise the job goes
+        # red but alerting/dashboard silently no-op (no artifact). Record a
+        # per-entry fail so the regression is still surfaced.
+        try:
+            harvested_cells = eval_lib.harvest_matrix_json(matrix_path)
+        except (ValueError, OSError) as exc:  # JSONDecodeError is a ValueError
+            results.append(
+                {"entry": name, "recipe": entry["recipe"], "cell": None,
+                 "verdict": "fail", "reasons": [f"unreadable matrix.json: {exc}"],
+                 "metrics": {}, "deltas": {}, "duration_sec": dur,
+                 "error": "corrupt_matrix",
+                 "matrix_path": str(matrix_path.relative_to(REPO_ROOT))
+                 if matrix_path.is_relative_to(REPO_ROOT) else str(matrix_path)}
+            )
+            continue
+
         if not harvested_cells:
             # matrix.json with zero cells: the entry produced no observation.
             # Fail it explicitly so a broken entry can't vanish from the report.

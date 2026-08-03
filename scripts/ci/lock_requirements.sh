@@ -25,4 +25,4 @@ OUT="${ROOT}/config/ci/ci-constraints.txt"
     | sort
 } > "${OUT}"
 
-echo "Wrote constraints: ${OUT} ($(grep -cvE '^#' "${OUT}") pins)"
+echo "Wrote constraints: ${OUT} ($(grep -cvE '^\s*(#|$)' "${OUT}") pins)"
