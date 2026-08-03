@@ -211,6 +211,24 @@ def test_refresh_gpu_skipped_without_existing_is_not_fatal(tmp_path, monkeypatch
     assert "gpu_smoke::baseline-local" in doc["baselines"]
 
 
+def test_refresh_refuses_on_corrupt_matrix_json(tmp_path, monkeypatch):
+    # A corrupt matrix.json must refuse cleanly (atomic message), not traceback.
+    import pytest
+    matrix_doc = {"entries": [{"name": "gpu_smoke", "recipe": "r1.yaml"}]}
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "gpu_count", lambda: 8)
+
+    def fake_run_entry(entry, out_dir):
+        mpath = out_dir / entry["name"] / "matrix.json"
+        mpath.parent.mkdir(parents=True, exist_ok=True)
+        mpath.write_text('{"cells": [', encoding="utf-8")  # truncated JSON
+        return 0, mpath, False
+
+    monkeypatch.setattr(refresh_baselines.nightly_eval, "run_entry", fake_run_entry)
+
+    with pytest.raises(SystemExit, match="unreadable matrix.json"):
+        refresh_baselines.build_baselines(matrix_doc, tmp_path, 0.25, 0.15, False)
+
+
 def test_refresh_refuses_when_entry_ran_but_failed(tmp_path, monkeypatch):
     # A genuine did-not-pass (ran but failed) must still refuse atomically.
     import pytest

@@ -69,7 +69,15 @@ def build_baselines(
             incomplete.append(f"{name} (no matrix.json; exit {rc})")
             continue
 
-        harvested_cells = eval_lib.harvest_matrix_json(matrix_path)
+        # A corrupt/truncated matrix.json is a genuine incompleteness: route it
+        # into `incomplete` so the refresh fails with the clean atomic "refusing
+        # partial refresh" message instead of a raw traceback (mirrors the guard
+        # in nightly_eval.evaluate).
+        try:
+            harvested_cells = eval_lib.harvest_matrix_json(matrix_path)
+        except (ValueError, OSError) as exc:  # JSONDecodeError is a ValueError
+            incomplete.append(f"{name} (unreadable matrix.json: {exc})")
+            continue
         if not harvested_cells:
             incomplete.append(f"{name} (matrix.json had no cells)")
             continue
