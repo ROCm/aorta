@@ -3724,20 +3724,109 @@ class TestEnvVars:
             # Dynamic loader
             "LD_LIBRARY_PATH",
             # hipBLASLt / rocBLAS / Tensile GEMM numeric + kernel-path selection
-            # (MI350X recom-repro NaN escalation). Logging-only knobs excluded.
-            "HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32",
+            # (MI350X recom-repro NaN escalation). Included iff the knob's
+            # upstream getenv site reaches code that changes what executes;
+            # print-only knobs are excluded (see test_logging_only_gemm_knobs
+            # _excluded). CHECK_NUMERICS is INCLUDED -- extra kernels + sync
+            # affect the race -- as is TENSILE_DB2, which can skip launches.
+            # Library / ExtOp loading
             "HIPBLASLT_TENSILE_LIBPATH",
+            "HIPBLASLT_EXT_OP_LIBRARY_PATH",
+            "HIPBLASLT_PRELOAD_KERNELS",
+            "ROCBLAS_TENSILE_LIBPATH",
+            "ROCBLAS_TENSILE_GEMM_OVERRIDE_PATH",
+            # Backend routing + generator choice
+            "ROCBLAS_USE_HIPBLASLT",
+            "ROCBLAS_USE_HIPBLASLT_BATCHED",
             "HIPBLASLT_USE_ROCROLLER",
             "HIPBLASLT_ROCROLLER_NO_CUSTOM_KERNEL",
             "HIPBLASLT_TUNING_OVERRIDE_FILE",
-            "ROCBLAS_USE_HIPBLASLT",
-            "ROCBLAS_TENSILE_LIBPATH",
+            # Numeric path
+            "HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32",
             "ROCBLAS_DEFAULT_ATOMICS_MODE",
             "ROCBLAS_INTERNAL_FP16_ALT_IMPL",
             "ROCBLAS_INTERNAL_FP16_ALT_IMPL_RNZ",
+            "ROCBLAS_INTERNAL_FORCE_VALU_FOR_DGEMM",
+            # Allocator + workspace sizing
             "ROCBLAS_STREAM_ORDER_ALLOC",
+            "ROCBLAS_DEVICE_MEMORY_SIZE",
+            "ROCBLAS_INTERNAL_TRSM_REG_KERNEL_MEM_LIMIT",
+            # Solution selection
             "TENSILE_SOLUTION_INDEX",
+            "TENSILE_SOLUTION_SELECTION_METHOD",
+            "TENSILE_EXPERIMENTAL_SELECTION",
+            "TENSILE_TAM_SELECTION_ENABLE",
+            "TENSILE_NAIVE_SEARCH",
+            "TENSILE_METRIC",
+            "TENSILE_PREDICTION_LIB",
+            "TENSILE_GRIDBASED_KDTREE",
+            "TENSILE_GRIDBASED_BATCH_EXP",
+            # Stream-K launch geometry
+            "TENSILE_STREAMK_DYNAMIC_GRID",
+            "TENSILE_STREAMK_FIXED_GRID",
+            "TENSILE_STREAMK_MAX_CUS",
+            "TENSILE_STREAMK_DATA_PARALLEL",
+            "TENSILE_STREAMK_DYNAMIC_WGM",
+            "TENSILE_STREAMK_FULL_TILES",
+            "TENSILE_STREAMK_GRID_MULTIPLIER",
+            # Workgroup mapping + StaggerU
+            "TENSILE_FIXED_WGM",
+            "TENSILE_FIXED_WGMXCC",
+            "TENSILE_FIXED_WGMXCCCHUNK",
+            "TENSILE_DISABLE_STAGGERU",
+            "TENSILE_FIXED_STAGGERU",
+            "TENSILE_FIXED_STAGGERU_MAPPING",
+            "TENSILE_FIXED_STAGGERU_STRIDE_SHIFT",
+            # Debug bits that skip work
+            "TENSILE_DB2",
+            # Forward-compat (absent from the 1.4.0 .so)
+            "TENSILE_STREAMK5_FORCE_MODE",
+            "TENSILE_STREAMK_TILES",
+            "TENSILE_STREAMK_SPLIT",
+            # In-library numeric checking
+            "HIPBLASLT_CHECK_NUMERICS",
+            "HIPBLASLT_CHECK_NUMERICS_SCAN_EVERY",
+            "HIPBLASLT_CHECK_NUMERICS_SCAN_FROM",
+            "HIPBLASLT_CHECK_NUMERICS_SCAN_UNTIL",
+            "HIPBLASLT_CHECK_NUMERICS_STOP_ON_FIRST",
+            "ROCBLAS_CHECK_NUMERICS",
         }
+
+    def test_logging_only_gemm_knobs_excluded(self):
+        # The counterpart to test_canonical_var_names_stable: the inclusion
+        # rule is "the getenv site reaches code that changes what executes".
+        # Each name below was checked against the upstream source and reaches
+        # only a print or a client-side report, so capturing it would dilute
+        # a diff with knobs that cannot move the failure. TENSILE_DB is here
+        # while its DB2 sibling is captured, which is the sharpest case: DB2's
+        # low bits gate skipKernelLaunch / skipInitKernelLaunch, DB's do not.
+        for name in (
+            "HIPBLASLT_LOG_FILE",
+            "HIPBLASLT_LOG_LEVEL",
+            "HIPBLASLT_LOG_MASK",
+            "HIPBLASLT_BENCH_PERF",
+            # Absent from the reference build but present in ROCm 7.2.3, so
+            # an operator auditing the list on a newer install does not find
+            # an unaccounted knob.
+            "HIPBLASLT_BENCH_PERF_ALL",
+            "HIPBLASLT_BENCH_PRINT_COMMAND",
+            "HIPBLASLT_ENABLE_MARKER",
+            "TENSILE_ENABLE_MARKER",
+            "ROCBLAS_LAYER",
+            "ROCBLAS_LOG_PATH",
+            "ROCBLAS_LOG_TRACE_PATH",
+            "ROCBLAS_LOG_BENCH_PATH",
+            "ROCBLAS_LOG_PROFILE_PATH",
+            "ROCBLAS_VERBOSE_HIPBLASLT_ERROR",
+            "ROCBLAS_VERBOSE_TENSILE_ERROR",
+            "TENSILE_DB",
+            "TENSILE_ADAPTIVE_GEMM_LOG",
+            "TENSILE_AUTO_GSU_ALGO",
+            "TENSILE_SOLUTION_SELECTION_TRACE",
+            "TENSILE_BENCHMARK",
+        ):
+            assert name not in CANONICAL_ENV_VARS, f"{name} is print-only"
+        assert "TENSILE_DB2" in CANONICAL_ENV_VARS
 
 
 # ---------------------------------------------------------------------------
@@ -5126,10 +5215,68 @@ class TestTritonBlock:
 # ---------------------------------------------------------------------------
 
 
+# A full 40-char build SHA, the shape TorchRec's setup.py writes into
+# torchrec/version.py -- deliberately longer than any version-string local
+# segment can carry (setup.py truncates those to sha[:7]).
+_TORCHREC_FULL_SHA = "0123abcdef0123abcdef0123abcdef0123abcdef"
+
+# Byte-for-byte the format of TorchRec's setup.py `_export_version`.
+_TORCHREC_VERSION_PY = "__version__ = '{version}'\ngit_version = '{commit}'\n"
+
+
+def _torchrec_pkg_spec(tmp_path: Path, version_py: str | None):
+    """A REAL ModuleSpec over a synthetic torchrec package directory.
+
+    Built with the genuine machinery rather than a stand-in object so the
+    ``loader`` / ``submodule_search_locations`` attributes that
+    ``_capture_torchrec`` inspects behave like the real thing.
+    """
+    pkg = tmp_path / "torchrec"
+    pkg.mkdir(exist_ok=True)
+    (pkg / "__init__.py").write_text("")
+    if version_py is not None:
+        (pkg / "version.py").write_text(version_py)
+    return importlib.util.spec_from_file_location(
+        "torchrec", pkg / "__init__.py", submodule_search_locations=[str(pkg)]
+    )
+
+
+def _torchrec_namespace_spec(tmp_path: Path):
+    """The spec CPython returns for a PEP 420 namespace package.
+
+    A bare directory named ``torchrec`` on ``sys.path`` (no ``__init__.py``)
+    resolves to a LOADER-LESS spec -- verified on 3.12::
+
+        ModuleSpec(name='torchrec', loader=None,
+                   submodule_search_locations=_NamespacePath(['.../torchrec']))
+
+    Constructed here rather than resolved for real because a genuinely
+    installed torchrec in the test environment would out-rank the namespace
+    portion and mask the case under test.
+    """
+    import importlib.machinery
+
+    pkg = tmp_path / "torchrec"
+    pkg.mkdir(exist_ok=True)
+    spec = importlib.machinery.ModuleSpec("torchrec", None)
+    spec.submodule_search_locations = [str(pkg)]
+    return spec
+
+
 class TestTorchrec:
-    def test_torchrec_absent_is_suppressed_no_reason(self, monkeypatch):
-        """A missing torchrec is the documented common case (non-recsys
-        installs lack it) -> no partial reason, mirroring fbgemm_gpu/aiter."""
+    @pytest.fixture
+    def no_torchrec_spec(self, monkeypatch):
+        """Pin ``find_spec`` to "not importable".
+
+        ``_capture_torchrec`` now reads the installed ``torchrec/version.py``,
+        so on a machine that genuinely has torchrec its real SHA would leak
+        into the version-string parser cases below and mask what they assert.
+        """
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+
+    def test_torchrec_absent_is_suppressed_no_reason(self, monkeypatch, no_torchrec_spec):
+        """No dist-info AND not importable (find_spec None) -> genuinely
+        absent -> no partial reason, mirroring fbgemm_gpu/aiter."""
         import importlib.metadata as md
 
         def fake_version(name):
@@ -5141,7 +5288,116 @@ class TestTorchrec:
         assert block == {"package_version": None, "commit": None}
         assert reasons == []
 
-    def test_torchrec_release_wheel_has_no_commit(self, monkeypatch):
+    def test_torchrec_namespace_package_counts_as_absent(self, monkeypatch, tmp_path):
+        """A bare ``torchrec/`` directory on sys.path is a PEP 420 namespace
+        portion, not an install. Without the loader guard it would inject a
+        phantom partial reason -- and since ``partial=bool(reasons)`` that
+        would mark an otherwise clean snapshot incomplete."""
+        import importlib.metadata as md
+
+        def fake_version(name):
+            raise md.PackageNotFoundError(name)
+
+        monkeypatch.setattr(md, "version", fake_version)
+        monkeypatch.setattr(
+            importlib.util, "find_spec", lambda name: _torchrec_namespace_spec(tmp_path)
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": None, "commit": None}
+        assert reasons == []
+
+    def test_torchrec_importable_without_version_py_is_partial(self, monkeypatch, tmp_path):
+        """Importable, no dist-info, no version.py -> present with unknown
+        identity. Must NOT be reported as absent."""
+        import importlib.metadata as md
+
+        def fake_version(name):
+            raise md.PackageNotFoundError(name)
+
+        monkeypatch.setattr(md, "version", fake_version)
+        monkeypatch.setattr(
+            importlib.util, "find_spec", lambda name: _torchrec_pkg_spec(tmp_path, None)
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": None, "commit": None}
+        assert any("torchrec" in r and "no distribution metadata" in r for r in reasons)
+
+    def test_torchrec_buck_link_tree_resolved_from_version_py(self, monkeypatch, tmp_path):
+        """Buck / PYTHONPATH link-tree: no dist-info, but the package ships
+        version.py -> report that identity, no partial reason."""
+        import importlib.metadata as md
+
+        def fake_version(name):
+            raise md.PackageNotFoundError(name)
+
+        version_py = _TORCHREC_VERSION_PY.format(version="1.8.0a0", commit=_TORCHREC_FULL_SHA)
+        monkeypatch.setattr(md, "version", fake_version)
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: _torchrec_pkg_spec(tmp_path, version_py),
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": "1.8.0a0", "commit": _TORCHREC_FULL_SHA}
+        assert reasons == []
+
+    def test_torchrec_release_wheel_commit_from_version_py(self, monkeypatch, tmp_path):
+        """The headline case: a release wheel's version string carries no SHA,
+        but torchrec/version.py holds the FULL 40-char one. Reporting null
+        here (schema 1.14) made two different builds of "1.4.0" indistinguishable."""
+        import importlib.metadata as md
+
+        version_py = _TORCHREC_VERSION_PY.format(version="1.4.0", commit=_TORCHREC_FULL_SHA)
+        monkeypatch.setattr(md, "version", lambda name: "1.4.0")
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: _torchrec_pkg_spec(tmp_path, version_py),
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": "1.4.0", "commit": _TORCHREC_FULL_SHA}
+        assert reasons == []
+
+    def test_torchrec_version_py_unknown_sha_is_rejected(self, monkeypatch, tmp_path):
+        """setup.py writes ``git_version = 'Unknown'`` when the build tree is
+        not a git checkout -- that must never surface as a commit."""
+        import importlib.metadata as md
+
+        version_py = _TORCHREC_VERSION_PY.format(version="1.4.0", commit="Unknown")
+        monkeypatch.setattr(md, "version", lambda name: "1.4.0")
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: _torchrec_pkg_spec(tmp_path, version_py),
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": "1.4.0", "commit": None}
+        assert reasons == []
+
+    def test_torchrec_version_py_disagreeing_with_metadata_drops_sha(self, monkeypatch, tmp_path):
+        """Two copies on sys.path: the importable one's version.py does not
+        describe the distribution we read metadata from, so its SHA is
+        dropped. A wrong SHA is worse than none."""
+        import importlib.metadata as md
+
+        version_py = _TORCHREC_VERSION_PY.format(version="9.9.9", commit=_TORCHREC_FULL_SHA)
+        monkeypatch.setattr(md, "version", lambda name: "1.4.0")
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: _torchrec_pkg_spec(tmp_path, version_py),
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": "1.4.0", "commit": None}
+        assert reasons == []
+
+    def test_torchrec_release_wheel_has_no_commit(self, monkeypatch, no_torchrec_spec):
         import importlib.metadata as md
 
         monkeypatch.setattr(md, "version", lambda name: "1.4.0")
@@ -5150,7 +5406,7 @@ class TestTorchrec:
         assert block == {"package_version": "1.4.0", "commit": None}
         assert reasons == []
 
-    def test_torchrec_dev_build_extracts_commit(self, monkeypatch):
+    def test_torchrec_setuptools_scm_commit(self, monkeypatch, no_torchrec_spec):
         import importlib.metadata as md
 
         monkeypatch.setattr(md, "version", lambda name: "1.5.0.dev0+g0123abc")
@@ -5158,6 +5414,59 @@ class TestTorchrec:
         block = env_mod._capture_torchrec(reasons)
         assert block == {"package_version": "1.5.0.dev0+g0123abc", "commit": "0123abc"}
         assert reasons == []
+
+    def test_torchrec_source_build_bare_hex_commit(self, monkeypatch, no_torchrec_spec):
+        """TorchRec source builds use a BARE hex local segment (no 'g' lead-in),
+        e.g. 1.8.0a0+0123abc -> 0123abc (P1 review)."""
+        import importlib.metadata as md
+
+        monkeypatch.setattr(md, "version", lambda name: "1.8.0a0+0123abc")
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": "1.8.0a0+0123abc", "commit": "0123abc"}
+        assert reasons == []
+
+    def test_torchrec_bare_hex_ignores_non_sha_local(self, monkeypatch, no_torchrec_spec):
+        """A non-SHA local segment (+cpu / +fb / too-short) must NOT be
+        mistaken for a commit."""
+        import importlib.metadata as md
+
+        for ver in ("1.4.0+cpu", "1.4.0+fb", "1.4.0+abcd", "2026.7.2"):
+            monkeypatch.setattr(md, "version", lambda name, v=ver: v)
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+            assert block == {"package_version": ver, "commit": None}, ver
+            assert reasons == []
+
+    def test_torchrec_scm_dirty_date_is_not_a_commit(self, monkeypatch, no_torchrec_spec):
+        """Regression: setuptools_scm's dirty-tree marker ``+d<YYYYMMDD>`` is
+        entirely valid hex, so a naive bare-hex match would publish the build
+        DATE as a commit SHA. A wrong SHA is worse than none (phantom
+        'commit changed' diffs), so these must resolve to None."""
+        import importlib.metadata as md
+
+        for ver in ("1.4.0+d20240101", "1.4.0+20240101"):
+            monkeypatch.setattr(md, "version", lambda name, v=ver: v)
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+            assert block == {"package_version": ver, "commit": None}, ver
+            assert reasons == []
+
+    def test_torchrec_real_sha_survives_dirty_date_guard(self, monkeypatch, no_torchrec_spec):
+        """The dirty-date guard must not swallow genuine SHAs, including a
+        bare SHA followed by the dirty tag, or an uppercase SHA."""
+        import importlib.metadata as md
+
+        for ver, expected in (
+            ("1.4.0+deadbeef", "deadbeef"),
+            ("1.8.0a0+0123abc.d20240101", "0123abc"),
+            ("1.8.0a0+0123ABC", "0123abc"),
+        ):
+            monkeypatch.setattr(md, "version", lambda name, v=ver: v)
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+            assert block == {"package_version": ver, "commit": expected}, ver
+            assert reasons == []
 
     def test_torchrec_metadata_error_records_reason(self, monkeypatch):
         import importlib.metadata as md
