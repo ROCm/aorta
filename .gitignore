@@ -55,6 +55,7 @@ overlap_debug*/
 *.logs
 # Exception: example sidecar files that ship with the repo
 !examples/*.json
+!**/examples/*.json
 *_merged_enhanced.json
 nccl_thread_sweep_*.log
 nccl_thread_sweep_summary_*.txt

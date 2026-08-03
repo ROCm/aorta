@@ -1,0 +1,11 @@
+{
+  "schema": "rocjitsu_sanitizers.kernels/1",
+  "top_n": 3,
+  "sources": ["synthetic"],
+  "kernel_count": 3,
+  "kernels": [
+    {"source": "gemm_csv", "rank": 1, "name": "gemm_NT_M256_N256_K256", "top_solution_idx": 100001},
+    {"source": "gemm_csv", "rank": 2, "name": "gemm_NN_M512_N512_K128", "top_solution_idx": 100002},
+    {"source": "gemm_csv", "rank": 3, "name": "gemm_TN_M128_N1024_K256", "top_solution_idx": 100003}
+  ]
+}
