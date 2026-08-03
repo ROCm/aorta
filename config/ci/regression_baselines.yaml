@@ -1,0 +1,25 @@
+# Expected-outcome baselines for the nightly evaluation.
+#
+# Keyed by "<entry>::<cell>" (entry from config/ci/nightly_eval_matrix.yaml, cell
+# from the recipe). Empty => RECORD-ONLY: the harness records observed metrics and
+# passes; it only compares/fails a cell once a blessed baseline entry exists here.
+#
+# Baselines are ROCm/stack-specific (numerics + step times move with ROCm /
+# hipBLASLt), so they are (re)generated on the runner and blessed via a PR from
+# the refresh-baselines workflow (scripts/ci/refresh_baselines.py) -- never
+# hand-edited blindly, never auto-committed.
+#
+# Entry shape (once blessed):
+#   "<entry>::<cell>":
+#     passed: true                     # require the cell to pass (clean run)
+#     step_time_ms: { max: <float> }   # fail if mean_step_time_ms exceeds max
+#                                      #   (a configured max with a MISSING
+#                                      #   observation is also a fail)
+#     metrics:                         # generic metric bounds with explicit policy
+#       gflops:            { policy: min,   value: <float> }   # fail if below
+#       decode_latency_ms: { policy: max,   value: <float> }   # fail if above
+#       logits_checksum:   { policy: equal, value: <number> }  # fail if != value
+#       # `required: false` allows a metric to be absent without failing;
+#       # policy defaults to eval_lib._METRIC_POLICIES when omitted.
+version: 1
+baselines: {}

@@ -1,0 +1,110 @@
+name: Refresh baselines
+
+# Dispatch-only: (re)generate config/ci/regression_baselines.yaml from a live run
+# on the GPU runner (against the released nightly wheel) and open a PR so a human
+# reviews/blesses the numbers. Baselines are ROCm/stack-specific, so this is also
+# the flow used after a ROCm/dependency bump. Never auto-commits to main.
+
+on:
+  workflow_dispatch:
+    inputs:
+      step_time_margin:
+        description: "Fractional headroom above observed mean step time"
+        required: false
+        default: "0.25"
+      throughput_margin:
+        description: "Fractional floor below observed throughput"
+        required: false
+        default: "0.15"
+      perf_gate:
+        description: "Also emit performance thresholds (Phase 5 perf gating)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: refresh-baselines-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CONTAINER_NAME: aorta-ci-gpu
+  DEV_WHEELS_INDEX: https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
+
+jobs:
+  refresh-baselines:
+    name: refresh baselines (GPU, MI350)
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 150
+
+    steps:
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
+
+      - name: Install nightly wheel and regenerate baselines
+        run: |
+          bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            python -m pip install --upgrade pip
+            # Install under the same ci-constraints.txt as nightly-eval,
+            # so baselines are generated on the exact dependency set they gate.
+            constraint=""
+            [ -f config/ci/ci-constraints.txt ] && constraint="-c config/ci/ci-constraints.txt"
+            pip install --pre "amd-aorta[hw-queue]" -f "${{ env.DEV_WHEELS_INDEX }}" $constraint
+            python scripts/ci/refresh_baselines.py \
+              --step-time-margin "${{ github.event.inputs.step_time_margin || 0.25 }}" \
+              --throughput-margin "${{ github.event.inputs.throughput_margin || 0.15 }}" \
+              ${{ github.event.inputs.perf_gate == 'true' && '--perf-gate' || '' }}
+          '
+
+      # The container wrote regression_baselines.yaml into the mounted workspace;
+      # reclaim ownership so the runner user can commit it.
+      - name: Reclaim results ownership
+        if: always()
+        run: |
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws 2>/dev/null \
+            || sudo -n chown -R "$uidgid" "$ws" 2>/dev/null || true
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
+
+      - name: Open baseline PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          add-paths: config/ci/regression_baselines.yaml
+          branch: ci/refresh-baselines
+          title: "ci: refresh nightly-eval baselines"
+          commit-message: "ci: refresh nightly-eval baselines from a runner run"
+          body: |
+            Auto-generated candidate baselines from `refresh_baselines.py` on the
+            GPU runner. **Review the diff** — this is the correctness/perf
+            expectation the nightly eval will enforce (and the impact review after
+            a ROCm/dependency bump). Merge to bless.

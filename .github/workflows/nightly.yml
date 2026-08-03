@@ -83,6 +83,16 @@ jobs:
       - name: Verify built version matches
         run: python scripts/check_wheel_version.py "${RC_VERSION}"
 
+      # Upload the exact built dist so the nightly-eval workflow can install the
+      # precise wheel that this run produced (rather than "latest from the index"),
+      # keeping dashboard results attributable to this run/commit.
+      - name: Upload built dist
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-dist
+          path: dist/*.whl
+          if-no-files-found: error
+
       # softprops/action-gh-release creates the dev-wheels tag on the first run
       # but does NOT move it on subsequent runs, so the rolling tag (and the
       # release's "commit" link) would keep pointing at the commit it was first

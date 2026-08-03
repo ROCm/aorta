@@ -1,0 +1,30 @@
+# Automated dependency bumps (Phase 4 of docs/ci-plan.md).
+#
+# Dependabot opens PRs for newer versions; a human reviews (and, for stack-moving
+# bumps, runs the Refresh baselines workflow so the baseline diff shows the
+# numeric/perf impact). No auto-merge.
+version: 2
+updates:
+  # Python deps (pyproject.toml extras + requirements*.txt).
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "python"]
+
+  # ROCm base image + other pinned images (bumps the FROM ... @sha256 digests).
+  - package-ecosystem: docker
+    directory: "/docker"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "docker", "rocm"]
+
+  # GitHub Actions used by the workflows.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "github-actions"]
