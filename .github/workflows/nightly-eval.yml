@@ -1,0 +1,121 @@
+name: Nightly Evaluation
+
+# CI plan (docs/ci-plan.md): after the nightly wheel is published, install THAT
+# exact wheel and evaluate the workloads against committed expected-outcome
+# baselines, capturing perf metrics as trend data. Runs inside the pinned ROCm
+# docker image on the self-hosted MI350 runner; a separate ubuntu-latest job
+# stores history (ci-results branch) and deploys the GitHub Pages dashboard.
+#
+# Correctness fails the job on any failed/errored cell, a missing matrix, a
+# per-entry timeout, a blessed-baseline breach, or a run that did zero work.
+# Cells without a baseline are recorded (record-only) so nightly isn't red before
+# baselines land.
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Nightly wheels"]
+    types: [completed]
+
+concurrency:
+  group: nightly-eval-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The GPU evaluation itself is a reusable workflow so the same matrix +
+  # baseline comparison can validate stack-bump PRs (see bump-validate.yml).
+  nightly-eval:
+    name: nightly eval
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    uses: ./.github/workflows/eval-reusable.yml
+    with:
+      ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      wheel_run_id: ${{ github.event.workflow_run.id || '' }}
+      do_alert: true
+    secrets: inherit
+
+  # Store history + deploy the dashboard via the official Pages actions. A
+  # GITHUB_TOKEN push to a branch does NOT trigger a branch-sourced Pages build,
+  # so we keep history on a data branch (ci-results) and deploy the generated
+  # site through actions/deploy-pages (repo Pages source must be "GitHub Actions").
+  publish:
+    name: publish dashboard
+    needs: nightly-eval
+    # Run even when the eval failed (to publish the failure), but NOT when it was
+    # skipped (upstream "Nightly wheels" failed/cancelled) -- there'd be no
+    # results artifact and publish would fail misleadingly.
+    if: always() && needs.nightly-eval.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push results history to the ci-results branch
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Download results
+        uses: actions/download-artifact@v6
+        with:
+          name: nightly-results-${{ github.run_id }}
+          path: incoming
+
+      - name: Update history + build site
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -f incoming/gpu-nightly-results.json ] || { echo "no results JSON; skipping publish"; exit 0; }
+          date="$(date -u +%Y-%m-%d)"
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          tmp="$(mktemp -d)"
+          # Fail closed: distinguish a genuinely-absent ci-results branch (create
+          # the orphan) from a transport/auth failure (must NOT be treated as
+          # "branch absent" -- that would truncate history to one day and still
+          # deploy). git ls-remote --exit-code: 0=present, 2=absent, else=error.
+          set +e
+          git ls-remote --exit-code --heads "$repo_url" ci-results >/dev/null 2>&1
+          lsr=$?
+          set -e
+          if [ "$lsr" -eq 0 ]; then
+            git clone --depth 1 --branch ci-results "$repo_url" "$tmp"
+          elif [ "$lsr" -eq 2 ]; then
+            echo "ci-results branch absent; creating it"
+            git clone --depth 1 "$repo_url" "$tmp"
+            ( cd "$tmp" && git checkout --orphan ci-results && git rm -rf . >/dev/null 2>&1 || true )
+          else
+            echo "::error::cannot reach ci-results (git ls-remote exit ${lsr}); failing closed"
+            exit 1
+          fi
+          mkdir -p "$tmp/results"
+          cp incoming/gpu-nightly-results.json "$tmp/results/${date}.json"
+          # Retention: keep the most recent 180 result files.
+          ls -1 "$tmp"/results/*.json 2>/dev/null | sort | head -n -180 | xargs -r rm -f
+          ( cd "$tmp"
+            git add -A
+            if git -c user.name=aorta-ci -c user.email=aorta-ci@users.noreply.github.com \
+                 commit -m "nightly results ${date}"; then
+              git push origin ci-results   # not swallowed -- a push failure fails the job
+            else
+              echo "no changes to commit"
+            fi )
+          mkdir -p site
+          python3 scripts/ci/gen_dashboard.py --results-dir "$tmp/results" --out-dir site --max-builds 180
+          touch site/.nojekyll
+
+      - name: Upload Pages artifact
+        if: hashFiles('site/index.html') != ''
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        if: hashFiles('site/index.html') != ''
+        uses: actions/deploy-pages@v4

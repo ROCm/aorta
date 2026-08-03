@@ -1,0 +1,140 @@
+name: GPU eval (reusable)
+
+# Reusable GPU evaluation: build/start the pinned ROCm container, install the
+# aorta wheel (the exact triggering wheel when a run-id is given, else the latest
+# rc from the index), run the nightly-eval harness, and upload results + debug
+# artifacts. Used by nightly-eval.yml (nightly) and bump-validate.yml (stack
+# bump PRs). Alerting/Pages are the caller's responsibility.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "git ref to check out (default: the caller's default)"
+        type: string
+        required: false
+        default: ""
+      wheel_run_id:
+        description: "run-id whose nightly-dist artifact holds the wheel to test"
+        type: string
+        required: false
+        default: ""
+      do_alert:
+        description: "file/close the regression issue from the results"
+        type: boolean
+        required: false
+        default: false
+
+env:
+  CONTAINER_NAME: aorta-ci-gpu
+  DEV_WHEELS_INDEX: https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
+
+jobs:
+  eval:
+    name: gpu eval (MI350)
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+
+    steps:
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Download triggering wheel
+        if: inputs.wheel_run_id != ''
+        uses: actions/download-artifact@v6
+        with:
+          name: nightly-dist
+          path: dist
+          run-id: ${{ inputs.wheel_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
+
+      - name: Install wheel and run evaluation
+        env:
+          UPSTREAM_RUN_ID: ${{ inputs.wheel_run_id }}
+          UPSTREAM_HEAD_SHA: ${{ inputs.ref || github.sha }}
+        run: |
+          bash scripts/ci/docker_cmd.sh exec \
+            -e UPSTREAM_RUN_ID="${UPSTREAM_RUN_ID}" \
+            -e UPSTREAM_HEAD_SHA="${UPSTREAM_HEAD_SHA}" \
+            -e DEV_WHEELS_INDEX="${{ env.DEV_WHEELS_INDEX }}" \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            python -m pip install --upgrade pip
+            constraint=""
+            [ -f config/ci/ci-constraints.txt ] && constraint="-c config/ci/ci-constraints.txt"
+            if ls dist/*.whl >/dev/null 2>&1; then
+              whl="$(ls dist/*.whl | head -1)"
+              export WHEEL_FILE="$(basename "$whl")"
+              echo "Installing exact wheel: $WHEEL_FILE"
+              pip install "${whl}[hw-queue]" $constraint
+            else
+              echo "No dist artifact; installing latest rc from the index."
+              pip install --pre "amd-aorta[hw-queue]" -f "$DEV_WHEELS_INDEX" $constraint
+            fi
+            python scripts/ci/nightly_eval.py --out gpu-nightly-results.json
+          '
+
+      - name: Reclaim results ownership
+        if: always()
+        run: |
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws 2>/dev/null \
+            || sudo -n chown -R "$uidgid" "$ws" 2>/dev/null || true
+
+      - name: Upload nightly results + debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-results-${{ github.run_id }}
+          path: |
+            gpu-nightly-results.json
+            .nightly-eval/**/matrix.json
+            .nightly-eval/**/recipe.resolved.yaml
+            .nightly-eval/**/cells/**
+          if-no-files-found: warn
+
+      - name: Alert on regression
+        if: always() && inputs.do_alert
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -f gpu-nightly-results.json ]; then
+            python3 scripts/ci/alert_issue.py --results gpu-nightly-results.json
+          else
+            echo "no results JSON; skipping alert"
+          fi
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
