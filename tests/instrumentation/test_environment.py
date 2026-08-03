@@ -280,6 +280,7 @@ REQUIRED_TOP_KEYS = {
     "rocfft_catalog",
     "triton",
     "fbgemm",
+    "torchrec",
     "aiter",
     "aotriton",
     "miopen",
@@ -293,6 +294,7 @@ REQUIRED_TOP_KEYS = {
     "pytorch_version",
     "pytorch_build",
     "build_system",
+    "buck_invocation",
     "library_introspection",
     "library_introspection_alternates",
     "pytorch_sdpa",
@@ -429,6 +431,10 @@ def _example_snapshot(**overrides) -> object:
             "pytorch_use_fbgemm": True,
             "pytorch_use_fbgemm_genai": True,
         },
+        "torchrec": {
+            "package_version": "1.4.0",
+            "commit": None,
+        },
         "aiter": {
             "package_version": None,
             "package_dist_name": None,
@@ -517,6 +523,21 @@ def _example_snapshot(**overrides) -> object:
             "ninja_hipcc": {"_source_file": None, "targets": None},
         },
         "build_system": {"kind": "none"},
+        "buck_invocation": {
+            "status": "success",
+            "target": "//app:trainer",
+            "context_source": "explicit",
+            "mode_files": ["root//mode/debug"],
+            "config_keys": ["build.profile"],
+            "modifiers": ["//constraints:linux"],
+            "option_order": ["mode", "config", "modifier"],
+            "context_fingerprint": "sha256:" + "a" * 64,
+            "configured_root_target": (
+                "root//app:trainer "
+                "(prelude//platforms:default#configured)"
+            ),
+            "comparison": "not_compared",
+        },
         "partial": False,
         "partial_reasons": [],
         "library_introspection": [],
@@ -604,6 +625,7 @@ class TestEnvSnapshot:
             ("rocfft_catalog", env_mod._empty_rocfft_catalog),
             ("amdgpu_driver", env_mod._empty_amdgpu_driver),
             ("execution_context", env_mod._empty_execution_context),
+            ("buck_invocation", env_mod._empty_buck_invocation),
         ],
     )
     def test_from_dict_backfills_missing_catalog_key(self, key, empty_factory):
@@ -699,6 +721,17 @@ class TestEnvSnapshot:
             if line.lstrip().startswith("runtime:")
         )
         assert "ns=mnt:012345…" in runtime_line
+
+    def test_summary_surfaces_buck_invocation_status_source_and_fingerprint(self):
+        snap = _example_snapshot()
+        buck_line = next(
+            line
+            for line in snap.summary().splitlines()
+            if line.lstrip().startswith("buck ctx:")
+        )
+        assert "status=success" in buck_line
+        assert "source=explicit" in buck_line
+        assert "fingerprint=sha256:aaaaaa…" in buck_line
 
     def test_dataclass_is_frozen(self):
         """Callers can safely embed the snapshot without mutation hazards."""
@@ -1393,6 +1426,25 @@ class TestCollectEnvContract:
         assert "collect_env: boom" in snap.partial_reasons
         # JSON-native check (no default=str needed)
         json.dumps(d)
+        assert snap.buck_invocation == env_mod._empty_buck_invocation()
+
+    def test_disaster_snapshot_preserves_redacted_buck_request(self):
+        hidden_value = "not-persisted-value"
+        context = env_mod.BuckInvocationContext(
+            config_overrides=(f"build.profile={hidden_value}",),
+        )
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=[],
+            unexpected_reason="collect_env: boom",
+            buck_target="//app:trainer",
+            buck_context=context,
+        )
+
+        assert snap.buck_invocation["status"] == "failure"
+        assert snap.buck_invocation["target"] == "//app:trainer"
+        assert snap.buck_invocation["context_source"] == "explicit"
+        assert snap.buck_invocation["config_keys"] == ["build.profile"]
+        assert hidden_value not in json.dumps(snap.buck_invocation)
 
     def test_disaster_snapshot_nics_block_is_fully_shaped(self):
         """The disaster path shapes nics like every other block (all
@@ -1544,13 +1596,16 @@ class TestCliIsThinWrapper:
         # * The --execution-context work (schema 1.11) added one more click
         #   option block plus a stderr validation-warning envelope (still
         #   pure wiring/validation -- no probing).
+        # * The Buck invocation-context work (schema 1.13) added four Click
+        #   options and their mutual-requirement validation. The typed argv
+        #   construction and fingerprinting remain in the library module.
         #
         # The real "no-probing-in-CLI" guard is
         # `test_cli_does_no_probing_imports` below -- this one is a
         # soft canary against the file ballooning beyond pure wiring.
         line_count = sum(1 for _ in cli_path.read_text().splitlines())
-        assert line_count <= 410, (
-            f"cli/env.py is {line_count} lines; soft budget is 410. "
+        assert line_count <= 500, (
+            f"cli/env.py is {line_count} lines; soft budget is 500. "
             "If you need more, check that the new code is genuinely "
             "wiring/error-handling and not probing -- "
             "test_cli_does_no_probing_imports is the strict guard."
@@ -2098,6 +2153,234 @@ class TestCliSummaryAndFieldFlags:
         assert payload["schema_version"] == env_mod.SCHEMA_VERSION
 
 
+class TestProbeBuckContextOptions:
+    _module_load_count = 0
+
+    @classmethod
+    def _cli_mod(cls):
+        cli_path = Path(env_mod.__file__).parent.parent / "cli" / "env.py"
+        cls._module_load_count += 1
+        module_name = f"aorta.cli.env_test_{cls._module_load_count}"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            cli_path,
+        )
+        assert spec is not None and spec.loader is not None
+        cli_mod = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = cli_mod
+        try:
+            spec.loader.exec_module(cli_mod)
+        finally:
+            sys.modules.pop(module_name, None)
+        return cli_mod
+
+    @pytest.mark.parametrize(
+        "context_args",
+        [
+            ["--buck-option", "mode=root//mode/debug"],
+            ["--buck-mode-file", "root//mode/debug"],
+            ["--buck-config", "build.profile=debug"],
+            ["--buck-modifier", "//constraints:linux"],
+            ["--buck-default-context"],
+        ],
+    )
+    def test_context_options_require_buck_target(self, context_args):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            ["probe", *context_args, "--summary"],
+        )
+        assert result.exit_code != 0
+        assert "require --buck-target" in result.output
+        assert "Traceback" not in result.output
+
+    def test_default_confirmation_rejects_explicit_context(self):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-default-context",
+                "--buck-modifier",
+                "//constraints:linux",
+                "--summary",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output
+
+    def test_repeatable_options_preserve_each_axis_order(self, monkeypatch):
+        from click.testing import CliRunner
+
+        captured = {}
+
+        def fake_collect_env(**kwargs):
+            captured.update(kwargs)
+            return _example_snapshot()
+
+        monkeypatch.setattr(env_mod, "collect_env", fake_collect_env)
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-mode-file",
+                "root//mode/debug",
+                "--buck-mode-file",
+                "root//mode/gpu",
+                "--buck-config",
+                "build.profile=debug",
+                "--buck-config",
+                "scheduler.policy=local",
+                "--buck-modifier",
+                "//constraints:linux",
+                "--buck-modifier",
+                "//constraints:gfx",
+                "--summary",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        context = captured["buck_context"]
+        assert context.mode_files == (
+            "root//mode/debug",
+            "root//mode/gpu",
+        )
+        assert context.config_overrides == (
+            "build.profile=debug",
+            "scheduler.policy=local",
+        )
+        assert context.modifiers == (
+            "//constraints:linux",
+            "//constraints:gfx",
+        )
+        assert context.to_buck_args() == [
+            "@root//mode/debug",
+            "@root//mode/gpu",
+            "-c",
+            "build.profile=debug",
+            "-c",
+            "scheduler.policy=local",
+            "-m",
+            "//constraints:linux",
+            "-m",
+            "//constraints:gfx",
+        ]
+
+    def test_ordered_option_preserves_cross_type_order(self, monkeypatch):
+        from click.testing import CliRunner
+
+        captured = {}
+
+        def fake_collect_env(**kwargs):
+            captured.update(kwargs)
+            return _example_snapshot()
+
+        monkeypatch.setattr(env_mod, "collect_env", fake_collect_env)
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-option",
+                "config=build.profile=debug",
+                "--buck-option",
+                "mode=root//mode/override",
+                "--buck-option",
+                "modifier=//constraints:gfx",
+                "--summary",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert captured["buck_context"].to_buck_args() == [
+            "-c",
+            "build.profile=debug",
+            "@root//mode/override",
+            "-m",
+            "//constraints:gfx",
+        ]
+
+    def test_ordered_option_rejects_grouped_options(self):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-option",
+                "mode=root//mode/debug",
+                "--buck-config",
+                "build.profile=debug",
+                "--summary",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "cannot be combined" in result.output
+
+    def test_default_confirmation_and_unspecified_target_are_distinct(
+        self, monkeypatch
+    ):
+        from click.testing import CliRunner
+
+        contexts = []
+
+        def fake_collect_env(**kwargs):
+            contexts.append(kwargs["buck_context"])
+            return _example_snapshot()
+
+        monkeypatch.setattr(env_mod, "collect_env", fake_collect_env)
+        cli_mod = self._cli_mod()
+        runner = CliRunner()
+
+        unspecified = runner.invoke(
+            cli_mod.env,
+            ["probe", "--buck-target", "//app:trainer", "--summary"],
+        )
+        confirmed = runner.invoke(
+            cli_mod.env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-default-context",
+                "--summary",
+            ],
+        )
+
+        assert unspecified.exit_code == 0, unspecified.output
+        assert confirmed.exit_code == 0, confirmed.output
+        assert contexts[0].source == "unspecified"
+        assert contexts[1].source == "default_confirmed"
+
+    def test_invalid_config_shape_is_clean_click_error(self):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(
+            self._cli_mod().env,
+            [
+                "probe",
+                "--buck-target",
+                "//app:trainer",
+                "--buck-config",
+                "build.profile",
+                "--summary",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "KEY=VALUE" in result.output
+        assert "--buck-config" in result.output
+        assert "Traceback" not in result.output
+
+
 class TestProbeBuckTimeoutValidation:
     """Per Copilot review on PR #165: ``--buck-timeout`` must reject
     values <= 0 at arg-parse time. ``subprocess.run(timeout=...)``
@@ -2233,6 +2516,51 @@ class TestProbeWritesUtf8:
         )
         assert recipe_result.exit_code == 0, recipe_result.output
         assert "BEST-EFFORT, NOT EXACT" in recipe_result.output
+
+
+class TestCaptureTo:
+    """Programmatic writer for Buck ``.par`` applications that own __main__."""
+
+    def test_writes_complete_json_and_returns_snapshot(
+        self, all_disabled, tmp_path: Path
+    ):
+        output = tmp_path / "nested" / "env.action.json"
+        snapshot = env_mod.capture_to(
+            output,
+            probe_invocation="buck2_run",
+        )
+        assert output.is_file()
+        assert output.stat().st_size > 0
+        on_disk = json.loads(output.read_text(encoding="utf-8"))
+        assert on_disk == snapshot.to_dict()
+
+    def test_forwards_buck_context_without_persisting_config_value(
+        self, all_disabled, tmp_path: Path
+    ):
+        hidden = "private-placeholder"
+        context = env_mod.BuckInvocationContext(
+            config_overrides=(f"build.profile={hidden}",),
+        )
+        output = tmp_path / "env.action.json"
+        snapshot = env_mod.capture_to(
+            output,
+            buck_target="//app:trainer",
+            buck_context=context,
+            probe_invocation="buck2_run",
+        )
+        serialized = output.read_text(encoding="utf-8")
+        assert snapshot.buck_invocation["config_keys"] == ["build.profile"]
+        assert hidden not in serialized
+
+    def test_write_failure_is_not_silenced(
+        self, all_disabled, tmp_path: Path, monkeypatch
+    ):
+        def fail_write(*args, **kwargs):
+            raise OSError("synthetic write failure")
+
+        monkeypatch.setattr(Path, "write_text", fail_write)
+        with pytest.raises(OSError, match="synthetic write failure"):
+            env_mod.capture_to(tmp_path / "env.json")
 
 
 # ---------------------------------------------------------------------------
@@ -3074,6 +3402,14 @@ class TestExecutionContext:
         msg = env_mod.execution_context_warning("buck2_action", False)
         assert msg is not None and msg.startswith("WARNING:")
 
+    def test_buck2_run_without_isolation_is_labeled_client_host(
+        self, all_disabled
+    ):
+        msg = env_mod.execution_context_warning("buck2_run", False)
+        assert msg is not None and msg.startswith("NOTICE:")
+        assert "client-host snapshot" in msg
+        assert "remote-worker" in msg
+
     def test_warning_predicate_suppressed_by_container_detected(
         self, all_disabled
     ):
@@ -3320,6 +3656,7 @@ class TestEnvVars:
             "HSA_KERNARG_POOL_SIZE",
             "HSA_NO_SCRATCH_RECLAIM",
             "HSA_OVERRIDE_GFX_VERSION",
+            "HSA_TOOLS_DISABLE_REGISTER",
             # GPU queue / codegen / build target
             "GPU_MAX_HW_QUEUES",
             "AMDGCN_USE_BUFFER_OPS",
@@ -3384,6 +3721,22 @@ class TestEnvVars:
             # PyTorch / inductor
             "TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE",
             "PYTORCH_CUDA_ALLOC_CONF",
+            # Dynamic loader
+            "LD_LIBRARY_PATH",
+            # hipBLASLt / rocBLAS / Tensile GEMM numeric + kernel-path selection
+            # (MI350X recom-repro NaN escalation). Logging-only knobs excluded.
+            "HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32",
+            "HIPBLASLT_TENSILE_LIBPATH",
+            "HIPBLASLT_USE_ROCROLLER",
+            "HIPBLASLT_ROCROLLER_NO_CUSTOM_KERNEL",
+            "HIPBLASLT_TUNING_OVERRIDE_FILE",
+            "ROCBLAS_USE_HIPBLASLT",
+            "ROCBLAS_TENSILE_LIBPATH",
+            "ROCBLAS_DEFAULT_ATOMICS_MODE",
+            "ROCBLAS_INTERNAL_FP16_ALT_IMPL",
+            "ROCBLAS_INTERNAL_FP16_ALT_IMPL_RNZ",
+            "ROCBLAS_STREAM_ORDER_ALLOC",
+            "TENSILE_SOLUTION_INDEX",
         }
 
 
@@ -4766,6 +5119,57 @@ class TestTritonBlock:
             "commit": "a272dfa8",
         }
         assert reasons == []
+
+
+# ---------------------------------------------------------------------------
+# TorchRec package identity (schema 1.14)
+# ---------------------------------------------------------------------------
+
+
+class TestTorchrec:
+    def test_torchrec_absent_is_suppressed_no_reason(self, monkeypatch):
+        """A missing torchrec is the documented common case (non-recsys
+        installs lack it) -> no partial reason, mirroring fbgemm_gpu/aiter."""
+        import importlib.metadata as md
+
+        def fake_version(name):
+            raise md.PackageNotFoundError(name)
+
+        monkeypatch.setattr(md, "version", fake_version)
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": None, "commit": None}
+        assert reasons == []
+
+    def test_torchrec_release_wheel_has_no_commit(self, monkeypatch):
+        import importlib.metadata as md
+
+        monkeypatch.setattr(md, "version", lambda name: "1.4.0")
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": "1.4.0", "commit": None}
+        assert reasons == []
+
+    def test_torchrec_dev_build_extracts_commit(self, monkeypatch):
+        import importlib.metadata as md
+
+        monkeypatch.setattr(md, "version", lambda name: "1.5.0.dev0+g0123abc")
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": "1.5.0.dev0+g0123abc", "commit": "0123abc"}
+        assert reasons == []
+
+    def test_torchrec_metadata_error_records_reason(self, monkeypatch):
+        import importlib.metadata as md
+
+        def boom(name):
+            raise RuntimeError("broken dist-info")
+
+        monkeypatch.setattr(md, "version", boom)
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == {"package_version": None, "commit": None}
+        assert any("torchrec" in r for r in reasons)
 
 
 # ---------------------------------------------------------------------------
@@ -6629,6 +7033,7 @@ class TestGpuArch:
 
         def fake_run(cmd, **kwargs):
             assert cmd[0].endswith("rocm_agent_enumerator")
+            assert kwargs["timeout"] == env_mod.GPU_ARCH_TIMEOUT_SEC
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0,
                 stdout="gfx942\ngfx942\ngfx942\ngfx942\n", stderr="",
@@ -6641,6 +7046,27 @@ class TestGpuArch:
         assert block["gfx_targets"] == ["gfx942"]
         assert block["agent_arch_counts"] == {"gfx942": 4}
         assert reasons == []
+
+    def test_timeout_uses_gpu_specific_budget_and_records_reason(
+        self, isolated_env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            env_mod.shutil, "which",
+            lambda name: "/usr/bin/" + name,
+        )
+
+        def fake_run(cmd, **kwargs):
+            assert kwargs["timeout"] == env_mod.GPU_ARCH_TIMEOUT_SEC
+            raise subprocess.TimeoutExpired(
+                cmd=cmd,
+                timeout=kwargs["timeout"],
+            )
+
+        monkeypatch.setattr(env_mod.subprocess, "run", fake_run)
+        reasons: list[str] = []
+        block = env_mod._capture_gpu_arch(reasons)
+        assert block["agent_count"] is None
+        assert any("exceeded 30s timeout" in reason for reason in reasons)
 
     def test_filters_gfx000_placeholder(self, isolated_env, monkeypatch):
         """Some hosts include a gfx000 placeholder for the host CPU
