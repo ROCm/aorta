@@ -23,13 +23,16 @@ Coverage matrix (per the updated A1 spec):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import logging
 import os
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -58,6 +61,10 @@ collect_env = env_mod.collect_env
 EnvSnapshot = env_mod.EnvSnapshot
 SCHEMA_VERSION = env_mod.SCHEMA_VERSION
 CANONICAL_ENV_VARS = env_mod.CANONICAL_ENV_VARS
+# The provenance manifest CANONICAL_ENV_VARS is generated from. Reached through
+# sys.modules because environment.py has already imported it -- so this adds no
+# import that the module under test did not already require.
+env_knobs = sys.modules["aorta.instrumentation.env_knobs"]
 
 
 # -- Shared fixtures ---------------------------------------------------------
@@ -434,6 +441,9 @@ def _example_snapshot(**overrides) -> object:
         "torchrec": {
             "package_version": "1.4.0",
             "commit": None,
+            "source_version": None,
+            "source_commit": None,
+            "distribution_version": "1.4.0",
         },
         "aiter": {
             "package_version": None,
@@ -3645,8 +3655,15 @@ class TestEnvVars:
             assert forbidden not in result, f"{forbidden} leaked into env_vars"
 
     def test_canonical_var_names_stable(self):
-        # Reasoned guard: changing this list is a schema change. If a future
-        # PR adds a var, this test forces an explicit acknowledgement.
+        # Change detector, and only that: changing the captured set is a schema
+        # change, so a future PR has to acknowledge it here.
+        #
+        # What this test canNOT do -- and must not be read as doing -- is show
+        # that the pinned upstream libraries are fully covered. It compares the
+        # generated list against a second hand-written list, so it only catches
+        # drift between the two. Coverage of the installed libraries is measured
+        # by scripts/audit_env_knobs.py, whose uncovered-knob direction is the
+        # one no hand-written list can check.
         assert set(CANONICAL_ENV_VARS) == {
             # GPU scoping
             "HIP_VISIBLE_DEVICES",
@@ -3790,24 +3807,15 @@ class TestEnvVars:
             "HIPBLASLT_CHECK_NUMERICS_SCAN_UNTIL",
             "HIPBLASLT_CHECK_NUMERICS_STOP_ON_FIRST",
             "ROCBLAS_CHECK_NUMERICS",
-        }
-
-    def test_logging_only_gemm_knobs_excluded(self):
-        # The counterpart to test_canonical_var_names_stable: the inclusion
-        # rule is "the getenv site reaches code that changes what executes".
-        # Each name below was checked against the upstream source and reaches
-        # only a print or a client-side report, so capturing it would dilute
-        # a diff with knobs that cannot move the failure. TENSILE_DB is here
-        # while its DB2 sibling is captured, which is the sharpest case: DB2's
-        # low bits gate skipKernelLaunch / skipInitKernelLaunch, DB's do not.
-        for name in (
+            # Diagnostics / reporting. Captured with their consumer recorded
+            # (category="gemm_diagnostics"), not excluded: recording a value
+            # never claims it changed execution. ROCBLAS_API_BENCH is here
+            # because scripts/audit_env_knobs.py found it in librocblas.so --
+            # no hand-written list had it.
             "HIPBLASLT_LOG_FILE",
             "HIPBLASLT_LOG_LEVEL",
             "HIPBLASLT_LOG_MASK",
             "HIPBLASLT_BENCH_PERF",
-            # Absent from the reference build but present in ROCm 7.2.3, so
-            # an operator auditing the list on a newer install does not find
-            # an unaccounted knob.
             "HIPBLASLT_BENCH_PERF_ALL",
             "HIPBLASLT_BENCH_PRINT_COMMAND",
             "HIPBLASLT_ENABLE_MARKER",
@@ -3819,14 +3827,147 @@ class TestEnvVars:
             "ROCBLAS_LOG_PROFILE_PATH",
             "ROCBLAS_VERBOSE_HIPBLASLT_ERROR",
             "ROCBLAS_VERBOSE_TENSILE_ERROR",
+            "ROCBLAS_API_BENCH",
+            "TENSILE_DB",
+            "TENSILE_ADAPTIVE_GEMM_LOG",
+            "TENSILE_AUTO_GSU_ALGO",
+            "TENSILE_SOLUTION_SELECTION_TRACE",
+            "TENSILE_BENCHMARK",
+        }
+
+    def test_report_only_gemm_knobs_are_captured_and_classified(self):
+        """Report-only knobs are CAPTURED, with the classification recorded.
+
+        Earlier 1.15 drafts excluded these because their only consumer is a print
+        or a client-side report. That made the snapshot's contents depend on our
+        classification being correct -- and the 2026-08-02 audit overturned two
+        of its own name-based verdicts, so the judgement was in the wrong place.
+        Capture is now comprehensive and the judgement lives in ``category`` /
+        ``consumer``, where a triager can see it without it deciding what the
+        snapshot preserves."""
+        for name in (
+            "HIPBLASLT_LOG_FILE",
+            "HIPBLASLT_LOG_LEVEL",
+            "HIPBLASLT_LOG_MASK",
+            "HIPBLASLT_BENCH_PERF",
+            "HIPBLASLT_BENCH_PERF_ALL",
+            "HIPBLASLT_BENCH_PRINT_COMMAND",
+            "HIPBLASLT_ENABLE_MARKER",
+            "TENSILE_ENABLE_MARKER",
+            "ROCBLAS_LAYER",
+            "ROCBLAS_LOG_PATH",
+            "ROCBLAS_LOG_TRACE_PATH",
+            "ROCBLAS_LOG_BENCH_PATH",
+            "ROCBLAS_LOG_PROFILE_PATH",
+            "ROCBLAS_VERBOSE_HIPBLASLT_ERROR",
+            "ROCBLAS_VERBOSE_TENSILE_ERROR",
+            "ROCBLAS_API_BENCH",
             "TENSILE_DB",
             "TENSILE_ADAPTIVE_GEMM_LOG",
             "TENSILE_AUTO_GSU_ALGO",
             "TENSILE_SOLUTION_SELECTION_TRACE",
             "TENSILE_BENCHMARK",
         ):
-            assert name not in CANONICAL_ENV_VARS, f"{name} is print-only"
-        assert "TENSILE_DB2" in CANONICAL_ENV_VARS
+            assert name in CANONICAL_ENV_VARS, f"{name} must be captured"
+            knob = env_mod.ENV_KNOBS_BY_NAME[name]
+            assert knob.category == "gemm_diagnostics", (name, knob.category)
+
+    def test_tensile_db2_is_not_classified_as_diagnostics(self):
+        """The sharpest classification case, kept as a test now that it no longer
+        decides capture: ``TENSILE_DB``'s bits are all prints, while
+        ``TENSILE_DB2``'s low bits gate skipKernelLaunch /
+        skipInitKernelLaunch -- so DB2 skips work and is categorised as such."""
+        assert env_mod.ENV_KNOBS_BY_NAME["TENSILE_DB"].category == "gemm_diagnostics"
+        assert env_mod.ENV_KNOBS_BY_NAME["TENSILE_DB2"].category == "gemm_skip_work"
+
+
+class TestEnvKnobRegistry:
+    """The manifest that ``CANONICAL_ENV_VARS`` is generated from."""
+
+    def test_canonical_env_vars_is_generated_from_the_registry(self):
+        assert CANONICAL_ENV_VARS == tuple(k.name for k in env_mod.ENV_KNOB_REGISTRY)
+        assert len(set(CANONICAL_ENV_VARS)) == len(CANONICAL_ENV_VARS), "duplicate knob name"
+        assert set(env_mod.ENV_KNOBS_BY_NAME) == set(CANONICAL_ENV_VARS)
+
+    def test_every_registered_value_is_preserved_verbatim(self, isolated_env):
+        """Review's suggested test: drive the capture from the registry itself.
+
+        Every registered knob is exported with a distinct sentinel and must come
+        back byte-identical -- so a knob can never be listed in the manifest yet
+        silently dropped, mangled, or deduplicated on the way into a snapshot."""
+        expected = {}
+        for i, knob in enumerate(env_mod.ENV_KNOB_REGISTRY):
+            value = f"sentinel-{i}-{knob.category}"
+            isolated_env.setenv(knob.name, value)
+            expected[knob.name] = value
+
+        captured = env_mod._capture_env_vars()
+
+        assert captured == expected
+
+    def test_every_knob_carries_a_classification_and_a_provenance(self):
+        for knob in env_mod.ENV_KNOB_REGISTRY:
+            assert knob.library.strip(), knob.name
+            assert knob.consumer.strip(), knob.name
+            assert knob.source_reference.strip(), knob.name
+            assert knob.reference_build.strip(), knob.name
+            assert knob.category in env_knobs.CATEGORIES, (knob.name, knob.category)
+
+    def test_gemm_knob_library_attribution_matches_its_prefix(self):
+        """The GEMM knobs' ``library`` is measured from the shipped libraries, so
+        it must at least agree with the owning project implied by the name -- a
+        TENSILE_ knob can live in either or both, but a HIPBLASLT_ knob claiming
+        rocblas-only would mean the manifest and the audit disagree."""
+        for knob in env_mod.ENV_KNOB_REGISTRY:
+            if knob.name.startswith("HIPBLASLT_"):
+                assert "hipblaslt" in knob.library, (knob.name, knob.library)
+            elif knob.name.startswith("ROCBLAS_"):
+                assert "rocblas" in knob.library, (knob.name, knob.library)
+
+    def test_forward_compat_knobs_are_marked_absent_from_the_reference_build(self):
+        """A knob the reference build does not ship is recorded as such rather
+        than implying it was verified there. This is the honesty half of review
+        2: capture does not claim library support."""
+        for name in ("TENSILE_STREAMK5_FORCE_MODE", "TENSILE_STREAMK_TILES",
+                     "TENSILE_STREAMK_SPLIT", "HIPBLASLT_BENCH_PERF_ALL"):
+            knob = env_mod.ENV_KNOBS_BY_NAME[name]
+            assert knob.source_reference == env_knobs.ABSENT_FROM_REFERENCE_BUILD, name
+
+    def test_inherited_knobs_are_marked_unaudited_not_given_a_false_source(self):
+        """Knobs inherited from schema <= 1.14 were never traced to a call site.
+        The manifest says so instead of inventing a source location -- the audit
+        debt is visible and countable."""
+        inherited = [
+            k
+            for k in env_mod.ENV_KNOB_REGISTRY
+            if k.source_reference == env_knobs.INHERITED_UNAUDITED
+        ]
+        assert inherited, "expected the pre-1.15 knobs to be marked unaudited"
+        for knob in inherited:
+            assert not knob.name.startswith(("HIPBLASLT_", "ROCBLAS_", "TENSILE_")), (
+                f"{knob.name} is a GEMM knob and should carry a measured provenance"
+            )
+
+    def test_unset_knob_is_null_and_does_not_make_the_snapshot_partial(self, isolated_env):
+        """Review 2's distinction, asserted: ``null`` means UNSET in this
+        process. It is not a statement about library support, and it never
+        contributes a partial reason."""
+        captured = env_mod._capture_env_vars()
+        assert all(v is None for v in captured.values())
+
+    def test_a_knob_absent_from_the_reference_library_is_still_serialized(
+        self, isolated_env, monkeypatch, tmp_path
+    ):
+        """Review 2's suggested test: export a forward-compatible variable that
+        the reference build does not ship, and it is still recorded. Capture
+        reflects the declared environment, not what the library supports."""
+        knob = env_mod.ENV_KNOBS_BY_NAME["TENSILE_STREAMK5_FORCE_MODE"]
+        assert knob.source_reference == env_knobs.ABSENT_FROM_REFERENCE_BUILD
+        isolated_env.setenv("TENSILE_STREAMK5_FORCE_MODE", "1")
+
+        captured = env_mod._capture_env_vars()
+
+        assert captured["TENSILE_STREAMK5_FORCE_MODE"] == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -5263,6 +5404,25 @@ def _torchrec_namespace_spec(tmp_path: Path):
     return spec
 
 
+def _expect_torchrec(**overrides):
+    """The full ``torchrec`` block shape, with ``None`` for anything not named.
+
+    Written out rather than compared key-by-key so a test also fails when a NEW
+    key appears -- the block is customer-facing identity, and a silently added
+    field is exactly what a reviewer would want flagged.
+    """
+    block = {
+        "package_version": None,
+        "commit": None,
+        "source_version": None,
+        "source_commit": None,
+        "distribution_version": None,
+    }
+    assert set(overrides) <= set(block), f"unknown torchrec keys: {set(overrides) - set(block)}"
+    block.update(overrides)
+    return block
+
+
 class TestTorchrec:
     @pytest.fixture
     def no_torchrec_spec(self, monkeypatch):
@@ -5285,7 +5445,7 @@ class TestTorchrec:
         monkeypatch.setattr(md, "version", fake_version)
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": None, "commit": None}
+        assert block == _expect_torchrec()
         assert reasons == []
 
     def test_torchrec_namespace_package_counts_as_absent(self, monkeypatch, tmp_path):
@@ -5304,7 +5464,7 @@ class TestTorchrec:
         )
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": None, "commit": None}
+        assert block == _expect_torchrec()
         assert reasons == []
 
     def test_torchrec_importable_without_version_py_is_partial(self, monkeypatch, tmp_path):
@@ -5321,7 +5481,7 @@ class TestTorchrec:
         )
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": None, "commit": None}
+        assert block == _expect_torchrec()
         assert any("torchrec" in r and "no distribution metadata" in r for r in reasons)
 
     def test_torchrec_buck_link_tree_resolved_from_version_py(self, monkeypatch, tmp_path):
@@ -5341,7 +5501,12 @@ class TestTorchrec:
         )
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": "1.8.0a0", "commit": _TORCHREC_FULL_SHA}
+        assert block == _expect_torchrec(
+            package_version="1.8.0a0",
+            commit=_TORCHREC_FULL_SHA,
+            source_version="1.8.0a0",
+            source_commit=_TORCHREC_FULL_SHA,
+        )
         assert reasons == []
 
     def test_torchrec_release_wheel_commit_from_version_py(self, monkeypatch, tmp_path):
@@ -5359,7 +5524,13 @@ class TestTorchrec:
         )
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": "1.4.0", "commit": _TORCHREC_FULL_SHA}
+        assert block == _expect_torchrec(
+            package_version="1.4.0",
+            commit=_TORCHREC_FULL_SHA,
+            source_version="1.4.0",
+            source_commit=_TORCHREC_FULL_SHA,
+            distribution_version="1.4.0",
+        )
         assert reasons == []
 
     def test_torchrec_version_py_unknown_sha_is_rejected(self, monkeypatch, tmp_path):
@@ -5376,13 +5547,24 @@ class TestTorchrec:
         )
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": "1.4.0", "commit": None}
+        assert block == _expect_torchrec(
+            package_version="1.4.0",
+            source_version="1.4.0",
+            distribution_version="1.4.0",
+        )
         assert reasons == []
 
-    def test_torchrec_version_py_disagreeing_with_metadata_drops_sha(self, monkeypatch, tmp_path):
+    def test_torchrec_conflicting_copies_report_the_import_target_and_say_so(
+        self, monkeypatch, tmp_path
+    ):
         """Two copies on sys.path: the importable one's version.py does not
-        describe the distribution we read metadata from, so its SHA is
-        dropped. A wrong SHA is worse than none."""
+        describe the distribution the metadata came from.
+
+        Schema 1.15 reports BOTH identities and prefers the import target -- the
+        code that would actually run -- instead of publishing the other
+        install's version with the SHA quietly dropped. The disagreement is a
+        fact about the process, so it belongs in partial_reasons rather than
+        being smoothed away."""
         import importlib.metadata as md
 
         version_py = _TORCHREC_VERSION_PY.format(version="9.9.9", commit=_TORCHREC_FULL_SHA)
@@ -5394,7 +5576,37 @@ class TestTorchrec:
         )
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": "1.4.0", "commit": None}
+        assert block == _expect_torchrec(
+            package_version="9.9.9",
+            commit=_TORCHREC_FULL_SHA,
+            source_version="9.9.9",
+            source_commit=_TORCHREC_FULL_SHA,
+            distribution_version="1.4.0",
+        )
+        assert any("9.9.9" in r and "1.4.0" in r for r in reasons), reasons
+
+    def test_torchrec_pep440_equivalent_versions_are_not_a_conflict(self, monkeypatch, tmp_path):
+        """``1.4.0-1`` and ``1.4.0.post1`` are the same PEP 440 version, so the
+        two identities agree and no conflict is reported. A raw string compare
+        called this a conflict and dropped the SHA."""
+        import importlib.metadata as md
+
+        version_py = _TORCHREC_VERSION_PY.format(version="1.4.0-1", commit=_TORCHREC_FULL_SHA)
+        monkeypatch.setattr(md, "version", lambda name: "1.4.0.post1")
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: _torchrec_pkg_spec(tmp_path, version_py),
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == _expect_torchrec(
+            package_version="1.4.0-1",
+            commit=_TORCHREC_FULL_SHA,
+            source_version="1.4.0-1",
+            source_commit=_TORCHREC_FULL_SHA,
+            distribution_version="1.4.0.post1",
+        )
         assert reasons == []
 
     def test_torchrec_release_wheel_has_no_commit(self, monkeypatch, no_torchrec_spec):
@@ -5403,7 +5615,7 @@ class TestTorchrec:
         monkeypatch.setattr(md, "version", lambda name: "1.4.0")
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": "1.4.0", "commit": None}
+        assert block == _expect_torchrec(package_version="1.4.0", distribution_version="1.4.0")
         assert reasons == []
 
     def test_torchrec_setuptools_scm_commit(self, monkeypatch, no_torchrec_spec):
@@ -5412,7 +5624,11 @@ class TestTorchrec:
         monkeypatch.setattr(md, "version", lambda name: "1.5.0.dev0+g0123abc")
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": "1.5.0.dev0+g0123abc", "commit": "0123abc"}
+        assert block == _expect_torchrec(
+            package_version="1.5.0.dev0+g0123abc",
+            commit="0123abc",
+            distribution_version="1.5.0.dev0+g0123abc",
+        )
         assert reasons == []
 
     def test_torchrec_source_build_bare_hex_commit(self, monkeypatch, no_torchrec_spec):
@@ -5423,7 +5639,11 @@ class TestTorchrec:
         monkeypatch.setattr(md, "version", lambda name: "1.8.0a0+0123abc")
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": "1.8.0a0+0123abc", "commit": "0123abc"}
+        assert block == _expect_torchrec(
+            package_version="1.8.0a0+0123abc",
+            commit="0123abc",
+            distribution_version="1.8.0a0+0123abc",
+        )
         assert reasons == []
 
     def test_torchrec_bare_hex_ignores_non_sha_local(self, monkeypatch, no_torchrec_spec):
@@ -5435,7 +5655,7 @@ class TestTorchrec:
             monkeypatch.setattr(md, "version", lambda name, v=ver: v)
             reasons: list[str] = []
             block = env_mod._capture_torchrec(reasons)
-            assert block == {"package_version": ver, "commit": None}, ver
+            assert block == _expect_torchrec(package_version=ver, distribution_version=ver), ver
             assert reasons == []
 
     def test_torchrec_scm_dirty_date_is_not_a_commit(self, monkeypatch, no_torchrec_spec):
@@ -5449,7 +5669,7 @@ class TestTorchrec:
             monkeypatch.setattr(md, "version", lambda name, v=ver: v)
             reasons: list[str] = []
             block = env_mod._capture_torchrec(reasons)
-            assert block == {"package_version": ver, "commit": None}, ver
+            assert block == _expect_torchrec(package_version=ver, distribution_version=ver), ver
             assert reasons == []
 
     def test_torchrec_real_sha_survives_dirty_date_guard(self, monkeypatch, no_torchrec_spec):
@@ -5465,10 +5685,12 @@ class TestTorchrec:
             monkeypatch.setattr(md, "version", lambda name, v=ver: v)
             reasons: list[str] = []
             block = env_mod._capture_torchrec(reasons)
-            assert block == {"package_version": ver, "commit": expected}, ver
+            assert block == _expect_torchrec(
+                package_version=ver, commit=expected, distribution_version=ver
+            ), ver
             assert reasons == []
 
-    def test_torchrec_metadata_error_records_reason(self, monkeypatch):
+    def test_torchrec_metadata_error_records_reason(self, monkeypatch, no_torchrec_spec):
         import importlib.metadata as md
 
         def boom(name):
@@ -5477,8 +5699,214 @@ class TestTorchrec:
         monkeypatch.setattr(md, "version", boom)
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
-        assert block == {"package_version": None, "commit": None}
+        assert block == _expect_torchrec()
         assert any("torchrec" in r for r in reasons)
+
+    def test_torchrec_metadata_error_keeps_the_readable_source_identity(
+        self, monkeypatch, tmp_path
+    ):
+        """A metadata read that RAISES must not discard an identity we already
+        have. Returning all-null here threw away a version.py that had just been
+        read successfully."""
+        import importlib.metadata as md
+
+        def boom(name):
+            raise OSError("unreadable dist-info")
+
+        version_py = _TORCHREC_VERSION_PY.format(version="1.4.0", commit=_TORCHREC_FULL_SHA)
+        monkeypatch.setattr(md, "version", boom)
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: _torchrec_pkg_spec(tmp_path, version_py),
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == _expect_torchrec(
+            package_version="1.4.0",
+            commit=_TORCHREC_FULL_SHA,
+            source_version="1.4.0",
+            source_commit=_TORCHREC_FULL_SHA,
+        )
+        assert any("metadata lookup raised (OSError)" in r for r in reasons), reasons
+
+    def test_torchrec_find_spec_error_is_not_reported_as_absent(self, monkeypatch):
+        """A broken ``sys.path`` entry makes ``find_spec`` raise. "We could not
+        look" is not the same fact as "torchrec is not installed", and only the
+        latter is allowed to be silent."""
+        import importlib.metadata as md
+
+        def boom_spec(name):
+            raise ImportError("broken meta-path finder")
+
+        monkeypatch.setattr(md, "version", lambda name: (_ for _ in ()).throw(
+            md.PackageNotFoundError(name)
+        ))
+        monkeypatch.setattr(importlib.util, "find_spec", boom_spec)
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+        assert block == _expect_torchrec()
+        assert any("find_spec raised (ImportError)" in r for r in reasons), reasons
+
+
+# ---------------------------------------------------------------------------
+# TorchRec identity against REAL on-disk layouts (schema 1.15)
+#
+# Everything above monkeypatches ``find_spec`` / ``importlib.metadata``. These
+# tests instead build the layout on disk and let the real machinery resolve it,
+# because the two defects this class exists to pin -- a ``.par`` whose
+# ``version.py`` lives inside a zip, and a single-module ``torchrec.py`` next to
+# a foreign ``version.py`` -- are invisible to a patched spec. (The PEP 420 bug
+# fixed earlier survived the suite for the same reason: the spec was an
+# ``object()`` stand-in.)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _only_sys_path(*entries: Path):
+    """Run with ``sys.path`` REPLACED by *entries*.
+
+    Replaced, not prepended: a host with a real torchrec installed would answer
+    every lookup and the scenario under test would silently not be tested. Both
+    ``find_spec`` and ``importlib.metadata`` resolve through ``sys.path``, so
+    emptying it is what makes "not installed" simulatable at all.
+    """
+    saved_path = sys.path[:]
+    saved_modules = {k: v for k, v in sys.modules.items() if k.startswith("torchrec")}
+    sys.path[:] = [str(e) for e in entries]
+    for name in saved_modules:
+        del sys.modules[name]
+    importlib.invalidate_caches()
+    try:
+        yield
+    finally:
+        sys.path[:] = saved_path
+        sys.modules.update(saved_modules)
+        importlib.invalidate_caches()
+
+
+def _make_torchrec_package(root: Path, *, version: str | None, commit: str | None) -> Path:
+    """A real importable ``torchrec`` package. Its ``__init__`` RAISES, which
+    doubles as the proof that the probe never executes it."""
+    pkg = root / "torchrec"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("raise RuntimeError('torchrec must not be imported')\n")
+    if version is not None:
+        (pkg / "version.py").write_text(_TORCHREC_VERSION_PY.format(version=version, commit=commit))
+    return pkg
+
+
+def _make_dist_info(root: Path, version: str) -> Path:
+    d = root / f"torchrec-{version}.dist-info"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "METADATA").write_text(f"Metadata-Version: 2.1\nName: torchrec\nVersion: {version}\n")
+    (d / "RECORD").write_text("")
+    return d
+
+
+class TestTorchrecRealLayouts:
+    def test_par_zipimport_resolves_identity_through_the_loader(self, tmp_path):
+        """The deployment this feature exists for: a Buck ``.par``.
+
+        ``submodule_search_locations`` points INSIDE the archive, so a
+        filesystem read finds nothing and the probe used to report null while
+        also claiming "no readable version.py" -- with the file sitting in the
+        zip. Reading through ``loader.get_data`` is what fixes it."""
+        stage = tmp_path / "stage"
+        _make_torchrec_package(stage, version="1.4.0", commit=_TORCHREC_FULL_SHA)
+        par = tmp_path / "app.par"
+        with zipfile.ZipFile(par, "w") as zf:
+            zf.write(stage / "torchrec" / "__init__.py", "torchrec/__init__.py")
+            zf.write(stage / "torchrec" / "version.py", "torchrec/version.py")
+
+        with _only_sys_path(par):
+            spec = importlib.util.find_spec("torchrec")
+            assert type(spec.loader).__name__ == "zipimporter", "layout is not a real zipimport"
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(
+            package_version="1.4.0",
+            commit=_TORCHREC_FULL_SHA,
+            source_version="1.4.0",
+            source_commit=_TORCHREC_FULL_SHA,
+        )
+        assert reasons == []
+        assert "torchrec" not in sys.modules
+
+    def test_single_module_does_not_adopt_a_foreign_version_py(self, tmp_path):
+        """``torchrec.py`` (a module, not a package) has no search locations.
+        Falling back to ``dirname(origin)`` made it publish an unrelated
+        project's version and SHA as torchrec's -- a wrong identity, which is
+        worse than none."""
+        (tmp_path / "torchrec.py").write_text("raise RuntimeError('must not import')\n")
+        (tmp_path / "version.py").write_text(
+            _TORCHREC_VERSION_PY.format(version="9.9.9", commit="d" * 40)
+        )
+
+        with _only_sys_path(tmp_path):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block["source_version"] is None
+        assert block["source_commit"] is None
+        assert block["package_version"] != "9.9.9"
+        assert block["commit"] != "d" * 40
+        assert any("version unknown" in r for r in reasons), reasons
+
+    def test_source_first_metadata_second_never_reports_the_other_sha(self, tmp_path):
+        """The review's required case: a real two-entry ``sys.path`` with a
+        Buck/source TorchRec first and an unrelated ``torchrec-*.dist-info``
+        second. The snapshot must never present the unrelated distribution's
+        identity as the thing that will run, and must surface the conflict."""
+        source_root = tmp_path / "buck-link-tree"
+        _make_torchrec_package(source_root, version="1.8.0a0", commit=_TORCHREC_FULL_SHA)
+        pip_root = tmp_path / "site-packages"
+        _make_dist_info(pip_root, "2.0.0")
+        _make_torchrec_package(pip_root, version="2.0.0", commit="b" * 40)
+
+        with _only_sys_path(source_root, pip_root):
+            assert importlib.metadata.version("torchrec") == "2.0.0", "layout not resolving"
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        # The import target wins, and its SHA travels with its own version.
+        assert block["source_version"] == "1.8.0a0"
+        assert block["source_commit"] == _TORCHREC_FULL_SHA
+        assert block["package_version"] == "1.8.0a0"
+        assert block["commit"] == _TORCHREC_FULL_SHA
+        # The other install is still recorded -- separately, and never as `commit`.
+        assert block["distribution_version"] == "2.0.0"
+        assert block["commit"] != "b" * 40
+        assert any("1.8.0a0" in r and "2.0.0" in r for r in reasons), reasons
+
+    def test_namespace_portion_loses_to_a_real_install_either_order(self, tmp_path):
+        """A bare ``torchrec/`` directory is a PEP 420 portion. CPython's path
+        finder only yields one when no real package exists anywhere on the path,
+        so detection does not depend on ``sys.path`` order -- asserted rather
+        than assumed, since the review raised order as a risk."""
+        ns_root = tmp_path / "ns"
+        (ns_root / "torchrec").mkdir(parents=True)
+        real_root = tmp_path / "real"
+        _make_torchrec_package(real_root, version="1.4.0", commit=_TORCHREC_FULL_SHA)
+        _make_dist_info(real_root, "1.4.0")
+
+        for entries in ((ns_root, real_root), (real_root, ns_root)):
+            with _only_sys_path(*entries):
+                reasons: list[str] = []
+                block = env_mod._capture_torchrec(reasons)
+            assert block["source_commit"] == _TORCHREC_FULL_SHA, entries
+            assert block["package_version"] == "1.4.0", entries
+            assert reasons == [], entries
+
+    def test_absent_everywhere_is_silent(self, tmp_path):
+        """No package, no dist-info, nothing raising -> suppressed, like
+        fbgemm_gpu / aiter. Requires an EMPTY sys.path to be a real test."""
+        with _only_sys_path(tmp_path):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+        assert block == _expect_torchrec()
+        assert reasons == []
 
 
 # ---------------------------------------------------------------------------
