@@ -4,7 +4,8 @@ name: Nightly Evaluation
 # exact wheel and evaluate the workloads against committed expected-outcome
 # baselines, capturing perf metrics as trend data. Runs inside the pinned ROCm
 # docker image on the self-hosted MI350 runner; a separate ubuntu-latest job
-# stores history (ci-results branch) and deploys the GitHub Pages dashboard.
+# stores history on the ci-results branch. The dashboard is built + deployed to
+# GitHub Pages by pages.yml (triggered on this workflow's completion).
 #
 # Correctness fails the job on any failed/errored cell, a missing matrix, a
 # per-entry timeout, a blessed-baseline breach, or a run that did zero work.
@@ -36,37 +37,29 @@ jobs:
       do_alert: true
     secrets: inherit
 
-  # Store history + deploy the dashboard via the official Pages actions. A
-  # GITHUB_TOKEN push to a branch does NOT trigger a branch-sourced Pages build,
-  # so we keep history on a data branch (ci-results) and deploy the generated
-  # site through actions/deploy-pages (repo Pages source must be "GitHub Actions").
+  # Append today's results to the ci-results data branch. The dashboard itself is
+  # built + deployed to GitHub Pages by the separate pages.yml workflow (a repo
+  # has a single Pages site, shared with the project landing page), which triggers
+  # on this workflow's completion and reads the history from ci-results.
   publish:
-    name: publish dashboard
+    name: publish results history
     needs: nightly-eval
-    # Run even when the eval failed (to publish the failure), but NOT when it was
+    # Run even when the eval failed (to record the failure), but NOT when it was
     # skipped (upstream "Nightly wheels" failed/cancelled) -- there'd be no
     # results artifact and publish would fail misleadingly.
     if: always() && needs.nightly-eval.result != 'skipped'
     runs-on: ubuntu-latest
     permissions:
       contents: write   # push results history to the ci-results branch
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
 
     steps:
-      - name: Check out code
-        uses: actions/checkout@v5
-
       - name: Download results
         uses: actions/download-artifact@v6
         with:
           name: nightly-results-${{ github.run_id }}
           path: incoming
 
-      - name: Update history + build site
+      - name: Update history branch (ci-results)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -77,8 +70,8 @@ jobs:
           tmp="$(mktemp -d)"
           # Fail closed: distinguish a genuinely-absent ci-results branch (create
           # the orphan) from a transport/auth failure (must NOT be treated as
-          # "branch absent" -- that would truncate history to one day and still
-          # deploy). git ls-remote --exit-code: 0=present, 2=absent, else=error.
+          # "branch absent" -- that would truncate history to one day). git
+          # ls-remote --exit-code: 0=present, 2=absent, else=error.
           set +e
           git ls-remote --exit-code --heads "$repo_url" ci-results >/dev/null 2>&1
           lsr=$?
@@ -105,17 +98,3 @@ jobs:
             else
               echo "no changes to commit"
             fi )
-          mkdir -p site
-          python3 scripts/ci/gen_dashboard.py --results-dir "$tmp/results" --out-dir site --max-builds 180
-          touch site/.nojekyll
-
-      - name: Upload Pages artifact
-        if: hashFiles('site/index.html') != ''
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: site
-
-      - name: Deploy to GitHub Pages
-        id: deploy
-        if: hashFiles('site/index.html') != ''
-        uses: actions/deploy-pages@v4

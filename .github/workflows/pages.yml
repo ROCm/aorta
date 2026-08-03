@@ -1,0 +1,80 @@
+name: Pages (landing + nightly dashboard)
+
+# Single owner of the GitHub Pages deployment (repo Pages source must be set to
+# "GitHub Actions"). A repo has exactly one Pages site, so this one build serves
+# BOTH the existing project landing page (Jekyll render of README.md at the site
+# root) AND the nightly CI dashboard mounted at /ci/. It runs on main pushes
+# (refresh the landing page), after each "Nightly Evaluation" completes (pick up
+# fresh history from the ci-results branch), and on demand.
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: ["Nightly Evaluation"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel an in-progress deploy; queue them so a landing-page push and a
+# nightly refresh don't race to publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    name: build + deploy pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v5
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      # Renders README.md (+ any repo docs) to ./_site exactly like the previous
+      # legacy Pages build (same github-pages gem), so the landing page is
+      # preserved.
+      - name: Build landing page (Jekyll)
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./
+          destination: ./_site
+
+      # History lives on the ci-results data branch (written by nightly-eval's
+      # publish job). It may not exist until the first nightly runs.
+      - name: Check out results history (ci-results)
+        uses: actions/checkout@v5
+        with:
+          ref: ci-results
+          path: ci-results
+        continue-on-error: true
+
+      - name: Generate nightly dashboard at /ci/
+        run: |
+          set -euo pipefail
+          if ls ci-results/results/*.json >/dev/null 2>&1; then
+            mkdir -p _site/ci
+            python3 scripts/ci/gen_dashboard.py \
+              --results-dir ci-results/results --out-dir _site/ci --max-builds 180
+            echo "mounted dashboard at /ci/ ($(ls -1 ci-results/results/*.json | wc -l) build(s))"
+          else
+            echo "no nightly results yet; deploying landing page only (dashboard appears after the first nightly)"
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
