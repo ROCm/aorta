@@ -53,6 +53,12 @@ jobs:
           source: ./
           destination: ./_site
 
+      # jekyll-build-pages is a container action running as root, so ./_site comes
+      # back root-owned and the later steps (which run as the unprivileged runner
+      # user) cannot mount the dashboard inside it.
+      - name: Take ownership of the Jekyll output
+        run: sudo chown -R "$(id -u):$(id -g)" _site
+
       # History lives on the ci-results data branch (written by nightly-eval's
       # publish job); it may not exist until the first nightly runs. Fail closed:
       # a genuinely-absent branch (ls-remote exit 2) deploys the landing page
