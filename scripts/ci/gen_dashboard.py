@@ -332,12 +332,23 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         tally_txt = " · ".join(
             f"{tally[v]} {v}" for v in _VERDICT_ORDER if tally.get(v)
         )
-        cell_word = "cell" if len(cell_keys) == 1 else "cells"
+        n = len(cell_keys)
+        head = f"{n} result{'' if n == 1 else 's'} · {tally_txt}"
+        # duration_sec is measured once around the whole recipe invocation and
+        # copied onto every record it produced, so it belongs to the workload and
+        # is stated here once -- repeated in each cell it reads as per-cell time.
+        durs = {
+            d for d in (latest_by_key[k].get("duration_sec") for k in cell_keys)
+            if _isnum(d)
+        }
+        # A skipped workload reports 0.0 -- it never ran, so it has no duration.
+        if len(durs) == 1 and max(durs) > 0:
+            head += f" · workload run {max(durs):,.0f}s"
 
         rows = [
             f"<tr class='grp'><th colspan='{ncols}' scope='rowgroup'>"
             f"<span class='wl'>{_esc(entry_name)}</span>"
-            f"<span class='muted'> {len(cell_keys)} {cell_word} · {_esc(tally_txt)}</span>"
+            f"<span class='muted'> {_esc(head)}</span>"
             f"</th></tr>"
         ]
         for k in cell_keys:
@@ -345,8 +356,16 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             verdict = e.get("verdict", "skip")
             color = _VERDICT_COLOR.get(verdict, "#57606a")
             st = (e.get("metrics") or {}).get("mean_step_time_ms")
+            # A record for a workload that never reached its cells (skipped for
+            # want of GPUs, or the synthetic zero-work entry) carries cell=None;
+            # printing that as "None" invites reading it as a cell's name.
+            cell_name = e.get("cell")
+            label = (
+                f"<span class='mono'>{_esc(str(cell_name))}</span>"
+                if cell_name else "<span class='muted'>whole workload</span>"
+            )
             cells = [
-                f"<td class='cell mono'>{_esc(str(e.get('cell')))}</td>",
+                f"<td class='cell'>{label}</td>",
                 f"<td class='center'><span class='badge' "
                 f"style='background:{color}'>{_esc(verdict)}</span></td>",
                 f"<td class='num'>{_esc(_fmt_ms(st))}{_bar(st, group_max)}</td>",
@@ -363,12 +382,9 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             if mrows:
                 n_metrics = len((e.get("metrics") or {}).get("summary") or {})
                 recipe = e.get("recipe") or ""
-                dur = e.get("duration_sec")
                 prov = []
                 if recipe:
                     prov.append(f"recipe <span class='mono'>{_esc(str(recipe))}</span>")
-                if _isnum(dur):
-                    prov.append(f"ran in {dur:,.0f}s")
                 trials = e.get("trials")
                 if _isnum(trials):
                     n_trials = int(trials)
@@ -430,10 +446,10 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         )
     elif nothing_graded and record_now:
         scope = (
-            f"all {total} cells" if record_now == total
-            else f"{record_now} of {total} cells ({skip_now} skipped)"
+            f"all {total} results" if record_now == total
+            else f"{record_now} of {total} results ({skip_now} skipped)"
         )
-        extra = f" Every cell reports: {_esc(shared_reason)}." if shared_reason else ""
+        extra = f" Every result reports: {_esc(shared_reason)}." if shared_reason else ""
         notices.append(
             f"<div class='notice'>No baselines are blessed yet, so nothing was graded "
             f"pass or fail — this run <strong>recorded</strong> metrics for {scope} "
@@ -441,13 +457,13 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         )
     elif nothing_graded:
         notices.append(
-            f"<div class='notice'>Nothing ran: all {total} cells were "
+            f"<div class='notice'>Nothing ran: all {total} results were "
             f"<strong>skipped</strong>, so this build establishes nothing. Check that "
             f"the runner exposes as many GPUs as the matrix asks for.</div>"
         )
     elif shared_reason:
         notices.append(
-            f"<div class='notice'>Every cell reports: {_esc(shared_reason)}.</div>"
+            f"<div class='notice'>Every result reports: {_esc(shared_reason)}.</div>"
         )
     if results and not (show_trend or show_metric_trend):
         notices.append(
@@ -458,7 +474,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     # Counts go through _fmt_num so a malformed summary shows "—" rather than
     # printing whatever str() makes of it ("nan", "True").
     cards = [
-        ("cells", _fmt_num(total), ""),
+        ("results", _fmt_num(total), ""),
         ("pass", _fmt_num(s.get("pass", 0)), "#3fb950"),
         ("fail", _fmt_num(s.get("fail", 0)), "#f85149"),
         ("record", _fmt_num(s.get("record", 0)), "#d29922"),
@@ -592,8 +608,9 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     <p class="legend">Verdicts: <strong>pass</strong>/<strong>fail</strong> = compared
       against a blessed baseline · <strong>record</strong> = no baseline yet, metrics
       captured as the future reference · <strong>skip</strong> = not enough GPUs on the
-      runner. Expand a cell to see its captured metrics and the recipe that produced
-      them.</p>
+      runner. One row is one recorded result: a workload skipped before it reached
+      its cells yields a single row for the whole workload, so a count of rows is
+      not a count of configured cells. Expand a row for its metrics and recipe.</p>
   </div>
 </body></html>
 """

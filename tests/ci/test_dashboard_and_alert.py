@@ -18,6 +18,7 @@ def _load(name: str):
 
 gen_dashboard = _load("gen_dashboard")
 alert_issue = _load("alert_issue")
+eval_lib = _load("eval_lib")
 
 
 def _results(generated, entries, **summary):
@@ -220,11 +221,11 @@ def test_dashboard_all_skip_summary_is_labelled_skipping_not_passing():
     assert "skipping" in html
     assert ">passing<" not in html
     assert "No baselines are blessed yet" not in html
-    assert "all 1 cells were" in html
+    assert "all 1 results were" in html
 
 
-def test_dashboard_partial_record_does_not_claim_every_cell_recorded():
-    # record + skip must not be described as "recorded all N cells".
+def test_dashboard_partial_record_does_not_claim_every_result_recorded():
+    # record + skip must not be described as "recorded all N results".
     entries = [{"entry": "w", "cell": f"r{i}", "verdict": "record",
                 "reasons": ["no baseline (record-only)"],
                 "metrics": {"mean_step_time_ms": 1.0}} for i in range(3)]
@@ -233,8 +234,8 @@ def test_dashboard_partial_record_does_not_claim_every_cell_recorded():
     html = gen_dashboard.build_dashboard_html(
         [_results("2026-07-30T00:00:00Z", entries, total=4, record=3, skip=1)])
     assert "recording" in html
-    assert "3 of 4 cells (1 skipped)" in html
-    assert "all 4 cells" not in html
+    assert "3 of 4 results (1 skipped)" in html
+    assert "all 4 results" not in html
 
 
 def test_dashboard_metric_trends_survive_a_missing_step_time():
@@ -342,6 +343,55 @@ def test_dashboard_rejects_values_it_cannot_render():
                             "reasons": [], "metrics": {}}],
                           total=1, **{"pass": float("nan")})
     assert "nan" not in gen_dashboard.build_dashboard_html([bad_counts]).lower()
+
+
+def test_dashboard_does_not_count_records_as_configured_cells():
+    # summary.total is len(entries), not the size of the matrix: a workload
+    # skipped for want of GPUs emits ONE record with cell=None however many
+    # cells its recipe defines. Counting those as "cells" overstates coverage
+    # exactly when coverage is worst, so the page says "results" instead.
+    entries = [
+        {"entry": "llm_determinism", "cell": c, "verdict": "record",
+         "reasons": ["no baseline (record-only)"],
+         "metrics": {"mean_step_time_ms": 10.0}} for c in ("bf16-12L", "tf32-24L")
+    ]
+    entries.append({"entry": "training_ddp_8gpu", "cell": None, "verdict": "skip",
+                    "reasons": ["needs 8 GPU(s), have 2"], "metrics": {}})
+    # Summarised by the harness's own summarizer, so the document under test
+    # cannot drift into a shape nightly_eval would never produce.
+    doc = _results("2026-07-30T00:00:00Z", entries, **eval_lib.summarize(entries))
+    assert doc["summary"]["total"] == 3  # three records, though the matrix is wider
+    html = gen_dashboard.build_dashboard_html([doc])
+
+    assert "2 of 3 results (1 skipped)" in html
+    assert ">results<" in html and ">cells<" not in html  # count card label
+    for wrong in ("2 of 3 cells", "3 cells", "2 cells ·", "1 cell ·"):
+        assert wrong not in html, wrong
+    assert "2 results ·" in html and "1 result ·" in html  # group tallies
+    # A skipped workload reports duration_sec 0.0; it never ran, so claiming a
+    # "workload run 0s" would be a measurement of something that did not happen.
+    assert "workload run 0s" not in html
+    # The skipped workload's single record is not presented as a cell name.
+    assert ">None<" not in html
+    assert "whole workload" in html
+
+
+def test_dashboard_states_duration_once_per_workload_not_per_cell():
+    # nightly_eval measures duration_sec once around the whole recipe and copies
+    # it onto every record, so repeating it inside each cell's details reads as
+    # per-cell time. It belongs to the workload and is stated there once.
+    entries = [
+        {"entry": "llm_determinism", "cell": c, "verdict": "record", "reasons": [],
+         "duration_sec": 105.96, "trials": 2,
+         "metrics": {"mean_step_time_ms": 10.0, "summary": {"latency_ms": 1.5}}}
+        for c in ("bf16-12L", "tf32-24L", "moe4-bf16-12L", "baseline-bf16-24L")
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, **eval_lib.summarize(entries))])
+
+    assert html.count("workload run 106s") == 1
+    assert "ran in 106s" not in html  # never restated as if it were per cell
+    assert html.count("2 trials") == 4  # genuinely per-record detail stays
 
 
 def test_dashboard_omits_the_unit_when_the_value_is_unknown():
