@@ -256,11 +256,12 @@ def waitcheck_argv(
     binary: Path,
     identity: KernelIdentity,
 ) -> tuple[str, ...]:
-    """Build exact argv for one final code-object kernel entry."""
+    """Build argv for one code-object Waitcheck invocation."""
 
-    if not identity.exact:
+    if not identity.exact and not identity.code_object_scan:
         raise ValueError(
-            "exact Waitcheck requires code_object, code_object_sha256, and entry_offset"
+            "Waitcheck requires code_object and code_object_sha256, "
+            "and optionally entry_offset for exact-entry mode"
         )
     argv = [
         str(binary),
@@ -270,12 +271,13 @@ def waitcheck_argv(
     ]
     if identity.code_object_index is not None:
         argv.extend(["--code-object-index", str(identity.code_object_index)])
-    argv.extend(
-        [
-            "--kernel-entry",
-            f"0x{identity.entry_offset:x}",
-        ]
-    )
+    if identity.entry_offset is not None:
+        argv.extend(
+            [
+                "--kernel-entry",
+                f"0x{identity.entry_offset:x}",
+            ]
+        )
     return tuple(argv)
 
 
@@ -296,8 +298,8 @@ def _run_one(
     timeout_seconds: float,
     execute: ProcessExecutor,
 ) -> KernelCheckResult:
-    if not identity.exact:
-        return _not_checked(identity, "exact_kernel_identity_required")
+    if not identity.exact and not identity.code_object_scan:
+        return _not_checked(identity, "code_object_identity_required")
     artifact = Path(str(identity.code_object))
     if not artifact.is_file():
         return _not_checked(identity, "code_object_not_found")

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from .consan_coverage import CoverageDecision, parse_coverage_decision
-from .execution import ProcessResult
+from .execution import ProcessResult, run_argv
 from .models import (
     CheckResult,
     ExecutionState,
@@ -387,15 +389,75 @@ def evaluate_record_replay(
 
 
 def scoped_consan_not_checked(worklist: KernelWorklist) -> CheckResult:
-    """Fail closed until RocJITsu accepts a stable kernel allowlist."""
+    """Fail closed when no targeted repro command is provisioned."""
 
     return CheckResult(
         sanitizer="consan",
         state=ExecutionState.NOT_CHECKED,
         verdict=Verdict.NOT_CHECKED,
         reason=(
-            "worklist_scope_unsupported: RocJITsu ConSan has no kernel "
-            f"allowlist; refused to wrap the whole application for "
-            f"{len(worklist.kernels)} selected kernels"
+            "consan_command_not_provisioned: targeted repro required; refused to "
+            f"wrap the whole application for {len(worklist.kernels)} selected kernels"
         ),
     )
+
+
+def resolve_consan_hook(explicit: Path | None = None) -> Path | None:
+    build_root = os.environ.get("ROCJITSU_BUILD", "").strip()
+    if explicit is not None:
+        return explicit
+    if not build_root:
+        return None
+    candidate = (
+        Path(build_root)
+        / "lib"
+        / "rocjitsu"
+        / "src"
+        / "rocjitsu"
+        / "hooks"
+        / "librocjitsu_dbi_hooks.so"
+    )
+    return candidate if candidate.is_file() else None
+
+
+def run_consan(
+    worklist: KernelWorklist,
+    *,
+    command: Path,
+    hook_lib: Path | None = None,
+    output_dir: Path,
+    consan_log: bool = True,
+    timeout_seconds: float = 900.0,
+    strict: bool = False,
+) -> CheckResult:
+    """Run a targeted repro under the RocJITsu DBI hook."""
+
+    resolved_hook = resolve_consan_hook(hook_lib)
+    if resolved_hook is None or not resolved_hook.is_file():
+        return CheckResult(
+            sanitizer="consan",
+            state=ExecutionState.NOT_CHECKED,
+            verdict=Verdict.NOT_CHECKED,
+            reason="consan_hook_not_found",
+        )
+    if not command.is_file():
+        return CheckResult(
+            sanitizer="consan",
+            state=ExecutionState.NOT_CHECKED,
+            verdict=Verdict.NOT_CHECKED,
+            reason="consan_command_not_found",
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["HSA_TOOLS_LIB"] = str(resolved_hook)
+    if consan_log:
+        env["RJ_CONSAN_LOG"] = "1"
+    process = run_argv(
+        (str(command),),
+        timeout_seconds=timeout_seconds,
+        env=env,
+    )
+    ( _waitcheck, consan) = evaluate_record_replay(process, strict=strict)
+    log_path = output_dir / "consan.log"
+    log_path.write_text(f"{process.stdout}\n{process.stderr}", encoding="utf-8")
+    return consan

@@ -1,17 +1,13 @@
 # Target-UX design example for recipe-driven kernel sanitizers.
 #
 # STATUS:
-#   - Keys marked [REAL] are accepted by the public AORTA recipe v1 loader today.
-#   - The `sanitizer_plan` block is [PROPOSED] and is intentionally rejected by
-#     today's strict loader as an unknown top-level key. It illustrates the
-#     desired contract; it is not a runnable sanitizer recipe yet.
-#   - The public Python core now implements typed worklists, deterministic
-#     selection, exact-entry Waitcheck, fail-closed parsing, and report schemas.
-#   - Top-K ConSan remains `not_checked` until RocJITsu accepts a kernel
-#     allowlist; AORTA will not silently instrument the whole application.
+#   - Runnable sanitizer recipes use ``mode: sanitizer`` (see
+#     ``recipes/sanitizers/daily-waitcheck-gemm.yaml``).
+#   - This file remains a triage/workload profiling example; its
+#     ``sanitizer_plan`` block documents the nested schema shape only.
 #
-# Intended future command:
-#   aorta sweep run --recipe recipes/sanitizers/example-training-top-time.yaml
+# Run a real sanitizer recipe:
+#   aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml
 #
 # This example uses only the public synthetic `training` workload. It contains
 # no customer-derived kernel names, traces, shapes, or code objects.

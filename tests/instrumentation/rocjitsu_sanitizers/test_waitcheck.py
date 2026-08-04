@@ -191,7 +191,7 @@ def test_waitcheck_requires_exact_identity(tmp_path: Path) -> None:
 
     assert result.verdict is Verdict.ERROR
     assert result.kernel_results[0].verdict is Verdict.NOT_CHECKED
-    assert result.kernel_results[0].reason == "exact_kernel_identity_required"
+    assert result.kernel_results[0].reason == "code_object_identity_required"
 
 
 def test_waitcheck_missing_binary_is_not_checked(tmp_path: Path) -> None:

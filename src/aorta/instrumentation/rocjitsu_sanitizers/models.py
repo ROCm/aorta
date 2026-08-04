@@ -146,6 +146,16 @@ class KernelIdentity:
         )
 
     @property
+    def code_object_scan(self) -> bool:
+        """Whether Waitcheck can scan a whole code object without an entry offset."""
+
+        return (
+            self.code_object is not None
+            and self.code_object_sha256 is not None
+            and self.entry_offset is None
+        )
+
+    @property
     def stable_key(self) -> str:
         if not self.exact:
             return "\x1f".join((self.target, self.name))

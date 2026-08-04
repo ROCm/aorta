@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import math
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -180,6 +181,241 @@ def observations_from_dispatch_csv(
     with path.open(newline="", encoding="utf-8") as stream:
         rows = tuple(dict(row) for row in csv.DictReader(stream))
     return observations_from_dispatch_rows(rows, target=target)
+
+
+# Runtime-internal copy kernels emitted by the ROCclr runtime (e.g.
+# ``__amd_rocclr_copyBuffer``). They are not user compute and would otherwise
+# dominate a dispatch-count ranking, so trace adapters drop them by default.
+_RUNTIME_COPY_PREFIX = "__amd_rocclr_"
+
+
+def _gemm_kernel_name(row: Mapping[str, object]) -> str:
+    """Synthesize a stable GEMM kernel name from hipBLASLt shape columns.
+
+    Matches the ``gemm_<transA><transB>_M<M>_N<N>_K<K>`` convention used by
+    the sanitizer verification bundle (e.g. ``gemm_NT_M128_N128_K128``).
+    """
+
+    def _field(key: str) -> str:
+        value = _optional_str(row.get(key))
+        if value is None:
+            raise ValueError(f"gemm CSV row missing required column {key!r}")
+        return value
+
+    trans_a = _field("transA")
+    trans_b = _field("transB")
+    m = _field("M")
+    n = _field("N")
+    k = _field("K")
+    return f"gemm_{trans_a}{trans_b}_M{m}_N{n}_K{k}"
+
+
+def observations_from_gemm_csv(
+    path: Path,
+    *,
+    target: str,
+    isa_dir: Path | None = None,
+    source: str = "gemm_csv",
+) -> tuple[KernelObservation, ...]:
+    """Normalize a hipBLASLt GEMM-shape CSV into kernel observations.
+
+    Each row is one unique GEMM shape with a ``count`` (dispatch count) and a
+    ``top_solution_idx``. When ``isa_dir`` is given, the selected shape's code
+    object is resolved to ``isa_dir/sol_<top_solution_idx>.hsaco`` and pinned
+    on the :class:`KernelIdentity` so Waitcheck can analyze a real object. The
+    CSV carries no per-shape time, so ``total_time_ms`` is left at ``0.0`` and
+    callers should rank these observations by ``top_dispatch_count``.
+
+    Input order is never treated as ranking; ``select_kernels`` ranks and
+    tie-breaks deterministically.
+    """
+
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = tuple(
+            dict(row)
+            for row in csv.DictReader(
+                line for line in stream if not line.lstrip().startswith("#")
+            )
+        )
+
+    observations: list[KernelObservation] = []
+    for index, row in enumerate(rows):
+        if row.get("count") in (None, ""):
+            raise ValueError(f"gemm CSV row {index} needs a count column")
+        name = _gemm_kernel_name(row)
+        solution_idx = _optional_int(
+            row.get("top_solution_idx"),
+            field=f"gemm CSV row {index} top_solution_idx",
+        )
+        code_object: str | None = None
+        code_object_sha256: str | None = None
+        if isa_dir is not None and solution_idx is not None:
+            artifact = Path(isa_dir) / f"sol_{solution_idx}.hsaco"
+            code_object = str(artifact)
+            if artifact.is_file() and artifact.stat().st_size > 0:
+                digest = hashlib.sha256()
+                with artifact.open("rb") as blob:
+                    for chunk in iter(lambda: blob.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                code_object_sha256 = digest.hexdigest()
+        observations.append(
+            KernelObservation(
+                identity=KernelIdentity(
+                    name=name,
+                    target=target,
+                    code_object=code_object,
+                    code_object_sha256=code_object_sha256,
+                    code_object_index=0 if code_object is not None else None,
+                ),
+                total_time_ms=0.0,
+                dispatch_count=_non_negative_int(
+                    row.get("count", 0),
+                    field=f"gemm CSV row {index} count",
+                ),
+                sources=(source,),
+            )
+        )
+    return tuple(observations)
+
+
+def observations_from_rocprof_rows(
+    rows: Iterable[Mapping[str, object]],
+    *,
+    target: str,
+    drop_runtime_copies: bool = True,
+    source: str = "rocprof_trace",
+) -> tuple[KernelObservation, ...]:
+    """Aggregate rocprofiler ``KERNEL_DISPATCH`` rows by kernel name.
+
+    ``dispatch_count`` is the number of rows for a kernel name and
+    ``total_time_ms`` is the summed ``End_Timestamp - Start_Timestamp`` (in
+    nanoseconds) divided by 1e6. Non-dispatch rows are ignored and, by
+    default, runtime-internal ``__amd_rocclr_*`` copy kernels are dropped.
+    These observations carry no code object (trend / selection views only).
+    """
+
+    aggregated: dict[str, tuple[int, float]] = {}
+    order: list[str] = []
+    for index, row in enumerate(rows):
+        kind = _optional_str(row.get("Kind"))
+        if kind is not None and kind != "KERNEL_DISPATCH":
+            continue
+        name = _optional_str(row.get("Kernel_Name"))
+        if name is None:
+            raise ValueError(f"rocprof row {index} needs a Kernel_Name column")
+        if drop_runtime_copies and name.startswith(_RUNTIME_COPY_PREFIX):
+            continue
+        start = _non_negative_float(
+            row.get("Start_Timestamp", 0.0),
+            field=f"rocprof row {index} Start_Timestamp",
+        )
+        end = _non_negative_float(
+            row.get("End_Timestamp", 0.0),
+            field=f"rocprof row {index} End_Timestamp",
+        )
+        if end < start:
+            raise ValueError(
+                f"rocprof row {index}: End_Timestamp {end} precedes Start_Timestamp {start}"
+            )
+        prev_count, prev_ns = aggregated.get(name, (0, 0.0))
+        if name not in aggregated:
+            order.append(name)
+        aggregated[name] = (prev_count + 1, prev_ns + (end - start))
+
+    return tuple(
+        KernelObservation(
+            identity=KernelIdentity(name=name, target=target),
+            total_time_ms=aggregated[name][1] / 1e6,
+            dispatch_count=aggregated[name][0],
+            sources=(source,),
+        )
+        for name in order
+    )
+
+
+def observations_from_rocprof_trace(
+    path: Path,
+    *,
+    target: str,
+    drop_runtime_copies: bool = True,
+) -> tuple[KernelObservation, ...]:
+    """Read a rocprofiler trace CSV and aggregate it by kernel name."""
+
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = tuple(dict(row) for row in csv.DictReader(stream))
+    return observations_from_rocprof_rows(
+        rows,
+        target=target,
+        drop_runtime_copies=drop_runtime_copies,
+    )
+
+
+def observations_from_kernel_list(
+    kernels: Iterable[str | Mapping[str, object]],
+    *,
+    target: str,
+    source: str = "kernel_list",
+) -> tuple[KernelObservation, ...]:
+    """Build direct kernel identities from an explicit list (no ranking).
+
+    Each item is either a bare kernel name or a mapping carrying identity
+    fields (``name``, ``code_object``, ``code_object_sha256``,
+    ``code_object_index``, ``entry_offset``). Every kernel is retained with a
+    ``dispatch_count`` of 1 so ``select_kernels`` keeps them all when
+    ``top_n`` covers the list.
+    """
+
+    observations: list[KernelObservation] = []
+    for index, item in enumerate(kernels):
+        if isinstance(item, str):
+            entry: Mapping[str, object] = {"name": item}
+        elif isinstance(item, Mapping):
+            entry = item
+        else:
+            raise ValueError(f"kernel_list[{index}] must be a string or mapping")
+        name = _optional_str(entry.get("name"))
+        if name is None:
+            raise ValueError(f"kernel_list[{index}] needs a non-empty name")
+        observations.append(
+            KernelObservation(
+                identity=KernelIdentity(
+                    name=name,
+                    target=target,
+                    code_object=_optional_str(entry.get("code_object")),
+                    code_object_sha256=_optional_str(entry.get("code_object_sha256")),
+                    code_object_index=_optional_int(
+                        entry.get("code_object_index"),
+                        field=f"kernel_list[{index}] code_object_index",
+                    ),
+                    entry_offset=_optional_int(
+                        entry.get("entry_offset"),
+                        field=f"kernel_list[{index}] entry_offset",
+                    ),
+                ),
+                total_time_ms=0.0,
+                dispatch_count=1,
+                sources=(source,),
+            )
+        )
+    return tuple(observations)
+
+
+def observations_from_consan_repro(
+    variant: str,
+    *,
+    target: str,
+) -> tuple[KernelObservation, ...]:
+    label = {"clean": "consan_lds_race", "racy": "consan_lds_race_2wave"}.get(variant)
+    if label is None:
+        raise ValueError(f"unsupported consan repro variant {variant!r}")
+    return (
+        KernelObservation(
+            identity=KernelIdentity(name=label, target=target),
+            total_time_ms=0.0,
+            dispatch_count=1,
+            sources=(f"consan_repro:{variant}",),
+        ),
+    )
 
 
 def _deduplicate(

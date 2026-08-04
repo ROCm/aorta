@@ -43,6 +43,7 @@ from aorta.cli.triage import (
     execute_list_mitigations,
     execute_triage_run,
 )
+from aorta.instrumentation.rocjitsu_sanitizers.recipe import execute_sanitizer_run
 from aorta.run.cli_helpers import configure_verbose_logging, parse_csv
 from aorta.triage.recipe import RecipeSchemaError, load_recipe_mapping
 
@@ -52,7 +53,7 @@ _BYPASS_TOKENS: frozenset[str] = frozenset({"--help", "-h"})
 def _peek_recipe_mode(path: Path) -> str | None:
     """Best-effort read of a recipe's top-level ``mode`` for flow dispatch.
 
-    Returns ``"probe"``, ``"triage"``, or ``None`` when the file can't be
+    Returns ``"probe"``, ``"triage"``, ``"sanitizer"``, or ``None`` when the file can't be
     parsed / isn't a mapping. ``None`` defers to the trailing-argv signal
     and lets the real loader (inside the chosen flow) raise the canonical,
     fully-validated error -- this peek never becomes the error surface.
@@ -67,6 +68,8 @@ def _peek_recipe_mode(path: Path) -> str | None:
             return "probe"
         if mode == "triage":
             return "triage"
+        if mode == "sanitizer":
+            return "sanitizer"
         # Unknown/malformed mode (typo, null, non-str): don't guess "triage"
         # and mis-dispatch -- return None so the real loader raises the
         # canonical RecipeSchemaError instead of a misleading sweep usage error.
@@ -415,6 +418,37 @@ def sweep_run(
     configure_verbose_logging(verbose)
     has_command = bool(argv)
     recipe_mode = _peek_recipe_mode(recipe) if recipe is not None else None
+
+    if recipe_mode == "sanitizer":
+        if recipe is None:
+            raise click.UsageError("a sanitizer run requires --recipe <path>")
+        if has_command:
+            raise click.UsageError(
+                "a trailing '-- <command>' is not valid for mode: sanitizer recipes"
+            )
+        if any(
+            value not in (None, "")
+            for value in (
+                workload,
+                mitigation_axis,
+                environment_axis,
+                trials,
+                steps,
+                baseline_cell,
+                confound_threshold,
+            )
+        ):
+            raise click.UsageError(
+                "workload-flow flags cannot be combined with a mode: sanitizer recipe"
+            )
+        out = output if output is not None else Path("sanitizer_results") / recipe.stem
+        report_path = execute_sanitizer_run(
+            recipe,
+            output_dir=out,
+            dry_run=dry_run,
+        )
+        click.echo(f"sanitizer report: {report_path}")
+        return
 
     # --- consistency guards (clear up-front errors, no silent fallback) ---
     if recipe_mode == "probe" and not has_command:

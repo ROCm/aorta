@@ -239,12 +239,12 @@ def test_only_record_replay_is_exposed() -> None:
         ConSanMode("inline-shadow")
 
 
-def test_top_k_consan_is_fail_closed_until_allowlist_exists() -> None:
+def test_top_k_consan_is_fail_closed_without_command() -> None:
     result = scoped_consan_not_checked(_worklist())
 
     assert result.state is ExecutionState.NOT_CHECKED
     assert result.verdict is Verdict.NOT_CHECKED
-    assert "allowlist" in str(result.reason)
+    assert "consan_command_not_provisioned" in str(result.reason)
 
 
 def test_combined_waitcheck_analysis_failure_never_passes() -> None:

@@ -1,15 +1,11 @@
-"""Public Phase-0 sanitizer pipeline.
-
-Waitcheck is executable for exact worklist entries. ConSan is intentionally
-fail-closed until RocJITsu can enforce a kernel allowlist.
-"""
+"""Public sanitizer pipeline."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
 
-from .consan import scoped_consan_not_checked
+from .consan import run_consan, scoped_consan_not_checked
 from .models import CheckResult, KernelWorklist, SanitizerReport
 from .report import build_report, write_report
 from .waitcheck import run_waitcheck
@@ -24,6 +20,11 @@ def run_sanitizers(
     sanitizers: Iterable[str],
     output_dir: Path,
     waitcheck_binary: Path | None = None,
+    consan_command: Path | None = None,
+    consan_hook: Path | None = None,
+    consan_log: bool = True,
+    consan_policy: str = "strict",
+    on_missing_backend: str = "fail",
     timeout_seconds: float = 900.0,
 ) -> SanitizerReport:
     """Run supported checks and persist one versioned report."""
@@ -49,7 +50,22 @@ def run_sanitizers(
                 )
             )
         elif sanitizer == "consan":
-            results.append(scoped_consan_not_checked(worklist))
+            if consan_command is not None:
+                results.append(
+                    run_consan(
+                        worklist,
+                        command=consan_command,
+                        hook_lib=consan_hook,
+                        output_dir=output_dir / "consan",
+                        consan_log=consan_log,
+                        timeout_seconds=timeout_seconds,
+                        strict=consan_policy == "strict",
+                    )
+                )
+            elif on_missing_backend == "fail":
+                results.append(scoped_consan_not_checked(worklist))
+            else:
+                results.append(scoped_consan_not_checked(worklist))
 
     report = build_report(
         target=target,
