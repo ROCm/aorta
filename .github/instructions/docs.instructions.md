@@ -50,6 +50,14 @@ the categories to the contents either way.
   to it -- other docs, README links, and module docstrings. A stale link tells a
   reader exactly what was withdrawn and invites them to go looking for it.
 
+## This file is public too
+
+Every rule above applies to this file. When illustrating a check, describe the
+shape of the offending value rather than quoting a real hostname, path, image
+tag, or customer name -- pasting one here publishes the exact value the rule
+exists to protect. See the same section in
+`.github/copilot-instructions.md`.
+
 ## Do not rewrite technical substance
 
 These instructions cover what is safe to publish, not how the documentation
