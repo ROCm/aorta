@@ -57,6 +57,12 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    (Settings -> Pages). Nightly dashboard: `https://rocm.github.io/aorta/`;
    project docs: `https://rocm.github.io/aorta/docs/`.
 
+   The dashboard previously lived at `/ci/`, so that path is kept: `/ci/`
+   redirects to the root and `/ci/data.json` is published alongside
+   `/data.json` for anything already polling it. A verification step fails the
+   deploy if any of those routes would be missing, since a Pages deploy
+   replaces the whole site and a dropped route 404s immediately.
+
 ## Correctness vs performance
 
 - **Correctness** is gated: a cell that should pass but errored/failed => `fail`.
