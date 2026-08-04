@@ -112,8 +112,9 @@ def _has_trend(series: list[list[float | None]]) -> bool:
 def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
     """Headline verdict for the newest build.
 
-    ``recording`` is distinct from ``passing``: with no blessed baselines
-    nothing was actually graded, and calling that "passing" overstates it.
+    Only a graded pass earns ``passing``. A build with no blessed baselines is
+    ``recording``, and one where every cell was skipped is ``skipping``:
+    reporting either as "passing" would claim a result nothing established.
     """
     if not results:
         return "unknown", "#57606a"
@@ -122,9 +123,11 @@ def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
         return "failing", _VERDICT_COLOR["fail"]
     if (s.get("total", 0) or 0) == 0:
         return "empty", "#57606a"
-    if not (s.get("pass", 0) or 0) and (s.get("record", 0) or 0):
+    if s.get("pass", 0) or 0:
+        return "passing", _VERDICT_COLOR["pass"]
+    if s.get("record", 0) or 0:
         return "recording", _VERDICT_COLOR["record"]
-    return "passing", _VERDICT_COLOR["pass"]
+    return "skipping", _VERDICT_COLOR["skip"]
 
 
 def _fmt_num(v: Any) -> str:
@@ -250,7 +253,12 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 
     total = s.get("total", 0) or 0
     graded_now = (s.get("pass", 0) or 0) + (s.get("fail", 0) or 0)
-    record_only = bool(total) and not graded_now
+    record_now = s.get("record", 0) or 0
+    skip_now = s.get("skip", 0) or 0
+    # "Nothing was graded" splits three ways and they must not be described
+    # identically: every cell recorded a baseline, some recorded while others
+    # were skipped, or nothing ran at all.
+    nothing_graded = bool(total) and not graded_now
 
     # Columns that would be uniformly empty are dropped rather than rendered as
     # a wall of "n/a" -- with one night of history that was three of five.
@@ -385,12 +393,22 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             "<div class='notice'>No nightly results have been published yet. "
             "This page fills in after the first Nightly Evaluation run.</div>"
         )
-    elif record_only:
+    elif nothing_graded and record_now:
+        scope = (
+            f"all {total} cells" if record_now == total
+            else f"{record_now} of {total} cells ({skip_now} skipped)"
+        )
         extra = f" Every cell reports: {_esc(shared_reason)}." if shared_reason else ""
         notices.append(
             f"<div class='notice'>No baselines are blessed yet, so nothing was graded "
-            f"pass or fail — this run <strong>recorded</strong> metrics for all {total} "
-            f"cells to become the reference.{extra}</div>"
+            f"pass or fail — this run <strong>recorded</strong> metrics for {scope} "
+            f"to become the reference.{extra}</div>"
+        )
+    elif nothing_graded:
+        notices.append(
+            f"<div class='notice'>Nothing ran: all {total} cells were "
+            f"<strong>skipped</strong>, so this build establishes nothing. Check that "
+            f"the runner exposes as many GPUs as the matrix asks for.</div>"
         )
     elif shared_reason:
         notices.append(

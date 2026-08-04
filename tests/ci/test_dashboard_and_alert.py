@@ -184,6 +184,34 @@ def test_dashboard_record_only_run_is_not_reported_as_passing():
     assert ">passing<" not in html
 
 
+def test_dashboard_skip_only_run_is_neither_passing_nor_recording():
+    # Every cell skipped for want of GPUs establishes nothing, so neither
+    # "passing" nor the record-only baseline story applies.
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "skip",
+                   "reasons": ["needs 8 GPUs, runner exposes 2"], "metrics": {}}],
+                 total=1, skip=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "skipping" in html
+    assert ">passing<" not in html
+    assert "No baselines are blessed yet" not in html
+    assert "all 1 cells were" in html
+
+
+def test_dashboard_partial_record_does_not_claim_every_cell_recorded():
+    # record + skip must not be described as "recorded all N cells".
+    entries = [{"entry": "w", "cell": f"r{i}", "verdict": "record",
+                "reasons": ["no baseline (record-only)"],
+                "metrics": {"mean_step_time_ms": 1.0}} for i in range(3)]
+    entries.append({"entry": "w", "cell": "s0", "verdict": "skip",
+                    "reasons": ["needs 8 GPUs, runner exposes 2"], "metrics": {}})
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, total=4, record=3, skip=1)])
+    assert "recording" in html
+    assert "3 of 4 cells (1 skipped)" in html
+    assert "all 4 cells" not in html
+
+
 def test_dashboard_groups_cells_under_their_workload():
     entries = [
         {"entry": "llm_determinism", "cell": c, "verdict": "record",
