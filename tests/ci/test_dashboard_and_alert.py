@@ -44,7 +44,9 @@ def test_dashboard_renders_status_and_rows():
     html = gen_dashboard.build_dashboard_html([r1, r2])
     assert "aorta nightly CI" in html
     assert "failing" in html  # latest run failed
-    assert "inference_offline::baseline-local" in html
+    # Cells are grouped under their workload, so the two names render separately.
+    assert "inference_offline" in html
+    assert "baseline-local" in html
     assert "0.2.1rc" in html
 
 
@@ -60,7 +62,7 @@ def test_dashboard_renders_summary_metric_series():
                                               "summary": {"decode_latency_ms": 12.5}}}],
                  total=1, **{"pass": 1})
     html = gen_dashboard.build_dashboard_html([r])
-    assert "Performance / metric trends" in html
+    assert "Workloads" in html
     assert "decode_latency_ms" in html
     assert "ms" in html  # unit rendered
 
@@ -136,3 +138,80 @@ def test_dashboard_escapes_untrusted_reason():
     html = gen_dashboard.build_dashboard_html([r])
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html
+
+
+def test_dashboard_always_explains_a_failure():
+    # Uninformative columns get collapsed, but a failing cell's reason must
+    # never be one of them -- a bare "fail" badge with no explanation anywhere
+    # is worse than a redundant column.
+    entries = [
+        {"entry": "w", "cell": f"c{i}", "verdict": "pass", "reasons": [],
+         "metrics": {"mean_step_time_ms": 1.0}}
+        for i in range(4)
+    ]
+    entries.append({"entry": "w", "cell": "bad", "verdict": "fail",
+                    "reasons": ["mean_step_time_ms 9 > max 5"],
+                    "metrics": {"mean_step_time_ms": 9.0}})
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, total=5, fail=1, **{"pass": 4})])
+    assert "mean_step_time_ms 9 &gt; max 5" in html
+
+
+def test_dashboard_collapses_a_note_shared_by_every_cell():
+    # When every cell says the same thing, say it once instead of repeating it
+    # down a column -- but it still has to appear somewhere.
+    entries = [
+        {"entry": "w", "cell": f"c{i}", "verdict": "record",
+         "reasons": ["no baseline (record-only)"],
+         "metrics": {"mean_step_time_ms": 1.0}}
+        for i in range(3)
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, total=3, record=3)])
+    assert "no baseline (record-only)" in html
+    assert "<th scope='col'>notes</th>" not in html
+
+
+def test_dashboard_record_only_run_is_not_reported_as_passing():
+    # Nothing was graded, so "passing" would overstate the result.
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record",
+                   "reasons": ["no baseline (record-only)"],
+                   "metrics": {"mean_step_time_ms": 1.0}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "recording" in html
+    assert ">passing<" not in html
+
+
+def test_dashboard_groups_cells_under_their_workload():
+    entries = [
+        {"entry": "llm_determinism", "cell": c, "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 10.0}}
+        for c in ("bf16-12L", "tf32-24L")
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, total=2, record=2)])
+    # One group header for the workload, and each cell listed beneath it.
+    assert html.count("llm_determinism") == 1
+    assert "bf16-12L" in html and "tf32-24L" in html
+
+
+def test_dashboard_omits_trend_column_without_history():
+    # A single build cannot draw a trend; the column is dropped rather than
+    # rendered as a full column of "n/a".
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                   "metrics": {"mean_step_time_ms": 1.0,
+                               "summary": {"decode_latency_ms": 12.5}}}],
+                 total=1, record=1)
+    one = gen_dashboard.build_dashboard_html([r])
+    assert "trend (step ms)" not in one
+
+    r2 = _results("2026-07-31T00:00:00Z",
+                  [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                    "metrics": {"mean_step_time_ms": 2.0,
+                                "summary": {"decode_latency_ms": 13.5}}}],
+                  total=1, record=1)
+    two = gen_dashboard.build_dashboard_html([r, r2])
+    assert "trend (step ms)" in two

@@ -2,10 +2,10 @@ name: Pages (landing + nightly dashboard)
 
 # Single owner of the GitHub Pages deployment (repo Pages source must be set to
 # "GitHub Actions"). A repo has exactly one Pages site, so this one build serves
-# BOTH the existing project landing page (Jekyll render of README.md at the site
-# root) AND the nightly CI dashboard mounted at /ci/. It runs on main pushes
-# (refresh the landing page), after each "Nightly Evaluation" completes (pick up
-# fresh history from the ci-results branch), and on demand.
+# BOTH the nightly CI dashboard (at the site root) AND the project landing page
+# (Jekyll render of README.md, under /docs/ alongside the rest of the rendered
+# docs). It runs on main pushes, after each "Nightly Evaluation" completes (pick
+# up fresh history from the ci-results branch), and on demand.
 
 on:
   push:
@@ -44,9 +44,8 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
-      # Renders README.md (+ any repo docs) to ./_site exactly like the previous
-      # legacy Pages build (same github-pages gem), so the landing page is
-      # preserved.
+      # Renders README.md (+ any repo docs) to ./_site with the same github-pages
+      # gem the legacy Pages build used, so the rendered docs are unchanged.
       - name: Build landing page (Jekyll)
         uses: actions/jekyll-build-pages@v1
         with:
@@ -55,16 +54,32 @@ jobs:
 
       # jekyll-build-pages is a container action running as root, so ./_site comes
       # back root-owned and the later steps (which run as the unprivileged runner
-      # user) cannot mount the dashboard inside it.
+      # user) cannot write inside it.
       - name: Take ownership of the Jekyll output
         run: sudo chown -R "$(id -u):$(id -g)" _site
 
+      # Jekyll renders README.md to _site/index.html and docs/*.md to _site/docs/*.
+      # Move that landing page under /docs/ (which had no index of its own) so the
+      # CI dashboard can own the site root. The rendered README mixes root-absolute
+      # links with relative ones; going one directory deeper breaks only the
+      # relative ones, so they are re-pointed with a ../ prefix. Fragments (#x),
+      # root-absolute (/x) and absolute (https://x) links are left alone.
+      - name: Move the landing page to /docs/
+        run: |
+          set -euo pipefail
+          test -f _site/index.html
+          mkdir -p _site/docs
+          sed -E 's%(href|src)="([^":#/][^":]*)"%\1="../\2"%g' \
+            _site/index.html > _site/docs/index.html
+          rm _site/index.html
+          echo "landing page -> /docs/ ($(wc -c < _site/docs/index.html) bytes)"
+
       # History lives on the ci-results data branch (written by nightly-eval's
       # publish job); it may not exist until the first nightly runs. Fail closed:
-      # a genuinely-absent branch (ls-remote exit 2) deploys the landing page
-      # only, but a transport/auth error must NOT be swallowed into "no dashboard"
-      # -- that would silently drop the dashboard while history exists.
-      - name: Generate nightly dashboard at /ci/
+      # a genuinely-absent branch (ls-remote exit 2) deploys the docs only, but a
+      # transport/auth error must NOT be swallowed into "no dashboard" -- that
+      # would silently drop the dashboard while history exists.
+      - name: Generate the nightly dashboard at the site root
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -75,21 +90,29 @@ jobs:
           lsr=$?
           set -e
           if [ "$lsr" -eq 2 ]; then
-            echo "ci-results branch absent; deploying landing page only (dashboard appears after the first nightly)"
-            exit 0
+            echo "ci-results branch absent; dashboard appears after the first nightly"
           elif [ "$lsr" -ne 0 ]; then
             echo "::error::cannot reach ci-results (git ls-remote exit ${lsr}); failing closed"
             exit 1
-          fi
-          tmp="$(mktemp -d)"
-          git clone --depth 1 --branch ci-results "$repo_url" "$tmp"
-          if ls "$tmp"/results/*.json >/dev/null 2>&1; then
-            mkdir -p _site/ci
-            python3 scripts/ci/gen_dashboard.py \
-              --results-dir "$tmp/results" --out-dir _site/ci --max-builds 180
-            echo "mounted dashboard at /ci/ ($(ls -1 "$tmp"/results/*.json | wc -l) build(s))"
           else
-            echo "ci-results exists but has no results yet; deploying landing page only"
+            tmp="$(mktemp -d)"
+            git clone --depth 1 --branch ci-results "$repo_url" "$tmp"
+            if ls "$tmp"/results/*.json >/dev/null 2>&1; then
+              python3 scripts/ci/gen_dashboard.py \
+                --results-dir "$tmp/results" --out-dir _site --max-builds 180
+              echo "dashboard at / ($(ls -1 "$tmp"/results/*.json | wc -l) build(s))"
+            else
+              echo "ci-results exists but has no results yet"
+            fi
+          fi
+
+          # The root must never 404: without results, publish the dashboard's own
+          # empty state rather than leaving the site with no index at all.
+          if [ ! -f _site/index.html ]; then
+            mkdir -p "${RUNNER_TEMP}/empty-results"
+            python3 scripts/ci/gen_dashboard.py \
+              --results-dir "${RUNNER_TEMP}/empty-results" --out-dir _site
+            echo "no history yet; published the dashboard's empty state at /"
           fi
 
       - name: Upload Pages artifact
