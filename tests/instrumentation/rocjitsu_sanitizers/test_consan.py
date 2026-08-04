@@ -14,6 +14,8 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
     parse_record_replay_output,
     scoped_consan_not_checked,
 )
+from aorta.instrumentation.rocjitsu_sanitizers import consan as consan_module
+from aorta.instrumentation.rocjitsu_sanitizers.consan import run_consan
 from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
 
 _PREFIX = "[rocjitsu-dbi-hooks] ConSan"
@@ -245,6 +247,56 @@ def test_top_k_consan_is_fail_closed_without_command() -> None:
     assert result.state is ExecutionState.NOT_CHECKED
     assert result.verdict is Verdict.NOT_CHECKED
     assert "consan_command_not_provisioned" in str(result.reason)
+
+
+def _capture_consan_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    *,
+    consan_log: bool,
+) -> dict[str, str]:
+    hook = tmp_path / "librocjitsu_dbi_hooks.so"
+    hook.write_bytes(b"")
+    command = tmp_path / "repro"
+    command.write_bytes(b"")
+    monkeypatch.delenv("RJ_CONSAN_LOG", raising=False)
+    captured: dict[str, str] = {}
+
+    def fake_run_argv(argv, *, timeout_seconds, env):
+        captured.update(env)
+        return ProcessResult(tuple(argv), 0, _healthy_evidence(), "")
+
+    monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
+    result = run_consan(
+        _worklist(),
+        command=command,
+        hook_lib=hook,
+        output_dir=tmp_path / "out",
+        consan_log=consan_log,
+    )
+    assert result.state is ExecutionState.RAN
+    return captured
+
+
+def test_run_consan_requests_debug_log_level(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # The strict coverage cross-check needs per-site coverage_site records, which
+    # the hook only emits at its debug level (kLogDebug=3). A boolean-truthy
+    # RJ_CONSAN_LOG=1 (kLogInfo) omits them and would fail closed on a clean run.
+    env = _capture_consan_env(monkeypatch, tmp_path, consan_log=True)
+
+    assert "RJ_CONSAN_LOG" in env
+    assert env["RJ_CONSAN_LOG"] != "1"
+    assert int(env["RJ_CONSAN_LOG"]) >= 3
+
+
+def test_run_consan_omits_log_env_when_logging_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    env = _capture_consan_env(monkeypatch, tmp_path, consan_log=False)
+
+    assert "RJ_CONSAN_LOG" not in env
 
 
 def test_combined_waitcheck_analysis_failure_never_passes() -> None:

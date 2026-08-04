@@ -34,6 +34,16 @@ class ConSanMode(str, Enum):
     RECORD_REPLAY = "record-replay"
 
 
+# The strict coverage cross-check (consan_coverage.parse_coverage_decision)
+# requires per-site ``coverage_site`` records to reconcile against each
+# aggregate ``coverage`` record's ``*_discovered`` counts. The hook only emits
+# those per-site lines at its debug level (kLogDebug=3). A boolean-truthy
+# ``RJ_CONSAN_LOG=1`` maps to kLogInfo, which prints the aggregate line but no
+# per-site records -- so the cross-check would fail closed on an otherwise clean
+# run. Request the debug level explicitly so the evidence is complete.
+_CONSAN_LOG_DEBUG_LEVEL = "3"
+
+
 @dataclass(frozen=True)
 class ParsedCombinedOutput:
     waitcheck_findings: tuple[Finding, ...]
@@ -451,7 +461,7 @@ def run_consan(
     env = dict(os.environ)
     env["HSA_TOOLS_LIB"] = str(resolved_hook)
     if consan_log:
-        env["RJ_CONSAN_LOG"] = "1"
+        env["RJ_CONSAN_LOG"] = _CONSAN_LOG_DEBUG_LEVEL
     process = run_argv(
         (str(command),),
         timeout_seconds=timeout_seconds,
