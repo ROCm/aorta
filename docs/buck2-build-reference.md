@@ -1,9 +1,9 @@
-# Buck2
+# Buck2 Build Reference
 
 Build and run the AORTA CLI with [Buck2](https://buck2.build/) -- a
 fast, hermetic, multi-language build system. The repo already ships a
-working Buck2 setup (added in [#187]); this doc is the user-facing
-walkthrough.
+working Buck2 setup (added in [#187]); this document is the build and
+command reference.
 
 > The repo's current Buck2 scaffold defines `python_library` /
 > `python_binary` targets only -- no `python_test` targets yet, so
@@ -412,9 +412,9 @@ toolchain Python version.
 ## See also
 
 * [Env Probe](env-probe.md) -- the snapshot schema and `jq` cookbook.
-* [Buck2 env probe](buck2-env-probe.md) -- workload integration,
+* [Buck2 env-probe workflow](buck2-env-probe-workflow.md) -- workload integration,
   client/workload snapshots, and validation.
-* [Buck2 env-probe setup on a Linux GPU host](buck2-env-probe-gpu-setup.md)
+* [Buck2 GPU and remote-execution setup](buck2-gpu-re-setup.md)
   -- first-time Buck2 installation, local smoke test, real-RE prerequisites,
   and a copy-paste agent prompt.
 * [`src/aorta/registry/README.md`](../src/aorta/registry/README.md) --

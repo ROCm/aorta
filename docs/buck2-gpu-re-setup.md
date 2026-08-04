@@ -1,4 +1,4 @@
-# Buck2 env-probe setup on a Linux GPU host
+# Buck2 GPU and Remote-Execution Setup
 
 This guide starts from a machine with no Buck2 installation. It has two
 separate goals:
