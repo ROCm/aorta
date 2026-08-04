@@ -70,7 +70,7 @@ It does **not** prove where an action ran or populate
 - The Buck2 `genrule`/`sh_test` rule wrapper — documentation-only per the
   external-tool policy; deferred until phase 2.
 - Open Q1, Q2, Q3 below all remain open (Q1/Q2 need a real Buck2 RE cluster;
-  Q3 is "where does the NaN-repro runbook live").
+  Q3 is "where does the workload runbook live").
 
 The **field classification, risks, and runbook** sections below are the
 enduring rationale and apply to both phases.

@@ -14,9 +14,11 @@ The same code path is used three ways:
   Buck `.par` applications that own `__main__`.
 * **B1 (per-trial runner)**: calls `collect_env()` once per trial; the
   snapshot is embedded in `TrialResult.env`.
-* **B2 (matrix runner)**: calls `collect_env()` once per matrix start
-  (host scope) and once per `--environment-axis` value (container
-  scope).
+* **B2 (matrix runner)**: captures the host environment once per matrix. For
+  an isolated environment, it asks the workload wrapper to run the probe
+  inside that environment and promotes the resulting snapshot; the core
+  dispatcher does not launch the container. See
+  [Environment snapshots](../recipes/README.md#environment-snapshots).
 
 ## Why
 
@@ -1719,12 +1721,49 @@ jq '.partial_reasons' /tmp/env.json
 PATH= aorta env probe -o /tmp/env_no_rdhc.json
 jq '.system_health' /tmp/env_no_rdhc.json    # null
 jq '.hipblaslt.rocm_release_tweak' /tmp/env_no_rdhc.json # still populated
-
-# Compare across docker images (manual until `aorta env matrix` lands)
-docker run --rm <image-A> aorta env probe -o /workspace/env_a.json
-docker run --rm <image-B> aorta env probe -o /workspace/env_b.json
-diff <(jq -S . env_a.json) <(jq -S . env_b.json)
 ```
+
+### Probe a Docker image without AORTA installed
+
+The probe must run inside the environment it describes. Use this manual path
+for a standalone image capture when AORTA is installed on the host but not in
+the image. It is not the execution model for every sweep: a Docker-aware
+workload that implements the
+[in-container snapshot contract](../recipes/README.md#wrapper-contract-for-in-container-snapshots)
+performs the equivalent mount and probe automatically.
+
+Do not mount the host's entire virtual-environment `site-packages` directory.
+Putting it first on `PYTHONPATH` can make host PyTorch or TorchRec shadow the
+versions in the image, producing a snapshot of the wrong frameworks. Mount
+only the `aorta` package and use the dependency-free `_probe_main` entry point.
+The image must provide Python 3.10 or newer.
+
+```bash
+IMAGE_REF=registry.example/image:tag
+IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")
+OUTPUT_DIR=$(pwd)
+AORTA_PACKAGE=$(
+  python -c \
+    'from pathlib import Path; import aorta; print(Path(aorta.__file__).resolve().parent)'
+)
+
+docker run --rm \
+  --device=/dev/kfd --device=/dev/dri \
+  --group-add video --group-add render \
+  -v "$AORTA_PACKAGE":/opt/aorta_src/aorta:ro \
+  -v "$OUTPUT_DIR":/out \
+  -e AORTA_DOCKER_IMAGE="$IMAGE_REF" \
+  -e AORTA_DOCKER_DIGEST="$IMAGE_ID" \
+  "$IMAGE_ID" \
+  env PYTHONPATH=/opt/aorta_src \
+  python3 -m aorta.instrumentation._probe_main /out/env.json
+```
+
+`AORTA_PACKAGE` resolves only the public package from the active host
+environment, so framework imports still come from the image. The command runs
+the resolved immutable image ID while recording both the requested image
+reference and that ID in `env.json`. Repeat with another image and compare the
+two output files with `diff <(jq -S . env_a.json) <(jq -S . env_b.json)`.
 
 ## Output modes
 

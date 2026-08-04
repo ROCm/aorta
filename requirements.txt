@@ -1,17 +1,16 @@
-# Dependencies for local analysis and processing scripts
-# (Training dependencies are managed in Docker - see docker/Dockerfile.*)
+# Optional dependencies for local analysis and processing scripts.
+# This is not the core AORTA install; use `pip install -e .` for that.
 #
-# Install with uv (two steps to avoid pulling nvidia packages):
-#   uv pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm7.1/
-#   uv pip install -r requirements.txt
+# PyTorch is workload-specific and is not listed here. Install a matching build
+# separately only when the selected workload or feature requires it.
 #
-# For full installation including hw_queue_eval:
+# For hardware-queue evaluation:
 #   uv pip install -e ".[hw-queue]"
 #
 # For development:
 #   uv pip install -e ".[all]"
 
-# Base dependencies (PyTorch installed separately - see above)
+# Base dependency used by these scripts
 pyyaml>=6.0
 
 # For analysis scripts

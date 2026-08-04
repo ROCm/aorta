@@ -32,57 +32,85 @@ published to the [nightly CI dashboard](https://rocm.github.io/aorta/).
 
 ## Installation
 
-PyTorch for ROCm is **installed separately** from the ROCm PyTorch index (it is
-not bundled in the wheel). Install it first, then AORTA.
-
-Install the published release with `pip install amd-aorta` (below). For the
-latest unreleased changes, clone the repo and do an editable install from source
-(see [From source](#from-source-for-contributors)).
+Install AORTA in the Python environment from which you will invoke `aorta`.
+The core install provides the CLI, recipe support, and environment probe. It
+does not install or require PyTorch. AORTA requires Python 3.10 or newer.
 
 ### From PyPI (recommended for users)
 
 ```bash
-# 1. PyTorch for your ROCm version — see https://pytorch.org/get-started/locally/
-#    for the index URL matching your ROCm release.
-pip install --pre torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/nightly/rocm<YOUR_ROCM_VERSION>/
-
-# 2. AORTA (distribution: amd-aorta; import package + CLI: aorta)
-pip install amd-aorta
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install amd-aorta
+aorta --help
 ```
 
-Optional extras:
-
-```bash
-pip install "amd-aorta[hw-queue]"   # hardware-queue evaluation (numpy/pandas/tabulate)
-```
-
-> `[hw-queue]` requires PyTorch — install torch from the ROCm index (step 1
-> above) before installing this extra.
-
-Other extras: `analysis` (matplotlib only), `hw-queue-profiling` (hw-queue +
-profiling plots), `ebpf` (no extra Python deps; needs the `bpftrace` binary and
-`CAP_BPF`/`CAP_PERFMON` or sudo at runtime).
+The distribution name is `amd-aorta`; the import package and command are
+`aorta`.
 
 ### From source (for contributors)
 
-We recommend [uv](https://github.com/astral-sh/uv) for fast environment management.
+Use [uv](https://github.com/astral-sh/uv) for a fast editable setup:
 
 ```bash
 git clone https://github.com/ROCm/aorta.git
 cd aorta
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+aorta --help
+```
 
-uv venv && source .venv/bin/activate
+Plain `pip` also works: `python -m pip install -e .`. Contributors who need
+the test and lint tools can use `uv pip install -e ".[dev]"`.
 
-# PyTorch for your ROCm version — see https://pytorch.org/get-started/locally/
-uv pip install --pre torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/nightly/rocm<YOUR_ROCM_VERSION>/
+### Optional dependencies
 
-# Editable install with the extras you need
+An **extra** adds dependencies for a specific feature; it is not part of the
+minimal install. Install only the extras you need. For example:
+
+```bash
+# Published package:
+python -m pip install "amd-aorta[hw-queue]"
+
+# Editable source checkout:
 uv pip install -e ".[hw-queue]"
 ```
 
-Plain `pip` works too: `pip install -e ".[hw-queue]"`.
+Hardware-queue evaluation and most GPU training or inference workloads also
+require PyTorch. AORTA does not bundle it. When the selected workload requires
+PyTorch, install a build matching that environment's ROCm version:
+
+```bash
+# Set this to the index URL for your ROCm release from
+# https://pytorch.org/get-started/locally/
+PYTORCH_ROCM_INDEX=https://download.pytorch.org/whl/nightly/rocmX.Y/
+python -m pip install --pre torch \
+  --index-url "$PYTORCH_ROCM_INDEX"
+```
+
+Other optional extras include `analysis`, `report`, `hw-queue-profiling`,
+`agent`, and `ebpf`. The `ebpf` extra has no additional Python packages; its
+runtime needs `bpftrace` and the required permissions.
+
+## Where commands run
+
+`aorta` runs in the active Python environment, and relative recipe, command,
+and output paths are resolved from the current directory. The examples below
+use paths from the AORTA repository root.
+
+There is no global rule that AORTA must run on the host or inside a container:
+
+- Run `aorta env probe` in the environment you want to inspect, including
+  inside a container when appropriate. To inspect an image without installing
+  AORTA in it, use the [package-mount workflow](docs/env-probe.md#probe-a-docker-image-without-aorta-installed).
+- Some workloads run in the same environment as the CLI.
+- Some workload plugins own a `docker run` launch. For those workloads, follow
+  the plugin's instructions; the CLI normally runs on a Docker-capable host,
+  while the workload image supplies its runtime dependencies.
+
+The core dispatcher does not execute `docker run`; Docker-aware workload
+plugins may do so and own the launch.
 
 ## Quick Start
 
@@ -245,7 +273,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 
 | Guide | Description |
 | --- | --- |
-| [Getting Started](docs/getting-started.md) | Prerequisites, Docker setup, installation |
+| [Getting Started](docs/getting-started.md) | Installation, command location, and workload-specific prerequisites |
 | [Hardware Queue Eval](docs/hw-queue-eval.md) | Workloads, CLI usage, metrics |
 | [Environment Probe](docs/env-probe.md) | Capture / diff / query a versioned environment snapshot; jq cookbook |
 | [`aorta sweep`](docs/probe/usage.md) | Unified matrix runner — built-in workloads **or** opaque launch commands |

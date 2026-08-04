@@ -15,6 +15,13 @@ Recipes are the primary interface. The `--mode matrix` flag shim is kept as
 an escape hatch for ad-hoc one-shots; internally it constructs an in-memory
 `Recipe` and reuses the same execution path.
 
+## Before you run
+
+Commands in this repository assume the repository root unless stated
+otherwise. For installation and host/container ownership, see
+[Where commands run](../README.md#where-commands-run) and the selected
+workload's guide.
+
 ## Layout
 
 Recipes are grouped by workload:
@@ -34,7 +41,7 @@ Recipes are grouped by workload:
 ```yaml
 schema_version: 1                    # required; loader rejects unknown versions
 ticket: EXAMPLE-001                  # optional; drives output dir grouping
-workload: fsdp                       # required; resolved via aorta.workloads entry-point group
+workload: training                   # required; resolved via aorta.workloads entry-point group
 trials: 8                            # required; per-cell trial count
 steps: 5000                          # required; per-cell step count
 trial_isolation: auto                # optional: auto | in_process | process
@@ -62,13 +69,6 @@ cells:
     environment: local
     trials: 16                       # optional per-cell override
     steps: 8000                      # optional per-cell override
-
-  - name: try-nightly                # inline docker shorthand
-    mitigations: [none]
-    environment:
-      docker: "rocm/pytorch:nightly"
-      env:                            # optional baseline intrinsic to this environment
-        TORCH_ROCM_FA_PREFER_CK: "1"
 
   - name: custom-env-override        # one-off env var override for this cell only
     mitigations: [tf32_off]
@@ -114,6 +114,8 @@ cells:
     `blake2b(image-ref)`. Non-empty `env` content is included canonically in
     the identity, so the same image with different baseline variables cannot
     silently collapse into one environment. No other keys are accepted.
+    This is metadata passed to the workload; it does not make the core
+    dispatcher launch a container. A Docker-aware plugin must consume it.
 - **Top-level `extra_env`** -- optional `dict[str, str]`. Applied to every
   cell after `Environment.env` and mitigations. Probe-mode recipes reject this
   triage-only key and retain their separate environment-passthrough contract.
@@ -157,8 +159,8 @@ not how it is merged. For distributed details, see
   guarantee); wrappers running on non-rank-0 won't see the keys and
   should treat capture as off there.
   `contextlib.redirect_*` only catches Python-level writes; workloads
-  that spawn subprocesses (e.g. `recom_repro` invoking `docker run`)
-  don't have their subprocess output captured automatically. Those
+  that spawn subprocesses don't have their subprocess output captured
+  automatically. Those
   wrappers can opt in by reading the platform-supplied
   `_aorta_save_logs` / `_aorta_log_prefix` config keys the dispatcher
   injects, and writing their own capture to a sibling path derived from
@@ -214,10 +216,8 @@ not how it is merged. For distributed details, see
   recipe scope (top level) and per cell. Forwarded to the workload
   constructor through the dispatcher's `Request.config_overrides`. Use
   this for workload-specific knobs that aren't env vars; it does not enter
-  `os.environ` or `_aorta_trial_env`. For example,
-  `shampoo_api: old` on the `recom_repro` workload to select the V1
-  flat-kwarg SHAMPOO entry script (both `new` and `old` import from the
-  OSS `distributed_shampoo` package; they differ in constructor shape).
+  `os.environ` or `_aorta_trial_env`. For example, a plugin may use
+  `algorithm: alternate` to select one implementation.
   Cell-scope merges over recipe-scope on a per-key basis (cell wins on
   collision; non-collision keys union),
   so a recipe can set a workload-wide default and opt one cell out.
@@ -226,18 +226,18 @@ not how it is merged. For distributed details, see
   (platform-supplied) are rejected at load time. Example:
 
   ```yaml
-  workload: recom_repro
+  workload: my_workload
   workload_config:
-    shampoo_api: new          # recipe default
+    algorithm: standard       # recipe default
   cells:
-    - name: v3-baseline
+    - name: baseline-local
       mitigations: [none]
-      environment: nan-repro-v3
-    - name: v2-baseline
+      environment: local
+    - name: alternate-local
       mitigations: [none]
-      environment: nan-repro-v2-image
+      environment: local
       workload_config:
-        shampoo_api: old      # cell override
+        algorithm: alternate  # cell override
   ```
 
 Every validation error reports a path like `cells[2].mitigations` so the
@@ -256,8 +256,8 @@ Direct `aorta run --extra-env` occupies the same highest-precedence request
 layer as the recipe runner's merged recipe/cell values. The dispatcher applies
 the controlled overlay to host workloads and injects the exact same mapping as
 `config["_aorta_trial_env"]` for self-isolating wrappers. It never adds
-unrelated ambient host variables, and it does not launch Docker. Docker-aware
-wrappers can use `aorta.run.docker_env_flags`; see
+unrelated ambient host variables, and the core dispatcher does not execute
+`docker run`. Docker-aware wrappers can use `aorta.run.docker_env_flags`; see
 [`docs/configuration.md`](../docs/configuration.md#workload-owned-docker-launches).
 
 ## Workloads
@@ -343,9 +343,6 @@ Confirmed working on a single node with 8 GPUs (one rank per GPU):
 # single node, 8 GPUs:
 torchrun --standalone --nproc_per_node=8 $(which aorta) sweep run \
   --recipe recipes/race/race_smoke.yaml
-
-# AINIC cluster, multi-node (1 rank per host via Slurm):
-# see rccl_ainic/run-cell.sbatch
 ```
 
 A green run proves: `compute_type=transformer`, `layers_verified > 0`, `layer_checksum_mismatches == 0`, `passed=true`. Use `recipes/race/ainic-gdr-flush-sdc.yaml` for the full SDC triage matrix.
@@ -440,10 +437,10 @@ For isolated envs the dispatcher injects a reserved
 - `out` -- absolute host path (`environments/<env-name>/env.json`) the runner
   will read after the cell runs. Bind-mount its parent and write there.
 
-A self-isolating wrapper (e.g. `recom_repro` invoking `docker run`) opts in
-by reading the reserved config key and running the probe as the first step
-inside the container. There are no `AORTA_PROBE_SRC` / `AORTA_ENV_OUT`
-environment variables -- the paths arrive only through
+A self-isolating wrapper that invokes `docker run` opts in by reading the
+reserved config key and running the probe as the first step inside the
+container. There are no `AORTA_PROBE_SRC` / `AORTA_ENV_OUT` environment
+variables -- the paths arrive only through
 `config["_aorta_env_probe"]`, and the wrapper is responsible for turning them
 into bind-mounts on the `docker run` it builds:
 
@@ -516,11 +513,11 @@ audit data is still preserved next to the run.
 
 ## Flag mode (escape hatch)
 
-The equivalent of `recipes/training/example-fsdp-smoke.yaml` as flag-mode CLI:
+Example flag-mode CLI:
 
 ```
 aorta sweep run --mode matrix \
-  --workload fsdp \
+  --workload training \
   --mitigation-axis none,tf32_off,xnack \
   --environment-axis local \
   --trials 2 --steps 100 \
@@ -531,7 +528,8 @@ Inline docker still works in flag mode via the `image:` prefix on the
 axis, e.g. `--environment-axis local,image:rocm/pytorch:nightly`. Each
 comma-separated item is parsed independently; bare names go through the
 registry, `image:<ref>` maps to the same `{ docker: <ref> }` shorthand as
-recipe mode.
+recipe mode. The value remains workload metadata; a Docker-aware plugin must
+consume it.
 
 ## Probe handout templates (issue #188 Phase 3)
 

@@ -1,5 +1,5 @@
-# Local development dependencies for AORTA
-# (Training runs in Docker - these are for local development only)
+# Legacy requirements-file setup for local development with analysis tools.
+# The canonical package development install is `pip install -e ".[dev]"`.
 # Install with: pip install -r requirements-dev.txt
 
 # Include base requirements

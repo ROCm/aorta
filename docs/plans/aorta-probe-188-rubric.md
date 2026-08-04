@@ -620,7 +620,7 @@ Every file path cited in the rubric was read or grep'd; the audit list:
 | `tests/triage/test_runner_b1_api.py` (header) | Existing mock-`run_trials` pattern that probe-mode's shared-engine test mirrors. |
 | `tests/run/test_cli_parsing.py` (header) | Thin-shell-handler test pattern (anchor for FR 1.15). |
 | `tests/conftest.py` | Shared fixtures (none relevant to probe). |
-| `recipes/example-fsdp-smoke.yaml` | Existing recipe shape (triage-mode) for back-compat assertion. |
+| `recipes/training/example-fsdp-smoke.yaml` | Existing recipe shape (triage-mode) for back-compat assertion. |
 | `pyproject.toml` | Project metadata, optional-deps, `[project.entry-points."aorta.workloads"]` (commented out), `[project.scripts] aorta=aorta.cli:main`, lint/format config. |
 | `.pre-commit-config.yaml` | Active hooks (trailing-whitespace, end-of-file-fixer, check-yaml). |
 | `BUCK` | Top-level `python_library` + `python_binary` definitions; `src/aorta/**/*.py` glob (confirms no per-file BUCK changes needed for new modules). |

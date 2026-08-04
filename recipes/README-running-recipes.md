@@ -9,21 +9,27 @@ Throughout, `<recipe>` is the path to any recipe YAML, e.g.
 
 ## 1. Install
 
-In an environment that already has a working PyTorch (ROCm or CUDA) build:
+Install AORTA in the environment from which your launcher will invoke the CLI:
 
 ```bash
 pip install -e .
-aorta --version
+aorta --help
 ```
 
 Workloads register via the `aorta.workloads` entry point — no extra wiring.
+PyTorch is workload-specific: install it in this environment only when the
+selected workload runs here and requires it. A workload plugin that launches
+Docker may instead rely on PyTorch and other runtime dependencies in its image;
+follow that workload's instructions.
 
 ## 2. CPU smoke test (no GPU needed)
 
-Confirm the code is intact on any machine, including a laptop:
+Validate the CLI and a subprocess recipe on any machine, including a laptop:
 
 ```bash
-python -m pytest tests/ -q
+aorta sweep run \
+  --recipe recipes/probe/probe-template-bash.yaml \
+  --dry-run -- echo hi
 ```
 
 ## 3. Validate a recipe without running it

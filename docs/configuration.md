@@ -80,7 +80,12 @@ as silent corruption. Trial metrics record both the workload dtype and
 
 ### Workload-owned Docker launches
 
-The dispatcher records the effective controlled overlay in
+Docker is not a universal AORTA execution backend. The core dispatcher does
+not execute `docker run`; a Docker-aware workload plugin may own the container
+launch. Operators should follow that workload's guide and normally invoke the
+CLI from a Docker-capable host.
+
+For plugin authors, the dispatcher records the effective controlled overlay in
 `config["_aorta_trial_env"]`. The key is always present as a plain
 `dict[str, str]`, including `{}` when no controlled source contributed. A
 Docker-aware workload wrapper can forward it with the public helper:
@@ -96,10 +101,10 @@ argv = ["docker", "run", *docker_env_flags(trial_env), image, *inner_command]
 validates names and string values, and never reads `os.environ`. Treat values
 as potentially sensitive and do not log `_aorta_trial_env`.
 
-The dispatcher does not launch Docker. Workload wrappers continue to own image
-selection, mounts, devices, IPC/shared-memory settings, entrypoints, and inner
-commands. Top-level recipe `extra_env` is a matrix/triage feature; probe-mode
-recipes retain their separate environment-passthrough contract.
+The dispatcher does not launch Docker itself. Workload wrappers continue to
+own image selection, mounts, devices, IPC/shared-memory settings, entrypoints,
+and inner commands. Top-level recipe `extra_env` is a matrix/triage feature;
+probe-mode recipes retain their separate environment-passthrough contract.
 
 ## Configuration Reference
 
@@ -131,8 +136,6 @@ In-process runs must set import/process-static values before launching Python.
 
 ## Tuning Scenarios
 
-![GEMM Communication CU Contention](../analysis/figures/GEMM_Comm_CU_Contention.png)
-
 ### Kernel Chunking / Occupancy Capping
 
 Split large GEMMs or reduce active waves so the hardware scheduler has chances to issue communication kernels between compute launches.
@@ -144,10 +147,6 @@ Enqueue SDMA copies immediately after compute and inject a lightweight wait kern
 ### Stream Isolation and Priorities
 
 Ensure collectives execute on dedicated HIP streams created with `torch.cuda.Stream(priority=...)`. This prevents default-stream enqueueing and allows experimentation with priority hints.
-
-## Parameter Sweep
-
-![Parameter Sweep Results](param_sweep.png)
 
 ## Next Steps
 
