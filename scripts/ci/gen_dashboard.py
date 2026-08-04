@@ -262,7 +262,11 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 
     # Columns that would be uniformly empty are dropped rather than rendered as
     # a wall of "n/a" -- with one night of history that was three of five.
+    # Step-time and per-metric history are judged separately: a workload can
+    # report metrics.summary without a mean_step_time_ms, and gating its metric
+    # sparklines on step time would discard trends that do exist.
     show_trend = _has_trend([history[k] for k in keys])
+    show_metric_trend = _has_trend(list(mhist.values()))
     reason_texts = ["; ".join(e.get("reasons") or []) for e in latest_entries]
     distinct_reasons = sorted({r for r in reason_texts if r})
     # Collapse the notes column ONLY when every cell says the same thing, so it
@@ -325,7 +329,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                 )
             rows.append(f"<tr>{''.join(cells)}</tr>")
 
-            mrows = _metric_rows(k, e, mhist, show_trend)
+            mrows = _metric_rows(k, e, mhist, show_metric_trend)
             if mrows:
                 n_metrics = len((e.get("metrics") or {}).get("summary") or {})
                 recipe = e.get("recipe") or ""
@@ -344,7 +348,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                     f"<p class='prov'>{' · '.join(prov)}</p>"
                     f"<table class='inner'><thead><tr><th>metric</th>"
                     f"<th class='center'>policy</th><th class='num'>latest</th>"
-                    f"{'<th>trend</th>' if show_trend else ''}</tr></thead>"
+                    f"{'<th>trend</th>' if show_metric_trend else ''}</tr></thead>"
                     f"<tbody>{mrows}</tbody></table>"
                     f"</details></td></tr>"
                 )
@@ -414,7 +418,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         notices.append(
             f"<div class='notice'>Every cell reports: {_esc(shared_reason)}.</div>"
         )
-    if results and not show_trend:
+    if results and not (show_trend or show_metric_trend):
         notices.append(
             "<div class='notice muted-notice'>Trend charts need at least two nightly "
             "runs; they appear automatically once more history accumulates.</div>"

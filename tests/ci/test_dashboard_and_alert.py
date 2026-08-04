@@ -212,6 +212,26 @@ def test_dashboard_partial_record_does_not_claim_every_cell_recorded():
     assert "all 4 cells" not in html
 
 
+def test_dashboard_metric_trends_survive_a_missing_step_time():
+    # A cell can report metrics.summary with no mean_step_time_ms (harvest
+    # leaves it None). Its metric history is real, so the per-metric sparkline
+    # must still draw and the "needs two runs" notice must not claim otherwise,
+    # even though there is no step-time history to chart.
+    def doc(when, latency):
+        return _results(when,
+                        [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                          "metrics": {"mean_step_time_ms": None,
+                                      "summary": {"decode_latency_ms": latency}}}],
+                        total=1, record=1)
+
+    html = gen_dashboard.build_dashboard_html(
+        [doc("2026-07-30T00:00:00Z", 12.5), doc("2026-07-31T00:00:00Z", 13.5)])
+    assert "<svg" in html
+    assert "Trend charts need at least two nightly runs" not in html
+    # The step-time column still has nothing to chart, so it stays collapsed.
+    assert "trend (step ms)" not in html
+
+
 def test_dashboard_groups_cells_under_their_workload():
     entries = [
         {"entry": "llm_determinism", "cell": c, "verdict": "record",
