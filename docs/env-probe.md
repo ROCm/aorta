@@ -5,7 +5,7 @@ that cross-environment comparison becomes a `jq` diff instead of a
 multi-day investigation.
 
 For Buck2 workloads, including the required client/workload snapshot pair, see
-[Buck2 Env Probe](buck2-env-probe.md).
+[Buck2 Env-Probe Workflow](buck2-env-probe-workflow.md).
 
 The same code path is used three ways:
 

@@ -282,7 +282,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [`aorta agent`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
 | [`aorta bundle`](docs/probe/bundle.md) | Package sweep artifacts with recipe-driven redaction |
 | [Recipes](recipes/README.md) | Recipe schema and running recipes |
-| [Buck2](docs/buck2.md) | Build / run the AORTA CLI via Buck2 |
+| [Buck2 Build Reference](docs/buck2-build-reference.md) | Build / run the AORTA CLI via Buck2 |
 
 
 ## Repository Layout

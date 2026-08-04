@@ -1,6 +1,6 @@
-# AORTA Env Probe for Buck2 Workloads
+# Buck2 Env-Probe Workflow
 
-Canonical source: `docs/buck2-env-probe.md` in the selected AORTA revision.
+Canonical source: `docs/buck2-env-probe-workflow.md` in the selected AORTA revision.
 Refresh exported copies from this file rather than editing two copies.
 
 This guide is only for workloads built or launched with Buck2. The probe
