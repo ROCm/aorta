@@ -1,0 +1,26 @@
+{
+  "waitcheck_gemm": {
+    "overall_verdict": "warn",
+    "checks": {
+      "waitcheck": "warn"
+    },
+    "finding_shape": {
+      "waitcheck": "missing s_waitcnt"
+    }
+  },
+  "consan_clean": {
+    "overall_verdict": "pass",
+    "checks": {
+      "consan": "pass"
+    }
+  },
+  "consan_racy": {
+    "overall_verdict": "fail",
+    "checks": {
+      "consan": "fail"
+    },
+    "finding_shape": {
+      "consan": "conflict=true"
+    }
+  }
+}
