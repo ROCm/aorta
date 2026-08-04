@@ -79,13 +79,104 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from aorta.instrumentation.buck_invocation import BuckInvocationContext
+from aorta.instrumentation.env_knobs import (
+    CANONICAL_ENV_VARS,
+    ENV_KNOB_REGISTRY,  # noqa: F401 -- re-exported: this module is the import site
+    ENV_KNOBS_BY_NAME,  # noqa: F401 -- re-exported
+    EnvironmentKnob,  # noqa: F401 -- re-exported
+)
 
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.14"
+SCHEMA_VERSION = "1.15"
+# 1.14 -> 1.15 (recom-NaN follow-up: backend/Stream-K selectors, numeric-check
+# knobs, TorchRec identity fixes). 1.14 already shipped in main (PR #308), so
+# these changes to what a snapshot emits get their own version rather than
+# silently redefining 1.14:
+#   - ``CANONICAL_ENV_VARS`` is now GENERATED from the provenance manifest
+#     ``aorta.instrumentation.env_knobs.ENV_KNOB_REGISTRY``, which records each
+#     knob's library, consumer, category, source reference and reference build.
+#     Capture is comprehensive and classification is recorded rather than used
+#     as a filter: knobs whose only consumer is a print or a client-side report
+#     (HIPBLASLT_LOG_*, HIPBLASLT_BENCH_*, {HIPBLASLT,TENSILE}_ENABLE_MARKER,
+#     ROCBLAS_LAYER, ROCBLAS_LOG_*_PATH, ROCBLAS_VERBOSE_*_ERROR,
+#     ANALYTICAL_GEMM_DEBUG, ORIGAMI_LOG_FILE, TENSILE_DB,
+#     TENSILE_ADAPTIVE_GEMM_LOG, TENSILE_AUTO_GSU_ALGO,
+#     TENSILE_SOLUTION_SELECTION_TRACE, TENSILE_BENCHMARK) are CAPTURED with
+#     ``category="gemm_diagnostics"``,
+#     where earlier 1.15 drafts excluded them. Recording a variable never
+#     claims it affected execution -- it preserves the declared environment.
+#     ``scripts/audit_env_knobs.py`` uses exact NUL-terminated strings: this
+#     found five real non-prefixed Origami/GridBased getenv controls and rejects
+#     the ``ROCBLAS_API_BENCH -f ...`` command template as non-environment data.
+#   - More GEMM knobs: the coverage is decided by following each knob's
+#     upstream getenv site to a call site, so the whole
+#     behaviour-changing class is captured rather than a subset -- library and
+#     ExtOp loading (HIPBLASLT_EXT_OP_LIBRARY_PATH, HIPBLASLT_PRELOAD_KERNELS),
+#     backend routing (ROCBLAS_USE_HIPBLASLT_BATCHED,
+#     ROCBLAS_TENSILE_GEMM_OVERRIDE_PATH), the numeric path
+#     (ROCBLAS_INTERNAL_FORCE_VALU_FOR_DGEMM), allocator and workspace sizing
+#     (ROCBLAS_DEVICE_MEMORY_SIZE,
+#     ROCBLAS_INTERNAL_TRSM_REG_KERNEL_MEM_LIMIT), solution selection
+#     (TENSILE_SOLUTION_SELECTION_METHOD, TENSILE_EXPERIMENTAL_SELECTION,
+#     TENSILE_TAM_SELECTION_ENABLE, TENSILE_NAIVE_SEARCH, TENSILE_METRIC,
+#     TENSILE_PREDICTION_LIB, TENSILE_GRIDBASED_{KDTREE,BATCH_EXP}), all seven
+#     TENSILE_STREAMK_* knobs present in the library, workgroup mapping and
+#     StaggerU (TENSILE_FIXED_WGM{,XCC,XCCCHUNK},
+#     TENSILE_{DISABLE_STAGGERU,FIXED_STAGGERU,FIXED_STAGGERU_MAPPING,
+#     FIXED_STAGGERU_STRIDE_SHIFT}), and TENSILE_DB2, whose low bits gate
+#     skipKernelLaunch / skipInitKernelLaunch. TENSILE_STREAMK5_FORCE_MODE,
+#     TENSILE_STREAMK_TILES and TENSILE_STREAMK_SPLIT are absent from the
+#     1.4.0 .so and kept for forward-compatible diffing. Capture is independent
+#     of library support: an exported value is preserved verbatim; null means
+#     only that the process left the variable unset.
+#   - HIPBLASLT_CHECK_NUMERICS[_SCAN_EVERY/_SCAN_FROM/_SCAN_UNTIL/
+#     _STOP_ON_FIRST] and ROCBLAS_CHECK_NUMERICS are now CAPTURED. 1.14
+#     wrongly classed them as behaviour-neutral logging: they launch extra
+#     scan kernels and add synchronization, so they can hide or expose a
+#     timing race even when the final arithmetic is unchanged. The rocBLAS
+#     variant is the load-bearing one on the stock 1.4.0 image, where the
+#     repro's GEMMs fall back to rocBLAS.
+#   - ``torchrec.commit`` prefers the FULL 40-char build SHA read as TEXT from
+#     the installed ``torchrec/version.py`` (``git_version``, written by
+#     TorchRec's own setup.py). A release wheel such as "1.4.0" carries no SHA
+#     in its version string, so 1.14 reported null even though the SHA was
+#     sitting on disk. The version-string parse stays as the fallback, and now
+#     also recognises TorchRec's source-build BARE-hex local segment
+#     ("1.8.0a0+0123abc") -- guarded against setuptools_scm's dirty-tree
+#     marker "+d<YYYYMMDD>" (all valid hex) so the build DATE is never
+#     published as a commit SHA.
+#   - A torchrec that is importable but lacks dist-info metadata (Buck /
+#     PYTHONPATH link-tree) is resolved from ``version.py`` via
+#     ``importlib.util.find_spec`` instead of being reported absent; only an
+#     install with neither dist-info nor ``version.py`` records the
+#     present-but-version-unknown partial reason. PEP 420 NAMESPACE packages
+#     (a bare ``torchrec/`` directory anywhere on sys.path) are loader-less
+#     and count as absent, so they can no longer flip a clean snapshot to
+#     ``partial``.
+#   - New ``torchrec`` keys ``source_version`` / ``source_commit`` /
+#     ``distribution_version``: the import target's identity and the dist-info
+#     identity are recorded SEPARATELY, because a Buck/PYTHONPATH-over-pip
+#     process can resolve code from one install and metadata from another.
+#     ``package_version`` / ``commit`` remain the primary identity and now
+#     follow the IMPORT TARGET (what would actually run), with ``commit`` taken
+#     from the same install as the version it accompanies. A disagreement is
+#     reported in ``partial_reasons`` instead of being silently reconciled, and
+#     versions are compared after PEP 440 normalisation so ``1.4.0-1`` and
+#     ``1.4.0.post1`` are not a conflict. ``version.py`` is read THROUGH THE
+#     LOADER, so a Buck ``.par`` (zipimport) resolves its identity instead of
+#     reporting null; and only the package's own ``submodule_search_locations``
+#     are consulted, so a single-module ``torchrec.py`` can no longer pick up an
+#     unrelated sibling ``version.py``. ``find_spec`` and metadata errors are no
+#     longer folded into "absent" -- each records its own reason, and a readable
+#     ``version.py`` identity survives a metadata failure.
+#   - ``summary()`` now shows a ``torchrec:`` line, matching its sibling
+#     package blocks.
 # 1.13 -> 1.14 (recsys-stack package identity + recom-NaN env vars):
 #   - New top-level ``torchrec`` block ``{package_version, commit}``, always
 #     present and defaulted so older snapshots / direct constructors remain
@@ -482,118 +573,17 @@ NM_TIMEOUT_SEC = 30.0
 # GPU node look architecture-less, so give enumeration its own bounded budget.
 GPU_ARCH_TIMEOUT_SEC = 30.0
 
-# Canonical env var list -- explicit, NOT prefix matching. Workload
-# config (AMP_DTYPE, MODEL_DTYPE, SHAMPOO_PRECONDITIONER_DTYPE) belongs
-# in the trial result emitted by ``aorta run`` (Task B1), so it is
-# deliberately absent here. Asserted by tests.
-CANONICAL_ENV_VARS: tuple[str, ...] = (
-    # GPU scoping (most common cause of "you see N GPUs, I see M")
-    "HIP_VISIBLE_DEVICES",
-    "ROCR_VISIBLE_DEVICES",
-    # HSA / runtime
-    "HSA_XNACK",
-    "HSA_KERNARG_POOL_SIZE",
-    "HSA_NO_SCRATCH_RECLAIM",
-    "HSA_OVERRIDE_GFX_VERSION",  # forces a different gfx target than the silicon
-    "HSA_TOOLS_DISABLE_REGISTER",  # disables HSA tool (profiler/sanitizer) registration
-    # GPU queue / codegen / build target
-    "GPU_MAX_HW_QUEUES",
-    "AMDGCN_USE_BUFFER_OPS",
-    "DISABLE_TF32",
-    "PYTORCH_ROCM_ARCH",
-    "HIP_LAUNCH_BLOCKING",  # forces synchronous launches; trace-debug leftover
-    # RCCL / NCCL
-    "NCCL_MAX_NCHANNELS",
-    "NCCL_P2P_LEVEL",
-    "NCCL_IB_HCA",
-    "NCCL_SOCKET_IFNAME",
-    "RCCL_MSCCL_ENABLE",
-    # AINIC (AMD-Pensando RoCE NIC) net-plugin + fabric tuning.
-    # Captured so an our-env vs customer-env diff surfaces RoCE/QoS
-    # mismatches (GID index, traffic class, DCQCN-adjacent flags) and
-    # which net plugin RCCL loads. Absent on non-AINIC nodes -> None.
-    "RCCL_AINIC_ROCE",
-    "NCCL_NET_PLUGIN",
-    "NCCL_NET",
-    "RCCL_CTS_OFFLOAD_ENABLED",
-    "NCCL_IB_GID_INDEX",
-    "NCCL_IB_ROCE_VERSION_NUM",
-    "NCCL_IB_TC",
-    "NCCL_IB_FIFO_TC",
-    "NCCL_GDR_FLUSH_DISABLE",
-    "NCCL_GDRCOPY_ENABLE",
-    "NCCL_IB_USE_INLINE",
-    "NCCL_IB_PCI_RELAXED_ORDERING",
-    "NCCL_IB_QPS_PER_CONNECTION",
-    "NCCL_PXN_DISABLE",
-    "NCCL_IGNORE_CPU_AFFINITY",
-    "NCCL_NET_OPTIONAL_RECV_COMPLETION",
-    "RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING",
-    "NCCL_IB_TIMEOUT",
-    "NCCL_IB_SL",
-    "NCCL_IB_SPLIT_DATA_ON_QPS",
-    "NCCL_DMABUF_ENABLE",
-    "NCCL_CUMEM_ENABLE",
-    "IONIC_LOCKFREE",
-    "RCCL_DISABLE_RAIL_TREES",
-    "RCCL_LL128_FORCE_ENABLE",
-    "NCCL_WORK_FIFO_BYTES",
-    # gfx950 (MI350/MI355X) fence-ordering debug knob from the
-    # silent-data-corruption investigation. Captured so a per-rank env
-    # diff catches a launcher that exports the override on rank 0 but
-    # not the rest -- a half-applied "fix" the diff would otherwise miss.
-    "RCCL_GFX9_CHEAP_FENCE_OFF",
-    # FBGEMM
-    "FBGEMM_NO_JK",
-    "FBGEMM_TBE_V2",
-    "FBGEMM_TBE_ROCM_HIP_BACKWARD_KERNEL",
-    "FBGEMM_BOUNDS_CHECK_INDICES_V2",
-    # MIOpen kernel DB + selection-mode
-    "MIOPEN_SYSTEM_DB_PATH",
-    "MIOPEN_USER_DB_PATH",
-    "MIOPEN_DEBUG_DISABLE_FIND_DB",
-    "MIOPEN_FIND_MODE",  # NORMAL/FAST/HYBRID/DYNAMIC -> different conv kernels
-    # SDPA / Flash Attention backend selection (CK vs AOTriton).
-    # Note: USE_ROCM_CK_SDPA / USE_ROCM_CK_GEMM are NOT here -- they're
-    # build-time cmake flags consumed when the PyTorch wheel is built,
-    # not runtime env vars. Captured under
-    # composable_kernel.{pytorch_use_ck_sdpa,pytorch_use_ck_gemm}.
-    "TORCH_ROCM_FA_PREFER_CK",
-    "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL",
-    # GEMM backend preference + hipBLASLt autotune pinning
-    "TORCH_BLAS_PREFER_HIPBLASLT",
-    "TORCH_HIPBLASLT_TUNING_FILE",
-    "TORCH_HIPBLASLT_TUNING_OVERRIDE_FILE",
-    # PyTorch / inductor
-    "TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE",
-    "PYTORCH_CUDA_ALLOC_CONF",
-    # Dynamic loader -- which shared object actually loads. LD_LIBRARY_PATH
-    # can silently point hipBLASLt/rocBLAS/RCCL at a different .so than the
-    # installed one ("the version running wasn't the version we thought" --
-    # the failure this tool exists to catch). Verbose and not ROCm-specific,
-    # but load-bearing for a library-identity diff.
-    "LD_LIBRARY_PATH",
-    # hipBLASLt / rocBLAS / Tensile GEMM numeric + kernel-path selection.
-    # These flip WHICH library and WHICH kernels actually run the GEMMs, and
-    # in the xf32/TF32 case the numeric path itself -- the load-bearing knobs
-    # in the MI350X recom-repro NaN escalation. All verified present in the
-    # libhipblaslt.so / librocblas.so string tables. Logging-only knobs
-    # (HIPBLASLT_LOG_*, ROCBLAS_LAYER, TENSILE_DB, *_CHECK_NUMERICS) are
-    # deliberately excluded: they don't change the computed result.
-    "HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32",  # forces xf32/TF32 emulation compute path
-    "HIPBLASLT_TENSILE_LIBPATH",  # overrides the Tensile kernel-DB dir (bypasses tensile_catalog)
-    "HIPBLASLT_USE_ROCROLLER",  # switches to the rocRoller kernel generator
-    "HIPBLASLT_ROCROLLER_NO_CUSTOM_KERNEL",  # rocRoller sub-knob (disables custom kernels)
-    "HIPBLASLT_TUNING_OVERRIDE_FILE",  # native pin (distinct from TORCH_HIPBLASLT_TUNING_OVERRIDE_FILE)
-    "ROCBLAS_USE_HIPBLASLT",  # routes rocBLAS GEMMs through hipBLASLt vs Tensile
-    "ROCBLAS_TENSILE_LIBPATH",  # overrides rocBLAS's Tensile kernel-DB dir
-    "ROCBLAS_DEFAULT_ATOMICS_MODE",  # atomic reductions on/off -> numeric determinism
-    "ROCBLAS_INTERNAL_FP16_ALT_IMPL",  # alternate fp16 implementation
-    "ROCBLAS_INTERNAL_FP16_ALT_IMPL_RNZ",  # alternate fp16 impl, round-nearest-zero variant
-    "ROCBLAS_STREAM_ORDER_ALLOC",  # stream-ordered allocation (interacts w/ cross-stream reuse)
-    "TENSILE_SOLUTION_INDEX",  # pins a specific Tensile solution (forces a kernel)
-)
-
+# Canonical env var list -- explicit, NOT prefix matching, and GENERATED from
+# the provenance manifest in ``aorta.instrumentation.env_knobs``. Add a knob by
+# adding one ``EnvironmentKnob`` there: the captured set, its classification and
+# its provenance then cannot drift apart, and
+# ``scripts/audit_env_knobs.py`` can check the set against the installed
+# libraries. Re-exported here because this module has always been the import
+# site for it.
+#
+# Workload config (AMP_DTYPE, MODEL_DTYPE, SHAMPOO_PRECONDITIONER_DTYPE) belongs
+# in the trial result emitted by ``aorta run`` (Task B1), so it is deliberately
+# absent from the manifest. Asserted by tests.
 # Filesystem locations -- collected here so tests can monkeypatch them.
 # Each constant is paired with a short note on the source so future
 # editors don't have to rediscover where the data comes from.
@@ -1171,10 +1161,9 @@ class EnvSnapshot:
     # sharded-embedding / training-pipeline library that sits ON TOP of fbgemm
     # (which we already capture) -- and it is the core library of the MI350X
     # recom-repro workload, so its version is load-bearing for that escalation.
-    # Same shape as ``triton`` (``{package_version, commit}``). Defaulted so
-    # pre-1.14 snapshots round-trip via ``from_dict()`` and older direct
-    # constructors don't raise. Populated by ``_capture_torchrec()``.
-    torchrec: dict = field(default_factory=lambda: {"package_version": None, "commit": None})
+    # Defaulted so pre-1.14 snapshots round-trip via ``from_dict()`` and older
+    # direct constructors don't raise. Populated by ``_capture_torchrec()``.
+    torchrec: dict = field(default_factory=lambda: _empty_torchrec())
 
     # Curated emit order for ``to_dict()`` / ``env.json`` (JSON is written
     # sort_keys=False, so THIS is the artifact's key order). Grouped so
@@ -1280,9 +1269,12 @@ class EnvSnapshot:
           Buck-vs-A1 merge").
         * ``buck_invocation`` -> ``status="not_requested"`` (added in
           schema 1.13; older producers did not record invocation context).
-        * ``torchrec`` -> ``{"package_version": None, "commit": None}``
-          (added in schema 1.14; older snapshots predate the recsys-stack
-          package block).
+        * ``torchrec`` -> ``_empty_torchrec()`` (added in schema 1.14; older
+          snapshots predate the recsys-stack package block). A torchrec block
+          that IS present is merged over that default, so a 1.14 snapshot --
+          which carries only ``package_version`` / ``commit`` -- gains the
+          1.15 ``source_*`` / ``distribution_version`` keys as ``null``
+          instead of round-tripping into a short dict.
 
         Strictly-required older fields (the schema-1.0/1.1 set) are NOT
         defaulted -- a missing ``rocm`` or ``hipblaslt`` key still
@@ -1304,7 +1296,7 @@ class EnvSnapshot:
         kwargs.setdefault("container_detected", False)
         kwargs.setdefault("execution_context", _empty_execution_context())
         kwargs.setdefault("probe_namespace", None)
-        kwargs.setdefault("torchrec", {"package_version": None, "commit": None})
+        kwargs["torchrec"] = {**_empty_torchrec(), **(kwargs.get("torchrec") or {})}
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -1333,6 +1325,7 @@ class EnvSnapshot:
         tensile = self.tensile or {}
         triton = self.triton or {}
         fbgemm = self.fbgemm or {}
+        torchrec = self.torchrec or {}
         aiter = self.aiter or {}
         aotriton = self.aotriton or {}
         miopen = self.miopen or {}
@@ -1381,6 +1374,19 @@ class EnvSnapshot:
             obvious without needing to read the schema.
             """
             return version if version else "(not installed)"
+
+        def torchrec_state(block: dict[str, Any]) -> str:
+            version = block.get("package_version")
+            commit = block.get("commit")
+            if version:
+                return f"{version}{(' commit=' + commit) if commit else ''}"
+            source_commit = block.get("source_commit")
+            if source_commit:
+                return f"present (version unknown) source_commit={source_commit}"
+            distribution_version = block.get("distribution_version")
+            if distribution_version:
+                return f"primary unknown; dist={distribution_version}"
+            return "(not installed)"
 
         # Static kernel-catalog "recipe book" fingerprints (schema 1.9).
         # Surface the per-menu content hash so the brief reflects the
@@ -1482,6 +1488,9 @@ class EnvSnapshot:
                 f"USE_FBGEMM_GENAI={fbgemm.get('pytorch_use_fbgemm_genai')}  "
                 f"[fbgemm_gpu pip pkg: {pkg_state(fbgemm.get('package_version'))}; "
                 f"separate from torch's vendored copy]",
+                # TorchRec sits on top of fbgemm and is the core library of
+                # recsys workloads; absent on non-recsys stacks (normal).
+                f"  torchrec:  {torchrec_state(torchrec)}",
                 # AITER (AMD's CK-based inference kernel lib) is
                 # optional -- some inference stacks pull it in, training
                 # / stock inference don't. PyPI dist name is `amd_aiter`;
@@ -2451,7 +2460,7 @@ def _disaster_snapshot(
             "pytorch_use_fbgemm": None,
             "pytorch_use_fbgemm_genai": None,
         },
-        torchrec={"package_version": None, "commit": None},
+        torchrec=_empty_torchrec(),
         aiter={
             "package_version": None,
             "package_dist_name": None,
@@ -3799,8 +3808,20 @@ def _read_container_id() -> str | None:
 def _capture_env_vars() -> dict[str, str | None]:
     """Capture canonical env vars (explicit list, not prefix matching).
 
-    Individual ``None`` values are the documented contract (env var unset)
-    and DO NOT trigger ``partial=True``.
+    This is ``os.environ.get`` over ``CANONICAL_ENV_VARS`` and nothing more, so
+    each value is the raw string this process exported, or ``None``.
+
+    ``None`` means **unset in this process**. It does NOT mean the installed
+    library ignores the variable, and a recorded value does NOT mean the library
+    supported it or acted on it: an exported knob is preserved even when the
+    local library has never heard of it (that is what makes the list portable
+    across ROCm releases, which ship different subsets). What this block
+    records is declared process configuration -- see
+    ``aorta.instrumentation.env_knobs`` for each knob's provenance and
+    classification.
+
+    Individual ``None`` values are the documented contract and DO NOT trigger
+    ``partial=True``.
     """
     return {name: os.environ.get(name) for name in CANONICAL_ENV_VARS}
 
@@ -3943,6 +3964,15 @@ _PACKAGE_COMMIT_ATTRS: tuple[str, ...] = (
 # non-SHA attr like ``"unknown"`` / ``"dirty"`` / a tag never leaks into
 # the snapshot's ``commit`` field.
 _COMMIT_SHA_RE = re.compile(r"[0-9a-f]{7,40}", re.IGNORECASE)
+
+# Companion guard for the TorchRec bare-hex local segment (see
+# ``_torchrec_commit``, which validates the candidate with ``_COMMIT_SHA_RE``
+# above): setuptools_scm marks a DIRTY working tree with ``+d<YYYYMMDD>``
+# (e.g. "1.4.0+d20240101"), and every character of that marker is valid hex,
+# so without this guard the build DATE would be published as a commit SHA.
+# Matches with or without the ``d`` lead-in, so a bare "20240101" is rejected
+# too.
+_SCM_DIRTY_DATE_RE = re.compile(r"d?\d{8}")
 
 
 def _extract_commit_from_version(version: str | None) -> str | None:
@@ -5222,42 +5252,631 @@ def _capture_triton(reasons: list[str]) -> dict[str, str | None]:
     }
 
 
+def _torchrec_commit(version: str | None) -> str | None:
+    """Best-effort commit SHA from a TorchRec version string.
+
+    First the shared setuptools_scm / fork parser
+    (``+g<sha>`` / ``.git<sha>``), then TorchRec's SOURCE-build form, whose
+    PEP 440 local segment is a BARE hex SHA with no ``g`` lead-in --
+    e.g. ``"1.8.0a0+0123abc"`` -> ``"0123abc"``. The bare-hex fallback is
+    scoped to torchrec (NOT folded into the shared
+    ``_extract_commit_from_version``) so it can never false-match a plain
+    local segment on triton / fbgemm / torch. Requires 7-40 hex chars, so
+    ``+cpu`` / ``+fb`` / ``+rocm7.2.1`` never match; a release like
+    ``"1.4.0"`` (no local segment) returns ``None``.
+
+    Bare hex needs one more guard: setuptools_scm marks a DIRTY working tree
+    with ``+d<YYYYMMDD>`` (e.g. ``"1.4.0+d20240101"``), and every character of
+    that marker is valid hex -- a naive bare-hex match would publish the build
+    DATE as a commit SHA. A wrong SHA in a customer-facing identity block is
+    worse than no SHA (it manufactures phantom "commit changed" diffs), so the
+    date form is rejected explicitly, with or without the ``d`` lead-in. The
+    cost is that an all-numeric 8-digit real SHA is reported as ``None``;
+    that is the deliberate conservative direction.
+    """
+    commit = _extract_commit_from_version(version)
+    if commit:
+        return commit
+    if version and "+" in version:
+        # Local version segment may carry dot-separated extra tags
+        # (e.g. "0123abc.d20240101"); the SHA is the first component.
+        local = version.split("+", 1)[1].split(".")[0]
+        if _COMMIT_SHA_RE.fullmatch(local) and not _SCM_DIRTY_DATE_RE.fullmatch(local):
+            return local.lower()
+    return None
+
+
+# TorchRec's setup.py generates ``torchrec/version.py`` next to
+# ``torchrec/__init__.py`` at build time; see ``_torchrec_source_identity``.
+_TORCHREC_VERSION_PY_VERSION_RE = re.compile(
+    r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", re.MULTILINE
+)
+_TORCHREC_VERSION_PY_COMMIT_RE = re.compile(r"^git_version\s*=\s*['\"]([^'\"]+)['\"]", re.MULTILINE)
+
+# Approximation of the PEP 440 grammar, used ONLY to decide whether two version
+# strings name the same distribution -- see ``_same_distribution_version``.
+_PEP440_RE = re.compile(
+    r"""^\s*v?
+    (?:(?P<epoch>\d+)!)?
+    (?P<release>\d+(?:\.\d+)*)
+    (?:[-_.]?(?P<pre_l>a|b|c|rc|alpha|beta|pre|preview)[-_.]?(?P<pre_n>\d+)?)?
+    (?:-(?P<post_implicit>\d+)|[-_.]?(?P<post_l>post|rev|r)[-_.]?(?P<post_n>\d+)?)?
+    (?:[-_.]?(?P<dev_l>dev)[-_.]?(?P<dev_n>\d+)?)?
+    (?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?
+    \s*$""",
+    re.VERBOSE | re.IGNORECASE,
+)
+_PRE_ALIASES = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc", "preview": "rc"}
+
+
+def _version_key(value: str) -> tuple[Any, ...] | None:
+    """Comparable key for a PEP 440 version, or ``None`` if it does not parse.
+
+    Only the equality-relevant normalisations are implemented: separator and
+    spelling variants (``1.4.0-1`` == ``1.4.0.post1``, ``alpha`` == ``a``,
+    ``rev`` == ``post``), case, a leading ``v``, and zero padding of the release
+    segment (``1.4`` == ``1.4.0``, which is PEP 440's padding rule). The local
+    segment is compared case-insensitively with separators normalised.
+    """
+    match = _PEP440_RE.match(value)
+    if match is None:
+        return None
+    try:
+        release = tuple(int(part) for part in match.group("release").split("."))
+        while len(release) > 1 and release[-1] == 0:  # 1.4.0 == 1.4
+            release = release[:-1]
+        pre_l = match.group("pre_l")
+        pre: tuple[str, int] | None = None
+        if pre_l:
+            pre_l = pre_l.lower()
+            pre = (_PRE_ALIASES.get(pre_l, pre_l), int(match.group("pre_n") or 0))
+        if match.group("post_implicit") is not None:
+            post: int | None = int(match.group("post_implicit"))
+        elif match.group("post_l"):
+            post = int(match.group("post_n") or 0)
+        else:
+            post = None
+        dev = int(match.group("dev_n") or 0) if match.group("dev_l") else None
+        local = match.group("local")
+        local_key = (
+            tuple(
+                int(part) if part.isdigit() else part
+                for part in re.split(r"[-_.]", local.lower())
+            )
+            if local
+            else ()
+        )
+        return (int(match.group("epoch") or 0), release, pre, post, dev, local_key)
+    except (ValueError, OverflowError):
+        # Python 3.11+ limits decimal-to-int conversion length. A malformed
+        # metadata version with thousands of digits used to escape the
+        # fail-soft TorchRec probe and force collect_env into a disaster
+        # snapshot. Parsing a version is never allowed to raise.
+        return None
+
+
+def _same_distribution_version(left: str, right: str) -> bool:
+    """Do two version strings name the same distribution?
+
+    Deliberately fail-open into "different": when either side does not parse we
+    fall back to a raw string comparison. The caller reports a *conflict* rather
+    than dropping data, so an incomplete normaliser can only ever produce an
+    extra ``partial_reasons`` entry -- never a wrong or silently discarded
+    identity.
+    """
+    if left == right:
+        return True
+    left_key, right_key = _version_key(left), _version_key(right)
+    if left_key is None or right_key is None:
+        return False
+    return left_key == right_key
+
+
+def _package_resource_text(spec: Any, root: str, filename: str) -> str | None:
+    """Read a file belonging to *spec*'s package, THROUGH the loader.
+
+    The loader, not the filesystem, is what makes this work for the deployment
+    the field cares about: in a Buck ``.par`` (zipimport) the package "directory"
+    is a path INSIDE an archive, so ``open()`` on it fails while
+    ``zipimporter.get_data()`` returns the member. Falling back to a filesystem
+    read keeps loaders that implement no ``get_data`` working.
+    """
+    path = os.path.join(root, filename)
+    try:
+        loader = getattr(spec, "loader", None)
+        get_data = getattr(loader, "get_data", None)
+    except Exception as exc:  # noqa: BLE001 -- malformed third-party loader
+        log.debug("loader get_data lookup for %s failed: %s", path, exc)
+        # The package may still be an ordinary on-disk layout. Preserve the
+        # documented filesystem fallback instead of discarding readable data.
+        get_data = None
+    if get_data is not None:
+        try:
+            raw = get_data(path)
+            if raw is not None:
+                return (
+                    raw.decode("utf-8", "replace")
+                    if isinstance(raw, bytes)
+                    else str(raw)
+                )
+        except Exception as exc:  # noqa: BLE001 -- absent member / unreadable archive
+            log.debug("loader get_data(%s) failed: %s", path, exc)
+    return _read_text_file(Path(path))
+
+
+def _torchrec_source_identity(spec: Any) -> tuple[str | None, str | None]:
+    """``(__version__, git_version)`` of the torchrec Python will actually import.
+
+    TorchRec's ``setup.py`` (``_export_version``) writes this file at build
+    time beside ``torchrec/__init__.py``::
+
+        __version__ = '1.4.0'
+        git_version = 'da377efc42e8b8450e06ac72af63ac9d3fcd48dd'
+
+    It is the only place a torchrec install keeps its FULL 40-char build SHA.
+    The version string can carry at most ``sha[:7]`` (setup.py truncates), and
+    release builds drop the SHA from the version string altogether -- which is
+    why a plain ``1.4.0`` wheel looks commit-less to a version-string parser
+    while this file still names the source it was built from.
+
+    Read as text through the loader and matched with a regex -- never imported,
+    never ``exec``-ed -- so the never-touch-``torch.cuda`` contract described in
+    ``_capture_torchrec`` still holds. The ``git_version`` value goes through
+    ``_commit_from_attr_value``, which rejects the literal ``'Unknown'`` that
+    setup.py writes when the build tree is not a git checkout.
+
+    Only ``submodule_search_locations`` -- the package's own search path -- is
+    consulted. A single-module ``torchrec.py`` has none, and it must NOT fall
+    back to ``dirname(origin)``: that directory belongs to whatever else sits
+    beside the module, so a ``version.py`` found there would publish a foreign
+    project's version and SHA as torchrec's.
+    """
+    roots = [str(p) for p in getattr(spec, "submodule_search_locations", None) or []]
+    for root in roots:
+        text = _package_resource_text(spec, root, "version.py")
+        if text is None:
+            continue
+        version_match = _TORCHREC_VERSION_PY_VERSION_RE.search(text)
+        commit_match = _TORCHREC_VERSION_PY_COMMIT_RE.search(text)
+        version = version_match.group(1) if version_match else None
+        # ``__version__`` gets the same sentinel treatment as its ``git_version``
+        # sibling. setup.py writes the literal ``'Unknown'`` for a non-git build
+        # tree, and publishing that verbatim made ``package_version: "Unknown"``
+        # the primary identity of an otherwise clean, non-partial snapshot --
+        # which a snapshot diff then reads as a version.
+        if version is not None and _version_key(version) is None:
+            version = None
+        return (
+            version,
+            _commit_from_attr_value(commit_match.group(1)) if commit_match else None,
+        )
+    return (None, None)
+
+
+def _empty_torchrec() -> dict[str, str | None]:
+    """Default/backfill shape for the ``torchrec`` block.
+
+    ``package_version`` / ``commit`` are the primary identity (schema 1.14);
+    the ``source_*`` / ``distribution_version`` trio was added in 1.15 so the
+    two things that can disagree are each visible on their own.
+    """
+
+    return {
+        "package_version": None,
+        "commit": None,
+        "source_version": None,
+        "source_commit": None,
+        "distribution_version": None,
+    }
+
+
+def _is_namespace_spec(spec: Any) -> bool:
+    """Recognize a PEP 420 namespace before OR after it has been imported.
+
+    Before import CPython exposes ``loader=None``; after import the same package
+    carries a namespace loader. Require one of those two loader states as well
+    as ``origin=None`` and package search locations: custom/Buck package
+    loaders may legitimately have no origin and must not be treated as absent.
+
+    Both loader spellings are accepted. CPython renamed ``_NamespaceLoader`` to
+    ``NamespaceLoader`` in 3.11 (bpo-35673), keeping the old name only as an
+    alias, so matching the new name alone leaves this guard dead on 3.10 -- the
+    declared minimum, the CI container's interpreter, and a cpu-tests matrix
+    entry. There an imported namespace portion would be mistaken for a real
+    import target and its dist-info promoted to the primary identity.
+    """
+
+    if spec is None:
+        return False
+    try:
+        loader = getattr(spec, "loader", None)
+        return (
+            getattr(spec, "origin", None) is None
+            and getattr(spec, "submodule_search_locations", None) is not None
+            and (loader is None or type(loader).__name__ in ("NamespaceLoader", "_NamespaceLoader"))
+        )
+    except Exception:  # noqa: BLE001 -- malformed third-party spec, handled later
+        return False
+
+
+def _torchrec_distributions(importlib_metadata: Any) -> list[Any]:
+    """Every installed distribution whose normalized name is ``torchrec``."""
+    found: list[Any] = []
+    try:
+        distributions = importlib_metadata.distributions()
+    except Exception as exc:  # noqa: BLE001 -- enumeration is best-effort
+        log.debug("torchrec distribution enumeration failed: %s", exc)
+        return found
+    for distribution in distributions:
+        try:
+            name = (
+                (distribution.metadata["Name"] or "")
+                .strip()
+                .lower()
+                .replace("_", "-")
+            )
+        except Exception:  # noqa: BLE001 -- unrelated malformed METADATA
+            continue
+        if name == "torchrec":
+            found.append(distribution)
+    return found
+
+
+def _torchrec_distribution_owns_spec(
+    importlib_metadata: Any,
+    spec: Any,
+    distribution_version: str,
+) -> bool:
+    """Whether TorchRec dist-info demonstrably owns the resolved import target.
+
+    Version equality alone cannot bind metadata to code when multiple sys.path
+    roots contain TorchRec. ``RECORD``/``Distribution.files`` can: promote
+    metadata only when the same distribution lists the module origin or a file
+    inside the resolved package directory.
+
+    Two layouts need more than a plain ``RECORD`` walk:
+
+    * **zipimport.** Inside a ``.par`` the located entry is a
+      ``zipfile._path.Path``, which has no ``__fspath__``; building a
+      ``pathlib.Path`` from it raises ``TypeError`` and the whole check used to
+      report "cannot verify" for an archive that demonstrably holds both the
+      metadata and the code. Compare on the string form, which zip paths render
+      as ``<archive>/<member>``.
+    * **PEP 660 editable installs.** Their ``RECORD`` lists only the ``.pth``
+      and the generated finder module, never the source files, so a RECORD walk
+      can never succeed. ``direct_url.json`` -- which IS in the RECORD -- names
+      the source tree the finder points at.
+    """
+
+    # Keep lexical paths for RECORD ownership. Resolving the located file
+    # followed its final symlink, so metadata could list an arbitrary external
+    # link whose target happened to be torchrec's __init__.py and be accepted
+    # as the owner. Lexical comparison still accepts links installed under the
+    # package root and keeps zip-member paths aligned for a symlinked .par.
+    #
+    # Guarded like the per-candidate loop below: a spec whose origin is not a
+    # str/PathLike raises TypeError here, and ``absolute()`` on a RELATIVE
+    # origin calls os.getcwd(), which raises when the cwd has been removed.
+    # Uncaught, either one leaves _capture_torchrec entirely and collect_env's
+    # never-raises gate answers with a disaster snapshot -- trading the whole
+    # environment capture for one unverifiable TorchRec install.
+    try:
+        origin = getattr(spec, "origin", None)
+        origin_path = Path(origin).absolute() if origin else None
+        roots = [
+            Path(root).absolute()
+            for root in (getattr(spec, "submodule_search_locations", None) or ())
+        ]
+    except Exception as exc:  # noqa: BLE001 -- unusable spec means "cannot verify"
+        log.debug("torchrec spec paths unusable for ownership: %s", exc)
+        return False
+    # Inspect every metadata candidate that reports the selected equivalent
+    # version. ``version()`` and ``distribution()`` both return the first
+    # match, so an unowned egg-info before an owning dist-info produced a false
+    # "ownership cannot be verified" result.
+    for distribution in _torchrec_distributions(importlib_metadata):
+        try:
+            if not _same_distribution_version(
+                distribution.version, distribution_version
+            ):
+                continue
+            if _editable_source_tree_owns_target(distribution, origin_path, roots):
+                return True
+            files = distribution.files
+            if not files:
+                continue
+            for entry in files:
+                located = distribution.locate_file(entry)
+                try:
+                    located_path = Path(located).absolute()
+                except TypeError:
+                    # Non-filesystem provider (zipimport). ``str`` still yields
+                    # a comparable ``<archive>/<member>`` path.
+                    located_path = Path(str(located)).absolute()
+                if origin_path is not None and located_path == origin_path:
+                    return True
+                if any(
+                    located_path == root or root in located_path.parents
+                    for root in roots
+                ):
+                    return True
+        except Exception as exc:  # noqa: BLE001 -- one bad candidate is not fatal
+            log.debug("torchrec distribution ownership candidate failed: %s", exc)
+    return False
+
+
+def _torchrec_disagreeing_distribution_versions(importlib_metadata: Any) -> list[str]:
+    """Distinct versions claimed by installed ``torchrec`` distributions.
+
+    Returns ``[]`` unless the metadata actually disagrees. Several metadata
+    directories for the SAME version are routine and unambiguous -- an editable
+    install leaves a ``*.egg-info`` in the source tree beside the
+    ``*.dist-info`` in site-packages, and both are on ``sys.path``. What matters
+    is whether the reported answer depends on directory order, which it only
+    does when the versions differ. Comparison is PEP 440-aware so ``1.4`` and
+    ``1.4.0`` do not read as a conflict.
+    """
+    versions: list[str] = []
+    try:
+        for dist in _torchrec_distributions(importlib_metadata):
+            version = dist.version
+            if not any(_same_distribution_version(version, seen) for seen in versions):
+                versions.append(version)
+    except Exception as exc:  # noqa: BLE001 -- enumeration is best-effort
+        log.debug("torchrec distribution enumeration failed: %s", exc)
+        return []
+    return sorted(versions) if len(versions) > 1 else []
+
+
+def _editable_source_tree_owns_target(
+    distribution: Any,
+    origin_path: Path | None,
+    roots: list[Path],
+) -> bool:
+    """Whether the distribution's ``direct_url.json`` names the import target's tree."""
+    try:
+        raw = distribution.read_text("direct_url.json")
+        if not raw:
+            return False
+        direct_url = json.loads(raw)
+        if not isinstance(direct_url, dict):
+            return False
+        if not (direct_url.get("dir_info") or {}).get("editable"):
+            return False
+        url = direct_url.get("url")
+        if not isinstance(url, str):
+            return False
+        parsed = urlparse(url)
+        if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+            # Discarding the authority made
+            # ``file://remote.example/tmp/src`` indistinguishable from the
+            # local ``file:///tmp/src`` and let foreign metadata claim a local
+            # import target.
+            return False
+        source_tree = Path(url2pathname(parsed.path)).resolve()
+    except Exception as exc:  # noqa: BLE001 -- provenance is best-effort
+        log.debug("torchrec direct_url lookup failed: %s", exc)
+        return False
+    candidates = [p for p in (origin_path, *roots) if p is not None]
+    return any(
+        candidate == source_tree or source_tree in candidate.parents
+        for candidate in candidates
+    )
+
+
 def _capture_torchrec(reasons: list[str]) -> dict[str, str | None]:
-    """Capture TorchRec package version (+ best-effort commit from version).
+    """Capture TorchRec package version + best-effort build commit.
 
     TorchRec is the sharded-embedding / training-pipeline library layered on
     top of fbgemm (already captured separately) and is the core library of
     the MI350X recom-repro workload, so pinning its version matters for that
     escalation.
 
-    Deliberately reads the version from DISTRIBUTION METADATA
-    (``importlib.metadata.version``) rather than importing torchrec the way
-    ``_capture_triton`` imports triton: importing torchrec eagerly pulls in
-    torch + fbgemm and can touch CUDA on import, which would violate the
-    probe's "no GPU compute" guarantee. Metadata lookup reads
-    ``*.dist-info`` off disk with no import side effects.
+    Deliberately uses ``find_spec`` plus distribution metadata rather than
+    importing torchrec the way ``_capture_triton`` imports triton: importing
+    torchrec eagerly pulls in torch + fbgemm and calls
+    ``torch.cuda.is_available()`` once on import (measured on ROCm 7.0.2).
+    The probe holds the stricter contract that it never calls into
+    ``torch.cuda`` at all; both identity lookups are side-effect-free.
 
-    Fail-soft like the other optional-package probes: a *missing* torchrec is
-    the documented common case (most non-recsys installs lack it), so it
-    records NO partial reason -- mirroring the ``suppress_missing`` contract
-    used for fbgemm_gpu / aiter. Only an unexpected metadata error records a
-    reason. Commit is parsed from the version string (pure string work, no
-    import); release wheels (e.g. ``"1.4.0"``) carry no SHA -> ``None``.
+    TWO IDENTITIES, RECORDED SEPARATELY (schema 1.15). ``find_spec`` and
+    ``importlib.metadata`` answer different questions, and in a Buck /
+    PYTHONPATH-over-pip deployment they can disagree:
+
+    * ``source_version`` / ``source_commit`` describe the code Python would
+      actually import -- read from ``version.py`` inside the resolved import
+      target (see ``_torchrec_source_identity``).
+    * ``distribution_version`` is what a ``*.dist-info`` on ``sys.path``
+      claims, which may belong to a DIFFERENT copy of torchrec.
+    * ``package_version`` / ``commit`` stay the primary identity for
+      consumers that want one answer. They follow the IMPORT TARGET, because
+      a snapshot should describe what would run; ``commit`` then comes from
+      the same install its version did, never from the other one's metadata.
+
+    When the two disagree, the conflict is recorded in ``partial_reasons``
+    rather than smoothed over -- an operator diffing two snapshots needs to
+    know the process had two torchrecs on its path. Versions are compared
+    after PEP 440 normalisation (``_same_distribution_version``) so
+    equivalent spellings like ``1.4.0-1`` and ``1.4.0.post1`` are not reported
+    as a conflict.
+
+    ``find_spec`` locates the package via the meta-path finders WITHOUT
+    executing ``torchrec/__init__.py`` (torchrec is top-level, so no parent
+    package is imported either), and it hands back the package's search
+    locations, which is what makes the ``version.py`` read possible under the
+    same no-import contract. That file is the authoritative source for
+    ``commit``: it carries the FULL 40-char build SHA even for release wheels,
+    whose version string carries none. The version-string parse
+    (``_torchrec_commit``) is the fallback for installs built without setup.py.
+
+    A PEP 420 NAMESPACE package -- any bare directory named ``torchrec`` on
+    ``sys.path`` -- is not an executable TorchRec install, so it counts as
+    absent. Detection accepts the two real namespace loader states (``None``
+    before import, ``NamespaceLoader`` after import) together with
+    ``origin is None`` and search locations; an originless custom/Buck loader
+    remains an executable import target. A namespace portion never wins over a
+    real install regardless of sys.path order: the path finder yields one only
+    when no real package exists.
+
+    Absence handling, so a Buck / PYTHONPATH deployment is not falsely
+    reported absent (``PackageNotFoundError`` means *no dist-info metadata*,
+    NOT *not importable* -- a monorepo link-tree can expose an importable
+    torchrec with no ``*.dist-info``):
+
+    * metadata missing AND not importable: the documented common case
+      (non-recsys installs lack it) -> NO partial reason, mirroring the
+      fbgemm_gpu / aiter ``suppress_missing`` contract.
+    * metadata missing BUT importable with a readable ``version.py``: report
+      that version and commit, no partial reason -- the same self-declared
+      identity ``_capture_triton`` publishes for triton.
+    * importable but no readable source version: promote distribution metadata
+      only when that distribution's ``RECORD`` owns the resolved package/module.
+      Otherwise retain its version and any source commit separately, leave the
+      primary identity unknown, and record a partial reason.
+    * metadata present but no importable non-namespace target: retain it only
+      as ``distribution_version`` and record a partial reason.
+    * either lookup RAISING is never folded into "absent": ``find_spec``
+      failing on a broken ``sys.path`` and a metadata read failing each record
+      their own reason, and a readable ``version.py`` identity survives a
+      metadata failure.
     """
     import importlib.metadata as importlib_metadata
+    import importlib.util
 
+    block = _empty_torchrec()
+
+    # --- identity 1: the code Python would import -------------------------
+    spec = None
+    spec_failed = False
+    namespace_spec = False
     try:
-        version = importlib_metadata.version("torchrec")
+        spec = importlib.util.find_spec("torchrec")
+    except Exception as exc:  # noqa: BLE001 -- find_spec can raise on broken sys.path
+        log.debug("torchrec find_spec failed: %s", exc)
+        spec_failed = True
+        reasons.append(
+            f"torchrec.source_version: find_spec raised ({type(exc).__name__}); "
+            "cannot tell whether torchrec is importable"
+        )
+    if _is_namespace_spec(spec):
+        namespace_spec = True
+        spec = None  # PEP 420 namespace portion -- not an executable install.
+    if spec is not None:
+        try:
+            block["source_version"], block["source_commit"] = _torchrec_source_identity(spec)
+        except Exception as exc:  # noqa: BLE001 -- malformed loader/spec must be fail-soft
+            log.debug("torchrec source identity lookup failed: %s", exc)
+            reasons.append(
+                "torchrec.source_version: import target identity lookup raised "
+                f"({type(exc).__name__}); version unknown"
+            )
+
+    # --- identity 2: the distribution metadata on sys.path ----------------
+    dist_version_valid = False
+    disagreeing: list[str] = []
+    try:
+        block["distribution_version"] = importlib_metadata.version("torchrec")
+        dist_version_valid = (
+            isinstance(block["distribution_version"], str)
+            and _version_key(block["distribution_version"]) is not None
+        )
+        if not dist_version_valid:
+            reasons.append(
+                "torchrec.distribution_version: metadata reports an invalid "
+                f"version {block['distribution_version']!r}; retaining it "
+                "separately but primary identity remains unknown"
+            )
+        # ``version()`` returns the FIRST match in sys.path / listdir order, so
+        # two torchrec dist-info directories (interrupted upgrade, two wheels
+        # unpacked into one --target, merged link-trees) are reconciled by
+        # filesystem iteration order and reported as a clean answer. Worse, the
+        # source-vs-metadata conflict reason then becomes order-dependent too:
+        # the same install yields a partial snapshot on one machine and a clean
+        # one on another. Name the conflict instead of picking a winner.
+        disagreeing = _torchrec_disagreeing_distribution_versions(importlib_metadata)
+        if disagreeing:
+            reasons.append(
+                "torchrec.distribution_version: torchrec metadata disagrees across "
+                f"{len(disagreeing)} distinct versions ({', '.join(disagreeing)}); "
+                f"retaining the first on sys.path ({block['distribution_version']}) "
+                "as distribution_version, but not promoting an arbitrary one to "
+                "primary identity"
+            )
     except importlib_metadata.PackageNotFoundError:
-        return {"package_version": None, "commit": None}
+        pass
     except Exception as exc:  # noqa: BLE001 -- never let env probe fail
         log.debug("torchrec metadata lookup failed: %s", exc)
-        reasons.append(f"torchrec.package_version: metadata lookup raised ({type(exc).__name__})")
-        return {"package_version": None, "commit": None}
-    return {
-        "package_version": version,
-        "commit": _extract_commit_from_version(version),
-    }
+        reasons.append(
+            f"torchrec.distribution_version: metadata lookup raised ({type(exc).__name__})"
+        )
+
+    source_version = block["source_version"]
+    dist_version = block["distribution_version"]
+    distribution_owns_target = bool(
+        spec is not None
+        and source_version is None
+        and dist_version is not None
+        and dist_version_valid
+        and not disagreeing
+        and _torchrec_distribution_owns_spec(importlib_metadata, spec, dist_version)
+    )
+
+    # Genuinely absent (including a bare namespace portion), and we were able
+    # to look: suppressed like fbgemm_gpu / aiter.
+    if spec is None and dist_version is None and not spec_failed:
+        return block
+
+    # --- reconcile ---------------------------------------------------------
+    if (
+        source_version
+        and dist_version
+        and dist_version_valid
+        and not _same_distribution_version(source_version, dist_version)
+    ):
+        reasons.append(
+            f"torchrec: import target reports version {source_version} but distribution "
+            f"metadata reports {dist_version}; reporting the import target, and both are "
+            "recorded separately"
+        )
+    if (
+        spec is not None
+        and source_version is None
+        and not distribution_owns_target
+    ):
+        # Branch on whether metadata actually exists: the unconditional wording
+        # told the operator that distribution metadata "is retained separately"
+        # even when ``distribution_version`` was null, sending them looking for
+        # a field that is not there.
+        if dist_version is None:
+            reasons.append(
+                "torchrec.package_version: import target has no readable source "
+                "version and no distribution metadata; primary identity remains "
+                "unknown"
+            )
+        elif dist_version_valid and not disagreeing:
+            reasons.append(
+                "torchrec.package_version: import target has no readable source "
+                "version; distribution metadata is retained separately and is not "
+                "promoted because ownership cannot be verified"
+            )
+    elif spec is None and dist_version is not None and not spec_failed:
+        kind = "PEP 420 namespace portion" if namespace_spec else "no import target"
+        reasons.append(
+            f"torchrec.package_version: distribution metadata exists but {kind}; "
+            "metadata is retained separately and primary identity remains unknown"
+        )
+
+    # The primary identity describes what would RUN, so the import target wins.
+    # Its commit comes from the same place its version did -- never from the
+    # other install's metadata.
+    if spec is not None:
+        if source_version is not None:
+            block["package_version"] = source_version
+            block["commit"] = block["source_commit"] or _torchrec_commit(source_version)
+        elif distribution_owns_target:
+            block["package_version"] = dist_version
+            block["commit"] = block["source_commit"] or _torchrec_commit(dist_version)
+    return block
 
 
 def _capture_fbgemm(reasons: list[str]) -> dict[str, Any]:

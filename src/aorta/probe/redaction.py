@@ -17,17 +17,23 @@ from __future__ import annotations
 import fnmatch
 import ipaddress
 import json
+import logging
 import re
 import shutil
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from json.decoder import scanstring
 from pathlib import Path
 from typing import Any
 
 from aorta.bundle.errors import RedactionError
 from aorta.bundle.redactor import RedactionCounts, Redactor
 from aorta.probe.sandbox import MAX_LOG_BYTES
-from aorta.triage.recipe import RecipeSchemaError
+from aorta.triage.recipe import (
+    RecipeSchemaError,
+    dump_recipe_mapping,
+    load_recipe_mapping,
+)
 
 # Path scrubber: absolute POSIX paths with at least one directory component.
 # The negative lookbehind anchors the match at a path START so a sub-path of a
@@ -62,6 +68,19 @@ _IPV6_UNBRACKETED_RE = re.compile(
 _VALID_REDACTION_KEYS = frozenset({"scrub_env_keys", "scrub_paths", "scrub_ip_addresses"})
 
 _TEXT_SUFFIXES = frozenset({".log", ".md", ".yaml", ".yml", ".json", ".txt", ".env"})
+_DISPATCHER_TRIAL_JSON_RE = re.compile(r"^trial_d\d+_m\d+_t\d+\.json$")
+_PROBE_TRIAL_DIR_RE = re.compile(r"^trial_\d+$")
+
+
+log = logging.getLogger(__name__)
+
+
+class _JsonKeyCollisionError(ValueError):
+    pass
+
+
+class _JsonTokenScanError(ValueError):
+    """A ``.json`` artifact whose string tokens do not scan (truncated/malformed)."""
 
 
 @dataclass(frozen=True)
@@ -224,6 +243,13 @@ def _scrub_ips_in_text(text: str, ip_index: _IpIndex) -> str:
 # encode entirely (fast path for the many small JSON string values that
 # scrub_text is called on).
 _MAX_UTF8_BYTES_PER_CHAR = 4
+# Keep a complete real POSIX path (PATH_MAX on Linux) or IP candidate on one
+# side of an oversized-line split. Boundaries are moved back to the last
+# character that cannot belong to either scrubber's token grammar.
+_HARD_SPLIT_LOOKBACK_CHARS = 4096
+_SCRUB_TOKEN_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-/:[]"
+)
 
 
 def _line_windows(text: str) -> list[str]:
@@ -245,11 +271,11 @@ def _line_windows(text: str) -> list[str]:
     A single line whose own UTF-8 byte length exceeds the cap (e.g. a hostile
     newline-free log) would otherwise be emitted as one over-cap window and
     defeat the byte budget entirely, so it is hard-split into ``<= cap`` byte
-    chunks. Each chunk holds ``MAX_LOG_BYTES // 4`` code points, which is
-    ``<= MAX_LOG_BYTES`` bytes for any UTF-8 string (4 bytes/char max). A token
-    straddling such a hard-split seam may be missed -- an accepted cost for a
-    line that defeats line-based windowing by construction; correctness still
-    holds for every newline-terminated log.
+    chunks. Each chunk holds at most ``MAX_LOG_BYTES // 4`` code points. Before
+    splitting, the boundary moves back (up to Linux ``PATH_MAX``) to a
+    delimiter outside both scrubbers' token grammars, so a path/IP at the seam
+    is carried intact into the next chunk instead of leaking when the chunks
+    are rejoined.
     """
     # max chars per window that is guaranteed <= MAX_LOG_BYTES UTF-8 bytes.
     max_chars = max(1, MAX_LOG_BYTES // _MAX_UTF8_BYTES_PER_CHAR)
@@ -277,8 +303,7 @@ def _stream_line_windows(lines: Iterable[str]) -> Iterator[str]:
                 yield "".join(buf)
                 buf = []
                 size = 0
-            for i in range(0, len(line), max_chars):
-                yield line[i : i + max_chars]
+            yield from _split_oversized_line(line, max_chars)
             continue
         if buf and size + line_bytes > MAX_LOG_BYTES:
             yield "".join(buf)
@@ -288,6 +313,29 @@ def _stream_line_windows(lines: Iterable[str]) -> Iterator[str]:
         size += line_bytes
     if buf:
         yield "".join(buf)
+
+
+def _split_oversized_line(line: str, max_chars: int) -> Iterator[str]:
+    """Split one over-cap line without cutting a normal path/IP token."""
+    start = 0
+    while len(line) - start > max_chars:
+        end = start + max_chars
+        floor = max(start, end - _HARD_SPLIT_LOOKBACK_CHARS)
+        split = end
+        # Move the boundary to immediately after the nearest safe delimiter.
+        # If none exists in PATH_MAX chars, keep the hard cap: a gigantic
+        # delimiter-free token is itself outside the real path/IP grammars we
+        # promise to recognize, and must not defeat the DoS bound.
+        for index in range(end - 1, floor - 1, -1):
+            if line[index] not in _SCRUB_TOKEN_CHARS:
+                split = index + 1
+                break
+        if split <= start:  # defensive progress guard
+            split = end
+        yield line[start:split]
+        start = split
+    if start < len(line):
+        yield line[start:]
 
 
 def scrub_text(
@@ -370,6 +418,137 @@ def _scrub_str_into(
     )
 
 
+def _collect_env_mapping_ids(doc: Any, document_kind: str) -> frozenset[int]:
+    """Locate environment mappings from the artifact's actual schema.
+
+    Key-name matching at arbitrary depth is unsafe: a collector may emit an
+    unrelated ``env_vars`` metric. Restrict removal to known artifact fields,
+    while path/IP rewriting still visits every string leaf.
+    """
+
+    found: set[int] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, dict):
+            found.add(id(value))
+
+    def add_snapshot(value: Any) -> bool:
+        if not isinstance(value, dict) or not isinstance(value.get("env_vars"), dict):
+            return False
+        add(value["env_vars"])
+        for block in value.values():
+            if isinstance(block, dict):
+                add(block.get("env_overrides"))
+        return True
+
+    if not isinstance(doc, dict):
+        return frozenset()
+
+    if document_kind == "snapshot":
+        if not add_snapshot(doc):
+            # Legacy host_env.json used {"env": {NAME: value}}.
+            add(doc.get("env"))
+            descriptor = doc.get("descriptor")
+            if isinstance(descriptor, dict):
+                # Isolated-environment fallback env.json stores the unresolved
+                # Environment descriptor rather than an EnvSnapshot.
+                add(descriptor.get("env"))
+    elif document_kind == "result":
+        env = doc.get("env")
+        if not add_snapshot(env):
+            # Probe result.json uses a flat env mapping. Treat it as such even
+            # when a malformed/legacy producer wrote a non-string value.
+            add(env)
+        execution_env = doc.get("execution_env")
+        if isinstance(execution_env, dict):
+            add(execution_env.get("env"))
+        config = doc.get("config")
+        if isinstance(config, dict):
+            configured_environment = config.get("_aorta_environment")
+            if isinstance(configured_environment, dict):
+                add(configured_environment.get("env"))
+            extras = config.get("_aorta_probe_extras")
+            if isinstance(extras, dict):
+                add(extras.get("cell_env_vars"))
+    elif document_kind == "matrix":
+        cells = doc.get("cells")
+        if isinstance(cells, list):
+            for cell in cells:
+                if isinstance(cell, dict):
+                    add(cell.get("resolved_env_vars"))
+                    add(cell.get("extra_env"))
+                    resolved_environment = cell.get("resolved_environment")
+                    if isinstance(resolved_environment, dict):
+                        add(resolved_environment.get("env"))
+    elif document_kind == "sidecar":
+        environments = doc.get("environments")
+        if isinstance(environments, dict):
+            for payload in environments.values():
+                if isinstance(payload, dict):
+                    add(payload.get("env"))
+        mitigations = doc.get("mitigations")
+        if isinstance(mitigations, dict):
+            for payload in mitigations.values():
+                add(payload)
+    elif document_kind == "recipe":
+        # recipe.resolved.yaml re-emits the same overlay that matrix.json
+        # records as cells[*].extra_env, plus any inline-docker baseline env.
+        add(doc.get("extra_env"))
+        cells = doc.get("cells")
+        if isinstance(cells, list):
+            for cell in cells:
+                if isinstance(cell, dict):
+                    add(cell.get("extra_env"))
+                    environment = cell.get("environment")
+                    if isinstance(environment, dict):
+                        add(environment.get("env"))
+    return frozenset(found)
+
+
+def _scrub_env_mapping(
+    value: dict[Any, Any],
+    *,
+    cfg: RedactionCfg,
+    env_removed: list[int],
+    path_index: _PathIndex,
+    ip_index: _IpIndex,
+    env_mapping_ids: frozenset[int],
+) -> dict[str, Any]:
+    """Filter environment keys while preserving value types.
+
+    ``env_vars`` contains ``str | null`` values. Converting the mapping to
+    ``dict[str, str]`` would turn null into the literal ``"None"`` and would
+    corrupt nested values, so use ``scrub_env_keys`` only to determine the kept
+    key set, then recursively scrub the original values.
+    """
+
+    text_view = {str(key): item if isinstance(item, str) else "" for key, item in value.items()}
+    kept, removed = scrub_env_keys(text_view, cfg.scrub_env_keys)
+    env_removed[0] += removed
+    scrubbed: dict[str, Any] = {}
+    for key, item in value.items():
+        source_key = str(key)
+        if source_key not in kept:
+            continue
+        scrubbed_key = _scrub_str_into(
+            source_key,
+            cfg=cfg,
+            path_index=path_index,
+            ip_index=ip_index,
+        )
+        if scrubbed_key in scrubbed:
+            raise _JsonKeyCollisionError("redaction produced duplicate JSON object keys")
+        scrubbed[scrubbed_key] = _scrub_json_value(
+            item,
+            cfg=cfg,
+            env_removed=env_removed,
+            path_index=path_index,
+            ip_index=ip_index,
+            env_mapping_ids=env_mapping_ids,
+        )
+    return scrubbed
+
+
 def _scrub_json_value(
     value: Any,
     *,
@@ -377,6 +556,7 @@ def _scrub_json_value(
     env_removed: list[int],
     path_index: _PathIndex,
     ip_index: _IpIndex,
+    env_mapping_ids: frozenset[int],
 ) -> Any:
     """Recursively scrub a JSON value, returning the scrubbed copy.
 
@@ -388,30 +568,31 @@ def _scrub_json_value(
     if isinstance(value, dict):
         new_dict: dict[str, Any] = {}
         for key, item in value.items():
-            if key == "env" and isinstance(item, dict):
-                kept_env, removed = scrub_env_keys(
-                    {str(k): str(v) for k, v in item.items()},
-                    cfg.scrub_env_keys,
+            scrubbed_key = _scrub_str_into(
+                str(key),
+                cfg=cfg,
+                path_index=path_index,
+                ip_index=ip_index,
+            )
+            if scrubbed_key in new_dict:
+                raise _JsonKeyCollisionError("redaction produced duplicate JSON object keys")
+            if isinstance(item, dict) and id(item) in env_mapping_ids:
+                new_dict[scrubbed_key] = _scrub_env_mapping(
+                    item,
+                    cfg=cfg,
+                    env_removed=env_removed,
+                    path_index=path_index,
+                    ip_index=ip_index,
+                    env_mapping_ids=env_mapping_ids,
                 )
-                env_removed[0] += removed
-                # Removing matching keys is not enough: a *retained* key's
-                # value can still carry a path or IP (e.g.
-                # LD_LIBRARY_PATH=/home/customer/...). Scrub the values too
-                # so result.json env matches the host_env.json path, which
-                # already scrubs values via its whole-document pass.
-                new_dict[key] = {
-                    env_key: _scrub_str_into(
-                        env_val, cfg=cfg, path_index=path_index, ip_index=ip_index
-                    )
-                    for env_key, env_val in kept_env.items()
-                }
                 continue
-            new_dict[key] = _scrub_json_value(
+            new_dict[scrubbed_key] = _scrub_json_value(
                 item,
                 cfg=cfg,
                 env_removed=env_removed,
                 path_index=path_index,
                 ip_index=ip_index,
+                env_mapping_ids=env_mapping_ids,
             )
         return new_dict
     if isinstance(value, list):
@@ -422,12 +603,48 @@ def _scrub_json_value(
                 env_removed=env_removed,
                 path_index=path_index,
                 ip_index=ip_index,
+                env_mapping_ids=env_mapping_ids,
             )
             for item in value
         ]
     if isinstance(value, str):
         return _scrub_str_into(value, cfg=cfg, path_index=path_index, ip_index=ip_index)
     return value
+
+
+def _scrub_json_string_tokens(
+    text: str,
+    *,
+    cfg: RedactionCfg,
+    path_index: _PathIndex,
+    ip_index: _IpIndex,
+) -> Iterator[str]:
+    """Yield ``text`` with only its JSON STRING tokens scrubbed.
+
+    In JSON a ``"`` occurs only as a string delimiter, and every string token is
+    consumed whole here, so scanning for the next quote and handing it to the
+    stdlib's own :func:`~json.decoder.scanstring` walks exactly the string
+    literals. Every other byte -- number literals, whitespace, key order,
+    duplicate keys -- is copied verbatim, and a token whose scrubbed value is
+    unchanged keeps its original escaping.
+
+    Raises :class:`_JsonTokenScanError` when a token does not scan, which the
+    caller answers with the streaming text scrubber.
+    """
+    index = 0
+    while True:
+        quote = text.find('"', index)
+        if quote < 0:
+            yield text[index:]
+            return
+        yield text[index:quote]
+        try:
+            value, end = scanstring(text, quote + 1)
+        except ValueError as exc:
+            raise _JsonTokenScanError(str(exc)) from exc
+        scrubbed = _scrub_str_into(value, cfg=cfg, path_index=path_index, ip_index=ip_index)
+        yield text[quote:end] if scrubbed == value else json.dumps(scrubbed)
+        index = end
 
 
 def _parse_probe_env(text: str) -> dict[str, str]:
@@ -452,23 +669,95 @@ def _is_text_artifact(path: Path) -> bool:
     return path.suffix.lower() in _TEXT_SUFFIXES
 
 
+def _structured_document_kind(path: Path, *, run_root: Path | None = None) -> str | None:
+    if run_root is None:
+        # Direct/unit use has no bundle context. Recover the source root from
+        # the tree and choose the outermost match so a collector cannot spoof a
+        # nested root. Production bundling always supplies its exact run root;
+        # inference is only a compatibility fallback.
+        roots = [
+            parent
+            for parent in path.parents
+            if (parent / "host_env.json").is_file()
+            and (
+                (parent / "recipe.resolved.yaml").is_file()
+                or (parent / "matrix.json").is_file()
+            )
+        ]
+        if not roots:
+            return None
+        if len(roots) != 1:
+            raise RedactionError(
+                path,
+                ValueError(
+                    "multiple probe run roots contain this artifact; "
+                    "supply the exact run_root instead of inferring it"
+                ),
+            )
+        run_root = roots[0]
+    try:
+        relative = path.absolute().relative_to(run_root.absolute())
+    except ValueError:
+        return None
+    parts = relative.parts
+
+    if (
+        len(parts) == 3
+        and parts[-1] == "result.json"
+        and _PROBE_TRIAL_DIR_RE.fullmatch(parts[-2])
+    ):
+        return "result"
+    dispatcher_layout = (
+        len(parts) == 3
+        or (len(parts) == 4 and parts[0] == "cells")
+    )
+    if dispatcher_layout and _DISPATCHER_TRIAL_JSON_RE.fullmatch(parts[-1]):
+        return "result"
+    if parts == ("host_env.json",):
+        return "snapshot"
+    if len(parts) == 3 and parts[0] == "environments" and parts[-1] == "env.json":
+        return "snapshot"
+    if parts == ("matrix.json",):
+        return "matrix"
+    if parts == ("recipe.resolved.yaml",):
+        return "recipe"
+    if parts == ("inline_environments.sidecar.json",) or (
+        len(parts) == 2
+        and parts[0] == "sidecars"
+        and path.suffix.lower() == ".json"
+    ):
+        return "sidecar"
+    return None
+
+
 class RedactingRedactor(Redactor):
     """Applies a probe recipe's ``redaction:`` block during bundling."""
 
     kind = "probe.v1"
 
-    def __init__(self, cfg: RedactionCfg) -> None:
+    def __init__(self, cfg: RedactionCfg, *, run_root: Path | None = None) -> None:
         self._cfg = cfg
+        # ``bundle_run_dir`` canonicalises its source root before staging.
+        # Canonicalise the matching context too: otherwise invoking bundle on
+        # a symlink stores the alias here, receives real source paths later,
+        # and classifies every platform JSON as generic text (so env-key
+        # filtering silently never runs).
+        self._run_root = run_root.resolve() if run_root is not None else None
 
     def scrub_file(self, src: Path, dst: Path) -> RedactionCounts:
         dst.parent.mkdir(parents=True, exist_ok=True)
+        document_kind = _structured_document_kind(src, run_root=self._run_root)
 
         if src.name == "probe.env":
             counts = self._scrub_probe_env(src.read_bytes(), dst)
-        elif src.name == "result.json":
-            counts = self._scrub_result_json(src.read_bytes(), dst, src)
-        elif src.name == "host_env.json":
-            counts = self._scrub_host_env_json(src.read_bytes(), dst, src)
+        elif document_kind == "recipe":
+            counts = self._scrub_recipe_yaml(dst, src)
+        elif document_kind is not None:
+            counts = self._scrub_json_document(
+                src.read_bytes(), dst, src, document_kind=document_kind
+            )
+        elif src.suffix.lower() == ".json":
+            counts = self._scrub_generic_json(src, dst)
         elif _is_text_artifact(src):
             counts = self._scrub_text_stream(src, dst)
         else:
@@ -492,7 +781,24 @@ class RedactingRedactor(Redactor):
     def _scrub_probe_env(self, raw: bytes, dst: Path) -> RedactionCounts:
         text = raw.decode("utf-8", errors="replace")
         env = _parse_probe_env(text)
-        scrubbed, removed = scrub_env_keys(env, self._cfg.scrub_env_keys)
+        kept, removed = scrub_env_keys(env, self._cfg.scrub_env_keys)
+        # probe.env is a verbatim copy of the cell env mapping that
+        # result.json and the dispatcher trial JSON also carry, so a retained
+        # key's value must be path/IP scrubbed here too -- otherwise the same
+        # LD_LIBRARY_PATH is a placeholder in one artifact and a customer path
+        # in another. Names are validated env identifiers and cannot hold a
+        # path or IP, so only values are rewritten.
+        path_index = _PathIndex()
+        ip_index = _IpIndex()
+        scrubbed = {
+            key: _scrub_str_into(
+                value,
+                cfg=self._cfg,
+                path_index=path_index,
+                ip_index=ip_index,
+            )
+            for key, value in kept.items()
+        }
         out = _format_probe_env(scrubbed)
         dst.write_text(out, encoding="utf-8")
         # Mode is carried from the source by scrub_file's shutil.copymode;
@@ -501,30 +807,154 @@ class RedactingRedactor(Redactor):
         out_bytes = out.encode("utf-8")
         return RedactionCounts(
             env_keys_removed=removed,
+            paths_rewritten=path_index.rewrites,
+            ips_rewritten=ip_index.ipv4_rewrites + ip_index.ipv6_rewrites,
             bytes_in=len(raw),
             bytes_out=len(out_bytes),
         )
 
-    def _scrub_result_json(self, raw: bytes, dst: Path, src: Path) -> RedactionCounts:
+    def _scrub_recipe_yaml(self, dst: Path, src: Path) -> RedactionCounts:
+        """Scrub ``recipe.resolved.yaml`` as a schema-owned document.
+
+        The resolved recipe re-emits the recipe- and cell-scope ``extra_env``
+        overlays (and any inline-docker baseline ``env``) verbatim. Treating it
+        as plain text left those copies unscrubbed while the identical values
+        were removed from ``matrix.json``.
+
+        Parsing and re-emitting go through :mod:`aorta.triage.recipe` because
+        this module is stdlib-only by rubric §3.F -- the YAML dependency stays
+        behind that seam.
+        """
+        try:
+            doc = load_recipe_mapping(src)
+        except (RecipeSchemaError, UnicodeDecodeError) as exc:
+            # Fail closed, matching the structured-JSON path: an unparseable
+            # recipe must not be copied through unredacted, and a raw decode
+            # error would otherwise escape staging as an unhandled traceback.
+            raise RedactionError(src, exc) from exc
+        if not isinstance(doc, dict):
+            raise RedactionError(
+                src,
+                ValueError(
+                    "recipe.resolved.yaml must contain a top-level mapping, "
+                    f"got {type(doc).__name__}"
+                ),
+            )
+
+        env_removed = [0]
+        path_index = _PathIndex()
+        ip_index = _IpIndex()
+        try:
+            scrubbed = _scrub_json_value(
+                doc,
+                cfg=self._cfg,
+                env_removed=env_removed,
+                path_index=path_index,
+                ip_index=ip_index,
+                env_mapping_ids=_collect_env_mapping_ids(doc, "recipe"),
+            )
+        except _JsonKeyCollisionError as exc:
+            raise RedactionError(src, exc) from exc
+        out = dump_recipe_mapping(scrubbed)
+        dst.write_text(out, encoding="utf-8")
+        out_bytes = out.encode("utf-8")
+        return RedactionCounts(
+            env_keys_removed=env_removed[0],
+            paths_rewritten=path_index.rewrites,
+            ips_rewritten=ip_index.ipv4_rewrites + ip_index.ipv6_rewrites,
+            bytes_in=src.stat().st_size,
+            bytes_out=len(out_bytes),
+        )
+
+    def _scrub_generic_json(self, src: Path, dst: Path) -> RedactionCounts:
+        """Scrub the STRING TOKENS of a ``.json`` artifact nobody owns a schema for.
+
+        Collector JSON gets no env-key filtering, so only path/IP rewriting is at
+        stake -- but raw text replacement is still wrong for it: it misses
+        ``\\u002fhome`` and turns ``\\/home`` into the invalid escape
+        ``\\<PATH:0>``. A parse-and-re-serialize is wrong in the other direction.
+        It rewrites number literals (``1.2345678901234567890123456789`` loses
+        digits, ``1e400`` becomes the non-JSON token ``Infinity``), collapses
+        duplicate keys, and holds the whole document graph in memory for
+        artifacts that are routinely multi-GB profiler traces.
+
+        Rewriting only the string tokens keeps every other byte verbatim, so a
+        metric keeps the value the collector wrote and a valid document stays
+        valid. A document whose tokens do not scan -- truncated by a collector
+        the crash took down with it -- falls back to the streaming text
+        scrubber: path/IP scrubbing still runs, there are no env keys here to
+        protect, and the run that crashed is exactly the one whose bundle the
+        operator needs. Schema-owned documents keep failing closed
+        (:meth:`_scrub_json_document`); there, structure carries env mappings.
+        """
+        raw = src.read_bytes()
+        text = raw.decode("utf-8", errors="replace")
+        path_index = _PathIndex()
+        ip_index = _IpIndex()
+        bytes_out = 0
+        try:
+            with open(dst, "w", encoding="utf-8", newline="") as out_fh:
+                for chunk in _scrub_json_string_tokens(
+                    text, cfg=self._cfg, path_index=path_index, ip_index=ip_index
+                ):
+                    out_fh.write(chunk)
+                    bytes_out += len(chunk.encode("utf-8"))
+        except _JsonTokenScanError as exc:
+            log.warning(
+                "aorta bundle: %s does not scan as JSON (%s); scrubbing it as "
+                "text instead. Path/IP redaction still applies; the staged copy "
+                "is as malformed as the original.",
+                src.name,
+                exc,
+            )
+            return self._scrub_text_stream(src, dst)
+        return RedactionCounts(
+            paths_rewritten=path_index.rewrites,
+            ips_rewritten=ip_index.ipv4_rewrites + ip_index.ipv6_rewrites,
+            bytes_in=len(raw),
+            bytes_out=bytes_out,
+        )
+
+    def _scrub_json_document(
+        self,
+        raw: bytes,
+        dst: Path,
+        src: Path,
+        *,
+        document_kind: str,
+    ) -> RedactionCounts:
         text = raw.decode("utf-8", errors="replace")
         try:
             doc = json.loads(text)
         except json.JSONDecodeError as exc:
-            # Fail closed: a corrupt/truncated result.json must not slip
-            # through unredacted, and the raw decode error would otherwise
-            # escape staging as an unhandled traceback (it is not an
-            # OSError, so the writer's OSError->BundleIOError wrap misses it).
+            # Fail closed: a corrupt/truncated structured artifact must not
+            # slip through unredacted, and the raw decode error would otherwise
+            # escape staging as an unhandled traceback (it is not an OSError,
+            # so the writer's OSError->BundleIOError wrap misses it).
             raise RedactionError(src, exc) from exc
+        if not isinstance(doc, dict):
+            raise RedactionError(
+                src,
+                ValueError(
+                    f"{document_kind} JSON must contain a top-level object, "
+                    f"got {type(doc).__name__}"
+                ),
+            )
         env_removed = [0]
         path_index = _PathIndex()
         ip_index = _IpIndex()
-        scrubbed = _scrub_json_value(
-            doc,
-            cfg=self._cfg,
-            env_removed=env_removed,
-            path_index=path_index,
-            ip_index=ip_index,
-        )
+        env_mapping_ids = _collect_env_mapping_ids(doc, document_kind)
+        try:
+            scrubbed = _scrub_json_value(
+                doc,
+                cfg=self._cfg,
+                env_removed=env_removed,
+                path_index=path_index,
+                ip_index=ip_index,
+                env_mapping_ids=env_mapping_ids,
+            )
+        except _JsonKeyCollisionError as exc:
+            raise RedactionError(src, exc) from exc
         out = json.dumps(scrubbed, indent=2, sort_keys=False) + "\n"
         dst.write_text(out, encoding="utf-8")
         out_bytes = out.encode("utf-8")
@@ -532,38 +962,6 @@ class RedactingRedactor(Redactor):
             env_keys_removed=env_removed[0],
             paths_rewritten=path_index.rewrites,
             ips_rewritten=ip_index.ipv4_rewrites + ip_index.ipv6_rewrites,
-            bytes_in=len(raw),
-            bytes_out=len(out_bytes),
-        )
-
-    def _scrub_host_env_json(self, raw: bytes, dst: Path, src: Path) -> RedactionCounts:
-        text = raw.decode("utf-8", errors="replace")
-        try:
-            doc = json.loads(text)
-        except json.JSONDecodeError as exc:
-            # Fail closed for the same reason as _scrub_result_json: a
-            # parse failure must stop bundling rather than emit a
-            # potentially unredacted host_env.json.
-            raise RedactionError(src, exc) from exc
-        env_removed = [0]
-        if isinstance(doc, dict) and "env" in doc and isinstance(doc["env"], dict):
-            scrubbed_env, removed = scrub_env_keys(
-                {str(k): str(v) for k, v in doc["env"].items()},
-                self._cfg.scrub_env_keys,
-            )
-            doc = {**doc, "env": scrubbed_env}
-            env_removed[0] += removed
-        out_text, paths, v4, v6 = scrub_text(
-            json.dumps(doc, indent=2, sort_keys=False),
-            scrub_paths=self._cfg.scrub_paths,
-            scrub_ip_addresses=self._cfg.scrub_ip_addresses,
-        )
-        dst.write_text(out_text + "\n", encoding="utf-8")
-        out_bytes = (out_text + "\n").encode("utf-8")
-        return RedactionCounts(
-            env_keys_removed=env_removed[0],
-            paths_rewritten=paths,
-            ips_rewritten=v4 + v6,
             bytes_in=len(raw),
             bytes_out=len(out_bytes),
         )

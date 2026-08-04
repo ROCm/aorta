@@ -92,8 +92,15 @@ jobs:
             'src/aorta/hw_queue_eval/*'
             'src/aorta/workloads/*'
             'src/aorta/utils/gpu_control.py'
+            'src/aorta/instrumentation/env_knobs.py'
+            # The module that performs the capture. Its test file was listed
+            # without it, so a PR touching only the probe ran neither the audit
+            # nor the GPU-gated tests in that file.
+            'src/aorta/instrumentation/environment.py'
+            'scripts/audit_env_knobs.py'
             'tests/hw_queue_eval/*'
             'tests/instrumentation/test_environment.py'
+            'tests/instrumentation/test_env_knob_audit.py'
             'tests/test_marker_partition.py'
             'config/ci/*'
             'recipes/ci/*'
@@ -183,6 +190,20 @@ jobs:
             python -m pip install --upgrade pip
             pip install -e ".[tests,hw-queue]"
             pytest -m "gpu or rocm" -n 4 --junitxml=gpu-results.xml
+          '
+
+      # Separate step, after pytest: under `set -euo pipefail` a knob the
+      # registry omits (a base-image bump is enough) aborted the script before
+      # pytest ran, so the GPU gate went red with zero test results and no
+      # junit artifact. Coverage drift must fail the job without destroying the
+      # test signal.
+      - name: Audit env-knob registry coverage
+        if: always()
+        run: |
+          bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            python scripts/audit_env_knobs.py --rocm-lib /opt/rocm/lib --strict
           '
 
       - name: Upload GPU test results

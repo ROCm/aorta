@@ -18,6 +18,13 @@ from aorta.triage.recipe import RecipeSchemaError, load_recipe_mapping
 log = logging.getLogger(__name__)
 
 _RECIPE_RESOLVED_NAME = "recipe.resolved.yaml"
+# Run-state fallback. ``recipe.resolved.yaml`` is emitted in the triage shape so
+# it stays loadable by ``load_recipe``, and ``redaction:`` is a probe-mode-only
+# key -- so the resolved recipe of a real probe run never carries the block.
+# ``matrix.json`` records the rule that was actually in force; without this
+# second candidate, ``aorta bundle <run-dir>`` silently produced an unredacted
+# bundle for every run that did not pass ``--redaction-from``.
+_MATRIX_JSON_NAME = "matrix.json"
 
 
 def load_redaction_cfg(recipe_path: Path) -> RedactionCfg | None:
@@ -61,35 +68,39 @@ def build_redactor_from_recipe(
 
     Precedence:
 
-    1. Explicit ``--redaction-from`` path when provided.
-    2. ``<run-dir>/recipe.resolved.yaml`` when present.
-    3. :class:`IdentityRedactor` when neither yields a ``redaction:`` block.
+    1. Explicit ``--redaction-from`` path when provided. An explicit path is
+       authoritative: if it carries no ``redaction:`` block, no fallback is
+       consulted.
+    2. ``<run-dir>/recipe.resolved.yaml``, then ``<run-dir>/matrix.json`` --
+       the first that carries a ``redaction:`` block wins.
+    3. :class:`IdentityRedactor` when none yields a block.
     """
-    resolved_path: Path | None = None
     if recipe_path is not None:
-        resolved_path = recipe_path
-    else:
-        fallback = run_dir / _RECIPE_RESOLVED_NAME
-        if fallback.is_file():
-            resolved_path = fallback
+        cfg = load_redaction_cfg(recipe_path)
+        if cfg is None:
             log.info(
-                "aorta bundle: using redaction recipe fallback %s",
-                fallback,
+                "aorta bundle: recipe %s has no redaction: block; "
+                "using IdentityRedactor",
+                recipe_path,
             )
+            return IdentityRedactor()
+        return RedactingRedactor(cfg, run_root=run_dir)
 
-    if resolved_path is None:
-        return IdentityRedactor()
+    for name in (_RECIPE_RESOLVED_NAME, _MATRIX_JSON_NAME):
+        candidate = run_dir / name
+        if not candidate.is_file():
+            continue
+        cfg = load_redaction_cfg(candidate)
+        if cfg is None:
+            continue
+        log.info("aorta bundle: using redaction block from %s", candidate)
+        return RedactingRedactor(cfg, run_root=run_dir)
 
-    cfg = load_redaction_cfg(resolved_path)
-    if cfg is None:
-        log.info(
-            "aorta bundle: recipe %s has no redaction: block; "
-            "using IdentityRedactor",
-            resolved_path,
-        )
-        return IdentityRedactor()
-
-    return RedactingRedactor(cfg)
+    log.info(
+        "aorta bundle: no redaction: block found under %s; using IdentityRedactor",
+        run_dir,
+    )
+    return IdentityRedactor()
 
 
 __all__ = [

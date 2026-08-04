@@ -8,6 +8,9 @@ reproduces workload-specific issues (numerics, races, nondeterminism) that
 micro-benchmarks miss. It ships a single `aorta` CLI plus a plugin system so
 downstream packages can register their own workloads.
 
+Every night AORTA's own workload sweep runs on an MI350 runner; the results are
+published to the [nightly CI dashboard](https://rocm.github.io/aorta/).
+
 ## What It Does
 
 - **Unified sweep.** Run a built-in workload — or your own opaque launch

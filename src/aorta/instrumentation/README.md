@@ -159,21 +159,23 @@ This captures the workload process. Keep client-side `--buck-target`
 introspection in a separate snapshot; a remote action may not have access to
 the Buck daemon or checkout needed for a nested cquery.
 
-### env.json schema (v1.13)
+### env.json schema (v1.15)
 
 See `EnvSnapshot` in [`environment.py`](environment.py) for the
 authoritative shape and field-by-field docstrings. Top-level keys:
 
 ```
-schema_version    captured_at       partial         partial_reasons
-system_health     rocm              hip             hipblaslt
-rocblas           miopen            rccl            composable_kernel
-tensile           triton            fbgemm          aiter
-aotriton          gpu_arch          host
-runtime_context   docker            env_vars
-python_version    pytorch_version   pytorch_build
-build_system      buck_invocation       library_introspection
-library_introspection_alternates
+schema_version    captured_at       host                runtime_context
+container_detected execution_context probe_namespace    docker
+rocm              amdgpu_driver     hip                 gpu_arch
+nics              hipblaslt         rocblas             composable_kernel
+tensile           tensile_catalog   miopen              miopen_catalog
+rocfft_catalog    rccl              triton              fbgemm
+torchrec          aiter             aotriton            build_system
+buck_invocation   library_introspection
+library_introspection_alternates     python_version
+pytorch_version   pytorch_build     pytorch_sdpa        env_vars
+system_health     partial           partial_reasons
 ```
 
 For the per-version field history (renames, env-var additions /
@@ -188,28 +190,49 @@ the version.
 
 ## How to add a new env var to `CANONICAL_ENV_VARS`
 
-The env var list in `environment.py` is **explicit, not prefix
-matching**. Adding a new variable is a deliberate three-step change so
-that what we capture stays auditable and reviewable.
+The env var list is **explicit, not prefix matching**, and it is
+**generated** from the provenance manifest `ENV_KNOB_REGISTRY` in
+`src/aorta/instrumentation/env_knobs.py`. Adding a variable is a
+deliberate three-step change so that what we capture stays auditable
+and reviewable.
 
-1. **Edit `CANONICAL_ENV_VARS`** in `src/aorta/instrumentation/environment.py`.
-   Group it with related vars under the matching `# HSA / runtime` /
-   `# GPU queue / codegen` / `# RCCL` / `# FBGEMM` / `# PyTorch / inductor`
-   comment. If it doesn't fit any group, add a new group with a short
-   header comment naming it.
+1. **Add one `EnvironmentKnob`** to `ENV_KNOB_REGISTRY`, recording
+   `name`, `library`, `consumer`, `category` (from `CATEGORIES`),
+   `source_reference` and `reference_build`. `CANONICAL_ENV_VARS` is
+   derived from the manifest, so there is no second list to edit, and
+   the order you add it in is the order it appears in a snapshot.
+
+   Record what you actually verified. If you did not trace the variable
+   to an upstream call site, mark it `INHERITED_UNAUDITED` rather than
+   citing a source you did not check -- an invented provenance is worse
+   than an admitted gap.
 
 2. **Update the stability-guard test**:
    `tests/instrumentation/test_environment.py::TestEnvVars::test_canonical_var_names_stable`
-   This is a literal `assert set(...) == {...}` over the canonical
+   This is a literal `assert set(...) == {...}` over the generated
    list. Without updating it, your PR fails. The test exists to force
    you to acknowledge that adding a variable is a schema-shape change
-   reviewers care about.
+   reviewers care about. Note what it does *not* do: because both sides
+   are hand-written, it cannot show that the upstream libraries are
+   covered. That is what `scripts/audit_env_knobs.py` measures -- run it
+   for any GEMM knob, and see
+   [docs/env-probe.md](../../../docs/env-probe.md#auditing-what-the-manifest-covers).
 
 3. **Document the addition** in your PR description: which workload /
-   library uses it, why it materially affects trial results, and a
-   pointer to the upstream documentation. The point of `CANONICAL_ENV_VARS`
-   is to capture variables that *change behaviour observably* -- if it
-   doesn't, it doesn't belong here.
+   library uses it, and a pointer to the upstream source or
+   documentation.
+
+**What "belongs here" means.** Capture is *comprehensive*, and the
+classification is *recorded rather than used as a filter*. A variable
+does not have to change behaviour observably to be captured -- knobs
+whose only consumer is a print or a client-side report are captured with
+`category="gemm_diagnostics"`. Recording a variable never claims it
+affected execution; it preserves the declared environment, which is what
+makes two snapshots comparable. Earlier revisions excluded report-only
+knobs, which made the snapshot's contents depend on our classification
+being correct: the 2026-08-02 GEMM audit overturned two of its own
+name-based verdicts, so that judgement now lives in `category` /
+`consumer` where a triager can weigh it.
 
 What does **not** belong here:
 
@@ -246,7 +269,7 @@ Roughly the same pattern as the existing blocks (`_run_rdhc`,
 
 ## Tests
 
-`tests/instrumentation/test_environment.py` has ~150 tests (run
+`tests/instrumentation/test_environment.py` has 500+ tests (run
 `pytest --collect-only -q tests/instrumentation/test_environment.py | tail -1`
 for the live count) covering:
 

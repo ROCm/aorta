@@ -47,14 +47,21 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
 5. **Publish** (`publish` job on `ubuntu-latest`): appends
    `results/<date>.json` to the **`ci-results`** data branch (history only).
 6. **Deploy** (`pages.yml`): a repo has a single Pages site, shared with the
-   project landing page, so one workflow owns the deploy. On main pushes, after
-   each Nightly Evaluation completes, and on demand, `pages.yml` builds the
-   README landing page (Jekyll) into `_site/`, mounts the self-contained
-   dashboard (`gen_dashboard.py`, from the `ci-results` history) at **`_site/ci/`**,
-   and deploys the combined site via `actions/upload-pages-artifact` +
+   project docs, so one workflow owns the deploy. On main pushes, after each
+   Nightly Evaluation completes, and on demand, `pages.yml` builds the Jekyll
+   site into `_site/`, relocates the rendered README from `_site/index.html` to
+   `_site/docs/index.html`, writes the self-contained dashboard
+   (`gen_dashboard.py`, from the `ci-results` history) to `_site/index.html`, and
+   deploys the combined site via `actions/upload-pages-artifact` +
    `actions/deploy-pages`. **Repo Pages source must be "GitHub Actions"**
-   (Settings -> Pages). Landing page: `https://rocm.github.io/aorta/`; nightly
-   dashboard: `https://rocm.github.io/aorta/ci/`.
+   (Settings -> Pages). Nightly dashboard: `https://rocm.github.io/aorta/`;
+   project docs: `https://rocm.github.io/aorta/docs/`.
+
+   The dashboard previously lived at `/ci/`, so that path is kept: `/ci/`
+   redirects to the root and `/ci/data.json` is published alongside
+   `/data.json` for anything already polling it. A verification step fails the
+   deploy if any of those routes would be missing, since a Pages deploy
+   replaces the whole site and a dropped route 404s immediately.
 
 ## Correctness vs performance
 
@@ -112,10 +119,12 @@ the cap in `nightly-eval.yml` / the flag if a longer window is wanted.
 
 1. Set GitHub Pages **source = "GitHub Actions"** (Settings -> Pages). This
    switches the site from the legacy branch build to `pages.yml`, which serves
-   the README landing page **and** the dashboard at `/ci/` from one deploy. Run
-   the **Pages (landing + nightly dashboard)** workflow once to publish
-   immediately (the landing page is served even before any nightly results).
+   the dashboard at `/` **and** the project docs under `/docs/` from one deploy.
+   Run the **Pages (landing + nightly dashboard)** workflow once to publish
+   immediately (the docs are served even before any nightly results, and the
+   root shows the dashboard's empty state).
 2. First nightly runs **record-only**; then run **Refresh baselines** to bless.
-   The dashboard at `/aorta/ci/` appears after the first Nightly Evaluation.
+   Until then the dashboard reports `recording` rather than `passing`, because
+   nothing has been graded against a baseline yet.
 3. (Optional) Run **Lock requirements** to pin the CI dependency set.
 4. (Later) Enable perf gating via `refresh_baselines.py --perf-gate`.
