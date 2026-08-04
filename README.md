@@ -99,7 +99,8 @@ use paths from the AORTA repository root.
 There is no global rule that AORTA must run on the host or inside a container:
 
 - Run `aorta env probe` in the environment you want to inspect, including
-  inside a container when appropriate.
+  inside a container when appropriate. To inspect an image without installing
+  AORTA in it, use the [package-mount workflow](docs/env-probe.md#probe-a-docker-image-without-aorta-installed).
 - Some workloads run in the same environment as the CLI.
 - Some workload plugins own a `docker run` launch. For those workloads, follow
   the plugin's instructions; the CLI normally runs on a Docker-capable host,

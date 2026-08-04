@@ -17,16 +17,10 @@ an escape hatch for ad-hoc one-shots; internally it constructs an in-memory
 
 ## Before you run
 
-Install AORTA in the environment from which you will invoke `aorta`. Relative
-recipe and output paths are resolved from the current directory; commands in
-this repository assume the repository root unless stated otherwise.
-
-Execution is workload-specific. Some workloads run in the CLI environment,
-while a Docker-aware workload plugin may launch its own container. The core
-dispatcher does not execute `docker run`; the plugin owns that launch. For such
-a plugin, use a Docker-capable host and follow the workload's instructions for
-host and image requirements. See
-[`README.md#where-commands-run`](../README.md#where-commands-run).
+Commands in this repository assume the repository root unless stated
+otherwise. For installation and host/container ownership, see
+[Where commands run](../README.md#where-commands-run) and the selected
+workload's guide.
 
 ## Layout
 

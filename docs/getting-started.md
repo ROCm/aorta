@@ -18,20 +18,10 @@ runtime requirements for particular workloads and features.
 
 ## 2. Choose where to invoke the CLI
 
-`aorta` runs in the environment where it is installed. Relative recipe,
-command, and output paths are resolved from your current directory.
-
-- Run `aorta env probe` in the environment you want to describe. That can be a
-  host environment or a container.
-- A workload that runs in the CLI process needs its runtime dependencies in
-  that same environment.
-- A Docker-launching workload plugin normally expects the CLI on a host with a
-  working Docker CLI and daemon. The plugin owns the container launch; follow
-  its guide for host mounts, image access, and dependencies inside the image.
-
-AORTA does not apply one host-or-container rule to every command. The core
-dispatcher does not execute `docker run`; Docker-aware workload plugins may do
-so and own the launch.
+Use the canonical [command-location guidance](../README.md#where-commands-run)
+to decide whether the CLI and runtime dependencies belong on the host or in a
+container. Relative recipe, command, and output paths are resolved from your
+current directory.
 
 ### Repository-relative examples
 
