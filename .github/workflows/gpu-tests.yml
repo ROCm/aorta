@@ -5,8 +5,13 @@ name: GPU Tests
 # Complements cpu-tests.yml (`not gpu and not rocm`) with no overlap -- see
 # docs/ci-testing-plan.md and issue #268.
 #
-# After a stable soak period, mark `pytest (GPU, MI350)` as a required status
-# check on `main` (branch protection) so GPU-touching PRs cannot merge red.
+# `pytest (GPU, MI350)` is a required status check on `main`. Path filtering
+# therefore must NOT live on the `pull_request` trigger: a workflow skipped by
+# path filtering leaves its checks Pending forever rather than reporting, so any
+# PR outside those paths would be permanently unmergeable. A job skipped by a
+# conditional, by contrast, reports Success. So this workflow always starts and
+# the `changes` job below decides whether the GPU work is relevant.
+# See https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks
 
 on:
   workflow_dispatch:
@@ -14,33 +19,14 @@ on:
     # Nightly full GPU run (offset from nightly.yml at 11:00 UTC).
     - cron: "0 8 * * *"
   pull_request:
-    paths:
-      - "src/aorta/race/**"
-      - "src/aorta/ebpf/**"
-      - "src/aorta/hw_queue_eval/**"
-      - "src/aorta/workloads/**"
-      - "src/aorta/utils/gpu_control.py"
-      - "src/aorta/instrumentation/env_knobs.py"
-      # The module that performs the capture. Its test file was listed without
-      # it, so a PR touching only the probe ran neither the audit nor the
-      # GPU-gated tests in that file.
-      - "src/aorta/instrumentation/environment.py"
-      - "scripts/audit_env_knobs.py"
-      - "tests/hw_queue_eval/**"
-      - "tests/instrumentation/test_environment.py"
-      - "tests/instrumentation/test_env_knob_audit.py"
-      - "tests/test_marker_partition.py"
-      - "config/ci/**"
-      - "recipes/ci/**"
-      - "scripts/ci/**"
-      - "docker/**"
-      - ".github/workflows/gpu-tests.yml"
 
 # contents: read to check out; actions: read for artifact upload (matches the
-# other artifact-uploading workflows in this repo).
+# other artifact-uploading workflows in this repo); pull-requests: read so the
+# `changes` gate can list the files a PR touches.
 permissions:
   contents: read
   actions: read
+  pull-requests: read
 
 # Protect the single GPU runner: one workflow run at a time per ref; newer PR
 # pushes cancel the superseded run.
@@ -52,15 +38,112 @@ env:
   CONTAINER_NAME: aorta-ci-gpu
 
 jobs:
+  # Cheap gate on a GitHub-hosted runner, replacing the trigger-level `paths:`
+  # filter. Non-PR triggers always report true so scheduled and dispatched runs
+  # exercise the full suite.
+  changes:
+    name: detect GPU-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      gpu: ${{ steps.filter.outputs.gpu }}
+    steps:
+      - name: Decide whether the GPU suite applies
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "$EVENT_NAME is not a pull request; running the full GPU suite."
+            echo "gpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Fail open. This gate decides a required status check, so an
+          # indeterminate answer must never be read as "no GPU work needed":
+          # that would hand a GPU-touching PR a green check without testing it.
+          # On any retrieval problem, claim relevance and run the suite.
+          # Assigning inside `if !` keeps `set -e` from aborting on failure.
+          if ! files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                          --paginate --jq '.[].filename' 2>&1)"; then
+            echo "::warning::Could not list the PR's files, so running the GPU" \
+                 "suite rather than guessing. gh said: ${files}"
+            echo "gpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$files" ]; then
+            echo "::warning::The PR file list came back empty, which should not" \
+                 "happen for a real PR; running the GPU suite."
+            echo "gpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # One-to-one with the `paths:` filter this replaced. Trailing `*` is a
+          # `case` glob, which matches `/` too, so it covers whole subtrees.
+          # Single-quoted and expanded via "${patterns[@]}" so the shell never
+          # filename-expands them -- they must reach `case` as literal patterns.
+          patterns=(
+            'src/aorta/race/*'
+            'src/aorta/ebpf/*'
+            'src/aorta/hw_queue_eval/*'
+            'src/aorta/workloads/*'
+            'src/aorta/utils/gpu_control.py'
+            'src/aorta/instrumentation/env_knobs.py'
+            # The module that performs the capture. Its test file was listed
+            # without it, so a PR touching only the probe ran neither the audit
+            # nor the GPU-gated tests in that file.
+            'src/aorta/instrumentation/environment.py'
+            'scripts/audit_env_knobs.py'
+            'tests/hw_queue_eval/*'
+            'tests/instrumentation/test_environment.py'
+            'tests/instrumentation/test_env_knob_audit.py'
+            'tests/test_marker_partition.py'
+            'config/ci/*'
+            'recipes/ci/*'
+            'scripts/ci/*'
+            'docker/*'
+            '.github/workflows/gpu-tests.yml'
+          )
+
+          gpu=false
+          while read -r file; do
+            [ -n "$file" ] || continue
+            for pattern in "${patterns[@]}"; do
+              # shellcheck disable=SC2254  # unquoted glob match is intentional
+              case "$file" in
+                $pattern)
+                  echo "GPU-relevant change: $file (matched $pattern)"
+                  gpu=true
+                  break 2
+                  ;;
+              esac
+            done
+          done <<< "$files"
+
+          if [ "$gpu" = false ]; then
+            echo "No GPU-relevant paths changed; the GPU jobs will be skipped."
+            echo "A skipped job reports Success, satisfying the required check."
+          fi
+          echo "gpu=$gpu" >> "$GITHUB_OUTPUT"
+
   gpu-tests:
     name: pytest (GPU, MI350)
     runs-on: [self-hosted, gpu]
+    needs: changes
+    # Skipped (and therefore reported as Success) when no GPU-relevant path
+    # changed, which keeps the single MI350 runner free on docs-only PRs.
+    #
     # Security: never run untrusted fork-PR code on the self-hosted GPU runner.
     # Only same-repo PRs (plus schedule / dispatch) reach the runner. Fork PRs
     # also lack the ROCM_SHARED_KEY secret, so they could not authenticate anyway.
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.changes.outputs.gpu == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     timeout-minutes: 60
 
     steps:
@@ -140,9 +223,11 @@ jobs:
     name: workload regression (GPU, MI350)
     runs-on: [self-hosted, gpu]
     needs: gpu-tests
-    # Runs on every trigger. PRs run the fast, single-GPU "pr" tier; nightly /
-    # dispatch run the full manifest (AORTA_CI_TIER below). Same fork-PR guard
-    # as gpu-tests: no untrusted fork code on the self-hosted runner.
+    # Skipped along with gpu-tests when no GPU-relevant path changed, since a
+    # dependency that did not succeed skips this job too. Otherwise PRs run the
+    # fast, single-GPU "pr" tier and nightly / dispatch run the full manifest
+    # (AORTA_CI_TIER below). Same fork-PR guard as gpu-tests: no untrusted fork
+    # code on the self-hosted runner.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository

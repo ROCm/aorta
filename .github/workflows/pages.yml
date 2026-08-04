@@ -1,0 +1,186 @@
+name: Pages (landing + nightly dashboard)
+
+# Single owner of the GitHub Pages deployment (repo Pages source must be set to
+# "GitHub Actions"). A repo has exactly one Pages site, so this one build serves
+# BOTH the nightly CI dashboard (at the site root) AND the project landing page
+# (Jekyll render of README.md, under /docs/ alongside the rest of the rendered
+# docs). It runs on main pushes, after each "Nightly Evaluation" completes (pick
+# up fresh history from the ci-results branch), and on demand.
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: ["Nightly Evaluation"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel an in-progress deploy; queue them so a landing-page push and a
+# nightly refresh don't race to publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    name: build + deploy pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      # Always deploy the landing page + dashboard generator from main, even for a
+      # manual workflow_dispatch off another ref, so Pages content is deterministic.
+      - name: Check out main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      # Renders README.md (+ any repo docs) to ./_site with the same github-pages
+      # gem the legacy Pages build used, so the rendered docs are unchanged.
+      - name: Build landing page (Jekyll)
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./
+          destination: ./_site
+
+      # jekyll-build-pages is a container action running as root, so ./_site comes
+      # back root-owned and the later steps (which run as the unprivileged runner
+      # user) cannot write inside it.
+      - name: Take ownership of the Jekyll output
+        run: sudo chown -R "$(id -u):$(id -g)" _site
+
+      # Jekyll renders README.md to _site/index.html and docs/*.md to _site/docs/*.
+      # Move that landing page under /docs/ (which had no index of its own) so the
+      # CI dashboard can own the site root. Two rewrites are needed:
+      #
+      #  1. The rendered README mixes root-absolute links with relative ones;
+      #     going one directory deeper breaks only the relative ones, so they are
+      #     re-pointed with a ../ prefix. Fragments (#x), root-absolute (/x) and
+      #     absolute (https://x, which all contain a colon) are left alone.
+      #  2. Jekyll's SEO tags hard-code the page's own URL, which was the site
+      #     root. Left alone they would tell crawlers and link unfurlers that this
+      #     page lives at the dashboard's URL, so they are re-pointed at /docs/.
+      - name: Move the landing page to /docs/
+        env:
+          DOCS_URL: ${{ steps.pages.outputs.base_url }}/docs/
+        run: |
+          set -euo pipefail
+          test -f _site/index.html
+          mkdir -p _site/docs
+          sed -E \
+            -e 's%(href|src)="([^":#/][^":]*)"%\1="../\2"%g' \
+            -e "s%(<link rel=\"canonical\" href=\")[^\"]*\"%\1${DOCS_URL}\"%" \
+            -e "s%(<meta property=\"og:url\" content=\")[^\"]*\"%\1${DOCS_URL}\"%" \
+            -e "s%(\"url\":\")[^\"]*\"%\1${DOCS_URL}\"%" \
+            _site/index.html > _site/docs/index.html
+          rm _site/index.html
+          echo "landing page -> /docs/ ($(wc -c < _site/docs/index.html) bytes)"
+
+      # History lives on the ci-results data branch (written by nightly-eval's
+      # publish job); it may not exist until the first nightly runs. Fail closed:
+      # a genuinely-absent branch (ls-remote exit 2) deploys the docs only, but a
+      # transport/auth error must NOT be swallowed into "no dashboard" -- that
+      # would silently drop the dashboard while history exists.
+      - name: Generate the nightly dashboard at the site root
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          set +e
+          git ls-remote --exit-code --heads "$repo_url" ci-results >/dev/null 2>&1
+          lsr=$?
+          set -e
+          if [ "$lsr" -eq 2 ]; then
+            echo "ci-results branch absent; dashboard appears after the first nightly"
+          elif [ "$lsr" -ne 0 ]; then
+            echo "::error::cannot reach ci-results (git ls-remote exit ${lsr}); failing closed"
+            exit 1
+          else
+            tmp="$(mktemp -d)"
+            git clone --depth 1 --branch ci-results "$repo_url" "$tmp"
+            if ls "$tmp"/results/*.json >/dev/null 2>&1; then
+              python3 scripts/ci/gen_dashboard.py \
+                --results-dir "$tmp/results" --out-dir _site --max-builds 180
+              echo "dashboard at / ($(ls -1 "$tmp"/results/*.json | wc -l) build(s))"
+            else
+              echo "ci-results exists but has no results yet"
+            fi
+          fi
+
+          # The root must never 404: without results, publish the dashboard's own
+          # empty state rather than leaving the site with no index at all.
+          if [ ! -f _site/index.html ]; then
+            mkdir -p "${RUNNER_TEMP}/empty-results"
+            python3 scripts/ci/gen_dashboard.py \
+              --results-dir "${RUNNER_TEMP}/empty-results" --out-dir _site
+            echo "no history yet; published the dashboard's empty state at /"
+          fi
+
+      # The dashboard used to live at /ci/, the docs advertised that URL, and
+      # /ci/data.json is a machine-readable endpoint something may already poll.
+      # A Pages deploy replaces the whole site, so moving the dashboard to the
+      # root would 404 both the moment it ships. Keep the data endpoint where it
+      # was and redirect the page to its new home.
+      - name: Keep the old /ci/ routes working
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          set -euo pipefail
+          site="${SITE_URL%/}"
+          mkdir -p _site/ci
+          cp _site/data.json _site/ci/data.json
+          printf '%s\n' \
+            '<!doctype html>' \
+            '<html lang="en"><head><meta charset="utf-8">' \
+            '<title>Moved — aorta nightly CI</title>' \
+            '<meta http-equiv="refresh" content="0; url=../">' \
+            "<link rel=\"canonical\" href=\"${site}/\">" \
+            '</head><body>' \
+            '<p>The nightly CI dashboard moved to <a href="../">the site root</a>.' \
+            'The history feed is unchanged at <a href="data.json">/ci/data.json</a>.</p>' \
+            '</body></html>' \
+            > _site/ci/index.html
+
+      # Fail before deploying rather than publishing a site that 404s a route we
+      # promised. Every path below is one an existing bookmark or consumer uses.
+      - name: Verify the published routes
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          set -euo pipefail
+          for f in _site/index.html _site/docs/index.html _site/ci/index.html \
+                   _site/data.json _site/ci/data.json; do
+            if [ ! -s "$f" ]; then
+              echo "::error::$f is missing or empty; refusing to deploy"
+              exit 1
+            fi
+          done
+          cmp _site/data.json _site/ci/data.json
+          # The moved docs page must not still identify itself as the site root.
+          site="${SITE_URL%/}"
+          if grep -E 'rel="canonical"|property="og:url"|"url":"' \
+               _site/docs/index.html | grep -qF "${site}/\""; then
+            echo "::error::/docs/ still claims the dashboard's URL as its own"
+            exit 1
+          fi
+          echo "routes ok: / /docs/ /ci/ /data.json /ci/data.json"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

@@ -18,6 +18,7 @@ def _load(name: str):
 
 gen_dashboard = _load("gen_dashboard")
 alert_issue = _load("alert_issue")
+eval_lib = _load("eval_lib")
 
 
 def _results(generated, entries, **summary):
@@ -44,7 +45,9 @@ def test_dashboard_renders_status_and_rows():
     html = gen_dashboard.build_dashboard_html([r1, r2])
     assert "aorta nightly CI" in html
     assert "failing" in html  # latest run failed
-    assert "inference_offline::baseline-local" in html
+    # Cells are grouped under their workload, so the two names render separately.
+    assert "inference_offline" in html
+    assert "baseline-local" in html
     assert "0.2.1rc" in html
 
 
@@ -60,9 +63,28 @@ def test_dashboard_renders_summary_metric_series():
                                               "summary": {"decode_latency_ms": 12.5}}}],
                  total=1, **{"pass": 1})
     html = gen_dashboard.build_dashboard_html([r])
-    assert "Performance / metric trends" in html
+    assert "Workloads" in html
     assert "decode_latency_ms" in html
     assert "ms" in html  # unit rendered
+
+
+def test_dashboard_record_only_history_keeps_trend_fallback_visible():
+    # A record-only build has no graded cells, so pass-rate is None for every
+    # build and the sparkline falls back to "n/a". That fallback must stay
+    # legible: styling the trend card with font-size:0 would blank it out.
+    r = _results("2026-08-03T00:00:00Z",
+                 [{"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "record",
+                   "reasons": ["no baseline (record-only)"],
+                   "metrics": {"mean_step_time_ms": 254.0}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+
+    trend_card = html.split('<div class="card trend">', 1)[1].split("</div></div>", 1)[0]
+    assert "n/a" in trend_card
+    assert "<svg" not in trend_card
+
+    assert ".card.trend svg { display:block; }" in html
+    assert "font-size:0" not in html
 
 
 def test_alert_render_lists_failures():
@@ -117,3 +139,272 @@ def test_dashboard_escapes_untrusted_reason():
     html = gen_dashboard.build_dashboard_html([r])
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html
+
+
+def test_dashboard_always_explains_a_failure():
+    # Uninformative columns get collapsed, but a failing cell's reason must
+    # never be one of them -- a bare "fail" badge with no explanation anywhere
+    # is worse than a redundant column.
+    entries = [
+        {"entry": "w", "cell": f"c{i}", "verdict": "pass", "reasons": [],
+         "metrics": {"mean_step_time_ms": 1.0}}
+        for i in range(4)
+    ]
+    entries.append({"entry": "w", "cell": "bad", "verdict": "fail",
+                    "reasons": ["mean_step_time_ms 9 > max 5"],
+                    "metrics": {"mean_step_time_ms": 9.0}})
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, total=5, fail=1, **{"pass": 4})])
+    assert "mean_step_time_ms 9 &gt; max 5" in html
+
+
+def test_dashboard_collapses_a_note_shared_by_every_cell():
+    # When every cell says the same thing, say it once instead of repeating it
+    # down a column -- but it still has to appear somewhere.
+    entries = [
+        {"entry": "w", "cell": f"c{i}", "verdict": "record",
+         "reasons": ["no baseline (record-only)"],
+         "metrics": {"mean_step_time_ms": 1.0}}
+        for i in range(3)
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, total=3, record=3)])
+    assert "no baseline (record-only)" in html
+    assert "<th scope='col'>notes</th>" not in html
+
+
+def test_dashboard_record_only_run_is_not_reported_as_passing():
+    # Nothing was graded, so "passing" would overstate the result.
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record",
+                   "reasons": ["no baseline (record-only)"],
+                   "metrics": {"mean_step_time_ms": 1.0}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "recording" in html
+    assert ">passing<" not in html
+
+
+def test_dashboard_zero_work_run_reports_the_failure_the_pipeline_records():
+    # This is what a real all-skip nightly looks like: nightly_eval appends a
+    # synthetic _nightly_eval "fail" entry when every cell skips, so the build
+    # carries fail>=1 and the honest headline is "failing", not "skipping".
+    # Asserting the shape without that entry would test a document this
+    # pipeline never emits.
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "skip",
+                   "reasons": ["needs 8 GPUs, runner exposes 2"], "metrics": {}},
+                  {"entry": "_nightly_eval", "cell": None, "verdict": "fail",
+                   "reasons": ["no matrix entry ran (empty matrix or all skipped -- check GPUs)"],
+                   "metrics": {}}],
+                 total=2, fail=1, skip=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "failing" in html
+    assert ">passing<" not in html
+    assert "skipping" not in html
+    # The reason a zero-work build failed must be on the page, not just a badge.
+    assert "no matrix entry ran" in html
+    assert "No baselines are blessed yet" not in html
+
+
+def test_dashboard_all_skip_summary_is_labelled_skipping_not_passing():
+    # Defensive branch: unreachable for nightly_eval's own output (the test
+    # above covers that), but _latest_status must still classify an all-skip
+    # summary from any other producer, and every label but "skipping" would
+    # overclaim. Kept so a future relaxation of that invariant cannot silently
+    # resurrect the "skip-only reads as passing" bug.
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "skip",
+                   "reasons": ["needs 8 GPUs, runner exposes 2"], "metrics": {}}],
+                 total=1, skip=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "skipping" in html
+    assert ">passing<" not in html
+    assert "No baselines are blessed yet" not in html
+    assert "all 1 results were" in html
+
+
+def test_dashboard_partial_record_does_not_claim_every_result_recorded():
+    # record + skip must not be described as "recorded all N results".
+    entries = [{"entry": "w", "cell": f"r{i}", "verdict": "record",
+                "reasons": ["no baseline (record-only)"],
+                "metrics": {"mean_step_time_ms": 1.0}} for i in range(3)]
+    entries.append({"entry": "w", "cell": "s0", "verdict": "skip",
+                    "reasons": ["needs 8 GPUs, runner exposes 2"], "metrics": {}})
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, total=4, record=3, skip=1)])
+    assert "recording" in html
+    assert "3 of 4 results (1 skipped)" in html
+    assert "all 4 results" not in html
+
+
+def test_dashboard_metric_trends_survive_a_missing_step_time():
+    # A cell can report metrics.summary with no mean_step_time_ms (harvest
+    # leaves it None). Its metric history is real, so the per-metric sparkline
+    # must still draw and the "needs two runs" notice must not claim otherwise,
+    # even though there is no step-time history to chart.
+    def doc(when, latency):
+        return _results(when,
+                        [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                          "metrics": {"mean_step_time_ms": None,
+                                      "summary": {"decode_latency_ms": latency}}}],
+                        total=1, record=1)
+
+    html = gen_dashboard.build_dashboard_html(
+        [doc("2026-07-30T00:00:00Z", 12.5), doc("2026-07-31T00:00:00Z", 13.5)])
+    assert "<svg" in html
+    assert "Trend charts need at least two nightly runs" not in html
+    # The step-time column still has nothing to chart, so it stays collapsed.
+    assert "trend (step ms)" not in html
+
+
+def test_dashboard_groups_cells_under_their_workload():
+    entries = [
+        {"entry": "llm_determinism", "cell": c, "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 10.0}}
+        for c in ("bf16-12L", "tf32-24L")
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, total=2, record=2)])
+    # One group header for the workload, and each cell listed beneath it.
+    assert html.count("llm_determinism") == 1
+    assert "bf16-12L" in html and "tf32-24L" in html
+
+
+def test_dashboard_omits_trend_column_without_history():
+    # A single build cannot draw a trend; the column is dropped rather than
+    # rendered as a full column of "n/a".
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                   "metrics": {"mean_step_time_ms": 1.0,
+                               "summary": {"decode_latency_ms": 12.5}}}],
+                 total=1, record=1)
+    one = gen_dashboard.build_dashboard_html([r])
+    assert "trend (step ms)" not in one
+
+    r2 = _results("2026-07-31T00:00:00Z",
+                  [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                    "metrics": {"mean_step_time_ms": 2.0,
+                                "summary": {"decode_latency_ms": 13.5}}}],
+                  total=1, record=1)
+    two = gen_dashboard.build_dashboard_html([r, r2])
+    assert "trend (step ms)" in two
+
+
+def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
+    # bool is a subclass of int, so a stray `true` in the results JSON would
+    # otherwise format as "1.0 ms", scale a bar, and count towards a trend.
+    assert gen_dashboard._fmt_ms(True) == "—"
+    assert gen_dashboard._fmt_num(True) == "—"
+    assert gen_dashboard._bar(True, 10.0) == ""
+    assert not gen_dashboard._has_trend([[True, False]])
+    assert "n/a" in gen_dashboard._svg_sparkline([True, True, True])
+
+    def doc(when, step):
+        return _results(when,
+                        [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                          "metrics": {"mean_step_time_ms": step,
+                                      "summary": {"decode_latency_ms": step}}}],
+                        total=1, record=1)
+
+    html = gen_dashboard.build_dashboard_html(
+        [doc("2026-07-30T00:00:00Z", True), doc("2026-07-31T00:00:00Z", False)])
+    assert "1.0 ms" not in html
+    assert "trend (step ms)" not in html
+
+
+def test_dashboard_rejects_values_it_cannot_render():
+    # json.loads accepts NaN/Infinity, and a metric mean can genuinely come out
+    # NaN. Unfiltered, NaN plots as "nan" coordinates and -- worse -- draws a
+    # full-width bar, since min(100.0, nan) returns 100.0. An int past the float
+    # range is rejected too: it raises OverflowError in every formatter here,
+    # including math.isfinite itself.
+    huge = int("9" * 400)
+    for bad in (float("nan"), float("inf"), float("-inf"), huge, True, None, "4"):
+        assert not gen_dashboard._isnum(bad), bad
+        assert gen_dashboard._fmt_num(bad) == "—", bad
+        assert gen_dashboard._fmt_ms(bad) == "—", bad
+        assert gen_dashboard._bar(bad, 10.0) == "", bad
+    assert gen_dashboard._isnum(0) and gen_dashboard._isnum(-1.5)
+
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                   "metrics": {"mean_step_time_ms": float("nan"),
+                               "summary": {"decode_latency_ms": huge}}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])  # must not raise
+    assert "nan" not in html.lower()
+    assert 'class="bar"' not in html
+
+    # Summary counts drive branching, division and the pass-rate card, so a
+    # malformed one must not crash generation ("4" + 0 raises TypeError) nor
+    # surface as "nan%". They render as "—" rather than a 0 we cannot vouch for.
+    entry = [{"entry": "w", "cell": "c", "verdict": "pass", "reasons": [],
+              "metrics": {}}]
+    for count in (float("nan"), "4", huge, True, None):
+        doc = _results("2026-07-30T00:00:00Z", entry, total=1, **{"pass": count})
+        out = gen_dashboard.build_dashboard_html([doc])  # must not raise
+        assert "nan" not in out.lower(), count
+        assert "—" in out, count
+
+
+def test_dashboard_does_not_count_records_as_configured_cells():
+    # summary.total is len(entries), not the size of the matrix: a workload
+    # skipped for want of GPUs emits ONE record with cell=None however many
+    # cells its recipe defines. Counting those as "cells" overstates coverage
+    # exactly when coverage is worst, so the page says "results" instead.
+    entries = [
+        {"entry": "llm_determinism", "cell": c, "verdict": "record",
+         "reasons": ["no baseline (record-only)"],
+         "metrics": {"mean_step_time_ms": 10.0}} for c in ("bf16-12L", "tf32-24L")
+    ]
+    entries.append({"entry": "training_ddp_8gpu", "cell": None, "verdict": "skip",
+                    "reasons": ["needs 8 GPU(s), have 2"], "metrics": {}})
+    # Summarised by the harness's own summarizer, so the document under test
+    # cannot drift into a shape nightly_eval would never produce.
+    doc = _results("2026-07-30T00:00:00Z", entries, **eval_lib.summarize(entries))
+    assert doc["summary"]["total"] == 3  # three records, though the matrix is wider
+    html = gen_dashboard.build_dashboard_html([doc])
+
+    assert "2 of 3 results (1 skipped)" in html
+    assert ">results<" in html and ">cells<" not in html  # count card label
+    for wrong in ("2 of 3 cells", "3 cells", "2 cells ·", "1 cell ·"):
+        assert wrong not in html, wrong
+    assert "2 results ·" in html and "1 result ·" in html  # group tallies
+    # A skipped workload reports duration_sec 0.0; it never ran, so claiming a
+    # "workload run 0s" would be a measurement of something that did not happen.
+    assert "workload run 0s" not in html
+    # The skipped workload's single record is not presented as a cell name.
+    assert ">None<" not in html
+    assert "whole workload" in html
+
+
+def test_dashboard_states_duration_once_per_workload_not_per_cell():
+    # nightly_eval measures duration_sec once around the whole recipe and copies
+    # it onto every record, so repeating it inside each cell's details reads as
+    # per-cell time. It belongs to the workload and is stated there once.
+    entries = [
+        {"entry": "llm_determinism", "cell": c, "verdict": "record", "reasons": [],
+         "duration_sec": 105.96, "trials": 2,
+         "metrics": {"mean_step_time_ms": 10.0, "summary": {"latency_ms": 1.5}}}
+        for c in ("bf16-12L", "tf32-24L", "moe4-bf16-12L", "baseline-bf16-24L")
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", entries, **eval_lib.summarize(entries))])
+
+    assert html.count("workload run 106s") == 1
+    assert "ran in 106s" not in html  # never restated as if it were per cell
+    assert html.count("2 trials") == 4  # genuinely per-record detail stays
+
+
+def test_dashboard_omits_the_unit_when_the_value_is_unknown():
+    # "— ms" reads as a measurement of nothing; a missing value gets no unit.
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                   "metrics": {"mean_step_time_ms": 1.0,
+                               "summary": {"decode_latency_ms": None,
+                                           "latency_ms": 12.5}}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "— ms" not in html
+    assert "12.5 ms" in html  # a real value keeps its unit
