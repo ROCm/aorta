@@ -159,21 +159,23 @@ This captures the workload process. Keep client-side `--buck-target`
 introspection in a separate snapshot; a remote action may not have access to
 the Buck daemon or checkout needed for a nested cquery.
 
-### env.json schema (v1.13)
+### env.json schema (v1.15)
 
 See `EnvSnapshot` in [`environment.py`](environment.py) for the
 authoritative shape and field-by-field docstrings. Top-level keys:
 
 ```
-schema_version    captured_at       partial         partial_reasons
-system_health     rocm              hip             hipblaslt
-rocblas           miopen            rccl            composable_kernel
-tensile           triton            fbgemm          aiter
-aotriton          gpu_arch          host
-runtime_context   docker            env_vars
-python_version    pytorch_version   pytorch_build
-build_system      buck_invocation       library_introspection
-library_introspection_alternates
+schema_version    captured_at       host                runtime_context
+container_detected execution_context probe_namespace    docker
+rocm              amdgpu_driver     hip                 gpu_arch
+nics              hipblaslt         rocblas             composable_kernel
+tensile           tensile_catalog   miopen              miopen_catalog
+rocfft_catalog    rccl              triton              fbgemm
+torchrec          aiter             aotriton            build_system
+buck_invocation   library_introspection
+library_introspection_alternates     python_version
+pytorch_version   pytorch_build     pytorch_sdpa        env_vars
+system_health     partial           partial_reasons
 ```
 
 For the per-version field history (renames, env-var additions /
@@ -268,7 +270,7 @@ Roughly the same pattern as the existing blocks (`_run_rdhc`,
 
 ## Tests
 
-`tests/instrumentation/test_environment.py` has ~150 tests (run
+`tests/instrumentation/test_environment.py` has 500+ tests (run
 `pytest --collect-only -q tests/instrumentation/test_environment.py | tail -1`
 for the live count) covering:
 

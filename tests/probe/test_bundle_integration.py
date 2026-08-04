@@ -134,6 +134,288 @@ def test_manifest_records_per_file_counts(redaction_run_dir: Path, tmp_path: Pat
     assert stdout_row.ips_rewritten >= 1
 
 
+def test_every_copy_of_a_cell_env_mapping_is_scrubbed(redaction_run_dir: Path, tmp_path: Path):
+    """No env value may be a placeholder in one artifact and plaintext in another.
+
+    ``probe.env`` and ``recipe.resolved.yaml`` are the two non-JSON carriers of
+    the same cell env mapping that ``result.json`` and ``matrix.json`` hold.
+    """
+    (redaction_run_dir / "none-none" / "trial_0" / "probe.env").write_text(
+        "AWS_TOKEN=secret\n"
+        "LD_LIBRARY_PATH=/home/customer/private/lib\n"
+        "MASTER_ADDR=192.168.1.42\n",
+        encoding="utf-8",
+    )
+    # The shape write_resolved_recipe emits: triage-shaped, both env scopes.
+    (redaction_run_dir / "recipe.resolved.yaml").write_text(
+        "schema_version: 1\n"
+        "workload: _subprocess\n"
+        "trials: 1\n"
+        "steps: 1\n"
+        "extra_env:\n"
+        "  AWS_TOKEN: secret\n"
+        "  KEEP: '1'\n"
+        "cells:\n"
+        "- name: none-none\n"
+        "  mitigations: [none]\n"
+        "  environment: local\n"
+        "  extra_env:\n"
+        "    AWS_TOKEN: secret\n"
+        "    LD_LIBRARY_PATH: /home/customer/private/lib\n"
+        "redaction:\n"
+        "  scrub_env_keys: ['AWS_*']\n"
+        "  scrub_paths: true\n"
+        "  scrub_ip_addresses: true\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "env-copies.tar.gz"
+    result = CliRunner().invoke(
+        main, ["bundle", str(redaction_run_dir), "--output", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+
+    secrets = ("AWS_TOKEN", "/home/customer/private/lib", "192.168.1.42")
+    with tarfile.open(out, "r:gz") as tar:
+        for name in tar.getnames():
+            member = tar.extractfile(name)
+            if member is None:
+                continue
+            body = member.read().decode("utf-8", errors="replace")
+            leaked = [needle for needle in secrets if needle in body]
+            assert not leaked, f"{name} leaked {leaked}"
+
+
+def test_nested_run_uses_exact_bundle_root(redaction_run_dir: Path, tmp_path: Path):
+    """A surrounding run-shaped directory must not disable inner redaction."""
+    outer = redaction_run_dir.parent
+    (outer / "host_env.json").write_text("{}", encoding="utf-8")
+    (outer / "recipe.resolved.yaml").write_text(
+        "schema_version: 1\n",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "nested-run-bundle.tar.gz"
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["bundle", str(redaction_run_dir), "--output", str(out)],
+    )
+
+    assert result.exit_code == 0, result.output
+    with tarfile.open(out, "r:gz") as tar:
+        result_name = next(n for n in tar.getnames() if n.endswith("/trial_0/result.json"))
+        bundled_result = json.loads(_member_text(tar, result_name))
+    assert bundled_result["env"] == {"HIP_VISIBLE_DEVICES": "0"}
+
+
+def test_symlinked_run_dir_uses_the_same_canonical_root(redaction_run_dir: Path, tmp_path: Path):
+    """The CLI may receive an alias, while the writer stages real paths."""
+    alias = tmp_path / "TKT-LINK"
+    alias.symlink_to(redaction_run_dir, target_is_directory=True)
+    out = tmp_path / "symlinked-run-bundle.tar.gz"
+
+    result = CliRunner().invoke(
+        main,
+        ["bundle", str(alias), "--output", str(out)],
+    )
+
+    assert result.exit_code == 0, result.output
+    with tarfile.open(out, "r:gz") as tar:
+        result_name = next(n for n in tar.getnames() if n.endswith("/trial_0/result.json"))
+        bundled_result = json.loads(_member_text(tar, result_name))
+    assert bundled_result["env"] == {"HIP_VISIBLE_DEVICES": "0"}
+
+
+def test_bundle_scrubs_nested_envsnapshot_env_vars_without_corrupting_schema(
+    redaction_run_dir: Path, tmp_path: Path
+):
+    """Real tar integration for the EnvSnapshot shape emitted by aorta run.
+
+    Unit-only JSON round trips missed two production failures: scrub_env_keys
+    never reached ``env_vars``, and treating TrialResult.env as a flat mapping
+    stringified every nested block.
+    """
+    host_env = {
+        "schema_version": "1.15",
+        "rocm": {"version": "7.0.2"},
+        "env_vars": {
+            "ROCBLAS_LOG_PATH": "/customer/private/rocblas.log",
+            "HIP_VISIBLE_DEVICES": "0",
+        },
+        "miopen_catalog": {
+            "env_overrides": {
+                "ROCBLAS_LOG_PATH": "/customer/private/miopen.log",
+                "HIP_VISIBLE_DEVICES": "0",
+            }
+        },
+    }
+    (redaction_run_dir / "host_env.json").write_text(json.dumps(host_env), encoding="utf-8")
+    env_path = redaction_run_dir / "environments" / "rocm" / "env.json"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text(json.dumps(host_env), encoding="utf-8")
+    result_path = redaction_run_dir / "none-none" / "trial_0" / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["env"] = host_env
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    dispatcher_path = (
+        redaction_run_dir
+        / "none-none"
+        / "_subprocess"
+        / "trial_d0_m0_t0.json"
+    )
+    dispatcher_path.parent.mkdir()
+    dispatcher_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "0.1",
+                "trial_id": "_subprocess_d0_m0_t0",
+                "workload": "_subprocess",
+                "execution_env": {
+                    "name": "local",
+                    "env": {
+                        "ROCBLAS_LOG_PATH": "/customer/private/execution.log",
+                        "HIP_VISIBLE_DEVICES": "0",
+                    },
+                },
+                "mitigations_applied": [],
+                "config": {
+                    "_aorta_environment": {
+                        "name": "local",
+                        "env": {
+                            "ROCBLAS_LOG_PATH": "/customer/private/config.log",
+                            "HIP_VISIBLE_DEVICES": "0",
+                        },
+                    },
+                    "_aorta_probe_extras": {
+                        "cell_env_vars": {
+                            "ROCBLAS_LOG_PATH": "/customer/private/dispatcher.log",
+                            "HIP_VISIBLE_DEVICES": "0",
+                        }
+                    }
+                },
+                "env": host_env,
+                "result": {"passed": True},
+                "wall_clock_sec": 0.1,
+                "exit_status": "ok",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (redaction_run_dir / "matrix.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cells": [
+                    {
+                        "name": "none-none",
+                        "resolved_env_vars": {
+                            "ROCBLAS_LOG_PATH": "/customer/private/resolved.log",
+                            "HIP_VISIBLE_DEVICES": "0",
+                        },
+                        "extra_env": {
+                            "ROCBLAS_LOG_PATH": "/customer/private/extra.log",
+                            "HIP_VISIBLE_DEVICES": "0",
+                        },
+                        "resolved_environment": {
+                            "name": "local",
+                            "env": {
+                                "ROCBLAS_LOG_PATH": "/customer/private/matrix.log",
+                                "HIP_VISIBLE_DEVICES": "0",
+                            },
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sidecar_payload = {
+        "version": 1,
+        "environments": {
+            "customer": {
+                "docker": "image",
+                "env": {
+                    "ROCBLAS_LOG_PATH": "/customer/private/sidecar.log",
+                    "HIP_VISIBLE_DEVICES": "0",
+                },
+            }
+        },
+    }
+    (redaction_run_dir / "inline_environments.sidecar.json").write_text(
+        json.dumps(sidecar_payload), encoding="utf-8"
+    )
+    copied_sidecar = redaction_run_dir / "sidecars" / "customer.json"
+    copied_sidecar.parent.mkdir()
+    copied_sidecar.write_text(json.dumps(sidecar_payload), encoding="utf-8")
+
+    out = tmp_path / "bundle-env-vars.tar.gz"
+    bundle_run_dir(
+        redaction_run_dir,
+        output=out,
+        redactor=RedactingRedactor(RedactionCfg(scrub_env_keys=("ROCBLAS_LOG_*",))),
+    )
+
+    with tarfile.open(out, "r:gz") as tar:
+        names = tar.getnames()
+        host_name = next(n for n in names if n.endswith("/host_env.json"))
+        env_name = next(n for n in names if n.endswith("/environments/rocm/env.json"))
+        result_name = next(n for n in names if n.endswith("/trial_0/result.json"))
+        dispatcher_name = next(n for n in names if n.endswith("/trial_d0_m0_t0.json"))
+        inline_sidecar_name = next(
+            n for n in names if n.endswith("/inline_environments.sidecar.json")
+        )
+        copied_sidecar_name = next(
+            n for n in names if n.endswith("/sidecars/customer.json")
+        )
+        matrix_name = next(n for n in names if n.endswith("/matrix.json"))
+        manifest_name = next(n for n in names if n.endswith(MANIFEST_FILENAME))
+        bundled_host = json.loads(_member_text(tar, host_name))
+        bundled_env = json.loads(_member_text(tar, env_name))
+        bundled_result = json.loads(_member_text(tar, result_name))
+        bundled_dispatcher = json.loads(_member_text(tar, dispatcher_name))
+        bundled_inline_sidecar = json.loads(_member_text(tar, inline_sidecar_name))
+        bundled_copied_sidecar = json.loads(_member_text(tar, copied_sidecar_name))
+        bundled_matrix = json.loads(_member_text(tar, matrix_name))
+        manifest = Manifest.from_json(_member_text(tar, manifest_name))
+
+    for snapshot in (bundled_host, bundled_env, bundled_result["env"]):
+        assert snapshot["rocm"] == {"version": "7.0.2"}
+        assert "ROCBLAS_LOG_PATH" not in snapshot["env_vars"]
+        assert snapshot["env_vars"]["HIP_VISIBLE_DEVICES"] == "0"
+        assert "ROCBLAS_LOG_PATH" not in snapshot["miopen_catalog"]["env_overrides"]
+        assert snapshot["miopen_catalog"]["env_overrides"]["HIP_VISIBLE_DEVICES"] == "0"
+    dispatcher_vars = bundled_dispatcher["config"]["_aorta_probe_extras"][
+        "cell_env_vars"
+    ]
+    assert dispatcher_vars == {"HIP_VISIBLE_DEVICES": "0"}
+    assert "ROCBLAS_LOG_PATH" not in bundled_dispatcher["env"]["env_vars"]
+    assert bundled_dispatcher["execution_env"]["env"] == {
+        "HIP_VISIBLE_DEVICES": "0"
+    }
+    assert bundled_dispatcher["config"]["_aorta_environment"]["env"] == {
+        "HIP_VISIBLE_DEVICES": "0"
+    }
+    matrix_cell = bundled_matrix["cells"][0]
+    assert matrix_cell["resolved_env_vars"] == {"HIP_VISIBLE_DEVICES": "0"}
+    assert matrix_cell["extra_env"] == {"HIP_VISIBLE_DEVICES": "0"}
+    assert matrix_cell["resolved_environment"]["env"] == {
+        "HIP_VISIBLE_DEVICES": "0"
+    }
+    for sidecar in (bundled_inline_sidecar, bundled_copied_sidecar):
+        assert sidecar["environments"]["customer"]["env"] == {
+            "HIP_VISIBLE_DEVICES": "0"
+        }
+    for suffix in (
+        "trial_d0_m0_t0.json",
+        "matrix.json",
+        "inline_environments.sidecar.json",
+        "sidecars/customer.json",
+    ):
+        row = next(item for item in manifest.files if item.path.endswith(suffix))
+        assert row.env_keys_removed >= 1
+
+
 def test_originals_untouched(redaction_run_dir: Path, tmp_path: Path):
     before = {
         p: p.read_bytes()

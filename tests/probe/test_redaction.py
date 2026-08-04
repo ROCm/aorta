@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aorta.bundle.errors import RedactionError
 from aorta.probe.redaction import (
@@ -17,9 +18,27 @@ from aorta.probe.redaction import (
     scrub_text,
 )
 from aorta.probe.sandbox import MAX_LOG_BYTES
-from aorta.triage.recipe import RecipeSchemaError
+from aorta.triage.recipe import RecipeSchemaError, load_recipe
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _mark_run_root(run_dir: Path) -> None:
+    run_dir.mkdir(exist_ok=True)
+    (run_dir / "host_env.json").write_text("{}", encoding="utf-8")
+    (run_dir / "recipe.resolved.yaml").write_text(
+        "schema_version: 1\n",
+        encoding="utf-8",
+    )
+
+
+def _result_json_paths(tmp_path: Path) -> tuple[Path, Path]:
+    run_dir = tmp_path / "run"
+    _mark_run_root(run_dir)
+    src = run_dir / "none-none" / "trial_0" / "result.json"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    dst = tmp_path / "out" / "none-none" / "trial_0" / "result.json"
+    return src, dst
 
 
 def test_env_key_glob():
@@ -160,8 +179,7 @@ def test_redacting_redactor_scrubs_result_json_env(tmp_path: Path):
         scrub_paths=True,
     )
     redactor = RedactingRedactor(cfg)
-    src = tmp_path / "result.json"
-    dst = tmp_path / "out" / "result.json"
+    src, dst = _result_json_paths(tmp_path)
     src.write_text(
         json.dumps(
             {
@@ -192,8 +210,7 @@ def test_result_json_env_values_scrubbed(tmp_path: Path):
         scrub_ip_addresses=True,
     )
     redactor = RedactingRedactor(cfg)
-    src = tmp_path / "result.json"
-    dst = tmp_path / "out" / "result.json"
+    src, dst = _result_json_paths(tmp_path)
     src.write_text(
         json.dumps(
             {
@@ -217,6 +234,563 @@ def test_result_json_env_values_scrubbed(tmp_path: Path):
     assert counts.ips_rewritten >= 1
 
 
+def test_result_json_nested_envsnapshot_preserves_types_and_scrubs_env_vars(
+    tmp_path: Path,
+):
+    """TrialResult.env is a nested EnvSnapshot, not a flat process env.
+
+    The old redactor treated every ``env`` dict as flat, stringifying ``rocm``
+    and ``env_vars`` and then missing scrub patterns inside the string.
+    """
+    cfg = RedactionCfg(scrub_env_keys=("ROCBLAS_LOG_*",), scrub_paths=True)
+    redactor = RedactingRedactor(cfg)
+    src, dst = _result_json_paths(tmp_path)
+    src.write_text(
+        json.dumps(
+            {
+                "verdict": "pass",
+                "env": {
+                    "schema_version": "1.15",
+                    "partial": False,
+                    "rocm": {"version": "7.0.2"},
+                    "env_vars": {
+                        "ROCBLAS_LOG_PATH": "/home/customer/private.log",
+                        "HIP_VISIBLE_DEVICES": "0",
+                        "TENSILE_STREAMK5_FORCE_MODE": None,
+                    },
+                    "miopen_catalog": {
+                        "env_overrides": {
+                            "ROCBLAS_LOG_PATH": "/home/customer/duplicate.log",
+                            "KEEP": "1",
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    counts = redactor.scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert counts.env_keys_removed == 2
+    assert doc["env"]["rocm"] == {"version": "7.0.2"}
+    assert doc["env"]["partial"] is False
+    assert "ROCBLAS_LOG_PATH" not in doc["env"]["env_vars"]
+    assert doc["env"]["env_vars"]["HIP_VISIBLE_DEVICES"] == "0"
+    assert doc["env"]["env_vars"]["TENSILE_STREAMK5_FORCE_MODE"] is None
+    assert doc["env"]["miopen_catalog"]["env_overrides"] == {"KEEP": "1"}
+
+
+@pytest.mark.parametrize("name", ["host_env.json", "env.json", "matrix.json"])
+def test_json_env_var_mappings_obey_scrub_env_keys(name: str, tmp_path: Path):
+    cfg = RedactionCfg(scrub_env_keys=("ROCBLAS_LOG_*",))
+    redactor = RedactingRedactor(cfg)
+    _mark_run_root(tmp_path)
+    src = (
+        tmp_path / "environments" / "rocm" / "env.json"
+        if name == "env.json"
+        else tmp_path / name
+    )
+    src.parent.mkdir(parents=True, exist_ok=True)
+    dst = tmp_path / "out" / src.relative_to(tmp_path)
+    payload = (
+        {
+            "cells": [
+                {
+                    "resolved_env_vars": {
+                        "ROCBLAS_LOG_PATH": "/customer/private.log",
+                        "KEEP": "1",
+                    },
+                    "extra_env": {
+                        "ROCBLAS_LOG_PATH": "/customer/duplicate.log",
+                        "KEEP": "1",
+                    },
+                }
+            ]
+        }
+        if name == "matrix.json"
+        else {
+            "schema_version": "1.15",
+            "env_vars": {
+                "ROCBLAS_LOG_PATH": "/customer/private.log",
+                "KEEP": "1",
+            },
+            "miopen_catalog": {
+                "env_overrides": {
+                    "ROCBLAS_LOG_PATH": "/customer/duplicate.log",
+                    "KEEP": "1",
+                }
+            },
+        }
+    )
+    src.write_text(json.dumps(payload), encoding="utf-8")
+
+    counts = redactor.scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+    env = doc["cells"][0]["resolved_env_vars"] if name == "matrix.json" else doc["env_vars"]
+
+    assert counts.env_keys_removed == 2
+    assert env == {"KEEP": "1"}
+    duplicate = (
+        doc["cells"][0]["extra_env"]
+        if name == "matrix.json"
+        else doc["miopen_catalog"]["env_overrides"]
+    )
+    assert duplicate == {"KEEP": "1"}
+
+
+def test_isolated_environment_placeholder_scrubs_descriptor_env(tmp_path: Path):
+    _mark_run_root(tmp_path)
+    src = tmp_path / "environments" / "isolated" / "env.json"
+    src.parent.mkdir(parents=True)
+    dst = tmp_path / "out" / "environments" / "isolated" / "env.json"
+    src.write_text(
+        json.dumps(
+            {
+                "name": "isolated",
+                "snapshot_captured": False,
+                "descriptor": {
+                    "docker": "image",
+                    "env": {
+                        "AWS_SECRET_ACCESS_KEY": "secret",
+                        "KEEP": "1",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    counts = RedactingRedactor(
+        RedactionCfg(scrub_env_keys=("AWS_*",))
+    ).scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert counts.env_keys_removed == 1
+    assert doc["descriptor"]["env"] == {"KEEP": "1"}
+
+
+def test_result_json_mixed_type_flat_env_still_scrubs_keys(tmp_path: Path):
+    src, dst = _result_json_paths(tmp_path)
+    src.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "AWS_SECRET_ACCESS_KEY": "secret",
+                    "RETRY_COUNT": 3,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    counts = RedactingRedactor(
+        RedactionCfg(scrub_env_keys=("AWS_*",))
+    ).scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert counts.env_keys_removed == 1
+    assert doc["env"] == {"RETRY_COUNT": 3}
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        Path("inline_environments.sidecar.json"),
+        Path("sidecars") / "customer.json",
+    ],
+)
+def test_environment_sidecars_scrub_environment_and_mitigation_maps(
+    relative: Path, tmp_path: Path
+):
+    _mark_run_root(tmp_path)
+    src = tmp_path / relative
+    src.parent.mkdir(parents=True, exist_ok=True)
+    dst = tmp_path / "out" / relative
+    src.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "environments": {
+                    "customer": {
+                        "docker": "image",
+                        "env": {"AWS_SECRET_ACCESS_KEY": "secret", "KEEP": "1"},
+                    }
+                },
+                "mitigations": {
+                    "diagnostic": {
+                        "AWS_SECRET_ACCESS_KEY": "secret",
+                        "KEEP": "1",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    counts = RedactingRedactor(
+        RedactionCfg(scrub_env_keys=("AWS_*",))
+    ).scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert counts.env_keys_removed == 2
+    assert doc["environments"]["customer"]["env"] == {"KEEP": "1"}
+    assert doc["mitigations"]["diagnostic"] == {"KEEP": "1"}
+
+
+def test_unrelated_collector_env_json_is_not_structurally_scrubbed(tmp_path: Path):
+    _mark_run_root(tmp_path)
+    src = (
+        tmp_path
+        / "none-none"
+        / "trial_0"
+        / "collector"
+        / "environments"
+        / "stats"
+        / "env.json"
+    )
+    src.parent.mkdir(parents=True)
+    dst = tmp_path / "out" / "collector" / "env.json"
+    src.write_text(
+        json.dumps({"metrics": {"env_vars": {"AWS_SCORE": 0.91, "KEEP": 1}}}),
+        encoding="utf-8",
+    )
+
+    counts = RedactingRedactor(
+        RedactionCfg(scrub_env_keys=("AWS_*",))
+    ).scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert counts.env_keys_removed == 0
+    assert doc["metrics"]["env_vars"] == {"AWS_SCORE": 0.91, "KEEP": 1}
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        Path("none-none") / "_subprocess" / "trial_d0_m0_t0.json",
+        Path("cells") / "none-none" / "_subprocess" / "trial_d0_m0_t0.json",
+    ],
+)
+def test_dispatcher_trial_layouts_scrub_environment_copies(
+    relative: Path, tmp_path: Path
+):
+    _mark_run_root(tmp_path)
+    src = tmp_path / relative
+    src.parent.mkdir(parents=True)
+    dst = tmp_path / "out" / relative
+    src.write_text(
+        json.dumps(
+            {
+                "execution_env": {
+                    "env": {"AWS_SECRET_ACCESS_KEY": "secret", "KEEP": "1"}
+                },
+                "env": {
+                    "schema_version": "1.15",
+                    "env_vars": {
+                        "AWS_SECRET_ACCESS_KEY": "secret",
+                        "KEEP": "1",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    counts = RedactingRedactor(
+        RedactionCfg(scrub_env_keys=("AWS_*",))
+    ).scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert counts.env_keys_removed == 2
+    assert doc["execution_env"]["env"] == {"KEEP": "1"}
+    assert doc["env"]["env_vars"] == {"KEEP": "1"}
+
+
+def test_unrelated_collector_result_json_keeps_non_environment_env_map(
+    tmp_path: Path,
+):
+    run_dir = tmp_path / "run"
+    _mark_run_root(run_dir)
+    src = run_dir / "none-none" / "trial_0" / "collector" / "result.json"
+    src.parent.mkdir(parents=True)
+    dst = tmp_path / "out" / "collector" / "result.json"
+    src.write_text(
+        json.dumps({"env": {"AWS_SCORE": 0.91, "KEEP": 1}}),
+        encoding="utf-8",
+    )
+
+    counts = RedactingRedactor(
+        RedactionCfg(scrub_env_keys=("AWS_*",))
+    ).scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert counts.env_keys_removed == 0
+    assert doc["env"] == {"AWS_SCORE": 0.91, "KEEP": 1}
+
+
+def test_unrelated_collector_matrix_json_is_not_structurally_scrubbed(
+    tmp_path: Path,
+):
+    run_dir = tmp_path / "run"
+    _mark_run_root(run_dir)
+    src = run_dir / "none-none" / "trial_0" / "collector" / "matrix.json"
+    src.parent.mkdir(parents=True)
+    dst = tmp_path / "out" / "collector" / "matrix.json"
+    src.write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "resolved_env_vars": {
+                            "AWS_SCORE": 0.91,
+                            "KEEP": 1,
+                        }
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    counts = RedactingRedactor(
+        RedactionCfg(scrub_env_keys=("AWS_*",))
+    ).scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert counts.env_keys_removed == 0
+    assert doc["cells"][0]["resolved_env_vars"] == {
+        "AWS_SCORE": 0.91,
+        "KEEP": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        r'{"path":"\u002fhome\u002fcustomer\u002fprivate"}',
+        r'{"path":"\/home\/customer\/private"}',
+    ],
+)
+def test_generic_collector_json_scrubs_semantic_strings_and_stays_valid(raw: str, tmp_path: Path):
+    """Raw text replacement either missed or corrupted these valid encodings."""
+    src = tmp_path / "collector.json"
+    dst = tmp_path / "out" / "collector.json"
+    src.write_text(raw, encoding="utf-8")
+
+    counts = RedactingRedactor(RedactionCfg(scrub_paths=True)).scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert counts.paths_rewritten == 1
+    assert doc == {"path": "<PATH:0>"}
+
+
+def test_corrupt_generic_collector_json_fails_closed(tmp_path: Path):
+    src = tmp_path / "collector.json"
+    dst = tmp_path / "out" / "collector.json"
+    src.write_text(r'{"path":"\/home/customer/private"', encoding="utf-8")
+
+    with pytest.raises(RedactionError):
+        RedactingRedactor(RedactionCfg(scrub_paths=True)).scrub_file(src, dst)
+
+    assert not dst.exists()
+
+
+def _resolved_recipe_doc() -> dict:
+    """The shape ``write_resolved_recipe`` actually emits.
+
+    It is a triage-shaped document (``workload`` / ``steps`` / ``cells``, no
+    ``mode``) regardless of the run's mode, so the env overlays live at
+    top-level ``extra_env``, ``cells[*].extra_env``, and the inline-docker
+    ``cells[*].environment.env``.
+    """
+    return {
+        "schema_version": 1,
+        "workload": "_subprocess",
+        "trials": 1,
+        "steps": 1,
+        "ticket": "TKT-1",
+        "extra_env": {"AWS_SECRET_ACCESS_KEY": "secret", "KEEP": "1"},
+        "confound": {"threshold": 1.15, "baseline_cell": "none-none"},
+        "cells": [
+            {
+                "name": "none-none",
+                "mitigations": ["none"],
+                "environment": {
+                    "docker": "image",
+                    "env": {"AWS_REGION": "us-east-1", "KEEP": "1"},
+                },
+                "extra_env": {"AWS_TOKEN": "secret", "KEEP": "1"},
+            }
+        ],
+    }
+
+
+def test_resolved_recipe_scrubs_every_env_overlay(tmp_path: Path):
+    """The resolved recipe re-emits the overlays matrix.json also records.
+
+    Treating it as plain text left ``extra_env`` unscrubbed while the
+    identical values were removed from ``matrix.json``.
+    """
+    _mark_run_root(tmp_path)
+    src = tmp_path / "recipe.resolved.yaml"
+    dst = tmp_path / "out" / "recipe.resolved.yaml"
+    src.write_text(yaml.safe_dump(_resolved_recipe_doc(), sort_keys=False), encoding="utf-8")
+
+    counts = RedactingRedactor(
+        RedactionCfg(scrub_env_keys=("AWS_*",))
+    ).scrub_file(src, dst)
+    doc = yaml.safe_load(dst.read_text(encoding="utf-8"))
+
+    assert counts.env_keys_removed == 3
+    assert doc["extra_env"] == {"KEEP": "1"}
+    assert doc["cells"][0]["extra_env"] == {"KEEP": "1"}
+    assert doc["cells"][0]["environment"] == {"docker": "image", "env": {"KEEP": "1"}}
+
+
+def test_resolved_recipe_stays_loadable_after_scrubbing(tmp_path: Path):
+    """Scrubbing must not break the resolved recipe's reload contract."""
+    _mark_run_root(tmp_path)
+    src = tmp_path / "recipe.resolved.yaml"
+    dst = tmp_path / "out" / "recipe.resolved.yaml"
+    src.write_text(yaml.safe_dump(_resolved_recipe_doc(), sort_keys=False), encoding="utf-8")
+
+    RedactingRedactor(RedactionCfg(scrub_env_keys=("AWS_*",))).scrub_file(src, dst)
+
+    recipe = load_recipe(dst)
+    assert recipe.extra_env == {"KEEP": "1"}
+    assert recipe.cells[0].extra_env == {"KEEP": "1"}
+    assert recipe.inline_environments[0].env == {"KEEP": "1"}
+
+
+def test_corrupt_resolved_recipe_fails_closed(tmp_path: Path):
+    _mark_run_root(tmp_path)
+    src = tmp_path / "recipe.resolved.yaml"
+    dst = tmp_path / "out" / "recipe.resolved.yaml"
+    src.write_text("cells: [\n  - name: 'unterminated\n", encoding="utf-8")
+
+    with pytest.raises(RedactionError):
+        RedactingRedactor(RedactionCfg(scrub_env_keys=("AWS_*",))).scrub_file(src, dst)
+
+    assert not dst.exists()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        [{"extra_env": {"AWS_TOKEN": "secret"}}],
+        None,
+        "not-a-recipe",
+    ],
+)
+def test_wrong_shaped_resolved_recipe_fails_closed(document: object, tmp_path: Path):
+    _mark_run_root(tmp_path)
+    src = tmp_path / "recipe.resolved.yaml"
+    dst = tmp_path / "out" / "recipe.resolved.yaml"
+    src.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(RedactionError):
+        RedactingRedactor(RedactionCfg(scrub_env_keys=("AWS_*",))).scrub_file(
+            src, dst
+        )
+
+    assert not dst.exists()
+
+
+def test_probe_env_scrubs_paths_and_ips_in_retained_values(tmp_path: Path):
+    """probe.env duplicates the cell env mapping result.json already scrubs."""
+    src = tmp_path / "probe.env"
+    dst = tmp_path / "out" / "probe.env"
+    src.write_text(
+        "AWS_TOKEN=secret\n"
+        "LD_LIBRARY_PATH=/home/customer/private/lib\n"
+        "MASTER_ADDR=192.168.1.42\n",
+        encoding="utf-8",
+    )
+
+    counts = RedactingRedactor(
+        RedactionCfg(
+            scrub_env_keys=("AWS_*",),
+            scrub_paths=True,
+            scrub_ip_addresses=True,
+        )
+    ).scrub_file(src, dst)
+    out = dst.read_text(encoding="utf-8")
+
+    assert counts.env_keys_removed == 1
+    assert counts.paths_rewritten == 1
+    assert counts.ips_rewritten == 1
+    assert "/home/customer/private/lib" not in out
+    assert "192.168.1.42" not in out
+    assert "LD_LIBRARY_PATH=<PATH:0>" in out
+    assert "MASTER_ADDR=<IPV4:0>" in out
+
+
+def test_ambiguous_run_root_inference_fails_closed(tmp_path: Path):
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    _mark_run_root(outer)
+    _mark_run_root(inner)
+    src = inner / "none-none" / "trial_0" / "result.json"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        json.dumps({"env": {"AWS_SECRET_ACCESS_KEY": "secret"}}),
+        encoding="utf-8",
+    )
+    dst = tmp_path / "out" / "result.json"
+
+    with pytest.raises(RedactionError) as excinfo:
+        RedactingRedactor(
+            RedactionCfg(scrub_env_keys=("AWS_*",))
+        ).scrub_file(src, dst)
+
+    assert "multiple probe run roots" in str(excinfo.value.cause)
+    assert not dst.exists()
+
+
+def test_structured_json_scrubs_paths_and_ips_in_object_keys(tmp_path: Path):
+    src, dst = _result_json_paths(tmp_path)
+    src.write_text(
+        json.dumps(
+            {
+                "/home/customer/private": {
+                    "192.168.1.42": "value",
+                },
+                "env": {
+                    "/home/customer/AWS_TOKEN": "secret",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    counts = RedactingRedactor(
+        RedactionCfg(scrub_paths=True, scrub_ip_addresses=True)
+    ).scrub_file(src, dst)
+    doc = json.loads(dst.read_text(encoding="utf-8"))
+
+    assert doc == {
+        "<PATH:0>": {"<IPV4:0>": "value"},
+        "env": {"<PATH:1>": "secret"},
+    }
+    assert counts.paths_rewritten == 2
+    assert counts.ips_rewritten == 1
+
+
+def test_structured_json_key_collision_fails_closed(tmp_path: Path):
+    src, dst = _result_json_paths(tmp_path)
+    src.write_text(
+        json.dumps({"/home/customer/private": 1, "<PATH:0>": 2}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RedactionError):
+        RedactingRedactor(RedactionCfg(scrub_paths=True)).scrub_file(src, dst)
+
+    assert not dst.exists()
+
+
 def test_result_json_placeholders_consistent_across_fields(tmp_path: Path):
     """Path/IP placeholders share one index across the whole result.json.
 
@@ -227,8 +801,7 @@ def test_result_json_placeholders_consistent_across_fields(tmp_path: Path):
     """
     cfg = RedactionCfg(scrub_paths=True)
     redactor = RedactingRedactor(cfg)
-    src = tmp_path / "result.json"
-    dst = tmp_path / "out" / "result.json"
+    src, dst = _result_json_paths(tmp_path)
     src.write_text(
         json.dumps(
             {
@@ -362,6 +935,39 @@ def test_line_windows_oversized_multibyte_line_stays_under_cap(monkeypatch):
     assert "".join(windows) == text
 
 
+@pytest.mark.parametrize(
+    ("token", "scrub_paths", "scrub_ips", "expected_counts"),
+    [
+        ("/home/customer/private", True, False, (1, 0, 0)),
+        ("192.168.1.42", False, True, (0, 1, 0)),
+        ("[2001:db8::1]", False, True, (0, 0, 1)),
+    ],
+)
+def test_oversized_line_hard_split_keeps_redaction_token_whole(
+    monkeypatch,
+    token,
+    scrub_paths,
+    scrub_ips,
+    expected_counts,
+):
+    """A valid path/IP crossing a hard-split seam must not leak."""
+    monkeypatch.setattr("aorta.probe.redaction.MAX_LOG_BYTES", 128)
+    # max_chars is 32. The token starts at offset 31, so the naive split cut
+    # it after one character. The trailing padding makes this one oversized,
+    # newline-free line and exercises the production hard-split path.
+    text = "x" * 30 + " " + token + " " + "y" * 128
+
+    out, paths, ipv4, ipv6 = scrub_text(
+        text,
+        scrub_paths=scrub_paths,
+        scrub_ip_addresses=scrub_ips,
+    )
+
+    assert token not in out
+    assert (paths, ipv4, ipv6) == expected_counts
+    assert all(len(w.encode("utf-8")) <= 128 for w in _line_windows(text))
+
+
 def test_scrubbed_copy_preserves_restrictive_mode(tmp_path: Path):
     """Every scrub branch carries the source mode; a 0600 source stays 0600.
 
@@ -439,8 +1045,7 @@ def test_corrupt_result_json_fails_closed(tmp_path: Path):
     """
     cfg = RedactionCfg(scrub_paths=True)
     redactor = RedactingRedactor(cfg)
-    src = tmp_path / "result.json"
-    dst = tmp_path / "out" / "result.json"
+    src, dst = _result_json_paths(tmp_path)
     src.write_text("{ this is not valid json", encoding="utf-8")
     with pytest.raises(RedactionError) as excinfo:
         redactor.scrub_file(src, dst)
@@ -448,9 +1053,30 @@ def test_corrupt_result_json_fails_closed(tmp_path: Path):
     assert not dst.exists()
 
 
+@pytest.mark.parametrize(
+    "document",
+    [
+        [{"env": {"AWS_TOKEN": "secret"}}],
+        None,
+        "not-a-result",
+    ],
+)
+def test_wrong_shaped_result_json_fails_closed(document: object, tmp_path: Path):
+    src, dst = _result_json_paths(tmp_path)
+    src.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(RedactionError):
+        RedactingRedactor(
+            RedactionCfg(scrub_env_keys=("AWS_*",))
+        ).scrub_file(src, dst)
+
+    assert not dst.exists()
+
+
 def test_corrupt_host_env_json_fails_closed(tmp_path: Path):
     cfg = RedactionCfg(scrub_env_keys=("AWS_*",))
     redactor = RedactingRedactor(cfg)
+    _mark_run_root(tmp_path)
     src = tmp_path / "host_env.json"
     dst = tmp_path / "out" / "host_env.json"
     src.write_text("not json at all", encoding="utf-8")

@@ -32,7 +32,7 @@ streamed through the redactor and copied into the staging tree.
 | `--ticket TICKET`     | inferred from `<run-dir>` basename           | Cross-check against the probe artifact tree; required when the basename is `_no_ticket_`.       |
 | `--review`            | off                                          | Print the manifest summary and pause for `[y/N]` confirmation before writing the tarball.       |
 | `--output PATH`       | `./<safe_slug(ticket)>-<UTC-timestamp>.tar.gz` | Where to write the bundle tarball. An *existing* directory drops the default filename inside it; any other PATH is used verbatim as the tarball filename. The ticket is slugified for filesystem safety (spaces/slashes → `_`). |
-| `--redaction-from F`  | auto: `<run-dir>/recipe.resolved.yaml`       | Recipe whose `redaction:` block governs scrubbers. Explicit path overrides the auto-fallback. Without a `redaction:` block, `IdentityRedactor` runs (no scrubbing). |
+| `--redaction-from F`  | auto: `<run-dir>/recipe.resolved.yaml`, then `<run-dir>/matrix.json` | Recipe whose `redaction:` block governs scrubbers. An explicit path is authoritative (no fallback). `matrix.json` is the entry that fires for a real run — the resolved recipe is emitted in the triage shape and cannot carry the probe-only `redaction:` key. If no source yields a block, `IdentityRedactor` runs (no scrubbing). |
 
 ### Ticket resolution
 

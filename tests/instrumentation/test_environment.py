@@ -3741,11 +3741,9 @@ class TestEnvVars:
             # Dynamic loader
             "LD_LIBRARY_PATH",
             # hipBLASLt / rocBLAS / Tensile GEMM numeric + kernel-path selection
-            # (MI350X recom-repro NaN escalation). Included iff the knob's
-            # upstream getenv site reaches code that changes what executes;
-            # print-only knobs are excluded (see test_logging_only_gemm_knobs
-            # _excluded). CHECK_NUMERICS is INCLUDED -- extra kernels + sync
-            # affect the race -- as is TENSILE_DB2, which can skip launches.
+            # (MI350X recom-repro NaN escalation). Capture is comprehensive:
+            # behavior-changing and diagnostic/report-only knobs are both
+            # retained, with the distinction recorded in the registry.
             # Library / ExtOp loading
             "HIPBLASLT_TENSILE_LIBPATH",
             "HIPBLASLT_EXT_OP_LIBRARY_PATH",
@@ -3778,6 +3776,9 @@ class TestEnvVars:
             "TENSILE_PREDICTION_LIB",
             "TENSILE_GRIDBASED_KDTREE",
             "TENSILE_GRIDBASED_BATCH_EXP",
+            "ANALYTICAL_GEMM_HEURISTICS",
+            "ANALYTICAL_GEMM_HEURISTICS_VARIANCE",
+            "GRIDBASED_TOPSOLS",
             # Stream-K launch geometry
             "TENSILE_STREAMK_DYNAMIC_GRID",
             "TENSILE_STREAMK_FIXED_GRID",
@@ -3809,9 +3810,9 @@ class TestEnvVars:
             "ROCBLAS_CHECK_NUMERICS",
             # Diagnostics / reporting. Captured with their consumer recorded
             # (category="gemm_diagnostics"), not excluded: recording a value
-            # never claims it changed execution. ROCBLAS_API_BENCH is here
-            # because scripts/audit_env_knobs.py found it in librocblas.so --
-            # no hand-written list had it.
+            # never claims it changed execution.
+            "ANALYTICAL_GEMM_DEBUG",
+            "ORIGAMI_LOG_FILE",
             "HIPBLASLT_LOG_FILE",
             "HIPBLASLT_LOG_LEVEL",
             "HIPBLASLT_LOG_MASK",
@@ -3827,7 +3828,6 @@ class TestEnvVars:
             "ROCBLAS_LOG_PROFILE_PATH",
             "ROCBLAS_VERBOSE_HIPBLASLT_ERROR",
             "ROCBLAS_VERBOSE_TENSILE_ERROR",
-            "ROCBLAS_API_BENCH",
             "TENSILE_DB",
             "TENSILE_ADAPTIVE_GEMM_LOG",
             "TENSILE_AUTO_GSU_ALGO",
@@ -3846,6 +3846,8 @@ class TestEnvVars:
         ``consumer``, where a triager can see it without it deciding what the
         snapshot preserves."""
         for name in (
+            "ANALYTICAL_GEMM_DEBUG",
+            "ORIGAMI_LOG_FILE",
             "HIPBLASLT_LOG_FILE",
             "HIPBLASLT_LOG_LEVEL",
             "HIPBLASLT_LOG_MASK",
@@ -3861,7 +3863,6 @@ class TestEnvVars:
             "ROCBLAS_LOG_PROFILE_PATH",
             "ROCBLAS_VERBOSE_HIPBLASLT_ERROR",
             "ROCBLAS_VERBOSE_TENSILE_ERROR",
-            "ROCBLAS_API_BENCH",
             "TENSILE_DB",
             "TENSILE_ADAPTIVE_GEMM_LOG",
             "TENSILE_AUTO_GSU_ALGO",
@@ -3960,23 +3961,20 @@ class TestEnvKnobRegistry:
         assert all(v is None for v in captured.values())
 
     def test_a_knob_absent_from_the_reference_library_is_still_serialized(
-        self, isolated_env, monkeypatch, tmp_path
+        self, all_disabled, tmp_path
     ):
         """Review 2's suggested test: export a forward-compatible variable that
         the reference build does not ship, and it is still recorded. Capture
         reflects the declared environment, not what the library supports."""
         knob = env_mod.ENV_KNOBS_BY_NAME["TENSILE_STREAMK5_FORCE_MODE"]
         assert knob.source_reference == env_knobs.ABSENT_FROM_REFERENCE_BUILD
-        isolated_env.setenv("TENSILE_STREAMK5_FORCE_MODE", "1")
+        all_disabled.setenv("TENSILE_STREAMK5_FORCE_MODE", "1")
+        output = tmp_path / "env.json"
 
-        captured = env_mod._capture_env_vars()
+        snapshot = env_mod.capture_to(output)
+        as_json = json.loads(output.read_text())
 
-        assert captured["TENSILE_STREAMK5_FORCE_MODE"] == "1"
-
-        # ...and it survives all the way into the artifact, not just the capture
-        # dict: "recorded" only counts if a customer bundle carries it.
-        snap = _example_snapshot(env_vars=captured)
-        as_json = json.loads(json.dumps(snap.to_dict()))
+        assert snapshot.env_vars["TENSILE_STREAMK5_FORCE_MODE"] == "1"
         assert as_json["env_vars"]["TENSILE_STREAMK5_FORCE_MODE"] == "1"
         assert EnvSnapshot.from_dict(as_json).env_vars["TENSILE_STREAMK5_FORCE_MODE"] == "1"
 
@@ -5493,7 +5491,55 @@ class TestTorchrec:
         reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
         assert block == _expect_torchrec()
-        assert any("torchrec" in r and "no distribution metadata" in r for r in reasons)
+        assert any("torchrec" in r and "no readable source version" in r for r in reasons)
+
+    def test_torchrec_unknown_source_never_promotes_unrelated_metadata(
+        self, monkeypatch, tmp_path
+    ):
+        """An import target without version.py cannot be bound to a dist-info
+        found elsewhere. Keep the latter separate and mark the primary identity
+        unknown instead of cleanly describing code that will not execute."""
+        import importlib.metadata as md
+
+        monkeypatch.setattr(md, "version", lambda name: "2.0.0")
+        monkeypatch.setattr(
+            importlib.util, "find_spec", lambda name: _torchrec_pkg_spec(tmp_path, None)
+        )
+        reasons: list[str] = []
+
+        block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(distribution_version="2.0.0")
+        assert any("not promoted" in r for r in reasons), reasons
+
+    def test_torchrec_source_commit_survives_when_source_version_is_missing(
+        self, monkeypatch, tmp_path
+    ):
+        import importlib.metadata as md
+
+        version_py = f"git_version = '{_TORCHREC_FULL_SHA}'\n"
+        monkeypatch.setattr(md, "version", lambda name: "2.0.0")
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: _torchrec_pkg_spec(tmp_path, version_py),
+        )
+        reasons: list[str] = []
+
+        block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(
+            source_commit=_TORCHREC_FULL_SHA,
+            distribution_version="2.0.0",
+        )
+        assert any("not promoted" in r for r in reasons), reasons
+        torchrec_line = next(
+            line
+            for line in _example_snapshot(torchrec=block).summary().splitlines()
+            if line.lstrip().startswith("torchrec:")
+        )
+        assert "present (version unknown)" in torchrec_line
+        assert _TORCHREC_FULL_SHA in torchrec_line
 
     def test_torchrec_buck_link_tree_resolved_from_version_py(self, monkeypatch, tmp_path):
         """Buck / PYTHONPATH link-tree: no dist-info, but the package ships
@@ -5565,6 +5611,33 @@ class TestTorchrec:
         )
         assert reasons == []
 
+    def test_torchrec_version_py_unknown_version_is_rejected(self, monkeypatch, tmp_path):
+        """A non-git build tree also gets ``__version__ = 'Unknown'``.
+
+        Publishing it verbatim made ``package_version: "Unknown"`` the primary
+        identity of a clean, non-partial snapshot, which a snapshot diff then
+        reads as a version.
+        """
+        import importlib.metadata as md
+
+        version_py = _TORCHREC_VERSION_PY.format(version="Unknown", commit="Unknown")
+        monkeypatch.setattr(
+            md, "version", lambda name: (_ for _ in ()).throw(md.PackageNotFoundError())
+        )
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: _torchrec_pkg_spec(tmp_path, version_py),
+        )
+        reasons: list[str] = []
+        block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec()
+        assert reasons == [
+            "torchrec.package_version: import target has no readable source "
+            "version and no distribution metadata; primary identity remains unknown"
+        ]
+
     def test_torchrec_conflicting_copies_report_the_import_target_and_say_so(
         self, monkeypatch, tmp_path
     ):
@@ -5620,86 +5693,156 @@ class TestTorchrec:
         )
         assert reasons == []
 
-    def test_torchrec_release_wheel_has_no_commit(self, monkeypatch, no_torchrec_spec):
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            ("1.0+01", "1.0+1"),
+            ("1.0+abc.01", "1.0+abc.1"),
+            ("1.0_dev", "1.0.dev0"),
+        ],
+    )
+    def test_torchrec_pep440_equivalent_spellings(self, left: str, right: str):
+        assert env_mod._same_distribution_version(left, right)
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            ("1.0+dev", "1.0.dev0+dev"),
+            ("1.0+abc.dev", "1.0.dev0+abc.dev"),
+        ],
+    )
+    def test_torchrec_pep440_non_equivalent_versions_stay_distinct(
+        self, left: str, right: str
+    ):
+        assert not env_mod._same_distribution_version(left, right)
+
+    def test_torchrec_malformed_loader_is_fail_soft(self, monkeypatch, tmp_path):
+        import importlib.machinery
         import importlib.metadata as md
 
+        class BrokenLoader:
+            @property
+            def get_data(self):
+                raise RuntimeError("broken loader property")
+
+        pkg = tmp_path / "torchrec"
+        pkg.mkdir()
+        spec = importlib.machinery.ModuleSpec(
+            "torchrec", BrokenLoader(), origin=str(pkg / "__init__.py")
+        )
+        spec.submodule_search_locations = [str(pkg)]
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: spec)
+        monkeypatch.setattr(md, "version", lambda name: "2.0.0")
+        reasons: list[str] = []
+
+        block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(distribution_version="2.0.0")
+        assert any("no readable source version" in r for r in reasons), reasons
+
+    def test_torchrec_malformed_loader_still_uses_filesystem_fallback(
+        self, monkeypatch, tmp_path
+    ):
+        import importlib.machinery
+        import importlib.metadata as md
+
+        class BrokenLoader:
+            @property
+            def get_data(self):
+                raise RuntimeError("broken loader property")
+
+        pkg = tmp_path / "torchrec"
+        pkg.mkdir()
+        (pkg / "version.py").write_text(
+            _TORCHREC_VERSION_PY.format(
+                version="1.4.0", commit=_TORCHREC_FULL_SHA
+            )
+        )
+        spec = importlib.machinery.ModuleSpec(
+            "torchrec", BrokenLoader(), origin=str(pkg / "__init__.py")
+        )
+        spec.submodule_search_locations = [str(pkg)]
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: spec)
         monkeypatch.setattr(md, "version", lambda name: "1.4.0")
         reasons: list[str] = []
-        block = env_mod._capture_torchrec(reasons)
-        assert block == _expect_torchrec(package_version="1.4.0", distribution_version="1.4.0")
-        assert reasons == []
 
-    def test_torchrec_setuptools_scm_commit(self, monkeypatch, no_torchrec_spec):
-        import importlib.metadata as md
-
-        monkeypatch.setattr(md, "version", lambda name: "1.5.0.dev0+g0123abc")
-        reasons: list[str] = []
         block = env_mod._capture_torchrec(reasons)
+
         assert block == _expect_torchrec(
-            package_version="1.5.0.dev0+g0123abc",
-            commit="0123abc",
-            distribution_version="1.5.0.dev0+g0123abc",
+            package_version="1.4.0",
+            commit=_TORCHREC_FULL_SHA,
+            source_version="1.4.0",
+            source_commit=_TORCHREC_FULL_SHA,
+            distribution_version="1.4.0",
         )
         assert reasons == []
 
-    def test_torchrec_source_build_bare_hex_commit(self, monkeypatch, no_torchrec_spec):
+    def test_torchrec_originless_custom_loader_is_not_a_namespace(self, monkeypatch):
+        import importlib.machinery
+        import importlib.metadata as md
+
+        class VirtualPackageLoader:
+            def get_data(self, path):
+                return _TORCHREC_VERSION_PY.format(
+                    version="7.7.7", commit=_TORCHREC_FULL_SHA
+                ).encode()
+
+        spec = importlib.machinery.ModuleSpec(
+            "torchrec", VirtualPackageLoader(), origin=None, is_package=True
+        )
+        spec.submodule_search_locations = ["/virtual/torchrec"]
+
+        def no_distribution(name):
+            raise md.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: spec)
+        monkeypatch.setattr(md, "version", no_distribution)
+        reasons: list[str] = []
+
+        block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(
+            package_version="7.7.7",
+            commit=_TORCHREC_FULL_SHA,
+            source_version="7.7.7",
+            source_commit=_TORCHREC_FULL_SHA,
+        )
+        assert reasons == []
+
+    def test_torchrec_release_wheel_has_no_commit(self):
+        assert env_mod._torchrec_commit("1.4.0") is None
+
+    def test_torchrec_setuptools_scm_commit(self):
+        assert env_mod._torchrec_commit("1.5.0.dev0+g0123abc") == "0123abc"
+
+    def test_torchrec_source_build_bare_hex_commit(self):
         """TorchRec source builds use a BARE hex local segment (no 'g' lead-in),
         e.g. 1.8.0a0+0123abc -> 0123abc (P1 review)."""
-        import importlib.metadata as md
+        assert env_mod._torchrec_commit("1.8.0a0+0123abc") == "0123abc"
 
-        monkeypatch.setattr(md, "version", lambda name: "1.8.0a0+0123abc")
-        reasons: list[str] = []
-        block = env_mod._capture_torchrec(reasons)
-        assert block == _expect_torchrec(
-            package_version="1.8.0a0+0123abc",
-            commit="0123abc",
-            distribution_version="1.8.0a0+0123abc",
-        )
-        assert reasons == []
-
-    def test_torchrec_bare_hex_ignores_non_sha_local(self, monkeypatch, no_torchrec_spec):
+    def test_torchrec_bare_hex_ignores_non_sha_local(self):
         """A non-SHA local segment (+cpu / +fb / too-short) must NOT be
         mistaken for a commit."""
-        import importlib.metadata as md
-
         for ver in ("1.4.0+cpu", "1.4.0+fb", "1.4.0+abcd", "2026.7.2"):
-            monkeypatch.setattr(md, "version", lambda name, v=ver: v)
-            reasons: list[str] = []
-            block = env_mod._capture_torchrec(reasons)
-            assert block == _expect_torchrec(package_version=ver, distribution_version=ver), ver
-            assert reasons == []
+            assert env_mod._torchrec_commit(ver) is None, ver
 
-    def test_torchrec_scm_dirty_date_is_not_a_commit(self, monkeypatch, no_torchrec_spec):
+    def test_torchrec_scm_dirty_date_is_not_a_commit(self):
         """Regression: setuptools_scm's dirty-tree marker ``+d<YYYYMMDD>`` is
         entirely valid hex, so a naive bare-hex match would publish the build
         DATE as a commit SHA. A wrong SHA is worse than none (phantom
         'commit changed' diffs), so these must resolve to None."""
-        import importlib.metadata as md
-
         for ver in ("1.4.0+d20240101", "1.4.0+20240101"):
-            monkeypatch.setattr(md, "version", lambda name, v=ver: v)
-            reasons: list[str] = []
-            block = env_mod._capture_torchrec(reasons)
-            assert block == _expect_torchrec(package_version=ver, distribution_version=ver), ver
-            assert reasons == []
+            assert env_mod._torchrec_commit(ver) is None, ver
 
-    def test_torchrec_real_sha_survives_dirty_date_guard(self, monkeypatch, no_torchrec_spec):
+    def test_torchrec_real_sha_survives_dirty_date_guard(self):
         """The dirty-date guard must not swallow genuine SHAs, including a
         bare SHA followed by the dirty tag, or an uppercase SHA."""
-        import importlib.metadata as md
-
         for ver, expected in (
             ("1.4.0+deadbeef", "deadbeef"),
             ("1.8.0a0+0123abc.d20240101", "0123abc"),
             ("1.8.0a0+0123ABC", "0123abc"),
         ):
-            monkeypatch.setattr(md, "version", lambda name, v=ver: v)
-            reasons: list[str] = []
-            block = env_mod._capture_torchrec(reasons)
-            assert block == _expect_torchrec(
-                package_version=ver, commit=expected, distribution_version=ver
-            ), ver
-            assert reasons == []
+            assert env_mod._torchrec_commit(ver) == expected, ver
 
     def test_torchrec_metadata_error_records_reason(self, monkeypatch, no_torchrec_spec):
         import importlib.metadata as md
@@ -5792,6 +5935,9 @@ def _only_sys_path(*entries: Path):
         yield
     finally:
         sys.path[:] = saved_path
+        for name in list(sys.modules):
+            if name == "torchrec" or name.startswith("torchrec."):
+                del sys.modules[name]
         sys.modules.update(saved_modules)
         importlib.invalidate_caches()
 
@@ -5807,11 +5953,15 @@ def _make_torchrec_package(root: Path, *, version: str | None, commit: str | Non
     return pkg
 
 
-def _make_dist_info(root: Path, version: str) -> Path:
+def _make_dist_info(
+    root: Path, version: str, *, owned_files: tuple[str, ...] = ()
+) -> Path:
     d = root / f"torchrec-{version}.dist-info"
     d.mkdir(parents=True, exist_ok=True)
     (d / "METADATA").write_text(f"Metadata-Version: 2.1\nName: torchrec\nVersion: {version}\n")
-    (d / "RECORD").write_text("")
+    (d / "RECORD").write_text(
+        "".join(f"{path},,\n" for path in owned_files)
+    )
     return d
 
 
@@ -5845,6 +5995,247 @@ class TestTorchrecRealLayouts:
         assert reasons == []
         assert "torchrec" not in sys.modules
 
+    def test_par_metadata_owns_the_archived_package(self, tmp_path):
+        """RECORD ownership must work inside a ``.par``.
+
+        ``locate_file`` yields a ``zipfile._path.Path``, which has no
+        ``__fspath__``; building a ``pathlib.Path`` from it raised ``TypeError``
+        into a broad handler, so an archive that demonstrably holds both the
+        metadata and the code reported "ownership cannot be verified".
+        """
+        stage = tmp_path / "stage"
+        _make_torchrec_package(stage, version=None, commit=None)
+        par = tmp_path / "app.par"
+        with zipfile.ZipFile(par, "w") as zf:
+            zf.write(stage / "torchrec" / "__init__.py", "torchrec/__init__.py")
+            zf.writestr(
+                "torchrec-1.4.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: torchrec\nVersion: 1.4.0\n",
+            )
+            zf.writestr("torchrec-1.4.0.dist-info/RECORD", "torchrec/__init__.py,,\n")
+
+        with _only_sys_path(par):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(
+            package_version="1.4.0",
+            distribution_version="1.4.0",
+        )
+        assert reasons == []
+        assert "torchrec" not in sys.modules
+
+    def test_symlinked_par_metadata_still_owns_the_archived_package(self, tmp_path):
+        """Lexical archive paths must stay aligned on both sides."""
+        stage = tmp_path / "stage"
+        _make_torchrec_package(stage, version=None, commit=None)
+        par = tmp_path / "real.par"
+        with zipfile.ZipFile(par, "w") as zf:
+            zf.write(stage / "torchrec" / "__init__.py", "torchrec/__init__.py")
+            zf.writestr(
+                "torchrec-1.4.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: torchrec\nVersion: 1.4.0\n",
+            )
+            zf.writestr(
+                "torchrec-1.4.0.dist-info/RECORD",
+                "torchrec/__init__.py,,\n",
+            )
+        alias = tmp_path / "alias.par"
+        alias.symlink_to(par.name)
+
+        with _only_sys_path(alias):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(
+            package_version="1.4.0",
+            distribution_version="1.4.0",
+        )
+        assert reasons == []
+
+    def test_editable_install_ownership_comes_from_direct_url(self, tmp_path):
+        """A PEP 660 RECORD lists the ``.pth`` and finder, never the sources.
+
+        RECORD ownership can therefore never succeed for an editable install,
+        even though ``direct_url.json`` -- itself in the RECORD -- names the
+        exact source tree the import target resolves into.
+        """
+        src = tmp_path / "src"
+        _make_torchrec_package(src, version=None, commit=None)
+        site = tmp_path / "site"
+        dist_info = _make_dist_info(
+            site,
+            "1.4.0",
+            owned_files=(
+                "__editable__.torchrec-1.4.0.pth",
+                "__editable___torchrec_1_4_0_finder.py",
+                "torchrec-1.4.0.dist-info/direct_url.json",
+            ),
+        )
+        (dist_info / "direct_url.json").write_text(
+            json.dumps({"url": src.as_uri(), "dir_info": {"editable": True}})
+        )
+
+        with _only_sys_path(src, site):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(
+            package_version="1.4.0",
+            distribution_version="1.4.0",
+        )
+        assert reasons == []
+
+    def test_editable_remote_file_url_cannot_claim_a_local_source(self, tmp_path):
+        src = tmp_path / "src"
+        _make_torchrec_package(src, version=None, commit=None)
+        site = tmp_path / "site"
+        dist_info = _make_dist_info(
+            site,
+            "1.4.0",
+            owned_files=("torchrec-1.4.0.dist-info/direct_url.json",),
+        )
+        (dist_info / "direct_url.json").write_text(
+            json.dumps(
+                {
+                    "url": f"file://remote.example{src.as_posix()}",
+                    "dir_info": {"editable": True},
+                }
+            )
+        )
+
+        with _only_sys_path(src, site):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(distribution_version="1.4.0")
+        assert any("ownership cannot be verified" in reason for reason in reasons)
+
+    def test_record_external_leaf_symlink_cannot_claim_the_import_target(self, tmp_path):
+        src = tmp_path / "src"
+        package = _make_torchrec_package(src, version=None, commit=None)
+        metadata = tmp_path / "metadata"
+        metadata.mkdir()
+        link = metadata / "external-link.py"
+        link.symlink_to(package / "__init__.py")
+        _make_dist_info(
+            metadata,
+            "8.8.8",
+            owned_files=("external-link.py",),
+        )
+
+        with _only_sys_path(metadata, src):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(distribution_version="8.8.8")
+        assert any("ownership cannot be verified" in reason for reason in reasons)
+
+    def test_disagreeing_duplicate_metadata_is_reported_not_reconciled(self, tmp_path):
+        """``version()`` returns the first match in directory order.
+
+        Two torchrec dist-infos claiming different versions were reconciled
+        silently, so the same install could yield a different answer on a
+        different filesystem.
+        """
+        site = tmp_path / "site"
+        _make_torchrec_package(site, version=None, commit=None)
+        _make_dist_info(site, "2.0.0", owned_files=("torchrec/__init__.py",))
+        _make_dist_info(site, "10.0.0", owned_files=("torchrec/__init__.py",))
+
+        with _only_sys_path(site):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert len(reasons) == 1
+        assert "metadata disagrees across 2 distinct versions (10.0.0, 2.0.0)" in reasons[0]
+        assert block["package_version"] is None
+        assert block["distribution_version"] in ("2.0.0", "10.0.0")
+
+    def test_agreeing_duplicate_metadata_is_not_a_conflict(self, tmp_path):
+        """An editable install routinely leaves a ``*.egg-info`` in the source
+        tree beside the ``*.dist-info`` in site-packages, and both are on
+        ``sys.path``. Two metadata dirs naming the SAME version leave the answer
+        unambiguous, so this must not fire a conflict."""
+        site = tmp_path / "site"
+        _make_torchrec_package(site, version=None, commit=None)
+        _make_dist_info(site, "1.4.0", owned_files=("torchrec/__init__.py",))
+        egg = site / "torchrec.egg-info"
+        egg.mkdir()
+        (egg / "PKG-INFO").write_text(
+            "Metadata-Version: 2.1\nName: torchrec\nVersion: 1.4.0\n"
+        )
+
+        with _only_sys_path(site):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert reasons == []
+        assert block["distribution_version"] == "1.4.0"
+
+    def test_equivalent_later_metadata_can_establish_ownership(self, tmp_path):
+        """The first metadata candidate need not be the owning one."""
+        metadata = tmp_path / "metadata"
+        metadata.mkdir()
+        egg = metadata / "torchrec.egg-info"
+        egg.mkdir()
+        (egg / "PKG-INFO").write_text(
+            "Metadata-Version: 2.1\nName: torchrec\nVersion: 1.4\n"
+        )
+        package_root = tmp_path / "package"
+        _make_torchrec_package(package_root, version=None, commit=None)
+        _make_dist_info(
+            package_root,
+            "1.4.0",
+            owned_files=("torchrec/__init__.py",),
+        )
+
+        with _only_sys_path(metadata, package_root):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block["package_version"] == "1.4"
+        assert block["distribution_version"] == "1.4"
+        assert reasons == []
+
+    def test_invalid_metadata_version_is_retained_but_never_promoted(self, tmp_path):
+        site = tmp_path / "site"
+        _make_torchrec_package(site, version=None, commit=None)
+        _make_dist_info(
+            site,
+            "Unknown",
+            owned_files=("torchrec/__init__.py",),
+        )
+
+        with _only_sys_path(site):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(distribution_version="Unknown")
+        assert len(reasons) == 1
+        assert "metadata reports an invalid version 'Unknown'" in reasons[0]
+
+    def test_pathological_numeric_metadata_version_is_fail_soft(self, tmp_path):
+        site = tmp_path / "site"
+        _make_torchrec_package(site, version="1.0", commit=None)
+        dist_info = site / "torchrec-x.dist-info"
+        dist_info.mkdir()
+        huge = "9" * 5000
+        (dist_info / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: torchrec\n"
+            f"Version: {huge}\n"
+        )
+        (dist_info / "RECORD").write_text("torchrec/__init__.py,,\n")
+
+        with _only_sys_path(site):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block["package_version"] == "1.0"
+        assert block["source_version"] == "1.0"
+        assert block["distribution_version"] == huge
+        assert any("metadata reports an invalid version" in reason for reason in reasons)
+
     def test_single_module_does_not_adopt_a_foreign_version_py(self, tmp_path):
         """``torchrec.py`` (a module, not a package) has no search locations.
         Falling back to ``dirname(origin)`` made it publish an unrelated
@@ -5863,7 +6254,7 @@ class TestTorchrecRealLayouts:
         assert block["source_commit"] is None
         assert block["package_version"] != "9.9.9"
         assert block["commit"] != "d" * 40
-        assert any("version unknown" in r for r in reasons), reasons
+        assert any("no readable source version" in r for r in reasons), reasons
 
     def test_source_first_metadata_second_never_reports_the_other_sha(self, tmp_path):
         """The review's required case: a real two-entry ``sys.path`` with a
@@ -5891,6 +6282,72 @@ class TestTorchrecRealLayouts:
         assert block["commit"] != "b" * 40
         assert any("1.8.0a0" in r and "2.0.0" in r for r in reasons), reasons
 
+    def test_source_without_version_py_does_not_promote_second_metadata(self, tmp_path):
+        source_root = tmp_path / "buck-link-tree"
+        _make_torchrec_package(source_root, version=None, commit=None)
+        pip_root = tmp_path / "site-packages"
+        _make_dist_info(pip_root, "2.0.0")
+        _make_torchrec_package(pip_root, version="2.0.0", commit="b" * 40)
+
+        with _only_sys_path(source_root, pip_root):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(distribution_version="2.0.0")
+        assert any("not promoted" in r for r in reasons), reasons
+
+    def test_same_distribution_record_can_supply_missing_source_version(
+        self, tmp_path
+    ):
+        root = tmp_path / "site-packages"
+        _make_torchrec_package(root, version=None, commit=None)
+        _make_dist_info(
+            root,
+            "3.2.1",
+            owned_files=("torchrec/__init__.py",),
+        )
+
+        with _only_sys_path(root):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(
+            package_version="3.2.1",
+            distribution_version="3.2.1",
+        )
+        assert reasons == []
+        torchrec_line = next(
+            line
+            for line in _example_snapshot(torchrec=block).summary().splitlines()
+            if line.lstrip().startswith("torchrec:")
+        )
+        assert "3.2.1" in torchrec_line
+        assert "(not installed)" not in torchrec_line
+
+    def test_owned_metadata_pairs_with_source_only_commit(self, tmp_path):
+        root = tmp_path / "site-packages"
+        pkg = _make_torchrec_package(root, version=None, commit=None)
+        (pkg / "version.py").write_text(
+            f"git_version = '{_TORCHREC_FULL_SHA}'\n"
+        )
+        _make_dist_info(
+            root,
+            "3.2.1",
+            owned_files=("torchrec/__init__.py", "torchrec/version.py"),
+        )
+
+        with _only_sys_path(root):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(
+            package_version="3.2.1",
+            commit=_TORCHREC_FULL_SHA,
+            source_commit=_TORCHREC_FULL_SHA,
+            distribution_version="3.2.1",
+        )
+        assert reasons == []
+
     def test_namespace_portion_loses_to_a_real_install_either_order(self, tmp_path):
         """A bare ``torchrec/`` directory is a PEP 420 portion. CPython's path
         finder only yields one when no real package exists anywhere on the path,
@@ -5909,6 +6366,38 @@ class TestTorchrecRealLayouts:
             assert block["source_commit"] == _TORCHREC_FULL_SHA, entries
             assert block["package_version"] == "1.4.0", entries
             assert reasons == [], entries
+
+    def test_imported_namespace_still_counts_as_absent(self, tmp_path):
+        ns_root = tmp_path / "ns"
+        (ns_root / "torchrec").mkdir(parents=True)
+
+        with _only_sys_path(ns_root):
+            imported = importlib.import_module("torchrec")
+            # CPython renamed this class in 3.11 and kept the old name as an
+            # alias, so pinning only the new spelling would pass on 3.12 while
+            # the guard under test is dead on 3.10 (the declared minimum, the
+            # GPU CI container's interpreter, and a cpu-tests matrix entry).
+            assert type(imported.__spec__.loader).__name__ in (
+                "NamespaceLoader",
+                "_NamespaceLoader",
+            )
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec()
+        assert reasons == []
+
+    def test_namespace_with_unrelated_metadata_never_becomes_primary(self, tmp_path):
+        root = tmp_path / "mixed"
+        (root / "torchrec").mkdir(parents=True)
+        _make_dist_info(root, "2.0.0")
+
+        with _only_sys_path(root):
+            reasons: list[str] = []
+            block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(distribution_version="2.0.0")
+        assert any("namespace" in r for r in reasons), reasons
 
     def test_absent_everywhere_is_silent(self, tmp_path):
         """No package, no dist-info, nothing raising -> suppressed, like

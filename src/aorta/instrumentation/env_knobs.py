@@ -13,9 +13,13 @@ that the process exported it, or that it affected a run. ``_capture_env_vars`` i
 ``os.environ.get`` over these names: a ``null`` value means the variable was **unset in
 this process**, never "unsupported by the library".
 
-* ``library``          -- the component that reads the variable. For the GEMM prefixes
-  (``HIPBLASLT_`` / ``ROCBLAS_`` / ``TENSILE_``) this is MEASURED: it is the shipped
-  shared object whose string table holds the name, per ``scripts/audit_env_knobs.py``.
+* ``library``          -- the component the variable belongs to. For a GEMM-prefix knob
+  that is PRESENT in the reference build this is MEASURED: it is the shipped shared
+  object whose string table holds the name, per ``scripts/audit_env_knobs.py``. A string
+  table shows the name, not a call site, so this is ownership rather than proof of
+  consumption -- ``consumer`` carries whatever was actually traced. Knobs marked
+  ``ABSENT_FROM_REFERENCE_BUILD`` are declared, not measured: the audit has no binary to
+  compare them against.
 * ``consumer``         -- what the value reaches, at the granularity that was actually
   verified. For ``category="gemm_diagnostics"`` knobs the verified answer is "log or
   report emission only"; that classification is *recorded*, and is deliberately NOT used
@@ -31,10 +35,10 @@ this process**, never "unsupported by the library".
 Auditing coverage
 -----------------
 ``scripts/audit_env_knobs.py`` diffs this registry against the env-var strings in the
-installed hipBLASLt / rocBLAS libraries and reports three sets: covered, not-present-here
-(fine -- the probe reports ``null``), and *uncovered* -- a knob the library exposes that
-this registry omits. That direction is the one a hand-written second list cannot check,
-and it is how ``ROCBLAS_API_BENCH`` was found.
+installed hipBLASLt / rocBLAS libraries and reports three sets: covered,
+not-present-here (fine -- support varies by build; capture still depends only on whether
+the process exported the variable), and *uncovered* -- a knob the library exposes that
+this registry omits. That direction is the one a hand-written second list cannot check.
 """
 
 from __future__ import annotations
@@ -594,7 +598,14 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
         source_reference=INHERITED_UNAUDITED,
         reference_build=NOT_BUILD_SCOPED,
     ),
-    # --- hipBLASLt / rocBLAS / Tensile GEMM numeric + kernel-path selection. These flip WHICH library and WHICH kernels actually run the GEMMs, and in the xf32/TF32 case the numeric path itself -- the load-bearing knobs in the MI350X recom-repro NaN escalation.  REFERENCE BUILD for every "present in the .so" statement below: the escalation build, hipBLASLt 1.4.70002 + rocBLAS 5.0.70002 on ROCm 7.0.2. Each ROCm release ships a different subset -- ROCm 7.2.3, for instance, has no HIPBLASLT_CHECK_NUMERICS* and no TENSILE_FIXED_STAGGERU*. That is deliberate and harmless: a knob the local library never reads is simply reported as null, contributes no partial reason, and keeps the list portable across versions. So this is a superset keyed to the build under investigation, NOT a claim about every ROCm.  INCLUSION RULE, applied by reading the upstream getenv site and following its getter to a call site -- NOT by reading the variable name. Every knob below reaches code that changes what executes: which solution is picked, how the grid / workgroup mapping is built, which library file is loaded, or whether extra kernels run. Knobs whose only call site is a print or a client-side report are EXCLUDED, namely HIPBLASLT_LOG_{FILE,LEVEL,MASK}, HIPBLASLT_BENCH_PERF (fills hipblasltClientPerformanceArgs and nothing else) and HIPBLASLT_BENCH_PERF_ALL (same family; absent from the reference build, present in ROCm 7.2.3), HIPBLASLT_BENCH_PRINT_COMMAND, {HIPBLASLT,TENSILE}_ENABLE_MARKER, ROCBLAS_LAYER, ROCBLAS_LOG_*_PATH, ROCBLAS_VERBOSE_{HIPBLASLT,TENSILE}_ ERROR, TENSILE_DB (every bit it sets is a print*), TENSILE_ADAPTIVE_GEMM_ LOG and TENSILE_AUTO_GSU_ALGO (each guards a lone std::cout), TENSILE_SOLUTION_SELECTION_TRACE, and TENSILE_BENCHMARK (its getter Debug::getBenchmark() has no call site in the libraries at all). NOTE the deliberate asymmetries: HIPBLASLT_CHECK_NUMERICS* is INCLUDED (it launches extra scan kernels and adds synchronization, which can hide or expose a timing race even when the final arithmetic is unchanged -- and this repro IS a cross-stream timing race), and TENSILE_DB2 is INCLUDED while its TENSILE_DB sibling is not, because DB2's low bits gate skipKernelLaunch / skipInitKernelLaunch.  Library / kernel loading -- which file backs the kernels.
+    # --- hipBLASLt / rocBLAS / Tensile GEMM configuration.
+    #
+    # Reference build: hipBLASLt 1.4.70002 + rocBLAS 5.0.70002 on ROCm 7.0.2.
+    # Capture is comprehensive: diagnostics and report-only controls are retained and
+    # classified, never filtered out. A value is the raw exported process setting; None
+    # means unset, not unsupported.
+    #
+    # Library / kernel loading -- which file backs the kernels.
     EnvironmentKnob(
         name="HIPBLASLT_TENSILE_LIBPATH",
         library="hipblaslt",
@@ -817,6 +828,30 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
         source_reference=REF_HIPBLASLT_SO,
         reference_build=REFERENCE_BUILD_GEMM,
     ),
+    EnvironmentKnob(
+        name="ANALYTICAL_GEMM_HEURISTICS",
+        library="hipblaslt",
+        consumer="selects Origami analytical GEMM heuristic behavior",
+        category="gemm_solution_selection",
+        source_reference=REF_HIPBLASLT_SO,
+        reference_build=REFERENCE_BUILD_GEMM,
+    ),
+    EnvironmentKnob(
+        name="ANALYTICAL_GEMM_HEURISTICS_VARIANCE",
+        library="hipblaslt",
+        consumer="configures variance used by Origami analytical GEMM heuristics",
+        category="gemm_solution_selection",
+        source_reference=REF_HIPBLASLT_SO,
+        reference_build=REFERENCE_BUILD_GEMM,
+    ),
+    EnvironmentKnob(
+        name="GRIDBASED_TOPSOLS",
+        library="hipblaslt",
+        consumer="sets the number of top GridBased candidate solutions considered",
+        category="gemm_solution_selection",
+        source_reference=REF_HIPBLASLT_SO,
+        reference_build=REFERENCE_BUILD_GEMM,
+    ),
     # --- Stream-K: how the K dimension is split across workgroups, i.e. the launch geometry and the CU occupancy of every GEMM.
     EnvironmentKnob(
         name="TENSILE_STREAMK_DYNAMIC_GRID",
@@ -952,7 +987,9 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
         source_reference=REF_BOTH_SO,
         reference_build=REFERENCE_BUILD_GEMM,
     ),
-    # --- Not in the reference build's .so (newer hipBLASLt Stream-K knobs); kept for forward-compat so a customer on a newer library still gets them diffed. Same null-when-unsupported behaviour as any other entry.
+    # --- Not in the reference build's .so (newer hipBLASLt Stream-K knobs).
+    # Kept for forward-compatible diffing. Exported values are captured verbatim even
+    # when the local library ignores them; None means only that the process left them unset.
     EnvironmentKnob(
         name="TENSILE_STREAMK5_FORCE_MODE",
         library="hipblaslt",
@@ -1053,6 +1090,22 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
     # that the rule was the wrong place to apply the judgement. Capturing them keeps the
     # snapshot a faithful record of declared configuration; the classification survives in
     # ``category``/``consumer`` for anyone triaging a diff.
+    EnvironmentKnob(
+        name="ANALYTICAL_GEMM_DEBUG",
+        library="hipblaslt",
+        consumer="enables Origami analytical-model debug output",
+        category="gemm_diagnostics",
+        source_reference=REF_HIPBLASLT_SO,
+        reference_build=REFERENCE_BUILD_GEMM,
+    ),
+    EnvironmentKnob(
+        name="ORIGAMI_LOG_FILE",
+        library="hipblaslt",
+        consumer="selects the Origami debug log path and output format",
+        category="gemm_diagnostics",
+        source_reference=REF_HIPBLASLT_SO,
+        reference_build=REFERENCE_BUILD_GEMM,
+    ),
     EnvironmentKnob(
         name="HIPBLASLT_LOG_FILE",
         library="hipblaslt",
@@ -1173,16 +1226,6 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
         consumer="verbose backend error reporting",
         category="gemm_diagnostics",
         source_reference=REF_ROCBLAS_SO,
-        reference_build=REFERENCE_BUILD_GEMM,
-    ),
-    EnvironmentKnob(
-        name="ROCBLAS_API_BENCH",
-        library="rocblas",
-        consumer=(
-            "rocBLAS API-level bench reporting; found by scripts/audit_env_knobs.py, which is why the audit is a script and not a second hand-written list"
-        ),
-        category="gemm_diagnostics",
-        source_reference=ABSENT_FROM_REFERENCE_BUILD,
         reference_build=REFERENCE_BUILD_GEMM,
     ),
     EnvironmentKnob(

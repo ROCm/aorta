@@ -389,12 +389,15 @@ aorta bundle ./probe_results/ROCM-1234/ --review
 * Without a `redaction:` block, files are copied byte-for-byte
   (`IdentityRedactor`, zero counts in `manifest.json`).
 
-### `result.json::env`
+### Structured environment artifacts
 
-Every trial's `result.json` includes an `env` object with the cell's
-resolved mitigation + diagnostic env bundle. The bundle scrubber removes
-keys matching `scrub_env_keys` from that block (and from `probe.env` /
-`host_env.json`).
+Probe trials can carry a flat process mapping under `result.json::env`;
+`aorta run` carries a nested EnvSnapshot in dispatcher
+`trial_d*_m*_t*.json`. The bundle scrubber handles both schemas and also applies
+`scrub_env_keys` to `probe.env`, host/per-environment snapshots, matrix
+environment fields, `inline_environments.sidecar.json`, and copied
+`sidecars/*.json`. Structured scrubbing is path/schema-scoped so unrelated
+collector JSON is not modified by an incidental `env_vars` key.
 
 Example minimal `redaction:` block:
 

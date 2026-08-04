@@ -1180,6 +1180,92 @@ def test_resolved_recipe_round_trips_extra_env(
     assert reloaded.cells[1].extra_env == {"CELL_KEY": "cell_value"}
 
 
+def _probe_recipe_with_redaction() -> Recipe:
+    from aorta.probe.recipe_builder import build_probe_recipe_from_dict
+
+    return build_probe_recipe_from_dict(
+        {
+            "schema_version": 1,
+            "mode": "probe",
+            "ticket": "RED-1",
+            "trials": 1,
+            "mitigation_axis": ["none"],
+            "diagnostic_axis": ["none"],
+            "redaction": {
+                "scrub_env_keys": ["AWS_*"],
+                "scrub_paths": True,
+                "scrub_ip_addresses": True,
+            },
+        },
+        None,
+    )
+
+
+def test_matrix_json_records_the_runs_redaction_rule(tmp_path, patched_env, patched_run_trials):
+    """``aorta bundle`` needs the run's redaction rule from the run dir itself.
+
+    ``recipe.resolved.yaml`` is emitted in the triage shape so it stays
+    loadable by ``load_recipe``, and ``redaction:`` is probe-mode-only -- so
+    the resolved recipe can never carry it. Without this record the documented
+    ``aorta bundle <run-dir>`` fallback silently used IdentityRedactor.
+    """
+    run_dir = runner.run_recipe(
+        _probe_recipe_with_redaction(), output_dir=tmp_path, layout="flat_resume"
+    )
+
+    doc = json.loads((run_dir / "matrix.json").read_text(encoding="utf-8"))
+    assert doc["redaction"] == {
+        "scrub_env_keys": ["AWS_*"],
+        "scrub_paths": True,
+        "scrub_ip_addresses": True,
+    }
+    # The resolved recipe stays a strict, loadable triage recipe.
+    assert "redaction" not in yaml.safe_load(
+        (run_dir / "recipe.resolved.yaml").read_text(encoding="utf-8")
+    )
+
+
+def test_bundle_fallback_finds_redaction_from_a_real_run(tmp_path, patched_env, patched_run_trials):
+    """End-to-end guard: generated run dir -> real scrubbing redactor.
+
+    The pre-existing coverage hand-wrote a ``recipe.resolved.yaml`` carrying a
+    ``redaction:`` block, a shape no run actually produces, so it passed while
+    every real bundle went out unredacted.
+    """
+    from aorta.probe.bundle_hook import build_redactor_from_recipe
+    from aorta.probe.redaction import RedactingRedactor
+
+    run_dir = runner.run_recipe(
+        _probe_recipe_with_redaction(), output_dir=tmp_path, layout="flat_resume"
+    )
+
+    redactor = build_redactor_from_recipe(None, run_dir)
+
+    assert isinstance(redactor, RedactingRedactor)
+    assert redactor._cfg.scrub_env_keys == ("AWS_*",)
+    assert redactor._cfg.scrub_paths is True
+    assert redactor._cfg.scrub_ip_addresses is True
+
+
+def test_bundle_fallback_stays_identity_without_a_redaction_rule(
+    tmp_path, patched_env, patched_run_trials
+):
+    """A run that declared no redaction must not gain one from matrix.json.
+
+    ``matrix.json`` omits the key entirely rather than writing ``null``:
+    ``parse_redaction`` rejects ``null`` as present-but-invalid, so emitting it
+    would fail bundling for every non-redacting run.
+    """
+    from aorta.bundle.redactor import IdentityRedactor
+    from aorta.probe.bundle_hook import build_redactor_from_recipe
+
+    run_dir = runner.run_recipe(_simple_recipe(), output_dir=tmp_path)
+
+    doc = json.loads((run_dir / "matrix.json").read_text(encoding="utf-8"))
+    assert "redaction" not in doc
+    assert isinstance(build_redactor_from_recipe(None, run_dir), IdentityRedactor)
+
+
 def test_resolved_recipe_records_effective_trial_isolation(
     tmp_path, patched_env, patched_run_trials
 ):
