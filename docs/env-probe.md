@@ -244,7 +244,7 @@ when the output directory/file cannot be created or validated.
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.14"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.15"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
@@ -265,7 +265,7 @@ when the output directory/file cannot be created or validated.
 | `miopen_catalog` | `dict` | reuses the `miopen` capture + a per-file enumeration of the MIOpen db dir (`share/miopen/db/`) | **Recipe book for MIOpen's convolution databases** -- same scoping as `tensile_catalog`. `doc` + `status`, the reused `package_version`/`lib_hash`/`kernel_db_revision` (no regression), `db_dir` + `db_dir_source` (`default` or `MIOPEN_SYSTEM_DB_PATH`), `env_overrides`, and a `menu`. `logic_file_count` counts the selectable DBs (`.kdb`/`.fdb.txt`/`.db.txt`/`.db`); `.ktn.model`/`.tn.model` heuristic models are catalog members but not logic. **`menu.files` is `null` by default (compact mode)** — same size rationale as `tensile_catalog`; use `aorta env probe --extended` to retain the per-file list. Added in schema 1.9 (issue #54 follow-up); compact default added in schema 1.10. |
 | `rocfft_catalog` | `dict` | optional `rocfft_kernel_cache.db` under `$ROCFFT_RTC_SYS_CACHE_PATH` or `/opt/rocm/lib/[rocfft/]` | Fingerprint of rocFFT's **optional** AOT kernel cache -- the READ-ONLY system cache, not the read-write runtime user cache. rocFFT usually compiles at runtime, so absence is normal: a *probed* "no cache" result is `status:"absent"` with **no** partial reason. (The default/backfill/disaster shape is `status:"partial"` with a "not captured" reason instead, so a snapshot that never probed is distinguishable from one that probed and found nothing.) `doc` + `status` (`ok`/`absent`/`partial`) + `env_overrides` (both `ROCFFT_RTC_SYS_CACHE_PATH` -- the override this catalog actually resolves against -- and `ROCFFT_RTC_CACHE_PATH`, recorded for visibility only since it names the mutable, workload-dependent user cache, not installed identity; both recorded even when no cache is found so a configured-but-empty override is visible) + `kernel_cache` (`present`, `path`, `source`, `size`, `sha256`, `reason`). Added in schema 1.9 (issue #54 follow-up). |
 | `triton` | `dict` | `import triton; triton.__version__` (+ commit parse) | `package_version`, `commit` (schema 1.8). ROCm Triton fork bakes the source commit into `__version__` (e.g. `3.5.1+rocm7.2.1.gita272dfa8` -> `commit: "a272dfa8"`); fb builds versioned `+fb` carry no SHA -> `commit: null`. |
-| `torchrec` | `dict` | `importlib.metadata.version("torchrec")` (+ commit parse from the version string) | `package_version`, `commit` (schema 1.14). TorchRec is the sharded-embedding / training-pipeline library layered on top of fbgemm and is the core library of the recom-repro workload; release wheels (e.g. `1.4.0`) carry no SHA so `commit` is usually `null`. Read from distribution metadata (NOT `import torchrec`, which would pull in torch/fbgemm and can touch CUDA on import). Absence is suppressed like `fbgemm_gpu`/`aiter`. |
+| `torchrec` | `dict` | `find_spec("torchrec")` + loader-based text read of the resolved package's `version.py` + separate distribution metadata | `package_version`, `commit`, `source_version`, `source_commit`, `distribution_version`. Schema 1.15 keeps import-target and dist-info identities separate. The primary identity follows the import target: source identity wins; if its version is unreadable, metadata is promoted only when that distribution's `RECORD` owns the resolved module/package. Unrelated or unprovable metadata remains separate and adds `partial_reasons`; a source-only SHA remains `source_commit` rather than forming a contradictory primary identity without a version. `.par`/zip resources are read through the loader without importing torchrec or touching CUDA. PEP 420 namespaces are recognized before and after import and count as absent unless unrelated metadata also exists, in which case that metadata is retained separately with a partial reason. |
 | `fbgemm` | `dict` | optional `import fbgemm_gpu` (+ commit parse) + parse of `torch.__config__.show()` for `-DUSE_FBGEMM*` defines | `package_version`, `commit` (schema 1.8 -- best-effort git SHA from a setuptools_scm `+g<sha>` local-version segment or a `git_version`/`__commit__` module attr; `null` when fbgemm_gpu is vendored-in-torch rather than separately installed, or carries no SHA), `pytorch_use_fbgemm`, `pytorch_use_fbgemm_genai`. The two booleans capture the build-time decision baked into the PyTorch wheel even when `fbgemm_gpu` isn't a separate pip package. |
 | `aiter` | `dict` | `import aiter; aiter.__version__` + `importlib.metadata.version("amd_aiter" \| "aiter")` + scan of `aiter_meta/hsa/<gfx>/` (or `$AORTA_PYTORCH_SRC/third_party/aiter/hsa/`) | `package_version`, `package_dist_name` (which PyPI dist matched: `amd_aiter` is the canonical AMD-internal ROCm/PyTorch image dist; `aiter` is the upstream name), `commit` (parsed from the setuptools_scm `+g<sha>` local-version segment, matches the image tag's `aiter-<sha>` label), `hsa_tree` (issue #176 -- per-arch fingerprint of pre-built `.co` kernel binaries: file_count, co_count, deterministic combined_sha256). Most installs record `null` for everything; absence is silent. |
 | `aotriton` | `dict` | scan of `<torch>/lib/libaotriton_v2.so*` filenames + `sha256` of the resolved file + presence of `<torch>/lib/aotriton.images/` + `$AOTRITON_INSTALLED_PREFIX` | Default ROCm Flash Attention backend. Bundled in the wheel via `cmake/External/aotriton.cmake` (NOT a `third_party/` git submodule). Fields: `bundled_present`, `bundled_version`, `bundled_lib_hash`, `bundled_images_dir_present`, `installed_prefix`. CK is the alternative backend (toggled via `TORCH_ROCM_FA_PREFER_CK=1`). |
@@ -274,7 +274,7 @@ when the output directory/file cannot be created or validated.
 | `execution_context` | `dict` | `--execution-context` CLI flag (self-declared) | Schema 1.11. `probe_invocation` (`"direct"` \| `"buck2_run"` \| `"buck2_action"`; `"direct"` by default) records **how the probe was launched** — set `buck2_action` when running the probe as a Buck2 action so it captures the executor's env, not the invoking shell's. `likely_execution_platform` (`str \| null`) is reserved for phase-2 Buck2 work and is always `null` today. See the design note `docs/env-probe-container-execution-context.md`. The flag also **warns to stderr** when a non-`direct` context is claimed but `container_detected` is `false` and neither `$AORTA_RE_IMAGE` nor `$AORTA_DOCKER_IMAGE` is set (you may have probed the wrong place). |
 | `probe_namespace` | `str \| null` | `/proc/self/ns/mnt` (primary) or `/proc/self/ns/cgroup` (fallback), hashed with `/proc/sys/kernel/random/boot_id` | Schema 1.12. **Mismatch-only namespace observation**, not a durable identity. Value forms: `mnt:<sha256[:16]>` or `cgroup-ns:<sha256[:16]>`; when `boot_id` is unavailable, the source token remains hashed and the prefix becomes `mnt-local:` / `cgroup-ns-local:`. Different values with the same prefix prove a different boot or namespace observation. Equal values are advisory because Linux can recycle non-initial namespace inode numbers after teardown. Different source prefixes are not directly comparable, and `*-local:` values are not cross-host comparable. Missing boot identity, fallback use, and total failure add `partial_reasons`; `null` means neither namespace handle was readable. |
 | `docker` | `dict \| null` | `$AORTA_DOCKER_IMAGE` / `$AORTA_DOCKER_DIGEST` env vars + `/proc/self/cgroup` | `null` on baremetal; image+digest provided by the launcher (the only reliable way from inside a container) |
-| `env_vars` | `dict[str, str \| null]` | explicit canonical list (currently 58 names; see `CANONICAL_ENV_VARS` in `environment.py` for the live set) | GPU scoping + HSA / runtime + GPU queue / codegen + NCCL/RCCL + AINIC net-plugin/fabric tuning + gfx950 fence-ordering knob + FBGEMM + MIOpen + SDPA backend selection + GEMM backend preference + hipBLASLt autotune + PyTorch / inductor. Build-time cmake flags (`USE_ROCM_CK_SDPA`, `USE_ROCM_CK_GEMM`, `USE_FBGEMM*`) are NOT in this list -- they're surfaced under their respective library blocks instead, parsed from `torch.__config__.show()`. |
+| `env_vars` | `dict[str, str \| null]` | explicit canonical list (currently 136 names, generated from `ENV_KNOB_REGISTRY` in `env_knobs.py`; the count is asserted by `test_docs_env_var_count_matches_registry`, so it cannot go stale) | GPU scoping + HSA / runtime + GPU queue / codegen + NCCL/RCCL + AINIC net-plugin/fabric tuning + gfx950 fence-ordering knob + FBGEMM + MIOpen + SDPA backend selection + GEMM backend preference + hipBLASLt autotune + PyTorch / inductor. Build-time cmake flags (`USE_ROCM_CK_SDPA`, `USE_ROCM_CK_GEMM`, `USE_FBGEMM*`) are NOT in this list -- they're surfaced under their respective library blocks instead, parsed from `torch.__config__.show()`. |
 | `python_version` | `str` | `platform.python_version()` | always populated |
 | `pytorch_version` | `str \| null` | optional `import torch` (no CUDA/HIP context init) | `null` when torch absent |
 | `pytorch_build` | `dict` | `torch.version.{git_version,hip,cuda,debug}` + install-kind detection + optional `git -C <src>/third_party/<sub> rev-parse HEAD` + parse of `torch.__config__.show()` + `nm -D libtorch_hip.so \| c++filt` symbol grep + scan of `<torch>/lib/` + parse of `<source>/build/CMakeCache.txt` + stream of `<source>/build/build.ninja` (modern `enable_language(HIP)` path) or walk of `<source>/build/**/<target>.dir/**/*.hip.o.cmake` (legacy `FindHIP.cmake` fallback) | `git_commit` is the linchpin -- pins every vendored submodule deterministically. Sub-blocks: `flags` (raw `build_settings`, `cxx_defines`, `cxx_flags_raw`, `cuda_flags_raw`, `gpu_arch_list`), `build_flags` (issue #170 stable 17-key parsed bool/str/None subset, with `CAFFE2_USE_MIOPEN` aliased to `USE_MIOPEN`), `binary_introspection` (`libtorch_hip_symbol_counts`, `torch_lib_bundled`, `cxx_flags_use_defines` -- pure facts, no ON/OFF inference), `cmake_cache` (source/editable installs only -- allowlisted entries from CMakeCache.txt), `ninja_hipcc` (source/editable installs only -- per-target HIPCC defines + codegen flags + offload archs; `_parser` discriminates the two parser strategies). See "PyTorch source-tree submodule probing" below. |
@@ -464,7 +464,135 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.14` (current)
+### `1.15` (current)
+
+recom-NaN follow-up: backend / Stream-K selectors, numeric-check knobs, and
+TorchRec identity fixes. `1.14` already shipped, so these changes to what a
+snapshot emits get their own version rather than silently redefining it. No
+new top-level keys — `env_vars` gains entries and `torchrec` gains accuracy plus
+three sub-keys (`source_version`, `source_commit`, `distribution_version`); a
+1.14 snapshot loaded through `from_dict()` gains them as `null`.
+
+* GEMM env-var coverage is now decided by following each knob's upstream
+  `getenv` site to a call site, rather than by reading its name, so the whole
+  behaviour-changing class is captured instead of a subset. Two snapshots with
+  different registered GEMM environment settings will now expose those
+  *configuration* differences. This does not prove that identical snapshots
+  selected the same runtime solution or kernel: the probe records declared
+  configuration and never observes the backend, solution ID, kernel or launch
+  geometry a run actually chose, which can still differ through device state,
+  driver behaviour or library heuristics. That is the same layer-1 / layer-2
+  boundary described under *"Catalog vs. runtime trace"* above.
+
+  | Class | Added in 1.15 |
+  | --- | --- |
+  | Library / ExtOp loading | `HIPBLASLT_EXT_OP_LIBRARY_PATH`, `HIPBLASLT_PRELOAD_KERNELS` |
+  | Backend routing | `ROCBLAS_USE_HIPBLASLT_BATCHED`, `ROCBLAS_TENSILE_GEMM_OVERRIDE_PATH` |
+  | Numeric path | `ROCBLAS_INTERNAL_FORCE_VALU_FOR_DGEMM` |
+  | Allocator / workspace | `ROCBLAS_DEVICE_MEMORY_SIZE`, `ROCBLAS_INTERNAL_TRSM_REG_KERNEL_MEM_LIMIT` |
+  | Solution selection | `TENSILE_SOLUTION_SELECTION_METHOD`, `TENSILE_EXPERIMENTAL_SELECTION`, `TENSILE_TAM_SELECTION_ENABLE`, `TENSILE_NAIVE_SEARCH`, `TENSILE_METRIC`, `TENSILE_PREDICTION_LIB`, `TENSILE_GRIDBASED_KDTREE`, `TENSILE_GRIDBASED_BATCH_EXP` |
+  | Origami / GridBased selection | `ANALYTICAL_GEMM_HEURISTICS`, `ANALYTICAL_GEMM_HEURISTICS_VARIANCE`, `GRIDBASED_TOPSOLS` |
+  | Stream-K | `TENSILE_STREAMK_DYNAMIC_GRID`, `TENSILE_STREAMK_FIXED_GRID`, `TENSILE_STREAMK_MAX_CUS`, `TENSILE_STREAMK_DATA_PARALLEL`, `TENSILE_STREAMK_DYNAMIC_WGM`, `TENSILE_STREAMK_FULL_TILES`, `TENSILE_STREAMK_GRID_MULTIPLIER` |
+  | Workgroup mapping / StaggerU | `TENSILE_FIXED_WGM`, `TENSILE_FIXED_WGMXCC`, `TENSILE_FIXED_WGMXCCCHUNK`, `TENSILE_DISABLE_STAGGERU`, `TENSILE_FIXED_STAGGERU`, `TENSILE_FIXED_STAGGERU_MAPPING`, `TENSILE_FIXED_STAGGERU_STRIDE_SHIFT` |
+  | Skips work | `TENSILE_DB2` (bit 0 `skipKernelLaunch`, bit 1 `skipInitKernelLaunch`) |
+  | Forward-compat (absent from the reference build) | `TENSILE_STREAMK5_FORCE_MODE`, `TENSILE_STREAMK_TILES`, `TENSILE_STREAMK_SPLIT` |
+
+  Also captured, and classified `gemm_diagnostics` because the only call site
+  found was a print or a client-side report: `HIPBLASLT_LOG_{FILE,LEVEL,MASK}`,
+  `HIPBLASLT_BENCH_PERF` and `HIPBLASLT_BENCH_PERF_ALL` (these fill
+  `hipblasltClientPerformanceArgs` and nothing else),
+  `HIPBLASLT_BENCH_PRINT_COMMAND`, `HIPBLASLT_ENABLE_MARKER`,
+  `TENSILE_ENABLE_MARKER`, `ROCBLAS_LAYER`, `ROCBLAS_LOG_*_PATH`,
+  `ROCBLAS_VERBOSE_{HIPBLASLT,TENSILE}_ERROR`, `ANALYTICAL_GEMM_DEBUG`,
+  `ORIGAMI_LOG_FILE`,
+  `TENSILE_DB` (every bit it sets is a `print*`), `TENSILE_ADAPTIVE_GEMM_LOG`,
+  `TENSILE_AUTO_GSU_ALGO` (each guards a lone `std::cout`),
+  `TENSILE_SOLUTION_SELECTION_TRACE`, and `TENSILE_BENCHMARK`
+  (`Debug::getBenchmark()` has no call site in the reference libraries at all).
+
+  Earlier `1.15` drafts *excluded* these. They are captured now because the
+  contract is comprehensive capture with classification recorded, not capture
+  filtered by classification: recording a variable does not claim it affected
+  execution, it preserves the declared environment. The classification survives
+  in the manifest's `category` / `consumer` fields, where a triager can weigh it
+  without it having decided what the snapshot preserves. The exact-string audit
+  also rejects command templates such as `ROCBLAS_API_BENCH -f gemmt -r`;
+  whitespace tokenization must never invent a variable from client help text.
+
+  **Which library these statements are about.** Presence and absence above are
+  stated against the *reference build* — hipBLASLt 1.4.70002 + rocBLAS
+  5.0.70002 on ROCm 7.0.2, the build the escalation runs. Every ROCm release
+  ships a different subset of these knobs: ROCm 7.2.3, for example, has no
+  `HIPBLASLT_CHECK_NUMERICS*` and no `TENSILE_FIXED_STAGGERU*`, and it does
+  have `HIPBLASLT_BENCH_PERF_ALL`. The captured list is therefore a superset
+  keyed to the build under investigation, not a claim about every ROCm.
+
+  **`null` means unset, not unsupported.** Each registered variable records its
+  raw exported value, or `null` when the variable is not set in the probed
+  process. `_capture_env_vars()` is `os.environ.get` over the manifest and
+  nothing more, so this block does not determine whether the installed library
+  supports the variable, consumed it, or was affected by it — an exported knob is
+  recorded verbatim even when the local library has never heard of it, which is
+  what keeps the list portable across ROCm releases. Nothing here contributes a
+  `partial_reasons` entry.
+* The `HIPBLASLT_CHECK_NUMERICS` family (`_SCAN_EVERY` / `_SCAN_FROM` /
+  `_SCAN_UNTIL` / `_STOP_ON_FIRST`) and `ROCBLAS_CHECK_NUMERICS` are now
+  **captured**. 1.14 wrongly classed them as behaviour-neutral logging:
+  in-library numeric checking launches extra scan kernels and adds
+  synchronization, which can hide or expose a timing race even when the final
+  arithmetic is unchanged. The rocBLAS variant is the load-bearing one on the
+  stock 1.4.0 image, where the repro's GEMMs fall back to rocBLAS — capturing
+  only the hipBLASLt half would capture the half that is not running.
+* **`torchrec` records two identities separately.** `find_spec` and
+  `importlib.metadata` answer different questions, and in a Buck /
+  PYTHONPATH-over-pip process they can resolve to different installs — so the
+  snapshot no longer merges them:
+  * `source_version` / `source_commit` — the code Python would actually import,
+    read from `version.py` inside the resolved import target.
+  * `distribution_version` — what a `*.dist-info` on `sys.path` claims, which may
+    belong to a different copy.
+  * `package_version` / `commit` stay the primary identity for consumers wanting
+    one answer, and follow the **import target**, because a snapshot should
+    describe what would run. `commit` therefore always comes from the same
+    install as the version beside it, never from the other one's metadata.
+
+  A disagreement is reported in `partial_reasons` rather than reconciled
+  silently — two torchrecs on one path is a fact about the process. Versions are
+  compared after PEP 440 normalisation, so `1.4.0-1` and `1.4.0.post1` are not
+  treated as a conflict; and because an unparseable version falls back to
+  "different", an incomplete normaliser can only add a reason, never discard an
+  identity.
+
+  `version.py` is read **through the loader**, so a Buck `.par` (zipimport)
+  resolves its identity instead of reporting `null` while claiming the file was
+  unreadable — that deployment is the one this feature exists for. Only the
+  package's own `submodule_search_locations` are consulted, so a single-module
+  `torchrec.py` no longer adopts an unrelated sibling `version.py` and publish
+  another project's SHA as torchrec's. Neither `find_spec` nor a metadata read
+  failing is folded into "absent": each records its own reason, and a readable
+  `version.py` identity survives a metadata failure.
+* `torchrec.commit` prefers the **full 40-char** build SHA read as text from
+  the installed `torchrec/version.py` (`git_version`, written by TorchRec's own
+  `setup.py`). A release wheel such as `1.4.0` carries no SHA in its version
+  string, so 1.14 reported `null` even though the SHA was on disk — which made
+  two different builds of `1.4.0` indistinguishable in a diff. The file is
+  parsed as text, never imported, so the no-`torch.cuda` contract holds.
+  The version-string parse remains the fallback and now also recognises
+  TorchRec's source-build **bare-hex** local segment (`1.8.0a0+0123abc` ->
+  `0123abc`), guarded against setuptools_scm's dirty-tree marker
+  `+d<YYYYMMDD>` (every character of which is valid hex) so the build *date*
+  is never published as a commit SHA.
+* A torchrec that is **importable but has no dist-info** (Buck / PYTHONPATH
+  link-tree) is resolved from `version.py` via `importlib.util.find_spec`
+  instead of being reported absent; only an install with neither dist-info nor
+  `version.py` records the present-but-version-unknown `partial_reasons`
+  entry. A PEP 420 **namespace** portion — a bare `torchrec/` directory
+  anywhere on `sys.path` — is loader-less and counts as absent, so it can no
+  longer flip a clean snapshot to `partial`.
+* `summary()` now prints a `torchrec:` line, matching its sibling package
+  blocks.
+
+### `1.14`
 
 Recsys-stack package identity + recom-NaN environment knobs. Additive — one
 new top-level block plus new `env_vars` entries; older snapshots and direct
@@ -484,9 +612,11 @@ constructors remain compatible.
   `HIPBLASLT_TUNING_OVERRIDE_FILE`, `ROCBLAS_DEFAULT_ATOMICS_MODE`,
   `ROCBLAS_INTERNAL_FP16_ALT_IMPL` (+ `_RNZ`), `ROCBLAS_STREAM_ORDER_ALLOC`,
   and `TENSILE_SOLUTION_INDEX`; plus `HSA_TOOLS_DISABLE_REGISTER` and
-  `LD_LIBRARY_PATH` (which `.so` actually loads). Logging-only knobs
-  (`HIPBLASLT_LOG_*`, `ROCBLAS_LAYER`, `TENSILE_DB`, `*_CHECK_NUMERICS`) were
-  deliberately excluded — they don't change the computed result.
+  `LD_LIBRARY_PATH` (which `.so` actually loads).
+
+  Note: 1.14 also claimed the `HIPBLASLT_CHECK_NUMERICS*` knobs were excluded
+  as behaviour-neutral. That was wrong and is corrected in 1.15, which
+  captures them.
 
 ### `1.13`
 
@@ -1273,8 +1403,129 @@ is stable.
 ## How to add a new env var
 
 See [the module README](../src/aorta/instrumentation/README.md#how-to-add-a-new-env-var-to-canonical_env_vars).
-Short version: edit `CANONICAL_ENV_VARS`, update
-`test_canonical_var_names_stable`, document why in your PR.
+Short version: add one `EnvironmentKnob` to `ENV_KNOB_REGISTRY` in
+`env_knobs.py` — `CANONICAL_ENV_VARS` is generated from it — then update
+`test_canonical_var_names_stable` and document why in your PR.
+
+## Auditing what the manifest covers
+
+`CANONICAL_ENV_VARS` is generated from `ENV_KNOB_REGISTRY`, a manifest that
+records, per variable: `name`, `library`, `consumer`, `category`,
+`source_reference` and `reference_build`. Entries assert what is known about who
+reads a variable. They deliberately do **not** assert that the installed library
+supports it, that the process exported it, or that it changed a run.
+
+### The captured inventory
+
+Generated from the manifest, so it is the set the probe actually reads rather than a
+second copy of it. Regenerate with `python scripts/audit_env_knobs.py
+--emit-docs-table`; `test_docs_knob_inventory_matches_registry` fails if this block and
+the manifest disagree. (The `1.15` changelog table above is a different thing on
+purpose: it records what that release *changed*, which is history and does not
+regenerate.)
+
+<!-- BEGIN GENERATED: env-knob-inventory -->
+
+136 knobs, generated from `ENV_KNOB_REGISTRY` by
+`python scripts/audit_env_knobs.py --emit-docs-table`. `library` is the component the variable belongs to. For GEMM knobs present in the reference build, ownership is measured from the shipped shared object's exact string table -- which shows the name, not a call site, so it is ownership and not proof of consumption; forward-compatible absent entries are marked in the manifest and are declared rather than measured. A row's presence records that the variable is preserved in a snapshot -- not that the installed library supports it, that the process exported it, or that it affected a run.
+
+| Category | Library | Variables |
+| --- | --- | --- |
+| `gpu_scoping` | hip-runtime | `HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES` |
+| `runtime` | hsa-runtime | `HSA_XNACK`, `HSA_KERNARG_POOL_SIZE`, `HSA_NO_SCRATCH_RECLAIM`, `HSA_OVERRIDE_GFX_VERSION`, `HSA_TOOLS_DISABLE_REGISTER` |
+| `runtime` | hip-runtime | `GPU_MAX_HW_QUEUES`, `HIP_LAUNCH_BLOCKING` |
+| `codegen` | compiler | `AMDGCN_USE_BUFFER_OPS` |
+| `gemm_numeric` | pytorch | `DISABLE_TF32` |
+| `codegen` | pytorch | `PYTORCH_ROCM_ARCH` |
+| `collectives` | rccl | `NCCL_MAX_NCHANNELS`, `NCCL_P2P_LEVEL`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `RCCL_MSCCL_ENABLE` |
+| `fabric` | rccl | `RCCL_AINIC_ROCE`, `NCCL_NET_PLUGIN`, `NCCL_NET`, `RCCL_CTS_OFFLOAD_ENABLED`, `NCCL_IB_GID_INDEX`, `NCCL_IB_ROCE_VERSION_NUM`, `NCCL_IB_TC`, `NCCL_IB_FIFO_TC`, `NCCL_GDR_FLUSH_DISABLE`, `NCCL_GDRCOPY_ENABLE`, `NCCL_IB_USE_INLINE`, `NCCL_IB_PCI_RELAXED_ORDERING`, `NCCL_IB_QPS_PER_CONNECTION`, `NCCL_PXN_DISABLE`, `NCCL_IGNORE_CPU_AFFINITY`, `NCCL_NET_OPTIONAL_RECV_COMPLETION`, `RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING`, `NCCL_IB_TIMEOUT`, `NCCL_IB_SL`, `NCCL_IB_SPLIT_DATA_ON_QPS`, `NCCL_DMABUF_ENABLE`, `NCCL_CUMEM_ENABLE`, `IONIC_LOCKFREE`, `RCCL_DISABLE_RAIL_TREES`, `RCCL_LL128_FORCE_ENABLE`, `NCCL_WORK_FIFO_BYTES`, `RCCL_GFX9_CHEAP_FENCE_OFF` |
+| `embedding_backend` | fbgemm | `FBGEMM_NO_JK`, `FBGEMM_TBE_V2`, `FBGEMM_TBE_ROCM_HIP_BACKWARD_KERNEL`, `FBGEMM_BOUNDS_CHECK_INDICES_V2` |
+| `conv_backend` | miopen | `MIOPEN_SYSTEM_DB_PATH`, `MIOPEN_USER_DB_PATH`, `MIOPEN_DEBUG_DISABLE_FIND_DB`, `MIOPEN_FIND_MODE` |
+| `attention_backend` | pytorch | `TORCH_ROCM_FA_PREFER_CK`, `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL` |
+| `gemm_routing` | pytorch | `TORCH_BLAS_PREFER_HIPBLASLT` |
+| `gemm_solution_selection` | pytorch | `TORCH_HIPBLASLT_TUNING_FILE`, `TORCH_HIPBLASLT_TUNING_OVERRIDE_FILE` |
+| `framework` | pytorch | `TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE`, `PYTORCH_CUDA_ALLOC_CONF` |
+| `loader` | dynamic-loader | `LD_LIBRARY_PATH` |
+| `gemm_loading` | hipblaslt | `HIPBLASLT_TENSILE_LIBPATH`, `HIPBLASLT_EXT_OP_LIBRARY_PATH`, `HIPBLASLT_PRELOAD_KERNELS` |
+| `gemm_loading` | rocblas | `ROCBLAS_TENSILE_LIBPATH` |
+| `gemm_solution_selection` | rocblas | `ROCBLAS_TENSILE_GEMM_OVERRIDE_PATH`, `TENSILE_EXPERIMENTAL_SELECTION`, `TENSILE_TAM_SELECTION_ENABLE` |
+| `gemm_routing` | rocblas | `ROCBLAS_USE_HIPBLASLT`, `ROCBLAS_USE_HIPBLASLT_BATCHED` |
+| `gemm_routing` | hipblaslt | `HIPBLASLT_USE_ROCROLLER`, `HIPBLASLT_ROCROLLER_NO_CUSTOM_KERNEL` |
+| `gemm_solution_selection` | hipblaslt | `HIPBLASLT_TUNING_OVERRIDE_FILE`, `TENSILE_SOLUTION_SELECTION_METHOD`, `TENSILE_PREDICTION_LIB`, `TENSILE_GRIDBASED_KDTREE`, `TENSILE_GRIDBASED_BATCH_EXP`, `ANALYTICAL_GEMM_HEURISTICS`, `ANALYTICAL_GEMM_HEURISTICS_VARIANCE`, `GRIDBASED_TOPSOLS` |
+| `gemm_numeric` | hipblaslt | `HIPBLASLT_OVERRIDE_COMPUTE_TYPE_XF32` |
+| `gemm_numeric` | rocblas | `ROCBLAS_DEFAULT_ATOMICS_MODE`, `ROCBLAS_INTERNAL_FP16_ALT_IMPL`, `ROCBLAS_INTERNAL_FP16_ALT_IMPL_RNZ`, `ROCBLAS_INTERNAL_FORCE_VALU_FOR_DGEMM` |
+| `gemm_workspace` | rocblas | `ROCBLAS_STREAM_ORDER_ALLOC`, `ROCBLAS_DEVICE_MEMORY_SIZE`, `ROCBLAS_INTERNAL_TRSM_REG_KERNEL_MEM_LIMIT` |
+| `gemm_solution_selection` | hipblaslt+rocblas | `TENSILE_SOLUTION_INDEX`, `TENSILE_NAIVE_SEARCH`, `TENSILE_METRIC` |
+| `gemm_launch_geometry` | hipblaslt+rocblas | `TENSILE_STREAMK_DYNAMIC_GRID`, `TENSILE_STREAMK_FIXED_GRID`, `TENSILE_STREAMK_MAX_CUS`, `TENSILE_STREAMK_FULL_TILES`, `TENSILE_STREAMK_GRID_MULTIPLIER` |
+| `gemm_launch_geometry` | hipblaslt | `TENSILE_STREAMK_DATA_PARALLEL`, `TENSILE_STREAMK_DYNAMIC_WGM`, `TENSILE_FIXED_WGM`, `TENSILE_FIXED_WGMXCC`, `TENSILE_FIXED_WGMXCCCHUNK`, `TENSILE_DISABLE_STAGGERU`, `TENSILE_FIXED_STAGGERU`, `TENSILE_FIXED_STAGGERU_MAPPING`, `TENSILE_FIXED_STAGGERU_STRIDE_SHIFT` |
+| `gemm_skip_work` | hipblaslt+rocblas | `TENSILE_DB2` |
+| `gemm_forward_compat` | hipblaslt | `TENSILE_STREAMK5_FORCE_MODE`, `TENSILE_STREAMK_TILES`, `TENSILE_STREAMK_SPLIT` |
+| `gemm_numeric_check` | hipblaslt | `HIPBLASLT_CHECK_NUMERICS`, `HIPBLASLT_CHECK_NUMERICS_SCAN_EVERY`, `HIPBLASLT_CHECK_NUMERICS_SCAN_FROM`, `HIPBLASLT_CHECK_NUMERICS_SCAN_UNTIL`, `HIPBLASLT_CHECK_NUMERICS_STOP_ON_FIRST` |
+| `gemm_numeric_check` | rocblas | `ROCBLAS_CHECK_NUMERICS` |
+| `gemm_diagnostics` | hipblaslt | `ANALYTICAL_GEMM_DEBUG`, `ORIGAMI_LOG_FILE`, `HIPBLASLT_LOG_FILE`, `HIPBLASLT_LOG_LEVEL`, `HIPBLASLT_LOG_MASK`, `HIPBLASLT_BENCH_PERF`, `HIPBLASLT_BENCH_PERF_ALL`, `HIPBLASLT_BENCH_PRINT_COMMAND`, `HIPBLASLT_ENABLE_MARKER`, `TENSILE_ENABLE_MARKER`, `TENSILE_ADAPTIVE_GEMM_LOG`, `TENSILE_AUTO_GSU_ALGO`, `TENSILE_BENCHMARK` |
+| `gemm_diagnostics` | rocblas | `ROCBLAS_LAYER`, `ROCBLAS_LOG_PATH`, `ROCBLAS_LOG_TRACE_PATH`, `ROCBLAS_LOG_BENCH_PATH`, `ROCBLAS_LOG_PROFILE_PATH`, `ROCBLAS_VERBOSE_HIPBLASLT_ERROR`, `ROCBLAS_VERBOSE_TENSILE_ERROR`, `TENSILE_SOLUTION_SELECTION_TRACE` |
+| `gemm_diagnostics` | hipblaslt+rocblas | `TENSILE_DB` |
+
+<!-- END GENERATED: env-knob-inventory -->
+
+Two different checks keep it honest, and it matters which one proves what:
+
+* **Drift between lists** — `test_canonical_var_names_stable` compares the
+  generated names against a hand-written set, so adding a knob must be
+  acknowledged. This catches accidental change and nothing more; it cannot show
+  that the upstream libraries are covered, because both sides are written by hand.
+* **Coverage of the installed libraries** — `scripts/audit_env_knobs.py` reads
+  complete NUL-delimited C strings from the shipped hipBLASLt / rocBLAS shared
+  objects and diffs them against the manifest:
+
+```bash
+python scripts/audit_env_knobs.py                    # audit the local ROCm install
+python scripts/audit_env_knobs.py --rocm-lib /opt/rocm-7.0.2/lib --strict
+python scripts/audit_env_knobs.py --json audit.json  # machine-readable
+```
+
+  `covered` is a manifest knob found in an installed library. `not_present` is a
+  manifest knob this ROCm does not ship — expected for forward-compat entries.
+  Capture remains independent: an exported value is preserved even when the
+  library ignores it; `null` means only that it was unset. `uncovered` is an
+  audited name the library exposes but the manifest omits. The mechanically
+  discoverable scope is every `HIPBLASLT_*`, `ROCBLAS_*`, and `TENSILE_*` string
+  that begins at a NUL boundary; the five non-prefixed Origami/GridBased names
+  found by source review are also checked exactly. The NUL-boundary rule is what
+  keeps help text from being read as a variable name, and its cost is that a name
+  the linker folded into the tail of a longer string (`.rodata` is
+  `SHF_MERGE|SHF_STRINGS`) has no standalone copy to find. A future non-prefixed
+  `getenv` still requires source review to
+  add it to that explicit scope — the binary string table alone cannot distinguish
+  arbitrary uppercase constants from environment-variable names. On the exact
+  reference build, identified by both resolved basename and pinned SHA-256, the
+  audit also checks library ownership and provenance; those checks are skipped on
+  other or patched versions where ownership may legitimately differ.
+  `--strict` makes any applicable audit error fatal; a missing requested library
+  is always a setup error.
+
+  The script resolves libraries through the soname symlink rather than globbing,
+  because a ROCm tree can keep a stale `libhipblaslt.so.1.0.70002` beside the
+  active `1.4.70002` and a glob picks the wrong one. A runtime-only tree ships no
+  bare `.so` devel link, so the fallback reads the `<soname>.<major>` links and
+  takes the highest major numerically — lexicographic ordering picked the oldest
+  co-installed library, and a single-digit glob missed a two-digit major
+  entirely.
+
+The audit needs a ROCm install, so the GPU workflow runs it with `--strict`
+whenever the registry, audit script, or their tests change. The CPU gate covers
+the comparator logic with fixture libraries in
+`tests/instrumentation/test_env_knob_audit.py`.
+
+Provenance is recorded at the granularity it was actually established. GEMM knobs
+carry a measured `source_reference` (the shipped library whose string table holds
+the name, re-checkable with the script above) and the reference build that
+statement is about. Knobs inherited from schema ≤ 1.14 are marked
+`INHERITED_UNAUDITED`, because they were never traced to an upstream call site —
+naming a source they were not verified against would be worse than admitting the
+gap. Tracing those to upstream `getenv` sites is open follow-up work, and the
+count of unaudited entries is asserted to be enumerable by
+`test_inherited_knobs_are_marked_unaudited_not_given_a_false_source`.
 
 ## Running inside a Buck environment
 

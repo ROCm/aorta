@@ -1169,6 +1169,23 @@ def write_matrix_md(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _redaction_doc(recipe: Recipe) -> dict[str, Any] | None:
+    """Serialize the run's effective ``redaction:`` block, or ``None``.
+
+    Only probe-mode recipes can declare one, and the block is parsed into
+    ``recipe.probe_extras.redaction`` at load time.
+    """
+    probe_extras = getattr(recipe, "probe_extras", None)
+    cfg = getattr(probe_extras, "redaction", None) if probe_extras else None
+    if cfg is None:
+        return None
+    return {
+        "scrub_env_keys": list(cfg.scrub_env_keys),
+        "scrub_paths": cfg.scrub_paths,
+        "scrub_ip_addresses": cfg.scrub_ip_addresses,
+    }
+
+
 def write_matrix_json(
     path: Path,
     recipe: Recipe,
@@ -1235,6 +1252,19 @@ def write_matrix_json(
         "runtime_provenance": _runtime_provenance(),
         "cells": [],
     }
+    # The redaction rule in force for this run. ``recipe.resolved.yaml`` cannot
+    # carry it: that file is emitted in the triage shape so it stays loadable by
+    # ``load_recipe``, and ``redaction:`` is a probe-mode-only key. Recording it
+    # here -- with the rest of the run-time state -- is what lets ``aorta bundle
+    # <run-dir>`` scrub without ``--redaction-from`` instead of silently falling
+    # back to IdentityRedactor.
+    #
+    # Emitted only when a block exists: a literal ``null`` would be read back as
+    # a present-but-invalid block (``parse_redaction`` rejects ``None`` by
+    # design) and would fail bundling for every non-redacting run.
+    redaction_doc = _redaction_doc(recipe)
+    if redaction_doc is not None:
+        doc["redaction"] = redaction_doc
     for cell in cell_stats:
         tag, ratio = confound_tags.get(cell.name, ("-", None))
         entry = asdict(cell)

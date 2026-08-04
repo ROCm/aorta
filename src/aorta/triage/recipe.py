@@ -1252,6 +1252,17 @@ def load_recipe_mapping(path: Path) -> Any:
     return data
 
 
+def dump_recipe_mapping(data: Any) -> str:
+    """Serialize a parsed recipe mapping back to YAML text.
+
+    Symmetric with :func:`load_recipe_mapping` and here for the same reason:
+    ``aorta bundle`` stages a *scrubbed* copy of ``recipe.resolved.yaml``
+    (:mod:`aorta.probe.redaction`), and those modules are stdlib-only by
+    rubric §3.F, so the YAML dependency stays on this side of the seam.
+    """
+    return yaml.safe_dump(data, sort_keys=False)
+
+
 def _build_recipe(
     data: Any,
     sidecar_files: tuple[Path, ...] | None,
