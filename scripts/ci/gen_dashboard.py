@@ -120,9 +120,16 @@ def _has_trend(series: list[list[float | None]]) -> bool:
 def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
     """Headline verdict for the newest build.
 
-    Only a graded pass earns ``passing``. A build with no blessed baselines is
-    ``recording``, and one where every cell was skipped is ``skipping``:
-    reporting either as "passing" would claim a result nothing established.
+    Only a graded pass earns ``passing``; a build with no blessed baselines is
+    ``recording``, since reporting either as "passing" would claim a result
+    nothing established.
+
+    ``skipping`` is the terminal branch of that classification and not a state
+    today's pipeline can reach: ``nightly_eval`` appends a synthetic ``fail``
+    entry when every cell skips, so a real zero-work build carries ``fail >= 1``
+    and stops at ``failing`` above. It stays because this function must classify
+    whatever summary it is handed, and for an all-skip one every other label
+    would be a lie.
     """
     if not results:
         return "unknown", "#57606a"
@@ -198,8 +205,10 @@ def _metric_rows(
     summary = ((entry.get("metrics") or {}).get("summary") or {})
     out = []
     for m in sorted(summary):
+        raw = summary.get(m)
         unit = _METRIC_UNITS.get(m, "")
-        val = f"{_fmt_num(summary.get(m))} {unit}".strip()
+        # A unit on an unknown value ("— ms") reads as a measurement of nothing.
+        val = f"{_fmt_num(raw)} {unit}".strip() if _isnum(raw) else _fmt_num(raw)
         policy = _metric_policy(m) or "trend only"
         trend = (
             f"<td class='spark'>{_svg_sparkline(mhist.get((cell_key, m), []))}</td>"
@@ -265,7 +274,9 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     skip_now = s.get("skip", 0) or 0
     # "Nothing was graded" splits three ways and they must not be described
     # identically: every cell recorded a baseline, some recorded while others
-    # were skipped, or nothing ran at all.
+    # were skipped, or nothing ran at all. The last of those is unreachable for
+    # this pipeline's own output (see _latest_status) and only guards a summary
+    # from some other producer.
     nothing_graded = bool(total) and not graded_now
 
     # Columns that would be uniformly empty are dropped rather than rendered as

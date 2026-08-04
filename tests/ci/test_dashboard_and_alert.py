@@ -184,9 +184,34 @@ def test_dashboard_record_only_run_is_not_reported_as_passing():
     assert ">passing<" not in html
 
 
-def test_dashboard_skip_only_run_is_neither_passing_nor_recording():
-    # Every cell skipped for want of GPUs establishes nothing, so neither
-    # "passing" nor the record-only baseline story applies.
+def test_dashboard_zero_work_run_reports_the_failure_the_pipeline_records():
+    # This is what a real all-skip nightly looks like: nightly_eval appends a
+    # synthetic _nightly_eval "fail" entry when every cell skips, so the build
+    # carries fail>=1 and the honest headline is "failing", not "skipping".
+    # Asserting the shape without that entry would test a document this
+    # pipeline never emits.
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "skip",
+                   "reasons": ["needs 8 GPUs, runner exposes 2"], "metrics": {}},
+                  {"entry": "_nightly_eval", "cell": None, "verdict": "fail",
+                   "reasons": ["no matrix entry ran (empty matrix or all skipped -- check GPUs)"],
+                   "metrics": {}}],
+                 total=2, fail=1, skip=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "failing" in html
+    assert ">passing<" not in html
+    assert "skipping" not in html
+    # The reason a zero-work build failed must be on the page, not just a badge.
+    assert "no matrix entry ran" in html
+    assert "No baselines are blessed yet" not in html
+
+
+def test_dashboard_all_skip_summary_is_labelled_skipping_not_passing():
+    # Defensive branch: unreachable for nightly_eval's own output (the test
+    # above covers that), but _latest_status must still classify an all-skip
+    # summary from any other producer, and every label but "skipping" would
+    # overclaim. Kept so a future relaxation of that invariant cannot silently
+    # resurrect the "skip-only reads as passing" bug.
     r = _results("2026-07-30T00:00:00Z",
                  [{"entry": "w", "cell": "c", "verdict": "skip",
                    "reasons": ["needs 8 GPUs, runner exposes 2"], "metrics": {}}],
@@ -285,3 +310,16 @@ def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
         [doc("2026-07-30T00:00:00Z", True), doc("2026-07-31T00:00:00Z", False)])
     assert "1.0 ms" not in html
     assert "trend (step ms)" not in html
+
+
+def test_dashboard_omits_the_unit_when_the_value_is_unknown():
+    # "— ms" reads as a measurement of nothing; a missing value gets no unit.
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                   "metrics": {"mean_step_time_ms": 1.0,
+                               "summary": {"decode_latency_ms": None,
+                                           "latency_ms": 12.5}}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "— ms" not in html
+    assert "12.5 ms" in html  # a real value keeps its unit
