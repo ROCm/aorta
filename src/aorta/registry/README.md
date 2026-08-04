@@ -32,7 +32,7 @@ candidate — it's a plugin candidate (Path 2).
 | Qualifies as built-in | Does NOT qualify (use Path 2) |
 |---|---|
 | `DISABLE_TF32` (hipBLASLt reads it) | `AMP_DTYPE` (only the workload's Python reads it) |
-| `HSA_XNACK` (ROCm runtime reads it) | `SHAMPOO_PRECONDITIONER_DTYPE` (only recom_repro reads it) |
+| `HSA_XNACK` (ROCm runtime reads it) | `MY_MODEL_DTYPE` (only a plugin workload reads it) |
 | `CUDA_LAUNCH_BLOCKING` (PyTorch reads it) | Any custom flag your workload introspects |
 | `NCCL_DEBUG`, `OMP_NUM_THREADS`, `LD_PRELOAD` | Anything that's a silent no-op on workloads that don't read it |
 
@@ -107,8 +107,8 @@ are not yet consumed. Today the commands raise "not yet implemented" before
 reaching the loader:
 
 ```bash
-aorta run    --workload fsdp --mitigations-file ./my-experiments.json --mitigations my_flag
-aorta triage run --workload fsdp --mitigations-file ./my-experiments.json ...
+aorta run    --workload training --mitigations-file ./my-experiments.json --mitigations my_flag
+aorta triage run --workload training --mitigations-file ./my-experiments.json ...
 ```
 
 `--mitigations-file` is repeatable. Each file may declare mitigations,
@@ -154,7 +154,7 @@ PR or publishing a package. Two options:
 For "is this even worth pursuing" experiments:
 
 ```bash
-aorta run --workload fsdp --env HSA_ENABLE_SDMA=0
+aorta run --workload training --env HSA_ENABLE_SDMA=0
 ```
 
 No registry involvement. The flag isn't named, isn't tracked, doesn't appear
@@ -253,11 +253,10 @@ config["_aorta_environment"] = {
 ```
 
 Workloads that can isolate themselves read this dict and branch their
-subprocess invocation accordingly. The platform itself launches no docker
-images, activates no venvs, and invokes no `buck2 run` — it threads the
-metadata; the wrapper decides. Today's `recom_repro` wrapper consumes
-`docker`; a Buck-aware wrapper consumes `buck_target` with the same
-pattern:
+subprocess invocation accordingly. The core platform does not execute
+`docker run`, activate a venv, or invoke `buck2 run`; it threads the metadata
+and the wrapper decides. A Docker-aware wrapper consumes `docker`; a Buck-aware
+wrapper consumes `buck_target` with the same pattern:
 
 ```python
 # Inside a workload's run() method:

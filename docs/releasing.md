@@ -5,8 +5,8 @@ Stable releases are published to **PyPI** (`pip install amd-aorta`) and also
 attached to a [GitHub Release](https://github.com/ROCm/aorta/releases);
 pre-release nightlies are published to a rolling **`dev-wheels`** pre-release.
 AORTA is a pure-Python package, so a single `py3-none-any` wheel installs on
-every platform; PyTorch is intentionally **not** bundled (customers install it
-from the ROCm index — see below).
+every platform; PyTorch is intentionally **not** bundled. Workloads that need
+PyTorch install a matching build separately.
 
 The version is **derived from git tags** by
 [`setuptools_scm`](https://setuptools-scm.readthedocs.io/) (see
@@ -96,13 +96,8 @@ install command below in a clean virtualenv as a smoke test.
 
 ## Customer install flow
 
-PyTorch is installed separately from the ROCm index (it is not part of the
-wheel), so customers always install it first:
-
-```bash
-pip install --pre torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/nightly/rocm7.1/
-```
+Install the core package first. Add only the extras and workload dependencies
+the customer needs.
 
 **Stable (recommended) — from PyPI:**
 
@@ -111,6 +106,14 @@ pip install --pre torch torchvision torchaudio \
 pip install amd-aorta                  # latest stable
 pip install "amd-aorta==X.Y.Z"         # a specific version
 pip install "amd-aorta[hw-queue]"      # with optional extras
+```
+
+PyTorch is not part of the AORTA wheel. Install it only when the selected
+workload or feature requires it, using the PyTorch index for that ROCm release:
+
+```bash
+PYTORCH_ROCM_INDEX=https://download.pytorch.org/whl/nightly/rocmX.Y/
+pip install --pre torch --index-url "$PYTORCH_ROCM_INDEX"
 ```
 
 **Stable — from the GitHub Release** (no PyPI; pin to the version you want, the

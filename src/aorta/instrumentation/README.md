@@ -213,9 +213,8 @@ that what we capture stays auditable and reviewable.
 
 What does **not** belong here:
 
-* **Workload config** like `AMP_DTYPE`, `MODEL_DTYPE`,
-  `SHAMPOO_PRECONDITIONER_DTYPE`, model precision, optimizer
-  hyperparameters. Those are training-script arguments
+* **Workload config** like `AMP_DTYPE`, `MODEL_DTYPE`, model precision, or
+  optimizer hyperparameters. Those are training-script arguments
   (Hydra/argparse), captured by `aorta run` in the trial result
   (Task B1). Some workloads forward them as env vars to subprocesses --
   the env probe still does NOT capture them, since they are workload

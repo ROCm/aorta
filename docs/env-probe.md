@@ -14,9 +14,11 @@ The same code path is used three ways:
   Buck `.par` applications that own `__main__`.
 * **B1 (per-trial runner)**: calls `collect_env()` once per trial; the
   snapshot is embedded in `TrialResult.env`.
-* **B2 (matrix runner)**: calls `collect_env()` once per matrix start
-  (host scope) and once per `--environment-axis` value (container
-  scope).
+* **B2 (matrix runner)**: captures the host environment once per matrix. For
+  an isolated environment, it asks the workload wrapper to run the probe
+  inside that environment and promotes the resulting snapshot; the core
+  dispatcher does not launch the container. See
+  [Environment snapshots](../recipes/README.md#environment-snapshots).
 
 ## Why
 

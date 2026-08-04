@@ -220,7 +220,7 @@ buck2 run aorta -- sweep list-environments
 
 # Validate a recipe without executing it
 buck2 run aorta -- sweep run --recipe recipes/training/example-fsdp-smoke.yaml --dry-run
-# Dry run: fsdp / ticket=EXAMPLE-151
+# Dry run: race (mode=fsdp) / ticket=EXAMPLE-151
 # Cells (3):
 #   - baseline-local: mitigations=['none'] environment=local trials=2 steps=100
 #   - tf32_off-local: mitigations=['tf32_off'] environment=local trials=2 steps=100
@@ -233,16 +233,16 @@ The public `aorta` build ships no `aorta.workloads` plugins (workloads
 register via a separate package's entry-points; see
 [Extending: adding workloads via plugins](#extending-adding-workloads-via-plugins)
 below).
-The example recipe targets `workload: fsdp`, so each cell will error
-with `Workload 'fsdp' not found. Available: []`. That's intentional --
-the recipe's own header documents it -- and `aorta sweep` is built to
-keep going:
+The example recipe targets `workload: race`, so each cell will error with
+`Workload 'race' not found. Available: []`. That's intentional for this Buck
+target, which does not include workload plugin metadata, and `aorta sweep` is
+built to keep going:
 
 ```bash
 buck2 run aorta -- sweep run --recipe recipes/training/example-fsdp-smoke.yaml -v
 ```
 
-What you get back (under `triage_results/EXAMPLE-151/fsdp/<timestamp>/`):
+What you get back (under `triage_results/EXAMPLE-151/race/<timestamp>/`):
 
 | Artifact | What's in it |
 |---|---|
