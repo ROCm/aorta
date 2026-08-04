@@ -63,6 +63,16 @@ _VERDICT_COLOR = {
 _VERDICT_ORDER = ("fail", "record", "skip", "pass")
 
 
+def _isnum(v: Any) -> bool:
+    """Numeric for display purposes.
+
+    ``bool`` is a subclass of ``int``, so a stray ``true`` in the (untrusted)
+    results JSON would otherwise format as a step time, scale a bar, or count
+    towards a trend.
+    """
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def load_results(results_dir: Path) -> list[dict[str, Any]]:
     """Load and sort all result docs by generated_at (oldest first)."""
     docs: list[dict[str, Any]] = []
@@ -77,7 +87,7 @@ def load_results(results_dir: Path) -> list[dict[str, Any]]:
 
 def _svg_sparkline(values: list[float], width: int = 160, height: int = 32) -> str:
     """Tiny inline SVG line chart for a metric's history (ignores None)."""
-    pts = [v for v in values if isinstance(v, (int, float))]
+    pts = [v for v in values if _isnum(v)]
     if len(pts) < 2:
         return '<span class="muted">n/a</span>'
     lo, hi = min(pts), max(pts)
@@ -85,7 +95,7 @@ def _svg_sparkline(values: list[float], width: int = 160, height: int = 32) -> s
     n = len(values)
     coords = []
     for i, v in enumerate(values):
-        if not isinstance(v, (int, float)):
+        if not _isnum(v):
             continue
         x = (i / (n - 1)) * (width - 4) + 2
         y = height - 2 - ((v - lo) / span) * (height - 4)
@@ -104,9 +114,7 @@ def _svg_sparkline(values: list[float], width: int = 160, height: int = 32) -> s
 
 def _has_trend(series: list[list[float | None]]) -> bool:
     """True when at least one series has enough numeric points to draw."""
-    return any(
-        len([v for v in vals if isinstance(v, (int, float))]) >= 2 for vals in series
-    )
+    return any(len([v for v in vals if _isnum(v)]) >= 2 for vals in series)
 
 
 def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
@@ -132,7 +140,7 @@ def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
 
 def _fmt_num(v: Any) -> str:
     """Compact number for display; keeps large integer counts readable."""
-    if not isinstance(v, (int, float)) or isinstance(v, bool):
+    if not _isnum(v):
         return "—"
     if float(v).is_integer() and abs(v) < 1e12:
         return f"{int(v):,}"
@@ -140,7 +148,7 @@ def _fmt_num(v: Any) -> str:
 
 
 def _fmt_ms(v: Any) -> str:
-    return f"{v:,.1f} ms" if isinstance(v, (int, float)) else "—"
+    return f"{v:,.1f} ms" if _isnum(v) else "—"
 
 
 def _fmt_timestamp(iso: str) -> str:
@@ -175,7 +183,7 @@ def _bar(value: Any, group_max: float) -> str:
     pass ``group_max`` of 0 for single-cell groups, where a bar would only ever
     compare a value against itself and read as a full-width bar.
     """
-    if not isinstance(value, (int, float)) or not group_max:
+    if not _isnum(value) or not group_max:
         return ""
     pct = max(2.0, min(100.0, value / group_max * 100.0))
     return f'<div class="bartrack"><div class="bar" style="width:{pct:.1f}%"></div></div>'
@@ -296,7 +304,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             v = latest_by_key[k].get("verdict", "skip")
             tally[v] = tally.get(v, 0) + 1
             st = (latest_by_key[k].get("metrics") or {}).get("mean_step_time_ms")
-            if isinstance(st, (int, float)):
+            if _isnum(st):
                 step_times.append(st)
         group_max = max(step_times) if len(step_times) > 1 else 0.0
         tally_txt = " · ".join(
@@ -337,11 +345,12 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                 prov = []
                 if recipe:
                     prov.append(f"recipe <span class='mono'>{_esc(str(recipe))}</span>")
-                if isinstance(dur, (int, float)):
+                if _isnum(dur):
                     prov.append(f"ran in {dur:,.0f}s")
                 trials = e.get("trials")
-                if isinstance(trials, int):
-                    prov.append(f"{trials} trial{'s' if trials != 1 else ''}")
+                if _isnum(trials):
+                    n_trials = int(trials)
+                    prov.append(f"{n_trials} trial{'s' if n_trials != 1 else ''}")
                 rows.append(
                     f"<tr class='mrow'><td colspan='{ncols}'><details>"
                     f"<summary>{n_metrics} metric{'s' if n_metrics != 1 else ''}</summary>"

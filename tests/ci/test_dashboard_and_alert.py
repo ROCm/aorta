@@ -263,3 +263,25 @@ def test_dashboard_omits_trend_column_without_history():
                   total=1, record=1)
     two = gen_dashboard.build_dashboard_html([r, r2])
     assert "trend (step ms)" in two
+
+
+def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
+    # bool is a subclass of int, so a stray `true` in the results JSON would
+    # otherwise format as "1.0 ms", scale a bar, and count towards a trend.
+    assert gen_dashboard._fmt_ms(True) == "—"
+    assert gen_dashboard._fmt_num(True) == "—"
+    assert gen_dashboard._bar(True, 10.0) == ""
+    assert not gen_dashboard._has_trend([[True, False]])
+    assert "n/a" in gen_dashboard._svg_sparkline([True, True, True])
+
+    def doc(when, step):
+        return _results(when,
+                        [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                          "metrics": {"mean_step_time_ms": step,
+                                      "summary": {"decode_latency_ms": step}}}],
+                        total=1, record=1)
+
+    html = gen_dashboard.build_dashboard_html(
+        [doc("2026-07-30T00:00:00Z", True), doc("2026-07-31T00:00:00Z", False)])
+    assert "1.0 ms" not in html
+    assert "trend (step ms)" not in html
