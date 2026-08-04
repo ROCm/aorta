@@ -52,7 +52,7 @@ def test_valid_pair_has_no_errors():
     assert not [finding for finding in findings if finding.severity == "ERROR"]
 
 
-def test_missing_client_context_and_workload_torch_are_errors():
+def test_missing_client_context_is_error_and_workload_torch_is_warning():
     client = _valid_client()
     client["buck_invocation"] = {
         "status": "success",
@@ -62,14 +62,19 @@ def test_missing_client_context_and_workload_torch_are_errors():
     workload = _valid_workload()
     workload["pytorch_version"] = None
 
-    messages = [
+    error_messages = [
         finding.message
         for finding in validator.validate_pair(client, workload)
         if finding.severity == "ERROR"
     ]
-    assert any("context was not confirmed" in message for message in messages)
-    assert any("fingerprint is missing" in message for message in messages)
-    assert any("pytorch_version" in message for message in messages)
+    warning_messages = [
+        finding.message
+        for finding in validator.validate_pair(client, workload)
+        if finding.severity == "WARNING"
+    ]
+    assert any("context was not confirmed" in message for message in error_messages)
+    assert any("fingerprint is missing" in message for message in error_messages)
+    assert any("pytorch_version" in message for message in warning_messages)
 
 
 def test_partial_reasons_are_warnings_not_errors():
@@ -88,16 +93,67 @@ def test_pytorch_hip_version_is_valid_runtime_rocm_identity():
     assert not [finding for finding in findings if finding.severity == "ERROR"]
 
 
-def test_missing_required_library_is_an_error():
+def test_no_recognized_libraries_is_warning_not_error():
+    client = _valid_client()
+    client["library_introspection"] = []
+    findings = validator.validate_pair(client, _valid_workload())
+
+    assert not [finding for finding in findings if finding.severity == "ERROR"]
+    assert any(
+        "no recognized libraries" in finding.message
+        for finding in findings
+        if finding.severity == "WARNING"
+    )
+
+
+def test_missing_pytorch_buck_identity_is_warning_by_default():
     client = _valid_client()
     client["library_introspection"] = [{"name": "rccl"}]
+    findings = validator.validate_pair(client, _valid_workload())
+
+    assert not [finding for finding in findings if finding.severity == "ERROR"]
+    assert any(
+        "PyTorch Buck identity is unavailable" in finding.message
+        for finding in findings
+        if finding.severity == "WARNING"
+    )
+
+
+def test_missing_explicitly_required_library_is_an_error():
     messages = [
         finding.message
-        for finding in validator.validate_pair(client, _valid_workload())
+        for finding in validator.validate_pair(
+            _valid_client(),
+            _valid_workload(),
+            required_libraries=("rccl",),
+        )
         if finding.severity == "ERROR"
     ]
+    assert any("required Buck library identity is missing: rccl" in message for message in messages)
+
+
+def test_only_explicit_library_is_strict():
+    client = _valid_client()
+    client["library_introspection"] = [{"name": "rccl"}]
+    workload = _valid_workload()
+    workload["pytorch_version"] = None
+
+    findings = validator.validate_pair(
+        client,
+        workload,
+        required_libraries=("rccl",),
+    )
+
+    assert not [finding for finding in findings if finding.severity == "ERROR"]
     assert any(
-        "required Buck library identity is missing: pytorch" in message for message in messages
+        "PyTorch Buck identity is unavailable" in finding.message
+        for finding in findings
+        if finding.severity == "WARNING"
+    )
+    assert any(
+        "pytorch_version" in finding.message
+        for finding in findings
+        if finding.severity == "WARNING"
     )
 
 
@@ -123,6 +179,7 @@ def test_unisolated_action_requires_explicit_override():
 
 def test_main_writes_diagnostics_to_stderr_and_pass_to_stdout(tmp_path, monkeypatch, capsys):
     client = _valid_client()
+    client["library_introspection"] = [{"name": "rccl"}]
     client["partial_reasons"] = ["system_health: optional tool unavailable"]
     client_path = tmp_path / "client.json"
     workload_path = tmp_path / "workload.json"

@@ -30,7 +30,7 @@ def validate_pair(
     client: dict[str, object],
     workload: dict[str, object],
     *,
-    required_libraries: tuple[str, ...] = ("pytorch",),
+    required_libraries: tuple[str, ...] = (),
     allow_unisolated_action: bool = False,
 ) -> list[Finding]:
     """Return actionable errors/warnings for a Buck client/workload pair."""
@@ -58,9 +58,17 @@ def validate_pair(
         findings.append(Finding("ERROR", "Buck invocation fingerprint is missing"))
     library_entries = client.get("library_introspection")
     if not _nonempty(library_entries):
-        findings.append(Finding("ERROR", "no recognized libraries were found in the Buck graph"))
+        findings.append(Finding("WARNING", "no recognized libraries were found in the Buck graph"))
     entry_list = library_entries if isinstance(library_entries, list) else []
     library_names = {str(entry.get("name")) for entry in entry_list if isinstance(entry, dict)}
+    if "pytorch" not in library_names and "pytorch" not in required_libraries:
+        findings.append(
+            Finding(
+                "WARNING",
+                "PyTorch Buck identity is unavailable; retaining the snapshot "
+                "with that identity unknown",
+            )
+        )
     for library in required_libraries:
         if library not in library_names:
             findings.append(
@@ -76,16 +84,23 @@ def validate_pair(
         or _object(workload.get("hip")).get("version")
         or pytorch_build.get("hip_version")
     )
-    required_workload_fields = {
-        "python_version": workload.get("python_version"),
+    if not _nonempty(workload.get("python_version")):
+        findings.append(Finding("ERROR", "workload snapshot is missing python_version"))
+
+    workload_identity_fields = {
         "pytorch_version": workload.get("pytorch_version"),
         "pytorch_build.git_commit": pytorch_build.get("git_commit"),
         "ROCm/HIP identity": runtime_rocm,
         "gpu_arch.gfx_targets": _object(workload.get("gpu_arch")).get("gfx_targets"),
     }
-    for name, value in required_workload_fields.items():
+    for name, value in workload_identity_fields.items():
         if not _nonempty(value):
-            findings.append(Finding("ERROR", f"workload snapshot is missing {name}"))
+            findings.append(
+                Finding(
+                    "WARNING",
+                    f"workload snapshot is missing {name}; retaining it as unknown",
+                )
+            )
 
     probe_invocation = _object(workload.get("execution_context")).get("probe_invocation")
     if probe_invocation not in {"buck2_run", "buck2_action"}:
@@ -131,7 +146,8 @@ def main() -> int:
         action="append",
         default=None,
         help=(
-            "Buck library identity required in the client graph " "(repeatable; default: pytorch)"
+            "Buck library identity required in the client graph "
+            "(repeatable; default: none; missing requested identities are errors)"
         ),
     )
     parser.add_argument(
@@ -148,7 +164,7 @@ def main() -> int:
         findings = validate_pair(
             _load(args.client),
             _load(args.workload),
-            required_libraries=tuple(args.require_library or ("pytorch",)),
+            required_libraries=tuple(args.require_library or ()),
             allow_unisolated_action=args.allow_unisolated_action,
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
@@ -159,7 +175,7 @@ def main() -> int:
         print(f"{finding.severity}: {finding.message}", file=sys.stderr)
     if any(finding.severity == "ERROR" for finding in findings):
         return 1
-    print("PASS: Buck dependency and workload runtime snapshots are usable")
+    print("PASS: snapshot structure and explicitly requested requirements are usable")
     return 0
 
 

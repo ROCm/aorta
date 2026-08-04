@@ -145,6 +145,11 @@ def main():
     # Existing application setup follows.
 ```
 
+`capture_to()` uses compact detail by default. Compact capture still includes
+every canonical `env_vars` key and the complete TorchRec identity block.
+`detail="full"` (CLI `--extended`) only retains verbose per-file
+Tensile/MIOpen catalog inventories.
+
 ### Local workload process launched by `buck2 run`
 
 ```bash
@@ -195,9 +200,12 @@ python3 <AORTA_CHECKOUT>/scripts/validate_buck_env_pair.py \
   env.workload.rank0.json
 ```
 
-The validator always requires the PyTorch Buck identity. For libraries the
-workload is expected to use, add optional checks before the two filenames, for
-example `--require-library rccl` or `--require-library hipblaslt`. For a
+No library is mandatory by default. Missing Buck or workload library
+identities are reported as warnings and remain unknown/`null`; they do not
+discard an otherwise usable snapshot. To make a Buck-graph identity mandatory,
+add `--require-library <NAME>` before the two filenames, for example
+`--require-library rccl` or `--require-library hipblaslt`. Only names supplied
+with this option are strict requirements, and the option is repeatable. For a
 multi-node capture, rerun the validator for every workload file.
 
 A file labeled `buck2_action` must contain detected isolation evidence. If
@@ -205,8 +213,11 @@ your repository proves placement through separate `what-ran` evidence, add
 `--allow-unisolated-action`; do not use that override merely to silence an
 error.
 
-Do not use the files until the validator prints `PASS`. If it fails, correct
-the reported setup or capture error and rerun the probe.
+`PASS` means the snapshot structure and every explicitly requested requirement
+passed. Warnings about unavailable optional identities are allowed; preserve
+the corresponding `null` values and warnings with the artifacts. If validation
+returns an error, correct the reported setup or capture problem and rerun the
+probe.
 
 ## Generated artifacts
 
