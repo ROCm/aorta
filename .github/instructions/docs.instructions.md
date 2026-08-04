@@ -13,11 +13,15 @@ customer the investigation was really about. Apply the categories in
 ## Is this document written for a public reader?
 
 A page belongs here only if a ROCm user outside AMD could act on it. Ask who the
-audience is:
+audience is. This test decides whether the *page* belongs in a public repository;
+it never waives the line-level checks. A broadly useful document can still leak a
+hostname, an absolute path, or an internal image tag in a single example, so apply
+the categories to the contents either way.
 
-- **Reproducible by anyone** -- flag nothing. Setup guides, CLI walkthroughs,
-  schema references, and design notes for published features are the point of
-  `docs/`.
+- **Reproducible by anyone** -- the page itself is in scope for `docs/`, so raise
+  no objection to its presence. Setup guides, CLI walkthroughs, schema
+  references, and design notes for published features are the point of this
+  directory. Still review its individual lines.
 - **Reproducible only by the author** -- flag it. A walkthrough pinned to one
   developer's host, container name, absolute home-directory path, or scratch
   mount is a private artifact even when nothing in it is formally confidential.
