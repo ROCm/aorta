@@ -586,15 +586,90 @@ def test_generic_collector_json_scrubs_semantic_strings_and_stays_valid(raw: str
     assert doc == {"path": "<PATH:0>"}
 
 
-def test_corrupt_generic_collector_json_fails_closed(tmp_path: Path):
+def test_truncated_generic_collector_json_is_still_scrubbed_and_bundled(tmp_path: Path):
+    """A collector killed mid-write must not cost the operator the bundle.
+
+    Nobody owns this artifact's schema, so there are no env keys to protect --
+    only path/IP rewriting. Refusing the file denied a handout for the crashed
+    run that needed it most. Schema-owned documents still fail closed
+    (``test_corrupt_result_json_fails_closed``).
+    """
+    raw = '{"path":"/home/customer/private", "step": 4'
     src = tmp_path / "collector.json"
     dst = tmp_path / "out" / "collector.json"
-    src.write_text(r'{"path":"\/home/customer/private"', encoding="utf-8")
+    src.write_text(raw, encoding="utf-8")
 
-    with pytest.raises(RedactionError):
-        RedactingRedactor(RedactionCfg(scrub_paths=True)).scrub_file(src, dst)
+    counts = RedactingRedactor(RedactionCfg(scrub_paths=True)).scrub_file(src, dst)
 
-    assert not dst.exists()
+    assert counts.paths_rewritten == 1
+    assert dst.read_text(encoding="utf-8") == raw.replace("/home/customer/private", "<PATH:0>")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"host": "/home/customer/logs/ru',  # truncated inside the string itself
+        r'{"host": "/home/customer/logs\q"}',  # invalid escape
+    ],
+)
+def test_unscannable_generic_collector_json_falls_back_to_text(raw: str, tmp_path: Path):
+    """When a string token itself does not scan, the text scrubber takes over.
+
+    This is the only case the token walk cannot serve, and it must degrade to
+    the pre-existing streaming scrubber -- redaction still runs -- rather than
+    fail the bundle.
+    """
+    src = tmp_path / "collector.json"
+    dst = tmp_path / "out" / "collector.json"
+    src.write_text(raw, encoding="utf-8")
+
+    counts = RedactingRedactor(RedactionCfg(scrub_paths=True)).scrub_file(src, dst)
+    staged = dst.read_text(encoding="utf-8")
+
+    assert counts.paths_rewritten == 1
+    assert "/home/customer/logs" not in staged
+    assert "<PATH:0>" in staged
+
+
+def test_generic_collector_json_keeps_numbers_and_duplicate_keys_verbatim(
+    tmp_path: Path,
+):
+    """Only string tokens may be rewritten.
+
+    Parsing and re-serializing silently rewrote the collector's own numbers:
+    precision was dropped, ``1e400`` became the non-JSON token ``Infinity``,
+    and duplicate keys collapsed -- an altered metric in an artifact the
+    customer is asked to trust.
+    """
+    raw = (
+        '{"precise": 1.2345678901234567890123456789, "exp": 1.0E+5, '
+        '"overflow": 1e400, "dup": 1, "dup": 2, '
+        '"big": 123456789012345678901234567890, "where": "/home/customer/x"}'
+    )
+    src = tmp_path / "collector.json"
+    dst = tmp_path / "out" / "collector.json"
+    src.write_text(raw, encoding="utf-8")
+
+    counts = RedactingRedactor(RedactionCfg(scrub_paths=True)).scrub_file(src, dst)
+    staged = dst.read_text(encoding="utf-8")
+
+    assert counts.paths_rewritten == 1
+    assert staged == raw.replace('"/home/customer/x"', '"<PATH:0>"')
+    assert "Infinity" not in staged
+
+
+def test_generic_collector_json_without_matches_is_byte_identical(tmp_path: Path):
+    """No match means no rewrite: the staged copy is the source, byte for byte."""
+    raw = '{\n  "a":   [1, 2.50, true, null],\n  "b": "plain \\u00e9 text"\n}\n'
+    src = tmp_path / "collector.json"
+    dst = tmp_path / "out" / "collector.json"
+    src.write_text(raw, encoding="utf-8")
+
+    cfg = RedactionCfg(scrub_paths=True, scrub_ip_addresses=True)
+    counts = RedactingRedactor(cfg).scrub_file(src, dst)
+
+    assert dst.read_bytes() == raw.encode("utf-8")
+    assert (counts.paths_rewritten, counts.ips_rewritten) == (0, 0)
 
 
 def _resolved_recipe_doc() -> dict:

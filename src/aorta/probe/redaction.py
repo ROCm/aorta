@@ -17,10 +17,12 @@ from __future__ import annotations
 import fnmatch
 import ipaddress
 import json
+import logging
 import re
 import shutil
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from json.decoder import scanstring
 from pathlib import Path
 from typing import Any
 
@@ -70,8 +72,15 @@ _DISPATCHER_TRIAL_JSON_RE = re.compile(r"^trial_d\d+_m\d+_t\d+\.json$")
 _PROBE_TRIAL_DIR_RE = re.compile(r"^trial_\d+$")
 
 
+log = logging.getLogger(__name__)
+
+
 class _JsonKeyCollisionError(ValueError):
     pass
+
+
+class _JsonTokenScanError(ValueError):
+    """A ``.json`` artifact whose string tokens do not scan (truncated/malformed)."""
 
 
 @dataclass(frozen=True)
@@ -603,6 +612,41 @@ def _scrub_json_value(
     return value
 
 
+def _scrub_json_string_tokens(
+    text: str,
+    *,
+    cfg: RedactionCfg,
+    path_index: _PathIndex,
+    ip_index: _IpIndex,
+) -> Iterator[str]:
+    """Yield ``text`` with only its JSON STRING tokens scrubbed.
+
+    In JSON a ``"`` occurs only as a string delimiter, and every string token is
+    consumed whole here, so scanning for the next quote and handing it to the
+    stdlib's own :func:`~json.decoder.scanstring` walks exactly the string
+    literals. Every other byte -- number literals, whitespace, key order,
+    duplicate keys -- is copied verbatim, and a token whose scrubbed value is
+    unchanged keeps its original escaping.
+
+    Raises :class:`_JsonTokenScanError` when a token does not scan, which the
+    caller answers with the streaming text scrubber.
+    """
+    index = 0
+    while True:
+        quote = text.find('"', index)
+        if quote < 0:
+            yield text[index:]
+            return
+        yield text[index:quote]
+        try:
+            value, end = scanstring(text, quote + 1)
+        except ValueError as exc:
+            raise _JsonTokenScanError(str(exc)) from exc
+        scrubbed = _scrub_str_into(value, cfg=cfg, path_index=path_index, ip_index=ip_index)
+        yield text[quote:end] if scrubbed == value else json.dumps(scrubbed)
+        index = end
+
+
 def _parse_probe_env(text: str) -> dict[str, str]:
     env: dict[str, str] = {}
     for line in text.splitlines():
@@ -713,12 +757,7 @@ class RedactingRedactor(Redactor):
                 src.read_bytes(), dst, src, document_kind=document_kind
             )
         elif src.suffix.lower() == ".json":
-            # Collector JSON is not schema-owned, so it gets no env-key
-            # filtering. Parse it nonetheless: raw regex replacement misses
-            # JSON escapes such as ``\u002fhome`` and can turn ``\/home`` into
-            # the invalid escape ``\<PATH:0>``. A semantic JSON walk preserves
-            # valid JSON while rewriting every string key/value.
-            counts = self._scrub_json_document(src.read_bytes(), dst, src, document_kind=None)
+            counts = self._scrub_generic_json(src, dst)
         elif _is_text_artifact(src):
             counts = self._scrub_text_stream(src, dst)
         else:
@@ -827,13 +866,62 @@ class RedactingRedactor(Redactor):
             bytes_out=len(out_bytes),
         )
 
+    def _scrub_generic_json(self, src: Path, dst: Path) -> RedactionCounts:
+        """Scrub the STRING TOKENS of a ``.json`` artifact nobody owns a schema for.
+
+        Collector JSON gets no env-key filtering, so only path/IP rewriting is at
+        stake -- but raw text replacement is still wrong for it: it misses
+        ``\\u002fhome`` and turns ``\\/home`` into the invalid escape
+        ``\\<PATH:0>``. A parse-and-re-serialize is wrong in the other direction.
+        It rewrites number literals (``1.2345678901234567890123456789`` loses
+        digits, ``1e400`` becomes the non-JSON token ``Infinity``), collapses
+        duplicate keys, and holds the whole document graph in memory for
+        artifacts that are routinely multi-GB profiler traces.
+
+        Rewriting only the string tokens keeps every other byte verbatim, so a
+        metric keeps the value the collector wrote and a valid document stays
+        valid. A document whose tokens do not scan -- truncated by a collector
+        the crash took down with it -- falls back to the streaming text
+        scrubber: path/IP scrubbing still runs, there are no env keys here to
+        protect, and the run that crashed is exactly the one whose bundle the
+        operator needs. Schema-owned documents keep failing closed
+        (:meth:`_scrub_json_document`); there, structure carries env mappings.
+        """
+        raw = src.read_bytes()
+        text = raw.decode("utf-8", errors="replace")
+        path_index = _PathIndex()
+        ip_index = _IpIndex()
+        bytes_out = 0
+        try:
+            with open(dst, "w", encoding="utf-8", newline="") as out_fh:
+                for chunk in _scrub_json_string_tokens(
+                    text, cfg=self._cfg, path_index=path_index, ip_index=ip_index
+                ):
+                    out_fh.write(chunk)
+                    bytes_out += len(chunk.encode("utf-8"))
+        except _JsonTokenScanError as exc:
+            log.warning(
+                "aorta bundle: %s does not scan as JSON (%s); scrubbing it as "
+                "text instead. Path/IP redaction still applies; the staged copy "
+                "is as malformed as the original.",
+                src.name,
+                exc,
+            )
+            return self._scrub_text_stream(src, dst)
+        return RedactionCounts(
+            paths_rewritten=path_index.rewrites,
+            ips_rewritten=ip_index.ipv4_rewrites + ip_index.ipv6_rewrites,
+            bytes_in=len(raw),
+            bytes_out=bytes_out,
+        )
+
     def _scrub_json_document(
         self,
         raw: bytes,
         dst: Path,
         src: Path,
         *,
-        document_kind: str | None,
+        document_kind: str,
     ) -> RedactionCounts:
         text = raw.decode("utf-8", errors="replace")
         try:
@@ -844,7 +932,7 @@ class RedactingRedactor(Redactor):
             # escape staging as an unhandled traceback (it is not an OSError,
             # so the writer's OSError->BundleIOError wrap misses it).
             raise RedactionError(src, exc) from exc
-        if document_kind is not None and not isinstance(doc, dict):
+        if not isinstance(doc, dict):
             raise RedactionError(
                 src,
                 ValueError(
@@ -855,11 +943,7 @@ class RedactingRedactor(Redactor):
         env_removed = [0]
         path_index = _PathIndex()
         ip_index = _IpIndex()
-        env_mapping_ids = (
-            _collect_env_mapping_ids(doc, document_kind)
-            if document_kind is not None
-            else frozenset()
-        )
+        env_mapping_ids = _collect_env_mapping_ids(doc, document_kind)
         try:
             scrubbed = _scrub_json_value(
                 doc,

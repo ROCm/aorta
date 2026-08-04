@@ -5548,17 +5548,28 @@ def _torchrec_distribution_owns_spec(
       the source tree the finder points at.
     """
 
-    origin = getattr(spec, "origin", None)
     # Keep lexical paths for RECORD ownership. Resolving the located file
     # followed its final symlink, so metadata could list an arbitrary external
     # link whose target happened to be torchrec's __init__.py and be accepted
     # as the owner. Lexical comparison still accepts links installed under the
     # package root and keeps zip-member paths aligned for a symlinked .par.
-    origin_path = Path(origin).absolute() if origin else None
-    roots = [
-        Path(root).absolute()
-        for root in (getattr(spec, "submodule_search_locations", None) or ())
-    ]
+    #
+    # Guarded like the per-candidate loop below: a spec whose origin is not a
+    # str/PathLike raises TypeError here, and ``absolute()`` on a RELATIVE
+    # origin calls os.getcwd(), which raises when the cwd has been removed.
+    # Uncaught, either one leaves _capture_torchrec entirely and collect_env's
+    # never-raises gate answers with a disaster snapshot -- trading the whole
+    # environment capture for one unverifiable TorchRec install.
+    try:
+        origin = getattr(spec, "origin", None)
+        origin_path = Path(origin).absolute() if origin else None
+        roots = [
+            Path(root).absolute()
+            for root in (getattr(spec, "submodule_search_locations", None) or ())
+        ]
+    except Exception as exc:  # noqa: BLE001 -- unusable spec means "cannot verify"
+        log.debug("torchrec spec paths unusable for ownership: %s", exc)
+        return False
     # Inspect every metadata candidate that reports the selected equivalent
     # version. ``version()`` and ``distribution()`` both return the first
     # match, so an unowned egg-info before an owning dist-info produced a false

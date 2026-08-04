@@ -384,8 +384,11 @@ aorta bundle ./probe_results/ROCM-1234/ --review
 ```
 
 * Redaction policy comes from the recipe's `redaction:` block.
-* When `--redaction-from` is omitted, `aorta bundle` auto-loads
-  `./probe_results/ROCM-1234/recipe.resolved.yaml` when present.
+* When `--redaction-from` is omitted, `aorta bundle` takes the first
+  `redaction:` block it finds in `./probe_results/ROCM-1234/recipe.resolved.yaml`
+  and then `matrix.json`. The resolved recipe is emitted in the *triage* shape,
+  which has no `redaction:` key, so in practice `matrix.json` is the file that
+  records the rule actually in force.
 * Without a `redaction:` block, files are copied byte-for-byte
   (`IdentityRedactor`, zero counts in `manifest.json`).
 
@@ -396,8 +399,10 @@ Probe trials can carry a flat process mapping under `result.json::env`;
 `trial_d*_m*_t*.json`. The bundle scrubber handles both schemas and also applies
 `scrub_env_keys` to `probe.env`, host/per-environment snapshots, matrix
 environment fields, `inline_environments.sidecar.json`, and copied
-`sidecars/*.json`. Structured scrubbing is path/schema-scoped so unrelated
-collector JSON is not modified by an incidental `env_vars` key.
+`sidecars/*.json`. Structured scrubbing is path/schema-scoped, so an incidental
+`env_vars` key in unrelated collector JSON is left in place. Those files are
+still path/IP-scrubbed inside their string values, with every byte outside a
+string -- numbers included -- preserved.
 
 Example minimal `redaction:` block:
 

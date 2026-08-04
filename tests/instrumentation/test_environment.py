@@ -5809,6 +5809,55 @@ class TestTorchrec:
         )
         assert reasons == []
 
+    def test_torchrec_unusable_spec_origin_does_not_cost_the_snapshot(self, monkeypatch):
+        """A spec whose ``origin`` is not a str/PathLike must stay fail-soft.
+
+        The ownership check builds ``Path(origin)`` before its per-candidate
+        guard, so a custom loader reporting a non-path origin raised TypeError
+        out of ``_capture_torchrec`` and collect_env's never-raises gate
+        answered with a disaster snapshot -- the whole environment capture
+        traded for one unverifiable TorchRec install.
+        """
+        import importlib.machinery
+        import importlib.metadata as md
+
+        spec = importlib.machinery.ModuleSpec("torchrec", object(), origin=object())
+        spec.submodule_search_locations = ["/virtual/torchrec"]
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: spec)
+        monkeypatch.setattr(md, "version", lambda name: "2.0.0")
+        reasons: list[str] = []
+
+        block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(distribution_version="2.0.0")
+        assert any("ownership cannot be verified" in r for r in reasons), reasons
+
+    def test_torchrec_ownership_is_fail_soft_when_cwd_is_gone(self, monkeypatch, tmp_path):
+        """``absolute()`` on a RELATIVE origin calls os.getcwd().
+
+        A long-lived trainer whose scratch directory is cleaned up underneath
+        it then hits FileNotFoundError inside the ownership check, which must
+        degrade to "cannot verify" rather than discard the snapshot.
+        """
+        import importlib.machinery
+        import importlib.metadata as md
+        import shutil as _shutil
+
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        spec = importlib.machinery.ModuleSpec("torchrec", object(), origin="torchrec/__init__.py")
+        spec.submodule_search_locations = ["torchrec"]
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: spec)
+        monkeypatch.setattr(md, "version", lambda name: "2.0.0")
+        monkeypatch.chdir(scratch)
+        _shutil.rmtree(scratch)
+        reasons: list[str] = []
+
+        block = env_mod._capture_torchrec(reasons)
+
+        assert block == _expect_torchrec(distribution_version="2.0.0")
+        assert any("ownership cannot be verified" in r for r in reasons), reasons
+
     def test_torchrec_release_wheel_has_no_commit(self):
         assert env_mod._torchrec_commit("1.4.0") is None
 

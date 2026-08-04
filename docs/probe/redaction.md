@@ -56,14 +56,21 @@ then locates environment mappings from that artifact's schema. This handles
 mixed-type legacy flat maps without failing open and preserves nested JSON types.
 Unrelated collector files merely named `env.json` or `result.json` are not
 treated as platform artifacts, and an arbitrary nested object named `env_vars`
-is not deleted. They are still parsed as generic JSON for path/IP rewriting:
-the semantic string is scrubbed even when `/` was encoded as `\u002f` or `\/`,
-and the staged copy remains valid JSON. Artifacts are identified by their exact
-path relative to the canonical bundle run root, which `aorta bundle` supplies,
-so a nested collector tree cannot spoof one and invoking bundle through a
-symlink does not disable schema handling. A parse failure or wrong top-level
-shape in a schema-owned document fails the bundle closed rather than copying
-the file through unredacted.
+is not deleted. Their JSON *string tokens* are still scrubbed for paths and IPs,
+so the semantic string is rewritten even when `/` was encoded as `\u002f` or
+`\/`, and a valid document stays valid. Everything outside a string token is
+copied byte for byte: number literals keep the precision and the spelling the
+collector wrote, duplicate keys are not collapsed, and the document is never
+re-serialized. Truncation therefore survives: a file the crash cut short is
+staged scrubbed and still truncated. Only a *string token* that cannot be scanned
+at all — a cut mid-string, an invalid escape — falls back to the text scrubber,
+logged at WARNING. Either way the file is bundled: it owns no env mappings to
+protect, and refusing it would deny a handout for the run that most needs one. Artifacts are identified by their exact path relative
+to the canonical bundle run root, which `aorta bundle` supplies, so a nested
+collector tree cannot spoof one and invoking bundle through a symlink does not
+disable schema handling. In a *schema-owned* document — where structure is what
+locates the env mappings — a parse failure or wrong top-level shape fails the
+bundle closed rather than copying the file through unredacted.
 
 `recipe.resolved.yaml` is parsed and re-emitted through
 `aorta.triage.recipe`; `aorta.probe.redaction` itself stays stdlib-only per
