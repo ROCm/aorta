@@ -82,6 +82,17 @@ def _isnum(v: Any) -> bool:
         return False
 
 
+def _count(v: Any) -> int:
+    """A summary count as an int; anything unusable counts as 0.
+
+    Counts drive branching and division, so a string in a malformed summary
+    would crash generation outright ("4" + 0 raises) instead of rendering badly.
+    Display still goes through ``_fmt_num``, which shows "—" rather than a 0 it
+    cannot vouch for.
+    """
+    return int(v) if _isnum(v) else 0
+
+
 def load_results(results_dir: Path) -> list[dict[str, Any]]:
     """Load and sort all result docs by generated_at (oldest first)."""
     docs: list[dict[str, Any]] = []
@@ -145,13 +156,13 @@ def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
     if not results:
         return "unknown", "#57606a"
     s = results[-1].get("summary", {}) or {}
-    if s.get("fail", 0):
+    if _count(s.get("fail")):
         return "failing", _VERDICT_COLOR["fail"]
-    if (s.get("total", 0) or 0) == 0:
+    if _count(s.get("total")) == 0:
         return "empty", "#57606a"
-    if s.get("pass", 0) or 0:
+    if _count(s.get("pass")):
         return "passing", _VERDICT_COLOR["pass"]
-    if s.get("record", 0) or 0:
+    if _count(s.get("record")):
         return "recording", _VERDICT_COLOR["record"]
     return "skipping", _VERDICT_COLOR["skip"]
 
@@ -276,13 +287,14 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     passrate = []
     for doc in results:
         ds = doc.get("summary", {}) or {}
-        graded = (ds.get("pass", 0) + ds.get("fail", 0)) or 0
-        passrate.append((ds.get("pass", 0) / graded) if graded else None)
+        passed, failed = _count(ds.get("pass")), _count(ds.get("fail"))
+        graded = passed + failed
+        passrate.append((passed / graded) if graded else None)
 
-    total = s.get("total", 0) or 0
-    graded_now = (s.get("pass", 0) or 0) + (s.get("fail", 0) or 0)
-    record_now = s.get("record", 0) or 0
-    skip_now = s.get("skip", 0) or 0
+    total = _count(s.get("total"))
+    graded_now = _count(s.get("pass")) + _count(s.get("fail"))
+    record_now = _count(s.get("record"))
+    skip_now = _count(s.get("skip"))
     # "Nothing was graded" splits three ways and they must not be described
     # identically: every cell recorded a baseline, some recorded while others
     # were skipped, or nothing ran at all. The last of those is unreachable for
@@ -474,7 +486,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     # Counts go through _fmt_num so a malformed summary shows "—" rather than
     # printing whatever str() makes of it ("nan", "True").
     cards = [
-        ("results", _fmt_num(total), ""),
+        ("results", _fmt_num(s.get("total", 0)), ""),
         ("pass", _fmt_num(s.get("pass", 0)), "#3fb950"),
         ("fail", _fmt_num(s.get("fail", 0)), "#f85149"),
         ("record", _fmt_num(s.get("record", 0)), "#d29922"),

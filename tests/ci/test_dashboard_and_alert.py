@@ -336,13 +336,16 @@ def test_dashboard_rejects_values_it_cannot_render():
     assert "nan" not in html.lower()
     assert 'class="bar"' not in html
 
-    # The pass-rate card divides summary counts, so a non-finite count would
-    # reach it as "nan%" rather than being withheld.
-    bad_counts = _results("2026-07-30T00:00:00Z",
-                          [{"entry": "w", "cell": "c", "verdict": "pass",
-                            "reasons": [], "metrics": {}}],
-                          total=1, **{"pass": float("nan")})
-    assert "nan" not in gen_dashboard.build_dashboard_html([bad_counts]).lower()
+    # Summary counts drive branching, division and the pass-rate card, so a
+    # malformed one must not crash generation ("4" + 0 raises TypeError) nor
+    # surface as "nan%". They render as "—" rather than a 0 we cannot vouch for.
+    entry = [{"entry": "w", "cell": "c", "verdict": "pass", "reasons": [],
+              "metrics": {}}]
+    for count in (float("nan"), "4", huge, True, None):
+        doc = _results("2026-07-30T00:00:00Z", entry, total=1, **{"pass": count})
+        out = gen_dashboard.build_dashboard_html([doc])  # must not raise
+        assert "nan" not in out.lower(), count
+        assert "—" in out, count
 
 
 def test_dashboard_does_not_count_records_as_configured_cells():
