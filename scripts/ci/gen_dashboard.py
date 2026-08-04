@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from html import escape as _esc
 from pathlib import Path
@@ -64,13 +65,21 @@ _VERDICT_ORDER = ("fail", "record", "skip", "pass")
 
 
 def _isnum(v: Any) -> bool:
-    """Numeric for display purposes.
+    """Numeric, finite, and representable as a float — i.e. safe to render.
 
-    ``bool`` is a subclass of ``int``, so a stray ``true`` in the (untrusted)
-    results JSON would otherwise format as a step time, scale a bar, or count
-    towards a trend.
+    Three things in the (untrusted) results JSON pass a bare isinstance check
+    and should not: ``bool``, which is a subclass of ``int`` and would format as
+    a step time or count towards a trend; ``NaN``/``Infinity``, which
+    ``json.loads`` accepts and which plot as ``nan`` coordinates and a bar that
+    silently reads full-width; and an integer too large to convert to a float,
+    which raises ``OverflowError`` in every formatter below.
     """
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:  # int beyond the float range
+        return False
 
 
 def load_results(results_dir: Path) -> list[dict[str, Any]]:
@@ -85,8 +94,10 @@ def load_results(results_dir: Path) -> list[dict[str, Any]]:
     return docs
 
 
-def _svg_sparkline(values: list[float], width: int = 160, height: int = 32) -> str:
-    """Tiny inline SVG line chart for a metric's history (ignores None)."""
+def _svg_sparkline(
+    values: list[float | None], width: int = 160, height: int = 32
+) -> str:
+    """Tiny inline SVG line chart for a metric's history (ignores non-numbers)."""
     pts = [v for v in values if _isnum(v)]
     if len(pts) < 2:
         return '<span class="muted">n/a</span>'
@@ -444,16 +455,18 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             "runs; they appear automatically once more history accumulates.</div>"
         )
 
+    # Counts go through _fmt_num so a malformed summary shows "—" rather than
+    # printing whatever str() makes of it ("nan", "True").
     cards = [
-        ("cells", total, ""),
-        ("pass", s.get("pass", 0), "#3fb950"),
-        ("fail", s.get("fail", 0), "#f85149"),
-        ("record", s.get("record", 0), "#d29922"),
-        ("skip", s.get("skip", 0), "#8b949e"),
+        ("cells", _fmt_num(total), ""),
+        ("pass", _fmt_num(s.get("pass", 0)), "#3fb950"),
+        ("fail", _fmt_num(s.get("fail", 0)), "#f85149"),
+        ("record", _fmt_num(s.get("record", 0)), "#d29922"),
+        ("skip", _fmt_num(s.get("skip", 0)), "#8b949e"),
     ]
     # Only worth a card when something was actually graded; otherwise it would
     # sit next to the trend card reading "n/a" twice.
-    if passrate and isinstance(passrate[-1], float):
+    if passrate and _isnum(passrate[-1]):
         cards.append(("pass rate", f"{passrate[-1] * 100:.0f}%", ""))
     cards_html = "".join(
         f'<div class="card"><div class="k">{_esc(k)}</div>'

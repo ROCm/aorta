@@ -312,6 +312,38 @@ def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
     assert "trend (step ms)" not in html
 
 
+def test_dashboard_rejects_values_it_cannot_render():
+    # json.loads accepts NaN/Infinity, and a metric mean can genuinely come out
+    # NaN. Unfiltered, NaN plots as "nan" coordinates and -- worse -- draws a
+    # full-width bar, since min(100.0, nan) returns 100.0. An int past the float
+    # range is rejected too: it raises OverflowError in every formatter here,
+    # including math.isfinite itself.
+    huge = int("9" * 400)
+    for bad in (float("nan"), float("inf"), float("-inf"), huge, True, None, "4"):
+        assert not gen_dashboard._isnum(bad), bad
+        assert gen_dashboard._fmt_num(bad) == "—", bad
+        assert gen_dashboard._fmt_ms(bad) == "—", bad
+        assert gen_dashboard._bar(bad, 10.0) == "", bad
+    assert gen_dashboard._isnum(0) and gen_dashboard._isnum(-1.5)
+
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                   "metrics": {"mean_step_time_ms": float("nan"),
+                               "summary": {"decode_latency_ms": huge}}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])  # must not raise
+    assert "nan" not in html.lower()
+    assert 'class="bar"' not in html
+
+    # The pass-rate card divides summary counts, so a non-finite count would
+    # reach it as "nan%" rather than being withheld.
+    bad_counts = _results("2026-07-30T00:00:00Z",
+                          [{"entry": "w", "cell": "c", "verdict": "pass",
+                            "reasons": [], "metrics": {}}],
+                          total=1, **{"pass": float("nan")})
+    assert "nan" not in gen_dashboard.build_dashboard_html([bad_counts]).lower()
+
+
 def test_dashboard_omits_the_unit_when_the_value_is_unknown():
     # "— ms" reads as a measurement of nothing; a missing value gets no unit.
     r = _results("2026-07-30T00:00:00Z",
