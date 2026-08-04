@@ -215,7 +215,9 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   .card .k {{ font-size:.68rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }}
   .card .v {{ font-size:1.3rem; font-weight:600; line-height:1.3; }}
   .card.trend {{ flex:1; min-width:220px; }}
-  .card.trend .v {{ font-size:0; }}
+  /* Block-level SVG avoids inline baseline spacing without zeroing the font
+     size, which would also hide the "n/a" fallback for short histories. */
+  .card.trend svg {{ display:block; }}
   table {{ border-collapse:collapse; width:100%; margin-top:.5rem; background:var(--panel);
            border:1px solid var(--border); border-radius:8px; overflow:hidden; }}
   th, td {{ padding:.5rem .8rem; border-bottom:1px solid var(--border); font-size:.88rem; vertical-align:middle; }}

@@ -65,6 +65,25 @@ def test_dashboard_renders_summary_metric_series():
     assert "ms" in html  # unit rendered
 
 
+def test_dashboard_record_only_history_keeps_trend_fallback_visible():
+    # A record-only build has no graded cells, so pass-rate is None for every
+    # build and the sparkline falls back to "n/a". That fallback must stay
+    # legible: styling the trend card with font-size:0 would blank it out.
+    r = _results("2026-08-03T00:00:00Z",
+                 [{"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "record",
+                   "reasons": ["no baseline (record-only)"],
+                   "metrics": {"mean_step_time_ms": 254.0}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+
+    trend_card = html.split('<div class="card trend">', 1)[1].split("</div></div>", 1)[0]
+    assert "n/a" in trend_card
+    assert "<svg" not in trend_card
+
+    assert ".card.trend svg { display:block; }" in html
+    assert "font-size:0" not in html
+
+
 def test_alert_render_lists_failures():
     results = _results("2026-07-29T00:00:00Z",
                        [{"entry": "race", "cell": "smoke", "verdict": "fail",
