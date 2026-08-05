@@ -246,6 +246,19 @@ group and add a smoke recipe/command to the manifest.
 Current smokes: `gpu_smoke` (recipe + CLI, PR tier), `inference` smoke (PR
 tier), `race` smoke (nightly only, requires 2 GPUs).
 
+**Exit codes.** New `aorta sweep run` smokes must pass `--strict`, so the sweep
+exits non-zero when a cell errors or never runs; the matrix flow otherwise
+tolerates per-cell failures and exits 0, leaving this gate green on a broken
+workload. `aorta run` needs no flag -- it already exits non-zero on a failed
+trial. Note that `--strict` does not trip on a cell that ran but reported
+`passed=False` (an expected A/B "bug reproduced" outcome); every smoke here is
+expected to pass cleanly, so an errored workload is what this guards against.
+
+Broader per-workload coverage (dtype and GPU-count axes, metric regressions
+against blessed baselines) lives in the nightly eval matrix instead -- see
+[`ci-nightly-eval.md`](ci-nightly-eval.md). Keep this manifest focused on fast
+crash-level protection, with the PR tier the part that gates merges.
+
 ### Making the GPU gate a required check
 
 After a stable soak on the runner, add the GPU jobs as **required status
