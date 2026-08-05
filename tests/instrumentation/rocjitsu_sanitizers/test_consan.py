@@ -274,7 +274,7 @@ def _capture_consan_env(
         output_dir=tmp_path / "out",
         consan_log=consan_log,
     )
-    assert result.state is ExecutionState.RAN
+    assert result.consan.state is ExecutionState.RAN
     return captured
 
 
@@ -326,6 +326,142 @@ def test_run_consan_scrubs_inherited_log_env_when_disabled(
     )
 
     assert "RJ_CONSAN_LOG" not in captured
+
+
+def _multi_worklist(count: int) -> KernelWorklist:
+    return KernelWorklist(
+        requirement=SelectionRequirement.TOP_TIME,
+        top_n=max(count, 1),
+        kernels=tuple(
+            KernelObservation(
+                identity=KernelIdentity(name=f"kernel_{index}", target="gfx950"),
+                total_time_ms=index + 1,
+                dispatch_count=index + 1,
+                sources=("test",),
+            )
+            for index in range(count)
+        ),
+    )
+
+
+def _run_consan_with(monkeypatch, tmp_path, *, worklist, output, strict=False, target=None):
+    hook = tmp_path / "librocjitsu_dbi_hooks.so"
+    hook.write_bytes(b"")
+    command = tmp_path / "repro"
+    command.write_bytes(b"repro-binary")
+    captured: dict[str, str] = {}
+
+    def fake_run_argv(argv, *, timeout_seconds, env):
+        captured.update(env)
+        return ProcessResult(tuple(argv), 0, output, "")
+
+    monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
+    result = run_consan(
+        worklist,
+        command=command,
+        hook_lib=hook,
+        output_dir=tmp_path / "out",
+        strict=strict,
+        target=target,
+    )
+    return result, captured
+
+
+def test_run_consan_empty_worklist_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    ran = False
+
+    def fake_run_argv(argv, *, timeout_seconds, env):
+        nonlocal ran
+        ran = True
+        return ProcessResult(tuple(argv), 0, _healthy_evidence(), "")
+
+    monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
+    command = tmp_path / "repro"
+    command.write_bytes(b"")
+    result = run_consan(
+        _multi_worklist(0),
+        command=command,
+        hook_lib=tmp_path / "hook.so",
+        output_dir=tmp_path / "out",
+    )
+
+    assert result.consan.state is ExecutionState.NOT_CHECKED
+    assert "consan_requires_one_targeted_repro" in str(result.consan.reason)
+    assert ran is False
+
+
+def test_run_consan_multiple_kernels_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    result, _ = _run_consan_with(
+        monkeypatch, tmp_path, worklist=_multi_worklist(2), output=_healthy_evidence()
+    )
+    assert result.consan.state is ExecutionState.NOT_CHECKED
+    assert "consan_requires_one_targeted_repro" in str(result.consan.reason)
+
+
+def test_run_consan_target_mismatch_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    other = KernelIdentity(name="different", target="gfx950")
+    result, _ = _run_consan_with(
+        monkeypatch, tmp_path, worklist=_worklist(), output=_healthy_evidence(), target=other
+    )
+    assert result.consan.state is ExecutionState.NOT_CHECKED
+    assert "consan_target_does_not_match_worklist" in str(result.consan.reason)
+
+
+def test_run_consan_pins_policy_env_over_hostile_inheritance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setenv("RJ_CONSAN_POLICY", "off")
+    monkeypatch.setenv("RJ_CONSAN_MODE", "inline-shadow")
+    monkeypatch.delenv("HSA_TOOLS_DISABLE_REGISTER", raising=False)
+
+    _, env = _run_consan_with(
+        monkeypatch, tmp_path, worklist=_worklist(), output=_healthy_evidence(), strict=True
+    )
+
+    assert env["RJ_CONSAN_MODE"] == ConSanMode.RECORD_REPLAY.value
+    assert env["RJ_CONSAN_POLICY"] == "strict"
+    assert env["HSA_TOOLS_DISABLE_REGISTER"] == "1"
+
+
+def test_run_consan_default_policy_when_not_strict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _, env = _run_consan_with(
+        monkeypatch, tmp_path, worklist=_worklist(), output=_healthy_evidence(), strict=False
+    )
+    assert env["RJ_CONSAN_POLICY"] == "default"
+
+
+def test_run_consan_surfaces_preflight_and_attributes_kernel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    output = "\n".join(
+        (
+            "rocjitsu-waitcheck: .text+0x40: missing s_wait_loadcnt <= 0",
+            "rocjitsu-waitcheck: consumer: v_mov_b32",
+            f"{_PREFIX} MOI auto replay diagnostics=0 conflict=false",
+            _healthy_evidence(),
+        )
+    )
+    result, _ = _run_consan_with(
+        monkeypatch, tmp_path, worklist=_worklist(), output=output
+    )
+
+    assert result.consan.verdict is Verdict.PASS
+    assert result.waitcheck_preflight.sanitizer == "waitcheck_preflight"
+    assert result.waitcheck_preflight.verdict is Verdict.WARN
+    # PASS is attributed to the single selected kernel, never vacuous.
+    (kernel_result,) = result.consan.kernel_results
+    assert kernel_result.identity.name == "kernel"
+    backend = dict(result.consan.backend)
+    assert "command_sha256" in backend
+    assert "selected_identity_sha256" in backend
 
 
 def test_object_coverage_static_complete_tracks_verdict() -> None:

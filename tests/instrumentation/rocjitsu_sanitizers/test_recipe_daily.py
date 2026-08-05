@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -41,9 +42,12 @@ def test_gemm_csv_resolver_is_deterministic(tmp_path: Path) -> None:
     csv_path = _FIXTURES / "gemm_shapes_unique.csv"
     isa_dir = tmp_path / "isa"
     isa_dir.mkdir()
-    for idx in (374829, 375437, 375583):
-        blob = isa_dir / f"sol_{idx}.hsaco"
-        blob.write_bytes(f"fake-{idx}".encode())
+    # Materialize a code object for every solution index the fixture references so
+    # whichever top-N shapes are selected resolve to a real (scan) object.
+    with csv_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(line for line in stream if not line.lstrip().startswith("#")))
+    for idx in {row["top_solution_idx"] for row in rows}:
+        (isa_dir / f"sol_{idx}.hsaco").write_bytes(f"fake-{idx}".encode())
     observations = observations_from_gemm_csv(csv_path, target="gfx950", isa_dir=isa_dir)
     worklist = select_kernels(
         observations,

@@ -1,6 +1,7 @@
 {
   "waitcheck_gemm": {
     "overall_verdict": "warn",
+    "execution_status": "complete",
     "checks": {
       "waitcheck": "warn"
     },
@@ -10,12 +11,14 @@
   },
   "consan_clean": {
     "overall_verdict": "pass",
+    "execution_status": "complete",
     "checks": {
       "consan": "pass"
     }
   },
   "consan_racy": {
     "overall_verdict": "fail",
+    "execution_status": "complete",
     "checks": {
       "consan": "fail"
     },

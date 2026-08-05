@@ -433,6 +433,8 @@ class KernelCheckResult:
                 raise ValueError("ran kernel result has invalid verdict")
         elif self.verdict not in {Verdict.ERROR, Verdict.FAIL}:
             raise ValueError("failed kernel execution cannot be clean")
+        if self.verdict is Verdict.PASS and self.findings:
+            raise ValueError("a PASS kernel result cannot carry findings")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -489,6 +491,12 @@ class CheckResult:
             Verdict.FAIL,
         }:
             raise ValueError("failed execution cannot have a clean verdict")
+        if self.verdict is Verdict.PASS and self.findings:
+            raise ValueError("a PASS check cannot carry findings")
+        if self.kernel_results and _VERDICT_RANK[self.verdict] < max(
+            _VERDICT_RANK[result.verdict] for result in self.kernel_results
+        ):
+            raise ValueError("a check verdict cannot be cleaner than its kernel results")
 
     def to_dict(self) -> dict[str, object]:
         return {

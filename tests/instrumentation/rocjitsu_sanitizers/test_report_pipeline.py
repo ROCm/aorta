@@ -8,6 +8,8 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
     CheckResult,
     ExecutionState,
     ExecutionSummary,
+    Finding,
+    FindingSeverity,
     KernelCheckResult,
     KernelIdentity,
     KernelObservation,
@@ -20,6 +22,52 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
     run_sanitizers,
     write_report,
 )
+
+
+def _race_finding() -> Finding:
+    return Finding(
+        sanitizer="consan",
+        severity=FindingSeverity.RACE,
+        code="record_replay_conflict",
+        message="conflict=true",
+    )
+
+
+def test_pass_check_cannot_carry_findings() -> None:
+    with pytest.raises(ValueError, match="PASS check cannot carry findings"):
+        CheckResult(
+            sanitizer="consan",
+            state=ExecutionState.RAN,
+            verdict=Verdict.PASS,
+            findings=(_race_finding(),),
+        )
+
+
+def test_pass_kernel_result_cannot_carry_findings() -> None:
+    with pytest.raises(ValueError, match="PASS kernel result cannot carry findings"):
+        KernelCheckResult(
+            identity=KernelIdentity(name="k", target="gfx950"),
+            state=ExecutionState.RAN,
+            verdict=Verdict.PASS,
+            findings=(_race_finding(),),
+        )
+
+
+@pytest.mark.parametrize("kernel_verdict", [Verdict.WARN, Verdict.FAIL])
+def test_check_cannot_be_cleaner_than_kernel_results(kernel_verdict: Verdict) -> None:
+    kernel = KernelCheckResult(
+        identity=KernelIdentity(name="k", target="gfx950"),
+        state=ExecutionState.RAN,
+        verdict=kernel_verdict,
+        findings=(_race_finding(),),
+    )
+    with pytest.raises(ValueError, match="cleaner than its kernel results"):
+        CheckResult(
+            sanitizer="consan",
+            state=ExecutionState.RAN,
+            verdict=Verdict.PASS,
+            kernel_results=(kernel,),
+        )
 
 
 def _worklist(*, target: str = "gfx950") -> KernelWorklist:

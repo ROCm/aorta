@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from .models import (
     ExecutionState,
     Finding,
     FindingSeverity,
+    KernelCheckResult,
+    KernelIdentity,
     KernelWorklist,
     ObjectCoverage,
     Verdict,
@@ -430,6 +433,63 @@ def resolve_consan_hook(explicit: Path | None = None) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+WAITCHECK_PREFLIGHT = "waitcheck_preflight"
+
+
+@dataclass(frozen=True)
+class ConSanRunResult:
+    """A ConSan run and its mandatory combined-hook Waitcheck preflight.
+
+    Both are surfaced as checks so an unhealthy preflight (WARN/ERROR) can never
+    be masked by a clean ConSan verdict: the report's overall verdict is the max
+    over all checks, so preflight evidence fails the run closed at report scope.
+    """
+
+    consan: CheckResult
+    waitcheck_preflight: CheckResult
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _preflight_not_run(reason: str) -> CheckResult:
+    return CheckResult(
+        sanitizer=WAITCHECK_PREFLIGHT,
+        state=ExecutionState.NOT_CHECKED,
+        verdict=Verdict.NOT_CHECKED,
+        reason=reason,
+    )
+
+
+def _combined_not_checked(reason: str) -> ConSanRunResult:
+    return ConSanRunResult(
+        consan=CheckResult(
+            sanitizer="consan",
+            state=ExecutionState.NOT_CHECKED,
+            verdict=Verdict.NOT_CHECKED,
+            reason=reason,
+        ),
+        waitcheck_preflight=_preflight_not_run("consan_preflight_not_executed"),
+    )
+
+
+def _relabel(check: CheckResult, sanitizer: str) -> CheckResult:
+    return CheckResult(
+        sanitizer=sanitizer,
+        state=check.state,
+        verdict=check.verdict,
+        reason=check.reason,
+        returncode=check.returncode,
+        findings=check.findings,
+        coverage=check.coverage,
+    )
+
+
 def run_consan(
     worklist: KernelWorklist,
     *,
@@ -439,27 +499,38 @@ def run_consan(
     consan_log: bool = True,
     timeout_seconds: float = 900.0,
     strict: bool = False,
-) -> CheckResult:
-    """Run a targeted repro under the RocJITsu DBI hook."""
+    target: KernelIdentity | None = None,
+) -> ConSanRunResult:
+    """Run one targeted repro under the RocJITsu DBI hook.
+
+    ConSan is only meaningful for a single, explicitly-selected kernel identity,
+    so an empty or multi-kernel worklist fails closed rather than returning a
+    vacuous PASS. When ``target`` is given it must match the selected identity,
+    guarding against a recipe that names one repro while executing another. The
+    returned result records the executed command/hook/identity digests and a
+    per-kernel result so a PASS is always attributed to a real selection.
+    """
+
+    if len(worklist.kernels) != 1:
+        return _combined_not_checked("consan_requires_one_targeted_repro")
+    selected = worklist.kernels[0].identity
+    if target is not None and target.stable_key != selected.stable_key:
+        return _combined_not_checked("consan_target_does_not_match_worklist")
 
     resolved_hook = resolve_consan_hook(hook_lib)
     if resolved_hook is None or not resolved_hook.is_file():
-        return CheckResult(
-            sanitizer="consan",
-            state=ExecutionState.NOT_CHECKED,
-            verdict=Verdict.NOT_CHECKED,
-            reason="consan_hook_not_found",
-        )
+        return _combined_not_checked("consan_hook_not_found")
     if not command.is_file():
-        return CheckResult(
-            sanitizer="consan",
-            state=ExecutionState.NOT_CHECKED,
-            verdict=Verdict.NOT_CHECKED,
-            reason="consan_command_not_found",
-        )
+        return _combined_not_checked("consan_command_not_found")
+
     output_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["HSA_TOOLS_LIB"] = str(resolved_hook)
+    # Pin the sanitizer contract so hostile inherited settings cannot weaken it:
+    # no auto-registration, record/replay mode, and the requested policy.
+    env["HSA_TOOLS_DISABLE_REGISTER"] = "1"
+    env["RJ_CONSAN_MODE"] = ConSanMode.RECORD_REPLAY.value
+    env["RJ_CONSAN_POLICY"] = "strict" if strict else "default"
     if consan_log:
         env["RJ_CONSAN_LOG"] = _CONSAN_LOG_DEBUG_LEVEL
     else:
@@ -472,7 +543,40 @@ def run_consan(
         timeout_seconds=timeout_seconds,
         env=env,
     )
-    ( _waitcheck, consan) = evaluate_record_replay(process, strict=strict)
+    preflight, consan = evaluate_record_replay(process, strict=strict)
     log_path = output_dir / "consan.log"
     log_path.write_text(f"{process.stdout}\n{process.stderr}", encoding="utf-8")
-    return consan
+
+    digests = {
+        "command": str(command),
+        "command_sha256": _sha256_file(command),
+        "hook": str(resolved_hook),
+        "hook_sha256": _sha256_file(resolved_hook),
+        "selected_kernel": selected.name,
+        "selected_identity_sha256": hashlib.sha256(
+            selected.stable_key.encode("utf-8")
+        ).hexdigest(),
+    }
+    kernel_result = KernelCheckResult(
+        identity=selected,
+        state=consan.state,
+        verdict=consan.verdict,
+        findings=consan.findings,
+        reason=consan.reason,
+        returncode=consan.returncode,
+    )
+    attributed_consan = CheckResult(
+        sanitizer="consan",
+        state=consan.state,
+        verdict=consan.verdict,
+        reason=consan.reason,
+        returncode=consan.returncode,
+        findings=consan.findings,
+        kernel_results=(kernel_result,),
+        coverage=consan.coverage,
+        backend=tuple(sorted(digests.items())),
+    )
+    return ConSanRunResult(
+        consan=attributed_consan,
+        waitcheck_preflight=_relabel(preflight, WAITCHECK_PREFLIGHT),
+    )

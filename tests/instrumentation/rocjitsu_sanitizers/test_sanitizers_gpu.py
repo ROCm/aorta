@@ -164,8 +164,8 @@ def test_consan_repro_case(variant: str, expected: Verdict, tmp_path: Path) -> N
         strict=False,
     )
 
-    assert result.verdict is expected
+    assert result.consan.verdict is expected
     if variant == "racy":
         # The guardrail's cardinal rule: a real data race is never a pass.
-        assert result.verdict is not Verdict.PASS
-        assert result.findings, "racy repro produced no ConSan findings"
+        assert result.consan.verdict is not Verdict.PASS
+        assert result.consan.findings, "racy repro produced no ConSan findings"

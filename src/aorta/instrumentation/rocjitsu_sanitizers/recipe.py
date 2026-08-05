@@ -39,6 +39,90 @@ _SUPPORTED_SANITIZERS = frozenset({"waitcheck", "consan"})
 _SUPPORTED_SCOPES = frozenset({"kernel"})
 _SUPPORTED_CONSAN_POLICIES = frozenset({"strict", "lenient"})
 _SUPPORTED_MISSING_BACKEND = frozenset({"fail"})
+_KERNEL_SPEC_FIELDS = frozenset(
+    {"name", "code_object", "code_object_sha256", "code_object_index", "entry_offset"}
+)
+
+
+@dataclass(frozen=True)
+class KernelSourceSpec:
+    """A fully-specified kernel identity from a ``kernel`` / ``kernel_list`` source.
+
+    Preserves the code-object path, SHA-256, image index, and entry offset that
+    exact-entry Waitcheck needs, rather than collapsing the source to a name.
+    """
+
+    name: str
+    code_object: str | None = None
+    code_object_sha256: str | None = None
+    code_object_index: int | None = None
+    entry_offset: int | None = None
+
+    def to_entry(self) -> dict[str, object]:
+        entry: dict[str, object] = {"name": self.name}
+        if self.code_object is not None:
+            entry["code_object"] = self.code_object
+        if self.code_object_sha256 is not None:
+            entry["code_object_sha256"] = self.code_object_sha256
+        if self.code_object_index is not None:
+            entry["code_object_index"] = self.code_object_index
+        if self.entry_offset is not None:
+            entry["entry_offset"] = self.entry_offset
+        return entry
+
+
+def _identity_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool):
+        raise RecipeSchemaError(f"{field} must be an integer")
+    if isinstance(value, int):
+        result = value
+    elif isinstance(value, str):
+        text = value.strip()
+        base = 16 if text.lower().startswith("0x") else 10
+        try:
+            result = int(text, base)
+        except ValueError as exc:
+            raise RecipeSchemaError(f"{field} must be an integer") from exc
+    else:
+        raise RecipeSchemaError(f"{field} must be an integer")
+    if result < 0:
+        raise RecipeSchemaError(f"{field} must be non-negative")
+    return result
+
+
+def _parse_kernel_spec(entry: object, *, context: str) -> KernelSourceSpec:
+    if isinstance(entry, str):
+        name = entry.strip()
+        if not name:
+            raise RecipeSchemaError(f"{context} name must be a non-empty string")
+        return KernelSourceSpec(name=name)
+    if not isinstance(entry, dict) or not all(isinstance(key, str) for key in entry):
+        raise RecipeSchemaError(f"{context} must be a string or an object")
+    unknown = set(entry) - _KERNEL_SPEC_FIELDS
+    if unknown:
+        raise RecipeSchemaError(f"{context} has unknown fields: {', '.join(sorted(unknown))}")
+    name = entry.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise RecipeSchemaError(f"{context}.name must be a non-empty string")
+    code_object = entry.get("code_object")
+    if code_object is not None and not isinstance(code_object, str):
+        raise RecipeSchemaError(f"{context}.code_object must be a string")
+    sha256 = entry.get("code_object_sha256")
+    if sha256 is not None and not isinstance(sha256, str):
+        raise RecipeSchemaError(f"{context}.code_object_sha256 must be a string")
+    index = entry.get("code_object_index")
+    offset = entry.get("entry_offset")
+    return KernelSourceSpec(
+        name=name.strip(),
+        code_object=code_object,
+        code_object_sha256=sha256,
+        code_object_index=(
+            None if index is None else _identity_int(index, field=f"{context}.code_object_index")
+        ),
+        entry_offset=(
+            None if offset is None else _identity_int(offset, field=f"{context}.entry_offset")
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -58,7 +142,7 @@ class SanitizerRecipe:
     on_missing_backend: str
     report_name: str
     repro_variant: str | None = None
-    kernel_names: tuple[str, ...] = ()
+    kernel_specs: tuple[KernelSourceSpec, ...] = ()
 
     @property
     def recipe_dir(self) -> Path | None:
@@ -154,7 +238,7 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         raise RecipeSchemaError("sanitizer_plan.source.consan_log must be a boolean")
     consan_log = consan_log_raw
     repro_variant: str | None = None
-    kernel_names: tuple[str, ...] = ()
+    kernel_specs: tuple[KernelSourceSpec, ...] = ()
 
     if source_kind in {"gemm_csv", "dispatch_csv", "rocprof_trace"}:
         source_path = _resolve_path(_require_str(source, "path"), recipe_path=path)
@@ -167,10 +251,13 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         names = source.get("kernels")
         if not isinstance(names, list) or not names:
             raise RecipeSchemaError("sanitizer_plan.source.kernels must be a non-empty list")
-        kernel_names = tuple(str(name) for name in names)
+        kernel_specs = tuple(
+            _parse_kernel_spec(item, context=f"sanitizer_plan.source.kernels[{index}]")
+            for index, item in enumerate(names)
+        )
     elif source_kind == "kernel":
         kernel = _require_mapping(source.get("kernel"), name="sanitizer_plan.source.kernel")
-        kernel_names = (_require_str(kernel, "name"),)
+        kernel_specs = (_parse_kernel_spec(kernel, context="sanitizer_plan.source.kernel"),)
 
     if "isa_dir" in source:
         isa_dir = _resolve_path(_require_str(source, "isa_dir"), recipe_path=path)
@@ -194,7 +281,7 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         on_missing_backend=on_missing_backend,
         report_name=report_name,
         repro_variant=repro_variant,
-        kernel_names=kernel_names,
+        kernel_specs=kernel_specs,
     )
 
 
@@ -222,7 +309,9 @@ def _resolve_observations(recipe: SanitizerRecipe) -> tuple:
             target=target,
         )
     if recipe.source_kind in {"kernel_list", "kernel"}:
-        return observations_from_kernel_list(recipe.kernel_names, target=target)
+        return observations_from_kernel_list(
+            [spec.to_entry() for spec in recipe.kernel_specs], target=target
+        )
     raise ValueError(f"unsupported source kind {recipe.source_kind!r}")
 
 
@@ -288,6 +377,9 @@ def execute_sanitizer_run(
     waitcheck_binary = _resolve_waitcheck_binary(build)
     consan_hook = _resolve_consan_hook(build)
     consan_command = recipe.consan_command
+    # Cross-check the executed repro against the single selected identity so a
+    # recipe cannot name one repro while ConSan runs against another selection.
+    consan_target = observations[0].identity if len(observations) == 1 else None
 
     run_sanitizers(
         worklist,
@@ -300,6 +392,7 @@ def execute_sanitizer_run(
         consan_log=recipe.consan_log,
         consan_policy=recipe.consan_policy,
         on_missing_backend=recipe.on_missing_backend,
+        consan_target=consan_target,
         report_name=recipe.report_name,
     )
     return report_path

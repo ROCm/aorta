@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .consan import run_consan, scoped_consan_not_checked
-from .models import CheckResult, KernelWorklist, SanitizerReport
+from .models import CheckResult, KernelIdentity, KernelWorklist, SanitizerReport
 from .report import build_report, write_report
 from .waitcheck import run_waitcheck
 
@@ -27,6 +27,7 @@ def run_sanitizers(
     on_missing_backend: str = "fail",
     timeout_seconds: float = 900.0,
     report_name: str = "sanitizer_report.json",
+    consan_target: KernelIdentity | None = None,
 ) -> SanitizerReport:
     """Run supported checks and persist one versioned report."""
 
@@ -52,17 +53,21 @@ def run_sanitizers(
             )
         elif sanitizer == "consan":
             if consan_command is not None:
-                results.append(
-                    run_consan(
-                        worklist,
-                        command=consan_command,
-                        hook_lib=consan_hook,
-                        output_dir=output_dir / "consan",
-                        consan_log=consan_log,
-                        timeout_seconds=timeout_seconds,
-                        strict=consan_policy == "strict",
-                    )
+                combined = run_consan(
+                    worklist,
+                    command=consan_command,
+                    hook_lib=consan_hook,
+                    output_dir=output_dir / "consan",
+                    consan_log=consan_log,
+                    timeout_seconds=timeout_seconds,
+                    strict=consan_policy == "strict",
+                    target=consan_target,
                 )
+                # Surface the mandatory combined-hook Waitcheck preflight as its
+                # own check so an unhealthy preflight fails the run closed at
+                # report scope instead of being masked by a clean ConSan verdict.
+                results.append(combined.consan)
+                results.append(combined.waitcheck_preflight)
             else:
                 # ConSan is always fail-closed when no targeted repro command is
                 # provisioned: it never falls back to whole-application

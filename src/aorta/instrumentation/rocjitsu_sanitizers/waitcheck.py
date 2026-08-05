@@ -27,6 +27,10 @@ WAITCHECK_HAZARD_EXIT = 4
 WAITCHECK_JSON_SCHEMA = "rj-waitcheck-diagnostic-v1"
 _HEADER = re.compile(
     r":(?P<target>gfx[0-9a-f]+)\[(?P<index>[0-9]+)\]:"
+    # An exact-entry run prefixes the summary with a kernel marker such as
+    # ``kernel=.text+0x120:``; accept and capture it so a real exact-entry run is
+    # not misread as a missing analysis summary.
+    r"(?:\s*kernel=\.text\+0x(?P<entry>[0-9a-f]+):)?"
     r"\s+instructions=(?P<instructions>[0-9]+).*"
     r"diagnostics=(?:>=)?(?P<diagnostics>[0-9]+)"
 )
@@ -176,7 +180,9 @@ def parse_waitcheck_jsonl(
                 severity=FindingSeverity.WARNING,
                 code=code,
                 message=message,
-                kernel_name=kernel_name,
+                # Attribute to a kernel name only for exact-entry identities; a
+                # whole-code-object scan reports at object scope (no kernel name).
+                kernel_name=(kernel_name if expected.entry_offset is not None else None),
                 code_object=expected.code_object,
                 entry_offset=expected.entry_offset,
                 metadata=tuple(sorted(metadata)),
@@ -211,6 +217,16 @@ def parse_waitcheck_text(
                     f"Waitcheck code-object index {header.group('index')} does not "
                     f"match requested {expected_index}"
                 )
+            entry_group = header.group("entry")
+            if (
+                entry_group is not None
+                and expected.entry_offset is not None
+                and int(entry_group, 16) != expected.entry_offset
+            ):
+                raise ValueError(
+                    f"Waitcheck entry 0x{int(entry_group, 16):x} does not match "
+                    f"requested 0x{expected.entry_offset:x}"
+                )
             continue
         context = _CONTEXT.match(line)
         if context is not None:
@@ -244,7 +260,10 @@ def parse_waitcheck_text(
                     severity=FindingSeverity.WARNING,
                     code="wait_hazard",
                     message=line,
-                    kernel_name=expected.name,
+                    # Only attribute a finding to a kernel name for an exact-entry
+                    # run; a whole-code-object scan must not fabricate per-kernel
+                    # attribution to a synthetic name.
+                    kernel_name=(expected.name if expected.entry_offset is not None else None),
                     code_object=expected.code_object,
                     entry_offset=expected.entry_offset,
                 )
@@ -415,16 +434,29 @@ def run_waitcheck(
         ("sha256", _sha256_file(resolved)),
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    kernel_results = tuple(
-        _run_one(
-            observation.identity,
-            binary=resolved,
-            log_path=output_dir / f"waitcheck-{index}.log",
-            timeout_seconds=timeout_seconds,
-            execute=execute,
+    kernel_results: list[KernelCheckResult] = []
+    scanned_objects: set[tuple[str | None, int | None]] = set()
+    for index, observation in enumerate(worklist.kernels):
+        identity = observation.identity
+        # A whole-code-object scan (no entry offset) covers the entire object, so
+        # multiple selected kernels that resolve to the same object must produce a
+        # single object-level invocation rather than repeated scans attributed to
+        # distinct synthetic names.
+        if identity.entry_offset is None and identity.code_object_scan:
+            object_key = (identity.code_object_sha256, identity.code_object_index)
+            if object_key in scanned_objects:
+                continue
+            scanned_objects.add(object_key)
+        kernel_results.append(
+            _run_one(
+                identity,
+                binary=resolved,
+                log_path=output_dir / f"waitcheck-{index}.log",
+                timeout_seconds=timeout_seconds,
+                execute=execute,
+            )
         )
-        for index, observation in enumerate(worklist.kernels)
-    )
+    kernel_results = tuple(kernel_results)
     findings = tuple(finding for result in kernel_results for finding in result.findings)
     if not kernel_results:
         return CheckResult(

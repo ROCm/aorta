@@ -18,6 +18,7 @@ from aorta.instrumentation.rocjitsu_sanitizers import (
     run_waitcheck,
 )
 from aorta.instrumentation.rocjitsu_sanitizers.execution import ProcessResult
+from aorta.instrumentation.rocjitsu_sanitizers.waitcheck import parse_waitcheck_text
 
 # Diagnostic fields mirror RocJITsu waitcheck_main.cpp at b4feaddd.
 
@@ -271,6 +272,41 @@ def test_waitcheck_parses_upstream_diagnostic_schema(tmp_path: Path) -> None:
     assert findings[0].code == "missing_lgkmcnt_use"
 
 
+def _entry_identity() -> KernelIdentity:
+    return KernelIdentity(
+        name="selected_kernel",
+        target="gfx950",
+        code_object="/tmp/library.so",
+        code_object_sha256="0" * 64,
+        code_object_index=3,
+        entry_offset=0x120,
+    )
+
+
+def test_parse_waitcheck_text_accepts_exact_entry_marker() -> None:
+    output = "\n".join(
+        (
+            "/tmp/library.so:gfx950[3]:kernel=.text+0x120: "
+            "instructions=10 memory-events=2 diagnostics=1",
+            "/tmp/library.so:gfx950[3]:.text+0x20: missing s_waitcnt lgkmcnt(0)",
+        )
+    )
+
+    findings = parse_waitcheck_text(output, expected=_entry_identity())
+
+    assert len(findings) == 1
+
+
+def test_parse_waitcheck_text_rejects_mismatched_entry() -> None:
+    output = (
+        "/tmp/library.so:gfx950[3]:kernel=.text+0x999: "
+        "instructions=10 memory-events=2 diagnostics=1"
+    )
+
+    with pytest.raises(ValueError, match="entry"):
+        parse_waitcheck_text(output, expected=_entry_identity())
+
+
 def test_waitcheck_accepts_single_image_without_index(tmp_path: Path) -> None:
     # A single-image code object omits code_object_index in the JSONL; when the
     # expected identity is also single-image (index None -> 0), that must parse
@@ -331,6 +367,57 @@ def test_waitcheck_rejects_structured_entry_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="entry"):
         parse_waitcheck_jsonl(diagnostics, expected=identity)
+
+
+def test_waitcheck_scans_shared_object_once_without_kernel_attribution(tmp_path: Path) -> None:
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifact = tmp_path / "shared.hsaco"
+    artifact.write_bytes(b"\x7fELFshared")
+    sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    # Three GEMM shapes that all resolve to the same code object (scan identities,
+    # no entry offset). They must trigger exactly one object-level invocation and
+    # never attribute the hazard to a fabricated GEMM kernel name.
+    worklist = KernelWorklist(
+        requirement=SelectionRequirement.TOP_DISPATCH_COUNT,
+        top_n=3,
+        kernels=tuple(
+            KernelObservation(
+                identity=KernelIdentity(
+                    name=f"gemm_{shape}",
+                    target="gfx950",
+                    code_object=str(artifact),
+                    code_object_sha256=sha,
+                    code_object_index=0,
+                ),
+                total_time_ms=0.0,
+                dispatch_count=count,
+                sources=("gemm_csv",),
+            )
+            for shape, count in (("a", 3), ("b", 2), ("c", 1))
+        ),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def execute(argv, *, timeout_seconds, env=None):
+        calls.append(tuple(argv))
+        output = "\n".join(
+            (
+                f"{artifact}:gfx950[0]: instructions=10 memory-events=2 diagnostics=1",
+                f"{artifact}:gfx950[0]:.text+0x20: missing s_waitcnt lgkmcnt(0)",
+            )
+        )
+        return ProcessResult(tuple(argv), 4, output, "")
+
+    result = run_waitcheck(
+        worklist, output_dir=tmp_path / "out", binary=binary, execute=execute
+    )
+
+    assert len(calls) == 1
+    assert len(result.kernel_results) == 1
+    assert result.verdict is Verdict.WARN
+    assert result.findings
+    assert all(finding.kernel_name is None for finding in result.findings)
 
 
 def test_waitcheck_rejects_changed_code_object(tmp_path: Path) -> None:

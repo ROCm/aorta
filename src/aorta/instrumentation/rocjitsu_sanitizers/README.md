@@ -3,6 +3,15 @@
 Public, typed primitives for selecting important GPU kernels and applying
 RocJITsu guardrails without importing customer-derived artifacts.
 
+**Scope.** This module delivers the Phase-1 engine and the `mode: sanitizer`
+recipe UX (deterministic selection, exact-entry Waitcheck, fail-closed ConSan
+Record/Replay, versioned reports). The end goal of
+[#316](https://github.com/ROCm/aorta/issues/316) -- fully automatic
+workload-driven top-kernel execution (profile an uninstrumented model, resolve
+the top-K kernels to exact identities, then run scoped ConSan) -- is **not** yet
+delivered; the "Not available yet" and "Planned scoped ConSan flow" sections
+below track that remaining work.
+
 ## Phase 0 capability
 
 Available now as a Python library:
