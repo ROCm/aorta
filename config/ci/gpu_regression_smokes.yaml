@@ -13,10 +13,10 @@
 #                 GPU-touching PRs stay protected without starving the runner.
 #                 Nightly / workflow_dispatch (AORTA_CI_TIER=full) run everything.
 #
-# Exit codes: every `aorta sweep run` smoke passes ``--strict``. Without it the
+# Exit codes: every ``aorta sweep run`` smoke passes ``--strict``. Without it the
 # matrix flow tolerates per-cell failures and exits 0, so a workload that errors
 # or never runs would leave this gate green -- the one thing it exists to catch.
-# `aorta run` needs no flag: it already exits non-zero on a failed trial.
+# ``aorta run`` needs no flag: it already exits non-zero on a failed trial.
 # ``--strict`` deliberately does NOT trip on a cell that ran and reported
 # passed=False, which is an expected A/B "bug reproduced" outcome; these smokes
 # are all expected to pass cleanly, so an errored workload is the target here.
@@ -35,7 +35,7 @@ smokes:
   - name: gpu_smoke_cli
     pr: true
     command:
-      # No --strict: `aorta run` derives its exit code from trial results.
+      # No ``--strict``: ``aorta run`` derives its exit code from trial results.
       - aorta
       - run
       - --workload
