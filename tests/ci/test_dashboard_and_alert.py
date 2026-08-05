@@ -606,6 +606,84 @@ def test_change_summary_names_a_cell_less_record_as_the_whole_workload():
     assert "w::None" not in html
 
 
+def test_history_grid_states_the_verdict_without_relying_on_colour():
+    # A bare count renders identically for a passing and a failing group, so the
+    # cell would be unreadable to anyone who cannot separate red from green, or
+    # who is on a touch screen and cannot hover for the title.
+    runs = [
+        _run(3, [_cell("w", "c", verdict="pass")], total=1, **{"pass": 1}),
+        _run(4, [_cell("w", "c", verdict="fail")], total=1, fail=1),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "✗ 1" in grid and "✓ 1" in grid
+    # The breakdown reaches assistive tech, not only a hover tooltip.
+    assert "aria-label='w — 1 fail'" in grid
+
+
+def test_history_grid_compares_its_oldest_row_against_the_run_before_it():
+    # The window truncates the rendered rows, not the history. Comparing the
+    # oldest displayed row against nothing would drop a toolchain change from
+    # that row every time history grows past the window.
+    runs = [
+        _run(1, [_cell("w", "c")], build={"rocm": "7.2.0"}, total=1, record=1),
+        _run(2, [_cell("w", "c")], build={"rocm": "7.3.0"}, total=1, record=1),
+        _run(3, [_cell("w", "c")], build={"rocm": "7.3.0"}, total=1, record=1),
+    ]
+    # Day 2 is the oldest rendered row and it is where ROCm moved.
+    grid = gen_dashboard.build_history_grid(runs, max_runs=2)
+    assert grid.count("class='bump'") == 1
+    assert "2026-08-01" not in grid  # genuinely outside the window
+
+
+def test_history_grid_first_ever_run_has_nothing_to_be_compared_against():
+    runs = [
+        _run(3, [_cell("w", "c")], build={"rocm": "7.2.0"}, total=1, record=1),
+        _run(4, [_cell("w", "c")], build={"rocm": "7.3.0"}, total=1, record=1),
+    ]
+    # The bump belongs to day 4 only; day 3 has no predecessor to differ from.
+    assert gen_dashboard.build_history_grid(runs).count("class='bump'") == 1
+
+
+def test_change_summary_compares_wall_clock_as_well_as_step_time():
+    # nightly_eval records both, and they can disagree: a steady step time with
+    # a climbing wall clock is what a slower setup or a stalling teardown looks
+    # like, and it would be invisible if only step time were compared.
+    runs = [
+        _run(3, [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                  "metrics": {"mean_step_time_ms": 10.0, "mean_wall_clock_sec": 5.0}}],
+             total=1, record=1),
+        _run(4, [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                  "metrics": {"mean_step_time_ms": 10.0, "mean_wall_clock_sec": 9.0}}],
+             total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "mean_wall_clock_sec" in html and "+80%" in html
+    assert "mean_step_time_ms" not in html  # genuinely unchanged
+
+
+def test_change_summary_threshold_is_the_more_than_it_claims_to_be():
+    # The docs, the constant's comment and the steady-state line all promise
+    # "more than" 10%, so exactly 10% must not be reported.
+    def moved(before, after):
+        runs = [_run(3, [_cell("w", "c", step=before)], total=1, record=1),
+                _run(4, [_cell("w", "c", step=after)], total=1, record=1)]
+        return "mean_step_time_ms" in gen_dashboard.build_change_summary(runs)
+
+    assert not moved(100.0, 110.0)   # exactly +10%
+    assert not moved(100.0, 90.0)    # exactly -10%
+    assert moved(100.0, 110.1)       # just past it
+
+
+def test_dashboard_withholds_the_js_controls_when_there_is_nothing_to_expand():
+    # A run whose results carried no metrics renders no details rows, so both
+    # buttons would provably do nothing.
+    runs = [_run(3, [_cell("w", "c", step=1.0)], total=1, record=1),
+            _run(4, [_cell("w", "c", step=1.0)], total=1, record=1)]
+    html = gen_dashboard.build_dashboard_html(runs)
+    assert "<details>" not in html
+    assert 'document.querySelectorAll("tr.mrow details").length' in html
+
+
 def test_dashboard_hides_the_js_only_controls_until_the_script_runs():
     # The page is complete without JavaScript, so a control that does nothing
     # without it must not be visible in the served markup.

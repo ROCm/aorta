@@ -60,6 +60,16 @@ _VERDICT_COLOR = {
     "skip": "#57606a",
 }
 
+# Colour alone cannot carry a verdict: it is invisible to a red/green colour
+# deficiency and to anyone reading a printed or greyscale copy. Every coloured
+# cell states its verdict with one of these too.
+_VERDICT_GLYPH = {
+    "pass": "✓",
+    "fail": "✗",
+    "record": "◆",
+    "skip": "○",
+}
+
 # Worst-first, so a group's tally leads with whatever needs attention.
 _VERDICT_ORDER = ("fail", "record", "skip", "pass")
 
@@ -71,6 +81,10 @@ _GRID_RUNS = 14
 # times on a shared runner wander a few percent between identical runs, so a
 # lower bar would fill the section with noise every night.
 _MOVE_PCT = 10.0
+
+# Timings the harness records for every result, outside the workload's own
+# metrics.summary. They are comparable across runs like any other measurement.
+_HARNESS_METRICS = ("mean_step_time_ms", "mean_wall_clock_sec")
 
 # Fields worth diffing between runs, in the order they are reported. AORTA's own
 # version is deliberately absent: it is date-stamped and therefore changes every
@@ -277,15 +291,18 @@ def _cell_label(entry: dict[str, Any]) -> str:
 def _measurements(entry: dict[str, Any]) -> dict[str, float]:
     """Every comparable number a result reports, keyed by metric name.
 
-    ``mean_step_time_ms`` sits beside the workload's own ``summary`` metrics so
-    both move through the same comparison; a workload can report either without
-    the other.
+    The harness's own timings sit beside the workload's ``summary`` metrics so
+    all of them move through the same comparison; a workload can report either
+    without the other. Both timings matter and they can disagree: step time can
+    hold steady while wall clock climbs, which is what a slower setup or a
+    stalling teardown looks like.
     """
     metrics = entry.get("metrics") or {}
     out: dict[str, float] = {}
-    step = metrics.get("mean_step_time_ms")
-    if _isnum(step):
-        out["mean_step_time_ms"] = float(step)
+    for name in _HARNESS_METRICS:
+        val = metrics.get(name)
+        if _isnum(val):
+            out[name] = float(val)
     for name, val in (metrics.get("summary") or {}).items():
         if _isnum(val):
             out[str(name)] = float(val)
@@ -321,6 +338,11 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
     runs = results[-max_runs:] if max_runs > 0 else list(results)
     if len(runs) < 2:
         return ""
+    # The run just outside the window, so the oldest displayed row is compared
+    # against the run that actually preceded it. Comparing it against nothing
+    # would silently drop a toolchain change from that row every time history
+    # grows past the window.
+    prior = results[-(len(runs) + 1)] if len(results) > len(runs) else None
 
     # Column order follows the newest run so tonight's matrix reads left to
     # right as configured; workloads that have since been retired trail it
@@ -360,8 +382,8 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
 
         # Mark the run where the toolchain moved: a column that changes colour on
         # exactly that row is the whole point of running this nightly.
-        older = newest_first[i + 1] if i + 1 < len(newest_first) else None
-        bumped = bool(older) and any(
+        older = newest_first[i + 1] if i + 1 < len(newest_first) else prior
+        bumped = older is not None and any(
             str((older.get("build") or {}).get(f) or "") != str(build.get(f) or "")
             for f, _ in _TOOLCHAIN_FIELDS
         )
@@ -377,11 +399,17 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             worst = next((v for v in _VERDICT_ORDER if counts.get(v)), "")
             n = len(group)
             worst_n = counts.get(worst, 0)
-            text = str(n) if worst_n == n else f"{worst_n}/{n}"
+            count = str(n) if worst_n == n else f"{worst_n}/{n}"
             bg = _VERDICT_COLOR.get(worst, "#57606a")
+            # The glyph, not the colour, is what states the verdict: a bare
+            # count renders identically for a passing and a failing group, which
+            # leaves anyone who cannot separate red from green — or who is on a
+            # touch screen with no hover — unable to read the row at all.
+            breakdown = f"{name} — {_tally_text(counts)}"
             cells.append(
                 f"<td class='gcell'><span class='dot' style='background:{bg}' "
-                f"title='{_esc(name)} — {_esc(_tally_text(counts))}'>{_esc(text)}</span></td>"
+                f"title='{_esc(breakdown)}' aria-label='{_esc(breakdown)}'>"
+                f"{_esc(_VERDICT_GLYPH.get(worst, '?'))} {_esc(count)}</span></td>"
             )
 
         rows.append(
@@ -394,8 +422,10 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
     return (
         "<h2>Run history</h2>"
         "<p class='muted'>Each row is one nightly run, newest first; each column is a "
-        "workload. A cell shows how many results it produced, coloured by the worst "
-        "verdict among them — hover for the breakdown.</p>"
+        "workload. A cell shows the worst verdict among that workload's results "
+        "(✓ pass · ✗ fail · ◆ record · ○ skip) and how many there were — "
+        "<span class='mono'>✗ 1/4</span> means one of four failed. Hover for the "
+        "full breakdown.</p>"
         "<div class='tablewrap'><table class='grid'>"
         f"<thead><tr><th scope='col'>run</th><th scope='col' class='center'>status</th>"
         f"{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
@@ -469,7 +499,7 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
             if not b:  # a move from zero has no meaningful percentage
                 continue
             pct = (a - b) / abs(b) * 100.0
-            if abs(pct) >= _MOVE_PCT:
+            if abs(pct) > _MOVE_PCT:
                 movers.append((abs(pct), pct, k, metric, b, a, latest_by[k]))
     movers.sort(reverse=True)
     for _, pct, _k, metric, b, a, entry in movers[:6]:
@@ -867,8 +897,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   .bump {{ display:inline-block; margin-left:.4rem; padding:0 6px; border-radius:999px;
            background:#1f6feb33; color:var(--accent); font-size:.62rem;
            font-weight:600; text-transform:uppercase; letter-spacing:.05em; }}
-  .dot {{ display:inline-block; min-width:30px; padding:2px 6px; border-radius:6px;
-          color:#fff; font-size:.72rem; font-weight:600;
+  .dot {{ display:inline-block; min-width:44px; padding:2px 6px; border-radius:6px;
+          color:#fff; font-size:.72rem; font-weight:600; white-space:nowrap;
           font-variant-numeric:tabular-nums; }}
   .absent {{ color:#39414a; }}
   .secthead {{ display:flex; align-items:baseline; justify-content:space-between;
@@ -931,6 +961,9 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 (function () {{
   var bar = document.getElementById("toolbar");
   if (!bar) return;
+  // Nothing to expand when no result carried metrics, and a pair of buttons
+  // that provably do nothing is worse than no buttons.
+  if (!document.querySelectorAll("tr.mrow details").length) return;
   bar.hidden = false;
   bar.addEventListener("click", function (ev) {{
     var want = ev.target && ev.target.getAttribute("data-details");
