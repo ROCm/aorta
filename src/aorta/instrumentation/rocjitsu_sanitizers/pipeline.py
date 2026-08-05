@@ -26,6 +26,7 @@ def run_sanitizers(
     consan_policy: str = "strict",
     on_missing_backend: str = "fail",
     timeout_seconds: float = 900.0,
+    report_name: str = "sanitizer_report.json",
 ) -> SanitizerReport:
     """Run supported checks and persist one versioned report."""
 
@@ -72,5 +73,5 @@ def run_sanitizers(
         worklist=worklist,
         checks=tuple(results),
     )
-    write_report(report, output_dir / "sanitizer_report.json")
+    write_report(report, output_dir / report_name)
     return report

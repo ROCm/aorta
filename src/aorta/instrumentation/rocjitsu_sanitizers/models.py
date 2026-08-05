@@ -157,18 +157,30 @@ class KernelIdentity:
 
     @property
     def stable_key(self) -> str:
-        if not self.exact:
-            return "\x1f".join((self.target, self.name))
         index_key = "" if self.code_object_index is None else str(self.code_object_index)
-        entry_key = "" if self.entry_offset is None else f"{self.entry_offset:x}"
-        return "\x1f".join(
-            (
-                self.target,
-                self.code_object_sha256 or "",
-                index_key,
-                entry_key,
+        if self.exact:
+            entry_key = "" if self.entry_offset is None else f"{self.entry_offset:x}"
+            return "\x1f".join(
+                (
+                    self.target,
+                    self.code_object_sha256 or "",
+                    index_key,
+                    entry_key,
+                )
             )
-        )
+        if self.code_object_scan:
+            # Whole-code-object scan has no entry offset to pin a kernel, so the
+            # code object identity (sha/index) plus the kernel name keeps distinct
+            # code objects and distinct kernels within one object from colliding.
+            return "\x1f".join(
+                (
+                    self.target,
+                    self.code_object_sha256 or "",
+                    index_key,
+                    self.name,
+                )
+            )
+        return "\x1f".join((self.target, self.name))
 
     def to_dict(self) -> dict[str, object]:
         return {

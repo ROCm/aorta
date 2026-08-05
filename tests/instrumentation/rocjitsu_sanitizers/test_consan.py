@@ -299,6 +299,22 @@ def test_run_consan_omits_log_env_when_logging_disabled(
     assert "RJ_CONSAN_LOG" not in env
 
 
+def test_object_coverage_static_complete_tracks_verdict() -> None:
+    # The coverage record still reports analysis_complete=true, but the aggregate
+    # analysis verdict is the authority for static completeness. A verdict that
+    # reports static_complete=false must not surface a statically-complete object.
+    output = _healthy_evidence().replace(
+        "analysis_complete=true static_complete=true dynamic_complete=true",
+        "analysis_complete=true static_complete=false dynamic_complete=true",
+    )
+
+    parsed = parse_record_replay_output(output)
+
+    assert parsed.coverage
+    assert parsed.coverage[0].static_complete is False
+    assert parsed.coverage[0].analysis_complete is True
+
+
 def test_combined_waitcheck_analysis_failure_never_passes() -> None:
     output = "\n".join(
         (

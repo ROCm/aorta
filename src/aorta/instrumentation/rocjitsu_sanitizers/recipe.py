@@ -242,18 +242,11 @@ def execute_sanitizer_run(
 
     recipe = load_sanitizer_recipe(recipe_path)
     observations = _resolve_observations(recipe)
-    if recipe.scope_kind == "kernel" and recipe.source_kind not in {"kernel", "consan_repro"}:
-        worklist = select_kernels(
-            observations,
-            requirement=recipe.requirement,
-            top_n=min(recipe.top_n, len(observations)),
-        )
-    else:
-        worklist = select_kernels(
-            observations,
-            requirement=recipe.requirement,
-            top_n=recipe.top_n,
-        )
+    worklist = select_kernels(
+        observations,
+        requirement=recipe.requirement,
+        top_n=recipe.top_n,
+    )
 
     report_path = output_dir / recipe.report_name
     if dry_run:
@@ -280,7 +273,7 @@ def execute_sanitizer_run(
     if consan_command is None and recipe.source_kind == "consan_repro":
         consan_command = output_dir / "consan_repro"
 
-    report = run_sanitizers(
+    run_sanitizers(
         worklist,
         target=recipe.target,
         sanitizers=recipe.sanitizers,
@@ -291,6 +284,6 @@ def execute_sanitizer_run(
         consan_log=recipe.consan_log,
         consan_policy=recipe.consan_policy,
         on_missing_backend=recipe.on_missing_backend,
+        report_name=recipe.report_name,
     )
-    _ = report
-    return report_path if report_path.is_file() else output_dir / "sanitizer_report.json"
+    return report_path

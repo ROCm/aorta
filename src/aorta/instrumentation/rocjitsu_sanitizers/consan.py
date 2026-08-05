@@ -202,7 +202,7 @@ def parse_record_replay_output(output: str) -> ParsedCombinedOutput:
             ),
             applicable=record.applicable,
             analysis_complete=record.analysis_complete,
-            static_complete=record.analysis_complete,
+            static_complete=decision.verdict.static_complete,
             dynamic_complete=decision.verdict.dynamic_complete,
             incomplete_code_objects=0 if record.analysis_complete else 1,
             unsupported=sum(

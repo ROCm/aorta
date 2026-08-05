@@ -98,6 +98,19 @@ def test_pipeline_writes_not_checked_for_scoped_consan(tmp_path: Path) -> None:
     assert (tmp_path / "sanitizer_report.json").is_file()
 
 
+def test_pipeline_honors_custom_report_name(tmp_path: Path) -> None:
+    run_sanitizers(
+        _worklist(),
+        target="gfx950",
+        sanitizers=("consan",),
+        output_dir=tmp_path,
+        report_name="custom_report.json",
+    )
+
+    assert (tmp_path / "custom_report.json").is_file()
+    assert not (tmp_path / "sanitizer_report.json").exists()
+
+
 def test_report_rejects_target_mismatch() -> None:
     with pytest.raises(ValueError, match="target"):
         build_report(

@@ -140,6 +140,63 @@ def test_exact_identity_deduplicates_profiler_name_variants() -> None:
     assert worklist.kernels[0].identity.name == "a_mangled"
 
 
+def test_scan_identity_distinguishes_code_objects_with_same_name() -> None:
+    common = {"name": "gemm", "target": "gfx950", "code_object_index": 0}
+    worklist = select_kernels(
+        [
+            KernelObservation(
+                identity=KernelIdentity(
+                    code_object="/tmp/a.hsaco", code_object_sha256="a" * 64, **common
+                ),
+                total_time_ms=1,
+                dispatch_count=3,
+                sources=("csv",),
+            ),
+            KernelObservation(
+                identity=KernelIdentity(
+                    code_object="/tmp/b.hsaco", code_object_sha256="b" * 64, **common
+                ),
+                total_time_ms=1,
+                dispatch_count=5,
+                sources=("csv",),
+            ),
+        ],
+        requirement=SelectionRequirement.TOP_DISPATCH_COUNT,
+        top_n=5,
+    )
+
+    assert len(worklist.kernels) == 2
+
+
+def test_scan_identity_distinguishes_kernels_sharing_a_code_object() -> None:
+    common = {
+        "target": "gfx950",
+        "code_object": "/tmp/sol.hsaco",
+        "code_object_sha256": "c" * 64,
+        "code_object_index": 0,
+    }
+    worklist = select_kernels(
+        [
+            KernelObservation(
+                identity=KernelIdentity(name="gemm_A", **common),
+                total_time_ms=1,
+                dispatch_count=3,
+                sources=("csv",),
+            ),
+            KernelObservation(
+                identity=KernelIdentity(name="gemm_B", **common),
+                total_time_ms=1,
+                dispatch_count=5,
+                sources=("csv",),
+            ),
+        ],
+        requirement=SelectionRequirement.TOP_DISPATCH_COUNT,
+        top_n=5,
+    )
+
+    assert {kernel.identity.name for kernel in worklist.kernels} == {"gemm_A", "gemm_B"}
+
+
 @pytest.mark.parametrize("top_n", [0, -1, True])
 def test_selection_rejects_invalid_top_n(top_n: int) -> None:
     with pytest.raises(ValueError, match="top_n"):

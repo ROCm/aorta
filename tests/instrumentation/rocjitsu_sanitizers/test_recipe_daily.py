@@ -7,7 +7,10 @@ from pathlib import Path
 
 from aorta.instrumentation.rocjitsu_sanitizers.backends import support
 from aorta.instrumentation.rocjitsu_sanitizers.models import SelectionRequirement
-from aorta.instrumentation.rocjitsu_sanitizers.recipe import load_sanitizer_recipe
+from aorta.instrumentation.rocjitsu_sanitizers.recipe import (
+    execute_sanitizer_run,
+    load_sanitizer_recipe,
+)
 from aorta.instrumentation.rocjitsu_sanitizers.selection import (
     observations_from_gemm_csv,
     observations_from_rocprof_trace,
@@ -62,6 +65,47 @@ def test_rocprof_trace_adapter_drops_runtime_copies(tmp_path: Path) -> None:
     assert len(observations) == 1
     assert observations[0].identity.name == "kernel_a"
     assert observations[0].dispatch_count == 2
+
+
+def test_execute_recipe_with_fewer_observations_than_top_n(tmp_path: Path) -> None:
+    # A trace whose only dispatch is a dropped runtime copy yields zero
+    # observations. top_n must not be clamped down to the observation count
+    # (which would request top_n=0 and raise); the empty worklist is valid.
+    trace = tmp_path / "trace.csv"
+    trace.write_text(
+        "Kind,Kernel_Name,Start_Timestamp,End_Timestamp\n"
+        "KERNEL_DISPATCH,__amd_rocclr_copyBuffer,0,500\n",
+        encoding="utf-8",
+    )
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        "schema_version: 1\n"
+        "mode: sanitizer\n"
+        "ticket: TEST-EMPTY\n"
+        "sanitizer_plan:\n"
+        "  target: gfx950\n"
+        "  source:\n"
+        "    kind: rocprof_trace\n"
+        "    path: trace.csv\n"
+        "  scope:\n"
+        "    kind: kernel\n"
+        "  selection:\n"
+        "    requirement: top_dispatch_count\n"
+        "    top_n: 8\n"
+        "  sanitizers:\n"
+        "    - waitcheck\n"
+        "  policy:\n"
+        "    consan_policy: strict\n"
+        "    on_missing_backend: fail\n"
+        "  output:\n"
+        "    report: custom_report.json\n",
+        encoding="utf-8",
+    )
+
+    report_path = execute_sanitizer_run(recipe, output_dir=tmp_path / "out", dry_run=True)
+
+    assert report_path == tmp_path / "out" / "custom_report.json"
+    assert report_path.is_file()
 
 
 def test_verdict_baselines_fixture_present() -> None:
