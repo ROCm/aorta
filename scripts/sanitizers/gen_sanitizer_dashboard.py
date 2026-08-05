@@ -12,6 +12,12 @@ emits, into ``--out-dir``:
 * ``summary.md`` -- a GitHub Actions job-summary fragment (append to
   ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail.
 * ``data.json`` -- the aggregated structure for any richer consumer.
+* ``status.json`` -- a copy of the ``--status`` run manifest, when supplied, so
+  Pages can distinguish a healthy snapshot from a stale one (a failed nightly).
+
+When ``--status`` points at an unhealthy manifest, a red "stale" banner is
+rendered at the top of both ``index.html`` and ``summary.md`` so a failed nightly
+never leaves the previous green page looking current.
 
 Two input shapes are supported:
 
@@ -227,6 +233,48 @@ def runs_from_runs_root(runs_root: Path, baselines: dict) -> list[dict[str, Any]
     return runs
 
 
+def _status_banner_html(status: dict[str, Any] | None) -> str:
+    """Red staleness banner shown when the latest nightly did not publish healthily.
+
+    A failed nightly skips its snapshot push, so Pages would otherwise republish
+    the previous green page as if it were current. When the publish job records an
+    unhealthy run status, surface it prominently with a link to the failed run.
+    """
+    if not status or status.get("healthy", True):
+        return ""
+    run_id = str(status.get("run_id", "") or "")
+    url = str(status.get("run_url", "") or "")
+    conclusion = str(status.get("conclusion", "") or "unknown")
+    when = str(status.get("date", "") or "")
+    run_txt = f" run {_esc(run_id)}" if run_id else ""
+    link = (
+        f' <a href="{_esc(url)}" style="color:#fff;text-decoration:underline">view failed run</a>'
+        if url else ""
+    )
+    when_txt = f' <span style="font-weight:400">({_esc(when)})</span>' if when else ""
+    return (
+        '<div style="color:#fff;background:#cf222e;padding:12px 16px;border-radius:8px;'
+        'font-weight:600;margin:12px 0 20px">'
+        f"&#9888; Latest sanitizer nightly{run_txt} did not complete successfully "
+        f"({_esc(conclusion)}) &mdash; the data below may be stale.{link}{when_txt}"
+        "</div>"
+    )
+
+
+def _status_banner_md(status: dict[str, Any] | None) -> str:
+    if not status or status.get("healthy", True):
+        return ""
+    run_id = str(status.get("run_id", "") or "")
+    url = str(status.get("run_url", "") or "")
+    conclusion = str(status.get("conclusion", "") or "unknown")
+    run_txt = f" run `{run_id}`" if run_id else ""
+    link = f" [view failed run]({url})" if url else ""
+    return (
+        f"> \u26a0\ufe0f **Stale** \u2014 latest sanitizer nightly{run_txt} did not "
+        f"complete successfully ({conclusion}); the data below may be stale.{link}"
+    )
+
+
 def _badge_html(verdict: str, expected: str | None) -> str:
     color = _VERDICT_COLOR.get(verdict, "#6e7781")
     mark = ""
@@ -280,9 +328,30 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
     return "".join(blocks)
 
 
-def build_html(runs: list[dict[str, Any]], *, title: str = "Sanitizers Nightly") -> str:
+def build_html(
+    runs: list[dict[str, Any]],
+    *,
+    title: str = "Sanitizers Nightly",
+    status: dict[str, Any] | None = None,
+) -> str:
+    banner = _status_banner_html(status)
     if not runs:
-        return f"<!doctype html><meta charset=utf-8><title>{_esc(title)}</title><p>No runs.</p>"
+        # Rendered before the first successful nightly (empty runs-root) so the
+        # /sanitizers/ route never 404s, and whenever a run fails with no data.
+        return (
+            "<!doctype html>\n"
+            "<html lang=en><head><meta charset=utf-8>\n"
+            '<meta name=viewport content="width=device-width, initial-scale=1">\n'
+            f"<title>{_esc(title)}</title></head>\n"
+            '<body style="font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,'
+            'sans-serif;max-width:1000px;margin:0 auto;padding:24px">\n'
+            '<p><a href="../">back to CI dashboard</a></p>\n'
+            f"{banner}"
+            f"<h1>{_esc(title)}</h1>\n"
+            "<p>No sanitizer runs yet. This page will populate after the first "
+            "successful sanitizer nightly.</p>\n"
+            "</body></html>\n"
+        )
     latest = runs[0]
     meta = latest["meta"]
     gate_ok = latest["gate"]
@@ -346,6 +415,7 @@ def build_html(runs: list[dict[str, Any]], *, title: str = "Sanitizers Nightly")
 </style></head>
 <body><div class=wrap>
   <p class=nav><a href="../">back to CI dashboard</a></p>
+  {banner}
   <h1>{_esc(title)} &middot; gfx950</h1>
   <div class=meta>latest run <span class=mono>{_esc(meta.get('run', ''))}</span>
      &middot; commit <span class=mono>{_esc(meta.get('commit', ''))}</span>
@@ -370,17 +440,25 @@ def build_html(runs: list[dict[str, Any]], *, title: str = "Sanitizers Nightly")
 """
 
 
-def build_summary_md(runs: list[dict[str, Any]]) -> str:
+def build_summary_md(
+    runs: list[dict[str, Any]], *, status: dict[str, Any] | None = None
+) -> str:
+    banner = _status_banner_md(status)
     if not runs:
-        return "# Sanitizers Nightly\n\nNo runs found.\n"
+        head = "# Sanitizers Nightly\n\n"
+        if banner:
+            head += banner + "\n\n"
+        return head + "No runs found.\n"
     latest = runs[0]
     meta = latest["meta"]
     gate = (
         "\u2705 **PASS** \u2014 all verdicts match baselines" if latest["gate"]
         else "\u274c **FAIL** \u2014 verdict mismatch vs baselines"
     )
-    lines = [
-        "# Sanitizers Nightly \u00b7 gfx950", "",
+    lines = ["# Sanitizers Nightly \u00b7 gfx950", ""]
+    if banner:
+        lines += [banner, ""]
+    lines += [
         f"Run `{meta.get('run', '')}` \u00b7 commit `{meta.get('commit', '')}` \u00b7 "
         f"{meta.get('date', '')}",
         "", gate, "",
@@ -454,7 +532,18 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""))
     ap.add_argument("--run-label", default=os.environ.get("GITHUB_RUN_ID", ""))
+    ap.add_argument(
+        "--status",
+        type=Path,
+        help="JSON run-status manifest; renders a stale banner when it is unhealthy",
+    )
     args = ap.parse_args()
+
+    # Optional run-status manifest (see sanitizers-nightly.yml). A malformed or
+    # absent file must not crash rendering -- treat it as "no status" (no banner).
+    status = _load(args.status) if args.status is not None else None
+    if args.status is not None and not isinstance(status, dict):
+        status = None
 
     # Load baselines strictly: a missing/corrupt file would otherwise leave every
     # expected verdict as None (match=True) and paint a false-green gate.
@@ -477,11 +566,19 @@ def main() -> int:
         runs = runs_from_runs_root(args.runs_root, baselines)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "index.html").write_text(build_html(runs), encoding="utf-8")
-    (args.out_dir / "summary.md").write_text(build_summary_md(runs), encoding="utf-8")
+    (args.out_dir / "index.html").write_text(build_html(runs, status=status), encoding="utf-8")
+    (args.out_dir / "summary.md").write_text(
+        build_summary_md(runs, status=status), encoding="utf-8"
+    )
     (args.out_dir / "data.json").write_text(
         json.dumps(runs, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    # Persist the status manifest alongside the rendered page so Pages (and any
+    # consumer) can tell a healthy snapshot from a stale one without re-parsing HTML.
+    if status is not None:
+        (args.out_dir / "status.json").write_text(
+            json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     gate = runs[0]["gate"] if runs else False
     print(f"wrote {args.out_dir}/index.html, summary.md, data.json (gate={'green' if gate else 'red'})")
     return 0

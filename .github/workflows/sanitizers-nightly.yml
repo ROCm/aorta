@@ -24,6 +24,9 @@ env:
 jobs:
   sanitizers-gpu:
     name: gfx950 sanitizer regression
+    # Must match a real online runner: the MI350 host is labelled
+    # `self-hosted, gpu, mi350x` (same set the other GPU workflows target, e.g.
+    # gpu-tests.yml / eval-reusable.yml use `self-hosted, gpu`).
     runs-on: [self-hosted, gpu, mi350x]
     timeout-minutes: 120
     steps:
@@ -88,6 +91,9 @@ jobs:
         run: python scripts/sanitizers/compare_verdict_baselines.py "${RUNNER_TEMP}/sanitizer-out"
 
       - name: Upload sanitizer results
+        # Always upload whatever ran, even when an earlier step (e.g. the baseline
+        # comparison) failed, so the publish job can render the failure with any
+        # partial evidence instead of the run silently producing nothing.
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -105,16 +111,56 @@ jobs:
   publish:
     name: publish sanitizer dashboard
     needs: sanitizers-gpu
-    if: always() && needs.sanitizers-gpu.result != 'skipped'
+    # Run even when the GPU job failed (to publish the failure, not a stale green
+    # page) but NOT when it was skipped. Publish ONLY from main: a workflow_dispatch
+    # branch run still executes sanitizers-gpu and uploads its artifact, but must
+    # never push branch output onto the public sanitizer-results branch (that would
+    # bypass branch protection). Branch runs therefore produce artifacts only.
+    if: >-
+      always() &&
+      needs.sanitizers-gpu.result != 'skipped' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write   # push dashboard to the sanitizer-results branch
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
+        # A failed GPU job may leave no artifact at all; don't hard-fail the
+        # publish job -- we still want to record the failure on the public page.
+        continue-on-error: true
         with:
           name: sanitizer-nightly-${{ github.run_id }}
           path: incoming
+      - name: Record run status
+        # Manifest consumed by gen_sanitizer_dashboard.py (--status) to render a
+        # stale banner, and persisted to the data branch so Pages can tell a
+        # healthy snapshot from a stale one on every subsequent deploy.
+        env:
+          GPU_RESULT: ${{ needs.sanitizers-gpu.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p incoming
+          if [ "${GPU_RESULT}" = "success" ]; then healthy=true; else healthy=false; fi
+          python - "$healthy" "$GPU_RESULT" > status.json <<'PY'
+          import json, os, sys
+          healthy = sys.argv[1] == "true"
+          conclusion = sys.argv[2]
+          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          run_id = os.environ.get("GITHUB_RUN_ID", "")
+          from datetime import datetime, timezone
+          print(json.dumps({
+              "healthy": healthy,
+              "conclusion": conclusion,
+              "run_id": run_id,
+              "run_url": f"{server}/{repo}/actions/runs/{run_id}",
+              "commit": os.environ.get("GITHUB_SHA", ""),
+              "ref": os.environ.get("GITHUB_REF", ""),
+              "date": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+          }, indent=2, sort_keys=True))
+          PY
+          cat status.json
 
       - name: Generate sanitizer dashboard
         run: |
@@ -122,6 +168,7 @@ jobs:
             --results-dir incoming \
             --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
             --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
+            --status status.json \
             --out-dir dashboard
           cat dashboard/summary.md >> "$GITHUB_STEP_SUMMARY"
 

@@ -56,7 +56,13 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    `actions/deploy-pages`. **Repo Pages source must be "GitHub Actions"**
    (Settings -> Pages).    Nightly dashboard: `https://rocm.github.io/aorta/`;
    project docs: `https://rocm.github.io/aorta/docs/`.
-   Sanitizer nightly dashboard: `https://rocm.github.io/aorta/sanitizers/` (linked from the root nav).
+   Sanitizer nightly dashboard: `https://rocm.github.io/aorta/sanitizers/` (linked
+   from the root nav). The route is always published so it never 404s: before the
+   first successful sanitizer nightly it shows a "no sanitizer runs yet" empty
+   state, and if the latest nightly failed it shows the last data under a red
+   stale banner linking the failed run (rather than silently re-serving the
+   previous green page). Only sanitizer data produced by a `main` run is
+   published.
 
    The dashboard previously lived at `/ci/`, so that path is kept: `/ci/`
    redirects to the root and `/ci/data.json` is published alongside
