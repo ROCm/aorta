@@ -63,9 +63,13 @@ def run_sanitizers(
                         strict=consan_policy == "strict",
                     )
                 )
-            elif on_missing_backend == "fail":
-                results.append(scoped_consan_not_checked(worklist))
             else:
+                # ConSan is always fail-closed when no targeted repro command is
+                # provisioned: it never falls back to whole-application
+                # instrumentation, so every on_missing_backend policy resolves to
+                # not_checked here. The recipe loader restricts the value to
+                # "fail" so a typo can't imply a (non-existent) softer policy.
+                _ = on_missing_backend
                 results.append(scoped_consan_not_checked(worklist))
 
     report = build_report(

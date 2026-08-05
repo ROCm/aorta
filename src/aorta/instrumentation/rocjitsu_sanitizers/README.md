@@ -16,11 +16,12 @@ Available now as a Python library:
 - parse Record/Replay output from the combined Waitcheck + ConSan hook;
 - preserve per-code-object ConSan coverage and fail closed on timeout, backend
   failure, missing verdicts, or incomplete coverage;
-- write and strictly reload experimental `aorta.sanitizer_report/0.1` JSON.
+- write and strictly reload experimental `aorta.sanitizer_report/0.1` JSON;
+- execute a `mode: sanitizer` recipe end-to-end (selection -> backends ->
+  report) via `aorta sweep run --recipe ...` / `execute_sanitizer_run`.
 
 Not available yet:
 
-- recipe/dispatcher execution of `sanitizer_plan`;
 - automatic Magpie/TraceLens execution;
 - automatic RocJITsu provisioning;
 - top-K ConSan execution.

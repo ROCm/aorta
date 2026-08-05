@@ -29,7 +29,7 @@ _KV = re.compile(r"(\w+)=(\S+)")
 
 
 class ConSanMode(str, Enum):
-    """The only mode whose evidence PR #7 actually knows how to parse."""
+    """The only ConSan mode whose evidence this module can parse (Record/Replay)."""
 
     RECORD_REPLAY = "record-replay"
 

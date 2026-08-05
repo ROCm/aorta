@@ -271,6 +271,42 @@ def test_waitcheck_parses_upstream_diagnostic_schema(tmp_path: Path) -> None:
     assert findings[0].code == "missing_lgkmcnt_use"
 
 
+def test_waitcheck_accepts_single_image_without_index(tmp_path: Path) -> None:
+    # A single-image code object omits code_object_index in the JSONL; when the
+    # expected identity is also single-image (index None -> 0), that must parse
+    # rather than being rejected as a mismatch.
+    artifact = tmp_path / "kernel.hsaco"
+    artifact.write_bytes(b"\x7fELF")
+    identity = KernelIdentity(
+        name="selected_kernel",
+        target="gfx950",
+        code_object=str(artifact),
+        code_object_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        entry_offset=0x120,
+    )
+    diagnostics = tmp_path / "diagnostics.jsonl"
+    diagnostics.write_text(
+        json.dumps(
+            {
+                "schema": "rj-waitcheck-diagnostic-v1",
+                "input": str(artifact),
+                "target": "gfx950",
+                "kernel_name": "selected_kernel",
+                "kernel_entry": 0x120,
+                "counter": "lgkmcnt",
+                "access": "use",
+                "message": "missing s_waitcnt lgkmcnt(0)",
+            }
+        )
+        + "\n"
+    )
+
+    findings = parse_waitcheck_jsonl(diagnostics, expected=identity)
+
+    assert len(findings) == 1
+    assert findings[0].code == "missing_lgkmcnt_use"
+
+
 def test_waitcheck_rejects_structured_entry_mismatch(tmp_path: Path) -> None:
     artifact = tmp_path / "kernel.hsaco"
     artifact.write_bytes(b"\x7fELF")

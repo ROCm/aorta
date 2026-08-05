@@ -132,10 +132,13 @@ def parse_waitcheck_jsonl(
             item.get("code_object_index"),
             field="code_object_index",
         )
-        if code_object_index != (expected.code_object_index or 0):
+        expected_index = expected.code_object_index or 0
+        # A missing/null index means a single-image code object (index 0), which
+        # must not be rejected when the expected identity is also single-image.
+        if (code_object_index or 0) != expected_index:
             raise ValueError(
                 f"Waitcheck code-object index {code_object_index!r} does not match "
-                f"requested {(expected.code_object_index or 0)!r}"
+                f"requested {expected_index!r}"
             )
         entry_offset = _parse_non_negative_int(
             item.get("kernel_entry"),

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from aorta.instrumentation.rocjitsu_sanitizers.backends import support
 from aorta.instrumentation.rocjitsu_sanitizers.models import SelectionRequirement
 from aorta.instrumentation.rocjitsu_sanitizers.recipe import (
@@ -16,6 +18,7 @@ from aorta.instrumentation.rocjitsu_sanitizers.selection import (
     observations_from_rocprof_trace,
     select_kernels,
 )
+from aorta.triage.recipe import RecipeSchemaError
 
 _REPO = Path(__file__).resolve().parents[3]
 _FIXTURES = _REPO / "recipes" / "sanitizers" / "fixtures"
@@ -106,6 +109,74 @@ def test_execute_recipe_with_fewer_observations_than_top_n(tmp_path: Path) -> No
 
     assert report_path == tmp_path / "out" / "custom_report.json"
     assert report_path.is_file()
+
+
+def _write_gemm_recipe(tmp_path: Path, *, scope: str, policy_lines: str, source_extra: str = "") -> Path:
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        "schema_version: 1\n"
+        "mode: sanitizer\n"
+        "ticket: TEST\n"
+        "sanitizer_plan:\n"
+        "  target: gfx950\n"
+        "  source:\n"
+        "    kind: gemm_csv\n"
+        "    path: shapes.csv\n"
+        f"{source_extra}"
+        "  scope:\n"
+        f"    kind: {scope}\n"
+        "  selection:\n"
+        "    requirement: top_dispatch_count\n"
+        "    top_n: 3\n"
+        "  sanitizers:\n"
+        "    - waitcheck\n"
+        "  policy:\n"
+        f"{policy_lines}"
+        "  output:\n"
+        "    report: sanitizer_report.json\n",
+        encoding="utf-8",
+    )
+    return recipe
+
+
+_GOOD_POLICY = "    consan_policy: strict\n    on_missing_backend: fail\n"
+
+
+def test_recipe_rejects_unknown_scope_kind(tmp_path: Path) -> None:
+    recipe = _write_gemm_recipe(tmp_path, scope="module", policy_lines=_GOOD_POLICY)
+    with pytest.raises(RecipeSchemaError, match="scope.kind"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_recipe_rejects_unknown_consan_policy(tmp_path: Path) -> None:
+    recipe = _write_gemm_recipe(
+        tmp_path,
+        scope="kernel",
+        policy_lines="    consan_policy: strictt\n    on_missing_backend: fail\n",
+    )
+    with pytest.raises(RecipeSchemaError, match="consan_policy"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_recipe_rejects_unknown_on_missing_backend(tmp_path: Path) -> None:
+    recipe = _write_gemm_recipe(
+        tmp_path,
+        scope="kernel",
+        policy_lines="    consan_policy: strict\n    on_missing_backend: skip\n",
+    )
+    with pytest.raises(RecipeSchemaError, match="on_missing_backend"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_recipe_rejects_non_boolean_consan_log(tmp_path: Path) -> None:
+    recipe = _write_gemm_recipe(
+        tmp_path,
+        scope="kernel",
+        policy_lines=_GOOD_POLICY,
+        source_extra='    consan_log: "false"\n',
+    )
+    with pytest.raises(RecipeSchemaError, match="consan_log"):
+        load_sanitizer_recipe(recipe)
 
 
 def test_verdict_baselines_fixture_present() -> None:

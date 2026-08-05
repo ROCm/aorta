@@ -347,8 +347,7 @@ def build_html(runs: list[dict[str, Any]], *, title: str = "Sanitizers Nightly")
   <h1>{_esc(title)} &middot; gfx950</h1>
   <div class=meta>latest run <span class=mono>{_esc(meta.get('run', ''))}</span>
      &middot; commit <span class=mono>{_esc(meta.get('commit', ''))}</span>
-     &middot; {_esc(meta.get('date', ''))} &middot; target {_esc(meta.get('gpu', 'gfx950'))}
-     &middot; PR <a href="https://github.com/ROCm/aorta/pull/324">#324</a></div>
+     &middot; {_esc(meta.get('date', ''))} &middot; target {_esc(meta.get('gpu', 'gfx950'))}</div>
   <div class=gate>{_esc(gate_text)}</div>
 
   <h2>Latest run</h2>
@@ -381,7 +380,7 @@ def build_summary_md(runs: list[dict[str, Any]]) -> str:
     lines = [
         "# Sanitizers Nightly \u00b7 gfx950", "",
         f"Run `{meta.get('run', '')}` \u00b7 commit `{meta.get('commit', '')}` \u00b7 "
-        f"{meta.get('date', '')} \u00b7 [PR #324](https://github.com/ROCm/aorta/pull/324)",
+        f"{meta.get('date', '')}",
         "", gate, "",
         "| Recipe | Backend | Verdict | Baseline | Execution | Findings | Coverage |",
         "|---|---|---|---|---|--:|---|",

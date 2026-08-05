@@ -36,6 +36,9 @@ _SUPPORTED_SOURCE_KINDS = frozenset(
 )
 _SUPPORTED_REQUIREMENTS = frozenset({"top_time", "top_dispatch_count"})
 _SUPPORTED_SANITIZERS = frozenset({"waitcheck", "consan"})
+_SUPPORTED_SCOPES = frozenset({"kernel"})
+_SUPPORTED_CONSAN_POLICIES = frozenset({"strict", "lenient"})
+_SUPPORTED_MISSING_BACKEND = frozenset({"fail"})
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,8 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
 
     scope = _require_mapping(plan.get("scope"), name="sanitizer_plan.scope")
     scope_kind = _require_str(scope, "kind")
+    if scope_kind not in _SUPPORTED_SCOPES:
+        raise RecipeSchemaError(f"unsupported sanitizer_plan.scope.kind={scope_kind!r}")
     selection = _require_mapping(plan.get("selection"), name="sanitizer_plan.selection")
     requirement_raw = _require_str(selection, "requirement")
     if requirement_raw not in _SUPPORTED_REQUIREMENTS:
@@ -129,14 +134,25 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
 
     policy = _require_mapping(plan.get("policy"), name="sanitizer_plan.policy")
     consan_policy = _require_str(policy, "consan_policy")
+    if consan_policy not in _SUPPORTED_CONSAN_POLICIES:
+        raise RecipeSchemaError(
+            f"unsupported sanitizer_plan.policy.consan_policy={consan_policy!r}"
+        )
     on_missing_backend = _require_str(policy, "on_missing_backend")
+    if on_missing_backend not in _SUPPORTED_MISSING_BACKEND:
+        raise RecipeSchemaError(
+            f"unsupported sanitizer_plan.policy.on_missing_backend={on_missing_backend!r}"
+        )
     output = _require_mapping(plan.get("output"), name="sanitizer_plan.output")
     report_name = _require_str(output, "report")
 
     source_path: Path | None = None
     isa_dir: Path | None = None
     consan_command: Path | None = None
-    consan_log = bool(source.get("consan_log", True))
+    consan_log_raw = source.get("consan_log", True)
+    if not isinstance(consan_log_raw, bool):
+        raise RecipeSchemaError("sanitizer_plan.source.consan_log must be a boolean")
+    consan_log = consan_log_raw
     repro_variant: str | None = None
     kernel_names: tuple[str, ...] = ()
 
@@ -270,8 +286,6 @@ def execute_sanitizer_run(
     waitcheck_binary = _resolve_waitcheck_binary(build)
     consan_hook = _resolve_consan_hook(build)
     consan_command = recipe.consan_command
-    if consan_command is None and recipe.source_kind == "consan_repro":
-        consan_command = output_dir / "consan_repro"
 
     run_sanitizers(
         worklist,
