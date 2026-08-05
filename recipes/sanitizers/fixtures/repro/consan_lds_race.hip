@@ -1,6 +1,10 @@
-// gfx950 ConSan repro: deliberate cross-wave LDS write/read race + a
-// missing-wait load. Mirrors the upstream sanitizers.md minimal repro but
-// compiled natively for gfx950 (MI350) so ConSan runs on real hardware.
+// gfx950 ConSan "clean" baseline: a single-wavefront LDS write/read that is
+// deliberately NOT a race. gfx950 (CDNA4) has a 64-lane wavefront, so launching
+// 64 threads in one block keeps every access inside one wave; the write and the
+// later read are ordered within that wave, so ConSan should report NO hazard
+// (daily-consan-clean.yaml expects PASS). Contrast the two-wave variant in
+// consan_lds_race_2wave.hip, which launches 2 waves to force a real cross-wave
+// race.
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
@@ -8,7 +12,8 @@ __global__ void lds_race(uint32_t *out) {
   __shared__ uint32_t value[64];
   const uint32_t tid = threadIdx.x;
   value[tid] = tid;
-  // Wave 1 reads what wave 0 wrote, with no barrier between them.
+  // Single 64-lane wave: this read is ordered after the write within the wave,
+  // so there is no cross-wave hazard.
   if (tid >= 32)
     out[tid] = value[tid - 32];
 }

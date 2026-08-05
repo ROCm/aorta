@@ -299,6 +299,35 @@ def test_run_consan_omits_log_env_when_logging_disabled(
     assert "RJ_CONSAN_LOG" not in env
 
 
+def test_run_consan_scrubs_inherited_log_env_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # A stray RJ_CONSAN_LOG in the parent environment must not leak through when
+    # the recipe disables logging; otherwise logging (and coverage strictness)
+    # would be non-deterministic.
+    hook = tmp_path / "librocjitsu_dbi_hooks.so"
+    hook.write_bytes(b"")
+    command = tmp_path / "repro"
+    command.write_bytes(b"")
+    monkeypatch.setenv("RJ_CONSAN_LOG", "1")
+    captured: dict[str, str] = {}
+
+    def fake_run_argv(argv, *, timeout_seconds, env):
+        captured.update(env)
+        return ProcessResult(tuple(argv), 0, _healthy_evidence(), "")
+
+    monkeypatch.setattr(consan_module, "run_argv", fake_run_argv)
+    run_consan(
+        _worklist(),
+        command=command,
+        hook_lib=hook,
+        output_dir=tmp_path / "out",
+        consan_log=False,
+    )
+
+    assert "RJ_CONSAN_LOG" not in captured
+
+
 def test_object_coverage_static_complete_tracks_verdict() -> None:
     # The coverage record still reports analysis_complete=true, but the aggregate
     # analysis verdict is the authority for static completeness. A verdict that

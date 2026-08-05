@@ -462,6 +462,11 @@ def run_consan(
     env["HSA_TOOLS_LIB"] = str(resolved_hook)
     if consan_log:
         env["RJ_CONSAN_LOG"] = _CONSAN_LOG_DEBUG_LEVEL
+    else:
+        # Scrub any inherited RJ_CONSAN_LOG so disabling logging is deterministic
+        # regardless of the parent environment (a stray value would otherwise
+        # force hook logging and change coverage parsing strictness).
+        env.pop("RJ_CONSAN_LOG", None)
     process = run_argv(
         (str(command),),
         timeout_seconds=timeout_seconds,
