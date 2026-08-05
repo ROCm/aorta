@@ -58,6 +58,12 @@ def test_dashboard_empty_history():
     assert "no results yet" in html
 
 
+def test_dashboard_links_to_sanitizer_nightly():
+    html = gen_dashboard.build_dashboard_html([])
+    assert 'href="sanitizers/"' in html
+    assert "sanitizer nightly" in html
+
+
 def test_dashboard_renders_summary_metric_series():
     r = _results("2026-07-29T00:00:00Z",
                  [{"entry": "inference_offline", "cell": "baseline-local", "verdict": "pass",

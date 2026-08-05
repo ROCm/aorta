@@ -345,6 +345,7 @@ def build_html(runs: list[dict[str, Any]], *, title: str = "Sanitizers Nightly")
   }}
 </style></head>
 <body><div class=wrap>
+  <p class=nav><a href="../">back to CI dashboard</a></p>
   <h1>{_esc(title)} &middot; gfx950</h1>
   <div class=meta>latest run <span class=mono>{_esc(meta.get('run', ''))}</span>
      &middot; commit <span class=mono>{_esc(meta.get('commit', ''))}</span>

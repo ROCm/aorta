@@ -54,8 +54,9 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    (`gen_dashboard.py`, from the `ci-results` history) to `_site/index.html`, and
    deploys the combined site via `actions/upload-pages-artifact` +
    `actions/deploy-pages`. **Repo Pages source must be "GitHub Actions"**
-   (Settings -> Pages). Nightly dashboard: `https://rocm.github.io/aorta/`;
+   (Settings -> Pages).    Nightly dashboard: `https://rocm.github.io/aorta/`;
    project docs: `https://rocm.github.io/aorta/docs/`.
+   Sanitizer nightly dashboard: `https://rocm.github.io/aorta/sanitizers/` (linked from the root nav).
 
    The dashboard previously lived at `/ci/`, so that path is kept: `/ci/`
    redirects to the root and `/ci/data.json` is published alongside

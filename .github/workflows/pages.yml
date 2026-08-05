@@ -5,13 +5,15 @@ name: Pages (landing + nightly dashboard)
 # BOTH the nightly CI dashboard (at the site root) AND the project landing page
 # (Jekyll render of README.md, under /docs/ alongside the rest of the rendered
 # docs). It runs on main pushes, after each "Nightly Evaluation" completes (pick
-# up fresh history from the ci-results branch), and on demand.
+# up fresh history from the ci-results branch), after each "Sanitizers Nightly"
+# completes (pick up fresh history from the sanitizer-results branch), and on
+# demand.
 
 on:
   push:
     branches: [main]
   workflow_run:
-    workflows: ["Nightly Evaluation"]
+    workflows: ["Nightly Evaluation", "Sanitizers Nightly"]
     types: [completed]
   workflow_dispatch:
 
@@ -127,6 +129,38 @@ jobs:
             echo "no history yet; published the dashboard's empty state at /"
           fi
 
+      # History lives on the sanitizer-results data branch (written by
+      # sanitizers-nightly's publish job); it may not exist until the first
+      # sanitizer nightly runs. Same fail-closed ls-remote contract as ci-results.
+      - name: Publish the sanitizer dashboard at /sanitizers/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          set +e
+          git ls-remote --exit-code --heads "$repo_url" sanitizer-results >/dev/null 2>&1
+          lsr=$?
+          set -e
+          if [ "$lsr" -eq 2 ]; then
+            echo "sanitizer-results branch absent; sub-page appears after the first sanitizer nightly"
+            echo "SANITIZER_DASHBOARD=absent" >> "$GITHUB_ENV"
+          elif [ "$lsr" -ne 0 ]; then
+            echo "::error::cannot reach sanitizer-results (git ls-remote exit ${lsr}); failing closed"
+            exit 1
+          else
+            echo "SANITIZER_DASHBOARD=present" >> "$GITHUB_ENV"
+            tmp="$(mktemp -d)"
+            git clone --depth 1 --branch sanitizer-results "$repo_url" "$tmp"
+            if [ -d "$tmp/dashboard" ] && [ -f "$tmp/dashboard/index.html" ]; then
+              mkdir -p _site/sanitizers
+              cp -r "$tmp/dashboard/"* _site/sanitizers/
+              echo "sanitizer dashboard at /sanitizers/"
+            else
+              echo "sanitizer-results exists but has no dashboard yet"
+            fi
+          fi
+
       # The dashboard used to live at /ci/, the docs advertised that URL, and
       # /ci/data.json is a machine-readable endpoint something may already poll.
       # A Pages deploy replaces the whole site, so moving the dashboard to the
@@ -159,8 +193,17 @@ jobs:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
         run: |
           set -euo pipefail
-          for f in _site/index.html _site/docs/index.html _site/ci/index.html \
-                   _site/data.json _site/ci/data.json; do
+          routes=(
+            _site/index.html
+            _site/docs/index.html
+            _site/ci/index.html
+            _site/data.json
+            _site/ci/data.json
+          )
+          if [ "${SANITIZER_DASHBOARD:-absent}" = "present" ]; then
+            routes+=(_site/sanitizers/index.html)
+          fi
+          for f in "${routes[@]}"; do
             if [ ! -s "$f" ]; then
               echo "::error::$f is missing or empty; refusing to deploy"
               exit 1
@@ -174,7 +217,11 @@ jobs:
             echo "::error::/docs/ still claims the dashboard's URL as its own"
             exit 1
           fi
-          echo "routes ok: / /docs/ /ci/ /data.json /ci/data.json"
+          msg="routes ok: / /docs/ /ci/ /data.json /ci/data.json"
+          if [ "${SANITIZER_DASHBOARD:-absent}" = "present" ]; then
+            msg="${msg} /sanitizers/"
+          fi
+          echo "$msg"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4

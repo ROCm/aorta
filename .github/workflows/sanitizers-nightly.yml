@@ -107,6 +107,8 @@ jobs:
     needs: sanitizers-gpu
     if: always() && needs.sanitizers-gpu.result != 'skipped'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push dashboard to the sanitizer-results branch
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
@@ -122,6 +124,44 @@ jobs:
             --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
             --out-dir dashboard
           cat dashboard/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update sanitizer-results branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -d dashboard ] || { echo "no dashboard/; skipping publish"; exit 0; }
+          date="$(date -u +%Y-%m-%d)"
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          tmp="$(mktemp -d)"
+          # Fail closed: distinguish a genuinely-absent sanitizer-results branch
+          # (create the orphan) from a transport/auth failure (must NOT be treated
+          # as "branch absent"). git ls-remote --exit-code: 0=present, 2=absent,
+          # else=error.
+          set +e
+          git ls-remote --exit-code --heads "$repo_url" sanitizer-results >/dev/null 2>&1
+          lsr=$?
+          set -e
+          if [ "$lsr" -eq 0 ]; then
+            git clone --depth 1 --branch sanitizer-results "$repo_url" "$tmp"
+          elif [ "$lsr" -eq 2 ]; then
+            echo "sanitizer-results branch absent; creating it"
+            git clone --depth 1 "$repo_url" "$tmp"
+            ( cd "$tmp" && git checkout --orphan sanitizer-results && git rm -rf . >/dev/null 2>&1 || true )
+          else
+            echo "::error::cannot reach sanitizer-results (git ls-remote exit ${lsr}); failing closed"
+            exit 1
+          fi
+          rm -rf "$tmp/dashboard"
+          cp -a dashboard "$tmp/dashboard"
+          ( cd "$tmp"
+            git add -A
+            if git -c user.name=aorta-ci -c user.email=aorta-ci@users.noreply.github.com \
+                 commit -m "sanitizer dashboard ${date}"; then
+              git push origin sanitizer-results   # not swallowed -- a push failure fails the job
+            else
+              echo "no changes to commit"
+            fi )
 
       - name: Upload sanitizer dashboard
         if: always()
