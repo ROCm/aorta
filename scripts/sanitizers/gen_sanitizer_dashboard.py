@@ -37,7 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from html import escape as _esc
 from pathlib import Path
 from typing import Any
@@ -460,7 +460,7 @@ def main() -> int:
         meta = {
             "run": args.run_label or "latest",
             "commit": _short(args.commit, 12),
-            "date": datetime.now(tz=UTC).isoformat(timespec="seconds"),
+            "date": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
             "gpu": "gfx950",
         }
         runs = runs_from_results_dir(args.results_dir, baselines, meta=meta)

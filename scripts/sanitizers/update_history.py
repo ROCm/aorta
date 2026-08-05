@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -15,7 +15,7 @@ def main(argv: list[str]) -> int:
         return 2
     incoming = Path(argv[1])
     history = Path("sanitizer-history.json")
-    payload = {"date": datetime.now(tz=UTC).date().isoformat(), "cases": {}}
+    payload = {"date": datetime.now(tz=timezone.utc).date().isoformat(), "cases": {}}
     for case in ("waitcheck", "consan-clean", "consan-racy"):
         report = incoming / case / "sanitizer_report.json"
         if report.is_file():
