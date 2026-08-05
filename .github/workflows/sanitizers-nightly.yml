@@ -5,10 +5,11 @@ on:
     - cron: "0 12 * * *"
   workflow_dispatch:
 
+# The dashboard is surfaced via the run's job summary + an uploaded artifact.
+# GitHub Pages is owned solely by the "Pages" workflow (one Pages site per repo),
+# so this workflow deliberately does not request pages/id-token.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: sanitizers-nightly-${{ github.workflow }}-${{ github.ref }}
@@ -95,3 +96,18 @@ jobs:
           path: incoming
       - name: Update sanitizer history
         run: python scripts/sanitizers/update_history.py incoming
+
+      - name: Generate sanitizer dashboard
+        run: |
+          python scripts/sanitizers/gen_sanitizer_dashboard.py \
+            --results-dir incoming \
+            --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
+            --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
+            --out-dir dashboard
+          cat dashboard/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitizer dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-dashboard-${{ github.run_id }}
+          path: dashboard
