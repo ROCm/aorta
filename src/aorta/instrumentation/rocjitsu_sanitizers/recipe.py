@@ -174,6 +174,8 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
 
     if "isa_dir" in source:
         isa_dir = _resolve_path(_require_str(source, "isa_dir"), recipe_path=path)
+    if source_kind == "gemm_csv" and isa_dir is None:
+        raise RecipeSchemaError("sanitizer_plan.source.isa_dir is required for gemm_csv")
 
     ticket = _require_str(data, "ticket") if "ticket" in data else path.stem
     return SanitizerRecipe(

@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from html import escape as _esc
 from pathlib import Path
@@ -454,7 +455,15 @@ def main() -> int:
     ap.add_argument("--run-label", default=os.environ.get("GITHUB_RUN_ID", ""))
     args = ap.parse_args()
 
-    baselines = _load(args.baselines) or {}
+    # Load baselines strictly: a missing/corrupt file would otherwise leave every
+    # expected verdict as None (match=True) and paint a false-green gate.
+    baselines = _load(args.baselines)
+    if not isinstance(baselines, dict) or not baselines:
+        print(
+            f"error: baselines file {args.baselines} is missing, empty, or unreadable",
+            file=sys.stderr,
+        )
+        return 2
     if args.results_dir is not None:
         meta = {
             "run": args.run_label or "latest",

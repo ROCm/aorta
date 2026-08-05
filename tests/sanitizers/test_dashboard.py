@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -184,3 +185,18 @@ def test_runs_from_results_dir_matches_baselines(tmp_path):
     assert rows["consan-racy"]["match"] is True
     assert rows["consan-clean"]["present"] is False
     assert runs[0]["gate"] is False
+
+
+def test_main_fails_closed_on_missing_baselines(tmp_path, monkeypatch):
+    # A missing/unreadable baselines file must not paint a false-green gate: main
+    # exits non-zero instead of falling back to an empty baseline set.
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--results-dir", str(tmp_path / "incoming"),
+        "--baselines", str(tmp_path / "missing.json"),
+        "--out-dir", str(tmp_path / "out"),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert gen.main() == 2
+    assert not (tmp_path / "out").exists()

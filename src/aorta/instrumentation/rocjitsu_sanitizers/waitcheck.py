@@ -1,4 +1,4 @@
-"""Exact-entry static Waitcheck backend."""
+"""Static Waitcheck backend for exact-entry and whole-code-object-scan identities."""
 
 from __future__ import annotations
 

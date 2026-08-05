@@ -111,7 +111,15 @@ def test_execute_recipe_with_fewer_observations_than_top_n(tmp_path: Path) -> No
     assert report_path.is_file()
 
 
-def _write_gemm_recipe(tmp_path: Path, *, scope: str, policy_lines: str, source_extra: str = "") -> Path:
+def _write_gemm_recipe(
+    tmp_path: Path,
+    *,
+    scope: str,
+    policy_lines: str,
+    source_extra: str = "",
+    include_isa_dir: bool = True,
+) -> Path:
+    isa_line = "    isa_dir: isa\n" if include_isa_dir else ""
     recipe = tmp_path / "recipe.yaml"
     recipe.write_text(
         "schema_version: 1\n"
@@ -122,6 +130,7 @@ def _write_gemm_recipe(tmp_path: Path, *, scope: str, policy_lines: str, source_
         "  source:\n"
         "    kind: gemm_csv\n"
         "    path: shapes.csv\n"
+        f"{isa_line}"
         f"{source_extra}"
         "  scope:\n"
         f"    kind: {scope}\n"
@@ -165,6 +174,14 @@ def test_recipe_rejects_unknown_on_missing_backend(tmp_path: Path) -> None:
         policy_lines="    consan_policy: strict\n    on_missing_backend: skip\n",
     )
     with pytest.raises(RecipeSchemaError, match="on_missing_backend"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_recipe_rejects_gemm_csv_without_isa_dir(tmp_path: Path) -> None:
+    recipe = _write_gemm_recipe(
+        tmp_path, scope="kernel", policy_lines=_GOOD_POLICY, include_isa_dir=False
+    )
+    with pytest.raises(RecipeSchemaError, match="isa_dir"):
         load_sanitizer_recipe(recipe)
 
 
