@@ -63,6 +63,26 @@ _VERDICT_COLOR = {
 # Worst-first, so a group's tally leads with whatever needs attention.
 _VERDICT_ORDER = ("fail", "record", "skip", "pass")
 
+# How many nightly runs the history grid shows before it starts scrolling. The
+# full history still ships in data.json; this only bounds the rendered rows.
+_GRID_RUNS = 14
+
+# A metric has to move more than this to be worth reporting as a change. Step
+# times on a shared runner wander a few percent between identical runs, so a
+# lower bar would fill the section with noise every night.
+_MOVE_PCT = 10.0
+
+# Fields worth diffing between runs, in the order they are reported. AORTA's own
+# version is deliberately absent: it is date-stamped and therefore changes every
+# single night, so reporting it would mark every run as a change and teach the
+# reader to ignore the one marker that should mean something. What can actually
+# explain a regression is the stack underneath.
+_TOOLCHAIN_FIELDS = (
+    ("torch", "PyTorch"),
+    ("rocm", "ROCm"),
+    ("hip", "HIP"),
+)
+
 
 def _isnum(v: Any) -> bool:
     """Numeric, finite, and representable as a float — i.e. safe to render.
@@ -242,6 +262,244 @@ def _metric_rows(
             f"<td class='num'>{_esc(val)}</td>{trend}</tr>"
         )
     return "".join(out)
+
+
+def _key(entry: dict[str, Any]) -> str:
+    return f"{entry.get('entry')}::{entry.get('cell')}"
+
+
+def _cell_label(entry: dict[str, Any]) -> str:
+    """``workload::cell`` for prose, with the cell-less form spelled out."""
+    name = entry.get("cell")
+    return f"{entry.get('entry')}::{name}" if name else f"{entry.get('entry')} (whole workload)"
+
+
+def _measurements(entry: dict[str, Any]) -> dict[str, float]:
+    """Every comparable number a result reports, keyed by metric name.
+
+    ``mean_step_time_ms`` sits beside the workload's own ``summary`` metrics so
+    both move through the same comparison; a workload can report either without
+    the other.
+    """
+    metrics = entry.get("metrics") or {}
+    out: dict[str, float] = {}
+    step = metrics.get("mean_step_time_ms")
+    if _isnum(step):
+        out["mean_step_time_ms"] = float(step)
+    for name, val in (metrics.get("summary") or {}).items():
+        if _isnum(val):
+            out[str(name)] = float(val)
+    return out
+
+
+def _tally(entries: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for e in entries:
+        v = str(e.get("verdict", "skip"))
+        counts[v] = counts.get(v, 0) + 1
+    return counts
+
+
+def _tally_text(counts: dict[str, int]) -> str:
+    known = " · ".join(f"{counts[v]} {v}" for v in _VERDICT_ORDER if counts.get(v))
+    # A verdict this generator has no colour for still has to be counted; the
+    # results JSON is not ours to constrain.
+    extra = " · ".join(
+        f"{counts[v]} {v}" for v in sorted(counts) if v not in _VERDICT_ORDER
+    )
+    return " · ".join(p for p in (known, extra) if p)
+
+
+def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS) -> str:
+    """One row per nightly run, one column per workload (pure).
+
+    The page's other table answers "how is tonight?"; this one answers "how has
+    this workload been?", which no single-run view can. Cells carry the count of
+    results and take the colour of the worst verdict among them, so a column
+    that turns red and stays red is visible without reading any number.
+    """
+    runs = results[-max_runs:] if max_runs > 0 else list(results)
+    if len(runs) < 2:
+        return ""
+
+    # Column order follows the newest run so tonight's matrix reads left to
+    # right as configured; workloads that have since been retired trail it
+    # rather than disappearing, which would hide that they ever ran.
+    newest = [str(e.get("entry")) for e in (runs[-1].get("entries") or [])]
+    ordered: list[str] = []
+    for name in newest:
+        if name not in ordered:
+            ordered.append(name)
+    for doc in reversed(runs):
+        for e in doc.get("entries") or []:
+            name = str(e.get("entry"))
+            if name not in ordered:
+                ordered.append(name)
+    if not ordered:
+        return ""
+
+    head = "".join(
+        f"<th scope='col' class='wlcol' title='{_esc(n)}'>{_esc(n)}</th>" for n in ordered
+    )
+
+    newest_first = list(reversed(runs))
+    rows = []
+    for i, doc in enumerate(newest_first):
+        build = doc.get("build") or {}
+        by_entry: dict[str, list[dict[str, Any]]] = {}
+        for e in doc.get("entries") or []:
+            by_entry.setdefault(str(e.get("entry")), []).append(e)
+
+        status, color = _latest_status([doc])
+        date = _fmt_timestamp(str(doc.get("generated_at") or "")).split(" ")[0] or "—"
+        run_id = str(build.get("upstream_run_id") or "")
+        when = (
+            f"<a href='https://github.com/{_REPO}/actions/runs/{_esc(run_id)}'>{_esc(date)}</a>"
+            if run_id else _esc(date)
+        )
+
+        # Mark the run where the toolchain moved: a column that changes colour on
+        # exactly that row is the whole point of running this nightly.
+        older = newest_first[i + 1] if i + 1 < len(newest_first) else None
+        bumped = bool(older) and any(
+            str((older.get("build") or {}).get(f) or "") != str(build.get(f) or "")
+            for f, _ in _TOOLCHAIN_FIELDS
+        )
+        flag = " <span class='bump' title='toolchain changed in this run'>bump</span>" if bumped else ""
+
+        cells = []
+        for name in ordered:
+            group = by_entry.get(name) or []
+            if not group:
+                cells.append("<td class='gcell'><span class='absent' title='not in this run'>·</span></td>")
+                continue
+            counts = _tally(group)
+            worst = next((v for v in _VERDICT_ORDER if counts.get(v)), "")
+            n = len(group)
+            worst_n = counts.get(worst, 0)
+            text = str(n) if worst_n == n else f"{worst_n}/{n}"
+            bg = _VERDICT_COLOR.get(worst, "#57606a")
+            cells.append(
+                f"<td class='gcell'><span class='dot' style='background:{bg}' "
+                f"title='{_esc(name)} — {_esc(_tally_text(counts))}'>{_esc(text)}</span></td>"
+            )
+
+        rows.append(
+            f"<tr><th scope='row' class='runcell'>{when}{flag}"
+            f"<span class='runmeta'>{_esc(str(build.get('amd_aorta_version') or ''))}</span></th>"
+            f"<td class='center'><span class='badge sm' style='background:{color}'>"
+            f"{_esc(status)}</span></td>{''.join(cells)}</tr>"
+        )
+
+    return (
+        "<h2>Run history</h2>"
+        "<p class='muted'>Each row is one nightly run, newest first; each column is a "
+        "workload. A cell shows how many results it produced, coloured by the worst "
+        "verdict among them — hover for the breakdown.</p>"
+        "<div class='tablewrap'><table class='grid'>"
+        f"<thead><tr><th scope='col'>run</th><th scope='col' class='center'>status</th>"
+        f"{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def build_change_summary(results: list[dict[str, Any]]) -> str:
+    """What moved between the two most recent runs (pure).
+
+    The nightly exists to catch what a new wheel broke, and that is a question
+    about the difference between two runs, not about either one of them. Ordered
+    by what would make someone act: the toolchain that changed, then verdicts
+    that flipped, then the matrix gaining or losing cells, then metrics that
+    moved far enough to mean something.
+    """
+    if len(results) < 2:
+        return ""
+    prev, latest = results[-2], results[-1]
+    prev_by = {_key(e): e for e in (prev.get("entries") or [])}
+    latest_by = {_key(e): e for e in (latest.get("entries") or [])}
+
+    items: list[str] = []
+
+    bumps = []
+    for field, label in _TOOLCHAIN_FIELDS:
+        before = str((prev.get("build") or {}).get(field) or "")
+        after = str((latest.get("build") or {}).get(field) or "")
+        if before != after and (before or after):
+            bumps.append(
+                f"{_esc(label)} <span class='mono'>{_esc(before or 'none')}</span> → "
+                f"<span class='mono'>{_esc(after or 'none')}</span>"
+            )
+    if bumps:
+        items.append(f"<li class='bumped'>Toolchain: {' · '.join(bumps)}</li>")
+
+    flips = []
+    for k in sorted(set(prev_by) & set(latest_by)):
+        was = str(prev_by[k].get("verdict", ""))
+        now = str(latest_by[k].get("verdict", ""))
+        if was != now:
+            flips.append((now, was, latest_by[k]))
+    # Regressions first: a cell that started failing is the reason to read this.
+    flips.sort(key=lambda f: (_VERDICT_ORDER.index(f[0]) if f[0] in _VERDICT_ORDER else 9))
+    for now, was, entry in flips:
+        color = _VERDICT_COLOR.get(now, "#57606a")
+        why = "; ".join(entry.get("reasons") or [])
+        tail = f" <span class='muted'>{_esc(why)}</span>" if why else ""
+        items.append(
+            f"<li><span class='mono'>{_esc(_cell_label(entry))}</span> "
+            f"{_esc(was)} → <span class='badge sm' style='background:{color}'>"
+            f"{_esc(now)}</span>{tail}</li>"
+        )
+
+    gained = sorted(set(latest_by) - set(prev_by))
+    lost = sorted(set(prev_by) - set(latest_by))
+    for k in gained:
+        items.append(
+            f"<li>new result <span class='mono'>{_esc(_cell_label(latest_by[k]))}</span></li>"
+        )
+    for k in lost:
+        items.append(
+            f"<li>no longer reported <span class='mono'>{_esc(_cell_label(prev_by[k]))}</span></li>"
+        )
+
+    movers = []
+    for k in sorted(set(prev_by) & set(latest_by)):
+        before_m = _measurements(prev_by[k])
+        after_m = _measurements(latest_by[k])
+        for metric in sorted(set(before_m) & set(after_m)):
+            b, a = before_m[metric], after_m[metric]
+            if not b:  # a move from zero has no meaningful percentage
+                continue
+            pct = (a - b) / abs(b) * 100.0
+            if abs(pct) >= _MOVE_PCT:
+                movers.append((abs(pct), pct, k, metric, b, a, latest_by[k]))
+    movers.sort(reverse=True)
+    for _, pct, _k, metric, b, a, entry in movers[:6]:
+        unit = _METRIC_UNITS.get(metric, "")
+        arrow = "▲" if pct > 0 else "▼"
+        items.append(
+            f"<li><span class='mono'>{_esc(_cell_label(entry))}</span> "
+            f"<span class='mono'>{_esc(metric)}</span> {arrow} {pct:+.0f}% "
+            f"<span class='muted'>{_esc(_fmt_num(b))} → {_esc(_fmt_num(a))}"
+            f"{(' ' + _esc(unit)) if unit else ''}</span></li>"
+        )
+
+    since = _fmt_timestamp(str(prev.get("generated_at") or "")).split(" ")[0]
+    if not items:
+        body = (
+            "<p class='steady'>Nothing moved: same workloads, same verdicts, and no "
+            f"metric changed by more than {_MOVE_PCT:.0f}%.</p>"
+        )
+    else:
+        extra = len(movers) - 6
+        more = (
+            f"<p class='muted'>and {extra} more metric"
+            f"{'' if extra == 1 else 's'} past {_MOVE_PCT:.0f}%</p>"
+            if extra > 0 else ""
+        )
+        body = f"<ul class='changes'>{''.join(items)}</ul>{more}"
+
+    return (
+        f"<h2>What changed since {_esc(since or 'the previous run')}</h2>{body}"
+    )
 
 
 def build_dashboard_html(results: list[dict[str, Any]]) -> str:
@@ -502,6 +760,9 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         for k, v, c in cards
     )
 
+    changes_html = build_change_summary(results)
+    history_html = build_history_grid(results)
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -582,10 +843,40 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   table.inner thead th {{ position:static; }}
   .badge {{ display:inline-block; min-width:62px; text-align:center; color:#fff;
             padding:2px 8px; border-radius:999px; font-size:.75rem; font-weight:600; }}
+  .badge.sm {{ min-width:0; font-size:.68rem; padding:1px 7px; }}
   .mono {{ font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
            font-size:.82rem; overflow-wrap:anywhere; }}
   .muted {{ color:var(--muted); font-size:.8rem; }}
   .legend {{ color:var(--muted); font-size:.78rem; margin:.7rem 0 0; }}
+  /* What changed: a list read top-down, so the eye lands on the toolchain bump
+     and the regressions before the smaller metric moves. */
+  ul.changes {{ list-style:none; margin:.5rem 0 0; padding:0; }}
+  ul.changes li {{ background:var(--panel); border:1px solid var(--border);
+                   border-left:3px solid var(--border); border-radius:6px;
+                   padding:.45rem .75rem; margin:.35rem 0; font-size:.86rem; }}
+  ul.changes li.bumped {{ border-left-color:var(--accent); }}
+  .steady {{ color:var(--muted); font-size:.86rem; margin:.5rem 0 0; }}
+  /* Run history: dense by design -- one glance should show a column that has
+     been red for a week, so cells stay small and colour does the talking. */
+  table.grid th.wlcol {{ font-size:.62rem; max-width:96px; overflow:hidden;
+                         text-overflow:ellipsis; white-space:nowrap; }}
+  table.grid td.gcell {{ text-align:center; padding:.35rem .4rem; }}
+  table.grid th.runcell {{ white-space:nowrap; font-weight:600; font-size:.82rem; }}
+  .runmeta {{ display:block; color:var(--muted); font-weight:400; font-size:.68rem;
+              font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  .bump {{ display:inline-block; margin-left:.4rem; padding:0 6px; border-radius:999px;
+           background:#1f6feb33; color:var(--accent); font-size:.62rem;
+           font-weight:600; text-transform:uppercase; letter-spacing:.05em; }}
+  .dot {{ display:inline-block; min-width:30px; padding:2px 6px; border-radius:6px;
+          color:#fff; font-size:.72rem; font-weight:600;
+          font-variant-numeric:tabular-nums; }}
+  .absent {{ color:#39414a; }}
+  .secthead {{ display:flex; align-items:baseline; justify-content:space-between;
+               gap:1rem; flex-wrap:wrap; }}
+  .toolbar button {{ background:var(--panel); color:var(--fg);
+                     border:1px solid var(--border); border-radius:6px;
+                     padding:.25rem .6rem; font-size:.75rem; cursor:pointer; }}
+  .toolbar button:hover {{ border-color:var(--accent); color:var(--accent); }}
 </style></head>
 <body>
   <div class="wrap">
@@ -610,7 +901,17 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
       <div class="card trend"><div class="k">pass-rate trend</div><div class="v">{_svg_sparkline(passrate, width=240)}</div></div>
     </div>
 
-    <h2>Workloads</h2>
+    {changes_html}
+
+    {history_html}
+
+    <div class="secthead">
+      <h2>Workloads</h2>
+      <div class="toolbar" id="toolbar" hidden>
+        <button type="button" data-details="open">Expand all</button>
+        <button type="button" data-details="close">Collapse all</button>
+      </div>
+    </div>
     <div class="tablewrap">
       <table>
         <thead><tr>{''.join(head)}</tr></thead>
@@ -624,6 +925,22 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
       its cells yields a single row for the whole workload, so a count of rows is
       not a count of configured cells. Expand a row for its metrics and recipe.</p>
   </div>
+<script>
+// Progressive enhancement only: the page is complete without this, so the
+// controls stay hidden until the script that drives them has actually run.
+(function () {{
+  var bar = document.getElementById("toolbar");
+  if (!bar) return;
+  bar.hidden = false;
+  bar.addEventListener("click", function (ev) {{
+    var want = ev.target && ev.target.getAttribute("data-details");
+    if (!want) return;
+    var open = want === "open";
+    var all = document.querySelectorAll("tr.mrow details");
+    for (var i = 0; i < all.length; i++) all[i].open = open;
+  }});
+}})();
+</script>
 </body></html>
 """
 

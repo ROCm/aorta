@@ -63,6 +63,31 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    deploy if any of those routes would be missing, since a Pages deploy
    replaces the whole site and a dropped route 404s immediately.
 
+## What the dashboard shows
+
+Three views, ordered so the page reads from "what should I do?" down to detail:
+
+- **What changed since \<date\>** diffs the two most recent runs, which is the
+  question a nightly actually answers. It reports, in this order: the toolchain
+  that moved (PyTorch / ROCm / HIP -- deliberately *not* AORTA's own version,
+  which is date-stamped and so changes every night), verdicts that flipped with
+  regressions first and their reasons attached, cells the matrix gained or lost,
+  and metrics that moved by more than `_MOVE_PCT` (10%). A quiet night says so
+  in one line rather than rendering an empty list.
+- **Run history** is one row per run (newest first) and one column per workload.
+  Each cell carries the number of results and the colour of the worst verdict
+  among them, so a workload that broke and stayed broken reads as a column that
+  turns red and stays red -- something no single-run view can show. Rows link to
+  their workflow run and are marked when the toolchain moved; a workload absent
+  from that night's matrix is a muted dot, not a blank.
+- **Workloads** is tonight's detail: cells grouped under their workload, with
+  metrics and recipe provenance nested in collapsible rows.
+
+Both of the first two withhold themselves until there are two runs to compare;
+with a single run they would imply a trend from one sample. The page needs no
+JavaScript -- the only script expands and collapses the metric rows, and its
+controls stay hidden unless it runs.
+
 ## Correctness vs performance
 
 - **Correctness** is gated: a cell that should pass but errored/failed => `fail`.
