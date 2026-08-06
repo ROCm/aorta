@@ -1,9 +1,9 @@
 {
-  "commit": "9ac25d9137779443c596dc31a26673cd97d862bc",
-  "conclusion": "failure",
-  "date": "2026-08-06T15:27:46+00:00",
+  "commit": "4d410a42b61acd34fbb886d48f4d72dad07d1773",
+  "conclusion": "cancelled",
+  "date": "2026-08-06T15:41:52+00:00",
   "healthy": false,
   "ref": "refs/heads/main",
-  "run_id": "31115723302",
-  "run_url": "https://github.com/ROCm/aorta/actions/runs/31115723302"
+  "run_id": "31116518267",
+  "run_url": "https://github.com/ROCm/aorta/actions/runs/31116518267"
 }
