@@ -73,6 +73,12 @@ _VERDICT_GLYPH = {
 # Worst-first, so a group's tally leads with whatever needs attention.
 _VERDICT_ORDER = ("fail", "record", "skip", "pass")
 
+# A verdict this generator has no colour or glyph for. Kept distinct from skip's
+# grey: an unrecognised verdict outranks skip, so rendering the two identically
+# would hide that difference behind a hover.
+_UNKNOWN_COLOR = "#8250df"
+_UNKNOWN_GLYPH = "?"
+
 # How many nightly runs the history grid shows before it starts scrolling. The
 # full history still ships in data.json; this only bounds the rendered rows.
 _GRID_RUNS = 14
@@ -186,14 +192,21 @@ def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
     and stops at ``failing`` above. It stays because this function must classify
     whatever summary it is handed, and for an all-skip one every other label
     would be a lie.
+
+    A summary whose counts do not account for its own total is holding at least
+    one verdict this generator does not know, and cannot be called ``passing``
+    on the strength of the verdicts it does know.
     """
     if not results:
         return "unknown", "#57606a"
     s = results[-1].get("summary", {}) or {}
     if _count(s.get("fail")):
         return "failing", _VERDICT_COLOR["fail"]
-    if _count(s.get("total")) == 0:
+    total = _count(s.get("total"))
+    if total == 0:
         return "empty", "#57606a"
+    if total > sum(_count(s.get(v)) for v in _VERDICT_ORDER):
+        return "unrecognised", _UNKNOWN_COLOR
     if _count(s.get("pass")):
         return "passing", _VERDICT_COLOR["pass"]
     if _count(s.get("record")):
@@ -317,6 +330,24 @@ def _tally(entries: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _worst_verdict(counts: dict[str, int]) -> str:
+    """The verdict a group should be judged by.
+
+    Known failures rank first. Anything this generator does not recognise ranks
+    next -- ahead of record, skip and pass -- because the results JSON is not
+    ours to constrain, and a group holding an unrecognised verdict must not be
+    able to render as healthy. Scanning ``_VERDICT_ORDER`` alone would count an
+    unknown towards the group size while never selecting it, so ``pass`` plus
+    ``error`` would show a green tick over a 1/2 ratio.
+    """
+    if counts.get("fail"):
+        return "fail"
+    unknown = sorted(v for v, n in counts.items() if n and v not in _VERDICT_ORDER)
+    if unknown:
+        return unknown[0]
+    return next((v for v in _VERDICT_ORDER if counts.get(v)), "")
+
+
 def _tally_text(counts: dict[str, int]) -> str:
     known = " · ".join(f"{counts[v]} {v}" for v in _VERDICT_ORDER if counts.get(v))
     # A verdict this generator has no colour for still has to be counted; the
@@ -396,11 +427,11 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
                 cells.append("<td class='gcell'><span class='absent' title='not in this run'>·</span></td>")
                 continue
             counts = _tally(group)
-            worst = next((v for v in _VERDICT_ORDER if counts.get(v)), "")
+            worst = _worst_verdict(counts)
             n = len(group)
             worst_n = counts.get(worst, 0)
             count = str(n) if worst_n == n else f"{worst_n}/{n}"
-            bg = _VERDICT_COLOR.get(worst, "#57606a")
+            bg = _VERDICT_COLOR.get(worst, _UNKNOWN_COLOR)
             # The glyph, not the colour, is what states the verdict: a bare
             # count renders identically for a passing and a failing group, which
             # leaves anyone who cannot separate red from green — or who is on a
@@ -409,7 +440,7 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             cells.append(
                 f"<td class='gcell'><span class='dot' style='background:{bg}' "
                 f"title='{_esc(breakdown)}' aria-label='{_esc(breakdown)}'>"
-                f"{_esc(_VERDICT_GLYPH.get(worst, '?'))} {_esc(count)}</span></td>"
+                f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span></td>"
             )
 
         rows.append(
@@ -423,7 +454,7 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
         "<h2>Run history</h2>"
         "<p class='muted'>Each row is one nightly run, newest first; each column is a "
         "workload. A cell shows the worst verdict among that workload's results "
-        "(✓ pass · ✗ fail · ◆ record · ○ skip) and how many there were — "
+        "(✓ pass · ✗ fail · ◆ record · ○ skip · ? unrecognised) and how many there were — "
         "<span class='mono'>✗ 1/4</span> means one of four failed. Hover for the "
         "full breakdown.</p>"
         "<div class='tablewrap'><table class='grid'>"

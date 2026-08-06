@@ -466,6 +466,60 @@ def test_history_grid_cell_leads_with_the_worst_verdict_in_the_group():
     assert "4/4" not in grid
 
 
+def test_history_grid_never_renders_an_unrecognised_verdict_as_healthy():
+    # The results JSON is not ours to constrain, so a verdict this generator has
+    # no colour for can appear. Counting it towards the group while never being
+    # able to select it would render pass + error as a green tick over "1/2" --
+    # an unrecognised result reported as healthy.
+    runs = [
+        _run(3, [_cell("w", "c0", verdict="pass"), _cell("w", "c1", verdict="pass")],
+             total=2, **{"pass": 2}),
+        _run(4, [_cell("w", "c0", verdict="pass"), _cell("w", "c1", verdict="error")],
+             total=2, **{"pass": 1}),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    cell = f"background:{gen_dashboard._UNKNOWN_COLOR}' title='w — 1 pass · 1 error'"
+    assert cell in grid          # the mixed group takes the unknown colour, not green
+    assert "? 1/2" in grid       # and reads as one unrecognised of two
+    assert "1 pass · 1 error" in grid  # the unknown is still counted in the hover
+
+
+def test_history_grid_ranks_a_known_failure_above_an_unrecognised_verdict():
+    # Unknown outranks the benign verdicts but must not displace a real failure:
+    # "something failed" is more actionable than "something is unfamiliar".
+    runs = [
+        _run(3, [_cell("w", "c0", verdict="pass")], total=1, **{"pass": 1}),
+        _run(4, [_cell("w", "c0", verdict="fail"), _cell("w", "c1", verdict="error")],
+             total=2, fail=1),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert gen_dashboard._VERDICT_COLOR["fail"] in grid
+    assert gen_dashboard._UNKNOWN_COLOR not in grid
+
+
+def test_headline_does_not_claim_passing_when_the_summary_hides_an_unknown():
+    # total=2 with a single known verdict means one entry carried something this
+    # generator cannot classify. Reporting "passing" off the one it recognises
+    # would be the same defect as a green grid cell, on the more prominent
+    # surface.
+    runs = [_run(3, [_cell("w", "c0", verdict="pass")], total=2, **{"pass": 1})]
+    assert gen_dashboard._latest_status(runs) == (
+        "unrecognised", gen_dashboard._UNKNOWN_COLOR)
+    # A summary that adds up is untouched.
+    ok = [_run(3, [_cell("w", "c0", verdict="pass")], total=1, **{"pass": 1})]
+    assert gen_dashboard._latest_status(ok)[0] == "passing"
+
+
+def test_worst_verdict_precedence_is_fail_then_unknown_then_the_benign_ones():
+    assert gen_dashboard._worst_verdict({"fail": 1, "error": 1, "pass": 5}) == "fail"
+    assert gen_dashboard._worst_verdict({"error": 1, "record": 2, "pass": 5}) == "error"
+    assert gen_dashboard._worst_verdict({"record": 1, "pass": 5}) == "record"
+    assert gen_dashboard._worst_verdict({"pass": 5}) == "pass"
+    # A zero count is not a present verdict; it must not win by being unknown.
+    assert gen_dashboard._worst_verdict({"error": 0, "pass": 5}) == "pass"
+    assert gen_dashboard._worst_verdict({}) == ""
+
+
 def test_history_grid_marks_a_workload_that_was_absent_that_night():
     runs = [
         _run(3, [_cell("w1", "c")], total=1, record=1),
