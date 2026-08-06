@@ -50,7 +50,7 @@ jobs:
           fetch-depth: 0  # full history + tags so setuptools_scm / bump_version see the latest release
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
