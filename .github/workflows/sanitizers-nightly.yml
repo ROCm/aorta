@@ -28,7 +28,7 @@ jobs:
     # Must match a real online runner: the MI350 host is labelled
     # `self-hosted, gpu, mi350x` (same set the other GPU workflows target, e.g.
     # gpu-tests.yml / eval-reusable.yml use `self-hosted, gpu`).
-    runs-on: [self-hosted, gpu, mi350x]
+    runs-on: [self-hosted, gpu]
     timeout-minutes: 120
     steps:
       # Sibling GPU jobs (gpu-tests.yml et al.) run aorta in a root ROCm CI
