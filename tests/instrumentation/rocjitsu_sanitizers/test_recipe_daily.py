@@ -9,12 +9,14 @@ from pathlib import Path
 import pytest
 
 from aorta.instrumentation.rocjitsu_sanitizers.backends import support
-from aorta.instrumentation.rocjitsu_sanitizers.models import SelectionRequirement
+from aorta.instrumentation.rocjitsu_sanitizers.models import SelectionRequirement, Verdict
 from aorta.instrumentation.rocjitsu_sanitizers.recipe import (
     execute_sanitizer_run,
     load_sanitizer_recipe,
 )
+from aorta.instrumentation.rocjitsu_sanitizers.report import read_report
 from aorta.instrumentation.rocjitsu_sanitizers.selection import (
+    observations_from_consan_repro,
     observations_from_gemm_csv,
     observations_from_rocprof_trace,
     select_kernels,
@@ -198,6 +200,167 @@ def test_recipe_rejects_non_boolean_consan_log(tmp_path: Path) -> None:
     )
     with pytest.raises(RecipeSchemaError, match="consan_log"):
         load_sanitizer_recipe(recipe)
+
+
+def _write_kernel_consan_recipe(
+    tmp_path: Path,
+    *,
+    consan_command: str = "loaders/consan_app",
+    ticket: str = "TEST-CONSAN-CMD",
+) -> Path:
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        "schema_version: 1\n"
+        "mode: sanitizer\n"
+        f"ticket: {ticket}\n"
+        "sanitizer_plan:\n"
+        "  target: gfx950\n"
+        "  source:\n"
+        "    kind: kernel\n"
+        "    kernel:\n"
+        "      name: gemm_NT_M128_N128_K128\n"
+        "      code_object: fixtures/isa/sol_0.hsaco\n"
+        "      code_object_index: 0\n"
+        f"    consan_command: {consan_command}\n"
+        "  scope:\n"
+        "    kind: kernel\n"
+        "  selection:\n"
+        "    requirement: top_dispatch_count\n"
+        "    top_n: 1\n"
+        "  sanitizers:\n"
+        "    - consan\n"
+        "  policy:\n"
+        "    consan_policy: strict\n"
+        "    on_missing_backend: fail\n"
+        "  output:\n"
+        "    report: sanitizer_report.json\n",
+        encoding="utf-8",
+    )
+    return recipe
+
+
+def test_loader_resolves_consan_command_for_kernel_source(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path)
+    loaded = load_sanitizer_recipe(recipe)
+    assert loaded.source_kind == "kernel"
+    assert loaded.consan_command is not None
+    assert loaded.consan_command.is_absolute()
+    assert loaded.consan_command == (tmp_path / "loaders" / "consan_app").resolve()
+
+
+def test_loader_resolves_consan_command_for_kernel_list_source(tmp_path: Path) -> None:
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        "schema_version: 1\n"
+        "mode: sanitizer\n"
+        "ticket: TEST-CONSAN-LIST\n"
+        "sanitizer_plan:\n"
+        "  target: gfx950\n"
+        "  source:\n"
+        "    kind: kernel_list\n"
+        "    kernels:\n"
+        "      - gemm_a\n"
+        "    consan_command: bin/loader\n"
+        "  scope:\n"
+        "    kind: kernel\n"
+        "  selection:\n"
+        "    requirement: top_dispatch_count\n"
+        "    top_n: 1\n"
+        "  sanitizers:\n"
+        "    - consan\n"
+        "  policy:\n"
+        "    consan_policy: strict\n"
+        "    on_missing_backend: fail\n"
+        "  output:\n"
+        "    report: sanitizer_report.json\n",
+        encoding="utf-8",
+    )
+    loaded = load_sanitizer_recipe(recipe)
+    assert loaded.source_kind == "kernel_list"
+    assert loaded.consan_command == (tmp_path / "bin" / "loader").resolve()
+
+
+def test_loader_resolves_consan_command_for_gemm_csv_source(tmp_path: Path) -> None:
+    recipe = _write_gemm_recipe(
+        tmp_path,
+        scope="kernel",
+        policy_lines=_GOOD_POLICY,
+        source_extra="    consan_command: loaders/consan_app\n",
+    )
+    loaded = load_sanitizer_recipe(recipe)
+    assert loaded.source_kind == "gemm_csv"
+    assert loaded.consan_command == (tmp_path / "loaders" / "consan_app").resolve()
+
+
+def test_loader_accepts_custom_consan_repro_variant(tmp_path: Path) -> None:
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        "schema_version: 1\n"
+        "mode: sanitizer\n"
+        "ticket: TEST-CONSAN-VARIANT\n"
+        "sanitizer_plan:\n"
+        "  target: gfx950\n"
+        "  source:\n"
+        "    kind: consan_repro\n"
+        "    variant: custom_race\n"
+        "    hip: repro/custom.hip\n"
+        "    command: bin/custom_repro\n"
+        "  scope:\n"
+        "    kind: kernel\n"
+        "  selection:\n"
+        "    requirement: top_dispatch_count\n"
+        "    top_n: 1\n"
+        "  sanitizers:\n"
+        "    - consan\n"
+        "  policy:\n"
+        "    consan_policy: strict\n"
+        "    on_missing_backend: fail\n"
+        "  output:\n"
+        "    report: sanitizer_report.json\n",
+        encoding="utf-8",
+    )
+    loaded = load_sanitizer_recipe(recipe)
+    assert loaded.repro_variant == "custom_race"
+    assert loaded.consan_command == (tmp_path / "bin" / "custom_repro").resolve()
+    observations = observations_from_consan_repro("custom_race", target="gfx950")
+    assert len(observations) == 1
+    assert observations[0].identity.name == "consan_custom_race"
+
+
+def test_observations_from_consan_repro_keeps_builtin_labels() -> None:
+    clean = observations_from_consan_repro("clean", target="gfx950")
+    racy = observations_from_consan_repro("racy", target="gfx950")
+    assert clean[0].identity.name == "consan_lds_race"
+    assert racy[0].identity.name == "consan_lds_race_2wave"
+
+
+def test_observations_from_consan_repro_rejects_empty_variant() -> None:
+    with pytest.raises(ValueError):
+        observations_from_consan_repro("  ", target="gfx950")
+
+
+def test_loader_rejects_empty_consan_command(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path, consan_command='""')
+    with pytest.raises(RecipeSchemaError, match="consan_command"):
+        load_sanitizer_recipe(recipe)
+
+
+def test_consan_command_run_is_fail_closed_when_command_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A kernel source + top_n: 1 with a consan_command that does not exist on
+    # disk must fail closed: the ConSan check is not_checked, never pass. Without
+    # ROCJITSU_BUILD the hook also fails to resolve; either is an acceptable
+    # fail-closed outcome, so we assert the verdict is never pass.
+    monkeypatch.delenv("ROCJITSU_BUILD", raising=False)
+    recipe = _write_kernel_consan_recipe(tmp_path, consan_command="loaders/does_not_exist")
+    report_path = execute_sanitizer_run(recipe, output_dir=tmp_path / "out")
+    report = read_report(report_path)
+    assert report.overall_verdict is not Verdict.PASS
+    consan_checks = [check for check in report.checks if check.sanitizer == "consan"]
+    assert consan_checks
+    for check in consan_checks:
+        assert check.verdict is Verdict.NOT_CHECKED
 
 
 def test_verdict_baselines_fixture_present() -> None:

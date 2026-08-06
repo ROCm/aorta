@@ -1,0 +1,37 @@
+schema_version: 1
+mode: sanitizer
+ticket: CONSAN-CODE-OBJECTS
+description: >
+  Drive ConSan over caller-selected/extracted code objects on gfx950. A run
+  area extracts the top-N f32 GEMM .hsaco objects from a customer report and a
+  small HIP loader (consan_app.py) loads exactly those objects on-device so
+  ConSan instruments precisely them. Point one selected identity (top_n: 1) at
+  that loader via source.consan_command; the command is resolved relative to
+  this recipe file. Fail-closed: a missing hook/loader yields not_checked, never
+  a false pass.
+
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: gemm_NT_M128_N128_K128
+      code_object: fixtures/isa/sol_0.hsaco
+      code_object_index: 0
+    # Loader that mmaps/loads the extracted .hsaco objects on-device (see the
+    # consan_app.py HIP-loader pattern) so ConSan runs against exactly the
+    # selected identity. Resolved relative to this recipe file.
+    consan_command: fixtures/bin/consan_app
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - consan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json

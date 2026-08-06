@@ -260,6 +260,14 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         kernel = _require_mapping(source.get("kernel"), name="sanitizer_plan.source.kernel")
         kernel_specs = (_parse_kernel_spec(kernel, context="sanitizer_plan.source.kernel"),)
 
+    # For every resolvable (non-repro) source kind an optional
+    # ``source.consan_command`` points ConSan at a caller-supplied command or
+    # code-object loader (e.g. the consan_app.py HIP loader), resolved relative
+    # to the recipe file. Absent, the non-repro kinds keep today's
+    # ``not_checked`` behavior; the ``consan_repro`` kind uses ``command``.
+    if source_kind != "consan_repro" and "consan_command" in source:
+        consan_command = _resolve_path(_require_str(source, "consan_command"), recipe_path=path)
+
     if "isa_dir" in source:
         isa_dir = _resolve_path(_require_str(source, "isa_dir"), recipe_path=path)
     if source_kind == "gemm_csv" and isa_dir is None:
