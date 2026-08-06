@@ -97,7 +97,7 @@ jobs:
         run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
 
       - name: Open baseline PR
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           add-paths: config/ci/regression_baselines.yaml
           branch: ci/refresh-baselines
