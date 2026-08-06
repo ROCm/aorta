@@ -52,8 +52,16 @@ jobs:
           git clone --filter=blob:none https://github.com/ROCm/rocm-systems.git "${ROCJITSU_SRC}"
           git -C "${ROCJITSU_SRC}" checkout "${ROCJITSU_REF}"
           echo "ROCJITSU checkout: $(git -C "${ROCJITSU_SRC}" rev-parse HEAD)"
-          cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}" -GNinja
-          ninja -C "${ROCJITSU_BUILD}" rj_waitcheck rocjitsu_dbi_hooks
+          # Prefer Ninja when the runner has it, but fall back to CMake's default
+          # generator so the gate doesn't hard-fail on hosts without Ninja
+          # installed. `cmake --build` drives whichever generator was selected.
+          if command -v ninja >/dev/null 2>&1; then
+            cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}" -GNinja
+          else
+            cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}"
+          fi
+          cmake --build "${ROCJITSU_BUILD}" --parallel \
+            --target rj_waitcheck rocjitsu_dbi_hooks
           echo "ROCJITSU_BUILD=${ROCJITSU_BUILD}" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
