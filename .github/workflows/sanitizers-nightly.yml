@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -124,7 +124,7 @@ jobs:
     permissions:
       contents: write   # push dashboard to the sanitizer-results branch
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         # A failed GPU job may leave no artifact at all; don't hard-fail the
         # publish job -- we still want to record the failure on the public page.

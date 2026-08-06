@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Checkout AORTA repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: ROCm/aorta
           ref : prosenj_gh_action
@@ -167,7 +167,7 @@ jobs:
 
 
       - name: Checkout aorta-report repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: ROCm/aorta-report
           ref: main

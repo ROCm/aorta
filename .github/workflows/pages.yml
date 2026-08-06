@@ -47,7 +47,7 @@ jobs:
       # Always deploy the landing page + dashboard generator from main, even for a
       # manual workflow_dispatch off another ref, so Pages content is deterministic.
       - name: Check out main
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: main
 
