@@ -1,0 +1,64 @@
+[
+  {
+    "gate": false,
+    "meta": {
+      "commit": "9ac25d913777",
+      "date": "2026-08-06T15:27:46+00:00",
+      "gpu": "gfx950",
+      "run": "run 31115723302"
+    },
+    "rows": {
+      "consan-clean": {
+        "backend": null,
+        "coverage": "",
+        "execution": "missing",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernels": [],
+        "match": false,
+        "present": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "consan-racy": {
+        "backend": null,
+        "coverage": "",
+        "execution": "missing",
+        "expected": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernels": [],
+        "match": false,
+        "present": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      },
+      "waitcheck": {
+        "backend": null,
+        "coverage": "",
+        "execution": "missing",
+        "expected": "warn",
+        "finding_groups": [],
+        "findings": 0,
+        "kernels": [],
+        "match": false,
+        "present": false,
+        "verdict": "\u2014",
+        "worklist": {
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
+        }
+      }
+    }
+  }
+]
