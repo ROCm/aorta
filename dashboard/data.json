@@ -1,134 +1,62 @@
 [
   {
-    "gate": true,
+    "gate": false,
     "meta": {
-      "commit": "5bc10d527471",
-      "date": "2026-08-06T16:19:32+00:00",
+      "commit": "4d410a42b61a",
+      "date": "2026-08-06T17:19:39+00:00",
       "gpu": "gfx950",
-      "run": "run local-20260806161917"
+      "run": "run 31117508536"
     },
     "rows": {
       "consan-clean": {
         "backend": null,
-        "coverage": "0/0, 2/2",
-        "execution": "complete",
+        "coverage": "",
+        "execution": "missing",
         "expected": "pass",
         "finding_groups": [],
         "findings": 0,
-        "kernels": [
-          {
-            "code_object": "",
-            "dispatch": 1,
-            "findings": 0,
-            "name": "consan_lds_race",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "pass"
-          }
-        ],
-        "match": true,
-        "present": true,
-        "verdict": "pass",
+        "kernels": [],
+        "match": false,
+        "present": false,
+        "verdict": "\u2014",
         "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
         }
       },
       "consan-racy": {
         "backend": null,
-        "coverage": "0/0, 2/2",
-        "execution": "complete",
+        "coverage": "",
+        "execution": "missing",
         "expected": "fail",
-        "finding_groups": [
-          {
-            "code": "1",
-            "count": 64,
-            "example": "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=13927600 index=0 kind=1 code_object=fnv1a64:6e7736ba22da0c89 report_generation=2 generation=2 epo\u2026",
-            "sanitizer": "consan",
-            "severity": "race"
-          }
-        ],
-        "findings": 64,
-        "kernels": [
-          {
-            "code_object": "",
-            "dispatch": 1,
-            "findings": 64,
-            "name": "consan_lds_race_2wave",
-            "offset": null,
-            "sha": "",
-            "time_ms": 0.0,
-            "verdict": "fail"
-          }
-        ],
-        "match": true,
-        "present": true,
-        "verdict": "fail",
+        "finding_groups": [],
+        "findings": 0,
+        "kernels": [],
+        "match": false,
+        "present": false,
+        "verdict": "\u2014",
         "worklist": {
-          "kernel_count": 1,
-          "requirement": "top_dispatch_count",
-          "top_n": 1
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
         }
       },
       "waitcheck": {
-        "backend": {
-          "name": "rj_waitcheck",
-          "sha": "472fcf288714"
-        },
+        "backend": null,
         "coverage": "",
-        "execution": "complete",
+        "execution": "missing",
         "expected": "warn",
-        "finding_groups": [
-          {
-            "code": "wait_hazard",
-            "count": 32,
-            "example": "sol_126578.hsaco:gfx950[0]:.text+0x100eb8: missing s_waitcnt lgkmcnt(0) before def of s45",
-            "sanitizer": "waitcheck",
-            "severity": "warning"
-          }
-        ],
-        "findings": 32,
-        "kernels": [
-          {
-            "code_object": "sol_126578.hsaco",
-            "dispatch": 479,
-            "findings": 32,
-            "name": "gemm_NT_M256_N4096_K1024",
-            "offset": null,
-            "sha": "93f09ae670",
-            "time_ms": 0.0,
-            "verdict": "warn"
-          },
-          {
-            "code_object": "sol_175415.hsaco",
-            "dispatch": 471,
-            "findings": 0,
-            "name": "gemm_NT_M128_N4096_K1280",
-            "offset": null,
-            "sha": "93f09ae670",
-            "time_ms": 0.0,
-            "verdict": "\u2014"
-          },
-          {
-            "code_object": "sol_137678.hsaco",
-            "dispatch": 440,
-            "findings": 0,
-            "name": "gemm_TT_M64_N64_K1280",
-            "offset": null,
-            "sha": "93f09ae670",
-            "time_ms": 0.0,
-            "verdict": "\u2014"
-          }
-        ],
-        "match": true,
-        "present": true,
-        "verdict": "warn",
+        "finding_groups": [],
+        "findings": 0,
+        "kernels": [],
+        "match": false,
+        "present": false,
+        "verdict": "\u2014",
         "worklist": {
-          "kernel_count": 3,
-          "requirement": "top_dispatch_count",
-          "top_n": 3
+          "kernel_count": 0,
+          "requirement": null,
+          "top_n": null
         }
       }
     }
