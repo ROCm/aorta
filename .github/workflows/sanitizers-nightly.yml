@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: sanitizers-nightly-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CONTAINER_NAME: aorta-ci-gpu
@@ -25,10 +25,10 @@ env:
 jobs:
   sanitizers-gpu:
     name: gfx950 sanitizer regression
-    # Must match a real online runner: the MI350 host is labelled
-    # `self-hosted, gpu, mi350x` (same set the other GPU workflows target, e.g.
-    # gpu-tests.yml / eval-reusable.yml use `self-hosted, gpu`).
-    runs-on: [self-hosted, gpu, mi350x]
+    # Target the same online MI350 runner pool as gpu-tests.yml /
+    # eval-reusable.yml (`self-hosted, gpu`). Avoid the extra `mi350x` label: it
+    # can route to a stale/offline runner and leave the job wedged in "Set up job".
+    runs-on: [self-hosted, gpu]
     timeout-minutes: 120
     steps:
       # Sibling GPU jobs (gpu-tests.yml et al.) run aorta in a root ROCm CI
