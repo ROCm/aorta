@@ -30,6 +30,29 @@ jobs:
     runs-on: [self-hosted, gpu, mi350x]
     timeout-minutes: 120
     steps:
+      # Sibling GPU jobs (gpu-tests.yml et al.) run aorta in a root ROCm CI
+      # container that leaves root-owned artifacts (e.g. results/gpu_smoke) in
+      # the mounted checkout. actions/checkout's `git clean` runs as the runner
+      # user and cannot delete them. Reclaim ownership first via a throwaway
+      # root container (repo scripts aren't checked out yet here).
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          # Pinned by digest for supply-chain safety / reproducibility on the
+          # self-hosted runner (busybox:1.37).
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          # Repo scripts aren't checked out yet, so resolve docker access inline.
+          # Support runners with direct docker, sudo docker, or only host sudo.
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
       - name: Check out code
         uses: actions/checkout@v5
 
