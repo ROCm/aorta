@@ -1,0 +1,83 @@
+# Target-UX design example for recipe-driven kernel sanitizers.
+#
+# STATUS:
+#   - Runnable sanitizer recipes use ``mode: sanitizer`` (see
+#     ``recipes/sanitizers/daily-waitcheck-gemm.yaml``).
+#   - This file remains a triage/workload profiling example; its
+#     ``sanitizer_plan`` block documents the nested schema shape only.
+#
+# Run a real sanitizer recipe:
+#   aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml
+#
+# This example uses only the public synthetic `training` workload. It contains
+# no customer-derived kernel names, traces, shapes, or code objects.
+
+schema_version: 1                  # [REAL] Only recipe schema understood today.
+ticket: EXAMPLE-SANITIZER-TOP-TIME # [REAL]
+workload: training                 # [REAL] Existing aorta.workloads entry point.
+trials: 1                          # [REAL]
+steps: 20                          # [REAL] Profiling needs repeated launches.
+trial_isolation: process           # [REAL] Hook/env must be active before ROCm loads.
+save_logs: true                    # [REAL]
+
+workload_config:                   # [REAL] Existing synthetic model configuration.
+  parallelism: fsdp
+  seed: 1234
+  device: auto
+  dtype: bfloat16
+  batch_size: 2
+  seq_len: 128
+  warmup_steps: 2
+  model:
+    kind: transformer
+    hidden_size: 256
+    num_layers: 2
+    num_heads: 4
+    ffn_size: 1024
+    vocab_size: 1024
+  optimizer:
+    kind: adamw
+    lr: 0.0001
+    weight_decay: 0.01
+
+cells:                              # [REAL]
+  - name: baseline-local
+    mitigations: [none]
+    environment: local
+
+sanitizer_plan:                     # [PROPOSED] Entire block is future schema.
+  source:
+    kind: workload                  # Existing workload, not a prebuilt kernels.json.
+    name: training                  # Must agree with the real `workload` above.
+
+  scope:
+    kind: model                     # One of: model | module | kernel.
+
+    # Module-scope alternative:
+    # kind: module
+    # module_path: model.layers.0
+
+    # Single-kernel alternative (selection is then unnecessary):
+    # kind: kernel
+    # kernel:
+    #   name: user_supplied_kernel
+    #   code_object: /path/to/user/kernel.hsaco
+    #   code_object_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    #   entry_offset: "0x120"
+
+  selection:
+    requirement: top_time           # Aggregate observed GPU time, descending.
+    top_n: 10
+    # Runtime-observed fused kernels remain one kernel identity and are eligible.
+    # AORTA must not claim it can decompose them back into framework operations.
+
+  sanitizers:                       # Declarative registry names; future tools append here.
+    - waitcheck
+    - consan                        # Declared target; currently fail-closed/not_checked.
+
+  provisioning:
+    mode: auto                      # Discover/provision profiler + sanitizer backends.
+    # If unavailable, resolution must fail/not-check; it must never silently PASS.
+
+  output:
+    report: sanitizer_report.json

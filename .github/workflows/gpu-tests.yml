@@ -91,6 +91,7 @@ jobs:
             'src/aorta/ebpf/*'
             'src/aorta/hw_queue_eval/*'
             'src/aorta/workloads/*'
+            'src/aorta/instrumentation/rocjitsu_sanitizers/*'
             'src/aorta/utils/gpu_control.py'
             'src/aorta/instrumentation/env_knobs.py'
             # The module that performs the capture. Its test file was listed
@@ -101,10 +102,14 @@ jobs:
             'tests/hw_queue_eval/*'
             'tests/instrumentation/test_environment.py'
             'tests/instrumentation/test_env_knob_audit.py'
+            'tests/instrumentation/rocjitsu_sanitizers/*'
+            'tests/sanitizers/*'
             'tests/test_marker_partition.py'
             'config/ci/*'
             'recipes/ci/*'
+            'recipes/sanitizers/*'
             'scripts/ci/*'
+            'scripts/sanitizers/*'
             'docker/*'
             '.github/workflows/gpu-tests.yml'
           )
