@@ -166,6 +166,91 @@ def test_build_html_has_gate_and_kernel_names():
     assert "gemm_x" in html and "Kernel details" in html
 
 
+def test_build_html_empty_shows_placeholder_and_back_link():
+    # Rendered for the /sanitizers/ route before the first successful nightly so
+    # it never 404s. Must carry the back-link and a clear "no runs yet" message.
+    html = gen.build_html([])
+    assert "<!doctype html>" in html
+    assert 'href="../"' in html
+    assert "No sanitizer runs yet" in html
+
+
+def test_build_html_renders_stale_banner_when_unhealthy():
+    rows = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"}, "rows": rows, "gate": True}]
+    status = {
+        "healthy": False, "conclusion": "failure", "run_id": "42",
+        "run_url": "https://github.com/ROCm/aorta/actions/runs/42", "date": "2026-08-05",
+    }
+    html = gen.build_html(runs, status=status)
+    assert "did not complete successfully" in html
+    assert "failure" in html
+    assert "actions/runs/42" in html
+
+
+def test_build_html_no_banner_when_healthy():
+    runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"},
+             "rows": {c: gen.summarize_case(_waitcheck_report(), "warn") for c, *_ in gen.CASES},
+             "gate": True}]
+    healthy = {"healthy": True, "conclusion": "success", "run_id": "42", "run_url": "", "date": "d"}
+    assert "did not complete successfully" not in gen.build_html(runs, status=healthy)
+    # An unhealthy banner also renders on the empty-state page.
+    empty = gen.build_html([], status={"healthy": False, "conclusion": "failure",
+                                       "run_id": "7", "run_url": "", "date": ""})
+    assert "did not complete successfully" in empty
+
+
+def test_build_summary_md_stale_banner():
+    status = {"healthy": False, "conclusion": "failure", "run_id": "9",
+              "run_url": "https://x/9", "date": "d"}
+    md = gen.build_summary_md([], status=status)
+    assert "Stale" in md and "https://x/9" in md
+
+
+def test_main_empty_runs_root_publishes_placeholder(tmp_path, monkeypatch):
+    # The empty-runs-root path Pages uses to guarantee /sanitizers/index.html.
+    baselines = _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    out = tmp_path / "out"
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--runs-root", str(tmp_path / "empty"),
+        "--baselines", str(baselines),
+        "--out-dir", str(out),
+    ]
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert "No sanitizer runs yet" in index
+
+
+def test_main_writes_status_json_and_banner(tmp_path, monkeypatch):
+    baselines = _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    status_file = tmp_path / "status.json"
+    status_file.write_text(json.dumps({
+        "healthy": False, "conclusion": "failure", "run_id": "13",
+        "run_url": "https://github.com/ROCm/aorta/actions/runs/13",
+        "ref": "refs/heads/main", "date": "2026-08-05",
+    }))
+    out = tmp_path / "out"
+    (tmp_path / "empty").mkdir()
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--runs-root", str(tmp_path / "empty"),
+        "--baselines", str(baselines),
+        "--status", str(status_file),
+        "--out-dir", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+    assert (out / "status.json").is_file()
+    assert "did not complete successfully" in (out / "index.html").read_text(encoding="utf-8")
+
+
 def test_runs_from_results_dir_matches_baselines(tmp_path):
     baselines = {
         "waitcheck_gemm": {"overall_verdict": "warn"},

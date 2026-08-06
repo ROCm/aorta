@@ -5,13 +5,15 @@ name: Pages (landing + nightly dashboard)
 # BOTH the nightly CI dashboard (at the site root) AND the project landing page
 # (Jekyll render of README.md, under /docs/ alongside the rest of the rendered
 # docs). It runs on main pushes, after each "Nightly Evaluation" completes (pick
-# up fresh history from the ci-results branch), and on demand.
+# up fresh history from the ci-results branch), after each "Sanitizers Nightly"
+# completes (pick up fresh history from the sanitizer-results branch), and on
+# demand.
 
 on:
   push:
     branches: [main]
   workflow_run:
-    workflows: ["Nightly Evaluation"]
+    workflows: ["Nightly Evaluation", "Sanitizers Nightly"]
     types: [completed]
   workflow_dispatch:
 
@@ -29,6 +31,14 @@ concurrency:
 jobs:
   build-deploy:
     name: build + deploy pages
+    # Only ever deploy trusted content: a push to main, a manual dispatch, or a
+    # data-branch refresh triggered by a source workflow that itself ran on main.
+    # A workflow_run fired by a feature-branch run (e.g. a workflow_dispatch of
+    # Sanitizers Nightly off a PR branch) must NOT trigger an official Pages
+    # deploy -- that would let unreviewed branch output reach the public site.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -127,6 +137,60 @@ jobs:
             echo "no history yet; published the dashboard's empty state at /"
           fi
 
+      # History lives on the sanitizer-results data branch (written by
+      # sanitizers-nightly's publish job); it may not exist until the first
+      # sanitizer nightly runs. Same fail-closed ls-remote contract as ci-results.
+      # The /sanitizers/ route must NEVER 404: the root nav and docs link to it
+      # unconditionally, so when there is no (trusted) snapshot yet we publish the
+      # generator's own "no runs yet" empty state instead of leaving it absent.
+      - name: Publish the sanitizer dashboard at /sanitizers/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          baselines="recipes/sanitizers/fixtures/expected/verdict_baselines.json"
+          mkdir -p _site/sanitizers
+          publish_placeholder() {
+            empty="$(mktemp -d)"
+            python3 scripts/sanitizers/gen_sanitizer_dashboard.py \
+              --runs-root "$empty" \
+              --baselines "$baselines" \
+              --out-dir _site/sanitizers
+          }
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          set +e
+          git ls-remote --exit-code --heads "$repo_url" sanitizer-results >/dev/null 2>&1
+          lsr=$?
+          set -e
+          if [ "$lsr" -eq 2 ]; then
+            echo "sanitizer-results branch absent; publishing the empty-state page"
+            publish_placeholder
+          elif [ "$lsr" -ne 0 ]; then
+            echo "::error::cannot reach sanitizer-results (git ls-remote exit ${lsr}); failing closed"
+            exit 1
+          else
+            tmp="$(mktemp -d)"
+            git clone --depth 1 --branch sanitizer-results "$repo_url" "$tmp"
+            src_ref=""
+            if [ -f "$tmp/dashboard/status.json" ]; then
+              src_ref="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ref",""))' \
+                        "$tmp/dashboard/status.json" 2>/dev/null || echo "")"
+            fi
+            if [ -f "$tmp/dashboard/status.json" ] && [ "$src_ref" != "refs/heads/main" ]; then
+              # Defence in depth for the main-only publish guard: never serve
+              # sanitizer data whose recorded source ref is not main.
+              echo "::warning::sanitizer-results recorded ref '${src_ref}' is not main; publishing empty state instead"
+              publish_placeholder
+            elif [ -d "$tmp/dashboard" ] && [ -f "$tmp/dashboard/index.html" ]; then
+              cp -r "$tmp/dashboard/"* _site/sanitizers/
+              echo "sanitizer dashboard at /sanitizers/ (source ref ${src_ref:-unknown})"
+            else
+              echo "sanitizer-results exists but has no dashboard yet; publishing empty state"
+              publish_placeholder
+            fi
+          fi
+          test -s _site/sanitizers/index.html
+
       # The dashboard used to live at /ci/, the docs advertised that URL, and
       # /ci/data.json is a machine-readable endpoint something may already poll.
       # A Pages deploy replaces the whole site, so moving the dashboard to the
@@ -159,8 +223,17 @@ jobs:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
         run: |
           set -euo pipefail
-          for f in _site/index.html _site/docs/index.html _site/ci/index.html \
-                   _site/data.json _site/ci/data.json; do
+          # /sanitizers/ is always published (a real snapshot or the empty state),
+          # so the route is required unconditionally -- it must never 404.
+          routes=(
+            _site/index.html
+            _site/docs/index.html
+            _site/ci/index.html
+            _site/data.json
+            _site/ci/data.json
+            _site/sanitizers/index.html
+          )
+          for f in "${routes[@]}"; do
             if [ ! -s "$f" ]; then
               echo "::error::$f is missing or empty; refusing to deploy"
               exit 1
@@ -174,7 +247,7 @@ jobs:
             echo "::error::/docs/ still claims the dashboard's URL as its own"
             exit 1
           fi
-          echo "routes ok: / /docs/ /ci/ /data.json /ci/data.json"
+          echo "routes ok: / /docs/ /ci/ /data.json /ci/data.json /sanitizers/"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4

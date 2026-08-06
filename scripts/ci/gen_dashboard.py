@@ -962,6 +962,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         MI350 runner and replays its workload sweep, comparing each result
         against a blessed baseline. This page is that run.</p>
       <p class="nav"><a href="docs/">AORTA documentation</a> ·
+        <a href="sanitizers/">sanitizer nightly</a> ·
         <a href="https://github.com/{_REPO}">repository</a></p>
       <div class="chips">{toolchain}</div>
       <p class="prov-line">{' · '.join(provenance)}</p>
