@@ -202,9 +202,19 @@ runner.
 PR path filter (GPU-touching changes only):
 
 - `src/aorta/race/**`, `src/aorta/ebpf/**`, `src/aorta/hw_queue_eval/**`,
-  `src/aorta/workloads/**`, `src/aorta/utils/gpu_control.py`
-- matching tests, `config/ci/**`, `recipes/ci/**`, `scripts/ci/**`, `docker/**`,
-  `.github/workflows/gpu-tests.yml`
+  `src/aorta/workloads/**`, `src/aorta/instrumentation/rocjitsu_sanitizers/**`,
+  `src/aorta/utils/gpu_control.py`
+- matching tests (`tests/hw_queue_eval/**`,
+  `tests/instrumentation/rocjitsu_sanitizers/**`, `tests/sanitizers/**`, ...),
+  `config/ci/**`, `recipes/ci/**`, `recipes/sanitizers/**`, `scripts/ci/**`,
+  `scripts/sanitizers/**`, `docker/**`, `.github/workflows/gpu-tests.yml`
+
+The RocJITsu sanitizer engine (`rocjitsu_sanitizers`) is gfx-hardware code, so
+its sources, recipes, dashboard scripts, and tests are GPU-relevant. The GPU
+gate's `test_sanitizers_gpu.py` always runs a fail-closed guardrail on the
+runner; its real clean/racy ConSan repro cases run when the DBI hook
+(`ROCJITSU_BUILD`) and `hipcc` are present (as in `sanitizers-nightly.yml`) and
+self-skip otherwise.
 
 **Concurrency:** one GPU workflow run per ref; newer pushes cancel superseded PR
 runs so the single runner is not starved by stale jobs.

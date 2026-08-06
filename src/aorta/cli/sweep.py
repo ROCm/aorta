@@ -43,6 +43,9 @@ from aorta.cli.triage import (
     execute_list_mitigations,
     execute_triage_run,
 )
+from aorta.instrumentation.rocjitsu_sanitizers.models import ExecutionSummary, Verdict
+from aorta.instrumentation.rocjitsu_sanitizers.recipe import execute_sanitizer_run
+from aorta.instrumentation.rocjitsu_sanitizers.report import read_report
 from aorta.run.cli_helpers import configure_verbose_logging, parse_csv
 from aorta.triage.recipe import RecipeSchemaError, load_recipe_mapping
 
@@ -52,7 +55,7 @@ _BYPASS_TOKENS: frozenset[str] = frozenset({"--help", "-h"})
 def _peek_recipe_mode(path: Path) -> str | None:
     """Best-effort read of a recipe's top-level ``mode`` for flow dispatch.
 
-    Returns ``"probe"``, ``"triage"``, or ``None`` when the file can't be
+    Returns ``"probe"``, ``"triage"``, ``"sanitizer"``, or ``None`` when the file can't be
     parsed / isn't a mapping. ``None`` defers to the trailing-argv signal
     and lets the real loader (inside the chosen flow) raise the canonical,
     fully-validated error -- this peek never becomes the error surface.
@@ -67,6 +70,8 @@ def _peek_recipe_mode(path: Path) -> str | None:
             return "probe"
         if mode == "triage":
             return "triage"
+        if mode == "sanitizer":
+            return "sanitizer"
         # Unknown/malformed mode (typo, null, non-str): don't guess "triage"
         # and mis-dispatch -- return None so the real loader raises the
         # canonical RecipeSchemaError instead of a misleading sweep usage error.
@@ -415,6 +420,68 @@ def sweep_run(
     configure_verbose_logging(verbose)
     has_command = bool(argv)
     recipe_mode = _peek_recipe_mode(recipe) if recipe is not None else None
+
+    if recipe_mode == "sanitizer":
+        if recipe is None:
+            raise click.UsageError("a sanitizer run requires --recipe <path>")
+        if has_command:
+            raise click.UsageError(
+                "a trailing '-- <command>' is not valid for mode: sanitizer recipes"
+            )
+        # A mode: sanitizer run only accepts --recipe/--dry-run/--output/--verbose;
+        # reject every other flag rather than silently ignoring it.
+        non_applicable = {
+            "--workload": workload,
+            "--mitigation-axis": mitigation_axis,
+            "--environment-axis": environment_axis,
+            "--trials": trials,
+            "--steps": steps,
+            "--ticket": ticket,
+            "--baseline-cell": baseline_cell,
+            "--confound-threshold": confound_threshold,
+            "--env-passthrough-mode": env_passthrough_mode,
+            "--stop-after-events": stop_after_events,
+            "--max-trials": max_trials,
+            "--disable-detector": disable_detectors,
+            "--mitigations-file": mitigation_files,
+            "--collect": collect,
+            "--strict": strict,
+        }
+        set_flags = sorted(
+            name for name, value in non_applicable.items() if value not in (None, "", (), False)
+        )
+        if set_flags:
+            raise click.UsageError(
+                "these flags are not valid for a mode: sanitizer recipe: "
+                + ", ".join(set_flags)
+            )
+        out = output if output is not None else Path("sanitizer_results") / recipe.stem
+        try:
+            report_path = execute_sanitizer_run(recipe, output_dir=out, dry_run=dry_run)
+        except (RecipeSchemaError, FileNotFoundError, ValueError) as exc:
+            # Expected recipe/input problems are user errors, not crashes.
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"sanitizer report: {report_path}")
+        if dry_run:
+            return
+        report = read_report(report_path)
+        click.echo(
+            f"overall verdict: {report.overall_verdict.value} "
+            f"(execution {report.execution_status.value})"
+        )
+        # Fail closed: a race/error verdict or any non-complete execution (a
+        # missing/errored backend) must be a non-zero exit. Positive-control
+        # recipes that expect a fail are gated by compare_verdict_baselines.py,
+        # not by this raw exit code.
+        if report.overall_verdict in {Verdict.FAIL, Verdict.ERROR} or (
+            report.execution_status is not ExecutionSummary.COMPLETE
+        ):
+            raise click.ClickException(
+                "sanitizer guardrail not clean: "
+                f"overall_verdict={report.overall_verdict.value}, "
+                f"execution_status={report.execution_status.value}"
+            )
+        return
 
     # --- consistency guards (clear up-front errors, no silent fallback) ---
     if recipe_mode == "probe" and not has_command:

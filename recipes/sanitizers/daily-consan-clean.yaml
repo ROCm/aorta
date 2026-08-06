@@ -1,0 +1,26 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-CONSAN-CLEAN
+description: >
+  Daily gfx950 ConSan guardrail on the generic single-wave LDS repro (expect PASS).
+
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: consan_repro
+    variant: clean
+    hip: fixtures/repro/consan_lds_race.hip
+    command: fixtures/bin/consan_lds_race
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - consan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json
