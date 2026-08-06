@@ -529,6 +529,17 @@ def test_history_grid_marks_a_workload_that_was_absent_that_night():
     assert "not in this run" in grid  # w2 has no cell on the older row
 
 
+def test_history_grid_absence_marker_is_named_for_assistive_tech():
+    # Unnamed, a screen reader reaches the bare glyph and announces "middle
+    # dot", which does not convey that the workload was absent that night.
+    runs = [
+        _run(3, [_cell("w1", "c")], total=1, record=1),
+        _run(4, [_cell("w1", "c"), _cell("w2", "c")], total=2, record=2),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "role='img' title='not in this run' aria-label='not in this run'" in grid
+
+
 def test_history_grid_does_not_flag_aortas_own_nightly_version_as_a_bump():
     # amd_aorta_version is date-stamped, so it changes every single night. Were
     # it treated as a toolchain change, every row would carry the marker and the
@@ -604,7 +615,7 @@ def test_change_summary_lists_metrics_that_moved_past_the_threshold():
              total=1, record=1),
     ]
     html = gen_dashboard.build_change_summary(runs)
-    assert "mean_step_time_ms" in html and "+50%" in html
+    assert "mean_step_time_ms" in html and "+50.0%" in html
     assert "latency_ms" not in html  # 2% is inside the noise floor
 
 
@@ -711,7 +722,7 @@ def test_change_summary_compares_wall_clock_as_well_as_step_time():
              total=1, record=1),
     ]
     html = gen_dashboard.build_change_summary(runs)
-    assert "mean_wall_clock_sec" in html and "+80%" in html
+    assert "mean_wall_clock_sec" in html and "+80.0%" in html
     assert "mean_step_time_ms" not in html  # genuinely unchanged
 
 
@@ -726,6 +737,30 @@ def test_change_summary_threshold_is_the_more_than_it_claims_to_be():
     assert not moved(100.0, 110.0)   # exactly +10%
     assert not moved(100.0, 90.0)    # exactly -10%
     assert moved(100.0, 110.1)       # just past it
+
+
+def test_change_summary_does_not_round_a_move_back_onto_the_threshold():
+    # Rounding to whole percent printed a reported 10.4% move as "+10%", inside
+    # a section that promises "moved more than 10%" -- the row read as a
+    # contradiction of the heading directly above it.
+    runs = [
+        _run(3, [_cell("w", "c", step=100.0)], total=1, record=1),
+        _run(4, [_cell("w", "c", step=110.4)], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "+10.4%" in html
+
+
+def test_change_summary_carries_the_unit_for_step_time():
+    # mean_step_time_ms is one of the compared harness metrics but had no entry
+    # in _METRIC_UNITS, so its rows rendered bare numbers while every other
+    # timing metric kept its unit.
+    runs = [
+        _run(3, [_cell("w", "c", step=100.0)], total=1, record=1),
+        _run(4, [_cell("w", "c", step=150.0)], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "100 → 150 ms" in html
 
 
 def test_dashboard_withholds_the_js_controls_when_there_is_nothing_to_expand():

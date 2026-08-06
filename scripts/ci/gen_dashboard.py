@@ -47,6 +47,7 @@ _METRIC_UNITS = {
     "latency_ms": "ms",
     "step_time_p50": "ms",
     "step_time_p99": "ms",
+    "mean_step_time_ms": "ms",
     "mean_wall_clock_sec": "s",
     "logits_checksum": "",
     "output_checksum": "",
@@ -424,7 +425,14 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
         for name in ordered:
             group = by_entry.get(name) or []
             if not group:
-                cells.append("<td class='gcell'><span class='absent' title='not in this run'>·</span></td>")
+                # role + aria-label for the same reason the populated cells
+                # carry one: unnamed, a screen reader reaches the bare glyph
+                # and announces "middle dot", which says nothing about the
+                # workload being absent from this run.
+                cells.append(
+                    "<td class='gcell'><span class='absent' role='img' "
+                    "title='not in this run' aria-label='not in this run'>·</span></td>"
+                )
                 continue
             counts = _tally(group)
             worst = _worst_verdict(counts)
@@ -538,7 +546,7 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
         arrow = "▲" if pct > 0 else "▼"
         items.append(
             f"<li><span class='mono'>{_esc(_cell_label(entry))}</span> "
-            f"<span class='mono'>{_esc(metric)}</span> {arrow} {pct:+.0f}% "
+            f"<span class='mono'>{_esc(metric)}</span> {arrow} {pct:+.1f}% "
             f"<span class='muted'>{_esc(_fmt_num(b))} → {_esc(_fmt_num(a))}"
             f"{(' ' + _esc(unit)) if unit else ''}</span></li>"
         )
