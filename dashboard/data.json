@@ -2,10 +2,10 @@
   {
     "gate": false,
     "meta": {
-      "commit": "4d410a42b61a",
-      "date": "2026-08-06T17:19:39+00:00",
+      "commit": "667b1a63e40d",
+      "date": "2026-08-06T21:14:27+00:00",
       "gpu": "gfx950",
-      "run": "run 31117508536"
+      "run": "run 31120770246"
     },
     "rows": {
       "consan-clean": {
