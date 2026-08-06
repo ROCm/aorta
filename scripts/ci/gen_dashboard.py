@@ -445,8 +445,12 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             # leaves anyone who cannot separate red from green — or who is on a
             # touch screen with no hover — unable to read the row at all.
             breakdown = f"{name} — {_tally_text(counts)}"
+            # role='img' so the aria-label is actually exposed: a plain span has
+            # the implicit generic role, which has no accessible name, so a
+            # screen reader is free to ignore the label and announce only the
+            # glyph and count -- the least useful part for a mixed group.
             cells.append(
-                f"<td class='gcell'><span class='dot' style='background:{bg}' "
+                f"<td class='gcell'><span class='dot' role='img' style='background:{bg}' "
                 f"title='{_esc(breakdown)}' aria-label='{_esc(breakdown)}'>"
                 f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span></td>"
             )

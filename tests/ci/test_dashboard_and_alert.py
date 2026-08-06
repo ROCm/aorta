@@ -681,8 +681,11 @@ def test_history_grid_states_the_verdict_without_relying_on_colour():
     ]
     grid = gen_dashboard.build_history_grid(runs)
     assert "✗ 1" in grid and "✓ 1" in grid
-    # The breakdown reaches assistive tech, not only a hover tooltip.
+    # The breakdown reaches assistive tech, not only a hover tooltip. The role
+    # is part of that: a generic span has no accessible name, so the label is
+    # not guaranteed to be announced without it.
     assert "aria-label='w — 1 fail'" in grid
+    assert grid.count("<span class='dot' role='img'") == 2
 
 
 def test_history_grid_compares_its_oldest_row_against_the_run_before_it():
