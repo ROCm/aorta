@@ -16,6 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  CONTAINER_NAME: aorta-ci-gpu
   # Immutable RocJITsu input. rocm-systems is public, so the checkout needs no
   # token. TODO(#330): replace this branch ref with the reviewed commit SHA so
   # the gate pins an immutable input rather than a mutable branch.
@@ -56,70 +57,79 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
         with:
-          python-version: "3.11"
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
 
-      - name: Install aorta
+      # Host hipcc is not a reliable ROCm toolchain (e.g. it may point at a
+      # missing /opt/rocm/llvm/bin/clang-*). Run the full sanitizer gate inside
+      # the same pinned ROCm container as gpu-tests.yml / eval-reusable.yml.
+      # Workspace-relative paths keep artifacts visible on the host for upload.
+      - name: Run sanitizer regression
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[tests]"
+          bash scripts/ci/docker_cmd.sh exec \
+            -e ROCJITSU_REF="${ROCJITSU_REF}" \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            SANITIZER_ROOT=".sanitizer-nightly"
+            ROCJITSU_SRC="${SANITIZER_ROOT}/rocjitsu-src"
+            ROCJITSU_BUILD="${SANITIZER_ROOT}/rocjitsu-build"
+            SANITIZER_OUT="${SANITIZER_ROOT}/out"
+            FIXTURES=recipes/sanitizers/fixtures
 
-      - name: Build rocjitsu sanitizer binaries
+            python -m pip install --upgrade pip
+            pip install -e ".[tests]"
+
+            rm -rf "${ROCJITSU_SRC}" "${ROCJITSU_BUILD}"
+            git clone --filter=blob:none https://github.com/ROCm/rocm-systems.git "${ROCJITSU_SRC}"
+            git -C "${ROCJITSU_SRC}" checkout "${ROCJITSU_REF}"
+            echo "ROCJITSU checkout: $(git -C "${ROCJITSU_SRC}" rev-parse HEAD)"
+            if command -v ninja >/dev/null 2>&1; then
+              cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}" -GNinja
+            else
+              cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}"
+            fi
+            cmake --build "${ROCJITSU_BUILD}" --parallel \
+              --target rj_waitcheck rocjitsu_dbi_hooks
+            export ROCJITSU_BUILD="${ROCJITSU_BUILD}"
+
+            mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
+            hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race.hip" \
+              -o "${FIXTURES}/bin/consan_lds_race"
+            hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race_2wave.hip" \
+              -o "${FIXTURES}/bin/consan_lds_race_2wave"
+            python scripts/sanitizers/prepare_gemm_isa.py \
+              --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 3
+
+            # Positive-control recipes intentionally exit non-zero via the
+            # guardrail-safe CLI. The authoritative gate is the baseline
+            # comparator below, so these only need to produce reports.
+            mkdir -p "${SANITIZER_OUT}/waitcheck" "${SANITIZER_OUT}/consan-clean" "${SANITIZER_OUT}/consan-racy"
+            aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml \
+              --output-dir "${SANITIZER_OUT}/waitcheck" || true
+            aorta sweep run --recipe recipes/sanitizers/daily-consan-clean.yaml \
+              --output-dir "${SANITIZER_OUT}/consan-clean" || true
+            aorta sweep run --recipe recipes/sanitizers/daily-consan-racy.yaml \
+              --output-dir "${SANITIZER_OUT}/consan-racy" || true
+
+            python scripts/sanitizers/compare_verdict_baselines.py "${SANITIZER_OUT}"
+          '
+
+      - name: Reclaim results ownership
+        if: always()
         run: |
-          set -euo pipefail
-          ROCJITSU_SRC="${RUNNER_TEMP}/rocjitsu-src"
-          ROCJITSU_BUILD="${RUNNER_TEMP}/rocjitsu-build"
-          # Token-free clone of the public repo, pinned to an explicit ref.
-          git clone --filter=blob:none https://github.com/ROCm/rocm-systems.git "${ROCJITSU_SRC}"
-          git -C "${ROCJITSU_SRC}" checkout "${ROCJITSU_REF}"
-          echo "ROCJITSU checkout: $(git -C "${ROCJITSU_SRC}" rev-parse HEAD)"
-          # Prefer Ninja when the runner has it, but fall back to CMake's default
-          # generator so the gate doesn't hard-fail on hosts without Ninja
-          # installed. `cmake --build` drives whichever generator was selected.
-          if command -v ninja >/dev/null 2>&1; then
-            cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}" -GNinja
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
           else
-            cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}"
+            sudo chown -R "$uidgid" "$ws" || true
           fi
-          cmake --build "${ROCJITSU_BUILD}" --parallel \
-            --target rj_waitcheck rocjitsu_dbi_hooks
-          echo "ROCJITSU_BUILD=${ROCJITSU_BUILD}" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
-
-      - name: Build ConSan repro binaries
-        run: |
-          set -euo pipefail
-          FIXTURES=recipes/sanitizers/fixtures
-          mkdir -p "$FIXTURES/bin" "$FIXTURES/isa"
-          hipcc --offload-arch=gfx950 -O1 -g "$FIXTURES/repro/consan_lds_race.hip" -o "$FIXTURES/bin/consan_lds_race"
-          hipcc --offload-arch=gfx950 -O1 -g "$FIXTURES/repro/consan_lds_race_2wave.hip" -o "$FIXTURES/bin/consan_lds_race_2wave"
-          python scripts/sanitizers/prepare_gemm_isa.py --csv "$FIXTURES/gemm_shapes_unique.csv" --out "$FIXTURES/isa" --top-n 3
-
-      # Positive-control recipes (e.g. the racy repro) intentionally exit non-zero
-      # via the guardrail-safe CLI. The authoritative gate is the baseline
-      # comparator below, so these steps only need to *produce* reports.
-      - name: Run waitcheck recipe
-        continue-on-error: true
-        run: |
-          aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml \
-            --output-dir "${RUNNER_TEMP}/sanitizer-out/waitcheck"
-
-      - name: Run ConSan clean recipe
-        continue-on-error: true
-        run: |
-          aorta sweep run --recipe recipes/sanitizers/daily-consan-clean.yaml \
-            --output-dir "${RUNNER_TEMP}/sanitizer-out/consan-clean"
-
-      - name: Run ConSan racy recipe
-        continue-on-error: true
-        run: |
-          aorta sweep run --recipe recipes/sanitizers/daily-consan-racy.yaml \
-            --output-dir "${RUNNER_TEMP}/sanitizer-out/consan-racy"
-
-      - name: Compare verdict baselines
-        run: python scripts/sanitizers/compare_verdict_baselines.py "${RUNNER_TEMP}/sanitizer-out"
 
       - name: Upload sanitizer results
         # Always upload whatever ran, even when an earlier step (e.g. the baseline
@@ -129,15 +139,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sanitizer-nightly-${{ github.run_id }}
-          path: ${{ runner.temp }}/sanitizer-out
+          path: .sanitizer-nightly/out
           if-no-files-found: warn
 
       - name: Clean up build/temp state
         if: always()
         run: |
-          rm -rf "${RUNNER_TEMP}/rocjitsu-src" "${RUNNER_TEMP}/rocjitsu-build" \
-                 "${RUNNER_TEMP}/sanitizer-out" \
+          rm -rf .sanitizer-nightly \
                  recipes/sanitizers/fixtures/bin recipes/sanitizers/fixtures/isa
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
 
   publish:
     name: publish sanitizer dashboard
