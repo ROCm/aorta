@@ -1,9 +1,9 @@
 {
-  "commit": "4d410a42b61acd34fbb886d48f4d72dad07d1773",
-  "conclusion": "cancelled",
-  "date": "2026-08-06T15:41:52+00:00",
-  "healthy": false,
+  "commit": "5bc10d52747189230be391cf74ecbae5a6b76577",
+  "conclusion": "success",
+  "date": "2026-08-06T16:19:17+00:00",
+  "healthy": true,
   "ref": "refs/heads/main",
-  "run_id": "31116518267",
-  "run_url": "https://github.com/ROCm/aorta/actions/runs/31116518267"
+  "run_id": "local-20260806161917",
+  "run_url": "https://github.com/ROCm/aorta/actions/workflows/sanitizers-nightly.yml"
 }
