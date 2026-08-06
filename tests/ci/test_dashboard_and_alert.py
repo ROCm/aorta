@@ -21,10 +21,12 @@ alert_issue = _load("alert_issue")
 eval_lib = _load("eval_lib")
 
 
-def _results(generated, entries, **summary):
+def _results(generated, entries, build=None, **summary):
     base = {"total": 0, "pass": 0, "fail": 0, "record": 0, "skip": 0}
     base.update(summary)
-    return {"generated_at": generated, "build": {"amd_aorta_version": "0.2.1rc"}, "summary": base, "entries": entries}
+    info = {"amd_aorta_version": "0.2.1rc"}
+    info.update(build or {})
+    return {"generated_at": generated, "build": info, "summary": base, "entries": entries}
 
 
 def test_sparkline_handles_short_and_normal_series():
@@ -408,3 +410,378 @@ def test_dashboard_omits_the_unit_when_the_value_is_unknown():
     html = gen_dashboard.build_dashboard_html([r])
     assert "— ms" not in html
     assert "12.5 ms" in html  # a real value keeps its unit
+
+
+def _run(day, entries, build=None, **summary):
+    return _results(f"2026-08-{day:02d}T00:00:00Z", entries, build=build, **summary)
+
+
+def _cell(entry, cell, verdict="record", step=None, summary=None, reasons=None):
+    metrics = {}
+    if step is not None:
+        metrics["mean_step_time_ms"] = step
+    if summary is not None:
+        metrics["summary"] = summary
+    return {"entry": entry, "cell": cell, "verdict": verdict,
+            "reasons": reasons or [], "metrics": metrics}
+
+
+# --- run history grid -------------------------------------------------------
+
+
+def test_history_grid_needs_two_runs_before_it_says_anything():
+    # One run is not a history: a grid of a single row invites reading a trend
+    # into a single sample.
+    one = [_run(3, [_cell("w", "c")], total=1, record=1)]
+    assert gen_dashboard.build_history_grid(one) == ""
+    assert gen_dashboard.build_history_grid([]) == ""
+    assert "<h2>Run history</h2>" not in gen_dashboard.build_dashboard_html(one)
+
+
+def test_history_grid_puts_runs_on_rows_and_workloads_on_columns():
+    runs = [
+        _run(3, [_cell("gpu_smoke", "c"), _cell("race", "smoke")], total=2, record=2),
+        _run(4, [_cell("gpu_smoke", "c"), _cell("race", "smoke")], total=2, record=2),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "gpu_smoke" in grid and "race" in grid
+    # Newest first: whichever date appears earlier in the markup is the top row.
+    assert grid.index("2026-08-04") < grid.index("2026-08-03")
+
+
+def test_history_grid_cell_leads_with_the_worst_verdict_in_the_group():
+    # Three passing cells and one failure is a failing workload that night; the
+    # cell has to say so rather than average the group into looking healthy.
+    mixed = [_cell("w", f"c{i}", verdict="pass") for i in range(3)]
+    mixed.append(_cell("w", "c3", verdict="fail"))
+    runs = [
+        _run(3, [_cell("w", f"c{i}", verdict="pass") for i in range(4)], total=4, **{"pass": 4}),
+        _run(4, mixed, total=4, fail=1, **{"pass": 3}),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "1/4" in grid                                    # one of four is the worst
+    assert gen_dashboard._VERDICT_COLOR["fail"] in grid
+    assert "3 pass · 1 fail" in grid or "1 fail · 3 pass" in grid  # hover breakdown
+    # A uniform group needs no ratio -- "4/4" would imply something was wrong.
+    assert "4/4" not in grid
+
+
+def test_history_grid_never_renders_an_unrecognised_verdict_as_healthy():
+    # The results JSON is not ours to constrain, so a verdict this generator has
+    # no colour for can appear. Counting it towards the group while never being
+    # able to select it would render pass + error as a green tick over "1/2" --
+    # an unrecognised result reported as healthy.
+    runs = [
+        _run(3, [_cell("w", "c0", verdict="pass"), _cell("w", "c1", verdict="pass")],
+             total=2, **{"pass": 2}),
+        _run(4, [_cell("w", "c0", verdict="pass"), _cell("w", "c1", verdict="error")],
+             total=2, **{"pass": 1}),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    cell = f"background:{gen_dashboard._UNKNOWN_COLOR}' title='w — 1 pass · 1 error'"
+    assert cell in grid          # the mixed group takes the unknown colour, not green
+    assert "? 1/2" in grid       # and reads as one unrecognised of two
+    assert "1 pass · 1 error" in grid  # the unknown is still counted in the hover
+
+
+def test_history_grid_ranks_a_known_failure_above_an_unrecognised_verdict():
+    # Unknown outranks the benign verdicts but must not displace a real failure:
+    # "something failed" is more actionable than "something is unfamiliar".
+    runs = [
+        _run(3, [_cell("w", "c0", verdict="pass")], total=1, **{"pass": 1}),
+        _run(4, [_cell("w", "c0", verdict="fail"), _cell("w", "c1", verdict="error")],
+             total=2, fail=1),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert gen_dashboard._VERDICT_COLOR["fail"] in grid
+    assert gen_dashboard._UNKNOWN_COLOR not in grid
+
+
+def test_headline_does_not_claim_passing_when_the_summary_hides_an_unknown():
+    # total=2 with a single known verdict means one entry carried something this
+    # generator cannot classify. Reporting "passing" off the one it recognises
+    # would be the same defect as a green grid cell, on the more prominent
+    # surface.
+    runs = [_run(3, [_cell("w", "c0", verdict="pass")], total=2, **{"pass": 1})]
+    assert gen_dashboard._latest_status(runs) == (
+        "unrecognised", gen_dashboard._UNKNOWN_COLOR)
+    # A summary that adds up is untouched.
+    ok = [_run(3, [_cell("w", "c0", verdict="pass")], total=1, **{"pass": 1})]
+    assert gen_dashboard._latest_status(ok)[0] == "passing"
+
+
+def test_worst_verdict_precedence_is_fail_then_unknown_then_the_benign_ones():
+    assert gen_dashboard._worst_verdict({"fail": 1, "error": 1, "pass": 5}) == "fail"
+    assert gen_dashboard._worst_verdict({"error": 1, "record": 2, "pass": 5}) == "error"
+    assert gen_dashboard._worst_verdict({"record": 1, "pass": 5}) == "record"
+    assert gen_dashboard._worst_verdict({"pass": 5}) == "pass"
+    # A zero count is not a present verdict; it must not win by being unknown.
+    assert gen_dashboard._worst_verdict({"error": 0, "pass": 5}) == "pass"
+    assert gen_dashboard._worst_verdict({}) == ""
+
+
+def test_history_grid_marks_a_workload_that_was_absent_that_night():
+    runs = [
+        _run(3, [_cell("w1", "c")], total=1, record=1),
+        _run(4, [_cell("w1", "c"), _cell("w2", "c")], total=2, record=2),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "not in this run" in grid  # w2 has no cell on the older row
+
+
+def test_history_grid_absence_marker_is_named_for_assistive_tech():
+    # Unnamed, a screen reader reaches the bare glyph and announces "middle
+    # dot", which does not convey that the workload was absent that night.
+    runs = [
+        _run(3, [_cell("w1", "c")], total=1, record=1),
+        _run(4, [_cell("w1", "c"), _cell("w2", "c")], total=2, record=2),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "role='img' title='not in this run' aria-label='not in this run'" in grid
+
+
+def test_history_grid_does_not_flag_aortas_own_nightly_version_as_a_bump():
+    # amd_aorta_version is date-stamped, so it changes every single night. Were
+    # it treated as a toolchain change, every row would carry the marker and the
+    # one signal that should mean something would mean nothing.
+    runs = [
+        _run(3, [_cell("w", "c")], build={"amd_aorta_version": "0.2.2rc20260803",
+                                          "rocm": "7.2.0", "torch": "2.9.1", "hip": "7.2"},
+             total=1, record=1),
+        _run(4, [_cell("w", "c")], build={"amd_aorta_version": "0.2.2rc20260804",
+                                          "rocm": "7.2.0", "torch": "2.9.1", "hip": "7.2"},
+             total=1, record=1),
+    ]
+    assert "class='bump'" not in gen_dashboard.build_history_grid(runs)
+
+
+def test_history_grid_flags_the_run_where_the_stack_underneath_moved():
+    runs = [
+        _run(3, [_cell("w", "c")], build={"rocm": "7.2.0"}, total=1, record=1),
+        _run(4, [_cell("w", "c")], build={"rocm": "7.3.0"}, total=1, record=1),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert grid.count("class='bump'") == 1  # only the run that moved
+
+
+def test_history_grid_window_bounds_the_rendered_rows():
+    runs = [_run(d, [_cell("w", "c")], total=1, record=1) for d in range(1, 21)]
+    grid = gen_dashboard.build_history_grid(runs, max_runs=5)
+    assert grid.count("<tr><th scope='row'") == 5  # body rows, not the header
+    assert "2026-08-20" in grid and "2026-08-15" not in grid  # newest five
+
+
+# --- what changed since the previous run ------------------------------------
+
+
+def test_change_summary_withheld_until_there_is_something_to_compare():
+    assert gen_dashboard.build_change_summary([]) == ""
+    assert gen_dashboard.build_change_summary(
+        [_run(3, [_cell("w", "c")], total=1, record=1)]) == ""
+
+
+def test_change_summary_reports_a_verdict_that_flipped_regressions_first():
+    runs = [
+        _run(3, [_cell("a", "c", verdict="pass"), _cell("b", "c", verdict="fail")],
+             total=2, **{"pass": 1, "fail": 1}),
+        _run(4, [_cell("a", "c", verdict="fail", reasons=["step time 9 > max 5"]),
+                 _cell("b", "c", verdict="pass")],
+             total=2, **{"pass": 1, "fail": 1}),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "a::c" in html and "b::c" in html
+    assert "step time 9 &gt; max 5" in html  # the reason travels with the flip
+    # The new failure is what someone needs to act on, so it leads.
+    assert html.index("a::c") < html.index("b::c")
+
+
+def test_change_summary_names_the_toolchain_that_moved():
+    runs = [
+        _run(3, [_cell("w", "c")], build={"rocm": "7.2.0", "torch": "2.9.1"},
+             total=1, record=1),
+        _run(4, [_cell("w", "c")], build={"rocm": "7.3.0", "torch": "2.9.1"},
+             total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "ROCm" in html and "7.2.0" in html and "7.3.0" in html
+    assert "PyTorch" not in html  # unchanged fields stay quiet
+
+
+def test_change_summary_lists_metrics_that_moved_past_the_threshold():
+    runs = [
+        _run(3, [_cell("w", "c", step=100.0, summary={"latency_ms": 10.0})],
+             total=1, record=1),
+        _run(4, [_cell("w", "c", step=150.0, summary={"latency_ms": 10.2})],
+             total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "mean_step_time_ms" in html and "+50.0%" in html
+    assert "latency_ms" not in html  # 2% is inside the noise floor
+
+
+def test_change_summary_survives_a_previous_value_of_zero():
+    # A percentage against zero is undefined; the run must still render.
+    runs = [
+        _run(3, [_cell("w", "c", step=0.0)], total=1, record=1),
+        _run(4, [_cell("w", "c", step=5.0)], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "mean_step_time_ms" not in html
+    assert "Nothing moved" in html
+
+
+def test_change_summary_ignores_values_it_cannot_compare():
+    runs = [
+        _run(3, [_cell("w", "c", summary={"m": float("nan"), "b": True, "s": "4"})],
+             total=1, record=1),
+        _run(4, [_cell("w", "c", summary={"m": 99.0, "b": False, "s": "400"})],
+             total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "Nothing moved" in html
+
+
+def test_change_summary_reports_cells_the_matrix_gained_and_lost():
+    runs = [
+        _run(3, [_cell("w", "old")], total=1, record=1),
+        _run(4, [_cell("w", "new")], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "new result" in html and "w::new" in html
+    assert "no longer reported" in html and "w::old" in html
+
+
+def test_change_summary_says_so_plainly_when_a_night_was_uneventful():
+    same = [_cell("w", "c", step=10.0, summary={"latency_ms": 1.0})]
+    runs = [_run(3, same, total=1, record=1), _run(4, same, total=1, record=1)]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "Nothing moved" in html
+    assert "<li>" not in html
+
+
+def test_change_summary_names_a_cell_less_record_as_the_whole_workload():
+    runs = [
+        _run(3, [{"entry": "w", "cell": None, "verdict": "skip", "reasons": [],
+                  "metrics": {}}], total=1, skip=1),
+        _run(4, [{"entry": "w", "cell": None, "verdict": "fail", "reasons": [],
+                  "metrics": {}}], total=1, fail=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "w (whole workload)" in html
+    assert "w::None" not in html
+
+
+def test_history_grid_states_the_verdict_without_relying_on_colour():
+    # A bare count renders identically for a passing and a failing group, so the
+    # cell would be unreadable to anyone who cannot separate red from green, or
+    # who is on a touch screen and cannot hover for the title.
+    runs = [
+        _run(3, [_cell("w", "c", verdict="pass")], total=1, **{"pass": 1}),
+        _run(4, [_cell("w", "c", verdict="fail")], total=1, fail=1),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "✗ 1" in grid and "✓ 1" in grid
+    # The breakdown reaches assistive tech, not only a hover tooltip. The role
+    # is part of that: a generic span has no accessible name, so the label is
+    # not guaranteed to be announced without it.
+    assert "aria-label='w — 1 fail'" in grid
+    assert grid.count("<span class='dot' role='img'") == 2
+
+
+def test_history_grid_compares_its_oldest_row_against_the_run_before_it():
+    # The window truncates the rendered rows, not the history. Comparing the
+    # oldest displayed row against nothing would drop a toolchain change from
+    # that row every time history grows past the window.
+    runs = [
+        _run(1, [_cell("w", "c")], build={"rocm": "7.2.0"}, total=1, record=1),
+        _run(2, [_cell("w", "c")], build={"rocm": "7.3.0"}, total=1, record=1),
+        _run(3, [_cell("w", "c")], build={"rocm": "7.3.0"}, total=1, record=1),
+    ]
+    # Day 2 is the oldest rendered row and it is where ROCm moved.
+    grid = gen_dashboard.build_history_grid(runs, max_runs=2)
+    assert grid.count("class='bump'") == 1
+    assert "2026-08-01" not in grid  # genuinely outside the window
+
+
+def test_history_grid_first_ever_run_has_nothing_to_be_compared_against():
+    runs = [
+        _run(3, [_cell("w", "c")], build={"rocm": "7.2.0"}, total=1, record=1),
+        _run(4, [_cell("w", "c")], build={"rocm": "7.3.0"}, total=1, record=1),
+    ]
+    # The bump belongs to day 4 only; day 3 has no predecessor to differ from.
+    assert gen_dashboard.build_history_grid(runs).count("class='bump'") == 1
+
+
+def test_change_summary_compares_wall_clock_as_well_as_step_time():
+    # nightly_eval records both, and they can disagree: a steady step time with
+    # a climbing wall clock is what a slower setup or a stalling teardown looks
+    # like, and it would be invisible if only step time were compared.
+    runs = [
+        _run(3, [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                  "metrics": {"mean_step_time_ms": 10.0, "mean_wall_clock_sec": 5.0}}],
+             total=1, record=1),
+        _run(4, [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
+                  "metrics": {"mean_step_time_ms": 10.0, "mean_wall_clock_sec": 9.0}}],
+             total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "mean_wall_clock_sec" in html and "+80.0%" in html
+    assert "mean_step_time_ms" not in html  # genuinely unchanged
+
+
+def test_change_summary_threshold_is_the_more_than_it_claims_to_be():
+    # The docs, the constant's comment and the steady-state line all promise
+    # "more than" 10%, so exactly 10% must not be reported.
+    def moved(before, after):
+        runs = [_run(3, [_cell("w", "c", step=before)], total=1, record=1),
+                _run(4, [_cell("w", "c", step=after)], total=1, record=1)]
+        return "mean_step_time_ms" in gen_dashboard.build_change_summary(runs)
+
+    assert not moved(100.0, 110.0)   # exactly +10%
+    assert not moved(100.0, 90.0)    # exactly -10%
+    assert moved(100.0, 110.1)       # just past it
+
+
+def test_change_summary_does_not_round_a_move_back_onto_the_threshold():
+    # Rounding to whole percent printed a reported 10.4% move as "+10%", inside
+    # a section that promises "moved more than 10%" -- the row read as a
+    # contradiction of the heading directly above it.
+    runs = [
+        _run(3, [_cell("w", "c", step=100.0)], total=1, record=1),
+        _run(4, [_cell("w", "c", step=110.4)], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "+10.4%" in html
+
+
+def test_change_summary_carries_the_unit_for_step_time():
+    # mean_step_time_ms is one of the compared harness metrics but had no entry
+    # in _METRIC_UNITS, so its rows rendered bare numbers while every other
+    # timing metric kept its unit.
+    runs = [
+        _run(3, [_cell("w", "c", step=100.0)], total=1, record=1),
+        _run(4, [_cell("w", "c", step=150.0)], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "100 → 150 ms" in html
+
+
+def test_dashboard_withholds_the_js_controls_when_there_is_nothing_to_expand():
+    # A run whose results carried no metrics renders no details rows, so both
+    # buttons would provably do nothing.
+    runs = [_run(3, [_cell("w", "c", step=1.0)], total=1, record=1),
+            _run(4, [_cell("w", "c", step=1.0)], total=1, record=1)]
+    html = gen_dashboard.build_dashboard_html(runs)
+    assert "<details>" not in html
+    assert 'document.querySelectorAll("tr.mrow details").length' in html
+
+
+def test_dashboard_hides_the_js_only_controls_until_the_script_runs():
+    # The page is complete without JavaScript, so a control that does nothing
+    # without it must not be visible in the served markup.
+    runs = [_run(3, [_cell("w", "c", summary={"m": 1.0})], total=1, record=1),
+            _run(4, [_cell("w", "c", summary={"m": 1.0})], total=1, record=1)]
+    html = gen_dashboard.build_dashboard_html(runs)
+    assert '<div class="toolbar" id="toolbar" hidden>' in html
+    assert "bar.hidden = false" in html
+    assert "Expand all" in html
