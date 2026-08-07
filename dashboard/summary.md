@@ -1,34 +1,54 @@
 # Sanitizers Nightly · gfx950
 
-> ⚠️ **Stale** — latest sanitizer nightly run `31155146550` did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/31155146550)
+Run `run 31172043222` · commit `440dc27b6c4d` · 2026-08-07T11:08:58+00:00
 
-Run `run 31155146550` · commit `986d81393e63` · 2026-08-07T06:48:22+00:00
-
-❌ **FAIL** — verdict mismatch vs baselines
+✅ **PASS** — all verdicts match baselines
 
 | Recipe | Backend | Verdict | Baseline | Execution | Findings | Coverage |
 |---|---|---|---|---|--:|---|
-| daily-waitcheck-gemm | waitcheck (static) | `—` ❌ (want warn) | `warn` | missing | 0 | — |
-| daily-consan-clean | consan (dynamic) | `—` ❌ (want pass) | `pass` | missing | 0 | — |
-| daily-consan-racy | consan (dynamic) | `—` ❌ (want fail) | `fail` | missing | 0 | — |
+| daily-waitcheck-gemm | waitcheck (static) | `warn` ✅ | `warn` | complete | 32 | — |
+| daily-consan-clean | consan (dynamic) | `pass` ✅ | `pass` | complete | 0 | 0/0, 2/2 |
+| daily-consan-racy | consan (dynamic) | `fail` ✅ | `fail` | complete | 64 | 0/0, 2/2 |
 
 ## Kernel details
 
-<details><summary><b>daily-waitcheck-gemm</b> — <code>—</code></summary>
+<details><summary><b>daily-waitcheck-gemm</b> — <code>warn</code></summary>
 
-report missing
+backend `rj_waitcheck` `8431040601e7` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution `complete`
+
+| Kernel | Dispatch | Verdict | Findings | Code object | SHA-256 |
+|---|--:|---|--:|---|---|
+| `gemm_NT_M256_N4096_K1024` | 479 | `warn` | 32 | `sol_126578.hsaco` | `80c7c264ad` |
+| `gemm_NT_M128_N4096_K1280` | 471 | `—` | 0 | `sol_175415.hsaco` | `80c7c264ad` |
+| `gemm_TT_M64_N64_K1280` | 440 | `—` | 0 | `sol_137678.hsaco` | `80c7c264ad` |
+
+| Sanitizer | Code | Severity | Count | Example |
+|---|---|---|--:|---|
+| waitcheck | `wait_hazard` | warning | 32 | sol_126578.hsaco:gfx950[0]:.text+0x12d610: missing s_waitcnt lgkmcnt(0) before def of s45 |
 
 </details>
 
-<details><summary><b>daily-consan-clean</b> — <code>—</code></summary>
+<details><summary><b>daily-consan-clean</b> — <code>pass</code></summary>
 
-report missing
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution `complete`
+
+| Kernel | Dispatch | Verdict | Findings | Code object | SHA-256 |
+|---|--:|---|--:|---|---|
+| `consan_lds_race` | 1 | `pass` | 0 | `—` | `—` |
 
 </details>
 
-<details><summary><b>daily-consan-racy</b> — <code>—</code></summary>
+<details><summary><b>daily-consan-racy</b> — <code>fail</code></summary>
 
-report missing
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution `complete`
+
+| Kernel | Dispatch | Verdict | Findings | Code object | SHA-256 |
+|---|--:|---|--:|---|---|
+| `consan_lds_race_2wave` | 1 | `fail` | 64 | `—` | `—` |
+
+| Sanitizer | Code | Severity | Count | Example |
+|---|---|---|--:|---|
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=23794960 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo… |
 
 </details>
 
@@ -36,4 +56,4 @@ report missing
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
-| run 31155146550 | `986d81393e63` | `—` | `—` | `—` | red |
+| run 31172043222 | `440dc27b6c4d` | `warn` | `pass` | `fail` | green |

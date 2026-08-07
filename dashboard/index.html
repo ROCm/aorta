@@ -12,7 +12,7 @@
   h3 { font-size:14px; margin:18px 0 4px; }
   .meta { color:#57606a; font-size:12px; margin-bottom:12px; }
   .mono { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
-  .gate { color:#fff; background:#cf222e; padding:12px 16px; border-radius:8px;
+  .gate { color:#fff; background:#1a7f37; padding:12px 16px; border-radius:8px;
           font-weight:600; margin:12px 0 20px; }
   table { width:100%; border-collapse:collapse; background:#fff; border-radius:8px;
           overflow:hidden; margin-bottom:16px; }
@@ -31,25 +31,25 @@
 </style></head>
 <body><div class=wrap>
   <p class=nav><a href="../">back to CI dashboard</a></p>
-  <div style="color:#fff;background:#cf222e;padding:12px 16px;border-radius:8px;font-weight:600;margin:12px 0 20px">&#9888; Latest sanitizer nightly run 31155146550 did not complete successfully (failure) &mdash; the data below may be stale. <a href="https://github.com/ROCm/aorta/actions/runs/31155146550" style="color:#fff;text-decoration:underline">view failed run</a> <span style="font-weight:400">(2026-08-07T06:48:22+00:00)</span></div>
+  
   <h1>Sanitizers Nightly &middot; gfx950</h1>
-  <div class=meta>latest run <span class=mono>run 31155146550</span>
-     &middot; commit <span class=mono>986d81393e63</span>
-     &middot; 2026-08-07T06:48:22+00:00 &middot; target gfx950</div>
-  <div class=gate>FAIL — verdict mismatch vs baselines</div>
+  <div class=meta>latest run <span class=mono>run 31172043222</span>
+     &middot; commit <span class=mono>440dc27b6c4d</span>
+     &middot; 2026-08-07T11:08:58+00:00 &middot; target gfx950</div>
+  <div class=gate>PASS — all verdicts match baselines</div>
 
   <h2>Latest run</h2>
   <table>
     <tr><th>Recipe</th><th>Backend</th><th>Verdict</th><th>Execution</th><th>Findings</th><th>Coverage</th></tr>
-    <tr><td>daily-waitcheck-gemm</td><td>waitcheck (static)</td><td><span class="badge" style="background:#6e7781">—</span><span class="mark bad">&#10008; want warn</span></td><td>missing</td><td class=num>0</td><td>&mdash;</td></tr><tr><td>daily-consan-clean</td><td>consan (dynamic)</td><td><span class="badge" style="background:#6e7781">—</span><span class="mark bad">&#10008; want pass</span></td><td>missing</td><td class=num>0</td><td>&mdash;</td></tr><tr><td>daily-consan-racy</td><td>consan (dynamic)</td><td><span class="badge" style="background:#6e7781">—</span><span class="mark bad">&#10008; want fail</span></td><td>missing</td><td class=num>0</td><td>&mdash;</td></tr>
+    <tr><td>daily-waitcheck-gemm</td><td>waitcheck (static)</td><td><span class="badge" style="background:#9a6700">warn</span><span class="mark ok">&#10004;</span></td><td>complete</td><td class=num>32</td><td>&mdash;</td></tr><tr><td>daily-consan-clean</td><td>consan (dynamic)</td><td><span class="badge" style="background:#1a7f37">pass</span><span class="mark ok">&#10004;</span></td><td>complete</td><td class=num>0</td><td>0/0, 2/2</td></tr><tr><td>daily-consan-racy</td><td>consan (dynamic)</td><td><span class="badge" style="background:#cf222e">fail</span><span class="mark ok">&#10004;</span></td><td>complete</td><td class=num>64</td><td>0/0, 2/2</td></tr>
   </table>
 
   <h2>Kernel details</h2>
-  <h3>daily-waitcheck-gemm</h3><p>report missing</p><h3>daily-consan-clean</h3><p>report missing</p><h3>daily-consan-racy</h3><p>report missing</p>
+  <h3>daily-waitcheck-gemm &middot; <span class="badge" style="background:#9a6700">warn</span><span class="mark ok">&#10004;</span></h3><div class=meta>backend rj_waitcheck <span class=mono>8431040601e7</span> &middot; selection top_dispatch_count top&#8209;3 &middot; 3 kernel(s) &middot; execution complete</div><table><tr><th>Kernel</th><th>Dispatch</th><th>Verdict</th><th>Findings</th><th>Code object</th><th>SHA-256</th></tr><tr><td class=mono>gemm_NT_M256_N4096_K1024</td><td class=num>479</td><td><span class="badge" style="background:#9a6700">warn</span></td><td class=num>32</td><td class=mono>sol_126578.hsaco</td><td class=mono>80c7c264ad</td></tr><tr><td class=mono>gemm_NT_M128_N4096_K1280</td><td class=num>471</td><td><span class="badge" style="background:#6e7781">—</span></td><td class=num>0</td><td class=mono>sol_175415.hsaco</td><td class=mono>80c7c264ad</td></tr><tr><td class=mono>gemm_TT_M64_N64_K1280</td><td class=num>440</td><td><span class="badge" style="background:#6e7781">—</span></td><td class=num>0</td><td class=mono>sol_137678.hsaco</td><td class=mono>80c7c264ad</td></tr></table><table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th><th>Example</th></tr><tr><td>waitcheck</td><td class=mono>wait_hazard</td><td>warning</td><td class=num>32</td><td class=mono>sol_126578.hsaco:gfx950[0]:.text+0x12d610: missing s_waitcnt lgkmcnt(0) before def of s45</td></tr></table><h3>daily-consan-clean &middot; <span class="badge" style="background:#1a7f37">pass</span><span class="mark ok">&#10004;</span></h3><div class=meta>backend &mdash; &middot; selection top_dispatch_count top&#8209;1 &middot; 1 kernel(s) &middot; execution complete</div><table><tr><th>Kernel</th><th>Dispatch</th><th>Verdict</th><th>Findings</th><th>Code object</th><th>SHA-256</th></tr><tr><td class=mono>consan_lds_race</td><td class=num>1</td><td><span class="badge" style="background:#1a7f37">pass</span></td><td class=num>0</td><td class=mono>&mdash;</td><td class=mono>&mdash;</td></tr></table><table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th><th>Example</th></tr><tr><td colspan=5>no findings</td></tr></table><h3>daily-consan-racy &middot; <span class="badge" style="background:#cf222e">fail</span><span class="mark ok">&#10004;</span></h3><div class=meta>backend &mdash; &middot; selection top_dispatch_count top&#8209;1 &middot; 1 kernel(s) &middot; execution complete</div><table><tr><th>Kernel</th><th>Dispatch</th><th>Verdict</th><th>Findings</th><th>Code object</th><th>SHA-256</th></tr><tr><td class=mono>consan_lds_race_2wave</td><td class=num>1</td><td><span class="badge" style="background:#cf222e">fail</span></td><td class=num>64</td><td class=mono>&mdash;</td><td class=mono>&mdash;</td></tr></table><table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th><th>Example</th></tr><tr><td>consan</td><td class=mono>1</td><td>race</td><td class=num>64</td><td class=mono>[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=23794960 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo…</td></tr></table>
 
   <h2>History / trend</h2>
   <table>
     <tr><th>Run</th><th>Commit</th><th>Date</th><th>daily-waitcheck-gemm</th><th>daily-consan-clean</th><th>daily-consan-racy</th><th>Gate</th></tr>
-    <tr><td class=mono>run 31155146550</td><td class=mono>986d81393e63</td><td>2026-08-07T06:48:22+00:00</td><td><span class="badge" style="background:#6e7781">—</span></td><td><span class="badge" style="background:#6e7781">—</span></td><td><span class="badge" style="background:#6e7781">—</span></td><td><span class="pill bad">red</span></td></tr>
+    <tr><td class=mono>run 31172043222</td><td class=mono>440dc27b6c4d</td><td>2026-08-07T11:08:58+00:00</td><td><span class="badge" style="background:#9a6700">warn</span></td><td><span class="badge" style="background:#1a7f37">pass</span></td><td><span class="badge" style="background:#cf222e">fail</span></td><td><span class="pill ok">green</span></td></tr>
   </table>
 </div></body></html>
