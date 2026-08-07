@@ -132,8 +132,8 @@ multi-GPU entries on an 8-GPU box.
 
 ## Automated ROCm + dependency bumps
 
-- **pip (nightly, auto-merged).** Dependabot (`.github/dependabot.yml`, `pip`
-  ecosystem) runs **daily** and opens **one grouped PR** (`python-deps`,
+- **pip (weekly, auto-merged).** Dependabot (`.github/dependabot.yml`, `pip`
+  ecosystem) runs **weekly** and opens **one grouped PR** (`python-deps`,
   `patterns: ["*"]`) that raises the `==` pins in the requirements files.
   `.github/workflows/dependabot-auto-merge.yml` turns on GitHub **auto-merge
   (squash)** for these PRs, so a bump lands **with no human review** once the
@@ -141,7 +141,7 @@ multi-GPU entries on an 8-GPU box.
   GPU checks auto-skip to Success for a requirements-only change). Only
   **one bump PR is open at a time** (`open-pull-requests-limit: 1`): a red or
   still-open bump PR blocks the next one instead of piling up, and Dependabot
-  rebases the open PR upward each night.
+  rebases the open PR upward each week.
   - A bump PR **edits exactly**: `requirements.txt` (`pyyaml`, `matplotlib`,
     `numpy`, `pandas`, `openpyxl`, `seaborn`, `beautifulsoup4`, `click`) and
     `requirements-dev.txt` (`pytest`, `pytest-cov`, `pre-commit`,

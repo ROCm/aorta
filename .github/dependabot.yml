@@ -1,6 +1,6 @@
 # Automated dependency bumps (Phase 4 of docs/ci-plan.md).
 #
-# pip: Dependabot opens one grouped, auto-merging PR nightly (see
+# pip: Dependabot opens one grouped, auto-merging PR weekly (see
 # .github/workflows/dependabot-auto-merge.yml). The docker base image is NOT
 # tracked here -- the ROCm/Ubuntu OS image is bumped manually so an OS change
 # never lands unreviewed. github-actions bumps are weekly and human-merged.
@@ -10,7 +10,7 @@ updates:
   - package-ecosystem: pip
     directory: "/"
     schedule:
-      interval: daily            # ~nightly (Dependabot's finest cadence)
+      interval: weekly           # weekly bump PR (revisit cadence later)
     open-pull-requests-limit: 1  # a still-open/failing bump PR blocks a new one
     labels: ["dependencies", "python"]
     groups:
