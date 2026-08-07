@@ -1,8 +1,8 @@
 # Sanitizers Nightly · gfx950
 
-> ⚠️ **Stale** — latest sanitizer nightly run `31120770246` did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/31120770246)
+> ⚠️ **Stale** — latest sanitizer nightly run `31152762604` did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/31152762604)
 
-Run `run 31120770246` · commit `667b1a63e40d` · 2026-08-07T04:45:27+00:00
+Run `run 31152762604` · commit `667b1a63e40d` · 2026-08-07T06:07:27+00:00
 
 ❌ **FAIL** — verdict mismatch vs baselines
 
@@ -36,4 +36,4 @@ report missing
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
-| run 31120770246 | `667b1a63e40d` | `—` | `—` | `—` | red |
+| run 31152762604 | `667b1a63e40d` | `—` | `—` | `—` | red |
