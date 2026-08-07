@@ -134,6 +134,13 @@ multi-GPU entries on an 8-GPU box.
 
 - **Dependabot** (`.github/dependabot.yml`) opens weekly PRs for pip / docker
   (ROCm base image digest) / github-actions updates.
+- Bumps are **validated by the nightly run, not per-PR.** Stack-touching PRs
+  (Dependabot bumps and any change to `docker/**` / `requirements*.txt` /
+  `config/ci/ci-constraints.txt`) do **not** kick off a GPU eval on raise — that
+  would run the full matrix on the single self-hosted runner for every bump. The
+  merged stack is exercised by the next **Nightly Evaluation** against the same
+  matrix + baselines; use **Actions -> Nightly Evaluation -> Run workflow**
+  (`workflow_dispatch`) if you want to confirm a specific bump on demand.
 - After a stack-moving bump, run **Refresh baselines** (numerics/perf move with
   ROCm/hipBLASLt — the baseline diff is the bump's impact) and **Lock
   requirements** to refresh `config/ci/ci-constraints.txt` (partial pip

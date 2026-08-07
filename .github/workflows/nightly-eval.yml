@@ -23,8 +23,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The GPU evaluation itself is a reusable workflow so the same matrix +
-  # baseline comparison can validate stack-bump PRs (see bump-validate.yml).
+  # The GPU evaluation itself is a reusable workflow (eval-reusable.yml). Stack
+  # bumps (dependabot pip/docker/actions PRs) are NOT validated per-PR on the
+  # single self-hosted runner; the nightly run below (and on-demand dispatch)
+  # exercises the merged stack against the same matrix + baselines instead.
   nightly-eval:
     name: nightly eval
     if: >-
