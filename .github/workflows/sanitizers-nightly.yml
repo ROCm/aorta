@@ -87,13 +87,15 @@ jobs:
             # binaries, no image change needed); the `command -v ninja` check
             # below then selects the faster Ninja generator.
             pip install cmake ninja
-            # rocjitsu's CMake does `find_package(zstd REQUIRED)` in config mode,
-            # but the ROCm base image (Ubuntu 22.04) ships neither libzstd's
-            # headers nor a zstd CMake package config, so configure aborted with
-            # "Could not find ... zstdConfig.cmake" (run 31155146550). Install
-            # the dev headers/lib (container runs as root) and point CMake at the
-            # in-repo Findzstd shim that wraps them into the expected
-            # zstd::libzstd_shared target.
+            # rocjitsu configure runs find_package(zstd REQUIRED) in config
+            # mode, but the ROCm base image (Ubuntu 22.04) ships neither the
+            # libzstd headers/lib nor a zstd CMake package config, so configure
+            # aborted with "Could not find ... zstdConfig.cmake" (run
+            # 31155146550). Install the dev headers/lib (container runs as root)
+            # and point CMake at the in-repo Findzstd shim that wraps them into
+            # the zstd::libzstd_shared target that rocjitsu aliases from.
+            # NB: keep this block free of the single-quote character -- it is
+            # wrapped in bash -lc, so a stray one would end the quoting early.
             apt-get update && apt-get install -y --no-install-recommends libzstd-dev
             RJ_CMAKE_MODULE_PATH="$(pwd)/scripts/sanitizers/cmake"
 
