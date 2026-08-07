@@ -81,25 +81,31 @@ jobs:
 
             python -m pip install --upgrade pip
             pip install -e ".[tests]"
-            # The pinned ROCm CI container ships hipcc but not cmake/ninja, so
-            # the rocjitsu build below hit `cmake: command not found` (exit 127
-            # on run 31152762604). Provision both from PyPI (real prebuilt
-            # binaries, no image change needed); the `command -v ninja` check
-            # below then selects the faster Ninja generator.
-            pip install cmake ninja
+            # rocjitsu build deps (cmake, ninja, libzstd-dev, g++-13, Findzstd
+            # shim) are baked into docker/Dockerfile.ci-gpu; see that file.
+            RJ_CMAKE_MODULE_PATH=/opt/aorta/cmake
 
             rm -rf "${ROCJITSU_SRC}" "${ROCJITSU_BUILD}"
             git clone --filter=blob:none https://github.com/ROCm/rocm-systems.git "${ROCJITSU_SRC}"
             git -C "${ROCJITSU_SRC}" checkout "${ROCJITSU_REF}"
             echo "ROCJITSU checkout: $(git -C "${ROCJITSU_SRC}" rev-parse HEAD)"
             if command -v ninja >/dev/null 2>&1; then
-              cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}" -GNinja
+              cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}" -GNinja \
+                -DCMAKE_MODULE_PATH="${RJ_CMAKE_MODULE_PATH}"
             else
-              cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}"
+              cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}" \
+                -DCMAKE_MODULE_PATH="${RJ_CMAKE_MODULE_PATH}"
             fi
             cmake --build "${ROCJITSU_BUILD}" --parallel \
               --target rj_waitcheck rocjitsu_dbi_hooks
             export ROCJITSU_BUILD="${ROCJITSU_BUILD}"
+
+            # hipcc shells out to clang-offload-bundler, which lives in the ROCm
+            # LLVM bindir (same dir as the amdclang++ used above) but is not on
+            # PATH -- the image only exports /opt/rocm/bin -- so the fixture
+            # build failed with "clang-offload-bundler not found on PATH" (run
+            # 31161251100). Add the LLVM bindir so hipcc can find its tools.
+            export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"
 
             mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
             hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race.hip" \
