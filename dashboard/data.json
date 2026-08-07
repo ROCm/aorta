@@ -3,9 +3,9 @@
     "gate": true,
     "meta": {
       "commit": "440dc27b6c4d",
-      "date": "2026-08-07T11:08:58+00:00",
+      "date": "2026-08-07T12:33:26+00:00",
       "gpu": "gfx950",
-      "run": "run 31172043222"
+      "run": "run 31177846396"
     },
     "rows": {
       "consan-clean": {
@@ -45,7 +45,7 @@
           {
             "code": "1",
             "count": 64,
-            "example": "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=23794960 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo\u2026",
+            "example": "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=34448272 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo\u2026",
             "sanitizer": "consan",
             "severity": "race"
           }
