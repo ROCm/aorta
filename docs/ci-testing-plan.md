@@ -18,7 +18,7 @@ runners; Phase 2 runs the GPU complement on a self-hosted MI350 runner
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `pre-commit.yml` | PR + push to `main` | Runs `pre-commit` hooks (whitespace, EOF, YAML) |
-| `cpu-tests.yml` | PR + push to `main` | CPU pytest gate (`not gpu and not rocm`) on `ubuntu-latest` |
+| `cpu-tests.yml` | PR (code-touching paths) + push to `main` | CPU pytest gate (`not gpu and not rocm`) on `ubuntu-latest` |
 | `gpu-tests.yml` | PR (GPU paths) + nightly + dispatch | GPU pytest gate + nightly workload regression on `[self-hosted, gpu]` |
 | `nightly.yml` | cron + dispatch | Builds/publishes rolling dev wheels |
 | `release.yml` / `cleanup_releases.yml` | tags / cron | Release packaging + asset pruning |
@@ -33,7 +33,9 @@ it never executes pytest. A PR could break ~2,000 tests and still merge.
 
 Workflow: [`.github/workflows/cpu-tests.yml`](../.github/workflows/cpu-tests.yml)
 
-- **Triggers:** `pull_request` (every PR) and `push` to `main`.
+- **Triggers:** `pull_request` and `push` to `main`. On PRs a cheap `changes`
+  job first decides whether the suite is relevant (see "Path gate" below); it
+  always runs on pushes to `main`.
 - **Runner / matrix:** `ubuntu-latest`, Python `3.10`, `3.11`, `3.12` (the
   versions declared in `pyproject.toml`). `fail-fast: false` so one version's
   failure still reports the others.
@@ -123,6 +125,31 @@ That pollution came from two culprits, both fixed in
 
 The suite is now deterministic in one interpreter (verified across randomized
 orderings), so `--forked` is dropped and only `-n auto` is kept, for speed.
+
+### Path gate (fail-open deny-list)
+
+`pytest (CPU, py3.x)` is a required status check, so the workflow can't use a
+trigger-level `paths:` filter: GitHub leaves a path-skipped required check
+Pending forever, making the PR unmergeable. Instead a cheap `changes` job runs
+first and a job-level `if` decides whether the matrix runs (a *skipped* job
+reports Success and satisfies the required check) -- the same pattern
+[`gpu-tests.yml`](../.github/workflows/gpu-tests.yml) uses.
+
+The GPU gate allow-lists a small set of GPU-relevant paths. The CPU gate is the
+opposite shape: it's the catch-all suite touched by nearly the whole tree
+(`src/**`, `tests/**`, packaging metadata, and even a few docs -- e.g.
+`test_layer_numerics_docs.py` reads `docs/layer-numerics.md`), so an allow-list
+would be huge and dangerous to get wrong. It instead uses a small **deny-list**
+and **fails open**: the suite runs unless *every* changed file matches a path
+that provably never feeds `pytest -m "not gpu and not rocm"`. A wrong or missing
+deny entry only ever runs the fast CPU suite unnecessarily; it can never skip a
+real code change. On any error listing the PR's files, it runs the suite.
+
+Currently the deny-list is just `.github/*` (CI workflows, composite actions,
+templates, CODEOWNERS -- none of which any test imports), with a special case so
+that a change to `cpu-tests.yml` itself still exercises the gate. This is why a
+CI-only PR such as [#337](https://github.com/ROCm/aorta/pull/337) (which only
+edited `sanitizers-nightly.yml`) no longer spins up the three-Python CPU matrix.
 
 ### Making it a required check
 
