@@ -128,22 +128,41 @@ orderings), so `--forked` is dropped and only `-n auto` is kept, for speed.
 
 ### Path gate (fail-open deny-list)
 
-`pytest (CPU, py3.x)` is a required status check, so the workflow can't use a
+The CPU suite is a required status check, so the workflow can't use a
 trigger-level `paths:` filter: GitHub leaves a path-skipped required check
 Pending forever, making the PR unmergeable. Instead a cheap `changes` job runs
-first and a job-level `if` decides whether the matrix runs (a *skipped* job
-reports Success and satisfies the required check) -- the same pattern
+first and a job-level `if` decides whether the matrix runs -- the same pattern
 [`gpu-tests.yml`](../.github/workflows/gpu-tests.yml) uses.
 
-The GPU gate allow-lists a small set of GPU-relevant paths. The CPU gate is the
-opposite shape: it's the catch-all suite touched by nearly the whole tree
-(`src/**`, `tests/**`, packaging metadata, and even a few docs -- e.g.
-`test_layer_numerics_docs.py` reads `docs/layer-numerics.md`), so an allow-list
-would be huge and dangerous to get wrong. It instead uses a small **deny-list**
-and **fails open**: the suite runs unless *every* changed file matches a path
-that provably never feeds `pytest -m "not gpu and not rocm"`. A wrong or missing
-deny entry only ever runs the fast CPU suite unnecessarily; it can never skip a
-real code change. On any error listing the PR's files, it runs the suite.
+There is one crucial difference from the GPU gate, though. GPU's gated job is a
+single, non-matrix job (`pytest (GPU, MI350)`): when skipped, its one static
+check context still reports (as *skipped* == success), so it can be the required
+check directly. The CPU job is a **matrix** (py3.10/3.11/3.12). GitHub evaluates
+a job-level `if` *before* expanding the matrix, so a skipped `tests` job never
+creates the `pytest (CPU, py3.x)` contexts at all -- and a required check pinned
+to a context that never reports hangs the PR forever
+([actions/runner#952](https://github.com/actions/runner/issues/952)). So the CPU
+workflow adds a stable, non-matrix `required` job (check name **`CPU tests`**,
+`if: always()`) that collapses the matrix result into one context that reports
+on every PR: it passes when the matrix ran green or was legitimately skipped,
+and fails if any leg failed. **That** aggregator is the required check, not the
+per-version legs.
+
+The relevance decision itself: the GPU gate allow-lists a small set of
+GPU-relevant paths. The CPU gate is the opposite shape -- it's the catch-all
+suite touched by nearly the whole tree (`src/**`, `tests/**`, packaging
+metadata, and even a few docs -- e.g. `test_layer_numerics_docs.py` reads
+`docs/layer-numerics.md`), so an allow-list would be huge and dangerous to get
+wrong. It instead uses a small **deny-list** and **fails open**: the suite runs
+unless *every* changed file matches a path that provably never feeds
+`pytest -m "not gpu and not rocm"`. The safety is **asymmetric**: an *omitted*
+deny entry only costs an unnecessary (fast) run, but an *overbroad or wrong*
+entry misclassifies a relevant change as ignorable and silently skips real
+tests. So new/unknown paths run the suite, and every deny entry must be proven
+inert before it is added. On any error listing the PR's files -- including a
+truncated listing past the 3000-file API cap -- it runs the suite. Renames are
+evaluated on both sides, so moving a source file *into* an ignored path still
+counts as a relevant (source-removing) change.
 
 Currently the deny-list is just `.github/*` (CI workflows, composite actions,
 templates, CODEOWNERS -- none of which any test imports), with a special case so
@@ -153,15 +172,20 @@ edited `sanitizers-nightly.yml`) no longer spins up the three-Python CPU matrix.
 
 ### Making it a required check
 
-To actually block merges, add the `tests` jobs as **required status checks** on
+To actually block merges, add the aggregator as a **required status check** on
 the `main` branch:
 
 `Settings -> Branches -> Branch protection rules -> main -> Require status
 checks to pass before merging`, then select:
 
-- `pytest (CPU, py3.10)`
-- `pytest (CPU, py3.11)`
-- `pytest (CPU, py3.12)`
+- `CPU tests`
+
+Do **not** require the per-version `pytest (CPU, py3.10/3.11/3.12)` legs: because
+the matrix is skipped by a job-level `if` on irrelevant PRs, those contexts are
+not emitted and a required check pinned to them would hang the PR forever
+([actions/runner#952](https://github.com/actions/runner/issues/952)). The `CPU
+tests` aggregator reports on every PR and already fails if any matrix leg fails,
+so it is the correct single required check.
 
 (The workflow runs on PRs regardless; branch protection is what makes a red run
 *block* the merge.)
