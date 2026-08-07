@@ -127,6 +127,13 @@ jobs:
               --target rj_waitcheck rocjitsu_dbi_hooks
             export ROCJITSU_BUILD="${ROCJITSU_BUILD}"
 
+            # hipcc shells out to clang-offload-bundler, which lives in the ROCm
+            # LLVM bindir (same dir as the amdclang++ used above) but is not on
+            # PATH -- the image only exports /opt/rocm/bin -- so the fixture
+            # build failed with "clang-offload-bundler not found on PATH" (run
+            # 31161251100). Add the LLVM bindir so hipcc can find its tools.
+            export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"
+
             mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
             hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race.hip" \
               -o "${FIXTURES}/bin/consan_lds_race"
