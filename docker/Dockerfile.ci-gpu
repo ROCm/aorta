@@ -1,9 +1,11 @@
 # CI GPU image for the aorta GPU test gate + workload regression smokes.
 #
-# Reproducibility: the ROCm PyTorch base is pinned by manifest digest and the
-# only extra dependencies are a couple of exact-pinned PyPI packages. The GPU
-# pytest gate and the current workload smokes (gpu_smoke / inference / race) do
-# not need TraceLens / Magpie, so those unpinned git installs from the general-
+# Reproducibility: the ROCm PyTorch base is pinned by manifest digest. Extra
+# dependencies are exact-pinned PyPI packages where possible, plus a small set
+# of apt packages (libzstd-dev, g++-13 from the toolchain PPA) and a baked
+# Findzstd.cmake shim for the nightly rocjitsu sanitizer build. The GPU pytest
+# gate and the current workload smokes (gpu_smoke / inference / race) do not
+# need TraceLens / Magpie, so those unpinned git installs from the general-
 # purpose image are intentionally omitted here to keep the CI image reproducible
 # and fast to build.
 #
@@ -18,7 +20,50 @@ USER root
 
 # Exact pins for reproducible CI image builds; fail the build if these can't be
 # installed (no `|| true`) so a broken image surfaces here, not at runtime.
-RUN python -m pip install --no-cache-dir "openpyxl==3.1.5" "seaborn==0.13.2"
+RUN python -m pip install --no-cache-dir \
+    "openpyxl==3.1.5" \
+    "seaborn==0.13.2" \
+    "cmake==4.4.2" \
+    "ninja==1.13.0"
+
+# rocjitsu build deps for the nightly sanitizer gate (see sanitizers-nightly.yml):
+#   - libzstd-dev: headers/lib for find_package(zstd)
+#   - g++-13: libstdc++ with C++20 <format> (GCC 12 in the base image lacks it)
+# g++-13 comes from the toolchain PPA and is not version-pinned (PPA versions
+# rotate); this matches the prior runtime install behavior.
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libzstd-dev g++-13 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Findzstd.cmake -- minimal module-mode shim for the rocjitsu build.
+# rocjitsu does find_package(zstd REQUIRED) expecting zstd's config package
+# (zstdConfig.cmake + zstd::libzstd_shared). Ubuntu's libzstd-dev ships the
+# headers and library but no CMake package config, so this shim wraps the distro
+# lib into the imported target rocjitsu aliases from.
+RUN mkdir -p /opt/aorta/cmake && cat > /opt/aorta/cmake/Findzstd.cmake <<'CMAKE'
+include(FindPackageHandleStandardArgs)
+
+find_path(zstd_INCLUDE_DIR NAMES zstd.h)
+find_library(zstd_LIBRARY NAMES zstd)
+
+find_package_handle_standard_args(zstd
+  REQUIRED_VARS zstd_LIBRARY zstd_INCLUDE_DIR
+)
+
+if(zstd_FOUND AND NOT TARGET zstd::libzstd_shared)
+  add_library(zstd::libzstd_shared UNKNOWN IMPORTED)
+  set_target_properties(zstd::libzstd_shared PROPERTIES
+    IMPORTED_LOCATION "${zstd_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${zstd_INCLUDE_DIR}"
+  )
+endif()
+
+mark_as_advanced(zstd_INCLUDE_DIR zstd_LIBRARY)
+CMAKE
 
 ENV ROCM_HOME=/opt/rocm
 ENV PATH=$ROCM_HOME/bin:$PATH
