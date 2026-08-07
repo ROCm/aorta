@@ -359,10 +359,11 @@ issues so each can be picked up independently:
 Done: [#269](https://github.com/ROCm/aorta/issues/269) modernized
 `test_sweep_cli.py` for `click>=8.2` and removed the `click<8.2` CI pin.
 
-Not an issue: making the `pytest (CPU, py3.x)` and **`pytest (GPU, MI350)`**
+Not an issue: making the **`CPU tests`** aggregator and **`pytest (GPU, MI350)`**
 jobs **required status checks** on `main` is a repo/admin setting (see
 "Making it a required check" / "Making the GPU gate a required check" above),
-not a code change.
+not a code change. (For CPU, require the `CPU tests` aggregator, not the
+per-version `pytest (CPU, py3.x)` legs -- see "Making it a required check".)
 
 ## Summary
 
