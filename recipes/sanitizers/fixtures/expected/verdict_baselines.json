@@ -23,7 +23,7 @@
       "consan": "fail"
     },
     "finding_shape": {
-      "consan": "conflict=true"
+      "consan": "auto replay diagnostic"
     }
   }
 }
