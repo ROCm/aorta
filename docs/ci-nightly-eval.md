@@ -132,13 +132,38 @@ multi-GPU entries on an 8-GPU box.
 
 ## Automated ROCm + dependency bumps
 
-- **Dependabot** (`.github/dependabot.yml`) opens weekly PRs for pip / docker
-  (ROCm base image digest) / github-actions updates.
-- After a stack-moving bump, run **Refresh baselines** (numerics/perf move with
-  ROCm/hipBLASLt — the baseline diff is the bump's impact) and **Lock
-  requirements** to refresh `config/ci/ci-constraints.txt` (partial pip
-  constraints, not a hash-pinned lock). Both open PRs; a human blesses.
-  No auto-merge.
+- **pip (nightly, auto-merged).** Dependabot (`.github/dependabot.yml`, `pip`
+  ecosystem) runs **daily** and opens **one grouped PR** (`python-deps`,
+  `patterns: ["*"]`) that raises the `==` pins in the requirements files.
+  `.github/workflows/dependabot-auto-merge.yml` turns on GitHub **auto-merge
+  (squash)** for these PRs, so a bump lands **with no human review** once the
+  required checks are green (`pytest (CPU, py3.10/3.11/3.12)` and `pre-commit`;
+  GPU checks auto-skip to Success for a requirements-only change). Only
+  **one bump PR is open at a time** (`open-pull-requests-limit: 1`): a red or
+  still-open bump PR blocks the next one instead of piling up, and Dependabot
+  rebases the open PR upward each night.
+  - A bump PR **edits exactly**: `requirements.txt` (`pyyaml`, `matplotlib`,
+    `numpy`, `pandas`, `openpyxl`, `seaborn`, `beautifulsoup4`, `click`) and
+    `requirements-dev.txt` (`pytest`, `pytest-cov`, `pre-commit`,
+    `pytest-timeout`, `pytest-xdist`, `pytest-forked`).
+  - It **never** edits: `pyproject.toml` (kept as `>=` library floors on
+    purpose — a library shouldn't hard-pin), `docker/**`, or
+    `config/ci/ci-constraints.txt` (that file is refreshed by the separate
+    **Lock requirements** dispatch, not by a bump PR). The
+    `git+https://github.com/AMD-AGI/TraceLens.git` VCS line is not
+    Dependabot-managed and is left alone.
+- **docker base image (manual, NOT auto-bumped).** The ROCm/Ubuntu OS/base
+  image is intentionally **not** tracked by Dependabot, so an OS change never
+  lands unreviewed. Bump it by hand: resolve the new digest with
+  `docker buildx imagetools inspect rocm/pytorch:<tag>`, update the
+  `FROM rocm/pytorch:...@sha256:...` line in `docker/Dockerfile.ci-gpu`, then run
+  **Refresh baselines** (numerics/perf move with ROCm/hipBLASLt — the baseline
+  diff is the bump's impact).
+- **github-actions (weekly, human-merged).** Action version bumps stay on the
+  **weekly** schedule and are reviewed/merged by a human — no auto-merge.
+- After any stack-moving bump, run **Lock requirements** to refresh
+  `config/ci/ci-constraints.txt` (partial pip constraints, not a hash-pinned
+  lock). It opens a PR that a human blesses.
 
 ## Results retention
 
