@@ -87,16 +87,29 @@ jobs:
             # binaries, no image change needed); the `command -v ninja` check
             # below then selects the faster Ninja generator.
             pip install cmake ninja
-            # rocjitsu configure runs find_package(zstd REQUIRED) in config
-            # mode, but the ROCm base image (Ubuntu 22.04) ships neither the
-            # libzstd headers/lib nor a zstd CMake package config, so configure
-            # aborted with "Could not find ... zstdConfig.cmake" (run
-            # 31155146550). Install the dev headers/lib (container runs as root)
-            # and point CMake at the in-repo Findzstd shim that wraps them into
-            # the zstd::libzstd_shared target that rocjitsu aliases from.
+            # Two in-container build deps the ROCm base image (Ubuntu 22.04)
+            # lacks, both surfaced by the rocjitsu build:
+            #   1. rocjitsu configure runs find_package(zstd REQUIRED) in config
+            #      mode, but the image ships no zstd CMake package config, so
+            #      configure aborted on "Could not find ... zstdConfig.cmake"
+            #      (run 31155146550). Install libzstd-dev and point CMake at the
+            #      in-repo Findzstd shim (on CMAKE_MODULE_PATH) that wraps it
+            #      into the zstd::libzstd_shared target rocjitsu aliases from.
+            #   2. rocjitsu util/log.h pulls in C++20 <format>, absent from the
+            #      image default GCC 12 libstdc++ (landed in libstdc++ 13), so
+            #      every compile failed with "fatal error: format file not
+            #      found" (run 31160603502). The pre-container workflow used
+            #      gcc-toolset-13 for this. Install g++-13 from the toolchain PPA
+            #      so amdclang++ (rocjitsu default) auto-selects the newest GCC
+            #      for a <format>-capable libstdc++.
             # NB: keep this block free of the single-quote character -- it is
             # wrapped in bash -lc, so a stray one would end the quoting early.
-            apt-get update && apt-get install -y --no-install-recommends libzstd-dev
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends software-properties-common
+            add-apt-repository -y ppa:ubuntu-toolchain-r/test
+            apt-get update
+            apt-get install -y --no-install-recommends libzstd-dev g++-13
             RJ_CMAKE_MODULE_PATH="$(pwd)/scripts/sanitizers/cmake"
 
             rm -rf "${ROCJITSU_SRC}" "${ROCJITSU_BUILD}"
