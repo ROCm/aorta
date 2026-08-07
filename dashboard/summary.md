@@ -2,7 +2,7 @@
 
 > ⚠️ **Stale** — latest sanitizer nightly run `31152762604` did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/31152762604)
 
-Run `run 31152762604` · commit `667b1a63e40d` · 2026-08-07T06:07:27+00:00
+Run `run 31152762604` · commit `667b1a63e40d` · 2026-08-07T06:44:33+00:00
 
 ❌ **FAIL** — verdict mismatch vs baselines
 
