@@ -1,12 +1,33 @@
 name: CPU Tests
 
-# PR merge gate: run the CPU-runnable slice of the pytest suite on every pull
-# request (and on pushes to main). GPU-only tests (markers `gpu` / `rocm`) are
-# deselected here and will get their own workflow once a GPU/self-hosted runner
-# is available -- see docs/ci-testing-plan.md.
+# PR merge gate: run the CPU-runnable slice of the pytest suite on pull
+# requests that touch code (and on pushes to main). GPU-only tests (markers
+# `gpu` / `rocm`) are deselected here and run in gpu-tests.yml -- see
+# docs/ci-testing-plan.md.
 #
 # Mark the `tests` jobs as required status checks on `main` so a red suite
 # blocks merge.
+#
+# Making this skippable-yet-required needs care on two fronts:
+#
+#   1. Path filtering must NOT live on the `pull_request` trigger. A workflow
+#      skipped by trigger-level path filtering leaves its checks Pending forever
+#      rather than reporting, so any PR outside those paths would be permanently
+#      unmergeable. Instead the `changes` job below always runs and decides
+#      whether the CPU suite is relevant (same pattern as gpu-tests.yml).
+#
+#   2. The per-version `pytest (CPU, py3.x)` legs must NOT be the required
+#      status checks. GitHub evaluates a job-level `if` *before* expanding a
+#      matrix, so when the `tests` job is skipped the three matrix contexts are
+#      never created -- and a required check pinned to a context that never
+#      reports hangs the PR forever (actions/runner#952). gpu-tests.yml dodges
+#      this only because its gated job is a single, non-matrix job whose one
+#      static context still reports "skipped" (== success). A matrix cannot rely
+#      on that. So the stable, always-running `required` aggregator job at the
+#      bottom is what `main` requires; it collapses the matrix result into one
+#      fixed check name that reports on every PR.
+# See https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks
+# and https://github.com/actions/runner/issues/952
 
 on:
   pull_request:
@@ -14,9 +35,11 @@ on:
     branches:
       - main
 
-# Least privilege: this gate only checks out code and runs tests.
+# contents: read to check out; pull-requests: read so the `changes` gate can
+# list the files a PR touches.
 permissions:
   contents: read
+  pull-requests: read
 
 # A newer push to the same PR/branch cancels the older, still-running gate:
 # the only thing that matters is whether the tip commit is green.
@@ -25,9 +48,169 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cheap gate on a GitHub-hosted runner, replacing a trigger-level `paths:`
+  # filter (which would strand the required check as Pending on skipped PRs).
+  # Non-PR triggers always report true so pushes to main run the full suite.
+  #
+  # Unlike gpu-tests.yml -- which allow-lists a small set of GPU-relevant paths
+  # -- the CPU suite is the catch-all gate and is affected by almost the entire
+  # tree (all of src/**, tests/**, packaging metadata, and even a few docs:
+  # tests/instrumentation/test_layer_numerics_docs.py reads docs/layer-numerics.md).
+  # So this gate is fail-open with a *deny*-list: it runs the suite unless every
+  # changed file matches a path that provably never feeds `pytest -m "not gpu
+  # and not rocm"`. The safety here is asymmetric, so mind the direction: an
+  # *omitted* deny entry only costs an unnecessary (fast) run, but an *overbroad
+  # or wrong* entry misclassifies a relevant change as ignorable and silently
+  # skips real tests. New/unknown paths therefore run the suite, and every deny
+  # entry below must be proven inert before it is added.
+  changes:
+    name: detect CPU-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      cpu: ${{ steps.filter.outputs.cpu }}
+    steps:
+      - name: Decide whether the CPU suite applies
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "$EVENT_NAME is not a pull request; running the full CPU suite."
+            echo "cpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Fail open. This gate decides a required status check, so an
+          # indeterminate answer must never be read as "no CPU work needed":
+          # that would hand a code-touching PR a green check without testing it.
+          # On any retrieval problem, claim relevance and run the suite.
+          # Assigning inside `if !` keeps `set -e` from aborting on failure.
+
+          # The true changed-file count, read first so we can detect the API cap
+          # below. The /files listing returns at most 3000 files; comparing its
+          # record count against this catches a truncated list.
+          if ! changed_files="$(gh api \
+                  "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+                  --jq '.changed_files' 2>&1)"; then
+            echo "::warning::Could not read PR metadata, so running the CPU" \
+                 "suite rather than guessing. gh said: ${changed_files}"
+            echo "cpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$changed_files" in
+            ''|*[!0-9]*)
+              echo "::warning::PR changed_files was not a number" \
+                   "(${changed_files:-empty}); running the CPU suite."
+              echo "cpu=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          if ! resp="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                          --paginate 2>&1)"; then
+            echo "::warning::Could not list the PR's files, so running the CPU" \
+                 "suite rather than guessing. gh said: ${resp}"
+            echo "cpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Evaluate *both* sides of a rename. A file moved out of a
+          # CPU-relevant path (its previous_filename) still deleted source and
+          # must count as relevant even when the new path is ignorable, so the
+          # deny-list must see the old path too. `// empty` drops it for
+          # non-renames. jq handles a merged array or a stream of per-page
+          # arrays identically, so this is robust to how gh emits --paginate.
+          if ! paths="$(printf '%s' "$resp" \
+                  | jq -r '.[] | .filename, (.previous_filename // empty)' 2>&1)"; then
+            echo "::warning::Could not parse the PR file list, so running the" \
+                 "CPU suite. jq said: ${paths}"
+            echo "cpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$paths" ]; then
+            echo "::warning::The PR file list came back empty, which should not" \
+                 "happen for a real PR; running the CPU suite."
+            echo "cpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # One record per changed file (renames counted once, unlike $paths).
+          record_count="$(printf '%s' "$resp" | jq -r '.[].filename' 2>/dev/null \
+                            | grep -c . || true)"
+          if [ "${record_count:-0}" -lt "$changed_files" ]; then
+            echo "::warning::Only ${record_count:-0}/${changed_files} changed" \
+                 "files were returned (3000-file API cap); running the CPU" \
+                 "suite rather than trusting a truncated list."
+            echo "cpu=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Deny-list: paths that provably never affect the CPU pytest suite.
+          # Kept intentionally narrow -- only entries we are certain are inert
+          # belong here, since a wrong entry silently skips real tests. Trailing
+          # `*` is a `case` glob that matches `/` too, so it covers whole
+          # subtrees. Single-quoted and expanded via "${ignore[@]}" so the shell
+          # never filename-expands them -- they must reach `case` as literal
+          # patterns.
+          #
+          # `.github/*` (CI workflows, composite actions, templates, CODEOWNERS)
+          # is inert for CPU tests -- no test imports or reads anything under it
+          # -- with one exception: a change to this workflow itself must re-run
+          # it, so cpu-tests.yml is special-cased as relevant below.
+          ignore=(
+            '.github/*'
+          )
+
+          cpu=false
+          while read -r file; do
+            [ -n "$file" ] || continue
+
+            # A change to the CPU gate itself must exercise the CPU gate.
+            if [ "$file" = ".github/workflows/cpu-tests.yml" ]; then
+              echo "CPU-relevant change: $file (the CPU workflow itself)"
+              cpu=true
+              break
+            fi
+
+            ignorable=false
+            for pattern in "${ignore[@]}"; do
+              # shellcheck disable=SC2254  # unquoted glob match is intentional
+              case "$file" in
+                $pattern)
+                  ignorable=true
+                  break
+                  ;;
+              esac
+            done
+
+            if [ "$ignorable" = false ]; then
+              echo "CPU-relevant change: $file"
+              cpu=true
+              break
+            fi
+          done <<< "$paths"
+
+          if [ "$cpu" = false ]; then
+            echo "No CPU-relevant paths changed; the CPU matrix will be skipped."
+            echo "The 'required' aggregator still reports and stays green, so the"
+            echo "required check is satisfied without running the matrix."
+          fi
+          echo "cpu=$cpu" >> "$GITHUB_OUTPUT"
+
   tests:
     name: pytest (CPU, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    needs: changes
+    # Skipped when no CPU-relevant path changed, so CI-only / other-workflow PRs
+    # don't spin up three Python matrix jobs for nothing. These per-version legs
+    # are deliberately NOT the required checks (a skipped matrix never emits
+    # their contexts -- actions/runner#952); the `required` job below is.
+    if: needs.changes.outputs.cpu == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -86,3 +269,39 @@ jobs:
       # longer needed for correctness -- and dropping it makes the gate faster.
       - name: Run CPU test suite
         run: pytest -m "not gpu and not rocm" -n auto
+
+  # Stable required-status-check aggregator. Branch protection on `main` must
+  # require THIS job ("CPU tests"), not the per-version `pytest (CPU, py3.x)`
+  # legs: a matrix skipped by a job-level `if` never emits those contexts, so a
+  # required check pinned to them would hang the PR forever (actions/runner#952).
+  # This job has no matrix and `if: always()`, so its single context reports on
+  # every PR. It passes when the matrix ran green OR was legitimately skipped
+  # (no CPU-relevant change), and fails if any leg failed/was cancelled or the
+  # gate itself did not succeed.
+  required:
+    name: CPU tests
+    runs-on: ubuntu-latest
+    needs: [changes, tests]
+    if: always()
+    steps:
+      - name: Collapse the CPU matrix result into one required check
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+        run: |
+          set -euo pipefail
+          echo "changes=${CHANGES_RESULT} tests=${TESTS_RESULT}"
+
+          # The relevance gate must have completed; a broken gate is not a pass.
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "The CPU relevance gate did not succeed (${CHANGES_RESULT})."
+            exit 1
+          fi
+
+          # 'skipped' == no CPU-relevant path changed (a pass); 'success' == the
+          # matrix ran green. Anything else (failure/cancelled) fails the check.
+          case "$TESTS_RESULT" in
+            success)  echo "CPU matrix passed." ;;
+            skipped)  echo "CPU matrix skipped (no CPU-relevant change)." ;;
+            *)        echo "CPU matrix did not pass (${TESTS_RESULT})."; exit 1 ;;
+          esac

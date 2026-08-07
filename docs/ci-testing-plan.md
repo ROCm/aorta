@@ -18,7 +18,7 @@ runners; Phase 2 runs the GPU complement on a self-hosted MI350 runner
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `pre-commit.yml` | PR + push to `main` | Runs `pre-commit` hooks (whitespace, EOF, YAML) |
-| `cpu-tests.yml` | PR + push to `main` | CPU pytest gate (`not gpu and not rocm`) on `ubuntu-latest` |
+| `cpu-tests.yml` | PR (code-touching paths) + push to `main` | CPU pytest gate (`not gpu and not rocm`) on `ubuntu-latest` |
 | `gpu-tests.yml` | PR (GPU paths) + nightly + dispatch | GPU pytest gate + nightly workload regression on `[self-hosted, gpu]` |
 | `nightly.yml` | cron + dispatch | Builds/publishes rolling dev wheels |
 | `release.yml` / `cleanup_releases.yml` | tags / cron | Release packaging + asset pruning |
@@ -33,7 +33,9 @@ it never executes pytest. A PR could break ~2,000 tests and still merge.
 
 Workflow: [`.github/workflows/cpu-tests.yml`](../.github/workflows/cpu-tests.yml)
 
-- **Triggers:** `pull_request` (every PR) and `push` to `main`.
+- **Triggers:** `pull_request` and `push` to `main`. On PRs a cheap `changes`
+  job first decides whether the suite is relevant (see "Path gate" below); it
+  always runs on pushes to `main`.
 - **Runner / matrix:** `ubuntu-latest`, Python `3.10`, `3.11`, `3.12` (the
   versions declared in `pyproject.toml`). `fail-fast: false` so one version's
   failure still reports the others.
@@ -124,17 +126,66 @@ That pollution came from two culprits, both fixed in
 The suite is now deterministic in one interpreter (verified across randomized
 orderings), so `--forked` is dropped and only `-n auto` is kept, for speed.
 
+### Path gate (fail-open deny-list)
+
+The CPU suite is a required status check, so the workflow can't use a
+trigger-level `paths:` filter: GitHub leaves a path-skipped required check
+Pending forever, making the PR unmergeable. Instead a cheap `changes` job runs
+first and a job-level `if` decides whether the matrix runs -- the same pattern
+[`gpu-tests.yml`](../.github/workflows/gpu-tests.yml) uses.
+
+There is one crucial difference from the GPU gate, though. GPU's gated job is a
+single, non-matrix job (`pytest (GPU, MI350)`): when skipped, its one static
+check context still reports (as *skipped* == success), so it can be the required
+check directly. The CPU job is a **matrix** (py3.10/3.11/3.12). GitHub evaluates
+a job-level `if` *before* expanding the matrix, so a skipped `tests` job never
+creates the `pytest (CPU, py3.x)` contexts at all -- and a required check pinned
+to a context that never reports hangs the PR forever
+([actions/runner#952](https://github.com/actions/runner/issues/952)). So the CPU
+workflow adds a stable, non-matrix `required` job (check name **`CPU tests`**,
+`if: always()`) that collapses the matrix result into one context that reports
+on every PR: it passes when the matrix ran green or was legitimately skipped,
+and fails if any leg failed. **That** aggregator is the required check, not the
+per-version legs.
+
+The relevance decision itself: the GPU gate allow-lists a small set of
+GPU-relevant paths. The CPU gate is the opposite shape -- it's the catch-all
+suite touched by nearly the whole tree (`src/**`, `tests/**`, packaging
+metadata, and even a few docs -- e.g. `test_layer_numerics_docs.py` reads
+`docs/layer-numerics.md`), so an allow-list would be huge and dangerous to get
+wrong. It instead uses a small **deny-list** and **fails open**: the suite runs
+unless *every* changed file matches a path that provably never feeds
+`pytest -m "not gpu and not rocm"`. The safety is **asymmetric**: an *omitted*
+deny entry only costs an unnecessary (fast) run, but an *overbroad or wrong*
+entry misclassifies a relevant change as ignorable and silently skips real
+tests. So new/unknown paths run the suite, and every deny entry must be proven
+inert before it is added. On any error listing the PR's files -- including a
+truncated listing past the 3000-file API cap -- it runs the suite. Renames are
+evaluated on both sides, so moving a source file *into* an ignored path still
+counts as a relevant (source-removing) change.
+
+Currently the deny-list is just `.github/*` (CI workflows, composite actions,
+templates, CODEOWNERS -- none of which any test imports), with a special case so
+that a change to `cpu-tests.yml` itself still exercises the gate. This is why a
+CI-only PR such as [#337](https://github.com/ROCm/aorta/pull/337) (which only
+edited `sanitizers-nightly.yml`) no longer spins up the three-Python CPU matrix.
+
 ### Making it a required check
 
-To actually block merges, add the `tests` jobs as **required status checks** on
+To actually block merges, add the aggregator as a **required status check** on
 the `main` branch:
 
 `Settings -> Branches -> Branch protection rules -> main -> Require status
 checks to pass before merging`, then select:
 
-- `pytest (CPU, py3.10)`
-- `pytest (CPU, py3.11)`
-- `pytest (CPU, py3.12)`
+- `CPU tests`
+
+Do **not** require the per-version `pytest (CPU, py3.10/3.11/3.12)` legs: because
+the matrix is skipped by a job-level `if` on irrelevant PRs, those contexts are
+not emitted and a required check pinned to them would hang the PR forever
+([actions/runner#952](https://github.com/actions/runner/issues/952)). The `CPU
+tests` aggregator reports on every PR and already fails if any matrix leg fails,
+so it is the correct single required check.
 
 (The workflow runs on PRs regardless; branch protection is what makes a red run
 *block* the merge.)
@@ -308,10 +359,11 @@ issues so each can be picked up independently:
 Done: [#269](https://github.com/ROCm/aorta/issues/269) modernized
 `test_sweep_cli.py` for `click>=8.2` and removed the `click<8.2` CI pin.
 
-Not an issue: making the `pytest (CPU, py3.x)` and **`pytest (GPU, MI350)`**
+Not an issue: making the **`CPU tests`** aggregator and **`pytest (GPU, MI350)`**
 jobs **required status checks** on `main` is a repo/admin setting (see
 "Making it a required check" / "Making the GPU gate a required check" above),
-not a code change.
+not a code change. (For CPU, require the `CPU tests` aggregator, not the
+per-version `pytest (CPU, py3.x)` legs -- see "Making it a required check".)
 
 ## Summary
 
