@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `run 31177846396` · commit `440dc27b6c4d` · 2026-08-07T12:33:26+00:00
+Run `run 31256722484` · commit `0f2cb230223c` · 2026-08-08T12:24:58+00:00
 
 ✅ **PASS** — all verdicts match baselines
 
@@ -48,7 +48,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=34448272 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=27129888 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo… |
 
 </details>
 
@@ -56,4 +56,4 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
-| run 31177846396 | `440dc27b6c4d` | `warn` | `pass` | `fail` | green |
+| run 31256722484 | `0f2cb230223c` | `warn` | `pass` | `fail` | green |
