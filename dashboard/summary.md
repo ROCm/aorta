@@ -1,22 +1,25 @@
 # Sanitizers Nightly · gfx950
 
-Run `run 31312725005` · commit `0f2cb230223c` · 2026-08-09T12:25:27+00:00
+Run `2026-08-10-31386669577` · commit `7f3ba90830b9` · 2026-08-10
 
-✅ **PASS** — all verdicts match baselines
+✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
-| Recipe | Backend | Verdict | Baseline | Execution | Findings | Coverage |
-|---|---|---|---|---|--:|---|
-| daily-waitcheck-gemm | waitcheck (static) | `warn` ✅ | `warn` | complete | 32 | — |
-| daily-consan-clean | consan (dynamic) | `pass` ✅ | `pass` | complete | 0 | 0/0, 2/2 |
-| daily-consan-racy | consan (dynamic) | `fail` ✅ | `fail` | complete | 64 | 0/0, 2/2 |
+Observed `WARN` or `FAIL` verdicts may be expected positive-control outcomes. Baseline status is the regression-health signal.
+
+| Recipe | Backend | Baseline status | Observed | Expected | Execution | Findings | Coverage |
+|---|---|---|---|---|---|--:|---|
+| daily-waitcheck-gemm | waitcheck (static) | ✅ **Expected outcome** | `warn` | `warn` | complete | 32 | — |
+| daily-consan-clean | consan (dynamic) | ✅ **Expected outcome** | `pass` | `pass` | complete | 0 | 0/0, 2/2 |
+| daily-consan-racy | consan (dynamic) | ✅ **Expected outcome** | `fail` | `fail` | complete | 64 | 0/0, 2/2 |
 
 ## Kernel details
 
-<details><summary><b>daily-waitcheck-gemm</b> — <code>warn</code></summary>
+<details><summary><b>daily-waitcheck-gemm</b> — ✅ **Expected outcome**</summary>
 
-backend `rj_waitcheck` `8431040601e7` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution `complete`
+Observed sanitizer verdict `warn` · expected `warn`
+backend `rj_waitcheck` `8431040601e7` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
 
-| Kernel | Dispatch | Verdict | Findings | Code object | SHA-256 |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
 | `gemm_NT_M256_N4096_K1024` | 479 | `warn` | 32 | `sol_126578.hsaco` | `80c7c264ad` |
 | `gemm_NT_M128_N4096_K1280` | 471 | `—` | 0 | `sol_175415.hsaco` | `80c7c264ad` |
@@ -28,27 +31,29 @@ backend `rj_waitcheck` `8431040601e7` · selection `top_dispatch_count` top-3 ·
 
 </details>
 
-<details><summary><b>daily-consan-clean</b> — <code>pass</code></summary>
+<details><summary><b>daily-consan-clean</b> — ✅ **Expected outcome**</summary>
 
-backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution `complete`
+Observed sanitizer verdict `pass` · expected `pass`
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
-| Kernel | Dispatch | Verdict | Findings | Code object | SHA-256 |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
 | `consan_lds_race` | 1 | `pass` | 0 | `—` | `—` |
 
 </details>
 
-<details><summary><b>daily-consan-racy</b> — <code>fail</code></summary>
+<details><summary><b>daily-consan-racy</b> — ✅ **Expected outcome**</summary>
 
-backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution `complete`
+Observed sanitizer verdict `fail` · expected `fail`
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
-| Kernel | Dispatch | Verdict | Findings | Code object | SHA-256 |
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
 | `consan_lds_race_2wave` | 1 | `fail` | 64 | `—` | `—` |
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=14837840 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=32453664 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo… |
 
 </details>
 
@@ -56,4 +61,4 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
-| run 31312725005 | `0f2cb230223c` | `warn` | `pass` | `fail` | green |
+| 2026-08-10-31386669577 | `7f3ba90830b9` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |

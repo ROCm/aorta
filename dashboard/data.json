@@ -2,11 +2,14 @@
   {
     "gate": true,
     "meta": {
-      "commit": "0f2cb230223c",
-      "date": "2026-08-09T12:25:27+00:00",
+      "commit": "7f3ba90830b9",
+      "date": "2026-08-10",
+      "gate": true,
       "gpu": "gfx950",
-      "run": "run 31312725005"
+      "run": "2026-08-10-31386669577",
+      "run_url": "https://github.com/ROCm/aorta/actions/runs/31386669577"
     },
+    "rel": "runs/2026-08-10-31386669577",
     "rows": {
       "consan-clean": {
         "backend": null,
@@ -29,6 +32,7 @@
         ],
         "match": true,
         "present": true,
+        "report_rel": "runs/2026-08-10-31386669577/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
           "kernel_count": 1,
@@ -45,7 +49,7 @@
           {
             "code": "1",
             "count": 64,
-            "example": "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=14837840 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo\u2026",
+            "example": "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=32453664 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo\u2026",
             "sanitizer": "consan",
             "severity": "race"
           }
@@ -65,6 +69,7 @@
         ],
         "match": true,
         "present": true,
+        "report_rel": "runs/2026-08-10-31386669577/consan-racy/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
           "kernel_count": 1,
@@ -124,6 +129,7 @@
         ],
         "match": true,
         "present": true,
+        "report_rel": "runs/2026-08-10-31386669577/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
           "kernel_count": 3,

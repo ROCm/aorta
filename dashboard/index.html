@@ -11,45 +11,55 @@
   h2 { font-size:15px; margin:20px 0 8px; }
   h3 { font-size:14px; margin:18px 0 4px; }
   .meta { color:#57606a; font-size:12px; margin-bottom:12px; }
+  .secondary { color:#57606a; font-size:12px; margin:4px 0 8px; }
+  a.raw { font-size:12px; font-weight:400; margin-left:8px; }
   .mono { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
-  .gate { color:#fff; background:#1a7f37; padding:12px 16px; border-radius:8px;
+  .gate { color:#fff; background:#2c7d3b; padding:12px 16px; border-radius:8px;
           font-weight:600; margin:12px 0 20px; }
   table { width:100%; border-collapse:collapse; background:#fff; border-radius:8px;
           overflow:hidden; margin-bottom:16px; }
   th,td { text-align:left; padding:7px 10px; border-bottom:1px solid #d0d7de; vertical-align:top; }
   th { background:#f6f8fa; font-size:11px; text-transform:uppercase; letter-spacing:.03em; color:#57606a; }
   td.num { text-align:right; font-variant-numeric:tabular-nums; }
-  .badge { color:#fff; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }
-  .mark { margin-left:8px; font-size:12px; } .mark.ok { color:#1a7f37; } .mark.bad { color:#cf222e; }
+  .observed { display:inline-block; color:#57606a; background:#afb8c133; border:1px solid #afb8c1;
+               padding:1px 7px; border-radius:999px; font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .execution.bad { color:#cf222e; font-weight:600; }
   .pill { padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }
   .pill.ok { background:#1a7f3722; color:#1a7f37; } .pill.bad { background:#cf222e22; color:#cf222e; }
+  .pill.pass { background:#2c7d3b; color:#fff; } .pill.fail { background:#c92c35; color:#fff; }
   @media (prefers-color-scheme: dark) {
     body { background:#0d1117; color:#e6edf3; }
     table { background:#161b22; } th { background:#161b22; color:#8b949e; }
     th,td { border-color:#30363d; }
+    .meta,.secondary { color:#8b949e; }
+    .observed { color:#c9d1d9; background:#6e768133; border-color:#6e7681; }
   }
 </style></head>
 <body><div class=wrap>
   <p class=nav><a href="../">back to CI dashboard</a></p>
   
   <h1>Sanitizers Nightly &middot; gfx950</h1>
-  <div class=meta>latest run <span class=mono>run 31312725005</span>
-     &middot; commit <span class=mono>0f2cb230223c</span>
-     &middot; 2026-08-09T12:25:27+00:00 &middot; target gfx950</div>
-  <div class=gate>PASS — all verdicts match baselines</div>
+  <div class=meta>latest run <span class=mono>2026-08-10-31386669577</span>
+     &middot; commit <span class=mono>7f3ba90830b9</span>
+     &middot; 2026-08-10 &middot; target gfx950 &middot; <a href="runs/2026-08-10-31386669577/">raw reports</a></div>
+  <div class=gate>HEALTHY — 3/3 sanitizer outcomes match their baselines</div>
+  <p class=secondary>Observed <span class=mono>WARN</span> or <span class=mono>FAIL</span>
+     verdicts may be expected positive-control outcomes. Baseline status is the
+     regression-health signal.</p>
 
   <h2>Latest run</h2>
   <table>
-    <tr><th>Recipe</th><th>Backend</th><th>Verdict</th><th>Execution</th><th>Findings</th><th>Coverage</th></tr>
-    <tr><td>daily-waitcheck-gemm</td><td>waitcheck (static)</td><td><span class="badge" style="background:#9a6700">warn</span><span class="mark ok">&#10004;</span></td><td>complete</td><td class=num>32</td><td>&mdash;</td></tr><tr><td>daily-consan-clean</td><td>consan (dynamic)</td><td><span class="badge" style="background:#1a7f37">pass</span><span class="mark ok">&#10004;</span></td><td>complete</td><td class=num>0</td><td>0/0, 2/2</td></tr><tr><td>daily-consan-racy</td><td>consan (dynamic)</td><td><span class="badge" style="background:#cf222e">fail</span><span class="mark ok">&#10004;</span></td><td>complete</td><td class=num>64</td><td>0/0, 2/2</td></tr>
+    <tr><th>Recipe</th><th>Backend</th><th>Baseline status</th><th>Observed</th>
+        <th>Expected</th><th>Execution</th><th>Findings</th><th>Coverage</th><th>Report</th></tr>
+    <tr><td>daily-waitcheck-gemm</td><td>waitcheck (static)</td><td><span class="pill ok">Expected outcome</span></td><td><span class="observed">warn</span></td><td><span class="observed">warn</span></td><td>complete</td><td class=num>32</td><td>&mdash;</td><td><a href="runs/2026-08-10-31386669577/waitcheck/sanitizer_report.json">report</a></td></tr><tr><td>daily-consan-clean</td><td>consan (dynamic)</td><td><span class="pill ok">Expected outcome</span></td><td><span class="observed">pass</span></td><td><span class="observed">pass</span></td><td>complete</td><td class=num>0</td><td>0/0, 2/2</td><td><a href="runs/2026-08-10-31386669577/consan-clean/sanitizer_report.json">report</a></td></tr><tr><td>daily-consan-racy</td><td>consan (dynamic)</td><td><span class="pill ok">Expected outcome</span></td><td><span class="observed">fail</span></td><td><span class="observed">fail</span></td><td>complete</td><td class=num>64</td><td>0/0, 2/2</td><td><a href="runs/2026-08-10-31386669577/consan-racy/sanitizer_report.json">report</a></td></tr>
   </table>
 
   <h2>Kernel details</h2>
-  <h3>daily-waitcheck-gemm &middot; <span class="badge" style="background:#9a6700">warn</span><span class="mark ok">&#10004;</span></h3><div class=meta>backend rj_waitcheck <span class=mono>8431040601e7</span> &middot; selection top_dispatch_count top&#8209;3 &middot; 3 kernel(s) &middot; execution complete</div><table><tr><th>Kernel</th><th>Dispatch</th><th>Verdict</th><th>Findings</th><th>Code object</th><th>SHA-256</th></tr><tr><td class=mono>gemm_NT_M256_N4096_K1024</td><td class=num>479</td><td><span class="badge" style="background:#9a6700">warn</span></td><td class=num>32</td><td class=mono>sol_126578.hsaco</td><td class=mono>80c7c264ad</td></tr><tr><td class=mono>gemm_NT_M128_N4096_K1280</td><td class=num>471</td><td><span class="badge" style="background:#6e7781">—</span></td><td class=num>0</td><td class=mono>sol_175415.hsaco</td><td class=mono>80c7c264ad</td></tr><tr><td class=mono>gemm_TT_M64_N64_K1280</td><td class=num>440</td><td><span class="badge" style="background:#6e7781">—</span></td><td class=num>0</td><td class=mono>sol_137678.hsaco</td><td class=mono>80c7c264ad</td></tr></table><table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th><th>Example</th></tr><tr><td>waitcheck</td><td class=mono>wait_hazard</td><td>warning</td><td class=num>32</td><td class=mono>sol_126578.hsaco:gfx950[0]:.text+0x12d610: missing s_waitcnt lgkmcnt(0) before def of s45</td></tr></table><h3>daily-consan-clean &middot; <span class="badge" style="background:#1a7f37">pass</span><span class="mark ok">&#10004;</span></h3><div class=meta>backend &mdash; &middot; selection top_dispatch_count top&#8209;1 &middot; 1 kernel(s) &middot; execution complete</div><table><tr><th>Kernel</th><th>Dispatch</th><th>Verdict</th><th>Findings</th><th>Code object</th><th>SHA-256</th></tr><tr><td class=mono>consan_lds_race</td><td class=num>1</td><td><span class="badge" style="background:#1a7f37">pass</span></td><td class=num>0</td><td class=mono>&mdash;</td><td class=mono>&mdash;</td></tr></table><table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th><th>Example</th></tr><tr><td colspan=5>no findings</td></tr></table><h3>daily-consan-racy &middot; <span class="badge" style="background:#cf222e">fail</span><span class="mark ok">&#10004;</span></h3><div class=meta>backend &mdash; &middot; selection top_dispatch_count top&#8209;1 &middot; 1 kernel(s) &middot; execution complete</div><table><tr><th>Kernel</th><th>Dispatch</th><th>Verdict</th><th>Findings</th><th>Code object</th><th>SHA-256</th></tr><tr><td class=mono>consan_lds_race_2wave</td><td class=num>1</td><td><span class="badge" style="background:#cf222e">fail</span></td><td class=num>64</td><td class=mono>&mdash;</td><td class=mono>&mdash;</td></tr></table><table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th><th>Example</th></tr><tr><td>consan</td><td class=mono>1</td><td>race</td><td class=num>64</td><td class=mono>[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=14837840 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo…</td></tr></table>
+  <h3>daily-waitcheck-gemm &middot; <span class="pill ok">Expected outcome</span> <a class=raw href="runs/2026-08-10-31386669577/waitcheck/sanitizer_report.json">view raw report</a></h3><div class="secondary">Observed sanitizer verdict <span class="observed">warn</span> &middot; expected <span class="observed">warn</span></div><div class=meta>backend rj_waitcheck <span class=mono>8431040601e7</span> &middot; selection top_dispatch_count top&#8209;3 &middot; 3 kernel(s) &middot; execution complete</div><table><tr><th>Kernel</th><th>Dispatch</th><th>Observed sanitizer verdict</th><th>Findings</th><th>Code object</th><th>SHA-256</th></tr><tr><td class=mono>gemm_NT_M256_N4096_K1024</td><td class=num>479</td><td><span class="observed">warn</span></td><td class=num>32</td><td class=mono>sol_126578.hsaco</td><td class=mono>80c7c264ad</td></tr><tr><td class=mono>gemm_NT_M128_N4096_K1280</td><td class=num>471</td><td><span class="observed">—</span></td><td class=num>0</td><td class=mono>sol_175415.hsaco</td><td class=mono>80c7c264ad</td></tr><tr><td class=mono>gemm_TT_M64_N64_K1280</td><td class=num>440</td><td><span class="observed">—</span></td><td class=num>0</td><td class=mono>sol_137678.hsaco</td><td class=mono>80c7c264ad</td></tr></table><table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th><th>Example</th></tr><tr><td>waitcheck</td><td class=mono>wait_hazard</td><td>warning</td><td class=num>32</td><td class=mono>sol_126578.hsaco:gfx950[0]:.text+0x12d610: missing s_waitcnt lgkmcnt(0) before def of s45</td></tr></table><h3>daily-consan-clean &middot; <span class="pill ok">Expected outcome</span> <a class=raw href="runs/2026-08-10-31386669577/consan-clean/sanitizer_report.json">view raw report</a></h3><div class="secondary">Observed sanitizer verdict <span class="observed">pass</span> &middot; expected <span class="observed">pass</span></div><div class=meta>backend &mdash; &middot; selection top_dispatch_count top&#8209;1 &middot; 1 kernel(s) &middot; execution complete</div><table><tr><th>Kernel</th><th>Dispatch</th><th>Observed sanitizer verdict</th><th>Findings</th><th>Code object</th><th>SHA-256</th></tr><tr><td class=mono>consan_lds_race</td><td class=num>1</td><td><span class="observed">pass</span></td><td class=num>0</td><td class=mono>&mdash;</td><td class=mono>&mdash;</td></tr></table><table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th><th>Example</th></tr><tr><td colspan=5>no findings</td></tr></table><h3>daily-consan-racy &middot; <span class="pill ok">Expected outcome</span> <a class=raw href="runs/2026-08-10-31386669577/consan-racy/sanitizer_report.json">view raw report</a></h3><div class="secondary">Observed sanitizer verdict <span class="observed">fail</span> &middot; expected <span class="observed">fail</span></div><div class=meta>backend &mdash; &middot; selection top_dispatch_count top&#8209;1 &middot; 1 kernel(s) &middot; execution complete</div><table><tr><th>Kernel</th><th>Dispatch</th><th>Observed sanitizer verdict</th><th>Findings</th><th>Code object</th><th>SHA-256</th></tr><tr><td class=mono>consan_lds_race_2wave</td><td class=num>1</td><td><span class="observed">fail</span></td><td class=num>64</td><td class=mono>&mdash;</td><td class=mono>&mdash;</td></tr></table><table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th><th>Example</th></tr><tr><td>consan</td><td class=mono>1</td><td>race</td><td class=num>64</td><td class=mono>[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=32453664 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo…</td></tr></table>
 
   <h2>History / trend</h2>
   <table>
     <tr><th>Run</th><th>Commit</th><th>Date</th><th>daily-waitcheck-gemm</th><th>daily-consan-clean</th><th>daily-consan-racy</th><th>Gate</th></tr>
-    <tr><td class=mono>run 31312725005</td><td class=mono>0f2cb230223c</td><td>2026-08-09T12:25:27+00:00</td><td><span class="badge" style="background:#9a6700">warn</span></td><td><span class="badge" style="background:#1a7f37">pass</span></td><td><span class="badge" style="background:#cf222e">fail</span></td><td><span class="pill ok">green</span></td></tr>
+    <tr><td class=mono><a href="runs/2026-08-10-31386669577/">2026-08-10-31386669577</a></td><td class=mono>7f3ba90830b9</td><td>2026-08-10</td><td><span class="pill ok">Match</span><div class="secondary">Observed <span class="observed">warn</span></div></td><td><span class="pill ok">Match</span><div class="secondary">Observed <span class="observed">pass</span></div></td><td><span class="pill ok">Match</span><div class="secondary">Observed <span class="observed">fail</span></div></td><td><span class="pill pass">Healthy</span></td></tr>
   </table>
 </div></body></html>
