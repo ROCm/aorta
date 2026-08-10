@@ -33,5 +33,9 @@ sanitizer_plan:
   policy:
     consan_policy: strict
     on_missing_backend: fail
+    # Optional per-sanitizer subprocess wall-clock ceiling in seconds (default
+    # 900). ConSan's MOI transform of large production code objects can exceed
+    # the default and fail closed with combined_hook_timeout; raise it here.
+    # timeout_seconds: 3600
   output:
     report: sanitizer_report.json

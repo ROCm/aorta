@@ -12,6 +12,11 @@ from .waitcheck import run_waitcheck
 
 _KNOWN_SANITIZERS = frozenset({"waitcheck", "consan"})
 
+# Default wall-clock ceiling for a single sanitizer subprocess (waitcheck or
+# consan). ConSan's MOI transform of large production code objects can be heavy,
+# so a recipe may raise this via ``sanitizer_plan.policy.timeout_seconds``.
+DEFAULT_TIMEOUT_SECONDS = 900.0
+
 
 def run_sanitizers(
     worklist: KernelWorklist,
@@ -25,7 +30,7 @@ def run_sanitizers(
     consan_log: bool = True,
     consan_policy: str = "strict",
     on_missing_backend: str = "fail",
-    timeout_seconds: float = 900.0,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     report_name: str = "sanitizer_report.json",
     consan_target: KernelIdentity | None = None,
 ) -> SanitizerReport:

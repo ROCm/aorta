@@ -17,6 +17,7 @@ from aorta.instrumentation.rocjitsu_sanitizers.models import (
     SelectionRequirement,
     Verdict,
 )
+from aorta.instrumentation.rocjitsu_sanitizers.pipeline import DEFAULT_TIMEOUT_SECONDS
 from aorta.instrumentation.rocjitsu_sanitizers.recipe import (
     execute_sanitizer_run,
     load_sanitizer_recipe,
@@ -214,7 +215,11 @@ def _write_kernel_consan_recipe(
     *,
     consan_command: str = "loaders/consan_app",
     ticket: str = "TEST-CONSAN-CMD",
+    timeout_seconds: str | None = None,
 ) -> Path:
+    timeout_line = (
+        f"    timeout_seconds: {timeout_seconds}\n" if timeout_seconds is not None else ""
+    )
     recipe = tmp_path / "recipe.yaml"
     recipe.write_text(
         "schema_version: 1\n"
@@ -239,6 +244,7 @@ def _write_kernel_consan_recipe(
         "  policy:\n"
         "    consan_policy: strict\n"
         "    on_missing_backend: fail\n"
+        f"{timeout_line}"
         "  output:\n"
         "    report: sanitizer_report.json\n",
         encoding="utf-8",
@@ -428,6 +434,61 @@ def test_consan_command_positive_path_surfaces_verdict(
     consan_checks = [check for check in report.checks if check.sanitizer == "consan"]
     assert consan_checks and consan_checks[0].verdict is consan_verdict
     assert report.overall_verdict is consan_verdict
+
+
+def test_loader_parses_policy_timeout_seconds(tmp_path: Path) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path, timeout_seconds="1800")
+    loaded = load_sanitizer_recipe(recipe)
+    assert loaded.timeout_seconds == 1800.0
+
+
+def test_loader_defaults_timeout_seconds_to_none_when_absent(tmp_path: Path) -> None:
+    loaded = load_sanitizer_recipe(_write_kernel_consan_recipe(tmp_path))
+    assert loaded.timeout_seconds is None
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-5", '"fast"', "true"])
+def test_loader_rejects_invalid_timeout_seconds(tmp_path: Path, bad_value: str) -> None:
+    recipe = _write_kernel_consan_recipe(tmp_path, timeout_seconds=bad_value)
+    with pytest.raises(RecipeSchemaError, match="timeout_seconds"):
+        load_sanitizer_recipe(recipe)
+
+
+@pytest.mark.parametrize(
+    ("timeout_seconds", "expected"),
+    [("2400", 2400.0), (None, DEFAULT_TIMEOUT_SECONDS)],
+)
+def test_execute_threads_timeout_seconds_into_run_sanitizers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout_seconds: str | None,
+    expected: float,
+) -> None:
+    # The recipe knob (or its pipeline default when absent) must reach run_consan
+    # as the per-subprocess wall-clock ceiling, so a heavy ConSan transform can be
+    # given more time without editing code.
+    captured: dict[str, object] = {}
+
+    def _fake_run_consan(worklist, *, timeout_seconds, **_kwargs) -> ConSanRunResult:
+        captured["timeout_seconds"] = timeout_seconds
+        return ConSanRunResult(
+            consan=CheckResult(
+                sanitizer="consan", state=ExecutionState.RAN, verdict=Verdict.PASS
+            ),
+            waitcheck_preflight=CheckResult(
+                sanitizer="waitcheck_preflight",
+                state=ExecutionState.RAN,
+                verdict=Verdict.PASS,
+            ),
+        )
+
+    monkeypatch.setattr(pipeline, "run_consan", _fake_run_consan)
+    loader = tmp_path / "loaders" / "consan_app"
+    loader.parent.mkdir(parents=True, exist_ok=True)
+    loader.write_text("#!/bin/sh\n", encoding="utf-8")
+    recipe = _write_kernel_consan_recipe(tmp_path, timeout_seconds=timeout_seconds)
+    execute_sanitizer_run(recipe, output_dir=tmp_path / "out")
+    assert captured.get("timeout_seconds") == expected
 
 
 def test_verdict_baselines_fixture_present() -> None:
