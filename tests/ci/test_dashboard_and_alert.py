@@ -842,3 +842,62 @@ def test_dashboard_failure_action_panel():
     html = gen_dashboard.build_dashboard_html([r])
     assert "Next steps" in html
     assert "aorta env probe" in html
+
+
+def test_headline_checksum_record_only_shows_captured_not_match():
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "inference_offline", "cell": "baseline-local",
+                   "verdict": "record", "reasons": ["no baseline (record-only)"],
+                   "metrics": {"mean_step_time_ms": 4.0,
+                               "summary": {"logits_checksum": 33904201}}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "captured (33,904,201)" in html
+    assert "match ✓" not in html
+
+
+def test_headline_checksum_shows_match_when_comparison_confirms():
+    entry = {"entry": "inference_offline", "cell": "baseline-local",
+             "verdict": "pass", "reasons": [],
+             "metrics": {"mean_step_time_ms": 4.0,
+                         "summary": {"logits_checksum": 33904201}},
+             "deltas": {"metrics": {"logits_checksum": {
+                 "observed": 33904201, "policy": "equal", "value": 33904201}}}}
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", [entry], total=1, **{"pass": 1})])
+    assert "logits checksum: match ✓" in html
+
+
+def test_change_summary_reports_correctness_counter_without_pct_gate():
+    runs = [
+        _run(3, [_cell("race", "smoke", summary={"layer_checksum_mismatches": 0})],
+             total=1, record=1),
+        _run(4, [_cell("race", "smoke", summary={"layer_checksum_mismatches": 1})],
+             total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "Correctness" in html
+    assert "layer_checksum_mismatches" in html
+    assert "0 → 1" in html
+
+
+def test_change_summary_reports_checksum_inequality_below_pct_gate():
+    runs = [
+        _run(3, [_cell("w", "c", summary={"logits_checksum": 100})], total=1, record=1),
+        _run(4, [_cell("w", "c", summary={"logits_checksum": 102})], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "Correctness" in html
+    assert "logits_checksum" in html
+    assert "100 → 102" in html
+
+
+def test_category_tile_anchors_to_workload_that_actually_ran():
+    entries = [
+        {"entry": "training_ddp_8gpu", "cell": "baseline-local", "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 10.0}},
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z", entries, total=1, record=1)])
+    assert "href='#wl-training_ddp_8gpu'" in html
+    assert "href='#wl-training_ddp'" not in html

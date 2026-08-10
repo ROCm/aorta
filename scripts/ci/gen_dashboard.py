@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover - dashboard must render even if import fai
         return None
 
     def _is_correctness_metric(_name: str) -> bool:  # type: ignore
-        return _name.endswith("_checksum") or _name.endswith("checksum")
+        return _name.endswith("checksum")
 
     def _is_performance_metric(name: str) -> bool:  # type: ignore
         return name in _METRIC_UNITS and name not in (
@@ -167,25 +167,56 @@ def _engineer_only_metrics() -> frozenset[str]:
     return _DEFAULT_ENGINEER_METRICS | frozenset(str(m) for m in extra)
 
 
-def _category_for_workload(entry_name: str) -> str:
-    for cat_id, cat in (load_dashboard_metadata().get("categories") or {}).items():
-        if entry_name in (cat.get("workloads") or []):
-            return str(cat_id)
-    return "other"
+# Correctness counters: any night-over-night change is significant.
+_CORRECTNESS_COUNTERS = frozenset({
+    "ranks_with_divergence",
+    "layer_checksum_mismatches",
+})
 
 
-def _format_headline_metric(name: str, raw: Any) -> str:
+def _is_correctness_change_metric(name: str) -> bool:
+    """True when any value change in this metric should surface in Correctness."""
+    return _is_correctness_metric(name) or name in _CORRECTNESS_COUNTERS
+
+
+def _checksum_headline(name: str, raw: Any, entry: dict[str, Any]) -> str:
+    """Headline for checksum metrics — neutral unless comparison confirms match."""
+    label = name.replace("_", " ")
+    if not _isnum(raw):
+        return f"{label}: —"
+    deltas = entry.get("deltas") or {}
+    metric_delta = (deltas.get("metrics") or {}).get(name)
+    if metric_delta:
+        policy = metric_delta.get("policy")
+        expected = metric_delta.get("value")
+        observed = metric_delta.get("observed", raw)
+        if policy == "equal" and expected is not None:
+            if observed == expected:
+                return f"{label}: match ✓"
+            return f"{label}: mismatch ✗"
+    verdict = str(entry.get("verdict", ""))
+    if verdict == "fail":
+        needle = name.replace("_", " ")
+        for reason in entry.get("reasons") or []:
+            text = str(reason).lower()
+            if name in text or needle in text or "checksum" in text:
+                return f"{label}: mismatch ✗"
+    return f"{label}: captured ({_fmt_num(raw)})"
+
+
+def _format_headline_metric(
+    name: str, raw: Any, entry: dict[str, Any] | None = None,
+) -> str:
     """One headline metric for customer view."""
-    if name in ("ranks_with_divergence", "layer_checksum_mismatches"):
+    entry = entry or {}
+    if name in _CORRECTNESS_COUNTERS:
         if _isnum(raw) and float(raw) == 0:
             return f"{name.replace('_', ' ')}: 0 ✓"
         if _isnum(raw):
             return f"{name.replace('_', ' ')}: {_fmt_num(raw)} ✗"
         return f"{name.replace('_', ' ')}: —"
     if name in ("logits_checksum", "output_checksum", "checksum"):
-        if _isnum(raw):
-            return f"{name.replace('_', ' ')}: match ✓"
-        return f"{name.replace('_', ' ')}: —"
+        return _checksum_headline(name, raw, entry)
     unit = _METRIC_UNITS.get(name, "")
     if name == "mean_step_time_ms":
         return f"step time: {_fmt_ms(raw)}"
@@ -209,7 +240,7 @@ def _headline_block(entry: dict[str, Any], entry_name: str) -> str:
             raw = metrics.get(name)
         else:
             raw = summary.get(name)
-        parts.append(_format_headline_metric(str(name), raw))
+        parts.append(_format_headline_metric(str(name), raw, entry))
     if not parts:
         return ""
     return (
@@ -258,7 +289,8 @@ def build_category_summary(
         color = _VERDICT_COLOR.get(worst, _UNKNOWN_COLOR)
         glyph = _VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH)
         tally_txt = _tally_text(counts)
-        anchor = f"wl-{_esc(str(workloads[0]))}" if workloads else ""
+        present = [str(wl) for wl in workloads if by_entry.get(str(wl))]
+        anchor = f"wl-{_esc(present[0])}" if present else ""
         tiles.append(
             f"<a class='cat-tile' href='#{anchor}' style='border-left-color:{color}'>"
             f"<div class='cat-k'>{_esc(label)}</div>"
@@ -712,21 +744,34 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
         after_m = _measurements(latest_by[k])
         for metric in sorted(set(before_m) & set(after_m)):
             b, a = before_m[metric], after_m[metric]
+            if b == a:
+                continue
+            if _is_correctness_change_metric(metric):
+                movers_corr.append((0, 0, k, metric, b, a, latest_by[k]))
+                continue
             if not b:  # a move from zero has no meaningful percentage
                 continue
             pct = (a - b) / abs(b) * 100.0
             if abs(pct) > _MOVE_PCT:
                 row = (abs(pct), pct, k, metric, b, a, latest_by[k])
-                if _is_correctness_metric(metric):
-                    movers_corr.append(row)
-                elif _is_performance_metric(metric):
+                if _is_performance_metric(metric):
                     movers_perf.append(row)
                 else:
                     movers_other.append(row)
-    movers_corr.sort(reverse=True)
+    movers_corr.sort(key=lambda r: (r[5], r[4]), reverse=True)
     movers_perf.sort(reverse=True)
     movers_other.sort(reverse=True)
     movers = movers_corr + movers_perf + movers_other
+
+    def _corr_mover_li(row: tuple) -> str:
+        _, _, _k, metric, b, a, entry = row
+        unit = _METRIC_UNITS.get(metric, "")
+        return (
+            f"<li class='corr'><span class='mono'>{_esc(_cell_label(entry))}</span> "
+            f"<span class='mono'>{_esc(metric)}</span> "
+            f"<span class='muted'>{_esc(_fmt_num(b))} → {_esc(_fmt_num(a))}"
+            f"{(' ' + _esc(unit)) if unit else ''}</span></li>"
+        )
 
     def _mover_li(row: tuple, css: str) -> str:
         _, pct, _k, metric, b, a, entry = row
@@ -742,7 +787,7 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
     if movers_corr:
         items.append("<li class='change-hdr corr'>Correctness</li>")
         for row in movers_corr[:4]:
-            items.append(_mover_li(row, "corr"))
+            items.append(_corr_mover_li(row))
     if movers_perf:
         items.append("<li class='change-hdr perf'>Performance</li>")
         for row in movers_perf[:4]:
