@@ -348,11 +348,26 @@ def test_loader_rejects_empty_consan_command(tmp_path: Path) -> None:
 def test_consan_command_run_is_fail_closed_when_command_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A kernel source + top_n: 1 with a consan_command that does not exist on
-    # disk must fail closed: the ConSan check is not_checked, never pass. Without
-    # ROCJITSU_BUILD the hook also fails to resolve; either is an acceptable
-    # fail-closed outcome, so we assert the verdict is never pass.
-    monkeypatch.delenv("ROCJITSU_BUILD", raising=False)
+    # A kernel source + top_n: 1 whose consan_command does not exist on disk must
+    # fail closed on command resolution: the ConSan check is not_checked with the
+    # specific consan_command_not_found reason, never pass. Provision a dummy hook
+    # so hook resolution succeeds and the run actually reaches the command check --
+    # deleting ROCJITSU_BUILD would short-circuit on consan_hook_not_found first and
+    # never exercise the command-resolution path this test is meant to cover.
+    hook = (
+        tmp_path
+        / "rocjitsu-build"
+        / "lib"
+        / "rocjitsu"
+        / "src"
+        / "rocjitsu"
+        / "hooks"
+        / "librocjitsu_dbi_hooks.so"
+    )
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    # Never dlopen'd: run_consan returns on the missing command before it launches.
+    hook.write_bytes(b"")
+    monkeypatch.setenv("ROCJITSU_BUILD", str(tmp_path / "rocjitsu-build"))
     recipe = _write_kernel_consan_recipe(tmp_path, consan_command="loaders/does_not_exist")
     report_path = execute_sanitizer_run(recipe, output_dir=tmp_path / "out")
     report = read_report(report_path)
@@ -361,6 +376,7 @@ def test_consan_command_run_is_fail_closed_when_command_missing(
     assert consan_checks
     for check in consan_checks:
         assert check.verdict is Verdict.NOT_CHECKED
+        assert check.reason == "consan_command_not_found"
 
 
 def test_verdict_baselines_fixture_present() -> None:
