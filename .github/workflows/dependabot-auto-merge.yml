@@ -26,7 +26,15 @@ permissions: {}
 
 jobs:
   meta:
-    if: github.actor == 'dependabot[bot]'
+    # Guard on the PR *author*, not `github.actor` (the event actor). A
+    # Dependabot-authored PR can emit synchronize/reopened events triggered by a
+    # maintainer or another automation after auto-merge is enabled; keying on
+    # `github.actor` would skip meta + the matrix on those, and the always-on
+    # `Requirements validation` aggregate would treat both skips as a pass --
+    # letting an unvalidated head merge. The author is stable across every
+    # revision, so validation covers them all (and fetch-metadata still rejects a
+    # PR that isn't genuinely Dependabot's).
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
