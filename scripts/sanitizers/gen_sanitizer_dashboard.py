@@ -294,8 +294,46 @@ def _execution_html(execution: Any) -> str:
     return f'<span class="execution bad">{_esc(text)}</span>'
 
 
-def _match_counts(rows: dict[str, dict[str, Any]]) -> tuple[int, int]:
-    return sum(1 for row in rows.values() if row["match"]), len(rows)
+def _execution_md(execution: Any) -> str:
+    """Markdown twin of ``_execution_html``: neutral when complete, else emphasized."""
+    text = str(execution)
+    if text == "complete":
+        return text
+    return f"\u274c **{text}**"
+
+
+def _gate_summary(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Classify the aggregate run health for the top banner and history gate.
+
+    A missing report and an observed verdict mismatch both fail the gate, but
+    they are operationally different: only a *present* verdict that disagrees
+    with its baseline is a regression. Absent reports are surfaced separately so
+    an infrastructure failure is not mislabeled as a verdict regression, and a
+    run with both is reported as a combined ``UNHEALTHY`` state.
+    """
+    total = len(rows)
+    matched = sum(1 for r in rows.values() if r["match"])
+    mismatches = sum(1 for r in rows.values() if r["present"] and not r["match"])
+    missing = sum(1 for r in rows.values() if not r["present"])
+    if matched == total:
+        label = "HEALTHY"
+        detail = f"{matched}/{total} sanitizer outcomes match their baselines"
+    elif mismatches and missing:
+        label = "UNHEALTHY"
+        detail = (
+            f"investigate {mismatches}/{total} mismatched outcome(s) and "
+            f"{missing}/{total} missing report(s)"
+        )
+    elif mismatches:
+        label = "REGRESSION"
+        detail = (
+            f"investigate {mismatches}/{total} sanitizer outcomes that do not "
+            "match their baselines"
+        )
+    else:
+        label = "INCOMPLETE"
+        detail = f"{missing}/{total} sanitizer report(s) are missing"
+    return {"ok": matched == total, "label": label, "detail": detail, "short": label.capitalize()}
 
 
 def _history_case_html(row: dict[str, Any]) -> str:
@@ -306,6 +344,12 @@ def _history_case_html(row: dict[str, Any]) -> str:
         f"{_baseline_status_html(row, history=True)}"
         f'<div class="secondary">Observed {_observed_html(row["verdict"])}{expected}</div>'
     )
+
+
+def _history_gate_html(run: dict[str, Any]) -> str:
+    summary = _gate_summary(run["rows"])
+    emphasis = "ok" if run["gate"] else "bad"
+    return f'<td><span class="pill {emphasis}">{_esc(summary["short"])}</span></td>'
 
 
 def _baseline_status_md(row: dict[str, Any], *, history: bool = False) -> str:
@@ -405,18 +449,9 @@ def build_html(
         )
     latest = runs[0]
     meta = latest["meta"]
-    gate_ok = latest["gate"]
-    matched, total = _match_counts(latest["rows"])
-    mismatches = total - matched
-    gate_color = "#1a7f37" if gate_ok else "#cf222e"
-    gate_text = (
-        f"HEALTHY \u2014 {matched}/{total} sanitizer outcomes match their baselines"
-        if gate_ok
-        else (
-            f"REGRESSION \u2014 investigate {mismatches}/{total} sanitizer outcomes "
-            "that do not match their baselines"
-        )
-    )
+    summary = _gate_summary(latest["rows"])
+    gate_color = "#1a7f37" if summary["ok"] else "#cf222e"
+    gate_text = f"{summary['label']} \u2014 {summary['detail']}"
 
     latest_rows = "".join(
         f"<tr><td>{_esc(label)}</td><td>{_esc(backend)}</td>"
@@ -435,11 +470,7 @@ def build_html(
         f"<td class=mono>{_esc(run['meta'].get('commit', ''))}</td>"
         f"<td>{_esc(run['meta'].get('date', ''))}</td>"
         + "".join(f"<td>{_history_case_html(run['rows'][c])}</td>" for c, _k, _l, _b in CASES)
-        + (
-            '<td><span class="pill ok">Healthy</span></td>'
-            if run["gate"]
-            else '<td><span class="pill bad">Regression</span></td>'
-        )
+        + _history_gate_html(run)
         + "</tr>"
         for run in runs
     )
@@ -521,16 +552,9 @@ def build_summary_md(
         return head + "No runs found.\n"
     latest = runs[0]
     meta = latest["meta"]
-    matched, total = _match_counts(latest["rows"])
-    mismatches = total - matched
-    gate = (
-        f"\u2705 **HEALTHY** \u2014 {matched}/{total} sanitizer outcomes match their baselines"
-        if latest["gate"]
-        else (
-            f"\u274c **REGRESSION** \u2014 investigate {mismatches}/{total} sanitizer "
-            "outcomes that do not match their baselines"
-        )
-    )
+    summary = _gate_summary(latest["rows"])
+    icon = "\u2705" if summary["ok"] else "\u274c"
+    gate = f"{icon} **{summary['label']}** \u2014 {summary['detail']}"
     lines = ["# Sanitizers Nightly \u00b7 gfx950", ""]
     if banner:
         lines += [banner, ""]
@@ -551,7 +575,7 @@ def build_summary_md(
         lines.append(
             f"| {label} | {backend} | {_baseline_status_md(r)} | `{r['verdict']}` | "
             f"`{r['expected'] or _DASH}` | "
-            f"{r['execution']} | {r['findings']} | {r['coverage'] or _DASH} |"
+            f"{_execution_md(r['execution'])} | {r['findings']} | {r['coverage'] or _DASH} |"
         )
 
     lines += ["", "## Kernel details", ""]
@@ -574,7 +598,7 @@ def build_summary_md(
             f"backend `{backend_name}`"
             + (f" `{b['sha']}`" if b else "")
             + f" \u00b7 selection `{wl['requirement']}` top-{wl['top_n']} "
-            f"\u00b7 {wl['kernel_count']} kernel(s) \u00b7 execution `{r['execution']}`"
+            f"\u00b7 {wl['kernel_count']} kernel(s) \u00b7 execution {_execution_md(r['execution'])}"
         )
         lines += [
             "",
@@ -611,7 +635,7 @@ def build_summary_md(
         cells = " | ".join(_history_case_md(run["rows"][c]) for c, _k, _l, _b in CASES)
         lines.append(
             f"| {run['meta'].get('run', '')} | `{run['meta'].get('commit', '')}` | {cells} | "
-            f"{'Healthy' if run['gate'] else 'Regression'} |"
+            f"{_gate_summary(run['rows'])['short']} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -673,11 +697,8 @@ def main() -> int:
         (args.out_dir / "status.json").write_text(
             json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-    gate = runs[0]["gate"] if runs else False
-    print(
-        f"wrote {args.out_dir}/index.html, summary.md, data.json "
-        f"(gate={'healthy' if gate else 'regression'})"
-    )
+    gate_label = _gate_summary(runs[0]["rows"])["short"].lower() if runs else "no-data"
+    print(f"wrote {args.out_dir}/index.html, summary.md, data.json (gate={gate_label})")
     return 0
 
 
