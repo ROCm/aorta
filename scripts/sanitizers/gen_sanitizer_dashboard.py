@@ -187,7 +187,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
 
 
 def _run_record(
-    meta: dict[str, str],
+    meta: dict[str, Any],
     rows: dict[str, dict[str, Any]],
     *,
     rel: str | None = None,
@@ -195,6 +195,13 @@ def _run_record(
     # Fail closed: a missing report (present=False -> match=False) turns the gate
     # unhealthy, mirroring compare_verdict_baselines.py which errors on absent reports.
     gate = all(r["match"] for r in rows.values())
+    # The authoritative comparator gate recorded in the run manifest (meta.gate)
+    # is stricter than a row-level overall_verdict match (it also checks schema,
+    # execution status, per-check verdicts, and finding shape). Honor a recorded
+    # failure so a comparator-failed run whose verdicts happen to match baselines
+    # is never rendered healthy, and run.gate agrees with meta.gate in data.json.
+    if meta.get("gate") is False:
+        gate = False
     # ``rel`` is the run's relative area under the published dashboard (e.g.
     # ``runs/<id>``); None for the results-dir / runs-root modes, which do not
     # publish co-located raw reports and therefore render no per-run links.
@@ -408,7 +415,9 @@ def _execution_md(execution: Any) -> str:
     return f"\u274c **{text}**"
 
 
-def _gate_summary(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _gate_summary(
+    rows: dict[str, dict[str, Any]], *, recorded_gate: bool | None = None
+) -> dict[str, Any]:
     """Classify the aggregate run health for the top banner and history gate.
 
     A missing report and an observed verdict mismatch both fail the gate, but
@@ -416,12 +425,23 @@ def _gate_summary(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
     with its baseline is a regression. Absent reports are surfaced separately so
     an infrastructure failure is not mislabeled as a verdict regression, and a
     run with both is reported as a combined ``UNHEALTHY`` state.
+
+    ``recorded_gate`` is the authoritative comparator result persisted in the run
+    manifest (``meta.gate``). It is stricter than the row-level ``overall_verdict``
+    match, so when it is explicitly ``False`` the run fails closed even if every
+    reduced row matches its baseline -- otherwise a comparator-failed run would
+    render ``HEALTHY``.
     """
     total = len(rows)
     matched = sum(1 for r in rows.values() if r["match"])
     mismatches = sum(1 for r in rows.values() if r["present"] and not r["match"])
     missing = sum(1 for r in rows.values() if not r["present"])
-    if matched == total:
+    rows_ok = matched == total
+    if rows_ok and recorded_gate is False:
+        # Rows match their baselines but the stricter comparator gate failed.
+        label = "FAILED"
+        detail = "run gate failed its comparator check"
+    elif rows_ok:
         label = "HEALTHY"
         detail = f"{matched}/{total} sanitizer outcomes match their baselines"
     elif mismatches and missing:
@@ -439,7 +459,8 @@ def _gate_summary(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
     else:
         label = "INCOMPLETE"
         detail = f"{missing}/{total} sanitizer report(s) are missing"
-    return {"ok": matched == total, "label": label, "detail": detail, "short": label.capitalize()}
+    ok = rows_ok and recorded_gate is not False
+    return {"ok": ok, "label": label, "detail": detail, "short": label.capitalize()}
 
 
 def _history_case_html(row: dict[str, Any]) -> str:
@@ -453,7 +474,7 @@ def _history_case_html(row: dict[str, Any]) -> str:
 
 
 def _history_gate_html(run: dict[str, Any]) -> str:
-    summary = _gate_summary(run["rows"])
+    summary = _gate_summary(run["rows"], recorded_gate=run["meta"].get("gate"))
     emphasis = "pass" if run["gate"] else "fail"
     return f'<td><span class="pill {emphasis}">{_esc(summary["short"])}</span></td>'
 
@@ -575,7 +596,7 @@ def build_html(
         )
     latest = runs[0]
     meta = latest["meta"]
-    summary = _gate_summary(latest["rows"])
+    summary = _gate_summary(latest["rows"], recorded_gate=latest["meta"].get("gate"))
     gate_color = "#2c7d3b" if summary["ok"] else "#c92c35"
     gate_text = f"{summary['label']} \u2014 {summary['detail']}"
 
@@ -686,7 +707,7 @@ def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightl
     rows = run["rows"]
     # Reuse the shared aggregate classifier so a missing report reads as
     # INCOMPLETE rather than a misleading "verdict mismatch" (mirrors build_html).
-    summary = _gate_summary(rows)
+    summary = _gate_summary(rows, recorded_gate=run["meta"].get("gate"))
     gate_color = "#1a7f37" if summary["ok"] else "#cf222e"
     gate_text = f"{summary['label']} \u2014 {summary['detail']}"
     run_url = meta.get("run_url", "")
@@ -754,7 +775,7 @@ def build_summary_md(
         return head + "No runs found.\n"
     latest = runs[0]
     meta = latest["meta"]
-    summary = _gate_summary(latest["rows"])
+    summary = _gate_summary(latest["rows"], recorded_gate=latest["meta"].get("gate"))
     icon = "\u2705" if summary["ok"] else "\u274c"
     gate = f"{icon} **{summary['label']}** \u2014 {summary['detail']}"
     lines = ["# Sanitizers Nightly \u00b7 gfx950", ""]
@@ -837,7 +858,7 @@ def build_summary_md(
         cells = " | ".join(_history_case_md(run["rows"][c]) for c, _k, _l, _b in CASES)
         lines.append(
             f"| {run['meta'].get('run', '')} | `{run['meta'].get('commit', '')}` | {cells} | "
-            f"{_gate_summary(run['rows'])['short']} |"
+            f"{_gate_summary(run['rows'], recorded_gate=run['meta'].get('gate'))['short']} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -956,7 +977,10 @@ def main() -> int:
         (args.out_dir / "status.json").write_text(
             json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-    gate_label = _gate_summary(runs[0]["rows"])["short"].lower() if runs else "no-data"
+    gate_label = (
+        _gate_summary(runs[0]["rows"], recorded_gate=runs[0]["meta"].get("gate"))["short"].lower()
+        if runs else "no-data"
+    )
     print(f"wrote {args.out_dir}/index.html, summary.md, data.json (gate={gate_label})")
     return 0
 

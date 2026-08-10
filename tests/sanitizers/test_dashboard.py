@@ -563,6 +563,27 @@ def test_history_root_orders_variable_width_run_ids_numerically(tmp_path):
     ]
 
 
+def test_history_root_preserves_recorded_comparator_gate_failure(tmp_path):
+    root = tmp_path / "runs"
+    # Every overall_verdict matches its baseline, but the authoritative comparator
+    # gate (meta.gate, the strict compare_verdict_baselines.py result) recorded a
+    # failure. The dashboard must fail closed, not render the run HEALTHY.
+    _write_history_run(root, "2026-08-05-33", meta={"gate": False})
+
+    run = gen.runs_from_history_root(root, _baselines())[0]
+
+    # run.gate agrees with meta.gate (no contradiction in data.json).
+    assert run["gate"] is False
+    assert run["meta"]["gate"] is False
+    summary = gen._gate_summary(run["rows"], recorded_gate=run["meta"].get("gate"))
+    assert summary["ok"] is False
+    assert summary["short"] == "Failed"
+    # The per-run landing page and the history gate pill reflect the failure.
+    page = gen.build_run_index_html(run)
+    assert "FAILED" in page and "HEALTHY" not in page
+    assert 'class="pill fail"' in gen._history_gate_html(run)
+
+
 def test_history_root_ignores_malformed_run_dirs(tmp_path):
     root = tmp_path / "runs"
     _write_history_run(root, "2026-08-05-33")
