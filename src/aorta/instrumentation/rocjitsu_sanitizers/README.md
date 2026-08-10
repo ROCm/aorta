@@ -88,6 +88,43 @@ Waitcheck requires an exact final-code identity: code-object path plus kernel
 entry offset, with code-object index when the container has multiple device
 images. Fuzzy filename matching is deliberately not supported.
 
+## Provisioning the RocJITsu binaries
+
+`mode: sanitizer` runs need two RocJITsu binaries: the standalone Waitcheck CLI
+(`rj_waitcheck`) and the combined Waitcheck + ConSan DBI hook
+(`librocjitsu_dbi_hooks.so`). The resolvers discover them from either of two
+environment variables (an explicit `waitcheck_binary` / `hook_lib` argument
+still wins, and `rj_waitcheck` on `PATH` is a final fallback):
+
+- **`ROCJITSU_PREBUILT`** (recommended) -- points at an unpacked *prebuilt
+  bundle* published by ROCm/rocm-systems. The tree is flattened:
+  `bin/rj_waitcheck` and `lib/librocjitsu_dbi_hooks.so`. Fetch it with the
+  upstream `emulation/rocjitsu/scripts/download_sanitizer_artifacts.py`, which
+  resolves the latest successful `rocjitsu-sanitizer-artifacts` run on
+  `shared/rocjitsu/sanitizers`, verifies the recorded SHA-256 digests, and
+  unpacks the bundle:
+
+  ```bash
+  python download_sanitizer_artifacts.py --dest ./rocjitsu-sanitizers
+  export ROCJITSU_PREBUILT="$PWD/rocjitsu-sanitizers"
+  ```
+
+  GitHub does not serve Actions artifacts anonymously, so the downloader needs a
+  token with `actions:read` (from `--token`, `$GITHUB_TOKEN`, `$GH_TOKEN`, or
+  `gh auth token`) even though the repository is public. The binaries are built
+  in the ROCm manylinux image (glibc 2.28) with zlib/zstd/libgcc/libstdc++
+  statically linked, so glibc is their only runtime dependency -- no ROCm SDK is
+  required to *run* `rj_waitcheck`. These are ephemeral (default 30-day) run
+  artifacts, not durable Releases; record the commit from the bundle's
+  `MANIFEST.json` for provenance.
+
+- **`ROCJITSU_BUILD`** -- points at a raw CMake *build tree* from a local
+  rocm-systems source build. Here the resolvers expect the build-tree layout
+  (`tools/rj_waitcheck` and
+  `lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so`).
+
+When both are set, the prebuilt bundle wins.
+
 ## Verdict and health rules
 
 - Waitcheck structured hazard → `warn`.
