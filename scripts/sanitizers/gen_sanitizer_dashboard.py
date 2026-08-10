@@ -348,7 +348,7 @@ def _history_case_html(row: dict[str, Any]) -> str:
 
 def _history_gate_html(run: dict[str, Any]) -> str:
     summary = _gate_summary(run["rows"])
-    emphasis = "ok" if run["gate"] else "bad"
+    emphasis = "pass" if run["gate"] else "fail"
     return f'<td><span class="pill {emphasis}">{_esc(summary["short"])}</span></td>'
 
 
@@ -450,7 +450,7 @@ def build_html(
     latest = runs[0]
     meta = latest["meta"]
     summary = _gate_summary(latest["rows"])
-    gate_color = "#1a7f37" if summary["ok"] else "#cf222e"
+    gate_color = "#2c7d3b" if summary["ok"] else "#c92c35"
     gate_text = f"{summary['label']} \u2014 {summary['detail']}"
 
     latest_rows = "".join(
@@ -502,6 +502,7 @@ def build_html(
   .execution.bad {{ color:#cf222e; font-weight:600; }}
   .pill {{ padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }}
   .pill.ok {{ background:#1a7f3722; color:#1a7f37; }} .pill.bad {{ background:#cf222e22; color:#cf222e; }}
+  .pill.pass {{ background:#2c7d3b; color:#fff; }} .pill.fail {{ background:#c92c35; color:#fff; }}
   @media (prefers-color-scheme: dark) {{
     body {{ background:#0d1117; color:#e6edf3; }}
     table {{ background:#161b22; }} th {{ background:#161b22; color:#8b949e; }}
