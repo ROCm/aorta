@@ -199,7 +199,7 @@ def test_build_html_expected_warn_and_fail_are_healthy_and_neutral():
     assert "gemm_x" in html and "Kernel details" in html
     assert "Observed sanitizer verdict" in html
     assert '<span class="pill ok">Match</span>' in html
-    assert '<span class="pill ok">Healthy</span>' in html
+    assert '<span class="pill pass">Healthy</span>' in html
     assert ">green<" not in html and ">red<" not in html
 
 
@@ -224,7 +224,7 @@ def test_build_html_mismatch_is_primary_regression_signal():
     assert '<span class="pill bad">Mismatch</span>' in html
     assert 'Observed <span class="observed">fail</span>' in html
     assert 'expected <span class="observed">pass</span>' in html
-    assert '<span class="pill bad">Regression</span>' in html
+    assert '<span class="pill fail">Regression</span>' in html
 
 
 def test_renderers_make_missing_report_explicit():
@@ -308,7 +308,7 @@ def test_missing_only_run_is_incomplete_not_regression():
     md = gen.build_summary_md(runs)
 
     assert "INCOMPLETE — 1/3 sanitizer report(s) are missing" in html
-    assert '<span class="pill bad">Incomplete</span>' in html
+    assert '<span class="pill fail">Incomplete</span>' in html
     assert "**INCOMPLETE** — 1/3 sanitizer report(s) are missing" in md
     assert "Incomplete |" in md
     # a missing report must not be surfaced as a verdict regression anywhere
@@ -338,7 +338,7 @@ def test_combined_mismatch_and_missing_is_unhealthy():
 
     detail = "investigate 1/3 mismatched outcome(s) and 1/3 missing report(s)"
     assert f"UNHEALTHY — {detail}" in html
-    assert '<span class="pill bad">Unhealthy</span>' in html
+    assert '<span class="pill fail">Unhealthy</span>' in html
     assert f"**UNHEALTHY** — {detail}" in md
     assert "Unhealthy |" in md
 
