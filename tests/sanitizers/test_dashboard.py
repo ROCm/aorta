@@ -563,6 +563,20 @@ def test_history_root_orders_variable_width_run_ids_numerically(tmp_path):
     ]
 
 
+def test_history_root_ignores_malformed_run_dirs(tmp_path):
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    # A stray non-conforming child (e.g. a leftover `source/` from a nested
+    # --history-root layout) must not be enumerated as a run: without filtering it
+    # would sort ahead of every dated id under reverse=True and show as "latest".
+    (root / "source" / "waitcheck").mkdir(parents=True)
+    (root / "not-a-run").mkdir()
+
+    runs = gen.runs_from_history_root(root, _baselines())
+
+    assert [r["meta"]["run"] for r in runs] == ["2026-08-05-33"]
+
+
 def test_history_root_missing_report_has_no_report_rel(tmp_path):
     root = tmp_path / "runs"
     run_dir = _write_history_run(root, "2026-08-05-33")

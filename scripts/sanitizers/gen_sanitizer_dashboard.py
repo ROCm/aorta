@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -268,14 +269,23 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
     return meta
 
 
+# A published run directory is ``<YYYY-MM-DD>-<run_id>`` (run_id an integer).
+_RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d+$")
+
+
+def _is_run_id(name: str) -> bool:
+    """Whether a directory name is a well-formed ``<YYYY-MM-DD>-<run_id>`` id."""
+    return _RUN_ID_RE.match(name) is not None
+
+
 def _history_sort_key(name: str) -> tuple[str, int]:
     """Order key for a published run id (``<YYYY-MM-DD>-<run_id>``).
 
-    The ISO date prefix sorts correctly as a string, but the trailing run id is a
-    variable-width integer, so a plain name sort mis-orders ``...-9`` after
-    ``...-10`` and would pick the wrong latest run (and prune the wrong dir).
-    Split the numeric suffix off and compare it as an int. Names that don't match
-    the scheme fall back to ``(name, -1)`` so enumeration never crashes.
+    Enumeration is already filtered to well-formed ids (``_is_run_id``); this key
+    exists because the trailing run id is a *variable-width* integer, so a plain
+    name sort mis-orders ``...-9`` after ``...-10`` and would pick the wrong
+    latest run (and prune the wrong dir). Split the numeric suffix off and compare
+    it as an int. The malformed fallback ``(name, -1)`` is defensive only.
     """
     head, sep, tail = name.rpartition("-")
     if sep and tail.isdigit():
@@ -295,8 +305,11 @@ def runs_from_history_root(
     relative to the dashboard root, and each record with the run's ``rel`` area,
     so ``build_html`` can emit relative links that work under ``/sanitizers/``.
     """
+    # Only enumerate well-formed <YYYY-MM-DD>-<run_id> dirs: a stray child (e.g. a
+    # leftover `source/` from a nested --history-root layout) must not become a
+    # phantom "latest" pseudo-run or consume a --keep slot.
     run_dirs = sorted(
-        (p for p in history_root.iterdir() if p.is_dir()),
+        (p for p in history_root.iterdir() if p.is_dir() and _is_run_id(p.name)),
         key=lambda p: _history_sort_key(p.name),
         reverse=True,
     ) if history_root.is_dir() else []
