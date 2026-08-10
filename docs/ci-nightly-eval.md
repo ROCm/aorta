@@ -64,6 +64,22 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    previous green page). Only sanitizer data produced by a `main` run is
    published.
 
+   Each nightly's raw per-case `sanitizer_report.json` files are co-located on the
+   `sanitizer-results` data branch under `dashboard/runs/<YYYY-MM-DD>-<run_id>/`
+   (one `<case>/sanitizer_report.json` per recipe plus a `meta.json` with commit /
+   date / gpu / run_url / gate), and the rendered page links to them: the latest
+   run table has a per-recipe **Report** link, the kernel-detail sections carry a
+   "view raw report" link, and each **Run** row in the history table links to its
+   `runs/<id>/` area. A tiny `runs/<id>/index.html` landing page lists that run's
+   three reports. Because `pages.yml` copies `dashboard/*` recursively into
+   `_site/sanitizers/`, everything under `runs/` is served at
+   `/sanitizers/runs/...` with relative links and no change to `pages.yml`. The
+   publish job keeps a rolling window of the newest **30** run directories
+   (`gen_sanitizer_dashboard.py --history-root <dir> --keep 30`); older ones are
+   pruned. Previously these raw reports lived only in an expiring Actions
+   artifact and were never linked; the rolling window makes them durable and
+   reachable from the page.
+
    The dashboard previously lived at `/ci/`, so that path is kept: `/ci/`
    redirects to the root and `/ci/data.json` is published alongside
    `/data.json` for anything already polling it. A verification step fails the
@@ -146,6 +162,14 @@ The publish step keeps only the **most recent 180** `results/<date>.json` files 
 the `ci-results` data branch (older ones are pruned), and the dashboard renders at
 most the last 180 builds (`gen_dashboard.py --max-builds`). Files are tiny; adjust
 the cap in `nightly-eval.yml` / the flag if a longer window is wanted.
+
+The **sanitizer** nightly keeps a separate rolling window on the
+`sanitizer-results` data branch: the newest **30** `dashboard/runs/<id>/`
+directories (each holding that run's three raw `sanitizer_report.json` files and a
+`meta.json`). The publish job prunes older ones and re-renders with
+`gen_sanitizer_dashboard.py --history-root dashboard/runs --keep 30`; adjust
+`keep` in `sanitizers-nightly.yml` (and the matching `--keep`) to change the
+window.
 
 ## Operating checklist
 

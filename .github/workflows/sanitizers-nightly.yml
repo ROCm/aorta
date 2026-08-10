@@ -219,23 +219,20 @@ jobs:
           PY
           cat status.json
 
-      - name: Generate sanitizer dashboard
-        run: |
-          python scripts/sanitizers/gen_sanitizer_dashboard.py \
-            --results-dir incoming \
-            --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
-            --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
-            --status status.json \
-            --out-dir dashboard
-          cat dashboard/summary.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Update sanitizer-results branch
+      - name: Publish sanitizer dashboard to sanitizer-results branch
+        # Preserve the accumulated per-run history on the data branch: clone it,
+        # co-locate THIS run's raw reports under dashboard/runs/<date>-<run_id>/,
+        # prune to a rolling window, then regenerate the rendered dashboard from
+        # the merged history and push. The old "wipe dashboard/ and re-copy" flow
+        # destroyed every prior run's raw reports, so it is deliberately gone.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPU_RESULT: ${{ needs.sanitizers-gpu.result }}
         run: |
           set -euo pipefail
-          [ -d dashboard ] || { echo "no dashboard/; skipping publish"; exit 0; }
+          keep=30
           date="$(date -u +%Y-%m-%d)"
+          run_dir_id="${date}-${GITHUB_RUN_ID}"   # <YYYY-MM-DD>-<run_id>: date-sortable + unique
           repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           tmp="$(mktemp -d)"
           # Fail closed: distinguish a genuinely-absent sanitizer-results branch
@@ -256,12 +253,77 @@ jobs:
             echo "::error::cannot reach sanitizer-results (git ls-remote exit ${lsr}); failing closed"
             exit 1
           fi
-          rm -rf "$tmp/dashboard"
-          cp -a dashboard "$tmp/dashboard"
+
+          # Stage this run's raw reports next to the preserved history (never wipe
+          # dashboard/runs/). A failed/absent report is simply not copied; the
+          # generator then renders that case as missing -> a red per-run gate.
+          runs_dir="$tmp/dashboard/runs"
+          dest="$runs_dir/${run_dir_id}"
+          # A same-day Actions re-run reuses GITHUB_RUN_ID (only GITHUB_RUN_ATTEMPT
+          # changes), so it targets this same directory. Clear it first so a report
+          # absent from the current attempt cannot survive from a prior one and mask
+          # a now-missing case (the generator fails such a case closed).
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          for case in waitcheck consan-clean consan-racy; do
+            report="incoming/${case}/sanitizer_report.json"
+            if [ -f "$report" ]; then
+              mkdir -p "$dest/${case}"
+              cp -a "$report" "$dest/${case}/sanitizer_report.json"
+            fi
+          done
+
+          # Per-run manifest read back by gen_sanitizer_dashboard.py --history-root.
+          # gate mirrors the GPU job result (its comparator step is the gate); the
+          # rendered history recomputes it from the reports + baselines regardless.
+          if [ "${GPU_RESULT}" = "success" ]; then gate=true; else gate=false; fi
+          python - "$run_dir_id" "$date" "$gate" > "$dest/meta.json" <<'PY'
+          import json, os, sys
+          run_id, date, gate = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          gh_run = os.environ.get("GITHUB_RUN_ID", "")
+          print(json.dumps({
+              "run": run_id,
+              "commit": os.environ.get("GITHUB_SHA", ""),
+              "date": date,
+              "gpu": "gfx950",
+              "run_url": f"{server}/{repo}/actions/runs/{gh_run}",
+              "gate": gate,
+          }, indent=2, sort_keys=True))
+          PY
+
+          # Rolling window: drop all but the newest N run directories. Sort by the
+          # date fields then the run-id numerically (-t- splits <YYYY-MM-DD>-<run_id>
+          # into fields 1-4), so a variable-width run id (...-9 vs ...-10) still
+          # orders newest-first -- a plain lexical sort would prune the wrong dir.
+          if [ -d "$runs_dir" ]; then
+            ls -1 "$runs_dir" \
+              | sort -t- -k1,1nr -k2,2nr -k3,3nr -k4,4nr \
+              | tail -n +"$((keep + 1))" | while IFS= read -r old; do
+              [ -n "$old" ] && rm -rf "${runs_dir:?}/${old}"
+            done
+          fi
+
+          # Regenerate the rendered dashboard from the merged, pruned history. This
+          # also writes each retained run's tiny runs/<id>/index.html landing page.
+          python scripts/sanitizers/gen_sanitizer_dashboard.py \
+            --history-root "$runs_dir" --keep "$keep" \
+            --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
+            --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
+            --status status.json \
+            --out-dir "$tmp/dashboard"
+
+          # Mirror the rendered dashboard to the workspace and append the job
+          # summary BEFORE pushing, so both survive even if the push later fails.
+          rm -rf dashboard
+          cp -a "$tmp/dashboard" dashboard
+          cat dashboard/summary.md >> "$GITHUB_STEP_SUMMARY"
+
           ( cd "$tmp"
             git add -A
             if git -c user.name=aorta-ci -c user.email=aorta-ci@users.noreply.github.com \
-                 commit -m "sanitizer dashboard ${date}"; then
+                 commit -m "sanitizer dashboard ${date} (run ${GITHUB_RUN_ID})"; then
               git push origin sanitizer-results   # not swallowed -- a push failure fails the job
             else
               echo "no changes to commit"

@@ -465,6 +465,317 @@ def test_runs_from_results_dir_matches_baselines(tmp_path):
     assert runs[0]["gate"] is False
 
 
+def _consan_clean_report() -> dict:
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "pass", "execution_status": "complete",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{
+                "identity": {
+                    "name": "consan_lds_clean", "target": "gfx950", "code_object": None,
+                    "code_object_sha256": None, "code_object_index": None, "entry_offset": None,
+                },
+                "total_time_ms": 0.0, "dispatch_count": 1, "sources": ["consan_repro"],
+            }],
+        },
+        "checks": [{
+            "sanitizer": "consan", "state": "ran", "verdict": "pass",
+            "reason": None, "returncode": 0, "findings": [], "kernel_results": [],
+            "coverage": [{"object_id": "reader=1,load=1", "access": "1/1"}], "backend": {},
+        }],
+    }
+
+
+def _baselines() -> dict:
+    return {
+        "waitcheck_gemm": {"overall_verdict": "warn"},
+        "consan_clean": {"overall_verdict": "pass"},
+        "consan_racy": {"overall_verdict": "fail"},
+    }
+
+
+def _write_history_run(root: Path, run_id: str, *, meta: dict | None = None) -> Path:
+    """Lay out one published run: root/<id>/<case>/sanitizer_report.json + meta.json."""
+    run_dir = root / run_id
+    for case, report in (
+        ("waitcheck", _waitcheck_report()),
+        ("consan-clean", _consan_clean_report()),
+        ("consan-racy", _consan_racy_report()),
+    ):
+        (run_dir / case).mkdir(parents=True)
+        (run_dir / case / "sanitizer_report.json").write_text(json.dumps(report))
+    manifest = {
+        "run": run_id, "commit": "0123456789abcdef", "date": "2026-08-05",
+        "gpu": "gfx950", "run_url": "https://github.com/ROCm/aorta/actions/runs/99",
+        "gate": True,
+    }
+    if meta:
+        manifest.update(meta)
+    (run_dir / "meta.json").write_text(json.dumps(manifest))
+    return run_dir
+
+
+def test_history_root_enumerates_newest_first(tmp_path):
+    root = tmp_path / "runs"
+    for run_id in ("2026-08-03-11", "2026-08-05-33", "2026-08-04-22"):
+        _write_history_run(root, run_id)
+
+    runs = gen.runs_from_history_root(root, _baselines())
+
+    ids = [r["meta"]["run"] for r in runs]
+    assert ids == ["2026-08-05-33", "2026-08-04-22", "2026-08-03-11"]
+    # rel + report_rel are threaded through, relative to the dashboard root.
+    latest = runs[0]
+    assert latest["rel"] == "runs/2026-08-05-33"
+    assert (
+        latest["rows"]["waitcheck"]["report_rel"]
+        == "runs/2026-08-05-33/waitcheck/sanitizer_report.json"
+    )
+    # meta.json is read back (commit is shortened to 12 chars for display).
+    assert latest["meta"]["commit"] == "0123456789ab"
+    assert latest["meta"]["gpu"] == "gfx950"
+    assert latest["meta"]["run_url"].endswith("/runs/99")
+
+
+def test_history_root_keep_caps_to_newest_n(tmp_path):
+    root = tmp_path / "runs"
+    for i in range(5):
+        _write_history_run(root, f"2026-08-0{i + 1}-{i + 1}")
+
+    runs = gen.runs_from_history_root(root, _baselines(), keep=2)
+
+    assert [r["meta"]["run"] for r in runs] == ["2026-08-05-5", "2026-08-04-4"]
+
+
+def test_history_root_orders_variable_width_run_ids_numerically(tmp_path):
+    root = tmp_path / "runs"
+    # Same day, variable-width run ids: 100 > 10 > 9 numerically, but a plain
+    # string sort would put "-9" ahead of "-10"/"-100" and pick the wrong latest.
+    for run_id in ("2026-08-05-9", "2026-08-05-10", "2026-08-05-100"):
+        _write_history_run(root, run_id)
+
+    runs = gen.runs_from_history_root(root, _baselines())
+
+    assert [r["meta"]["run"] for r in runs] == [
+        "2026-08-05-100", "2026-08-05-10", "2026-08-05-9",
+    ]
+
+
+def test_history_root_preserves_recorded_comparator_gate_failure(tmp_path):
+    root = tmp_path / "runs"
+    # Every overall_verdict matches its baseline, but the authoritative comparator
+    # gate (meta.gate, the strict compare_verdict_baselines.py result) recorded a
+    # failure. The dashboard must fail closed, not render the run HEALTHY.
+    _write_history_run(root, "2026-08-05-33", meta={"gate": False})
+
+    run = gen.runs_from_history_root(root, _baselines())[0]
+
+    # run.gate agrees with meta.gate (no contradiction in data.json).
+    assert run["gate"] is False
+    assert run["meta"]["gate"] is False
+    summary = gen._gate_summary(run["rows"], recorded_gate=run["meta"].get("gate"))
+    assert summary["ok"] is False
+    assert summary["short"] == "Failed"
+    # The per-run landing page and the history gate pill reflect the failure.
+    page = gen.build_run_index_html(run)
+    assert "FAILED" in page and "HEALTHY" not in page
+    assert 'class="pill fail"' in gen._history_gate_html(run)
+
+
+def test_history_root_ignores_malformed_run_dirs(tmp_path):
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    # A stray non-conforming child (e.g. a leftover `source/` from a nested
+    # --history-root layout) must not be enumerated as a run: without filtering it
+    # would sort ahead of every dated id under reverse=True and show as "latest".
+    (root / "source" / "waitcheck").mkdir(parents=True)
+    (root / "not-a-run").mkdir()
+
+    runs = gen.runs_from_history_root(root, _baselines())
+
+    assert [r["meta"]["run"] for r in runs] == ["2026-08-05-33"]
+
+
+def test_history_root_missing_report_has_no_report_rel(tmp_path):
+    root = tmp_path / "runs"
+    run_dir = _write_history_run(root, "2026-08-05-33")
+    # Remove one case's report -> present False, and no dead link is emitted.
+    (run_dir / "consan-clean" / "sanitizer_report.json").unlink()
+
+    runs = gen.runs_from_history_root(root, _baselines())
+    rows = runs[0]["rows"]
+    assert rows["consan-clean"]["present"] is False
+    assert rows["consan-clean"]["report_rel"] is None
+    assert runs[0]["gate"] is False  # a missing report fails the gate closed
+
+
+def test_build_html_emits_relative_report_links(tmp_path):
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    _write_history_run(root, "2026-08-04-22")
+    runs = gen.runs_from_history_root(root, _baselines())
+
+    html = gen.build_html(runs)
+
+    # Latest-run table links each case to its raw JSON, relative to /sanitizers/.
+    assert 'href="runs/2026-08-05-33/waitcheck/sanitizer_report.json"' in html
+    # A "view raw report" link appears in the kernel-detail section.
+    assert "view raw report" in html
+    # The run area is linked from the latest-run header and the history table.
+    assert 'href="runs/2026-08-05-33/"' in html
+    assert 'href="runs/2026-08-04-22/"' in html
+    # All emitted links are relative (no site-absolute or protocol-absolute hrefs
+    # to the run area / reports).
+    assert 'href="/runs/' not in html
+    assert "https://runs/" not in html
+
+
+def test_build_html_no_report_column_links_without_history():
+    # results-dir / runs-root modes carry no rel/report_rel: the Report column is
+    # present but renders an em dash, and no run-area links are emitted.
+    rows = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    runs = [gen._run_record({"run": "r1", "commit": "abc", "date": "d"}, rows)]
+    html = gen.build_html(runs)
+    assert "<th>Report</th>" in html
+    assert "sanitizer_report.json" not in html
+    assert "runs/" not in html
+
+
+def test_build_run_index_html_lists_reports(tmp_path):
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    run = gen.runs_from_history_root(root, _baselines())[0]
+
+    page = gen.build_run_index_html(run)
+
+    assert "<!doctype html>" in page
+    assert "2026-08-05-33" in page
+    # Report links are case-local (the page lives inside runs/<id>/).
+    assert 'href="waitcheck/sanitizer_report.json"' in page
+    assert 'href="consan-racy/sanitizer_report.json"' in page
+    # Links back to the workflow run and up to the dashboard.
+    assert "/runs/99" in page
+    assert 'href="../../"' in page
+
+
+def test_build_run_index_html_missing_report_reads_incomplete(tmp_path):
+    root = tmp_path / "runs"
+    run_dir = _write_history_run(root, "2026-08-05-33")
+    (run_dir / "consan-clean" / "sanitizer_report.json").unlink()
+    run = gen.runs_from_history_root(root, _baselines())[0]
+
+    page = gen.build_run_index_html(run)
+
+    # A missing report must read as INCOMPLETE, not a misleading verdict mismatch.
+    assert "INCOMPLETE \u2014 1/3 sanitizer report(s) are missing" in page
+    assert "verdict mismatch" not in page
+
+
+def test_main_history_root_writes_per_run_landing_pages(tmp_path, monkeypatch):
+    baselines = _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    _write_history_run(root, "2026-08-04-22")
+    out = tmp_path / "dashboard"
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(root),
+        "--keep", "30",
+        "--baselines", str(baselines),
+        "--out-dir", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+
+    assert (out / "index.html").is_file()
+    # A per-run landing page is written next to each retained run's reports.
+    assert (out / "runs" / "2026-08-05-33" / "index.html").is_file()
+    assert (out / "runs" / "2026-08-04-22" / "index.html").is_file()
+    # The raw reports are co-located under the output tree so every emitted
+    # runs/<id>/<case>/sanitizer_report.json link resolves even though the
+    # history-root here is a separate directory from <out-dir>/runs.
+    assert (out / "runs" / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
+    assert (out / "runs" / "2026-08-04-22" / "consan-racy" / "sanitizer_report.json").is_file()
+    # The run manifest is carried too, so the published runs/<id>/ layout is complete.
+    assert (out / "runs" / "2026-08-05-33" / "meta.json").is_file()
+    # data.json mirrors the rel / report_rel fields for machine consumers.
+    data = json.loads((out / "data.json").read_text(encoding="utf-8"))
+    assert data[0]["rel"] == "runs/2026-08-05-33"
+    assert (
+        data[0]["rows"]["waitcheck"]["report_rel"]
+        == "runs/2026-08-05-33/waitcheck/sanitizer_report.json"
+    )
+    # gate stays a JSON boolean (not coerced to the string "True") for consumers.
+    assert data[0]["meta"]["gate"] is True
+
+
+def test_main_history_root_clears_stale_output_runs(tmp_path, monkeypatch):
+    # When --history-root is a separate tree from <out-dir>/runs and the output is
+    # reused, a run dropped from the history must not linger as stale published
+    # output. main() clears out/runs before copying the current retained set.
+    baselines = _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    out = tmp_path / "dashboard"
+    stale = out / "runs" / "2026-08-01-01" / "waitcheck"
+    stale.mkdir(parents=True)
+    (stale / "sanitizer_report.json").write_text("{}")
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(root),
+        "--baselines", str(baselines),
+        "--out-dir", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+
+    assert not (out / "runs" / "2026-08-01-01").exists()
+    assert (out / "runs" / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
+
+
+def test_main_history_root_nested_under_output_is_not_wiped(tmp_path, monkeypatch):
+    # If --history-root nests beneath <out-dir>/runs, the stale-clear must NOT
+    # rmtree runs_out (that would delete the source reports before they're copied).
+    baselines = _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    out = tmp_path / "dashboard"
+    root = out / "runs" / "source"  # nested beneath <out-dir>/runs
+    _write_history_run(root, "2026-08-05-33")
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(root),
+        "--baselines", str(baselines),
+        "--out-dir", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+
+    # Source reports survive (not wiped) and are still published under the output.
+    assert (root / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
+    assert (out / "runs" / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
+
+
+def test_main_empty_history_root_publishes_placeholder(tmp_path, monkeypatch):
+    # Mirrors the Pages empty-state invocation (pages.yml publish_placeholder).
+    baselines = _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    out = tmp_path / "out"
+    (tmp_path / "empty").mkdir()
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(tmp_path / "empty"),
+        "--baselines", str(baselines),
+        "--out-dir", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+    assert "No sanitizer runs yet" in (out / "index.html").read_text(encoding="utf-8")
+
+
 def test_main_fails_closed_on_missing_baselines(tmp_path, monkeypatch):
     # A missing/unreadable baselines file must not paint a false-healthy gate: main
     # exits non-zero instead of falling back to an empty baseline set.
