@@ -45,8 +45,9 @@ def test_dashboard_renders_status_and_rows():
                     "reasons": ["mean_step_time_ms 9 > max 5"], "metrics": {"mean_step_time_ms": 9.0}}],
                   total=1, fail=1)
     html = gen_dashboard.build_dashboard_html([r1, r2])
-    assert "aorta nightly CI" in html
-    assert "failing" in html  # latest run failed
+    assert "ROCm stack health" in html
+    assert "Regression detected" in html
+    assert "failing" in html  # internal label still visible
     # Cells are grouped under their workload, so the two names render separately.
     assert "inference_offline" in html
     assert "baseline-local" in html
@@ -61,7 +62,7 @@ def test_dashboard_empty_history():
 def test_dashboard_links_to_sanitizer_nightly():
     html = gen_dashboard.build_dashboard_html([])
     assert 'href="sanitizers/"' in html
-    assert "sanitizer nightly" in html
+    assert "Sanitizer nightly" in html
 
 
 def test_dashboard_renders_summary_metric_series():
@@ -274,8 +275,9 @@ def test_dashboard_groups_cells_under_their_workload():
     ]
     html = gen_dashboard.build_dashboard_html(
         [_results("2026-07-30T00:00:00Z", entries, total=2, record=2)])
-    # One group header for the workload, and each cell listed beneath it.
-    assert html.count("llm_determinism") == 1
+    # Customer title once in the group header; internal id in wl-id + category anchor.
+    assert "LLM determinism" in html
+    assert html.count("llm_determinism") >= 1
     assert "bf16-12L" in html and "tf32-24L" in html
 
 
@@ -791,3 +793,52 @@ def test_dashboard_hides_the_js_only_controls_until_the_script_runs():
     assert '<div class="toolbar" id="toolbar" hidden>' in html
     assert "bar.hidden = false" in html
     assert "Expand all" in html
+
+
+def test_dashboard_renders_category_health_tiles():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 254.0}},
+        {"entry": "inference_offline", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 4.0,
+                                    "summary": {"tokens_per_sec": 4160}}},
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z", entries, total=2, record=1, **{"pass": 1})])
+    assert "Category health" in html
+    assert "Platform" in html and "Inference" in html
+    assert "Healthy" in html  # one pass + one record => passing headline
+
+
+def test_dashboard_record_only_shows_baseline_setup_label():
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record",
+                   "reasons": ["no baseline (record-only)"],
+                   "metrics": {"mean_step_time_ms": 1.0}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "Baseline setup" in html
+    assert "recording" in html
+    assert ">passing<" not in html
+
+
+def test_dashboard_run_command_block():
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "inference_offline", "cell": "baseline-local",
+                   "verdict": "record", "reasons": [],
+                   "metrics": {"mean_step_time_ms": 4.0}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "Run this workload locally" in html
+    assert "example-inference-smoke.yaml" in html
+
+
+def test_dashboard_failure_action_panel():
+    r = _results("2026-07-29T00:00:00Z",
+                 [{"entry": "race", "cell": "smoke", "verdict": "fail",
+                   "reasons": ["expected passing cell but it did not pass"],
+                   "metrics": {"mean_step_time_ms": 1.0}}],
+                 total=1, fail=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "Next steps" in html
+    assert "aorta env probe" in html

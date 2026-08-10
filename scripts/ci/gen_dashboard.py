@@ -27,9 +27,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import eval_lib  # for metric_policy display
     _metric_policy = eval_lib.metric_policy
+    _is_correctness_metric = eval_lib.is_correctness_metric
+    _is_performance_metric = eval_lib.is_performance_metric
 except Exception:  # pragma: no cover - dashboard must render even if import fails
     def _metric_policy(_name: str):  # type: ignore
         return None
+
+    def _is_correctness_metric(_name: str) -> bool:  # type: ignore
+        return _name.endswith("_checksum") or _name.endswith("checksum")
+
+    def _is_performance_metric(name: str) -> bool:  # type: ignore
+        return name in _METRIC_UNITS and name not in (
+            "logits_checksum", "output_checksum", "checksum"
+        )
 
 # Links back to the source of truth. This dashboard only ever describes this
 # repo's nightly run, so the slug is fixed rather than plumbed through.
@@ -103,6 +113,167 @@ _TOOLCHAIN_FIELDS = (
     ("rocm", "ROCm"),
     ("hip", "HIP"),
 )
+
+try:
+    from dashboard_metadata import DASHBOARD_METADATA as _DEFAULT_METADATA
+except ImportError:  # pragma: no cover
+    _DEFAULT_METADATA: dict[str, Any] = {
+        "categories": {}, "workloads": {}, "engineer_only_metrics": [],
+    }
+
+# Customer-facing headline for each internal _latest_status() label.
+_CUSTOMER_STATUS = {
+    "unknown": "Unknown",
+    "empty": "No data",
+    "unrecognised": "Unrecognised verdict",
+    "failing": "Regression detected",
+    "passing": "Healthy",
+    "recording": "Baseline setup",
+    "skipping": "Incomplete run",
+}
+
+# Metrics shown only in the engineer metrics table, not the headline row.
+_DEFAULT_ENGINEER_METRICS = frozenset({
+    "rank", "world_size", "local_world_size", "node_count",
+    "corruption_details_omitted", "parameter_count", "num_experts", "num_layers",
+    "generate_tokens", "decoded_tokens", "prompt_len", "batch_size",
+    "eff_batch_size", "eff_ffn_size", "eff_num_heads", "eff_seq_len",
+    "declared_h2d_tensor_size", "effective_h2d_tensor_size", "layers_verified",
+    "expected", "n", "sum", "final_loss",
+})
+
+
+def load_dashboard_metadata() -> dict[str, Any]:
+    """Load customer-facing workload/category metadata (pure, cached per process)."""
+    if not hasattr(load_dashboard_metadata, "_cache"):
+        load_dashboard_metadata._cache = None  # type: ignore[attr-defined]
+    if load_dashboard_metadata._cache is not None:  # type: ignore[attr-defined]
+        return load_dashboard_metadata._cache  # type: ignore[attr-defined]
+    load_dashboard_metadata._cache = dict(_DEFAULT_METADATA)  # type: ignore[attr-defined]
+    return load_dashboard_metadata._cache  # type: ignore[attr-defined]
+
+
+def _customer_status_label(status: str) -> str:
+    return _CUSTOMER_STATUS.get(status, status.replace("_", " ").title())
+
+
+def _workload_meta(entry_name: str) -> dict[str, Any]:
+    return (load_dashboard_metadata().get("workloads") or {}).get(entry_name) or {}
+
+
+def _engineer_only_metrics() -> frozenset[str]:
+    meta = load_dashboard_metadata()
+    extra = meta.get("engineer_only_metrics") or []
+    return _DEFAULT_ENGINEER_METRICS | frozenset(str(m) for m in extra)
+
+
+def _category_for_workload(entry_name: str) -> str:
+    for cat_id, cat in (load_dashboard_metadata().get("categories") or {}).items():
+        if entry_name in (cat.get("workloads") or []):
+            return str(cat_id)
+    return "other"
+
+
+def _format_headline_metric(name: str, raw: Any) -> str:
+    """One headline metric for customer view."""
+    if name in ("ranks_with_divergence", "layer_checksum_mismatches"):
+        if _isnum(raw) and float(raw) == 0:
+            return f"{name.replace('_', ' ')}: 0 ✓"
+        if _isnum(raw):
+            return f"{name.replace('_', ' ')}: {_fmt_num(raw)} ✗"
+        return f"{name.replace('_', ' ')}: —"
+    if name in ("logits_checksum", "output_checksum", "checksum"):
+        if _isnum(raw):
+            return f"{name.replace('_', ' ')}: match ✓"
+        return f"{name.replace('_', ' ')}: —"
+    unit = _METRIC_UNITS.get(name, "")
+    if name == "mean_step_time_ms":
+        return f"step time: {_fmt_ms(raw)}"
+    label = name.replace("_", " ")
+    if _isnum(raw):
+        val = f"{_fmt_num(raw)} {unit}".strip()
+        return f"{label}: {val}"
+    return f"{label}: —"
+
+
+def _headline_block(entry: dict[str, Any], entry_name: str) -> str:
+    meta = _workload_meta(entry_name)
+    names = meta.get("headline_metrics") or []
+    if not names:
+        return ""
+    summary = ((entry.get("metrics") or {}).get("summary") or {})
+    metrics = entry.get("metrics") or {}
+    parts = []
+    for name in names:
+        if name in _HARNESS_METRICS:
+            raw = metrics.get(name)
+        else:
+            raw = summary.get(name)
+        parts.append(_format_headline_metric(str(name), raw))
+    if not parts:
+        return ""
+    return (
+        "<ul class='headlines'>"
+        + "".join(f"<li>{_esc(p)}</li>" for p in parts)
+        + "</ul>"
+    )
+
+
+def _run_command_block(entry_name: str) -> str:
+    cmd = _workload_meta(entry_name).get("run_command") or ""
+    if not cmd:
+        return ""
+    return (
+        "<details class='run-cmd'>"
+        "<summary>Run this workload locally</summary>"
+        f"<pre class='mono'>{_esc(cmd)}</pre>"
+        "</details>"
+    )
+
+
+def build_category_summary(
+    latest_entries: list[dict[str, Any]],
+) -> str:
+    """Four category tiles summarising worst verdict per use-case area."""
+    meta = load_dashboard_metadata()
+    categories = meta.get("categories") or {}
+    if not categories:
+        return ""
+
+    by_entry: dict[str, list[dict[str, Any]]] = {}
+    for e in latest_entries:
+        by_entry.setdefault(str(e.get("entry")), []).append(e)
+
+    tiles = []
+    for cat_id, cat in categories.items():
+        label = str(cat.get("label") or cat_id)
+        workloads = cat.get("workloads") or []
+        group: list[dict[str, Any]] = []
+        for wl in workloads:
+            group.extend(by_entry.get(str(wl), []))
+        if not group:
+            continue
+        counts = _tally(group)
+        worst = _worst_verdict(counts)
+        color = _VERDICT_COLOR.get(worst, _UNKNOWN_COLOR)
+        glyph = _VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH)
+        tally_txt = _tally_text(counts)
+        anchor = f"wl-{_esc(str(workloads[0]))}" if workloads else ""
+        tiles.append(
+            f"<a class='cat-tile' href='#{anchor}' style='border-left-color:{color}'>"
+            f"<div class='cat-k'>{_esc(label)}</div>"
+            f"<div class='cat-v'>{glyph} {_esc(worst or '—')}</div>"
+            f"<div class='cat-sub muted'>{_esc(tally_txt)}</div>"
+            f"</a>"
+        )
+    if not tiles:
+        return ""
+    return (
+        "<h2>Category health</h2>"
+        "<p class='muted'>Worst verdict in each area from tonight's run. "
+        "Click a tile to jump to workloads.</p>"
+        f"<div class='cat-grid'>{''.join(tiles)}</div>"
+    )
 
 
 def _isnum(v: Any) -> bool:
@@ -533,7 +704,9 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
             f"<li>no longer reported <span class='mono'>{_esc(_cell_label(prev_by[k]))}</span></li>"
         )
 
-    movers = []
+    movers_corr: list[tuple] = []
+    movers_perf: list[tuple] = []
+    movers_other: list[tuple] = []
     for k in sorted(set(prev_by) & set(latest_by)):
         before_m = _measurements(prev_by[k])
         after_m = _measurements(latest_by[k])
@@ -543,17 +716,42 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
                 continue
             pct = (a - b) / abs(b) * 100.0
             if abs(pct) > _MOVE_PCT:
-                movers.append((abs(pct), pct, k, metric, b, a, latest_by[k]))
-    movers.sort(reverse=True)
-    for _, pct, _k, metric, b, a, entry in movers[:6]:
+                row = (abs(pct), pct, k, metric, b, a, latest_by[k])
+                if _is_correctness_metric(metric):
+                    movers_corr.append(row)
+                elif _is_performance_metric(metric):
+                    movers_perf.append(row)
+                else:
+                    movers_other.append(row)
+    movers_corr.sort(reverse=True)
+    movers_perf.sort(reverse=True)
+    movers_other.sort(reverse=True)
+    movers = movers_corr + movers_perf + movers_other
+
+    def _mover_li(row: tuple, css: str) -> str:
+        _, pct, _k, metric, b, a, entry = row
         unit = _METRIC_UNITS.get(metric, "")
         arrow = "▲" if pct > 0 else "▼"
-        items.append(
-            f"<li><span class='mono'>{_esc(_cell_label(entry))}</span> "
+        return (
+            f"<li class='{css}'><span class='mono'>{_esc(_cell_label(entry))}</span> "
             f"<span class='mono'>{_esc(metric)}</span> {arrow} {pct:+.1f}% "
             f"<span class='muted'>{_esc(_fmt_num(b))} → {_esc(_fmt_num(a))}"
             f"{(' ' + _esc(unit)) if unit else ''}</span></li>"
         )
+
+    if movers_corr:
+        items.append("<li class='change-hdr corr'>Correctness</li>")
+        for row in movers_corr[:4]:
+            items.append(_mover_li(row, "corr"))
+    if movers_perf:
+        items.append("<li class='change-hdr perf'>Performance</li>")
+        for row in movers_perf[:4]:
+            items.append(_mover_li(row, "perf"))
+    for row in movers_other[:2]:
+        items.append(_mover_li(row, ""))
+
+    shown = min(len(movers_corr), 4) + min(len(movers_perf), 4) + min(len(movers_other), 2)
+    extra = len(movers) - shown
 
     since = _fmt_timestamp(str(prev.get("generated_at") or "")).split(" ")[0]
     if not items:
@@ -562,7 +760,6 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
             f"metric changed by more than {_MOVE_PCT:.0f}%.</p>"
         )
     else:
-        extra = len(movers) - 6
         more = (
             f"<p class='muted'>and {extra} more metric"
             f"{'' if extra == 1 else 's'} past {_MOVE_PCT:.0f}%</p>"
@@ -578,6 +775,7 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
 def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     """Render the full dashboard HTML from the results history (pure)."""
     status, status_color = _latest_status(results)
+    customer_status = _customer_status_label(status)
     latest = results[-1] if results else {"build": {}, "summary": {}, "entries": []}
     build = latest.get("build", {}) or {}
     s = latest.get("summary", {}) or {}
@@ -688,10 +886,19 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         if len(durs) == 1 and max(durs) > 0:
             head += f" · workload run {max(durs):,.0f}s"
 
+        wl_meta = _workload_meta(entry_name)
+        wl_title = str(wl_meta.get("title") or entry_name)
+        wl_summary = str(wl_meta.get("summary") or "")
+        summary_html = (
+            f"<p class='wl-sum muted'>{_esc(wl_summary)}</p>" if wl_summary else ""
+        )
         rows = [
-            f"<tr class='grp'><th colspan='{ncols}' scope='rowgroup'>"
-            f"<span class='wl'>{_esc(entry_name)}</span>"
+            f"<tr class='grp' id='wl-{_esc(entry_name)}'><th colspan='{ncols}' scope='rowgroup'>"
+            f"<div class='wl-head'><strong>{_esc(wl_title)}</strong>"
+            f"<span class='mono muted wl-id'>{_esc(entry_name)}</span></div>"
+            f"{summary_html}"
             f"<span class='muted'> {_esc(head)}</span>"
+            f"{_run_command_block(entry_name)}"
             f"</th></tr>"
         ]
         for k in cell_keys:
@@ -721,6 +928,13 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                 )
             rows.append(f"<tr>{''.join(cells)}</tr>")
 
+            headlines = _headline_block(e, entry_name)
+            if headlines:
+                rows.append(
+                    f"<tr class='headline-row'><td class='cell' colspan='{ncols}'>"
+                    f"{headlines}</td></tr>"
+                )
+
             mrows = _metric_rows(k, e, mhist, show_metric_trend)
             if mrows:
                 n_metrics = len((e.get("metrics") or {}).get("summary") or {})
@@ -734,7 +948,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                     prov.append(f"{n_trials} trial{'s' if n_trials != 1 else ''}")
                 rows.append(
                     f"<tr class='mrow'><td colspan='{ncols}'><details>"
-                    f"<summary>{n_metrics} metric{'s' if n_metrics != 1 else ''}</summary>"
+                    f"<summary>All metrics (engineer) — {n_metrics} metric"
+                    f"{'s' if n_metrics != 1 else ''}</summary>"
                     f"<p class='prov'>{' · '.join(prov)}</p>"
                     f"<table class='inner'><thead><tr><th>metric</th>"
                     f"<th class='center'>policy</th><th class='num'>latest</th>"
@@ -796,7 +1011,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         notices.append(
             f"<div class='notice'>No baselines are blessed yet, so nothing was graded "
             f"pass or fail — this run <strong>recorded</strong> metrics for {scope} "
-            f"to become the reference.{extra}</div>"
+            f"to become the reference. Pass/fail grading starts after the first "
+            f"blessed baseline PR.{extra}</div>"
         )
     elif nothing_graded:
         notices.append(
@@ -813,6 +1029,28 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             "<div class='notice muted-notice'>Trend charts need at least two nightly "
             "runs; they appear automatically once more history accumulates.</div>"
         )
+
+    fail_now = _count(s.get("fail"))
+    action_panel = ""
+    if fail_now:
+        action_panel = (
+            "<div class='notice fail-actions'>"
+            "<strong>Next steps</strong> "
+            "Capture your environment with "
+            "<code class='mono'>aorta env probe -o env.json</code>, "
+            "review the failing workload below, and "
+            f"<a href='https://github.com/{_REPO}/issues/new/choose'>"
+            "open a ROCm issue</a> with the stack versions above."
+            "</div>"
+        )
+
+    scope_notice = (
+        "<div class='notice scope-notice muted-notice'>"
+        "<strong>Reference hardware:</strong> single-node MI350 runner with pinned "
+        "ROCm + PyTorch wheels. Numbers are nightly CI references — not a guarantee "
+        "on other AMD GPUs or cluster configurations."
+        "</div>"
+    )
 
     # Counts go through _fmt_num so a malformed summary shows "—" rather than
     # printing whatever str() makes of it ("nan", "True").
@@ -835,11 +1073,12 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 
     changes_html = build_change_summary(results)
     history_html = build_history_grid(results)
+    category_html = build_category_summary(latest_entries)
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>aorta nightly CI</title>
+<title>ROCm stack health · AORTA nightly</title>
 <style>
   :root {{ --bg:#0d1117; --panel:#161b22; --border:#21262d; --fg:#c9d1d9;
            --muted:#8b949e; --accent:#539bf5; }}
@@ -950,30 +1189,68 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                      border:1px solid var(--border); border-radius:6px;
                      padding:.25rem .6rem; font-size:.75rem; cursor:pointer; }}
   .toolbar button:hover {{ border-color:var(--accent); color:var(--accent); }}
+  .cat-grid {{ display:grid; gap:.65rem; margin:.5rem 0 0;
+               grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); }}
+  .cat-tile {{ display:block; background:var(--panel); border:1px solid var(--border);
+               border-left:3px solid var(--border); border-radius:8px;
+               padding:.65rem .85rem; text-decoration:none; color:inherit; }}
+  .cat-tile:hover {{ border-color:var(--accent); }}
+  .cat-k {{ font-size:.72rem; color:var(--muted); text-transform:uppercase;
+            letter-spacing:.06em; }}
+  .cat-v {{ font-size:1rem; font-weight:600; margin:.2rem 0; }}
+  .cat-sub {{ font-size:.75rem; }}
+  .scope-notice {{ margin-top:.65rem; }}
+  .fail-actions {{ border-left-color:#f85149; }}
+  .wl-head {{ display:flex; align-items:baseline; gap:.6rem; flex-wrap:wrap; }}
+  .wl-head strong {{ color:#e6edf3; font-size:.95rem; }}
+  .wl-id {{ font-size:.72rem; }}
+  .wl-sum {{ margin:.25rem 0 .35rem; font-size:.82rem; }}
+  ul.headlines {{ list-style:none; margin:.35rem 0 0; padding:0;
+                  display:flex; flex-wrap:wrap; gap:.35rem .75rem; }}
+  ul.headlines li {{ background:#12161b; border:1px solid var(--border);
+                     border-radius:6px; padding:.2rem .55rem; font-size:.78rem; }}
+  tr.headline-row > td {{ padding-top:0; padding-bottom:.5rem; }}
+  details.run-cmd {{ margin:.45rem 0 0; font-size:.78rem; }}
+  details.run-cmd pre {{ background:#0d1117; border:1px solid var(--border);
+                         border-radius:6px; padding:.5rem .65rem; margin:.35rem 0 0;
+                         overflow-x:auto; white-space:pre-wrap; word-break:break-word; }}
+  ul.changes li.change-hdr {{ background:transparent; border:none; padding:.15rem 0;
+                              font-size:.72rem; text-transform:uppercase;
+                              letter-spacing:.06em; color:var(--muted); }}
+  ul.changes li.corr {{ border-left-color:#f85149; }}
+  ul.changes li.perf {{ border-left-color:#d29922; }}
+  .status-sub {{ font-size:.68rem; color:var(--muted); margin-left:.25rem; }}
 </style></head>
 <body>
   <div class="wrap">
     <header>
       <div class="titlebar">
-        <h1>aorta nightly CI</h1>
-        <span class="status-pill">{status}</span>
+        <h1>ROCm stack health</h1>
+        <span class="status-pill" title="{_esc(status)}">{_esc(customer_status)}</span>
+        <span class="status-sub mono">({_esc(status)})</span>
       </div>
-      <p class="lede">Every night AORTA installs the freshly built wheel on an
-        MI350 runner and replays its workload sweep, comparing each result
-        against a blessed baseline. This page is that run.</p>
+      <p class="lede">Every night AORTA installs the freshly built wheel on a
+        reference MI350 runner and replays representative PyTorch workloads —
+        training, inference, and distributed correctness checks — comparing each
+        result against a blessed baseline when one exists.</p>
       <p class="nav"><a href="docs/">AORTA documentation</a> ·
-        <a href="sanitizers/">sanitizer nightly</a> ·
-        <a href="https://github.com/{_REPO}">repository</a></p>
+        <a href="sanitizers/">Sanitizer nightly</a> ·
+        <a href="https://github.com/{_REPO}">Repository</a> ·
+        <a href="data.json">data.json</a></p>
       <div class="chips">{toolchain}</div>
       <p class="prov-line">{' · '.join(provenance)}</p>
     </header>
 
+    {scope_notice}
     {''.join(notices)}
+    {action_panel}
 
     <div class="cards">
       {cards_html}
       <div class="card trend"><div class="k">pass-rate trend</div><div class="v">{_svg_sparkline(passrate, width=240)}</div></div>
     </div>
+
+    {category_html}
 
     {changes_html}
 
