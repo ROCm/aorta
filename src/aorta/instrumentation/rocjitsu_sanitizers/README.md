@@ -111,7 +111,11 @@ still wins, and `rj_waitcheck` on `PATH` is a final fallback):
 
   GitHub does not serve Actions artifacts anonymously, so the downloader needs a
   token with `actions:read` (from `--token`, `$GITHUB_TOKEN`, `$GH_TOKEN`, or
-  `gh auth token`) even though the repository is public. The binaries are built
+  `gh auth token`) even though the repository is public: the unauthenticated
+  artifact download endpoint returns HTTP 401, and these binaries are not
+  published as a GitHub Release, so there is no anonymous download path. (In CI,
+  note that the default `GITHUB_TOKEN` is scoped to its own repository and cannot
+  read another repo's artifacts cross-repo.) The binaries are built
   in the ROCm manylinux image (glibc 2.28) with zlib/zstd/libgcc/libstdc++
   statically linked, so glibc is their only runtime dependency -- no ROCm SDK is
   required to *run* `rj_waitcheck`. These are ephemeral (default 30-day) run

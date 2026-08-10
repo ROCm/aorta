@@ -101,9 +101,13 @@ jobs:
             # ROCm/rocm-systems (#350): fetch the upstream downloader, then pull
             # bin/rj_waitcheck + lib/librocjitsu_dbi_hooks.so for the latest
             # successful run on ${ROCJITSU_REF}. This replaces the old
-            # clone + cmake source build (its docker toolchain deps -- cmake,
-            # ninja, libzstd-dev, g++-13, Findzstd shim in
-            # docker/Dockerfile.ci-gpu -- are now unused by this gate).
+            # clone + cmake source build, whose docker toolchain deps (cmake,
+            # ninja, libzstd-dev, g++-13, Findzstd shim) have been removed from
+            # docker/Dockerfile.ci-gpu.
+            # Downloading Actions artifacts requires a token with actions:read
+            # even though rocm-systems is public: the unauthenticated artifact
+            # /zip endpoint returns 401 and no equivalent GitHub Release exists.
+            # See the step env (GH_TOKEN) and the token note there.
             rm -rf "${ROCJITSU_PREBUILT}"
             mkdir -p "${SANITIZER_ROOT}"
             DL_SCRIPT="${SANITIZER_ROOT}/download_sanitizer_artifacts.py"
