@@ -1,0 +1,520 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-10T11:35:03.122973+00:00",
+  "build": {
+    "amd_aorta_version": "0.2.2rc20260810",
+    "torch": "2.9.1+rocm7.2.0.git7e1940d4",
+    "hip": "7.2.26015-fc0010cf6a",
+    "rocm": "7.2.0",
+    "upstream_run_id": "31383376631",
+    "head_sha": "b79ffc3bb7360a3b6c0f5a15397c512acba2c5fe",
+    "wheel_file": "amd_aorta-0.2.2rc20260810-py3-none-any.whl"
+  },
+  "summary": {
+    "total": 16,
+    "pass": 0,
+    "fail": 0,
+    "record": 16,
+    "skip": 0
+  },
+  "entries": [
+    {
+      "entry": "gpu_smoke",
+      "recipe": "recipes/ci/gpu-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 263.1540531292558,
+        "mean_wall_clock_sec": 5.218323276378214,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "sum": 8.0,
+          "expected": 8.0,
+          "n": 8.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/gpu_smoke/CI-GPU-SMOKE/gpu_smoke/2026-08-10T11-25-39/matrix.json",
+      "duration_sec": 16.493944,
+      "error": null
+    },
+    {
+      "entry": "inference_offline",
+      "recipe": "recipes/inference/example-inference-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 37.7242227550596,
+        "mean_wall_clock_sec": 12.312535801902413,
+        "step_time_source": "per_step",
+        "summary": {
+          "parameter_count": 33170432.0,
+          "batch_size": 4.0,
+          "prompt_len": 128.0,
+          "generate_tokens": 32.0,
+          "prefill_latency_ms": 1.0789150837808847,
+          "decode_latency_ms": 0.961465670937492,
+          "tokens_per_sec": 4160.314945098079,
+          "decoded_tokens": 496.0,
+          "step_time_p50": 35.40200833231211,
+          "step_time_p99": 45.0842841155827,
+          "logits_checksum": 33904201.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/inference_offline/EXAMPLE-INFERENCE-SMOKE/inference/2026-08-10T11-25-55/matrix.json",
+      "duration_sec": 23.951004,
+      "error": null
+    },
+    {
+      "entry": "training_ddp",
+      "recipe": "recipes/training/example-training-ddp-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 1662.0176599826664,
+        "mean_wall_clock_sec": 22.964321916922927,
+        "step_time_source": "per_step",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "parameter_count": 656896.0,
+          "final_loss": 6.9368743896484375,
+          "step_time_p50": 1.9729789346456528,
+          "step_time_p99": 3.3918134309351444
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/training_ddp/EXAMPLE-TRAINING-DDP/training/2026-08-10T11-26-20/matrix.json",
+      "duration_sec": 37.222887,
+      "error": null
+    },
+    {
+      "entry": "training_fsdp",
+      "recipe": "recipes/training/example-training-fsdp-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 1569.4950660690665,
+        "mean_wall_clock_sec": 17.918698858469725,
+        "step_time_source": "per_step",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "parameter_count": 2361856.0,
+          "final_loss": 254.3885498046875,
+          "step_time_p50": 7.758828811347485,
+          "step_time_p99": 48.42123819515109
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/training_fsdp/EXAMPLE-TRAINING-FSDP/training/2026-08-10T11-26-58/matrix.json",
+      "duration_sec": 32.163926,
+      "error": null
+    },
+    {
+      "entry": "race",
+      "recipe": "recipes/race/race_smoke.yaml",
+      "cell": "smoke",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 2410.573101043701,
+        "mean_wall_clock_sec": 19.592885647900403,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "avg_step_time_ms": 2410.573101043701,
+          "layers_verified": 15.0,
+          "layer_checksum_mismatches": 0.0,
+          "eff_num_heads": 4.0,
+          "eff_ffn_size": 2048.0,
+          "eff_seq_len": 512.0,
+          "eff_batch_size": 1.0,
+          "effective_h2d_tensor_size": 1000000.0,
+          "declared_h2d_tensor_size": 1000000.0,
+          "corruption_details_omitted": 0.0,
+          "rank": 0.0,
+          "world_size": 2.0,
+          "local_world_size": 2.0,
+          "node_count": 1.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/race/RACE-SMOKE/race/2026-08-10T11-27-30/matrix.json",
+      "duration_sec": 32.26596,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "baseline-bf16-24L",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 12491.34769383818,
+        "mean_wall_clock_sec": 24.340490957722068,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "num_layers": 24.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-08-10T11-28-02/matrix.json",
+      "duration_sec": 110.73731,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "bf16-12L",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 12451.228047721088,
+        "mean_wall_clock_sec": 22.245169366709888,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "num_layers": 12.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-08-10T11-28-02/matrix.json",
+      "duration_sec": 110.73731,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "tf32_off-bf16-24L",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 12602.386581711471,
+        "mean_wall_clock_sec": 24.330416724085808,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "num_layers": 24.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-08-10T11-28-02/matrix.json",
+      "duration_sec": 110.73731,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "moe4-bf16-12L",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 13583.405612967908,
+        "mean_wall_clock_sec": 27.147009733133018,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 2.0,
+          "num_layers": 12.0,
+          "num_experts": 4.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism/LLM-DET-001/llm_determinism/2026-08-10T11-28-02/matrix.json",
+      "duration_sec": 110.73731,
+      "error": null
+    },
+    {
+      "entry": "training_ddp_8gpu",
+      "recipe": "recipes/training/example-training-ddp-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 1711.0615279525518,
+        "mean_wall_clock_sec": 26.81342104077339,
+        "step_time_source": "per_step",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "parameter_count": 656896.0,
+          "final_loss": 6.936972618103027,
+          "step_time_p50": 1.4263913035392761,
+          "step_time_p99": 43.12122793868184
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/training_ddp_8gpu/EXAMPLE-TRAINING-DDP/training/2026-08-10T11-29-53/matrix.json",
+      "duration_sec": 46.785697,
+      "error": null
+    },
+    {
+      "entry": "training_fsdp_8gpu",
+      "recipe": "recipes/training/example-training-fsdp-smoke.yaml",
+      "cell": "baseline-local",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 2171.4422691147774,
+        "mean_wall_clock_sec": 27.894976002164185,
+        "step_time_source": "per_step",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "parameter_count": 2361856.0,
+          "final_loss": 254.35585021972656,
+          "step_time_p50": 6.887407973408699,
+          "step_time_p99": 46.92627523094416
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/training_fsdp_8gpu/EXAMPLE-TRAINING-FSDP/training/2026-08-10T11-30-39/matrix.json",
+      "duration_sec": 47.441946,
+      "error": null
+    },
+    {
+      "entry": "race_8gpu",
+      "recipe": "recipes/race/race_smoke.yaml",
+      "cell": "smoke",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 4426.046705245972,
+        "mean_wall_clock_sec": 34.59697254374623,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "avg_step_time_ms": 4426.046705245972,
+          "layers_verified": 15.0,
+          "layer_checksum_mismatches": 0.0,
+          "eff_num_heads": 4.0,
+          "eff_ffn_size": 2048.0,
+          "eff_seq_len": 512.0,
+          "eff_batch_size": 1.0,
+          "effective_h2d_tensor_size": 1000000.0,
+          "declared_h2d_tensor_size": 1000000.0,
+          "corruption_details_omitted": 0.0,
+          "rank": 0.0,
+          "world_size": 8.0,
+          "local_world_size": 8.0,
+          "node_count": 1.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/race_8gpu/RACE-SMOKE/race/2026-08-10T11-31-27/matrix.json",
+      "duration_sec": 47.443339,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism_8gpu",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "baseline-bf16-24L",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 20921.22139595449,
+        "mean_wall_clock_sec": 39.70283759199083,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "num_layers": 24.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-08-10T11-32-14/matrix.json",
+      "duration_sec": 169.386437,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism_8gpu",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "bf16-12L",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 19818.10911744833,
+        "mean_wall_clock_sec": 36.36040620226413,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "num_layers": 12.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-08-10T11-32-14/matrix.json",
+      "duration_sec": 169.386437,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism_8gpu",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "tf32_off-bf16-24L",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 20149.469181895256,
+        "mean_wall_clock_sec": 38.94213449489325,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "num_layers": 24.0,
+          "num_experts": 1.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-08-10T11-32-14/matrix.json",
+      "duration_sec": 169.386437,
+      "error": null
+    },
+    {
+      "entry": "llm_determinism_8gpu",
+      "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+      "cell": "moe4-bf16-12L",
+      "verdict": "record",
+      "reasons": [
+        "no baseline (record-only)"
+      ],
+      "metrics": {
+        "mean_step_time_ms": 21241.031749174,
+        "mean_wall_clock_sec": 41.30899911560118,
+        "step_time_source": "elapsed_per_iter",
+        "summary": {
+          "rank": 0.0,
+          "world_size": 8.0,
+          "num_layers": 12.0,
+          "num_experts": 4.0,
+          "ranks_with_divergence": 0.0,
+          "corruption_details_omitted": 0.0
+        }
+      },
+      "deltas": {},
+      "passed_count": 1,
+      "failed_count": 0,
+      "error_count": 0,
+      "trials": 1,
+      "matrix_path": ".nightly-eval/llm_determinism_8gpu/LLM-DET-001/llm_determinism/2026-08-10T11-32-14/matrix.json",
+      "duration_sec": 169.386437,
+      "error": null
+    }
+  ]
+}
