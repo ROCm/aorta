@@ -895,10 +895,16 @@ def main() -> int:
         # branch below), a reused --out-dir would keep run dirs dropped by --keep
         # (or reports since removed from a retained run) as stale published output.
         # Clear the output runs/ tree first so the published set matches `runs`
-        # exactly. Skipped when both resolve to the same tree (CI), where clearing
-        # would delete the very reports we are about to render.
+        # exactly. Skip when history_root IS runs_out (CI) or nests beneath it
+        # (e.g. --history-root out/runs/source --out-dir out) -- removing runs_out
+        # would delete the very reports we are about to copy.
         runs_out = args.out_dir / "runs"
-        if runs_out.exists() and args.history_root.resolve() != runs_out.resolve():
+        runs_out_res = runs_out.resolve()
+        history_res = args.history_root.resolve()
+        history_within_runs_out = (
+            history_res == runs_out_res or runs_out_res in history_res.parents
+        )
+        if runs_out.exists() and not history_within_runs_out:
             shutil.rmtree(runs_out)
         for run in runs:
             rel = run.get("rel")
@@ -917,6 +923,11 @@ def main() -> int:
                     if src_report.is_file():
                         (run_out / case).mkdir(parents=True, exist_ok=True)
                         shutil.copy2(src_report, run_out / case / "sanitizer_report.json")
+                # Carry the run manifest too so the published layout
+                # (runs/<id>/meta.json) is complete, not just the reports.
+                src_meta = src_run / "meta.json"
+                if src_meta.is_file():
+                    shutil.copy2(src_meta, run_out / "meta.json")
             (run_out / "index.html").write_text(
                 build_run_index_html(run), encoding="utf-8"
             )

@@ -667,6 +667,8 @@ def test_main_history_root_writes_per_run_landing_pages(tmp_path, monkeypatch):
     # history-root here is a separate directory from <out-dir>/runs.
     assert (out / "runs" / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
     assert (out / "runs" / "2026-08-04-22" / "consan-racy" / "sanitizer_report.json").is_file()
+    # The run manifest is carried too, so the published runs/<id>/ layout is complete.
+    assert (out / "runs" / "2026-08-05-33" / "meta.json").is_file()
     # data.json mirrors the rel / report_rel fields for machine consumers.
     data = json.loads((out / "data.json").read_text(encoding="utf-8"))
     assert data[0]["rel"] == "runs/2026-08-05-33"
@@ -699,6 +701,27 @@ def test_main_history_root_clears_stale_output_runs(tmp_path, monkeypatch):
     assert gen.main() == 0
 
     assert not (out / "runs" / "2026-08-01-01").exists()
+    assert (out / "runs" / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
+
+
+def test_main_history_root_nested_under_output_is_not_wiped(tmp_path, monkeypatch):
+    # If --history-root nests beneath <out-dir>/runs, the stale-clear must NOT
+    # rmtree runs_out (that would delete the source reports before they're copied).
+    baselines = _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    out = tmp_path / "dashboard"
+    root = out / "runs" / "source"  # nested beneath <out-dir>/runs
+    _write_history_run(root, "2026-08-05-33")
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(root),
+        "--baselines", str(baselines),
+        "--out-dir", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+
+    # Source reports survive (not wiped) and are still published under the output.
+    assert (root / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
     assert (out / "runs" / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
 
 
