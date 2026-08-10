@@ -19,22 +19,32 @@ When ``--status`` points at an unhealthy manifest, an error-colored "stale" bann
 rendered at the top of both ``index.html`` and ``summary.md`` so a failed nightly
 never leaves the previous healthy page looking current.
 
-Two input shapes are supported:
+Three input shapes are supported:
 
 * ``--results-dir DIR`` -- a single run laid out as
   ``DIR/{waitcheck,consan-clean,consan-racy}/sanitizer_report.json`` (the same
   layout ``compare_verdict_baselines.py`` consumes). This is the CI shape.
 * ``--runs-root DIR`` -- a directory of ``run_*`` folders, each with an
   ``out/<case>/sanitizer_report.json``; used locally to render a history/trend.
+* ``--history-root DIR`` -- the PUBLISHED data-branch layout
+  ``DIR/<id>/<case>/sanitizer_report.json`` plus a per-run ``DIR/<id>/meta.json``
+  (keys: commit, date, gpu, run_url, gate). ``<id>`` is ``<YYYY-MM-DD>-<run_id>``
+  (date-sortable, unique), enumerated newest-first and capped by ``--keep N``
+  (default 30). This is the shape the nightly publishes and Pages serves under
+  ``/sanitizers/``: each run's raw reports are co-located under ``runs/<id>/`` and
+  linked from the rendered page, and a tiny ``runs/<id>/index.html`` landing page
+  is written for each retained run.
 
-Pure rendering lives in ``build_html`` / ``build_summary_md`` and pure
-aggregation in ``summarize_case`` so they are unit testable without the FS.
+Pure rendering lives in ``build_html`` / ``build_summary_md`` /
+``build_run_index_html`` and pure aggregation in ``summarize_case`` so they are
+unit testable without the FS.
 
-Usage (CI):
+Usage (CI, published-history mode):
     python scripts/sanitizers/gen_sanitizer_dashboard.py \
-        --results-dir incoming \
+        --history-root dashboard/runs --keep 30 \
         --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
         --commit "$GITHUB_SHA" --run-label "run $GITHUB_RUN_ID" \
+        --status status.json \
         --out-dir dashboard
 """
 
@@ -174,11 +184,19 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     }
 
 
-def _run_record(meta: dict[str, str], rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _run_record(
+    meta: dict[str, str],
+    rows: dict[str, dict[str, Any]],
+    *,
+    rel: str | None = None,
+) -> dict[str, Any]:
     # Fail closed: a missing report (present=False -> match=False) turns the gate
     # unhealthy, mirroring compare_verdict_baselines.py which errors on absent reports.
     gate = all(r["match"] for r in rows.values())
-    return {"meta": meta, "rows": rows, "gate": gate}
+    # ``rel`` is the run's relative area under the published dashboard (e.g.
+    # ``runs/<id>``); None for the results-dir / runs-root modes, which do not
+    # publish co-located raw reports and therefore render no per-run links.
+    return {"meta": meta, "rows": rows, "gate": gate, "rel": rel}
 
 
 def runs_from_results_dir(
@@ -221,6 +239,57 @@ def runs_from_runs_root(runs_root: Path, baselines: dict) -> list[dict[str, Any]
         }
         if any(r["present"] for r in rows.values()):
             runs.append(_run_record(_run_meta_from_env(run_dir), rows))
+    return runs
+
+
+def _run_meta_from_history(run_dir: Path) -> dict[str, str]:
+    """Read a published run's ``meta.json`` (commit, date, gpu, run_url, gate).
+
+    The run id (``<YYYY-MM-DD>-<run_id>``) is authoritative from the directory
+    name; ``meta.json`` supplies the rest. A missing/corrupt manifest degrades to
+    an id-only record rather than crashing the whole dashboard render.
+    """
+    meta: dict[str, str] = {"run": run_dir.name, "commit": "", "date": "", "gpu": "gfx950"}
+    data = _load(run_dir / "meta.json")
+    if isinstance(data, dict):
+        if data.get("commit"):
+            meta["commit"] = _short(str(data["commit"]), 12)
+        for key in ("date", "gpu", "run_url", "gate"):
+            value = data.get(key)
+            if value not in (None, ""):
+                meta[key] = str(value)
+    return meta
+
+
+def runs_from_history_root(
+    history_root: Path, baselines: dict, *, keep: int = 30
+) -> list[dict[str, Any]]:
+    """Enumerate the PUBLISHED ``DIR/<id>/<case>/sanitizer_report.json`` layout.
+
+    Runs are ordered newest-first by the ``<id>`` directory name (the
+    ``<YYYY-MM-DD>-<run_id>`` format is monotonic) and capped to the newest
+    ``keep``. Each summarized row is tagged with a ``report_rel`` pointing at its
+    raw JSON relative to the dashboard root, and each record with the run's
+    ``rel`` area, so ``build_html`` can emit relative links that work under
+    ``/sanitizers/``.
+    """
+    run_dirs = sorted(
+        (p for p in history_root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True
+    ) if history_root.is_dir() else []
+    runs: list[dict[str, Any]] = []
+    for run_dir in run_dirs[: max(keep, 0)]:
+        rel = f"runs/{run_dir.name}"
+        rows: dict[str, dict[str, Any]] = {}
+        for case, key, _label, _backend in CASES:
+            row = summarize_case(
+                _load(run_dir / case / "sanitizer_report.json"),
+                baselines.get(key, {}).get("overall_verdict"),
+            )
+            # Only link reports that are actually present, so the page never
+            # points at a 404. Relative to the dashboard root (runs/<id>/...).
+            row["report_rel"] = f"{rel}/{case}/sanitizer_report.json" if row["present"] else None
+            rows[case] = row
+        runs.append(_run_record(_run_meta_from_history(run_dir), rows, rel=rel))
     return runs
 
 
@@ -367,10 +436,30 @@ def _history_case_md(row: dict[str, Any]) -> str:
     return f"{_baseline_status_md(row, history=True)}<br>" f"Observed: `{row['verdict']}`{expected}"
 
 
+def _report_link_html(report_rel: str | None) -> str:
+    """A relative link to a case's raw ``sanitizer_report.json``, or an em dash."""
+    if not report_rel:
+        return "&mdash;"
+    return f'<a href="{_esc(report_rel)}">report</a>'
+
+
+def _run_cell_html(run: dict[str, Any]) -> str:
+    """History "Run" cell: link the run id to its published ``runs/<id>/`` area."""
+    label = run["meta"].get("run", "")
+    rel = run.get("rel")
+    if rel:
+        return f'<a href="{_esc(rel)}/">{_esc(label)}</a>'
+    return _esc(label)
+
+
 def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
     blocks: list[str] = []
     for case, _key, label, _backend_label in CASES:
         row = rows[case]
+        report_rel = row.get("report_rel")
+        raw_link = (
+            f' <a class=raw href="{_esc(report_rel)}">view raw report</a>' if report_rel else ""
+        )
         if not row["present"]:
             blocks.append(
                 f"<h3>{_esc(label)} &middot; {_baseline_status_html(row)}</h3>"
@@ -406,7 +495,7 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
             or "<tr><td colspan=5>no findings</td></tr>"
         )
         blocks.append(
-            f"<h3>{_esc(label)} &middot; {_baseline_status_html(row)}</h3>"
+            f"<h3>{_esc(label)} &middot; {_baseline_status_html(row)}{raw_link}</h3>"
             f'<div class="secondary">Observed sanitizer verdict '
             f"{_observed_html(row['verdict'])} &middot; expected "
             f"{_observed_html(row['expected'] or _DASH)}</div>"
@@ -460,13 +549,19 @@ def build_html(
         f"<td>{_observed_html(latest['rows'][case]['expected'] or _DASH)}</td>"
         f"<td>{_execution_html(latest['rows'][case]['execution'])}</td>"
         f"<td class=num>{latest['rows'][case]['findings']}</td>"
-        f"<td>{_esc(latest['rows'][case]['coverage']) or '&mdash;'}</td></tr>"
+        f"<td>{_esc(latest['rows'][case]['coverage']) or '&mdash;'}</td>"
+        f"<td>{_report_link_html(latest['rows'][case].get('report_rel'))}</td></tr>"
         for case, _key, label, backend in CASES
+    )
+    # Link to the whole run area (co-located raw reports) when published there.
+    latest_rel = latest.get("rel")
+    run_area_link = (
+        f' &middot; <a href="{_esc(latest_rel)}/">raw reports</a>' if latest_rel else ""
     )
 
     hist_head = "".join(f"<th>{_esc(label)}</th>" for _c, _k, label, _b in CASES)
     hist_rows = "".join(
-        f"<tr><td class=mono>{_esc(run['meta'].get('run', ''))}</td>"
+        f"<tr><td class=mono>{_run_cell_html(run)}</td>"
         f"<td class=mono>{_esc(run['meta'].get('commit', ''))}</td>"
         f"<td>{_esc(run['meta'].get('date', ''))}</td>"
         + "".join(f"<td>{_history_case_html(run['rows'][c])}</td>" for c, _k, _l, _b in CASES)
@@ -489,6 +584,7 @@ def build_html(
   h3 {{ font-size:14px; margin:18px 0 4px; }}
   .meta {{ color:#57606a; font-size:12px; margin-bottom:12px; }}
   .secondary {{ color:#57606a; font-size:12px; margin:4px 0 8px; }}
+  a.raw {{ font-size:12px; font-weight:400; margin-left:8px; }}
   .mono {{ font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }}
   .gate {{ color:#fff; background:{gate_color}; padding:12px 16px; border-radius:8px;
           font-weight:600; margin:12px 0 20px; }}
@@ -517,7 +613,7 @@ def build_html(
   <h1>{_esc(title)} &middot; gfx950</h1>
   <div class=meta>latest run <span class=mono>{_esc(meta.get('run', ''))}</span>
      &middot; commit <span class=mono>{_esc(meta.get('commit', ''))}</span>
-     &middot; {_esc(meta.get('date', ''))} &middot; target {_esc(meta.get('gpu', 'gfx950'))}</div>
+     &middot; {_esc(meta.get('date', ''))} &middot; target {_esc(meta.get('gpu', 'gfx950'))}{run_area_link}</div>
   <div class=gate>{_esc(gate_text)}</div>
   <p class=secondary>Observed <span class=mono>WARN</span> or <span class=mono>FAIL</span>
      verdicts may be expected positive-control outcomes. Baseline status is the
@@ -526,7 +622,7 @@ def build_html(
   <h2>Latest run</h2>
   <table>
     <tr><th>Recipe</th><th>Backend</th><th>Baseline status</th><th>Observed</th>
-        <th>Expected</th><th>Execution</th><th>Findings</th><th>Coverage</th></tr>
+        <th>Expected</th><th>Execution</th><th>Findings</th><th>Coverage</th><th>Report</th></tr>
     {latest_rows}
   </table>
 
@@ -540,6 +636,72 @@ def build_html(
   </table>
 </div></body></html>
 """
+
+
+def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightly") -> str:
+    """A tiny, self-contained landing page for one published run (pure).
+
+    Lives at ``runs/<id>/index.html`` alongside the run's raw reports, so the
+    report links are case-local (``<case>/sanitizer_report.json``) rather than
+    dashboard-root-relative.
+    """
+    meta = run["meta"]
+    rows = run["rows"]
+    gate_ok = run["gate"]
+    gate_color = "#1a7f37" if gate_ok else "#cf222e"
+    gate_text = "PASS \u2014 verdicts match baselines" if gate_ok else "FAIL \u2014 verdict mismatch"
+    run_url = meta.get("run_url", "")
+    run_link = (
+        f' &middot; <a href="{_esc(run_url)}">workflow run</a>' if run_url else ""
+    )
+
+    def _cell(case: str, present: bool) -> str:
+        if not present:
+            return "report missing"
+        href = _esc(f"{case}/sanitizer_report.json")
+        return f'<a href="{href}">sanitizer_report.json</a>'
+
+    report_rows = "".join(
+        f"<tr><td>{_esc(label)}</td>"
+        f"<td>{_baseline_status_html(rows[case])}"
+        f'<div class="secondary">Observed {_observed_html(rows[case]["verdict"])}</div></td>'
+        f"<td>{_cell(case, rows[case]['present'])}</td></tr>"
+        for case, _key, label, _backend in CASES
+    )
+    return (
+        "<!doctype html>\n"
+        "<html lang=en><head><meta charset=utf-8>\n"
+        '<meta name=viewport content="width=device-width, initial-scale=1">\n'
+        f"<title>{_esc(title)} &middot; {_esc(meta.get('run', ''))}</title>\n"
+        "<style>\n"
+        "  body { font: 14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;\n"
+        "         max-width:900px; margin:0 auto; padding:24px; color:#1f2328; }\n"
+        "  h1 { font-size:18px; margin:0 0 4px; }\n"
+        "  .meta { color:#57606a; font-size:12px; margin-bottom:12px; }\n"
+        "  .mono { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }\n"
+        f"  .gate {{ color:#fff; background:{gate_color}; padding:10px 14px; border-radius:8px;\n"
+        "          font-weight:600; margin:12px 0 18px; }\n"
+        "  table { width:100%; border-collapse:collapse; }\n"
+        "  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid #d0d7de; }\n"
+        "  .secondary { color:#57606a; font-size:12px; margin:4px 0 0; }\n"
+        "  .pill { padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }\n"
+        "  .pill.ok { background:#1a7f3722; color:#1a7f37; } .pill.bad { background:#cf222e22; color:#cf222e; }\n"
+        "  .observed { display:inline-block; color:#57606a; background:#afb8c133; border:1px solid #afb8c1;\n"
+        "              padding:1px 7px; border-radius:999px; font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace; }\n"
+        "</style></head>\n"
+        "<body>\n"
+        '<p><a href="../../">back to sanitizer dashboard</a></p>\n'
+        f"<h1>{_esc(title)} &middot; run <span class=mono>{_esc(meta.get('run', ''))}</span></h1>\n"
+        f"<div class=meta>commit <span class=mono>{_esc(meta.get('commit', ''))}</span>"
+        f" &middot; {_esc(meta.get('date', ''))} &middot; target {_esc(meta.get('gpu', 'gfx950'))}"
+        f"{run_link}</div>\n"
+        f"<div class=gate>{_esc(gate_text)}</div>\n"
+        "<table>\n"
+        "<tr><th>Recipe</th><th>Baseline status</th><th>Raw report</th></tr>\n"
+        f"{report_rows}\n"
+        "</table>\n"
+        "</body></html>\n"
+    )
 
 
 def build_summary_md(
@@ -647,6 +809,17 @@ def main() -> int:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--results-dir", type=Path, help="DIR/<case>/sanitizer_report.json (one run)")
     src.add_argument("--runs-root", type=Path, help="dir of run_* folders (local history)")
+    src.add_argument(
+        "--history-root",
+        type=Path,
+        help="published DIR/<id>/<case>/sanitizer_report.json layout (data branch)",
+    )
+    ap.add_argument(
+        "--keep",
+        type=int,
+        default=30,
+        help="in --history-root mode, render only the newest N runs (default 30)",
+    )
     ap.add_argument("--baselines", type=Path, required=True)
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""))
@@ -681,11 +854,26 @@ def main() -> int:
             "gpu": "gfx950",
         }
         runs = runs_from_results_dir(args.results_dir, baselines, meta=meta)
-    else:
+    elif args.runs_root is not None:
         runs = runs_from_runs_root(args.runs_root, baselines)
+    else:
+        runs = runs_from_history_root(args.history_root, baselines, keep=args.keep)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(build_html(runs, status=status), encoding="utf-8")
+    # In published-history mode, write each retained run's tiny landing page next
+    # to its co-located raw reports (out_dir/runs/<id>/index.html). Bounded by
+    # --keep, so pruned runs stop getting a page.
+    if args.history_root is not None:
+        for run in runs:
+            rel = run.get("rel")
+            if not rel:
+                continue
+            run_out = args.out_dir / rel
+            run_out.mkdir(parents=True, exist_ok=True)
+            (run_out / "index.html").write_text(
+                build_run_index_html(run), encoding="utf-8"
+            )
     (args.out_dir / "summary.md").write_text(
         build_summary_md(runs, status=status), encoding="utf-8"
     )
