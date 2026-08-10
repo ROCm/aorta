@@ -13,10 +13,13 @@
 # Base dependency used by these scripts
 pyyaml==6.0.3
 
-# For analysis scripts
-matplotlib==3.11.1
-numpy==2.5.1
-pandas==3.0.5
+# For analysis scripts.
+# Pins are the latest releases that still support the project's minimum Python
+# (3.10); matplotlib 3.11 / numpy 2.3+ / pandas 3.0 require >=3.11. Dependabot
+# respects requires-python, so it keeps these on the 3.10-compatible line.
+matplotlib==3.10.9
+numpy==2.2.6
+pandas==2.3.3
 openpyxl==3.1.5
 seaborn==0.13.2
 beautifulsoup4==4.15.0
