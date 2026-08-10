@@ -268,20 +268,37 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
     return meta
 
 
+def _history_sort_key(name: str) -> tuple[str, int]:
+    """Order key for a published run id (``<YYYY-MM-DD>-<run_id>``).
+
+    The ISO date prefix sorts correctly as a string, but the trailing run id is a
+    variable-width integer, so a plain name sort mis-orders ``...-9`` after
+    ``...-10`` and would pick the wrong latest run (and prune the wrong dir).
+    Split the numeric suffix off and compare it as an int. Names that don't match
+    the scheme fall back to ``(name, -1)`` so enumeration never crashes.
+    """
+    head, sep, tail = name.rpartition("-")
+    if sep and tail.isdigit():
+        return (head, int(tail))
+    return (name, -1)
+
+
 def runs_from_history_root(
     history_root: Path, baselines: dict, *, keep: int = 30
 ) -> list[dict[str, Any]]:
     """Enumerate the PUBLISHED ``DIR/<id>/<case>/sanitizer_report.json`` layout.
 
-    Runs are ordered newest-first by the ``<id>`` directory name (the
-    ``<YYYY-MM-DD>-<run_id>`` format is monotonic) and capped to the newest
-    ``keep``. Each summarized row is tagged with a ``report_rel`` pointing at its
-    raw JSON relative to the dashboard root, and each record with the run's
-    ``rel`` area, so ``build_html`` can emit relative links that work under
-    ``/sanitizers/``.
+    Runs are ordered newest-first by ``<id>`` (``<YYYY-MM-DD>-<run_id>``) using a
+    date-then-numeric key (see ``_history_sort_key``; a plain string sort would
+    put ``...-9`` after ``...-10``) and capped to the newest ``keep``. Each
+    summarized row is tagged with a ``report_rel`` pointing at its raw JSON
+    relative to the dashboard root, and each record with the run's ``rel`` area,
+    so ``build_html`` can emit relative links that work under ``/sanitizers/``.
     """
     run_dirs = sorted(
-        (p for p in history_root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True
+        (p for p in history_root.iterdir() if p.is_dir()),
+        key=lambda p: _history_sort_key(p.name),
+        reverse=True,
     ) if history_root.is_dir() else []
     runs: list[dict[str, Any]] = []
     for run_dir in run_dirs[: max(keep, 0)]:
@@ -874,6 +891,15 @@ def main() -> int:
     # to its co-located raw reports (out_dir/runs/<id>/index.html). Bounded by
     # --keep, so pruned runs stop getting a page.
     if args.history_root is not None:
+        # When the raw reports live in a separate tree from the output (the copy
+        # branch below), a reused --out-dir would keep run dirs dropped by --keep
+        # (or reports since removed from a retained run) as stale published output.
+        # Clear the output runs/ tree first so the published set matches `runs`
+        # exactly. Skipped when both resolve to the same tree (CI), where clearing
+        # would delete the very reports we are about to render.
+        runs_out = args.out_dir / "runs"
+        if runs_out.exists() and args.history_root.resolve() != runs_out.resolve():
+            shutil.rmtree(runs_out)
         for run in runs:
             rel = run.get("rel")
             if not rel:

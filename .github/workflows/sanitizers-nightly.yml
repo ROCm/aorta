@@ -293,10 +293,14 @@ jobs:
           }, indent=2, sort_keys=True))
           PY
 
-          # Rolling window: drop all but the newest N run directories (ids sort
-          # lexically because of the <YYYY-MM-DD>-<run_id> prefix).
+          # Rolling window: drop all but the newest N run directories. Sort by the
+          # date fields then the run-id numerically (-t- splits <YYYY-MM-DD>-<run_id>
+          # into fields 1-4), so a variable-width run id (...-9 vs ...-10) still
+          # orders newest-first -- a plain lexical sort would prune the wrong dir.
           if [ -d "$runs_dir" ]; then
-            ls -1 "$runs_dir" | sort -r | tail -n +"$((keep + 1))" | while IFS= read -r old; do
+            ls -1 "$runs_dir" \
+              | sort -t- -k1,1nr -k2,2nr -k3,3nr -k4,4nr \
+              | tail -n +"$((keep + 1))" | while IFS= read -r old; do
               [ -n "$old" ] && rm -rf "${runs_dir:?}/${old}"
             done
           fi

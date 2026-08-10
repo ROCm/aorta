@@ -549,6 +549,20 @@ def test_history_root_keep_caps_to_newest_n(tmp_path):
     assert [r["meta"]["run"] for r in runs] == ["2026-08-05-5", "2026-08-04-4"]
 
 
+def test_history_root_orders_variable_width_run_ids_numerically(tmp_path):
+    root = tmp_path / "runs"
+    # Same day, variable-width run ids: 100 > 10 > 9 numerically, but a plain
+    # string sort would put "-9" ahead of "-10"/"-100" and pick the wrong latest.
+    for run_id in ("2026-08-05-9", "2026-08-05-10", "2026-08-05-100"):
+        _write_history_run(root, run_id)
+
+    runs = gen.runs_from_history_root(root, _baselines())
+
+    assert [r["meta"]["run"] for r in runs] == [
+        "2026-08-05-100", "2026-08-05-10", "2026-08-05-9",
+    ]
+
+
 def test_history_root_missing_report_has_no_report_rel(tmp_path):
     root = tmp_path / "runs"
     run_dir = _write_history_run(root, "2026-08-05-33")
@@ -662,6 +676,30 @@ def test_main_history_root_writes_per_run_landing_pages(tmp_path, monkeypatch):
     )
     # gate stays a JSON boolean (not coerced to the string "True") for consumers.
     assert data[0]["meta"]["gate"] is True
+
+
+def test_main_history_root_clears_stale_output_runs(tmp_path, monkeypatch):
+    # When --history-root is a separate tree from <out-dir>/runs and the output is
+    # reused, a run dropped from the history must not linger as stale published
+    # output. main() clears out/runs before copying the current retained set.
+    baselines = _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    out = tmp_path / "dashboard"
+    stale = out / "runs" / "2026-08-01-01" / "waitcheck"
+    stale.mkdir(parents=True)
+    (stale / "sanitizer_report.json").write_text("{}")
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(root),
+        "--baselines", str(baselines),
+        "--out-dir", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+
+    assert not (out / "runs" / "2026-08-01-01").exists()
+    assert (out / "runs" / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
 
 
 def test_main_empty_history_root_publishes_placeholder(tmp_path, monkeypatch):
