@@ -10,23 +10,29 @@ name: Dependabot auto-merge
 #   2. `gh pr merge --auto` still waits on any other required checks before the
 #      merge completes.
 # Scoped to Dependabot pip PRs only.
+#
+# Permissions are per-job, not workflow-wide: `validate-requirements` checks out
+# the PR and installs newly published packages *before* human review, so it must
+# never hold a write-capable token (and it checks out with
+# `persist-credentials: false` so no token is left in the Git config for that
+# package code to recover). Only `auto-merge` gets contents/pull-requests write.
 
 on: pull_request
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   meta:
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
     outputs:
       ecosystem: ${{ steps.meta.outputs.package-ecosystem }}
     steps:
-      # Pinned to a commit SHA rather than the mutable `v2` tag: this workflow
-      # runs with contents/pull-requests write and gates an auto-merge, so an
-      # upstream tag move must not silently change what runs with that token.
+      # Pinned to a commit SHA rather than the mutable `v2` tag: this action's
+      # output is the sole gate on the write-capable `auto-merge` job, so an
+      # upstream tag move must not silently change what decides the merge.
       # The github-actions Dependabot ecosystem keeps this SHA updated.
       - id: meta
         uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2
@@ -37,12 +43,16 @@ jobs:
     needs: meta
     if: needs.meta.outputs.ecosystem == 'pip'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
@@ -55,6 +65,9 @@ jobs:
     needs: [meta, validate-requirements]
     if: needs.meta.outputs.ecosystem == 'pip'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Enable auto-merge (squash)
         env:
