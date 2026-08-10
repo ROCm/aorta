@@ -615,6 +615,19 @@ def test_build_run_index_html_lists_reports(tmp_path):
     assert 'href="../../"' in page
 
 
+def test_build_run_index_html_missing_report_reads_incomplete(tmp_path):
+    root = tmp_path / "runs"
+    run_dir = _write_history_run(root, "2026-08-05-33")
+    (run_dir / "consan-clean" / "sanitizer_report.json").unlink()
+    run = gen.runs_from_history_root(root, _baselines())[0]
+
+    page = gen.build_run_index_html(run)
+
+    # A missing report must read as INCOMPLETE, not a misleading verdict mismatch.
+    assert "INCOMPLETE \u2014 1/3 sanitizer report(s) are missing" in page
+    assert "verdict mismatch" not in page
+
+
 def test_main_history_root_writes_per_run_landing_pages(tmp_path, monkeypatch):
     baselines = _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
     root = tmp_path / "runs"
@@ -635,6 +648,11 @@ def test_main_history_root_writes_per_run_landing_pages(tmp_path, monkeypatch):
     # A per-run landing page is written next to each retained run's reports.
     assert (out / "runs" / "2026-08-05-33" / "index.html").is_file()
     assert (out / "runs" / "2026-08-04-22" / "index.html").is_file()
+    # The raw reports are co-located under the output tree so every emitted
+    # runs/<id>/<case>/sanitizer_report.json link resolves even though the
+    # history-root here is a separate directory from <out-dir>/runs.
+    assert (out / "runs" / "2026-08-05-33" / "waitcheck" / "sanitizer_report.json").is_file()
+    assert (out / "runs" / "2026-08-04-22" / "consan-racy" / "sanitizer_report.json").is_file()
     # data.json mirrors the rel / report_rel fields for machine consumers.
     data = json.loads((out / "data.json").read_text(encoding="utf-8"))
     assert data[0]["rel"] == "runs/2026-08-05-33"
@@ -642,6 +660,8 @@ def test_main_history_root_writes_per_run_landing_pages(tmp_path, monkeypatch):
         data[0]["rows"]["waitcheck"]["report_rel"]
         == "runs/2026-08-05-33/waitcheck/sanitizer_report.json"
     )
+    # gate stays a JSON boolean (not coerced to the string "True") for consumers.
+    assert data[0]["meta"]["gate"] is True
 
 
 def test_main_empty_history_root_publishes_placeholder(tmp_path, monkeypatch):

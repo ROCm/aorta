@@ -259,6 +259,11 @@ jobs:
           # generator then renders that case as missing -> a red per-run gate.
           runs_dir="$tmp/dashboard/runs"
           dest="$runs_dir/${run_dir_id}"
+          # A same-day Actions re-run reuses GITHUB_RUN_ID (only GITHUB_RUN_ATTEMPT
+          # changes), so it targets this same directory. Clear it first so a report
+          # absent from the current attempt cannot survive from a prior one and mask
+          # a now-missing case (the generator fails such a case closed).
+          rm -rf "$dest"
           mkdir -p "$dest"
           for case in waitcheck consan-clean consan-racy; do
             report="incoming/${case}/sanitizer_report.json"

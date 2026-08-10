@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from html import escape as _esc
@@ -242,22 +243,28 @@ def runs_from_runs_root(runs_root: Path, baselines: dict) -> list[dict[str, Any]
     return runs
 
 
-def _run_meta_from_history(run_dir: Path) -> dict[str, str]:
+def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
     """Read a published run's ``meta.json`` (commit, date, gpu, run_url, gate).
 
     The run id (``<YYYY-MM-DD>-<run_id>``) is authoritative from the directory
     name; ``meta.json`` supplies the rest. A missing/corrupt manifest degrades to
     an id-only record rather than crashing the whole dashboard render.
     """
-    meta: dict[str, str] = {"run": run_dir.name, "commit": "", "date": "", "gpu": "gfx950"}
+    meta: dict[str, Any] = {"run": run_dir.name, "commit": "", "date": "", "gpu": "gfx950"}
     data = _load(run_dir / "meta.json")
     if isinstance(data, dict):
         if data.get("commit"):
             meta["commit"] = _short(str(data["commit"]), 12)
-        for key in ("date", "gpu", "run_url", "gate"):
+        for key in ("date", "gpu", "run_url"):
             value = data.get(key)
             if value not in (None, ""):
                 meta[key] = str(value)
+        # Preserve the manifest's recorded gate with its JSON type. Coercing it to
+        # str would emit "True"/"False" into data.json, where "False" is truthy
+        # for machine consumers and the documented boolean type is lost.
+        gate = data.get("gate")
+        if gate is not None:
+            meta["gate"] = gate
     return meta
 
 
@@ -647,9 +654,11 @@ def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightl
     """
     meta = run["meta"]
     rows = run["rows"]
-    gate_ok = run["gate"]
-    gate_color = "#1a7f37" if gate_ok else "#cf222e"
-    gate_text = "PASS \u2014 verdicts match baselines" if gate_ok else "FAIL \u2014 verdict mismatch"
+    # Reuse the shared aggregate classifier so a missing report reads as
+    # INCOMPLETE rather than a misleading "verdict mismatch" (mirrors build_html).
+    summary = _gate_summary(rows)
+    gate_color = "#1a7f37" if summary["ok"] else "#cf222e"
+    gate_text = f"{summary['label']} \u2014 {summary['detail']}"
     run_url = meta.get("run_url", "")
     run_link = (
         f' &middot; <a href="{_esc(run_url)}">workflow run</a>' if run_url else ""
@@ -871,6 +880,17 @@ def main() -> int:
                 continue
             run_out = args.out_dir / rel
             run_out.mkdir(parents=True, exist_ok=True)
+            # Co-locate each retained run's raw reports under the output tree so the
+            # emitted runs/<id>/<case>/sanitizer_report.json links resolve even when
+            # --history-root is not already <out-dir>/runs. In CI both resolve to the
+            # same path, so the copy is skipped and this is a no-op.
+            src_run = args.history_root / run["meta"].get("run", "")
+            if src_run.is_dir() and src_run.resolve() != run_out.resolve():
+                for case, _key, _label, _backend in CASES:
+                    src_report = src_run / case / "sanitizer_report.json"
+                    if src_report.is_file():
+                        (run_out / case).mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src_report, run_out / case / "sanitizer_report.json")
             (run_out / "index.html").write_text(
                 build_run_index_html(run), encoding="utf-8"
             )
