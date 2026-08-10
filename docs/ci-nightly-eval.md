@@ -135,13 +135,24 @@ multi-GPU entries on an 8-GPU box.
 - **pip (weekly, auto-merged).** Dependabot (`.github/dependabot.yml`, `pip`
   ecosystem) runs **weekly** and opens **one grouped PR** (`python-deps`,
   version updates, `patterns: ["*"]`) that raises the `==` pins in the
-  requirements files. `.github/workflows/dependabot-auto-merge.yml` first
+  requirements files.   `.github/workflows/dependabot-auto-merge.yml` first
   installs `requirements.txt` + `requirements-dev.txt` across Python
   3.10/3.11/3.12 (no other gate exercises those files -- the CPU gate installs
   `pyproject.toml` extras, not the requirements files), then turns on GitHub
   **auto-merge (squash)**, so a bump lands **with no human review** once that
   install job and the repo's other required checks (the aggregate `CPU tests`
-  check and `pre-commit`) are green. Only **one bump PR is open at a time**
+  check and `pre-commit`) are green. **`Requirements validation` must be a
+  required status check on `main`** (branch protection): it is the stable
+  aggregate over the `validate-requirements` matrix (the per-version legs can't
+  be required — a skipped matrix never emits their contexts, actions/runner#952),
+  and requiring it is what enforces the install gate on the *current head SHA*.
+  A bare `needs:` edge only gates enabling auto-merge; since Dependabot rebases
+  the open PR weekly, without the required aggregate a later revision could merge
+  as soon as the other required checks pass while its re-validation is still
+  pending. The permissions are per-job: only the `auto-merge` job holds
+  `contents`/`pull-requests: write`, while `validate-requirements` checks out and
+  installs the newly published packages with a read-only token and
+  `persist-credentials: false`. Only **one bump PR is open at a time**
   (`open-pull-requests-limit: 1`): a red or still-open bump PR blocks the next
   one instead of piling up, and Dependabot rebases the open PR upward each week.
   - **Security updates are the exception.** Dependabot opens security-update PRs
