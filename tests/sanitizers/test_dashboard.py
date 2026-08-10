@@ -88,6 +88,12 @@ def _consan_racy_report() -> dict:
     }
 
 
+def _incomplete_execution_report() -> dict:
+    report = _waitcheck_report()
+    report["execution_status"] = "not_checked"
+    return report
+
+
 def test_summarize_waitcheck_reports_per_kernel_detail():
     case = gen.summarize_case(_waitcheck_report(), "warn")
 
@@ -128,7 +134,7 @@ def test_missing_report_is_marked_absent():
     assert case["match"] is False
 
 
-def test_summary_md_gate_reflects_baseline_match():
+def test_summary_md_expected_warn_and_fail_are_healthy():
     rows = {
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
@@ -136,34 +142,221 @@ def test_summary_md_gate_reflects_baseline_match():
     }
     runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d"}, "rows": rows, "gate": True}]
     md = gen.build_summary_md(runs)
-    assert "PASS" in md and "Kernel details" in md
+    assert "**HEALTHY** — 3/3 sanitizer outcomes match their baselines" in md
+    assert md.count("✅ **Expected outcome**") >= 3
+    assert "positive-control outcomes" in md
+    assert "| Baseline status | Observed | Expected | Execution |" in md
+    assert "| `fail` | `fail` |" in md
+    assert "**REGRESSION**" not in md
+    assert "Kernel details" in md
     assert "`gemm_x`" in md and "sol_1.hsaco" in md
+    assert "Observed sanitizer verdict `fail` · expected `fail`" in md
+    assert "| Kernel | Dispatch | Observed sanitizer verdict |" in md
+    assert "✅ **Match**<br>Observed: `warn`" in md
+    assert "Healthy |" in md
+    assert "green" not in md and "red" not in md
 
 
-def test_summary_md_gate_fails_on_mismatch():
+def test_summary_md_mismatch_is_actionable_regression():
     rows = {
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         # baseline says pass but report is fail -> mismatch
         "consan-clean": gen.summarize_case(_consan_racy_report(), "pass"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
     }
-    gate = all(r["match"] for r in rows.values() if r["present"])
+    gate = all(r["match"] for r in rows.values())
     runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d"}, "rows": rows, "gate": gate}]
     md = gen.build_summary_md(runs)
-    assert "FAIL" in md and "want pass" in md
+    assert "**REGRESSION** — investigate 1/3 sanitizer outcomes" in md
+    assert "❌ **Unexpected outcome**" in md
+    assert "| `fail` | `pass` |" in md
+    assert "❌ **Mismatch**<br>Observed: `fail`; expected `pass`" in md
+    assert "Regression |" in md
 
 
-def test_build_html_has_gate_and_kernel_names():
+def test_build_html_expected_warn_and_fail_are_healthy_and_neutral():
     rows = {
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
         "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
         "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
     }
-    runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"}, "rows": rows, "gate": True}]
+    runs = [
+        {
+            "meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"},
+            "rows": rows,
+            "gate": True,
+        }
+    ]
     html = gen.build_html(runs)
     assert "<!doctype html>" in html
-    assert "PASS" in html
+    assert "HEALTHY — 3/3 sanitizer outcomes match their baselines" in html
+    assert html.count('<span class="pill ok">Expected outcome</span>') >= 3
+    assert '<span class="observed">warn</span>' in html
+    assert '<span class="observed">fail</span>' in html
+    assert "positive-control outcomes" in html
+    assert "<th>Baseline status</th><th>Observed</th>" in html
+    assert "<th>Expected</th><th>Execution</th>" in html
     assert "gemm_x" in html and "Kernel details" in html
+    assert "Observed sanitizer verdict" in html
+    assert '<span class="pill ok">Match</span>' in html
+    assert '<span class="pill ok">Healthy</span>' in html
+    assert ">green<" not in html and ">red<" not in html
+
+
+def test_build_html_mismatch_is_primary_regression_signal():
+    rows = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(_consan_racy_report(), "pass"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    runs = [
+        {
+            "meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"},
+            "rows": rows,
+            "gate": False,
+        }
+    ]
+
+    html = gen.build_html(runs)
+
+    assert "REGRESSION — investigate 1/3 sanitizer outcomes" in html
+    assert '<span class="pill bad">Unexpected outcome</span>' in html
+    assert '<span class="pill bad">Mismatch</span>' in html
+    assert 'Observed <span class="observed">fail</span>' in html
+    assert 'expected <span class="observed">pass</span>' in html
+    assert '<span class="pill bad">Regression</span>' in html
+
+
+def test_renderers_make_missing_report_explicit():
+    rows = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(None, "pass"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    runs = [
+        {
+            "meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"},
+            "rows": rows,
+            "gate": False,
+        }
+    ]
+
+    html = gen.build_html(runs)
+    md = gen.build_summary_md(runs)
+
+    assert '<span class="pill bad">Report missing</span>' in html
+    assert 'Observed <span class="observed">—</span>' in html
+    assert "❌ **Report missing**" in md
+    assert "Observed sanitizer verdict: `—`" in md
+    assert "❌ **Report missing**<br>Observed: `—`" in md
+
+
+def test_gate_summary_distinguishes_missing_from_regression():
+    # An absent report and an observed verdict mismatch both fail the gate, but
+    # only a present-and-mismatched verdict is a regression; missing reports and
+    # the combined case get their own aggregate labels.
+    all_match = {c: gen.summarize_case(_waitcheck_report(), "warn") for c, *_ in gen.CASES}
+    assert gen._gate_summary(all_match) == {
+        "ok": True,
+        "label": "HEALTHY",
+        "detail": "3/3 sanitizer outcomes match their baselines",
+        "short": "Healthy",
+    }
+
+    missing_only = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(None, "pass"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    incomplete = gen._gate_summary(missing_only)
+    assert incomplete["ok"] is False and incomplete["label"] == "INCOMPLETE"
+    assert incomplete["detail"] == "1/3 sanitizer report(s) are missing"
+
+    mismatch_only = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(_consan_racy_report(), "pass"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    regression = gen._gate_summary(mismatch_only)
+    assert regression["label"] == "REGRESSION" and "1/3" in regression["detail"]
+
+    combined = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(None, "pass"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "pass"),
+    }
+    unhealthy = gen._gate_summary(combined)
+    assert unhealthy["label"] == "UNHEALTHY"
+    assert "1/3 mismatched" in unhealthy["detail"] and "1/3 missing" in unhealthy["detail"]
+
+
+def test_missing_only_run_is_incomplete_not_regression():
+    rows = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(None, "pass"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    runs = [
+        {
+            "meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"},
+            "rows": rows,
+            "gate": False,
+        }
+    ]
+
+    html = gen.build_html(runs)
+    md = gen.build_summary_md(runs)
+
+    assert "INCOMPLETE — 1/3 sanitizer report(s) are missing" in html
+    assert '<span class="pill bad">Incomplete</span>' in html
+    assert "**INCOMPLETE** — 1/3 sanitizer report(s) are missing" in md
+    assert "Incomplete |" in md
+    # a missing report must not be surfaced as a verdict regression anywhere
+    assert "Regression" not in html and "REGRESSION" not in html
+    assert "Regression" not in md and "REGRESSION" not in md
+    # per-case missing status stays explicit
+    assert '<span class="pill bad">Report missing</span>' in html
+    assert "❌ **Report missing**" in md
+
+
+def test_combined_mismatch_and_missing_is_unhealthy():
+    rows = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": gen.summarize_case(None, "pass"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "pass"),
+    }
+    runs = [
+        {
+            "meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"},
+            "rows": rows,
+            "gate": False,
+        }
+    ]
+
+    html = gen.build_html(runs)
+    md = gen.build_summary_md(runs)
+
+    detail = "investigate 1/3 mismatched outcome(s) and 1/3 missing report(s)"
+    assert f"UNHEALTHY — {detail}" in html
+    assert '<span class="pill bad">Unhealthy</span>' in html
+    assert f"**UNHEALTHY** — {detail}" in md
+    assert "Unhealthy |" in md
+
+
+def test_summary_md_emphasizes_noncomplete_execution():
+    rows = {
+        "waitcheck": gen.summarize_case(_incomplete_execution_report(), "warn"),
+        "consan-clean": gen.summarize_case(_consan_racy_report(), "fail"),
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    runs = [{"meta": {"run": "r1", "commit": "abc", "date": "d"}, "rows": rows, "gate": True}]
+
+    md = gen.build_summary_md(runs)
+
+    # non-complete execution is error-emphasized in Markdown, matching _execution_html
+    assert "❌ **not_checked**" in md
+    # complete executions stay neutral (no false emphasis)
+    assert "❌ **complete**" not in md
 
 
 def test_build_html_empty_shows_placeholder_and_back_link():
@@ -261,7 +454,7 @@ def test_runs_from_results_dir_matches_baselines(tmp_path):
     (tmp_path / "waitcheck" / "sanitizer_report.json").write_text(json.dumps(_waitcheck_report()))
     (tmp_path / "consan-racy").mkdir()
     (tmp_path / "consan-racy" / "sanitizer_report.json").write_text(json.dumps(_consan_racy_report()))
-    # consan-clean intentionally absent -> present False, gate must go red
+    # consan-clean intentionally absent -> present False, gate must be unhealthy
 
     runs = gen.runs_from_results_dir(tmp_path, baselines, meta={"run": "r", "commit": "c"})
     assert len(runs) == 1
@@ -273,7 +466,7 @@ def test_runs_from_results_dir_matches_baselines(tmp_path):
 
 
 def test_main_fails_closed_on_missing_baselines(tmp_path, monkeypatch):
-    # A missing/unreadable baselines file must not paint a false-green gate: main
+    # A missing/unreadable baselines file must not paint a false-healthy gate: main
     # exits non-zero instead of falling back to an empty baseline set.
     argv = [
         "gen_sanitizer_dashboard",

@@ -4,10 +4,10 @@
 Consumes the three daily recipe reports and the committed verdict baselines and
 emits, into ``--out-dir``:
 
-* ``index.html`` -- a self-contained (no CDN) status page: gate banner, latest
-  per-recipe table with verdict badges, **per-kernel detail** (selected worklist
-  kernels with their code object / SHA-256 / dispatch count / per-kernel verdict
-  and finding count), a findings-by-(code, severity) summary, and a cross-run
+* ``index.html`` -- a self-contained (no CDN) status page: baseline-health banner,
+  latest per-recipe table, **per-kernel detail** (selected worklist kernels with
+  their code object / SHA-256 / dispatch count / observed sanitizer verdict and
+  finding count), a findings-by-(code, severity) summary, and a cross-run
   history/trend table.
 * ``summary.md`` -- a GitHub Actions job-summary fragment (append to
   ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail.
@@ -15,9 +15,9 @@ emits, into ``--out-dir``:
 * ``status.json`` -- a copy of the ``--status`` run manifest, when supplied, so
   Pages can distinguish a healthy snapshot from a stale one (a failed nightly).
 
-When ``--status`` points at an unhealthy manifest, a red "stale" banner is
+When ``--status`` points at an unhealthy manifest, an error-colored "stale" banner is
 rendered at the top of both ``index.html`` and ``summary.md`` so a failed nightly
-never leaves the previous green page looking current.
+never leaves the previous healthy page looking current.
 
 Two input shapes are supported:
 
@@ -57,15 +57,6 @@ CASES: tuple[tuple[str, str, str, str], ...] = (
 )
 
 _DASH = "\u2014"  # em dash; kept as a name so it can sit inside f-string braces (py3.11)
-
-_VERDICT_COLOR = {
-    "pass": "#1a7f37",
-    "warn": "#9a6700",
-    "fail": "#cf222e",
-    "error": "#6e7781",
-    "not_checked": "#6e7781",
-    "—": "#6e7781",
-}
 
 
 def _load(path: Path) -> dict[str, Any] | None:
@@ -185,7 +176,7 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
 
 def _run_record(meta: dict[str, str], rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
     # Fail closed: a missing report (present=False -> match=False) turns the gate
-    # red, mirroring compare_verdict_baselines.py which errors on absent reports.
+    # unhealthy, mirroring compare_verdict_baselines.py which errors on absent reports.
     gate = all(r["match"] for r in rows.values())
     return {"meta": meta, "rows": rows, "gate": gate}
 
@@ -234,10 +225,10 @@ def runs_from_runs_root(runs_root: Path, baselines: dict) -> list[dict[str, Any]
 
 
 def _status_banner_html(status: dict[str, Any] | None) -> str:
-    """Red staleness banner shown when the latest nightly did not publish healthily.
+    """Staleness banner shown when the latest nightly did not publish healthily.
 
     A failed nightly skips its snapshot push, so Pages would otherwise republish
-    the previous green page as if it were current. When the publish job records an
+    the previous healthy page as if it were current. When the publish job records an
     unhealthy run status, surface it prominently with a link to the failed run.
     """
     if not status or status.get("healthy", True):
@@ -275,15 +266,105 @@ def _status_banner_md(status: dict[str, Any] | None) -> str:
     )
 
 
-def _badge_html(verdict: str, expected: str | None) -> str:
-    color = _VERDICT_COLOR.get(verdict, "#6e7781")
-    mark = ""
-    if expected is not None:
-        mark = (
-            '<span class="mark ok">&#10004;</span>' if verdict == expected
-            else f'<span class="mark bad">&#10008; want {_esc(expected)}</span>'
+def _baseline_status(row: dict[str, Any]) -> tuple[str, str]:
+    """Return the human-readable baseline status and its emphasis class."""
+    if not row["present"]:
+        return "Report missing", "bad"
+    if row["match"]:
+        return "Expected outcome", "ok"
+    return "Unexpected outcome", "bad"
+
+
+def _baseline_status_html(row: dict[str, Any], *, history: bool = False) -> str:
+    text, emphasis = _baseline_status(row)
+    if history and row["present"]:
+        text = "Match" if row["match"] else "Mismatch"
+    return f'<span class="pill {emphasis}">{_esc(text)}</span>'
+
+
+def _observed_html(verdict: Any) -> str:
+    """Render an exact sanitizer verdict without regression-health coloring."""
+    return f'<span class="observed">{_esc(str(verdict))}</span>'
+
+
+def _execution_html(execution: Any) -> str:
+    text = str(execution)
+    if text == "complete":
+        return _esc(text)
+    return f'<span class="execution bad">{_esc(text)}</span>'
+
+
+def _execution_md(execution: Any) -> str:
+    """Markdown twin of ``_execution_html``: neutral when complete, else emphasized."""
+    text = str(execution)
+    if text == "complete":
+        return text
+    return f"\u274c **{text}**"
+
+
+def _gate_summary(rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Classify the aggregate run health for the top banner and history gate.
+
+    A missing report and an observed verdict mismatch both fail the gate, but
+    they are operationally different: only a *present* verdict that disagrees
+    with its baseline is a regression. Absent reports are surfaced separately so
+    an infrastructure failure is not mislabeled as a verdict regression, and a
+    run with both is reported as a combined ``UNHEALTHY`` state.
+    """
+    total = len(rows)
+    matched = sum(1 for r in rows.values() if r["match"])
+    mismatches = sum(1 for r in rows.values() if r["present"] and not r["match"])
+    missing = sum(1 for r in rows.values() if not r["present"])
+    if matched == total:
+        label = "HEALTHY"
+        detail = f"{matched}/{total} sanitizer outcomes match their baselines"
+    elif mismatches and missing:
+        label = "UNHEALTHY"
+        detail = (
+            f"investigate {mismatches}/{total} mismatched outcome(s) and "
+            f"{missing}/{total} missing report(s)"
         )
-    return f'<span class="badge" style="background:{color}">{_esc(str(verdict))}</span>{mark}'
+    elif mismatches:
+        label = "REGRESSION"
+        detail = (
+            f"investigate {mismatches}/{total} sanitizer outcomes that do not "
+            "match their baselines"
+        )
+    else:
+        label = "INCOMPLETE"
+        detail = f"{missing}/{total} sanitizer report(s) are missing"
+    return {"ok": matched == total, "label": label, "detail": detail, "short": label.capitalize()}
+
+
+def _history_case_html(row: dict[str, Any]) -> str:
+    expected = ""
+    if row["present"] and not row["match"]:
+        expected = f" &middot; expected {_observed_html(row['expected'])}"
+    return (
+        f"{_baseline_status_html(row, history=True)}"
+        f'<div class="secondary">Observed {_observed_html(row["verdict"])}{expected}</div>'
+    )
+
+
+def _history_gate_html(run: dict[str, Any]) -> str:
+    summary = _gate_summary(run["rows"])
+    emphasis = "ok" if run["gate"] else "bad"
+    return f'<td><span class="pill {emphasis}">{_esc(summary["short"])}</span></td>'
+
+
+def _baseline_status_md(row: dict[str, Any], *, history: bool = False) -> str:
+    text, _emphasis = _baseline_status(row)
+    if history and row["present"]:
+        text = "Match" if row["match"] else "Mismatch"
+    icon = "\u2705" if row["present"] and row["match"] else "\u274c"
+    return f"{icon} **{text}**"
+
+
+def _history_case_md(row: dict[str, Any]) -> str:
+    expected = ""
+    if row["present"] and not row["match"]:
+        expected = f"; expected `{row['expected']}`"
+    return f"{_baseline_status_md(row, history=True)}<br>" f"Observed: `{row['verdict']}`{expected}"
 
 
 def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
@@ -291,36 +372,50 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
     for case, _key, label, _backend_label in CASES:
         row = rows[case]
         if not row["present"]:
-            blocks.append(f"<h3>{_esc(label)}</h3><p>report missing</p>")
+            blocks.append(
+                f"<h3>{_esc(label)} &middot; {_baseline_status_html(row)}</h3>"
+                f"<p>Observed sanitizer verdict: {_observed_html(row['verdict'])}</p>"
+            )
             continue
         wl = row["worklist"]
         backend = row["backend"]
         backend_txt = (
             f'{_esc(backend["name"])} <span class=mono>{_esc(backend["sha"])}</span>'
-            if backend else "&mdash;"
+            if backend
+            else "&mdash;"
         )
-        krows = "".join(
-            f"<tr><td class=mono>{_esc(str(k['name']))}</td>"
-            f"<td class=num>{_esc(str(k['dispatch']))}</td>"
-            f"<td>{_badge_html(k['verdict'], None)}</td>"
-            f"<td class=num>{_esc(str(k['findings']))}</td>"
-            f"<td class=mono>{_esc(k['code_object']) or '&mdash;'}</td>"
-            f"<td class=mono>{_esc(k['sha']) or '&mdash;'}</td></tr>"
-            for k in row["kernels"]
-        ) or '<tr><td colspan=6>no kernels selected</td></tr>'
-        frows = "".join(
-            f"<tr><td>{_esc(str(g['sanitizer']))}</td><td class=mono>{_esc(str(g['code']))}</td>"
-            f"<td>{_esc(str(g['severity']))}</td><td class=num>{g['count']}</td>"
-            f"<td class=mono>{_esc(g['example'])}</td></tr>"
-            for g in row["finding_groups"]
-        ) or '<tr><td colspan=5>no findings</td></tr>'
+        krows = (
+            "".join(
+                f"<tr><td class=mono>{_esc(str(k['name']))}</td>"
+                f"<td class=num>{_esc(str(k['dispatch']))}</td>"
+                f"<td>{_observed_html(k['verdict'])}</td>"
+                f"<td class=num>{_esc(str(k['findings']))}</td>"
+                f"<td class=mono>{_esc(k['code_object']) or '&mdash;'}</td>"
+                f"<td class=mono>{_esc(k['sha']) or '&mdash;'}</td></tr>"
+                for k in row["kernels"]
+            )
+            or "<tr><td colspan=6>no kernels selected</td></tr>"
+        )
+        frows = (
+            "".join(
+                f"<tr><td>{_esc(str(g['sanitizer']))}</td><td class=mono>{_esc(str(g['code']))}</td>"
+                f"<td>{_esc(str(g['severity']))}</td><td class=num>{g['count']}</td>"
+                f"<td class=mono>{_esc(g['example'])}</td></tr>"
+                for g in row["finding_groups"]
+            )
+            or "<tr><td colspan=5>no findings</td></tr>"
+        )
         blocks.append(
-            f"<h3>{_esc(label)} &middot; {_badge_html(row['verdict'], row['expected'])}</h3>"
+            f"<h3>{_esc(label)} &middot; {_baseline_status_html(row)}</h3>"
+            f'<div class="secondary">Observed sanitizer verdict '
+            f"{_observed_html(row['verdict'])} &middot; expected "
+            f"{_observed_html(row['expected'] or _DASH)}</div>"
             f"<div class=meta>backend {backend_txt} &middot; selection "
             f"{_esc(str(wl['requirement']))} top&#8209;{_esc(str(wl['top_n']))} &middot; "
             f"{_esc(str(wl['kernel_count']))} kernel(s) &middot; execution "
-            f"{_esc(str(row['execution']))}</div>"
-            "<table><tr><th>Kernel</th><th>Dispatch</th><th>Verdict</th><th>Findings</th>"
+            f"{_execution_html(row['execution'])}</div>"
+            "<table><tr><th>Kernel</th><th>Dispatch</th>"
+            "<th>Observed sanitizer verdict</th><th>Findings</th>"
             f"<th>Code object</th><th>SHA-256</th></tr>{krows}</table>"
             "<table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th>"
             f"<th>Example</th></tr>{frows}</table>"
@@ -354,17 +449,16 @@ def build_html(
         )
     latest = runs[0]
     meta = latest["meta"]
-    gate_ok = latest["gate"]
-    gate_color = "#1a7f37" if gate_ok else "#cf222e"
-    gate_text = (
-        "PASS \u2014 all verdicts match baselines" if gate_ok
-        else "FAIL \u2014 verdict mismatch vs baselines"
-    )
+    summary = _gate_summary(latest["rows"])
+    gate_color = "#1a7f37" if summary["ok"] else "#cf222e"
+    gate_text = f"{summary['label']} \u2014 {summary['detail']}"
 
     latest_rows = "".join(
         f"<tr><td>{_esc(label)}</td><td>{_esc(backend)}</td>"
-        f"<td>{_badge_html(latest['rows'][case]['verdict'], latest['rows'][case]['expected'])}</td>"
-        f"<td>{_esc(str(latest['rows'][case]['execution']))}</td>"
+        f"<td>{_baseline_status_html(latest['rows'][case])}</td>"
+        f"<td>{_observed_html(latest['rows'][case]['verdict'])}</td>"
+        f"<td>{_observed_html(latest['rows'][case]['expected'] or _DASH)}</td>"
+        f"<td>{_execution_html(latest['rows'][case]['execution'])}</td>"
         f"<td class=num>{latest['rows'][case]['findings']}</td>"
         f"<td>{_esc(latest['rows'][case]['coverage']) or '&mdash;'}</td></tr>"
         for case, _key, label, backend in CASES
@@ -375,9 +469,8 @@ def build_html(
         f"<tr><td class=mono>{_esc(run['meta'].get('run', ''))}</td>"
         f"<td class=mono>{_esc(run['meta'].get('commit', ''))}</td>"
         f"<td>{_esc(run['meta'].get('date', ''))}</td>"
-        + "".join(f"<td>{_badge_html(run['rows'][c]['verdict'], None)}</td>" for c, _k, _l, _b in CASES)
-        + ('<td><span class="pill ok">green</span></td>' if run["gate"]
-           else '<td><span class="pill bad">red</span></td>')
+        + "".join(f"<td>{_history_case_html(run['rows'][c])}</td>" for c, _k, _l, _b in CASES)
+        + _history_gate_html(run)
         + "</tr>"
         for run in runs
     )
@@ -395,6 +488,7 @@ def build_html(
   h2 {{ font-size:15px; margin:20px 0 8px; }}
   h3 {{ font-size:14px; margin:18px 0 4px; }}
   .meta {{ color:#57606a; font-size:12px; margin-bottom:12px; }}
+  .secondary {{ color:#57606a; font-size:12px; margin:4px 0 8px; }}
   .mono {{ font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }}
   .gate {{ color:#fff; background:{gate_color}; padding:12px 16px; border-radius:8px;
           font-weight:600; margin:12px 0 20px; }}
@@ -403,14 +497,17 @@ def build_html(
   th,td {{ text-align:left; padding:7px 10px; border-bottom:1px solid #d0d7de; vertical-align:top; }}
   th {{ background:#f6f8fa; font-size:11px; text-transform:uppercase; letter-spacing:.03em; color:#57606a; }}
   td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
-  .badge {{ color:#fff; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }}
-  .mark {{ margin-left:8px; font-size:12px; }} .mark.ok {{ color:#1a7f37; }} .mark.bad {{ color:#cf222e; }}
+  .observed {{ display:inline-block; color:#57606a; background:#afb8c133; border:1px solid #afb8c1;
+               padding:1px 7px; border-radius:999px; font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace; }}
+  .execution.bad {{ color:#cf222e; font-weight:600; }}
   .pill {{ padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }}
   .pill.ok {{ background:#1a7f3722; color:#1a7f37; }} .pill.bad {{ background:#cf222e22; color:#cf222e; }}
   @media (prefers-color-scheme: dark) {{
     body {{ background:#0d1117; color:#e6edf3; }}
     table {{ background:#161b22; }} th {{ background:#161b22; color:#8b949e; }}
     th,td {{ border-color:#30363d; }}
+    .meta,.secondary {{ color:#8b949e; }}
+    .observed {{ color:#c9d1d9; background:#6e768133; border-color:#6e7681; }}
   }}
 </style></head>
 <body><div class=wrap>
@@ -421,10 +518,14 @@ def build_html(
      &middot; commit <span class=mono>{_esc(meta.get('commit', ''))}</span>
      &middot; {_esc(meta.get('date', ''))} &middot; target {_esc(meta.get('gpu', 'gfx950'))}</div>
   <div class=gate>{_esc(gate_text)}</div>
+  <p class=secondary>Observed <span class=mono>WARN</span> or <span class=mono>FAIL</span>
+     verdicts may be expected positive-control outcomes. Baseline status is the
+     regression-health signal.</p>
 
   <h2>Latest run</h2>
   <table>
-    <tr><th>Recipe</th><th>Backend</th><th>Verdict</th><th>Execution</th><th>Findings</th><th>Coverage</th></tr>
+    <tr><th>Recipe</th><th>Backend</th><th>Baseline status</th><th>Observed</th>
+        <th>Expected</th><th>Execution</th><th>Findings</th><th>Coverage</th></tr>
     {latest_rows}
   </table>
 
@@ -451,47 +552,57 @@ def build_summary_md(
         return head + "No runs found.\n"
     latest = runs[0]
     meta = latest["meta"]
-    gate = (
-        "\u2705 **PASS** \u2014 all verdicts match baselines" if latest["gate"]
-        else "\u274c **FAIL** \u2014 verdict mismatch vs baselines"
-    )
+    summary = _gate_summary(latest["rows"])
+    icon = "\u2705" if summary["ok"] else "\u274c"
+    gate = f"{icon} **{summary['label']}** \u2014 {summary['detail']}"
     lines = ["# Sanitizers Nightly \u00b7 gfx950", ""]
     if banner:
         lines += [banner, ""]
     lines += [
         f"Run `{meta.get('run', '')}` \u00b7 commit `{meta.get('commit', '')}` \u00b7 "
         f"{meta.get('date', '')}",
-        "", gate, "",
-        "| Recipe | Backend | Verdict | Baseline | Execution | Findings | Coverage |",
-        "|---|---|---|---|---|--:|---|",
+        "",
+        gate,
+        "",
+        "Observed `WARN` or `FAIL` verdicts may be expected positive-control outcomes. "
+        "Baseline status is the regression-health signal.",
+        "",
+        "| Recipe | Backend | Baseline status | Observed | Expected | Execution | Findings | Coverage |",
+        "|---|---|---|---|---|---|--:|---|",
     ]
     for case, _key, label, backend in CASES:
         r = latest["rows"][case]
-        mark = "" if r["expected"] is None else (" \u2705" if r["match"] else f" \u274c (want {r['expected']})")
         lines.append(
-            f"| {label} | {backend} | `{r['verdict']}`{mark} | `{r['expected']}` | "
-            f"{r['execution']} | {r['findings']} | {r['coverage'] or _DASH} |"
+            f"| {label} | {backend} | {_baseline_status_md(r)} | `{r['verdict']}` | "
+            f"`{r['expected'] or _DASH}` | "
+            f"{_execution_md(r['execution'])} | {r['findings']} | {r['coverage'] or _DASH} |"
         )
 
     lines += ["", "## Kernel details", ""]
     for case, _key, label, _backend in CASES:
         r = latest["rows"][case]
-        lines.append(f"<details><summary><b>{label}</b> \u2014 <code>{r['verdict']}</code></summary>")
+        lines.append(
+            f"<details><summary><b>{label}</b> \u2014 " f"{_baseline_status_md(r)}</summary>"
+        )
         lines.append("")
         if not r["present"]:
-            lines += ["report missing", "", "</details>", ""]
+            lines += [f"Observed sanitizer verdict: `{r['verdict']}`", "", "</details>", ""]
             continue
         b = r["backend"]
         wl = r["worklist"]
         backend_name = b["name"] if b else _DASH
         lines.append(
+            f"Observed sanitizer verdict `{r['verdict']}` \u00b7 expected `{r['expected'] or _DASH}`"
+        )
+        lines.append(
             f"backend `{backend_name}`"
             + (f" `{b['sha']}`" if b else "")
             + f" \u00b7 selection `{wl['requirement']}` top-{wl['top_n']} "
-            f"\u00b7 {wl['kernel_count']} kernel(s) \u00b7 execution `{r['execution']}`"
+            f"\u00b7 {wl['kernel_count']} kernel(s) \u00b7 execution {_execution_md(r['execution'])}"
         )
         lines += [
-            "", "| Kernel | Dispatch | Verdict | Findings | Code object | SHA-256 |",
+            "",
+            "| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |",
             "|---|--:|---|--:|---|---|",
         ]
         for k in r["kernels"]:
@@ -502,7 +613,11 @@ def build_summary_md(
                 f"`{code_object}` | `{sha}` |"
             )
         if r["finding_groups"]:
-            lines += ["", "| Sanitizer | Code | Severity | Count | Example |", "|---|---|---|--:|---|"]
+            lines += [
+                "",
+                "| Sanitizer | Code | Severity | Count | Example |",
+                "|---|---|---|--:|---|",
+            ]
             for g in r["finding_groups"]:
                 example = g["example"].replace("|", "\\|")
                 lines.append(
@@ -510,14 +625,17 @@ def build_summary_md(
                 )
         lines += ["", "</details>", ""]
 
-    lines += ["## History / trend", "",
-              "| Run | Commit | " + " | ".join(lbl for _c, _k, lbl, _b in CASES) + " | Gate |",
-              "|---|---|" + "|".join(["---"] * len(CASES)) + "|---|"]
+    lines += [
+        "## History / trend",
+        "",
+        "| Run | Commit | " + " | ".join(lbl for _c, _k, lbl, _b in CASES) + " | Gate |",
+        "|---|---|" + "|".join(["---"] * len(CASES)) + "|---|",
+    ]
     for run in runs:
-        cells = " | ".join(f"`{run['rows'][c]['verdict']}`" for c, _k, _l, _b in CASES)
+        cells = " | ".join(_history_case_md(run["rows"][c]) for c, _k, _l, _b in CASES)
         lines.append(
             f"| {run['meta'].get('run', '')} | `{run['meta'].get('commit', '')}` | {cells} | "
-            f"{'green' if run['gate'] else 'red'} |"
+            f"{_gate_summary(run['rows'])['short']} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -546,7 +664,7 @@ def main() -> int:
         status = None
 
     # Load baselines strictly: a missing/corrupt file would otherwise leave every
-    # expected verdict as None (match=True) and paint a false-green gate.
+    # expected verdict as None (match=True) and paint a false-healthy gate.
     baselines = _load(args.baselines)
     if not isinstance(baselines, dict) or not baselines:
         print(
@@ -579,8 +697,8 @@ def main() -> int:
         (args.out_dir / "status.json").write_text(
             json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-    gate = runs[0]["gate"] if runs else False
-    print(f"wrote {args.out_dir}/index.html, summary.md, data.json (gate={'green' if gate else 'red'})")
+    gate_label = _gate_summary(runs[0]["rows"])["short"].lower() if runs else "no-data"
+    print(f"wrote {args.out_dir}/index.html, summary.md, data.json (gate={gate_label})")
     return 0
 
 
