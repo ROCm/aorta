@@ -1,18 +1,62 @@
 name: Dependabot auto-merge
+
+# Auto-merge grouped pip version bumps once they are green. Two guards keep an
+# unattended merge safe:
+#   1. `validate-requirements` actually installs requirements.txt +
+#      requirements-dev.txt across the supported Pythons -- no other required
+#      check exercises those files (the CPU gate installs pyproject extras, not
+#      the requirements files; pre-commit only installs pre-commit), so an
+#      incompatible exact pin could otherwise merge green.
+#   2. `gh pr merge --auto` still waits on any other required checks before the
+#      merge completes.
+# Scoped to Dependabot pip PRs only.
+
 on: pull_request
+
 permissions:
   contents: write
   pull-requests: write
+
 jobs:
-  auto-merge:
+  meta:
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    outputs:
+      ecosystem: ${{ steps.meta.outputs.package-ecosystem }}
     steps:
+      # Pinned to a commit SHA rather than the mutable `v2` tag: this workflow
+      # runs with contents/pull-requests write and gates an auto-merge, so an
+      # upstream tag move must not silently change what runs with that token.
+      # The github-actions Dependabot ecosystem keeps this SHA updated.
       - id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - if: steps.meta.outputs.package-ecosystem == 'pip'
+
+  validate-requirements:
+    needs: meta
+    if: needs.meta.outputs.ecosystem == 'pip'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pinned requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+  auto-merge:
+    needs: [meta, validate-requirements]
+    if: needs.meta.outputs.ecosystem == 'pip'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge (squash)
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

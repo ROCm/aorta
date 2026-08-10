@@ -11,11 +11,16 @@ updates:
     directory: "/"
     schedule:
       interval: weekly           # weekly bump PR (revisit cadence later)
-    open-pull-requests-limit: 1  # a still-open/failing bump PR blocks a new one
+    # Caps version-update PRs so a still-open/failing bump blocks the next one.
+    # NOTE: Dependabot exempts security-update PRs from this limit and from the
+    # version-update group below, so more than one pip PR can be open at once
+    # (see docs/ci-nightly-eval.md).
+    open-pull-requests-limit: 1
     labels: ["dependencies", "python"]
     groups:
       python-deps:
-        patterns: ["*"]          # one combined PR for all pip updates
+        applies-to: version-updates
+        patterns: ["*"]          # one combined PR for all pip version updates
 
   # (docker ecosystem intentionally omitted -- OS/base image is bumped manually)
 
