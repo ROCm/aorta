@@ -8,8 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from aorta.instrumentation.rocjitsu_sanitizers import pipeline
 from aorta.instrumentation.rocjitsu_sanitizers.backends import support
-from aorta.instrumentation.rocjitsu_sanitizers.models import SelectionRequirement, Verdict
+from aorta.instrumentation.rocjitsu_sanitizers.consan import ConSanRunResult
+from aorta.instrumentation.rocjitsu_sanitizers.models import (
+    CheckResult,
+    ExecutionState,
+    SelectionRequirement,
+    Verdict,
+)
 from aorta.instrumentation.rocjitsu_sanitizers.recipe import (
     execute_sanitizer_run,
     load_sanitizer_recipe,
@@ -377,6 +384,50 @@ def test_consan_command_run_is_fail_closed_when_command_missing(
     for check in consan_checks:
         assert check.verdict is Verdict.NOT_CHECKED
         assert check.reason == "consan_command_not_found"
+
+
+@pytest.mark.parametrize("consan_verdict", [Verdict.PASS, Verdict.FAIL])
+def test_consan_command_positive_path_surfaces_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, consan_verdict: Verdict
+) -> None:
+    # Positive execution coverage for the new custom-source command path. run_consan
+    # needs a gfx950 host + provisioned hook, so it is stubbed here; the point is the
+    # adapter wiring, not the ConSan verdict logic. Asserts that a present
+    # consan_command reaches run_consan (guarding a regression that drops it before
+    # the call), that the single selected identity is threaded as the target, and
+    # that a healthy/failing hook verdict surfaces as PASS/FAIL through the report.
+    loader = tmp_path / "loaders" / "consan_app"
+    loader.parent.mkdir(parents=True, exist_ok=True)
+    loader.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_consan(worklist, *, command, target, **_kwargs) -> ConSanRunResult:
+        captured["command"] = command
+        captured["target"] = target
+        return ConSanRunResult(
+            consan=CheckResult(
+                sanitizer="consan", state=ExecutionState.RAN, verdict=consan_verdict
+            ),
+            waitcheck_preflight=CheckResult(
+                sanitizer="waitcheck_preflight",
+                state=ExecutionState.RAN,
+                verdict=Verdict.PASS,
+            ),
+        )
+
+    monkeypatch.setattr(pipeline, "run_consan", _fake_run_consan)
+    recipe = _write_kernel_consan_recipe(tmp_path)
+    report_path = execute_sanitizer_run(recipe, output_dir=tmp_path / "out")
+    report = read_report(report_path)
+
+    assert captured.get("command") == (tmp_path / "loaders" / "consan_app").resolve()
+    target = captured.get("target")
+    assert target is not None
+    assert target.name == "gemm_NT_M128_N128_K128"
+    consan_checks = [check for check in report.checks if check.sanitizer == "consan"]
+    assert consan_checks and consan_checks[0].verdict is consan_verdict
+    assert report.overall_verdict is consan_verdict
 
 
 def test_verdict_baselines_fixture_present() -> None:
