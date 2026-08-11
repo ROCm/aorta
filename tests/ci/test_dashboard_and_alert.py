@@ -264,7 +264,7 @@ def test_dashboard_metric_trends_survive_a_missing_step_time():
     assert "<svg" in html
     assert "Trend charts need at least two nightly runs" not in html
     # The step-time column still has nothing to chart, so it stays collapsed.
-    assert "trend (step ms)" not in html
+    assert "step time history" not in html
 
 
 def test_dashboard_groups_cells_under_their_workload():
@@ -290,7 +290,7 @@ def test_dashboard_omits_trend_column_without_history():
                                "summary": {"decode_latency_ms": 12.5}}}],
                  total=1, record=1)
     one = gen_dashboard.build_dashboard_html([r])
-    assert "trend (step ms)" not in one
+    assert "step time history" not in one
 
     r2 = _results("2026-07-31T00:00:00Z",
                   [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
@@ -320,7 +320,7 @@ def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
     html = gen_dashboard.build_dashboard_html(
         [doc("2026-07-30T00:00:00Z", True), doc("2026-07-31T00:00:00Z", False)])
     assert "1.0 ms" not in html
-    assert "trend (step ms)" not in html
+    assert "step time history" not in html
 
 
 def test_dashboard_rejects_values_it_cannot_render():

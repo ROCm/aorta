@@ -257,19 +257,25 @@ _ENGINEER_HIDDEN_METRICS = frozenset({
     "local_world_size",
     "node_count",
     "parameter_count",
-    "corruption_details_omitted",
 })
 
 
-def _policy_label(name: str) -> str:
-    """Plain-language grading rule for the detailed metrics table."""
-    policy = _metric_policy(name)
+def _grading_rule_label(entry: dict[str, Any], name: str) -> str:
+    """Plain-language rule for one metric in this cell's detailed table.
+
+    Uses the policy recorded in ``entry["deltas"]`` from ``compare_to_baseline``
+    when present; otherwise the metric was not gated for this run.
+    """
+    delta = ((entry.get("deltas") or {}).get("metrics") or {}).get(name) or {}
+    policy = delta.get("policy")
     if policy == "equal":
         return "must match baseline"
     if policy == "min":
         return "higher is better"
     if policy == "max":
         return "lower is better"
+    if policy:
+        return str(policy)
     return "tracked only (not gated)"
 
 
@@ -666,7 +672,7 @@ def _metric_rows(
         )
         out.append(
             f"<tr><td class='mono'>{_esc(m)}</td>"
-            f"<td class='center muted'>{_esc(_policy_label(m))}</td>"
+            f"<td class='center muted'>{_esc(_grading_rule_label(entry, m))}</td>"
             f"<td class='num'>{_esc(val)}</td>{trend}</tr>"
         )
     return "".join(out)
@@ -1570,11 +1576,22 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   </div>
 <script>
 (function () {{
-  var hash = location.hash;
-  if (hash) {{
+  function openFromHash() {{
+    var hash = location.hash;
+    if (!hash) return;
     var target = document.querySelector(hash);
-    if (target && target.tagName === "DETAILS") target.open = true;
+    if (!target) return;
+    if (target.tagName === "DETAILS") {{
+      target.open = true;
+      return;
+    }}
+    if (target.id && target.id.indexOf("wl-") === 0) {{
+      var repro = document.getElementById("repro-" + target.id.slice(3));
+      if (repro && repro.tagName === "DETAILS") repro.open = true;
+    }}
   }}
+  openFromHash();
+  window.addEventListener("hashchange", openFromHash);
 }})();
 (function () {{
   var bar = document.getElementById("toolbar");
