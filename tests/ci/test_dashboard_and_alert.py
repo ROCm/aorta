@@ -885,6 +885,22 @@ def test_headline_checksum_shows_match_when_comparison_confirms():
     assert "logits checksum: match ✓" in html
 
 
+def test_headline_checksum_no_match_on_float_equality_when_harness_failed():
+    """Distinct int64 checksums can round to the same float; trust verdict, not ==."""
+    collided = 9007199254740992.0  # 2**53 — float equality hides int64 differences
+    entry = {"entry": "inference_offline", "cell": "baseline-local",
+             "verdict": "fail",
+             "reasons": ["metric 'logits_checksum' != expected 9007199254740993"],
+             "metrics": {"mean_step_time_ms": 4.0,
+                         "summary": {"logits_checksum": collided}},
+             "deltas": {"metrics": {"logits_checksum": {
+                 "observed": collided, "policy": "equal", "value": collided}}}}
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", [entry], total=1, fail=1)])
+    assert "logits checksum: mismatch ✗" in html
+    assert "logits checksum: match ✓" not in html
+
+
 def test_change_summary_reports_correctness_counter_without_pct_gate():
     runs = [
         _run(3, [_cell("race", "smoke", summary={"layer_checksum_mismatches": 0})],

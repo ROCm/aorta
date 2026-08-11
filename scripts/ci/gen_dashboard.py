@@ -176,28 +176,35 @@ def _is_dashboard_performance_metric(name: str) -> bool:
     return name in _METRIC_UNITS or name in _HARNESS_METRICS
 
 
+def _checksum_metric_failed(entry: dict[str, Any], name: str) -> bool:
+    """True when the harness reported this checksum metric failed comparison."""
+    needle = name.replace("_", " ")
+    for reason in entry.get("reasons") or []:
+        text = str(reason)
+        lower = text.lower()
+        if name in text or needle in text or "checksum" in lower:
+            if "!=" in text or "expected" in lower or "mismatch" in lower:
+                return True
+    return False
+
+
 def _checksum_headline(name: str, raw: Any, entry: dict[str, Any]) -> str:
-    """Headline for checksum metrics — neutral unless comparison confirms match."""
+    """Headline for checksum metrics — neutral unless the harness confirms match.
+
+    Checksums are serialized as floats in nightly JSON; ``observed == expected``
+    is unsafe for large int64 checksums that can collide after rounding. Trust
+    the entry verdict and failure reasons from ``compare_to_baseline`` instead.
+    """
     label = name.replace("_", " ")
     if not _isnum(raw):
         return f"{label}: —"
+    verdict = str(entry.get("verdict", ""))
     deltas = entry.get("deltas") or {}
     metric_delta = (deltas.get("metrics") or {}).get(name)
-    if metric_delta:
-        policy = metric_delta.get("policy")
-        expected = metric_delta.get("value")
-        observed = metric_delta.get("observed", raw)
-        if policy == "equal" and expected is not None:
-            if observed == expected:
-                return f"{label}: match ✓"
-            return f"{label}: mismatch ✗"
-    verdict = str(entry.get("verdict", ""))
-    if verdict == "fail":
-        needle = name.replace("_", " ")
-        for reason in entry.get("reasons") or []:
-            text = str(reason).lower()
-            if name in text or needle in text or "checksum" in text:
-                return f"{label}: mismatch ✗"
+    if verdict == "fail" and _checksum_metric_failed(entry, name):
+        return f"{label}: mismatch ✗"
+    if verdict == "pass" and metric_delta and metric_delta.get("policy") == "equal":
+        return f"{label}: match ✓"
     return f"{label}: captured ({_fmt_num(raw)})"
 
 
