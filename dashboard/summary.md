@@ -1,10 +1,8 @@
 # Sanitizers Nightly · gfx950
 
-> ⚠️ **Stale** — latest sanitizer nightly run `31511121124` did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/31511121124)
+Run `2026-08-11-31513370892` · commit `d80f57250f7f` · 2026-08-11
 
-Run `2026-08-11-31511121124` · commit `fc0a3ff54748` · 2026-08-11
-
-❌ **FAILED** — run gate failed its comparator check
+✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
 Observed `WARN` or `FAIL` verdicts may be expected positive-control outcomes. Baseline status is the regression-health signal.
 
@@ -55,14 +53,25 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=38186368 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=16924752 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
 
 </details>
+
+## Informational · caller-supplied code objects (non-gating)
+
+Experimental ConSan runs over caller-supplied kernels/objects (`source.consan_command`, #347). These do **not** affect the gate; the table reports each case's observed verdict and reason for this run.
+
+| Recipe | Sanitizer | Verdict | Reason | ConSan preflight |
+|---|---|---|---|---|
+| `consan-gemm` | `consan` | `error` | combined_hook_timeout | `error` |
+| `consan-lds-dispatch` | `consan` | `error` | combined_hook_exit_86 | `error` |
+| `consan-tiny` | `consan` | `error` | combined_hook_exit_86 | `error` |
 
 ## History / trend
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-08-11-31513370892 | `d80f57250f7f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-11-31511121124 | `fc0a3ff54748` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Failed |
 | 2026-08-11-31508140809 | `1663ad70a9a2` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Failed |
 | 2026-08-11-31490825323 | `d1ba9de1aea2` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
