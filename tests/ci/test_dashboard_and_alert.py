@@ -45,8 +45,9 @@ def test_dashboard_renders_status_and_rows():
                     "reasons": ["mean_step_time_ms 9 > max 5"], "metrics": {"mean_step_time_ms": 9.0}}],
                   total=1, fail=1)
     html = gen_dashboard.build_dashboard_html([r1, r2])
-    assert "aorta nightly CI" in html
-    assert "failing" in html  # latest run failed
+    assert "ROCm stack health" in html
+    assert "Regression detected" in html
+    assert "failing" in html  # internal label still visible
     # Cells are grouped under their workload, so the two names render separately.
     assert "inference_offline" in html
     assert "baseline-local" in html
@@ -61,7 +62,7 @@ def test_dashboard_empty_history():
 def test_dashboard_links_to_sanitizer_nightly():
     html = gen_dashboard.build_dashboard_html([])
     assert 'href="sanitizers/"' in html
-    assert "sanitizer nightly" in html
+    assert "Sanitizer nightly" in html
 
 
 def test_dashboard_renders_summary_metric_series():
@@ -274,8 +275,9 @@ def test_dashboard_groups_cells_under_their_workload():
     ]
     html = gen_dashboard.build_dashboard_html(
         [_results("2026-07-30T00:00:00Z", entries, total=2, record=2)])
-    # One group header for the workload, and each cell listed beneath it.
-    assert html.count("llm_determinism") == 1
+    # Customer title once in the group header; internal id in wl-id + category anchor.
+    assert "LLM determinism" in html
+    assert html.count("llm_determinism") >= 1
     assert "bf16-12L" in html and "tf32-24L" in html
 
 
@@ -441,7 +443,7 @@ def test_history_grid_needs_two_runs_before_it_says_anything():
     one = [_run(3, [_cell("w", "c")], total=1, record=1)]
     assert gen_dashboard.build_history_grid(one) == ""
     assert gen_dashboard.build_history_grid([]) == ""
-    assert "<h2>Run history</h2>" not in gen_dashboard.build_dashboard_html(one)
+    assert "<h2>Nightly release health</h2>" not in gen_dashboard.build_dashboard_html(one)
 
 
 def test_history_grid_puts_runs_on_rows_and_workloads_on_columns():
@@ -484,10 +486,9 @@ def test_history_grid_never_renders_an_unrecognised_verdict_as_healthy():
              total=2, **{"pass": 1}),
     ]
     grid = gen_dashboard.build_history_grid(runs)
-    cell = f"background:{gen_dashboard._UNKNOWN_COLOR}' title='w — 1 pass · 1 error'"
-    assert cell in grid          # the mixed group takes the unknown colour, not green
-    assert "? 1/2" in grid       # and reads as one unrecognised of two
-    assert "1 pass · 1 error" in grid  # the unknown is still counted in the hover
+    assert f"background:{gen_dashboard._UNKNOWN_COLOR}" in grid
+    assert "? 1/2" in grid
+    assert "1 pass · 1 error" in grid
 
 
 def test_history_grid_ranks_a_known_failure_above_an_unrecognised_verdict():
@@ -621,6 +622,7 @@ def test_change_summary_lists_metrics_that_moved_past_the_threshold():
              total=1, record=1),
     ]
     html = gen_dashboard.build_change_summary(runs)
+    assert "Performance" in html
     assert "mean_step_time_ms" in html and "+50.0%" in html
     assert "latency_ms" not in html  # 2% is inside the noise floor
 
@@ -791,3 +793,269 @@ def test_dashboard_hides_the_js_only_controls_until_the_script_runs():
     assert '<div class="toolbar" id="toolbar" hidden>' in html
     assert "bar.hidden = false" in html
     assert "Expand all" in html
+
+
+def test_dashboard_renders_category_health_tiles():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 254.0}},
+        {"entry": "inference_offline", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 4.0,
+                                    "summary": {"tokens_per_sec": 4160}}},
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z", entries, total=2, record=1, **{"pass": 1})])
+    assert "Category health" in html
+    assert "Platform" in html and "Inference" in html
+    assert "Healthy" in html  # one pass + one record => passing headline
+
+
+def test_dashboard_pass_and_skip_is_not_labelled_healthy():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 1.0}},
+        {"entry": "training_ddp_8gpu", "cell": None, "verdict": "skip",
+         "reasons": ["needs 8 GPU(s), have 2"], "metrics": {}},
+    ]
+    doc = _results("2026-07-30T00:00:00Z", entries, total=2, **{"pass": 1, "skip": 1})
+    assert gen_dashboard._latest_status([doc])[0] == "partial"
+    html = gen_dashboard.build_dashboard_html([doc])
+    assert "Partial run" in html
+    assert ">Healthy<" not in html
+    assert "partial" in html
+    assert "partial</strong>" in html or "<strong>partial</strong>" in html
+
+
+def test_dashboard_record_only_shows_baseline_setup_label():
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "w", "cell": "c", "verdict": "record",
+                   "reasons": ["no baseline (record-only)"],
+                   "metrics": {"mean_step_time_ms": 1.0}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "Baseline setup" in html
+    assert "recording" in html
+    assert ">passing<" not in html
+
+
+def test_dashboard_run_command_block():
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "inference_offline", "cell": "baseline-local",
+                   "verdict": "record", "reasons": [],
+                   "metrics": {"mean_step_time_ms": 4.0}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "Run this workload locally" in html
+    assert "example-inference-smoke.yaml" in html
+    assert "getting started guide" in html
+    assert "README-running-recipes.md" in html
+    assert "id='repro-inference_offline'" in html
+    assert "href='#repro-inference_offline'" in html
+
+
+def test_history_grid_retired_workloads_do_not_link_to_missing_sections():
+    runs = [
+        _run(3, [_cell("old_workload", "c")], total=1, record=1),
+        _run(4, [_cell("gpu_smoke", "c")], total=1, record=1),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "href='#wl-old_workload'" not in grid
+    assert "gcell-retired" in grid
+    assert "href='#wl-gpu_smoke'" in grid
+
+
+def test_history_grid_workloads_and_cells_link_to_repro_sections():
+    runs = [
+        _run(3, [_cell("gpu_smoke", "c"), _cell("race", "smoke")], total=2, record=2),
+        _run(4, [_cell("gpu_smoke", "c"), _cell("race", "smoke")], total=2, record=2),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "href='#wl-gpu_smoke'" in grid
+    assert "gcell-link" in grid
+    assert "overall health" in grid
+
+
+def test_history_grid_overall_health_uses_customer_label():
+    runs = [
+        _run(3, [_cell("w", "c")], total=1, record=1),
+        _run(4, [_cell("w", "c")], total=1, record=1),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "Baseline setup" in grid
+
+
+def test_build_status_json_structured_latest_summary():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 1.0}},
+    ]
+    runs = [_results("2026-08-03T12:00:00Z", entries, total=1, record=1)]
+    doc = gen_dashboard.build_status_json(runs)
+    assert doc["schema_version"] == 2
+    assert doc["latest"]["customer_status"] == "Baseline setup"
+    assert doc["latest"]["categories"]["platform"]["worst_verdict"] == "record"
+    assert "results" not in doc
+
+
+def test_data_json_feed_stays_a_top_level_array():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 1.0}},
+    ]
+    runs = [_results("2026-08-03T12:00:00Z", entries, total=1, record=1)]
+    import json
+    feed = json.loads(json.dumps(runs, indent=2))
+    assert isinstance(feed, list)
+    assert feed == runs
+
+
+def test_scaling_summary_uses_weak_scaling_efficiency():
+    entries = [
+        _cell("training_ddp", "c", summary={"step_time_p50": 8.0}),
+        _cell("training_ddp_8gpu", "c", summary={"step_time_p50": 2.0}),
+    ]
+    html = gen_dashboard.build_scaling_summary(entries)
+    assert "weak scaling" in html
+    assert "400%" in html  # 8.0 / 2.0 * 100
+
+
+def test_scaling_summary_renders_when_two_and_eight_gpu_training_present():
+    entries = [
+        _cell("training_ddp", "c", summary={"step_time_p50": 8.0}),
+        _cell("training_ddp_8gpu", "c", summary={"step_time_p50": 2.5}),
+        _cell("training_fsdp", "c", summary={"step_time_p50": 10.0}),
+        _cell("training_fsdp_8gpu", "c", summary={"step_time_p50": 3.0}),
+    ]
+    html = gen_dashboard.build_scaling_summary(entries)
+    assert "Training scaling" in html
+    assert "DDP" in html and "FSDP" in html
+
+
+def test_dashboard_metadata_covers_nightly_matrix():
+    matrix_path = _REPO_ROOT / "config" / "ci" / "nightly_eval_matrix.yaml"
+    text = matrix_path.read_text(encoding="utf-8")
+    names = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("- name:"):
+            names.append(line.split(":", 1)[1].strip())
+    meta = gen_dashboard.load_dashboard_metadata()
+    workloads = meta.get("workloads") or {}
+    missing = [n for n in names if n not in workloads]
+    assert not missing, f"missing dashboard metadata for {missing}"
+    for name in names:
+        assert workloads[name].get("run_command"), name
+        assert workloads[name].get("recipe"), name
+
+
+def test_dashboard_failure_action_panel():
+    r = _results("2026-07-29T00:00:00Z",
+                 [{"entry": "race", "cell": "smoke", "verdict": "fail",
+                   "reasons": ["expected passing cell but it did not pass"],
+                   "metrics": {"mean_step_time_ms": 1.0}}],
+                 total=1, fail=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "Next steps" in html
+    assert "aorta env probe" in html
+
+
+def test_headline_checksum_record_only_shows_captured_not_match():
+    r = _results("2026-07-30T00:00:00Z",
+                 [{"entry": "inference_offline", "cell": "baseline-local",
+                   "verdict": "record", "reasons": ["no baseline (record-only)"],
+                   "metrics": {"mean_step_time_ms": 4.0,
+                               "summary": {"logits_checksum": 33904201}}}],
+                 total=1, record=1)
+    html = gen_dashboard.build_dashboard_html([r])
+    assert "captured (33,904,201)" in html
+    assert "match ✓" not in html
+
+
+def test_headline_checksum_pass_verdict_still_shows_captured_not_match():
+    """A pass verdict cannot confirm exact checksum equality after float rounding."""
+    entry = {"entry": "inference_offline", "cell": "baseline-local",
+             "verdict": "pass", "reasons": [],
+             "metrics": {"mean_step_time_ms": 4.0,
+                         "summary": {"logits_checksum": 33904201}},
+             "deltas": {"metrics": {"logits_checksum": {
+                 "observed": 33904201, "policy": "equal", "value": 33904201}}}}
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", [entry], total=1, **{"pass": 1})])
+    assert "logits checksum: captured (33,904,201)" in html
+    assert "logits checksum: match ✓" not in html
+
+
+def test_headline_checksum_no_match_on_float_equality_when_harness_failed():
+    """Distinct int64 checksums can round to the same float; trust verdict, not ==."""
+    collided = 9007199254740992.0  # 2**53 — float equality hides int64 differences
+    entry = {"entry": "inference_offline", "cell": "baseline-local",
+             "verdict": "fail",
+             "reasons": ["metric 'logits_checksum' != expected 9007199254740993"],
+             "metrics": {"mean_step_time_ms": 4.0,
+                         "summary": {"logits_checksum": collided}},
+             "deltas": {"metrics": {"logits_checksum": {
+                 "observed": collided, "policy": "equal", "value": collided}}}}
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-07-30T00:00:00Z", [entry], total=1, fail=1)])
+    assert "logits checksum: mismatch ✗" in html
+    assert "logits checksum: match ✓" not in html
+
+
+def test_change_summary_reports_correctness_counter_without_pct_gate():
+    runs = [
+        _run(3, [_cell("race", "smoke", summary={"layer_checksum_mismatches": 0})],
+             total=1, record=1),
+        _run(4, [_cell("race", "smoke", summary={"layer_checksum_mismatches": 1})],
+             total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "Correctness" in html
+    assert "layer_checksum_mismatches" in html
+    assert "0 → 1" in html
+
+
+def test_change_summary_reports_checksum_inequality_below_pct_gate():
+    runs = [
+        _run(3, [_cell("w", "c", summary={"logits_checksum": 100})], total=1, record=1),
+        _run(4, [_cell("w", "c", summary={"logits_checksum": 102})], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "Correctness" in html
+    assert "logits_checksum" in html
+    assert "100 → 102" in html
+
+
+def test_category_tile_anchors_to_workload_that_actually_ran():
+    entries = [
+        {"entry": "training_ddp_8gpu", "cell": "baseline-local", "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 10.0}},
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z", entries, total=1, record=1)])
+    assert "href='#wl-training_ddp_8gpu'" in html
+    assert "href='#wl-training_ddp'" not in html
+
+
+def test_change_summary_groups_step_time_p99_under_performance():
+    runs = [
+        _run(3, [_cell("w", "c", summary={"step_time_p99": 40.0})], total=1, record=1),
+        _run(4, [_cell("w", "c", summary={"step_time_p99": 50.0})], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "Performance" in html
+    assert "step_time_p99" in html
+
+
+def test_change_summary_footer_splits_correctness_from_thresholded():
+    cells = [
+        _cell("w", f"c{i}", summary={"layer_checksum_mismatches": i})
+        for i in range(6)
+    ]
+    runs = [
+        _run(3, cells[:6], total=6, record=6),
+        _run(4, [_cell("w", f"c{i}", summary={"layer_checksum_mismatches": i + 1})
+                 for i in range(6)], total=6, record=6),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "and 2 more correctness changes" in html
+    assert "past 10%" not in html

@@ -27,9 +27,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import eval_lib  # for metric_policy display
     _metric_policy = eval_lib.metric_policy
+    _is_correctness_metric = eval_lib.is_correctness_metric
+    _is_performance_metric = eval_lib.is_performance_metric
 except Exception:  # pragma: no cover - dashboard must render even if import fails
     def _metric_policy(_name: str):  # type: ignore
         return None
+
+    def _is_correctness_metric(_name: str) -> bool:  # type: ignore
+        return _name.endswith("checksum")
+
+    def _is_performance_metric(name: str) -> bool:  # type: ignore
+        return name in _METRIC_UNITS and name not in (
+            "logits_checksum", "output_checksum", "checksum"
+        )
 
 # Links back to the source of truth. This dashboard only ever describes this
 # repo's nightly run, so the slug is fixed rather than plumbed through.
@@ -103,6 +113,348 @@ _TOOLCHAIN_FIELDS = (
     ("rocm", "ROCm"),
     ("hip", "HIP"),
 )
+
+try:
+    from dashboard_metadata import DASHBOARD_METADATA as _DEFAULT_METADATA
+except ImportError:  # pragma: no cover
+    _DEFAULT_METADATA: dict[str, Any] = {
+        "categories": {}, "workloads": {},
+    }
+
+# Plain-language headline for each internal _latest_status() label.
+_CUSTOMER_STATUS = {
+    "unknown": "Unknown",
+    "empty": "No data",
+    "unrecognised": "Unrecognised verdict",
+    "failing": "Regression detected",
+    "passing": "Healthy",
+    "partial": "Partial run",
+    "recording": "Baseline setup",
+    "skipping": "Incomplete run",
+}
+
+
+def load_dashboard_metadata() -> dict[str, Any]:
+    """Load workload/category metadata for the dashboard (pure, cached per process)."""
+    if not hasattr(load_dashboard_metadata, "_cache"):
+        load_dashboard_metadata._cache = None  # type: ignore[attr-defined]
+    if load_dashboard_metadata._cache is not None:  # type: ignore[attr-defined]
+        return load_dashboard_metadata._cache  # type: ignore[attr-defined]
+    load_dashboard_metadata._cache = dict(_DEFAULT_METADATA)  # type: ignore[attr-defined]
+    return load_dashboard_metadata._cache  # type: ignore[attr-defined]
+
+
+def _customer_status_label(status: str) -> str:
+    return _CUSTOMER_STATUS.get(status, status.replace("_", " ").title())
+
+
+def _workload_meta(entry_name: str) -> dict[str, Any]:
+    return (load_dashboard_metadata().get("workloads") or {}).get(entry_name) or {}
+
+
+# Correctness counters: any night-over-night change is significant.
+_CORRECTNESS_COUNTERS = frozenset({
+    "ranks_with_divergence",
+    "layer_checksum_mismatches",
+})
+
+
+def _is_correctness_change_metric(name: str) -> bool:
+    """True when any value change in this metric should surface in Correctness."""
+    return _is_correctness_metric(name) or name in _CORRECTNESS_COUNTERS
+
+
+def _is_dashboard_performance_metric(name: str) -> bool:
+    """True for timing/throughput metrics the dashboard treats as performance.
+
+    Uses the dashboard's own unit map (and harness timings), not the eval-lib
+    gating allowlist — step_time_p50/p99 and mean_step_time_ms are headline
+    metrics here but are not eval_lib performance gates.
+    """
+    if _is_correctness_change_metric(name):
+        return False
+    return name in _METRIC_UNITS or name in _HARNESS_METRICS
+
+
+def _checksum_metric_failed(entry: dict[str, Any], name: str) -> bool:
+    """True when the harness reported this checksum metric failed comparison."""
+    needle = name.replace("_", " ")
+    for reason in entry.get("reasons") or []:
+        text = str(reason)
+        lower = text.lower()
+        if name in text or needle in text or "checksum" in lower:
+            if "!=" in text or "expected" in lower or "mismatch" in lower:
+                return True
+    return False
+
+
+def _checksum_headline(name: str, raw: Any, entry: dict[str, Any]) -> str:
+    """Headline for checksum metrics — neutral unless the harness reports failure.
+
+    Checksums are serialized as floats in nightly JSON; both ``observed == expected``
+    and a ``pass`` verdict can be wrong for large int64 values that collide after
+    rounding. Only surface a definite mismatch from failure reasons; otherwise
+    show the captured value.
+    """
+    label = name.replace("_", " ")
+    if not _isnum(raw):
+        return f"{label}: —"
+    if str(entry.get("verdict", "")) == "fail" and _checksum_metric_failed(entry, name):
+        return f"{label}: mismatch ✗"
+    return f"{label}: captured ({_fmt_num(raw)})"
+
+
+def _format_headline_metric(
+    name: str, raw: Any, entry: dict[str, Any] | None = None,
+) -> str:
+    """One headline metric for customer view."""
+    entry = entry or {}
+    if name in _CORRECTNESS_COUNTERS:
+        if _isnum(raw) and float(raw) == 0:
+            return f"{name.replace('_', ' ')}: 0 ✓"
+        if _isnum(raw):
+            return f"{name.replace('_', ' ')}: {_fmt_num(raw)} ✗"
+        return f"{name.replace('_', ' ')}: —"
+    if name in ("logits_checksum", "output_checksum", "checksum"):
+        return _checksum_headline(name, raw, entry)
+    unit = _METRIC_UNITS.get(name, "")
+    if name == "mean_step_time_ms":
+        return f"step time: {_fmt_ms(raw)}"
+    label = name.replace("_", " ")
+    if _isnum(raw):
+        val = f"{_fmt_num(raw)} {unit}".strip()
+        return f"{label}: {val}"
+    return f"{label}: —"
+
+
+def _headline_block(entry: dict[str, Any], entry_name: str) -> str:
+    meta = _workload_meta(entry_name)
+    names = meta.get("headline_metrics") or []
+    if not names:
+        return ""
+    summary = ((entry.get("metrics") or {}).get("summary") or {})
+    metrics = entry.get("metrics") or {}
+    parts = []
+    for name in names:
+        if name in _HARNESS_METRICS:
+            raw = metrics.get(name)
+        else:
+            raw = summary.get(name)
+        parts.append(_format_headline_metric(str(name), raw, entry))
+    if not parts:
+        return ""
+    return (
+        "<ul class='headlines'>"
+        + "".join(f"<li>{_esc(p)}</li>" for p in parts)
+        + "</ul>"
+    )
+
+
+def _run_command_block(entry_name: str) -> str:
+    """Step-by-step instructions to reproduce a workload outside CI."""
+    meta = _workload_meta(entry_name)
+    cmd = str(meta.get("run_command") or "")
+    if not cmd:
+        return ""
+    recipe = str(meta.get("recipe") or "")
+    min_gpus = meta.get("min_gpus")
+    if not _isnum(min_gpus):
+        min_gpus = 8 if entry_name.endswith("_8gpu") else 1
+    min_gpus = int(min_gpus)
+    gpu_note = (
+        f"At least {min_gpus} AMD GPU(s) visible to PyTorch"
+        if min_gpus > 1 else "One AMD GPU visible to PyTorch"
+    )
+    recipe_line = ""
+    if recipe:
+        recipe_line = (
+            f"<p class='repro-note muted'>Recipe: "
+            f"<a class='mono' href='https://github.com/{_REPO}/blob/main/{_esc(recipe)}'>"
+            f"{_esc(recipe)}</a></p>"
+        )
+    return (
+        f"<div class='repro-panel' id='repro-{_esc(entry_name)}'>"
+        f"<p class='repro-kicker muted'>Run this workload locally</p>"
+        f"<ol class='repro-steps'>"
+        f"<li><strong>Requirements:</strong> {gpu_note}; ROCm + PyTorch installed "
+        f"(match the stack versions in the header when comparing numbers).</li>"
+        f"<li><strong>Install AORTA</strong> — follow the "
+        f"<a href='docs/'>getting started guide</a> and clone this repository.</li>"
+        f"<li><strong>Run from the repo root:</strong>"
+        f"<pre class='mono repro-cmd'>{_esc(cmd)}</pre></li>"
+        f"<li><strong>Distributed workloads:</strong> see "
+        f"<a href='https://github.com/{_REPO}/blob/main/recipes/README-running-recipes.md'>"
+        f"recipes/README-running-recipes.md</a> for torchrun and multi-node notes.</li>"
+        f"</ol>{recipe_line}</div>"
+    )
+
+
+def _category_statuses(
+    latest_entries: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Structured category health for ``status.json`` consumers."""
+    meta = load_dashboard_metadata()
+    categories = meta.get("categories") or {}
+    by_entry: dict[str, list[dict[str, Any]]] = {}
+    for e in latest_entries:
+        by_entry.setdefault(str(e.get("entry")), []).append(e)
+    out: dict[str, dict[str, Any]] = {}
+    for cat_id, cat in categories.items():
+        workloads = cat.get("workloads") or []
+        group: list[dict[str, Any]] = []
+        for wl in workloads:
+            group.extend(by_entry.get(str(wl), []))
+        if not group:
+            continue
+        counts = _tally(group)
+        worst = _worst_verdict(counts)
+        out[str(cat_id)] = {
+            "label": str(cat.get("label") or cat_id),
+            "worst_verdict": worst,
+            "counts": dict(counts),
+            "workloads": [str(w) for w in workloads if by_entry.get(str(w))],
+        }
+    return out
+
+
+def _headline_metrics_for_entries(
+    latest_entries: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Latest headline metric values keyed by ``entry::cell``."""
+    out: dict[str, dict[str, Any]] = {}
+    for e in latest_entries:
+        entry_name = str(e.get("entry") or "")
+        cell = e.get("cell")
+        key = f"{entry_name}::{cell}" if cell else entry_name
+        metrics: dict[str, Any] = {}
+        meta = _workload_meta(entry_name)
+        for name in meta.get("headline_metrics") or []:
+            raw = ((e.get("metrics") or {}).get("summary") or {}).get(name)
+            if name in _HARNESS_METRICS:
+                raw = (e.get("metrics") or {}).get(name, raw)
+            if _isnum(raw):
+                metrics[str(name)] = raw
+        if metrics:
+            out[key] = metrics
+    return out
+
+
+def build_status_json(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Structured latest-night summary for embeds (separate from the history feed)."""
+    latest = results[-1] if results else None
+    status, _ = _latest_status(results)
+    latest_entries = list((latest or {}).get("entries") or [])
+    latest_block: dict[str, Any] = {
+        "status": status,
+        "customer_status": _customer_status_label(status),
+        "generated_at": (latest or {}).get("generated_at"),
+        "build": (latest or {}).get("build") or {},
+        "summary": (latest or {}).get("summary") or {},
+        "categories": _category_statuses(latest_entries),
+        "headline_metrics": _headline_metrics_for_entries(latest_entries),
+    }
+    return {
+        "schema_version": 2,
+        "latest": latest_block,
+    }
+
+
+def build_scaling_summary(latest_entries: list[dict[str, Any]]) -> str:
+    """2-GPU vs 8-GPU step-time scaling for training workloads."""
+    by_entry: dict[str, list[dict[str, Any]]] = {}
+    for e in latest_entries:
+        by_entry.setdefault(str(e.get("entry")), []).append(e)
+
+    def _step_p50(entry_name: str) -> float | None:
+        for e in by_entry.get(entry_name) or []:
+            raw = ((e.get("metrics") or {}).get("summary") or {}).get("step_time_p50")
+            if _isnum(raw):
+                return float(raw)
+        return None
+
+    pairs = (
+        ("training_ddp", "training_ddp_8gpu", "DDP"),
+        ("training_fsdp", "training_fsdp_8gpu", "FSDP"),
+    )
+    rows = []
+    for two_gpu, eight_gpu, label in pairs:
+        p50_2 = _step_p50(two_gpu)
+        p50_8 = _step_p50(eight_gpu)
+        if p50_2 is None or p50_8 is None:
+            continue
+        ratio = p50_8 / p50_2 if p50_2 else None
+        # Weak scaling: recipes keep the same per-rank batch, so global batch
+        # grows 4× from 2 to 8 GPUs and ideal step time stays flat.
+        efficiency = (p50_2 / p50_8 * 100.0) if p50_8 else None
+        eff_txt = f"{efficiency:.0f}%" if efficiency is not None else "—"
+        ratio_txt = f"{ratio:.2f}×" if ratio is not None else "—"
+        rows.append(
+            f"<tr><td>{_esc(label)}</td>"
+            f"<td class='num'>{_esc(_fmt_ms(p50_2))}</td>"
+            f"<td class='num'>{_esc(_fmt_ms(p50_8))}</td>"
+            f"<td class='num'>{_esc(ratio_txt)}</td>"
+            f"<td class='num'>{_esc(eff_txt)}</td></tr>"
+        )
+    if not rows:
+        return ""
+    return (
+        "<h2>Training scaling (2 → 8 GPU)</h2>"
+        "<p class='muted'>Reference step_time_p50 from the latest nightly. "
+        "Recipes use the same per-rank batch at 2 and 8 GPUs (weak scaling), so "
+        "ideal step time is flat. Efficiency is "
+        "<span class='mono'>p50_2 / p50_8</span> as a percentage.</p>"
+        "<div class='tablewrap'><table class='scaling'>"
+        "<thead><tr><th>strategy</th><th class='num'>2 GPU p50</th>"
+        "<th class='num'>8 GPU p50</th><th class='num'>slowdown</th>"
+        "<th class='num'>efficiency</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def build_category_summary(
+    latest_entries: list[dict[str, Any]],
+) -> str:
+    """Four category tiles summarising worst verdict per use-case area."""
+    meta = load_dashboard_metadata()
+    categories = meta.get("categories") or {}
+    if not categories:
+        return ""
+
+    by_entry: dict[str, list[dict[str, Any]]] = {}
+    for e in latest_entries:
+        by_entry.setdefault(str(e.get("entry")), []).append(e)
+
+    tiles = []
+    for cat_id, cat in categories.items():
+        label = str(cat.get("label") or cat_id)
+        workloads = cat.get("workloads") or []
+        group: list[dict[str, Any]] = []
+        for wl in workloads:
+            group.extend(by_entry.get(str(wl), []))
+        if not group:
+            continue
+        counts = _tally(group)
+        worst = _worst_verdict(counts)
+        color = _VERDICT_COLOR.get(worst, _UNKNOWN_COLOR)
+        glyph = _VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH)
+        tally_txt = _tally_text(counts)
+        present = [str(wl) for wl in workloads if by_entry.get(str(wl))]
+        anchor = f"wl-{_esc(present[0])}" if present else ""
+        tiles.append(
+            f"<a class='cat-tile' href='#{anchor}' style='border-left-color:{color}'>"
+            f"<div class='cat-k'>{_esc(label)}</div>"
+            f"<div class='cat-v'>{glyph} {_esc(worst or '—')}</div>"
+            f"<div class='cat-sub muted'>{_esc(tally_txt)}</div>"
+            f"</a>"
+        )
+    if not tiles:
+        return ""
+    return (
+        "<h2>Category health</h2>"
+        "<p class='muted'>Worst verdict in each area from tonight's run. "
+        "Click a tile to jump to workloads.</p>"
+        f"<div class='cat-grid'>{''.join(tiles)}</div>"
+    )
 
 
 def _isnum(v: Any) -> bool:
@@ -209,6 +561,10 @@ def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
     if total > sum(_count(s.get(v)) for v in _VERDICT_ORDER):
         return "unrecognised", _UNKNOWN_COLOR
     if _count(s.get("pass")):
+        # A mix of pass and skip is not a fully healthy run — some workloads
+        # never executed (e.g. not enough GPUs for the 8-GPU matrix entries).
+        if _count(s.get("skip")):
+            return "partial", _VERDICT_COLOR["record"]
         return "passing", _VERDICT_COLOR["pass"]
     if _count(s.get("record")):
         return "recording", _VERDICT_COLOR["record"]
@@ -392,9 +748,23 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
     if not ordered:
         return ""
 
-    head = "".join(
-        f"<th scope='col' class='wlcol' title='{_esc(n)}'>{_esc(n)}</th>" for n in ordered
-    )
+    active = set(newest)
+
+    def _wl_col_header(name: str) -> str:
+        title = str(_workload_meta(name).get("title") or name)
+        if name in active:
+            return (
+                f"<th scope='col' class='wlcol'>"
+                f"<a href='#wl-{_esc(name)}' title='{_esc(name)} — jump to workload'>"
+                f"{_esc(title)}</a></th>"
+            )
+        return (
+            f"<th scope='col' class='wlcol retired' "
+            f"title='{_esc(name)} — retired (no section below)'>"
+            f"{_esc(title)}</th>"
+        )
+
+    head = "".join(_wl_col_header(n) for n in ordered)
 
     newest_first = list(reversed(runs))
     rows = []
@@ -405,6 +775,7 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             by_entry.setdefault(str(e.get("entry")), []).append(e)
 
         status, color = _latest_status([doc])
+        customer_status = _customer_status_label(status)
         date = _fmt_timestamp(str(doc.get("generated_at") or "")).split(" ")[0] or "—"
         run_id = str(build.get("upstream_run_id") or "")
         when = (
@@ -445,32 +816,40 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             # leaves anyone who cannot separate red from green — or who is on a
             # touch screen with no hover — unable to read the row at all.
             breakdown = f"{name} — {_tally_text(counts)}"
-            # role='img' so the aria-label is actually exposed: a plain span has
-            # the implicit generic role, which has no accessible name, so a
-            # screen reader is free to ignore the label and announce only the
-            # glyph and count -- the least useful part for a mixed group.
-            cells.append(
-                f"<td class='gcell'><span class='dot' role='img' style='background:{bg}' "
-                f"title='{_esc(breakdown)}' aria-label='{_esc(breakdown)}'>"
-                f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span></td>"
+            dot = (
+                f"<span class='dot' role='img' style='background:{bg}' "
+                f"aria-label='{_esc(breakdown)}'>"
+                f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span>"
             )
+            if name in active:
+                cells.append(
+                    f"<td class='gcell'><a class='gcell-link' href='#wl-{_esc(name)}' "
+                    f"title='{_esc(breakdown)} — jump to workload'>{dot}</a></td>"
+                )
+            else:
+                cells.append(
+                    f"<td class='gcell'><span class='gcell-retired' "
+                    f"title='{_esc(breakdown)} (retired workload)'>{dot}</span></td>"
+                )
 
         rows.append(
             f"<tr><th scope='row' class='runcell'>{when}{flag}"
             f"<span class='runmeta'>{_esc(str(build.get('amd_aorta_version') or ''))}</span></th>"
-            f"<td class='center'><span class='badge sm' style='background:{color}'>"
-            f"{_esc(status)}</span></td>{''.join(cells)}</tr>"
+            f"<td class='center'><span class='badge sm' style='background:{color}' "
+            f"title='{_esc(status)}'>{_esc(customer_status)}</span></td>"
+            f"{''.join(cells)}</tr>"
         )
 
     return (
-        "<h2>Run history</h2>"
-        "<p class='muted'>Each row is one nightly run, newest first; each column is a "
-        "workload. A cell shows the worst verdict among that workload's results "
-        "(✓ pass · ✗ fail · ◆ record · ○ skip · ? unrecognised) and how many there were — "
-        "<span class='mono'>✗ 1/4</span> means one of four failed. Hover for the "
-        "full breakdown.</p>"
+        "<h2>Nightly release health</h2>"
+        "<p class='muted'>Each row is one nightly release (newest first). The "
+        "<strong>overall health</strong> column summarises that night's graded "
+        "verdicts; active workload columns link to reproduction steps below. "
+        "Retired columns (no longer in the latest matrix) are plain text. "
+        "Cell glyphs: ✓ pass · ✗ fail · ◆ record · ○ skip.</p>"
         "<div class='tablewrap'><table class='grid'>"
-        f"<thead><tr><th scope='col'>run</th><th scope='col' class='center'>status</th>"
+        f"<thead><tr><th scope='col'>release</th>"
+        f"<th scope='col' class='center'>overall health</th>"
         f"{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
     )
 
@@ -533,27 +912,69 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
             f"<li>no longer reported <span class='mono'>{_esc(_cell_label(prev_by[k]))}</span></li>"
         )
 
-    movers = []
+    movers_corr: list[tuple] = []
+    movers_perf: list[tuple] = []
+    movers_other: list[tuple] = []
     for k in sorted(set(prev_by) & set(latest_by)):
         before_m = _measurements(prev_by[k])
         after_m = _measurements(latest_by[k])
         for metric in sorted(set(before_m) & set(after_m)):
             b, a = before_m[metric], after_m[metric]
+            if b == a:
+                continue
+            if _is_correctness_change_metric(metric):
+                movers_corr.append((0, 0, k, metric, b, a, latest_by[k]))
+                continue
             if not b:  # a move from zero has no meaningful percentage
                 continue
             pct = (a - b) / abs(b) * 100.0
             if abs(pct) > _MOVE_PCT:
-                movers.append((abs(pct), pct, k, metric, b, a, latest_by[k]))
-    movers.sort(reverse=True)
-    for _, pct, _k, metric, b, a, entry in movers[:6]:
+                row = (abs(pct), pct, k, metric, b, a, latest_by[k])
+                if _is_dashboard_performance_metric(metric):
+                    movers_perf.append(row)
+                else:
+                    movers_other.append(row)
+    movers_corr.sort(key=lambda r: (r[5], r[4]), reverse=True)
+    movers_perf.sort(reverse=True)
+    movers_other.sort(reverse=True)
+
+    def _corr_mover_li(row: tuple) -> str:
+        _, _, _k, metric, b, a, entry = row
+        unit = _METRIC_UNITS.get(metric, "")
+        return (
+            f"<li class='corr'><span class='mono'>{_esc(_cell_label(entry))}</span> "
+            f"<span class='mono'>{_esc(metric)}</span> "
+            f"<span class='muted'>{_esc(_fmt_num(b))} → {_esc(_fmt_num(a))}"
+            f"{(' ' + _esc(unit)) if unit else ''}</span></li>"
+        )
+
+    def _mover_li(row: tuple, css: str) -> str:
+        _, pct, _k, metric, b, a, entry = row
         unit = _METRIC_UNITS.get(metric, "")
         arrow = "▲" if pct > 0 else "▼"
-        items.append(
-            f"<li><span class='mono'>{_esc(_cell_label(entry))}</span> "
+        return (
+            f"<li class='{css}'><span class='mono'>{_esc(_cell_label(entry))}</span> "
             f"<span class='mono'>{_esc(metric)}</span> {arrow} {pct:+.1f}% "
             f"<span class='muted'>{_esc(_fmt_num(b))} → {_esc(_fmt_num(a))}"
             f"{(' ' + _esc(unit)) if unit else ''}</span></li>"
         )
+
+    if movers_corr:
+        items.append("<li class='change-hdr corr'>Correctness</li>")
+        for row in movers_corr[:4]:
+            items.append(_corr_mover_li(row))
+    if movers_perf:
+        items.append("<li class='change-hdr perf'>Performance</li>")
+        for row in movers_perf[:4]:
+            items.append(_mover_li(row, "perf"))
+    for row in movers_other[:2]:
+        items.append(_mover_li(row, ""))
+
+    shown_corr = min(len(movers_corr), 4)
+    shown_perf = min(len(movers_perf), 4)
+    shown_other = min(len(movers_other), 2)
+    extra_corr = len(movers_corr) - shown_corr
+    extra_thresholded = (len(movers_perf) - shown_perf) + (len(movers_other) - shown_other)
 
     since = _fmt_timestamp(str(prev.get("generated_at") or "")).split(" ")[0]
     if not items:
@@ -562,11 +983,20 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
             f"metric changed by more than {_MOVE_PCT:.0f}%.</p>"
         )
     else:
-        extra = len(movers) - 6
+        more_parts: list[str] = []
+        if extra_corr:
+            more_parts.append(
+                f"and {extra_corr} more correctness change"
+                f"{'' if extra_corr == 1 else 's'}"
+            )
+        if extra_thresholded:
+            more_parts.append(
+                f"and {extra_thresholded} more metric"
+                f"{'' if extra_thresholded == 1 else 's'} past {_MOVE_PCT:.0f}%"
+            )
         more = (
-            f"<p class='muted'>and {extra} more metric"
-            f"{'' if extra == 1 else 's'} past {_MOVE_PCT:.0f}%</p>"
-            if extra > 0 else ""
+            "".join(f"<p class='muted'>{p}</p>" for p in more_parts)
+            if more_parts else ""
         )
         body = f"<ul class='changes'>{''.join(items)}</ul>{more}"
 
@@ -578,6 +1008,7 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
 def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     """Render the full dashboard HTML from the results history (pure)."""
     status, status_color = _latest_status(results)
+    customer_status = _customer_status_label(status)
     latest = results[-1] if results else {"build": {}, "summary": {}, "entries": []}
     build = latest.get("build", {}) or {}
     s = latest.get("summary", {}) or {}
@@ -688,10 +1119,21 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         if len(durs) == 1 and max(durs) > 0:
             head += f" · workload run {max(durs):,.0f}s"
 
+        wl_meta = _workload_meta(entry_name)
+        wl_title = str(wl_meta.get("title") or entry_name)
+        wl_summary = str(wl_meta.get("summary") or "")
+        summary_html = (
+            f"<p class='wl-sum muted'>{_esc(wl_summary)}</p>" if wl_summary else ""
+        )
         rows = [
-            f"<tr class='grp'><th colspan='{ncols}' scope='rowgroup'>"
-            f"<span class='wl'>{_esc(entry_name)}</span>"
+            f"<tr class='grp' id='wl-{_esc(entry_name)}'><th colspan='{ncols}' scope='rowgroup'>"
+            f"<div class='wl-head'>"
+            f"<a class='wl-title' href='#repro-{_esc(entry_name)}'>"
+            f"<strong>{_esc(wl_title)}</strong></a>"
+            f"<span class='mono muted wl-id'>{_esc(entry_name)}</span></div>"
+            f"{summary_html}"
             f"<span class='muted'> {_esc(head)}</span>"
+            f"{_run_command_block(entry_name)}"
             f"</th></tr>"
         ]
         for k in cell_keys:
@@ -721,6 +1163,13 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                 )
             rows.append(f"<tr>{''.join(cells)}</tr>")
 
+            headlines = _headline_block(e, entry_name)
+            if headlines:
+                rows.append(
+                    f"<tr class='headline-row'><td class='cell' colspan='{ncols}'>"
+                    f"{headlines}</td></tr>"
+                )
+
             mrows = _metric_rows(k, e, mhist, show_metric_trend)
             if mrows:
                 n_metrics = len((e.get("metrics") or {}).get("summary") or {})
@@ -734,7 +1183,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                     prov.append(f"{n_trials} trial{'s' if n_trials != 1 else ''}")
                 rows.append(
                     f"<tr class='mrow'><td colspan='{ncols}'><details>"
-                    f"<summary>{n_metrics} metric{'s' if n_metrics != 1 else ''}</summary>"
+                    f"<summary>All metrics (engineer) — {n_metrics} metric"
+                    f"{'s' if n_metrics != 1 else ''}</summary>"
                     f"<p class='prov'>{' · '.join(prov)}</p>"
                     f"<table class='inner'><thead><tr><th>metric</th>"
                     f"<th class='center'>policy</th><th class='num'>latest</th>"
@@ -796,13 +1246,22 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         notices.append(
             f"<div class='notice'>No baselines are blessed yet, so nothing was graded "
             f"pass or fail — this run <strong>recorded</strong> metrics for {scope} "
-            f"to become the reference.{extra}</div>"
+            f"to become the reference. Pass/fail grading starts after the first "
+            f"blessed baseline PR.{extra}</div>"
         )
     elif nothing_graded:
         notices.append(
             f"<div class='notice'>Nothing ran: all {total} results were "
             f"<strong>skipped</strong>, so this build establishes nothing. Check that "
             f"the runner exposes as many GPUs as the matrix asks for.</div>"
+        )
+    elif status == "partial":
+        pass_now = _count(s.get("pass"))
+        notices.append(
+            f"<div class='notice'>This run is <strong>partial</strong>: "
+            f"{pass_now} of {total} results passed but {skip_now} workload(s) were "
+            f"<strong>skipped</strong> — not every configured matrix entry ran. "
+            f"Check that the runner exposes as many GPUs as the matrix asks for.</div>"
         )
     elif shared_reason:
         notices.append(
@@ -813,6 +1272,28 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             "<div class='notice muted-notice'>Trend charts need at least two nightly "
             "runs; they appear automatically once more history accumulates.</div>"
         )
+
+    fail_now = _count(s.get("fail"))
+    action_panel = ""
+    if fail_now:
+        action_panel = (
+            "<div class='notice fail-actions'>"
+            "<strong>Next steps</strong> "
+            "Capture your environment with "
+            "<code class='mono'>aorta env probe -o env.json</code>, "
+            "review the failing workload below, and "
+            f"<a href='https://github.com/{_REPO}/issues/new/choose'>"
+            "open a ROCm issue</a> with the stack versions above."
+            "</div>"
+        )
+
+    scope_notice = (
+        "<div class='notice scope-notice muted-notice'>"
+        "<strong>Reference hardware:</strong> single-node MI350 runner with pinned "
+        "ROCm + PyTorch wheels. Numbers are nightly CI references — not a guarantee "
+        "on other AMD GPUs or cluster configurations."
+        "</div>"
+    )
 
     # Counts go through _fmt_num so a malformed summary shows "—" rather than
     # printing whatever str() makes of it ("nan", "True").
@@ -835,11 +1316,13 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 
     changes_html = build_change_summary(results)
     history_html = build_history_grid(results)
+    category_html = build_category_summary(latest_entries)
+    scaling_html = build_scaling_summary(latest_entries)
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>aorta nightly CI</title>
+<title>ROCm stack health · AORTA nightly</title>
 <style>
   :root {{ --bg:#0d1117; --panel:#161b22; --border:#21262d; --fg:#c9d1d9;
            --muted:#8b949e; --accent:#539bf5; }}
@@ -950,34 +1433,89 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                      border:1px solid var(--border); border-radius:6px;
                      padding:.25rem .6rem; font-size:.75rem; cursor:pointer; }}
   .toolbar button:hover {{ border-color:var(--accent); color:var(--accent); }}
+  .cat-grid {{ display:grid; gap:.65rem; margin:.5rem 0 0;
+               grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); }}
+  .cat-tile {{ display:block; background:var(--panel); border:1px solid var(--border);
+               border-left:3px solid var(--border); border-radius:8px;
+               padding:.65rem .85rem; text-decoration:none; color:inherit; }}
+  .cat-tile:hover {{ border-color:var(--accent); }}
+  .cat-k {{ font-size:.72rem; color:var(--muted); text-transform:uppercase;
+            letter-spacing:.06em; }}
+  .cat-v {{ font-size:1rem; font-weight:600; margin:.2rem 0; }}
+  .cat-sub {{ font-size:.75rem; }}
+  .scope-notice {{ margin-top:.65rem; }}
+  .fail-actions {{ border-left-color:#f85149; }}
+  .wl-head {{ display:flex; align-items:baseline; gap:.6rem; flex-wrap:wrap; }}
+  .wl-head strong {{ color:#e6edf3; font-size:.95rem; }}
+  .wl-id {{ font-size:.72rem; }}
+  .wl-sum {{ margin:.25rem 0 .35rem; font-size:.82rem; }}
+  ul.headlines {{ list-style:none; margin:.35rem 0 0; padding:0;
+                  display:flex; flex-wrap:wrap; gap:.35rem .75rem; }}
+  ul.headlines li {{ background:#12161b; border:1px solid var(--border);
+                     border-radius:6px; padding:.2rem .55rem; font-size:.78rem; }}
+  tr.headline-row > td {{ padding-top:0; padding-bottom:.5rem; }}
+  .repro-panel {{ margin:.55rem 0 0; padding:.65rem .75rem; background:#12161b;
+                  border:1px solid var(--border); border-radius:8px; }}
+  .repro-kicker {{ margin:0 0 .35rem; font-size:.72rem; text-transform:uppercase;
+                   letter-spacing:.05em; }}
+  ol.repro-steps {{ margin:.35rem 0 0; padding-left:1.25rem; font-size:.82rem; }}
+  ol.repro-steps li {{ margin:.35rem 0; }}
+  .repro-cmd {{ background:#0d1117; border:1px solid var(--border); border-radius:6px;
+                padding:.5rem .65rem; margin:.35rem 0 0; overflow-x:auto;
+                white-space:pre-wrap; word-break:break-word; }}
+  .repro-note {{ margin:.45rem 0 0; font-size:.75rem; }}
+  a.wl-title {{ color:#e6edf3; text-decoration:none; }}
+  a.wl-title:hover {{ color:var(--accent); text-decoration:underline; }}
+  a.gcell-link {{ color:inherit; text-decoration:none; display:inline-block; }}
+  a.gcell-link:hover .dot {{ outline:2px solid var(--accent); outline-offset:1px; }}
+  table.scaling {{ margin-top:.5rem; }}
+  table.grid th.wlcol a {{ color:var(--muted); text-decoration:none; font-size:.62rem; }}
+  table.grid th.wlcol a:hover {{ color:var(--accent); text-decoration:underline; }}
+  ul.changes li.change-hdr {{ background:transparent; border:none; padding:.15rem 0;
+                              font-size:.72rem; text-transform:uppercase;
+                              letter-spacing:.06em; color:var(--muted); }}
+  ul.changes li.corr {{ border-left-color:#f85149; }}
+  ul.changes li.perf {{ border-left-color:#d29922; }}
+  .status-sub {{ font-size:.68rem; color:var(--muted); margin-left:.25rem; }}
 </style></head>
 <body>
   <div class="wrap">
     <header>
       <div class="titlebar">
-        <h1>aorta nightly CI</h1>
-        <span class="status-pill">{status}</span>
+        <h1>ROCm stack health</h1>
+        <span class="status-pill" title="{_esc(status)}">{_esc(customer_status)}</span>
+        <span class="status-sub mono">({_esc(status)})</span>
       </div>
-      <p class="lede">Every night AORTA installs the freshly built wheel on an
-        MI350 runner and replays its workload sweep, comparing each result
-        against a blessed baseline. This page is that run.</p>
-      <p class="nav"><a href="docs/">AORTA documentation</a> ·
-        <a href="sanitizers/">sanitizer nightly</a> ·
-        <a href="https://github.com/{_REPO}">repository</a></p>
+      <p class="lede">Every night AORTA installs the freshly built wheel on a
+        reference MI350 runner and replays representative PyTorch workloads —
+        training, inference, and distributed correctness checks — comparing each
+        result against a blessed baseline when one exists.</p>
+      <p class="nav"><strong>Stack health</strong> ·
+        <a href="docs/">AORTA documentation</a> ·
+        <a href="sanitizers/">Sanitizer nightly</a> ·
+        <a href="https://github.com/{_REPO}">Repository</a> ·
+        <a href="data.json">data.json</a> ·
+        <a href="status.json">status.json</a></p>
       <div class="chips">{toolchain}</div>
       <p class="prov-line">{' · '.join(provenance)}</p>
     </header>
 
+    {scope_notice}
     {''.join(notices)}
+    {action_panel}
 
     <div class="cards">
       {cards_html}
       <div class="card trend"><div class="k">pass-rate trend</div><div class="v">{_svg_sparkline(passrate, width=240)}</div></div>
     </div>
 
+    {category_html}
+
     {changes_html}
 
     {history_html}
+
+    {scaling_html}
 
     <div class="secthead">
       <h2>Workloads</h2>
@@ -1036,6 +1574,8 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(build_dashboard_html(results), encoding="utf-8")
     (args.out_dir / "data.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+    (args.out_dir / "status.json").write_text(
+        json.dumps(build_status_json(results), indent=2), encoding="utf-8")
     print(f"dashboard: {len(results)} build(s) -> {args.out_dir / 'index.html'}", flush=True)
     return 0
 
