@@ -41,6 +41,7 @@ docker compose -f docker-compose.build.yaml up -d
 | `Dockerfile.rocm70_9-1-shampoo` | ROCm 7.0.9.1 + Shampoo optimizer | Shampoo optimizer experiments |
 | `Dockerfile.rocm70_2-ubuntu-pytorch` | ROCm 7.0.2 Ubuntu PyTorch | Legacy ROCm 7.0.2 support |
 | `Dockerfile.rocm70_2-ubuntu-nan` | ROCm 7.0.2 + NaN debugging | Debugging NaN issues |
+| `Dockerfile.rocm70_2-nan-asan` | ROCm 7.0.2 nan-repro (hipBLASLt 1.4.0) + AddressSanitizer | Running the residual-NaN repro under ASAN |
 | `Dockerfile.rocm-ubuntu-ebpf` | ROCm 7.2 + eBPF tracing (bpftrace, bcc) | eBPF-based GPU queue/memory tracing |
 | `Dockerfile.ci-gpu` | ROCm 7.2 PyTorch base pinned by digest | GPU CI on self-hosted runners (see `.env.ci`) |
 
@@ -118,6 +119,32 @@ AORTA_WORKSPACE=..
 Inside the container, verify eBPF readiness with `aorta ebpf-info`, then run
 workloads with `--ebpf-trace` and/or `--ebpf-memory-trace` flags.
 
+### Example 5: Residual-NaN Repro under AddressSanitizer
+
+```bash
+# .env
+DOCKERFILE=Dockerfile.rocm70_2-nan-asan
+CONTAINER_NAME=myuser-nan-asan
+AORTA_WORKSPACE=..
+```
+
+This image layers ROCm ASAN-instrumented libraries onto the customer-aligned
+`nan-repro` hipBLASLt 1.4.0 base. The base is Ubuntu 24.04 (noble) but ROCm
+only ships `*-asan` packages for jammy (22.04), so the Dockerfile *extracts*
+the jammy asan `.so` files into `/opt/rocm/lib/asan` without disturbing the
+noble ROCm stack (see the header of `Dockerfile.rocm70_2-nan-asan`).
+
+Build requires host networking (the default bridge has no outbound net):
+
+```bash
+docker build --network=host -f Dockerfile.rocm70_2-nan-asan \
+  -t aorta:nan-repro-hipblaslt-1.4.0-asan .
+```
+
+Then drive the residual-NaN matrix under ASAN via the sidecar in the internal
+repo (`recipes/recom_repro_residual_nan_asan_side_car.json`); see the
+"run under ROCm ASAN" section of `docs/Residual-NaN-Repro-runbook.md`.
+
 ## Using custom RCCL
 
 By default, the container uses the RCCL bundled in the image. You do not need to set or remove any RCCL path in the YAML.
@@ -146,6 +173,7 @@ docker/
 ├── Dockerfile.rocm70_9-1         # Standard ROCm build
 ├── Dockerfile.rocm70_9-1-shampoo # Shampoo variant
 ├── Dockerfile.rocm70_2-ubuntu-*  # Legacy ROCm 7.0.2 builds
+├── Dockerfile.rocm70_2-nan-asan  # nan-repro hipBLASLt 1.4.0 + AddressSanitizer
 ├── Dockerfile.rocm-ubuntu-ebpf   # ROCm 7.2 + eBPF tracing tools
 └── rccl_test/                    # Separate RCCL testing setup
 ```
