@@ -163,7 +163,7 @@ jobs:
               --output-dir "${SANITIZER_OUT}/consan-racy" || true
 
             # Informational (non-gating) ConSan over caller-supplied code objects
-            # (#347), rendered in the dashboard's informational section. The ENTIRE
+            # (#347), rendered in the dashboard informational section. The ENTIRE
             # informational path -- fixture build (hipcc/genco/unbundle) AND the
             # sweeps -- runs in a guarded subshell so no failure here (a bad genco,
             # bundler, or compile) can abort the job before the gate below. It is
@@ -177,7 +177,7 @@ jobs:
               genco_object() {  # <hip-source> <final .hsaco>
                 local tmp; tmp="$(mktemp --suffix=.o)" || return 1
                 hipcc --genco --offload-arch=gfx950 "$1" -o "$tmp" || return 1
-                if head -c 24 "$tmp" | grep -q '__CLANG_OFFLOAD_BUNDLE__'; then
+                if head -c 24 "$tmp" | grep -qF __CLANG_OFFLOAD_BUNDLE__; then
                   clang-offload-bundler --type=o --unbundle --input="$tmp" \
                     --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="$2" || return 1
                 else
