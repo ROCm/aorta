@@ -279,43 +279,93 @@ def _grading_rule_label(entry: dict[str, Any], name: str) -> str:
     return "tracked only (not gated)"
 
 
+def _repro_commands_html(commands: list[str]) -> str:
+    return "".join(
+        f"<pre class='mono repro-cmd'>{_esc(c)}</pre>" for c in commands if c
+    )
+
+
 def _run_command_block(entry_name: str) -> str:
-    """Step-by-step instructions to reproduce a workload outside CI."""
+    """Exhaustive, workload-specific reproduction guide outside CI."""
     meta = _workload_meta(entry_name)
-    cmd = str(meta.get("run_command") or "")
+    repro = meta.get("repro") or {}
+    cmd = str((repro.get("run") or {}).get("command") or meta.get("run_command") or "")
     if not cmd:
         return ""
     recipe = str(meta.get("recipe") or "")
-    min_gpus = meta.get("min_gpus")
-    if not _isnum(min_gpus):
-        min_gpus = 8 if entry_name.endswith("_8gpu") else 1
-    min_gpus = int(min_gpus)
-    gpu_note = (
-        f"At least {min_gpus} AMD GPU(s) visible to PyTorch"
-        if min_gpus > 1 else "One AMD GPU visible to PyTorch"
-    )
-    recipe_line = ""
-    if recipe:
-        recipe_line = (
-            f"<p class='repro-note muted'>Recipe: "
-            f"<a class='mono' href='https://github.com/{_REPO}/blob/main/{_esc(recipe)}'>"
-            f"{_esc(recipe)}</a></p>"
+    parts: list[str] = []
+
+    prereq = repro.get("prerequisites") or []
+    if prereq:
+        items = "".join(f"<li>{_esc(p)}</li>" for p in prereq)
+        parts.append(
+            f"<section class='repro-sec'><h4>Before you start</h4>"
+            f"<ul class='repro-list'>{items}</ul></section>"
         )
+
+    step_no = 1
+    for step in repro.get("setup") or []:
+        title = str(step.get("title") or f"Setup step {step_no}")
+        parts.append(
+            f"<section class='repro-sec'><h4>{step_no}. {_esc(title)}</h4>"
+            f"{_repro_commands_html(list(step.get('commands') or []))}</section>"
+        )
+        step_no += 1
+
+    dry = repro.get("dry_run") or {}
+    dry_cmd = str(dry.get("command") or "")
+    if dry_cmd:
+        dry_title = str(dry.get("title") or "Validate the recipe YAML (no GPU execution)")
+        parts.append(
+            f"<section class='repro-sec'><h4>{step_no}. {_esc(dry_title)}</h4>"
+            f"<pre class='mono repro-cmd'>{_esc(dry_cmd)}</pre></section>"
+        )
+        step_no += 1
+
+    run = repro.get("run") or {}
+    run_title = str(run.get("title") or "Run the nightly recipe")
+    parts.append(
+        f"<section class='repro-sec'><h4>{step_no}. {_esc(run_title)}</h4>"
+        f"<p class='repro-note muted'>Run from the repository root after setup completes.</p>"
+        f"<pre class='mono repro-cmd'>{_esc(cmd)}</pre></section>"
+    )
+    step_no += 1
+
+    for step in repro.get("verify") or []:
+        title = str(step.get("title") or "Verify results")
+        parts.append(
+            f"<section class='repro-sec'><h4>{step_no}. {_esc(title)}</h4>"
+            f"{_repro_commands_html(list(step.get('commands') or []))}</section>"
+        )
+        step_no += 1
+
+    success = str(repro.get("success_criteria") or "")
+    if success:
+        parts.append(
+            f"<section class='repro-sec'><h4>Success criteria</h4>"
+            f"<p>{_esc(success)}</p></section>"
+        )
+
+    compare = str(repro.get("compare_notes") or "")
+    if compare:
+        parts.append(
+            f"<section class='repro-sec'><h4>Compare with nightly numbers</h4>"
+            f"<p class='muted'>{_esc(compare)}</p></section>"
+        )
+
+    if recipe:
+        parts.append(
+            f"<p class='repro-note muted'>Recipe YAML: "
+            f"<a class='mono' href='https://github.com/{_REPO}/blob/main/{_esc(recipe)}'>"
+            f"{_esc(recipe)}</a> · "
+            f"<a href='https://github.com/{_REPO}/blob/main/recipes/README-running-recipes.md'>"
+            f"Multi-node launcher guide</a></p>"
+        )
+
     return (
         f"<details class='repro-panel' id='repro-{_esc(entry_name)}'>"
-        f"<summary>Run this workload locally</summary>"
-        f"<div class='repro-body'>"
-        f"<ol class='repro-steps'>"
-        f"<li><strong>Requirements:</strong> {gpu_note}; ROCm + PyTorch installed "
-        f"(match the stack versions in the header when comparing numbers).</li>"
-        f"<li><strong>Install AORTA</strong> — follow the "
-        f"<a href='docs/'>getting started guide</a> and clone this repository.</li>"
-        f"<li><strong>Run from the repo root:</strong>"
-        f"<pre class='mono repro-cmd'>{_esc(cmd)}</pre></li>"
-        f"<li><strong>Distributed workloads:</strong> see "
-        f"<a href='https://github.com/{_REPO}/blob/main/recipes/README-running-recipes.md'>"
-        f"recipes/README-running-recipes.md</a> for torchrun and multi-node notes.</li>"
-        f"</ol>{recipe_line}</div></details>"
+        f"<summary>Reproduce this workload locally</summary>"
+        f"<div class='repro-body'>{''.join(parts)}</div></details>"
     )
 
 
@@ -780,24 +830,43 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
 
     active = set(newest)
 
-    def _wl_col_header(name: str) -> str:
-        title = str(_workload_meta(name).get("title") or name)
-        if name in active:
+    def _wl_chip(name: str, group: list[dict[str, Any]], *, retired: bool) -> str:
+        if not group:
             return (
-                f"<th scope='col' class='wlcol'>"
-                f"<a href='#wl-{_esc(name)}' title='{_esc(name)} — jump to workload'>"
-                f"{_esc(title)}</a></th>"
+                f"<span class='wl-chip absent' role='img' "
+                f"title='{_esc(name)} — not in this run' "
+                f"aria-label='{_esc(name)} — not in this run'>"
+                f"<span class='chip-label'>{_esc(str(_workload_meta(name).get('title') or name))}</span>"
+                f"<span class='chip-meta'>·</span></span>"
+            )
+        counts = _tally(group)
+        worst = _worst_verdict(counts)
+        n = len(group)
+        worst_n = counts.get(worst, 0)
+        count = str(n) if worst_n == n else f"{worst_n}/{n}"
+        bg = _VERDICT_COLOR.get(worst, _UNKNOWN_COLOR)
+        breakdown = f"{name} — {_tally_text(counts)}"
+        dot = (
+            f"<span class='dot sm' role='img' style='background:{bg}' "
+            f"aria-label='{_esc(breakdown)}'>"
+            f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span>"
+        )
+        title = str(_workload_meta(name).get("title") or name)
+        inner = (
+            f"{dot}<span class='chip-label'>{_esc(title)}</span>"
+        )
+        if retired:
+            return (
+                f"<span class='wl-chip retired' title='{_esc(breakdown)} (retired workload)'>"
+                f"{inner}</span>"
             )
         return (
-            f"<th scope='col' class='wlcol retired' "
-            f"title='{_esc(name)} — retired (no section below)'>"
-            f"{_esc(title)}</th>"
+            f"<a class='wl-chip' href='#wl-{_esc(name)}' "
+            f"title='{_esc(breakdown)} — jump to workload'>{inner}</a>"
         )
 
-    head = "".join(_wl_col_header(n) for n in ordered)
-
     newest_first = list(reversed(runs))
-    rows = []
+    cards = []
     for i, doc in enumerate(newest_first):
         build = doc.get("build") or {}
         by_entry: dict[str, list[dict[str, Any]]] = {}
@@ -813,8 +882,6 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             if run_id else _esc(date)
         )
 
-        # Mark the run where the toolchain moved: a column that changes colour on
-        # exactly that row is the whole point of running this nightly.
         older = newest_first[i + 1] if i + 1 < len(newest_first) else prior
         bumped = older is not None and any(
             str((older.get("build") or {}).get(f) or "") != str(build.get(f) or "")
@@ -822,65 +889,32 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
         )
         flag = " <span class='bump' title='toolchain changed in this run'>bump</span>" if bumped else ""
 
-        cells = []
-        for name in ordered:
-            group = by_entry.get(name) or []
-            if not group:
-                # role + aria-label for the same reason the populated cells
-                # carry one: unnamed, a screen reader reaches the bare glyph
-                # and announces "middle dot", which says nothing about the
-                # workload being absent from this run.
-                cells.append(
-                    "<td class='gcell'><span class='absent' role='img' "
-                    "title='not in this run' aria-label='not in this run'>·</span></td>"
-                )
-                continue
-            counts = _tally(group)
-            worst = _worst_verdict(counts)
-            n = len(group)
-            worst_n = counts.get(worst, 0)
-            count = str(n) if worst_n == n else f"{worst_n}/{n}"
-            bg = _VERDICT_COLOR.get(worst, _UNKNOWN_COLOR)
-            # The glyph, not the colour, is what states the verdict: a bare
-            # count renders identically for a passing and a failing group, which
-            # leaves anyone who cannot separate red from green — or who is on a
-            # touch screen with no hover — unable to read the row at all.
-            breakdown = f"{name} — {_tally_text(counts)}"
-            dot = (
-                f"<span class='dot' role='img' style='background:{bg}' "
-                f"aria-label='{_esc(breakdown)}'>"
-                f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span>"
-            )
-            if name in active:
-                cells.append(
-                    f"<td class='gcell'><a class='gcell-link' href='#wl-{_esc(name)}' "
-                    f"title='{_esc(breakdown)} — jump to workload'>{dot}</a></td>"
-                )
-            else:
-                cells.append(
-                    f"<td class='gcell'><span class='gcell-retired' "
-                    f"title='{_esc(breakdown)} (retired workload)'>{dot}</span></td>"
-                )
-
-        rows.append(
-            f"<tr><th scope='row' class='runcell'>{when}{flag}"
-            f"<span class='runmeta'>{_esc(str(build.get('amd_aorta_version') or ''))}</span></th>"
-            f"<td class='center'><span class='badge sm' style='background:{color}' "
-            f"title='{_esc(status)}'>{_esc(customer_status)}</span></td>"
-            f"{''.join(cells)}</tr>"
+        chips = "".join(
+            _wl_chip(name, by_entry.get(name) or [], retired=name not in active)
+            for name in ordered
+        )
+        cards.append(
+            f"<article class='release-card'>"
+            f"<header class='release-hdr'>"
+            f"<span class='release-date'>{when}{flag}</span>"
+            f"<span class='badge sm' style='background:{color}' "
+            f"title='{_esc(status)}'>{_esc(customer_status)}</span>"
+            f"<span class='runmeta mono'>{_esc(str(build.get('amd_aorta_version') or ''))}</span>"
+            f"</header>"
+            f"<div class='wl-chips' role='list'>{chips}</div>"
+            f"</article>"
         )
 
     return (
+        "<section class='dash-section' id='release-history'>"
         "<h2>Nightly release health</h2>"
-        "<p class='muted'>Each row is one nightly release (newest first). The "
-        "<strong>overall health</strong> column summarises that night's graded "
-        "verdicts; active workload columns link to reproduction steps below. "
-        "Retired columns (no longer in the latest matrix) are plain text. "
-        "Cell glyphs: ✓ pass · ✗ fail · ◆ record · ○ skip.</p>"
-        "<div class='tablewrap'><table class='grid'>"
-        f"<thead><tr><th scope='col'>release</th>"
-        f"<th scope='col' class='center'>overall health</th>"
-        f"{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+        "<p class='muted'>Each card is one nightly release (newest first). "
+        "<strong>Overall health</strong> summarises that night's graded verdicts; "
+        "workload chips wrap instead of scrolling sideways. Active workloads link "
+        "to reproduction steps below. Retired workloads (no longer in the latest "
+        "matrix) are plain text. Glyphs: ✓ pass · ✗ fail · ◆ record · ○ skip.</p>"
+        f"<div class='release-list'>{''.join(cards)}</div>"
+        "</section>"
     )
 
 
@@ -1035,6 +1069,173 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
     )
 
 
+def build_workload_cards(
+    *,
+    groups: dict[str, list[str]],
+    latest_by_key: dict[str, dict[str, Any]],
+    history: dict[str, list[float | None]],
+    mhist: dict[tuple[str, str], list[float | None]],
+    show_trend: bool,
+    show_metric_trend: bool,
+    show_notes: bool,
+) -> str:
+    """Category-grouped workload cards (replaces the wide results table)."""
+    meta = load_dashboard_metadata()
+    categories = meta.get("categories") or {}
+    ordered_entries: list[str] = []
+    seen: set[str] = set()
+    for cat in categories.values():
+        for wl in cat.get("workloads") or []:
+            name = str(wl)
+            if name in groups and name not in seen:
+                ordered_entries.append(name)
+                seen.add(name)
+    for name in sorted(groups):
+        if name not in seen:
+            ordered_entries.append(name)
+
+    def _workload_card(entry_name: str) -> str:
+        cell_keys = sorted(groups[entry_name])
+        tally: dict[str, int] = {}
+        step_times = []
+        for k in cell_keys:
+            v = latest_by_key[k].get("verdict", "skip")
+            tally[v] = tally.get(v, 0) + 1
+            st = (latest_by_key[k].get("metrics") or {}).get("mean_step_time_ms")
+            if _isnum(st):
+                step_times.append(st)
+        group_max = max(step_times) if len(step_times) > 1 else 0.0
+        tally_txt = " · ".join(
+            f"{tally[v]} {v}" for v in _VERDICT_ORDER if tally.get(v)
+        )
+        n = len(cell_keys)
+        meta_line = f"{n} result{'' if n == 1 else 's'} · {tally_txt}"
+        durs = {
+            d for d in (latest_by_key[k].get("duration_sec") for k in cell_keys)
+            if _isnum(d)
+        }
+        if len(durs) == 1 and max(durs) > 0:
+            meta_line += f" · workload run {max(durs):,.0f}s"
+
+        wl_meta = _workload_meta(entry_name)
+        wl_title = str(wl_meta.get("title") or entry_name)
+        wl_summary = str(wl_meta.get("summary") or "")
+        summary_html = (
+            f"<p class='wl-sum muted'>{_esc(wl_summary)}</p>" if wl_summary else ""
+        )
+
+        variants: list[str] = []
+        for k in cell_keys:
+            e = latest_by_key[k]
+            verdict = e.get("verdict", "skip")
+            color = _VERDICT_COLOR.get(verdict, "#57606a")
+            st = (e.get("metrics") or {}).get("mean_step_time_ms")
+            cell_name = e.get("cell")
+            label = (
+                f"<span class='mono'>{_esc(str(cell_name))}</span>"
+                if cell_name else "<span class='muted'>whole workload</span>"
+            )
+            trend_html = (
+                f"<span class='variant-spark'>{_svg_sparkline(history.get(k, []))}</span>"
+                if show_trend else ""
+            )
+            notes_html = (
+                f"<p class='variant-note muted'>{_esc('; '.join(e.get('reasons') or []))}</p>"
+                if show_notes else ""
+            )
+            headlines = _headline_block(e, entry_name)
+            headline_html = headlines or ""
+            mrows = _metric_rows(k, e, mhist, show_metric_trend)
+            metrics_html = ""
+            if mrows:
+                visible = [
+                    m for m in ((e.get("metrics") or {}).get("summary") or {})
+                    if m not in _ENGINEER_HIDDEN_METRICS
+                ]
+                n_metrics = len(visible)
+                recipe = e.get("recipe") or ""
+                prov = []
+                if recipe:
+                    prov.append(f"recipe <span class='mono'>{_esc(str(recipe))}</span>")
+                trials = e.get("trials")
+                if _isnum(trials):
+                    n_trials = int(trials)
+                    prov.append(f"{n_trials} trial{'s' if n_trials != 1 else ''}")
+                metrics_html = (
+                    f"<details class='variant-metrics'>"
+                    f"<summary>Detailed metrics (optional) — {n_metrics} value"
+                    f"{'s' if n_metrics != 1 else ''}</summary>"
+                    f"<p class='prov muted'>Additional summary metrics for this recipe variant. "
+                    f"<strong>Grading rule</strong> is how nightly CI compares the value; "
+                    f"<strong>this run</strong> is tonight; "
+                    f"<strong>history</strong> is recent nights (when available).</p>"
+                    f"<p class='prov'>{' · '.join(prov)}</p>"
+                    f"<table class='inner'><thead><tr><th>metric</th>"
+                    f"<th class='center'>grading rule</th><th class='num'>this run</th>"
+                    f"{'<th>history</th>' if show_metric_trend else ''}</tr></thead>"
+                    f"<tbody>{mrows}</tbody></table>"
+                    f"</details>"
+                )
+            variants.append(
+                f"<div class='variant'>"
+                f"<div class='variant-hdr'>"
+                f"<span class='variant-name'>{label}</span>"
+                f"<span class='badge' style='background:{color}'>{_esc(verdict)}</span>"
+                f"<span class='num variant-step'>{_esc(_fmt_ms(st))}{_bar(st, group_max)}</span>"
+                f"{trend_html}"
+                f"</div>"
+                f"{headline_html}{notes_html}{metrics_html}"
+                f"</div>"
+            )
+
+        return (
+            f"<article class='wl-card' id='wl-{_esc(entry_name)}'>"
+            f"<header class='wl-card-hdr'>"
+            f"<div class='wl-head'>"
+            f"<a class='wl-title' href='#repro-{_esc(entry_name)}'>"
+            f"<strong>{_esc(wl_title)}</strong></a>"
+            f"<span class='mono muted wl-id'>{_esc(entry_name)}</span></div>"
+            f"{summary_html}"
+            f"<p class='muted wl-meta'>{_esc(meta_line)}</p>"
+            f"{_run_command_block(entry_name)}"
+            f"</header>"
+            f"<div class='variant-list'>{''.join(variants)}</div>"
+            f"</article>"
+        )
+
+    blocks: list[str] = []
+    for cat_id, cat in categories.items():
+        cat_workloads = [str(w) for w in (cat.get("workloads") or []) if str(w) in groups]
+        if not cat_workloads:
+            continue
+        cards = "".join(_workload_card(w) for w in cat_workloads)
+        label = str(cat.get("label") or cat_id)
+        summary = str(cat.get("summary") or "")
+        sum_html = f"<p class='cat-block-sum muted'>{_esc(summary)}</p>" if summary else ""
+        blocks.append(
+            f"<div class='cat-block' id='cat-{_esc(cat_id)}'>"
+            f"<h3 class='cat-block-head'>{_esc(label)}</h3>"
+            f"{sum_html}"
+            f"<div class='wl-grid'>{cards}</div>"
+            f"</div>"
+        )
+
+    orphan = [n for n in ordered_entries if n not in {
+        str(w) for c in categories.values() for w in (c.get("workloads") or [])
+    }]
+    if orphan:
+        cards = "".join(_workload_card(w) for w in orphan)
+        blocks.append(
+            f"<div class='cat-block' id='cat-other'>"
+            f"<h3 class='cat-block-head'>Other</h3>"
+            f"<div class='wl-grid'>{cards}</div></div>"
+        )
+
+    if not blocks:
+        return "<p class='muted'>no results yet</p>"
+    return "".join(blocks)
+
+
 def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     """Render the full dashboard HTML from the results history (pure)."""
     status, status_color = _latest_status(results)
@@ -1116,137 +1317,20 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     show_notes = bool(distinct_reasons) and not collapse_note
     shared_reason = distinct_reasons[0] if collapse_note else ""
 
-    ncols = 3 + int(show_trend) + int(show_notes)
-
     # Group cells under their workload so the sweep matrix stays visible.
     groups: dict[str, list[str]] = {}
     for k in keys:
         groups.setdefault(str(latest_by_key[k].get("entry")), []).append(k)
 
-    body_parts = []
-    for entry_name in sorted(groups):
-        cell_keys = sorted(groups[entry_name])
-        tally: dict[str, int] = {}
-        step_times = []
-        for k in cell_keys:
-            v = latest_by_key[k].get("verdict", "skip")
-            tally[v] = tally.get(v, 0) + 1
-            st = (latest_by_key[k].get("metrics") or {}).get("mean_step_time_ms")
-            if _isnum(st):
-                step_times.append(st)
-        group_max = max(step_times) if len(step_times) > 1 else 0.0
-        tally_txt = " · ".join(
-            f"{tally[v]} {v}" for v in _VERDICT_ORDER if tally.get(v)
-        )
-        n = len(cell_keys)
-        head = f"{n} result{'' if n == 1 else 's'} · {tally_txt}"
-        # duration_sec is measured once around the whole recipe invocation and
-        # copied onto every record it produced, so it belongs to the workload and
-        # is stated here once -- repeated in each cell it reads as per-cell time.
-        durs = {
-            d for d in (latest_by_key[k].get("duration_sec") for k in cell_keys)
-            if _isnum(d)
-        }
-        # A skipped workload reports 0.0 -- it never ran, so it has no duration.
-        if len(durs) == 1 and max(durs) > 0:
-            head += f" · workload run {max(durs):,.0f}s"
-
-        wl_meta = _workload_meta(entry_name)
-        wl_title = str(wl_meta.get("title") or entry_name)
-        wl_summary = str(wl_meta.get("summary") or "")
-        summary_html = (
-            f"<p class='wl-sum muted'>{_esc(wl_summary)}</p>" if wl_summary else ""
-        )
-        rows = [
-            f"<tr class='grp' id='wl-{_esc(entry_name)}'><th colspan='{ncols}' scope='rowgroup'>"
-            f"<div class='wl-head'>"
-            f"<a class='wl-title' href='#repro-{_esc(entry_name)}'>"
-            f"<strong>{_esc(wl_title)}</strong></a>"
-            f"<span class='mono muted wl-id'>{_esc(entry_name)}</span></div>"
-            f"{summary_html}"
-            f"<span class='muted'> {_esc(head)}</span>"
-            f"{_run_command_block(entry_name)}"
-            f"</th></tr>"
-        ]
-        for k in cell_keys:
-            e = latest_by_key[k]
-            verdict = e.get("verdict", "skip")
-            color = _VERDICT_COLOR.get(verdict, "#57606a")
-            st = (e.get("metrics") or {}).get("mean_step_time_ms")
-            # A record for a workload that never reached its cells (skipped for
-            # want of GPUs, or the synthetic zero-work entry) carries cell=None;
-            # printing that as "None" invites reading it as a cell's name.
-            cell_name = e.get("cell")
-            label = (
-                f"<span class='mono'>{_esc(str(cell_name))}</span>"
-                if cell_name else "<span class='muted'>whole workload</span>"
-            )
-            cells = [
-                f"<td class='cell'>{label}</td>",
-                f"<td class='center'><span class='badge' "
-                f"style='background:{color}'>{_esc(verdict)}</span></td>",
-                f"<td class='num'>{_esc(_fmt_ms(st))}{_bar(st, group_max)}</td>",
-            ]
-            if show_trend:
-                cells.append(f"<td class='spark'>{_svg_sparkline(history.get(k, []))}</td>")
-            if show_notes:
-                cells.append(
-                    f"<td class='muted'>{_esc('; '.join(e.get('reasons') or []))}</td>"
-                )
-            rows.append(f"<tr>{''.join(cells)}</tr>")
-
-            headlines = _headline_block(e, entry_name)
-            if headlines:
-                rows.append(
-                    f"<tr class='headline-row'><td class='cell' colspan='{ncols}'>"
-                    f"{headlines}</td></tr>"
-                )
-
-            mrows = _metric_rows(k, e, mhist, show_metric_trend)
-            if mrows:
-                visible = [
-                    m for m in ((e.get("metrics") or {}).get("summary") or {})
-                    if m not in _ENGINEER_HIDDEN_METRICS
-                ]
-                n_metrics = len(visible)
-                recipe = e.get("recipe") or ""
-                prov = []
-                if recipe:
-                    prov.append(f"recipe <span class='mono'>{_esc(str(recipe))}</span>")
-                trials = e.get("trials")
-                if _isnum(trials):
-                    n_trials = int(trials)
-                    prov.append(f"{n_trials} trial{'s' if n_trials != 1 else ''}")
-                rows.append(
-                    f"<tr class='mrow'><td colspan='{ncols}'><details>"
-                    f"<summary>Detailed metrics (optional) — {n_metrics} value"
-                    f"{'s' if n_metrics != 1 else ''}</summary>"
-                    f"<p class='prov muted'>Additional summary metrics for this recipe variant. "
-                    f"<strong>Grading rule</strong> is how nightly CI compares the value; "
-                    f"<strong>this run</strong> is tonight; "
-                    f"<strong>history</strong> is recent nights (when available).</p>"
-                    f"<p class='prov'>{' · '.join(prov)}</p>"
-                    f"<table class='inner'><thead><tr><th>metric</th>"
-                    f"<th class='center'>grading rule</th><th class='num'>this run</th>"
-                    f"{'<th>history</th>' if show_metric_trend else ''}</tr></thead>"
-                    f"<tbody>{mrows}</tbody></table>"
-                    f"</details></td></tr>"
-                )
-        body_parts.append(f"<tbody>{''.join(rows)}</tbody>")
-
-    table_body = "".join(body_parts) or (
-        f"<tbody><tr><td colspan='{ncols}' class='muted'>no results yet</td></tr></tbody>"
+    workloads_html = build_workload_cards(
+        groups=groups,
+        latest_by_key=latest_by_key,
+        history=history,
+        mhist=mhist,
+        show_trend=show_trend,
+        show_metric_trend=show_metric_trend,
+        show_notes=show_notes,
     )
-
-    head = [
-        "<th scope='col'>recipe variant</th>",
-        "<th scope='col' class='center'>result</th>",
-        "<th scope='col' class='num'>step time</th>",
-    ]
-    if show_trend:
-        head.append("<th scope='col'>step time history</th>")
-    if show_notes:
-        head.append("<th scope='col'>notes</th>")
 
     toolchain = "".join([
         _chip("aorta", build.get("amd_aorta_version")),
@@ -1404,6 +1488,50 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   /* Block-level SVG avoids inline baseline spacing without zeroing the font
      size, which would also hide the "n/a" fallback for short histories. */
   .card.trend svg {{ display:block; }}
+  .dash-section {{ margin-top:2rem; }}
+  .dash-section:first-of-type {{ margin-top:1.5rem; }}
+  .release-list {{ display:flex; flex-direction:column; gap:.65rem; margin-top:.5rem; }}
+  .release-card {{ background:var(--panel); border:1px solid var(--border);
+                   border-radius:8px; padding:.65rem .85rem; }}
+  .release-hdr {{ display:flex; flex-wrap:wrap; align-items:center; gap:.45rem .75rem;
+                  margin-bottom:.55rem; }}
+  .release-date {{ font-weight:600; font-size:.88rem; }}
+  .wl-chips {{ display:flex; flex-wrap:wrap; gap:.4rem; }}
+  .wl-chip {{ display:inline-flex; align-items:center; gap:.35rem; padding:.25rem .55rem;
+              border:1px solid var(--border); border-radius:999px; font-size:.75rem;
+              text-decoration:none; color:inherit; background:#12161b; max-width:100%; }}
+  a.wl-chip:hover {{ border-color:var(--accent); }}
+  .wl-chip.retired, .wl-chip.absent {{ opacity:.72; cursor:default; }}
+  .wl-chip .chip-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+                          max-width:18ch; }}
+  .wl-chip .chip-meta {{ color:var(--muted); }}
+  .dot.sm {{ min-width:38px; font-size:.68rem; padding:1px 5px; }}
+  .cat-block {{ margin-top:1.5rem; }}
+  .cat-block-head {{ font-size:.95rem; margin:0 0 .25rem; color:#e6edf3; }}
+  .cat-block-sum {{ margin:0 0 .55rem; max-width:72ch; }}
+  .wl-grid {{ display:grid; gap:.75rem;
+              grid-template-columns:repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }}
+  .wl-card {{ background:var(--panel); border:1px solid var(--border); border-radius:8px;
+              overflow:hidden; }}
+  .wl-card-hdr {{ padding:.75rem .85rem .55rem; border-bottom:1px solid var(--border); }}
+  .wl-meta {{ margin:.25rem 0 0; font-size:.78rem; }}
+  .variant-list {{ padding:.55rem .85rem .75rem; display:flex; flex-direction:column;
+                    gap:.65rem; }}
+  .variant {{ border:1px solid var(--border); border-radius:6px; padding:.5rem .65rem;
+              background:#12161b; }}
+  .variant-hdr {{ display:flex; flex-wrap:wrap; align-items:center; gap:.45rem .65rem; }}
+  .variant-name {{ flex:1 1 120px; min-width:0; }}
+  .variant-step {{ margin-left:auto; }}
+  .variant-spark svg {{ display:block; }}
+  .variant-note {{ margin:.35rem 0 0; font-size:.78rem; }}
+  .variant-metrics {{ margin-top:.45rem; }}
+  .variant-metrics summary {{ cursor:pointer; color:var(--muted); font-size:.78rem; }}
+  ul.headlines {{ margin-top:.35rem; }}
+  .repro-sec {{ margin:.65rem 0 0; }}
+  .repro-sec h4 {{ margin:0 0 .35rem; font-size:.78rem; color:#e6edf3;
+                   text-transform:uppercase; letter-spacing:.04em; }}
+  ul.repro-list {{ margin:.2rem 0 0; padding-left:1.1rem; font-size:.82rem; }}
+  ul.repro-list li {{ margin:.25rem 0; }}
   .tablewrap {{ overflow-x:auto; }}
   table {{ border-collapse:collapse; width:100%; margin-top:.5rem;
            background:var(--panel); border:1px solid var(--border);
@@ -1547,10 +1675,12 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     {''.join(notices)}
     {action_panel}
 
+    <section class="dash-section" id="overview">
     <div class="cards">
       {cards_html}
       <div class="card trend"><div class="k">pass-rate trend</div><div class="v">{_svg_sparkline(passrate, width=240)}</div></div>
     </div>
+    </section>
 
     {category_html}
 
@@ -1560,6 +1690,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 
     {scaling_html}
 
+    <section class="dash-section" id="workloads">
     <div class="secthead">
       <h2>Workloads</h2>
       <div class="toolbar" id="toolbar" hidden>
@@ -1567,14 +1698,10 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         <button type="button" data-details="close">Collapse all</button>
       </div>
     </div>
-    <p class="muted wl-intro">Each card is one workload. The bullets under a variant are tonight&apos;s headline numbers. Expand <strong>Run this workload locally</strong> to reproduce on your machine, or <strong>Detailed metrics</strong> for additional summary values.</p>
-    <div class="tablewrap">
-      <table>
-        <thead><tr>{''.join(head)}</tr></thead>
-        {table_body}
-      </table>
-    </div>
+    <p class="muted wl-intro">Workloads are grouped by use case below. Each card shows tonight&apos;s recipe variants; expand <strong>Reproduce this workload locally</strong> for a full step-by-step guide, or <strong>Detailed metrics</strong> for additional summary values.</p>
+    {workloads_html}
     <p class="legend">Results: <strong>pass</strong>/<strong>fail</strong> = compared against a blessed baseline · <strong>record</strong> = baseline not set yet · <strong>skip</strong> = not enough GPUs. Expand cards for reproduction steps or optional detailed metrics.</p>
+    </section>
   </div>
 <script>
 (function () {{
@@ -1598,7 +1725,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 (function () {{
   var bar = document.getElementById("toolbar");
   if (!bar) return;
-  var panels = document.querySelectorAll("tr.mrow details, details.repro-panel");
+  var panels = document.querySelectorAll(".variant-metrics, details.repro-panel");
   if (!panels.length) return;
   bar.hidden = false;
   bar.addEventListener("click", function (ev) {{

@@ -304,7 +304,7 @@ def test_dashboard_omits_trend_column_without_history():
                                "summary": {"decode_latency_ms": 12.5}}}],
                  total=1, record=1)
     one = gen_dashboard.build_dashboard_html([r])
-    assert "step time history" not in one
+    assert "<span class='variant-spark'>" not in one
 
     r2 = _results("2026-07-31T00:00:00Z",
                   [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
@@ -312,7 +312,7 @@ def test_dashboard_omits_trend_column_without_history():
                                 "summary": {"decode_latency_ms": 13.5}}}],
                   total=1, record=1)
     two = gen_dashboard.build_dashboard_html([r, r2])
-    assert "step time history" in two
+    assert "<span class='variant-spark'>" in two
 
 
 def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
@@ -558,7 +558,9 @@ def test_history_grid_absence_marker_is_named_for_assistive_tech():
         _run(4, [_cell("w1", "c"), _cell("w2", "c")], total=2, record=2),
     ]
     grid = gen_dashboard.build_history_grid(runs)
-    assert "role='img' title='not in this run' aria-label='not in this run'" in grid
+    assert "not in this run" in grid
+    assert "role='img'" in grid
+    assert "aria-label='w2 — not in this run'" in grid
 
 
 def test_history_grid_does_not_flag_aortas_own_nightly_version_as_a_bump():
@@ -588,7 +590,7 @@ def test_history_grid_flags_the_run_where_the_stack_underneath_moved():
 def test_history_grid_window_bounds_the_rendered_rows():
     runs = [_run(d, [_cell("w", "c")], total=1, record=1) for d in range(1, 21)]
     grid = gen_dashboard.build_history_grid(runs, max_runs=5)
-    assert grid.count("<tr><th scope='row'") == 5  # body rows, not the header
+    assert grid.count("class='release-card'") == 5
     assert "2026-08-20" in grid and "2026-08-15" not in grid  # newest five
 
 
@@ -707,7 +709,7 @@ def test_history_grid_states_the_verdict_without_relying_on_colour():
     # is part of that: a generic span has no accessible name, so the label is
     # not guaranteed to be announced without it.
     assert "aria-label='w — 1 fail'" in grid
-    assert grid.count("<span class='dot' role='img'") == 2
+    assert grid.count("<span class='dot sm' role='img'") == 2
 
 
 def test_history_grid_compares_its_oldest_row_against_the_run_before_it():
@@ -859,12 +861,14 @@ def test_dashboard_run_command_block():
                    "metrics": {"mean_step_time_ms": 4.0}}],
                  total=1, record=1)
     html = gen_dashboard.build_dashboard_html([r])
-    assert "Run this workload locally" in html
+    assert "Reproduce this workload locally" in html
+    assert "Before you start" in html
+    assert "Success criteria" in html
     assert "example-inference-smoke.yaml" in html
-    assert "getting started guide" in html
     assert "README-running-recipes.md" in html
     assert "details class='repro-panel' id='repro-inference_offline'" in html
-    assert "<summary>Run this workload locally</summary>" in html
+    assert "<summary>Reproduce this workload locally</summary>" in html
+    assert "torchrun" not in html  # inference is single-GPU
 
 
 def test_history_grid_retired_workloads_do_not_link_to_missing_sections():
@@ -874,7 +878,7 @@ def test_history_grid_retired_workloads_do_not_link_to_missing_sections():
     ]
     grid = gen_dashboard.build_history_grid(runs)
     assert "href='#wl-old_workload'" not in grid
-    assert "gcell-retired" in grid
+    assert "wl-chip retired" in grid
     assert "href='#wl-gpu_smoke'" in grid
 
 
@@ -885,8 +889,8 @@ def test_history_grid_workloads_and_cells_link_to_repro_sections():
     ]
     grid = gen_dashboard.build_history_grid(runs)
     assert "href='#wl-gpu_smoke'" in grid
-    assert "gcell-link" in grid
-    assert "overall health" in grid
+    assert "wl-chip" in grid
+    assert "overall health" in grid.lower() or "Overall health" in grid
 
 
 def test_history_grid_overall_health_uses_customer_label():
@@ -960,6 +964,36 @@ def test_dashboard_metadata_covers_nightly_matrix():
     for name in names:
         assert workloads[name].get("run_command"), name
         assert workloads[name].get("recipe"), name
+        assert workloads[name].get("repro"), name
+        assert workloads[name]["repro"].get("success_criteria"), name
+
+
+def test_dashboard_repro_guides_differ_by_workload_type():
+    meta = gen_dashboard.load_dashboard_metadata()
+    wl = meta.get("workloads") or {}
+    smoke = wl["gpu_smoke"]["repro"]
+    ddp = wl["training_ddp"]["repro"]
+    assert "One AMD GPU" in smoke["prerequisites"][0]
+    assert "torchrun" in ddp["run"]["command"]
+    assert any("NCCL" in c for step in ddp["setup"] for c in step["commands"])
+    race = wl["race"]["repro"]
+    assert any("AORTA_TRIAL_MASTER_PORT_BASE" in c for step in race["setup"] for c in step["commands"])
+
+
+def test_dashboard_workloads_use_category_card_layout():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 254.0}},
+        {"entry": "training_ddp", "cell": "smoke", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 10.0,
+                                    "summary": {"step_time_p50": 9.0}}},
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z", entries, total=2, **{"pass": 2})])
+    assert "class='wl-card'" in html
+    assert "class='wl-grid'" in html
+    assert "class='cat-block'" in html
+    assert "<table><thead><tr><th scope='col'>recipe variant</th>" not in html
 
 
 def test_dashboard_failure_action_panel():
