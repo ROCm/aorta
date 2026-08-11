@@ -889,7 +889,7 @@ def test_history_grid_workloads_and_cells_link_to_repro_sections():
     ]
     grid = gen_dashboard.build_history_grid(runs)
     assert "href='#wl-gpu_smoke'" in grid
-    assert "wl-chip" in grid
+    assert "<ul class='wl-chips'>" in grid
     assert "overall health" in grid.lower() or "Overall health" in grid
 
 
@@ -978,6 +978,12 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     assert any("NCCL" in c for step in ddp["setup"] for c in step["commands"])
     race = wl["race"]["repro"]
     assert any("AORTA_TRIAL_MASTER_PORT_BASE" in c for step in race["setup"] for c in step["commands"])
+    inference = wl["inference_offline"]["repro"]
+    verify_cmds = inference["verify"][0]["commands"]
+    assert any("/inference/" in c for c in verify_cmds)
+    assert not any("/inference_offline/" in c for c in verify_cmds)
+    assert any("pip install --upgrade --pre" in c for step in smoke["setup"] for c in step["commands"])
+    assert any("find triage_results" in c for c in verify_cmds)
 
 
 def test_dashboard_workloads_use_category_card_layout():

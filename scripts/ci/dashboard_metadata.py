@@ -7,17 +7,28 @@ from __future__ import annotations
 
 from typing import Any
 
-_READ_MATRIX = [
-    "ls -lt triage_results/*/*/$(ls -t triage_results/*/* | head -1 | xargs basename) 2>/dev/null || true",
-    "cat triage_results/<TICKET>/<workload>/<timestamp>/matrix.md",
-    "cat triage_results/<TICKET>/<workload>/<timestamp>/matrix.json | python -m json.tool | head -80",
-]
-
 _COMPARE_NOTE = (
     "Match the aorta, PyTorch, ROCm, and HIP versions shown in the dashboard "
     "header when comparing numbers. Small differences on different hardware are "
     "expected; regressions vs the blessed baseline are what nightly CI flags."
 )
+
+
+def _read_matrix_cmds(artifact_workload: str) -> list[str]:
+    """Shell helpers to locate and read the newest matrix for one recipe workload."""
+    wl = artifact_workload
+    return [
+        (
+            "find triage_results -mindepth 3 -maxdepth 3 -type d "
+            f"-path '*/{wl}/*' -printf '%T@ %p\\n' 2>/dev/null "
+            "| sort -rn | head -1 | cut -d' ' -f2-"
+        ),
+        f"cat triage_results/<TICKET>/{wl}/<timestamp>/matrix.md",
+        (
+            f"cat triage_results/<TICKET>/{wl}/<timestamp>/matrix.json "
+            "| python -m json.tool | head -80"
+        ),
+    ]
 
 
 def _install_setup(*, min_gpus: int, distributed: bool = False) -> list[dict[str, Any]]:
@@ -29,7 +40,7 @@ def _install_setup(*, min_gpus: int, distributed: bool = False) -> list[dict[str
                 "cd aorta",
                 "pip install --upgrade pip",
                 (
-                    "pip install --pre 'amd-aorta[hw-queue]' "
+                    "pip install --upgrade --pre 'amd-aorta[hw-queue]' "
                     "-f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels"
                 ),
                 "aorta --help",
@@ -64,6 +75,7 @@ def _install_setup(*, min_gpus: int, distributed: bool = False) -> list[dict[str
 
 def _workload_repro(
     *,
+    artifact_workload: str,
     prerequisites: list[str],
     recipe: str,
     run_command: str,
@@ -75,7 +87,7 @@ def _workload_repro(
     success: str,
     setup_extra: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    verify_cmds = list(_READ_MATRIX)
+    verify_cmds = _read_matrix_cmds(artifact_workload)
     if verify_extra:
         verify_cmds.extend(verify_extra)
     setup = _install_setup(min_gpus=min_gpus, distributed=distributed)
@@ -137,6 +149,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "min_gpus": 1,
             "run_command": "aorta sweep run --recipe recipes/ci/gpu-smoke.yaml",
             "repro": _workload_repro(
+                artifact_workload="gpu_smoke",
                 prerequisites=[
                     "One AMD GPU with working ROCm drivers",
                     "Python 3.10+ and a PyTorch build for your ROCm version",
@@ -170,9 +183,10 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "aorta sweep run --recipe recipes/inference/example-inference-smoke.yaml"
             ),
             "repro": _workload_repro(
+                artifact_workload="inference",
                 prerequisites=[
-                    "One AMD GPU with enough VRAM for the smoke model weights",
-                    "PyTorch with ROCm; HuggingFace model cache or network to fetch weights",
+                    "One AMD GPU with enough VRAM for the built-in smoke model",
+                    "PyTorch with ROCm (the recipe uses AORTA's RepeatedBlockModel locally)",
                     "Same AORTA wheel channel as nightly when comparing checksums",
                 ],
                 recipe="recipes/inference/example-inference-smoke.yaml",
@@ -188,7 +202,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 verify_title="Inspect latency, throughput, and checksum artifacts",
                 verify_extra=[
                     "grep -E 'tokens_per_sec|prefill|decode|checksum' "
-                    "triage_results/<TICKET>/inference_offline/<timestamp>/matrix.md",
+                    "triage_results/<TICKET>/inference/<timestamp>/matrix.md",
                 ],
                 success=(
                     "All cells pass against baseline (or record on first capture). "
@@ -208,9 +222,10 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/training/example-training-ddp-smoke.yaml"
             ),
             "repro": _workload_repro(
+                artifact_workload="training",
                 prerequisites=[
                     "Two AMD GPUs on one node, visible to a single PyTorch process group",
-                    "NCCL/RCCL usable between the two devices (no PCIe/NVLINK misconfig)",
+                    "RCCL usable between the two devices (check PCIe/xGMI topology)",
                     "torchrun on PATH (ships with PyTorch)",
                 ],
                 recipe="recipes/training/example-training-ddp-smoke.yaml",
@@ -227,7 +242,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 verify_title="Confirm both ranks finished and step times recorded",
                 verify_extra=[
                     "grep -E 'step_time_p50|step_time_p99' "
-                    "triage_results/<TICKET>/training_ddp/<timestamp>/matrix.md",
+                    "triage_results/<TICKET>/training/<timestamp>/matrix.md",
                 ],
                 success=(
                     "Both ranks exit cleanly; matrix.md lists step_time_p50/p99 per cell. "
@@ -246,6 +261,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/training/example-training-ddp-smoke.yaml"
             ),
             "repro": _workload_repro(
+                artifact_workload="training",
                 prerequisites=[
                     "Eight AMD GPUs on one node (nightly reference: single MI350 node)",
                     "torchrun --standalone --nproc_per_node=8 must bind one rank per GPU",
@@ -264,7 +280,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 ),
                 verify_title="Check weak-scaling step times on eight ranks",
                 verify_extra=[
-                    "grep step_time_p50 triage_results/<TICKET>/training_ddp_8gpu/<timestamp>/matrix.md",
+                    "grep step_time_p50 triage_results/<TICKET>/training/<timestamp>/matrix.md",
                 ],
                 success=(
                     "All eight ranks participate; step_time_p50/p99 recorded. "
@@ -283,6 +299,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/training/example-training-fsdp-smoke.yaml"
             ),
             "repro": _workload_repro(
+                artifact_workload="training",
                 prerequisites=[
                     "Two AMD GPUs with FSDP-compatible PyTorch build",
                     "Same torchrun/NCCL setup as DDP (FSDP still uses dist.init_process_group)",
@@ -316,6 +333,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/training/example-training-fsdp-smoke.yaml"
             ),
             "repro": _workload_repro(
+                artifact_workload="training",
                 prerequisites=[
                     "Full eight-GPU node (nightly runs on a single MI350 host)",
                     "FSDP requires stable NCCL/RCCL across all eight ranks",
@@ -352,6 +370,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/llm-determinism/example-llm-determinism.yaml"
             ),
             "repro": _workload_repro(
+                artifact_workload="llm_determinism",
                 prerequisites=[
                     "Two GPUs — determinism is checked across ranks in one job",
                     "Identical random seeds and deterministic PyTorch ops where required",
@@ -389,6 +408,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/llm-determinism/example-llm-determinism.yaml"
             ),
             "repro": _workload_repro(
+                artifact_workload="llm_determinism",
                 prerequisites=[
                     "Eight-GPU node — catches determinism bugs that only appear at scale",
                     "Stable RCCL collectives; any rank mismatch fails the workload",
@@ -424,6 +444,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/race/race_smoke.yaml"
             ),
             "repro": _workload_repro(
+                artifact_workload="race",
                 prerequisites=[
                     "Two GPUs — race workload stresses concurrent RCCL + layer checksums",
                     "Race workloads use fresh process isolation per trial (see recipe)",
@@ -466,6 +487,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/race/race_smoke.yaml"
             ),
             "repro": _workload_repro(
+                artifact_workload="race",
                 prerequisites=[
                     "Eight-GPU node — amplifies timing races vs the 2-GPU smoke",
                     "Export AORTA_TRIAL_MASTER_PORT_BASE on static launchers (see README-running-recipes)",

@@ -889,10 +889,10 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
         )
         flag = " <span class='bump' title='toolchain changed in this run'>bump</span>" if bumped else ""
 
-        chips = "".join(
-            _wl_chip(name, by_entry.get(name) or [], retired=name not in active)
+        chip_items = [
+            f"<li>{_wl_chip(name, by_entry.get(name) or [], retired=name not in active)}</li>"
             for name in ordered
-        )
+        ]
         cards.append(
             f"<article class='release-card'>"
             f"<header class='release-hdr'>"
@@ -901,7 +901,7 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             f"title='{_esc(status)}'>{_esc(customer_status)}</span>"
             f"<span class='runmeta mono'>{_esc(str(build.get('amd_aorta_version') or ''))}</span>"
             f"</header>"
-            f"<div class='wl-chips' role='list'>{chips}</div>"
+            f"<ul class='wl-chips'>{''.join(chip_items)}</ul>"
             f"</article>"
         )
 
@@ -1496,7 +1496,9 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   .release-hdr {{ display:flex; flex-wrap:wrap; align-items:center; gap:.45rem .75rem;
                   margin-bottom:.55rem; }}
   .release-date {{ font-weight:600; font-size:.88rem; }}
-  .wl-chips {{ display:flex; flex-wrap:wrap; gap:.4rem; }}
+  .wl-chips {{ display:flex; flex-wrap:wrap; gap:.4rem; list-style:none;
+                margin:0; padding:0; }}
+  .wl-chips > li {{ margin:0; padding:0; }}
   .wl-chip {{ display:inline-flex; align-items:center; gap:.35rem; padding:.25rem .55rem;
               border:1px solid var(--border); border-radius:999px; font-size:.75rem;
               text-decoration:none; color:inherit; background:#12161b; max-width:100%; }}
