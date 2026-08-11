@@ -250,6 +250,29 @@ def _headline_block(entry: dict[str, Any], entry_name: str) -> str:
     )
 
 
+# Metrics hidden from the optional detailed table — still in headline view when relevant.
+_ENGINEER_HIDDEN_METRICS = frozenset({
+    "rank",
+    "world_size",
+    "local_world_size",
+    "node_count",
+    "parameter_count",
+    "corruption_details_omitted",
+})
+
+
+def _policy_label(name: str) -> str:
+    """Plain-language grading rule for the detailed metrics table."""
+    policy = _metric_policy(name)
+    if policy == "equal":
+        return "must match baseline"
+    if policy == "min":
+        return "higher is better"
+    if policy == "max":
+        return "lower is better"
+    return "tracked only (not gated)"
+
+
 def _run_command_block(entry_name: str) -> str:
     """Step-by-step instructions to reproduce a workload outside CI."""
     meta = _workload_meta(entry_name)
@@ -273,8 +296,9 @@ def _run_command_block(entry_name: str) -> str:
             f"{_esc(recipe)}</a></p>"
         )
     return (
-        f"<div class='repro-panel' id='repro-{_esc(entry_name)}'>"
-        f"<p class='repro-kicker muted'>Run this workload locally</p>"
+        f"<details class='repro-panel' id='repro-{_esc(entry_name)}'>"
+        f"<summary>Run this workload locally</summary>"
+        f"<div class='repro-body'>"
         f"<ol class='repro-steps'>"
         f"<li><strong>Requirements:</strong> {gpu_note}; ROCm + PyTorch installed "
         f"(match the stack versions in the header when comparing numbers).</li>"
@@ -285,7 +309,7 @@ def _run_command_block(entry_name: str) -> str:
         f"<li><strong>Distributed workloads:</strong> see "
         f"<a href='https://github.com/{_REPO}/blob/main/recipes/README-running-recipes.md'>"
         f"recipes/README-running-recipes.md</a> for torchrun and multi-node notes.</li>"
-        f"</ol>{recipe_line}</div>"
+        f"</ol>{recipe_line}</div></details>"
     )
 
 
@@ -631,18 +655,18 @@ def _metric_rows(
     summary = ((entry.get("metrics") or {}).get("summary") or {})
     out = []
     for m in sorted(summary):
+        if m in _ENGINEER_HIDDEN_METRICS:
+            continue
         raw = summary.get(m)
         unit = _METRIC_UNITS.get(m, "")
-        # A unit on an unknown value ("— ms") reads as a measurement of nothing.
         val = f"{_fmt_num(raw)} {unit}".strip() if _isnum(raw) else _fmt_num(raw)
-        policy = _metric_policy(m) or "trend only"
         trend = (
             f"<td class='spark'>{_svg_sparkline(mhist.get((cell_key, m), []))}</td>"
             if show_trend else ""
         )
         out.append(
             f"<tr><td class='mono'>{_esc(m)}</td>"
-            f"<td class='center muted'>{_esc(policy)}</td>"
+            f"<td class='center muted'>{_esc(_policy_label(m))}</td>"
             f"<td class='num'>{_esc(val)}</td>{trend}</tr>"
         )
     return "".join(out)
@@ -1172,7 +1196,11 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 
             mrows = _metric_rows(k, e, mhist, show_metric_trend)
             if mrows:
-                n_metrics = len((e.get("metrics") or {}).get("summary") or {})
+                visible = [
+                    m for m in ((e.get("metrics") or {}).get("summary") or {})
+                    if m not in _ENGINEER_HIDDEN_METRICS
+                ]
+                n_metrics = len(visible)
                 recipe = e.get("recipe") or ""
                 prov = []
                 if recipe:
@@ -1183,12 +1211,16 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                     prov.append(f"{n_trials} trial{'s' if n_trials != 1 else ''}")
                 rows.append(
                     f"<tr class='mrow'><td colspan='{ncols}'><details>"
-                    f"<summary>All metrics (engineer) — {n_metrics} metric"
+                    f"<summary>Detailed metrics (optional) — {n_metrics} value"
                     f"{'s' if n_metrics != 1 else ''}</summary>"
+                    f"<p class='prov muted'>Full harness output for this recipe variant. "
+                    f"<strong>Grading rule</strong> is how nightly CI compares the value; "
+                    f"<strong>this run</strong> is tonight; "
+                    f"<strong>history</strong> is recent nights (when available).</p>"
                     f"<p class='prov'>{' · '.join(prov)}</p>"
                     f"<table class='inner'><thead><tr><th>metric</th>"
-                    f"<th class='center'>policy</th><th class='num'>latest</th>"
-                    f"{'<th>trend</th>' if show_metric_trend else ''}</tr></thead>"
+                    f"<th class='center'>grading rule</th><th class='num'>this run</th>"
+                    f"{'<th>history</th>' if show_metric_trend else ''}</tr></thead>"
                     f"<tbody>{mrows}</tbody></table>"
                     f"</details></td></tr>"
                 )
@@ -1199,12 +1231,12 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     )
 
     head = [
-        "<th scope='col'>cell</th>",
-        "<th scope='col' class='center'>status</th>",
+        "<th scope='col'>recipe variant</th>",
+        "<th scope='col' class='center'>result</th>",
         "<th scope='col' class='num'>step time</th>",
     ]
     if show_trend:
-        head.append("<th scope='col'>trend (step ms)</th>")
+        head.append("<th scope='col'>step time history</th>")
     if show_notes:
         head.append("<th scope='col'>notes</th>")
 
@@ -1454,16 +1486,19 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   ul.headlines li {{ background:#12161b; border:1px solid var(--border);
                      border-radius:6px; padding:.2rem .55rem; font-size:.78rem; }}
   tr.headline-row > td {{ padding-top:0; padding-bottom:.5rem; }}
-  .repro-panel {{ margin:.55rem 0 0; padding:.65rem .75rem; background:#12161b;
-                  border:1px solid var(--border); border-radius:8px; }}
-  .repro-kicker {{ margin:0 0 .35rem; font-size:.72rem; text-transform:uppercase;
-                   letter-spacing:.05em; }}
+  .repro-panel {{ margin:.55rem 0 0; border:1px solid var(--border); border-radius:8px;
+                  background:#12161b; }}
+  .repro-panel summary {{ cursor:pointer; padding:.55rem .75rem; font-size:.82rem;
+                           font-weight:600; color:var(--accent); list-style-position:outside; }}
+  .repro-panel[open] summary {{ border-bottom:1px solid var(--border); }}
+  .repro-body {{ padding:.65rem .75rem .75rem; }}
   ol.repro-steps {{ margin:.35rem 0 0; padding-left:1.25rem; font-size:.82rem; }}
   ol.repro-steps li {{ margin:.35rem 0; }}
   .repro-cmd {{ background:#0d1117; border:1px solid var(--border); border-radius:6px;
                 padding:.5rem .65rem; margin:.35rem 0 0; overflow-x:auto;
                 white-space:pre-wrap; word-break:break-word; }}
   .repro-note {{ margin:.45rem 0 0; font-size:.75rem; }}
+  .wl-intro {{ margin:.35rem 0 .5rem; font-size:.86rem; max-width:72ch; }}
   a.wl-title {{ color:#e6edf3; text-decoration:none; }}
   a.wl-title:hover {{ color:var(--accent); text-decoration:underline; }}
   a.gcell-link {{ color:inherit; text-decoration:none; display:inline-block; }}
@@ -1524,35 +1559,34 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         <button type="button" data-details="close">Collapse all</button>
       </div>
     </div>
+    <p class="muted wl-intro">Each card is one workload. The bullets under a variant are tonight&apos;s headline numbers. Expand <strong>Run this workload locally</strong> to reproduce on your machine, or <strong>Detailed metrics</strong> for the full log.</p>
     <div class="tablewrap">
       <table>
         <thead><tr>{''.join(head)}</tr></thead>
         {table_body}
       </table>
     </div>
-    <p class="legend">Verdicts: <strong>pass</strong>/<strong>fail</strong> = compared
-      against a blessed baseline · <strong>record</strong> = no baseline yet, metrics
-      captured as the future reference · <strong>skip</strong> = not enough GPUs on the
-      runner. One row is one recorded result: a workload skipped before it reached
-      its cells yields a single row for the whole workload, so a count of rows is
-      not a count of configured cells. Expand a row for its metrics and recipe.</p>
+    <p class="legend">Results: <strong>pass</strong>/<strong>fail</strong> = compared against a blessed baseline · <strong>record</strong> = baseline not set yet · <strong>skip</strong> = not enough GPUs. Expand cards for reproduction steps or optional detailed metrics.</p>
   </div>
 <script>
-// Progressive enhancement only: the page is complete without this, so the
-// controls stay hidden until the script that drives them has actually run.
+(function () {{
+  var hash = location.hash;
+  if (hash) {{
+    var target = document.querySelector(hash);
+    if (target && target.tagName === "DETAILS") target.open = true;
+  }}
+}})();
 (function () {{
   var bar = document.getElementById("toolbar");
   if (!bar) return;
-  // Nothing to expand when no result carried metrics, and a pair of buttons
-  // that provably do nothing is worse than no buttons.
-  if (!document.querySelectorAll("tr.mrow details").length) return;
+  var panels = document.querySelectorAll("tr.mrow details, details.repro-panel");
+  if (!panels.length) return;
   bar.hidden = false;
   bar.addEventListener("click", function (ev) {{
     var want = ev.target && ev.target.getAttribute("data-details");
     if (!want) return;
     var open = want === "open";
-    var all = document.querySelectorAll("tr.mrow details");
-    for (var i = 0; i < all.length; i++) all[i].open = open;
+    for (var i = 0; i < panels.length; i++) panels[i].open = open;
   }});
 }})();
 </script>

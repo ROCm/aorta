@@ -298,7 +298,7 @@ def test_dashboard_omits_trend_column_without_history():
                                 "summary": {"decode_latency_ms": 13.5}}}],
                   total=1, record=1)
     two = gen_dashboard.build_dashboard_html([r, r2])
-    assert "trend (step ms)" in two
+    assert "step time history" in two
 
 
 def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
@@ -781,7 +781,7 @@ def test_dashboard_withholds_the_js_controls_when_there_is_nothing_to_expand():
             _run(4, [_cell("w", "c", step=1.0)], total=1, record=1)]
     html = gen_dashboard.build_dashboard_html(runs)
     assert "<details>" not in html
-    assert 'document.querySelectorAll("tr.mrow details").length' in html
+    assert "details.repro-panel" in html
 
 
 def test_dashboard_hides_the_js_only_controls_until_the_script_runs():
@@ -849,8 +849,8 @@ def test_dashboard_run_command_block():
     assert "example-inference-smoke.yaml" in html
     assert "getting started guide" in html
     assert "README-running-recipes.md" in html
-    assert "id='repro-inference_offline'" in html
-    assert "href='#repro-inference_offline'" in html
+    assert "details class='repro-panel' id='repro-inference_offline'" in html
+    assert "<summary>Run this workload locally</summary>" in html
 
 
 def test_history_grid_retired_workloads_do_not_link_to_missing_sections():
