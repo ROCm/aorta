@@ -11,7 +11,7 @@ from aorta.triage.recipe import RecipeSchemaError, load_recipe_mapping
 
 from .consan import resolve_consan_hook
 from .models import CheckResult, ExecutionState, SelectionRequirement, Verdict
-from .pipeline import run_sanitizers
+from .pipeline import DEFAULT_TIMEOUT_SECONDS, run_sanitizers
 from .report import build_report, write_report
 from .selection import (
     observations_from_consan_repro,
@@ -144,6 +144,7 @@ class SanitizerRecipe:
     report_name: str
     repro_variant: str | None = None
     kernel_specs: tuple[KernelSourceSpec, ...] = ()
+    timeout_seconds: float | None = None
 
     @property
     def recipe_dir(self) -> Path | None:
@@ -170,6 +171,28 @@ def _resolve_path(raw: str, *, recipe_path: Path) -> Path:
     if candidate.is_absolute():
         return candidate
     return (recipe_path.parent / candidate).resolve()
+
+
+def _optional_timeout_seconds(block: Mapping[str, object]) -> float | None:
+    """Parse an optional positive ``timeout_seconds`` (seconds) from a block.
+
+    Absent keeps the pipeline default. A bool, non-number, or non-positive value
+    is rejected so a malformed knob fails at load rather than silently disabling
+    the ceiling.
+    """
+
+    if "timeout_seconds" not in block:
+        return None
+    value = block.get("timeout_seconds")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RecipeSchemaError(
+            "sanitizer_plan.policy.timeout_seconds must be a positive number"
+        )
+    if value <= 0:
+        raise RecipeSchemaError(
+            "sanitizer_plan.policy.timeout_seconds must be a positive number"
+        )
+    return float(value)
 
 
 def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
@@ -228,6 +251,7 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         raise RecipeSchemaError(
             f"unsupported sanitizer_plan.policy.on_missing_backend={on_missing_backend!r}"
         )
+    timeout_seconds = _optional_timeout_seconds(policy)
     output = _require_mapping(plan.get("output"), name="sanitizer_plan.output")
     report_name = _require_str(output, "report")
 
@@ -260,6 +284,14 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         kernel = _require_mapping(source.get("kernel"), name="sanitizer_plan.source.kernel")
         kernel_specs = (_parse_kernel_spec(kernel, context="sanitizer_plan.source.kernel"),)
 
+    # For every resolvable (non-repro) source kind an optional
+    # ``source.consan_command`` points ConSan at a caller-supplied command or
+    # code-object loader (e.g. the consan_app.py HIP loader), resolved relative
+    # to the recipe file. Absent, the non-repro kinds keep today's
+    # ``not_checked`` behavior; the ``consan_repro`` kind uses ``command``.
+    if source_kind != "consan_repro" and "consan_command" in source:
+        consan_command = _resolve_path(_require_str(source, "consan_command"), recipe_path=path)
+
     if "isa_dir" in source:
         isa_dir = _resolve_path(_require_str(source, "isa_dir"), recipe_path=path)
     if source_kind == "gemm_csv" and isa_dir is None:
@@ -283,6 +315,7 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
         report_name=report_name,
         repro_variant=repro_variant,
         kernel_specs=kernel_specs,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -399,5 +432,10 @@ def execute_sanitizer_run(
         on_missing_backend=recipe.on_missing_backend,
         consan_target=consan_target,
         report_name=recipe.report_name,
+        timeout_seconds=(
+            recipe.timeout_seconds
+            if recipe.timeout_seconds is not None
+            else DEFAULT_TIMEOUT_SECONDS
+        ),
     )
     return report_path

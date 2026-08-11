@@ -404,16 +404,32 @@ def observations_from_consan_repro(
     variant: str,
     *,
     target: str,
+    label: str | None = None,
 ) -> tuple[KernelObservation, ...]:
-    label = {"clean": "consan_lds_race", "racy": "consan_lds_race_2wave"}.get(variant)
-    if label is None:
+    """Build the single kernel identity for a ConSan repro variant.
+
+    The two built-in variants ("clean"/"racy") keep their historical kernel
+    labels for backward compatibility. Any other non-empty variant is accepted
+    so a recipe can drive ConSan over a user-supplied command/code object: its
+    kernel label is either the explicit ``label`` or a stable ``consan_{variant}``
+    derived from the variant. An empty/invalid variant still fails closed.
+    """
+
+    normalized = _optional_str(variant)
+    if normalized is None:
         raise ValueError(f"unsupported consan repro variant {variant!r}")
+    builtin = {"clean": "consan_lds_race", "racy": "consan_lds_race_2wave"}.get(normalized)
+    if builtin is not None:
+        resolved_label = builtin
+    else:
+        explicit = _optional_str(label)
+        resolved_label = explicit if explicit is not None else f"consan_{normalized}"
     return (
         KernelObservation(
-            identity=KernelIdentity(name=label, target=target),
+            identity=KernelIdentity(name=resolved_label, target=target),
             total_time_ms=0.0,
             dispatch_count=1,
-            sources=(f"consan_repro:{variant}",),
+            sources=(f"consan_repro:{normalized}",),
         ),
     )
 
