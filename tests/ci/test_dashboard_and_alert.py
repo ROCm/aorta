@@ -853,6 +853,17 @@ def test_dashboard_run_command_block():
     assert "href='#repro-inference_offline'" in html
 
 
+def test_history_grid_retired_workloads_do_not_link_to_missing_sections():
+    runs = [
+        _run(3, [_cell("old_workload", "c")], total=1, record=1),
+        _run(4, [_cell("gpu_smoke", "c")], total=1, record=1),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "href='#wl-old_workload'" not in grid
+    assert "gcell-retired" in grid
+    assert "href='#wl-gpu_smoke'" in grid
+
+
 def test_history_grid_workloads_and_cells_link_to_repro_sections():
     runs = [
         _run(3, [_cell("gpu_smoke", "c"), _cell("race", "smoke")], total=2, record=2),
@@ -873,17 +884,39 @@ def test_history_grid_overall_health_uses_customer_label():
     assert "Baseline setup" in grid
 
 
-def test_build_data_json_v2_wraps_results_with_latest_summary():
+def test_build_status_json_structured_latest_summary():
     entries = [
         {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "record",
          "reasons": [], "metrics": {"mean_step_time_ms": 1.0}},
     ]
     runs = [_results("2026-08-03T12:00:00Z", entries, total=1, record=1)]
-    doc = gen_dashboard.build_data_json(runs)
+    doc = gen_dashboard.build_status_json(runs)
     assert doc["schema_version"] == 2
     assert doc["latest"]["customer_status"] == "Baseline setup"
     assert doc["latest"]["categories"]["platform"]["worst_verdict"] == "record"
-    assert doc["results"] == runs
+    assert "results" not in doc
+
+
+def test_data_json_feed_stays_a_top_level_array():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 1.0}},
+    ]
+    runs = [_results("2026-08-03T12:00:00Z", entries, total=1, record=1)]
+    import json
+    feed = json.loads(json.dumps(runs, indent=2))
+    assert isinstance(feed, list)
+    assert feed == runs
+
+
+def test_scaling_summary_uses_weak_scaling_efficiency():
+    entries = [
+        _cell("training_ddp", "c", summary={"step_time_p50": 8.0}),
+        _cell("training_ddp_8gpu", "c", summary={"step_time_p50": 2.0}),
+    ]
+    html = gen_dashboard.build_scaling_summary(entries)
+    assert "weak scaling" in html
+    assert "400%" in html  # 8.0 / 2.0 * 100
 
 
 def test_scaling_summary_renders_when_two_and_eight_gpu_training_present():
@@ -938,7 +971,8 @@ def test_headline_checksum_record_only_shows_captured_not_match():
     assert "match ✓" not in html
 
 
-def test_headline_checksum_shows_match_when_comparison_confirms():
+def test_headline_checksum_pass_verdict_still_shows_captured_not_match():
+    """A pass verdict cannot confirm exact checksum equality after float rounding."""
     entry = {"entry": "inference_offline", "cell": "baseline-local",
              "verdict": "pass", "reasons": [],
              "metrics": {"mean_step_time_ms": 4.0,
@@ -947,7 +981,8 @@ def test_headline_checksum_shows_match_when_comparison_confirms():
                  "observed": 33904201, "policy": "equal", "value": 33904201}}}}
     html = gen_dashboard.build_dashboard_html(
         [_results("2026-07-30T00:00:00Z", [entry], total=1, **{"pass": 1})])
-    assert "logits checksum: match ✓" in html
+    assert "logits checksum: captured (33,904,201)" in html
+    assert "logits checksum: match ✓" not in html
 
 
 def test_headline_checksum_no_match_on_float_equality_when_harness_failed():

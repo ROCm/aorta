@@ -189,22 +189,18 @@ def _checksum_metric_failed(entry: dict[str, Any], name: str) -> bool:
 
 
 def _checksum_headline(name: str, raw: Any, entry: dict[str, Any]) -> str:
-    """Headline for checksum metrics — neutral unless the harness confirms match.
+    """Headline for checksum metrics — neutral unless the harness reports failure.
 
-    Checksums are serialized as floats in nightly JSON; ``observed == expected``
-    is unsafe for large int64 checksums that can collide after rounding. Trust
-    the entry verdict and failure reasons from ``compare_to_baseline`` instead.
+    Checksums are serialized as floats in nightly JSON; both ``observed == expected``
+    and a ``pass`` verdict can be wrong for large int64 values that collide after
+    rounding. Only surface a definite mismatch from failure reasons; otherwise
+    show the captured value.
     """
     label = name.replace("_", " ")
     if not _isnum(raw):
         return f"{label}: —"
-    verdict = str(entry.get("verdict", ""))
-    deltas = entry.get("deltas") or {}
-    metric_delta = (deltas.get("metrics") or {}).get(name)
-    if verdict == "fail" and _checksum_metric_failed(entry, name):
+    if str(entry.get("verdict", "")) == "fail" and _checksum_metric_failed(entry, name):
         return f"{label}: mismatch ✗"
-    if verdict == "pass" and metric_delta and metric_delta.get("policy") == "equal":
-        return f"{label}: match ✓"
     return f"{label}: captured ({_fmt_num(raw)})"
 
 
@@ -296,7 +292,7 @@ def _run_command_block(entry_name: str) -> str:
 def _category_statuses(
     latest_entries: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Structured category health for ``data.json`` consumers."""
+    """Structured category health for ``status.json`` consumers."""
     meta = load_dashboard_metadata()
     categories = meta.get("categories") or {}
     by_entry: dict[str, list[dict[str, Any]]] = {}
@@ -343,8 +339,8 @@ def _headline_metrics_for_entries(
     return out
 
 
-def build_data_json(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate history plus structured latest-night summary for embeds."""
+def build_status_json(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Structured latest-night summary for embeds (separate from the history feed)."""
     latest = results[-1] if results else None
     status, _ = _latest_status(results)
     latest_entries = list((latest or {}).get("entries") or [])
@@ -360,7 +356,6 @@ def build_data_json(results: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "schema_version": 2,
         "latest": latest_block,
-        "results": results,
     }
 
 
@@ -388,9 +383,9 @@ def build_scaling_summary(latest_entries: list[dict[str, Any]]) -> str:
         if p50_2 is None or p50_8 is None:
             continue
         ratio = p50_8 / p50_2 if p50_2 else None
-        # Ideal 8-GPU step time with perfect 4× scaling from 2 GPUs.
-        ideal_8 = p50_2 / 4.0
-        efficiency = (ideal_8 / p50_8 * 100.0) if p50_8 else None
+        # Weak scaling: recipes keep the same per-rank batch, so global batch
+        # grows 4× from 2 to 8 GPUs and ideal step time stays flat.
+        efficiency = (p50_2 / p50_8 * 100.0) if p50_8 else None
         eff_txt = f"{efficiency:.0f}%" if efficiency is not None else "—"
         ratio_txt = f"{ratio:.2f}×" if ratio is not None else "—"
         rows.append(
@@ -405,8 +400,9 @@ def build_scaling_summary(latest_entries: list[dict[str, Any]]) -> str:
     return (
         "<h2>Training scaling (2 → 8 GPU)</h2>"
         "<p class='muted'>Reference step_time_p50 from the latest nightly. "
-        "Scaling efficiency assumes ideal 4× speedup from 2 to 8 GPUs on the "
-        "same recipe.</p>"
+        "Recipes use the same per-rank batch at 2 and 8 GPUs (weak scaling), so "
+        "ideal step time is flat. Efficiency is "
+        "<span class='mono'>p50_2 / p50_8</span> as a percentage.</p>"
         "<div class='tablewrap'><table class='scaling'>"
         "<thead><tr><th>strategy</th><th class='num'>2 GPU p50</th>"
         "<th class='num'>8 GPU p50</th><th class='num'>slowdown</th>"
@@ -752,12 +748,23 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
     if not ordered:
         return ""
 
-    head = "".join(
-        f"<th scope='col' class='wlcol'>"
-        f"<a href='#wl-{_esc(n)}' title='{_esc(n)} — jump to workload'>"
-        f"{_esc(str(_workload_meta(n).get('title') or n))}</a></th>"
-        for n in ordered
-    )
+    active = set(newest)
+
+    def _wl_col_header(name: str) -> str:
+        title = str(_workload_meta(name).get("title") or name)
+        if name in active:
+            return (
+                f"<th scope='col' class='wlcol'>"
+                f"<a href='#wl-{_esc(name)}' title='{_esc(name)} — jump to workload'>"
+                f"{_esc(title)}</a></th>"
+            )
+        return (
+            f"<th scope='col' class='wlcol retired' "
+            f"title='{_esc(name)} — retired (no section below)'>"
+            f"{_esc(title)}</th>"
+        )
+
+    head = "".join(_wl_col_header(n) for n in ordered)
 
     newest_first = list(reversed(runs))
     rows = []
@@ -809,17 +816,21 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             # leaves anyone who cannot separate red from green — or who is on a
             # touch screen with no hover — unable to read the row at all.
             breakdown = f"{name} — {_tally_text(counts)}"
-            # role='img' so the aria-label is actually exposed: a plain span has
-            # the implicit generic role, which has no accessible name, so a
-            # screen reader is free to ignore the label and announce only the
-            # glyph and count -- the least useful part for a mixed group.
-            cells.append(
-                f"<td class='gcell'><a class='gcell-link' href='#wl-{_esc(name)}' "
-                f"title='{_esc(breakdown)} — jump to workload'>"
+            dot = (
                 f"<span class='dot' role='img' style='background:{bg}' "
                 f"aria-label='{_esc(breakdown)}'>"
-                f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span></a></td>"
+                f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span>"
             )
+            if name in active:
+                cells.append(
+                    f"<td class='gcell'><a class='gcell-link' href='#wl-{_esc(name)}' "
+                    f"title='{_esc(breakdown)} — jump to workload'>{dot}</a></td>"
+                )
+            else:
+                cells.append(
+                    f"<td class='gcell'><span class='gcell-retired' "
+                    f"title='{_esc(breakdown)} (retired workload)'>{dot}</span></td>"
+                )
 
         rows.append(
             f"<tr><th scope='row' class='runcell'>{when}{flag}"
@@ -833,7 +844,8 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
         "<h2>Nightly release health</h2>"
         "<p class='muted'>Each row is one nightly release (newest first). The "
         "<strong>overall health</strong> column summarises that night's graded "
-        "verdicts; workload columns link to reproduction steps below. "
+        "verdicts; active workload columns link to reproduction steps below. "
+        "Retired columns (no longer in the latest matrix) are plain text. "
         "Cell glyphs: ✓ pass · ✗ fail · ◆ record · ○ skip.</p>"
         "<div class='tablewrap'><table class='grid'>"
         f"<thead><tr><th scope='col'>release</th>"
@@ -1482,7 +1494,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         <a href="docs/">AORTA documentation</a> ·
         <a href="sanitizers/">Sanitizer nightly</a> ·
         <a href="https://github.com/{_REPO}">Repository</a> ·
-        <a href="data.json">data.json</a></p>
+        <a href="data.json">data.json</a> ·
+        <a href="status.json">status.json</a></p>
       <div class="chips">{toolchain}</div>
       <p class="prov-line">{' · '.join(provenance)}</p>
     </header>
@@ -1560,8 +1573,9 @@ def main() -> int:
         results = results[-args.max_builds:]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(build_dashboard_html(results), encoding="utf-8")
-    (args.out_dir / "data.json").write_text(
-        json.dumps(build_data_json(results), indent=2), encoding="utf-8")
+    (args.out_dir / "data.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+    (args.out_dir / "status.json").write_text(
+        json.dumps(build_status_json(results), indent=2), encoding="utf-8")
     print(f"dashboard: {len(results)} build(s) -> {args.out_dir / 'index.html'}", flush=True)
     return 0
 

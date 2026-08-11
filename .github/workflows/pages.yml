@@ -231,6 +231,7 @@ jobs:
             _site/ci/index.html
             _site/data.json
             _site/ci/data.json
+            _site/status.json
             _site/sanitizers/index.html
           )
           for f in "${routes[@]}"; do
@@ -247,7 +248,7 @@ jobs:
             echo "::error::/docs/ still claims the dashboard's URL as its own"
             exit 1
           fi
-          echo "routes ok: / /docs/ /ci/ /data.json /ci/data.json /sanitizers/"
+          echo "routes ok: / /docs/ /ci/ /data.json /ci/data.json /status.json /sanitizers/"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
