@@ -811,6 +811,22 @@ def test_dashboard_renders_category_health_tiles():
     assert "Healthy" in html  # one pass + one record => passing headline
 
 
+def test_dashboard_pass_and_skip_is_not_labelled_healthy():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 1.0}},
+        {"entry": "training_ddp_8gpu", "cell": None, "verdict": "skip",
+         "reasons": ["needs 8 GPU(s), have 2"], "metrics": {}},
+    ]
+    doc = _results("2026-07-30T00:00:00Z", entries, total=2, **{"pass": 1, "skip": 1})
+    assert gen_dashboard._latest_status([doc])[0] == "partial"
+    html = gen_dashboard.build_dashboard_html([doc])
+    assert "Partial run" in html
+    assert ">Healthy<" not in html
+    assert "partial" in html
+    assert "partial</strong>" in html or "<strong>partial</strong>" in html
+
+
 def test_dashboard_record_only_shows_baseline_setup_label():
     r = _results("2026-07-30T00:00:00Z",
                  [{"entry": "w", "cell": "c", "verdict": "record",

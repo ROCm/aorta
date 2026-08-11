@@ -128,6 +128,7 @@ _CUSTOMER_STATUS = {
     "unrecognised": "Unrecognised verdict",
     "failing": "Regression detected",
     "passing": "Healthy",
+    "partial": "Partial run",
     "recording": "Baseline setup",
     "skipping": "Incomplete run",
 }
@@ -408,6 +409,10 @@ def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
     if total > sum(_count(s.get(v)) for v in _VERDICT_ORDER):
         return "unrecognised", _UNKNOWN_COLOR
     if _count(s.get("pass")):
+        # A mix of pass and skip is not a fully healthy run — some workloads
+        # never executed (e.g. not enough GPUs for the 8-GPU matrix entries).
+        if _count(s.get("skip")):
+            return "partial", _VERDICT_COLOR["record"]
         return "passing", _VERDICT_COLOR["pass"]
     if _count(s.get("record")):
         return "recording", _VERDICT_COLOR["record"]
@@ -1072,6 +1077,14 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             f"<div class='notice'>Nothing ran: all {total} results were "
             f"<strong>skipped</strong>, so this build establishes nothing. Check that "
             f"the runner exposes as many GPUs as the matrix asks for.</div>"
+        )
+    elif status == "partial":
+        pass_now = _count(s.get("pass"))
+        notices.append(
+            f"<div class='notice'>This run is <strong>partial</strong>: "
+            f"{pass_now} of {total} results passed but {skip_now} workload(s) were "
+            f"<strong>skipped</strong> — not every configured matrix entry ran. "
+            f"Check that the runner exposes as many GPUs as the matrix asks for.</div>"
         )
     elif shared_reason:
         notices.append(
