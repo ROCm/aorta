@@ -864,6 +864,7 @@ def test_dashboard_run_command_block():
     assert "Reproduce this workload locally" in html
     assert "Before you start" in html
     assert "Success criteria" in html
+    assert "--strict" in html
     assert "example-inference-smoke.yaml" in html
     assert "README-running-recipes.md" in html
     assert "details class='repro-panel' id='repro-inference_offline'" in html
@@ -984,7 +985,32 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     assert not any("/inference_offline/" in c for c in verify_cmds)
     assert any("pip install --upgrade --pre" in c for step in smoke["setup"] for c in step["commands"])
     assert any("find triage_results" in c for c in verify_cmds)
+    assert any('RUN_DIR="$(' in c for c in verify_cmds)
+    assert any("$RUN_DIR/perf.md" in c for c in verify_cmds)
+    assert inference["run"]["command"].endswith("--strict")
+    assert "passed/recording only" in ddp["success_criteria"].lower()
 
+
+def test_dashboard_review_a11y_and_layout_fixes():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 254.0,
+                                    "summary": {"mean_step_time_ms": 254.0}}},
+        {"entry": "inference_offline", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 4.0,
+                                    "summary": {"tokens_per_sec": 4160}}},
+    ]
+    doc = _results("2026-08-03T00:00:00Z", entries, total=2, **{"pass": 2})
+    doc2 = _results("2026-08-04T00:00:00Z", entries, total=2, **{"pass": 2})
+    html = gen_dashboard.build_dashboard_html([doc, doc2])
+    assert "<h3 class='release-date'>" in html
+    assert "<h4 class='wl-title'>" in html
+    assert "<section class='repro-sec'><h5>Before you start</h5>" in html
+    assert "nightly_eval.py" in html
+    assert "overflow:visible" in html
+    assert "class='tablewrap'><table class='inner'>" in html
+    assert ".wl-chip.absent .chip-meta" in html
+    assert ".absent { color:#39414a; }" not in html
 
 def test_dashboard_workloads_use_category_card_layout():
     entries = [

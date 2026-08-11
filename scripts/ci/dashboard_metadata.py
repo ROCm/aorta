@@ -13,20 +13,36 @@ _COMPARE_NOTE = (
     "expected; regressions vs the blessed baseline are what nightly CI flags."
 )
 
+_TRAINING_SUCCESS = (
+    "All ranks complete without error. step_time_p50/p99 appear in perf.md. "
+    "Nightly currently records training cells (passed/recording only); "
+    "step-time thresholds are not perf-gated in regression_baselines.yaml yet."
+)
+
+_METRICS_IN_PERF = (
+    'grep -E "{pattern}" "$RUN_DIR/perf.md" 2>/dev/null | head '
+    '|| python -c "import json,sys; d=json.load(open(sys.argv[1])); '
+    'print(json.dumps(d.get(\\\"cells\\\",{{}}), indent=2)[:2000])" "$RUN_DIR/matrix.json"'
+)
+
 
 def _read_matrix_cmds(artifact_workload: str) -> list[str]:
     """Shell helpers to locate and read the newest matrix for one recipe workload."""
     wl = artifact_workload
     return [
         (
-            "find triage_results -mindepth 3 -maxdepth 3 -type d "
-            f"-path '*/{wl}/*' -printf '%T@ %p\\n' 2>/dev/null "
-            "| sort -rn | head -1 | cut -d' ' -f2-"
+            f'RUN_DIR="$(find triage_results -mindepth 3 -maxdepth 3 -type d '
+            f'-path "*/{wl}/*" -printf \'%T@ %p\\n\' 2>/dev/null '
+            f'| sort -rn | head -1 | cut -d\' \' -f2-)"'
         ),
-        f"cat triage_results/<TICKET>/{wl}/<timestamp>/matrix.md",
+        'if [ -z "$RUN_DIR" ] || [ ! -d "$RUN_DIR" ]; then echo "No run directory found"; exit 1; fi',
+        'echo "Using run directory: $RUN_DIR"',
+        'cat "$RUN_DIR/matrix.md"',
+        'python -m json.tool "$RUN_DIR/matrix.json" | head -80',
+        'if [ -f "$RUN_DIR/perf.md" ]; then head -60 "$RUN_DIR/perf.md"; else echo "(no perf.md)"; fi',
         (
-            f"cat triage_results/<TICKET>/{wl}/<timestamp>/matrix.json "
-            "| python -m json.tool | head -80"
+            "# Dashboard pass/record/fail comes from nightly_eval.py comparing "
+            "matrix.json to config/ci/regression_baselines.yaml (--strict)"
         ),
     ]
 
@@ -93,6 +109,10 @@ def _workload_repro(
     setup = _install_setup(min_gpus=min_gpus, distributed=distributed)
     if setup_extra:
         setup.extend(setup_extra)
+    strict_cmd = (
+        run_command if run_command.rstrip().endswith("--strict")
+        else f"{run_command.rstrip()} --strict"
+    )
     return {
         "prerequisites": prerequisites,
         "setup": setup,
@@ -100,7 +120,10 @@ def _workload_repro(
             "title": "Validate the recipe YAML (no GPU execution)",
             "command": dry_run,
         },
-        "run": {"title": "Run the nightly recipe", "command": run_command},
+        "run": {
+            "title": "Run the recipe with --strict (same flag as nightly CI)",
+            "command": strict_cmd,
+        },
         "verify": [{"title": verify_title, "commands": verify_cmds}],
         "success_criteria": success,
         "compare_notes": _COMPARE_NOTE,
@@ -162,9 +185,9 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 dry_run="aorta sweep run --recipe recipes/ci/gpu-smoke.yaml --dry-run",
                 verify_title="Read the smoke matrix",
                 success=(
-                    "Rank 0 prints `Wrote matrix to ...` and matrix.md shows every "
-                    "cell as pass (or record when no baseline exists yet). "
-                    "mean_step_time_ms is the headline metric on the dashboard."
+                    "Rank 0 prints `Wrote matrix to ...`. matrix.md shows every cell "
+                    "completed; mean_step_time_ms is recorded in perf.md. Nightly "
+                    "records this workload until a blessed baseline exists."
                 ),
             ),
         },
@@ -201,13 +224,14 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 ),
                 verify_title="Inspect latency, throughput, and checksum artifacts",
                 verify_extra=[
-                    "grep -E 'tokens_per_sec|prefill|decode|checksum' "
-                    "triage_results/<TICKET>/inference/<timestamp>/matrix.md",
+                    _METRICS_IN_PERF.format(
+                        pattern="tokens_per_sec|prefill|decode|checksum"
+                    ),
                 ],
                 success=(
-                    "All cells pass against baseline (or record on first capture). "
-                    "Headline metrics: tokens_per_sec, prefill/decode latency, "
-                    "and logits_checksum must match baseline when graded pass."
+                    "Recipe completes with --strict. logits_checksum is the active "
+                    "correctness gate in regression_baselines.yaml; latency and "
+                    "throughput are recorded on the dashboard but not perf-gated yet."
                 ),
             ),
         },
@@ -241,13 +265,9 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 ),
                 verify_title="Confirm both ranks finished and step times recorded",
                 verify_extra=[
-                    "grep -E 'step_time_p50|step_time_p99' "
-                    "triage_results/<TICKET>/training/<timestamp>/matrix.md",
+                    _METRICS_IN_PERF.format(pattern="step_time_p50|step_time_p99"),
                 ],
-                success=(
-                    "Both ranks exit cleanly; matrix.md lists step_time_p50/p99 per cell. "
-                    "Nightly grades lower step time as better vs blessed baseline."
-                ),
+                success=_TRAINING_SUCCESS,
             ),
         },
         "training_ddp_8gpu": {
@@ -280,11 +300,11 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 ),
                 verify_title="Check weak-scaling step times on eight ranks",
                 verify_extra=[
-                    "grep step_time_p50 triage_results/<TICKET>/training/<timestamp>/matrix.md",
+                    _METRICS_IN_PERF.format(pattern="step_time_p50"),
                 ],
                 success=(
-                    "All eight ranks participate; step_time_p50/p99 recorded. "
-                    "Compare to the 2-GPU DDP row in the scaling section on the dashboard."
+                    f"{_TRAINING_SUCCESS} Compare 2-GPU vs 8-GPU step_time_p50 in the "
+                    "dashboard scaling section."
                 ),
             ),
         },
@@ -315,11 +335,11 @@ DASHBOARD_METADATA: dict[str, Any] = {
                     "aorta sweep run --recipe "
                     "recipes/training/example-training-fsdp-smoke.yaml --dry-run"
                 ),
-                verify_title="Read FSDP step-time matrix",
-                success=(
-                    "matrix.md shows pass/record per cell with step_time_p50/p99. "
-                    "Failures usually indicate sharding or RCCL init problems across the two GPUs."
-                ),
+                verify_title="Read FSDP step-time artifacts",
+                verify_extra=[
+                    _METRICS_IN_PERF.format(pattern="step_time_p50|step_time_p99"),
+                ],
+                success=_TRAINING_SUCCESS,
             ),
         },
         "training_fsdp_8gpu": {
@@ -349,10 +369,13 @@ DASHBOARD_METADATA: dict[str, Any] = {
                     "aorta sweep run --recipe "
                     "recipes/training/example-training-fsdp-smoke.yaml --dry-run"
                 ),
-                verify_title="Confirm eight-rank FSDP matrix",
+                verify_title="Confirm eight-rank FSDP artifacts",
+                verify_extra=[
+                    _METRICS_IN_PERF.format(pattern="step_time_p50"),
+                ],
                 success=(
-                    "All ranks complete; step times appear in matrix.md. "
-                    "Use the dashboard scaling table to compare 2-GPU vs 8-GPU FSDP efficiency."
+                    f"{_TRAINING_SUCCESS} Use the dashboard scaling table to compare "
+                    "2-GPU vs 8-GPU FSDP efficiency."
                 ),
             ),
         },
@@ -388,8 +411,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 ),
                 verify_title="Look for rank divergence in matrix and trial JSON",
                 verify_extra=[
-                    "grep -i diverge triage_results/<TICKET>/llm_determinism/<timestamp>/matrix.md",
-                    "find triage_results/<TICKET>/llm_determinism/<timestamp>/cells -name 'trial_*.json' | head",
+                    'grep -i diverge "$RUN_DIR/matrix.md" 2>/dev/null | head',
+                    'find "$RUN_DIR/cells" -name \'trial_*.json\' 2>/dev/null | head',
                 ],
                 success=(
                     "ranks_with_divergence must be 0 for a pass. Any non-zero value "
@@ -425,6 +448,9 @@ DASHBOARD_METADATA: dict[str, Any] = {
                     "recipes/llm-determinism/example-llm-determinism.yaml --dry-run"
                 ),
                 verify_title="Verify zero divergence across all eight ranks",
+                verify_extra=[
+                    'grep -i diverge "$RUN_DIR/matrix.md" 2>/dev/null | head',
+                ],
                 success=(
                     "ranks_with_divergence == 0 on every cell. This is a correctness gate, "
                     "not a performance benchmark."
@@ -459,7 +485,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 dry_run="aorta sweep run --recipe recipes/race/race_smoke.yaml --dry-run",
                 verify_title="Check layer checksum mismatches in matrix output",
                 verify_extra=[
-                    "grep -i checksum triage_results/<TICKET>/race/<timestamp>/matrix.md",
+                    'grep -i checksum "$RUN_DIR/matrix.md" 2>/dev/null | head',
+                    _METRICS_IN_PERF.format(pattern="layer_checksum_mismatch"),
                 ],
                 success=(
                     "layer_checksum_mismatches must be 0. Non-zero values indicate "
@@ -501,6 +528,10 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 distributed=True,
                 dry_run="aorta sweep run --recipe recipes/race/race_smoke.yaml --dry-run",
                 verify_title="Confirm zero checksum mismatches at 8-GPU scale",
+                verify_extra=[
+                    'grep -i checksum "$RUN_DIR/matrix.md" 2>/dev/null | head',
+                    _METRICS_IN_PERF.format(pattern="layer_checksum_mismatch"),
+                ],
                 success=(
                     "layer_checksum_mismatches == 0 for every cell. "
                     "Any failure warrants inspecting per-trial JSON under cells/."

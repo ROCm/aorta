@@ -299,7 +299,7 @@ def _run_command_block(entry_name: str) -> str:
     if prereq:
         items = "".join(f"<li>{_esc(p)}</li>" for p in prereq)
         parts.append(
-            f"<section class='repro-sec'><h4>Before you start</h4>"
+            f"<section class='repro-sec'><h5>Before you start</h5>"
             f"<ul class='repro-list'>{items}</ul></section>"
         )
 
@@ -307,7 +307,7 @@ def _run_command_block(entry_name: str) -> str:
     for step in repro.get("setup") or []:
         title = str(step.get("title") or f"Setup step {step_no}")
         parts.append(
-            f"<section class='repro-sec'><h4>{step_no}. {_esc(title)}</h4>"
+            f"<section class='repro-sec'><h5>{step_no}. {_esc(title)}</h5>"
             f"{_repro_commands_html(list(step.get('commands') or []))}</section>"
         )
         step_no += 1
@@ -317,7 +317,7 @@ def _run_command_block(entry_name: str) -> str:
     if dry_cmd:
         dry_title = str(dry.get("title") or "Validate the recipe YAML (no GPU execution)")
         parts.append(
-            f"<section class='repro-sec'><h4>{step_no}. {_esc(dry_title)}</h4>"
+            f"<section class='repro-sec'><h5>{step_no}. {_esc(dry_title)}</h5>"
             f"<pre class='mono repro-cmd'>{_esc(dry_cmd)}</pre></section>"
         )
         step_no += 1
@@ -325,8 +325,11 @@ def _run_command_block(entry_name: str) -> str:
     run = repro.get("run") or {}
     run_title = str(run.get("title") or "Run the nightly recipe")
     parts.append(
-        f"<section class='repro-sec'><h4>{step_no}. {_esc(run_title)}</h4>"
-        f"<p class='repro-note muted'>Run from the repository root after setup completes.</p>"
+        f"<section class='repro-sec'><h5>{step_no}. {_esc(run_title)}</h5>"
+        f"<p class='repro-note muted'>Run from the repository root after setup completes. "
+        f"Dashboard pass/record/fail comes from nightly_eval.py with --strict against "
+        f"config/ci/regression_baselines.yaml; a standalone sweep writes artifacts but "
+        f"does not apply those gates unless you run the harness.</p>"
         f"<pre class='mono repro-cmd'>{_esc(cmd)}</pre></section>"
     )
     step_no += 1
@@ -334,7 +337,7 @@ def _run_command_block(entry_name: str) -> str:
     for step in repro.get("verify") or []:
         title = str(step.get("title") or "Verify results")
         parts.append(
-            f"<section class='repro-sec'><h4>{step_no}. {_esc(title)}</h4>"
+            f"<section class='repro-sec'><h5>{step_no}. {_esc(title)}</h5>"
             f"{_repro_commands_html(list(step.get('commands') or []))}</section>"
         )
         step_no += 1
@@ -342,14 +345,14 @@ def _run_command_block(entry_name: str) -> str:
     success = str(repro.get("success_criteria") or "")
     if success:
         parts.append(
-            f"<section class='repro-sec'><h4>Success criteria</h4>"
+            f"<section class='repro-sec'><h5>Success criteria</h5>"
             f"<p>{_esc(success)}</p></section>"
         )
 
     compare = str(repro.get("compare_notes") or "")
     if compare:
         parts.append(
-            f"<section class='repro-sec'><h4>Compare with nightly numbers</h4>"
+            f"<section class='repro-sec'><h5>Compare with nightly numbers</h5>"
             f"<p class='muted'>{_esc(compare)}</p></section>"
         )
 
@@ -896,7 +899,7 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
         cards.append(
             f"<article class='release-card'>"
             f"<header class='release-hdr'>"
-            f"<span class='release-date'>{when}{flag}</span>"
+            f"<h3 class='release-date'>{when}{flag}</h3>"
             f"<span class='badge sm' style='background:{color}' "
             f"title='{_esc(status)}'>{_esc(customer_status)}</span>"
             f"<span class='runmeta mono'>{_esc(str(build.get('amd_aorta_version') or ''))}</span>"
@@ -1170,10 +1173,10 @@ def build_workload_cards(
                     f"<strong>this run</strong> is tonight; "
                     f"<strong>history</strong> is recent nights (when available).</p>"
                     f"<p class='prov'>{' · '.join(prov)}</p>"
-                    f"<table class='inner'><thead><tr><th>metric</th>"
+                    f"<div class='tablewrap'><table class='inner'><thead><tr><th>metric</th>"
                     f"<th class='center'>grading rule</th><th class='num'>this run</th>"
                     f"{'<th>history</th>' if show_metric_trend else ''}</tr></thead>"
-                    f"<tbody>{mrows}</tbody></table>"
+                    f"<tbody>{mrows}</tbody></table></div>"
                     f"</details>"
                 )
             variants.append(
@@ -1192,9 +1195,10 @@ def build_workload_cards(
             f"<article class='wl-card' id='wl-{_esc(entry_name)}'>"
             f"<header class='wl-card-hdr'>"
             f"<div class='wl-head'>"
-            f"<a class='wl-title' href='#repro-{_esc(entry_name)}'>"
-            f"<strong>{_esc(wl_title)}</strong></a>"
-            f"<span class='mono muted wl-id'>{_esc(entry_name)}</span></div>"
+            f"<h4 class='wl-title'>"
+            f"<a href='#repro-{_esc(entry_name)}'>{_esc(wl_title)}</a>"
+            f"<span class='mono muted wl-id'>{_esc(entry_name)}</span>"
+            f"</h4></div>"
             f"{summary_html}"
             f"<p class='muted wl-meta'>{_esc(meta_line)}</p>"
             f"{_run_command_block(entry_name)}"
@@ -1495,7 +1499,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                    border-radius:8px; padding:.65rem .85rem; }}
   .release-hdr {{ display:flex; flex-wrap:wrap; align-items:center; gap:.45rem .75rem;
                   margin-bottom:.55rem; }}
-  .release-date {{ font-weight:600; font-size:.88rem; }}
+  .release-date {{ font-weight:600; font-size:.88rem; margin:0; }}
   .wl-chips {{ display:flex; flex-wrap:wrap; gap:.4rem; list-style:none;
                 margin:0; padding:0; }}
   .wl-chips > li {{ margin:0; padding:0; }}
@@ -1503,7 +1507,9 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
               border:1px solid var(--border); border-radius:999px; font-size:.75rem;
               text-decoration:none; color:inherit; background:#12161b; max-width:100%; }}
   a.wl-chip:hover {{ border-color:var(--accent); }}
-  .wl-chip.retired, .wl-chip.absent {{ opacity:.72; cursor:default; }}
+  .wl-chip.retired {{ opacity:.72; cursor:default; }}
+  .wl-chip.absent {{ cursor:default; }}
+  .wl-chip.absent .chip-meta {{ color:var(--muted); }}
   .wl-chip .chip-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
                           max-width:18ch; }}
   .wl-chip .chip-meta {{ color:var(--muted); }}
@@ -1514,7 +1520,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   .wl-grid {{ display:grid; gap:.75rem;
               grid-template-columns:repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }}
   .wl-card {{ background:var(--panel); border:1px solid var(--border); border-radius:8px;
-              overflow:hidden; }}
+              overflow:visible; }}
   .wl-card-hdr {{ padding:.75rem .85rem .55rem; border-bottom:1px solid var(--border); }}
   .wl-meta {{ margin:.25rem 0 0; font-size:.78rem; }}
   .variant-list {{ padding:.55rem .85rem .75rem; display:flex; flex-direction:column;
@@ -1530,7 +1536,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   .variant-metrics summary {{ cursor:pointer; color:var(--muted); font-size:.78rem; }}
   ul.headlines {{ margin-top:.35rem; }}
   .repro-sec {{ margin:.65rem 0 0; }}
-  .repro-sec h4 {{ margin:0 0 .35rem; font-size:.78rem; color:#e6edf3;
+  .repro-sec h5 {{ margin:0 0 .35rem; font-size:.78rem; color:#e6edf3;
                    text-transform:uppercase; letter-spacing:.04em; }}
   ul.repro-list {{ margin:.2rem 0 0; padding-left:1.1rem; font-size:.82rem; }}
   ul.repro-list li {{ margin:.25rem 0; }}
@@ -1596,7 +1602,6 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   .dot {{ display:inline-block; min-width:44px; padding:2px 6px; border-radius:6px;
           color:#fff; font-size:.72rem; font-weight:600; white-space:nowrap;
           font-variant-numeric:tabular-nums; }}
-  .absent {{ color:#39414a; }}
   .secthead {{ display:flex; align-items:baseline; justify-content:space-between;
                gap:1rem; flex-wrap:wrap; }}
   .toolbar button {{ background:var(--panel); color:var(--fg);
@@ -1637,8 +1642,10 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                 white-space:pre-wrap; word-break:break-word; }}
   .repro-note {{ margin:.45rem 0 0; font-size:.75rem; }}
   .wl-intro {{ margin:.35rem 0 .5rem; font-size:.86rem; max-width:72ch; }}
-  a.wl-title {{ color:#e6edf3; text-decoration:none; }}
-  a.wl-title:hover {{ color:var(--accent); text-decoration:underline; }}
+  h4.wl-title {{ margin:0; font-size:.92rem; font-weight:600; display:flex;
+                 flex-wrap:wrap; align-items:baseline; gap:.35rem .5rem; }}
+  h4.wl-title a {{ color:#e6edf3; text-decoration:none; }}
+  h4.wl-title a:hover {{ color:var(--accent); text-decoration:underline; }}
   a.gcell-link {{ color:inherit; text-decoration:none; display:inline-block; }}
   a.gcell-link:hover .dot {{ outline:2px solid var(--accent); outline-offset:1px; }}
   table.scaling {{ margin-top:.5rem; }}
