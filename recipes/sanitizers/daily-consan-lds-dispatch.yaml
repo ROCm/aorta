@@ -1,0 +1,34 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-CONSAN-LDS-DISPATCH
+description: >
+  Informational (non-gating) gfx950 ConSan run over a small, race-free shared-memory
+  (LDS) reduction kernel that is actually DISPATCHED (hipModuleLoad + hipModuleLaunch)
+  via the source.consan_command path added in #347. The kernel is instrumented and
+  runs, exercising ConSan record/replay end-to-end on a caller-supplied object. On the
+  current rocjitsu build it fails closed (record capture yields zero events -> exit 86;
+  see ROCm/rocm-systems#9972) rather than a false pass. Rendered in the dashboard's
+  informational section; it does NOT gate the nightly.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: lds_reduce
+      code_object: fixtures/isa/lds.hsaco
+      code_object_index: 0
+    consan_command: fixtures/bin/lds_dispatch
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - consan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+    timeout_seconds: 600
+  output:
+    report: sanitizer_report.json

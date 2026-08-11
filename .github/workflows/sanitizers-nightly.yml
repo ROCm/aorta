@@ -149,7 +149,25 @@ jobs:
             hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race_2wave.hip" \
               -o "${FIXTURES}/bin/consan_lds_race_2wave"
             python scripts/sanitizers/prepare_gemm_isa.py \
-              --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 3
+              --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 3 \
+              --consan-object "${FIXTURES}/isa/consan_gemm_f32.hsaco"
+
+            # Informational (non-gating) ConSan-over-code-object fixtures (#347):
+            # the small synthetic kernels + their load-only / dispatch drivers, and
+            # the heavy f32 SS object extracted above. All generic; no customer data.
+            KROOT="${FIXTURES}/kernels"
+            hipcc --genco --offload-arch=gfx950 "${KROOT}/lds_reduce.hip" -o /tmp/_lds.o
+            clang-offload-bundler --type=o --unbundle --input=/tmp/_lds.o \
+              --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="${FIXTURES}/isa/lds.hsaco"
+            hipcc --genco --offload-arch=gfx950 "${KROOT}/tiny_vecadd.hip" -o /tmp/_tiny.o
+            clang-offload-bundler --type=o --unbundle --input=/tmp/_tiny.o \
+              --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="${FIXTURES}/isa/tiny.hsaco"
+            hipcc --offload-arch=gfx950 -DLDS_HSACO="\"$(pwd)/${FIXTURES}/isa/lds.hsaco\"" \
+              "${KROOT}/lds_dispatch.hip" -o "${FIXTURES}/bin/lds_dispatch"
+            hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/tiny.hsaco\"" \
+              "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_tiny_load"
+            hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/consan_gemm_f32.hsaco\"" \
+              "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_gemm_load"
 
             # Positive-control recipes intentionally exit non-zero via the
             # guardrail-safe CLI. The authoritative gate is the baseline
@@ -162,6 +180,21 @@ jobs:
             aorta sweep run --recipe recipes/sanitizers/daily-consan-racy.yaml \
               --output-dir "${SANITIZER_OUT}/consan-racy" || true
 
+            # Informational (non-gating) ConSan over caller-supplied code objects
+            # (#347). These fail closed on the current rocjitsu build (see
+            # ROCm/rocm-systems#9964 / #9970 / #9972) and are rendered in the
+            # dashboard's informational section; they are NOT part of the gate below.
+            for c in consan-gemm consan-lds-dispatch consan-tiny; do
+              mkdir -p "${SANITIZER_OUT}/informational/${c}"
+            done
+            aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml \
+              --output-dir "${SANITIZER_OUT}/informational/consan-gemm" || true
+            aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml \
+              --output-dir "${SANITIZER_OUT}/informational/consan-lds-dispatch" || true
+            aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml \
+              --output-dir "${SANITIZER_OUT}/informational/consan-tiny" || true
+
+            # Gate is the three daily controls only (informational cases excluded).
             python scripts/sanitizers/compare_verdict_baselines.py "${SANITIZER_OUT}"
           '
 
@@ -343,11 +376,19 @@ jobs:
 
           # Regenerate the rendered dashboard from the merged, pruned history. This
           # also writes each retained run's tiny runs/<id>/index.html landing page.
+          # Non-gating informational section: THIS run's ConSan-over-code-object
+          # cases (#347), from the downloaded artifact. Absent (e.g. GPU job failed)
+          # is handled gracefully by the generator -> no section, gate unaffected.
+          info_arg=()
+          if [ -d incoming/informational ]; then
+            info_arg=(--informational-results-dir incoming/informational)
+          fi
           python scripts/sanitizers/gen_sanitizer_dashboard.py \
             --history-root "$runs_dir" --keep "$keep" \
             --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
             --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
             --status status.json \
+            "${info_arg[@]}" \
             --out-dir "$tmp/dashboard"
 
           # Mirror the rendered dashboard to the workspace and append the job

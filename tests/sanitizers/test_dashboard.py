@@ -789,3 +789,63 @@ def test_main_fails_closed_on_missing_baselines(tmp_path, monkeypatch):
 
     assert gen.main() == 2
     assert not (tmp_path / "out").exists()
+
+
+def _informational_report(reason: str) -> dict:
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": {"name": "gemm_f32_ss", "target": "gfx950"},
+                         "total_time_ms": 0.0, "dispatch_count": 1, "sources": ["kernel_list"]}],
+        },
+        "checks": [{
+            "sanitizer": "consan", "state": "error", "verdict": "error",
+            "reason": reason, "returncode": None, "findings": [],
+            "kernel_results": [], "coverage": [], "backend": {},
+        }, {
+            "sanitizer": "waitcheck_preflight", "state": "error", "verdict": "error",
+            "reason": reason, "returncode": None, "findings": [],
+            "kernel_results": [], "coverage": [], "backend": {},
+        }],
+    }
+
+
+def test_informational_from_dir_surfaces_verdict_and_reason(tmp_path):
+    root = tmp_path / "informational"
+    (root / "consan-gemm").mkdir(parents=True)
+    (root / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (root / "empty-case").mkdir()  # no report -> skipped
+
+    cases = gen.informational_from_dir(root)
+    assert len(cases) == 1
+    assert cases[0]["name"] == "consan-gemm"
+    assert cases[0]["sanitizer"] == "consan"
+    assert cases[0]["verdict"] == "error"
+    assert cases[0]["reason"] == "combined_hook_timeout"
+    assert gen.informational_from_dir(tmp_path / "does-not-exist") == []
+
+
+def test_informational_section_renders_reason_and_is_non_gating():
+    cases = [
+        {"name": "consan-gemm", "sanitizer": "consan", "verdict": "error",
+         "reason": "combined_hook_timeout", "preflight": "error", "summary": {}},
+    ]
+    html = gen.build_informational_html(cases)
+    assert "combined_hook_timeout" in html and "non-gating" in html
+    md = gen.build_informational_md(cases)
+    assert "combined_hook_timeout" in md and "non-gating" in md.lower()
+    assert gen.build_informational_html([]) == ""
+    assert gen.build_informational_md([]) == ""
+
+    # The gate is computed only from the daily rows, so a HEALTHY daily run stays
+    # HEALTHY regardless of informational content.
+    rows = {c: gen.summarize_case(_waitcheck_report(), "warn") for c, *_ in gen.CASES}
+    healthy = gen._run_record({"run": "r", "commit": "c", "date": "d"}, rows)
+    page = gen.build_html([healthy], informational=cases)
+    assert "HEALTHY" in page
+    assert "combined_hook_timeout" in page and "non-gating" in page
