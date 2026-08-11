@@ -570,11 +570,98 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
     return "".join(blocks)
 
 
+def informational_from_dir(root: Path) -> list[dict[str, Any]]:
+    """Enumerate non-gating "informational" cases under ``root/<case>/sanitizer_report.json``.
+
+    Used for experimental ConSan runs over caller-supplied code objects / commands
+    (``source.consan_command``, #347). These are rendered in a clearly-labelled section
+    that does **not** feed the baseline gate, so the daily controls stay authoritative.
+    Each case surfaces its observed verdict and *reason* (which the gated tables omit)
+    plus the ConSan preflight verdict. Absent fields (e.g. a passing check serializes a
+    ``null`` reason) render as the em-dash placeholder rather than a literal ``None``.
+    """
+
+    def _cell(value: object) -> str:
+        return _DASH if value is None else str(value)
+
+    cases: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return cases
+    for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        report = _load(case_dir / "sanitizer_report.json")
+        if report is None:
+            continue
+        summary = summarize_case(report, report.get("overall_verdict"))
+        primary = (_DASH, _DASH, _DASH)
+        preflight = _DASH
+        for check in report.get("checks", []):
+            san = check.get("sanitizer")
+            if san == "waitcheck_preflight":
+                preflight = _cell(check.get("verdict"))
+            else:
+                primary = (_cell(san), _cell(check.get("verdict")), _cell(check.get("reason")))
+        cases.append(
+            {
+                "name": case_dir.name,
+                "summary": summary,
+                "sanitizer": primary[0],
+                "verdict": primary[1],
+                "reason": primary[2],
+                "preflight": preflight,
+            }
+        )
+    return cases
+
+
+def build_informational_html(cases: list[dict[str, Any]]) -> str:
+    if not cases:
+        return ""
+    rows = "".join(
+        f"<tr><td class=mono>{_esc(c['name'])}</td>"
+        f"<td class=mono>{_esc(c['sanitizer'])}</td>"
+        f"<td>{_observed_html(c['verdict'])}</td>"
+        f"<td class=mono>{_esc(_clean_msg(c['reason'], 200))}</td>"
+        f"<td>{_observed_html(c['preflight'])}</td></tr>"
+        for c in cases
+    )
+    return (
+        "<h2>Informational &middot; caller-supplied code objects (non-gating)</h2>"
+        "<p class=secondary>Experimental ConSan runs over caller-supplied kernels/objects "
+        "(<span class=mono>source.consan_command</span>, #347). These do <b>not</b> affect the "
+        "gate above; the table reports each case's observed verdict and reason for this run.</p>"
+        "<table><tr><th>Recipe</th><th>Sanitizer</th><th>Verdict</th><th>Reason</th>"
+        f"<th>ConSan preflight</th></tr>{rows}</table>"
+    )
+
+
+def build_informational_md(cases: list[dict[str, Any]]) -> str:
+    if not cases:
+        return ""
+    lines = [
+        "## Informational \u00b7 caller-supplied code objects (non-gating)",
+        "",
+        "Experimental ConSan runs over caller-supplied kernels/objects "
+        "(`source.consan_command`, #347). These do **not** affect the gate; the table reports "
+        "each case's observed verdict and reason for this run.",
+        "",
+        "| Recipe | Sanitizer | Verdict | Reason | ConSan preflight |",
+        "|---|---|---|---|---|",
+    ]
+    for c in cases:
+        reason = _clean_msg(c["reason"], 200).replace("|", "\\|")
+        lines.append(
+            f"| `{c['name']}` | `{c['sanitizer']}` | `{c['verdict']}` | {reason} | `{c['preflight']}` |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_html(
     runs: list[dict[str, Any]],
     *,
     title: str = "Sanitizers Nightly",
     status: dict[str, Any] | None = None,
+    informational: list[dict[str, Any]] | None = None,
 ) -> str:
     banner = _status_banner_html(status)
     if not runs:
@@ -687,6 +774,7 @@ def build_html(
   <h2>Kernel details</h2>
   {_kernel_detail_html(latest['rows'])}
 
+  {build_informational_html(informational or [])}
   <h2>History / trend</h2>
   <table>
     <tr><th>Run</th><th>Commit</th><th>Date</th>{hist_head}<th>Gate</th></tr>
@@ -765,7 +853,10 @@ def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightl
 
 
 def build_summary_md(
-    runs: list[dict[str, Any]], *, status: dict[str, Any] | None = None
+    runs: list[dict[str, Any]],
+    *,
+    status: dict[str, Any] | None = None,
+    informational: list[dict[str, Any]] | None = None,
 ) -> str:
     banner = _status_banner_md(status)
     if not runs:
@@ -848,6 +939,10 @@ def build_summary_md(
                 )
         lines += ["", "</details>", ""]
 
+    informational_md = build_informational_md(informational or [])
+    if informational_md:
+        lines += [informational_md]
+
     lines += [
         "## History / trend",
         "",
@@ -889,6 +984,12 @@ def main() -> int:
         type=Path,
         help="JSON run-status manifest; renders a stale banner when it is unhealthy",
     )
+    ap.add_argument(
+        "--informational-results-dir",
+        type=Path,
+        help="dir of <case>/sanitizer_report.json rendered as a non-gating informational "
+        "section (experimental caller-supplied ConSan objects; does not affect the gate)",
+    )
     args = ap.parse_args()
 
     # Optional run-status manifest (see sanitizers-nightly.yml). A malformed or
@@ -919,8 +1020,16 @@ def main() -> int:
     else:
         runs = runs_from_history_root(args.history_root, baselines, keep=args.keep)
 
+    informational = (
+        informational_from_dir(args.informational_results_dir)
+        if args.informational_results_dir is not None
+        else []
+    )
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "index.html").write_text(build_html(runs, status=status), encoding="utf-8")
+    (args.out_dir / "index.html").write_text(
+        build_html(runs, status=status, informational=informational), encoding="utf-8"
+    )
     # In published-history mode, write each retained run's tiny landing page next
     # to its co-located raw reports (out_dir/runs/<id>/index.html). Bounded by
     # --keep, so pruned runs stop getting a page.
@@ -966,7 +1075,7 @@ def main() -> int:
                 build_run_index_html(run), encoding="utf-8"
             )
     (args.out_dir / "summary.md").write_text(
-        build_summary_md(runs, status=status), encoding="utf-8"
+        build_summary_md(runs, status=status, informational=informational), encoding="utf-8"
     )
     (args.out_dir / "data.json").write_text(
         json.dumps(runs, indent=2, sort_keys=True) + "\n", encoding="utf-8"

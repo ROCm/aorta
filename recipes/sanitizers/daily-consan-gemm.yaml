@@ -1,0 +1,35 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-CONSAN-GEMM
+description: >
+  Informational (non-gating) gfx950 ConSan run over a real, heavy f32 Type_SS
+  hipBLASLt Tensile code object (generic public content extracted in CI from the
+  synthetic gemm_shapes_unique.csv), driven via the source.consan_command path
+  added in #347. This exercises the guardrail's fail-closed behavior on large
+  production code objects; on the current rocjitsu build it fails closed
+  (combined_hook_timeout / moi-report-allocation) rather than a false pass -- see
+  ROCm/rocm-systems#9964 and #9970. Rendered in the dashboard's informational
+  section; it does NOT gate the nightly.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: gemm_f32_ss
+      code_object: fixtures/isa/consan_gemm_f32.hsaco
+      code_object_index: 0
+    consan_command: fixtures/bin/consan_gemm_load
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - consan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+    timeout_seconds: 3600
+  output:
+    report: sanitizer_report.json

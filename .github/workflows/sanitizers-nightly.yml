@@ -162,6 +162,55 @@ jobs:
             aorta sweep run --recipe recipes/sanitizers/daily-consan-racy.yaml \
               --output-dir "${SANITIZER_OUT}/consan-racy" || true
 
+            # Informational (non-gating) ConSan over caller-supplied code objects
+            # (#347), rendered in the dashboard's informational section. The ENTIRE
+            # informational path -- fixture build (hipcc/genco/unbundle) AND the
+            # sweeps -- runs in a guarded subshell so no failure here (a bad genco,
+            # bundler, or compile) can abort the job before the gate below. It is
+            # best-effort: a missing report simply omits that dashboard row.
+            (
+              set +e
+              KROOT="${FIXTURES}/kernels"
+              # hipcc --genco emits either a raw gfx950 code object or a clang-offload
+              # bundle depending on the ROCm build; unbundle only when it is a bundle
+              # (a raw ELF fed back through --unbundle would fail).
+              genco_object() {  # <hip-source> <final .hsaco>
+                local tmp; tmp="$(mktemp --suffix=.o)" || return 1
+                hipcc --genco --offload-arch=gfx950 "$1" -o "$tmp" || return 1
+                if head -c 24 "$tmp" | grep -q '__CLANG_OFFLOAD_BUNDLE__'; then
+                  clang-offload-bundler --type=o --unbundle --input="$tmp" \
+                    --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="$2" || return 1
+                else
+                  cp "$tmp" "$2" || return 1
+                fi
+                rm -f "$tmp"
+              }
+              # --top-n 0 extracts only the ConSan object, leaving the gated waitcheck
+              # fixtures (already built above) untouched.
+              python scripts/sanitizers/prepare_gemm_isa.py \
+                --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 0 \
+                --consan-object "${FIXTURES}/isa/consan_gemm_f32.hsaco"
+              genco_object "${KROOT}/lds_reduce.hip" "${FIXTURES}/isa/lds.hsaco"
+              genco_object "${KROOT}/tiny_vecadd.hip" "${FIXTURES}/isa/tiny.hsaco"
+              hipcc --offload-arch=gfx950 -DLDS_HSACO="\"$(pwd)/${FIXTURES}/isa/lds.hsaco\"" \
+                "${KROOT}/lds_dispatch.hip" -o "${FIXTURES}/bin/lds_dispatch"
+              hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/tiny.hsaco\"" \
+                "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_tiny_load"
+              hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/consan_gemm_f32.hsaco\"" \
+                "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_gemm_load"
+              for c in consan-gemm consan-lds-dispatch consan-tiny; do
+                mkdir -p "${SANITIZER_OUT}/informational/${c}"
+              done
+              aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml \
+                --output-dir "${SANITIZER_OUT}/informational/consan-gemm"
+              aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml \
+                --output-dir "${SANITIZER_OUT}/informational/consan-lds-dispatch"
+              aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml \
+                --output-dir "${SANITIZER_OUT}/informational/consan-tiny"
+            ) || true
+
+            # Gate is the three daily controls only; the guarded informational block
+            # above cannot reach this line with a non-zero status.
             python scripts/sanitizers/compare_verdict_baselines.py "${SANITIZER_OUT}"
           '
 
@@ -343,11 +392,19 @@ jobs:
 
           # Regenerate the rendered dashboard from the merged, pruned history. This
           # also writes each retained run's tiny runs/<id>/index.html landing page.
+          # Non-gating informational section: THIS run's ConSan-over-code-object
+          # cases (#347), from the downloaded artifact. Absent (e.g. GPU job failed)
+          # is handled gracefully by the generator -> no section, gate unaffected.
+          info_arg=()
+          if [ -d incoming/informational ]; then
+            info_arg=(--informational-results-dir incoming/informational)
+          fi
           python scripts/sanitizers/gen_sanitizer_dashboard.py \
             --history-root "$runs_dir" --keep "$keep" \
             --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
             --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
             --status status.json \
+            "${info_arg[@]}" \
             --out-dir "$tmp/dashboard"
 
           # Mirror the rendered dashboard to the workspace and append the job
