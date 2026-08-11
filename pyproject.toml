@@ -211,10 +211,14 @@ markers = [
 line-length = 100
 target-version = ['py310', 'py311', 'py312']
 include = '\.pyi?$'
+# Vendored verbatim from ROCm/rocm-systems (see the file header); kept in sync
+# with upstream rather than reformatted to our style.
+force-exclude = 'scripts/sanitizers/download_sanitizer_artifacts\.py'
 
 [tool.isort]
 profile = "black"
 line_length = 100
+extend_skip = ["scripts/sanitizers/download_sanitizer_artifacts.py"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -226,3 +230,6 @@ ignore_missing_imports = true
 line-length = 100
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
 ignore = ["E501"]
+# Vendored verbatim from ROCm/rocm-systems (see the file header); kept in sync
+# with upstream rather than reformatted to our lints.
+extend-exclude = ["scripts/sanitizers/download_sanitizer_artifacts.py"]

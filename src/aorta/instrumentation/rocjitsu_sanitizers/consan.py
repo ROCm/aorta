@@ -416,21 +416,37 @@ def scoped_consan_not_checked(worklist: KernelWorklist) -> CheckResult:
 
 
 def resolve_consan_hook(explicit: Path | None = None) -> Path | None:
-    build_root = os.environ.get("ROCJITSU_BUILD", "").strip()
+    """Locate the RocJITsu DBI hook, preferring an explicit override.
+
+    Two provisioning layouts are supported. ``ROCJITSU_PREBUILT`` points at an
+    unpacked prebuilt sanitizer bundle (published by ROCm/rocm-systems), whose
+    flattened tree keeps the hook at ``lib/librocjitsu_dbi_hooks.so``.
+    ``ROCJITSU_BUILD`` points at a raw CMake build tree, where the hook lives
+    under ``lib/rocjitsu/src/rocjitsu/hooks/``. The prebuilt bundle wins when
+    both are set.
+    """
+
     if explicit is not None:
         return explicit
-    if not build_root:
-        return None
-    candidate = (
-        Path(build_root)
-        / "lib"
-        / "rocjitsu"
-        / "src"
-        / "rocjitsu"
-        / "hooks"
-        / "librocjitsu_dbi_hooks.so"
-    )
-    return candidate if candidate.is_file() else None
+    prebuilt = os.environ.get("ROCJITSU_PREBUILT", "").strip()
+    if prebuilt:
+        candidate = Path(prebuilt) / "lib" / "librocjitsu_dbi_hooks.so"
+        if candidate.is_file():
+            return candidate
+    build_root = os.environ.get("ROCJITSU_BUILD", "").strip()
+    if build_root:
+        candidate = (
+            Path(build_root)
+            / "lib"
+            / "rocjitsu"
+            / "src"
+            / "rocjitsu"
+            / "hooks"
+            / "librocjitsu_dbi_hooks.so"
+        )
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 WAITCHECK_PREFLIGHT = "waitcheck_preflight"

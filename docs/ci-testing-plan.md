@@ -264,8 +264,8 @@ The RocJITsu sanitizer engine (`rocjitsu_sanitizers`) is gfx-hardware code, so
 its sources, recipes, dashboard scripts, and tests are GPU-relevant. The GPU
 gate's `test_sanitizers_gpu.py` always runs a fail-closed guardrail on the
 runner; its real clean/racy ConSan repro cases run when the DBI hook
-(`ROCJITSU_BUILD`) and `hipcc` are present (as in `sanitizers-nightly.yml`) and
-self-skip otherwise.
+(provisioned via `ROCJITSU_PREBUILT` or `ROCJITSU_BUILD`) and `hipcc` are
+present (as in `sanitizers-nightly.yml`) and self-skip otherwise.
 
 **Concurrency:** one GPU workflow run per ref; newer pushes cancel superseded PR
 runs so the single runner is not starved by stale jobs.
