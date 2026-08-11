@@ -247,6 +247,20 @@ def test_dashboard_partial_record_does_not_claim_every_result_recorded():
     assert "all 4 results" not in html
 
 
+def test_hidden_metrics_do_not_enable_empty_history_column():
+    """Hidden metrics with multi-night history must not turn on an all-n/a column."""
+    runs = [
+        _run(3, [_cell("inference_offline", "c", summary={"world_size": 2.0})],
+             total=1, **{"pass": 1}),
+        _run(4, [_cell("inference_offline", "c",
+                        summary={"world_size": 2.0, "decode_latency_ms": 1.0})],
+             total=1, **{"pass": 1}),
+    ]
+    html = gen_dashboard.build_dashboard_html(runs)
+    assert "Additional summary metrics" in html
+    assert ">history</th>" not in html
+
+
 def test_dashboard_metric_trends_survive_a_missing_step_time():
     # A cell can report metrics.summary with no mean_step_time_ms (harvest
     # leaves it None). Its metric history is real, so the per-metric sparkline

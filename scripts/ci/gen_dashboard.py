@@ -1065,6 +1065,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     metric_pairs: list[tuple[str, str]] = []
     for k, e in latest_by_key.items():
         for m in ((e.get("metrics") or {}).get("summary") or {}):
+            if m in _ENGINEER_HIDDEN_METRICS:
+                continue
             metric_pairs.append((k, m))
     mhist: dict[tuple[str, str], list[float | None]] = {p: [] for p in metric_pairs}
     for doc in results:
@@ -1219,7 +1221,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                     f"<tr class='mrow'><td colspan='{ncols}'><details>"
                     f"<summary>Detailed metrics (optional) — {n_metrics} value"
                     f"{'s' if n_metrics != 1 else ''}</summary>"
-                    f"<p class='prov muted'>Full harness output for this recipe variant. "
+                    f"<p class='prov muted'>Additional summary metrics for this recipe variant. "
                     f"<strong>Grading rule</strong> is how nightly CI compares the value; "
                     f"<strong>this run</strong> is tonight; "
                     f"<strong>history</strong> is recent nights (when available).</p>"
@@ -1565,7 +1567,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         <button type="button" data-details="close">Collapse all</button>
       </div>
     </div>
-    <p class="muted wl-intro">Each card is one workload. The bullets under a variant are tonight&apos;s headline numbers. Expand <strong>Run this workload locally</strong> to reproduce on your machine, or <strong>Detailed metrics</strong> for the full log.</p>
+    <p class="muted wl-intro">Each card is one workload. The bullets under a variant are tonight&apos;s headline numbers. Expand <strong>Run this workload locally</strong> to reproduce on your machine, or <strong>Detailed metrics</strong> for additional summary values.</p>
     <div class="tablewrap">
       <table>
         <thead><tr>{''.join(head)}</tr></thead>
