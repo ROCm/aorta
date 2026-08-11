@@ -821,12 +821,23 @@ def test_informational_from_dir_surfaces_verdict_and_reason(tmp_path):
     )
     (root / "empty-case").mkdir()  # no report -> skipped
 
-    cases = gen.informational_from_dir(root)
-    assert len(cases) == 1
-    assert cases[0]["name"] == "consan-gemm"
-    assert cases[0]["sanitizer"] == "consan"
-    assert cases[0]["verdict"] == "error"
-    assert cases[0]["reason"] == "combined_hook_timeout"
+    # A passing case serializes a null reason; it must normalize to the em-dash
+    # placeholder, not the literal "None".
+    passing = _informational_report("combined_hook_timeout")
+    for check in passing["checks"]:
+        check["state"], check["verdict"], check["reason"] = "ran", "pass", None
+    passing["overall_verdict"], passing["execution_status"] = "pass", "complete"
+    (root / "consan-pass").mkdir()
+    (root / "consan-pass" / "sanitizer_report.json").write_text(json.dumps(passing))
+
+    cases = {c["name"]: c for c in gen.informational_from_dir(root)}
+    assert set(cases) == {"consan-gemm", "consan-pass"}
+    assert cases["consan-gemm"]["sanitizer"] == "consan"
+    assert cases["consan-gemm"]["verdict"] == "error"
+    assert cases["consan-gemm"]["reason"] == "combined_hook_timeout"
+    assert cases["consan-pass"]["verdict"] == "pass"
+    assert cases["consan-pass"]["reason"] == "\u2014"  # normalized null, not "None"
+    assert "None" not in gen.build_informational_html(list(cases.values()))
     assert gen.informational_from_dir(tmp_path / "does-not-exist") == []
 
 

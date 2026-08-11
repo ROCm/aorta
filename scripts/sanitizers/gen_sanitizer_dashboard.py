@@ -576,9 +576,14 @@ def informational_from_dir(root: Path) -> list[dict[str, Any]]:
     Used for experimental ConSan runs over caller-supplied code objects / commands
     (``source.consan_command``, #347). These are rendered in a clearly-labelled section
     that does **not** feed the baseline gate, so the daily controls stay authoritative.
-    Each case surfaces its observed verdict and the fail-closed *reason* (which the
-    gated tables omit) plus the ConSan preflight verdict.
+    Each case surfaces its observed verdict and *reason* (which the gated tables omit)
+    plus the ConSan preflight verdict. Absent fields (e.g. a passing check serializes a
+    ``null`` reason) render as the em-dash placeholder rather than a literal ``None``.
     """
+
+    def _cell(value: object) -> str:
+        return _DASH if value is None else str(value)
+
     cases: list[dict[str, Any]] = []
     if not root.is_dir():
         return cases
@@ -587,14 +592,14 @@ def informational_from_dir(root: Path) -> list[dict[str, Any]]:
         if report is None:
             continue
         summary = summarize_case(report, report.get("overall_verdict"))
-        primary = ("\u2014", "\u2014", "\u2014")
-        preflight = "\u2014"
+        primary = (_DASH, _DASH, _DASH)
+        preflight = _DASH
         for check in report.get("checks", []):
             san = check.get("sanitizer")
             if san == "waitcheck_preflight":
-                preflight = str(check.get("verdict"))
+                preflight = _cell(check.get("verdict"))
             else:
-                primary = (str(san), str(check.get("verdict")), str(check.get("reason")))
+                primary = (_cell(san), _cell(check.get("verdict")), _cell(check.get("reason")))
         cases.append(
             {
                 "name": case_dir.name,
@@ -623,8 +628,7 @@ def build_informational_html(cases: list[dict[str, Any]]) -> str:
         "<h2>Informational &middot; caller-supplied code objects (non-gating)</h2>"
         "<p class=secondary>Experimental ConSan runs over caller-supplied kernels/objects "
         "(<span class=mono>source.consan_command</span>, #347). These do <b>not</b> affect the "
-        "gate above. On the current rocjitsu build they fail closed (never a false pass); the "
-        "exact reason is shown.</p>"
+        "gate above; the table reports each case's observed verdict and reason for this run.</p>"
         "<table><tr><th>Recipe</th><th>Sanitizer</th><th>Verdict</th><th>Reason</th>"
         f"<th>ConSan preflight</th></tr>{rows}</table>"
     )
@@ -637,8 +641,8 @@ def build_informational_md(cases: list[dict[str, Any]]) -> str:
         "## Informational \u00b7 caller-supplied code objects (non-gating)",
         "",
         "Experimental ConSan runs over caller-supplied kernels/objects "
-        "(`source.consan_command`, #347). These do **not** affect the gate. On the current "
-        "rocjitsu build they fail closed (never a false pass).",
+        "(`source.consan_command`, #347). These do **not** affect the gate; the table reports "
+        "each case's observed verdict and reason for this run.",
         "",
         "| Recipe | Sanitizer | Verdict | Reason | ConSan preflight |",
         "|---|---|---|---|---|",

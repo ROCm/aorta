@@ -156,12 +156,23 @@ jobs:
             # the small synthetic kernels + their load-only / dispatch drivers, and
             # the heavy f32 SS object extracted above. All generic; no customer data.
             KROOT="${FIXTURES}/kernels"
-            hipcc --genco --offload-arch=gfx950 "${KROOT}/lds_reduce.hip" -o /tmp/_lds.o
-            clang-offload-bundler --type=o --unbundle --input=/tmp/_lds.o \
-              --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="${FIXTURES}/isa/lds.hsaco"
-            hipcc --genco --offload-arch=gfx950 "${KROOT}/tiny_vecadd.hip" -o /tmp/_tiny.o
-            clang-offload-bundler --type=o --unbundle --input=/tmp/_tiny.o \
-              --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="${FIXTURES}/isa/tiny.hsaco"
+            # `hipcc --genco` emits either a raw gfx950 code object or a
+            # clang-offload bundle depending on the ROCm build, so unbundle only when
+            # the output actually is a bundle (feeding a raw ELF back through
+            # --unbundle would fail; loading a bundle directly is not a raw object).
+            genco_object() {  # <hip-source> <final .hsaco>
+              local tmp; tmp="$(mktemp --suffix=.o)"
+              hipcc --genco --offload-arch=gfx950 "$1" -o "$tmp"
+              if head -c 24 "$tmp" | grep -q '__CLANG_OFFLOAD_BUNDLE__'; then
+                clang-offload-bundler --type=o --unbundle --input="$tmp" \
+                  --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="$2"
+              else
+                cp "$tmp" "$2"
+              fi
+              rm -f "$tmp"
+            }
+            genco_object "${KROOT}/lds_reduce.hip" "${FIXTURES}/isa/lds.hsaco"
+            genco_object "${KROOT}/tiny_vecadd.hip" "${FIXTURES}/isa/tiny.hsaco"
             hipcc --offload-arch=gfx950 -DLDS_HSACO="\"$(pwd)/${FIXTURES}/isa/lds.hsaco\"" \
               "${KROOT}/lds_dispatch.hip" -o "${FIXTURES}/bin/lds_dispatch"
             hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/tiny.hsaco\"" \
