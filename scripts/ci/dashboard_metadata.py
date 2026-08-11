@@ -1,4 +1,4 @@
-"""Customer-facing labels for the nightly CI dashboard.
+"""Workload and category labels for the nightly CI dashboard.
 
 Kept as a Python module (not JSON) because the repo gitignores ``*.json``.
 """
@@ -138,29 +138,4 @@ DASHBOARD_METADATA: dict[str, Any] = {
             ),
         },
     },
-    "engineer_only_metrics": [
-        "rank",
-        "world_size",
-        "local_world_size",
-        "node_count",
-        "corruption_details_omitted",
-        "parameter_count",
-        "num_experts",
-        "num_layers",
-        "generate_tokens",
-        "decoded_tokens",
-        "prompt_len",
-        "batch_size",
-        "eff_batch_size",
-        "eff_ffn_size",
-        "eff_num_heads",
-        "eff_seq_len",
-        "declared_h2d_tensor_size",
-        "effective_h2d_tensor_size",
-        "layers_verified",
-        "expected",
-        "n",
-        "sum",
-        "final_loss",
-    ],
 }

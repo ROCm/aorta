@@ -118,10 +118,10 @@ try:
     from dashboard_metadata import DASHBOARD_METADATA as _DEFAULT_METADATA
 except ImportError:  # pragma: no cover
     _DEFAULT_METADATA: dict[str, Any] = {
-        "categories": {}, "workloads": {}, "engineer_only_metrics": [],
+        "categories": {}, "workloads": {},
     }
 
-# Customer-facing headline for each internal _latest_status() label.
+# Plain-language headline for each internal _latest_status() label.
 _CUSTOMER_STATUS = {
     "unknown": "Unknown",
     "empty": "No data",
@@ -132,19 +132,9 @@ _CUSTOMER_STATUS = {
     "skipping": "Incomplete run",
 }
 
-# Metrics shown only in the engineer metrics table, not the headline row.
-_DEFAULT_ENGINEER_METRICS = frozenset({
-    "rank", "world_size", "local_world_size", "node_count",
-    "corruption_details_omitted", "parameter_count", "num_experts", "num_layers",
-    "generate_tokens", "decoded_tokens", "prompt_len", "batch_size",
-    "eff_batch_size", "eff_ffn_size", "eff_num_heads", "eff_seq_len",
-    "declared_h2d_tensor_size", "effective_h2d_tensor_size", "layers_verified",
-    "expected", "n", "sum", "final_loss",
-})
-
 
 def load_dashboard_metadata() -> dict[str, Any]:
-    """Load customer-facing workload/category metadata (pure, cached per process)."""
+    """Load workload/category metadata for the dashboard (pure, cached per process)."""
     if not hasattr(load_dashboard_metadata, "_cache"):
         load_dashboard_metadata._cache = None  # type: ignore[attr-defined]
     if load_dashboard_metadata._cache is not None:  # type: ignore[attr-defined]
@@ -161,12 +151,6 @@ def _workload_meta(entry_name: str) -> dict[str, Any]:
     return (load_dashboard_metadata().get("workloads") or {}).get(entry_name) or {}
 
 
-def _engineer_only_metrics() -> frozenset[str]:
-    meta = load_dashboard_metadata()
-    extra = meta.get("engineer_only_metrics") or []
-    return _DEFAULT_ENGINEER_METRICS | frozenset(str(m) for m in extra)
-
-
 # Correctness counters: any night-over-night change is significant.
 _CORRECTNESS_COUNTERS = frozenset({
     "ranks_with_divergence",
@@ -177,6 +161,18 @@ _CORRECTNESS_COUNTERS = frozenset({
 def _is_correctness_change_metric(name: str) -> bool:
     """True when any value change in this metric should surface in Correctness."""
     return _is_correctness_metric(name) or name in _CORRECTNESS_COUNTERS
+
+
+def _is_dashboard_performance_metric(name: str) -> bool:
+    """True for timing/throughput metrics the dashboard treats as performance.
+
+    Uses the dashboard's own unit map (and harness timings), not the eval-lib
+    gating allowlist — step_time_p50/p99 and mean_step_time_ms are headline
+    metrics here but are not eval_lib performance gates.
+    """
+    if _is_correctness_change_metric(name):
+        return False
+    return name in _METRIC_UNITS or name in _HARNESS_METRICS
 
 
 def _checksum_headline(name: str, raw: Any, entry: dict[str, Any]) -> str:
@@ -754,14 +750,13 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
             pct = (a - b) / abs(b) * 100.0
             if abs(pct) > _MOVE_PCT:
                 row = (abs(pct), pct, k, metric, b, a, latest_by[k])
-                if _is_performance_metric(metric):
+                if _is_dashboard_performance_metric(metric):
                     movers_perf.append(row)
                 else:
                     movers_other.append(row)
     movers_corr.sort(key=lambda r: (r[5], r[4]), reverse=True)
     movers_perf.sort(reverse=True)
     movers_other.sort(reverse=True)
-    movers = movers_corr + movers_perf + movers_other
 
     def _corr_mover_li(row: tuple) -> str:
         _, _, _k, metric, b, a, entry = row
@@ -795,8 +790,11 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
     for row in movers_other[:2]:
         items.append(_mover_li(row, ""))
 
-    shown = min(len(movers_corr), 4) + min(len(movers_perf), 4) + min(len(movers_other), 2)
-    extra = len(movers) - shown
+    shown_corr = min(len(movers_corr), 4)
+    shown_perf = min(len(movers_perf), 4)
+    shown_other = min(len(movers_other), 2)
+    extra_corr = len(movers_corr) - shown_corr
+    extra_thresholded = (len(movers_perf) - shown_perf) + (len(movers_other) - shown_other)
 
     since = _fmt_timestamp(str(prev.get("generated_at") or "")).split(" ")[0]
     if not items:
@@ -805,10 +803,20 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
             f"metric changed by more than {_MOVE_PCT:.0f}%.</p>"
         )
     else:
+        more_parts: list[str] = []
+        if extra_corr:
+            more_parts.append(
+                f"and {extra_corr} more correctness change"
+                f"{'' if extra_corr == 1 else 's'}"
+            )
+        if extra_thresholded:
+            more_parts.append(
+                f"and {extra_thresholded} more metric"
+                f"{'' if extra_thresholded == 1 else 's'} past {_MOVE_PCT:.0f}%"
+            )
         more = (
-            f"<p class='muted'>and {extra} more metric"
-            f"{'' if extra == 1 else 's'} past {_MOVE_PCT:.0f}%</p>"
-            if extra > 0 else ""
+            "".join(f"<p class='muted'>{p}</p>" for p in more_parts)
+            if more_parts else ""
         )
         body = f"<ul class='changes'>{''.join(items)}</ul>{more}"
 

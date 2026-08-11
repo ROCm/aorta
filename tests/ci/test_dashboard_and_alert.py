@@ -623,6 +623,7 @@ def test_change_summary_lists_metrics_that_moved_past_the_threshold():
              total=1, record=1),
     ]
     html = gen_dashboard.build_change_summary(runs)
+    assert "Performance" in html
     assert "mean_step_time_ms" in html and "+50.0%" in html
     assert "latency_ms" not in html  # 2% is inside the noise floor
 
@@ -901,3 +902,28 @@ def test_category_tile_anchors_to_workload_that_actually_ran():
         [_results("2026-08-03T00:00:00Z", entries, total=1, record=1)])
     assert "href='#wl-training_ddp_8gpu'" in html
     assert "href='#wl-training_ddp'" not in html
+
+
+def test_change_summary_groups_step_time_p99_under_performance():
+    runs = [
+        _run(3, [_cell("w", "c", summary={"step_time_p99": 40.0})], total=1, record=1),
+        _run(4, [_cell("w", "c", summary={"step_time_p99": 50.0})], total=1, record=1),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "Performance" in html
+    assert "step_time_p99" in html
+
+
+def test_change_summary_footer_splits_correctness_from_thresholded():
+    cells = [
+        _cell("w", f"c{i}", summary={"layer_checksum_mismatches": i})
+        for i in range(6)
+    ]
+    runs = [
+        _run(3, cells[:6], total=6, record=6),
+        _run(4, [_cell("w", f"c{i}", summary={"layer_checksum_mismatches": i + 1})
+                 for i in range(6)], total=6, record=6),
+    ]
+    html = gen_dashboard.build_change_summary(runs)
+    assert "and 2 more correctness changes" in html
+    assert "past 10%" not in html
