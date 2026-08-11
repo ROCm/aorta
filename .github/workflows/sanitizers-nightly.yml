@@ -17,9 +17,15 @@ concurrency:
 
 env:
   CONTAINER_NAME: aorta-ci-gpu
-  # Immutable RocJITsu input. rocm-systems is public, so the checkout needs no
-  # token. TODO(#330): replace this branch ref with the reviewed commit SHA so
-  # the gate pins an immutable input rather than a mutable branch.
+  # Branch whose prebuilt sanitizer artifacts we consume. The nightly no longer
+  # clones + builds rocm-systems from source (#350); it downloads the bundle
+  # published by ROCm/rocm-systems' `rocjitsu-sanitizer-artifacts` workflow and
+  # points the resolvers at it via ROCJITSU_PREBUILT. `--run latest` on this
+  # branch is resolved by the vendored downloader (scripts/sanitizers/).
+  # TODO(#330): these are ephemeral (30-day) Actions artifacts, not an immutable
+  # Release. For a truly immutable gate, pin an explicit reviewed run ID (record
+  # the commit from the bundle's MANIFEST.json for provenance) or promote the
+  # build to a durable store.
   ROCJITSU_REF: "shared/rocjitsu/sanitizers"
 
 jobs:
@@ -67,42 +73,72 @@ jobs:
       # the same pinned ROCm container as gpu-tests.yml / eval-reusable.yml.
       # Workspace-relative paths keep artifacts visible on the host for upload.
       - name: Run sanitizer regression
+        env:
+          # Downloading GitHub Actions artifacts requires a token with
+          # `actions:read` -- even for a public repo. The default GITHUB_TOKEN is
+          # scoped to THIS repo (ROCm/aorta) only and CANNOT read another repo's
+          # (ROCm/rocm-systems) artifacts, so a PAT with `actions:read` on
+          # rocm-systems must be provided as the ROCJITSU_ARTIFACTS_TOKEN secret.
+          # The GITHUB_TOKEN fallback keeps the step wired, but will 403 on the
+          # cross-repo download until the secret is configured.
+          ROCJITSU_ARTIFACTS_TOKEN: ${{ secrets.ROCJITSU_ARTIFACTS_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           bash scripts/ci/docker_cmd.sh exec \
             -e ROCJITSU_REF="${ROCJITSU_REF}" \
+            -e GH_TOKEN="${ROCJITSU_ARTIFACTS_TOKEN}" \
             "${{ env.CONTAINER_NAME }}" bash -lc '
             set -euo pipefail
             cd /workspace/aorta
             SANITIZER_ROOT=".sanitizer-nightly"
-            ROCJITSU_SRC="${SANITIZER_ROOT}/rocjitsu-src"
-            ROCJITSU_BUILD="${SANITIZER_ROOT}/rocjitsu-build"
+            ROCJITSU_PREBUILT="${SANITIZER_ROOT}/rocjitsu-prebuilt"
             SANITIZER_OUT="${SANITIZER_ROOT}/out"
             FIXTURES=recipes/sanitizers/fixtures
 
             python -m pip install --upgrade pip
             pip install -e ".[tests]"
-            # rocjitsu build deps (cmake, ninja, libzstd-dev, g++-13, Findzstd
-            # shim) are baked into docker/Dockerfile.ci-gpu; see that file.
-            RJ_CMAKE_MODULE_PATH=/opt/aorta/cmake
 
-            rm -rf "${ROCJITSU_SRC}" "${ROCJITSU_BUILD}"
-            git clone --filter=blob:none https://github.com/ROCm/rocm-systems.git "${ROCJITSU_SRC}"
-            git -C "${ROCJITSU_SRC}" checkout "${ROCJITSU_REF}"
-            echo "ROCJITSU checkout: $(git -C "${ROCJITSU_SRC}" rev-parse HEAD)"
-            if command -v ninja >/dev/null 2>&1; then
-              cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}" -GNinja \
-                -DCMAKE_MODULE_PATH="${RJ_CMAKE_MODULE_PATH}"
-            else
-              cmake -S "${ROCJITSU_SRC}/emulation/rocjitsu" -B "${ROCJITSU_BUILD}" \
-                -DCMAKE_MODULE_PATH="${RJ_CMAKE_MODULE_PATH}"
+            # Consume the prebuilt sanitizer bundle published by
+            # ROCm/rocm-systems (#350): run the vendored downloader to pull
+            # bin/rj_waitcheck + lib/librocjitsu_dbi_hooks.so for the latest
+            # successful run on ${ROCJITSU_REF}. This replaces the old
+            # clone + cmake source build, whose docker toolchain deps (cmake,
+            # ninja, libzstd-dev, g++-13, Findzstd shim) have been removed from
+            # docker/Dockerfile.ci-gpu.
+            # Downloading Actions artifacts requires a token with actions:read
+            # even though rocm-systems is public: the unauthenticated artifact
+            # /zip endpoint returns 401 and no equivalent GitHub Release exists.
+            # See the step env (GH_TOKEN) and the token note there.
+            rm -rf "${ROCJITSU_PREBUILT}"
+            mkdir -p "${SANITIZER_ROOT}"
+            # Run the VENDORED downloader (scripts/sanitizers/, copied from a
+            # reviewed rocm-systems commit) rather than fetching executable code
+            # from the mutable ${ROCJITSU_REF} branch and running it with the
+            # artifacts token -- a moving/compromised branch could otherwise run
+            # arbitrary code in this job and exfiltrate the PAT.
+            python scripts/sanitizers/download_sanitizer_artifacts.py \
+              --branch "${ROCJITSU_REF}" --dest "${ROCJITSU_PREBUILT}" --force
+            export ROCJITSU_PREBUILT="$(cd "${ROCJITSU_PREBUILT}" && pwd)"
+            echo "ROCJITSU_PREBUILT=${ROCJITSU_PREBUILT}"
+            # Fail closed: the downloader only *warns* when sha256sums.txt is
+            # absent, which would admit an unverified bundle. Require it.
+            if [ ! -f "${ROCJITSU_PREBUILT}/sha256sums.txt" ]; then
+              echo "::error::prebuilt bundle has no sha256sums.txt; refusing unverified artifacts" >&2
+              exit 1
             fi
-            cmake --build "${ROCJITSU_BUILD}" --parallel \
-              --target rj_waitcheck rocjitsu_dbi_hooks
-            export ROCJITSU_BUILD="${ROCJITSU_BUILD}"
+            # The token is only needed for the download above. Drop it before
+            # building fixtures or running any artifact-provided code
+            # (rj_waitcheck and the ConSan hook, which copies os.environ) so
+            # those never inherit the cross-repo PAT.
+            unset GH_TOKEN GITHUB_TOKEN
+            # Record the source commit for provenance (bundle is ephemeral).
+            python -c "import json,sys; m=json.load(open(sys.argv[1])); \
+              print(\"ROCJITSU bundle commit:\", m.get(\"commit\"), \
+              \"run:\", m.get(\"run_url\"))" \
+              "${ROCJITSU_PREBUILT}/MANIFEST.json"
 
             # hipcc shells out to clang-offload-bundler, which lives in the ROCm
-            # LLVM bindir (same dir as the amdclang++ used above) but is not on
-            # PATH -- the image only exports /opt/rocm/bin -- so the fixture
+            # LLVM bindir but is not on PATH -- the image only exports
+            # /opt/rocm/bin -- so the fixture
             # build failed with "clang-offload-bundler not found on PATH" (run
             # 31161251100). Add the LLVM bindir so hipcc can find its tools.
             export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"

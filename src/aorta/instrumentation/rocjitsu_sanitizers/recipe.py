@@ -9,6 +9,7 @@ from pathlib import Path
 
 from aorta.triage.recipe import RecipeSchemaError, load_recipe_mapping
 
+from .consan import resolve_consan_hook
 from .models import CheckResult, ExecutionState, SelectionRequirement, Verdict
 from .pipeline import run_sanitizers
 from .report import build_report, write_report
@@ -315,28 +316,33 @@ def _resolve_observations(recipe: SanitizerRecipe) -> tuple:
     raise ValueError(f"unsupported source kind {recipe.source_kind!r}")
 
 
-def _resolve_rocjitsu_build() -> Path | None:
-    raw = os.environ.get("ROCJITSU_BUILD", "").strip()
+def _env_dir(name: str) -> Path | None:
+    raw = os.environ.get(name, "").strip()
     if not raw:
         return None
-    build = Path(raw)
-    return build if build.is_dir() else None
+    root = Path(raw)
+    return root if root.is_dir() else None
 
 
-def _resolve_waitcheck_binary(build: Path | None) -> Path | None:
-    if build is None:
-        return None
-    candidate = build / "tools" / "rj_waitcheck"
-    return candidate if candidate.is_file() else None
+def _resolve_waitcheck_binary() -> Path | None:
+    """Locate ``rj_waitcheck`` in a prebuilt bundle or a CMake build tree.
 
+    Prefers the flattened prebuilt sanitizer bundle published by
+    ROCm/rocm-systems (``$ROCJITSU_PREBUILT/bin/rj_waitcheck``), then falls back
+    to the raw CMake build-tree layout (``$ROCJITSU_BUILD/tools/rj_waitcheck``).
+    """
 
-def _resolve_consan_hook(build: Path | None) -> Path | None:
-    if build is None:
-        return None
-    candidate = (
-        build / "lib" / "rocjitsu" / "src" / "rocjitsu" / "hooks" / "librocjitsu_dbi_hooks.so"
-    )
-    return candidate if candidate.is_file() else None
+    prebuilt = _env_dir("ROCJITSU_PREBUILT")
+    if prebuilt is not None:
+        candidate = prebuilt / "bin" / "rj_waitcheck"
+        if candidate.is_file():
+            return candidate
+    build = _env_dir("ROCJITSU_BUILD")
+    if build is not None:
+        candidate = build / "tools" / "rj_waitcheck"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def execute_sanitizer_run(
@@ -373,9 +379,8 @@ def execute_sanitizer_run(
         )
         return report_path
 
-    build = _resolve_rocjitsu_build()
-    waitcheck_binary = _resolve_waitcheck_binary(build)
-    consan_hook = _resolve_consan_hook(build)
+    waitcheck_binary = _resolve_waitcheck_binary()
+    consan_hook = resolve_consan_hook()
     consan_command = recipe.consan_command
     # Cross-check the executed repro against the single selected identity so a
     # recipe cannot name one repro while ConSan runs against another selection.

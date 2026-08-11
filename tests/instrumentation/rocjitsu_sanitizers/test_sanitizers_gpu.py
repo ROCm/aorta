@@ -17,8 +17,9 @@ exercising the full backend when it is available:
 2. **Real ConSan repro cases** (opt-in): build and run the committed clean/racy
    LDS repros -- the same "our cases" the ``sanitizers-nightly.yml`` workflow
    exercises -- and assert ``clean => pass`` / ``racy => fail`` on real
-   hardware. Self-skips unless ``ROCJITSU_BUILD`` (the DBI hook) and ``hipcc``
-   are both present, so the standard PR container stays green.
+   hardware. Self-skips unless the DBI hook (provisioned via
+   ``ROCJITSU_PREBUILT`` or ``ROCJITSU_BUILD``) and ``hipcc`` are both present,
+   so the standard PR container stays green.
 """
 
 from __future__ import annotations
@@ -79,14 +80,17 @@ skip_no_rocm = pytest.mark.skipif(
     reason="no AMD ROCm GPU detected (rocminfo reported no gfx target)",
 )
 
-# The real-repro layer needs the private DBI hook (via ROCJITSU_BUILD) *and* a
-# compiler to build the fixture. Missing either => skip, never fail: the PR gate
-# container has neither, so it must stay green.
+# The real-repro layer needs the private DBI hook (via ROCJITSU_PREBUILT or
+# ROCJITSU_BUILD) *and* a compiler to build the fixture. Missing either => skip,
+# never fail: the PR gate container has neither, so it must stay green.
 _HAVE_HIPCC = shutil.which("hipcc") is not None
 _HAVE_HOOK = resolve_consan_hook() is not None
 skip_no_backend = pytest.mark.skipif(
     not (_HAVE_HIPCC and _HAVE_HOOK),
-    reason="set ROCJITSU_BUILD (ConSan DBI hook) and install hipcc to run real repros",
+    reason=(
+        "set ROCJITSU_PREBUILT (or ROCJITSU_BUILD) for the ConSan DBI hook and "
+        "install hipcc to run real repros"
+    ),
 )
 
 
