@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-08-10-31387689897` · commit `7f3ba90830b9` · 2026-08-10
+Run `2026-08-11-31490825323` · commit `d1ba9de1aea2` · 2026-08-11
 
 ✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
@@ -17,7 +17,7 @@ Observed `WARN` or `FAIL` verdicts may be expected positive-control outcomes. Ba
 <details><summary><b>daily-waitcheck-gemm</b> — ✅ **Expected outcome**</summary>
 
 Observed sanitizer verdict `warn` · expected `warn`
-backend `rj_waitcheck` `8431040601e7` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
+backend `rj_waitcheck` `5c02eee0055c` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
@@ -53,7 +53,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=44957280 index=0 kind=1 code_object=fnv1a64:ee4f81229a69f3ed report_generation=2 generation=2 epo… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=35139968 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
 
 </details>
 
@@ -61,5 +61,6 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-08-11-31490825323 | `d1ba9de1aea2` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-10-31387689897 | `7f3ba90830b9` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-10-31386669577 | `7f3ba90830b9` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
