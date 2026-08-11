@@ -255,14 +255,163 @@ def _headline_block(entry: dict[str, Any], entry_name: str) -> str:
 
 
 def _run_command_block(entry_name: str) -> str:
-    cmd = _workload_meta(entry_name).get("run_command") or ""
+    """Step-by-step instructions to reproduce a workload outside CI."""
+    meta = _workload_meta(entry_name)
+    cmd = str(meta.get("run_command") or "")
     if not cmd:
         return ""
+    recipe = str(meta.get("recipe") or "")
+    min_gpus = meta.get("min_gpus")
+    if not _isnum(min_gpus):
+        min_gpus = 8 if entry_name.endswith("_8gpu") else 1
+    min_gpus = int(min_gpus)
+    gpu_note = (
+        f"At least {min_gpus} AMD GPU(s) visible to PyTorch"
+        if min_gpus > 1 else "One AMD GPU visible to PyTorch"
+    )
+    recipe_line = ""
+    if recipe:
+        recipe_line = (
+            f"<p class='repro-note muted'>Recipe: "
+            f"<a class='mono' href='https://github.com/{_REPO}/blob/main/{_esc(recipe)}'>"
+            f"{_esc(recipe)}</a></p>"
+        )
     return (
-        "<details class='run-cmd'>"
-        "<summary>Run this workload locally</summary>"
-        f"<pre class='mono'>{_esc(cmd)}</pre>"
-        "</details>"
+        f"<div class='repro-panel' id='repro-{_esc(entry_name)}'>"
+        f"<p class='repro-kicker muted'>Run this workload locally</p>"
+        f"<ol class='repro-steps'>"
+        f"<li><strong>Requirements:</strong> {gpu_note}; ROCm + PyTorch installed "
+        f"(match the stack versions in the header when comparing numbers).</li>"
+        f"<li><strong>Install AORTA</strong> — follow the "
+        f"<a href='docs/'>getting started guide</a> and clone this repository.</li>"
+        f"<li><strong>Run from the repo root:</strong>"
+        f"<pre class='mono repro-cmd'>{_esc(cmd)}</pre></li>"
+        f"<li><strong>Distributed workloads:</strong> see "
+        f"<a href='https://github.com/{_REPO}/blob/main/recipes/README-running-recipes.md'>"
+        f"recipes/README-running-recipes.md</a> for torchrun and multi-node notes.</li>"
+        f"</ol>{recipe_line}</div>"
+    )
+
+
+def _category_statuses(
+    latest_entries: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Structured category health for ``data.json`` consumers."""
+    meta = load_dashboard_metadata()
+    categories = meta.get("categories") or {}
+    by_entry: dict[str, list[dict[str, Any]]] = {}
+    for e in latest_entries:
+        by_entry.setdefault(str(e.get("entry")), []).append(e)
+    out: dict[str, dict[str, Any]] = {}
+    for cat_id, cat in categories.items():
+        workloads = cat.get("workloads") or []
+        group: list[dict[str, Any]] = []
+        for wl in workloads:
+            group.extend(by_entry.get(str(wl), []))
+        if not group:
+            continue
+        counts = _tally(group)
+        worst = _worst_verdict(counts)
+        out[str(cat_id)] = {
+            "label": str(cat.get("label") or cat_id),
+            "worst_verdict": worst,
+            "counts": dict(counts),
+            "workloads": [str(w) for w in workloads if by_entry.get(str(w))],
+        }
+    return out
+
+
+def _headline_metrics_for_entries(
+    latest_entries: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Latest headline metric values keyed by ``entry::cell``."""
+    out: dict[str, dict[str, Any]] = {}
+    for e in latest_entries:
+        entry_name = str(e.get("entry") or "")
+        cell = e.get("cell")
+        key = f"{entry_name}::{cell}" if cell else entry_name
+        metrics: dict[str, Any] = {}
+        meta = _workload_meta(entry_name)
+        for name in meta.get("headline_metrics") or []:
+            raw = ((e.get("metrics") or {}).get("summary") or {}).get(name)
+            if name in _HARNESS_METRICS:
+                raw = (e.get("metrics") or {}).get(name, raw)
+            if _isnum(raw):
+                metrics[str(name)] = raw
+        if metrics:
+            out[key] = metrics
+    return out
+
+
+def build_data_json(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate history plus structured latest-night summary for embeds."""
+    latest = results[-1] if results else None
+    status, _ = _latest_status(results)
+    latest_entries = list((latest or {}).get("entries") or [])
+    latest_block: dict[str, Any] = {
+        "status": status,
+        "customer_status": _customer_status_label(status),
+        "generated_at": (latest or {}).get("generated_at"),
+        "build": (latest or {}).get("build") or {},
+        "summary": (latest or {}).get("summary") or {},
+        "categories": _category_statuses(latest_entries),
+        "headline_metrics": _headline_metrics_for_entries(latest_entries),
+    }
+    return {
+        "schema_version": 2,
+        "latest": latest_block,
+        "results": results,
+    }
+
+
+def build_scaling_summary(latest_entries: list[dict[str, Any]]) -> str:
+    """2-GPU vs 8-GPU step-time scaling for training workloads."""
+    by_entry: dict[str, list[dict[str, Any]]] = {}
+    for e in latest_entries:
+        by_entry.setdefault(str(e.get("entry")), []).append(e)
+
+    def _step_p50(entry_name: str) -> float | None:
+        for e in by_entry.get(entry_name) or []:
+            raw = ((e.get("metrics") or {}).get("summary") or {}).get("step_time_p50")
+            if _isnum(raw):
+                return float(raw)
+        return None
+
+    pairs = (
+        ("training_ddp", "training_ddp_8gpu", "DDP"),
+        ("training_fsdp", "training_fsdp_8gpu", "FSDP"),
+    )
+    rows = []
+    for two_gpu, eight_gpu, label in pairs:
+        p50_2 = _step_p50(two_gpu)
+        p50_8 = _step_p50(eight_gpu)
+        if p50_2 is None or p50_8 is None:
+            continue
+        ratio = p50_8 / p50_2 if p50_2 else None
+        # Ideal 8-GPU step time with perfect 4× scaling from 2 GPUs.
+        ideal_8 = p50_2 / 4.0
+        efficiency = (ideal_8 / p50_8 * 100.0) if p50_8 else None
+        eff_txt = f"{efficiency:.0f}%" if efficiency is not None else "—"
+        ratio_txt = f"{ratio:.2f}×" if ratio is not None else "—"
+        rows.append(
+            f"<tr><td>{_esc(label)}</td>"
+            f"<td class='num'>{_esc(_fmt_ms(p50_2))}</td>"
+            f"<td class='num'>{_esc(_fmt_ms(p50_8))}</td>"
+            f"<td class='num'>{_esc(ratio_txt)}</td>"
+            f"<td class='num'>{_esc(eff_txt)}</td></tr>"
+        )
+    if not rows:
+        return ""
+    return (
+        "<h2>Training scaling (2 → 8 GPU)</h2>"
+        "<p class='muted'>Reference step_time_p50 from the latest nightly. "
+        "Scaling efficiency assumes ideal 4× speedup from 2 to 8 GPUs on the "
+        "same recipe.</p>"
+        "<div class='tablewrap'><table class='scaling'>"
+        "<thead><tr><th>strategy</th><th class='num'>2 GPU p50</th>"
+        "<th class='num'>8 GPU p50</th><th class='num'>slowdown</th>"
+        "<th class='num'>efficiency</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
 
 
@@ -604,7 +753,10 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
         return ""
 
     head = "".join(
-        f"<th scope='col' class='wlcol' title='{_esc(n)}'>{_esc(n)}</th>" for n in ordered
+        f"<th scope='col' class='wlcol'>"
+        f"<a href='#wl-{_esc(n)}' title='{_esc(n)} — jump to workload'>"
+        f"{_esc(str(_workload_meta(n).get('title') or n))}</a></th>"
+        for n in ordered
     )
 
     newest_first = list(reversed(runs))
@@ -616,6 +768,7 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             by_entry.setdefault(str(e.get("entry")), []).append(e)
 
         status, color = _latest_status([doc])
+        customer_status = _customer_status_label(status)
         date = _fmt_timestamp(str(doc.get("generated_at") or "")).split(" ")[0] or "—"
         run_id = str(build.get("upstream_run_id") or "")
         when = (
@@ -661,27 +814,30 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
             # screen reader is free to ignore the label and announce only the
             # glyph and count -- the least useful part for a mixed group.
             cells.append(
-                f"<td class='gcell'><span class='dot' role='img' style='background:{bg}' "
-                f"title='{_esc(breakdown)}' aria-label='{_esc(breakdown)}'>"
-                f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span></td>"
+                f"<td class='gcell'><a class='gcell-link' href='#wl-{_esc(name)}' "
+                f"title='{_esc(breakdown)} — jump to workload'>"
+                f"<span class='dot' role='img' style='background:{bg}' "
+                f"aria-label='{_esc(breakdown)}'>"
+                f"{_esc(_VERDICT_GLYPH.get(worst, _UNKNOWN_GLYPH))} {_esc(count)}</span></a></td>"
             )
 
         rows.append(
             f"<tr><th scope='row' class='runcell'>{when}{flag}"
             f"<span class='runmeta'>{_esc(str(build.get('amd_aorta_version') or ''))}</span></th>"
-            f"<td class='center'><span class='badge sm' style='background:{color}'>"
-            f"{_esc(status)}</span></td>{''.join(cells)}</tr>"
+            f"<td class='center'><span class='badge sm' style='background:{color}' "
+            f"title='{_esc(status)}'>{_esc(customer_status)}</span></td>"
+            f"{''.join(cells)}</tr>"
         )
 
     return (
-        "<h2>Run history</h2>"
-        "<p class='muted'>Each row is one nightly run, newest first; each column is a "
-        "workload. A cell shows the worst verdict among that workload's results "
-        "(✓ pass · ✗ fail · ◆ record · ○ skip · ? unrecognised) and how many there were — "
-        "<span class='mono'>✗ 1/4</span> means one of four failed. Hover for the "
-        "full breakdown.</p>"
+        "<h2>Nightly release health</h2>"
+        "<p class='muted'>Each row is one nightly release (newest first). The "
+        "<strong>overall health</strong> column summarises that night's graded "
+        "verdicts; workload columns link to reproduction steps below. "
+        "Cell glyphs: ✓ pass · ✗ fail · ◆ record · ○ skip.</p>"
         "<div class='tablewrap'><table class='grid'>"
-        f"<thead><tr><th scope='col'>run</th><th scope='col' class='center'>status</th>"
+        f"<thead><tr><th scope='col'>release</th>"
+        f"<th scope='col' class='center'>overall health</th>"
         f"{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
     )
 
@@ -959,7 +1115,9 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         )
         rows = [
             f"<tr class='grp' id='wl-{_esc(entry_name)}'><th colspan='{ncols}' scope='rowgroup'>"
-            f"<div class='wl-head'><strong>{_esc(wl_title)}</strong>"
+            f"<div class='wl-head'>"
+            f"<a class='wl-title' href='#repro-{_esc(entry_name)}'>"
+            f"<strong>{_esc(wl_title)}</strong></a>"
             f"<span class='mono muted wl-id'>{_esc(entry_name)}</span></div>"
             f"{summary_html}"
             f"<span class='muted'> {_esc(head)}</span>"
@@ -1147,6 +1305,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     changes_html = build_change_summary(results)
     history_html = build_history_grid(results)
     category_html = build_category_summary(latest_entries)
+    scaling_html = build_scaling_summary(latest_entries)
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1283,10 +1442,23 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   ul.headlines li {{ background:#12161b; border:1px solid var(--border);
                      border-radius:6px; padding:.2rem .55rem; font-size:.78rem; }}
   tr.headline-row > td {{ padding-top:0; padding-bottom:.5rem; }}
-  details.run-cmd {{ margin:.45rem 0 0; font-size:.78rem; }}
-  details.run-cmd pre {{ background:#0d1117; border:1px solid var(--border);
-                         border-radius:6px; padding:.5rem .65rem; margin:.35rem 0 0;
-                         overflow-x:auto; white-space:pre-wrap; word-break:break-word; }}
+  .repro-panel {{ margin:.55rem 0 0; padding:.65rem .75rem; background:#12161b;
+                  border:1px solid var(--border); border-radius:8px; }}
+  .repro-kicker {{ margin:0 0 .35rem; font-size:.72rem; text-transform:uppercase;
+                   letter-spacing:.05em; }}
+  ol.repro-steps {{ margin:.35rem 0 0; padding-left:1.25rem; font-size:.82rem; }}
+  ol.repro-steps li {{ margin:.35rem 0; }}
+  .repro-cmd {{ background:#0d1117; border:1px solid var(--border); border-radius:6px;
+                padding:.5rem .65rem; margin:.35rem 0 0; overflow-x:auto;
+                white-space:pre-wrap; word-break:break-word; }}
+  .repro-note {{ margin:.45rem 0 0; font-size:.75rem; }}
+  a.wl-title {{ color:#e6edf3; text-decoration:none; }}
+  a.wl-title:hover {{ color:var(--accent); text-decoration:underline; }}
+  a.gcell-link {{ color:inherit; text-decoration:none; display:inline-block; }}
+  a.gcell-link:hover .dot {{ outline:2px solid var(--accent); outline-offset:1px; }}
+  table.scaling {{ margin-top:.5rem; }}
+  table.grid th.wlcol a {{ color:var(--muted); text-decoration:none; font-size:.62rem; }}
+  table.grid th.wlcol a:hover {{ color:var(--accent); text-decoration:underline; }}
   ul.changes li.change-hdr {{ background:transparent; border:none; padding:.15rem 0;
                               font-size:.72rem; text-transform:uppercase;
                               letter-spacing:.06em; color:var(--muted); }}
@@ -1306,7 +1478,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         reference MI350 runner and replays representative PyTorch workloads —
         training, inference, and distributed correctness checks — comparing each
         result against a blessed baseline when one exists.</p>
-      <p class="nav"><a href="docs/">AORTA documentation</a> ·
+      <p class="nav"><strong>Stack health</strong> ·
+        <a href="docs/">AORTA documentation</a> ·
         <a href="sanitizers/">Sanitizer nightly</a> ·
         <a href="https://github.com/{_REPO}">Repository</a> ·
         <a href="data.json">data.json</a></p>
@@ -1328,6 +1501,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     {changes_html}
 
     {history_html}
+
+    {scaling_html}
 
     <div class="secthead">
       <h2>Workloads</h2>
@@ -1385,7 +1560,8 @@ def main() -> int:
         results = results[-args.max_builds:]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(build_dashboard_html(results), encoding="utf-8")
-    (args.out_dir / "data.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+    (args.out_dir / "data.json").write_text(
+        json.dumps(build_data_json(results), indent=2), encoding="utf-8")
     print(f"dashboard: {len(results)} build(s) -> {args.out_dir / 'index.html'}", flush=True)
     return 0
 

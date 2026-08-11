@@ -45,6 +45,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "title": "GPU platform smoke",
             "summary": "Verifies the ROCm/PyTorch stack loads and runs on GPU.",
             "headline_metrics": ["mean_step_time_ms"],
+            "recipe": "recipes/ci/gpu-smoke.yaml",
+            "min_gpus": 1,
             "run_command": "aorta sweep run --recipe recipes/ci/gpu-smoke.yaml",
         },
         "inference_offline": {
@@ -56,6 +58,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "decode_latency_ms",
                 "logits_checksum",
             ],
+            "recipe": "recipes/inference/example-inference-smoke.yaml",
+            "min_gpus": 1,
             "run_command": (
                 "aorta sweep run --recipe recipes/inference/example-inference-smoke.yaml"
             ),
@@ -64,6 +68,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "title": "PyTorch DDP training (2 GPU)",
             "summary": "Distributed data parallel training step time on two GPUs.",
             "headline_metrics": ["step_time_p50", "step_time_p99"],
+            "recipe": "recipes/training/example-training-ddp-smoke.yaml",
+            "min_gpus": 2,
             "run_command": (
                 "torchrun --standalone --nproc_per_node=2 $(which aorta) "
                 "sweep run --recipe recipes/training/example-training-ddp-smoke.yaml"
@@ -73,6 +79,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "title": "PyTorch DDP training (8 GPU)",
             "summary": "Distributed data parallel training step time on eight GPUs.",
             "headline_metrics": ["step_time_p50", "step_time_p99"],
+            "recipe": "recipes/training/example-training-ddp-smoke.yaml",
+            "min_gpus": 8,
             "run_command": (
                 "torchrun --standalone --nproc_per_node=8 $(which aorta) "
                 "sweep run --recipe recipes/training/example-training-ddp-smoke.yaml"
@@ -82,6 +90,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "title": "PyTorch FSDP training (2 GPU)",
             "summary": "Fully sharded data parallel training on two GPUs.",
             "headline_metrics": ["step_time_p50", "step_time_p99"],
+            "recipe": "recipes/training/example-training-fsdp-smoke.yaml",
+            "min_gpus": 2,
             "run_command": (
                 "torchrun --standalone --nproc_per_node=2 $(which aorta) "
                 "sweep run --recipe recipes/training/example-training-fsdp-smoke.yaml"
@@ -91,6 +101,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "title": "PyTorch FSDP training (8 GPU)",
             "summary": "Fully sharded data parallel training on eight GPUs.",
             "headline_metrics": ["step_time_p50", "step_time_p99"],
+            "recipe": "recipes/training/example-training-fsdp-smoke.yaml",
+            "min_gpus": 8,
             "run_command": (
                 "torchrun --standalone --nproc_per_node=8 $(which aorta) "
                 "sweep run --recipe recipes/training/example-training-fsdp-smoke.yaml"
@@ -103,6 +115,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "silent corruption."
             ),
             "headline_metrics": ["ranks_with_divergence"],
+            "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+            "min_gpus": 2,
             "run_command": (
                 "torchrun --standalone --nproc_per_node=2 $(which aorta) "
                 "sweep run --recipe recipes/llm-determinism/example-llm-determinism.yaml"
@@ -112,6 +126,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "title": "LLM determinism (8 GPU)",
             "summary": "Bit-exact repeatability at full-node scale.",
             "headline_metrics": ["ranks_with_divergence"],
+            "recipe": "recipes/llm-determinism/example-llm-determinism.yaml",
+            "min_gpus": 8,
             "run_command": (
                 "torchrun --standalone --nproc_per_node=8 $(which aorta) "
                 "sweep run --recipe recipes/llm-determinism/example-llm-determinism.yaml"
@@ -123,6 +139,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "Detects timing races and silent data corruption in distributed layers."
             ),
             "headline_metrics": ["layer_checksum_mismatches"],
+            "recipe": "recipes/race/race_smoke.yaml",
+            "min_gpus": 2,
             "run_command": (
                 "torchrun --standalone --nproc_per_node=2 $(which aorta) "
                 "sweep run --recipe recipes/race/race_smoke.yaml"
@@ -132,6 +150,8 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "title": "RCCL race detection (8 GPU)",
             "summary": "Race detection at full-node scale.",
             "headline_metrics": ["layer_checksum_mismatches"],
+            "recipe": "recipes/race/race_smoke.yaml",
+            "min_gpus": 8,
             "run_command": (
                 "torchrun --standalone --nproc_per_node=8 $(which aorta) "
                 "sweep run --recipe recipes/race/race_smoke.yaml"

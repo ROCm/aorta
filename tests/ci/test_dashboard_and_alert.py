@@ -443,7 +443,7 @@ def test_history_grid_needs_two_runs_before_it_says_anything():
     one = [_run(3, [_cell("w", "c")], total=1, record=1)]
     assert gen_dashboard.build_history_grid(one) == ""
     assert gen_dashboard.build_history_grid([]) == ""
-    assert "<h2>Run history</h2>" not in gen_dashboard.build_dashboard_html(one)
+    assert "<h2>Nightly release health</h2>" not in gen_dashboard.build_dashboard_html(one)
 
 
 def test_history_grid_puts_runs_on_rows_and_workloads_on_columns():
@@ -486,10 +486,9 @@ def test_history_grid_never_renders_an_unrecognised_verdict_as_healthy():
              total=2, **{"pass": 1}),
     ]
     grid = gen_dashboard.build_history_grid(runs)
-    cell = f"background:{gen_dashboard._UNKNOWN_COLOR}' title='w — 1 pass · 1 error'"
-    assert cell in grid          # the mixed group takes the unknown colour, not green
-    assert "? 1/2" in grid       # and reads as one unrecognised of two
-    assert "1 pass · 1 error" in grid  # the unknown is still counted in the hover
+    assert f"background:{gen_dashboard._UNKNOWN_COLOR}" in grid
+    assert "? 1/2" in grid
+    assert "1 pass · 1 error" in grid
 
 
 def test_history_grid_ranks_a_known_failure_above_an_unrecognised_verdict():
@@ -848,6 +847,72 @@ def test_dashboard_run_command_block():
     html = gen_dashboard.build_dashboard_html([r])
     assert "Run this workload locally" in html
     assert "example-inference-smoke.yaml" in html
+    assert "getting started guide" in html
+    assert "README-running-recipes.md" in html
+    assert "id='repro-inference_offline'" in html
+    assert "href='#repro-inference_offline'" in html
+
+
+def test_history_grid_workloads_and_cells_link_to_repro_sections():
+    runs = [
+        _run(3, [_cell("gpu_smoke", "c"), _cell("race", "smoke")], total=2, record=2),
+        _run(4, [_cell("gpu_smoke", "c"), _cell("race", "smoke")], total=2, record=2),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "href='#wl-gpu_smoke'" in grid
+    assert "gcell-link" in grid
+    assert "overall health" in grid
+
+
+def test_history_grid_overall_health_uses_customer_label():
+    runs = [
+        _run(3, [_cell("w", "c")], total=1, record=1),
+        _run(4, [_cell("w", "c")], total=1, record=1),
+    ]
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "Baseline setup" in grid
+
+
+def test_build_data_json_v2_wraps_results_with_latest_summary():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "record",
+         "reasons": [], "metrics": {"mean_step_time_ms": 1.0}},
+    ]
+    runs = [_results("2026-08-03T12:00:00Z", entries, total=1, record=1)]
+    doc = gen_dashboard.build_data_json(runs)
+    assert doc["schema_version"] == 2
+    assert doc["latest"]["customer_status"] == "Baseline setup"
+    assert doc["latest"]["categories"]["platform"]["worst_verdict"] == "record"
+    assert doc["results"] == runs
+
+
+def test_scaling_summary_renders_when_two_and_eight_gpu_training_present():
+    entries = [
+        _cell("training_ddp", "c", summary={"step_time_p50": 8.0}),
+        _cell("training_ddp_8gpu", "c", summary={"step_time_p50": 2.5}),
+        _cell("training_fsdp", "c", summary={"step_time_p50": 10.0}),
+        _cell("training_fsdp_8gpu", "c", summary={"step_time_p50": 3.0}),
+    ]
+    html = gen_dashboard.build_scaling_summary(entries)
+    assert "Training scaling" in html
+    assert "DDP" in html and "FSDP" in html
+
+
+def test_dashboard_metadata_covers_nightly_matrix():
+    matrix_path = _REPO_ROOT / "config" / "ci" / "nightly_eval_matrix.yaml"
+    text = matrix_path.read_text(encoding="utf-8")
+    names = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("- name:"):
+            names.append(line.split(":", 1)[1].strip())
+    meta = gen_dashboard.load_dashboard_metadata()
+    workloads = meta.get("workloads") or {}
+    missing = [n for n in names if n not in workloads]
+    assert not missing, f"missing dashboard metadata for {missing}"
+    for name in names:
+        assert workloads[name].get("run_command"), name
+        assert workloads[name].get("recipe"), name
 
 
 def test_dashboard_failure_action_panel():
