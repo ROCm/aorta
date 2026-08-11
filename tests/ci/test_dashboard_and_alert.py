@@ -247,6 +247,20 @@ def test_dashboard_partial_record_does_not_claim_every_result_recorded():
     assert "all 4 results" not in html
 
 
+def test_hidden_metrics_do_not_enable_empty_history_column():
+    """Hidden metrics with multi-night history must not turn on an all-n/a column."""
+    runs = [
+        _run(3, [_cell("inference_offline", "c", summary={"world_size": 2.0})],
+             total=1, **{"pass": 1}),
+        _run(4, [_cell("inference_offline", "c",
+                        summary={"world_size": 2.0, "decode_latency_ms": 1.0})],
+             total=1, **{"pass": 1}),
+    ]
+    html = gen_dashboard.build_dashboard_html(runs)
+    assert "Additional summary metrics" in html
+    assert ">history</th>" not in html
+
+
 def test_dashboard_metric_trends_survive_a_missing_step_time():
     # A cell can report metrics.summary with no mean_step_time_ms (harvest
     # leaves it None). Its metric history is real, so the per-metric sparkline
@@ -264,7 +278,7 @@ def test_dashboard_metric_trends_survive_a_missing_step_time():
     assert "<svg" in html
     assert "Trend charts need at least two nightly runs" not in html
     # The step-time column still has nothing to chart, so it stays collapsed.
-    assert "trend (step ms)" not in html
+    assert "step time history" not in html
 
 
 def test_dashboard_groups_cells_under_their_workload():
@@ -290,7 +304,7 @@ def test_dashboard_omits_trend_column_without_history():
                                "summary": {"decode_latency_ms": 12.5}}}],
                  total=1, record=1)
     one = gen_dashboard.build_dashboard_html([r])
-    assert "trend (step ms)" not in one
+    assert "step time history" not in one
 
     r2 = _results("2026-07-31T00:00:00Z",
                   [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
@@ -298,7 +312,7 @@ def test_dashboard_omits_trend_column_without_history():
                                 "summary": {"decode_latency_ms": 13.5}}}],
                   total=1, record=1)
     two = gen_dashboard.build_dashboard_html([r, r2])
-    assert "trend (step ms)" in two
+    assert "step time history" in two
 
 
 def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
@@ -320,7 +334,7 @@ def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
     html = gen_dashboard.build_dashboard_html(
         [doc("2026-07-30T00:00:00Z", True), doc("2026-07-31T00:00:00Z", False)])
     assert "1.0 ms" not in html
-    assert "trend (step ms)" not in html
+    assert "step time history" not in html
 
 
 def test_dashboard_rejects_values_it_cannot_render():
@@ -781,7 +795,7 @@ def test_dashboard_withholds_the_js_controls_when_there_is_nothing_to_expand():
             _run(4, [_cell("w", "c", step=1.0)], total=1, record=1)]
     html = gen_dashboard.build_dashboard_html(runs)
     assert "<details>" not in html
-    assert 'document.querySelectorAll("tr.mrow details").length' in html
+    assert "details.repro-panel" in html
 
 
 def test_dashboard_hides_the_js_only_controls_until_the_script_runs():
@@ -849,8 +863,8 @@ def test_dashboard_run_command_block():
     assert "example-inference-smoke.yaml" in html
     assert "getting started guide" in html
     assert "README-running-recipes.md" in html
-    assert "id='repro-inference_offline'" in html
-    assert "href='#repro-inference_offline'" in html
+    assert "details class='repro-panel' id='repro-inference_offline'" in html
+    assert "<summary>Run this workload locally</summary>" in html
 
 
 def test_history_grid_retired_workloads_do_not_link_to_missing_sections():
