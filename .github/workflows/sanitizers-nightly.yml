@@ -35,6 +35,11 @@ jobs:
     # `self-hosted, gpu, mi350x` (same set the other GPU workflows target, e.g.
     # gpu-tests.yml / eval-reusable.yml use `self-hosted, gpu`).
     runs-on: [self-hosted, gpu]
+    # 120 min is GitHub's ceiling for this job, not necessarily the binding
+    # limit: an effective ~20-min cap has been observed on the [self-hosted,
+    # gpu] runner (a runner/org Actions policy that a workflow's timeout-minutes
+    # can only lower, never raise). Confirming and raising that effective cap is
+    # tracked in #370 (split out of #366).
     timeout-minutes: 120
     steps:
       # Sibling GPU jobs (gpu-tests.yml et al.) run aorta in a root ROCm CI
@@ -94,6 +99,12 @@ jobs:
             SANITIZER_OUT="${SANITIZER_ROOT}/out"
             FIXTURES=recipes/sanitizers/fixtures
 
+            # Timestamped phase markers keep the job log alive: the sanitizer
+            # scans below are minutes of silent, CPU-bound static work, so an
+            # unannotated run looks frozen for ~15 min (#366). Each phase prints
+            # "[HH:MM:SS] <phase> …" so an operator can see what is executing and
+            # how long it takes.
+            echo "[$(date +%T)] setup: installing aorta (editable, [tests]) …"
             python -m pip install --upgrade pip
             pip install -e ".[tests]"
 
@@ -108,6 +119,7 @@ jobs:
             # even though rocm-systems is public: the unauthenticated artifact
             # /zip endpoint returns 401 and no equivalent GitHub Release exists.
             # See the step env (GH_TOKEN) and the token note there.
+            echo "[$(date +%T)] setup: downloading prebuilt rocjitsu sanitizer bundle (${ROCJITSU_REF}) …"
             rm -rf "${ROCJITSU_PREBUILT}"
             mkdir -p "${SANITIZER_ROOT}"
             # Run the VENDORED downloader (scripts/sanitizers/, copied from a
@@ -131,6 +143,7 @@ jobs:
             # those never inherit the cross-repo PAT.
             unset GH_TOKEN GITHUB_TOKEN
             # Record the source commit for provenance (bundle is ephemeral).
+            echo "[$(date +%T)] setup: verified bundle digests; recording rocjitsu provenance …"
             python -c "import json,sys; m=json.load(open(sys.argv[1])); \
               print(\"ROCJITSU bundle commit:\", m.get(\"commit\"), \
               \"run:\", m.get(\"run_url\"))" \
@@ -144,10 +157,13 @@ jobs:
             export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"
 
             mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
+            echo "[$(date +%T)] fixture build: hipcc consan_lds_race (clean single-wave LDS repro) …"
             hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race.hip" \
               -o "${FIXTURES}/bin/consan_lds_race"
+            echo "[$(date +%T)] fixture build: hipcc consan_lds_race_2wave (racy two-wave LDS repro) …"
             hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race_2wave.hip" \
               -o "${FIXTURES}/bin/consan_lds_race_2wave"
+            echo "[$(date +%T)] fixture build: extracting real per-transpose f32 GEMM code objects for the top-3 shapes (~16MB each; distinct SHA per transpose layout) …"
             python scripts/sanitizers/prepare_gemm_isa.py \
               --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 3
 
@@ -155,10 +171,13 @@ jobs:
             # guardrail-safe CLI. The authoritative gate is the baseline
             # comparator below, so these only need to produce reports.
             mkdir -p "${SANITIZER_OUT}/waitcheck" "${SANITIZER_OUT}/consan-clean" "${SANITIZER_OUT}/consan-racy"
+            echo "[$(date +%T)] daily-waitcheck-gemm: concurrent rj_waitcheck scan of the top-3 shapes' distinct f32 GEMM transpose objects (CPU-bound, ~1 min each) …"
             aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml \
               --output-dir "${SANITIZER_OUT}/waitcheck" || true
+            echo "[$(date +%T)] daily-consan-clean: ConSan on single-wave LDS repro (expect pass) …"
             aorta sweep run --recipe recipes/sanitizers/daily-consan-clean.yaml \
               --output-dir "${SANITIZER_OUT}/consan-clean" || true
+            echo "[$(date +%T)] daily-consan-racy: ConSan on two-wave LDS race repro (expect fail) …"
             aorta sweep run --recipe recipes/sanitizers/daily-consan-racy.yaml \
               --output-dir "${SANITIZER_OUT}/consan-racy" || true
 
@@ -168,6 +187,7 @@ jobs:
             # sweeps -- runs in a guarded subshell so no failure here (a bad genco,
             # bundler, or compile) can abort the job before the gate below. It is
             # best-effort: a missing report simply omits that dashboard row.
+            echo "[$(date +%T)] informational: ConSan over caller-supplied code objects (#347; non-gating) …"
             (
               set +e
               KROOT="${FIXTURES}/kernels"
@@ -211,6 +231,7 @@ jobs:
 
             # Gate is the three daily controls only; the guarded informational block
             # above cannot reach this line with a non-zero status.
+            echo "[$(date +%T)] gate: comparing reports against verdict_baselines.json …"
             python scripts/sanitizers/compare_verdict_baselines.py "${SANITIZER_OUT}"
           '
 
