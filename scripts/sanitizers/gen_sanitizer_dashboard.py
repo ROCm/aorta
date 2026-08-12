@@ -638,7 +638,15 @@ def survey_cases_from_informational_dir(
         if not isinstance(report, dict):
             continue
         name = case_dir.name
-        summary = summarize_case(report, None)
+        # A top-level dict can still hold a malformed *nested* shape (e.g.
+        # ``{"checks": null}`` or a non-list ``worklist``) that makes the reduction
+        # raise mid-iteration. Isolate it: one broken best-effort report must not
+        # abort the whole non-gating publication -- skip the case (fails closed, the
+        # same degradation as a non-object/unreadable report) rather than propagate.
+        try:
+            summary = summarize_case(report, None)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
         backend = summary.get("backend")
         backend_name = backend["name"] if backend else _DASH
         group, san_from_name = _split_survey_case(name)
@@ -994,8 +1002,10 @@ def _survey_note_html() -> str:
         "<p>This tab shows how <b>real GPU kernels</b> behave when AMD&rsquo;s sanitizers "
         "run over them: <b>waitcheck</b> (a static <span class=mono>s_waitcnt</span> "
         "wait-count hazard scan of the code object) and <b>ConSan</b> (a dynamic "
-        "data-race / concurrency check at run time). Each kernel is shown under "
-        "<b>both</b> sanitizers.</p>"
+        "data-race / concurrency check at run time). Where <b>both</b> produced a "
+        "report, the kernel is shown under each; when a scan was skipped or its "
+        "report is missing (e.g. a non-GPU run), only the sanitizer(s) that actually "
+        "ran appear.</p>"
         "<p><b>No expected-behavior comparison on this tab</b> &mdash; it is "
         "observed-only and does <b>not</b> gate the nightly. An "
         "<span class=mono>error</span>, <span class=mono>fail</span>, or "
@@ -1037,22 +1047,42 @@ def _survey_howto_html(entry: dict[str, Any]) -> str:
     )
 
 
+def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
+    """Pick the inline survey message as an ``(label, text)`` pair (pure).
+
+    Precedence is verdict-aware: an ``error`` case leads with its fail-closed
+    ``primary.reason`` -- an errored report can still carry *partial* findings (e.g.
+    a coverage-incomplete ConSan run), and surfacing a ``Finding:`` there would hide
+    the reason the requirement says errored cases must show inline. warn/fail cases
+    lead with the top finding example, falling back to a reason if present. Returns
+    ``("", "")`` when there is nothing to say. Single source of truth so the HTML and
+    MD twins stay in parity.
+    """
+    verdict = str(row.get("verdict") or "").strip().lower()
+    reason = (row.get("primary") or {}).get("reason")
+    reason_text = _clean_msg(str(reason), 240) if reason else ""
+    groups = row.get("finding_groups") or []
+    example = _clean_msg(str(groups[0].get("example", "")), 240) if groups else ""
+    if verdict == "error" and reason_text:
+        return "Reason", reason_text
+    if example:
+        return "Finding", example
+    if reason_text:
+        return "Reason", reason_text
+    return "", ""
+
+
 def _survey_message_html(row: dict[str, Any]) -> str:
     """The human-readable outcome message shown INLINE on the page (#374 E).
 
     Surfaces the actual finding / error text on Tab 2 itself, not only behind the
-    raw-report link: the top finding example for warn/fail cases, otherwise the
-    fail-closed reason for errored cases. Empty when there is nothing to say.
+    raw-report link, with error-reason-first precedence (see ``_survey_message_parts``).
+    Empty when there is nothing to say.
     """
-    groups = row.get("finding_groups") or []
-    if groups:
-        example = _clean_msg(str(groups[0].get("example", "")), 240)
-        if example:
-            return f'<div class="survey-msg">Finding: {_esc(example)}</div>'
-    reason = (row.get("primary") or {}).get("reason")
-    if reason:
-        return f'<div class="survey-msg">Reason: {_esc(_clean_msg(str(reason), 240))}</div>'
-    return ""
+    label, text = _survey_message_parts(row)
+    if not text:
+        return ""
+    return f'<div class="survey-msg">{label}: {_esc(text)}</div>'
 
 
 _SANITIZER_RANK = {"waitcheck": 0, "consan": 1}
@@ -1157,9 +1187,17 @@ def _survey_group_findings(entries: list[dict[str, Any]]) -> int:
 def _survey_group_note(entries: list[dict[str, Any]]) -> str:
     """A short observation note for a kernel group's roll-up row (pure).
 
-    The first available finding code, else the first fail-closed reason, else empty.
-    Descriptive only -- never regression vocabulary.
+    Error-reason-first, mirroring ``_survey_message_parts``: if any sanitizer in the
+    group errored, its fail-closed reason is the salient note even when a sibling
+    produced findings; otherwise the first finding code, else the first reason, else
+    empty. Descriptive only -- never regression vocabulary.
     """
+    for entry in entries:
+        row = entry.get("summary") or {}
+        if str(row.get("verdict") or "").strip().lower() == "error":
+            reason = (row.get("primary") or {}).get("reason")
+            if reason:
+                return str(reason)
     for entry in entries:
         row = entry.get("summary") or {}
         finding_groups = row.get("finding_groups") or []
@@ -1533,16 +1571,12 @@ def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightl
 
 
 def _survey_message_md(row: dict[str, Any]) -> str:
-    """The inline human-readable outcome message for the MD mirror (#374 E)."""
-    groups = row.get("finding_groups") or []
-    if groups:
-        example = _clean_msg(str(groups[0].get("example", "")), 240)
-        if example:
-            return f"Finding: `{example}`"
-    reason = (row.get("primary") or {}).get("reason")
-    if reason:
-        return f"Reason: `{_clean_msg(str(reason), 240)}`"
-    return ""
+    """The inline human-readable outcome message for the MD mirror (#374 E).
+
+    Same error-reason-first precedence as the HTML twin (``_survey_message_parts``).
+    """
+    label, text = _survey_message_parts(row)
+    return f"{label}: `{text}`" if text else ""
 
 
 def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[str]:
@@ -1581,10 +1615,12 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
         "## Workload survey (observed-only)",
         "",
         "How real GPU kernels behave under AMD's sanitizers \u2014 **waitcheck** (static "
-        "`s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check), each "
-        "kernel shown under both. **No expected-behavior comparison on this tab**; an "
-        "`error` / `fail` / `warn` here is an observation of how the kernel behaved, not "
-        "a regression. Each case lists a copy-paste command to reproduce the run.",
+        "`s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check); where "
+        "both produced a report the kernel is shown under each, and when a scan was "
+        "skipped or its report is missing only the sanitizer(s) that ran appear. **No "
+        "expected-behavior comparison on this tab**; an `error` / `fail` / `warn` here "
+        "is an observation of how the kernel behaved, not a regression. Each case lists "
+        "a copy-paste command to reproduce the run.",
         "",
     ]
     if not survey:

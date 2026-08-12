@@ -948,6 +948,107 @@ def test_survey_intro_is_readable_and_drops_experimental_framing():
     assert "caller-supplied" not in html.lower()
 
 
+def test_survey_intro_qualifies_the_both_sanitizers_claim():
+    # Review (#374): the absolute "shown under both sanitizers" claim is false on the
+    # supported degraded path (an absent/unreadable report skips a sanitizer). The
+    # HTML intro + MD mirror must qualify it so the UI never claims both ran when only
+    # one report exists.
+    html = gen.build_html([_healthy_guardrail_run()], survey=[])
+    # the old absolute claim is gone; the qualified degraded-path copy is present
+    assert "shown under <b>both</b> sanitizers." not in html
+    assert "only the sanitizer(s) that actually ran appear" in html
+    md = gen.build_summary_md([_healthy_guardrail_run()], survey=[])
+    assert "shown under both." not in md
+    assert "only the sanitizer(s) that ran appear" in md
+
+
+def _errored_report_with_partial_findings(reason: str = "combined_hook_timeout") -> dict:
+    # An errored ConSan run that still emitted a partial finding before aborting
+    # (e.g. coverage-incomplete): overall_verdict=error AND a finding is present.
+    partial = {
+        "sanitizer": "consan", "severity": "race", "code": "data_race",
+        "message": "[rocjitsu-dbi-hooks] partial conflict observed before hook timeout",
+        "kernel_name": None, "code_object": None, "entry_offset": None, "metadata": {},
+    }
+    return {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": {"name": "gemm_f32_ss", "target": "gfx950"},
+                         "total_time_ms": 0.0, "dispatch_count": 1, "sources": ["kernel_list"]}],
+        },
+        "checks": [{
+            "sanitizer": "consan", "state": "error", "verdict": "error",
+            "reason": reason, "returncode": None, "findings": [partial],
+            "kernel_results": [], "coverage": [], "backend": {},
+        }],
+    }
+
+
+def test_survey_message_error_reason_takes_precedence_over_partial_findings():
+    # Review (#374): an errored report that also carries partial findings must show
+    # its error REASON inline, not a Finding that hides it. warn/fail cases keep
+    # finding-first. Enforced in the shared parts helper + both HTML and MD twins.
+    errored = gen.summarize_case(_errored_report_with_partial_findings(), None)
+    assert errored["verdict"] == "error" and errored["findings"] == 1  # partial finding present
+    assert gen._survey_message_parts(errored) == ("Reason", "combined_hook_timeout")
+    assert gen._survey_message_html(errored) == (
+        '<div class="survey-msg">Reason: combined_hook_timeout</div>'
+    )
+    assert gen._survey_message_md(errored) == "Reason: `combined_hook_timeout`"
+
+    # a warn case with a finding still leads with the finding (unchanged behavior)
+    warn = gen.summarize_case(_waitcheck_report(), None)
+    assert gen._survey_message_parts(warn)[0] == "Finding"
+    assert gen._survey_message_html(warn).startswith('<div class="survey-msg">Finding:')
+    assert gen._survey_message_md(warn).startswith("Finding: `")
+
+    # the summary-table note also surfaces the errored group's reason ahead of a
+    # sibling sanitizer's finding code (sweep of the same precedence class)
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "waitcheck-obj", "group": "obj", "sanitizer": "waitcheck",
+             "report": _waitcheck_report()},
+            {"name": "consan-obj", "group": "obj", "sanitizer": "consan",
+             "report": _errored_report_with_partial_findings()},
+        ]}
+    )
+    groups = gen._group_survey_entries(entries)
+    assert gen._survey_group_note(groups[0][1]) == "combined_hook_timeout"
+    # rendered end-to-end: the errored reason shows on the page, gate stays HEALTHY
+    html = gen.build_html([_healthy_guardrail_run()], survey=entries)
+    assert "Reason: combined_hook_timeout" in html
+    assert "HEALTHY" in html
+    assert "REGRESSION" not in html and "Regression" not in html
+
+
+def test_survey_informational_dir_isolates_malformed_nested_reports(tmp_path):
+    # Review (#374): a top-level dict with a malformed NESTED shape (e.g.
+    # {"checks": null}) passes the isinstance guard but makes the reduction raise
+    # mid-iteration. One broken best-effort report must not abort the whole
+    # non-gating publication -- the case is skipped (fails closed), good cases render.
+    root = tmp_path / "informational"
+    (root / "consan-bad").mkdir(parents=True)
+    (root / "consan-bad" / "sanitizer_report.json").write_text(json.dumps({"checks": None}))
+    (root / "consan-bad2").mkdir(parents=True)
+    (root / "consan-bad2" / "sanitizer_report.json").write_text(
+        json.dumps({"checks": [], "worklist": [1, 2, 3]})  # non-dict worklist
+    )
+    (root / "consan-good").mkdir(parents=True)
+    (root / "consan-good" / "sanitizer_report.json").write_text(
+        json.dumps(_consan_clean_report())
+    )
+
+    entries = gen.survey_cases_from_informational_dir(root, rel="runs/2026-08-05-33")
+    # the two malformed cases are dropped; the healthy one still renders
+    assert [e["name"] for e in entries] == ["consan-good"]
+    # and it still renders end-to-end without raising
+    html = gen.build_html([_healthy_guardrail_run()], survey=entries)
+    assert "HEALTHY" in html
+
+
 def test_survey_informational_groups_both_sanitizers_with_chips_and_repro(tmp_path):
     # #374 C/D/E: the same kernel scanned by both sanitizers renders under ONE
     # kernel-group heading with a sanitizer sub-block each, color-coded verdict chips,
