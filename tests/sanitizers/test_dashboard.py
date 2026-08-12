@@ -1060,6 +1060,57 @@ def test_build_html_survey_report_link_and_graceful_absence():
     assert "linked survey" in html and "nolink survey" in html
 
 
+def test_kernel_tables_html_links_each_row_to_report():
+    # #367 per-row acceptance: each kernel row links to the case's raw report via a
+    # Report column, and degrades to an em dash (never a dead/unsafe link) when the
+    # case carries no safe link.
+    row = gen.summarize_case(_waitcheck_report(), "warn")
+    assert len(row["kernels"]) == 1
+    rel = "runs/2026-08-05-33/waitcheck/sanitizer_report.json"
+
+    linked = gen._kernel_tables_html(row, report_rel=rel)
+    assert "<th>Report</th>" in linked
+    assert linked.count(f'<a href="{rel}">report</a>') == len(row["kernels"])
+
+    # absent link -> Report column present but each row shows an em dash, no link
+    absent = gen._kernel_tables_html(row, report_rel=None)
+    assert "<th>Report</th>" in absent
+    assert "sanitizer_report.json" not in absent
+    assert ">report</a>" not in absent
+
+    # unsafe caller value is rejected in the shared helper too (defense in depth)
+    unsafe = gen._kernel_tables_html(row, report_rel="javascript:alert(1)")
+    assert "javascript:alert(1)" not in unsafe
+    assert ">report</a>" not in unsafe
+
+    # empty-kernel case spans the full (now 7-column) row
+    empty = gen._kernel_tables_html({**row, "kernels": []}, report_rel=rel)
+    assert "colspan=7>no kernels selected" in empty
+
+
+def test_build_html_kernel_rows_link_reports_on_both_tabs(tmp_path):
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    runs = gen.runs_from_history_root(root, _baselines())
+    survey = gen.survey_cases_from_spec(
+        {"cases": [{"name": "s", "label": "survey linked",
+                    "report_rel": "runs/x/survey/s/sanitizer_report.json",
+                    "report": _consan_racy_report()}]}
+    )
+    html = gen.build_html(runs, survey=survey)
+
+    # Guardrail kernel-detail row links to its case report (in addition to the
+    # latest-run table's Report cell) -> the waitcheck report link now appears
+    # twice: the latest-run table cell and the per-kernel-row Report column.
+    wc = 'href="runs/2026-08-05-33/waitcheck/sanitizer_report.json">report</a>'
+    assert html.count(wc) == 2
+    # Survey kernel row links to the survey case's report_rel (the heading uses the
+    # distinct "view raw report" text, so a "report" link here is the per-row one).
+    assert 'href="runs/x/survey/s/sanitizer_report.json">report</a>' in html
+    # no dead/unsafe links leaked in
+    assert 'href="/runs/' not in html and "javascript:" not in html
+
+
 def test_build_html_empty_survey_shows_placeholder_note():
     html = gen.build_html([_healthy_guardrail_run()], survey=[])
     assert "Workload survey (observed-only)" in html
