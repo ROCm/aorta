@@ -1,0 +1,6 @@
+# The repo-root .gitignore ignores *.json (experiment outputs). The survey spec
+# and its recorded, scrubbed report fixtures are committed *source data*, not
+# experiment output -- re-include them so `gen_survey_spec.py` regeneration plus a
+# plain `git add` tracks them (no `git add -f` needed).
+!*.json
+!**/*.json

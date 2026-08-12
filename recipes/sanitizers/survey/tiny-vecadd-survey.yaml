@@ -1,0 +1,33 @@
+schema_version: 1
+mode: sanitizer
+ticket: SURVEY-TINY-VECADD
+description: >
+  Workload-survey (observed-only, Tab 2, #367) reproduction over the synthetic
+  tiny_vecadd control kernel -- an ordinary, independently-authored single-kernel
+  vector-add repro with no customer association. Runs BOTH sanitizers: waitcheck
+  (static, observes a clean pass) and ConSan (dynamic, fails closed with exit 86
+  since there is nothing analyzable). Reproduction path for the committed survey
+  fixtures reports/tiny_vecadd_waitcheck and reports/tiny_vecadd_consan.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: tiny_vecadd
+      code_object: ../fixtures/isa/tiny.hsaco
+      code_object_index: 0
+    consan_command: ../fixtures/bin/consan_tiny_load
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+    - consan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json

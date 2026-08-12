@@ -1,0 +1,895 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "path": "tools/rj_waitcheck",
+        "sha256": "472fcf288714d6d5851c258d2f36f39fe29be407929f69d910c4a2f93ed10455"
+      },
+      "coverage": [],
+      "findings": [
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x105690: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x105680: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x105690: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x11d958: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x11d948: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x11d958: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x134b04: missing s_waitcnt lgkmcnt(0) before def of s49",
+          "metadata": {
+            "context_1": "producer .text+0x134af4: s_load_dwordx8 s[44:51], s[0:1], 0x50",
+            "context_2": "consumer .text+0x134b04: s_load_dword s49, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x139704: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x1396f4: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x139704: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x14f858: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x14f848: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x14f858: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x181958: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x181948: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x181958: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x19c490: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x19c480: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x19c490: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x1ab348: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x1ab338: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x1ab348: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x1be190: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x1be180: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x1be190: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x1d8d04: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x1d8cf4: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x1d8d04: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x1e0348: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x1e0338: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x1e0348: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x20363c: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x20362c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x20363c: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x218658: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x218648: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x218658: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x227e10: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x227e00: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x227e10: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x23a904: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x23a8f4: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x23a904: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x24f93c: missing s_waitcnt lgkmcnt(0) before def of s49",
+          "metadata": {
+            "context_1": "producer .text+0x24f92c: s_load_dwordx8 s[44:51], s[0:1], 0x50",
+            "context_2": "consumer .text+0x24f93c: s_load_dword s49, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x256990: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x256980: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x256990: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x271558: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x271548: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x271558: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x2a3a90: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x2a3a80: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x2a3a90: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x2bac90: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x2bac80: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x2bac90: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x2d1e90: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x2d1e80: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x2d1e90: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x2f1b90: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x2f1b80: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x2f1b90: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x30a864: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x30a854: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x30a864: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x33623c: missing s_waitcnt lgkmcnt(0) before def of s49",
+          "metadata": {
+            "context_1": "producer .text+0x33622c: s_load_dwordx8 s[44:51], s[0:1], 0x50",
+            "context_2": "consumer .text+0x33623c: s_load_dword s49, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x341a3c: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x341a2c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x341a3c: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x3fa58: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x3fa48: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x3fa58: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x448: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x438: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x448: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x4e890: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x4e880: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x4e890: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x6753c: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x6752c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x6753c: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x71d1c: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0x71d0c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0x71d1c: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0xb2848: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0xb2838: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0xb2848: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        },
+        {
+          "code": "wait_hazard",
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "entry_offset": null,
+          "kernel_name": null,
+          "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0xfae04: missing s_waitcnt lgkmcnt(0) before def of s45",
+          "metadata": {
+            "context_1": "producer .text+0xfadf4: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+            "context_2": "consumer .text+0xfae04: s_load_dword s45, s[0:1], 0x8c"
+          },
+          "sanitizer": "waitcheck",
+          "severity": "warning"
+        }
+      ],
+      "kernel_results": [
+        {
+          "findings": [
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x105690: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x105680: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x105690: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x11d958: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x11d948: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x11d958: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x134b04: missing s_waitcnt lgkmcnt(0) before def of s49",
+              "metadata": {
+                "context_1": "producer .text+0x134af4: s_load_dwordx8 s[44:51], s[0:1], 0x50",
+                "context_2": "consumer .text+0x134b04: s_load_dword s49, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x139704: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x1396f4: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x139704: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x14f858: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x14f848: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x14f858: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x181958: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x181948: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x181958: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x19c490: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x19c480: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x19c490: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x1ab348: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x1ab338: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x1ab348: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x1be190: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x1be180: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x1be190: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x1d8d04: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x1d8cf4: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x1d8d04: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x1e0348: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x1e0338: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x1e0348: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x20363c: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x20362c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x20363c: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x218658: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x218648: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x218658: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x227e10: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x227e00: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x227e10: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x23a904: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x23a8f4: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x23a904: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x24f93c: missing s_waitcnt lgkmcnt(0) before def of s49",
+              "metadata": {
+                "context_1": "producer .text+0x24f92c: s_load_dwordx8 s[44:51], s[0:1], 0x50",
+                "context_2": "consumer .text+0x24f93c: s_load_dword s49, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x256990: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x256980: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x256990: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x271558: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x271548: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x271558: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x2a3a90: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x2a3a80: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x2a3a90: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x2bac90: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x2bac80: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x2bac90: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x2d1e90: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x2d1e80: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x2d1e90: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x2f1b90: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x2f1b80: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x2f1b90: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x30a864: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x30a854: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x30a864: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x33623c: missing s_waitcnt lgkmcnt(0) before def of s49",
+              "metadata": {
+                "context_1": "producer .text+0x33622c: s_load_dwordx8 s[44:51], s[0:1], 0x50",
+                "context_2": "consumer .text+0x33623c: s_load_dword s49, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x341a3c: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x341a2c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x341a3c: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x3fa58: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x3fa48: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x3fa58: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x448: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x438: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x448: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x4e890: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x4e880: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x4e890: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x6753c: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x6752c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x6753c: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0x71d1c: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0x71d0c: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0x71d1c: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0xb2848: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0xb2838: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0xb2848: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            },
+            {
+              "code": "wait_hazard",
+              "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+              "entry_offset": null,
+              "kernel_name": null,
+              "message": "survey_isa/hipblaslt_gemm_f32.hsaco:gfx950[0]:.text+0xfae04: missing s_waitcnt lgkmcnt(0) before def of s45",
+              "metadata": {
+                "context_1": "producer .text+0xfadf4: s_load_dwordx8 s[40:47], s[0:1], 0x50",
+                "context_2": "consumer .text+0xfae04: s_load_dword s45, s[0:1], 0x8c"
+              },
+              "sanitizer": "waitcheck",
+              "severity": "warning"
+            }
+          ],
+          "identity": {
+            "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "74f07deaefd3f12cd1b5d0d8ca04fb1f678c3c3cf4f87a434e4126278b661825",
+            "entry_offset": null,
+            "name": "hipblaslt_gemm_f32_nt_128x128",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 4,
+          "state": "ran",
+          "verdict": "warn"
+        }
+      ],
+      "reason": null,
+      "returncode": null,
+      "sanitizer": "waitcheck",
+      "state": "ran",
+      "verdict": "warn"
+    }
+  ],
+  "execution_status": "complete",
+  "overall_verdict": "warn",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "74f07deaefd3f12cd1b5d0d8ca04fb1f678c3c3cf4f87a434e4126278b661825",
+          "entry_offset": null,
+          "name": "hipblaslt_gemm_f32_nt_128x128",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
