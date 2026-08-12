@@ -905,6 +905,17 @@ def test_main_history_root_informational_folds_into_survey_tab(tmp_path, monkeyp
     assert survey[0]["summary"]["expected"] is None
 
 
+def test_survey_recipe_for_uses_real_recipe_not_derived_guess():
+    # Most survey cases map to daily-<case>.yaml, but the gemm waitcheck survey uses
+    # a dedicated object recipe -- the gated Tab-1 daily-waitcheck-gemm guardrail is
+    # never reused, so the displayed reproduce command must not point at it.
+    assert gen._survey_recipe_for("consan-gemm") == "daily-consan-gemm"
+    assert gen._survey_recipe_for("waitcheck-lds-dispatch") == "daily-waitcheck-lds-dispatch"
+    assert gen._survey_recipe_for("waitcheck-tiny") == "daily-waitcheck-tiny"
+    assert gen._survey_recipe_for("waitcheck-gemm") == "daily-waitcheck-gemm-object"
+    assert gen._survey_recipe_for("waitcheck-gemm") != "daily-waitcheck-gemm"
+
+
 def test_verdict_chip_html_colors_by_verdict():
     # #374 D: solid color-coded verdict chips keyed on the verdict string.
     assert gen._verdict_chip_html("error") == '<span class="vchip err">error</span>'
@@ -948,6 +959,16 @@ def test_survey_informational_groups_both_sanitizers_with_chips_and_repro(tmp_pa
     entries = gen.survey_cases_from_informational_dir(root, rel="runs/2026-08-05-33")
     assert {e["group"] for e in entries} == {"gemm"}
     assert {e["sanitizer"] for e in entries} == {"consan", "waitcheck"}
+    by_name = {e["name"]: e for e in entries}
+    # the waitcheck gemm survey case's report comes from its own survey dir and its
+    # reproduce command points at the dedicated object recipe (not the gated one).
+    assert by_name["waitcheck-gemm"]["command"] == (
+        "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml"
+    )
+    assert (
+        by_name["waitcheck-gemm"]["report_rel"]
+        == "runs/2026-08-05-33/survey/waitcheck-gemm/sanitizer_report.json"
+    )
 
     html = gen.build_html([_healthy_guardrail_run()], survey=entries)
     # one kernel-group heading, both sanitizer sub-blocks
@@ -957,9 +978,15 @@ def test_survey_informational_groups_both_sanitizers_with_chips_and_repro(tmp_pa
     # solid color-coded chips: consan error -> red, waitcheck warn -> amber
     assert '<span class="vchip err">error</span>' in html
     assert '<span class="vchip warn">warn</span>' in html
-    # per-case copy-paste reproduce command
+    # per-case copy-paste reproduce command reflects the ACTUAL recipe: the gemm
+    # waitcheck survey uses its dedicated object recipe, NOT the gated Tab-1
+    # daily-waitcheck-gemm guardrail (which is never reused for the survey).
     assert "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml" in html
-    assert "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml" in html
+    assert (
+        "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml"
+        in html
+    )
+    assert "recipes/sanitizers/daily-waitcheck-gemm.yaml" not in html
     # the actual message is inline on the page (not only behind the raw-report link):
     # the errored ConSan case shows its reason; the waitcheck case shows a finding.
     assert "Reason: combined_hook_timeout" in html

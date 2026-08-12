@@ -560,6 +560,22 @@ def survey_cases_from_spec(
     return entries
 
 
+# The recipe that actually produces each best-effort survey case's report, so the
+# "reproduce this yourself" command on Tab 2 is the REAL recipe rather than a
+# name-derived guess. Most case dirs (``<sanitizer>-<group>``) map to
+# ``daily-<case>.yaml``, but the gemm waitcheck survey uses a dedicated object recipe
+# (``daily-waitcheck-gemm.yaml`` is the *gated* Tab-1 guardrail and is never reused
+# for the survey). Recipe names are generic/public -- no customer/NDA identifiers.
+_SURVEY_RECIPE: dict[str, str] = {
+    "waitcheck-gemm": "daily-waitcheck-gemm-object",
+}
+
+
+def _survey_recipe_for(name: str) -> str:
+    """The recipe filename stem that produces survey case ``name``'s report."""
+    return _SURVEY_RECIPE.get(name, f"daily-{name}")
+
+
 def _split_survey_case(name: str) -> tuple[str, str | None]:
     """Split a survey case dir name into a (kernel-group, sanitizer) pair.
 
@@ -592,8 +608,10 @@ def survey_cases_from_informational_dir(
     Cases are keyed into kernel groups by ``_split_survey_case`` so the same kernel
     run under both waitcheck and ConSan renders under one heading with a sanitizer
     sub-block each (#374 C). The provenance recipe is surfaced as a copy-pasteable
-    reproduce ``command`` (``aorta sweep run --recipe .../daily-<case>.yaml``) rather
-    than an "experimental / caller-supplied" label (#374 B). No customer/NDA
+    reproduce ``command`` -- the REAL recipe that produced the report, resolved via
+    ``_survey_recipe_for`` (a small case-name -> recipe map, defaulting to
+    ``daily-<case>.yaml``) rather than an "experimental / caller-supplied" label
+    (#374 B). No customer/NDA
     identifiers are hardcoded: the kernel data flows in at run time from the reports
     (CLAUDE.md rule #4); the generic CI GEMM/LDS/vecadd kernel names are public-safe.
 
@@ -629,7 +647,10 @@ def survey_cases_from_informational_dir(
                 "sanitizer": sanitizer,
                 "backend": str(backend_name),
                 "workload": None,
-                "command": f"aorta sweep run --recipe recipes/sanitizers/daily-{name}.yaml",
+                "command": (
+                    "aorta sweep run --recipe "
+                    f"recipes/sanitizers/{_survey_recipe_for(name)}.yaml"
+                ),
                 "report_rel": report_rel,
                 "cls": "survey",
                 "summary": summary,

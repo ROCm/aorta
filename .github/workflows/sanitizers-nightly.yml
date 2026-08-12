@@ -233,17 +233,17 @@ jobs:
               # Observed-only waitcheck static scans over the SAME survey objects, so
               # Tab 2 shows both sanitizers per kernel (#374 C). Case dirs are named
               # <sanitizer>-<group> so the dashboard groups e.g. consan-gemm and
-              # waitcheck-gemm under one "gemm" kernel heading. Non-gating/best-effort.
+              # waitcheck-gemm under one "gemm" kernel heading. Each survey waitcheck
+              # scan is a dedicated best-effort run publishing its OWN report -- the
+              # gated Tab-1 waitcheck report is never reused here. Non-gating.
               for c in waitcheck-gemm waitcheck-lds-dispatch waitcheck-tiny; do
                 mkdir -p "${SANITIZER_OUT}/informational/${c}"
               done
-              # The gated waitcheck run above already scanned the real GEMM Tensile
-              # objects; reuse that report for the survey's gemm group rather than
-              # re-scanning (the reproduce command daily-waitcheck-gemm.yaml is exact).
-              if [ -f "${SANITIZER_OUT}/waitcheck/sanitizer_report.json" ]; then
-                cp "${SANITIZER_OUT}/waitcheck/sanitizer_report.json" \
-                   "${SANITIZER_OUT}/informational/waitcheck-gemm/sanitizer_report.json"
-              fi
+              # daily-waitcheck-gemm-object scans the same consan_gemm_f32.hsaco object
+              # the consan-gemm survey case uses (distinct from the gated top-3-CSV
+              # daily-waitcheck-gemm guardrail, which is left untouched).
+              aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml \
+                --output-dir "${SANITIZER_OUT}/informational/waitcheck-gemm"
               aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml \
                 --output-dir "${SANITIZER_OUT}/informational/waitcheck-lds-dispatch"
               aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml \
