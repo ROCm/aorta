@@ -57,6 +57,28 @@ def _optional_str(value: object) -> str | None:
     return text or None
 
 
+def sha256_code_object(path: Path) -> str | None:
+    """Lowercase SHA-256 of a non-empty code object, or ``None`` if unreadable.
+
+    Streams the file so a large (~16 MB) code object is not read into memory at
+    once. Returns ``None`` for a missing / empty / unreadable path so callers can
+    degrade gracefully rather than crash: the identity stays digest-less and
+    Waitcheck fails closed (``code_object_identity_required``) exactly as it does
+    today for a kernel source with no committed digest.
+    """
+
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as blob:
+            for chunk in iter(lambda: blob.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def observations_from_magpie_report(
     report: Mapping[str, object],
     *,
@@ -252,12 +274,7 @@ def observations_from_gemm_csv(
         if isa_dir is not None and solution_idx is not None:
             artifact = Path(isa_dir) / f"sol_{solution_idx}.hsaco"
             code_object = str(artifact)
-            if artifact.is_file() and artifact.stat().st_size > 0:
-                digest = hashlib.sha256()
-                with artifact.open("rb") as blob:
-                    for chunk in iter(lambda: blob.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                code_object_sha256 = digest.hexdigest()
+            code_object_sha256 = sha256_code_object(artifact)
         observations.append(
             KernelObservation(
                 identity=KernelIdentity(

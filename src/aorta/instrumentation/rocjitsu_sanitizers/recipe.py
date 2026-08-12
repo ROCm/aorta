@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from aorta.triage.recipe import RecipeSchemaError, load_recipe_mapping
@@ -20,6 +20,7 @@ from .selection import (
     observations_from_kernel_list,
     observations_from_rocprof_trace,
     select_kernels,
+    sha256_code_object,
 )
 
 _SANITIZER_TOP_LEVEL = frozenset(
@@ -70,6 +71,35 @@ class KernelSourceSpec:
         if self.entry_offset is not None:
             entry["entry_offset"] = self.entry_offset
         return entry
+
+
+def _resolve_kernel_object(
+    spec: KernelSourceSpec, *, recipe_path: Path
+) -> KernelSourceSpec:
+    """Resolve a ``kind: kernel`` spec's ``code_object`` and auto-hash it at load.
+
+    A ``kernel`` / ``kernel_list`` source names a code object by path rather than
+    carrying the runtime digest (the object is rebuilt per run, so its SHA is
+    host-specific and must not be committed). We resolve that path relative to the
+    recipe file's directory -- so a lane runs identically from CI's repo root or
+    standalone -- and, when no explicit ``code_object_sha256`` was given, hash the
+    resolved object at load time so Waitcheck can build a whole-object-scan
+    identity (mirrors ``observations_from_gemm_csv``).
+
+    An explicit digest is preserved verbatim (a real file mismatch still trips
+    Waitcheck's existing ``code_object_digest_mismatch`` fail-closed check). A
+    missing / unreadable object degrades gracefully: the digest stays absent and
+    the lane fails closed (``code_object_identity_required``) exactly as before.
+    Harmless for ConSan, which never digests the object.
+    """
+
+    if spec.code_object is None:
+        return spec
+    resolved = _resolve_path(spec.code_object, recipe_path=recipe_path)
+    sha256 = spec.code_object_sha256
+    if sha256 is None:
+        sha256 = sha256_code_object(resolved)
+    return replace(spec, code_object=str(resolved), code_object_sha256=sha256)
 
 
 def _identity_int(value: object, *, field: str) -> int:
@@ -283,6 +313,13 @@ def load_sanitizer_recipe(path: Path) -> SanitizerRecipe:
     elif source_kind == "kernel":
         kernel = _require_mapping(source.get("kernel"), name="sanitizer_plan.source.kernel")
         kernel_specs = (_parse_kernel_spec(kernel, context="sanitizer_plan.source.kernel"),)
+
+    if source_kind in {"kernel", "kernel_list"}:
+        # Resolve each kernel's code object relative to the recipe and auto-hash it
+        # (see _resolve_kernel_object) so a digest-less waitcheck lane can run.
+        kernel_specs = tuple(
+            _resolve_kernel_object(spec, recipe_path=path) for spec in kernel_specs
+        )
 
     # For every resolvable (non-repro) source kind an optional
     # ``source.consan_command`` points ConSan at a caller-supplied command or

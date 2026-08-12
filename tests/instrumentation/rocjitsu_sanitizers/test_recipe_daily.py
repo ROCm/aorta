@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from aorta.instrumentation.rocjitsu_sanitizers.report import read_report
 from aorta.instrumentation.rocjitsu_sanitizers.selection import (
     observations_from_consan_repro,
     observations_from_gemm_csv,
+    observations_from_kernel_list,
     observations_from_rocprof_trace,
     select_kernels,
 )
@@ -291,6 +293,108 @@ def test_loader_resolves_consan_command_for_kernel_list_source(tmp_path: Path) -
     loaded = load_sanitizer_recipe(recipe)
     assert loaded.source_kind == "kernel_list"
     assert loaded.consan_command == (tmp_path / "bin" / "loader").resolve()
+
+
+def _write_kernel_waitcheck_recipe(
+    tmp_path: Path,
+    *,
+    code_object: str = "fixtures/isa/tiny.hsaco",
+    sha256_line: str = "",
+) -> Path:
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        "schema_version: 1\n"
+        "mode: sanitizer\n"
+        "ticket: TEST-WAITCHECK-KERNEL\n"
+        "sanitizer_plan:\n"
+        "  target: gfx950\n"
+        "  source:\n"
+        "    kind: kernel\n"
+        "    kernel:\n"
+        "      name: tiny_vecadd\n"
+        f"      code_object: {code_object}\n"
+        f"{sha256_line}"
+        "      code_object_index: 0\n"
+        "  scope:\n"
+        "    kind: kernel\n"
+        "  selection:\n"
+        "    requirement: top_dispatch_count\n"
+        "    top_n: 1\n"
+        "  sanitizers:\n"
+        "    - waitcheck\n"
+        "  policy:\n"
+        "    consan_policy: strict\n"
+        "    on_missing_backend: fail\n"
+        "  output:\n"
+        "    report: sanitizer_report.json\n",
+        encoding="utf-8",
+    )
+    return recipe
+
+
+def test_kernel_source_auto_hashes_code_object_for_waitcheck(tmp_path: Path) -> None:
+    # A digest-less waitcheck kernel lane (the survey recipes): the loader resolves
+    # the object relative to the recipe and hashes it, so the identity becomes a
+    # whole-object scan instead of failing with code_object_identity_required.
+    obj = tmp_path / "fixtures" / "isa" / "tiny.hsaco"
+    obj.parent.mkdir(parents=True)
+    obj.write_bytes(b"\x7fELF fake tiny code object")
+    expected = hashlib.sha256(obj.read_bytes()).hexdigest()
+
+    loaded = load_sanitizer_recipe(_write_kernel_waitcheck_recipe(tmp_path))
+    spec = loaded.kernel_specs[0]
+    assert spec.code_object == str(obj.resolve())  # recipe-relative, absolute
+    assert spec.code_object_sha256 == expected  # auto-hashed at load
+    identity = observations_from_kernel_list([spec.to_entry()], target=loaded.target)[0].identity
+    assert identity.code_object_scan
+
+
+def test_kernel_source_preserves_explicit_sha256(tmp_path: Path) -> None:
+    # An explicitly committed digest is never overwritten by the on-disk hash, so a
+    # real mismatch still trips waitcheck's fail-closed code_object_digest_mismatch.
+    obj = tmp_path / "fixtures" / "isa" / "tiny.hsaco"
+    obj.parent.mkdir(parents=True)
+    obj.write_bytes(b"real bytes that hash to something else")
+    explicit = "a" * 64
+
+    loaded = load_sanitizer_recipe(
+        _write_kernel_waitcheck_recipe(
+            tmp_path, sha256_line=f"      code_object_sha256: {explicit}\n"
+        )
+    )
+    spec = loaded.kernel_specs[0]
+    assert spec.code_object_sha256 == explicit
+    assert spec.code_object_sha256 != hashlib.sha256(obj.read_bytes()).hexdigest()
+
+
+def test_kernel_source_missing_object_degrades_gracefully(tmp_path: Path) -> None:
+    # No object on disk (a non-GPU checkout that never built fixtures): the recipe
+    # still loads, the digest stays absent, and the identity is neither exact nor a
+    # code-object scan -- waitcheck fails closed exactly as before, no crash.
+    loaded = load_sanitizer_recipe(_write_kernel_waitcheck_recipe(tmp_path))
+    spec = loaded.kernel_specs[0]
+    assert spec.code_object == str((tmp_path / "fixtures" / "isa" / "tiny.hsaco").resolve())
+    assert spec.code_object_sha256 is None
+    identity = observations_from_kernel_list([spec.to_entry()], target=loaded.target)[0].identity
+    assert not identity.exact and not identity.code_object_scan
+
+
+def test_kernel_source_resolution_is_cwd_independent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Resolution is recipe-relative, not CWD-relative, so the lane runs identically
+    # whether the nightly invokes `aorta sweep run` from the repo root or elsewhere.
+    obj = tmp_path / "fixtures" / "isa" / "tiny.hsaco"
+    obj.parent.mkdir(parents=True)
+    obj.write_bytes(b"tiny object bytes")
+    recipe = _write_kernel_waitcheck_recipe(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    spec = load_sanitizer_recipe(recipe).kernel_specs[0]
+    assert spec.code_object == str(obj.resolve())
+    assert spec.code_object_sha256 == hashlib.sha256(obj.read_bytes()).hexdigest()
 
 
 def test_loader_resolves_consan_command_for_gemm_csv_source(tmp_path: Path) -> None:
