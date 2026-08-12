@@ -1032,6 +1032,37 @@ def _healthy_guardrail_run() -> dict:
     )
 
 
+def test_survey_execution_status_renders_neutral_not_health_colored():
+    # An observed-only survey error must not be health-colored on Tab 2. The
+    # committed ConSan survey reports carry execution_status="error"; the meta
+    # line must render it with the neutral `observed` style, never the red
+    # `execution bad` class the guardrail tab uses for a broken run.
+    err = {
+        "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
+        "overall_verdict": "error", "execution_status": "error",
+        "worklist": {
+            "schema": "aorta.kernel_worklist/0.1", "requirement": "top_dispatch_count",
+            "top_n": 1, "kernel_count": 1,
+            "kernels": [{"identity": {"name": "k", "target": "gfx950"},
+                         "total_time_ms": 0.0, "dispatch_count": 1, "sources": ["s"]}],
+        },
+        "checks": [{"sanitizer": "consan", "state": "error", "verdict": "error",
+                    "reason": None, "returncode": None, "findings": [],
+                    "kernel_results": [], "coverage": [], "backend": {}}],
+    }
+    survey = gen.survey_cases_from_spec({"cases": [{"name": "s", "label": "obs", "report": err}]})
+    # Only non-complete execution on the page is the survey one (guardrail runs
+    # are complete), so a neutral survey render means no `execution bad` at all.
+    html = gen.build_html([_healthy_guardrail_run()], survey=survey)
+    assert "execution bad" not in html
+    assert '<span class="observed">error</span>' in html
+
+    # Unit: the survey meta line neutralizes execution; the guardrail one colors it.
+    row = survey[0]["summary"]
+    assert "execution bad" not in gen._meta_line_html(row, observed=True)
+    assert "execution bad" in gen._meta_line_html(row, observed=False)
+
+
 def test_build_html_renders_two_self_contained_tabs():
     survey = gen.survey_cases_from_spec(
         {"cases": [{"name": "top5", "label": "top-5 GEMM survey",

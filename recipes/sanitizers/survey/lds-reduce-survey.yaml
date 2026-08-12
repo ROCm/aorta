@@ -17,6 +17,13 @@ sanitizer_plan:
       name: lds_reduce
       code_object: ../fixtures/isa/lds.hsaco
       code_object_index: 0
+      # Waitcheck needs a complete scan identity: with entry_offset omitted (a
+      # whole-object scan) it also requires code_object_sha256. Without it the
+      # identity is neither `exact` nor `code_object_scan`, so Waitcheck returns
+      # `code_object_identity_required` instead of the recorded `pass`. The digest
+      # is specific to the object regenerated on the gfx950 host (the .hsaco is not
+      # committed to this public repo), so set it at regeneration time:
+      # code_object_sha256: <sha256 of the regenerated object>
     consan_command: ../fixtures/bin/lds_dispatch
     consan_log: true
   scope:

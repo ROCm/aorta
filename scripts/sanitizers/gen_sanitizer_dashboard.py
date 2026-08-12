@@ -618,6 +618,20 @@ def _execution_html(execution: Any) -> str:
     return f'<span class="execution bad">{_esc(text)}</span>'
 
 
+def _execution_observed_html(execution: Any) -> str:
+    """Neutral (never health-colored) execution status for the survey tab.
+
+    Tab 2 promises observed-only rendering, so a non-``complete`` execution (the
+    committed ConSan survey reports carry ``execution_status: "error"``) is an
+    observation, not a regression: it must not get the red ``execution bad`` class
+    that the guardrail tab uses. Mirrors ``_observed_html`` for verdicts.
+    """
+    text = str(execution)
+    if text == "complete":
+        return _esc(text)
+    return f'<span class="observed">{_esc(text)}</span>'
+
+
 def _execution_md(execution: Any) -> str:
     """Markdown twin of ``_execution_html``: neutral when complete, else emphasized."""
     text = str(execution)
@@ -727,13 +741,24 @@ def _backend_txt_html(backend: dict[str, Any] | None) -> str:
     return f'{_esc(backend["name"])} <span class=mono>{_esc(backend["sha"])}</span>'
 
 
-def _meta_line_html(row: dict[str, Any]) -> str:
+def _meta_line_html(row: dict[str, Any], *, observed: bool = False) -> str:
+    """Backend / selection / execution meta line.
+
+    ``observed=True`` (the survey tab) renders execution neutrally so an observed
+    ``error``/incomplete status is not health-colored; the guardrail tab keeps the
+    health-colored ``_execution_html``.
+    """
     wl = row["worklist"]
+    execution = (
+        _execution_observed_html(row["execution"])
+        if observed
+        else _execution_html(row["execution"])
+    )
     return (
         f"<div class=meta>backend {_backend_txt_html(row['backend'])} &middot; selection "
         f"{_esc(str(wl['requirement']))} top&#8209;{_esc(str(wl['top_n']))} &middot; "
         f"{_esc(str(wl['kernel_count']))} kernel(s) &middot; execution "
-        f"{_execution_html(row['execution'])}</div>"
+        f"{execution}</div>"
     )
 
 
@@ -848,7 +873,7 @@ def _survey_detail_html(survey: list[dict[str, Any]]) -> str:
             f"{head}"
             f'<div class="secondary">backend {_esc(str(entry["backend"]))}{workload_txt}</div>'
             f'<div class="secondary">Observation: {_esc(row.get("observation", ""))}</div>'
-            f"{_meta_line_html(row)}"
+            f"{_meta_line_html(row, observed=True)}"
             f"{_kernel_tables_html(row, report_rel=entry.get('report_rel'))}"
         )
     return "".join(blocks)
