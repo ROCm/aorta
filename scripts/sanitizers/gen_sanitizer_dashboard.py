@@ -13,8 +13,9 @@ emits, into ``--out-dir``:
   kernels drawn from multiple workloads (including aorta-internal-sourced kernels
   supplied via ``--survey``) shown with the same kernel-detail shape but **no
   expected/match column** (a fail / not_checked here is an observation, never a
-  regression). Both tabs link each case to its ``sanitizer_report.json`` and carry
-  a one-line observation summary.
+  regression). Both tabs link each case -- in its heading and in a per-kernel-row
+  ``Report`` column -- to its ``sanitizer_report.json`` (satisfying #367's per-row
+  drill-down), and carry a one-line observation summary.
 * ``summary.md`` -- a GitHub Actions job-summary fragment (append to
   ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail.
 * ``data.json`` -- the aggregated structure for any richer consumer.
@@ -706,8 +707,19 @@ def _meta_line_html(row: dict[str, Any]) -> str:
     )
 
 
-def _kernel_tables_html(row: dict[str, Any]) -> str:
-    """The shared kernel-detail + findings tables (identical shape on both tabs)."""
+def _kernel_tables_html(row: dict[str, Any], *, report_rel: str | None = None) -> str:
+    """The shared kernel-detail + findings tables (identical shape on both tabs).
+
+    ``report_rel`` is the case's raw ``sanitizer_report.json`` link; when it is a
+    safe relative path it is rendered in a per-row **Report** column so every
+    kernel row drills down to the report (#367's per-row acceptance criterion),
+    for both the guardrail and survey callers. It degrades to an em dash when the
+    case carries no link -- an absent report, an unsafe caller value, or an input
+    mode (results-dir / runs-root) that publishes no co-located reports -- so no
+    dead or unsafe link is ever emitted. All kernel rows of one case share the
+    single case-level report, so they all point at the same file.
+    """
+    link = _report_link_html(_safe_report_rel(report_rel))
     krows = (
         "".join(
             f"<tr><td class=mono>{_esc(str(k['name']))}</td>"
@@ -715,10 +727,11 @@ def _kernel_tables_html(row: dict[str, Any]) -> str:
             f"<td>{_observed_html(k['verdict'])}</td>"
             f"<td class=num>{_esc(str(k['findings']))}</td>"
             f"<td class=mono>{_esc(k['code_object']) or '&mdash;'}</td>"
-            f"<td class=mono>{_esc(k['sha']) or '&mdash;'}</td></tr>"
+            f"<td class=mono>{_esc(k['sha']) or '&mdash;'}</td>"
+            f"<td>{link}</td></tr>"
             for k in row["kernels"]
         )
-        or "<tr><td colspan=6>no kernels selected</td></tr>"
+        or "<tr><td colspan=7>no kernels selected</td></tr>"
     )
     frows = (
         "".join(
@@ -732,7 +745,7 @@ def _kernel_tables_html(row: dict[str, Any]) -> str:
     return (
         "<table><tr><th>Kernel</th><th>Dispatch</th>"
         "<th>Observed sanitizer verdict</th><th>Findings</th>"
-        f"<th>Code object</th><th>SHA-256</th></tr>{krows}</table>"
+        f"<th>Code object</th><th>SHA-256</th><th>Report</th></tr>{krows}</table>"
         "<table><tr><th>Sanitizer</th><th>Code</th><th>Severity</th><th>Count</th>"
         f"<th>Example</th></tr>{frows}</table>"
     )
@@ -761,7 +774,7 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
             f"{_observed_html(row['expected'] or _DASH)}</div>"
             f'<div class="secondary">Observation: {_esc(row.get("observation", ""))}</div>'
             f"{_meta_line_html(row)}"
-            f"{_kernel_tables_html(row)}"
+            f"{_kernel_tables_html(row, report_rel=row.get('report_rel'))}"
         )
     return "".join(blocks)
 
@@ -805,7 +818,7 @@ def _survey_detail_html(survey: list[dict[str, Any]]) -> str:
             f'<div class="secondary">backend {_esc(str(entry["backend"]))}{workload_txt}</div>'
             f'<div class="secondary">Observation: {_esc(row.get("observation", ""))}</div>'
             f"{_meta_line_html(row)}"
-            f"{_kernel_tables_html(row)}"
+            f"{_kernel_tables_html(row, report_rel=entry.get('report_rel'))}"
         )
     return "".join(blocks)
 
