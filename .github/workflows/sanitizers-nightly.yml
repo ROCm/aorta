@@ -171,7 +171,7 @@ jobs:
             # guardrail-safe CLI. The authoritative gate is the baseline
             # comparator below, so these only need to produce reports.
             mkdir -p "${SANITIZER_OUT}/waitcheck" "${SANITIZER_OUT}/consan-clean" "${SANITIZER_OUT}/consan-racy"
-            echo "[$(date +%T)] daily-waitcheck-gemm: concurrent rj_waitcheck scan of the top-3 shapes' distinct f32 GEMM transpose objects (CPU-bound, ~1 min each) …"
+            echo "[$(date +%T)] daily-waitcheck-gemm: concurrent rj_waitcheck scan of the distinct f32 GEMM transpose objects for the top-3 shapes (CPU-bound, ~1 min each) …"
             aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml \
               --output-dir "${SANITIZER_OUT}/waitcheck" || true
             echo "[$(date +%T)] daily-consan-clean: ConSan on single-wave LDS repro (expect pass) …"
