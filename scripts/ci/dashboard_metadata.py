@@ -21,31 +21,37 @@ _TRAINING_SUCCESS = (
 
 _METRICS_IN_PERF = (
     'grep -m 10 -E "{pattern}" "$RUN_DIR/perf.md" 2>/dev/null '
-    '|| python -c "import json,sys; d=json.load(open(sys.argv[1])); '
+    '|| python3 -c "import json,sys; d=json.load(open(sys.argv[1])); '
     'print(json.dumps(d.get(\\\"cells\\\",[]), indent=2)[:2000])" "$RUN_DIR/matrix.json"'
 )
 
 _DIVERGENCE_IN_ARTIFACTS = (
     'grep -m 5 -E "ranks_with_divergence|diverge" "$RUN_DIR/perf.md" 2>/dev/null '
-    '|| python -c "'
-    "import json, pathlib, sys; "
-    "run = pathlib.Path(sys.argv[1]); "
-    "doc = json.loads((run / 'matrix.json').read_text()); "
-    "out = {}; "
-    "for cell in doc.get('cells') or []: "
-    "  name = cell.get('name', '?'); "
-    "  vals = []; "
-    "  for raw in cell.get('trial_paths') or []: "
-    "    p = pathlib.Path(raw); "
-    "    if not p.is_absolute(): p = run / raw; "
-    "    if p.is_dir(): p = p / 'result.json'; "
-    "    if not p.is_file(): continue; "
-    "    t = json.loads(p.read_text()); "
-    "    m = (t.get('result') or {}).get('metrics') or {}; "
-    "    if 'ranks_with_divergence' in m: vals.append(m['ranks_with_divergence']); "
-    "  out[name] = vals if vals else None; "
-    "print(json.dumps(out, indent=2))"
-    '" "$RUN_DIR"'
+    "|| python3 - \"$RUN_DIR\" <<'PY'\n"
+    "import json\n"
+    "from pathlib import Path\n"
+    "import sys\n"
+    "\n"
+    "run = Path(sys.argv[1])\n"
+    "doc = json.loads((run / 'matrix.json').read_text(encoding='utf-8'))\n"
+    "out = {}\n"
+    "for cell in doc.get('cells') or []:\n"
+    "    values = []\n"
+    "    for raw in cell.get('trial_paths') or []:\n"
+    "        path = Path(raw)\n"
+    "        if not path.is_absolute() and not path.exists():\n"
+    "            path = run / path\n"
+    "        if path.is_dir():\n"
+    "            path = path / 'result.json'\n"
+    "        if not path.is_file():\n"
+    "            continue\n"
+    "        trial = json.loads(path.read_text(encoding='utf-8'))\n"
+    "        metrics = (trial.get('result') or {}).get('metrics') or {}\n"
+    "        if 'ranks_with_divergence' in metrics:\n"
+    "            values.append(metrics['ranks_with_divergence'])\n"
+    "    out[cell.get('name', '?')] = values or None\n"
+    "print(json.dumps(out, indent=2))\n"
+    "PY\n"
 )
 
 
@@ -65,11 +71,12 @@ def _read_matrix_cmds(repro_root: str) -> list[str]:
         'if [ -z "$RUN_DIR" ] || [ ! -d "$RUN_DIR" ]; then echo "No run directory found"; exit 1; fi',
         'echo "Using run directory: $RUN_DIR"',
         'cat "$RUN_DIR/matrix.md"',
-        'python -m json.tool "$RUN_DIR/matrix.json" | head -80',
+        'python3 -m json.tool "$RUN_DIR/matrix.json" | head -80',
         'if [ -f "$RUN_DIR/perf.md" ]; then head -60 "$RUN_DIR/perf.md"; else echo "(no perf.md)"; fi',
         (
-            "# Dashboard pass/record/fail comes from nightly_eval.py comparing "
-            "matrix.json to config/ci/regression_baselines.yaml (--strict)"
+            "# Standalone --strict only catches errored or not-run cells; dashboard "
+            "pass/record/fail comes from nightly_eval.py separately comparing matrix.json "
+            "to config/ci/regression_baselines.yaml"
         ),
     ]
 
@@ -82,9 +89,10 @@ def _install_setup(*, min_gpus: int, distributed: bool = False) -> list[dict[str
                 "git clone https://github.com/ROCm/aorta.git",
                 "cd aorta",
                 "git checkout {{HEAD_SHA}}",
-                "pip install --upgrade pip",
+                "python3 -m pip install --upgrade pip",
                 (
-                    "pip install --upgrade --pre 'amd-aorta[hw-queue]=={{AORTA_VERSION}}' "
+                    "python3 -m pip install --upgrade --pre "
+                    "'amd-aorta[hw-queue]=={{AORTA_VERSION}}' "
                     "-f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels"
                 ),
                 "# If that exact wheel is unavailable, pick the closest dev-wheel build",
@@ -96,7 +104,7 @@ def _install_setup(*, min_gpus: int, distributed: bool = False) -> list[dict[str
             "title": "Confirm ROCm + PyTorch see enough GPUs",
             "commands": [
                 (
-                    'python -c "import torch; n=torch.cuda.device_count(); '
+                    'python3 -c "import torch; n=torch.cuda.device_count(); '
                     "assert torch.cuda.is_available() and n>0, 'no CUDA/HIP devices'; "
                     f"assert n>={min_gpus}, f'need {min_gpus} GPU(s), have {{n}}'; "
                     "print(f'{n} GPU(s), HIP', torch.version.hip)\""

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import subprocess
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -987,6 +990,7 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     assert any("NCCL" in c for step in ddp["setup"] for c in step["commands"])
     race = wl["race"]["repro"]
     assert any("AORTA_TRIAL_MASTER_PORT_BASE" in c for step in race["setup"] for c in step["commands"])
+    assert any("python3 -m pip" in c for step in smoke["setup"] for c in step["commands"])
     inference = wl["inference_offline"]["repro"]
     verify_cmds = inference["verify"][0]["commands"]
     assert any("triage_results/repro/inference_offline" in c for c in verify_cmds)
@@ -996,6 +1000,7 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     assert any("find triage_results" in c for c in verify_cmds)
     assert any('RUN_DIR="$(' in c for c in verify_cmds)
     assert any("$RUN_DIR/perf.md" in c for c in verify_cmds)
+    assert any("Standalone --strict only" in c for c in verify_cmds)
     assert "triage_results/repro/inference_offline" in inference["run"]["command"]
     assert inference["run"]["command"].endswith("--strict")
     assert "triage_results/repro/training_ddp" in ddp["run"]["command"]
@@ -1004,6 +1009,52 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     det = wl["llm_determinism"]["repro"]["verify"][0]["commands"]
     assert any("ranks_with_divergence" in c for c in det)
     assert any("trial_paths" in c for c in det)
+    assert any("python3 -" in c for c in det)
+
+
+def test_determinism_verify_reads_repo_relative_failed_trial(tmp_path):
+    run_dir = (
+        tmp_path
+        / "triage_results"
+        / "repro"
+        / "llm_determinism"
+        / "TICKET"
+        / "llm_determinism"
+        / "timestamp"
+    )
+    trial_path = run_dir / "cells" / "baseline" / "llm_determinism" / "trial_0.json"
+    trial_path.parent.mkdir(parents=True)
+    trial_path.write_text(
+        json.dumps({"result": {"metrics": {"ranks_with_divergence": 2}}}),
+        encoding="utf-8",
+    )
+    (run_dir / "matrix.json").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "name": "baseline",
+                        "trial_paths": [str(trial_path.relative_to(tmp_path))],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repro = gen_dashboard.load_dashboard_metadata()["workloads"]["llm_determinism"]["repro"]
+    command = repro["verify"][0]["commands"][-1]
+    env = {**os.environ, "RUN_DIR": str(run_dir.relative_to(tmp_path))}
+    proc = subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"baseline": [2]}
 
 
 def test_repro_pins_fail_closed_when_version_missing():
@@ -1045,6 +1096,8 @@ def test_dashboard_review_a11y_and_layout_fixes():
     assert "mean step time history, oldest to newest" in html
     assert "role='img'" in html
     assert "#1a7f37" in html
+    assert "nightly_eval.py comparing matrix.json" in html
+    assert "with --strict against" not in html
 
 
 def test_gpu_smoke_success_notes_baseline_gating():

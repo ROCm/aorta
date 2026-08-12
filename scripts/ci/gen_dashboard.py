@@ -298,11 +298,12 @@ def _substitute_repro_pins(text: str, build: dict[str, Any]) -> str:
         text = text.replace("{{AORTA_VERSION}}", ver)
     else:
         text = text.replace(
-            "pip install --upgrade --pre 'amd-aorta[hw-queue]=={{AORTA_VERSION}}' "
+            "python3 -m pip install --upgrade --pre "
+            "'amd-aorta[hw-queue]=={{AORTA_VERSION}}' "
             "-f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels",
             "# STOP: dashboard is missing amd_aorta_version — copy the AORTA version "
             "from the dashboard header, then run:\n"
-            "# pip install --upgrade --pre 'amd-aorta[hw-queue]==<version>' "
+            "# python3 -m pip install --upgrade --pre 'amd-aorta[hw-queue]==<version>' "
             "-f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels",
         )
     return text
@@ -358,9 +359,10 @@ def _run_command_block(entry_name: str, build: dict[str, Any]) -> str:
     parts.append(
         f"<section class='repro-sec'><h5>{step_no}. {_esc(run_title)}</h5>"
         f"<p class='repro-note muted'>Run from the repository root after setup completes. "
-        f"Dashboard pass/record/fail comes from nightly_eval.py with --strict against "
-        f"config/ci/regression_baselines.yaml; a standalone sweep writes artifacts but "
-        f"does not apply those gates unless you run the harness.</p>"
+        f"A standalone <code>--strict</code> sweep only fails cells that error or never run. "
+        f"Dashboard pass/record/fail comes separately from nightly_eval.py comparing "
+        f"matrix.json against config/ci/regression_baselines.yaml; run that harness to "
+        f"apply the dashboard gates.</p>"
         f"<pre class='mono repro-cmd'>{_esc(cmd)}</pre></section>"
     )
     step_no += 1
