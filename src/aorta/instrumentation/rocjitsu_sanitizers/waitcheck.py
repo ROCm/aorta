@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Protocol
 
@@ -434,8 +436,8 @@ def run_waitcheck(
         ("sha256", _sha256_file(resolved)),
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    kernel_results: list[KernelCheckResult] = []
     scanned_objects: set[tuple[str | None, int | None]] = set()
+    scan_tasks: list[tuple[int, KernelIdentity]] = []
     for index, observation in enumerate(worklist.kernels):
         identity = observation.identity
         # A whole-code-object scan (no entry offset) covers the entire object, so
@@ -447,16 +449,35 @@ def run_waitcheck(
             if object_key in scanned_objects:
                 continue
             scanned_objects.add(object_key)
-        kernel_results.append(
-            _run_one(
-                identity,
-                binary=resolved,
-                log_path=output_dir / f"waitcheck-{index}.log",
-                timeout_seconds=timeout_seconds,
-                execute=execute,
-            )
+        scan_tasks.append((index, identity))
+
+    def _scan(task: tuple[int, KernelIdentity]) -> KernelCheckResult:
+        task_index, task_identity = task
+        return _run_one(
+            task_identity,
+            binary=resolved,
+            log_path=output_dir / f"waitcheck-{task_index}.log",
+            timeout_seconds=timeout_seconds,
+            execute=execute,
         )
-    kernel_results = tuple(kernel_results)
+
+    # Each selected code object is an independent rj_waitcheck subprocess doing
+    # CPU-bound static disassembly (~a minute on a real ~16MB / ~490-kernel
+    # Tensile object, #366), so scan distinct objects concurrently to cut
+    # wall-clock time. This is coverage-preserving -- every selected object is
+    # still scanned with its full per-scan timeout -- so the gate is unchanged;
+    # it only removes the serialization penalty when the worklist spans more
+    # than one object (the daily GEMM fixture spans the distinct NT/TT transpose
+    # objects, so two scans run in parallel). Shapes that share a transpose
+    # already dedup to one object above, and a single-object worklist keeps the
+    # exact serial path. ``ThreadPoolExecutor.map`` preserves task order, so
+    # results stay deterministic regardless of completion order.
+    if len(scan_tasks) <= 1:
+        kernel_results = tuple(_scan(task) for task in scan_tasks)
+    else:
+        max_workers = min(len(scan_tasks), os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            kernel_results = tuple(pool.map(_scan, scan_tasks))
     findings = tuple(finding for result in kernel_results for finding in result.findings)
     if not kernel_results:
         return CheckResult(
