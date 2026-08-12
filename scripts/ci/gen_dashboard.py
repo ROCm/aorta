@@ -1561,7 +1561,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
               border:1px solid var(--border); border-radius:999px; font-size:.75rem;
               text-decoration:none; color:inherit; background:#12161b; max-width:100%; }}
   a.wl-chip:hover {{ border-color:var(--accent); }}
-  .wl-chip.retired {{ opacity:.72; cursor:default; }}
+  .wl-chip.retired {{ cursor:default; border-color:#30363d; }}
+  .wl-chip.retired .chip-label {{ color:var(--muted); }}
   .wl-chip.absent {{ cursor:default; }}
   .wl-chip.absent .chip-meta {{ color:var(--muted); }}
   .wl-chip .chip-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap;

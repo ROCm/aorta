@@ -883,6 +883,19 @@ def test_dashboard_run_command_block():
     assert "torchrun" not in html  # inference is single-GPU
 
 
+def test_history_grid_retired_chip_dims_label_not_status_badge():
+    runs = [
+        _run(3, [_cell("old_workload", "c", verdict="pass")], total=1, **{"pass": 1}),
+        _run(4, [_cell("gpu_smoke", "c", verdict="pass")], total=1, **{"pass": 1}),
+    ]
+    html = gen_dashboard.build_dashboard_html(runs)
+    assert ".wl-chip.retired { opacity" not in html
+    assert ".wl-chip.retired .chip-label { color:var(--muted); }" in html
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "wl-chip retired" in grid
+    assert "background:#1a7f37" in grid
+
+
 def test_history_grid_retired_workloads_do_not_link_to_missing_sections():
     runs = [
         _run(3, [_cell("old_workload", "c")], total=1, record=1),
@@ -1010,9 +1023,11 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     assert any("ranks_with_divergence" in c for c in det)
     assert any("trial_paths" in c for c in det)
     assert any("python3 -" in c for c in det)
+    assert any("|| true" in c for c in det)
     race_verify = race["verify"][0]["commands"]
     assert any("layer_checksum_mismatches" in c for c in race_verify)
     assert any("trial_paths" in c for c in race_verify)
+    assert any("|| true" in c for c in race_verify)
     race8 = wl["race_8gpu"]["repro"]["verify"][0]["commands"]
     assert any("layer_checksum_mismatches" in c for c in race8)
 
@@ -1060,6 +1075,117 @@ def test_determinism_verify_reads_repo_relative_failed_trial(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {"baseline": [2]}
+
+
+def _run_repro_trial_metric_parser(tmp_path, *, metric_key: str, metric_value: int) -> str:
+    run_dir = (
+        tmp_path
+        / "triage_results"
+        / "repro"
+        / "llm_determinism"
+        / "TICKET"
+        / "llm_determinism"
+        / "timestamp"
+    )
+    trial_path = run_dir / "cells" / "baseline" / "llm_determinism" / "trial_0.json"
+    trial_path.parent.mkdir(parents=True)
+    trial_path.write_text(
+        json.dumps({"result": {"metrics": {metric_key: metric_value}}}),
+        encoding="utf-8",
+    )
+    (run_dir / "matrix.json").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "name": "baseline",
+                        "trial_paths": [str(trial_path.relative_to(tmp_path))],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "perf.md").write_text(
+        f"# perf\n{metric_key}: 0\n",
+        encoding="utf-8",
+    )
+    repro = gen_dashboard.load_dashboard_metadata()["workloads"]["llm_determinism"]["repro"]
+    commands = repro["verify"][0]["commands"]
+    grep_cmd = next(c for c in commands if "|| true" in c)
+    parse_cmd = commands[-1]
+    env = {**os.environ, "RUN_DIR": str(run_dir.relative_to(tmp_path))}
+    grep = subprocess.run(
+        ["bash", "-c", grep_cmd],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert grep.returncode == 0, grep.stderr
+    proc = subprocess.run(
+        ["bash", "-c", parse_cmd],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_determinism_verify_reads_failed_trial_even_when_perf_shows_zero(tmp_path):
+    out = _run_repro_trial_metric_parser(
+        tmp_path, metric_key="ranks_with_divergence", metric_value=2)
+    assert json.loads(out) == {"baseline": [2]}
+
+
+def test_race_verify_reads_failed_trial_even_when_perf_shows_zero(tmp_path):
+    run_dir = (
+        tmp_path
+        / "triage_results"
+        / "repro"
+        / "race"
+        / "TICKET"
+        / "race"
+        / "timestamp"
+    )
+    trial_path = run_dir / "cells" / "smoke" / "race" / "trial_0.json"
+    trial_path.parent.mkdir(parents=True)
+    trial_path.write_text(
+        json.dumps({"result": {"metrics": {"layer_checksum_mismatches": 3}}}),
+        encoding="utf-8",
+    )
+    (run_dir / "matrix.json").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "name": "smoke",
+                        "trial_paths": [str(trial_path.relative_to(tmp_path))],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "perf.md").write_text("layer_checksum_mismatches: 0\n", encoding="utf-8")
+    repro = gen_dashboard.load_dashboard_metadata()["workloads"]["race"]["repro"]
+    commands = repro["verify"][0]["commands"]
+    parse_cmd = commands[-1]
+    env = {**os.environ, "RUN_DIR": str(run_dir.relative_to(tmp_path))}
+    proc = subprocess.run(
+        ["bash", "-c", parse_cmd],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"smoke": [3]}
 
 
 def test_repro_pins_fail_closed_when_version_missing():
