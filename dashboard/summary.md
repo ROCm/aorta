@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-08-12-31596128350` · commit `261893abafd3` · 2026-08-12
+Run `2026-08-12-31598906719` · commit `5fbbb5c04dc4` · 2026-08-12
 
 ✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
@@ -12,11 +12,14 @@ Observed `WARN` or `FAIL` verdicts may be expected positive-control outcomes. Ba
 | daily-consan-clean | consan (dynamic) | ✅ **Expected outcome** | `pass` | `pass` | complete | 0 | 0/0, 2/2 |
 | daily-consan-racy | consan (dynamic) | ✅ **Expected outcome** | `fail` | `fail` | complete | 64 | 0/0, 2/2 |
 
-## Kernel details
+Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate) and **Workload survey (observed-only)** (non-gating).
+
+## Expected behavior (guardrails) · Kernel details
 
 <details><summary><b>daily-waitcheck-gemm</b> — ✅ **Expected outcome**</summary>
 
 Observed sanitizer verdict `warn` · expected `warn`
+Observation: waitcheck warn; 64 finding(s) (wait_hazard)
 backend `rj_waitcheck` `5c02eee0055c` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
@@ -34,6 +37,7 @@ backend `rj_waitcheck` `5c02eee0055c` · selection `top_dispatch_count` top-3 ·
 <details><summary><b>daily-consan-clean</b> — ✅ **Expected outcome**</summary>
 
 Observed sanitizer verdict `pass` · expected `pass`
+Observation: consan pass; preflight pass
 backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
@@ -45,6 +49,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 <details><summary><b>daily-consan-racy</b> — ✅ **Expected outcome**</summary>
 
 Observed sanitizer verdict `fail` · expected `fail`
+Observation: consan fail; 64 finding(s) (1); preflight pass
 backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
@@ -53,9 +58,15 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=20637856 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=18362752 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
 
 </details>
+
+## Workload survey (observed-only)
+
+Observed sanitizer behavior only — **no expected-behavior comparison on this tab**; a `fail` / `not_checked` here is an observation, not a regression. Kernels may be drawn from multiple workloads, including aorta-internal-sourced kernels supplied via the survey input.
+
+No workload-survey kernels in this run.
 
 ## Informational · caller-supplied code objects (non-gating)
 
@@ -71,6 +82,7 @@ Experimental ConSan runs over caller-supplied kernels/objects (`source.consan_co
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-08-12-31598906719 | `5fbbb5c04dc4` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-12-31596128350 | `261893abafd3` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-11-31513370892 | `d80f57250f7f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-11-31511121124 | `fc0a3ff54748` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Failed |

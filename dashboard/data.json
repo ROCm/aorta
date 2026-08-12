@@ -2,17 +2,18 @@
   {
     "gate": true,
     "meta": {
-      "commit": "261893abafd3",
+      "commit": "5fbbb5c04dc4",
       "date": "2026-08-12",
       "gate": true,
       "gpu": "gfx950",
-      "run": "2026-08-12-31596128350",
-      "run_url": "https://github.com/ROCm/aorta/actions/runs/31596128350"
+      "run": "2026-08-12-31598906719",
+      "run_url": "https://github.com/ROCm/aorta/actions/runs/31598906719"
     },
-    "rel": "runs/2026-08-12-31596128350",
+    "rel": "runs/2026-08-12-31598906719",
     "rows": {
       "consan-clean": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "pass",
@@ -31,7 +32,179 @@
           }
         ],
         "match": true,
+        "observation": "consan pass; preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
+        "report_rel": "runs/2026-08-12-31598906719/consan-clean/sanitizer_report.json",
+        "verdict": "pass",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "consan-racy": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
+        "expected": "fail",
+        "finding_groups": [
+          {
+            "code": "1",
+            "count": 64,
+            "example": "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=18362752 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo\u2026",
+            "sanitizer": "consan",
+            "severity": "race"
+          }
+        ],
+        "findings": 64,
+        "kernels": [
+          {
+            "code_object": "",
+            "dispatch": 1,
+            "findings": 64,
+            "name": "consan_lds_race_2wave",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "fail"
+          }
+        ],
+        "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
+        "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
+        "report_rel": "runs/2026-08-12-31598906719/consan-racy/sanitizer_report.json",
+        "verdict": "fail",
+        "worklist": {
+          "kernel_count": 1,
+          "requirement": "top_dispatch_count",
+          "top_n": 1
+        }
+      },
+      "waitcheck": {
+        "backend": {
+          "name": "rj_waitcheck",
+          "sha": "5c02eee0055c"
+        },
+        "cls": "guardrail",
+        "coverage": "",
+        "execution": "complete",
+        "expected": "warn",
+        "finding_groups": [
+          {
+            "code": "wait_hazard",
+            "count": 64,
+            "example": "sol_126578.hsaco:gfx950[0]:.text+0x454: missing s_waitcnt lgkmcnt(0) before def of s45",
+            "sanitizer": "waitcheck",
+            "severity": "warning"
+          }
+        ],
+        "findings": 64,
+        "kernels": [
+          {
+            "code_object": "sol_126578.hsaco",
+            "dispatch": 479,
+            "findings": 32,
+            "name": "gemm_NT_M256_N4096_K1024",
+            "offset": null,
+            "sha": "c1190d2005",
+            "time_ms": 0.0,
+            "verdict": "warn"
+          },
+          {
+            "code_object": "sol_175415.hsaco",
+            "dispatch": 471,
+            "findings": 0,
+            "name": "gemm_NT_M128_N4096_K1280",
+            "offset": null,
+            "sha": "c1190d2005",
+            "time_ms": 0.0,
+            "verdict": "\u2014"
+          },
+          {
+            "code_object": "sol_137678.hsaco",
+            "dispatch": 440,
+            "findings": 32,
+            "name": "gemm_TT_M64_N64_K1280",
+            "offset": null,
+            "sha": "f5935e6937",
+            "time_ms": 0.0,
+            "verdict": "warn"
+          }
+        ],
+        "match": true,
+        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
+        "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
+        "report_rel": "runs/2026-08-12-31598906719/waitcheck/sanitizer_report.json",
+        "verdict": "warn",
+        "worklist": {
+          "kernel_count": 3,
+          "requirement": "top_dispatch_count",
+          "top_n": 3
+        }
+      }
+    },
+    "survey": []
+  },
+  {
+    "gate": true,
+    "meta": {
+      "commit": "261893abafd3",
+      "date": "2026-08-12",
+      "gate": true,
+      "gpu": "gfx950",
+      "run": "2026-08-12-31596128350",
+      "run_url": "https://github.com/ROCm/aorta/actions/runs/31596128350"
+    },
+    "rel": "runs/2026-08-12-31596128350",
+    "rows": {
+      "consan-clean": {
+        "backend": null,
+        "cls": "guardrail",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
+        "expected": "pass",
+        "finding_groups": [],
+        "findings": 0,
+        "kernels": [
+          {
+            "code_object": "",
+            "dispatch": 1,
+            "findings": 0,
+            "name": "consan_lds_race",
+            "offset": null,
+            "sha": "",
+            "time_ms": 0.0,
+            "verdict": "pass"
+          }
+        ],
+        "match": true,
+        "observation": "consan pass; preflight pass",
+        "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
         "report_rel": "runs/2026-08-12-31596128350/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
@@ -42,6 +215,7 @@
       },
       "consan-racy": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "fail",
@@ -68,7 +242,14 @@
           }
         ],
         "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
         "report_rel": "runs/2026-08-12-31596128350/consan-racy/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
@@ -82,6 +263,7 @@
           "name": "rj_waitcheck",
           "sha": "5c02eee0055c"
         },
+        "cls": "guardrail",
         "coverage": "",
         "execution": "complete",
         "expected": "warn",
@@ -128,7 +310,14 @@
           }
         ],
         "match": true,
+        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
         "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
         "report_rel": "runs/2026-08-12-31596128350/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
@@ -153,6 +342,7 @@
     "rows": {
       "consan-clean": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "pass",
@@ -171,7 +361,14 @@
           }
         ],
         "match": true,
+        "observation": "consan pass; preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
         "report_rel": "runs/2026-08-11-31513370892/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
@@ -182,6 +379,7 @@
       },
       "consan-racy": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "fail",
@@ -208,7 +406,14 @@
           }
         ],
         "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
         "report_rel": "runs/2026-08-11-31513370892/consan-racy/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
@@ -222,6 +427,7 @@
           "name": "rj_waitcheck",
           "sha": "5c02eee0055c"
         },
+        "cls": "guardrail",
         "coverage": "",
         "execution": "complete",
         "expected": "warn",
@@ -268,7 +474,14 @@
           }
         ],
         "match": true,
+        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
         "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
         "report_rel": "runs/2026-08-11-31513370892/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
@@ -293,6 +506,7 @@
     "rows": {
       "consan-clean": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "pass",
@@ -311,7 +525,14 @@
           }
         ],
         "match": true,
+        "observation": "consan pass; preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
         "report_rel": "runs/2026-08-11-31511121124/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
@@ -322,6 +543,7 @@
       },
       "consan-racy": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "fail",
@@ -348,7 +570,14 @@
           }
         ],
         "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
         "report_rel": "runs/2026-08-11-31511121124/consan-racy/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
@@ -362,6 +591,7 @@
           "name": "rj_waitcheck",
           "sha": "5c02eee0055c"
         },
+        "cls": "guardrail",
         "coverage": "",
         "execution": "complete",
         "expected": "warn",
@@ -408,7 +638,14 @@
           }
         ],
         "match": true,
+        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
         "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
         "report_rel": "runs/2026-08-11-31511121124/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
@@ -433,6 +670,7 @@
     "rows": {
       "consan-clean": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "pass",
@@ -451,7 +689,14 @@
           }
         ],
         "match": true,
+        "observation": "consan pass; preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
         "report_rel": "runs/2026-08-11-31508140809/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
@@ -462,6 +707,7 @@
       },
       "consan-racy": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "fail",
@@ -488,7 +734,14 @@
           }
         ],
         "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
         "report_rel": "runs/2026-08-11-31508140809/consan-racy/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
@@ -502,6 +755,7 @@
           "name": "rj_waitcheck",
           "sha": "5c02eee0055c"
         },
+        "cls": "guardrail",
         "coverage": "",
         "execution": "complete",
         "expected": "warn",
@@ -548,7 +802,14 @@
           }
         ],
         "match": true,
+        "observation": "waitcheck warn; 64 finding(s) (wait_hazard)",
         "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
         "report_rel": "runs/2026-08-11-31508140809/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
@@ -573,6 +834,7 @@
     "rows": {
       "consan-clean": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "pass",
@@ -591,7 +853,14 @@
           }
         ],
         "match": true,
+        "observation": "consan pass; preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
         "report_rel": "runs/2026-08-11-31490825323/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
@@ -602,6 +871,7 @@
       },
       "consan-racy": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "fail",
@@ -628,7 +898,14 @@
           }
         ],
         "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
         "report_rel": "runs/2026-08-11-31490825323/consan-racy/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
@@ -642,6 +919,7 @@
           "name": "rj_waitcheck",
           "sha": "5c02eee0055c"
         },
+        "cls": "guardrail",
         "coverage": "",
         "execution": "complete",
         "expected": "warn",
@@ -688,7 +966,14 @@
           }
         ],
         "match": true,
+        "observation": "waitcheck warn; 32 finding(s) (wait_hazard)",
         "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
         "report_rel": "runs/2026-08-11-31490825323/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
@@ -713,6 +998,7 @@
     "rows": {
       "consan-clean": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "pass",
@@ -731,7 +1017,14 @@
           }
         ],
         "match": true,
+        "observation": "consan pass; preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
         "report_rel": "runs/2026-08-10-31387689897/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
@@ -742,6 +1035,7 @@
       },
       "consan-racy": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "fail",
@@ -768,7 +1062,14 @@
           }
         ],
         "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
         "report_rel": "runs/2026-08-10-31387689897/consan-racy/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
@@ -782,6 +1083,7 @@
           "name": "rj_waitcheck",
           "sha": "8431040601e7"
         },
+        "cls": "guardrail",
         "coverage": "",
         "execution": "complete",
         "expected": "warn",
@@ -828,7 +1130,14 @@
           }
         ],
         "match": true,
+        "observation": "waitcheck warn; 32 finding(s) (wait_hazard)",
         "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
         "report_rel": "runs/2026-08-10-31387689897/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {
@@ -853,6 +1162,7 @@
     "rows": {
       "consan-clean": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "pass",
@@ -871,7 +1181,14 @@
           }
         ],
         "match": true,
+        "observation": "consan pass; preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "pass"
+        },
         "report_rel": "runs/2026-08-10-31386669577/consan-clean/sanitizer_report.json",
         "verdict": "pass",
         "worklist": {
@@ -882,6 +1199,7 @@
       },
       "consan-racy": {
         "backend": null,
+        "cls": "guardrail",
         "coverage": "0/0, 2/2",
         "execution": "complete",
         "expected": "fail",
@@ -908,7 +1226,14 @@
           }
         ],
         "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
         "present": true,
+        "primary": {
+          "preflight": "pass",
+          "reason": null,
+          "sanitizer": "consan",
+          "verdict": "fail"
+        },
         "report_rel": "runs/2026-08-10-31386669577/consan-racy/sanitizer_report.json",
         "verdict": "fail",
         "worklist": {
@@ -922,6 +1247,7 @@
           "name": "rj_waitcheck",
           "sha": "8431040601e7"
         },
+        "cls": "guardrail",
         "coverage": "",
         "execution": "complete",
         "expected": "warn",
@@ -968,7 +1294,14 @@
           }
         ],
         "match": true,
+        "observation": "waitcheck warn; 32 finding(s) (wait_hazard)",
         "present": true,
+        "primary": {
+          "preflight": null,
+          "reason": null,
+          "sanitizer": "waitcheck",
+          "verdict": "warn"
+        },
         "report_rel": "runs/2026-08-10-31386669577/waitcheck/sanitizer_report.json",
         "verdict": "warn",
         "worklist": {

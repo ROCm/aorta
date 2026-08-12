@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<title>Sanitizers Nightly &middot; 2026-08-12-31598906719</title>
+<style>
+  body { font: 14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+         max-width:900px; margin:0 auto; padding:24px; color:#1f2328; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .meta { color:#57606a; font-size:12px; margin-bottom:12px; }
+  .mono { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+  .gate { color:#fff; background:#1a7f37; padding:10px 14px; border-radius:8px;
+          font-weight:600; margin:12px 0 18px; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid #d0d7de; }
+  .secondary { color:#57606a; font-size:12px; margin:4px 0 0; }
+  .pill { padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pill.ok { background:#1a7f3722; color:#1a7f37; } .pill.bad { background:#cf222e22; color:#cf222e; }
+  .observed { display:inline-block; color:#57606a; background:#afb8c133; border:1px solid #afb8c1;
+              padding:1px 7px; border-radius:999px; font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace; }
+</style></head>
+<body>
+<p><a href="../../">back to sanitizer dashboard</a></p>
+<h1>Sanitizers Nightly &middot; run <span class=mono>2026-08-12-31598906719</span></h1>
+<div class=meta>commit <span class=mono>5fbbb5c04dc4</span> &middot; 2026-08-12 &middot; target gfx950 &middot; <a href="https://github.com/ROCm/aorta/actions/runs/31598906719">workflow run</a></div>
+<div class=gate>HEALTHY — 3/3 sanitizer outcomes match their baselines</div>
+<table>
+<tr><th>Recipe</th><th>Baseline status</th><th>Raw report</th></tr>
+<tr><td>daily-waitcheck-gemm</td><td><span class="pill ok">Expected outcome</span><div class="secondary">Observed <span class="observed">warn</span></div></td><td><a href="waitcheck/sanitizer_report.json">sanitizer_report.json</a></td></tr><tr><td>daily-consan-clean</td><td><span class="pill ok">Expected outcome</span><div class="secondary">Observed <span class="observed">pass</span></div></td><td><a href="consan-clean/sanitizer_report.json">sanitizer_report.json</a></td></tr><tr><td>daily-consan-racy</td><td><span class="pill ok">Expected outcome</span><div class="secondary">Observed <span class="observed">fail</span></div></td><td><a href="consan-racy/sanitizer_report.json">sanitizer_report.json</a></td></tr>
+</table>
+</body></html>
