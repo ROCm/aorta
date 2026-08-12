@@ -164,11 +164,14 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     the reduced row carries no baseline signal and the renderer must treat it as
     observational, never as a passing/failing gate row.
     """
-    if report is None:
-        # Match follows the same rule as the present path: a survey case
-        # (expected is None) is never a mismatch, while a guardrail case keeps a
-        # non-null expectation and so a missing report stays a mismatch (the gate
-        # fails closed). Hardcoding False here contradicted the survey contract.
+    if not isinstance(report, dict):
+        # Treat a missing report AND a structurally invalid one (``_load`` returns
+        # any JSON value, so a report file holding ``[]``/a scalar reaches here as a
+        # non-dict) as absent rather than calling ``.get`` on it and aborting the
+        # whole dashboard render. Match follows the same rule as the present path: a
+        # survey case (expected is None) is never a mismatch, while a guardrail case
+        # keeps a non-null expectation and so an absent report stays a mismatch (the
+        # gate fails closed). Hardcoding False here contradicted the survey contract.
         return {
             "present": False, "verdict": "—", "execution": "missing", "findings": 0,
             "coverage": "", "backend": None, "expected": expected, "match": expected is None,
@@ -628,7 +631,11 @@ def survey_cases_from_informational_dir(
         return entries
     for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         report = _load(case_dir / "sanitizer_report.json")
-        if report is None:
+        # Skip an unreadable report AND a structurally invalid one (``_load`` admits
+        # any JSON value, so a best-effort survey report holding ``[]``/``null``/a
+        # scalar arrives as a non-dict); rendering it would crash ``summarize_case``
+        # on ``.get`` and abort the whole publication for a non-gating input.
+        if not isinstance(report, dict):
             continue
         name = case_dir.name
         summary = summarize_case(report, None)
@@ -1242,7 +1249,7 @@ def build_html(
   .survey-empty {{ font-size:14px; color:#1f2328; margin:8px 0; }}
   .vchip {{ display:inline-block; color:#fff; padding:1px 8px; border-radius:999px;
           font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace; }}
-  .vchip.err {{ background:#cf222e; }} .vchip.warn {{ background:#bf8700; }}
+  .vchip.err {{ background:#cf222e; }} .vchip.warn {{ background:#9a6700; }}
   .vchip.pass {{ background:#1a7f37; }} .vchip.neutral {{ background:#6e7681; }}
   @media (prefers-color-scheme: dark) {{
     body {{ background:#0d1117; color:#e6edf3; }}

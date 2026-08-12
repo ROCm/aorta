@@ -830,9 +830,15 @@ def test_survey_cases_from_informational_dir_folds_caller_supplied_cases(tmp_pat
         json.dumps(_informational_report("combined_hook_timeout"))
     )
     (root / "empty-case").mkdir()  # no report -> skipped
+    # A structurally invalid best-effort report (valid JSON, but not an object)
+    # must be skipped like an unreadable one, never crash the whole publication.
+    (root / "list-case").mkdir()
+    (root / "list-case" / "sanitizer_report.json").write_text("[]")
+    (root / "scalar-case").mkdir()
+    (root / "scalar-case" / "sanitizer_report.json").write_text("null")
 
     entries = gen.survey_cases_from_informational_dir(root, rel="runs/2026-08-05-33")
-    assert [e["name"] for e in entries] == ["consan-gemm"]  # empty-case skipped
+    assert [e["name"] for e in entries] == ["consan-gemm"]  # non-object reports skipped
     case = entries[0]
     assert case["cls"] == "survey"
     assert case["summary"]["expected"] is None
@@ -1028,6 +1034,11 @@ def test_summarize_case_survey_is_observational_with_primary_and_observation():
     assert missing["present"] is False and missing["observation"] == "report missing"
     assert missing["match"] is True
     assert gen.summarize_case(None, "pass")["match"] is False
+    # A structurally invalid report (``_load`` admits any JSON value, so a list or
+    # scalar can reach here) is treated as absent instead of crashing on ``.get``.
+    for bad in ([], "oops", 0, False):
+        degraded = gen.summarize_case(bad, "pass")
+        assert degraded["present"] is False and degraded["match"] is False
 
 
 def test_primary_prefers_last_nonpreflight_and_captures_preflight():
