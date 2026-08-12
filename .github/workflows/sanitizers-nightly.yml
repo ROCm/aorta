@@ -35,6 +35,11 @@ jobs:
     # `self-hosted, gpu, mi350x` (same set the other GPU workflows target, e.g.
     # gpu-tests.yml / eval-reusable.yml use `self-hosted, gpu`).
     runs-on: [self-hosted, gpu]
+    # 120 min is GitHub's ceiling for this job, not necessarily the binding
+    # limit: an effective ~20-min cap has been observed on the [self-hosted,
+    # gpu] runner (a runner/org Actions policy that a workflow's timeout-minutes
+    # can only lower, never raise). Confirming and raising that effective cap is
+    # tracked in #370 (split out of #366).
     timeout-minutes: 120
     steps:
       # Sibling GPU jobs (gpu-tests.yml et al.) run aorta in a root ROCm CI
