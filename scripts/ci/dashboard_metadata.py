@@ -20,19 +20,31 @@ _TRAINING_SUCCESS = (
 )
 
 _METRICS_IN_PERF = (
-    'grep -E "{pattern}" "$RUN_DIR/perf.md" 2>/dev/null | head '
+    'grep -m 10 -E "{pattern}" "$RUN_DIR/perf.md" 2>/dev/null '
     '|| python -c "import json,sys; d=json.load(open(sys.argv[1])); '
     'print(json.dumps(d.get(\\\"cells\\\",{{}}), indent=2)[:2000])" "$RUN_DIR/matrix.json"'
 )
 
+_DIVERGENCE_IN_ARTIFACTS = (
+    'grep -m 5 -E "ranks_with_divergence|diverge" "$RUN_DIR/perf.md" 2>/dev/null '
+    '|| python -c "import json,sys; d=json.load(open(sys.argv[1])); '
+    'cells=d.get(\\\"cells\\\",{}); '
+    'print(json.dumps({k:(v.get(\\\"metrics_summary\\\") or {}).get(\\\"ranks_with_divergence\\\") '
+    'for k,v in cells.items()}, indent=2))" "$RUN_DIR/matrix.json"'
+)
 
-def _read_matrix_cmds(artifact_workload: str) -> list[str]:
-    """Shell helpers to locate and read the newest matrix for one recipe workload."""
-    wl = artifact_workload
+
+def _repro_output_root(entry_name: str) -> str:
+    return f"triage_results/repro/{entry_name}"
+
+
+def _read_matrix_cmds(repro_root: str) -> list[str]:
+    """Shell helpers to locate and read the newest matrix for one repro run."""
+    root = repro_root
     return [
         (
-            f'RUN_DIR="$(find triage_results -mindepth 3 -maxdepth 3 -type d '
-            f'-path "*/{wl}/*" -printf \'%T@ %p\\n\' 2>/dev/null '
+            f'RUN_DIR="$(find {root} -mindepth 3 -maxdepth 3 -type d '
+            f'-printf \'%T@ %p\\n\' 2>/dev/null '
             f'| sort -rn | head -1 | cut -d\' \' -f2-)"'
         ),
         'if [ -z "$RUN_DIR" ] || [ ! -d "$RUN_DIR" ]; then echo "No run directory found"; exit 1; fi',
@@ -50,15 +62,18 @@ def _read_matrix_cmds(artifact_workload: str) -> list[str]:
 def _install_setup(*, min_gpus: int, distributed: bool = False) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = [
         {
-            "title": "Clone AORTA and install the nightly wheel channel",
+            "title": "Check out the dashboard commit and install the matching AORTA wheel",
             "commands": [
                 "git clone https://github.com/ROCm/aorta.git",
                 "cd aorta",
+                "git checkout {{HEAD_SHA}}",
                 "pip install --upgrade pip",
                 (
-                    "pip install --upgrade --pre 'amd-aorta[hw-queue]' "
+                    "pip install --upgrade --pre 'amd-aorta[hw-queue]=={{AORTA_VERSION}}' "
                     "-f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels"
                 ),
+                "# If that exact wheel is unavailable, pick the closest dev-wheel build",
+                "# and compare `aorta --version` with the dashboard header before reproducing.",
                 "aorta --help",
             ],
         },
@@ -91,7 +106,7 @@ def _install_setup(*, min_gpus: int, distributed: bool = False) -> list[dict[str
 
 def _workload_repro(
     *,
-    artifact_workload: str,
+    entry_name: str,
     prerequisites: list[str],
     recipe: str,
     run_command: str,
@@ -103,16 +118,17 @@ def _workload_repro(
     success: str,
     setup_extra: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    verify_cmds = _read_matrix_cmds(artifact_workload)
+    repro_root = _repro_output_root(entry_name)
+    verify_cmds = _read_matrix_cmds(repro_root)
     if verify_extra:
         verify_cmds.extend(verify_extra)
     setup = _install_setup(min_gpus=min_gpus, distributed=distributed)
     if setup_extra:
         setup.extend(setup_extra)
-    strict_cmd = (
-        run_command if run_command.rstrip().endswith("--strict")
-        else f"{run_command.rstrip()} --strict"
-    )
+    cmd = run_command.rstrip()
+    if "--output-dir" not in cmd:
+        cmd = f"{cmd} --output-dir {repro_root}"
+    strict_cmd = cmd if cmd.endswith("--strict") else f"{cmd} --strict"
     return {
         "prerequisites": prerequisites,
         "setup": setup,
@@ -172,7 +188,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
             "min_gpus": 1,
             "run_command": "aorta sweep run --recipe recipes/ci/gpu-smoke.yaml",
             "repro": _workload_repro(
-                artifact_workload="gpu_smoke",
+                entry_name="gpu_smoke",
                 prerequisites=[
                     "One AMD GPU with working ROCm drivers",
                     "Python 3.10+ and a PyTorch build for your ROCm version",
@@ -186,8 +202,9 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 verify_title="Read the smoke matrix",
                 success=(
                     "Rank 0 prints `Wrote matrix to ...`. matrix.md shows every cell "
-                    "completed; mean_step_time_ms is recorded in perf.md. Nightly "
-                    "records this workload until a blessed baseline exists."
+                    "completed; mean_step_time_ms is recorded in perf.md. Nightly gates "
+                    "pass/fail against the blessed gpu_smoke::baseline-local baseline; "
+                    "step time is recorded but not performance-thresholded."
                 ),
             ),
         },
@@ -206,7 +223,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "aorta sweep run --recipe recipes/inference/example-inference-smoke.yaml"
             ),
             "repro": _workload_repro(
-                artifact_workload="inference",
+                entry_name="inference_offline",
                 prerequisites=[
                     "One AMD GPU with enough VRAM for the built-in smoke model",
                     "PyTorch with ROCm (the recipe uses AORTA's RepeatedBlockModel locally)",
@@ -246,7 +263,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/training/example-training-ddp-smoke.yaml"
             ),
             "repro": _workload_repro(
-                artifact_workload="training",
+                entry_name="training_ddp",
                 prerequisites=[
                     "Two AMD GPUs on one node, visible to a single PyTorch process group",
                     "RCCL usable between the two devices (check PCIe/xGMI topology)",
@@ -281,7 +298,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/training/example-training-ddp-smoke.yaml"
             ),
             "repro": _workload_repro(
-                artifact_workload="training",
+                entry_name="training_ddp_8gpu",
                 prerequisites=[
                     "Eight AMD GPUs on one node (nightly reference: single MI350 node)",
                     "torchrun --standalone --nproc_per_node=8 must bind one rank per GPU",
@@ -319,7 +336,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/training/example-training-fsdp-smoke.yaml"
             ),
             "repro": _workload_repro(
-                artifact_workload="training",
+                entry_name="training_fsdp",
                 prerequisites=[
                     "Two AMD GPUs with FSDP-compatible PyTorch build",
                     "Same torchrun/NCCL setup as DDP (FSDP still uses dist.init_process_group)",
@@ -353,7 +370,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/training/example-training-fsdp-smoke.yaml"
             ),
             "repro": _workload_repro(
-                artifact_workload="training",
+                entry_name="training_fsdp_8gpu",
                 prerequisites=[
                     "Full eight-GPU node (nightly runs on a single MI350 host)",
                     "FSDP requires stable NCCL/RCCL across all eight ranks",
@@ -393,7 +410,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/llm-determinism/example-llm-determinism.yaml"
             ),
             "repro": _workload_repro(
-                artifact_workload="llm_determinism",
+                entry_name="llm_determinism",
                 prerequisites=[
                     "Two GPUs — determinism is checked across ranks in one job",
                     "Identical random seeds and deterministic PyTorch ops where required",
@@ -409,10 +426,9 @@ DASHBOARD_METADATA: dict[str, Any] = {
                     "aorta sweep run --recipe "
                     "recipes/llm-determinism/example-llm-determinism.yaml --dry-run"
                 ),
-                verify_title="Look for rank divergence in matrix and trial JSON",
+                verify_title="Confirm ranks_with_divergence from perf.md or matrix.json",
                 verify_extra=[
-                    'grep -i diverge "$RUN_DIR/matrix.md" 2>/dev/null | head',
-                    'find "$RUN_DIR/cells" -name \'trial_*.json\' 2>/dev/null | head',
+                    _DIVERGENCE_IN_ARTIFACTS,
                 ],
                 success=(
                     "ranks_with_divergence must be 0 for a pass. Any non-zero value "
@@ -431,7 +447,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/llm-determinism/example-llm-determinism.yaml"
             ),
             "repro": _workload_repro(
-                artifact_workload="llm_determinism",
+                entry_name="llm_determinism_8gpu",
                 prerequisites=[
                     "Eight-GPU node — catches determinism bugs that only appear at scale",
                     "Stable RCCL collectives; any rank mismatch fails the workload",
@@ -447,9 +463,9 @@ DASHBOARD_METADATA: dict[str, Any] = {
                     "aorta sweep run --recipe "
                     "recipes/llm-determinism/example-llm-determinism.yaml --dry-run"
                 ),
-                verify_title="Verify zero divergence across all eight ranks",
+                verify_title="Confirm ranks_with_divergence is zero on all eight ranks",
                 verify_extra=[
-                    'grep -i diverge "$RUN_DIR/matrix.md" 2>/dev/null | head',
+                    _DIVERGENCE_IN_ARTIFACTS,
                 ],
                 success=(
                     "ranks_with_divergence == 0 on every cell. This is a correctness gate, "
@@ -470,7 +486,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/race/race_smoke.yaml"
             ),
             "repro": _workload_repro(
-                artifact_workload="race",
+                entry_name="race",
                 prerequisites=[
                     "Two GPUs — race workload stresses concurrent RCCL + layer checksums",
                     "Race workloads use fresh process isolation per trial (see recipe)",
@@ -485,7 +501,6 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 dry_run="aorta sweep run --recipe recipes/race/race_smoke.yaml --dry-run",
                 verify_title="Check layer checksum mismatches in matrix output",
                 verify_extra=[
-                    'grep -i checksum "$RUN_DIR/matrix.md" 2>/dev/null | head',
                     _METRICS_IN_PERF.format(pattern="layer_checksum_mismatch"),
                 ],
                 success=(
@@ -514,7 +529,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 "sweep run --recipe recipes/race/race_smoke.yaml"
             ),
             "repro": _workload_repro(
-                artifact_workload="race",
+                entry_name="race_8gpu",
                 prerequisites=[
                     "Eight-GPU node — amplifies timing races vs the 2-GPU smoke",
                     "Export AORTA_TRIAL_MASTER_PORT_BASE on static launchers (see README-running-recipes)",
@@ -529,7 +544,6 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 dry_run="aorta sweep run --recipe recipes/race/race_smoke.yaml --dry-run",
                 verify_title="Confirm zero checksum mismatches at 8-GPU scale",
                 verify_extra=[
-                    'grep -i checksum "$RUN_DIR/matrix.md" 2>/dev/null | head',
                     _METRICS_IN_PERF.format(pattern="layer_checksum_mismatch"),
                 ],
                 success=(

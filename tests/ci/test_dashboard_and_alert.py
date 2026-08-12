@@ -33,6 +33,14 @@ def test_sparkline_handles_short_and_normal_series():
     assert "n/a" in gen_dashboard._svg_sparkline([1.0])
     svg = gen_dashboard._svg_sparkline([1.0, 2.0, 1.5])
     assert svg.startswith("<svg") and "polyline" in svg
+    labelled = gen_dashboard._svg_sparkline([1.0, 2.0, 1.5], label="step time history")
+    assert 'role="img"' in labelled and 'aria-label="step time history"' in labelled
+
+
+def test_sparkline_a11y_label_lists_oldest_to_newest():
+    label = gen_dashboard._sparkline_a11y_label("mean step time", [100.0, None, 150.0])
+    assert "oldest to newest" in label
+    assert "100" in label and "150" in label
 
 
 def test_dashboard_renders_status_and_rows():
@@ -981,14 +989,20 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     assert any("AORTA_TRIAL_MASTER_PORT_BASE" in c for step in race["setup"] for c in step["commands"])
     inference = wl["inference_offline"]["repro"]
     verify_cmds = inference["verify"][0]["commands"]
-    assert any("/inference/" in c for c in verify_cmds)
-    assert not any("/inference_offline/" in c for c in verify_cmds)
-    assert any("pip install --upgrade --pre" in c for step in smoke["setup"] for c in step["commands"])
+    assert any("triage_results/repro/inference_offline" in c for c in verify_cmds)
+    assert any("grep -m 10" in c for c in verify_cmds)
+    assert any("{{HEAD_SHA}}" in c for step in smoke["setup"] for c in step["commands"])
+    assert any("{{AORTA_VERSION}}" in c for step in smoke["setup"] for c in step["commands"])
     assert any("find triage_results" in c for c in verify_cmds)
     assert any('RUN_DIR="$(' in c for c in verify_cmds)
     assert any("$RUN_DIR/perf.md" in c for c in verify_cmds)
+    assert "triage_results/repro/inference_offline" in inference["run"]["command"]
     assert inference["run"]["command"].endswith("--strict")
+    assert "triage_results/repro/training_ddp" in ddp["run"]["command"]
+    assert "triage_results/repro/training_ddp_8gpu" in wl["training_ddp_8gpu"]["repro"]["run"]["command"]
     assert "passed/recording only" in ddp["success_criteria"].lower()
+    det = wl["llm_determinism"]["repro"]["verify"][0]["commands"]
+    assert any("ranks_with_divergence" in c for c in det)
 
 
 def test_dashboard_review_a11y_and_layout_fixes():
@@ -1000,8 +1014,10 @@ def test_dashboard_review_a11y_and_layout_fixes():
          "reasons": [], "metrics": {"mean_step_time_ms": 4.0,
                                     "summary": {"tokens_per_sec": 4160}}},
     ]
-    doc = _results("2026-08-03T00:00:00Z", entries, total=2, **{"pass": 2})
-    doc2 = _results("2026-08-04T00:00:00Z", entries, total=2, **{"pass": 2})
+    doc = _results("2026-08-03T00:00:00Z", entries, total=2, **{"pass": 2},
+                   build={"head_sha": "abc123" * 5 + "abcd", "amd_aorta_version": "0.2.2rc20260803"})
+    doc2 = _results("2026-08-04T00:00:00Z", entries, total=2, **{"pass": 2},
+                    build={"head_sha": "abc123" * 5 + "abcd", "amd_aorta_version": "0.2.2rc20260803"})
     html = gen_dashboard.build_dashboard_html([doc, doc2])
     assert "<h3 class='release-date'>" in html
     assert "<h4 class='wl-title'>" in html
@@ -1011,6 +1027,18 @@ def test_dashboard_review_a11y_and_layout_fixes():
     assert "class='tablewrap'><table class='inner'>" in html
     assert ".wl-chip.absent .chip-meta" in html
     assert ".absent { color:#39414a; }" not in html
+    assert "git checkout abc123abc123abc123abc123abc123abcd" in html
+    assert "amd-aorta[hw-queue]==0.2.2rc20260803" in html
+    assert "mean step time history, oldest to newest" in html
+    assert "role='img'" in html
+    assert "#1a7f37" in html
+
+
+def test_gpu_smoke_success_notes_baseline_gating():
+    meta = gen_dashboard.load_dashboard_metadata()
+    success = meta["workloads"]["gpu_smoke"]["repro"]["success_criteria"]
+    assert "gpu_smoke::baseline-local" in success
+    assert "not performance-thresholded" in success
 
 def test_dashboard_workloads_use_category_card_layout():
     entries = [

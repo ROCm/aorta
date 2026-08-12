@@ -71,6 +71,10 @@ _VERDICT_COLOR = {
     "skip": "#57606a",
 }
 
+# History-chip dots use white text at small size; pass green must meet 4.5:1 AA.
+_CHIP_VERDICT_COLOR = dict(_VERDICT_COLOR)
+_CHIP_VERDICT_COLOR["pass"] = "#1a7f37"
+
 # Colour alone cannot carry a verdict: it is invisible to a red/green colour
 # deficiency and to anyone reading a printed or greyscale copy. Every coloured
 # cell states its verdict with one of these too.
@@ -279,19 +283,42 @@ def _grading_rule_label(entry: dict[str, Any], name: str) -> str:
     return "tracked only (not gated)"
 
 
-def _repro_commands_html(commands: list[str]) -> str:
+def _substitute_repro_pins(text: str, build: dict[str, Any]) -> str:
+    """Fill repro setup commands with the toolchain pins from the newest nightly."""
+    sha = str(build.get("head_sha") or "").strip()
+    ver = str(build.get("amd_aorta_version") or "").strip()
+    if sha:
+        text = text.replace("{{HEAD_SHA}}", sha)
+    else:
+        text = text.replace(
+            "git checkout {{HEAD_SHA}}",
+            "# git checkout <head_sha shown in the dashboard header>",
+        )
+    if ver:
+        text = text.replace("{{AORTA_VERSION}}", ver)
+    else:
+        text = text.replace(
+            "'amd-aorta[hw-queue]=={{AORTA_VERSION}}'",
+            "'amd-aorta[hw-queue]'  # pin to the AORTA version in the dashboard header",
+        )
+    return text
+
+
+def _repro_commands_html(commands: list[str], build: dict[str, Any]) -> str:
     return "".join(
-        f"<pre class='mono repro-cmd'>{_esc(c)}</pre>" for c in commands if c
+        f"<pre class='mono repro-cmd'>{_esc(_substitute_repro_pins(c, build))}</pre>"
+        for c in commands if c
     )
 
 
-def _run_command_block(entry_name: str) -> str:
+def _run_command_block(entry_name: str, build: dict[str, Any]) -> str:
     """Exhaustive, workload-specific reproduction guide outside CI."""
     meta = _workload_meta(entry_name)
     repro = meta.get("repro") or {}
     cmd = str((repro.get("run") or {}).get("command") or meta.get("run_command") or "")
     if not cmd:
         return ""
+    cmd = _substitute_repro_pins(cmd, build)
     recipe = str(meta.get("recipe") or "")
     parts: list[str] = []
 
@@ -308,7 +335,7 @@ def _run_command_block(entry_name: str) -> str:
         title = str(step.get("title") or f"Setup step {step_no}")
         parts.append(
             f"<section class='repro-sec'><h5>{step_no}. {_esc(title)}</h5>"
-            f"{_repro_commands_html(list(step.get('commands') or []))}</section>"
+            f"{_repro_commands_html(list(step.get('commands') or []), build)}</section>"
         )
         step_no += 1
 
@@ -338,7 +365,7 @@ def _run_command_block(entry_name: str) -> str:
         title = str(step.get("title") or "Verify results")
         parts.append(
             f"<section class='repro-sec'><h5>{step_no}. {_esc(title)}</h5>"
-            f"{_repro_commands_html(list(step.get('commands') or []))}</section>"
+            f"{_repro_commands_html(list(step.get('commands') or []), build)}</section>"
         )
         step_no += 1
 
@@ -581,8 +608,21 @@ def load_results(results_dir: Path) -> list[dict[str, Any]]:
     return docs
 
 
+def _sparkline_a11y_label(metric: str, values: list[float | None]) -> str:
+    """Plain-language history for screen readers (oldest → newest)."""
+    pts = [v for v in values if _isnum(v)]
+    if len(pts) < 2:
+        return f"{metric} history: not enough data"
+    rendered = [_fmt_ms(v) if "step time" in metric.lower() else _fmt_num(v) for v in pts]
+    return f"{metric} history, oldest to newest: {', '.join(rendered)}"
+
+
 def _svg_sparkline(
-    values: list[float | None], width: int = 160, height: int = 32
+    values: list[float | None],
+    width: int = 160,
+    height: int = 32,
+    *,
+    label: str | None = None,
 ) -> str:
     """Tiny inline SVG line chart for a metric's history (ignores non-numbers)."""
     pts = [v for v in values if _isnum(v)]
@@ -600,7 +640,7 @@ def _svg_sparkline(
         coords.append(f"{x:.1f},{y:.1f}")
     poly = " ".join(coords)
     last_x, last_y = coords[-1].split(",")
-    return (
+    svg = (
         f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
         f'preserveAspectRatio="none" style="vertical-align:middle">'
         f'<polyline fill="none" stroke="#539bf5" stroke-width="1.5" '
@@ -608,6 +648,11 @@ def _svg_sparkline(
         f'<circle cx="{last_x}" cy="{last_y}" r="2" fill="#539bf5"/>'
         f"</svg>"
     )
+    if label:
+        return (
+            f'<span class="spark-a11y" role="img" aria-label="{_esc(label)}">{svg}</span>'
+        )
+    return svg
 
 
 def _has_trend(series: list[list[float | None]]) -> bool:
@@ -847,7 +892,7 @@ def build_history_grid(results: list[dict[str, Any]], max_runs: int = _GRID_RUNS
         n = len(group)
         worst_n = counts.get(worst, 0)
         count = str(n) if worst_n == n else f"{worst_n}/{n}"
-        bg = _VERDICT_COLOR.get(worst, _UNKNOWN_COLOR)
+        bg = _CHIP_VERDICT_COLOR.get(worst, _UNKNOWN_COLOR)
         breakdown = f"{name} — {_tally_text(counts)}"
         dot = (
             f"<span class='dot sm' role='img' style='background:{bg}' "
@@ -1081,6 +1126,7 @@ def build_workload_cards(
     show_trend: bool,
     show_metric_trend: bool,
     show_notes: bool,
+    build: dict[str, Any],
 ) -> str:
     """Category-grouped workload cards (replaces the wide results table)."""
     meta = load_dashboard_metadata()
@@ -1138,8 +1184,9 @@ def build_workload_cards(
                 f"<span class='mono'>{_esc(str(cell_name))}</span>"
                 if cell_name else "<span class='muted'>whole workload</span>"
             )
+            spark_vals = history.get(k, [])
             trend_html = (
-                f"<span class='variant-spark'>{_svg_sparkline(history.get(k, []))}</span>"
+                f"<span class='variant-spark'>{_svg_sparkline(spark_vals, label=_sparkline_a11y_label('mean step time', spark_vals))}</span>"
                 if show_trend else ""
             )
             notes_html = (
@@ -1201,7 +1248,7 @@ def build_workload_cards(
             f"</h4></div>"
             f"{summary_html}"
             f"<p class='muted wl-meta'>{_esc(meta_line)}</p>"
-            f"{_run_command_block(entry_name)}"
+            f"{_run_command_block(entry_name, build)}"
             f"</header>"
             f"<div class='variant-list'>{''.join(variants)}</div>"
             f"</article>"
@@ -1334,6 +1381,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         show_trend=show_trend,
         show_metric_trend=show_metric_trend,
         show_notes=show_notes,
+        build=build,
     )
 
     toolchain = "".join([
