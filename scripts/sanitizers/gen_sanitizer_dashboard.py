@@ -422,9 +422,12 @@ def _safe_report_rel(value: Any) -> str | None:
     executable or off-origin ``<a href>`` -- HTML-escaping the attribute does not
     neutralize a URL scheme. Reject anything that is not a plain relative path:
     a URL scheme (``scheme:``), absolute or protocol-relative paths (leading
-    ``/``), backslashes, and embedded control/whitespace characters. The
-    internally-computed guardrail/history links already have this shape, so this
-    only tightens the untrusted survey field.
+    ``/``), backslashes, ``..`` parent-directory traversal, and embedded
+    control/whitespace characters. The internally-computed guardrail/history
+    links already have this shape, so this only tightens the untrusted survey
+    field. Rejecting ``..`` also makes the value safe to join onto a base
+    directory when it is (re)used as a filesystem ``report_path`` (see
+    ``_load_survey_report``): the joined path can never escape the base.
     """
     if not isinstance(value, str) or not value:
         return None
@@ -436,7 +439,32 @@ def _safe_report_rel(value: Any) -> str | None:
     # (before the first "/", e.g. ``javascript:``) means it is a scheme, not a path.
     if ":" in value.split("/", 1)[0]:
         return None
+    # No parent-directory traversal, so the path stays within its origin.
+    if ".." in value.split("/"):
+        return None
     return value
+
+
+def _load_survey_report(report_path: str, base_dir: Path | None) -> dict[str, Any] | None:
+    """Load a survey case's ``report_path`` (untrusted caller JSON) safely.
+
+    Only a validated *relative* path that stays beneath ``base_dir`` is read, so a
+    supplied ``--survey`` spec cannot pull JSON from outside the spec directory --
+    via an absolute path, ``..`` traversal, or a URL scheme -- and serialize its
+    contents into the public dashboard. This mirrors the relative-only boundary
+    ``_safe_report_rel`` enforces on the ``report_rel`` link; an unsafe value
+    renders the case as absent (no report) rather than reading the file.
+    """
+    safe_rel = _safe_report_rel(report_path)
+    if safe_rel is None:
+        return None
+    base = (base_dir if base_dir is not None else Path(".")).resolve()
+    candidate = (base / safe_rel).resolve()
+    # Defense in depth against symlink escapes: the resolved target must stay at
+    # or beneath base_dir even though ``..``/absolute inputs are already rejected.
+    if candidate != base and base not in candidate.parents:
+        return None
+    return _load(candidate)
 
 
 def survey_cases_from_spec(
@@ -460,18 +488,21 @@ def survey_cases_from_spec(
           "workload": "internal:gemm_top5",    # originating workload (optional)
           "report_rel": "runs/<id>/survey/top5-gemm-consan/sanitizer_report.json",  # optional link
           "report": { ...inline sanitizer_report... }   # inline report, OR
-          "report_path": "relative/or/abs/report.json"   # a file to load
+          "report_path": "relative/report.json"   # a file to load (relative to base_dir)
         }
 
     Each entry carries ``cls="survey"`` and a ``summarize_case(report, None)``
     summary (``expected=None`` -> observational, ``match=True``), so failures /
     ``not_checked`` are shown as data and never rendered as a regression.
 
-    ``report_rel`` is retained only for a *present* report (no dead link, matching
-    the guardrail path in ``runs_from_history_root``) and only when it is a safe
-    relative path (it is untrusted caller JSON; see ``_safe_report_rel``). A
-    malformed spec (a non-list ``cases`` wrapper, a non-string ``report_path``)
-    degrades to an empty / absent survey rather than raising.
+    Both untrusted-JSON path fields are relative-only and validated: ``report_rel``
+    (the link) via ``_safe_report_rel`` and ``report_path`` (the file to load) via
+    ``_load_survey_report``, which reads only a validated relative path beneath
+    ``base_dir`` (no absolute paths, ``..`` traversal, or URL schemes). ``report_rel``
+    is retained only for a *present* report (no dead link, matching the guardrail
+    path in ``runs_from_history_root``). A malformed spec (a non-list ``cases``
+    wrapper, a non-string / unsafe ``report_path``) degrades to an empty / absent
+    survey rather than raising.
     """
     cases = spec.get("cases", []) if isinstance(spec, dict) else spec
     # A malformed wrapper (e.g. ``{"cases": 1}``) must degrade to an empty survey,
@@ -484,15 +515,14 @@ def survey_cases_from_spec(
         if not isinstance(case, dict):
             continue
         report = case.get("report")
-        # Only construct a path from a non-empty string; a non-string report_path
-        # (e.g. a numeric JSON value) would otherwise raise in Path() and abort the
-        # whole dashboard instead of rendering this case as absent.
+        # Only load from a non-empty string; a non-string report_path (e.g. a
+        # numeric JSON value) would otherwise raise in Path() and abort the whole
+        # dashboard instead of rendering this case as absent. The path is untrusted
+        # caller JSON, so _load_survey_report resolves only a validated relative
+        # path beneath base_dir (no absolute paths / ``..`` traversal / schemes).
         report_path = case.get("report_path")
         if report is None and isinstance(report_path, str) and report_path:
-            path = Path(report_path)
-            if base_dir is not None and not path.is_absolute():
-                path = base_dir / path
-            report = _load(path)
+            report = _load_survey_report(report_path, base_dir)
         summary = summarize_case(report if isinstance(report, dict) else None, None)
         name = str(case.get("name", case.get("label", "survey")))
         backend = case.get("backend")

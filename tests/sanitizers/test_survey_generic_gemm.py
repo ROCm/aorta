@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SURVEY_DIR = _REPO_ROOT / "recipes" / "sanitizers" / "survey"
@@ -27,14 +30,30 @@ _BASELINES = (
 # dashboard output) must be fully scrubbed: no customer/NDA project name, org
 # label, private absolute paths, internal run/user/ticket tokens, and not even
 # the generic word "customer".
+#
+# Each entry is a regex carrying its OWN case sensitivity so a variant cannot
+# slip past the guard without introducing false positives:
+#   * Path/internal tokens (``recom``, ``/apps/``, ``vivekag``, ``pr347``,
+#     ``feature_consan_waitcheck``) are matched case-INsensitively -- ``(?i:...)``
+#     -- so ``RECOM``/``VivekAG`` are still caught; none collide with a legitimate
+#     substring in the guarded artifacts.
+#   * The org name "Meta" is matched case-SENSITIVELY in its real company forms
+#     (``Meta``/``META``) with word boundaries. A blanket case-insensitive
+#     ``meta`` would false-positive on the HTML ``<meta>`` tag and the
+#     ``"metadata"`` key every ``sanitizer_report.json`` carries; matching only
+#     the capitalized company forms catches an uppercase leak (Copilot's concern)
+#     without those collisions.
+#   * ``customer`` is a case-insensitive whole word (so ``Customer`` is caught but
+#     ``customary`` is not).
+_META_ORG = r"\b(?:Meta|META)\b"
 _FORBIDDEN = (
-    "recom",
-    "Meta",
-    "/apps/",
-    "vivekag",
-    "pr347",
-    "feature_consan_waitcheck",
-    "customer",
+    r"(?i:recom)",
+    _META_ORG,
+    r"(?i:/apps/)",
+    r"(?i:vivekag)",
+    r"(?i:pr347)",
+    r"(?i:feature_consan_waitcheck)",
+    r"(?i:\bcustomers?\b)",
 )
 
 # Reproduction recipes/scripts carry de-branding *prose* that legitimately uses
@@ -42,12 +61,12 @@ _FORBIDDEN = (
 # do, e.g. consan-code-objects.yaml). Guard those against customer NAMES,
 # private paths, and internal tokens -- but not the generic word itself.
 _FORBIDDEN_NAMES = (
-    "recom",
-    "Meta",
-    "/apps/",
-    "vivekag",
-    "pr347",
-    "feature_consan_waitcheck",
+    r"(?i:recom)",
+    _META_ORG,
+    r"(?i:/apps/)",
+    r"(?i:vivekag)",
+    r"(?i:pr347)",
+    r"(?i:feature_consan_waitcheck)",
 )
 
 
@@ -65,8 +84,13 @@ gen_spec = _load_module("gen_survey_spec")
 
 
 def _assert_no_forbidden(blob: str, where: str, tokens: tuple[str, ...] = _FORBIDDEN) -> None:
+    # Each token carries its own case sensitivity via an inline ``(?i:...)`` flag,
+    # so this deliberately does NOT pass a global re.IGNORECASE.
     for token in tokens:
-        assert token not in blob, f"forbidden token {token!r} found in {where}"
+        match = re.search(token, blob)
+        assert match is None, (
+            f"forbidden token {token!r} (matched {match.group(0)!r}) found in {where}"
+        )
 
 
 def _survey_entries() -> list[dict]:
@@ -250,3 +274,30 @@ def test_rendered_dashboard_output_is_public_safe(tmp_path, monkeypatch):
     parsed = json.loads(data)
     assert len(parsed[0]["survey"]) == 6
     assert parsed[0]["gate"] is True
+
+
+def test_scrub_guard_is_case_insensitive_but_boundary_aware():
+    # Casing variants of a forbidden token must be caught -- a case-sensitive
+    # guard would let an uppercase project/codename/path slip through.
+    for variant in (
+        "RECOM_repro",
+        "VivekAG",
+        "/APPS/vivekag/run",
+        "Meta",
+        "PR347",
+        "FEATURE_Consan_Waitcheck",
+        "Customer",
+        "CUSTOMERS",
+    ):
+        with pytest.raises(AssertionError):
+            _assert_no_forbidden(f"leak {variant} here", "synthetic")
+
+    # ...but a legitimate substring must NOT false-positive: every
+    # ``sanitizer_report.json`` carries a ``"metadata"`` key, which must not trip
+    # the boundary-anchored ``\bmeta\b`` name token.
+    _assert_no_forbidden('{"metadata": {"instruction": 1}}', "synthetic")
+    # The recipe denylist omits the generic word "customer" but still catches the
+    # name/path/codename tokens case-insensitively.
+    _assert_no_forbidden("a generic customer-facing repro", "synthetic", tokens=_FORBIDDEN_NAMES)
+    with pytest.raises(AssertionError):
+        _assert_no_forbidden("path /Apps/ leak", "synthetic", tokens=_FORBIDDEN_NAMES)

@@ -971,6 +971,8 @@ def test_survey_report_rel_rejects_unsafe_links():
         "\\\\unc\\share",
         "data:text/html,<script>1</script>",
         " runs/x/report.json",  # leading whitespace browsers would strip
+        "../runs/x/report.json",  # parent-directory traversal
+        "a/../../b/report.json",  # traversal buried mid-path
     ):
         spec = {"cases": [{"name": "s", "report_rel": unsafe, "report": _consan_racy_report()}]}
         entry = gen.survey_cases_from_spec(spec)[0]
@@ -987,6 +989,32 @@ def test_survey_report_rel_rejects_unsafe_links():
     )
     html = gen.build_html([_healthy_guardrail_run()], survey=bad)
     assert "javascript:alert(1)" not in html
+
+
+def test_survey_report_path_rejects_traversal_and_absolute(tmp_path):
+    # report_path is untrusted caller JSON used to read a file off disk. It must
+    # be a validated relative path beneath base_dir: an absolute path or ``..``
+    # traversal must NOT read the file (else a spec could pull JSON from outside
+    # the spec dir and serialize it into the public dashboard). The case still
+    # renders, just as an absent report.
+    outside = tmp_path / "secret.json"
+    outside.write_text(json.dumps(_waitcheck_report()))
+    base = tmp_path / "spec_dir"
+    base.mkdir()
+    (base / "ok.json").write_text(json.dumps(_waitcheck_report()))
+
+    for evil in ("../secret.json", str(outside), "a/../../secret.json"):
+        spec = {"cases": [{"name": "s", "label": "evil", "report_path": evil}]}
+        entry = gen.survey_cases_from_spec(spec, base_dir=base)[0]
+        assert entry["summary"]["present"] is False, evil
+        assert entry["report_rel"] is None, evil
+
+    # A validated relative path beneath base_dir still loads normally.
+    ok = gen.survey_cases_from_spec(
+        {"cases": [{"name": "s", "label": "ok", "report_path": "ok.json"}]}, base_dir=base
+    )[0]
+    assert ok["summary"]["present"] is True
+    assert ok["summary"]["verdict"] == "warn"
 
 
 def test_build_html_tabs_have_keyboard_focus_style():

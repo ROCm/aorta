@@ -67,11 +67,17 @@ python scripts/sanitizers/gen_sanitizer_dashboard.py \
       --out recipes/sanitizers/survey/generic_gemm_survey.json
   ```
 
-* **The reports** are recorded GPU outputs, not fabricated. To regenerate them on
-  a gfx950 host, run the reproduction recipes (`*-survey.yaml`) with the aorta
-  sanitizer runner; each runs both sanitizers over its kernel and emits a
-  `sanitizer_report.json`. Then scrub any absolute paths / labels before
-  committing (see the policy below).
+* **The reports** are recorded GPU outputs, not fabricated. Each committed
+  fixture directory holds exactly **one** sanitizer's report
+  (`reports/<kernel>_waitcheck/` and `reports/<kernel>_consan/`), so the recorded
+  layout is *per sanitizer*, not one combined report per kernel. To regenerate
+  them on a gfx950 host, run the reproduction recipe (`*-survey.yaml`) **once per
+  sanitizer** — set `sanitizers:` to a single entry (`[waitcheck]`, then
+  `[consan]`) so each run emits a single-sanitizer `sanitizer_report.json` that
+  maps to one fixture directory. (Running both sanitizers in one plan, as the
+  recipe lists them for provenance, produces a single combined report whose
+  `checks[]` you would then have to split into the per-sanitizer fixtures.) Then
+  scrub any absolute paths / labels before committing (see the policy below).
 
 ## De-branded / public-safe policy (CLAUDE.md rule #4)
 
