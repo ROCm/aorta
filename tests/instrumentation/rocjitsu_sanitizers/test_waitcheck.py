@@ -420,6 +420,117 @@ def test_waitcheck_scans_shared_object_once_without_kernel_attribution(tmp_path:
     assert all(finding.kernel_name is None for finding in result.findings)
 
 
+def test_waitcheck_scans_distinct_objects_in_order(tmp_path: Path) -> None:
+    # Distinct code objects are scanned concurrently (#366), but results must
+    # stay in worklist order and every object must be scanned exactly once,
+    # independent of completion order -- coverage is preserved.
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    artifacts = []
+    for name in ("a", "b", "c"):
+        artifact = tmp_path / f"{name}.hsaco"
+        artifact.write_bytes(b"\x7fELF" + name.encode())
+        artifacts.append(artifact)
+    worklist = KernelWorklist(
+        requirement=SelectionRequirement.TOP_DISPATCH_COUNT,
+        top_n=3,
+        kernels=tuple(
+            KernelObservation(
+                identity=KernelIdentity(
+                    name=f"gemm_{artifact.stem}",
+                    target="gfx950",
+                    code_object=str(artifact),
+                    code_object_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                    code_object_index=0,
+                ),
+                total_time_ms=0.0,
+                dispatch_count=count,
+                sources=("gemm_csv",),
+            )
+            for artifact, count in zip(artifacts, (3, 2, 1))
+        ),
+    )
+    scanned: list[str] = []
+
+    def execute(argv, *, timeout_seconds, env=None):
+        target_object = argv[1]
+        scanned.append(target_object)
+        output = f"{target_object}:gfx950[0]: instructions=10 memory-events=2 diagnostics=0"
+        return ProcessResult(tuple(argv), 0, output, "")
+
+    result = run_waitcheck(
+        worklist, output_dir=tmp_path / "out", binary=binary, execute=execute
+    )
+
+    assert result.state is ExecutionState.RAN
+    assert result.verdict is Verdict.PASS
+    assert len(result.kernel_results) == 3
+    assert sorted(scanned) == sorted(str(artifact) for artifact in artifacts)
+    scanned_in_result = [str(item.identity.code_object) for item in result.kernel_results]
+    assert scanned_in_result == [str(artifact) for artifact in artifacts]
+
+
+def test_waitcheck_daily_fixture_topology_scans_two_of_three(tmp_path: Path) -> None:
+    # Mirrors the real daily GEMM fixture: the top-3 shapes are two NT shapes
+    # (which resolve to the SAME real transpose object -> one scan) plus one TT
+    # shape (a distinct object -> its own scan). Waitcheck must dedup the shared
+    # NT object to a single scan and still scan the distinct TT object, i.e. two
+    # concurrent scans, not one and not three.
+    binary = tmp_path / "rj_waitcheck"
+    binary.write_text("binary")
+    nt = tmp_path / "nt.hsaco"
+    nt.write_bytes(b"\x7fELFnt")
+    tt = tmp_path / "tt.hsaco"
+    tt.write_bytes(b"\x7fELFtt")
+    nt_sha = hashlib.sha256(nt.read_bytes()).hexdigest()
+    tt_sha = hashlib.sha256(tt.read_bytes()).hexdigest()
+
+    def _obj(name: str, artifact: Path, sha: str, count: int) -> KernelObservation:
+        return KernelObservation(
+            identity=KernelIdentity(
+                name=name,
+                target="gfx950",
+                code_object=str(artifact),
+                code_object_sha256=sha,
+                code_object_index=0,
+            ),
+            total_time_ms=0.0,
+            dispatch_count=count,
+            sources=("gemm_csv",),
+        )
+
+    worklist = KernelWorklist(
+        requirement=SelectionRequirement.TOP_DISPATCH_COUNT,
+        top_n=3,
+        kernels=(
+            _obj("gemm_NT_a", nt, nt_sha, 3),
+            _obj("gemm_NT_b", nt, nt_sha, 2),
+            _obj("gemm_TT_c", tt, tt_sha, 1),
+        ),
+    )
+    scanned: list[str] = []
+
+    def execute(argv, *, timeout_seconds, env=None):
+        target_object = argv[1]
+        scanned.append(target_object)
+        output = "\n".join(
+            (
+                f"{target_object}:gfx950[0]: instructions=10 memory-events=2 diagnostics=1",
+                f"{target_object}:gfx950[0]:.text+0x20: missing s_waitcnt lgkmcnt(0)",
+            )
+        )
+        return ProcessResult(tuple(argv), 4, output, "")
+
+    result = run_waitcheck(
+        worklist, output_dir=tmp_path / "out", binary=binary, execute=execute
+    )
+
+    assert result.state is ExecutionState.RAN
+    assert result.verdict is Verdict.WARN
+    assert sorted(scanned) == sorted((str(nt), str(tt)))  # two scans, NT deduped
+    assert len(result.kernel_results) == 2
+
+
 def test_waitcheck_rejects_changed_code_object(tmp_path: Path) -> None:
     binary = tmp_path / "rj_waitcheck"
     binary.write_text("binary")
