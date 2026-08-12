@@ -298,8 +298,12 @@ def _substitute_repro_pins(text: str, build: dict[str, Any]) -> str:
         text = text.replace("{{AORTA_VERSION}}", ver)
     else:
         text = text.replace(
-            "'amd-aorta[hw-queue]=={{AORTA_VERSION}}'",
-            "'amd-aorta[hw-queue]'  # pin to the AORTA version in the dashboard header",
+            "pip install --upgrade --pre 'amd-aorta[hw-queue]=={{AORTA_VERSION}}' "
+            "-f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels",
+            "# STOP: dashboard is missing amd_aorta_version — copy the AORTA version "
+            "from the dashboard header, then run:\n"
+            "# pip install --upgrade --pre 'amd-aorta[hw-queue]==<version>' "
+            "-f https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels",
         )
     return text
 

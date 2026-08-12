@@ -1003,6 +1003,19 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     assert "passed/recording only" in ddp["success_criteria"].lower()
     det = wl["llm_determinism"]["repro"]["verify"][0]["commands"]
     assert any("ranks_with_divergence" in c for c in det)
+    assert any("trial_paths" in c for c in det)
+
+
+def test_repro_pins_fail_closed_when_version_missing():
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z",
+                  [{"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+                    "reasons": [], "metrics": {"mean_step_time_ms": 1.0}}],
+                  total=1, **{"pass": 1},
+                  build={"head_sha": "abc123" * 5 + "abcd", "amd_aorta_version": ""})])
+    assert "STOP: dashboard is missing amd_aorta_version" in html
+    assert "expanded_assets/dev-wheels" in html
+    assert "'amd-aorta[hw-queue]'  #" not in html
 
 
 def test_dashboard_review_a11y_and_layout_fixes():

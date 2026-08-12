@@ -22,15 +22,30 @@ _TRAINING_SUCCESS = (
 _METRICS_IN_PERF = (
     'grep -m 10 -E "{pattern}" "$RUN_DIR/perf.md" 2>/dev/null '
     '|| python -c "import json,sys; d=json.load(open(sys.argv[1])); '
-    'print(json.dumps(d.get(\\\"cells\\\",{{}}), indent=2)[:2000])" "$RUN_DIR/matrix.json"'
+    'print(json.dumps(d.get(\\\"cells\\\",[]), indent=2)[:2000])" "$RUN_DIR/matrix.json"'
 )
 
 _DIVERGENCE_IN_ARTIFACTS = (
     'grep -m 5 -E "ranks_with_divergence|diverge" "$RUN_DIR/perf.md" 2>/dev/null '
-    '|| python -c "import json,sys; d=json.load(open(sys.argv[1])); '
-    'cells=d.get(\\\"cells\\\",{}); '
-    'print(json.dumps({k:(v.get(\\\"metrics_summary\\\") or {}).get(\\\"ranks_with_divergence\\\") '
-    'for k,v in cells.items()}, indent=2))" "$RUN_DIR/matrix.json"'
+    '|| python -c "'
+    "import json, pathlib, sys; "
+    "run = pathlib.Path(sys.argv[1]); "
+    "doc = json.loads((run / 'matrix.json').read_text()); "
+    "out = {}; "
+    "for cell in doc.get('cells') or []: "
+    "  name = cell.get('name', '?'); "
+    "  vals = []; "
+    "  for raw in cell.get('trial_paths') or []: "
+    "    p = pathlib.Path(raw); "
+    "    if not p.is_absolute(): p = run / raw; "
+    "    if p.is_dir(): p = p / 'result.json'; "
+    "    if not p.is_file(): continue; "
+    "    t = json.loads(p.read_text()); "
+    "    m = (t.get('result') or {}).get('metrics') or {}; "
+    "    if 'ranks_with_divergence' in m: vals.append(m['ranks_with_divergence']); "
+    "  out[name] = vals if vals else None; "
+    "print(json.dumps(out, indent=2))"
+    '" "$RUN_DIR"'
 )
 
 
