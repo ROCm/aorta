@@ -819,7 +819,11 @@ def _informational_report(reason: str) -> dict:
     }
 
 
-def test_informational_from_dir_surfaces_verdict_and_reason(tmp_path):
+def test_survey_cases_from_informational_dir_folds_caller_supplied_cases(tmp_path):
+    # Caller-supplied ConSan cases (#347) fold into the Tab 2 workload-survey shape:
+    # observed-only (expected None / match True), the observation carries the
+    # fail-closed reason, the provenance workload references #347, and report_rel
+    # points at the co-published survey area when a run rel is supplied.
     root = tmp_path / "informational"
     (root / "consan-gemm").mkdir(parents=True)
     (root / "consan-gemm" / "sanitizer_report.json").write_text(
@@ -827,45 +831,151 @@ def test_informational_from_dir_surfaces_verdict_and_reason(tmp_path):
     )
     (root / "empty-case").mkdir()  # no report -> skipped
 
-    # A passing case serializes a null reason; it must normalize to the em-dash
-    # placeholder, not the literal "None".
-    passing = _informational_report("combined_hook_timeout")
-    for check in passing["checks"]:
-        check["state"], check["verdict"], check["reason"] = "ran", "pass", None
-    passing["overall_verdict"], passing["execution_status"] = "pass", "complete"
-    (root / "consan-pass").mkdir()
-    (root / "consan-pass" / "sanitizer_report.json").write_text(json.dumps(passing))
+    entries = gen.survey_cases_from_informational_dir(root, rel="runs/2026-08-05-33")
+    assert [e["name"] for e in entries] == ["consan-gemm"]  # empty-case skipped
+    case = entries[0]
+    assert case["cls"] == "survey"
+    assert case["summary"]["expected"] is None
+    assert case["summary"]["match"] is True
+    assert case["summary"]["verdict"] == "error"
+    assert "combined_hook_timeout" in case["summary"]["observation"]
+    # kernel-group + sanitizer are parsed from the case name (both-sanitizer grouping)
+    assert case["group"] == "gemm"
+    assert case["sanitizer"] == "consan"
+    # provenance is a copy-paste reproduce command, not an "experimental /
+    # caller-supplied" label (#374 B): the user-facing workload/source is dropped.
+    assert case["workload"] is None
+    assert case["command"] == "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml"
+    assert (
+        case["report_rel"]
+        == "runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json"
+    )
 
-    cases = {c["name"]: c for c in gen.informational_from_dir(root)}
-    assert set(cases) == {"consan-gemm", "consan-pass"}
-    assert cases["consan-gemm"]["sanitizer"] == "consan"
-    assert cases["consan-gemm"]["verdict"] == "error"
-    assert cases["consan-gemm"]["reason"] == "combined_hook_timeout"
-    assert cases["consan-pass"]["verdict"] == "pass"
-    assert cases["consan-pass"]["reason"] == "\u2014"  # normalized null, not "None"
-    assert "None" not in gen.build_informational_html(list(cases.values()))
-    assert gen.informational_from_dir(tmp_path / "does-not-exist") == []
+    # Without a run rel (results-dir / runs-root modes) no dead link is emitted.
+    no_rel = gen.survey_cases_from_informational_dir(root, rel=None)
+    assert no_rel[0]["report_rel"] is None
+
+    # A non-existent dir degrades to an empty list.
+    assert gen.survey_cases_from_informational_dir(tmp_path / "does-not-exist") == []
 
 
-def test_informational_section_renders_reason_and_is_non_gating():
-    cases = [
-        {"name": "consan-gemm", "sanitizer": "consan", "verdict": "error",
-         "reason": "combined_hook_timeout", "preflight": "error", "summary": {}},
+def test_main_history_root_informational_folds_into_survey_tab(tmp_path, monkeypatch):
+    # End-to-end: a history run plus a caller-supplied ConSan dir renders the case as
+    # a Tab 2 workload-survey entry, co-publishes its report under the run's survey
+    # area (so the raw-report link resolves), drops the old informational heading, and
+    # threads the case into data.json's runs[0]["survey"].
+    baselines = (
+        _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    )
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    out = tmp_path / "dashboard"
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(root),
+        "--baselines", str(baselines),
+        "--informational-results-dir", str(info),
+        "--out-dir", str(out),
     ]
-    html = gen.build_informational_html(cases)
-    assert "combined_hook_timeout" in html and "non-gating" in html
-    md = gen.build_informational_md(cases)
-    assert "combined_hook_timeout" in md and "non-gating" in md.lower()
-    assert gen.build_informational_html([]) == ""
-    assert gen.build_informational_md([]) == ""
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
 
-    # The gate is computed only from the daily rows, so a HEALTHY daily run stays
-    # HEALTHY regardless of informational content.
-    rows = {c: gen.summarize_case(_waitcheck_report(), "warn") for c, *_ in gen.CASES}
-    healthy = gen._run_record({"run": "r", "commit": "c", "date": "d"}, rows)
-    page = gen.build_html([healthy], informational=cases)
-    assert "HEALTHY" in page
-    assert "combined_hook_timeout" in page and "non-gating" in page
+    html = (out / "index.html").read_text(encoding="utf-8")
+    # The caller-supplied case renders in the survey tab (its kernel name + a raw
+    # report link into the co-published survey area).
+    assert "gemm_f32_ss" in html
+    assert 'href="runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json"' in html
+    # The old informational section heading is gone.
+    assert "Informational \u00b7 caller-supplied code objects (non-gating)" not in html
+    assert "Informational · caller-supplied code objects" not in html
+    # The report is co-published under the run's survey area so the link resolves.
+    assert (
+        out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm" / "sanitizer_report.json"
+    ).is_file()
+    # data.json threads the case into the latest run's survey list.
+    data = json.loads((out / "data.json").read_text(encoding="utf-8"))
+    survey = data[0]["survey"]
+    assert [c["name"] for c in survey] == ["consan-gemm"]
+    assert survey[0]["cls"] == "survey"
+    assert survey[0]["summary"]["expected"] is None
+
+
+def test_verdict_chip_html_colors_by_verdict():
+    # #374 D: solid color-coded verdict chips keyed on the verdict string.
+    assert gen._verdict_chip_html("error") == '<span class="vchip err">error</span>'
+    assert gen._verdict_chip_html("fail") == '<span class="vchip err">fail</span>'
+    assert gen._verdict_chip_html("warn") == '<span class="vchip warn">warn</span>'
+    assert gen._verdict_chip_html("pass") == '<span class="vchip pass">pass</span>'
+    assert (
+        gen._verdict_chip_html("not_checked") == '<span class="vchip neutral">not_checked</span>'
+    )
+    assert gen._verdict_chip_html("\u2014") == '<span class="vchip neutral">\u2014</span>'
+
+
+def test_survey_intro_is_readable_and_drops_experimental_framing():
+    # #374 A/B: the intro is body-size readable copy (not 12px muted fine print) and
+    # frames the tab as real kernels under both sanitizers, dropping the old
+    # "experimental" / "caller-supplied code objects" framing from user-facing copy.
+    html = gen.build_html([_healthy_guardrail_run()], survey=[])
+    assert 'class="survey-intro"' in html
+    assert ".survey-intro { font-size:14px" in html  # readable body size
+    assert "real GPU kernels" in html
+    assert "waitcheck" in html and "ConSan" in html
+    assert "No expected-behavior comparison on this tab" in html
+    assert "experimental" not in html.lower()
+    assert "caller-supplied" not in html.lower()
+
+
+def test_survey_informational_groups_both_sanitizers_with_chips_and_repro(tmp_path):
+    # #374 C/D/E: the same kernel scanned by both sanitizers renders under ONE
+    # kernel-group heading with a sanitizer sub-block each, color-coded verdict chips,
+    # a copy-paste reproduce command, and the actual message inline on the page.
+    root = tmp_path / "informational"
+    (root / "consan-gemm").mkdir(parents=True)
+    (root / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (root / "waitcheck-gemm").mkdir(parents=True)
+    (root / "waitcheck-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_waitcheck_report())
+    )
+
+    entries = gen.survey_cases_from_informational_dir(root, rel="runs/2026-08-05-33")
+    assert {e["group"] for e in entries} == {"gemm"}
+    assert {e["sanitizer"] for e in entries} == {"consan", "waitcheck"}
+
+    html = gen.build_html([_healthy_guardrail_run()], survey=entries)
+    # one kernel-group heading, both sanitizer sub-blocks
+    assert 'class="survey-group">gemm</h3>' in html
+    assert "waitcheck (static wait-count scan)" in html
+    assert "ConSan (dynamic data-race check)" in html
+    # solid color-coded chips: consan error -> red, waitcheck warn -> amber
+    assert '<span class="vchip err">error</span>' in html
+    assert '<span class="vchip warn">warn</span>' in html
+    # per-case copy-paste reproduce command
+    assert "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml" in html
+    assert "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml" in html
+    # the actual message is inline on the page (not only behind the raw-report link):
+    # the errored ConSan case shows its reason; the waitcheck case shows a finding.
+    assert "Reason: combined_hook_timeout" in html
+    assert "Finding:" in html
+    # gate stays healthy; no regression vocabulary leaks from the survey
+    assert "HEALTHY" in html
+    assert "REGRESSION" not in html and "Regression" not in html
+
+
+def test_build_html_has_no_informational_section():
+    # The separate informational section is fully removed: a normally-rendered page
+    # never carries its heading, and build_html no longer accepts an informational arg.
+    html = gen.build_html([_healthy_guardrail_run()])
+    assert "Informational · caller-supplied code objects" not in html
+    md = gen.build_summary_md([_healthy_guardrail_run()])
+    assert "Informational · caller-supplied code objects" not in md
 
 
 # --- #367: two-tab (guardrail + workload survey) kernel-level dashboard ---
@@ -1055,7 +1165,13 @@ def test_survey_execution_status_renders_neutral_not_health_colored():
     # are complete), so a neutral survey render means no `execution bad` at all.
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
     assert "execution bad" not in html
+    # execution status stays neutral (never health-colored) on the survey tab
     assert '<span class="observed">error</span>' in html
+    # but the observed *verdict* is now a solid color-coded chip (#374 D): an error
+    # verdict is a solid-red chip. This is descriptive only -- the gate stays healthy.
+    assert '<span class="vchip err">error</span>' in html
+    assert "HEALTHY — 3/3 sanitizer outcomes match their baselines" in html
+    assert "REGRESSION" not in html and "Regression" not in html
 
     # Unit: the survey meta line neutralizes execution; the guardrail one colors it.
     row = survey[0]["summary"]
@@ -1083,10 +1199,10 @@ def test_build_html_renders_two_self_contained_tabs():
     assert "No expected-behavior comparison on this tab" in html
 
 
-def test_build_html_survey_fail_is_observed_neutral_never_a_regression():
+def test_build_html_survey_fail_is_color_coded_but_never_a_regression():
     # Guardrails are all healthy warn; the survey case observed a fail. The survey
-    # fail must render as a neutral observed verdict and must NOT turn the gate red
-    # or be labelled a regression / mismatch / unexpected outcome.
+    # fail must render as a solid color-coded (red) verdict chip (#374 D) and must
+    # NOT turn the gate red or be labelled a regression / mismatch / unexpected.
     survey = gen.survey_cases_from_spec(
         {"cases": [{"name": "s", "label": "survey fail case",
                     "report": _consan_racy_report()}]}
@@ -1094,16 +1210,19 @@ def test_build_html_survey_fail_is_observed_neutral_never_a_regression():
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
 
     assert "HEALTHY — 3/3 sanitizer outcomes match their baselines" in html
-    # the fail is surfaced as an observed (neutral) verdict, not a health colour
-    assert '<span class="observed">fail</span>' in html
-    # none of the guardrail regression vocabulary leaks in from the survey
+    # the fail is a solid-red verdict chip (color-coded), never the neutral grey chip
+    assert '<span class="vchip err">fail</span>' in html
+    assert '<span class="observed">fail</span>' not in html
+    # none of the guardrail regression vocabulary leaks in from the survey, and the
+    # gate banner stays healthy (a survey fail/error is observational, never a gate).
     assert "REGRESSION" not in html and "Regression" not in html
     assert "Unexpected outcome" not in html and "Mismatch" not in html
     # no baseline/expected column on the survey tab (no "expected <verdict>" phrasing
     # is emitted for the survey case; that phrasing is guardrail-only)
     assert "survey fail case" in html
-    # observation summary is present on the tab
+    # observation summary + inline message are present on the tab
     assert "Observation:" in html
+    assert "Finding:" in html
 
 
 def test_build_html_survey_report_link_and_graceful_absence():

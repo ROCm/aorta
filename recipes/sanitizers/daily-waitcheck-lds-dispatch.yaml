@@ -1,0 +1,29 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-WAITCHECK-LDS-DISPATCH
+description: >
+  Observed-only (non-gating) gfx950 waitcheck static s_waitcnt wait-count hazard
+  scan over the same small LDS reduction code object the ConSan survey case
+  dispatches. Paired with daily-consan-lds-dispatch so the dashboard Workload
+  survey (Tab 2) shows both sanitizers for the one kernel; it does NOT gate the
+  nightly.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: lds_reduce
+      code_object: fixtures/isa/lds.hsaco
+      code_object_index: 0
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json

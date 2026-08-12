@@ -6,8 +6,8 @@ description: >
   (tiny_vecadd) with no LDS/atomic/barrier sites, driven via the source.consan_command
   path added in #347. Demonstrates the guardrail's fail-closed behavior when there is
   nothing analyzable: static analysis is complete but strict require-records fails
-  closed (exit 86) rather than emitting a false pass. Rendered in the dashboard's
-  informational section; it does NOT gate the nightly.
+  closed (exit 86) rather than emitting a false pass. Rendered on the dashboard's
+  Workload survey tab (Tab 2) as an observed-only case; it does NOT gate the nightly.
 sanitizer_plan:
   target: gfx950
   source:
