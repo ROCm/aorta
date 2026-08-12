@@ -25,33 +25,45 @@ _METRICS_IN_PERF = (
     'print(json.dumps(d.get(\\\"cells\\\",[]), indent=2)[:2000])" "$RUN_DIR/matrix.json"'
 )
 
-_DIVERGENCE_IN_ARTIFACTS = (
-    'grep -m 5 -E "ranks_with_divergence|diverge" "$RUN_DIR/perf.md" 2>/dev/null '
-    "|| python3 - \"$RUN_DIR\" <<'PY'\n"
-    "import json\n"
-    "from pathlib import Path\n"
-    "import sys\n"
-    "\n"
-    "run = Path(sys.argv[1])\n"
-    "doc = json.loads((run / 'matrix.json').read_text(encoding='utf-8'))\n"
-    "out = {}\n"
-    "for cell in doc.get('cells') or []:\n"
-    "    values = []\n"
-    "    for raw in cell.get('trial_paths') or []:\n"
-    "        path = Path(raw)\n"
-    "        if not path.is_absolute() and not path.exists():\n"
-    "            path = run / path\n"
-    "        if path.is_dir():\n"
-    "            path = path / 'result.json'\n"
-    "        if not path.is_file():\n"
-    "            continue\n"
-    "        trial = json.loads(path.read_text(encoding='utf-8'))\n"
-    "        metrics = (trial.get('result') or {}).get('metrics') or {}\n"
-    "        if 'ranks_with_divergence' in metrics:\n"
-    "            values.append(metrics['ranks_with_divergence'])\n"
-    "    out[cell.get('name', '?')] = values or None\n"
-    "print(json.dumps(out, indent=2))\n"
-    "PY\n"
+def _trial_metric_in_artifacts(*, perf_grep_pattern: str, metric_key: str) -> str:
+    """Read a trial metric from perf.md when present, else from raw trial JSON."""
+    return (
+        f'grep -m 5 -E "{perf_grep_pattern}" "$RUN_DIR/perf.md" 2>/dev/null '
+        "|| python3 - \"$RUN_DIR\" <<'PY'\n"
+        "import json\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        "\n"
+        "run = Path(sys.argv[1])\n"
+        "doc = json.loads((run / 'matrix.json').read_text(encoding='utf-8'))\n"
+        "out = {}\n"
+        "for cell in doc.get('cells') or []:\n"
+        "    values = []\n"
+        "    for raw in cell.get('trial_paths') or []:\n"
+        "        path = Path(raw)\n"
+        "        if not path.is_absolute() and not path.exists():\n"
+        "            path = run / path\n"
+        "        if path.is_dir():\n"
+        "            path = path / 'result.json'\n"
+        "        if not path.is_file():\n"
+        "            continue\n"
+        "        trial = json.loads(path.read_text(encoding='utf-8'))\n"
+        "        metrics = (trial.get('result') or {}).get('metrics') or {}\n"
+        f"        if '{metric_key}' in metrics:\n"
+        f"            values.append(metrics['{metric_key}'])\n"
+        "    out[cell.get('name', '?')] = values or None\n"
+        "print(json.dumps(out, indent=2))\n"
+        "PY\n"
+    )
+
+
+_DIVERGENCE_IN_ARTIFACTS = _trial_metric_in_artifacts(
+    perf_grep_pattern="ranks_with_divergence|diverge",
+    metric_key="ranks_with_divergence",
+)
+_RACE_CHECKSUM_IN_ARTIFACTS = _trial_metric_in_artifacts(
+    perf_grep_pattern="layer_checksum_mismatch",
+    metric_key="layer_checksum_mismatches",
 )
 
 
@@ -523,9 +535,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 distributed=True,
                 dry_run="aorta sweep run --recipe recipes/race/race_smoke.yaml --dry-run",
                 verify_title="Check layer checksum mismatches in matrix output",
-                verify_extra=[
-                    _METRICS_IN_PERF.format(pattern="layer_checksum_mismatch"),
-                ],
+                verify_extra=[_RACE_CHECKSUM_IN_ARTIFACTS],
                 success=(
                     "layer_checksum_mismatches must be 0. Non-zero values indicate "
                     "detected races or silent corruption in distributed layers."
@@ -566,9 +576,7 @@ DASHBOARD_METADATA: dict[str, Any] = {
                 distributed=True,
                 dry_run="aorta sweep run --recipe recipes/race/race_smoke.yaml --dry-run",
                 verify_title="Confirm zero checksum mismatches at 8-GPU scale",
-                verify_extra=[
-                    _METRICS_IN_PERF.format(pattern="layer_checksum_mismatch"),
-                ],
+                verify_extra=[_RACE_CHECKSUM_IN_ARTIFACTS],
                 success=(
                     "layer_checksum_mismatches == 0 for every cell. "
                     "Any failure warrants inspecting per-trial JSON under cells/."

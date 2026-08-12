@@ -699,7 +699,7 @@ def _latest_status(results: list[dict[str, Any]]) -> tuple[str, str]:
         # never executed (e.g. not enough GPUs for the 8-GPU matrix entries).
         if _count(s.get("skip")):
             return "partial", _VERDICT_COLOR["record"]
-        return "passing", _VERDICT_COLOR["pass"]
+        return "passing", _CHIP_VERDICT_COLOR["pass"]
     if _count(s.get("record")):
         return "recording", _VERDICT_COLOR["record"]
     return "skipping", _VERDICT_COLOR["skip"]
@@ -1183,7 +1183,7 @@ def build_workload_cards(
         for k in cell_keys:
             e = latest_by_key[k]
             verdict = e.get("verdict", "skip")
-            color = _VERDICT_COLOR.get(verdict, "#57606a")
+            color = _CHIP_VERDICT_COLOR.get(verdict, _VERDICT_COLOR.get(verdict, "#57606a"))
             st = (e.get("metrics") or {}).get("mean_step_time_ms")
             cell_name = e.get("cell")
             label = (

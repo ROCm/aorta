@@ -1010,6 +1010,11 @@ def test_dashboard_repro_guides_differ_by_workload_type():
     assert any("ranks_with_divergence" in c for c in det)
     assert any("trial_paths" in c for c in det)
     assert any("python3 -" in c for c in det)
+    race_verify = race["verify"][0]["commands"]
+    assert any("layer_checksum_mismatches" in c for c in race_verify)
+    assert any("trial_paths" in c for c in race_verify)
+    race8 = wl["race_8gpu"]["repro"]["verify"][0]["commands"]
+    assert any("layer_checksum_mismatches" in c for c in race8)
 
 
 def test_determinism_verify_reads_repo_relative_failed_trial(tmp_path):
@@ -1098,6 +1103,17 @@ def test_dashboard_review_a11y_and_layout_fixes():
     assert "#1a7f37" in html
     assert "nightly_eval.py comparing matrix.json" in html
     assert "with --strict against" not in html
+
+
+def test_pass_badges_use_accessible_green_not_default_verdict_green():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 254.0}},
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z", entries, total=1, **{"pass": 1})])
+    assert "background:#1a7f37" in html
+    assert "background:#2ea043" not in html
 
 
 def test_gpu_smoke_success_notes_baseline_gating():
