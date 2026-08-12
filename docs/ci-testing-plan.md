@@ -230,10 +230,10 @@ model as the existing analysis workflows):
 The base image is pinned by digest:
 
 ```
-rocm/pytorch@sha256:376bfab5f4f680c8b4b843c6d0c5d1f0a04e5a84ec3e86728db8d11d79a9d1e3
+rocm/pytorch@sha256:3b71b642af60419cd68156d3ab4114943a6d39b730d4dd6b33e8f6ffdb982f88
 ```
 
-(tag: `rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1`). Bump the digest in
+(tag: `rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.10.0`). Bump the digest in
 `Dockerfile.ci-gpu` / `.env.ci` when intentionally upgrading the CI stack.
 
 ### Triggers and frequency
