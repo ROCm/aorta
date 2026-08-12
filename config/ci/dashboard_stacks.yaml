@@ -1,0 +1,22 @@
+# Dual ROCm tracks rendered on the nightly dashboard (https://rocm.github.io/aorta/).
+#
+# customer — stack AMD recommends to ROCm/PyTorch customers. Update `rocm` and
+#            `pytorch_prefix` when a new stack is certified for external use.
+# latest   — bleeding-edge stack from nightly CI; matched automatically as the
+#            newest ROCm version seen in published results history.
+#
+# When nightly CI runs on a single image, both tracks may show the same run until
+# the CI stack moves ahead of the customer pin.
+
+stacks:
+  customer:
+    id: customer
+    label: Customer certified stack
+    lede: ROCm + PyTorch versions we recommend to customers and field teams.
+    rocm: "7.2.0"
+    pytorch_prefix: "2.9"
+  latest:
+    id: latest
+    label: Latest ROCm stack
+    lede: Newest ROCm build exercised in nightly CI — preview before customer certification.
+    match: newest_rocm

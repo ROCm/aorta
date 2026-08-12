@@ -41,6 +41,24 @@ except Exception:  # pragma: no cover - dashboard must render even if import fai
             "logits_checksum", "output_checksum", "checksum"
         )
 
+try:
+    from dashboard_stacks import (
+        load_dashboard_stacks,
+        partition_results_by_stack,
+        stack_toolchain_chips,
+    )
+except ImportError:  # pragma: no cover
+    def load_dashboard_stacks() -> dict[str, dict[str, Any]]:  # type: ignore[misc]
+        return {}
+
+    def partition_results_by_stack(  # type: ignore[misc]
+        results: list[dict[str, Any]], stacks: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        return {"customer": list(results), "latest": list(results)}
+
+    def stack_toolchain_chips(_build: dict[str, Any]) -> list[tuple[str, str]]:  # type: ignore[misc]
+        return []
+
 # Links back to the source of truth. This dashboard only ever describes this
 # repo's nightly run, so the slug is fixed rather than plumbed through.
 _REPO = "ROCm/aorta"
@@ -455,12 +473,12 @@ def _headline_metrics_for_entries(
     return out
 
 
-def build_status_json(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Structured latest-night summary for embeds (separate from the history feed)."""
+def _latest_status_block(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Structured summary for one stack track's result history."""
     latest = results[-1] if results else None
     status, _ = _latest_status(results)
     latest_entries = list((latest or {}).get("entries") or [])
-    latest_block: dict[str, Any] = {
+    return {
         "status": status,
         "customer_status": _customer_status_label(status),
         "generated_at": (latest or {}).get("generated_at"),
@@ -469,9 +487,22 @@ def build_status_json(results: list[dict[str, Any]]) -> dict[str, Any]:
         "categories": _category_statuses(latest_entries),
         "headline_metrics": _headline_metrics_for_entries(latest_entries),
     }
+
+
+def build_status_json(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Structured latest-night summary for embeds (separate from the history feed)."""
+    stacks_cfg = load_dashboard_stacks()
+    partitioned = partition_results_by_stack(results, stacks_cfg)
+    stacks_out = {
+        sid: _latest_status_block(subset)
+        for sid, subset in partitioned.items()
+    }
+    customer = stacks_out.get("customer") or _latest_status_block(results)
     return {
-        "schema_version": 2,
-        "latest": latest_block,
+        "schema_version": 3,
+        "stacks": stacks_out,
+        # Backward compatibility: ``latest`` is the customer-certified track.
+        "latest": customer,
     }
 
 
@@ -1123,6 +1154,114 @@ def build_change_summary(results: list[dict[str, Any]]) -> str:
     )
 
 
+def _stack_tracks_diverged(
+    customer_results: list[dict[str, Any]],
+    latest_results: list[dict[str, Any]],
+) -> bool:
+    if not customer_results or not latest_results:
+        return False
+    bc = (customer_results[-1].get("build") or {})
+    bl = (latest_results[-1].get("build") or {})
+    return (
+        str(bc.get("rocm") or "") != str(bl.get("rocm") or "")
+        or str(bc.get("torch") or "") != str(bl.get("torch") or "")
+    )
+
+
+def build_stack_tracks_html(
+    partitioned: dict[str, list[dict[str, Any]]],
+    stacks_cfg: dict[str, dict[str, Any]],
+) -> str:
+    """Dual ROCm track cards: customer-certified vs latest nightly stack."""
+    cards: list[str] = []
+    for sid in ("customer", "latest"):
+        stack = stacks_cfg.get(sid) or {}
+        subset = partitioned.get(sid) or []
+        status, color = _latest_status(subset)
+        customer_status = _customer_status_label(status)
+        build = (subset[-1].get("build") or {}) if subset else {}
+        when_raw = str((subset[-1] or {}).get("generated_at") or "") if subset else ""
+        when = _fmt_timestamp(when_raw).split(" ")[0] if when_raw else "—"
+        chips = stack_toolchain_chips(build)
+        chips_html = (
+            "".join(
+                f"<span class='chip'><span class='chip-k'>{_esc(k)}</span>"
+                f"<span class='chip-v mono'>{_esc(v)}</span></span>"
+                for k, v in chips
+            )
+            if chips
+            else "<span class='muted'>No nightly run on this stack yet</span>"
+        )
+        aorta = str(build.get("amd_aorta_version") or "").strip()
+        if aorta:
+            chips_html = (
+                f"<span class='chip'><span class='chip-k'>aorta</span>"
+                f"<span class='chip-v mono'>{_esc(aorta)}</span></span>"
+                + chips_html
+            )
+        cards.append(
+            f"<article class='stack-card' id='stack-{sid}'>"
+            f"<h2 class='stack-k'>{_esc(str(stack.get('label') or sid))}</h2>"
+            f"<p class='stack-lede muted'>{_esc(str(stack.get('lede') or ''))}</p>"
+            f"<span class='badge sm' style='background:{color}' "
+            f"title='{_esc(status)}'>{_esc(customer_status)}</span>"
+            f"<div class='chips stack-chips'>{chips_html}</div>"
+            f"<p class='stack-when muted'>Last evaluated: {_esc(when)}</p>"
+            f"</article>"
+        )
+    return (
+        "<section class='dash-section' id='stack-tracks'>"
+        "<p class='muted'>Two ROCm tracks: the stack we recommend to customers, "
+        "and the newest stack nightly CI exercises. Workloads and release history "
+        "below reflect the <strong>customer certified</strong> track; when the CI "
+        "stack moves ahead, a preview of the latest track appears further down.</p>"
+        f"<div class='stack-grid'>{''.join(cards)}</div>"
+        "</section>"
+    )
+
+
+def build_latest_stack_preview(
+    latest_results: list[dict[str, Any]],
+    stacks_cfg: dict[str, dict[str, Any]],
+) -> str:
+    """Compact health snapshot when the latest ROCm track diverges from customer."""
+    if not latest_results:
+        return ""
+    stack = stacks_cfg.get("latest") or {}
+    status, color = _latest_status(latest_results)
+    customer_status = _customer_status_label(status)
+    latest = latest_results[-1]
+    build = latest.get("build") or {}
+    entries = list(latest.get("entries") or [])
+    s = latest.get("summary") or {}
+    category_html = build_category_summary(entries)
+    chips = stack_toolchain_chips(build)
+    chips_html = "".join(
+        f"<span class='chip'><span class='chip-k'>{_esc(k)}</span>"
+        f"<span class='chip-v mono'>{_esc(v)}</span></span>"
+        for k, v in chips
+    )
+    counts = (
+        f"{_fmt_num(s.get('pass', 0))} pass · "
+        f"{_fmt_num(s.get('fail', 0))} fail · "
+        f"{_fmt_num(s.get('record', 0))} record"
+    )
+    return (
+        "<section class='dash-section' id='latest-rocm-preview'>"
+        f"<h2>{_esc(str(stack.get('label') or 'Latest ROCm stack'))} preview</h2>"
+        f"<p class='muted'>{_esc(str(stack.get('lede') or ''))} "
+        "This section appears only when nightly CI runs on a newer ROCm build "
+        "than the customer-certified pin.</p>"
+        f"<div class='stack-preview-hdr'>"
+        f"<span class='badge sm' style='background:{color}' "
+        f"title='{_esc(status)}'>{_esc(customer_status)}</span>"
+        f"<span class='mono muted'>{counts}</span></div>"
+        f"<div class='chips stack-chips'>{chips_html}</div>"
+        f"{category_html}"
+        "</section>"
+    )
+
+
 def build_workload_cards(
     *,
     groups: dict[str, list[str]],
@@ -1295,9 +1434,18 @@ def build_workload_cards(
 
 def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     """Render the full dashboard HTML from the results history (pure)."""
-    status, status_color = _latest_status(results)
+    stacks_cfg = load_dashboard_stacks()
+    partitioned = partition_results_by_stack(results, stacks_cfg)
+    customer_results = partitioned.get("customer") or []
+    latest_results = partitioned.get("latest") or []
+    primary_results = customer_results
+    show_latest_preview = bool(latest_results) and (
+        not customer_results or _stack_tracks_diverged(customer_results, latest_results)
+    )
+
+    status, status_color = _latest_status(primary_results)
     customer_status = _customer_status_label(status)
-    latest = results[-1] if results else {"build": {}, "summary": {}, "entries": []}
+    latest = primary_results[-1] if primary_results else {"build": {}, "summary": {}, "entries": []}
     build = latest.get("build", {}) or {}
     s = latest.get("summary", {}) or {}
 
@@ -1311,7 +1459,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
 
     # Step-time history (across builds) is only charted for currently-present keys.
     history: dict[str, list[float | None]] = {k: [] for k in keys}
-    for doc in results:
+    for doc in primary_results:
         seen: dict[str, float | None] = {}
         for e in doc.get("entries", []) or []:
             k = f"{e.get('entry')}::{e.get('cell')}"
@@ -1327,7 +1475,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
                 continue
             metric_pairs.append((k, m))
     mhist: dict[tuple[str, str], list[float | None]] = {p: [] for p in metric_pairs}
-    for doc in results:
+    for doc in primary_results:
         seen_m: dict[tuple[str, str], float | None] = {}
         for e in doc.get("entries", []) or []:
             kk = f"{e.get('entry')}::{e.get('cell')}"
@@ -1337,7 +1485,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
             mhist[p].append(seen_m.get(p))
 
     passrate = []
-    for doc in results:
+    for doc in primary_results:
         ds = doc.get("summary", {}) or {}
         passed, failed = _count(ds.get("pass")), _count(ds.get("fail"))
         graded = passed + failed
@@ -1379,23 +1527,32 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     for k in keys:
         groups.setdefault(str(latest_by_key[k].get("entry")), []).append(k)
 
-    workloads_html = build_workload_cards(
-        groups=groups,
-        latest_by_key=latest_by_key,
-        history=history,
-        mhist=mhist,
-        show_trend=show_trend,
-        show_metric_trend=show_metric_trend,
-        show_notes=show_notes,
-        build=build,
-    )
+    workloads_html = ""
+    if not results:
+        workloads_html = "<p class='muted'>no results yet</p>"
+    elif customer_results:
+        workloads_html = build_workload_cards(
+            groups=groups,
+            latest_by_key=latest_by_key,
+            history=history,
+            mhist=mhist,
+            show_trend=show_trend,
+            show_metric_trend=show_metric_trend,
+            show_notes=show_notes,
+            build=build,
+        )
+    else:
+        workloads_html = (
+            "<p class='muted'>No workload results on the customer-certified stack yet. "
+            "When nightly CI runs on a newer ROCm build than the customer pin, "
+            "see the latest-stack preview below.</p>"
+        )
 
-    toolchain = "".join([
-        _chip("aorta", build.get("amd_aorta_version")),
-        _chip("PyTorch", build.get("torch")),
-        _chip("ROCm", build.get("rocm")),
-        _chip("HIP", build.get("hip")),
-    ])
+    stack_tracks_html = build_stack_tracks_html(partitioned, stacks_cfg)
+    latest_preview_html = (
+        build_latest_stack_preview(latest_results, stacks_cfg)
+        if show_latest_preview else ""
+    )
 
     provenance = [f"Run of {_esc(_fmt_timestamp(latest.get('generated_at', '')))}"]
     sha = str(build.get("head_sha") or "")
@@ -1418,6 +1575,14 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         notices.append(
             "<div class='notice'>No nightly results have been published yet. "
             "This page fills in after the first Nightly Evaluation run.</div>"
+        )
+    elif not customer_results and latest_results:
+        pin = stacks_cfg.get("customer") or {}
+        notices.append(
+            f"<div class='notice'>Nightly CI is on a newer ROCm stack than the "
+            f"customer-certified pin (ROCm {_esc(str(pin.get('rocm') or ''))}). "
+            f"Update <code class='mono'>config/ci/dashboard_stacks.yaml</code> "
+            f"when the new stack is ready for customers.</div>"
         )
     elif nothing_graded and record_now:
         scope = (
@@ -1449,7 +1614,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         notices.append(
             f"<div class='notice'>Every result reports: {_esc(shared_reason)}.</div>"
         )
-    if results and not (show_trend or show_metric_trend):
+    if results and not (show_trend or show_metric_trend) and customer_results:
         notices.append(
             "<div class='notice muted-notice'>Trend charts need at least two nightly "
             "runs; they appear automatically once more history accumulates.</div>"
@@ -1496,10 +1661,16 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         for k, v, c in cards
     )
 
-    changes_html = build_change_summary(results)
-    history_html = build_history_grid(results)
-    category_html = build_category_summary(latest_entries)
-    scaling_html = build_scaling_summary(latest_entries)
+    changes_html = build_change_summary(primary_results)
+    history_html = build_history_grid(primary_results)
+    category_html = build_category_summary(latest_entries) if customer_results else ""
+    scaling_html = build_scaling_summary(latest_entries) if customer_results else ""
+
+    trend_spark = _svg_sparkline(passrate, width=240) if customer_results else "—"
+    overview_cards = cards_html if customer_results else (
+        '<div class="card"><div class="k">customer track</div>'
+        '<div class="v">—</div></div>'
+    )
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1712,6 +1883,16 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
   ul.changes li.corr {{ border-left-color:#f85149; }}
   ul.changes li.perf {{ border-left-color:#d29922; }}
   .status-sub {{ font-size:.68rem; color:var(--muted); margin-left:.25rem; }}
+  .stack-grid {{ display:grid; gap:.75rem; margin-top:.65rem;
+                 grid-template-columns:repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }}
+  .stack-card {{ background:var(--panel); border:1px solid var(--border); border-radius:8px;
+                 padding:.75rem .85rem; }}
+  .stack-k {{ font-size:.95rem; margin:0 0 .25rem; color:#e6edf3; }}
+  .stack-lede {{ margin:0 0 .45rem; font-size:.78rem; max-width:52ch; }}
+  .stack-chips {{ margin-top:.45rem; }}
+  .stack-when {{ margin:.45rem 0 0; font-size:.75rem; }}
+  .stack-preview-hdr {{ display:flex; flex-wrap:wrap; align-items:center; gap:.5rem .75rem;
+                         margin:.35rem 0 .45rem; }}
 </style></head>
 <body>
   <div class="wrap">
@@ -1722,37 +1903,40 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
         <span class="status-sub mono">({_esc(status)})</span>
       </div>
       <p class="lede">Every night AORTA installs the freshly built wheel on a
-        reference MI350 runner and replays representative PyTorch workloads —
-        training, inference, and distributed correctness checks — comparing each
-        result against a blessed baseline when one exists.</p>
+        reference MI350 runner and replays representative PyTorch workloads.
+        The headline status reflects the <strong>customer certified</strong> ROCm
+        stack; a separate track tracks the newest ROCm nightly CI exercises.</p>
       <p class="nav"><strong>Stack health</strong> ·
+        <a href="#stack-tracks">ROCm tracks</a> ·
         <a href="docs/">AORTA documentation</a> ·
         <a href="sanitizers/">Sanitizer nightly</a> ·
         <a href="https://github.com/{_REPO}">Repository</a> ·
         <a href="data.json">data.json</a> ·
         <a href="status.json">status.json</a></p>
-      <div class="chips">{toolchain}</div>
-      <p class="prov-line">{' · '.join(provenance)}</p>
+      <p class="prov-line">{' · '.join(provenance) if customer_results else ''}</p>
     </header>
 
     {scope_notice}
+    {stack_tracks_html}
     {''.join(notices)}
     {action_panel}
 
     <section class="dash-section" id="overview">
     <div class="cards">
-      {cards_html}
-      <div class="card trend"><div class="k">pass-rate trend</div><div class="v">{_svg_sparkline(passrate, width=240)}</div></div>
+      {overview_cards}
+      <div class="card trend"><div class="k">pass-rate trend</div><div class="v">{trend_spark}</div></div>
     </div>
     </section>
 
     {category_html}
 
-    {changes_html}
+    {changes_html if customer_results else ''}
 
-    {history_html}
+    {history_html if customer_results else ''}
 
     {scaling_html}
+
+    {latest_preview_html}
 
     <section class="dash-section" id="workloads">
     <div class="secthead">

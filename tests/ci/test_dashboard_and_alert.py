@@ -27,7 +27,12 @@ eval_lib = _load("eval_lib")
 def _results(generated, entries, build=None, **summary):
     base = {"total": 0, "pass": 0, "fail": 0, "record": 0, "skip": 0}
     base.update(summary)
-    info = {"amd_aorta_version": "0.2.1rc"}
+    info = {
+        "amd_aorta_version": "0.2.1rc",
+        "rocm": "7.2.0",
+        "torch": "2.9.1+rocm7.2.0",
+        "hip": "7.2.26015",
+    }
     info.update(build or {})
     return {"generated_at": generated, "build": info, "summary": base, "entries": entries}
 
@@ -934,10 +939,47 @@ def test_build_status_json_structured_latest_summary():
     ]
     runs = [_results("2026-08-03T12:00:00Z", entries, total=1, record=1)]
     doc = gen_dashboard.build_status_json(runs)
-    assert doc["schema_version"] == 2
+    assert doc["schema_version"] == 3
     assert doc["latest"]["customer_status"] == "Baseline setup"
+    assert doc["stacks"]["customer"]["customer_status"] == "Baseline setup"
+    assert doc["stacks"]["latest"]["customer_status"] == "Baseline setup"
     assert doc["latest"]["categories"]["platform"]["worst_verdict"] == "record"
     assert "results" not in doc
+
+
+def test_dashboard_renders_dual_rocm_stack_tracks():
+    runs = [
+        _results("2026-08-10T00:00:00Z",
+                 [_cell("gpu_smoke", "c", verdict="pass")],
+                 total=1, **{"pass": 1},
+                 build={"rocm": "7.2.0", "torch": "2.9.1+rocm7.2.0"}),
+        _results("2026-08-12T00:00:00Z",
+                 [_cell("gpu_smoke", "c", verdict="pass")],
+                 total=1, **{"pass": 1},
+                 build={"rocm": "7.2.4", "torch": "2.10.0+rocm7.2.4"}),
+    ]
+    html = gen_dashboard.build_dashboard_html(runs)
+    assert "Customer certified stack" in html
+    assert "Latest ROCm stack" in html
+    assert "id='stack-tracks'" in html
+    assert "7.2.0" in html
+    assert "7.2.4" in html
+    assert "latest-rocm-preview" in html
+
+
+def test_dashboard_stacks_partition_customer_and_latest():
+    import dashboard_stacks as stacks
+
+    runs = [
+        {"build": {"rocm": "7.2.0", "torch": "2.9.1"}},
+        {"build": {"rocm": "7.2.4", "torch": "2.10.0"}},
+    ]
+    cfg = stacks.load_dashboard_stacks()
+    parts = stacks.partition_results_by_stack(runs, cfg)
+    assert len(parts["customer"]) == 1
+    assert parts["customer"][0]["build"]["rocm"] == "7.2.0"
+    assert len(parts["latest"]) == 1
+    assert parts["latest"][0]["build"]["rocm"] == "7.2.4"
 
 
 def test_data_json_feed_stays_a_top_level_array():
