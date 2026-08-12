@@ -1002,6 +1002,129 @@ def test_survey_informational_groups_both_sanitizers_with_chips_and_repro(tmp_pa
     assert "REGRESSION" not in html and "Regression" not in html
 
 
+def _waitcheck_pass_report() -> dict:
+    report = _waitcheck_report()
+    report["overall_verdict"] = "pass"
+    report["checks"][0]["verdict"] = "pass"
+    report["checks"][0]["findings"] = []
+    report["checks"][0]["kernel_results"][0]["verdict"] = "pass"
+    report["checks"][0]["kernel_results"][0]["findings"] = []
+    return report
+
+
+def _survey_mixed_entries() -> list[dict]:
+    # Three kernel groups spanning the full verdict spectrum, mirroring the nightly
+    # survey layout: gemm (waitcheck warn + ConSan fail), obj (ConSan error only ->
+    # waitcheck absent), tiny (both pass).
+    return gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "waitcheck-gemm", "group": "gemm", "sanitizer": "waitcheck",
+             "report": _waitcheck_report()},
+            {"name": "consan-gemm", "group": "gemm", "sanitizer": "consan",
+             "report": _consan_racy_report()},
+            {"name": "consan-obj", "group": "obj", "sanitizer": "consan",
+             "report": _informational_report("combined_hook_timeout")},
+            {"name": "waitcheck-tiny", "group": "tiny", "sanitizer": "waitcheck",
+             "report": _waitcheck_pass_report()},
+            {"name": "consan-tiny", "group": "tiny", "sanitizer": "consan",
+             "report": _consan_clean_report()},
+        ]}
+    )
+
+
+def test_survey_summary_stats_counts_kernels_runs_and_verdicts():
+    # #374 summary roll-up: the aggregation counts kernel groups, sanitizer runs
+    # (present reports only), and a per-verdict breakdown that sums to the run count.
+    groups = gen._group_survey_entries(_survey_mixed_entries())
+    stats = gen._survey_summary_stats(groups)
+    assert stats["kernels"] == 3
+    assert stats["runs"] == 5
+    assert stats["verdicts"] == {
+        "pass": 2, "warn": 1, "fail": 1, "error": 1, "not_checked": 0
+    }
+    # the breakdown sums exactly to the sanitizer-run count (honest arithmetic)
+    assert sum(stats["verdicts"].values()) == stats["runs"]
+    # headline is readable and omits the zero bucket
+    headline = gen._survey_headline(stats)
+    assert headline == (
+        "Surveyed 3 kernels across 5 sanitizer runs "
+        "\u2014 2 pass \u00b7 1 warn \u00b7 1 fail \u00b7 1 error"
+    )
+    assert "not_checked" not in headline
+
+
+def test_survey_summary_stats_absent_sanitizer_is_not_a_run():
+    # A group whose sanitizer has no report (didn't run / non-GPU host) is not
+    # counted as a sanitizer run and never fabricates a verdict bucket.
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "waitcheck-ghost", "group": "ghost", "sanitizer": "waitcheck"},
+            {"name": "consan-real", "group": "real", "sanitizer": "consan",
+             "report": _consan_clean_report()},
+        ]}
+    )
+    stats = gen._survey_summary_stats(gen._group_survey_entries(entries))
+    assert stats == {
+        "kernels": 2, "runs": 1,
+        "verdicts": {"pass": 1, "warn": 0, "fail": 0, "error": 0, "not_checked": 0},
+    }
+
+
+def test_survey_summary_table_renders_chips_emdash_and_gate_stays_healthy():
+    # #374: the roll-up table renders one row per kernel with the solid-color verdict
+    # chips per sanitizer, an em dash where a sanitizer did not run, the headline
+    # stat, and never flips the HEALTHY gate or leaks regression vocabulary.
+    entries = _survey_mixed_entries()
+    groups = gen._group_survey_entries(entries)
+    table = gen._survey_summary_table_html(groups)
+
+    # readable headline stat (not tiny muted text) with the accurate breakdown
+    assert 'class="survey-headline"' in table
+    assert "Surveyed 3 kernels across 5 sanitizer runs" in table
+    for part in ("2 pass", "1 warn", "1 fail", "1 error"):
+        assert part in table
+    # one row per kernel group with a stable header
+    assert "<th>Kernel</th><th>waitcheck</th><th>ConSan</th>" in table
+    # solid-color chips for every observed verdict (error/fail red, warn amber, pass green)
+    assert '<span class="vchip warn">warn</span>' in table
+    assert '<span class="vchip err">fail</span>' in table
+    assert '<span class="vchip err">error</span>' in table
+    assert '<span class="vchip pass">pass</span>' in table
+    # the obj group's waitcheck did not run -> em dash cell, never a fake verdict
+    assert "<td>&mdash;</td>" in table
+
+    # rendered on the page: gate stays HEALTHY, no regression vocabulary
+    html = gen.build_html([_healthy_guardrail_run()], survey=entries)
+    assert 'class="survey-headline"' in html
+    assert "HEALTHY — 3/3 sanitizer outcomes match their baselines" in html
+    assert "REGRESSION" not in html and "Regression" not in html
+    assert "Unexpected outcome" not in html and "Mismatch" not in html
+
+
+def test_survey_summary_empty_survey_renders_gracefully():
+    # Empty survey: no roll-up table (empty string), the empty-state note instead,
+    # and the page still renders healthy without a 0-row table.
+    assert gen._survey_summary_table_html([]) == ""
+    assert gen._survey_summary_md([]) == []
+    html = gen.build_html([_healthy_guardrail_run()], survey=[])
+    assert "No workload-survey kernels in this run." in html
+    assert 'class="survey-summary"' not in html
+    assert "HEALTHY" in html
+
+
+def test_survey_summary_md_mirrors_headline_and_table():
+    # #374: the GitHub job-summary markdown mirrors the roll-up (headline + table).
+    md = gen.build_summary_md([_healthy_guardrail_run()], survey=_survey_mixed_entries())
+    assert "Surveyed 3 kernels across 5 sanitizer runs" in md
+    assert "| Kernel | waitcheck | ConSan | Findings | Note |" in md
+    # a kernel row with both sanitizer verdicts as markdown code spans
+    assert "| gemm | `warn` | `fail` |" in md
+    # the obj group's absent waitcheck renders as an em dash, not a fake verdict
+    assert f"| obj | {gen._DASH} | `error` |" in md
+    # observed-only: no regression vocabulary in the mirror
+    assert "REGRESSION" not in md and "Mismatch" not in md
+
+
 def test_build_html_has_no_informational_section():
     # The separate informational section is fully removed: a normally-rendered page
     # never carries its heading, and build_html no longer accepts an informational arg.

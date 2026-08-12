@@ -1058,6 +1058,160 @@ def _survey_message_html(row: dict[str, Any]) -> str:
 _SANITIZER_RANK = {"waitcheck": 0, "consan": 1}
 
 
+def _group_survey_entries(
+    survey: list[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Group survey entries by kernel-group key, preserving first-seen order (pure).
+
+    The single source of truth for the Tab 2 kernel grouping: both the roll-up
+    summary table and the per-kernel detail blocks consume this same structure, so
+    a kernel scanned by both waitcheck and ConSan is one group with a sub-entry per
+    sanitizer. Returns an ordered ``[(group_key, entries), ...]`` list.
+    """
+    order: list[str] = []
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for entry in survey:
+        key = str(entry.get("group") or entry.get("name") or entry.get("label") or "survey")
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(entry)
+    return [(key, groups[key]) for key in order]
+
+
+# Verdict buckets for the observed-only survey roll-up, in display order. A
+# *present* survey run that observed something other than pass/warn/fail/error
+# (e.g. a literal ``not_checked``/unknown verdict) folds into ``not_checked``. An
+# absent sanitizer cell (no report -> the kernel was not scanned by that sanitizer)
+# is NOT a run and is excluded from these counts entirely (rendered as an em dash).
+_SURVEY_VERDICT_BUCKETS: tuple[str, ...] = ("pass", "warn", "fail", "error", "not_checked")
+
+
+def _survey_verdict_bucket(row: dict[str, Any]) -> str:
+    """Bucket a present survey row's observed verdict for the roll-up (pure)."""
+    verdict = str(row.get("verdict") or "").strip().lower()
+    return verdict if verdict in ("pass", "warn", "fail", "error") else "not_checked"
+
+
+def _survey_summary_stats(
+    groups: list[tuple[str, list[dict[str, Any]]]],
+) -> dict[str, Any]:
+    """Aggregate grouped survey entries into observed-only roll-up counts (pure).
+
+    Returns ``{"kernels": K, "runs": M, "verdicts": {bucket: n}}`` where ``kernels``
+    is the number of kernel groups, ``runs`` is the number of sanitizer runs that
+    actually produced a report (absent sanitizer cells are not runs), and
+    ``verdicts`` sums exactly to ``runs``. These are observations of what the
+    sanitizers saw -- they never gate and carry no regression semantics.
+    """
+    verdicts = dict.fromkeys(_SURVEY_VERDICT_BUCKETS, 0)
+    runs = 0
+    for _key, entries in groups:
+        for entry in entries:
+            row = entry.get("summary") or {}
+            if not row.get("present"):
+                continue
+            runs += 1
+            verdicts[_survey_verdict_bucket(row)] += 1
+    return {"kernels": len(groups), "runs": runs, "verdicts": verdicts}
+
+
+def _survey_headline(stats: dict[str, Any]) -> str:
+    """One-line at-a-glance stat for the survey roll-up (pure).
+
+    Zero buckets are omitted so the line stays readable; the shown buckets always
+    sum to the sanitizer-run count for honest arithmetic.
+    """
+    verdicts = stats.get("verdicts", {})
+    parts = [f"{n} {bucket}" for bucket in _SURVEY_VERDICT_BUCKETS if (n := verdicts.get(bucket, 0))]
+    breakdown = " \u00b7 ".join(parts) if parts else "no sanitizer runs"
+    kernels = int(stats.get("kernels", 0))
+    runs = int(stats.get("runs", 0))
+    return (
+        f"Surveyed {kernels} kernel{'' if kernels == 1 else 's'} across "
+        f"{runs} sanitizer run{'' if runs == 1 else 's'} \u2014 {breakdown}"
+    )
+
+
+def _survey_group_by_sanitizer(
+    entries: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Map a kernel group's entries to ``{sanitizer: entry}`` (first wins) (pure)."""
+    by_san: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        san = str(entry.get("sanitizer") or "").strip().lower()
+        if san and san not in by_san:
+            by_san[san] = entry
+    return by_san
+
+
+def _survey_group_findings(entries: list[dict[str, Any]]) -> int:
+    """Total findings observed across a kernel group's present entries (pure)."""
+    return sum(
+        int((entry.get("summary") or {}).get("findings") or 0)
+        for entry in entries
+        if (entry.get("summary") or {}).get("present")
+    )
+
+
+def _survey_group_note(entries: list[dict[str, Any]]) -> str:
+    """A short observation note for a kernel group's roll-up row (pure).
+
+    The first available finding code, else the first fail-closed reason, else empty.
+    Descriptive only -- never regression vocabulary.
+    """
+    for entry in entries:
+        row = entry.get("summary") or {}
+        finding_groups = row.get("finding_groups") or []
+        if finding_groups and finding_groups[0].get("code"):
+            return str(finding_groups[0]["code"])
+        reason = (row.get("primary") or {}).get("reason")
+        if reason:
+            return str(reason)
+    return ""
+
+
+def _survey_summary_cell_html(entry: dict[str, Any] | None) -> str:
+    """A verdict-chip roll-up cell, or an em dash when the sanitizer did not run."""
+    row = (entry or {}).get("summary") or {}
+    if entry is None or not row.get("present"):
+        return "&mdash;"
+    return _verdict_chip_html(row.get("verdict"))
+
+
+def _survey_summary_table_html(
+    groups: list[tuple[str, list[dict[str, Any]]]],
+) -> str:
+    """The Tab 2 roll-up: a headline stat + one row per kernel (pure).
+
+    Columns: Kernel | waitcheck | ConSan | Findings | Note. Verdict cells reuse the
+    solid-color ``_verdict_chip_html`` chips; a sanitizer not run for a kernel shows
+    an em dash rather than a fabricated verdict. Observed-only: nothing here gates.
+    Empty groups render nothing (the caller shows the empty-state note).
+    """
+    if not groups:
+        return ""
+    stats = _survey_summary_stats(groups)
+    rows: list[str] = []
+    for key, entries in groups:
+        by_san = _survey_group_by_sanitizer(entries)
+        note = _survey_group_note(entries)
+        rows.append(
+            f"<tr><td>{_esc(_survey_group_label(key, entries))}</td>"
+            f"<td>{_survey_summary_cell_html(by_san.get('waitcheck'))}</td>"
+            f"<td>{_survey_summary_cell_html(by_san.get('consan'))}</td>"
+            f"<td class=num>{_survey_group_findings(entries)}</td>"
+            f"<td>{_esc(note) or '&mdash;'}</td></tr>"
+        )
+    return (
+        f'<p class="survey-headline">{_esc(_survey_headline(stats))}</p>'
+        '<table class="survey-summary">'
+        "<tr><th>Kernel</th><th>waitcheck</th><th>ConSan</th>"
+        "<th>Findings</th><th>Note</th></tr>"
+        f'{"".join(rows)}</table>'
+    )
+
+
 def _survey_case_html(entry: dict[str, Any], *, heading: str, level: int = 3) -> str:
     """One observed-only survey case: colored verdict chip, inline message, reproduce
     line, meta, and kernel tables. ``level`` is the heading tag (3 for a standalone
@@ -1103,18 +1257,11 @@ def _survey_detail_html(survey: list[dict[str, Any]]) -> str:
             f"{_survey_note_html()}"
             '<p class="survey-empty">No workload-survey kernels in this run.</p>'
         )
-    # Group by group key, preserving first-seen order.
-    order: list[str] = []
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for entry in survey:
-        key = str(entry.get("group") or entry.get("name") or entry.get("label") or "survey")
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append(entry)
-    blocks: list[str] = [_survey_note_html()]
-    for key in order:
-        entries = groups[key]
+    grouped = _group_survey_entries(survey)
+    # Roll-up summary (headline + one row per kernel) sits above the detail blocks
+    # so the reader sees coverage + outcomes at a glance without scrolling.
+    blocks: list[str] = [_survey_note_html(), _survey_summary_table_html(grouped)]
+    for key, entries in grouped:
         if len(entries) == 1:
             entry = entries[0]
             heading = str(entry.get("label") or key)
@@ -1240,6 +1387,8 @@ def build_html(
      The chips are descriptive only (this tab never gates). */
   .survey-intro {{ font-size:14px; line-height:1.55; color:#1f2328; margin:8px 0 16px; max-width:70ch; }}
   .survey-intro p {{ margin:0 0 10px; }}
+  .survey-headline {{ font-size:14px; font-weight:600; color:#1f2328; margin:8px 0 10px; }}
+  .survey-summary {{ margin-bottom:20px; }}
   .survey-group {{ font-size:15px; margin:22px 0 4px; padding-top:6px; border-top:1px solid #d0d7de; }}
   .survey-howto {{ font-size:13px; margin:4px 0 8px; }}
   .survey-howto code {{ background:#afb8c133; border:1px solid #afb8c1; border-radius:6px;
@@ -1257,7 +1406,7 @@ def build_html(
     th,td {{ border-color:#30363d; }}
     .meta,.secondary {{ color:#8b949e; }}
     .observed {{ color:#c9d1d9; background:#6e768133; border-color:#6e7681; }}
-    .survey-intro,.survey-msg,.survey-empty {{ color:#e6edf3; }}
+    .survey-intro,.survey-msg,.survey-empty,.survey-headline {{ color:#e6edf3; }}
     .survey-group {{ border-color:#30363d; }}
     .survey-howto code {{ background:#6e768133; border-color:#6e7681; }}
     .vchip.warn {{ background:#9e6a00; }}
@@ -1396,6 +1545,36 @@ def _survey_message_md(row: dict[str, Any]) -> str:
     return ""
 
 
+def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[str]:
+    """Markdown mirror of the Tab 2 roll-up: headline stat + one row per kernel."""
+    if not groups:
+        return []
+    stats = _survey_summary_stats(groups)
+
+    def cell(entry: dict[str, Any] | None) -> str:
+        row = (entry or {}).get("summary") or {}
+        if entry is None or not row.get("present"):
+            return _DASH
+        return f"`{row.get('verdict')}`"
+
+    lines = [
+        _survey_headline(stats),
+        "",
+        "| Kernel | waitcheck | ConSan | Findings | Note |",
+        "|---|---|---|--:|---|",
+    ]
+    for key, entries in groups:
+        by_san = _survey_group_by_sanitizer(entries)
+        note = _survey_group_note(entries)
+        lines.append(
+            f"| {_survey_group_label(key, entries)} | {cell(by_san.get('waitcheck'))} "
+            f"| {cell(by_san.get('consan'))} | {_survey_group_findings(entries)} "
+            f"| {note or _DASH} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
     """Tab 2 mirror for the GitHub job summary: observed-only, non-gating."""
     lines = [
@@ -1411,6 +1590,7 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
     if not survey:
         lines += ["No workload-survey kernels in this run.", ""]
         return lines
+    lines += _survey_summary_md(_group_survey_entries(survey))
     for entry in survey:
         r = entry["summary"]
         workload = f" \u00b7 source `{entry['workload']}`" if entry.get("workload") else ""
