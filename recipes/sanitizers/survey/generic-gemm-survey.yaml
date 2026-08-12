@@ -1,0 +1,51 @@
+schema_version: 1
+mode: sanitizer
+ticket: SURVEY-GENERIC-GEMM
+description: >
+  Workload-survey (observed-only, Tab 2 of the sanitizer dashboard, #367)
+  reproduction over the GENERIC PUBLIC hipBLASLt gfx950 f32 Tensile GEMM object
+  (the same TensileLibrary_*SB*gfx950.co content prepared by
+  scripts/sanitizers/prepare_gemm_isa.py -- no customer/NDA association; only a
+  generic public code object is scanned, per CLAUDE.md rule #4). Runs BOTH
+  sanitizers over the kernel: waitcheck (static ISA scan) and ConSan (dynamic).
+  This is the reproduction path for the committed survey fixtures
+  reports/gemm_f32_waitcheck and reports/gemm_f32_consan; the committed reports
+  are the recorded outputs, this recipe documents how to regenerate them on a
+  gfx950 host. Survey rows are OBSERVED-ONLY: a warn/error here is an
+  observation, never a gate regression.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: hipblaslt_gemm_f32_nt_128x128
+      code_object: ../fixtures/isa/consan_gemm_f32.hsaco
+      code_object_index: 0
+      # Waitcheck needs a complete scan identity: with entry_offset omitted (a
+      # whole-object scan) it also requires code_object_sha256. Without it the
+      # identity is neither `exact` nor `code_object_scan`, so Waitcheck returns
+      # `code_object_identity_required` instead of the recorded `warn`. The digest
+      # is specific to the object regenerated on the gfx950 host (the .hsaco is not
+      # committed to this public repo), so set it at regeneration time:
+      # code_object_sha256: <sha256 of the regenerated object>
+    # Dynamic ConSan lane loads exactly the selected identity on-device (see the
+    # consan_app.py loader pattern); resolved relative to this recipe file.
+    consan_command: ../fixtures/bin/consan_gemm_load
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+    - consan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+    # Large production code object: the ConSan MOI transform can exceed the
+    # default ceiling and fail closed (consan_strict_load_rejection); keep the
+    # observed error as survey data rather than a false pass.
+    timeout_seconds: 300
+  output:
+    report: sanitizer_report.json

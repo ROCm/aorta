@@ -1,0 +1,76 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "load_gemm_f32.sh",
+        "command_sha256": "fbf8c5f415c858583ad028a1008d7e07bb875c344cdeaa4743ffc1a10b1a2264",
+        "hook": "lib/rocjitsu/src/rocjitsu/hooks/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "de9d9f09ce51e29e89de4e3a32e1a25cfa7da0eb602853ef725ce9aebfc6d925",
+        "selected_identity_sha256": "40f2bad2c2a23a56bbf489765793470250ae4aa3b8d73f54ca4d89dbea8836eb",
+        "selected_kernel": "hipblaslt_gemm_f32_nt_128x128"
+      },
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": null,
+            "entry_offset": null,
+            "name": "hipblaslt_gemm_f32_nt_128x128",
+            "target": "gfx950"
+          },
+          "reason": "consan_strict_load_rejection",
+          "returncode": 92,
+          "state": "error",
+          "verdict": "error"
+        }
+      ],
+      "reason": "consan_strict_load_rejection",
+      "returncode": 92,
+      "sanitizer": "consan",
+      "state": "error",
+      "verdict": "error"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [],
+      "reason": "consan_strict_load_rejection",
+      "returncode": 92,
+      "sanitizer": "waitcheck_preflight",
+      "state": "error",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "survey_isa/hipblaslt_gemm_f32.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": null,
+          "entry_offset": null,
+          "name": "hipblaslt_gemm_f32_nt_128x128",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
