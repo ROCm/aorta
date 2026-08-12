@@ -1,0 +1,28 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-WAITCHECK-TINY
+description: >
+  Observed-only (non-gating) gfx950 waitcheck static s_waitcnt wait-count hazard
+  scan over the same trivial single-kernel object (tiny_vecadd) the ConSan survey
+  case uses. Paired with daily-consan-tiny so the dashboard Workload survey
+  (Tab 2) shows both sanitizers for the one kernel; it does NOT gate the nightly.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: tiny_vecadd
+      code_object: fixtures/isa/tiny.hsaco
+      code_object_index: 0
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json

@@ -11,11 +11,12 @@ emits, into ``--out-dir``:
   object / SHA-256 / dispatch count / observed sanitizer verdict / finding count),
   and a cross-run history/trend table; and **Workload survey (observed-only)** --
   kernels drawn from multiple workloads (including aorta-internal-sourced kernels
-  supplied via ``--survey``) shown with the same kernel-detail shape but **no
-  expected/match column** (a fail / not_checked here is an observation, never a
-  regression). Both tabs link each case -- in its heading and in a per-kernel-row
-  ``Report`` column -- to its ``sanitizer_report.json`` (satisfying #367's per-row
-  drill-down), and carry a one-line observation summary.
+  supplied via ``--survey`` and the caller-supplied ConSan cases from
+  ``--informational-results-dir``, #347) shown with the same kernel-detail shape
+  but **no expected/match column** (a fail / not_checked here is an observation,
+  never a regression). Both tabs link each case -- in its heading and in a
+  per-kernel-row ``Report`` column -- to its ``sanitizer_report.json`` (satisfying
+  #367's per-row drill-down), and carry a one-line observation summary.
 * ``summary.md`` -- a GitHub Actions job-summary fragment (append to
   ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail.
 * ``data.json`` -- the aggregated structure for any richer consumer.
@@ -163,11 +164,14 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     the reduced row carries no baseline signal and the renderer must treat it as
     observational, never as a passing/failing gate row.
     """
-    if report is None:
-        # Match follows the same rule as the present path: a survey case
-        # (expected is None) is never a mismatch, while a guardrail case keeps a
-        # non-null expectation and so a missing report stays a mismatch (the gate
-        # fails closed). Hardcoding False here contradicted the survey contract.
+    if not isinstance(report, dict):
+        # Treat a missing report AND a structurally invalid one (``_load`` returns
+        # any JSON value, so a report file holding ``[]``/a scalar reaches here as a
+        # non-dict) as absent rather than calling ``.get`` on it and aborting the
+        # whole dashboard render. Match follows the same rule as the present path: a
+        # survey case (expected is None) is never a mismatch, while a guardrail case
+        # keeps a non-null expectation and so an absent report stays a mismatch (the
+        # gate fails closed). Hardcoding False here contradicted the survey contract.
         return {
             "present": False, "verdict": "—", "execution": "missing", "findings": 0,
             "coverage": "", "backend": None, "expected": expected, "match": expected is None,
@@ -529,10 +533,21 @@ def survey_cases_from_spec(
         if not backend:
             b = summary.get("backend")
             backend = b["name"] if b else _DASH
+        sanitizer = case.get("sanitizer")
+        if not sanitizer:
+            sanitizer = (summary.get("primary") or {}).get("sanitizer")
         entries.append(
             {
                 "name": name,
                 "label": str(case.get("label", name)),
+                # Optional kernel-group key so a spec can render both sanitizers of
+                # one kernel under a single heading (defaults to the case name -> a
+                # standalone case). ``command`` is an optional copy-paste reproduce
+                # line surfaced on Tab 2 (#374 B/C).
+                "group": str(case.get("group", name)),
+                "group_label": case.get("group_label"),
+                "sanitizer": sanitizer,
+                "command": case.get("command"),
                 "backend": str(backend),
                 "workload": case.get("workload"),
                 # Keep a report link only for a present report (no dead link,
@@ -541,6 +556,117 @@ def survey_cases_from_spec(
                 "report_rel": (
                     _safe_report_rel(case.get("report_rel")) if summary["present"] else None
                 ),
+                "cls": "survey",
+                "summary": summary,
+            }
+        )
+    return entries
+
+
+# The recipe that actually produces each best-effort survey case's report, so the
+# "reproduce this yourself" command on Tab 2 is the REAL recipe rather than a
+# name-derived guess. Most case dirs (``<sanitizer>-<group>``) map to
+# ``daily-<case>.yaml``, but the gemm waitcheck survey uses a dedicated object recipe
+# (``daily-waitcheck-gemm.yaml`` is the *gated* Tab-1 guardrail and is never reused
+# for the survey). Recipe names are generic/public -- no customer/NDA identifiers.
+_SURVEY_RECIPE: dict[str, str] = {
+    "waitcheck-gemm": "daily-waitcheck-gemm-object",
+}
+
+
+def _survey_recipe_for(name: str) -> str:
+    """The recipe filename stem that produces survey case ``name``'s report."""
+    return _SURVEY_RECIPE.get(name, f"daily-{name}")
+
+
+def _split_survey_case(name: str) -> tuple[str, str | None]:
+    """Split a survey case dir name into a (kernel-group, sanitizer) pair.
+
+    The nightly names each best-effort survey case ``<sanitizer>-<group>`` (e.g.
+    ``consan-gemm``, ``waitcheck-gemm``, ``consan-lds-dispatch``), so the same kernel
+    scanned by both sanitizers shares one group key and renders under one heading
+    with a sanitizer sub-block each. A name without a recognized sanitizer prefix is
+    its own group with an unknown sanitizer (the report's primary sanitizer is used
+    for display). This parse is purely structural -- no customer/NDA identifiers.
+    """
+    for prefix, san in (("consan-", "consan"), ("waitcheck-", "waitcheck")):
+        if name.startswith(prefix):
+            return name[len(prefix):], san
+    return name, None
+
+
+def survey_cases_from_informational_dir(
+    root: Path, *, rel: str | None = None
+) -> list[dict[str, Any]]:
+    """Build observed-only *survey* entries from a caller-supplied results dir.
+
+    Enumerates ``root/<case>/sanitizer_report.json`` (the layout the nightly writes
+    for its best-effort survey recipes) and folds each case into the same Tab 2
+    workload-survey shape ``survey_cases_from_spec`` produces -- kernel name,
+    dispatch, observed verdict, findings, code object / SHA, selection meta, and a
+    one-line observation carrying any fail-closed reason. Each entry is observed-only
+    (``summarize_case(report, None)`` -> ``expected=None``, ``match`` True) so a
+    ``fail``/``error`` here is an observation, never a gate.
+
+    Cases are keyed into kernel groups by ``_split_survey_case`` so the same kernel
+    run under both waitcheck and ConSan renders under one heading with a sanitizer
+    sub-block each (#374 C). The provenance recipe is surfaced as a copy-pasteable
+    reproduce ``command`` -- the REAL recipe that produced the report, resolved via
+    ``_survey_recipe_for`` (a small case-name -> recipe map, defaulting to
+    ``daily-<case>.yaml``) rather than an "experimental / caller-supplied" label
+    (#374 B). No customer/NDA
+    identifiers are hardcoded: the kernel data flows in at run time from the reports
+    (CLAUDE.md rule #4); the generic CI GEMM/LDS/vecadd kernel names are public-safe.
+
+    ``rel`` is the latest run's published area (e.g. ``runs/<id>``); when it is
+    supplied and the report is present, ``report_rel`` is set to
+    ``<rel>/survey/<name>/sanitizer_report.json`` (validated via ``_safe_report_rel``)
+    so per-case + per-kernel raw-report links resolve to the co-published report (see
+    ``main``). With ``rel=None`` (results-dir / runs-root modes, which publish no
+    co-located reports) ``report_rel`` stays ``None`` so no dead link is emitted. An
+    absent ``root`` returns ``[]`` and a case with no loadable report is skipped.
+    """
+    entries: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return entries
+    for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        report = _load(case_dir / "sanitizer_report.json")
+        # Skip an unreadable report AND a structurally invalid one (``_load`` admits
+        # any JSON value, so a best-effort survey report holding ``[]``/``null``/a
+        # scalar arrives as a non-dict); rendering it would crash ``summarize_case``
+        # on ``.get`` and abort the whole publication for a non-gating input.
+        if not isinstance(report, dict):
+            continue
+        name = case_dir.name
+        # A top-level dict can still hold a malformed *nested* shape (e.g.
+        # ``{"checks": null}`` or a non-list ``worklist``) that makes the reduction
+        # raise mid-iteration. Isolate it: one broken best-effort report must not
+        # abort the whole non-gating publication -- skip the case (fails closed, the
+        # same degradation as a non-object/unreadable report) rather than propagate.
+        try:
+            summary = summarize_case(report, None)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        backend = summary.get("backend")
+        backend_name = backend["name"] if backend else _DASH
+        group, san_from_name = _split_survey_case(name)
+        sanitizer = san_from_name or (summary.get("primary") or {}).get("sanitizer")
+        report_rel = None
+        if rel is not None and summary["present"]:
+            report_rel = _safe_report_rel(f"{rel}/survey/{name}/sanitizer_report.json")
+        entries.append(
+            {
+                "name": name,
+                "label": name,
+                "group": group,
+                "sanitizer": sanitizer,
+                "backend": str(backend_name),
+                "workload": None,
+                "command": (
+                    "aorta sweep run --recipe "
+                    f"recipes/sanitizers/{_survey_recipe_for(name)}.yaml"
+                ),
+                "report_rel": report_rel,
                 "cls": "survey",
                 "summary": summary,
             }
@@ -609,6 +735,23 @@ def _baseline_status_html(row: dict[str, Any], *, history: bool = False) -> str:
 def _observed_html(verdict: Any) -> str:
     """Render an exact sanitizer verdict without regression-health coloring."""
     return f'<span class="observed">{_esc(str(verdict))}</span>'
+
+
+# Solid-color verdict chip classes for the observed-only survey tab (Tab 2). The
+# color keys on the *observed* verdict string so a reader can scan outcomes at a
+# glance; it is purely descriptive (this tab never gates), so a red ``fail``/``error``
+# chip here is an observation and never flips the guardrail gate. not_checked /
+# unknown / anything unmapped stays neutral grey.
+_VERDICT_CHIP_CLASS: dict[str, str] = {
+    "error": "err", "fail": "err", "warn": "warn", "pass": "pass",
+}
+
+
+def _verdict_chip_html(verdict: Any) -> str:
+    """Render an observed verdict as a solid color-coded chip (survey tab only)."""
+    text = str(verdict)
+    cls = _VERDICT_CHIP_CLASS.get(text.strip().lower(), "neutral")
+    return f'<span class="vchip {cls}">{_esc(text)}</span>'
 
 
 def _execution_html(execution: Any) -> str:
@@ -762,7 +905,12 @@ def _meta_line_html(row: dict[str, Any], *, observed: bool = False) -> str:
     )
 
 
-def _kernel_tables_html(row: dict[str, Any], *, report_rel: str | None = None) -> str:
+def _kernel_tables_html(
+    row: dict[str, Any],
+    *,
+    report_rel: str | None = None,
+    verdict_html: Any = _observed_html,
+) -> str:
     """The shared kernel-detail + findings tables (identical shape on both tabs).
 
     ``report_rel`` is the case's raw ``sanitizer_report.json`` link; when it is a
@@ -773,13 +921,17 @@ def _kernel_tables_html(row: dict[str, Any], *, report_rel: str | None = None) -
     mode (results-dir / runs-root) that publishes no co-located reports -- so no
     dead or unsafe link is ever emitted. All kernel rows of one case share the
     single case-level report, so they all point at the same file.
+
+    ``verdict_html`` renders each kernel's verdict cell. The guardrail tab keeps
+    the neutral ``_observed_html`` chip; the survey tab passes ``_verdict_chip_html``
+    so a per-kernel verdict is a solid-color-coded chip (red/amber/green/grey).
     """
     link = _report_link_html(_safe_report_rel(report_rel))
     krows = (
         "".join(
             f"<tr><td class=mono>{_esc(str(k['name']))}</td>"
             f"<td class=num>{_esc(str(k['dispatch']))}</td>"
-            f"<td>{_observed_html(k['verdict'])}</td>"
+            f"<td>{verdict_html(k['verdict'])}</td>"
             f"<td class=num>{_esc(str(k['findings']))}</td>"
             f"<td class=mono>{_esc(k['code_object']) or '&mdash;'}</td>"
             f"<td class=mono>{_esc(k['sha']) or '&mdash;'}</td>"
@@ -836,133 +988,332 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
 
 
 def _survey_note_html() -> str:
+    """Readable (body-size, non-muted) intro for the workload-survey tab.
+
+    Rewritten for #374: frames Tab 2 as real GPU kernels run under AMD's two
+    sanitizers (waitcheck static wait-count scan + ConSan dynamic data-race check),
+    states plainly that it is observed-only / non-gating, and points at the per-case
+    reproduce line. Rendered at normal body size (class ``survey-intro``), not the
+    12px muted fine print it used to be. Kept free of the "experimental" /
+    "caller-supplied code objects" framing.
+    """
     return (
-        '<p class="secondary survey-note">Workload survey &mdash; observed sanitizer '
-        "behavior only. <b>No expected-behavior comparison on this tab</b>: a "
-        "<span class=mono>fail</span> or <span class=mono>not_checked</span> here is an "
-        "observation, not a regression. Kernels may be drawn from multiple workloads, "
-        "including aorta-internal-sourced kernels supplied via the survey input.</p>"
+        '<div class="survey-intro">'
+        "<p>This tab shows how <b>real GPU kernels</b> behave when AMD&rsquo;s sanitizers "
+        "run over them: <b>waitcheck</b> (a static <span class=mono>s_waitcnt</span> "
+        "wait-count hazard scan of the code object) and <b>ConSan</b> (a dynamic "
+        "data-race / concurrency check at run time). Where <b>both</b> produced a "
+        "report, the kernel is shown under each; when a scan was skipped or its "
+        "report is missing (e.g. a non-GPU run), only the sanitizer(s) that actually "
+        "ran appear.</p>"
+        "<p><b>No expected-behavior comparison on this tab</b> &mdash; it is "
+        "observed-only and does <b>not</b> gate the nightly. An "
+        "<span class=mono>error</span>, <span class=mono>fail</span>, or "
+        "<span class=mono>warn</span> here records how the kernel behaved under the "
+        "sanitizer; it is never a regression. Each case lists the recipe that produced "
+        "it and a copy-paste command to reproduce the run yourself.</p>"
+        "</div>"
+    )
+
+
+def _sanitizer_label(entry: dict[str, Any]) -> str:
+    """Human sanitizer heading for a grouped (both-sanitizer) survey sub-block."""
+    san = str(entry.get("sanitizer") or "").strip().lower()
+    if san == "waitcheck":
+        return "waitcheck (static wait-count scan)"
+    if san == "consan":
+        return "ConSan (dynamic data-race check)"
+    return str(entry.get("label") or san or "sanitizer")
+
+
+def _survey_group_label(group: str, entries: list[dict[str, Any]]) -> str:
+    """A readable kernel-group heading. Prefer an entry-supplied group label, else
+    prettify the group key (``lds-dispatch`` -> ``lds dispatch``)."""
+    for entry in entries:
+        gl = entry.get("group_label")
+        if gl:
+            return str(gl)
+    return group.replace("-", " ").replace("_", " ")
+
+
+def _survey_howto_html(entry: dict[str, Any]) -> str:
+    """A copy-pasteable "reproduce this run yourself" line (empty when unknown)."""
+    command = entry.get("command")
+    if not command:
+        return ""
+    return (
+        '<div class="survey-howto">Reproduce: '
+        f"<code>{_esc(str(command))}</code></div>"
+    )
+
+
+def _survey_message_parts(row: dict[str, Any]) -> tuple[str, str]:
+    """Pick the inline survey message as an ``(label, text)`` pair (pure).
+
+    Precedence is verdict-aware: an ``error`` case leads with its fail-closed
+    ``primary.reason`` -- an errored report can still carry *partial* findings (e.g.
+    a coverage-incomplete ConSan run), and surfacing a ``Finding:`` there would hide
+    the reason the requirement says errored cases must show inline. warn/fail cases
+    lead with the top finding example, falling back to a reason if present. Returns
+    ``("", "")`` when there is nothing to say. Single source of truth so the HTML and
+    MD twins stay in parity.
+    """
+    verdict = str(row.get("verdict") or "").strip().lower()
+    reason = (row.get("primary") or {}).get("reason")
+    reason_text = _clean_msg(str(reason), 240) if reason else ""
+    groups = row.get("finding_groups") or []
+    example = _clean_msg(str(groups[0].get("example", "")), 240) if groups else ""
+    if verdict == "error" and reason_text:
+        return "Reason", reason_text
+    if example:
+        return "Finding", example
+    if reason_text:
+        return "Reason", reason_text
+    return "", ""
+
+
+def _survey_message_html(row: dict[str, Any]) -> str:
+    """The human-readable outcome message shown INLINE on the page (#374 E).
+
+    Surfaces the actual finding / error text on Tab 2 itself, not only behind the
+    raw-report link, with error-reason-first precedence (see ``_survey_message_parts``).
+    Empty when there is nothing to say.
+    """
+    label, text = _survey_message_parts(row)
+    if not text:
+        return ""
+    return f'<div class="survey-msg">{label}: {_esc(text)}</div>'
+
+
+_SANITIZER_RANK = {"waitcheck": 0, "consan": 1}
+
+
+def _group_survey_entries(
+    survey: list[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Group survey entries by kernel-group key, preserving first-seen order (pure).
+
+    The single source of truth for the Tab 2 kernel grouping: both the roll-up
+    summary table and the per-kernel detail blocks consume this same structure, so
+    a kernel scanned by both waitcheck and ConSan is one group with a sub-entry per
+    sanitizer. Returns an ordered ``[(group_key, entries), ...]`` list.
+    """
+    order: list[str] = []
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for entry in survey:
+        key = str(entry.get("group") or entry.get("name") or entry.get("label") or "survey")
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(entry)
+    return [(key, groups[key]) for key in order]
+
+
+# Verdict buckets for the observed-only survey roll-up, in display order. A
+# *present* survey run that observed something other than pass/warn/fail/error
+# (e.g. a literal ``not_checked``/unknown verdict) folds into ``not_checked``. An
+# absent sanitizer cell (no report -> the kernel was not scanned by that sanitizer)
+# is NOT a run and is excluded from these counts entirely (rendered as an em dash).
+_SURVEY_VERDICT_BUCKETS: tuple[str, ...] = ("pass", "warn", "fail", "error", "not_checked")
+
+
+def _survey_verdict_bucket(row: dict[str, Any]) -> str:
+    """Bucket a present survey row's observed verdict for the roll-up (pure)."""
+    verdict = str(row.get("verdict") or "").strip().lower()
+    return verdict if verdict in ("pass", "warn", "fail", "error") else "not_checked"
+
+
+def _survey_summary_stats(
+    groups: list[tuple[str, list[dict[str, Any]]]],
+) -> dict[str, Any]:
+    """Aggregate grouped survey entries into observed-only roll-up counts (pure).
+
+    Returns ``{"kernels": K, "runs": M, "verdicts": {bucket: n}}`` where ``kernels``
+    is the number of kernel groups, ``runs`` is the number of sanitizer runs that
+    actually produced a report (absent sanitizer cells are not runs), and
+    ``verdicts`` sums exactly to ``runs``. These are observations of what the
+    sanitizers saw -- they never gate and carry no regression semantics.
+    """
+    verdicts = dict.fromkeys(_SURVEY_VERDICT_BUCKETS, 0)
+    runs = 0
+    for _key, entries in groups:
+        for entry in entries:
+            row = entry.get("summary") or {}
+            if not row.get("present"):
+                continue
+            runs += 1
+            verdicts[_survey_verdict_bucket(row)] += 1
+    return {"kernels": len(groups), "runs": runs, "verdicts": verdicts}
+
+
+def _survey_headline(stats: dict[str, Any]) -> str:
+    """One-line at-a-glance stat for the survey roll-up (pure).
+
+    Zero buckets are omitted so the line stays readable; the shown buckets always
+    sum to the sanitizer-run count for honest arithmetic.
+    """
+    verdicts = stats.get("verdicts", {})
+    parts = [f"{n} {bucket}" for bucket in _SURVEY_VERDICT_BUCKETS if (n := verdicts.get(bucket, 0))]
+    breakdown = " \u00b7 ".join(parts) if parts else "no sanitizer runs"
+    kernels = int(stats.get("kernels", 0))
+    runs = int(stats.get("runs", 0))
+    return (
+        f"Surveyed {kernels} kernel{'' if kernels == 1 else 's'} across "
+        f"{runs} sanitizer run{'' if runs == 1 else 's'} \u2014 {breakdown}"
+    )
+
+
+def _survey_group_by_sanitizer(
+    entries: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Map a kernel group's entries to ``{sanitizer: entry}`` (first wins) (pure)."""
+    by_san: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        san = str(entry.get("sanitizer") or "").strip().lower()
+        if san and san not in by_san:
+            by_san[san] = entry
+    return by_san
+
+
+def _survey_group_findings(entries: list[dict[str, Any]]) -> int:
+    """Total findings observed across a kernel group's present entries (pure)."""
+    return sum(
+        int((entry.get("summary") or {}).get("findings") or 0)
+        for entry in entries
+        if (entry.get("summary") or {}).get("present")
+    )
+
+
+def _survey_group_note(entries: list[dict[str, Any]]) -> str:
+    """A short observation note for a kernel group's roll-up row (pure).
+
+    Error-reason-first, mirroring ``_survey_message_parts``: if any sanitizer in the
+    group errored, its fail-closed reason is the salient note even when a sibling
+    produced findings; otherwise the first finding code, else the first reason, else
+    empty. Descriptive only -- never regression vocabulary.
+    """
+    for entry in entries:
+        row = entry.get("summary") or {}
+        if str(row.get("verdict") or "").strip().lower() == "error":
+            reason = (row.get("primary") or {}).get("reason")
+            if reason:
+                return str(reason)
+    for entry in entries:
+        row = entry.get("summary") or {}
+        finding_groups = row.get("finding_groups") or []
+        if finding_groups and finding_groups[0].get("code"):
+            return str(finding_groups[0]["code"])
+        reason = (row.get("primary") or {}).get("reason")
+        if reason:
+            return str(reason)
+    return ""
+
+
+def _survey_summary_cell_html(entry: dict[str, Any] | None) -> str:
+    """A verdict-chip roll-up cell, or an em dash when the sanitizer did not run."""
+    row = (entry or {}).get("summary") or {}
+    if entry is None or not row.get("present"):
+        return "&mdash;"
+    return _verdict_chip_html(row.get("verdict"))
+
+
+def _survey_summary_table_html(
+    groups: list[tuple[str, list[dict[str, Any]]]],
+) -> str:
+    """The Tab 2 roll-up: a headline stat + one row per kernel (pure).
+
+    Columns: Kernel | waitcheck | ConSan | Findings | Note. Verdict cells reuse the
+    solid-color ``_verdict_chip_html`` chips; a sanitizer not run for a kernel shows
+    an em dash rather than a fabricated verdict. Observed-only: nothing here gates.
+    Empty groups render nothing (the caller shows the empty-state note).
+    """
+    if not groups:
+        return ""
+    stats = _survey_summary_stats(groups)
+    rows: list[str] = []
+    for key, entries in groups:
+        by_san = _survey_group_by_sanitizer(entries)
+        note = _survey_group_note(entries)
+        rows.append(
+            f"<tr><td>{_esc(_survey_group_label(key, entries))}</td>"
+            f"<td>{_survey_summary_cell_html(by_san.get('waitcheck'))}</td>"
+            f"<td>{_survey_summary_cell_html(by_san.get('consan'))}</td>"
+            f"<td class=num>{_survey_group_findings(entries)}</td>"
+            f"<td>{_esc(note) or '&mdash;'}</td></tr>"
+        )
+    return (
+        f'<p class="survey-headline">{_esc(_survey_headline(stats))}</p>'
+        '<table class="survey-summary">'
+        "<tr><th>Kernel</th><th>waitcheck</th><th>ConSan</th>"
+        "<th>Findings</th><th>Note</th></tr>"
+        f'{"".join(rows)}</table>'
+    )
+
+
+def _survey_case_html(entry: dict[str, Any], *, heading: str, level: int = 3) -> str:
+    """One observed-only survey case: colored verdict chip, inline message, reproduce
+    line, meta, and kernel tables. ``level`` is the heading tag (3 for a standalone
+    case, 4 for a sanitizer sub-block inside a kernel group)."""
+    row = entry["summary"]
+    tag = f"h{level}"
+    raw_link = _raw_link_html(entry.get("report_rel"))
+    workload = entry.get("workload")
+    workload_txt = f" &middot; source {_esc(str(workload))}" if workload else ""
+    head = (
+        f"<{tag}>{_esc(heading)} &middot; {_verdict_chip_html(row['verdict'])}"
+        f"{raw_link}</{tag}>"
+    )
+    if not row["present"]:
+        return (
+            f"{head}"
+            f'<div class="secondary">Observation: {_esc(row.get("observation", ""))}'
+            f"{workload_txt}</div>"
+            f"{_survey_message_html(row)}"
+            f"{_survey_howto_html(entry)}"
+        )
+    return (
+        f"{head}"
+        f'<div class="secondary">backend {_esc(str(entry["backend"]))}{workload_txt}</div>'
+        f'<div class="secondary">Observation: {_esc(row.get("observation", ""))}</div>'
+        f"{_survey_message_html(row)}"
+        f"{_survey_howto_html(entry)}"
+        f"{_meta_line_html(row, observed=True)}"
+        f"{_kernel_tables_html(row, report_rel=entry.get('report_rel'), verdict_html=_verdict_chip_html)}"
     )
 
 
 def _survey_detail_html(survey: list[dict[str, Any]]) -> str:
-    """Tab 2 (workload survey): observed-only kernel detail, no expected/match column."""
+    """Tab 2 (workload survey): observed-only kernel detail, no expected/match column.
+
+    Cases sharing a ``group`` key (e.g. the same kernel run under both waitcheck and
+    ConSan) render under one kernel-group heading with a sanitizer sub-block each
+    (waitcheck first, then ConSan). A lone case renders on its own. Verdicts are
+    solid color-coded chips and the actual message is shown inline (#374 C/D/E).
+    """
     if not survey:
         return (
             f"{_survey_note_html()}"
-            "<p class=secondary>No workload-survey kernels in this run.</p>"
+            '<p class="survey-empty">No workload-survey kernels in this run.</p>'
         )
-    blocks: list[str] = [_survey_note_html()]
-    for entry in survey:
-        row = entry["summary"]
-        raw_link = _raw_link_html(entry.get("report_rel"))
-        workload = entry.get("workload")
-        workload_txt = f" &middot; source {_esc(str(workload))}" if workload else ""
-        head = (
-            f"<h3>{_esc(str(entry['label']))} &middot; {_observed_html(row['verdict'])}"
-            f"{raw_link}</h3>"
-        )
-        if not row["present"]:
-            blocks.append(
-                f"{head}"
-                f'<div class="secondary">Observation: {_esc(row.get("observation", ""))}'
-                f"{workload_txt}</div>"
-            )
+    grouped = _group_survey_entries(survey)
+    # Roll-up summary (headline + one row per kernel) sits above the detail blocks
+    # so the reader sees coverage + outcomes at a glance without scrolling.
+    blocks: list[str] = [_survey_note_html(), _survey_summary_table_html(grouped)]
+    for key, entries in grouped:
+        if len(entries) == 1:
+            entry = entries[0]
+            heading = str(entry.get("label") or key)
+            blocks.append(_survey_case_html(entry, heading=heading, level=3))
             continue
+        ordered = sorted(
+            entries, key=lambda e: _SANITIZER_RANK.get(str(e.get("sanitizer")), 99)
+        )
         blocks.append(
-            f"{head}"
-            f'<div class="secondary">backend {_esc(str(entry["backend"]))}{workload_txt}</div>'
-            f'<div class="secondary">Observation: {_esc(row.get("observation", ""))}</div>'
-            f"{_meta_line_html(row, observed=True)}"
-            f"{_kernel_tables_html(row, report_rel=entry.get('report_rel'))}"
+            f'<h3 class="survey-group">{_esc(_survey_group_label(key, entries))}</h3>'
         )
+        for entry in ordered:
+            blocks.append(_survey_case_html(entry, heading=_sanitizer_label(entry), level=4))
     return "".join(blocks)
-
-
-def informational_from_dir(root: Path) -> list[dict[str, Any]]:
-    """Enumerate non-gating "informational" cases under ``root/<case>/sanitizer_report.json``.
-
-    Used for experimental ConSan runs over caller-supplied code objects / commands
-    (``source.consan_command``, #347). These are rendered in a clearly-labelled section
-    that does **not** feed the baseline gate, so the daily controls stay authoritative.
-    Each case surfaces its observed verdict and *reason* (which the gated tables omit)
-    plus the ConSan preflight verdict. Absent fields (e.g. a passing check serializes a
-    ``null`` reason) render as the em-dash placeholder rather than a literal ``None``.
-    """
-
-    def _cell(value: object) -> str:
-        return _DASH if value is None else str(value)
-
-    cases: list[dict[str, Any]] = []
-    if not root.is_dir():
-        return cases
-    for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        report = _load(case_dir / "sanitizer_report.json")
-        if report is None:
-            continue
-        summary = summarize_case(report, report.get("overall_verdict"))
-        primary = (_DASH, _DASH, _DASH)
-        preflight = _DASH
-        for check in report.get("checks", []):
-            san = check.get("sanitizer")
-            if san == "waitcheck_preflight":
-                preflight = _cell(check.get("verdict"))
-            else:
-                primary = (_cell(san), _cell(check.get("verdict")), _cell(check.get("reason")))
-        cases.append(
-            {
-                "name": case_dir.name,
-                "summary": summary,
-                "sanitizer": primary[0],
-                "verdict": primary[1],
-                "reason": primary[2],
-                "preflight": preflight,
-            }
-        )
-    return cases
-
-
-def build_informational_html(cases: list[dict[str, Any]]) -> str:
-    if not cases:
-        return ""
-    rows = "".join(
-        f"<tr><td class=mono>{_esc(c['name'])}</td>"
-        f"<td class=mono>{_esc(c['sanitizer'])}</td>"
-        f"<td>{_observed_html(c['verdict'])}</td>"
-        f"<td class=mono>{_esc(_clean_msg(c['reason'], 200))}</td>"
-        f"<td>{_observed_html(c['preflight'])}</td></tr>"
-        for c in cases
-    )
-    return (
-        "<h2>Informational &middot; caller-supplied code objects (non-gating)</h2>"
-        "<p class=secondary>Experimental ConSan runs over caller-supplied kernels/objects "
-        "(<span class=mono>source.consan_command</span>, #347). These do <b>not</b> affect the "
-        "gate above; the table reports each case's observed verdict and reason for this run.</p>"
-        "<table><tr><th>Recipe</th><th>Sanitizer</th><th>Verdict</th><th>Reason</th>"
-        f"<th>ConSan preflight</th></tr>{rows}</table>"
-    )
-
-
-def build_informational_md(cases: list[dict[str, Any]]) -> str:
-    if not cases:
-        return ""
-    lines = [
-        "## Informational \u00b7 caller-supplied code objects (non-gating)",
-        "",
-        "Experimental ConSan runs over caller-supplied kernels/objects "
-        "(`source.consan_command`, #347). These do **not** affect the gate; the table reports "
-        "each case's observed verdict and reason for this run.",
-        "",
-        "| Recipe | Sanitizer | Verdict | Reason | ConSan preflight |",
-        "|---|---|---|---|---|",
-    ]
-    for c in cases:
-        reason = _clean_msg(c["reason"], 200).replace("|", "\\|")
-        lines.append(
-            f"| `{c['name']}` | `{c['sanitizer']}` | `{c['verdict']}` | {reason} | `{c['preflight']}` |"
-        )
-    lines.append("")
-    return "\n".join(lines)
 
 
 def build_html(
@@ -970,7 +1321,6 @@ def build_html(
     *,
     title: str = "Sanitizers Nightly",
     status: dict[str, Any] | None = None,
-    informational: list[dict[str, Any]] | None = None,
     survey: list[dict[str, Any]] | None = None,
 ) -> str:
     banner = _status_banner_html(status)
@@ -1071,12 +1421,33 @@ def build_html(
   .pill {{ padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }}
   .pill.ok {{ background:#1a7f3722; color:#1a7f37; }} .pill.bad {{ background:#cf222e22; color:#cf222e; }}
   .pill.pass {{ background:#2c7d3b; color:#fff; }} .pill.fail {{ background:#c92c35; color:#fff; }}
+  /* Survey tab (Tab 2): readable body-size intro + solid color-coded verdict chips.
+     The chips are descriptive only (this tab never gates). */
+  .survey-intro {{ font-size:14px; line-height:1.55; color:#1f2328; margin:8px 0 16px; max-width:70ch; }}
+  .survey-intro p {{ margin:0 0 10px; }}
+  .survey-headline {{ font-size:14px; font-weight:600; color:#1f2328; margin:8px 0 10px; }}
+  .survey-summary {{ margin-bottom:20px; }}
+  .survey-group {{ font-size:15px; margin:22px 0 4px; padding-top:6px; border-top:1px solid #d0d7de; }}
+  .survey-howto {{ font-size:13px; margin:4px 0 8px; }}
+  .survey-howto code {{ background:#afb8c133; border:1px solid #afb8c1; border-radius:6px;
+          padding:1px 6px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }}
+  .survey-msg {{ font-size:13px; line-height:1.5; margin:4px 0 8px; color:#1f2328;
+          font-family:ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-word; }}
+  .survey-empty {{ font-size:14px; color:#1f2328; margin:8px 0; }}
+  .vchip {{ display:inline-block; color:#fff; padding:1px 8px; border-radius:999px;
+          font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace; }}
+  .vchip.err {{ background:#cf222e; }} .vchip.warn {{ background:#9a6700; }}
+  .vchip.pass {{ background:#1a7f37; }} .vchip.neutral {{ background:#6e7681; }}
   @media (prefers-color-scheme: dark) {{
     body {{ background:#0d1117; color:#e6edf3; }}
     table {{ background:#161b22; }} th {{ background:#161b22; color:#8b949e; }}
     th,td {{ border-color:#30363d; }}
     .meta,.secondary {{ color:#8b949e; }}
     .observed {{ color:#c9d1d9; background:#6e768133; border-color:#6e7681; }}
+    .survey-intro,.survey-msg,.survey-empty,.survey-headline {{ color:#e6edf3; }}
+    .survey-group {{ border-color:#30363d; }}
+    .survey-howto code {{ background:#6e768133; border-color:#6e7681; }}
+    .vchip.warn {{ background:#9e6a00; }}
     #tab-guardrails:checked ~ .tabbar label[for="tab-guardrails"],
     #tab-survey:checked ~ .tabbar label[for="tab-survey"] {{
             color:#e6edf3; background:#161b22; border-color:#30363d; }}
@@ -1125,7 +1496,6 @@ def build_html(
   <section class=tabpanel id=panel-survey>
   <h2>Workload survey</h2>
   {_survey_detail_html(survey or [])}
-  {build_informational_html(informational or [])}
   </section>
   </div>
 </div></body></html>
@@ -1200,20 +1570,63 @@ def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightl
     )
 
 
+def _survey_message_md(row: dict[str, Any]) -> str:
+    """The inline human-readable outcome message for the MD mirror (#374 E).
+
+    Same error-reason-first precedence as the HTML twin (``_survey_message_parts``).
+    """
+    label, text = _survey_message_parts(row)
+    return f"{label}: `{text}`" if text else ""
+
+
+def _survey_summary_md(groups: list[tuple[str, list[dict[str, Any]]]]) -> list[str]:
+    """Markdown mirror of the Tab 2 roll-up: headline stat + one row per kernel."""
+    if not groups:
+        return []
+    stats = _survey_summary_stats(groups)
+
+    def cell(entry: dict[str, Any] | None) -> str:
+        row = (entry or {}).get("summary") or {}
+        if entry is None or not row.get("present"):
+            return _DASH
+        return f"`{row.get('verdict')}`"
+
+    lines = [
+        _survey_headline(stats),
+        "",
+        "| Kernel | waitcheck | ConSan | Findings | Note |",
+        "|---|---|---|--:|---|",
+    ]
+    for key, entries in groups:
+        by_san = _survey_group_by_sanitizer(entries)
+        note = _survey_group_note(entries)
+        lines.append(
+            f"| {_survey_group_label(key, entries)} | {cell(by_san.get('waitcheck'))} "
+            f"| {cell(by_san.get('consan'))} | {_survey_group_findings(entries)} "
+            f"| {note or _DASH} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
     """Tab 2 mirror for the GitHub job summary: observed-only, non-gating."""
     lines = [
         "## Workload survey (observed-only)",
         "",
-        "Observed sanitizer behavior only \u2014 **no expected-behavior comparison on this "
-        "tab**; a `fail` / `not_checked` here is an observation, not a regression. Kernels "
-        "may be drawn from multiple workloads, including aorta-internal-sourced kernels "
-        "supplied via the survey input.",
+        "How real GPU kernels behave under AMD's sanitizers \u2014 **waitcheck** (static "
+        "`s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check); where "
+        "both produced a report the kernel is shown under each, and when a scan was "
+        "skipped or its report is missing only the sanitizer(s) that ran appear. **No "
+        "expected-behavior comparison on this tab**; an `error` / `fail` / `warn` here "
+        "is an observation of how the kernel behaved, not a regression. Each case lists "
+        "a copy-paste command to reproduce the run.",
         "",
     ]
     if not survey:
         lines += ["No workload-survey kernels in this run.", ""]
         return lines
+    lines += _survey_summary_md(_group_survey_entries(survey))
     for entry in survey:
         r = entry["summary"]
         workload = f" \u00b7 source `{entry['workload']}`" if entry.get("workload") else ""
@@ -1222,6 +1635,11 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
             f"`{r['verdict']}`</summary>"
         )
         lines += ["", f"Observation: {r.get('observation', '')}{workload}"]
+        message = _survey_message_md(r)
+        if message:
+            lines += ["", message]
+        if entry.get("command"):
+            lines += ["", f"Reproduce: `{entry['command']}`"]
         if not r["present"]:
             lines += ["", "</details>", ""]
             continue
@@ -1243,7 +1661,6 @@ def build_summary_md(
     runs: list[dict[str, Any]],
     *,
     status: dict[str, Any] | None = None,
-    informational: list[dict[str, Any]] | None = None,
     survey: list[dict[str, Any]] | None = None,
 ) -> str:
     banner = _status_banner_md(status)
@@ -1344,10 +1761,6 @@ def build_summary_md(
 
     lines += _survey_section_md(survey or [])
 
-    informational_md = build_informational_md(informational or [])
-    if informational_md:
-        lines += [informational_md]
-
     lines += [
         "## History / trend",
         "",
@@ -1392,8 +1805,9 @@ def main() -> int:
     ap.add_argument(
         "--informational-results-dir",
         type=Path,
-        help="dir of <case>/sanitizer_report.json rendered as a non-gating informational "
-        "section (experimental caller-supplied ConSan objects; does not affect the gate)",
+        help="dir of <case>/sanitizer_report.json (caller-supplied ConSan objects, #347) "
+        "folded into the observed-only workload-survey tab (Tab 2) as non-gating cases; "
+        "no longer a separate informational section. Absent dir => no cases.",
     )
     ap.add_argument(
         "--survey",
@@ -1432,12 +1846,6 @@ def main() -> int:
     else:
         runs = runs_from_history_root(args.history_root, baselines, keep=args.keep)
 
-    informational = (
-        informational_from_dir(args.informational_results_dir)
-        if args.informational_results_dir is not None
-        else []
-    )
-
     # Observed-only survey cases for Tab 2. A malformed/absent spec degrades to an
     # empty survey (Tab 2 renders its empty-state note) rather than crashing render.
     survey: list[dict[str, Any]] = []
@@ -1445,6 +1853,16 @@ def main() -> int:
         spec = _load(args.survey)
         if isinstance(spec, (dict, list)):
             survey = survey_cases_from_spec(spec, base_dir=args.survey.parent)
+    # Caller-supplied ConSan cases (#347) now render as observed-only workload-survey
+    # (Tab 2) entries rather than a separate informational section. They are appended
+    # after any explicit --survey spec cases so an explicit spec (if wired) leads, and
+    # their report_rel is threaded to the latest run's published area so per-case /
+    # per-kernel raw-report links resolve once the reports are co-published below.
+    if args.informational_results_dir is not None:
+        survey += survey_cases_from_informational_dir(
+            args.informational_results_dir,
+            rel=runs[0].get("rel") if runs else None,
+        )
     # Mirror the two-class split into data.json: attach the survey list to the
     # latest run record (additive; existing per-run keys are untouched).
     if runs:
@@ -1452,7 +1870,7 @@ def main() -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(
-        build_html(runs, status=status, informational=informational, survey=survey),
+        build_html(runs, status=status, survey=survey),
         encoding="utf-8",
     )
     # In published-history mode, write each retained run's tiny landing page next
@@ -1499,8 +1917,23 @@ def main() -> int:
             (run_out / "index.html").write_text(
                 build_run_index_html(run), encoding="utf-8"
             )
+        # Co-publish each caller-supplied ConSan report (#347) under the latest run's
+        # survey area so the report_rel links threaded above (survey/<name>/...)
+        # resolve. Done after the stale-clear (shutil.rmtree) and the per-run loop
+        # that (re)creates out_dir/<rel>, using the same rel + case name as
+        # survey_cases_from_informational_dir so the copied path matches the link.
+        latest_rel = runs[0].get("rel") if runs else None
+        info_dir = args.informational_results_dir
+        if latest_rel and info_dir is not None and info_dir.is_dir():
+            for case_dir in sorted(p for p in info_dir.iterdir() if p.is_dir()):
+                src_report = case_dir / "sanitizer_report.json"
+                if not src_report.is_file():
+                    continue
+                dest = args.out_dir / latest_rel / "survey" / case_dir.name
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_report, dest / "sanitizer_report.json")
     (args.out_dir / "summary.md").write_text(
-        build_summary_md(runs, status=status, informational=informational, survey=survey),
+        build_summary_md(runs, status=status, survey=survey),
         encoding="utf-8",
     )
     (args.out_dir / "data.json").write_text(

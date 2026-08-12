@@ -7,8 +7,8 @@ description: >
   via the source.consan_command path added in #347. The kernel is instrumented and
   runs, exercising ConSan record/replay end-to-end on a caller-supplied object. On the
   current rocjitsu build it fails closed (record capture yields zero events -> exit 86;
-  see ROCm/rocm-systems#9972) rather than a false pass. Rendered in the dashboard's
-  informational section; it does NOT gate the nightly.
+  see ROCm/rocm-systems#9972) rather than a false pass. Rendered on the dashboard's
+  Workload survey tab (Tab 2) as an observed-only case; it does NOT gate the nightly.
 sanitizer_plan:
   target: gfx950
   source:

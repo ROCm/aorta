@@ -8,8 +8,8 @@ description: >
   added in #347. This exercises the guardrail's fail-closed behavior on large
   production code objects; on the current rocjitsu build it fails closed
   (combined_hook_timeout / moi-report-allocation) rather than a false pass -- see
-  ROCm/rocm-systems#9964 and #9970. Rendered in the dashboard's informational
-  section; it does NOT gate the nightly.
+  ROCm/rocm-systems#9964 and #9970. Rendered on the dashboard's Workload survey
+  tab (Tab 2) as an observed-only case; it does NOT gate the nightly.
 sanitizer_plan:
   target: gfx950
   source:
