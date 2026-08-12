@@ -860,3 +860,248 @@ def test_informational_section_renders_reason_and_is_non_gating():
     page = gen.build_html([healthy], informational=cases)
     assert "HEALTHY" in page
     assert "combined_hook_timeout" in page and "non-gating" in page
+
+
+# --- #367: two-tab (guardrail + workload survey) kernel-level dashboard ---
+
+
+def test_summarize_case_survey_is_observational_with_primary_and_observation():
+    # expected=None marks a survey (observed-only) case: match is True (no baseline
+    # comparison) and the folded primary/observation fields are surfaced for both tabs.
+    case = gen.summarize_case(_consan_racy_report(), None)
+    assert case["expected"] is None
+    assert case["match"] is True
+    assert case["primary"] == {
+        "sanitizer": "consan", "verdict": "fail", "reason": None, "preflight": None
+    }
+    assert case["observation"].startswith("consan fail")
+    # a guardrail case (expected set) keeps its baseline match semantics
+    guard = gen.summarize_case(_consan_racy_report(), "pass")
+    assert guard["match"] is False and guard["expected"] == "pass"
+    # a missing report degrades to an explicit, observational placeholder
+    missing = gen.summarize_case(None, None)
+    assert missing["present"] is False and missing["observation"] == "report missing"
+
+
+def test_primary_prefers_last_nonpreflight_and_captures_preflight():
+    report = _informational_report("consan_strict_load_rejection")
+    primary = gen._primary_checks(report["checks"])
+    assert primary["sanitizer"] == "consan"
+    assert primary["verdict"] == "error"
+    assert primary["reason"] == "consan_strict_load_rejection"
+    # the waitcheck_preflight check is captured separately, not as the primary
+    assert primary["preflight"] == "error"
+
+
+def test_run_record_tags_rows_as_guardrail():
+    rows = {c: gen.summarize_case(_waitcheck_report(), "warn") for c, *_ in gen.CASES}
+    rec = gen._run_record({"run": "r"}, rows)
+    assert all(r["cls"] == "guardrail" for r in rec["rows"].values())
+
+
+def test_survey_cases_from_spec_classifies_and_threads_links(tmp_path):
+    (tmp_path / "wc.json").write_text(json.dumps(_waitcheck_report()))
+    spec = {
+        "cases": [
+            {
+                "name": "top5", "label": "top-5 f32 GEMM \u00b7 ConSan",
+                "backend": "consan (dynamic)", "workload": "internal:gemm_top5",
+                "report_rel": "runs/x/survey/top5/sanitizer_report.json",
+                "report": _consan_racy_report(),
+            },
+            {"name": "wc", "label": "waitcheck survey", "report_path": "wc.json"},
+            {"name": "missing", "label": "absent case", "report_path": "does-not-exist.json"},
+        ]
+    }
+    entries = gen.survey_cases_from_spec(spec, base_dir=tmp_path)
+
+    assert [e["cls"] for e in entries] == ["survey", "survey", "survey"]
+    top = entries[0]
+    # observed-only: expected None, match True -> never a regression
+    assert top["summary"]["expected"] is None and top["summary"]["match"] is True
+    assert top["summary"]["verdict"] == "fail"
+    assert top["report_rel"] == "runs/x/survey/top5/sanitizer_report.json"
+    assert top["workload"] == "internal:gemm_top5"
+    assert top["summary"]["observation"].startswith("consan fail")
+    # report_path is loaded relative to base_dir
+    assert entries[1]["summary"]["verdict"] == "warn"
+    # a missing report degrades gracefully: still an entry, no dead link
+    assert entries[2]["summary"]["present"] is False
+    assert entries[2]["report_rel"] is None
+    # a bare list (no "cases" wrapper) is accepted too
+    assert gen.survey_cases_from_spec([{"name": "x", "report": _waitcheck_report()}])[0][
+        "cls"
+    ] == "survey"
+
+
+def _healthy_guardrail_run() -> dict:
+    rows = {c: gen.summarize_case(_waitcheck_report(), "warn") for c, *_ in gen.CASES}
+    return gen._run_record(
+        {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"}, rows
+    )
+
+
+def test_build_html_renders_two_self_contained_tabs():
+    survey = gen.survey_cases_from_spec(
+        {"cases": [{"name": "top5", "label": "top-5 GEMM survey",
+                    "backend": "consan (dynamic)", "report": _consan_racy_report()}]}
+    )
+    html = gen.build_html([_healthy_guardrail_run()], survey=survey)
+
+    # both tabs, radio-toggled, guardrails default-selected
+    assert "id=tab-guardrails class=tabradio checked" in html
+    assert "id=tab-survey class=tabradio" in html
+    assert "Expected behavior (guardrails)" in html
+    assert "Workload survey (observed-only)" in html
+    # self-contained: no external JS/CSS, no CDN, no protocol-absolute links
+    assert "<script" not in html.lower()
+    assert "cdn" not in html.lower()
+    assert "http://" not in html and "https://" not in html
+    # explicit observed-only note on the survey tab
+    assert "No expected-behavior comparison on this tab" in html
+
+
+def test_build_html_survey_fail_is_observed_neutral_never_a_regression():
+    # Guardrails are all healthy warn; the survey case observed a fail. The survey
+    # fail must render as a neutral observed verdict and must NOT turn the gate red
+    # or be labelled a regression / mismatch / unexpected outcome.
+    survey = gen.survey_cases_from_spec(
+        {"cases": [{"name": "s", "label": "survey fail case",
+                    "report": _consan_racy_report()}]}
+    )
+    html = gen.build_html([_healthy_guardrail_run()], survey=survey)
+
+    assert "HEALTHY — 3/3 sanitizer outcomes match their baselines" in html
+    # the fail is surfaced as an observed (neutral) verdict, not a health colour
+    assert '<span class="observed">fail</span>' in html
+    # none of the guardrail regression vocabulary leaks in from the survey
+    assert "REGRESSION" not in html and "Regression" not in html
+    assert "Unexpected outcome" not in html and "Mismatch" not in html
+    # no baseline/expected column on the survey tab (no "expected <verdict>" phrasing
+    # is emitted for the survey case; that phrasing is guardrail-only)
+    assert "survey fail case" in html
+    # observation summary is present on the tab
+    assert "Observation:" in html
+
+
+def test_build_html_survey_report_link_and_graceful_absence():
+    survey = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "linked", "label": "linked survey",
+             "report_rel": "runs/x/survey/linked/sanitizer_report.json",
+             "report": _consan_racy_report()},
+            {"name": "nolink", "label": "nolink survey", "report": _waitcheck_report()},
+        ]}
+    )
+    html = gen.build_html([_healthy_guardrail_run()], survey=survey)
+
+    # the linked survey case drills down to its raw report; the unlinked one still
+    # renders (degrades to no link). Guardrail rows carry no report_rel here, so the
+    # only "view raw report" link comes from the linked survey case.
+    assert 'href="runs/x/survey/linked/sanitizer_report.json"' in html
+    assert html.count("view raw report") == 1
+    assert "linked survey" in html and "nolink survey" in html
+
+
+def test_build_html_empty_survey_shows_placeholder_note():
+    html = gen.build_html([_healthy_guardrail_run()], survey=[])
+    assert "Workload survey (observed-only)" in html
+    assert "No workload-survey kernels in this run." in html
+
+
+def test_build_summary_md_mirrors_two_tab_split():
+    survey = gen.survey_cases_from_spec(
+        {"cases": [{"name": "top5", "label": "top-5 survey",
+                    "workload": "internal:gemm_top5", "report": _consan_racy_report()}]}
+    )
+    rows = {c: gen.summarize_case(_waitcheck_report(), "warn") for c, *_ in gen.CASES}
+    run = gen._run_record({"run": "r1", "commit": "abc", "date": "d"}, rows)
+    md = gen.build_summary_md([run], survey=survey)
+
+    # guardrail section stays labelled and keeps the substring existing tests rely on
+    assert "Expected behavior (guardrails) \u00b7 Kernel details" in md
+    assert "Kernel details" in md
+    # survey section present, observed-only, non-gating
+    assert "## Workload survey (observed-only)" in md
+    assert "no expected-behavior comparison on this tab" in md.lower()
+    assert "observed `fail`" in md
+    assert "source `internal:gemm_top5`" in md
+    # the survey fail never flips the gate
+    assert "**HEALTHY**" in md
+    assert "**REGRESSION**" not in md
+
+
+def test_main_survey_flows_into_html_and_data_json(tmp_path, monkeypatch):
+    baselines = (
+        _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    )
+    incoming = tmp_path / "incoming"
+    for case, report in (
+        ("waitcheck", _waitcheck_report()),
+        ("consan-clean", _consan_clean_report()),
+        ("consan-racy", _consan_racy_report()),
+    ):
+        (incoming / case).mkdir(parents=True)
+        (incoming / case / "sanitizer_report.json").write_text(json.dumps(report))
+
+    survey_spec = tmp_path / "survey.json"
+    survey_spec.write_text(json.dumps({"cases": [
+        {"name": "top5", "label": "top-5 GEMM survey", "backend": "consan (dynamic)",
+         "workload": "internal:gemm_top5",
+         "report_rel": "survey/top5/sanitizer_report.json",
+         "report": _consan_racy_report()},
+    ]}))
+    out = tmp_path / "out"
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--results-dir", str(incoming),
+        "--baselines", str(baselines),
+        "--survey", str(survey_spec),
+        "--out-dir", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "Workload survey (observed-only)" in html and "top-5 GEMM survey" in html
+    assert 'href="survey/top5/sanitizer_report.json"' in html
+
+    data = json.loads((out / "data.json").read_text(encoding="utf-8"))
+    # guardrail/survey case-class split is mirrored into data.json (additive fields)
+    assert data[0]["rows"]["waitcheck"]["cls"] == "guardrail"
+    survey = data[0]["survey"]
+    assert len(survey) == 1 and survey[0]["cls"] == "survey"
+    assert survey[0]["summary"]["expected"] is None
+    assert survey[0]["report_rel"] == "survey/top5/sanitizer_report.json"
+
+    md = (out / "summary.md").read_text(encoding="utf-8")
+    assert "## Workload survey (observed-only)" in md
+
+
+def test_main_without_survey_omits_survey_rows_but_renders_tab(tmp_path, monkeypatch):
+    # The survey flag is additive: existing invocations (no --survey) still work and
+    # render Tab 2 with its empty-state note; data.json carries an empty survey list.
+    baselines = (
+        _REPO_ROOT / "recipes" / "sanitizers" / "fixtures" / "expected" / "verdict_baselines.json"
+    )
+    incoming = tmp_path / "incoming"
+    for case, report in (
+        ("waitcheck", _waitcheck_report()),
+        ("consan-clean", _consan_clean_report()),
+        ("consan-racy", _consan_racy_report()),
+    ):
+        (incoming / case).mkdir(parents=True)
+        (incoming / case / "sanitizer_report.json").write_text(json.dumps(report))
+    out = tmp_path / "out"
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--results-dir", str(incoming),
+        "--baselines", str(baselines),
+        "--out-dir", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "No workload-survey kernels in this run." in html
+    data = json.loads((out / "data.json").read_text(encoding="utf-8"))
+    assert data[0]["survey"] == []
