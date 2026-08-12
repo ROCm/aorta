@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-08-12-31598906719` · commit `5fbbb5c04dc4` · 2026-08-12
+Run `2026-08-12-31615014466` · commit `f1660c492df6` · 2026-08-12
 
 ✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
@@ -58,30 +58,107 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=18362752 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=39182336 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
 
 </details>
 
 ## Workload survey (observed-only)
 
-Observed sanitizer behavior only — **no expected-behavior comparison on this tab**; a `fail` / `not_checked` here is an observation, not a regression. Kernels may be drawn from multiple workloads, including aorta-internal-sourced kernels supplied via the survey input.
+How real GPU kernels behave under AMD's sanitizers — **waitcheck** (static `s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check); where both produced a report the kernel is shown under each, and when a scan was skipped or its report is missing only the sanitizer(s) that ran appear. **No expected-behavior comparison on this tab**; an `error` / `fail` / `warn` here is an observation of how the kernel behaved, not a regression. Each case lists a copy-paste command to reproduce the run.
 
-No workload-survey kernels in this run.
+Surveyed 3 kernels across 6 sanitizer runs — 2 pass · 1 warn · 3 error
 
-## Informational · caller-supplied code objects (non-gating)
+| Kernel | waitcheck | ConSan | Findings | Note |
+|---|---|---|--:|---|
+| gemm | `warn` | `error` | 32 | combined_hook_timeout |
+| lds dispatch | `pass` | `error` | 0 | combined_hook_exit_86 |
+| tiny | `pass` | `error` | 0 | combined_hook_exit_86 |
 
-Experimental ConSan runs over caller-supplied kernels/objects (`source.consan_command`, #347). These do **not** affect the gate; the table reports each case's observed verdict and reason for this run.
+<details><summary><b>consan-gemm</b> — observed `error`</summary>
 
-| Recipe | Sanitizer | Verdict | Reason | ConSan preflight |
-|---|---|---|---|---|
-| `consan-gemm` | `consan` | `error` | combined_hook_timeout | `error` |
-| `consan-lds-dispatch` | `consan` | `error` | combined_hook_exit_86 | `error` |
-| `consan-tiny` | `consan` | `error` | combined_hook_exit_86 | `error` |
+Observation: consan error; reason combined_hook_timeout; preflight error
+
+Reason: `combined_hook_timeout`
+
+Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
+|---|--:|---|--:|---|---|
+| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `c1190d2005` |
+
+</details>
+
+<details><summary><b>consan-lds-dispatch</b> — observed `error`</summary>
+
+Observation: consan error; reason combined_hook_exit_86; preflight error
+
+Reason: `combined_hook_exit_86`
+
+Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
+|---|--:|---|--:|---|---|
+| `lds_reduce` | 1 | `error` | 0 | `lds.hsaco` | `98cff2cdda` |
+
+</details>
+
+<details><summary><b>consan-tiny</b> — observed `error`</summary>
+
+Observation: consan error; reason combined_hook_exit_86; preflight error
+
+Reason: `combined_hook_exit_86`
+
+Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
+|---|--:|---|--:|---|---|
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `87c4da610c` |
+
+</details>
+
+<details><summary><b>waitcheck-gemm</b> — observed `warn`</summary>
+
+Observation: waitcheck warn; 32 finding(s) (wait_hazard)
+
+Finding: `consan_gemm_f32.hsaco:gfx950[0]:.text+0x454: missing s_waitcnt lgkmcnt(0) before def of s45`
+
+Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
+|---|--:|---|--:|---|---|
+| `gemm_f32_ss` | 1 | `warn` | 32 | `consan_gemm_f32.hsaco` | `c1190d2005` |
+
+</details>
+
+<details><summary><b>waitcheck-lds-dispatch</b> — observed `pass`</summary>
+
+Observation: waitcheck pass
+
+Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
+|---|--:|---|--:|---|---|
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `98cff2cdda` |
+
+</details>
+
+<details><summary><b>waitcheck-tiny</b> — observed `pass`</summary>
+
+Observation: waitcheck pass
+
+Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml`
+
+| Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
+|---|--:|---|--:|---|---|
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `87c4da610c` |
+
+</details>
 
 ## History / trend
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-08-12-31615014466 | `f1660c492df6` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-12-31598906719 | `5fbbb5c04dc4` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-12-31596128350 | `261893abafd3` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-11-31513370892 | `d80f57250f7f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
