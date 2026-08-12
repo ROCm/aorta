@@ -765,6 +765,7 @@ def _kernel_detail_html(rows: dict[str, dict[str, Any]]) -> str:
             blocks.append(
                 f"<h3>{_esc(label)} &middot; {_baseline_status_html(row)}</h3>"
                 f"<p>Observed sanitizer verdict: {_observed_html(row['verdict'])}</p>"
+                f'<div class="secondary">Observation: {_esc(row.get("observation", ""))}</div>'
             )
             continue
         blocks.append(
@@ -1239,7 +1240,14 @@ def build_summary_md(
         )
         lines.append("")
         if not r["present"]:
-            lines += [f"Observed sanitizer verdict: `{r['verdict']}`", "", "</details>", ""]
+            lines += [
+                f"Observed sanitizer verdict: `{r['verdict']}`",
+                "",
+                f"Observation: {r.get('observation', '')}",
+                "",
+                "</details>",
+                "",
+            ]
             continue
         b = r["backend"]
         wl = r["worklist"]
@@ -1247,6 +1255,7 @@ def build_summary_md(
         lines.append(
             f"Observed sanitizer verdict `{r['verdict']}` \u00b7 expected `{r['expected'] or _DASH}`"
         )
+        lines.append(f"Observation: {r.get('observation', '')}")
         lines.append(
             f"backend `{backend_name}`"
             + (f" `{b['sha']}`" if b else "")

@@ -151,6 +151,8 @@ def test_summary_md_expected_warn_and_fail_are_healthy():
     assert "Kernel details" in md
     assert "`gemm_x`" in md and "sol_1.hsaco" in md
     assert "Observed sanitizer verdict `fail` · expected `fail`" in md
+    # per-case observation summary is surfaced on the guardrail (Tab 1) MD too
+    assert "Observation: waitcheck warn" in md
     assert "| Kernel | Dispatch | Observed sanitizer verdict |" in md
     assert "✅ **Match**<br>Observed: `warn`" in md
     assert "Healthy |" in md
@@ -249,6 +251,10 @@ def test_renderers_make_missing_report_explicit():
     assert "❌ **Report missing**" in md
     assert "Observed sanitizer verdict: `—`" in md
     assert "❌ **Report missing**<br>Observed: `—`" in md
+    # the per-case observation summary renders for a missing guardrail report too,
+    # on both Tab 1 renderers (parity with the survey missing branch / #367).
+    assert '<div class="secondary">Observation: report missing</div>' in html
+    assert "Observation: report missing" in md
 
 
 def test_gate_summary_distinguishes_missing_from_regression():
