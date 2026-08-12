@@ -1,0 +1,61 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "path": "tools/rj_waitcheck",
+        "sha256": "472fcf288714d6d5851c258d2f36f39fe29be407929f69d910c4a2f93ed10455"
+      },
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": "survey_isa/tiny_vecadd.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "454078f63825e0e5b6df20effd358ae55566193702c6137600ed6d9d36084d9b",
+            "entry_offset": null,
+            "name": "tiny_vecadd",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 0,
+          "state": "ran",
+          "verdict": "pass"
+        }
+      ],
+      "reason": null,
+      "returncode": null,
+      "sanitizer": "waitcheck",
+      "state": "ran",
+      "verdict": "pass"
+    }
+  ],
+  "execution_status": "complete",
+  "overall_verdict": "pass",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "survey_isa/tiny_vecadd.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "454078f63825e0e5b6df20effd358ae55566193702c6137600ed6d9d36084d9b",
+          "entry_offset": null,
+          "name": "tiny_vecadd",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}

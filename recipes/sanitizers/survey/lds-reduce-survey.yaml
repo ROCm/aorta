@@ -1,0 +1,35 @@
+schema_version: 1
+mode: sanitizer
+ticket: SURVEY-LDS-REDUCE
+description: >
+  Workload-survey (observed-only, Tab 2, #367) reproduction over the synthetic
+  lds_reduce control kernel -- an ordinary, independently-authored shared-memory
+  (LDS) reduction repro with no customer association. Runs BOTH sanitizers:
+  waitcheck (static, observes a clean pass) and ConSan (dynamic, fails closed
+  with exit 86 on the current rocjitsu build; see ROCm/rocm-systems#9972).
+  Reproduction path for the committed survey fixtures
+  reports/lds_reduce_waitcheck and reports/lds_reduce_consan.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: lds_reduce
+      code_object: ../fixtures/isa/lds.hsaco
+      code_object_index: 0
+    consan_command: ../fixtures/bin/lds_dispatch
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+    - consan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+    timeout_seconds: 600
+  output:
+    report: sanitizer_report.json
