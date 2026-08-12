@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import subprocess
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -33,6 +36,14 @@ def test_sparkline_handles_short_and_normal_series():
     assert "n/a" in gen_dashboard._svg_sparkline([1.0])
     svg = gen_dashboard._svg_sparkline([1.0, 2.0, 1.5])
     assert svg.startswith("<svg") and "polyline" in svg
+    labelled = gen_dashboard._svg_sparkline([1.0, 2.0, 1.5], label="step time history")
+    assert 'role="img"' in labelled and 'aria-label="step time history"' in labelled
+
+
+def test_sparkline_a11y_label_lists_oldest_to_newest():
+    label = gen_dashboard._sparkline_a11y_label("mean step time", [100.0, None, 150.0])
+    assert "oldest to newest" in label
+    assert "100" in label and "150" in label
 
 
 def test_dashboard_renders_status_and_rows():
@@ -304,7 +315,7 @@ def test_dashboard_omits_trend_column_without_history():
                                "summary": {"decode_latency_ms": 12.5}}}],
                  total=1, record=1)
     one = gen_dashboard.build_dashboard_html([r])
-    assert "step time history" not in one
+    assert "<span class='variant-spark'>" not in one
 
     r2 = _results("2026-07-31T00:00:00Z",
                   [{"entry": "w", "cell": "c", "verdict": "record", "reasons": [],
@@ -312,7 +323,7 @@ def test_dashboard_omits_trend_column_without_history():
                                 "summary": {"decode_latency_ms": 13.5}}}],
                   total=1, record=1)
     two = gen_dashboard.build_dashboard_html([r, r2])
-    assert "step time history" in two
+    assert "<span class='variant-spark'>" in two
 
 
 def test_dashboard_does_not_treat_a_boolean_as_a_measurement():
@@ -558,7 +569,9 @@ def test_history_grid_absence_marker_is_named_for_assistive_tech():
         _run(4, [_cell("w1", "c"), _cell("w2", "c")], total=2, record=2),
     ]
     grid = gen_dashboard.build_history_grid(runs)
-    assert "role='img' title='not in this run' aria-label='not in this run'" in grid
+    assert "not in this run" in grid
+    assert "role='img'" in grid
+    assert "aria-label='w2 — not in this run'" in grid
 
 
 def test_history_grid_does_not_flag_aortas_own_nightly_version_as_a_bump():
@@ -588,7 +601,7 @@ def test_history_grid_flags_the_run_where_the_stack_underneath_moved():
 def test_history_grid_window_bounds_the_rendered_rows():
     runs = [_run(d, [_cell("w", "c")], total=1, record=1) for d in range(1, 21)]
     grid = gen_dashboard.build_history_grid(runs, max_runs=5)
-    assert grid.count("<tr><th scope='row'") == 5  # body rows, not the header
+    assert grid.count("class='release-card'") == 5
     assert "2026-08-20" in grid and "2026-08-15" not in grid  # newest five
 
 
@@ -707,7 +720,7 @@ def test_history_grid_states_the_verdict_without_relying_on_colour():
     # is part of that: a generic span has no accessible name, so the label is
     # not guaranteed to be announced without it.
     assert "aria-label='w — 1 fail'" in grid
-    assert grid.count("<span class='dot' role='img'") == 2
+    assert grid.count("<span class='dot sm' role='img'") == 2
 
 
 def test_history_grid_compares_its_oldest_row_against_the_run_before_it():
@@ -859,12 +872,28 @@ def test_dashboard_run_command_block():
                    "metrics": {"mean_step_time_ms": 4.0}}],
                  total=1, record=1)
     html = gen_dashboard.build_dashboard_html([r])
-    assert "Run this workload locally" in html
+    assert "Reproduce this workload locally" in html
+    assert "Before you start" in html
+    assert "Success criteria" in html
+    assert "--strict" in html
     assert "example-inference-smoke.yaml" in html
-    assert "getting started guide" in html
     assert "README-running-recipes.md" in html
     assert "details class='repro-panel' id='repro-inference_offline'" in html
-    assert "<summary>Run this workload locally</summary>" in html
+    assert "<summary>Reproduce this workload locally</summary>" in html
+    assert "torchrun" not in html  # inference is single-GPU
+
+
+def test_history_grid_retired_chip_dims_label_not_status_badge():
+    runs = [
+        _run(3, [_cell("old_workload", "c", verdict="pass")], total=1, **{"pass": 1}),
+        _run(4, [_cell("gpu_smoke", "c", verdict="pass")], total=1, **{"pass": 1}),
+    ]
+    html = gen_dashboard.build_dashboard_html(runs)
+    assert ".wl-chip.retired { opacity" not in html
+    assert ".wl-chip.retired .chip-label { color:var(--muted); }" in html
+    grid = gen_dashboard.build_history_grid(runs)
+    assert "wl-chip retired" in grid
+    assert "background:#1a7f37" in grid
 
 
 def test_history_grid_retired_workloads_do_not_link_to_missing_sections():
@@ -874,7 +903,7 @@ def test_history_grid_retired_workloads_do_not_link_to_missing_sections():
     ]
     grid = gen_dashboard.build_history_grid(runs)
     assert "href='#wl-old_workload'" not in grid
-    assert "gcell-retired" in grid
+    assert "wl-chip retired" in grid
     assert "href='#wl-gpu_smoke'" in grid
 
 
@@ -885,8 +914,8 @@ def test_history_grid_workloads_and_cells_link_to_repro_sections():
     ]
     grid = gen_dashboard.build_history_grid(runs)
     assert "href='#wl-gpu_smoke'" in grid
-    assert "gcell-link" in grid
-    assert "overall health" in grid
+    assert "<ul class='wl-chips'>" in grid
+    assert "overall health" in grid.lower() or "Overall health" in grid
 
 
 def test_history_grid_overall_health_uses_customer_label():
@@ -960,6 +989,279 @@ def test_dashboard_metadata_covers_nightly_matrix():
     for name in names:
         assert workloads[name].get("run_command"), name
         assert workloads[name].get("recipe"), name
+        assert workloads[name].get("repro"), name
+        assert workloads[name]["repro"].get("success_criteria"), name
+
+
+def test_dashboard_repro_guides_differ_by_workload_type():
+    meta = gen_dashboard.load_dashboard_metadata()
+    wl = meta.get("workloads") or {}
+    smoke = wl["gpu_smoke"]["repro"]
+    ddp = wl["training_ddp"]["repro"]
+    assert "One AMD GPU" in smoke["prerequisites"][0]
+    assert "torchrun" in ddp["run"]["command"]
+    assert any("NCCL" in c for step in ddp["setup"] for c in step["commands"])
+    race = wl["race"]["repro"]
+    assert any("AORTA_TRIAL_MASTER_PORT_BASE" in c for step in race["setup"] for c in step["commands"])
+    assert any("python3 -m pip" in c for step in smoke["setup"] for c in step["commands"])
+    inference = wl["inference_offline"]["repro"]
+    verify_cmds = inference["verify"][0]["commands"]
+    assert any("triage_results/repro/inference_offline" in c for c in verify_cmds)
+    assert any("grep -m 10" in c for c in verify_cmds)
+    assert any("{{HEAD_SHA}}" in c for step in smoke["setup"] for c in step["commands"])
+    assert any("{{AORTA_VERSION}}" in c for step in smoke["setup"] for c in step["commands"])
+    assert any("find triage_results" in c for c in verify_cmds)
+    assert any('RUN_DIR="$(' in c for c in verify_cmds)
+    assert any("$RUN_DIR/perf.md" in c for c in verify_cmds)
+    assert any("Standalone --strict only" in c for c in verify_cmds)
+    assert "triage_results/repro/inference_offline" in inference["run"]["command"]
+    assert inference["run"]["command"].endswith("--strict")
+    assert "triage_results/repro/training_ddp" in ddp["run"]["command"]
+    assert "triage_results/repro/training_ddp_8gpu" in wl["training_ddp_8gpu"]["repro"]["run"]["command"]
+    assert "passed/recording only" in ddp["success_criteria"].lower()
+    det = wl["llm_determinism"]["repro"]["verify"][0]["commands"]
+    assert any("ranks_with_divergence" in c for c in det)
+    assert any("trial_paths" in c for c in det)
+    assert any("python3 -" in c for c in det)
+    assert any("|| true" in c for c in det)
+    race_verify = race["verify"][0]["commands"]
+    assert any("layer_checksum_mismatches" in c for c in race_verify)
+    assert any("trial_paths" in c for c in race_verify)
+    assert any("|| true" in c for c in race_verify)
+    race8 = wl["race_8gpu"]["repro"]["verify"][0]["commands"]
+    assert any("layer_checksum_mismatches" in c for c in race8)
+
+
+def test_determinism_verify_reads_repo_relative_failed_trial(tmp_path):
+    run_dir = (
+        tmp_path
+        / "triage_results"
+        / "repro"
+        / "llm_determinism"
+        / "TICKET"
+        / "llm_determinism"
+        / "timestamp"
+    )
+    trial_path = run_dir / "cells" / "baseline" / "llm_determinism" / "trial_0.json"
+    trial_path.parent.mkdir(parents=True)
+    trial_path.write_text(
+        json.dumps({"result": {"metrics": {"ranks_with_divergence": 2}}}),
+        encoding="utf-8",
+    )
+    (run_dir / "matrix.json").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "name": "baseline",
+                        "trial_paths": [str(trial_path.relative_to(tmp_path))],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repro = gen_dashboard.load_dashboard_metadata()["workloads"]["llm_determinism"]["repro"]
+    command = repro["verify"][0]["commands"][-1]
+    env = {**os.environ, "RUN_DIR": str(run_dir.relative_to(tmp_path))}
+    proc = subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"baseline": [2]}
+
+
+def _run_repro_trial_metric_parser(tmp_path, *, metric_key: str, metric_value: int) -> str:
+    run_dir = (
+        tmp_path
+        / "triage_results"
+        / "repro"
+        / "llm_determinism"
+        / "TICKET"
+        / "llm_determinism"
+        / "timestamp"
+    )
+    trial_path = run_dir / "cells" / "baseline" / "llm_determinism" / "trial_0.json"
+    trial_path.parent.mkdir(parents=True)
+    trial_path.write_text(
+        json.dumps({"result": {"metrics": {metric_key: metric_value}}}),
+        encoding="utf-8",
+    )
+    (run_dir / "matrix.json").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "name": "baseline",
+                        "trial_paths": [str(trial_path.relative_to(tmp_path))],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "perf.md").write_text(
+        f"# perf\n{metric_key}: 0\n",
+        encoding="utf-8",
+    )
+    repro = gen_dashboard.load_dashboard_metadata()["workloads"]["llm_determinism"]["repro"]
+    commands = repro["verify"][0]["commands"]
+    grep_cmd = next(c for c in commands if "|| true" in c)
+    parse_cmd = commands[-1]
+    env = {**os.environ, "RUN_DIR": str(run_dir.relative_to(tmp_path))}
+    grep = subprocess.run(
+        ["bash", "-c", grep_cmd],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert grep.returncode == 0, grep.stderr
+    proc = subprocess.run(
+        ["bash", "-c", parse_cmd],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_determinism_verify_reads_failed_trial_even_when_perf_shows_zero(tmp_path):
+    out = _run_repro_trial_metric_parser(
+        tmp_path, metric_key="ranks_with_divergence", metric_value=2)
+    assert json.loads(out) == {"baseline": [2]}
+
+
+def test_race_verify_reads_failed_trial_even_when_perf_shows_zero(tmp_path):
+    run_dir = (
+        tmp_path
+        / "triage_results"
+        / "repro"
+        / "race"
+        / "TICKET"
+        / "race"
+        / "timestamp"
+    )
+    trial_path = run_dir / "cells" / "smoke" / "race" / "trial_0.json"
+    trial_path.parent.mkdir(parents=True)
+    trial_path.write_text(
+        json.dumps({"result": {"metrics": {"layer_checksum_mismatches": 3}}}),
+        encoding="utf-8",
+    )
+    (run_dir / "matrix.json").write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "name": "smoke",
+                        "trial_paths": [str(trial_path.relative_to(tmp_path))],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "perf.md").write_text("layer_checksum_mismatches: 0\n", encoding="utf-8")
+    repro = gen_dashboard.load_dashboard_metadata()["workloads"]["race"]["repro"]
+    commands = repro["verify"][0]["commands"]
+    parse_cmd = commands[-1]
+    env = {**os.environ, "RUN_DIR": str(run_dir.relative_to(tmp_path))}
+    proc = subprocess.run(
+        ["bash", "-c", parse_cmd],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"smoke": [3]}
+
+
+def test_repro_pins_fail_closed_when_version_missing():
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z",
+                  [{"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+                    "reasons": [], "metrics": {"mean_step_time_ms": 1.0}}],
+                  total=1, **{"pass": 1},
+                  build={"head_sha": "abc123" * 5 + "abcd", "amd_aorta_version": ""})])
+    assert "STOP: dashboard is missing amd_aorta_version" in html
+    assert "expanded_assets/dev-wheels" in html
+    assert "'amd-aorta[hw-queue]'  #" not in html
+
+
+def test_dashboard_review_a11y_and_layout_fixes():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 254.0,
+                                    "summary": {"mean_step_time_ms": 254.0}}},
+        {"entry": "inference_offline", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 4.0,
+                                    "summary": {"tokens_per_sec": 4160}}},
+    ]
+    doc = _results("2026-08-03T00:00:00Z", entries, total=2, **{"pass": 2},
+                   build={"head_sha": "abc123" * 5 + "abcd", "amd_aorta_version": "0.2.2rc20260803"})
+    doc2 = _results("2026-08-04T00:00:00Z", entries, total=2, **{"pass": 2},
+                    build={"head_sha": "abc123" * 5 + "abcd", "amd_aorta_version": "0.2.2rc20260803"})
+    html = gen_dashboard.build_dashboard_html([doc, doc2])
+    assert "<h3 class='release-date'>" in html
+    assert "<h4 class='wl-title'>" in html
+    assert "<section class='repro-sec'><h5>Before you start</h5>" in html
+    assert "nightly_eval.py" in html
+    assert "overflow:visible" in html
+    assert "class='tablewrap'><table class='inner'>" in html
+    assert ".wl-chip.absent .chip-meta" in html
+    assert ".absent { color:#39414a; }" not in html
+    assert "git checkout abc123abc123abc123abc123abc123abcd" in html
+    assert "amd-aorta[hw-queue]==0.2.2rc20260803" in html
+    assert "mean step time history, oldest to newest" in html
+    assert "role='img'" in html
+    assert "#1a7f37" in html
+    assert "nightly_eval.py comparing matrix.json" in html
+    assert "with --strict against" not in html
+
+
+def test_pass_badges_use_accessible_green_not_default_verdict_green():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 254.0}},
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z", entries, total=1, **{"pass": 1})])
+    assert "background:#1a7f37" in html
+    assert "background:#2ea043" not in html
+
+
+def test_gpu_smoke_success_notes_baseline_gating():
+    meta = gen_dashboard.load_dashboard_metadata()
+    success = meta["workloads"]["gpu_smoke"]["repro"]["success_criteria"]
+    assert "gpu_smoke::baseline-local" in success
+    assert "not performance-thresholded" in success
+
+def test_dashboard_workloads_use_category_card_layout():
+    entries = [
+        {"entry": "gpu_smoke", "cell": "baseline-local", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 254.0}},
+        {"entry": "training_ddp", "cell": "smoke", "verdict": "pass",
+         "reasons": [], "metrics": {"mean_step_time_ms": 10.0,
+                                    "summary": {"step_time_p50": 9.0}}},
+    ]
+    html = gen_dashboard.build_dashboard_html(
+        [_results("2026-08-03T00:00:00Z", entries, total=2, **{"pass": 2})])
+    assert "class='wl-card'" in html
+    assert "class='wl-grid'" in html
+    assert "class='cat-block'" in html
+    assert "<table><thead><tr><th scope='col'>recipe variant</th>" not in html
 
 
 def test_dashboard_failure_action_panel():
