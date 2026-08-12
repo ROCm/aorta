@@ -33,16 +33,24 @@ import argparse
 import json
 from pathlib import Path
 
-# Ordered survey cases: (report case dir, stable name, display label, workload, backend).
+# Ordered survey cases:
+# (report case dir, stable name, display label, workload, backend, group, group label, sanitizer).
 # Both sanitizers (waitcheck static + ConSan dynamic) are represented for every
-# kernel, so the survey shows each kernel under each tool it was observed with.
-CASES: tuple[tuple[str, str, str, str, str], ...] = (
+# kernel, so the survey shows each kernel under each tool it was observed with. The
+# ``group`` key pairs the two sanitizer cases of one kernel under a single kernel
+# heading (and a single summary-table row) on Tab 2; ``sanitizer`` selects the
+# summary-table column. Without them the dashboard would render each case as its own
+# standalone kernel (a "6 kernels" roll-up with an em dash in every column).
+CASES: tuple[tuple[str, str, str, str, str, str, str, str], ...] = (
     (
         "gemm_f32_waitcheck",
         "hipblaslt-gemm-f32-nt-128x128-waitcheck",
         "hipBLASLt GEMM f32 nt 128x128 \u00b7 waitcheck (static)",
         "hipblaslt:gemm_f32",
         "waitcheck (static)",
+        "gemm-f32-nt-128x128",
+        "hipBLASLt GEMM f32 nt 128x128",
+        "waitcheck",
     ),
     (
         "gemm_f32_consan",
@@ -50,6 +58,9 @@ CASES: tuple[tuple[str, str, str, str, str], ...] = (
         "hipBLASLt GEMM f32 nt 128x128 \u00b7 ConSan (dynamic)",
         "hipblaslt:gemm_f32",
         "consan (dynamic)",
+        "gemm-f32-nt-128x128",
+        "hipBLASLt GEMM f32 nt 128x128",
+        "consan",
     ),
     (
         "tiny_vecadd_waitcheck",
@@ -57,6 +68,9 @@ CASES: tuple[tuple[str, str, str, str, str], ...] = (
         "tiny_vecadd \u00b7 waitcheck (static)",
         "synthetic:vecadd",
         "waitcheck (static)",
+        "tiny-vecadd",
+        "tiny_vecadd",
+        "waitcheck",
     ),
     (
         "tiny_vecadd_consan",
@@ -64,6 +78,9 @@ CASES: tuple[tuple[str, str, str, str, str], ...] = (
         "tiny_vecadd \u00b7 ConSan (dynamic)",
         "synthetic:vecadd",
         "consan (dynamic)",
+        "tiny-vecadd",
+        "tiny_vecadd",
+        "consan",
     ),
     (
         "lds_reduce_waitcheck",
@@ -71,6 +88,9 @@ CASES: tuple[tuple[str, str, str, str, str], ...] = (
         "lds_reduce \u00b7 waitcheck (static)",
         "synthetic:lds_reduce",
         "waitcheck (static)",
+        "lds-reduce",
+        "lds_reduce",
+        "waitcheck",
     ),
     (
         "lds_reduce_consan",
@@ -78,6 +98,9 @@ CASES: tuple[tuple[str, str, str, str, str], ...] = (
         "lds_reduce \u00b7 ConSan (dynamic)",
         "synthetic:lds_reduce",
         "consan (dynamic)",
+        "lds-reduce",
+        "lds_reduce",
+        "consan",
     ),
 )
 
@@ -88,11 +111,12 @@ def build_spec(reports_dir: Path, *, report_root: Path | None = None) -> dict:
     directory, so the dashboard resolves fixtures next to the spec at render
     time). ``report_rel`` is the *published* drill-down link (``survey/<case>/``,
     co-located next to ``index.html`` by the publish step), a safe same-origin
-    relative path.
+    relative path. ``group``/``group_label``/``sanitizer`` pair each kernel's two
+    sanitizer cases under one heading + summary-table row (see ``CASES``).
     """
     root = report_root if report_root is not None else reports_dir
     cases: list[dict] = []
-    for case_dir, name, label, workload, backend in CASES:
+    for case_dir, name, label, workload, backend, group, group_label, sanitizer in CASES:
         report_file = reports_dir / case_dir / "sanitizer_report.json"
         report = json.loads(report_file.read_text(encoding="utf-8"))
         _assert_public_safe(report, case_dir)
@@ -101,6 +125,9 @@ def build_spec(reports_dir: Path, *, report_root: Path | None = None) -> dict:
             {
                 "name": name,
                 "label": label,
+                "group": group,
+                "group_label": group_label,
+                "sanitizer": sanitizer,
                 "backend": backend,
                 "workload": workload,
                 "report_path": rel_path.as_posix(),

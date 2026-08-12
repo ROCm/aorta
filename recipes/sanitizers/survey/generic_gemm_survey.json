@@ -3,6 +3,9 @@
     {
       "name": "hipblaslt-gemm-f32-nt-128x128-waitcheck",
       "label": "hipBLASLt GEMM f32 nt 128x128 \u00b7 waitcheck (static)",
+      "group": "gemm-f32-nt-128x128",
+      "group_label": "hipBLASLt GEMM f32 nt 128x128",
+      "sanitizer": "waitcheck",
       "backend": "waitcheck (static)",
       "workload": "hipblaslt:gemm_f32",
       "report_path": "reports/gemm_f32_waitcheck/sanitizer_report.json",
@@ -11,6 +14,9 @@
     {
       "name": "hipblaslt-gemm-f32-nt-128x128-consan",
       "label": "hipBLASLt GEMM f32 nt 128x128 \u00b7 ConSan (dynamic)",
+      "group": "gemm-f32-nt-128x128",
+      "group_label": "hipBLASLt GEMM f32 nt 128x128",
+      "sanitizer": "consan",
       "backend": "consan (dynamic)",
       "workload": "hipblaslt:gemm_f32",
       "report_path": "reports/gemm_f32_consan/sanitizer_report.json",
@@ -19,6 +25,9 @@
     {
       "name": "tiny-vecadd-waitcheck",
       "label": "tiny_vecadd \u00b7 waitcheck (static)",
+      "group": "tiny-vecadd",
+      "group_label": "tiny_vecadd",
+      "sanitizer": "waitcheck",
       "backend": "waitcheck (static)",
       "workload": "synthetic:vecadd",
       "report_path": "reports/tiny_vecadd_waitcheck/sanitizer_report.json",
@@ -27,6 +36,9 @@
     {
       "name": "tiny-vecadd-consan",
       "label": "tiny_vecadd \u00b7 ConSan (dynamic)",
+      "group": "tiny-vecadd",
+      "group_label": "tiny_vecadd",
+      "sanitizer": "consan",
       "backend": "consan (dynamic)",
       "workload": "synthetic:vecadd",
       "report_path": "reports/tiny_vecadd_consan/sanitizer_report.json",
@@ -35,6 +47,9 @@
     {
       "name": "lds-reduce-waitcheck",
       "label": "lds_reduce \u00b7 waitcheck (static)",
+      "group": "lds-reduce",
+      "group_label": "lds_reduce",
+      "sanitizer": "waitcheck",
       "backend": "waitcheck (static)",
       "workload": "synthetic:lds_reduce",
       "report_path": "reports/lds_reduce_waitcheck/sanitizer_report.json",
@@ -43,6 +58,9 @@
     {
       "name": "lds-reduce-consan",
       "label": "lds_reduce \u00b7 ConSan (dynamic)",
+      "group": "lds-reduce",
+      "group_label": "lds_reduce",
+      "sanitizer": "consan",
       "backend": "consan (dynamic)",
       "workload": "synthetic:lds_reduce",
       "report_path": "reports/lds_reduce_consan/sanitizer_report.json",
