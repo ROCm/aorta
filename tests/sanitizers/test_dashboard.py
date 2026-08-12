@@ -878,9 +878,13 @@ def test_summarize_case_survey_is_observational_with_primary_and_observation():
     # a guardrail case (expected set) keeps its baseline match semantics
     guard = gen.summarize_case(_consan_racy_report(), "pass")
     assert guard["match"] is False and guard["expected"] == "pass"
-    # a missing report degrades to an explicit, observational placeholder
+    # a missing report degrades to an explicit, observational placeholder; with no
+    # expectation it is NOT a mismatch (survey contract), while a missing guardrail
+    # report (non-null expected) stays a mismatch so the gate fails closed.
     missing = gen.summarize_case(None, None)
     assert missing["present"] is False and missing["observation"] == "report missing"
+    assert missing["match"] is True
+    assert gen.summarize_case(None, "pass")["match"] is False
 
 
 def test_primary_prefers_last_nonpreflight_and_captures_preflight():
@@ -932,6 +936,59 @@ def test_survey_cases_from_spec_classifies_and_threads_links(tmp_path):
     assert gen.survey_cases_from_spec([{"name": "x", "report": _waitcheck_report()}])[0][
         "cls"
     ] == "survey"
+
+
+def test_survey_cases_from_spec_degrades_on_malformed_specs():
+    # A malformed wrapper value must not raise (the CLI promises the survey tab
+    # degrades to its empty-state note rather than aborting the whole render).
+    assert gen.survey_cases_from_spec({"cases": 1}) == []
+    assert gen.survey_cases_from_spec({"cases": "nope"}) == []
+    assert gen.survey_cases_from_spec({}) == []
+    # A non-string report_path (e.g. a numeric JSON value) is ignored instead of
+    # raising in Path(); the case still renders, just as an absent report.
+    entries = gen.survey_cases_from_spec(
+        {"cases": [{"name": "bad", "label": "bad path", "report_path": 5}]}
+    )
+    assert len(entries) == 1
+    assert entries[0]["summary"]["present"] is False
+    assert entries[0]["report_rel"] is None
+
+
+def test_survey_report_rel_rejects_unsafe_links():
+    # report_rel is untrusted caller JSON: a URL scheme, an absolute path, or a
+    # protocol-relative link must be dropped (HTML-escaping does not make a URL
+    # safe), while a plain relative path is preserved.
+    for unsafe in (
+        "javascript:alert(1)",
+        "/etc/passwd",
+        "//evil.example/x",
+        "\\\\unc\\share",
+        "data:text/html,<script>1</script>",
+        " runs/x/report.json",  # leading whitespace browsers would strip
+    ):
+        spec = {"cases": [{"name": "s", "report_rel": unsafe, "report": _consan_racy_report()}]}
+        entry = gen.survey_cases_from_spec(spec)[0]
+        assert entry["report_rel"] is None, unsafe
+
+    safe = "runs/2026-08-05-33/survey/top5/sanitizer_report.json"
+    spec = {"cases": [{"name": "s", "report_rel": safe, "report": _consan_racy_report()}]}
+    assert gen.survey_cases_from_spec(spec)[0]["report_rel"] == safe
+
+    # An unsafe report_rel must never reach the rendered HTML as an href.
+    bad = gen.survey_cases_from_spec(
+        {"cases": [{"name": "s", "label": "xss", "report_rel": "javascript:alert(1)",
+                    "report": _consan_racy_report()}]}
+    )
+    html = gen.build_html([_healthy_guardrail_run()], survey=bad)
+    assert "javascript:alert(1)" not in html
+
+
+def test_build_html_tabs_have_keyboard_focus_style():
+    # The visually-hidden radios (opacity:0) must project a focus indicator onto
+    # their labels so keyboard users can see which tab is focused.
+    html = gen.build_html([_healthy_guardrail_run()])
+    assert ':focus-visible ~ .tabbar label[for="tab-guardrails"]' in html
+    assert ':focus-visible ~ .tabbar label[for="tab-survey"]' in html
 
 
 def _healthy_guardrail_run() -> dict:

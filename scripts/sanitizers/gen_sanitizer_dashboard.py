@@ -163,9 +163,13 @@ def summarize_case(report: dict[str, Any] | None, expected: str | None) -> dict[
     observational, never as a passing/failing gate row.
     """
     if report is None:
+        # Match follows the same rule as the present path: a survey case
+        # (expected is None) is never a mismatch, while a guardrail case keeps a
+        # non-null expectation and so a missing report stays a mismatch (the gate
+        # fails closed). Hardcoding False here contradicted the survey contract.
         return {
             "present": False, "verdict": "—", "execution": "missing", "findings": 0,
-            "coverage": "", "backend": None, "expected": expected, "match": False,
+            "coverage": "", "backend": None, "expected": expected, "match": expected is None,
             "worklist": {"requirement": None, "top_n": None, "kernel_count": 0},
             "kernels": [], "finding_groups": [],
             "primary": {"sanitizer": None, "verdict": None, "reason": None, "preflight": None},
@@ -409,6 +413,31 @@ def runs_from_history_root(
     return runs
 
 
+def _safe_report_rel(value: Any) -> str | None:
+    """Accept only a same-origin *relative* path for a survey report link.
+
+    ``report_rel`` on a survey case is caller-supplied JSON, so a value like
+    ``javascript:alert(1)`` or ``//evil.example/x`` would otherwise render as an
+    executable or off-origin ``<a href>`` -- HTML-escaping the attribute does not
+    neutralize a URL scheme. Reject anything that is not a plain relative path:
+    a URL scheme (``scheme:``), absolute or protocol-relative paths (leading
+    ``/``), backslashes, and embedded control/whitespace characters. The
+    internally-computed guardrail/history links already have this shape, so this
+    only tightens the untrusted survey field.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    if value != value.strip() or any(ord(ch) < 0x20 for ch in value):
+        return None
+    if value.startswith("/") or "\\" in value:
+        return None
+    # A relative path never carries a URL scheme; a colon in the first segment
+    # (before the first "/", e.g. ``javascript:``) means it is a scheme, not a path.
+    if ":" in value.split("/", 1)[0]:
+        return None
+    return value
+
+
 def survey_cases_from_spec(
     spec: dict[str, Any] | list[Any], *, base_dir: Path | None = None
 ) -> list[dict[str, Any]]:
@@ -436,15 +465,30 @@ def survey_cases_from_spec(
     Each entry carries ``cls="survey"`` and a ``summarize_case(report, None)``
     summary (``expected=None`` -> observational, ``match=True``), so failures /
     ``not_checked`` are shown as data and never rendered as a regression.
+
+    ``report_rel`` is retained only for a *present* report (no dead link, matching
+    the guardrail path in ``runs_from_history_root``) and only when it is a safe
+    relative path (it is untrusted caller JSON; see ``_safe_report_rel``). A
+    malformed spec (a non-list ``cases`` wrapper, a non-string ``report_path``)
+    degrades to an empty / absent survey rather than raising.
     """
     cases = spec.get("cases", []) if isinstance(spec, dict) else spec
+    # A malformed wrapper (e.g. ``{"cases": 1}``) must degrade to an empty survey,
+    # not raise a TypeError when iterated -- matching the CLI's promise that a bad
+    # --survey spec renders the empty-state note rather than aborting the render.
+    if not isinstance(cases, list):
+        cases = []
     entries: list[dict[str, Any]] = []
-    for case in cases or []:
+    for case in cases:
         if not isinstance(case, dict):
             continue
         report = case.get("report")
-        if report is None and case.get("report_path"):
-            path = Path(case["report_path"])
+        # Only construct a path from a non-empty string; a non-string report_path
+        # (e.g. a numeric JSON value) would otherwise raise in Path() and abort the
+        # whole dashboard instead of rendering this case as absent.
+        report_path = case.get("report_path")
+        if report is None and isinstance(report_path, str) and report_path:
+            path = Path(report_path)
             if base_dir is not None and not path.is_absolute():
                 path = base_dir / path
             report = _load(path)
@@ -460,7 +504,12 @@ def survey_cases_from_spec(
                 "label": str(case.get("label", name)),
                 "backend": str(backend),
                 "workload": case.get("workload"),
-                "report_rel": case.get("report_rel"),
+                # Keep a report link only for a present report (no dead link,
+                # matching runs_from_history_root) and only when it is a safe
+                # relative path (report_rel is untrusted caller JSON).
+                "report_rel": (
+                    _safe_report_rel(case.get("report_rel")) if summary["present"] else None
+                ),
                 "cls": "survey",
                 "summary": summary,
             }
@@ -930,6 +979,12 @@ def build_html(
   #tab-guardrails:checked ~ .tabbar label[for="tab-guardrails"],
   #tab-survey:checked ~ .tabbar label[for="tab-survey"] {{
           color:#1f2328; background:#fff; border-color:#d0d7de; }}
+  /* The radios are visually hidden (opacity:0) so they show no native focus
+     ring; mirror :focus-visible onto the associated label so keyboard users can
+     see which tab control is focused. */
+  #tab-guardrails:focus-visible ~ .tabbar label[for="tab-guardrails"],
+  #tab-survey:focus-visible ~ .tabbar label[for="tab-survey"] {{
+          outline:2px solid #0969da; outline-offset:-2px; }}
   .tabpanel {{ display:none; padding-top:8px; }}
   #tab-guardrails:checked ~ #panel-guardrails {{ display:block; }}
   #tab-survey:checked ~ #panel-survey {{ display:block; }}
