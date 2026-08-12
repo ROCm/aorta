@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-08-11-31513370892` · commit `d80f57250f7f` · 2026-08-11
+Run `2026-08-12-31596128350` · commit `261893abafd3` · 2026-08-12
 
 ✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
@@ -53,7 +53,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=16924752 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=20637856 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
 
 </details>
 
@@ -71,6 +71,7 @@ Experimental ConSan runs over caller-supplied kernels/objects (`source.consan_co
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-08-12-31596128350 | `261893abafd3` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-11-31513370892 | `d80f57250f7f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-11-31511121124 | `fc0a3ff54748` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Failed |
 | 2026-08-11-31508140809 | `1663ad70a9a2` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Failed |
