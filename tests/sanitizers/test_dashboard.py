@@ -975,7 +975,7 @@ def test_absent_report_never_claims_no_findings():
     # "no findings" next to a "Report missing" pill and claim a clean scan that
     # never ran. Sweep both tabs: the guardrail card and the survey card.
     missing = gen.summarize_case(None, "pass")
-    assert missing["present"] is False and missing["findings"] == 0
+    assert missing.get("present") is False and missing.get("findings") == 0
     assert gen._findings_chip_html(missing) == ""
 
     rows = {
@@ -994,7 +994,7 @@ def test_absent_report_never_claims_no_findings():
 
     # same on the survey tab, which has no baseline pill to fall back on
     survey = gen.survey_cases_from_spec({"cases": [{"name": "s", "label": "gone"}]})
-    assert survey[0]["summary"]["present"] is False
+    assert survey[0].get("summary", {}).get("present") is False
     card = gen._survey_case_html(survey[0], heading="gone")
     assert "no findings" not in card
 
