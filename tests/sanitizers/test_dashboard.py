@@ -1179,6 +1179,26 @@ def test_survey_absent_report_still_renders_a_card_and_is_not_counted_as_a_run()
     assert stats.get("runs") == 1
 
 
+def test_survey_absent_card_keeps_its_workload_provenance():
+    # Bugbot (#378): moving the survey meta line into the facts grid rendered the
+    # grid only on the present branch, so an absent card silently lost the
+    # "Source" pair that the pre-redesign HTML and the Markdown twin both keep.
+    # The rest of the grid stays off that branch: backend / selection /
+    # execution would describe a report that was never produced.
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "consan-ghost", "sanitizer": "consan", "workload": "internal:gemm_top5"},
+        ]}
+    )
+    card = gen._survey_case_html(entries[0], heading="ConSan")
+    assert "report missing" in card
+    assert '<span class="k">Source</span>' in card
+    assert "internal:gemm_top5" in card
+    assert "Backend" not in card and "Execution" not in card
+    md = "\n".join(gen._survey_section_md(entries))
+    assert "source `internal:gemm_top5`" in md
+
+
 def _errored_report_with_partial_findings(reason: str = "combined_hook_timeout") -> dict:
     # An errored ConSan run that still emitted a partial finding before aborting
     # (e.g. coverage-incomplete): overall_verdict=error AND a finding is present.

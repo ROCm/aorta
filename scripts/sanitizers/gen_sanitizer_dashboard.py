@@ -1867,7 +1867,9 @@ def _survey_case_html(entry: dict[str, Any], *, heading: str, kind: str = "") ->
 
     The summary row carries the verdict badge and findings count so a reader can
     triage every case without expanding any of them. The body holds the facts
-    grid, the inline finding/reason, the reproduce command and the tables.
+    grid, the inline finding/reason, the reproduce command and the tables. An
+    absent report keeps its originating workload but drops the facts that would
+    describe a report that was never produced.
     """
     row = entry["summary"]
     san = str(entry.get("sanitizer") or "").strip().lower()
@@ -1882,8 +1884,13 @@ def _survey_case_html(entry: dict[str, Any], *, heading: str, kind: str = "") ->
         (("Source", _esc(str(workload))),) if workload else ()
     )
     if not row["present"]:
+        # Provenance only: the rest of the facts grid (backend, selection,
+        # execution) would describe a report that does not exist. The source
+        # still belongs here -- the MD twin names it on this branch too.
+        facts = "".join(_fact_html(label, value) for label, value in extra)
         body = (
-            _observation_html(row, tone=_tone_for(row["verdict"]))
+            (f'<div class="kv">{facts}</div>' if facts else "")
+            + _observation_html(row, tone=_tone_for(row["verdict"]))
             + _survey_message_html(row)
             + _survey_howto_html(entry)
         )
