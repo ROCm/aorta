@@ -320,7 +320,10 @@ _CSS = """
   .two-col { display:grid; grid-template-columns:1.85fr 1fr; gap:12px; align-items:start; margin-bottom:12px; }
   .two-col > .panel { margin-bottom:0; }
 
-  .flow { display:flex; align-items:flex-start; justify-content:space-between; gap:4px; padding:2px 0; }
+  /* Same reachability rule as .table-wrap: the five steps are fixed-width, so a
+     narrow viewport scrolls the band instead of spilling it out of its panel. */
+  .flow { display:flex; align-items:flex-start; justify-content:space-between; gap:4px;
+    padding:2px 0; overflow-x:auto; }
   .step { display:flex; flex-direction:column; align-items:center; text-align:center; width:104px; }
   /* Solid, deepened fills: white on the identity accents at 85% alpha measured
      2.99:1 for green (WCAG AA needs 4.5:1 for this 11.5px bold text). These

@@ -1007,10 +1007,14 @@ def test_table_wrapper_scrolls_instead_of_clipping():
     # Review (#378): the latest-run table carries nine columns and its headers do
     # not wrap, so a clipping wrapper put the rightmost columns -- including the
     # report links -- permanently out of reach on a narrow viewport.
-    rule = re.search(r"\.table-wrap\s*\{([^}]*)\}", gen._CSS)
-    assert rule, "the .table-wrap rule is no longer in the stylesheet"
-    assert "overflow-x:auto" in rule.group(1)
-    assert "overflow:hidden" not in rule.group(1)
+    #
+    # Swept to the survey flow band for the same reason: its five steps are
+    # fixed-width, so without a scroll container they spill out of their panel.
+    for selector in (r"\.table-wrap", r"\.flow"):
+        rule = re.search(rf"{selector}\s*\{{([^}}]*)\}}", gen._CSS)
+        assert rule, f"the {selector} rule is no longer in the stylesheet"
+        assert "overflow-x:auto" in rule.group(1)
+        assert "overflow:hidden" not in rule.group(1)
 
 
 def test_group_run_count_matches_the_rollup_and_excludes_absent_reports():
