@@ -213,9 +213,13 @@ def test_build_html_renders_all_survey_kernels_with_drilldown():
         assert group_heading in html
     assert html.count('<span class="name">WaitCheck</span>') == 3
     assert html.count('<span class="name">ConSan</span>') == 3
-    # every card ships collapsed, so its summary row must carry the verdict
-    assert html.count("<details class=\"kcard") == 6 + len(gen.CASES)
-    assert "<details open" not in html
+    # Every card ships collapsed (its summary row carries the verdict instead).
+    # Inspect each opening tag: a substring check for '<details class="kcard'
+    # would still match '<details class="kcard wc" open>'.
+    kcards = [tag for tag in re.findall(r"<details[^>]*>", html) if 'class="kcard' in tag]
+    assert len(kcards) == 6 + len(gen.CASES)
+    opened = [tag for tag in kcards if re.search(r"\bopen\b", tag)]
+    assert not opened, f"kernel cards must ship collapsed, found: {opened}"
     # every case still drills down to its published raw report
     for entry in survey:
         assert entry["report_rel"] in html

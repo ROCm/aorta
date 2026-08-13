@@ -208,7 +208,11 @@ _CSS = """
   .count { font-size:12px; font-weight:600; color:var(--text-3); background:var(--inset);
     border:1px solid var(--border); border-radius:999px; padding:1px 10px; }
 
-  .table-wrap { border:1px solid var(--border); border-radius:var(--radius-sm); overflow:hidden; }
+  /* overflow-x:auto, not hidden: the latest-run table has nine columns with
+     non-wrapping headers, so clipping would put the rightmost columns and the
+     report links out of reach on a narrow viewport. A scroll container still
+     clips to the border-radius. */
+  .table-wrap { border:1px solid var(--border); border-radius:var(--radius-sm); overflow-x:auto; }
   table { width:100%; border-collapse:separate; border-spacing:0; }
   th { text-align:left; padding:10px 12px; font-size:var(--fs-th); font-weight:600;
     text-transform:uppercase; letter-spacing:.06em; color:var(--text-3);
@@ -1503,7 +1507,7 @@ _SURVEY_NOTES: tuple[str, ...] = (
     "This tab is informational only and does not affect nightly pass/fail status.",
     "Findings represent observed behavior, not regressions.",
     "Where both sanitizers produced a report the kernel appears under each; "
-    "a skipped or missing scan simply does not appear.",
+    "a skipped or missing scan still appears, marked report missing with no verdict.",
     "Every case lists the recipe that produced the kernel and a reproducible command.",
 )
 
@@ -1694,6 +1698,16 @@ def _survey_verdict_bucket(row: dict[str, Any]) -> str:
     return verdict if verdict in ("pass", "warn", "fail", "error") else "not_checked"
 
 
+def _survey_present_runs(entries: list[dict[str, Any]]) -> int:
+    """Sanitizer runs in a kernel group that actually produced a report (pure).
+
+    Single source of truth for "how many runs", so the kernel-group heading and the
+    roll-up headline agree: an absent report still renders a card (with no verdict)
+    but it is not a run.
+    """
+    return sum(1 for entry in entries if (entry.get("summary") or {}).get("present"))
+
+
 def _survey_summary_stats(
     groups: list[tuple[str, list[dict[str, Any]]]],
 ) -> dict[str, Any]:
@@ -1708,11 +1722,11 @@ def _survey_summary_stats(
     verdicts = dict.fromkeys(_SURVEY_VERDICT_BUCKETS, 0)
     runs = 0
     for _key, entries in groups:
+        runs += _survey_present_runs(entries)
         for entry in entries:
             row = entry.get("summary") or {}
             if not row.get("present"):
                 continue
-            runs += 1
             verdicts[_survey_verdict_bucket(row)] += 1
     return {"kernels": len(groups), "runs": runs, "verdicts": verdicts}
 
@@ -1906,7 +1920,9 @@ def _survey_detail_html(survey: list[dict[str, Any]]) -> str:
         ordered = sorted(
             entries, key=lambda e: _SANITIZER_RANK.get(str(e.get("sanitizer")), 99)
         )
-        runs = len(ordered)
+        # Counting spec entries instead would show "2 sanitizer runs" on a group
+        # whose second report is missing while the roll-up above it counts one.
+        runs = _survey_present_runs(ordered)
         cards = "".join(
             _survey_case_html(
                 entry,
@@ -1935,19 +1951,25 @@ def build_html(
     if not runs:
         # Rendered before the first successful nightly (empty runs-root) so the
         # /sanitizers/ route never 404s, and whenever a run fails with no data.
+        # Shares _CSS: this branch still renders the stale banner, which is the
+        # most safety-relevant thing on the page, and an unstyled warning on an
+        # otherwise-dark site reads as a broken page rather than an alert.
         return (
             "<!doctype html>\n"
             "<html lang=en><head><meta charset=utf-8>\n"
             '<meta name=viewport content="width=device-width, initial-scale=1">\n'
-            f"<title>{_esc(title)}</title></head>\n"
-            '<body style="font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,'
-            'sans-serif;max-width:1000px;margin:0 auto;padding:24px">\n'
-            '<p><a href="../">back to CI dashboard</a></p>\n'
+            f"<title>{_esc(title)}</title>\n"
+            f"<style>{_CSS}</style></head>\n"
+            "<body><div class=wrap>\n"
+            '<div class=navrow><a href="../">&larr; back to CI dashboard</a></div>\n'
             f"{banner}"
+            '<header class="page-header"><div class="brand-tile">'
+            f"{_svg(_ICON_ACTIVITY, size=24, width=2)}</div><div>\n"
             f"<h1>{_esc(title)}</h1>\n"
-            "<p>No sanitizer runs yet. This page will populate after the first "
-            "successful sanitizer nightly.</p>\n"
-            "</body></html>\n"
+            '<p class="subtitle">No runs yet</p></div></header>\n'
+            '<section class="panel"><p>No sanitizer runs yet. This page will '
+            "populate after the first successful sanitizer nightly.</p></section>\n"
+            "</div></body></html>\n"
         )
     latest = runs[0]
     meta = latest["meta"]
@@ -2162,8 +2184,9 @@ def _survey_section_md(survey: list[dict[str, Any]]) -> list[str]:
         "",
         "How real GPU kernels behave under AMD's sanitizers \u2014 **waitcheck** (static "
         "`s_waitcnt` wait-count scan) and **ConSan** (dynamic data-race check); where "
-        "both produced a report the kernel is shown under each, and when a scan was "
-        "skipped or its report is missing only the sanitizer(s) that ran appear. **No "
+        "both produced a report the kernel is shown under each, and a scan that was "
+        "skipped or whose report is missing still appears, marked report missing with "
+        "no verdict. **No "
         "expected-behavior comparison on this tab**; an `error` / `fail` / `warn` here "
         "is an observation of how the kernel behaved, not a regression. Each case lists "
         "a copy-paste command to reproduce the run.",

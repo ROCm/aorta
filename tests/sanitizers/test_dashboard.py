@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -375,6 +376,21 @@ def test_build_html_empty_shows_placeholder_and_back_link():
     assert "No sanitizer runs yet" in html
 
 
+def test_empty_page_styles_its_stale_banner():
+    # The empty-runs branch still renders the stale banner, which is the most
+    # safety-relevant thing on the page. It uses the shared .stale class, so the
+    # branch has to embed _CSS -- otherwise a failed nightly with no data shows
+    # the warning as an unstyled div and it reads as a broken page, not an alert.
+    status = {
+        "healthy": False, "conclusion": "failure", "run_id": "13",
+        "run_url": "https://github.com/ROCm/aorta/actions/runs/13", "date": "2026-08-05",
+    }
+    html = gen.build_html([], status=status)
+    assert 'class="stale"' in html
+    assert ".stale {" in html, "empty-runs page renders .stale without embedding _CSS"
+    assert "No sanitizer runs yet" in html
+
+
 def test_build_html_renders_stale_banner_when_unhealthy():
     rows = {
         "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
@@ -402,6 +418,11 @@ def test_build_html_no_banner_when_healthy():
     empty = gen.build_html([], status={"healthy": False, "conclusion": "failure",
                                        "run_id": "7", "run_url": "", "date": ""})
     assert "did not complete successfully" in empty
+    # Review (#378): the banner is drawn by the .stale rules, so the empty-state
+    # document has to embed the shared sheet. Without it the one page a reader
+    # lands on when the nightly is broken shows its warning as an unstyled div.
+    assert '<div class="stale">' in empty
+    assert ".stale {" in empty
 
 
 def test_build_summary_md_stale_banner():
@@ -955,19 +976,67 @@ def test_every_white_on_solid_fill_clears_wcag_aa():
     # *not* WCAG "large text", so they need the full 4.5:1 too -- white on the
     # brand green at 85% alpha measured 2.99:1 before this was pinned.
     css = gen._CSS
-    solid_fills = {
-        "--solid-ok": "#15803D",
-        "--solid-bad": "#B91C1C",
-        ".step-num.blue": "#2563EB",
-        ".step-num.purple": "#7C3AED",
-        ".step-num.green": "#15803D",
+    # Read the colour actually bound to each selector rather than asserting a
+    # hardcoded pair: "#15803D appears somewhere in the sheet" would still pass
+    # if .step-num.green regressed, because --solid-ok uses the same value.
+    hexcolor = r"(#[0-9A-Fa-f]{6})"
+    declarations = {
+        "--solid-ok": rf"--solid-ok:\s*{hexcolor}",
+        "--solid-bad": rf"--solid-bad:\s*{hexcolor}",
+        ".step-num.blue": rf"\.step-num\.blue\s*\{{\s*background:\s*{hexcolor}",
+        ".step-num.purple": rf"\.step-num\.purple\s*\{{\s*background:\s*{hexcolor}",
+        ".step-num.green": rf"\.step-num\.green\s*\{{\s*background:\s*{hexcolor}",
     }
-    for name, fill in solid_fills.items():
-        assert fill in css, f"{name} fill {fill} is no longer in the stylesheet"
+    for selector, pattern in declarations.items():
+        match = re.search(pattern, css)
+        assert match, f"no opaque solid fill declared for {selector}"
+        fill = match.group(1)
         ratio = _contrast_with_white(fill)
-        assert ratio >= 4.5, f"white on {name} ({fill}) is {ratio:.2f}:1, below WCAG AA"
+        assert ratio >= 4.5, f"white on {selector} ({fill}) is {ratio:.2f}:1, below WCAG AA"
+    # the audited custom properties only matter while the pills still consume
+    # them, and the whole sweep only matters while this text is still white
+    assert ".pill.ok, .pill.pass { background:var(--solid-ok); }" in css
+    assert ".pill.bad, .pill.fail { background:var(--solid-bad); }" in css
+    assert re.search(r"\.pill\s*\{[^}]*color:#fff", css), ".pill no longer sets white text"
+    assert re.search(r"\.step-num\s*\{[^}]*color:#fff", css), ".step-num lost white text"
     # a semi-transparent fill under white text would silently reintroduce the bug
     assert "background:rgba(34,197,94,.85)" not in css
+
+
+def test_table_wrapper_scrolls_instead_of_clipping():
+    # Review (#378): the latest-run table carries nine columns and its headers do
+    # not wrap, so a clipping wrapper put the rightmost columns -- including the
+    # report links -- permanently out of reach on a narrow viewport.
+    rule = re.search(r"\.table-wrap\s*\{([^}]*)\}", gen._CSS)
+    assert rule, "the .table-wrap rule is no longer in the stylesheet"
+    assert "overflow-x:auto" in rule.group(1)
+    assert "overflow:hidden" not in rule.group(1)
+
+
+def test_group_run_count_matches_the_rollup_and_excludes_absent_reports():
+    # The per-kernel panel's "N sanitizer runs" chip and the roll-up's run total
+    # must agree. Counting spec entries would show 2 here and 1 above for a group
+    # whose second report is missing.
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "waitcheck-k", "group": "k", "sanitizer": "waitcheck",
+             "report": _waitcheck_report()},
+            {"name": "consan-k", "group": "k", "sanitizer": "consan"},  # no report
+        ]}
+    )
+    present = [e for e in entries if (e.get("summary") or {}).get("present")]
+    assert len(entries) == 2 and len(present) == 1
+
+    grouped = gen._group_survey_entries(entries)
+    assert gen._survey_summary_stats(grouped).get("runs") == 1
+
+    html = gen._survey_detail_html(entries)
+    assert '<span class="count">1 sanitizer run</span>' in html
+    assert "2 sanitizer runs" not in html
+    # the absent sanitizer still gets a card -- it is listed, not hidden, which
+    # is what the "Important Notes" copy has to describe
+    kcards = [tag for tag in re.findall(r"<details[^>]*>", html) if 'class="kcard' in tag]
+    assert len(kcards) == 2
 
 
 def test_absent_report_never_claims_no_findings():
@@ -1016,6 +1085,18 @@ def test_run_index_page_lays_out_header_and_run_card_together():
     assert "</div>" in page[page.index('<aside class="runcard">'):]
 
 
+def test_wide_tables_stay_reachable_on_narrow_viewports():
+    # The latest-run table has nine columns and th is white-space:nowrap, so a
+    # clipping wrapper would put the rightmost columns and the report links out
+    # of reach on a narrow viewport instead of letting the user scroll to them.
+    css = gen._CSS
+    match = re.search(r"\.table-wrap\s*\{([^}]*)\}", css)
+    assert match, ".table-wrap rule not found"
+    rule = match.group(1)
+    assert "overflow-x:auto" in rule.replace(" ", ""), f".table-wrap must scroll: {rule}"
+    assert "overflow:hidden" not in rule.replace(" ", "")
+
+
 def test_verdict_and_baseline_use_separate_visual_axes():
     # The verdict badge is always tinted; the baseline status pill is always
     # solid. That is what lets a red observed `fail` sit beside a green
@@ -1056,13 +1137,42 @@ def test_survey_intro_qualifies_the_both_sanitizers_claim():
     # supported degraded path (an absent/unreadable report skips a sanitizer). The
     # HTML notes + MD mirror must qualify it so the UI never claims both ran when only
     # one report exists.
+    #
+    # Review (#378): the qualification must also match what the degraded path
+    # actually renders. An absent report still gets a card (marked "report
+    # missing", no verdict), so copy claiming it "does not appear" is wrong.
     html = gen.build_html([_healthy_guardrail_run()], survey=[])
     # the old absolute claim is gone; the qualified degraded-path copy is present
     assert "shown under <b>both</b> sanitizers." not in html
-    assert "a skipped or missing scan simply does not appear" in html
+    assert "simply does not appear" not in html
+    assert "a skipped or missing scan still appears, marked report missing" in html
     md = gen.build_summary_md([_healthy_guardrail_run()], survey=[])
     assert "shown under both." not in md
-    assert "only the sanitizer(s) that ran appear" in md
+    assert "only the sanitizer(s) that ran appear" not in md
+    assert "still appears, marked report missing with no verdict" in md
+
+
+def test_survey_absent_report_still_renders_a_card_and_is_not_counted_as_a_run():
+    # Review (#378), the behavior the intro copy above promises: a survey entry
+    # whose report is missing still renders its own card so the gap is visible,
+    # but it is not a sanitizer run -- the kernel-group heading must agree with
+    # the roll-up headline instead of counting spec entries.
+    entries = gen.survey_cases_from_spec(
+        {"cases": [
+            {"name": "waitcheck-half", "group": "half", "sanitizer": "waitcheck",
+             "report": _waitcheck_report()},
+            {"name": "consan-half", "group": "half", "sanitizer": "consan"},
+        ]}
+    )
+    detail = gen._survey_detail_html(entries)
+    # both entries render a card, so the missing scan is visible rather than dropped
+    assert detail.count('<details class="kcard') == 2
+    assert "report missing" in detail
+    # ... but only the one that produced a report counts as a run
+    assert '<span class="count">1 sanitizer run</span>' in detail
+    assert "2 sanitizer runs" not in detail
+    stats = gen._survey_summary_stats(gen._group_survey_entries(entries))
+    assert stats["runs"] == 1
 
 
 def _errored_report_with_partial_findings(reason: str = "combined_hook_timeout") -> dict:
