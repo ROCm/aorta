@@ -1,0 +1,76 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_gemm_load",
+        "command_sha256": "b8ff5ea7642e28771add88aea42a049f86db3260cb674ecea03300f7c296abd8",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "ca39f6c615910a97c35d5f8a3ecaf4bb0c6a4fbb9c4ca912dacde2214e01760f",
+        "selected_identity_sha256": "505ae1eff9c51feb670a16eb7ad5347c7cb416a451e93e53db0d7f16b67a8075",
+        "selected_kernel": "gemm_f32_ss"
+      },
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "c1190d2005185bbf797b913022a681d52fb8ea90748901495dde56cc06f359b3",
+            "entry_offset": null,
+            "name": "gemm_f32_ss",
+            "target": "gfx950"
+          },
+          "reason": "combined_hook_timeout",
+          "returncode": null,
+          "state": "timed_out",
+          "verdict": "error"
+        }
+      ],
+      "reason": "combined_hook_timeout",
+      "returncode": null,
+      "sanitizer": "consan",
+      "state": "timed_out",
+      "verdict": "error"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [],
+      "reason": "combined_hook_timeout",
+      "returncode": null,
+      "sanitizer": "waitcheck_preflight",
+      "state": "timed_out",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "c1190d2005185bbf797b913022a681d52fb8ea90748901495dde56cc06f359b3",
+          "entry_offset": null,
+          "name": "gemm_f32_ss",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
