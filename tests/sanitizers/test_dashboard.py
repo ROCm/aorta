@@ -1176,7 +1176,7 @@ def test_survey_absent_report_still_renders_a_card_and_is_not_counted_as_a_run()
     assert '<span class="count">1 sanitizer run</span>' in detail
     assert "2 sanitizer runs" not in detail
     stats = gen._survey_summary_stats(gen._group_survey_entries(entries))
-    assert stats["runs"] == 1
+    assert stats.get("runs") == 1
 
 
 def _errored_report_with_partial_findings(reason: str = "combined_hook_timeout") -> dict:
