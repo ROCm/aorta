@@ -935,6 +935,87 @@ def test_verdict_html_colors_by_verdict():
     assert gen._verdict_html("\u2014") == '<span class="v neutral">\u2014</span>'
 
 
+def _relative_luminance(hex_color: str) -> float:
+    channels = []
+    for offset in (0, 2, 4):
+        value = int(hex_color[offset : offset + 2], 16) / 255
+        channels.append(value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4)
+    r, g, b = channels
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast_with_white(hex_color: str) -> float:
+    return 1.05 / (_relative_luminance(hex_color.lstrip("#")) + 0.05)
+
+
+def test_every_white_on_solid_fill_clears_wcag_aa():
+    # Sweep the whole class rather than one chip (precedent: the .vchip.warn
+    # contrast fix). Every solid fill that carries white text must clear 4.5:1
+    # for normal-size text. The step-number badges are 11.5px bold, which is
+    # *not* WCAG "large text", so they need the full 4.5:1 too -- white on the
+    # brand green at 85% alpha measured 2.99:1 before this was pinned.
+    css = gen._CSS
+    solid_fills = {
+        "--solid-ok": "#15803D",
+        "--solid-bad": "#B91C1C",
+        ".step-num.blue": "#2563EB",
+        ".step-num.purple": "#7C3AED",
+        ".step-num.green": "#15803D",
+    }
+    for name, fill in solid_fills.items():
+        assert fill in css, f"{name} fill {fill} is no longer in the stylesheet"
+        ratio = _contrast_with_white(fill)
+        assert ratio >= 4.5, f"white on {name} ({fill}) is {ratio:.2f}:1, below WCAG AA"
+    # a semi-transparent fill under white text would silently reintroduce the bug
+    assert "background:rgba(34,197,94,.85)" not in css
+
+
+def test_absent_report_never_claims_no_findings():
+    # An absent case also carries findings: 0, so a naive count chip would put
+    # "no findings" next to a "Report missing" pill and claim a clean scan that
+    # never ran. Sweep both tabs: the guardrail card and the survey card.
+    missing = gen.summarize_case(None, "pass")
+    assert missing["present"] is False and missing["findings"] == 0
+    assert gen._findings_chip_html(missing) == ""
+
+    rows = {
+        "waitcheck": gen.summarize_case(_waitcheck_report(), "warn"),
+        "consan-clean": missing,
+        "consan-racy": gen.summarize_case(_consan_racy_report(), "fail"),
+    }
+    html = gen.build_html(
+        [{"meta": {"run": "r1", "commit": "abc", "date": "d", "gpu": "gfx950"},
+          "rows": rows, "gate": False}]
+    )
+    assert '<span class="pill bad">Report missing</span>' in html
+    # the surviving "no findings" chip belongs to a present case, never the absent one
+    assert 'Report missing</span><span class="v neutral">' in html
+    assert '<span class="v neutral">\u2014</span><span class="findings">' not in html
+
+    # same on the survey tab, which has no baseline pill to fall back on
+    survey = gen.survey_cases_from_spec({"cases": [{"name": "s", "label": "gone"}]})
+    assert survey[0]["summary"]["present"] is False
+    card = gen._survey_case_html(survey[0], heading="gone")
+    assert "no findings" not in card
+
+
+def test_run_index_page_lays_out_header_and_run_card_together():
+    # The run card only sits top-right when it shares the .topbar flex row with
+    # the header; emitting it as a bare sibling silently drops the layout.
+    run = {
+        "meta": {"run": "2026-08-05-33", "commit": "abc", "date": "d", "gpu": "gfx950"},
+        "rows": {
+            case: gen.summarize_case(_waitcheck_report(), "warn")
+            for case, _k, _l, _b in gen.CASES
+        },
+        "gate": True,
+    }
+    page = gen.build_run_index_html(run)
+    topbar = page.index("<div class=topbar>")
+    assert topbar < page.index('<header class="page-header">') < page.index('<aside class="runcard">')
+    assert "</div>" in page[page.index('<aside class="runcard">'):]
+
+
 def test_verdict_and_baseline_use_separate_visual_axes():
     # The verdict badge is always tinted; the baseline status pill is always
     # solid. That is what lets a red observed `fail` sit beside a green

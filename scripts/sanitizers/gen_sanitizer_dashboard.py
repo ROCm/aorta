@@ -318,11 +318,14 @@ _CSS = """
 
   .flow { display:flex; align-items:flex-start; justify-content:space-between; gap:4px; padding:2px 0; }
   .step { display:flex; flex-direction:column; align-items:center; text-align:center; width:104px; }
+  /* Solid, deepened fills: white on the identity accents at 85% alpha measured
+     2.99:1 for green (WCAG AA needs 4.5:1 for this 11.5px bold text). These
+     opaque shades clear it -- blue 5.2:1, purple 5.7:1, green 5.0:1. */
   .step-num { width:21px; height:21px; border-radius:50%; display:grid; place-items:center;
     font-size:11.5px; font-weight:700; margin-bottom:7px; color:#fff; }
-  .step-num.blue { background:rgba(59,130,246,.85); }
-  .step-num.purple { background:rgba(139,92,246,.85); }
-  .step-num.green { background:rgba(34,197,94,.85); }
+  .step-num.blue { background:#2563EB; }
+  .step-num.purple { background:#7C3AED; }
+  .step-num.green { background:#15803D; }
   .step .tile { width:46px; height:46px; border-radius:var(--radius-sm); }
   .step .label { font-size:13px; font-weight:600; color:var(--text-1); margin-top:9px; line-height:1.25; }
   .step .desc { font-size:12px; color:var(--text-3); margin-top:4px; line-height:1.35; }
@@ -1368,7 +1371,14 @@ def _raw_link_html(report_rel: str | None) -> str:
 
 
 def _findings_chip_html(row: dict[str, Any]) -> str:
-    """Findings count for a collapsed card's summary row."""
+    """Findings count for a collapsed card's summary row.
+
+    An absent report also carries ``findings: 0``, but "no findings" would
+    claim a clean scan where none ran. Emit nothing in that case and let the
+    verdict badge (and, on the guardrail tab, the "Report missing" pill) say so.
+    """
+    if not row.get("present"):
+        return ""
     count = int(row.get("findings") or 0)
     if not count:
         return '<span class="findings">no findings</span>'
@@ -1387,8 +1397,13 @@ def _observation_html(row: dict[str, Any], *, tone: str = "") -> str:
 
 
 def _tone_for(verdict: Any) -> str:
-    """Map a verdict onto the callout tint class (empty for pass/unknown)."""
-    return _VERDICT_CLASS.get(str(verdict).strip().lower(), "").replace("pass", "")
+    """Map a verdict onto the callout tint class.
+
+    Returns "" for pass and for anything unmapped, so a healthy or unknown
+    observation keeps the neutral grey callout rather than being tinted.
+    """
+    cls = _VERDICT_CLASS.get(str(verdict).strip().lower(), "")
+    return "" if cls == "pass" else cls
 
 
 def _sanitizer_accent(backend_label: str) -> str:
@@ -1542,19 +1557,6 @@ def _survey_note_html() -> str:
         f"{_chevron_html()}</summary><ul>{notes}</ul></details>"
         "</div>"
     )
-
-
-def _sanitizer_label(entry: dict[str, Any]) -> str:
-    """Human sanitizer heading for a grouped (both-sanitizer) survey sub-block.
-
-    Retained for the markdown mirror, which has no room for a two-part heading.
-    """
-    san = str(entry.get("sanitizer") or "").strip().lower()
-    if san == "waitcheck":
-        return "waitcheck (static wait-count scan)"
-    if san == "consan":
-        return "ConSan (dynamic data-race check)"
-    return str(entry.get("label") or san or "sanitizer")
 
 
 def _sanitizer_name(entry: dict[str, Any]) -> str:
@@ -2098,11 +2100,13 @@ def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightl
         "<body><div class=wrap>\n"
         '<div class=navrow><a href="../../">&larr; back to sanitizer dashboard</a>\n'
         f"{run_link}</div>\n"
+        '<div class=topbar>\n'
         '<header class="page-header"><div class="brand-tile">'
         f"{_svg(_ICON_ACTIVITY, size=24, width=2)}</div><div>\n"
         f"<h1>{_esc(title)}</h1>\n"
         f'<p class="subtitle">run {_esc(meta.get("run", ""))}</p></div></header>\n'
         f"{_run_card_html(meta)}\n"
+        "</div>\n"
         f"{_gate_hero_html(summary)}\n"
         '<section class="panel"><h2>Raw reports</h2><div class="table-wrap"><table>\n'
         "<thead><tr><th>Recipe</th><th>Baseline status</th><th>Raw report</th></tr></thead>\n"
