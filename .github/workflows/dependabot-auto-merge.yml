@@ -1,0 +1,128 @@
+name: Dependabot auto-merge
+
+# Auto-merge grouped pip version bumps once they are green. Two guards keep an
+# unattended merge safe:
+#   1. `validate-requirements` actually installs requirements.txt +
+#      requirements-dev.txt across the supported Pythons -- no other required
+#      check exercises those files (the CPU gate installs pyproject extras, not
+#      the requirements files; pre-commit only installs pre-commit), so an
+#      incompatible exact pin could otherwise merge green. The stable
+#      `Requirements validation` aggregate must be a *required* status check on
+#      `main` so this is enforced on the current head SHA (a `needs:` edge only
+#      gates enabling auto-merge, not the merge itself across a rebase).
+#   2. `gh pr merge --auto` still waits on any other required checks before the
+#      merge completes.
+# Scoped to Dependabot pip PRs only.
+#
+# Permissions are per-job, not workflow-wide: `validate-requirements` checks out
+# the PR and installs newly published packages *before* human review, so it must
+# never hold a write-capable token (and it checks out with
+# `persist-credentials: false` so no token is left in the Git config for that
+# package code to recover). Only `auto-merge` gets contents/pull-requests write.
+
+on: pull_request
+
+permissions: {}
+
+jobs:
+  meta:
+    # Guard on the PR *author*, not `github.actor` (the event actor). A
+    # Dependabot-authored PR can emit synchronize/reopened events triggered by a
+    # maintainer or another automation after auto-merge is enabled; keying on
+    # `github.actor` would skip meta + the matrix on those, and the always-on
+    # `Requirements validation` aggregate would treat both skips as a pass --
+    # letting an unvalidated head merge. The author is stable across every
+    # revision, so validation covers them all (and fetch-metadata still rejects a
+    # PR that isn't genuinely Dependabot's).
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      ecosystem: ${{ steps.meta.outputs.package-ecosystem }}
+    steps:
+      # Pinned to a commit SHA rather than the mutable `v2` tag: this action's
+      # output is the sole gate on the write-capable `auto-merge` job, so an
+      # upstream tag move must not silently change what decides the merge.
+      # The github-actions Dependabot ecosystem keeps this SHA updated.
+      - id: meta
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  validate-requirements:
+    needs: meta
+    if: needs.meta.outputs.ecosystem == 'pip'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pinned requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+  # Stable required-status-check aggregator, same pattern as cpu-tests.yml's
+  # `required` job. Branch protection on `main` must require THIS check
+  # ("Requirements validation"), not the per-version `validate-requirements`
+  # matrix legs: a matrix skipped by a job-level `if` never emits their contexts,
+  # so a required check pinned to them hangs the PR forever (actions/runner#952).
+  # Requiring the aggregate also closes the auto-merge rebase race -- `gh pr
+  # merge --auto` merges once the *required* checks pass on the current head SHA,
+  # so a rebased Dependabot PR is re-validated on its merge commit rather than
+  # only when auto-merge was first enabled. Non-pip / non-Dependabot PRs skip the
+  # matrix and this reports a pass.
+  requirements-validated:
+    name: Requirements validation
+    runs-on: ubuntu-latest
+    needs: [meta, validate-requirements]
+    if: always()
+    permissions: {}
+    steps:
+      - name: Collapse the requirements matrix result into one required check
+        env:
+          META_RESULT: ${{ needs.meta.result }}
+          VALIDATE_RESULT: ${{ needs.validate-requirements.result }}
+        run: |
+          set -euo pipefail
+          echo "meta=${META_RESULT} validate-requirements=${VALIDATE_RESULT}"
+
+          # meta ran (dependabot) or was not applicable (non-dependabot,
+          # skipped); a broken meta must not read as a pass.
+          case "$META_RESULT" in
+            success|skipped) ;;
+            *) echo "meta job did not succeed (${META_RESULT})."; exit 1 ;;
+          esac
+
+          # 'success' == the pinned files installed across every supported
+          # Python; 'skipped' == not a pip bump, nothing to validate (a pass).
+          # Anything else (failure/cancelled) fails the required check.
+          case "$VALIDATE_RESULT" in
+            success)  echo "Pinned requirements installed on all supported Pythons." ;;
+            skipped)  echo "Not a Dependabot pip bump; nothing to validate." ;;
+            *)        echo "Requirements validation did not pass (${VALIDATE_RESULT})."; exit 1 ;;
+          esac
+
+  auto-merge:
+    needs: [meta, validate-requirements]
+    if: needs.meta.outputs.ecosystem == 'pip'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Enable auto-merge (squash)
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --squash "$PR_URL"

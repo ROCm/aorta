@@ -148,13 +148,62 @@ multi-GPU entries on an 8-GPU box.
 
 ## Automated ROCm + dependency bumps
 
-- **Dependabot** (`.github/dependabot.yml`) opens weekly PRs for pip / docker
-  (ROCm base image digest) / github-actions updates.
-- After a stack-moving bump, run **Refresh baselines** (numerics/perf move with
-  ROCm/hipBLASLt — the baseline diff is the bump's impact) and **Lock
-  requirements** to refresh `config/ci/ci-constraints.txt` (partial pip
-  constraints, not a hash-pinned lock). Both open PRs; a human blesses.
-  No auto-merge.
+- **pip (weekly, auto-merged).** Dependabot (`.github/dependabot.yml`, `pip`
+  ecosystem) runs **weekly** and opens **one grouped PR** (`python-deps`,
+  version updates, `patterns: ["*"]`) that raises the `==` pins in the
+  requirements files.   `.github/workflows/dependabot-auto-merge.yml` first
+  installs `requirements.txt` + `requirements-dev.txt` across Python
+  3.10/3.11/3.12 (no other gate exercises those files -- the CPU gate installs
+  `pyproject.toml` extras, not the requirements files), then turns on GitHub
+  **auto-merge (squash)**, so a bump lands **with no human review** once that
+  install job and the repo's other required checks (the aggregate `CPU tests`
+  check and `pre-commit`) are green. **`Requirements validation` must be a
+  required status check on `main`** (branch protection): it is the stable
+  aggregate over the `validate-requirements` matrix (the per-version legs can't
+  be required — a skipped matrix never emits their contexts, actions/runner#952),
+  and requiring it is what enforces the install gate on the *current head SHA*.
+  A bare `needs:` edge only gates enabling auto-merge; since Dependabot rebases
+  the open PR weekly, without the required aggregate a later revision could merge
+  as soon as the other required checks pass while its re-validation is still
+  pending. The permissions are per-job: only the `auto-merge` job holds
+  `contents`/`pull-requests: write`, while `validate-requirements` checks out and
+  installs the newly published packages with a read-only token and
+  `persist-credentials: false`. Only **one bump PR is open at a time**
+  (`open-pull-requests-limit: 1`): a red or still-open bump PR blocks the next
+  one instead of piling up, and Dependabot rebases the open PR upward each week.
+  - **Security updates are the exception.** Dependabot opens security-update PRs
+    regardless of `open-pull-requests-limit` and outside the version-update
+    group, so more than one pip PR can be open at once; those also auto-merge on
+    green via the same workflow. Only version updates obey the one-PR/grouped
+    contract.
+  - **`bump-validate.yml` must be absent for a clean pip merge.** If that
+    workflow is present, a pip PR that edits `requirements*.txt` also triggers
+    its self-hosted GPU eval, which cannot run on a Dependabot PR (no
+    `ROCM_SHARED_KEY`) and would block the merge. It is removed in #345, so
+    ensure that has landed. (`gpu-tests.yml` itself skips to Success, since
+    `requirements*.txt` is not one of its GPU-relevant paths.)
+  - A bump PR **edits exactly**: `requirements.txt` (`pyyaml`, `matplotlib`,
+    `numpy`, `pandas`, `openpyxl`, `seaborn`, `beautifulsoup4`, `click`) and
+    `requirements-dev.txt` (`pytest`, `pytest-cov`, `pre-commit`,
+    `pytest-timeout`, `pytest-xdist`, `pytest-forked`).
+  - It **never** edits: `pyproject.toml` (kept as `>=` library floors on
+    purpose — a library shouldn't hard-pin), `docker/**`, or
+    `config/ci/ci-constraints.txt` (that file is refreshed by the separate
+    **Lock requirements** dispatch, not by a bump PR). The
+    `git+https://github.com/AMD-AGI/TraceLens.git` VCS line is not
+    Dependabot-managed and is left alone.
+- **docker base image (manual, NOT auto-bumped).** The ROCm/Ubuntu OS/base
+  image is intentionally **not** tracked by Dependabot, so an OS change never
+  lands unreviewed. Bump it by hand: resolve the new digest with
+  `docker buildx imagetools inspect rocm/pytorch:<tag>`, update the
+  `FROM rocm/pytorch:...@sha256:...` line in `docker/Dockerfile.ci-gpu`, then run
+  **Refresh baselines** (numerics/perf move with ROCm/hipBLASLt — the baseline
+  diff is the bump's impact).
+- **github-actions (weekly, human-merged).** Action version bumps stay on the
+  **weekly** schedule and are reviewed/merged by a human — no auto-merge.
+- After any stack-moving bump, run **Lock requirements** to refresh
+  `config/ci/ci-constraints.txt` (partial pip constraints, not a hash-pinned
+  lock). It opens a PR that a human blesses.
 
 ## Results retention
 
