@@ -176,8 +176,8 @@ def test_committed_spec_groups_into_three_kernels_with_both_sanitizers():
         by_san = gen._survey_group_by_sanitizer(members)
         assert set(by_san) == {"waitcheck", "consan"}
     table = gen._survey_summary_table_html(groups)
-    assert "Surveyed 3 kernels across 6 sanitizer runs" in table
-    assert "&mdash;" not in table  # every cell has a real verdict chip
+    assert "Surveyed <b>3 kernels</b> across <b>6 sanitizer runs</b>" in table
+    assert "&mdash;" not in table  # every cell has a real verdict badge
 
 
 # --- survey warn/error is neutral, never a gate regression ---
@@ -193,7 +193,8 @@ def test_survey_error_and_warn_never_flip_the_gate():
     assert "REGRESSION" not in html
     assert "**HEALTHY**" in md and "**REGRESSION**" not in md
     # survey rows are observed-only (explicit note on the tab)
-    assert "No expected-behavior comparison on this tab" in html
+    assert "This tab is observational only." in html
+    assert "Findings represent observed behavior, not regressions." in html
     # each case drills down to its published report link
     for entry in survey:
         assert entry["report_rel"] in html
@@ -202,16 +203,19 @@ def test_survey_error_and_warn_never_flip_the_gate():
 def test_build_html_renders_all_survey_kernels_with_drilldown():
     survey = _survey_entries()
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
-    # Cases are now grouped by kernel: each kernel shows a group heading with a
-    # waitcheck + ConSan sub-block (rather than six standalone case headings).
+    # Cases are grouped by kernel: each kernel is one panel holding a collapsed
+    # waitcheck card and a collapsed ConSan card (not six standalone headings).
     for group_heading in (
-        '<h3 class="survey-group">hipBLASLt GEMM f32 nt 128x128</h3>',
-        '<h3 class="survey-group">tiny_vecadd</h3>',
-        '<h3 class="survey-group">lds_reduce</h3>',
+        '<span class="kname">hipBLASLt GEMM f32 nt 128x128</span>',
+        '<span class="kname">tiny_vecadd</span>',
+        '<span class="kname">lds_reduce</span>',
     ):
         assert group_heading in html
-    assert "waitcheck (static wait-count scan)" in html
-    assert "ConSan (dynamic data-race check)" in html
+    assert html.count('<span class="name">WaitCheck</span>') == 3
+    assert html.count('<span class="name">ConSan</span>') == 3
+    # every card ships collapsed, so its summary row must carry the verdict
+    assert html.count("<details class=\"kcard") == 6 + len(gen.CASES)
+    assert "<details open" not in html
     # every case still drills down to its published raw report
     for entry in survey:
         assert entry["report_rel"] in html

@@ -191,15 +191,16 @@ def test_build_html_expected_warn_and_fail_are_healthy_and_neutral():
     ]
     html = gen.build_html(runs)
     assert "<!doctype html>" in html
-    assert "HEALTHY — 3/3 sanitizer outcomes match their baselines" in html
+    # the gate hero splits state and detail onto two lines
+    assert "<strong>HEALTHY</strong>3/3 sanitizer outcomes match their baselines" in html
     assert html.count('<span class="pill ok">Expected outcome</span>') >= 3
-    assert '<span class="observed">warn</span>' in html
-    assert '<span class="observed">fail</span>' in html
-    assert "positive-control outcomes" in html
+    # verdicts are tinted badges; the solid baseline pill carries regression health
+    assert '<span class="v warn">warn</span>' in html
+    assert '<span class="v fail">fail</span>' in html
+    assert "This tab is the regression gate." in html
     assert "<th>Baseline status</th><th>Observed</th>" in html
     assert "<th>Expected</th><th>Execution</th>" in html
     assert "gemm_x" in html and "Kernel details" in html
-    assert "Observed sanitizer verdict" in html
     assert '<span class="pill ok">Match</span>' in html
     assert '<span class="pill pass">Healthy</span>' in html
     assert ">green<" not in html and ">red<" not in html
@@ -221,11 +222,11 @@ def test_build_html_mismatch_is_primary_regression_signal():
 
     html = gen.build_html(runs)
 
-    assert "REGRESSION — investigate 1/3 sanitizer outcomes" in html
+    assert "<strong>REGRESSION</strong>investigate 1/3 sanitizer outcomes" in html
     assert '<span class="pill bad">Unexpected outcome</span>' in html
     assert '<span class="pill bad">Mismatch</span>' in html
-    assert 'Observed <span class="observed">fail</span>' in html
-    assert 'expected <span class="observed">pass</span>' in html
+    assert '<span class="v fail">fail</span>' in html
+    assert '<span class="dash">expected</span> <span class="v pass">pass</span>' in html
     assert '<span class="pill fail">Regression</span>' in html
 
 
@@ -247,13 +248,13 @@ def test_renderers_make_missing_report_explicit():
     md = gen.build_summary_md(runs)
 
     assert '<span class="pill bad">Report missing</span>' in html
-    assert 'Observed <span class="observed">—</span>' in html
+    assert '<span class="v neutral">—</span>' in html
     assert "❌ **Report missing**" in md
     assert "Observed sanitizer verdict: `—`" in md
     assert "❌ **Report missing**<br>Observed: `—`" in md
     # the per-case observation summary renders for a missing guardrail report too,
     # on both Tab 1 renderers (parity with the survey missing branch / #367).
-    assert '<div class="secondary">Observation: report missing</div>' in html
+    assert '<span class="lbl">Observation</span>report missing' in html
     assert "Observation: report missing" in md
 
 
@@ -313,7 +314,7 @@ def test_missing_only_run_is_incomplete_not_regression():
     html = gen.build_html(runs)
     md = gen.build_summary_md(runs)
 
-    assert "INCOMPLETE — 1/3 sanitizer report(s) are missing" in html
+    assert "<strong>INCOMPLETE</strong>1/3 sanitizer report(s) are missing" in html
     assert '<span class="pill fail">Incomplete</span>' in html
     assert "**INCOMPLETE** — 1/3 sanitizer report(s) are missing" in md
     assert "Incomplete |" in md
@@ -343,7 +344,7 @@ def test_combined_mismatch_and_missing_is_unhealthy():
     md = gen.build_summary_md(runs)
 
     detail = "investigate 1/3 mismatched outcome(s) and 1/3 missing report(s)"
-    assert f"UNHEALTHY — {detail}" in html
+    assert f"<strong>UNHEALTHY</strong>{detail}" in html
     assert '<span class="pill fail">Unhealthy</span>' in html
     assert f"**UNHEALTHY** — {detail}" in md
     assert "Unhealthy |" in md
@@ -679,7 +680,7 @@ def test_build_run_index_html_missing_report_reads_incomplete(tmp_path):
     page = gen.build_run_index_html(run)
 
     # A missing report must read as INCOMPLETE, not a misleading verdict mismatch.
-    assert "INCOMPLETE \u2014 1/3 sanitizer report(s) are missing" in page
+    assert "<strong>INCOMPLETE</strong>1/3 sanitizer report(s) are missing" in page
     assert "verdict mismatch" not in page
 
 
@@ -922,41 +923,62 @@ def test_survey_recipe_for_uses_real_recipe_not_derived_guess():
     assert gen._survey_recipe_for("waitcheck-gemm") != "daily-waitcheck-gemm"
 
 
-def test_verdict_chip_html_colors_by_verdict():
-    # #374 D: solid color-coded verdict chips keyed on the verdict string.
-    assert gen._verdict_chip_html("error") == '<span class="vchip err">error</span>'
-    assert gen._verdict_chip_html("fail") == '<span class="vchip err">fail</span>'
-    assert gen._verdict_chip_html("warn") == '<span class="vchip warn">warn</span>'
-    assert gen._verdict_chip_html("pass") == '<span class="vchip pass">pass</span>'
-    assert (
-        gen._verdict_chip_html("not_checked") == '<span class="vchip neutral">not_checked</span>'
-    )
-    assert gen._verdict_chip_html("\u2014") == '<span class="vchip neutral">\u2014</span>'
+def test_verdict_html_colors_by_verdict():
+    # #374 D: verdict badges keyed on the verdict string. fail and error keep
+    # distinct class names but share one red in CSS, so the hues can be split
+    # later without touching markup.
+    assert gen._verdict_html("error") == '<span class="v error">error</span>'
+    assert gen._verdict_html("fail") == '<span class="v fail">fail</span>'
+    assert gen._verdict_html("warn") == '<span class="v warn">warn</span>'
+    assert gen._verdict_html("pass") == '<span class="v pass">pass</span>'
+    assert gen._verdict_html("not_checked") == '<span class="v neutral">not_checked</span>'
+    assert gen._verdict_html("\u2014") == '<span class="v neutral">\u2014</span>'
+
+
+def test_verdict_and_baseline_use_separate_visual_axes():
+    # The verdict badge is always tinted; the baseline status pill is always
+    # solid. That is what lets a red observed `fail` sit beside a green
+    # "Expected outcome" pill without reading as a regression.
+    row = gen.summarize_case(_consan_racy_report(), "fail")
+    assert 'class="v fail"' in gen._verdict_html(row["verdict"])
+    assert gen._baseline_status_html(row) == '<span class="pill ok">Expected outcome</span>'
+    css = gen._CSS
+    assert ".pill.ok, .pill.pass { background:var(--solid-ok); }" in css
+    assert "background:rgba(239,68,68,.13)" in css  # verdict red stays tinted
 
 
 def test_survey_intro_is_readable_and_drops_experimental_framing():
-    # #374 A/B: the intro is body-size readable copy (not 12px muted fine print) and
-    # frames the tab as real kernels under both sanitizers, dropping the old
-    # "experimental" / "caller-supplied code objects" framing from user-facing copy.
+    # #374 A/B: the survey tab states plainly that it is observed-only and
+    # non-gating, dropping the old "experimental" / "caller-supplied code
+    # objects" framing from user-facing copy. The WaitCheck / ConSan
+    # definitions are page-level cards (both tabs report both sanitizers).
     html = gen.build_html([_healthy_guardrail_run()], survey=[])
-    assert 'class="survey-intro"' in html
-    assert ".survey-intro { font-size:14px" in html  # readable body size
-    assert "real GPU kernels" in html
-    assert "waitcheck" in html and "ConSan" in html
-    assert "No expected-behavior comparison on this tab" in html
+    assert "This tab is observational only." in html
+    assert "do not affect nightly pass/fail status" in html
+    assert "WaitCheck" in html and "ConSan" in html
+    assert "Findings represent observed behavior, not regressions." in html
     assert "experimental" not in html.lower()
     assert "caller-supplied" not in html.lower()
+
+
+def test_tool_cards_are_page_level_so_both_tabs_get_them():
+    # Both tabs report waitcheck and consan results, so the definitions sit
+    # above the tab bar rather than inside the survey panel.
+    html = gen.build_html([_healthy_guardrail_run()], survey=[])
+    tabbar = html.index('<div class=tabbar>')
+    assert html.index('<section class="toolgrid">') < tabbar
+    assert html.count("Static Analysis") == 1 and html.count("Runtime Analysis") == 1
 
 
 def test_survey_intro_qualifies_the_both_sanitizers_claim():
     # Review (#374): the absolute "shown under both sanitizers" claim is false on the
     # supported degraded path (an absent/unreadable report skips a sanitizer). The
-    # HTML intro + MD mirror must qualify it so the UI never claims both ran when only
+    # HTML notes + MD mirror must qualify it so the UI never claims both ran when only
     # one report exists.
     html = gen.build_html([_healthy_guardrail_run()], survey=[])
     # the old absolute claim is gone; the qualified degraded-path copy is present
     assert "shown under <b>both</b> sanitizers." not in html
-    assert "only the sanitizer(s) that actually ran appear" in html
+    assert "a skipped or missing scan simply does not appear" in html
     md = gen.build_summary_md([_healthy_guardrail_run()], survey=[])
     assert "shown under both." not in md
     assert "only the sanitizer(s) that ran appear" in md
@@ -995,14 +1017,17 @@ def test_survey_message_error_reason_takes_precedence_over_partial_findings():
     assert errored["verdict"] == "error" and errored["findings"] == 1  # partial finding present
     assert gen._survey_message_parts(errored) == ("Reason", "combined_hook_timeout")
     assert gen._survey_message_html(errored) == (
-        '<div class="survey-msg">Reason: combined_hook_timeout</div>'
+        '<div class="observation error"><span class="lbl">Reason</span>'
+        '<span class="msg">combined_hook_timeout</span></div>'
     )
     assert gen._survey_message_md(errored) == "Reason: `combined_hook_timeout`"
 
     # a warn case with a finding still leads with the finding (unchanged behavior)
     warn = gen.summarize_case(_waitcheck_report(), None)
     assert gen._survey_message_parts(warn)[0] == "Finding"
-    assert gen._survey_message_html(warn).startswith('<div class="survey-msg">Finding:')
+    assert gen._survey_message_html(warn).startswith(
+        '<div class="observation warn"><span class="lbl">Finding</span>'
+    )
     assert gen._survey_message_md(warn).startswith("Finding: `")
 
     # the summary-table note also surfaces the errored group's reason ahead of a
@@ -1019,7 +1044,7 @@ def test_survey_message_error_reason_takes_precedence_over_partial_findings():
     assert gen._survey_group_note(groups[0][1]) == "combined_hook_timeout"
     # rendered end-to-end: the errored reason shows on the page, gate stays HEALTHY
     html = gen.build_html([_healthy_guardrail_run()], survey=entries)
-    assert "Reason: combined_hook_timeout" in html
+    assert '<span class="lbl">Reason</span><span class="msg">combined_hook_timeout' in html
     assert "HEALTHY" in html
     assert "REGRESSION" not in html and "Regression" not in html
 
@@ -1078,13 +1103,15 @@ def test_survey_informational_groups_both_sanitizers_with_chips_and_repro(tmp_pa
     )
 
     html = gen.build_html([_healthy_guardrail_run()], survey=entries)
-    # one kernel-group heading, both sanitizer sub-blocks
-    assert 'class="survey-group">gemm</h3>' in html
-    assert "waitcheck (static wait-count scan)" in html
-    assert "ConSan (dynamic data-race check)" in html
-    # solid color-coded chips: consan error -> red, waitcheck warn -> amber
-    assert '<span class="vchip err">error</span>' in html
-    assert '<span class="vchip warn">warn</span>' in html
+    # one kernel-group panel, one collapsed card per sanitizer
+    assert '<span class="kname">gemm</span>' in html
+    assert '<span class="name">WaitCheck</span>' in html
+    assert '<span class="kind">static wait-count scan</span>' in html
+    assert '<span class="name">ConSan</span>' in html
+    assert '<span class="kind">dynamic data-race check</span>' in html
+    # color-coded verdict badges: consan error -> red, waitcheck warn -> amber
+    assert '<span class="v error">error</span>' in html
+    assert '<span class="v warn">warn</span>' in html
     # per-case copy-paste reproduce command reflects the ACTUAL recipe: the gemm
     # waitcheck survey uses its dedicated object recipe, NOT the gated Tab-1
     # daily-waitcheck-gemm guardrail (which is never reused for the survey).
@@ -1096,8 +1123,8 @@ def test_survey_informational_groups_both_sanitizers_with_chips_and_repro(tmp_pa
     assert "recipes/sanitizers/daily-waitcheck-gemm.yaml" not in html
     # the actual message is inline on the page (not only behind the raw-report link):
     # the errored ConSan case shows its reason; the waitcheck case shows a finding.
-    assert "Reason: combined_hook_timeout" in html
-    assert "Finding:" in html
+    assert '<span class="lbl">Reason</span><span class="msg">combined_hook_timeout' in html
+    assert '<span class="lbl">Finding</span>' in html
     # gate stays healthy; no regression vocabulary leaks from the survey
     assert "HEALTHY" in html
     assert "REGRESSION" not in html and "Regression" not in html
@@ -1180,24 +1207,24 @@ def test_survey_summary_table_renders_chips_emdash_and_gate_stays_healthy():
     table = gen._survey_summary_table_html(groups)
 
     # readable headline stat (not tiny muted text) with the accurate breakdown
-    assert 'class="survey-headline"' in table
-    assert "Surveyed 3 kernels across 5 sanitizer runs" in table
+    assert 'class="statline"' in table
+    assert "Surveyed <b>3 kernels</b> across <b>5 sanitizer runs</b>" in table
     for part in ("2 pass", "1 warn", "1 fail", "1 error"):
         assert part in table
     # one row per kernel group with a stable header
-    assert "<th>Kernel</th><th>waitcheck</th><th>ConSan</th>" in table
-    # solid-color chips for every observed verdict (error/fail red, warn amber, pass green)
-    assert '<span class="vchip warn">warn</span>' in table
-    assert '<span class="vchip err">fail</span>' in table
-    assert '<span class="vchip err">error</span>' in table
-    assert '<span class="vchip pass">pass</span>' in table
+    assert "<th>Kernel</th><th>WaitCheck</th><th>ConSan</th>" in table
+    # color-coded verdict badges (error/fail red, warn amber, pass green)
+    assert '<span class="v warn">warn</span>' in table
+    assert '<span class="v fail">fail</span>' in table
+    assert '<span class="v error">error</span>' in table
+    assert '<span class="v pass">pass</span>' in table
     # the obj group's waitcheck did not run -> em dash cell, never a fake verdict
-    assert "<td>&mdash;</td>" in table
+    assert '<td><span class="dash">&mdash;</span></td>' in table
 
     # rendered on the page: gate stays HEALTHY, no regression vocabulary
     html = gen.build_html([_healthy_guardrail_run()], survey=entries)
-    assert 'class="survey-headline"' in html
-    assert "HEALTHY — 3/3 sanitizer outcomes match their baselines" in html
+    assert 'class="statline"' in html
+    assert "<strong>HEALTHY</strong>3/3 sanitizer outcomes match their baselines" in html
     assert "REGRESSION" not in html and "Regression" not in html
     assert "Unexpected outcome" not in html and "Mismatch" not in html
 
@@ -1406,9 +1433,9 @@ def _healthy_guardrail_run() -> dict:
 
 def test_survey_execution_status_renders_neutral_not_health_colored():
     # An observed-only survey error must not be health-colored on Tab 2. The
-    # committed ConSan survey reports carry execution_status="error"; the meta
-    # line must render it with the neutral `observed` style, never the red
-    # `execution bad` class the guardrail tab uses for a broken run.
+    # committed ConSan survey reports carry execution_status="error"; the facts
+    # grid must render it as plain text, never the red badge the guardrail tab
+    # uses for a broken run.
     err = {
         "schema": "aorta.sanitizer_report/0.1", "target": "gfx950",
         "overall_verdict": "error", "execution_status": "error",
@@ -1424,21 +1451,20 @@ def test_survey_execution_status_renders_neutral_not_health_colored():
     }
     survey = gen.survey_cases_from_spec({"cases": [{"name": "s", "label": "obs", "report": err}]})
     # Only non-complete execution on the page is the survey one (guardrail runs
-    # are complete), so a neutral survey render means no `execution bad` at all.
+    # are complete), so a neutral survey render means no red execution badge.
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
-    assert "execution bad" not in html
-    # execution status stays neutral (never health-colored) on the survey tab
-    assert '<span class="observed">error</span>' in html
-    # but the observed *verdict* is now a solid color-coded chip (#374 D): an error
-    # verdict is a solid-red chip. This is descriptive only -- the gate stays healthy.
-    assert '<span class="vchip err">error</span>' in html
-    assert "HEALTHY — 3/3 sanitizer outcomes match their baselines" in html
+    # execution status stays plain (never health-colored) on the survey tab
+    assert '<span class="k">Execution</span><span class="val">error</span>' in html
+    # but the observed *verdict* is a color-coded badge (#374 D): an error verdict
+    # is red. This is descriptive only -- the gate stays healthy.
+    assert '<span class="v error">error</span>' in html
+    assert "<strong>HEALTHY</strong>3/3 sanitizer outcomes match their baselines" in html
     assert "REGRESSION" not in html and "Regression" not in html
 
-    # Unit: the survey meta line neutralizes execution; the guardrail one colors it.
+    # Unit: the survey facts grid neutralizes execution; the guardrail one flags it.
     row = survey[0]["summary"]
-    assert "execution bad" not in gen._meta_line_html(row, observed=True)
-    assert "execution bad" in gen._meta_line_html(row, observed=False)
+    assert '<span class="v fail">error</span>' not in gen._facts_html(row, observed=True)
+    assert '<span class="v fail">error</span>' in gen._facts_html(row, observed=False)
 
 
 def test_build_html_renders_two_self_contained_tabs():
@@ -1458,7 +1484,9 @@ def test_build_html_renders_two_self_contained_tabs():
     assert "cdn" not in html.lower()
     assert "http://" not in html and "https://" not in html
     # explicit observed-only note on the survey tab
-    assert "No expected-behavior comparison on this tab" in html
+    assert "This tab is observational only." in html
+    # folding is pure HTML disclosure, so the no-JS promise still holds
+    assert "<details" in html and "<summary>" in html
 
 
 def test_build_html_survey_fail_is_color_coded_but_never_a_regression():
@@ -1471,10 +1499,10 @@ def test_build_html_survey_fail_is_color_coded_but_never_a_regression():
     )
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
 
-    assert "HEALTHY — 3/3 sanitizer outcomes match their baselines" in html
-    # the fail is a solid-red verdict chip (color-coded), never the neutral grey chip
-    assert '<span class="vchip err">fail</span>' in html
-    assert '<span class="observed">fail</span>' not in html
+    assert "<strong>HEALTHY</strong>3/3 sanitizer outcomes match their baselines" in html
+    # the fail is a red verdict badge (color-coded), never the neutral grey one
+    assert '<span class="v fail">fail</span>' in html
+    assert '<span class="v neutral">fail</span>' not in html
     # none of the guardrail regression vocabulary leaks in from the survey, and the
     # gate banner stays healthy (a survey fail/error is observational, never a gate).
     assert "REGRESSION" not in html and "Regression" not in html
@@ -1483,8 +1511,8 @@ def test_build_html_survey_fail_is_color_coded_but_never_a_regression():
     # is emitted for the survey case; that phrasing is guardrail-only)
     assert "survey fail case" in html
     # observation summary + inline message are present on the tab
-    assert "Observation:" in html
-    assert "Finding:" in html
+    assert '<span class="lbl">Observation</span>' in html
+    assert '<span class="lbl">Finding</span>' in html
 
 
 def test_build_html_survey_report_link_and_graceful_absence():
