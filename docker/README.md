@@ -37,12 +37,19 @@ docker compose -f docker-compose.build.yaml up -d
 
 | Dockerfile | Description | Use Case |
 |------------|-------------|----------|
-| `Dockerfile.rocm70_9-1` | Standard ROCm 7.0.9.1 | General development and testing |
+| `Dockerfile.rocm-latest` | **Latest ROCm production release (7.14)** — compose default | General development and testing |
+| `Dockerfile.rocm70_9-1` | Standard ROCm 7.0.9.1 | Older-stack comparison |
 | `Dockerfile.rocm70_9-1-shampoo` | ROCm 7.0.9.1 + Shampoo optimizer | Shampoo optimizer experiments |
 | `Dockerfile.rocm70_2-ubuntu-pytorch` | ROCm 7.0.2 Ubuntu PyTorch | Legacy ROCm 7.0.2 support |
 | `Dockerfile.rocm70_2-ubuntu-nan` | ROCm 7.0.2 + NaN debugging | Debugging NaN issues |
 | `Dockerfile.rocm-ubuntu-ebpf` | ROCm 7.2 + eBPF tracing (bpftrace, bcc) | eBPF-based GPU queue/memory tracing |
-| `Dockerfile.ci-gpu` | ROCm 7.2 PyTorch base pinned by digest | GPU CI on self-hosted runners (see `.env.ci`) |
+| `Dockerfile.ci-gpu` | Latest ROCm production release (7.14) PyTorch base pinned by digest | GPU CI on self-hosted runners (see `.env.ci`) |
+
+Except for `Dockerfile.rocm-latest` and `Dockerfile.ci-gpu`, the images above are
+pinned to older ROCm **on purpose** — the version is the thing under test (a
+customer's stack, a specific `amdgpu` build, a bisect point). Bumping them would
+turn a reproducer into noise. New general-purpose tooling belongs in
+`Dockerfile.rocm-latest`.
 
 ## CI configuration (`.env.ci`)
 
@@ -76,7 +83,7 @@ See [`.env.ci`](.env.ci), [`Dockerfile.ci-gpu`](Dockerfile.ci-gpu), and
 
 ```bash
 # .env
-DOCKERFILE=Dockerfile.rocm70_9-1
+DOCKERFILE=Dockerfile.rocm-latest
 CONTAINER_NAME=myuser-dev-20260205
 AORTA_WORKSPACE=..
 # RCCL_PATH unset = use image RCCL
@@ -143,6 +150,7 @@ docker/
 ├── .env.example                  # Template for your .env
 ├── .env                          # Your personal config (git-ignored)
 ├── setup-env.sh                  # Interactive setup script
+├── Dockerfile.rocm-latest        # Latest ROCm production release (compose default)
 ├── Dockerfile.rocm70_9-1         # Standard ROCm build
 ├── Dockerfile.rocm70_9-1-shampoo # Shampoo variant
 ├── Dockerfile.rocm70_2-ubuntu-*  # Legacy ROCm 7.0.2 builds

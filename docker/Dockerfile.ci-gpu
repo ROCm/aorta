@@ -13,12 +13,16 @@
 # has therefore been removed from this image. hipcc (from the ROCm base) still
 # builds the HIP repro fixtures and does not need any of those.
 #
-# Base: rocm/pytorch ROCm 7.2, Ubuntu 22.04, Python 3.10, PyTorch 2.9.1
+# Base: rocm/pytorch ROCm 7.14, Ubuntu 24.04, Python 3.12, PyTorch 2.12.0
+# CI tracks the latest ROCm production release so the nightly eval reports
+# against the stack customers are actually on. ROCm 7.9+ is the technology
+# preview stream, NOT a newer production release, so the tag below must stay on
+# the production line (7.0-7.8 historically, then 7.14+ post-discontinuity).
 # Pinned as tag@digest (not digest-only): the tag anchors Dependabot to the
-# intended ROCm 7.2 stream when it proposes a new digest; the digest keeps the
+# intended ROCm stream when it proposes a new digest; the digest keeps the
 # build reproducible. Resolved via:
-#   docker buildx imagetools inspect rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1
-FROM rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1@sha256:376bfab5f4f680c8b4b843c6d0c5d1f0a04e5a84ec3e86728db8d11d79a9d1e3
+#   docker buildx imagetools inspect rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0
+FROM rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0@sha256:c38eeda81d85f00fbe35d3d50ce42ce59c524e87d810624f4eb5c52fddb3b9ad
 
 USER root
 

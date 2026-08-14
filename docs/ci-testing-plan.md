@@ -230,11 +230,17 @@ model as the existing analysis workflows):
 The base image is pinned by digest:
 
 ```
-rocm/pytorch@sha256:376bfab5f4f680c8b4b843c6d0c5d1f0a04e5a84ec3e86728db8d11d79a9d1e3
+rocm/pytorch@sha256:c38eeda81d85f00fbe35d3d50ce42ce59c524e87d810624f4eb5c52fddb3b9ad
 ```
 
-(tag: `rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1`). Bump the digest in
+(tag: `rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0`). Bump the digest in
 `Dockerfile.ci-gpu` / `.env.ci` when intentionally upgrading the CI stack.
+
+CI tracks the **latest ROCm production release** so the nightly eval reports
+against the stack customers run. Note the ROCm versioning discontinuity: 7.9
+through 7.13 are the *technology preview* stream, not newer production releases,
+so a Dependabot proposal that moves the tag onto a preview version must be
+rejected rather than merged.
 
 ### Triggers and frequency
 

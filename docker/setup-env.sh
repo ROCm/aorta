@@ -40,43 +40,52 @@ fi
 # Step 1: Select Dockerfile
 echo -e "${GREEN}Step 1: Select Dockerfile${NC}"
 echo "Available Dockerfiles:"
-echo "  1) Dockerfile.rocm70_9-1              - Standard ROCm 7.0.9.1 build"
-echo "  2) Dockerfile.rocm70_9-1-shampoo      - ROCm 7.0.9.1 with Shampoo optimizer"
-echo "  3) Dockerfile.rocm70_2-ubuntu-pytorch - ROCm 7.0.2 Ubuntu PyTorch build"
-echo "  4) Dockerfile.rocm70_2-ubuntu-nan     - ROCm 7.0.2 with NaN debugging tools"
-echo "  5) Dockerfile.rocm-ubuntu-ebpf        - ROCm 7.2 with eBPF tracing tools (bpftrace, bcc)"
+echo "  1) Dockerfile.rocm-latest             - Latest ROCm production release (7.14) [default]"
+echo "  2) Dockerfile.rocm70_9-1              - Standard ROCm 7.0.9.1 build"
+echo "  3) Dockerfile.rocm70_9-1-shampoo      - ROCm 7.0.9.1 with Shampoo optimizer"
+echo "  4) Dockerfile.rocm70_2-ubuntu-pytorch - ROCm 7.0.2 Ubuntu PyTorch build"
+echo "  5) Dockerfile.rocm70_2-ubuntu-nan     - ROCm 7.0.2 with NaN debugging tools"
+echo "  6) Dockerfile.rocm-ubuntu-ebpf        - ROCm 7.2 with eBPF tracing tools (bpftrace, bcc)"
+echo ""
+echo "Options 2-6 are pinned to older ROCm on purpose (the version is the"
+echo "experiment). Choose 1 unless you need a specific older stack."
 echo ""
 
 while true; do
-    read -p "Enter choice [1-5]: " dockerfile_choice
-    case $dockerfile_choice in
+    read -p "Enter choice [1-6, Enter for 1]: " dockerfile_choice
+    case ${dockerfile_choice:-1} in
         1)
+            DOCKERFILE="Dockerfile.rocm-latest"
+            VARIANT="rocm-latest"
+            break
+            ;;
+        2)
             DOCKERFILE="Dockerfile.rocm70_9-1"
             VARIANT="rocm70_9-1"
             break
             ;;
-        2)
+        3)
             DOCKERFILE="Dockerfile.rocm70_9-1-shampoo"
             VARIANT="rocm70_9-1-shampoo"
             break
             ;;
-        3)
+        4)
             DOCKERFILE="Dockerfile.rocm70_2-ubuntu-pytorch"
             VARIANT="rocm70_2-ubuntu-pytorch"
             break
             ;;
-        4)
+        5)
             DOCKERFILE="Dockerfile.rocm70_2-ubuntu-nan"
             VARIANT="rocm70_2-ubuntu-nan"
             break
             ;;
-        5)
+        6)
             DOCKERFILE="Dockerfile.rocm-ubuntu-ebpf"
             VARIANT="rocm-ubuntu-ebpf"
             break
             ;;
         *)
-            echo -e "${RED}Invalid choice. Please enter 1-5.${NC}"
+            echo -e "${RED}Invalid choice. Please enter 1-6.${NC}"
             ;;
     esac
 done

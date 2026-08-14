@@ -17,7 +17,9 @@ services:
     image: ${IMAGE_NAME:-aorta:latest}
     build:
       context: .
-      dockerfile: ${DOCKERFILE:-Dockerfile.rocm70_9-1}
+      # Default is the latest-ROCm dev image. Existing .env files that set
+      # DOCKERFILE explicitly are unaffected.
+      dockerfile: ${DOCKERFILE:-Dockerfile.rocm-latest}
       # Required for build: apt/npm access during docker compose build
       network: host
     # Security Configuration (Elevated Privileges Required)

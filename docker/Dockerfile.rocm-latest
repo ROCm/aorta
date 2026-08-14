@@ -1,0 +1,37 @@
+# Default general-purpose development image, on the latest ROCm production
+# release. This is what `docker-compose.build.yaml` builds unless DOCKERFILE is
+# overridden, and what you want unless you are reproducing a bug that is
+# specific to an older stack.
+#
+# The other Dockerfiles here are deliberately pinned to older ROCm because the
+# version IS the experiment (a customer's stack, a specific amdgpu build, a
+# bisect point). Do not "modernise" those; add to this one instead.
+#
+# Base: rocm/pytorch ROCm 7.14, Ubuntu 24.04, Python 3.12, PyTorch 2.12.0
+# Tag-pinned rather than `:latest`: `rocm/pytorch:latest` moves whenever a new
+# ROCm-tested PyTorch is published, which would silently change the stack under
+# a running experiment. Bump this tag deliberately. (GPU CI additionally pins a
+# digest -- see Dockerfile.ci-gpu -- because CI must be byte-reproducible.)
+#
+# ROCm versioning discontinuity: 7.9 through 7.13 are the TECHNOLOGY PREVIEW
+# stream, NOT newer production releases. A higher number is not automatically
+# newer-production. Keep this on the production line.
+FROM rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0
+
+USER root
+
+# Analysis tooling used by the report/trace workflows. Unpinned and non-fatal
+# (`|| true`) to match the other dev images: a transient GitHub outage should
+# not block a local container build. The CI image intentionally omits these --
+# it needs reproducibility, and the GPU gate does not use TraceLens/Magpie.
+RUN pip install git+https://github.com/AMD-AGI/TraceLens.git || true
+RUN pip install git+https://github.com/AMD-AGI/Magpie.git || true
+RUN pip install openpyxl seaborn
+
+ENV ROCM_HOME=/opt/rocm
+ENV PATH=$ROCM_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$LD_LIBRARY_PATH
+
+WORKDIR /workspace/aorta
+
+CMD ["/bin/bash"]
