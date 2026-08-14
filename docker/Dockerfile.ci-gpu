@@ -28,6 +28,33 @@ FROM rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0@sha256:c38e
 
 USER root
 
+# Require the classic system ROCm layout, and fail the build if it is absent.
+#
+# TheRock ships ROCm in two shapes: a system install rooted at /opt/rocm
+# (DEB/RPM, tarballs) and a Python wheel whose root is ROCM_PATH under
+# site-packages with no /opt/rocm at all (e.g. rocm/pytorch:latest). Everything
+# this repo uses to read a ROCm install hardcodes /opt/rocm -- the env probe's
+# version, hipBLASLt commit and rocBLAS capture, scripts/audit_env_knobs.py, and
+# the sanitizer GEMM fixtures.
+#
+# Those all fail SOFT: on a wheel image the probe reports null and the audit
+# finds no libraries, so a digest bump onto such an image would quietly gut the
+# evidence the NaN escalations depend on while CI still looked green. Assert the
+# layout here instead, where it is loud, cheap, and precedes any test run.
+#
+# Mirrors the files scripts/ci/nightly_eval.py actually reads, so this guard
+# tracks the real dependency rather than a proxy for it. Drop it only once ROCm
+# discovery is path-agnostic (see issue #381), not to make a bump pass.
+RUN if [ ! -f /opt/rocm/.info/version ] && [ ! -f /opt/rocm/.info/version-dev ]; then \
+        echo "ERROR: no /opt/rocm/.info/version{,-dev}; base image is not a classic ROCm install." >&2; \
+        echo "       ROCM_PATH=${ROCM_PATH:-<unset>} -- a wheel-based (TheRock) image needs issue #381 first." >&2; \
+        exit 1; \
+    fi \
+ && if [ ! -d /opt/rocm/lib ]; then \
+        echo "ERROR: no /opt/rocm/lib; audit_env_knobs.py --rocm-lib would find no libraries." >&2; \
+        exit 1; \
+    fi
+
 # Exact pins for reproducible CI image builds; fail the build if these can't be
 # installed (no `|| true`) so a broken image surfaces here, not at runtime.
 RUN python -m pip install --no-cache-dir \

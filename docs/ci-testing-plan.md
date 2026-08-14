@@ -243,6 +243,24 @@ A higher version number is therefore not automatically a newer production
 release, and any bump that moves the tag onto a preview version — proposed by a
 human or by automation — must be rejected rather than merged.
 
+#### ROCm install layout: classic `/opt/rocm` (decided)
+
+TheRock publishes ROCm both as a system install rooted at `/opt/rocm` (DEB/RPM,
+tarballs) and as a Python wheel rooted at `ROCM_PATH` under `site-packages` with
+no `/opt/rocm` (for example `rocm/pytorch:latest`). **CI images must use the
+classic layout.**
+
+The reason is fidelity, not preference: customers run system installs, and
+everything we use to read a ROCm install is bound to `/opt/rocm` — the env
+probe's ROCm version plus its hipBLASLt-commit and rocBLAS capture,
+`scripts/audit_env_knobs.py`, and the sanitizer GEMM fixtures. On a wheel image
+those degrade to `null`/empty rather than failing, so the loss would be silent.
+
+`Dockerfile.ci-gpu` therefore asserts the layout at build time and fails closed.
+Making ROCm discovery path-agnostic is tracked in issue #381; using a wheel-based
+image (and tracking `rocm/pytorch:latest`) is tracked in issue #382 as a
+non-gating canary. Neither is a prerequisite for the pinned gate.
+
 ### Triggers and frequency
 
 | Event | GPU pytest job | Workload regression job |
