@@ -265,9 +265,17 @@ Which images are which, and how to tell before pulling:
 | `rocm7.2.x` tags | classic | `/opt/rocm/bin` on `PATH`; no `npi.*` labels |
 | `rocm7.14+` tags, `rocm/pytorch:latest` | wheel (TheRock) | `npi.*` labels present; no `/opt/rocm` on `PATH` |
 
+Check before pulling — a classic image carries `/opt/rocm/bin` on `PATH`, a
+wheel-based one does not:
+
 ```bash
-# Cheap pre-flight, no pull: classic images carry /opt/rocm/bin on PATH.
-docker buildx imagetools inspect rocm/pytorch:<tag>   # digest
+docker buildx imagetools inspect rocm/pytorch:<tag> \
+  --format '{{range .Image.Config.Env}}{{println .}}{{end}}' | grep ^PATH=
+# classic 7.2.4 -> PATH=/opt/venv/bin:/opt/rocm/bin:...
+# wheel   7.14  -> PATH=/opt/venv/bin:...            (no /opt/rocm/bin)
+
+# The npi.* labels are the same signal from the other side:
+docker buildx imagetools inspect rocm/pytorch:<tag> --format '{{json .Image.Config.Labels}}'
 ```
 
 This is not a permanent stance. A wheel install is *richer* in provenance —
