@@ -39,13 +39,16 @@ fi
 
 # Step 1: Select Dockerfile
 echo -e "${GREEN}Step 1: Select Dockerfile${NC}"
+# Labels state the ROCm userspace each image actually installs, not its filename.
+# The `rocm70_9-1` / `rocm70_2` filenames encode an amdgpu installer revision, not
+# a ROCm version, so taking them at face value points people at the wrong stack.
 echo "Available Dockerfiles:"
-echo "  1) Dockerfile.rocm-latest             - Latest ROCm production release (7.14) [default]"
-echo "  2) Dockerfile.rocm70_9-1              - Standard ROCm 7.0.9.1 build"
-echo "  3) Dockerfile.rocm70_9-1-shampoo      - ROCm 7.0.9.1 with Shampoo optimizer"
-echo "  4) Dockerfile.rocm70_2-ubuntu-pytorch - ROCm 7.0.2 Ubuntu PyTorch build"
-echo "  5) Dockerfile.rocm70_2-ubuntu-nan     - ROCm 7.0.2 with NaN debugging tools"
-echo "  6) Dockerfile.rocm-ubuntu-ebpf        - ROCm 7.2 with eBPF tracing tools (bpftrace, bcc)"
+echo "  1) Dockerfile.rocm-latest             - ROCm 7.14 / PyTorch 2.12 (latest production) [default]"
+echo "  2) Dockerfile.rocm70_9-1              - ROCm 7.2 / PyTorch 2.9.1"
+echo "  3) Dockerfile.rocm70_9-1-shampoo      - ROCm 7.0 meta build #19, plus Shampoo optimizer"
+echo "  4) Dockerfile.rocm70_2-ubuntu-pytorch - ROCm 7.0.2.1 build #17 on Ubuntu 22.04"
+echo "  5) Dockerfile.rocm70_2-ubuntu-nan     - ROCm 7.0.2.1 build #17, plus NaN debugging tools"
+echo "  6) Dockerfile.rocm-ubuntu-ebpf        - ROCm 7.2.0.1 build #5, plus eBPF tracing (bpftrace, bcc)"
 echo ""
 echo "Options 2-6 are pinned to older ROCm on purpose (the version is the"
 echo "experiment). Choose 1 unless you need a specific older stack."

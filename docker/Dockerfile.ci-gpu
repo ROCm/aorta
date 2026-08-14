@@ -15,9 +15,9 @@
 #
 # Base: rocm/pytorch ROCm 7.14, Ubuntu 24.04, Python 3.12, PyTorch 2.12.0
 # CI tracks the latest ROCm production release so the nightly eval reports
-# against the stack customers are actually on. ROCm 7.9+ is the technology
-# preview stream, NOT a newer production release, so the tag below must stay on
-# the production line (7.0-7.8 historically, then 7.14+ post-discontinuity).
+# against the stack customers are actually on. ROCm 7.9 through 7.13 are the
+# technology preview stream, NOT newer production releases, so the tag below must
+# stay on the production line (7.0-7.8, then 7.14 onward post-discontinuity).
 # Pinned as tag@digest (not digest-only): the tag records which ROCm stream the
 # digest is meant to come from, so a bump proposal that silently changes streams
 # is visible in review (and anchors the docker Dependabot ecosystem to that
