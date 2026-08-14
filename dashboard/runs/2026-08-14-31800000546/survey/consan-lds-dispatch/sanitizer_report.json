@@ -1,0 +1,76 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/lds_dispatch",
+        "command_sha256": "0703e16ce9075ca5bcc4cb82fc1c25a6fd21c758baa749e51882f1d407da56ab",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "ca39f6c615910a97c35d5f8a3ecaf4bb0c6a4fbb9c4ca912dacde2214e01760f",
+        "selected_identity_sha256": "47e027d659754898289d7bca5137a02f4181b9a48588f913801f0d5127974e3e",
+        "selected_kernel": "lds_reduce"
+      },
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/lds.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "dac85bd1eeb29135fd4ed20c32d37f0afac1504ede0da222cc3c760c7e2e2631",
+            "entry_offset": null,
+            "name": "lds_reduce",
+            "target": "gfx950"
+          },
+          "reason": "combined_hook_exit_86",
+          "returncode": 86,
+          "state": "error",
+          "verdict": "error"
+        }
+      ],
+      "reason": "combined_hook_exit_86",
+      "returncode": 86,
+      "sanitizer": "consan",
+      "state": "error",
+      "verdict": "error"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [],
+      "reason": "combined_hook_exit_86",
+      "returncode": 86,
+      "sanitizer": "waitcheck_preflight",
+      "state": "error",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/lds.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "dac85bd1eeb29135fd4ed20c32d37f0afac1504ede0da222cc3c760c7e2e2631",
+          "entry_offset": null,
+          "name": "lds_reduce",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
