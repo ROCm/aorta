@@ -238,9 +238,10 @@ rocm/pytorch@sha256:c38eeda81d85f00fbe35d3d50ce42ce59c524e87d810624f4eb5c52fddb3
 
 CI tracks the **latest ROCm production release** so the nightly eval reports
 against the stack customers run. Note the ROCm versioning discontinuity: 7.9
-through 7.13 are the *technology preview* stream, not newer production releases,
-so a Dependabot proposal that moves the tag onto a preview version must be
-rejected rather than merged.
+through 7.13 are the *technology preview* stream, not newer production releases.
+A higher version number is therefore not automatically a newer production
+release, and any bump that moves the tag onto a preview version — proposed by a
+human or by automation — must be rejected rather than merged.
 
 ### Triggers and frequency
 
