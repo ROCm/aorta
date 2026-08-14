@@ -13,18 +13,26 @@
 # has therefore been removed from this image. hipcc (from the ROCm base) still
 # builds the HIP repro fixtures and does not need any of those.
 #
-# Base: rocm/pytorch ROCm 7.14, Ubuntu 24.04, Python 3.12, PyTorch 2.12.0
-# CI tracks the latest ROCm production release so the nightly eval reports
-# against the stack customers are actually on. ROCm 7.9 through 7.13 are the
-# technology preview stream, NOT newer production releases, so the tag below must
-# stay on the production line (7.0-7.8, then 7.14 onward post-discontinuity).
+# Base: rocm/pytorch ROCm 7.2.4, Ubuntu 22.04, Python 3.10, PyTorch 2.10.0
+#
+# The newest ROCm production release we can currently run. Two constraints set
+# that, and both are worth knowing before proposing a bump:
+#
+#   * 7.9 through 7.13 are the technology PREVIEW stream, not newer production
+#     releases, so a higher number there is not an upgrade.
+#   * 7.14 onward IS production, but its rocm/pytorch images are wheel-based
+#     (TheRock): ROCm installs under site-packages with no /opt/rocm, which the
+#     guard below rejects because everything here reads ROCm from /opt/rocm.
+#     Making that discovery layout-agnostic is issue #381; the base flips to
+#     7.14 once it lands, and the guard is what will verify the flip.
+#
 # Pinned as tag@digest (not digest-only): the tag records which ROCm stream the
 # digest is meant to come from, so a bump proposal that silently changes streams
 # is visible in review (and anchors the docker Dependabot ecosystem to that
 # stream for as long as .github/dependabot.yml enables it); the digest keeps the
 # build reproducible. Resolved via:
-#   docker buildx imagetools inspect rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0
-FROM rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0@sha256:c38eeda81d85f00fbe35d3d50ce42ce59c524e87d810624f4eb5c52fddb3b9ad
+#   docker buildx imagetools inspect rocm/pytorch:rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.10.0
+FROM rocm/pytorch:rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.10.0@sha256:3b71b642af60419cd68156d3ab4114943a6d39b730d4dd6b33e8f6ffdb982f88
 
 USER root
 

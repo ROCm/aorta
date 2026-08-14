@@ -1,22 +1,26 @@
-# Default general-purpose development image, on the latest ROCm production
-# release. This is what `docker-compose.build.yaml` builds unless DOCKERFILE is
-# overridden, and what you want unless you are reproducing a bug that is
-# specific to an older stack.
+# Default general-purpose development image. "latest" here means the newest
+# stack CI is validated against, so it moves as CI moves -- it is not the
+# `rocm/pytorch:latest` tag. This is what `docker-compose.build.yaml` builds
+# unless DOCKERFILE is overridden, and what you want unless you are reproducing
+# a bug specific to an older stack.
 #
 # The other Dockerfiles here are deliberately pinned to older ROCm because the
 # version IS the experiment (a customer's stack, a specific amdgpu build, a
 # bisect point). Do not "modernise" those; add to this one instead.
 #
-# Base: rocm/pytorch ROCm 7.14, Ubuntu 24.04, Python 3.12, PyTorch 2.12.0
+# Base: rocm/pytorch ROCm 7.2.4, Ubuntu 22.04, Python 3.10, PyTorch 2.10.0
+# Kept in step with Dockerfile.ci-gpu so local runs match what CI validates.
+# This is the newest ROCm PRODUCTION release we can currently use:
+#   * 7.9-7.13 are the technology PREVIEW stream, not newer production;
+#   * 7.14+ is production but ships wheel-based (TheRock) images with no
+#     /opt/rocm, which this image's ROCM_HOME below assumes -- see issue #381.
+#
 # Tag-pinned rather than `:latest`: `rocm/pytorch:latest` moves whenever a new
 # ROCm-tested PyTorch is published, which would silently change the stack under
-# a running experiment. Bump this tag deliberately. (GPU CI additionally pins a
-# digest -- see Dockerfile.ci-gpu -- because CI must be byte-reproducible.)
-#
-# ROCm versioning discontinuity: 7.9 through 7.13 are the TECHNOLOGY PREVIEW
-# stream, NOT newer production releases. A higher number is not automatically
-# newer-production. Keep this on the production line.
-FROM rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0
+# a running experiment. It is also wheel-based today, so it would not work here.
+# Bump this tag deliberately. (GPU CI additionally pins a digest -- see
+# Dockerfile.ci-gpu -- because CI must be byte-reproducible.)
+FROM rocm/pytorch:rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.10.0
 
 USER root
 

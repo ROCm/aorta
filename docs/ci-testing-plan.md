@@ -230,36 +230,53 @@ model as the existing analysis workflows):
 The base image is pinned by digest:
 
 ```
-rocm/pytorch@sha256:c38eeda81d85f00fbe35d3d50ce42ce59c524e87d810624f4eb5c52fddb3b9ad
+rocm/pytorch@sha256:3b71b642af60419cd68156d3ab4114943a6d39b730d4dd6b33e8f6ffdb982f88
 ```
 
-(tag: `rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.12.0`). Bump the digest in
+(tag: `rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.10.0`). Bump the digest in
 `Dockerfile.ci-gpu` / `.env.ci` when intentionally upgrading the CI stack.
 
-CI tracks the **latest ROCm production release** so the nightly eval reports
-against the stack customers run. Note the ROCm versioning discontinuity: 7.9
-through 7.13 are the *technology preview* stream, not newer production releases.
-A higher version number is therefore not automatically a newer production
-release, and any bump that moves the tag onto a preview version — proposed by a
-human or by automation — must be rejected rather than merged.
+CI tracks the newest ROCm production release it can actually run, so the nightly
+eval reports against the stack customers run. Two constraints bound "newest", and
+a bump proposal — from a human or from automation — must clear both:
+
+1. **Preview stream.** ROCm 7.9 through 7.13 are the *technology preview* stream,
+   not newer production releases, so a higher number there is not an upgrade.
+2. **Install layout.** 7.14 onward is production, but its `rocm/pytorch` images
+   are wheel-based (see below), which this repo cannot read yet.
 
 #### ROCm install layout: classic `/opt/rocm` (decided)
 
 TheRock publishes ROCm both as a system install rooted at `/opt/rocm` (DEB/RPM,
-tarballs) and as a Python wheel rooted at `ROCM_PATH` under `site-packages` with
-no `/opt/rocm` (for example `rocm/pytorch:latest`). **CI images must use the
-classic layout.**
+tarballs) and as a Python wheel rooted under `site-packages` with no `/opt/rocm`.
+**CI images must currently use the classic layout.**
 
-The reason is fidelity, not preference: customers run system installs, and
-everything we use to read a ROCm install is bound to `/opt/rocm` — the env
-probe's ROCm version plus its hipBLASLt-commit and rocBLAS capture,
-`scripts/audit_env_knobs.py`, and the sanitizer GEMM fixtures. On a wheel image
-those degrade to `null`/empty rather than failing, so the loss would be silent.
+The reason is capability, not preference: everything we use to read a ROCm install
+is bound to `/opt/rocm` — the env probe's ROCm version plus its hipBLASLt-commit
+and rocBLAS capture, `scripts/audit_env_knobs.py`, and the sanitizer GEMM
+fixtures. On a wheel image those degrade to `null`/empty rather than failing, so
+the loss would be silent. `Dockerfile.ci-gpu` therefore asserts the layout at
+build time and fails closed.
 
-`Dockerfile.ci-gpu` therefore asserts the layout at build time and fails closed.
-Making ROCm discovery path-agnostic is tracked in issue #381; using a wheel-based
-image (and tracking `rocm/pytorch:latest`) is tracked in issue #382 as a
-non-gating canary. Neither is a prerequisite for the pinned gate.
+Which images are which, and how to tell before pulling:
+
+| Image | Layout | Tell |
+|---|---|---|
+| `rocm7.2.x` tags | classic | `/opt/rocm/bin` on `PATH`; no `npi.*` labels |
+| `rocm7.14+` tags, `rocm/pytorch:latest` | wheel (TheRock) | `npi.*` labels present; no `/opt/rocm` on `PATH` |
+
+```bash
+# Cheap pre-flight, no pull: classic images carry /opt/rocm/bin on PATH.
+docker buildx imagetools inspect rocm/pytorch:<tag>   # digest
+```
+
+This is not a permanent stance. A wheel install is *richer* in provenance —
+`share/therock/therock_manifest.json` carries the full 40-char `rocm-libraries`
+commit (the classic header only exposes its first 8 as `..._VERSION_TWEAK`), plus
+the build's `github_run_id` and any applied patches. Issue #381 makes discovery
+layout-agnostic and manifest-aware, after which the base flips to 7.14 and the
+guard above verifies the flip. Issue #382 covers the wheel lane's other payoff:
+cheap ROCm version bisection in a venv, plus a non-gating latest-ROCm canary.
 
 ### Triggers and frequency
 

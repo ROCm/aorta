@@ -43,19 +43,26 @@ image to reproduce a stack against.
 
 | Dockerfile | Stack | Use Case |
 |------------|-------|----------|
-| `Dockerfile.rocm-latest` | **7.14 / PyTorch 2.12** (latest production) — compose default | General development and testing |
+| `Dockerfile.rocm-latest` | **7.2.4 / PyTorch 2.10** (newest stack CI validates) — compose default | General development and testing |
 | `Dockerfile.rocm70_9-1` | 7.2 / PyTorch 2.9.1 | Older-stack comparison |
 | `Dockerfile.rocm70_9-1-shampoo` | 7.0 meta build #19, plus Shampoo optimizer | Shampoo optimizer experiments |
 | `Dockerfile.rocm70_2-ubuntu-pytorch` | 7.0.2.1 build #17 on Ubuntu 22.04 | Legacy 7.0.2.x support |
 | `Dockerfile.rocm70_2-ubuntu-nan` | 7.0.2.1 build #17, plus NaN debugging | Debugging NaN issues |
 | `Dockerfile.rocm-ubuntu-ebpf` | 7.2.0.1 build #5, plus eBPF tracing (bpftrace, bcc) | eBPF-based GPU queue/memory tracing |
-| `Dockerfile.ci-gpu` | 7.14 / PyTorch 2.12 (latest production), pinned by digest | GPU CI on self-hosted runners (see `.env.ci`) |
+| `Dockerfile.ci-gpu` | 7.2.4 / PyTorch 2.10, pinned by digest | GPU CI on self-hosted runners (see `.env.ci`) |
 
 Except for `Dockerfile.rocm-latest` and `Dockerfile.ci-gpu`, the images above are
 pinned to older ROCm **on purpose** — the version is the thing under test (a
 customer's stack, a specific `amdgpu` build, a bisect point). Bumping them would
 turn a reproducer into noise. New general-purpose tooling belongs in
 `Dockerfile.rocm-latest`.
+
+7.2.4 is the newest ROCm **production** release we can currently use. ROCm
+7.9–7.13 are the technology *preview* stream (a higher number there is not an
+upgrade), and while 7.14+ is production, its `rocm/pytorch` images are
+wheel-based (TheRock) with no `/opt/rocm` — which everything here reads ROCm
+from. Issue #381 makes that discovery layout-agnostic; the base flips to 7.14
+once it lands.
 
 ## CI configuration (`.env.ci`)
 
@@ -156,7 +163,7 @@ docker/
 ├── .env.example                  # Template for your .env
 ├── .env                          # Your personal config (git-ignored)
 ├── setup-env.sh                  # Interactive setup script
-├── Dockerfile.rocm-latest        # ROCm 7.14 / PyTorch 2.12 (compose default)
+├── Dockerfile.rocm-latest        # ROCm 7.2.4 / PyTorch 2.10 (compose default)
 ├── Dockerfile.rocm70_9-1         # ROCm 7.2 / PyTorch 2.9.1
 ├── Dockerfile.rocm70_9-1-shampoo # ROCm 7.0 meta build #19 + Shampoo
 ├── Dockerfile.rocm70_2-ubuntu-*  # ROCm 7.0.2.1 build #17
