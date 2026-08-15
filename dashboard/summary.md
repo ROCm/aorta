@@ -1,6 +1,6 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-08-14-31800000546` · commit `68c980aa449f` · 2026-08-14
+Run `2026-08-15-31883858931` · commit `b4be48fdd6dd` · 2026-08-15
 
 ✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
 
@@ -20,17 +20,17 @@ Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate)
 
 Observed sanitizer verdict `warn` · expected `warn`
 Observation: waitcheck warn; 64 finding(s) (wait_hazard)
-backend `rj_waitcheck` `5fb63fdb255d` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
+backend `rj_waitcheck` `47bcf0f888f9` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `gemm_NT_M256_N4096_K1024` | 479 | `warn` | 32 | `sol_126578.hsaco` | `c1190d2005` |
-| `gemm_NT_M128_N4096_K1280` | 471 | `—` | 0 | `sol_175415.hsaco` | `c1190d2005` |
-| `gemm_TT_M64_N64_K1280` | 440 | `warn` | 32 | `sol_137678.hsaco` | `f5935e6937` |
+| `gemm_NT_M256_N4096_K1024` | 479 | `warn` | 32 | `sol_126578.hsaco` | `5bd40b78d1` |
+| `gemm_NT_M128_N4096_K1280` | 471 | `—` | 0 | `sol_175415.hsaco` | `5bd40b78d1` |
+| `gemm_TT_M64_N64_K1280` | 440 | `warn` | 32 | `sol_137678.hsaco` | `7ea836fe29` |
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| waitcheck | `wait_hazard` | warning | 64 | sol_126578.hsaco:gfx950[0]:.text+0x454: missing s_waitcnt lgkmcnt(0) before def of s45 |
+| waitcheck | `wait_hazard` | warning | 64 | sol_126578.hsaco:gfx950[0]:.text+0x28f8: missing s_waitcnt lgkmcnt(14) before use of v88 |
 
 </details>
 
@@ -58,7 +58,7 @@ backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · executio
 
 | Sanitizer | Code | Severity | Count | Example |
 |---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=21740224 index=0 kind=1 code_object=fnv1a64:9c359d862932193f report_generation=2 generation=2 epo… |
+| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=32008816 index=0 kind=1 code_object=fnv1a64:7db8350dfcf3fedf report_generation=2 generation=2 epo… |
 
 </details>
 
@@ -84,7 +84,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `c1190d2005` |
+| `gemm_f32_ss` | 1 | `error` | 0 | `consan_gemm_f32.hsaco` | `5bd40b78d1` |
 
 </details>
 
@@ -98,7 +98,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatc
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `error` | 0 | `lds.hsaco` | `dac85bd1ee` |
+| `lds_reduce` | 1 | `error` | 0 | `lds.hsaco` | `a935958871` |
 
 </details>
 
@@ -112,7 +112,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `4aac258cad` |
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `3add68e073` |
 
 </details>
 
@@ -120,13 +120,13 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 Observation: waitcheck warn; 32 finding(s) (wait_hazard)
 
-Finding: `consan_gemm_f32.hsaco:gfx950[0]:.text+0x454: missing s_waitcnt lgkmcnt(0) before def of s45`
+Finding: `consan_gemm_f32.hsaco:gfx950[0]:.text+0x28f8: missing s_waitcnt lgkmcnt(14) before use of v88`
 
 Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `gemm_f32_ss` | 1 | `warn` | 32 | `consan_gemm_f32.hsaco` | `c1190d2005` |
+| `gemm_f32_ss` | 1 | `warn` | 32 | `consan_gemm_f32.hsaco` | `5bd40b78d1` |
 
 </details>
 
@@ -138,7 +138,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-disp
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `dac85bd1ee` |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `a935958871` |
 
 </details>
 
@@ -150,7 +150,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `4aac258cad` |
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `3add68e073` |
 
 </details>
 
@@ -158,6 +158,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-08-15-31883858931 | `b4be48fdd6dd` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-14-31800000546 | `68c980aa449f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-13-31718502485 | `68c980aa449f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-13-31714026084 | `68c980aa449f` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
