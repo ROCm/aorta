@@ -8,8 +8,12 @@
 # version IS the experiment (a customer's stack, a specific amdgpu build, a
 # bisect point). Do not "modernise" those; add to this one instead.
 #
-# Base: rocm/pytorch ROCm 7.2.4, Ubuntu 22.04, Python 3.10, PyTorch 2.10.0
+# Base: rocm/pytorch ROCm 7.2.4, Ubuntu 24.04, Python 3.12, PyTorch 2.10.0
 # Kept in step with Dockerfile.ci-gpu so local runs match what CI validates.
+# Newest published combination on every axis: 24.04 / py3.12 / torch 2.10.0 are
+# the newest Ubuntu, Python and PyTorch on the 7.2.4 line, and py3.12 is also
+# where our own pyproject classifiers stop.
+#
 # This is the newest ROCm PRODUCTION release we can currently use:
 #   * 7.9-7.13 are the technology PREVIEW stream, not newer production;
 #   * 7.14+ is production but ships wheel-based (TheRock) images with no
@@ -20,7 +24,7 @@
 # a running experiment. It is also wheel-based today, so it would not work here.
 # Bump this tag deliberately. (GPU CI additionally pins a digest -- see
 # Dockerfile.ci-gpu -- because CI must be byte-reproducible.)
-FROM rocm/pytorch:rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.10.0
+FROM rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
 
 USER root
 

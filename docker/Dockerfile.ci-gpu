@@ -13,10 +13,17 @@
 # has therefore been removed from this image. hipcc (from the ROCm base) still
 # builds the HIP repro fixtures and does not need any of those.
 #
-# Base: rocm/pytorch ROCm 7.2.4, Ubuntu 22.04, Python 3.10, PyTorch 2.10.0
+# Base: rocm/pytorch ROCm 7.2.4, Ubuntu 24.04, Python 3.12, PyTorch 2.10.0
 #
-# The newest ROCm production release we can currently run. Two constraints set
-# that, and both are worth knowing before proposing a bump:
+# This is the newest published combination on every axis at once: ROCm 7.2.4 is
+# the newest classic-layout production release, and 24.04 / py3.12 / torch 2.10.0
+# are the newest Ubuntu, Python and PyTorch that line ships. Python is
+# additionally capped at 3.12 by our own packaging -- pyproject's classifiers
+# stop there and the CPU matrix tests 3.10-3.12 -- so moving the GPU gate past
+# 3.12 means declaring support and extending that matrix first, not just
+# swapping a tag.
+#
+# Two constraints set "newest ROCm", and both are worth knowing before a bump:
 #
 #   * 7.9 through 7.13 are the technology PREVIEW stream, not newer production
 #     releases, so a higher number there is not an upgrade.
@@ -31,8 +38,8 @@
 # is visible in review (and anchors the docker Dependabot ecosystem to that
 # stream for as long as .github/dependabot.yml enables it); the digest keeps the
 # build reproducible. Resolved via:
-#   docker buildx imagetools inspect rocm/pytorch:rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.10.0
-FROM rocm/pytorch:rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.10.0@sha256:3b71b642af60419cd68156d3ab4114943a6d39b730d4dd6b33e8f6ffdb982f88
+#   docker buildx imagetools inspect rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
+FROM rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
 
 USER root
 

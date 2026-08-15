@@ -230,11 +230,21 @@ model as the existing analysis workflows):
 The base image is pinned by digest:
 
 ```
-rocm/pytorch@sha256:3b71b642af60419cd68156d3ab4114943a6d39b730d4dd6b33e8f6ffdb982f88
+rocm/pytorch@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
 ```
 
-(tag: `rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.10.0`). Bump the digest in
+(tag: `rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0`). Bump the digest in
 `Dockerfile.ci-gpu` / `.env.ci` when intentionally upgrading the CI stack.
+
+That tag is the newest published combination on every axis at once — ROCm 7.2.4
+is the newest classic-layout production release, and 24.04 / py3.12 / torch
+2.10.0 are the newest Ubuntu, Python and PyTorch that line ships. Newer Python
+(3.13, 3.14) and newer PyTorch (2.11, 2.12) exist **only** on the wheel-based
+7.14 line, so they arrive with the #381 flip rather than separately.
+
+Python has a second, independent cap: `pyproject.toml`'s classifiers stop at
+3.12 and the CPU matrix tests 3.10–3.12. Moving the GPU gate past 3.12 therefore
+means declaring the support and extending that matrix first — see issue #383.
 
 CI tracks the newest ROCm production release it can actually run, so the nightly
 eval reports against the stack customers run. Two constraints bound "newest", and
