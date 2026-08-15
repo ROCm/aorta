@@ -36,9 +36,9 @@ Workflow: [`.github/workflows/cpu-tests.yml`](../.github/workflows/cpu-tests.yml
 - **Triggers:** `pull_request` and `push` to `main`. On PRs a cheap `changes`
   job first decides whether the suite is relevant (see "Path gate" below); it
   always runs on pushes to `main`.
-- **Runner / matrix:** `ubuntu-latest`, Python `3.10`, `3.11`, `3.12` (the
-  versions declared in `pyproject.toml`). `fail-fast: false` so one version's
-  failure still reports the others.
+- **Runner / matrix:** `ubuntu-latest`, Python `3.10`, `3.11`, `3.12`, `3.13`,
+  `3.14` (the versions declared in `pyproject.toml`). `fail-fast: false` so one
+  version's failure still reports the others.
 - **Concurrency:** newer pushes to the same ref cancel the older run.
 - **Selection:** `pytest -m "not gpu and not rocm"`. The `gpu` and `rocm`
   markers already exist (`pytest.ini`); GPU-only tests are deferred to Phase 2.
@@ -137,7 +137,7 @@ first and a job-level `if` decides whether the matrix runs -- the same pattern
 There is one crucial difference from the GPU gate, though. GPU's gated job is a
 single, non-matrix job (`pytest (GPU, MI350)`): when skipped, its one static
 check context still reports (as *skipped* == success), so it can be the required
-check directly. The CPU job is a **matrix** (py3.10/3.11/3.12). GitHub evaluates
+check directly. The CPU job is a **matrix** (py3.10 through py3.14). GitHub evaluates
 a job-level `if` *before* expanding the matrix, so a skipped `tests` job never
 creates the `pytest (CPU, py3.x)` contexts at all -- and a required check pinned
 to a context that never reports hangs the PR forever
@@ -180,7 +180,7 @@ checks to pass before merging`, then select:
 
 - `CPU tests`
 
-Do **not** require the per-version `pytest (CPU, py3.10/3.11/3.12)` legs: because
+Do **not** require the per-version `pytest (CPU, py3.x)` legs: because
 the matrix is skipped by a job-level `if` on irrelevant PRs, those contexts are
 not emitted and a required check pinned to them would hang the PR forever
 ([actions/runner#952](https://github.com/actions/runner/issues/952)). The `CPU
@@ -242,9 +242,10 @@ is the newest classic-layout production release, and 24.04 / py3.12 / torch
 (3.13, 3.14) and newer PyTorch (2.11, 2.12) exist **only** on the wheel-based
 7.14 line, so they arrive with the #381 flip rather than separately.
 
-Python has a second, independent cap: `pyproject.toml`'s classifiers stop at
-3.12 and the CPU matrix tests 3.10–3.12. Moving the GPU gate past 3.12 therefore
-means declaring the support and extending that matrix first — see issue #383.
+Python's second, independent cap has now been lifted: `pyproject.toml` declares
+through 3.14 and the CPU matrix tests 3.10–3.14 (issue #383). The GPU gate stays
+on py3.12 only because that is the newest Python the classic ROCm line ships, so
+the remaining move is the base-image flip, not a packaging change.
 
 CI tracks the newest ROCm production release it can actually run, so the nightly
 eval reports against the stack customers run. Two constraints bound "newest", and
@@ -429,5 +430,5 @@ per-version `pytest (CPU, py3.x)` legs -- see "Making it a required check".)
 
 | Phase | Runner | Selection | Status |
 | --- | --- | --- | --- |
-| 1 - CPU gate | `ubuntu-latest` (3.10-3.12) | `not gpu and not rocm`, `-n auto` | Implemented (`cpu-tests.yml`) |
+| 1 - CPU gate | `ubuntu-latest` (3.10-3.14) | `not gpu and not rocm`, `-n auto` | Implemented (`cpu-tests.yml`) |
 | 2 - GPU gate | `[self-hosted, gpu]` | `gpu or rocm`, `-n 4` + nightly workload regression | Implemented (`gpu-tests.yml`) |

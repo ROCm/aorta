@@ -17,11 +17,9 @@
 #
 # This is the newest published combination on every axis at once: ROCm 7.2.4 is
 # the newest classic-layout production release, and 24.04 / py3.12 / torch 2.10.0
-# are the newest Ubuntu, Python and PyTorch that line ships. Python is
-# additionally capped at 3.12 by our own packaging -- pyproject's classifiers
-# stop there and the CPU matrix tests 3.10-3.12 -- so moving the GPU gate past
-# 3.12 means declaring support and extending that matrix first, not just
-# swapping a tag.
+# are the newest Ubuntu, Python and PyTorch that line ships. Our own packaging no
+# longer caps Python here -- pyproject declares through 3.14 and the CPU matrix
+# tests 3.10-3.14 (#383) -- so 3.12 is purely what this ROCm line offers.
 #
 # Two constraints set "newest ROCm", and both are worth knowing before a bump:
 #
