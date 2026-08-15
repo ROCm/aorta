@@ -230,11 +230,71 @@ model as the existing analysis workflows):
 The base image is pinned by digest:
 
 ```
-rocm/pytorch@sha256:376bfab5f4f680c8b4b843c6d0c5d1f0a04e5a84ec3e86728db8d11d79a9d1e3
+rocm/pytorch@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
 ```
 
-(tag: `rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.9.1`). Bump the digest in
+(tag: `rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0`). Bump the digest in
 `Dockerfile.ci-gpu` / `.env.ci` when intentionally upgrading the CI stack.
+
+That tag is the newest published combination on every axis at once — ROCm 7.2.4
+is the newest classic-layout production release, and 24.04 / py3.12 / torch
+2.10.0 are the newest Ubuntu, Python and PyTorch that line ships. Newer Python
+(3.13, 3.14) and newer PyTorch (2.11, 2.12) exist **only** on the wheel-based
+7.14 line, so they arrive with the #381 flip rather than separately.
+
+Python has a second, independent cap: `pyproject.toml`'s classifiers stop at
+3.12 and the CPU matrix tests 3.10–3.12. Moving the GPU gate past 3.12 therefore
+means declaring the support and extending that matrix first — see issue #383.
+
+CI tracks the newest ROCm production release it can actually run, so the nightly
+eval reports against the stack customers run. Two constraints bound "newest", and
+a bump proposal — from a human or from automation — must clear both:
+
+1. **Preview stream.** ROCm 7.9 through 7.13 are the *technology preview* stream,
+   not newer production releases, so a higher number there is not an upgrade.
+2. **Install layout.** 7.14 onward is production, but its `rocm/pytorch` images
+   are wheel-based (see below), which this repo cannot read yet.
+
+#### ROCm install layout: classic `/opt/rocm` (decided)
+
+TheRock publishes ROCm both as a system install rooted at `/opt/rocm` (DEB/RPM,
+tarballs) and as a Python wheel rooted under `site-packages` with no `/opt/rocm`.
+**CI images must currently use the classic layout.**
+
+The reason is capability, not preference: everything we use to read a ROCm install
+is bound to `/opt/rocm` — the env probe's ROCm version plus its hipBLASLt-commit
+and rocBLAS capture, `scripts/audit_env_knobs.py`, and the sanitizer GEMM
+fixtures. On a wheel image those degrade to `null`/empty rather than failing, so
+the loss would be silent. `Dockerfile.ci-gpu` therefore asserts the layout at
+build time and fails closed.
+
+Which images are which, and how to tell before pulling:
+
+| Image | Layout | Tell |
+|---|---|---|
+| `rocm7.2.x` tags | classic | `/opt/rocm/bin` on `PATH`; no `npi.*` labels |
+| `rocm7.14+` tags, `rocm/pytorch:latest` | wheel (TheRock) | `npi.*` labels present; no `/opt/rocm` on `PATH` |
+
+Check before pulling — a classic image carries `/opt/rocm/bin` on `PATH`, a
+wheel-based one does not:
+
+```bash
+docker buildx imagetools inspect rocm/pytorch:<tag> \
+  --format '{{range .Image.Config.Env}}{{println .}}{{end}}' | grep ^PATH=
+# classic 7.2.4 -> PATH=/opt/venv/bin:/opt/rocm/bin:...
+# wheel   7.14  -> PATH=/opt/venv/bin:...            (no /opt/rocm/bin)
+
+# The npi.* labels are the same signal from the other side:
+docker buildx imagetools inspect rocm/pytorch:<tag> --format '{{json .Image.Config.Labels}}'
+```
+
+This is not a permanent stance. A wheel install is *richer* in provenance —
+`share/therock/therock_manifest.json` carries the full 40-char `rocm-libraries`
+commit (the classic header only exposes its first 8 as `..._VERSION_TWEAK`), plus
+the build's `github_run_id` and any applied patches. Issue #381 makes discovery
+layout-agnostic and manifest-aware, after which the base flips to 7.14 and the
+guard above verifies the flip. Issue #382 covers the wheel lane's other payoff:
+cheap ROCm version bisection in a venv, plus a non-gating latest-ROCm canary.
 
 ### Triggers and frequency
 
