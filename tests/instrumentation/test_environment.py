@@ -93,6 +93,19 @@ def all_disabled(isolated_env, tmp_path: Path, monkeypatch):
     block returns its null-shaped form. Triggers ``partial=True`` with
     one reason per fallback.
     """
+    # Resolved ROCm roots (#381). Patched so the snapshot is identical whether
+    # or not the test host happens to have a real /opt/rocm or an importable
+    # TheRock wheel -- otherwise `rocm.root_source` alone would differ between
+    # a developer laptop and a GPU box.
+    monkeypatch.setattr(env_mod, "ROCM_ROOT", tmp_path / "no_rocm_root")
+    monkeypatch.setattr(env_mod, "ROCM_LIB_ROOT", tmp_path / "no_rocm_root")
+    monkeypatch.setattr(env_mod, "ROCM_INCLUDE_ROOT", tmp_path / "no_rocm_root")
+    monkeypatch.setattr(env_mod, "ROCM_ROOT_SOURCE", "none")
+    monkeypatch.setattr(env_mod, "ROCM_LAYOUT", "classic")
+    monkeypatch.setattr(
+        env_mod, "THEROCK_MANIFEST_FILE", tmp_path / "no_therock_manifest.json"
+    )
+    _disable_rocm_version_fallbacks(monkeypatch)
     monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", tmp_path / "no_rocm")
     monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", tmp_path / "no_rocm_dev")
     monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", tmp_path / "no_kmd")
@@ -167,9 +180,13 @@ class TestPathConstants:
     @pytest.mark.parametrize(
         "constant_name",
         [
+            "ROCM_ROOT",
+            "ROCM_LIB_ROOT",
+            "ROCM_INCLUDE_ROOT",
             "ROCM_BIN_DIR",
             "ROCM_VERSION_FILE",
             "ROCM_VERSION_DEV_FILE",
+            "THEROCK_MANIFEST_FILE",
             "KMD_VERSION_FILE",
             "KFD_DEVICE_NODE",
             "KFD_SYSFS_DIR",
@@ -219,9 +236,15 @@ class TestPathConstants:
             and not name.startswith("_")
         }
         assert path_attrs == {
+            # Roots resolved by aorta.instrumentation.rocm_paths (#381); every
+            # ROCm path below is derived from one of them.
+            "ROCM_ROOT",
+            "ROCM_LIB_ROOT",
+            "ROCM_INCLUDE_ROOT",
             "ROCM_BIN_DIR",
             "ROCM_VERSION_FILE",
             "ROCM_VERSION_DEV_FILE",
+            "THEROCK_MANIFEST_FILE",
             "KMD_VERSION_FILE",
             "KFD_DEVICE_NODE",
             "KFD_SYSFS_DIR",
@@ -277,6 +300,7 @@ REQUIRED_TOP_KEYS = {
     "partial_reasons",
     "system_health",
     "rocm",
+    "therock",
     "hip",
     "hipblaslt",
     "rocblas",
@@ -321,11 +345,20 @@ class TestSchemaCompleteness:
         assert set(snapshot.to_dict().keys()) == REQUIRED_TOP_KEYS
         assert snapshot.schema_version == SCHEMA_VERSION
         assert snapshot.system_health is None
+        # The three version fields are null, and the schema-1.16 attribution
+        # keys say why: no ROCm install was located at all (`root_source:
+        # "none"`), as opposed to one found without a version file.
         assert snapshot.rocm == {
             "version": None,
             "version_dev": None,
             "kmd_version": None,
+            "version_source": None,
+            "root": str(env_mod.ROCM_ROOT),
+            "lib_root": str(env_mod.ROCM_LIB_ROOT),
+            "root_source": "none",
+            "layout": "classic",
         }
+        assert snapshot.therock["status"] == "absent"
         assert snapshot.hip == {
             "version": None,
             "platform": None,
@@ -1372,7 +1405,7 @@ class TestCollectEnvContract:
         partial, with the exception captured in partial_reasons.
         """
 
-        def boom(reasons: list[str]) -> dict:
+        def boom(reasons: list[str], gemm_libraries_commit: str | None = None) -> dict:
             raise RuntimeError("simulated probe failure")
 
         monkeypatch.setattr(env_mod, "_capture_hipblaslt", boom)
@@ -2754,6 +2787,17 @@ class TestRdhcWrapper:
 # ---------------------------------------------------------------------------
 
 
+def _disable_rocm_version_fallbacks(monkeypatch):
+    """Silence the non-file sources in the ROCm version chain.
+
+    Without this, a test asserting "no version resolved" would pass or fail
+    depending on whether the host happens to have a ROCm torch or the
+    ``rocm`` distribution installed.
+    """
+    monkeypatch.setattr(env_mod, "_distribution_version", lambda name: None)
+    monkeypatch.setattr(env_mod, "_rocm_version_from_torch", lambda: None)
+
+
 class TestRocmVersionFiles:
     def test_all_present_no_reasons(self, tmp_path: Path, monkeypatch):
         v = tmp_path / "version"
@@ -2769,22 +2813,39 @@ class TestRocmVersionFiles:
 
         reasons: list[str] = []
         result = env_mod._capture_rocm_version_files(reasons)
-        assert result == {
-            "version": "7.2.1",
-            "version_dev": "7.2.1.50311-abc1234",
-            "kmd_version": "6.16.13",
-        }
+        assert result["version"] == "7.2.1"
+        assert result["version_dev"] == "7.2.1.50311-abc1234"
+        assert result["kmd_version"] == "6.16.13"
+        # The file is the most authoritative source, so no fallback ran.
+        assert result["version_source"] == "version_file"
         assert reasons == []
 
     def test_all_missing_appends_three_reasons(self, tmp_path: Path, monkeypatch):
         monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", tmp_path / "nope1")
         monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", tmp_path / "nope2")
         monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", tmp_path / "nope3")
+        _disable_rocm_version_fallbacks(monkeypatch)
         reasons: list[str] = []
         result = env_mod._capture_rocm_version_files(reasons)
-        assert result == {"version": None, "version_dev": None, "kmd_version": None}
+        assert result["version"] is None
+        assert result["version_dev"] is None
+        assert result["kmd_version"] is None
+        assert result["version_source"] is None
         assert len(reasons) == 3
         assert all(r.startswith("rocm.") for r in reasons)
+
+    def test_attribution_keys_are_always_populated(self, monkeypatch):
+        """A null version must say which root was searched and how it was found.
+
+        Before #381 a null was unattributable: "found an install with no
+        version file" and "found no install" produced identical output.
+        """
+        reasons: list[str] = []
+        result = env_mod._capture_rocm_version_files(reasons)
+        assert result["root"] == str(env_mod.ROCM_ROOT)
+        assert result["lib_root"] == str(env_mod.ROCM_LIB_ROOT)
+        assert result["root_source"] == env_mod.ROCM_ROOT_SOURCE
+        assert result["layout"] in {"classic", "wheel"}
 
     def test_partial_missing_appends_only_for_missing(self, tmp_path: Path, monkeypatch):
         v = tmp_path / "version"
@@ -2993,6 +3054,8 @@ class TestHipblasltBlockShape:
             "package_version",
             "lib_hash",
             "kernel_db_revision",
+            "upstream_commit",
+            "upstream_commit_matches_tweak",
             "applied_prs",
         }
 
@@ -4231,6 +4294,8 @@ class TestRocblasBlockShape:
             "package_version",
             "lib_hash",
             "kernel_db_revision",
+            "upstream_commit",
+            "upstream_commit_matches_tweak",
             "applied_prs",
         }
         assert block["applied_prs"] == {}

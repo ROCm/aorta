@@ -246,16 +246,17 @@ when the output directory/file cannot be created or validated.
 
 | Top-level key | Type | Source | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | `str` | constant | Currently `"1.15"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
+| `schema_version` | `str` | constant | Currently `"1.16"`. See the changelog comment in `src/aorta/instrumentation/environment.py` next to the `SCHEMA_VERSION` constant for the field-by-field history. |
 | `captured_at` | `str` | `datetime` | ISO-8601 UTC with trailing `Z` |
 | `partial` | `bool` | computed | `True` if any probe fell back |
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
 | `system_health` | `dict \| null` | `rdhc --quick --json` (subprocess) | verbatim parsed JSON; `null` when rdhc absent / sudo unavailable / timeout / malformed |
-| `rocm` | `dict[str, str \| null]` | `/opt/rocm/.info/version{,_dev}`, `/sys/module/amdgpu/version` | `version`, `version_dev`, `kmd_version` |
+| `rocm` | `dict[str, str \| null]` | `<rocm-root>/.info/version{,-dev}`, `/sys/module/amdgpu/version`, then the TheRock manifest / pip metadata / `torch.__version__` | `version`, `version_dev`, `kmd_version`, plus schema 1.16 attribution: `root`, `lib_root`, `root_source` (`ROCM_PATH`/`ROCM_HOME`/`opt_rocm`/`import:_rocm_sdk_core`/`none`), `layout` (`classic`/`wheel`), `version_source` (`version_file`/`therock_manifest`/`pip:<dist>`/`torch`/null). The root is resolved rather than hardcoded to `/opt/rocm` (issue #381) so a wheel-layout install reads correctly; `root_source: "none"` is what distinguishes "no ROCm install found" from "install found but it has no version file". |
+| `therock` | `dict` | `<rocm-root>/share/therock/therock_manifest.json` | Schema 1.16. Build provenance for a wheel-layout (TheRock) install: `status` (`present`/`absent`), `manifest_path`, `rocm_version`, `rocm_package_version`, `the_rock_commit`, `github_run_id`, `github_job`, `gemm_libraries_commit`, `submodules` (`[{name, url, pin_sha, patches}]`). **Documented absence**: a classic `/opt/rocm` install ships no manifest, so `status:"absent"` there carries no `partial_reason`. Where present it is strictly richer than the header parse -- full 40-char upstream pins vs a truncated tweak, plus the applied-patch list, which is the only signal that a built library is *not* just what its pinned commit contains. |
 | `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (stable candidate family `amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_full_name` (complete canonical identity — apt `name=version` or rpm NVRA — capturing kernel-suffixed package names such as `amdgpu-kmod-<kernel>-<driver-version>.<arch>` that `package_name` alone drops; the single field two host snapshots diff on), `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_full_name`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — amdgpu module loaded (`modinfo` metadata present) but no dpkg/rpm package resolvable — records a `partial_reason`; `/dev/kfd` alone never does, since a passthrough container legitimately has the host's KFD node without a container-local package. Package lookup is a portable, **glob-capable** dpkg-then-rpm query parsed in Python (no shell pipe), so kernel-suffixed RPM names are matched. |
 | `hip` | `dict[str, str \| null]` | `hipconfig --version/--platform/--compiler/--runtime/--cpp_config` | five subprocesses; `--version` and `--platform` cannot be combined (no delimiter) |
-| `hipblaslt` | `dict` | header parse + `sha256(libhipblaslt.so)` + sorted-filenames hash of `lib/hipblaslt/library/*` | `rocm_release_tweak` (NOT a per-hipBLASLt commit -- it's the ROCm release identifier shared across every library in a release; see note below), `package_version`, `lib_hash`, `kernel_db_revision`, `applied_prs: {}` |
-| `rocblas` | `dict` | header parse + `sha256(librocblas.so)` + sorted-filenames hash of `lib/rocblas/library/*` | Same shape as `hipblaslt`. Header lives at `include/rocblas/internal/rocblas-version.h`. |
+| `hipblaslt` | `dict` | header parse + `sha256(libhipblaslt.so)` + sorted-filenames hash of `lib/hipblaslt/library/*` (and `library/<gfx>/*` on the wheel layout) + the TheRock manifest | `rocm_release_tweak` (NOT a per-hipBLASLt commit -- it's the ROCm release identifier shared across every library in a release; see note below), `package_version`, `lib_hash`, `kernel_db_revision`, `applied_prs: {}`, and schema 1.16 `upstream_commit` / `upstream_commit_matches_tweak`. `upstream_commit` is the full 40-char `rocm-libraries` pin from the manifest -- ROCm consolidated hipBLASLt and rocBLAS into that monorepo, so it is now their upstream identity. It matters most on a wheel image, where the version header is a devel-only file that runtime images omit: without it the hipBLASLt provenance would read `null` exactly where the NaN escalations need it. `null` on a classic install is expected, not a fallback. `upstream_commit_matches_tweak` cross-checks the two sources by prefix at the tweak's own length (the tweak is a short hash of unspecified width -- measured 10 chars on ROCm 7.2.4), and is `null` whenever only one source is present. |
+| `rocblas` | `dict` | header parse + `sha256(librocblas.so)` + sorted-filenames hash of `lib/rocblas/library/*` (and `library/<gfx>/*`) + the TheRock manifest | Same shape as `hipblaslt`, including `upstream_commit`, which is the same `rocm-libraries` pin. Header lives at `include/rocblas/internal/rocblas-version.h`. |
 | `miopen` | `dict` | header parse + `sha256(libMIOpen.so)` + sorted-filenames hash of `share/miopen/db/*.txt` | `rocm_release_tweak`, `package_version`, `lib_hash`, `kernel_db_revision`. MIOpen drives convolution kernels on ROCm; kernel-DB drift changes which conv kernel runs. |
 | `rccl` | `dict` | header parse for `NCCL_VERSION_CODE` + `sha256(librccl.so)` + resolve+hash of `NCCL_NET_PLUGIN` + best-effort `sha256` of `librccl-anp.so`/`librccl-net.so` in the lib dir | `version_code` (raw int, e.g. `22707`), `version` (decoded `"2.27.7"`), `lib_hash`, `net_plugin_mode` (`"external"`/`"internal"`/`"unknown"`), `plugin_path`, `plugin_lib_hash`, `anp_lib_hash`, `net_lib_hash`. RCCL is AMD's NCCL-compatible collectives library. **`plugin_path`/`plugin_lib_hash` are the authoritative net-plugin signal**: `NCCL_NET_PLUGIN` is resolved to a real `.so` (absolute path, or bare name found on `LD_LIBRARY_PATH` then the rccl lib dir) and *that* file is hashed -- this is how a real AMD-ANP deployment ships the plugin (`librccl-net.so` under a user-build tree, not `librccl-anp.so` in `/opt/rocm/lib`). `net_plugin_mode` is `"external"` when `NCCL_NET_PLUGIN` resolves, `"internal"` when it is unset/empty (built-in net-ib), and `"unknown"` when it is set but unresolvable (misconfigured launcher -- this records a `partial_reason`; the unset case does not). `anp_lib_hash`/`net_lib_hash` are a best-effort scan of the rccl lib dir for the packaged-install case; `null` when absent (documented absence, no `partial`). |
 | `gpu_arch` | `dict` | `rocm_agent_enumerator` subprocess (no `/dev/kfd` access typically required) | `agent_count`, `gfx_targets` (sorted unique), `agent_arch_counts` (per-arch distribution -- captures both homogeneous and mixed-arch boxes). |
@@ -466,7 +467,49 @@ Mirrors the in-code comment at `SCHEMA_VERSION` in
 `src/aorta/instrumentation/environment.py`. Recorded here so consumers
 tracking schema evolution don't have to read source.
 
-### `1.15` (current)
+### `1.16` (current)
+
+Layout-agnostic ROCm discovery (issue #381). ROCm ships in two on-disk shapes
+— a classic system install rooted at `/opt/rocm`, and TheRock's Python wheel
+(ROCm 7.14+, and what `rocm/pytorch:latest` already is) which has no
+`/opt/rocm` at all. Every ROCm path was hardcoded to the former, so on the
+latter the probe degraded *silently*: `rocm.version` null, and the hipBLASLt
+commit — core evidence in the NaN escalations — lost. Paths are now derived
+from a resolved root.
+
+One new top-level key (`therock`) and four changes to existing blocks; a 1.15
+snapshot loaded through `from_dict()` gains them as their empty/`null` shape.
+
+* **`rocm` gains attribution**: `root`, `lib_root`, `root_source`, `layout`,
+  `version_source`. A null version used to be unattributable — "found an
+  install with no version file" and "found no install at all" produced
+  identical output. `root_source: "none"` now says which one happened.
+* **`rocm.version` gains a fallback chain** past `.info/version`: the TheRock
+  manifest, then pip metadata (`rocm` / `rocm-sdk-core`), then torch's
+  `+rocm` local version segment. Ordered most to least authoritative, and
+  `version_source` records which one answered.
+* **New `therock` block** — full 40-char upstream submodule pins,
+  `the_rock_commit`, `github_run_id`, and applied patches. `status:"absent"`
+  on a classic install is a documented absence, not a partial.
+* **`hipblaslt` / `rocblas` gain `upstream_commit`** (the full
+  `rocm-libraries` pin the version header truncates) and
+  `upstream_commit_matches_tweak`.
+
+Note on the cross-check: the header tweak is a short hash of *unspecified*
+width — measured 10 characters on ROCm 7.2.4, and documented upstream as
+7–12 — so the comparison is a prefix match at the tweak's own length rather
+than a fixed 8. Today the two sources never coexist on a real image (classic
+has headers but no manifest; the runtime wheel has a manifest but no
+headers), so the field is `null` in practice and exists for the devel-wheel
+case and as a mis-parse guard.
+
+Values on a classic install are otherwise unchanged: every derived path
+resolves to the literal it replaced, and the Tensile fingerprint of a flat
+kernel directory is byte-identical. The kernel-database scan now also reads
+one level of `gfx*`-named subdirectories, which is how the wheel layout ships
+Tensile (`library/gfx950/...`); nested files are recorded as `<arch>/<name>`.
+
+### `1.15`
 
 recom-NaN follow-up: backend / Stream-K selectors, numeric-check knobs, and
 TorchRec identity fixes. `1.14` already shipped, so these changes to what a
