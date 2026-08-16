@@ -5,11 +5,13 @@ description: >
   Informational (non-gating) gfx950 ConSan run over a real, heavy f32 Type_SS
   hipBLASLt Tensile code object (generic public content extracted in CI from the
   synthetic gemm_shapes_unique.csv), driven via the source.consan_command path
-  added in #347. This exercises the guardrail's fail-closed behavior on large
-  production code objects; on the current rocjitsu build it fails closed
-  (combined_hook_timeout / moi-report-allocation) rather than a false pass -- see
-  ROCm/rocm-systems#9964 and #9970. Rendered on the dashboard's Workload survey
-  tab (Tab 2) as an observed-only case; it does NOT gate the nightly.
+  added in #347. This exercises the guardrail's behavior on large production code
+  objects: whatever ConSan concludes, strict policy must reach a real verdict or
+  fail closed, never a false pass. The observed outcome is whatever the run
+  reports -- known rocjitsu limitations hit by this object are tracked in
+  docs/sanitizers/consan-4112-overlapping-anchor-patches.md. Rendered on the
+  dashboard's Workload survey tab (Tab 2) as an observed-only case; it does NOT
+  gate the nightly.
 sanitizer_plan:
   target: gfx950
   source:
@@ -30,12 +32,18 @@ sanitizer_plan:
   policy:
     consan_policy: strict
     on_missing_backend: fail
-    # This object's MOI inventory does not terminate on the current rocjitsu build
-    # (ROCm/rocm-systems#9964), so it always hits combined_hook_timeout and the run
-    # consumes the full ceiling. Keep it small (past the ~70s load-time waitcheck,
-    # into the inventory) so the informational row documents that state without
-    # adding ~an hour to every nightly. Raise it once #9964 lands and the object can
-    # actually complete.
-    timeout_seconds: 300
+    # Raised from the 300s cap of #364, which was chosen only because ROCm/rocm-systems#9964
+    # made MOI inventory non-terminating: every ceiling produced the same
+    # combined_hook_timeout, so a short one bought the identical row for a fraction of
+    # the nightly. #9964 is fixed as of rocjitsu db0c47df, and the case was measured
+    # reaching a terminal state in ~1283s on gfx950 (~59s load-time waitcheck + ~659s
+    # MOI inventory + patching). A 300s ceiling still cuts that off, reporting a
+    # timeout for a phase that now completes, so the ceiling has to clear the run.
+    #
+    # 1800s is ~40% headroom over the measured 1283s. That headroom is the point: the
+    # timing was measured on ROCm 7.0.2.2, while CI now builds fixtures against ROCm
+    # 7.2.4 (#380), whose hipBLASLt may extract a differently sized object. Budget
+    # ~21-30 min of nightly wall-clock for this case.
+    timeout_seconds: 1800
   output:
     report: sanitizer_report.json
