@@ -34,6 +34,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MATRIX = REPO_ROOT / "config" / "ci" / "nightly_eval_matrix.yaml"
 BASELINES = REPO_ROOT / "config" / "ci" / "regression_baselines.yaml"
 
+_SRC = REPO_ROOT / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+from aorta.instrumentation.rocm_paths import resolve_rocm_roots  # noqa: E402
+
+_ROCM_ROOTS = resolve_rocm_roots()
+
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -71,7 +78,12 @@ def build_metadata() -> dict[str, Any]:
         meta["hip"] = getattr(torch.version, "hip", None)
     except Exception:
         pass
-    for candidate in (Path("/opt/rocm/.info/version"), Path("/opt/rocm/.info/version-dev")):
+    # Resolved rather than hardcoded to /opt/rocm (issue #381): a TheRock
+    # wheel install keeps .info/version under site-packages, and reading the
+    # literal path there left the dashboard's `rocm` column silently null
+    # while `torch` and `hip` still populated -- the worst kind of gap,
+    # because the row still looked complete.
+    for candidate in (_ROCM_ROOTS.version_file, _ROCM_ROOTS.version_dev_file):
         if candidate.exists():
             meta["rocm"] = candidate.read_text(encoding="utf-8").strip()
             break

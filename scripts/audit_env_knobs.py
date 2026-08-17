@@ -73,6 +73,9 @@ _BINARY_ENV_NAME_RE = re.compile(
 
 # Sonames rather than globs: the symlink names the library that would actually load.
 DEFAULT_SONAMES = ("libhipblaslt.so", "librocblas.so")
+# Fallback only. The real default is resolved at run time (see
+# ``default_rocm_lib``) because a TheRock wheel install keeps the GEMM
+# libraries under site-packages rather than /opt/rocm -- issue #381.
 DEFAULT_ROCM_LIB = Path("/opt/rocm/lib")
 REFERENCE_LIBRARY_BASENAMES = {
     "libhipblaslt.so": "libhipblaslt.so.1.4.70002",
@@ -160,6 +163,27 @@ def _import_registry():
     return _import_registry_module().ENV_KNOB_REGISTRY
 
 
+def default_rocm_lib() -> Path:
+    """The lib directory to audit when ``--rocm-lib`` is not given.
+
+    Resolved rather than hardcoded so the audit finds libhipblaslt.so on a
+    TheRock wheel install (where it lives under site-packages) as well as on
+    a classic /opt/rocm one. Falls back to the classic path if the resolver
+    cannot be imported -- this script is also run standalone, and a wrong
+    default is better than a traceback when ``--rocm-lib`` was going to be
+    passed explicitly anyway.
+    """
+    here = Path(__file__).resolve().parent.parent
+    src = here / "src"
+    if src.is_dir() and str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+    try:
+        from aorta.instrumentation.rocm_paths import resolve_rocm_roots
+    except ImportError:
+        return DEFAULT_ROCM_LIB
+    return resolve_rocm_roots().lib_dir
+
+
 def load_registry() -> tuple[dict[str, str], str]:
     """``{name: library}`` from the registry, plus a description of its source."""
     registry = _import_registry()
@@ -214,7 +238,12 @@ def render_docs_table() -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--rocm-lib", type=Path, default=DEFAULT_ROCM_LIB)
+    ap.add_argument(
+        "--rocm-lib",
+        type=Path,
+        default=None,
+        help="lib dir to audit (default: resolved from the local ROCm install)",
+    )
     ap.add_argument("--soname", action="append", dest="sonames", default=None)
     ap.add_argument(
         "--names-file",
@@ -270,8 +299,9 @@ def main() -> int:
             print(f"error: cannot load the registry: {exc}", file=sys.stderr)
             return 2
 
-    if not args.rocm_lib.is_dir():
-        print(f"error: {args.rocm_lib} is not a directory", file=sys.stderr)
+    rocm_lib = args.rocm_lib if args.rocm_lib is not None else default_rocm_lib()
+    if not rocm_lib.is_dir():
+        print(f"error: {rocm_lib} is not a directory", file=sys.stderr)
         return 2
 
     requested_sonames = tuple(args.sonames or DEFAULT_SONAMES)
@@ -279,9 +309,9 @@ def main() -> int:
     missing_sonames: list[str] = []
     library_errors: list[dict[str, str]] = []
     for soname in requested_sonames:
-        resolved = resolve_library(args.rocm_lib, soname)
+        resolved = resolve_library(rocm_lib, soname)
         if resolved is None:
-            print(f"warning: {soname} not found under {args.rocm_lib}", file=sys.stderr)
+            print(f"warning: {soname} not found under {rocm_lib}", file=sys.stderr)
             missing_sonames.append(soname)
             continue
         try:

@@ -20,9 +20,18 @@ from __future__ import annotations
 import argparse
 import csv
 import subprocess
+import sys
 from pathlib import Path
 
-HIPBLASLT_LIBRARY = Path("/opt/rocm/lib/hipblaslt/library")
+_SRC = Path(__file__).resolve().parents[2] / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+from aorta.instrumentation.rocm_paths import resolve_rocm_roots  # noqa: E402
+
+# Resolved rather than hardcoded to /opt/rocm (issue #381) so the fixtures can
+# be built from a TheRock wheel install, which keeps the Tensile database
+# under site-packages.
+HIPBLASLT_LIBRARY = resolve_rocm_roots().lib_dir / "hipblaslt" / "library"
 GFX = "gfx950"
 TARGET = f"hipv4-amdgcn-amd-amdhsa--{GFX}"
 
@@ -53,10 +62,15 @@ def _bundler() -> str:
 
 
 def _library_for(layout: str) -> Path:
-    candidate = HIPBLASLT_LIBRARY / _SS_HEAVY.format(layout=layout)
-    if not candidate.is_file():
-        raise SystemExit(f"no gfx950 f32 SS Tensile bundle for layout {layout}: {candidate}")
-    return candidate
+    bundle = _SS_HEAVY.format(layout=layout)
+    # The classic layout is flat; the TheRock wheel layout nests the bundles
+    # one level deeper under the gfx target (library/gfx950/...). Try both.
+    candidates = [HIPBLASLT_LIBRARY / bundle, HIPBLASLT_LIBRARY / GFX / bundle]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    tried = " or ".join(str(c) for c in candidates)
+    raise SystemExit(f"no {GFX} f32 SS Tensile bundle for layout {layout}: {tried}")
 
 
 def _unbundle(bundler: str, src: Path, dst: Path) -> None:
