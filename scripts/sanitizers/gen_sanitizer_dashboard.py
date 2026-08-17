@@ -14,9 +14,12 @@ emits, into ``--out-dir``:
   supplied via ``--survey`` and the caller-supplied ConSan cases from
   ``--informational-results-dir``, #347) shown with the same kernel-detail shape
   but **no expected/match column** (a fail / not_checked here is an observation,
-  never a regression). Both tabs link each case -- in its heading and in a
-  per-kernel-row ``Report`` column -- to its ``sanitizer_report.json`` (satisfying
-  #367's per-row drill-down), and carry a one-line observation summary.
+  never a regression). On both tabs a per-kernel-row ``Report`` column links the
+  case's ``sanitizer_report.json`` (satisfying #367's per-row drill-down) and the
+  card footer links its **run area** -- the published case *directory*, which also
+  carries the sanitizer logs, the recipe as it ran and a REPRODUCE.md, so the
+  reproduce command on the card is actionable (#384). Each case also carries a
+  one-line observation summary.
 * ``summary.md`` -- a GitHub Actions job-summary fragment (append to
   ``$GITHUB_STEP_SUMMARY``) carrying the same gate, table, and kernel detail.
 * ``data.json`` -- the aggregated structure for any richer consumer.
@@ -39,13 +42,18 @@ Three input shapes are supported:
   (keys: commit, date, gpu, run_url, gate). ``<id>`` is ``<YYYY-MM-DD>-<run_id>``
   (date-sortable, unique), enumerated newest-first and capped by ``--keep N``
   (default 30). This is the shape the nightly publishes and Pages serves under
-  ``/sanitizers/``: each run's raw reports are co-located under ``runs/<id>/`` and
-  linked from the rendered page, and a tiny ``runs/<id>/index.html`` landing page
-  is written for each retained run.
+  ``/sanitizers/``: each run's case dirs are co-located under ``runs/<id>/`` and
+  linked from the rendered page, and a ``runs/<id>/index.html`` landing page is
+  written for each retained run. Every case dir is completed into a *run area*
+  (report + gzipped logs + recipe + inputs + REPRODUCE.md + env.json + its own
+  ``index.html``); ``--keep-logs N`` (default 7) bounds how many runs keep the
+  bulky parts -- guardrail and survey areas alike -- while reports stay for the
+  full ``--keep`` window.
 
 Pure rendering lives in ``build_html`` / ``build_summary_md`` /
-``build_run_index_html`` and pure aggregation in ``summarize_case`` so they are
-unit testable without the FS.
+``build_run_index_html`` / ``build_case_index_html`` / ``build_reproduce_md`` and
+pure aggregation in ``summarize_case`` / ``report_digests`` so they are unit
+testable without the FS.
 
 Usage (CI, published-history mode):
     python scripts/sanitizers/gen_sanitizer_dashboard.py \
@@ -59,6 +67,7 @@ Usage (CI, published-history mode):
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import re
@@ -750,6 +759,10 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
             value = data.get(key)
             if value not in (None, ""):
                 meta[key] = str(value)
+        # The unabbreviated SHA as well: ``commit`` is shortened for display, but
+        # a run area's reproduce instructions need a checkout-able revision.
+        if data.get("commit"):
+            meta["commit_full"] = str(data["commit"])
         # Preserve the manifest's recorded gate with its JSON type. Coercing it to
         # str would emit "True"/"False" into data.json, where "False" is truthy
         # for machine consumers and the documented boolean type is lost.
@@ -1076,6 +1089,755 @@ def survey_cases_from_informational_dir(
     return entries
 
 
+# ---------------------------------------------------------------------------
+# Run area (#384)
+#
+# A published case directory is the "run area" a card footer links to. It holds
+# everything needed to reproduce that one case locally: the report, the
+# sanitizer logs the verdict was derived from, the recipe exactly as it ran,
+# that recipe's source-level inputs, and REPRODUCE.md / env.json recording the
+# CI-built artifacts that are deliberately NOT published, by digest.
+#
+# Everything here is stdlib-only on purpose: the publish job runs this script
+# from a bare checkout with no ``pip install``, so PyYAML is not importable.
+# ---------------------------------------------------------------------------
+
+# Fixture paths under these prefixes are CI-built (see
+# recipes/sanitizers/fixtures/.gitignore): a ~16MB Tensile code object or a
+# compiled repro binary. They are never copied into a run area -- publishing
+# them for every retained run would bloat the data branch and Pages -- so their
+# SHA-256 is recorded instead and a local rebuild can be verified against it.
+_BUILT_FIXTURE_DIRS = ("fixtures/bin/", "fixtures/isa/")
+
+# Any fixture path a sanitizer recipe references. Recipes name them under
+# several different keys (``path``, ``isa_dir``, ``code_object``,
+# ``consan_command``, ``hip``, ``command``), so match the value shape rather
+# than enumerating keys -- a recipe that adds a new key needs no change here.
+_FIXTURE_REF_RE = re.compile(r"fixtures/[A-Za-z0-9._/-]+")
+
+
+def _is_built_fixture(ref: str) -> bool:
+    """Whether a recipe's fixture reference names CI-built output.
+
+    Compares with a trailing slash appended so a bare directory reference
+    (``isa_dir: fixtures/isa``) is classified alongside the files inside it; a
+    plain ``startswith`` on the prefixes would let that one through as a source
+    input and leave it off the "not published" list.
+    """
+    return f"{ref}/".startswith(_BUILT_FIXTURE_DIRS)
+
+
+RUN_AREA_ENV_SCHEMA = "aorta.sanitizer_run_area/0.1"
+
+# Provenance the workflow knows but the report does not. Absent => omitted from
+# env.json rather than emitted empty, so the file only ever states what the run
+# actually captured.
+_RUN_AREA_ENV_VARS: tuple[tuple[str, str], ...] = (
+    ("container_image", "AORTA_CI_IMAGE"),
+    ("rocjitsu_commit", "AORTA_ROCJITSU_COMMIT"),
+    ("rocjitsu_run_url", "AORTA_ROCJITSU_RUN_URL"),
+)
+
+
+def provenance_from_environ() -> dict[str, str]:
+    """The publish job's environment-derived provenance for the run it just staged.
+
+    These describe *this* job's GPU run -- the container image it ran in and the
+    rocjitsu bundle its sanitizer backends came from -- so they are only valid
+    for the run being published now, never for the older runs re-rendered
+    alongside it (see ``write_case_run_area``).
+    """
+    return {key: os.environ[var] for key, var in _RUN_AREA_ENV_VARS if os.environ.get(var)}
+
+
+def _case_dir_rel(report_rel: str | None) -> str | None:
+    """The run-area directory holding a case's report, as a relative link.
+
+    Derived from ``report_rel`` and re-validated through ``_safe_report_rel``,
+    so the footer link inherits exactly the same relative-only guarantee as the
+    report link it replaces: no URL scheme, no absolute path, no ``..``
+    traversal. Returns ``None`` when there is no safe directory to link -- an
+    absent or unsafe ``report_rel``, or a bare filename with no directory part
+    -- so an unlinkable case still renders, just without a footer.
+    """
+    safe = _safe_report_rel(report_rel)
+    if not safe or "/" not in safe:
+        return None
+    return f"{safe.rsplit('/', 1)[0]}/"
+
+
+def _recipe_fixture_refs(recipe_text: str) -> tuple[list[str], list[str]]:
+    """Split a recipe's fixture references into ``(source, built)`` paths (pure).
+
+    Paths are as written in the recipe, i.e. relative to ``recipes/sanitizers/``.
+    Source inputs (the ``.hip`` repro sources, the GEMM shape CSV) are small --
+    hundreds of bytes to a few KB -- and are copied into the run area. Built
+    artifacts are recorded by digest only. Order is first-seen and de-duplicated.
+    """
+    source: list[str] = []
+    built: list[str] = []
+    for ref in dict.fromkeys(_FIXTURE_REF_RE.findall(recipe_text)):
+        (built if _is_built_fixture(ref) else source).append(ref)
+    return source, built
+
+
+def report_digests(report: dict[str, Any] | None) -> dict[str, str]:
+    """Artifact digests a run area records for the files it does not publish.
+
+    Both sanitizers already write this provenance into every report and nothing
+    renders it today: waitcheck stores its binary's ``path``/``sha256``, ConSan
+    stores the repro ``command`` and hook plus their digests, and each worklist
+    kernel carries its ``code_object_sha256``. Flattened into one mapping so
+    REPRODUCE.md and env.json can name the exact artifacts a local rebuild has
+    to match. A malformed report degrades to ``{}`` rather than raising.
+    """
+    digests: dict[str, str] = {}
+    if not isinstance(report, dict):
+        return digests
+    checks = report.get("checks")
+    for check in checks if isinstance(checks, list) else []:
+        backend = check.get("backend") if isinstance(check, dict) else None
+        if not isinstance(backend, dict):
+            continue
+        for key, value in backend.items():
+            if isinstance(value, str) and value:
+                digests.setdefault(str(key), value)
+    worklist = report.get("worklist")
+    kernels = worklist.get("kernels") if isinstance(worklist, dict) else None
+    for entry in kernels if isinstance(kernels, list) else []:
+        identity = entry.get("identity") if isinstance(entry, dict) else None
+        if not isinstance(identity, dict):
+            continue
+        obj, sha = identity.get("code_object"), identity.get("code_object_sha256")
+        if isinstance(obj, str) and obj and isinstance(sha, str) and sha:
+            digests.setdefault(f"code_object:{_basename(obj)}", sha)
+    return digests
+
+
+def artifact_digest_index(digests: dict[str, str]) -> dict[str, str]:
+    """Index recorded digests by artifact *basename* (pure).
+
+    The two sanitizers name the same kind of thing differently: waitcheck records
+    its binary as ``path``/``sha256``, ConSan records the repro binary as
+    ``command``/``command_sha256`` and its hook as ``hook``/``hook_sha256``, and
+    worklist kernels arrive from ``report_digests`` already keyed as
+    ``code_object:<basename>``. A run area names the artifacts it did not publish
+    by their recipe-relative path, so index by basename and look them up with one
+    rule -- keying only on ``code_object:`` left every ``fixtures/bin/`` repro
+    binary showing an em dash while its digest sat in the report unused.
+    """
+    index: dict[str, str] = {}
+    for name_key, sha_key in (
+        ("path", "sha256"),
+        ("command", "command_sha256"),
+        ("hook", "hook_sha256"),
+    ):
+        name, sha = digests.get(name_key), digests.get(sha_key)
+        if name and sha:
+            index.setdefault(_basename(name), sha)
+    for key, value in digests.items():
+        prefix, sep, base = key.partition("code_object:")
+        if sep and not prefix and base:
+            index.setdefault(base, value)
+    return index
+
+
+def _gzip_logs(case_dir: Path) -> None:
+    """Compress every ``*.log`` in a published case dir to ``*.log.gz`` in place.
+
+    ConSan runs with hook logging at debug level, so an uncompressed log is the
+    bulkiest thing in a run area; gzip keeps a 7-run log window cheap on the
+    data branch. ``mtime=0`` keeps the output byte-stable for identical input,
+    so re-publishing an unchanged run does not churn the branch. Idempotent: a
+    case dir that was already compressed has no ``*.log`` left to convert.
+    """
+    for src in sorted(case_dir.rglob("*.log")):
+        if not src.is_file():
+            continue
+        dest = src.with_name(f"{src.name}.gz")
+        with src.open("rb") as raw, dest.open("wb") as fh:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=fh, mtime=0) as out:
+                shutil.copyfileobj(raw, out)
+        src.unlink()
+
+
+def _prune_run_area_bulk(case_dir: Path) -> None:
+    """Drop the heavy, regenerable parts of a run area outside the log window.
+
+    Keeps ``sanitizer_report.json`` (and the landing page / manifests written
+    next to it) so an older run still renders and still drills down; removes the
+    logs, the copied inputs and the recipe copy. ``recipe.yaml`` is pruned even
+    though it is tiny, so that a run area's contents depend only on its age and
+    not on whether it was ever published inside the window -- ``env.json`` still
+    records the recipe path, and the commit it ran at, to recover it from.
+
+    The caller must re-render ``index.html`` afterwards: it enumerates what is
+    on disk, so a page written before pruning would link files that are gone.
+    """
+    if not case_dir.is_dir():
+        return
+    for log in sorted(case_dir.rglob("*.log.gz")) + sorted(case_dir.rglob("*.log")):
+        log.unlink(missing_ok=True)
+    shutil.rmtree(case_dir / "inputs", ignore_errors=True)
+    (case_dir / "recipe.yaml").unlink(missing_ok=True)
+    # Remove the now-empty per-sanitizer log dirs so the file list is not a row
+    # of empty folders.
+    for sub in sorted(p for p in case_dir.iterdir() if p.is_dir()):
+        if not any(sub.iterdir()):
+            sub.rmdir()
+
+
+def _read_text_or_empty(path: Path) -> str:
+    """Read a repo file, or "" when it is missing/unreadable.
+
+    A run area whose recipe cannot be read is still worth publishing; aborting
+    the whole dashboard over it is not.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _publish_recipe_inputs(
+    case_dir: Path, *, recipe_src: Path, repo_root: Path
+) -> tuple[list[str], list[str]]:
+    """Copy a case's recipe and its source-level inputs into the run area.
+
+    Returns ``(copied, built)``: the recipe-relative paths copied under
+    ``inputs/``, and the referenced CI-built artifacts that were deliberately
+    skipped (recorded by digest by the caller). A recipe that cannot be read
+    yields ``([], [])`` -- a run area missing its inputs is worth publishing,
+    an aborted dashboard is not.
+    """
+    recipe_text = _read_text_or_empty(recipe_src)
+    if not recipe_text:
+        return [], []
+    (case_dir / "recipe.yaml").write_text(recipe_text, encoding="utf-8")
+    source_refs, built_refs = _recipe_fixture_refs(recipe_text)
+    recipe_dir = recipe_src.parent
+    copied: list[str] = []
+    for ref in source_refs:
+        src = recipe_dir / ref
+        # Recipe text is repo-authored, but resolve defensively anyway: an input
+        # must stay inside the recipe tree so a stray path cannot pull an
+        # unrelated file into a published, publicly-served directory.
+        try:
+            resolved = src.resolve()
+            resolved.relative_to(repo_root.resolve())
+        except (OSError, ValueError):
+            continue
+        if not resolved.is_file():
+            continue
+        dest = case_dir / "inputs" / ref
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(resolved, dest)
+        copied.append(ref)
+    return copied, built_refs
+
+
+def _human_size(num_bytes: int) -> str:
+    """A compact file size for the run-area file table."""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    value = float(num_bytes)
+    for unit in ("KB", "MB", "GB"):
+        value /= 1024.0
+        if value < 1024.0:
+            return f"{value:.1f} {unit}"
+    return f"{value:.1f} TB"
+
+
+def run_area_files(case_dir: Path) -> list[tuple[str, int]]:
+    """Every published file in a run area as ``(relative path, size)`` pairs.
+
+    Enumerates what is actually on disk rather than what was expected, so the
+    landing page never links a file that pruning removed or a run never
+    produced. ``index.html`` itself is excluded (it is the page doing the
+    listing). Sorted for a stable page across re-publishes.
+    """
+    if not case_dir.is_dir():
+        return []
+    files: list[tuple[str, int]] = []
+    for path in sorted(case_dir.rglob("*")):
+        if not path.is_file() or path.name == "index.html":
+            continue
+        files.append((path.relative_to(case_dir).as_posix(), path.stat().st_size))
+    return files
+
+
+# Both renderers of the rebuild section share this trailer: the workflow is what
+# actually built the artifacts, so it -- not a paraphrase here -- is the source
+# of truth for the exact invocation.
+_REBUILD_NOTE = (
+    "The exact invocations the nightly used are in "
+    ".github/workflows/sanitizers-nightly.yml."
+)
+
+
+def _rebuild_hints(built_refs: list[str], *, target: str) -> list[str]:
+    """One rebuild hint per artifact the run area deliberately does not ship (pure).
+
+    Single source of truth so the REPRODUCE.md and landing-page renderings of
+    the rebuild section stay in parity.
+    """
+    hints: list[str] = []
+    for ref in built_refs:
+        if f"{ref}/".startswith("fixtures/isa/"):
+            hints.append(
+                f"{ref} -- a gfx code object: `hipcc --genco --offload-arch={target}` "
+                "from the matching fixtures/kernels/*.hip source, or "
+                "scripts/sanitizers/prepare_gemm_isa.py for the GEMM objects."
+            )
+        elif f"{ref}/".startswith("fixtures/bin/"):
+            hints.append(
+                f"{ref} -- a host repro binary: "
+                f"`hipcc --offload-arch={target} <source>.hip -o {ref}`."
+            )
+        else:
+            hints.append(ref)
+    return hints
+
+
+def build_case_env(
+    *,
+    case: str,
+    cls: str,
+    recipe: str,
+    command: str,
+    meta: dict[str, Any],
+    summary: dict[str, Any],
+    report: dict[str, Any] | None,
+    built_refs: list[str],
+    inputs: list[str],
+    logs: bool = True,
+    provenance: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """The machine-readable provenance manifest for one run area (pure).
+
+    Deliberately narrow: it states only what the publishing job genuinely knows
+    -- the run identity, the recipe and command, what was observed, and the
+    digests already present in the report. It is NOT an env-probe snapshot;
+    the nightly never runs one, so anything shaped like that schema here would
+    be fabricated fields rather than captured ones.
+
+    ``provenance`` is passed in rather than read from the environment here, so a
+    caller re-rendering an *older* run's area cannot accidentally relabel it with
+    the current job's image and bundle; an empty mapping omits those fields.
+
+    ``logs`` records whether this area still carries the bulk it was published
+    with, or has been pruned back to the report for falling outside the
+    ``--keep-logs`` window. Both renderings read it, so neither promises files
+    that a pruned area no longer has.
+    """
+    digests = report_digests(report)
+    by_basename = artifact_digest_index(digests)
+    env: dict[str, Any] = {
+        "schema": RUN_AREA_ENV_SCHEMA,
+        "case": case,
+        "class": cls,
+        "recipe": recipe,
+        "command": command,
+        "run": meta.get("run", ""),
+        "commit": meta.get("commit_full") or meta.get("commit", ""),
+        "date": meta.get("date", ""),
+        "target": meta.get("gpu", ""),
+        "observed": {
+            "verdict": summary.get("verdict"),
+            "execution": summary.get("execution"),
+            "reason": (summary.get("primary") or {}).get("reason"),
+            "findings": summary.get("findings", 0),
+        },
+        "inputs": inputs,
+        "logs_published": logs,
+        "artifacts_not_published": [
+            {"path": ref, "sha256": by_basename.get(_basename(ref))} for ref in built_refs
+        ],
+        "digests": digests,
+    }
+    if meta.get("run_url"):
+        env["run_url"] = meta["run_url"]
+    for key, value in (provenance or {}).items():
+        if value:
+            env[key] = value
+    return env
+
+
+def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
+    """REPRODUCE.md for one run area (pure).
+
+    The downloadable companion to the landing page rather than a strict twin of
+    it: the two share the run identity, the reproduce command and the rebuild
+    section (via ``_rebuild_hints``), and this file additionally carries the
+    required env and the recorded digests that the page links it for.
+    """
+    observed = env.get("observed") or {}
+    # Point at the file table rather than restating an inventory here: what a run
+    # area holds depends on its age (see ``--keep-logs``) and on whether it was
+    # published by the job that ran it, and a fixed sentence would go stale.
+    pruned = (
+        ""
+        if env.get("logs_published", True)
+        else " Its logs, recipe copy and inputs were pruned for falling outside the "
+        "nightly's log-retention window."
+    )
+    lines = [
+        f"# Reproduce `{env['case']}`",
+        "",
+        f"Sanitizer case `{env['case']}` from run `{env.get('run', '')}` of the AORTA "
+        "sanitizer nightly. This directory is the run area for that one case: its "
+        "report, the sanitizer output the verdict came from, and the provenance "
+        f"below.{pruned} See `index.html` for every file actually published here.",
+        "",
+        "## Run",
+        "",
+        f"- Commit: `{env.get('commit', '')}`",
+        f"- Date: {env.get('date', '')}",
+        f"- Target: `{env.get('target', '')}`",
+        f"- Class: {env.get('class', '')} "
+        + ("(gated guardrail)" if env.get("class") == "guardrail" else "(observed-only, non-gating)"),
+    ]
+    if env.get("run_url"):
+        lines.append(f"- Workflow run: {env['run_url']}")
+    if env.get("container_image"):
+        lines.append(f"- Container image: `{env['container_image']}`")
+    if env.get("rocjitsu_commit"):
+        bundle = f"- rocjitsu bundle: `{env['rocjitsu_commit']}`"
+        if env.get("rocjitsu_run_url"):
+            bundle += f" ({env['rocjitsu_run_url']})"
+        lines.append(bundle)
+    lines += [
+        "",
+        "## Observed",
+        "",
+        f"- Verdict: `{observed.get('verdict') or _DASH}`",
+        f"- Execution: `{observed.get('execution') or _DASH}`",
+        f"- Findings: {observed.get('findings', 0)}",
+    ]
+    if observed.get("reason"):
+        lines.append(f"- Reason: `{observed['reason']}`")
+    lines += [
+        "",
+        "## Run it yourself",
+        "",
+        "```",
+        "git clone https://github.com/ROCm/aorta && cd aorta",
+        f"git checkout {env.get('commit', '')}",
+        "pip install -e .",
+        f"{env.get('command', '')}",
+        "```",
+        "",
+        "The sanitizer backends (`rj_waitcheck`, the ConSan hook) come from the "
+        "prebuilt rocjitsu bundle; point `ROCJITSU_PREBUILT` at an unpacked bundle "
+        "before running. ConSan additionally requires `HSA_TOOLS_LIB`, "
+        "`HSA_TOOLS_DISABLE_REGISTER=1`, `RJ_CONSAN_MODE` and `RJ_CONSAN_POLICY`, "
+        "which `aorta` sets for you from the recipe's policy block.",
+        "",
+    ]
+    hints = _rebuild_hints(built_refs, target=str(env.get("target") or "gfx950"))
+    if hints:
+        lines += [
+            "## Rebuild the fixtures",
+            "",
+            "This case needs CI-built fixtures that are not published here (see "
+            "'Artifacts not published' below). Rebuild them with:",
+            "",
+            *(f"- {hint}" for hint in hints),
+            "",
+            _REBUILD_NOTE,
+            "",
+        ]
+    if env.get("artifacts_not_published"):
+        lines += [
+            "## Artifacts not published",
+            "",
+            "These are CI-built and too large to publish for every retained run. "
+            "Rebuild them as above and check the digest matches.",
+            "",
+            "| Path | SHA-256 |",
+            "|---|---|",
+        ]
+        for item in env["artifacts_not_published"]:
+            lines.append(f"| `{item['path']}` | `{item.get('sha256') or _DASH}` |")
+        lines.append("")
+    if env.get("digests"):
+        lines += ["## Recorded digests", "", "| Key | Value |", "|---|---|"]
+        for key, value in sorted(env["digests"].items()):
+            lines.append(f"| `{key}` | `{value}` |")
+        lines.append("")
+    lines += [
+        "## Files here",
+        "",
+        "See `index.html` for the browsable list. "
+        + ("Logs are gzipped; " if env.get("logs_published", True) else "")
+        + "`sanitizer_report.json` is the full `aorta.sanitizer_report/0.1` document "
+        "the dashboard renders from.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def case_dir_up(case_dir: Path, out_dir: Path) -> tuple[str, str]:
+    """Relative paths from a case dir back to ``(dashboard root, its run dir)``.
+
+    Derived from the published depth rather than hardcoded per caller, because
+    the two tabs sit at different depths -- ``runs/<id>/<case>/`` for a guardrail
+    case and ``runs/<id>/survey/<case>/`` for a survey one -- and an off-by-one
+    here is a broken back-link on a page nothing else links to.
+    """
+    try:
+        depth = len(case_dir.resolve().relative_to(out_dir.resolve()).parts)
+    except ValueError:
+        return "../../", "../"
+    return "../" * depth, "../" * max(depth - 2, 1)
+
+
+def build_case_index_html(
+    env: dict[str, Any],
+    files: list[tuple[str, int]],
+    *,
+    built_refs: list[str],
+    up: str,
+    run_up: str = "../",
+    title: str = "Sanitizers Nightly",
+) -> str:
+    """The run area's landing page: what this case was, and every file to download.
+
+    GitHub Pages does not auto-index a directory, so this page is what makes the
+    card footer's directory link resolve at all. ``up`` / ``run_up`` are the
+    relative paths back to the dashboard root and to this case's run area (case
+    dirs sit at different depths on the two tabs; see ``case_dir_up``).
+    """
+    observed = env.get("observed") or {}
+    rows = "".join(
+        f'<tr><td class=mono><a href="{_esc(rel)}">{_esc(rel)}</a></td>'
+        f"<td class=num>{_esc(_human_size(size))}</td></tr>"
+        for rel, size in files
+    ) or '<tr><td class=empty colspan=2>no files published for this case</td></tr>'
+    facts = [
+        ("Run", _esc(str(env.get("run", "")))),
+        ("Commit", _esc(str(env.get("commit", "")))),
+        ("Date", _esc(str(env.get("date", "")))),
+        ("Target", _esc(str(env.get("target", "")))),
+        ("Recipe", _esc(str(env.get("recipe", "")))),
+        ("Findings", _esc(str(observed.get("findings", 0)))),
+    ]
+    if env.get("container_image"):
+        facts.append(("Container", _esc(str(env["container_image"]))))
+    if env.get("rocjitsu_commit"):
+        facts.append(("rocjitsu bundle", _esc(str(env["rocjitsu_commit"]))))
+    kv = "".join(_fact_html(label, value, mono=True) for label, value in facts)
+    reason = observed.get("reason")
+    reason_html = (
+        f'<div class="observation {_tone_for(observed.get("verdict"))}">'
+        f'<span class="lbl">Reason</span><span class="msg">{_esc(str(reason))}</span></div>'
+        if reason
+        else ""
+    )
+    hints = _rebuild_hints(built_refs, target=str(env.get("target") or "gfx950"))
+    steps_html = (
+        (
+            '<p class="cap">Rebuild the fixtures</p><ul class="steps">'
+            + "".join(f"<li>{_esc(hint)}</li>" for hint in hints)
+            + f'</ul><p class="note">{_esc(_REBUILD_NOTE)}</p>'
+        )
+        if hints
+        else ""
+    )
+    not_published = env.get("artifacts_not_published") or []
+    np_html = ""
+    if not_published:
+        np_rows = "".join(
+            f'<tr><td class=mono>{_esc(str(item["path"]))}</td>'
+            f'<td class="mono wrap-any">{_esc(str(item.get("sha256") or "")) or "&mdash;"}</td></tr>'
+            for item in not_published
+        )
+        np_html = (
+            '<p class="cap">Artifacts not published</p><div class="table-wrap"><table>'
+            "<thead><tr><th>Path</th><th>SHA-256</th></tr></thead>"
+            f"<tbody>{np_rows}</tbody></table></div>"
+        )
+    run_link = (
+        f'<a href="{_esc(str(env["run_url"]))}">workflow run</a>'
+        if env.get("run_url")
+        else "<span></span>"
+    )
+    files_caption = (
+        "Every file published for this case. Logs are gzipped."
+        if env.get("logs_published", True)
+        else "Every file published for this case. Its logs, recipe copy and inputs "
+        "were pruned for falling outside the nightly's log-retention window."
+    )
+    return (
+        "<!doctype html>\n"
+        "<html lang=en><head><meta charset=utf-8>\n"
+        '<meta name=viewport content="width=device-width, initial-scale=1">\n'
+        f"<title>{_esc(title)} &middot; {_esc(str(env.get('case', '')))}</title>\n"
+        f"<style>{_CSS}\n  .wrap {{ max-width:900px; }}\n"
+        "  .note { margin:0 0 14px; color:var(--text-3); font-size:13px; }\n"
+        "  .steps { margin:0 0 6px; padding-left:18px; color:var(--text-2);\n"
+        "    font-size:var(--fs-obs); }\n"
+        "  .steps li { margin:3px 0; }</style></head>\n"
+        "<body><div class=wrap>\n"
+        f'<div class=navrow><span><a href="{_esc(up)}">&larr; back to sanitizer dashboard</a>'
+        f' &middot; <a href="{_esc(run_up)}">run {_esc(str(env.get("run", "")))}</a></span>\n'
+        f"{run_link}</div>\n"
+        '<div class=topbar>\n'
+        '<header class="page-header"><div class="brand-tile">'
+        f"{_svg(_ICON_FILE, size=24, width=2)}</div><div>\n"
+        f"<h1>{_esc(str(env.get('case', '')))}</h1>\n"
+        '<p class="subtitle">Run area &mdash; everything needed to reproduce this '
+        "case locally</p></div></header>\n"
+        "</div>\n"
+        '<section class="panel">\n'
+        f"<h2>Case {_verdict_html(observed.get('verdict') or _DASH)}</h2>\n"
+        f'<div class="kv">{kv}</div>\n'
+        f"{reason_html}\n"
+        '<div class="repro"><span class="lbl">Reproduce</span>'
+        f'<code>{_esc(str(env.get("command", "")))}</code></div>\n'
+        f"{steps_html}{np_html}"
+        "</section>\n"
+        '<section class="panel"><h2>Files</h2>\n'
+        f'<p class="cap">{_esc(files_caption)}</p>\n'
+        '<div class="table-wrap"><table>\n'
+        "<thead><tr><th>File</th><th class=num>Size</th></tr></thead>\n"
+        f"<tbody>{rows}</tbody>\n"
+        "</table></div></section>\n"
+        "</div></body></html>\n"
+    )
+
+
+def write_case_run_area(
+    case_dir: Path,
+    *,
+    case: str,
+    cls: str,
+    recipe_stem: str,
+    command: str,
+    meta: dict[str, Any],
+    summary: dict[str, Any],
+    report: dict[str, Any] | None,
+    repo_root: Path,
+    up: str,
+    run_up: str = "../",
+    logs: bool = True,
+    provenance: dict[str, str] | None = None,
+    current: bool = True,
+) -> None:
+    """Materialise one run area: recipe + inputs + REPRODUCE.md + env.json + index.
+
+    Called after the case's report and logs are already in ``case_dir``, so the
+    file listing on the landing page reflects exactly what was published.
+
+    ``current`` means this run is the one the publishing job just staged, and is
+    what gates the two things only that job can source correctly: the ``recipe``
+    and its inputs, which come from *its* checkout, and ``provenance``, which
+    describes *its* container and sanitizer build. Re-rendering an older run's
+    area must leave both alone -- copying today's recipe into a three-week-old
+    area would replace the recipe as it ran with whatever is on ``main`` now,
+    beside an ``env.json`` still telling the reader to check out that run's
+    commit. Older areas keep what they captured while they were current (see
+    ``refresh_published_case_area``); this path is the fallback for a run
+    published before run areas existed, which can only state what its own
+    ``meta.json`` and report still say.
+
+    ``logs=False`` (a run outside the ``--keep-logs`` window) still writes the
+    manifests and the page -- which stay useful and cost bytes, not megabytes --
+    and both renderings then describe the area as pruned rather than promising
+    files it does not have.
+    """
+    recipe_rel = f"recipes/sanitizers/{recipe_stem}.yaml"
+    inputs: list[str] = []
+    built_refs: list[str] = []
+    if current and logs:
+        inputs, built_refs = _publish_recipe_inputs(
+            case_dir, recipe_src=repo_root / recipe_rel, repo_root=repo_root
+        )
+    else:
+        # The referenced built artifacts are still worth naming by digest even
+        # when nothing is copied; the recipe is only read, never published.
+        _, built_refs = _recipe_fixture_refs(
+            _read_text_or_empty(repo_root / recipe_rel)
+        )
+    env = build_case_env(
+        case=case,
+        cls=cls,
+        recipe=recipe_rel,
+        command=command,
+        meta=meta,
+        summary=summary,
+        report=report,
+        built_refs=built_refs,
+        inputs=inputs,
+        logs=logs,
+        provenance=provenance if current else None,
+    )
+    (case_dir / "env.json").write_text(
+        json.dumps(env, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (case_dir / "REPRODUCE.md").write_text(
+        build_reproduce_md(env, built_refs=built_refs), encoding="utf-8"
+    )
+    (case_dir / "index.html").write_text(
+        build_case_index_html(
+            env,
+            run_area_files(case_dir),
+            built_refs=built_refs,
+            up=up,
+            run_up=run_up,
+        ),
+        encoding="utf-8",
+    )
+
+
+def refresh_published_case_area(case_dir: Path, out_dir: Path, *, logs: bool) -> bool:
+    """Re-render an already-published run area from its own persisted manifest.
+
+    Every retained run is re-rendered on every nightly, but only the run being
+    published now can be described from the live job. So an older area keeps the
+    ``env.json`` it captured while it was current -- its commit, its container
+    image, its rocjitsu bundle -- and only its rendering is rebuilt. That rebuild
+    is what keeps the page honest once the area has been pruned: the file table
+    enumerates what is on disk, so a page written before pruning would go on
+    linking logs that are gone.
+
+    Call after gzipping or pruning, with ``logs`` saying which happened. Returns
+    ``False`` when there is no manifest to rebuild from (a run published before
+    run areas existed), leaving the caller to write a fresh one.
+    """
+    env = _load(case_dir / "env.json")
+    if not isinstance(env, dict):
+        return False
+    if not logs:
+        # The manifest described an area that still had its bulk. Restate it for
+        # what is left, so it does not name inputs that are no longer there.
+        env["inputs"] = []
+    env["logs_published"] = logs
+    built_refs = [
+        str(item["path"])
+        for item in env.get("artifacts_not_published") or []
+        if isinstance(item, dict) and item.get("path")
+    ]
+    up, run_up = case_dir_up(case_dir, out_dir)
+    (case_dir / "env.json").write_text(
+        json.dumps(env, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (case_dir / "REPRODUCE.md").write_text(
+        build_reproduce_md(env, built_refs=built_refs), encoding="utf-8"
+    )
+    (case_dir / "index.html").write_text(
+        build_case_index_html(
+            env,
+            run_area_files(case_dir),
+            built_refs=built_refs,
+            up=up,
+            run_up=run_up,
+        ),
+        encoding="utf-8",
+    )
+    return True
+
+
 def _status_banner_html(status: dict[str, Any] | None) -> str:
     """Staleness banner shown when the latest nightly did not publish healthily.
 
@@ -1367,14 +2129,22 @@ def _kernel_tables_html(
 
 
 def _raw_link_html(report_rel: str | None) -> str:
-    """The raw-report link, as a card footer.
+    """The run-area link, as a card footer.
+
+    Points at the case's published *directory*, not just its
+    ``sanitizer_report.json``: the run area also carries the sanitizer logs the
+    verdict came from, the recipe as it ran, its source-level inputs and a
+    REPRODUCE.md, which is what makes the card's reproduce command actionable
+    (#384). The per-kernel-row ``Report`` column still links the JSON directly
+    for a schema drill-down.
 
     Deliberately in the card body rather than the ``<summary>`` row: a link
     inside a summary competes with the disclosure toggle.
     """
-    if not report_rel:
+    rel = _case_dir_rel(report_rel)
+    if not rel:
         return ""
-    return f'<div class="card-foot"><a href="{_esc(report_rel)}">view raw report</a></div>'
+    return f'<div class="card-foot"><a href="{_esc(rel)}">run area</a></div>'
 
 
 def _findings_chip_html(row: dict[str, Any]) -> str:
@@ -2092,12 +2862,79 @@ def build_html(
 """
 
 
-def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightly") -> str:
+def _run_index_survey_html(survey: list[dict[str, Any]] | None) -> str:
+    """The run landing page's workload-survey table (pure).
+
+    Without this the page lists only the three gated guardrail recipes, so the
+    top-nav "raw reports" link never mentions the survey cases published
+    alongside them under ``survey/<case>/`` (#384). Links are case-local, and
+    only a present report gets one so the page never points at a 404. For a past
+    run the entries come from ``survey_entries_from_published``, whose recorded
+    verdict can be absent -- hence the em-dash fallback rather than a "None".
+    """
+    if not survey:
+        return ""
+    rows = "".join(
+        f"<tr><td class=mono>{_esc(str(entry.get('label') or entry.get('name', '')))}</td>"
+        f"<td>{_verdict_html((entry.get('summary') or {}).get('verdict') or _DASH)}</td>"
+        f"<td class=mono>{_esc(str(entry.get('command') or ''))}</td>"
+        + (
+            f'<td><a href="survey/{_esc(str(entry.get("name", "")))}/">run area</a></td>'
+            if (entry.get("summary") or {}).get("present")
+            else '<td><span class="dash">&mdash;</span></td>'
+        )
+        + "</tr>"
+        for entry in survey
+    )
+    return (
+        '<section class="panel"><h2>Workload survey '
+        f'<span class=count>{len(survey)} observed-only</span></h2>'
+        '<div class="table-wrap"><table>\n'
+        "<thead><tr><th>Case</th><th>Observed</th><th>Reproduce</th><th>Files</th></tr></thead>\n"
+        f"<tbody>{rows}</tbody>\n"
+        "</table></div></section>\n"
+    )
+
+
+def survey_entries_from_published(run_dir: Path) -> list[dict[str, Any]]:
+    """Reconstruct a past run's survey list from the areas published under it.
+
+    The live survey list only ever covers the run being published now, so an
+    older run's landing page has nothing to render its Workload survey section
+    from -- leaving the survey areas still on the data branch under it reachable
+    only by typing the URL, on a site that cannot auto-index a directory. Each
+    area's own ``env.json`` already records everything that table shows.
+    """
+    entries: list[dict[str, Any]] = []
+    for case_dir in sorted(p for p in (run_dir / "survey").glob("*") if p.is_dir()):
+        env = _load(case_dir / "env.json")
+        if not isinstance(env, dict):
+            continue
+        observed = env.get("observed") or {}
+        entries.append({
+            "name": case_dir.name,
+            "label": str(env.get("case") or case_dir.name),
+            "command": str(env.get("command") or ""),
+            "summary": {
+                "verdict": observed.get("verdict"),
+                "present": (case_dir / "sanitizer_report.json").is_file(),
+            },
+        })
+    return entries
+
+
+def build_run_index_html(
+    run: dict[str, Any],
+    *,
+    title: str = "Sanitizers Nightly",
+    survey: list[dict[str, Any]] | None = None,
+) -> str:
     """A tiny, self-contained landing page for one published run (pure).
 
     Lives at ``runs/<id>/index.html`` alongside the run's raw reports, so the
     report links are case-local (``<case>/sanitizer_report.json``) rather than
-    dashboard-root-relative.
+    dashboard-root-relative. ``survey`` adds the observed-only cases published
+    under ``survey/<case>/`` for this run, so the page covers both tabs.
     """
     meta = run["meta"]
     rows = run["rows"]
@@ -2115,10 +2952,16 @@ def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightl
         href = _esc(f"{case}/sanitizer_report.json")
         return f'<a href="{href}">sanitizer_report.json</a>'
 
+    def _area_cell(case: str, present: bool) -> str:
+        if not present:
+            return '<span class="dash">&mdash;</span>'
+        return f'<a href="{_esc(case)}/">run area</a>'
+
     report_rows = "".join(
         f"<tr><td class=mono>{_esc(label)}</td>"
         f"<td>{_baseline_status_html(rows[case])} {_verdict_html(rows[case]['verdict'])}</td>"
-        f"<td>{_cell(case, rows[case]['present'])}</td></tr>"
+        f"<td>{_cell(case, rows[case]['present'])}</td>"
+        f"<td>{_area_cell(case, rows[case]['present'])}</td></tr>"
         for case, _key, label, _backend in CASES
     )
     # Shares the dashboard stylesheet so a drill-down does not look like a
@@ -2141,9 +2984,11 @@ def build_run_index_html(run: dict[str, Any], *, title: str = "Sanitizers Nightl
         "</div>\n"
         f"{_gate_hero_html(summary)}\n"
         '<section class="panel"><h2>Raw reports</h2><div class="table-wrap"><table>\n'
-        "<thead><tr><th>Recipe</th><th>Baseline status</th><th>Raw report</th></tr></thead>\n"
+        "<thead><tr><th>Recipe</th><th>Baseline status</th><th>Raw report</th>"
+        "<th>Files</th></tr></thead>\n"
         f"<tbody>{report_rows}</tbody>\n"
         "</table></div></section>\n"
+        f"{_run_index_survey_html(survey)}"
         "</div></body></html>\n"
     )
 
@@ -2372,6 +3217,22 @@ def main() -> int:
         default=30,
         help="in --history-root mode, render only the newest N runs (default 30)",
     )
+    ap.add_argument(
+        "--keep-logs",
+        type=int,
+        default=7,
+        help="keep sanitizer logs + the recipe copy and its inputs for only the "
+        "newest N runs (default 7), guardrail and survey areas alike. Older "
+        "retained runs keep their report, manifests and landing page; their bulk "
+        "is pruned so the data branch stays bounded (#384).",
+    )
+    ap.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path(__file__).resolve().parents[2],
+        help="repo checkout the recipes and their source-level fixture inputs are "
+        "copied from into each run area (defaults to this script's own checkout)",
+    )
     ap.add_argument("--baselines", type=Path, required=True)
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""))
@@ -2463,6 +3324,9 @@ def main() -> int:
         # exactly. Skip when history_root IS runs_out (CI) or nests beneath it
         # (e.g. --history-root out/runs/source --out-dir out) -- removing runs_out
         # would delete the very reports we are about to copy.
+        # Describes this job's GPU run only, so it is stamped onto the run being
+        # published now and never onto the older runs re-rendered beside it.
+        provenance = provenance_from_environ()
         runs_out = args.out_dir / "runs"
         runs_out_res = runs_out.resolve()
         history_res = args.history_root.resolve()
@@ -2471,30 +3335,114 @@ def main() -> int:
         )
         if runs_out.exists() and not history_within_runs_out:
             shutil.rmtree(runs_out)
-        for run in runs:
+        for position, run in enumerate(runs):
             rel = run.get("rel")
             if not rel:
                 continue
             run_out = args.out_dir / rel
             run_out.mkdir(parents=True, exist_ok=True)
-            # Co-locate each retained run's raw reports under the output tree so the
-            # emitted runs/<id>/<case>/sanitizer_report.json links resolve even when
-            # --history-root is not already <out-dir>/runs. In CI both resolve to the
-            # same path, so the copy is skipped and this is a no-op.
+            # Logs and copied inputs are kept only for the newest --keep-logs runs;
+            # every retained run still keeps its report, manifests and landing page.
+            keep_logs = position < max(args.keep_logs, 0)
+            # Co-locate each retained run's raw case dirs under the output tree so the
+            # emitted runs/<id>/<case>/... links resolve even when --history-root is
+            # not already <out-dir>/runs. In CI both resolve to the same path, so the
+            # copy is skipped and only the in-place steps below apply.
             src_run = args.history_root / run["meta"].get("run", "")
             if src_run.is_dir() and src_run.resolve() != run_out.resolve():
                 for case, _key, _label, _backend in CASES:
-                    src_report = src_run / case / "sanitizer_report.json"
-                    if src_report.is_file():
-                        (run_out / case).mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src_report, run_out / case / "sanitizer_report.json")
+                    # Copy the whole case dir, not just the report: the sanitizer
+                    # logs the verdict came from are what make the run area
+                    # reproducible (#384).
+                    src_case = src_run / case
+                    if src_case.is_dir():
+                        shutil.copytree(src_case, run_out / case, dirs_exist_ok=True)
                 # Carry the run manifest too so the published layout
                 # (runs/<id>/meta.json) is complete, not just the reports.
                 src_meta = src_run / "meta.json"
                 if src_meta.is_file():
                     shutil.copy2(src_meta, run_out / "meta.json")
+            # Only the newest run was produced by this job, so only its area may be
+            # written from the live checkout and environment (see
+            # write_case_run_area); older ones are re-rendered from what they
+            # captured themselves.
+            current = position == 0
+            for case, _key, label, _backend in CASES:
+                row = run["rows"][case]
+                case_out = run_out / case
+                if not row.get("present") or not case_out.is_dir():
+                    continue
+                if keep_logs:
+                    _gzip_logs(case_out)
+                else:
+                    _prune_run_area_bulk(case_out)
+                if not current and refresh_published_case_area(
+                    case_out, args.out_dir, logs=keep_logs
+                ):
+                    continue
+                up, run_up = case_dir_up(case_out, args.out_dir)
+                write_case_run_area(
+                    case_out,
+                    case=case,
+                    cls="guardrail",
+                    recipe_stem=label,
+                    command=f"aorta sweep run --recipe recipes/sanitizers/{label}.yaml",
+                    meta=run["meta"],
+                    summary=row,
+                    report=_load(case_out / "sanitizer_report.json"),
+                    repo_root=args.repo_root,
+                    up=up,
+                    run_up=run_up,
+                    logs=keep_logs,
+                    provenance=provenance,
+                    current=current,
+                )
+            # A survey area is published under whichever run was latest at the
+            # time, so it ages out of the log window with the rest of that run --
+            # without this its ConSan log, the bulkiest thing published, would
+            # outlive the guardrail logs beside it by --keep minus --keep-logs.
+            # The current run's areas are (re)written from this job's own results
+            # further below, so they are not touched here.
+            if not current:
+                for survey_case in sorted(
+                    p for p in (run_out / "survey").glob("*") if p.is_dir()
+                ):
+                    if not keep_logs:
+                        _prune_run_area_bulk(survey_case)
+                    if refresh_published_case_area(
+                        survey_case, args.out_dir, logs=keep_logs
+                    ):
+                        continue
+                    # Co-published before run areas existed: retrofit one, the same
+                    # way an older guardrail case is handled above. Without this an
+                    # area with a report but no manifest stays invisible -- it gets
+                    # no landing page, and survey_entries_from_published skips it.
+                    survey_report = _load(survey_case / "sanitizer_report.json")
+                    if not isinstance(survey_report, dict):
+                        continue
+                    stem = _survey_recipe_for(survey_case.name)
+                    up, run_up = case_dir_up(survey_case, args.out_dir)
+                    write_case_run_area(
+                        survey_case,
+                        case=survey_case.name,
+                        cls="survey",
+                        recipe_stem=stem,
+                        command=f"aorta sweep run --recipe recipes/sanitizers/{stem}.yaml",
+                        meta=run["meta"],
+                        summary=summarize_case(survey_report, None),
+                        report=survey_report,
+                        repo_root=args.repo_root,
+                        up=up,
+                        run_up=run_up,
+                        logs=keep_logs,
+                        current=False,
+                    )
             (run_out / "index.html").write_text(
-                build_run_index_html(run), encoding="utf-8"
+                build_run_index_html(
+                    run,
+                    survey=survey if current else survey_entries_from_published(run_out),
+                ),
+                encoding="utf-8",
             )
         # Co-publish each caller-supplied ConSan report (#347) under the latest run's
         # survey area so the report_rel links threaded above (survey/<name>/...)
@@ -2504,13 +3452,34 @@ def main() -> int:
         latest_rel = runs[0].get("rel") if runs else None
         info_dir = args.informational_results_dir
         if latest_rel and info_dir is not None and info_dir.is_dir():
+            survey_by_name = {str(entry.get("name")): entry for entry in survey}
             for case_dir in sorted(p for p in info_dir.iterdir() if p.is_dir()):
                 src_report = case_dir / "sanitizer_report.json"
                 if not src_report.is_file():
                     continue
                 dest = args.out_dir / latest_rel / "survey" / case_dir.name
-                dest.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_report, dest / "sanitizer_report.json")
+                # The whole case dir, so the ConSan/waitcheck logs behind the
+                # observed verdict ship with the report (#384).
+                shutil.copytree(case_dir, dest, dirs_exist_ok=True)
+                _gzip_logs(dest)
+                entry = survey_by_name.get(case_dir.name)
+                if entry is None:
+                    continue
+                up, run_up = case_dir_up(dest, args.out_dir)
+                write_case_run_area(
+                    dest,
+                    case=case_dir.name,
+                    cls="survey",
+                    recipe_stem=_survey_recipe_for(case_dir.name),
+                    command=str(entry.get("command") or ""),
+                    meta=runs[0]["meta"],
+                    summary=entry.get("summary") or {},
+                    report=_load(dest / "sanitizer_report.json"),
+                    repo_root=args.repo_root,
+                    up=up,
+                    run_up=run_up,
+                    provenance=provenance,
+                )
     (args.out_dir / "summary.md").write_text(
         build_summary_md(runs, status=status, survey=survey),
         encoding="utf-8",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
 import re
@@ -649,8 +650,10 @@ def test_build_html_emits_relative_report_links(tmp_path):
 
     # Latest-run table links each case to its raw JSON, relative to /sanitizers/.
     assert 'href="runs/2026-08-05-33/waitcheck/sanitizer_report.json"' in html
-    # A "view raw report" link appears in the kernel-detail section.
-    assert "view raw report" in html
+    # The kernel-detail card footer links the case's run area (its directory),
+    # not just the report, so the logs/recipe/inputs are one click away (#384).
+    assert 'href="runs/2026-08-05-33/waitcheck/">run area</a>' in html
+    assert "view raw report" not in html
     # The run area is linked from the latest-run header and the history table.
     assert 'href="runs/2026-08-05-33/"' in html
     assert 'href="runs/2026-08-04-22/"' in html
@@ -1741,11 +1744,13 @@ def test_build_html_survey_report_link_and_graceful_absence():
     )
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
 
-    # the linked survey case drills down to its raw report; the unlinked one still
-    # renders (degrades to no link). Guardrail rows carry no report_rel here, so the
-    # only "view raw report" link comes from the linked survey case.
+    # the linked survey case drills down to its raw report (per-kernel row) and to
+    # its run area (card footer); the unlinked one still renders, degrading to
+    # neither link. Guardrail rows carry no report_rel here, so the only run-area
+    # footer comes from the linked survey case.
     assert 'href="runs/x/survey/linked/sanitizer_report.json"' in html
-    assert html.count("view raw report") == 1
+    assert html.count('href="runs/x/survey/linked/">run area</a>') == 1
+    assert html.count("run area</a>") == 1
     assert "linked survey" in html and "nolink survey" in html
 
 
@@ -1793,9 +1798,11 @@ def test_build_html_kernel_rows_link_reports_on_both_tabs(tmp_path):
     # twice: the latest-run table cell and the per-kernel-row Report column.
     wc = 'href="runs/2026-08-05-33/waitcheck/sanitizer_report.json">report</a>'
     assert html.count(wc) == 2
-    # Survey kernel row links to the survey case's report_rel (the heading uses the
-    # distinct "view raw report" text, so a "report" link here is the per-row one).
+    # Survey kernel row links to the survey case's report_rel (the card footer uses
+    # the distinct "run area" text pointing at the directory, so a "report" link
+    # here is the per-row one).
     assert 'href="runs/x/survey/s/sanitizer_report.json">report</a>' in html
+    assert 'href="runs/x/survey/s/">run area</a>' in html
     # no dead/unsafe links leaked in
     assert 'href="/runs/' not in html and "javascript:" not in html
 
@@ -1902,3 +1909,555 @@ def test_main_without_survey_omits_survey_rows_but_renders_tab(tmp_path, monkeyp
     assert "No workload-survey kernels in this run." in html
     data = json.loads((out / "data.json").read_text(encoding="utf-8"))
     assert data[0]["survey"] == []
+
+
+# --------------------------------------------------------------------------
+# Run area (#384): the case directory a card footer links to
+# --------------------------------------------------------------------------
+
+
+def _publish_with_logs(tmp_path, monkeypatch, *, run_ids, keep_logs=None, survey=True):
+    """Publish a history (each case carrying a sweep log) plus one survey case."""
+    root = tmp_path / "runs"
+    for run_id in run_ids:
+        run_dir = _write_history_run(root, run_id)
+        (run_dir / "waitcheck" / "waitcheck").mkdir(parents=True)
+        (run_dir / "waitcheck" / "waitcheck" / "waitcheck-0.log").write_text("scan output\n")
+        (run_dir / "consan-racy" / "consan").mkdir(parents=True)
+        (run_dir / "consan-racy" / "consan" / "consan.log").write_text("race detected\n")
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(root),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(tmp_path / "dashboard"),
+    ]
+    if survey:
+        info = tmp_path / "informational"
+        (info / "consan-gemm" / "consan").mkdir(parents=True)
+        (info / "consan-gemm" / "sanitizer_report.json").write_text(
+            json.dumps(_informational_report("combined_hook_timeout"))
+        )
+        (info / "consan-gemm" / "consan" / "consan.log").write_text("hook timeout\n")
+        argv += ["--informational-results-dir", str(info)]
+    if keep_logs is not None:
+        argv += ["--keep-logs", str(keep_logs)]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+    return tmp_path / "dashboard"
+
+
+def test_case_dir_rel_points_at_the_directory_and_rejects_unsafe_values():
+    # The footer link is the case's directory, derived from report_rel so it
+    # inherits the same relative-only guarantee as the report link.
+    assert (
+        gen._case_dir_rel("runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json")
+        == "runs/2026-08-05-33/survey/consan-gemm/"
+    )
+    assert gen._case_dir_rel("runs/x/waitcheck/sanitizer_report.json") == "runs/x/waitcheck/"
+    # No safe directory to link -> no link at all, never a dead or unsafe href.
+    for unsafe in (
+        None, "", "sanitizer_report.json", "javascript:alert(1)",
+        "/runs/x/c/sanitizer_report.json", "../../etc/passwd",
+        "//evil.example/x/sanitizer_report.json",
+    ):
+        assert gen._case_dir_rel(unsafe) is None, unsafe
+
+
+def test_raw_link_html_renders_run_area_or_nothing():
+    linked = gen._raw_link_html("runs/x/survey/s/sanitizer_report.json")
+    assert 'href="runs/x/survey/s/">run area</a>' in linked
+    assert "view raw report" not in linked
+    assert gen._raw_link_html(None) == ""
+    assert gen._raw_link_html("javascript:alert(1)") == ""
+
+
+def test_recipe_fixture_refs_splits_source_inputs_from_built_artifacts():
+    # Source inputs are copied into the run area; CI-built artifacts (gitignored,
+    # ~16MB for a GEMM object) are recorded by digest instead.
+    recipe = (
+        "sanitizer_plan:\n"
+        "  source:\n"
+        "    hip: fixtures/repro/consan_lds_race.hip\n"
+        "    path: fixtures/gemm_shapes_unique.csv\n"
+        "    code_object: fixtures/isa/consan_gemm_f32.hsaco\n"
+        "    consan_command: fixtures/bin/consan_gemm_load\n"
+        "    isa_dir: fixtures/isa\n"
+    )
+    source, built = gen._recipe_fixture_refs(recipe)
+    assert source == ["fixtures/repro/consan_lds_race.hip", "fixtures/gemm_shapes_unique.csv"]
+    assert built == [
+        "fixtures/isa/consan_gemm_f32.hsaco",
+        "fixtures/bin/consan_gemm_load",
+        "fixtures/isa",
+    ]
+
+
+def test_report_digests_flattens_backend_and_code_object_provenance():
+    # waitcheck records its binary path/sha256; every worklist kernel records its
+    # code-object digest. Both are already in the report and rendered nowhere.
+    digests = gen.report_digests(_waitcheck_report())
+    assert digests["path"] == "/tmp/build/tools/rj_waitcheck"
+    assert digests["sha256"] == "472fcf288714beef"
+    assert digests["code_object:sol_1.hsaco"] == "93f09ae670abcdef"
+    # ConSan's repro command / hook digests are picked up from the same field.
+    consan = _consan_clean_report()
+    consan["checks"][0]["backend"] = {
+        "command": "/w/fixtures/bin/consan_gemm_load", "command_sha256": "deadbeef",
+        "hook": "/w/librocjitsu_dbi_hooks.so", "hook_sha256": "feedface",
+    }
+    assert gen.report_digests(consan)["command_sha256"] == "deadbeef"
+    # A malformed report degrades to {} rather than raising.
+    for bad in (None, [], "oops", {"checks": None}, {"worklist": {"kernels": [1]}}):
+        assert gen.report_digests(bad) == {}
+
+
+def test_artifact_digest_index_covers_every_key_shape_a_sanitizer_writes():
+    # The unpublished-artifact table looks digests up by basename, because the two
+    # sanitizers name the same kind of artifact under different report keys.
+    index = gen.artifact_digest_index({
+        "path": "/tmp/build/tools/rj_waitcheck", "sha256": "aa",
+        "command": "/w/fixtures/bin/consan_gemm_load", "command_sha256": "bb",
+        "hook": "/w/librocjitsu_dbi_hooks.so", "hook_sha256": "cc",
+        "code_object:consan_gemm_f32.hsaco": "dd",
+    })
+    assert index == {
+        "rj_waitcheck": "aa", "consan_gemm_load": "bb",
+        "librocjitsu_dbi_hooks.so": "cc", "consan_gemm_f32.hsaco": "dd",
+    }
+    # A half-recorded pair contributes nothing rather than a partial entry.
+    assert gen.artifact_digest_index({"command": "/w/x", "sha256": "aa"}) == {}
+    assert gen.artifact_digest_index({}) == {}
+
+
+def test_run_area_names_the_consan_repro_binary_digest_not_an_em_dash():
+    # ConSan records the repro binary as command/command_sha256. Keying only on
+    # "code_object:" left every fixtures/bin/ artifact with a null digest, so the
+    # "rebuild it and check the digest" instruction had nothing to check against.
+    report = _consan_clean_report()
+    report["checks"][0]["backend"] = {
+        "command": "/w/fixtures/bin/consan_gemm_load", "command_sha256": "deadbeef",
+    }
+    env = gen.build_case_env(
+        case="consan-gemm", cls="survey",
+        recipe="recipes/sanitizers/daily-consan-gemm.yaml", command="aorta sweep run",
+        meta={}, summary={}, report=report,
+        built_refs=["fixtures/bin/consan_gemm_load", "fixtures/isa"], inputs=[],
+    )
+    by_path = {item["path"]: item["sha256"] for item in env["artifacts_not_published"]}
+    assert by_path["fixtures/bin/consan_gemm_load"] == "deadbeef"
+    # A bare directory reference still has no digest to record; that stays honest.
+    assert by_path["fixtures/isa"] is None
+    assert "deadbeef" in gen.build_reproduce_md(env, built_refs=list(by_path))
+
+
+def test_case_dir_up_matches_the_published_depth_of_each_tab(tmp_path):
+    out = tmp_path / "dashboard"
+    guardrail = out / "runs" / "2026-08-05-33" / "waitcheck"
+    survey = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    guardrail.mkdir(parents=True)
+    survey.mkdir(parents=True)
+    # A guardrail case sits one level shallower than a survey case, so a single
+    # hardcoded "up" would break the back-link on one of the two tabs.
+    assert gen.case_dir_up(guardrail, out) == ("../../../", "../")
+    assert gen.case_dir_up(survey, out) == ("../../../../", "../../")
+
+
+def test_main_publishes_full_case_dirs_with_gzipped_logs(tmp_path, monkeypatch):
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    case = out / "runs" / "2026-08-05-33" / "waitcheck"
+    survey_case = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+
+    # The logs the verdict came from are published, gzipped, and still readable.
+    log = case / "waitcheck" / "waitcheck-0.log.gz"
+    assert log.is_file() and not (case / "waitcheck" / "waitcheck-0.log").exists()
+    assert gzip.decompress(log.read_bytes()) == b"scan output\n"
+    survey_log = survey_case / "consan" / "consan.log.gz"
+    assert gzip.decompress(survey_log.read_bytes()) == b"hook timeout\n"
+
+    # Every run area carries the inputs needed to reproduce it.
+    for area in (case, survey_case):
+        assert (area / "sanitizer_report.json").is_file()
+        assert (area / "recipe.yaml").is_file()
+        assert (area / "REPRODUCE.md").is_file()
+        assert (area / "env.json").is_file()
+        assert (area / "index.html").is_file()
+    # Source-level recipe inputs are copied; the CI-built artifacts are not.
+    assert (case / "inputs" / "fixtures" / "gemm_shapes_unique.csv").is_file()
+    assert not list(case.rglob("*.hsaco"))
+    assert not (survey_case / "inputs" / "fixtures" / "isa").exists()
+
+
+def test_run_area_records_unpublished_artifacts_by_digest(tmp_path, monkeypatch):
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    case = out / "runs" / "2026-08-05-33" / "waitcheck"
+
+    env = json.loads((case / "env.json").read_text(encoding="utf-8"))
+    assert env["schema"] == gen.RUN_AREA_ENV_SCHEMA
+    assert env["class"] == "guardrail"
+    assert env["recipe"] == "recipes/sanitizers/daily-waitcheck-gemm.yaml"
+    assert env["command"] == (
+        "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml"
+    )
+    # The full SHA is recorded, not the display-shortened one, so the reproduce
+    # instructions name a revision you can actually check out.
+    assert env["commit"] == "0123456789abcdef"
+    assert env["observed"]["verdict"] == "warn"
+    assert env["digests"]["sha256"] == "472fcf288714beef"
+
+    md = (case / "REPRODUCE.md").read_text(encoding="utf-8")
+    assert "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml" in md
+    assert "git checkout 0123456789abcdef" in md
+    assert "472fcf288714beef" in md
+
+    # The survey case's recipe references built artifacts, so they are named with
+    # their digest under "artifacts not published" rather than shipped.
+    survey_env = json.loads(
+        (out / "runs/2026-08-05-33/survey/consan-gemm/env.json").read_text(encoding="utf-8")
+    )
+    paths = [item["path"] for item in survey_env["artifacts_not_published"]]
+    assert "fixtures/isa/consan_gemm_f32.hsaco" in paths
+    survey_md = (
+        out / "runs/2026-08-05-33/survey/consan-gemm/REPRODUCE.md"
+    ).read_text(encoding="utf-8")
+    assert "Artifacts not published" in survey_md
+    assert "hipcc --genco" in survey_md
+
+
+def test_case_index_lists_every_published_file(tmp_path, monkeypatch):
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    case = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    page = (case / "index.html").read_text(encoding="utf-8")
+
+    # Pages does not auto-index a directory, so this page is what makes the
+    # footer's directory link resolve; it must link everything actually present.
+    for rel, _size in gen.run_area_files(case):
+        assert f'href="{rel}"' in page
+    assert 'href="consan/consan.log.gz"' in page
+    assert 'href="sanitizer_report.json"' in page
+    # It never links itself, and every link resolves on disk.
+    assert 'href="index.html"' not in page
+    for href in re.findall(r'href="([^"#]+)"', page):
+        if href.startswith("http"):
+            continue
+        target = (case / href).resolve()
+        assert target.exists(), href
+        if target.is_dir():
+            assert (target / "index.html").is_file(), href
+
+
+def test_keep_logs_window_prunes_bulk_but_keeps_report_and_page(tmp_path, monkeypatch):
+    # Reports are retained for --keep runs; logs and copied inputs only for the
+    # newest --keep-logs, so the data branch stays bounded (#384).
+    out = _publish_with_logs(
+        tmp_path,
+        monkeypatch,
+        run_ids=["2026-08-05-33", "2026-08-04-22", "2026-08-03-11"],
+        keep_logs=2,
+        survey=False,
+    )
+    latest = out / "runs" / "2026-08-05-33" / "waitcheck"
+    inside = out / "runs" / "2026-08-04-22" / "waitcheck"
+    outside = out / "runs" / "2026-08-03-11" / "waitcheck"
+
+    assert (inside / "waitcheck" / "waitcheck-0.log.gz").is_file()
+    # The recipe and its inputs are pinned to the checkout that ran the case, so
+    # only the run this job staged gets them -- publishing today's recipe into an
+    # older area would contradict the commit its env.json names.
+    assert (latest / "recipe.yaml").is_file()
+    assert (latest / "inputs").is_dir()
+    assert not (inside / "recipe.yaml").exists()
+    assert not (inside / "inputs").exists()
+
+    # The pruned run keeps what makes it still readable and still drillable.
+    assert (outside / "sanitizer_report.json").is_file()
+    assert (outside / "index.html").is_file()
+    assert (outside / "env.json").is_file()
+    assert not list(outside.rglob("*.log.gz"))
+    assert not (outside / "inputs").exists()
+    assert not (outside / "recipe.yaml").exists()
+    # Both renderings say the area was pruned rather than promising its logs.
+    env = json.loads((outside / "env.json").read_text(encoding="utf-8"))
+    assert env["logs_published"] is False
+    assert env["inputs"] == []
+    assert "pruned" in (outside / "REPRODUCE.md").read_text(encoding="utf-8")
+    assert json.loads((inside / "env.json").read_text(encoding="utf-8"))["logs_published"] is True
+    # An empty per-sanitizer log dir is removed rather than left as a stub, and
+    # the page lists only files that survived -- no dead links.
+    assert not (outside / "waitcheck").exists()
+    page = (outside / "index.html").read_text(encoding="utf-8")
+    assert ".log.gz" not in page
+    for href in re.findall(r'href="([^"#]+)"', page):
+        if not href.startswith("http"):
+            assert (outside / href).resolve().exists(), href
+
+
+def test_run_index_lists_survey_cases_and_run_areas(tmp_path):
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    run = gen.runs_from_history_root(root, _baselines())[0]
+    survey = gen.survey_cases_from_spec(
+        {"cases": [{
+            "name": "consan-gemm", "label": "gemm - ConSan",
+            "command": "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml",
+            "report_rel": "runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json",
+            "report": _consan_racy_report(),
+        }]}
+    )
+
+    page = gen.build_run_index_html(run, survey=survey)
+
+    # Without this the run page lists only the three gated guardrail recipes, so
+    # the top-nav "raw reports" link never mentions the survey cases beside them.
+    assert "Workload survey" in page
+    assert 'href="survey/consan-gemm/">run area</a>' in page
+    assert "daily-consan-gemm.yaml" in page
+    # Guardrail rows link their own run area alongside the raw report.
+    assert 'href="waitcheck/">run area</a>' in page
+    assert 'href="waitcheck/sanitizer_report.json"' in page
+
+    # A run with no survey cases renders exactly as before (no empty section).
+    assert "Workload survey" not in gen.build_run_index_html(run)
+
+
+def test_keep_logs_window_also_bounds_survey_logs(tmp_path, monkeypatch):
+    """The log window must bound the survey areas, not just the guardrail cases.
+
+    A survey area is only ever published under the run that was latest at the
+    time, and then persists on the data branch under that run -- so it is only
+    reachable for pruning on a *later* publish. Publishing once per run into one
+    output tree is what the nightly does to the ``sanitizer-results`` branch, and
+    it is the only way this shows up: a single publish leaves every survey area
+    inside the window and looks correct.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    run_ids = ["2026-08-03-11", "2026-08-04-22", "2026-08-05-33"]
+    for run_id in run_ids:
+        run_dir = _write_history_run(dashboard / "runs", run_id)
+        (run_dir / "consan-racy" / "consan").mkdir(parents=True)
+        (run_dir / "consan-racy" / "consan" / "consan.log").write_text("race\n")
+        info = tmp_path / f"informational-{run_id}"
+        (info / "consan-gemm" / "consan").mkdir(parents=True)
+        (info / "consan-gemm" / "sanitizer_report.json").write_text(
+            json.dumps(_informational_report("combined_hook_timeout"))
+        )
+        (info / "consan-gemm" / "consan" / "consan.log").write_text("hook timeout\n")
+        monkeypatch.setattr(sys, "argv", [
+            "gen_sanitizer_dashboard",
+            "--history-root", str(dashboard / "runs"),
+            "--baselines",
+            str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+            "--out-dir", str(dashboard),
+            "--keep-logs", "1",
+            "--informational-results-dir", str(info),
+        ])
+        assert gen.main() == 0
+
+    latest = dashboard / "runs/2026-08-05-33/survey/consan-gemm"
+    assert (latest / "consan" / "consan.log.gz").is_file()
+
+    for run_id in run_ids[:-1]:
+        area = dashboard / "runs" / run_id / "survey" / "consan-gemm"
+        # ConSan survey logs are the bulkiest thing published; unbounded here they
+        # would outlive the guardrail logs beside them by --keep / --keep-logs.
+        assert not list(area.rglob("*.log.gz")), run_id
+        assert not list(area.rglob("*.log")), run_id
+        # Still readable and still drillable, like a pruned guardrail area.
+        assert (area / "sanitizer_report.json").is_file(), run_id
+        env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+        assert env["logs_published"] is False, run_id
+        # The page is re-rendered from that manifest, so it cannot keep linking
+        # the log it no longer has.
+        page = (area / "index.html").read_text(encoding="utf-8")
+        assert ".log.gz" not in page, run_id
+        for href in re.findall(r'href="([^"#]+)"', page):
+            if not href.startswith("http"):
+                assert (area / href).resolve().exists(), f"{run_id}: {href}"
+
+
+def test_refresh_published_case_area_reports_an_unusable_manifest(tmp_path):
+    # env.json is the only input for re-rendering an older area, so a missing or
+    # malformed one must be reported (the caller then writes a fresh area) rather
+    # than raising and aborting the whole dashboard.
+    area = tmp_path / "dashboard" / "runs" / "r" / "survey" / "c"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text("{}")
+
+    assert gen.refresh_published_case_area(area, tmp_path / "dashboard", logs=True) is False
+    (area / "env.json").write_text("[]")  # valid JSON, wrong shape
+    assert gen.refresh_published_case_area(area, tmp_path / "dashboard", logs=True) is False
+
+
+def test_older_run_areas_keep_their_own_provenance_not_the_current_job(tmp_path, monkeypatch):
+    """An older area must not be relabelled with the publishing job's environment.
+
+    ``AORTA_CI_IMAGE`` / ``AORTA_ROCJITSU_*`` describe the GPU run being published
+    now. Every retained run's area is re-rendered on every nightly, so stamping
+    them unconditionally would tell a reader that a three-week-old run used
+    today's container image and sanitizer build.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    for run_id, image, bundle in (
+        ("2026-08-04-22", "rocm/pytorch@sha256:old", "oldbundle"),
+        ("2026-08-05-33", "rocm/pytorch@sha256:new", "newbundle"),
+    ):
+        _write_history_run(dashboard / "runs", run_id)
+        monkeypatch.setenv("AORTA_CI_IMAGE", image)
+        monkeypatch.setenv("AORTA_ROCJITSU_COMMIT", bundle)
+        monkeypatch.setattr(sys, "argv", [
+            "gen_sanitizer_dashboard",
+            "--history-root", str(dashboard / "runs"),
+            "--baselines",
+            str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+            "--out-dir", str(dashboard),
+        ])
+        assert gen.main() == 0
+
+    def _env(run_id):
+        path = dashboard / "runs" / run_id / "waitcheck" / "env.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    assert _env("2026-08-04-22")["container_image"] == "rocm/pytorch@sha256:old"
+    assert _env("2026-08-04-22")["rocjitsu_commit"] == "oldbundle"
+    assert _env("2026-08-05-33")["container_image"] == "rocm/pytorch@sha256:new"
+    # It also survives into the rendering, not just the manifest.
+    assert "rocm/pytorch@sha256:old" in (
+        dashboard / "runs/2026-08-04-22/waitcheck/REPRODUCE.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_past_run_pages_still_list_the_survey_areas_published_under_them(
+    tmp_path, monkeypatch
+):
+    # The live survey list only covers the run being published now, so a past
+    # run's page has to be rebuilt from the areas on disk -- otherwise the areas
+    # kept under it are reachable only by typing the URL, on a site with no
+    # directory listing. Uses the nightly's layout (history nested under the
+    # output tree); with disjoint trees runs/ is cleared and re-copied instead.
+    out = tmp_path / "dashboard"
+    out.mkdir()
+    for run_id, with_survey in (("2026-08-05-33", True), ("2026-08-06-44", False)):
+        _write_history_run(out / "runs", run_id)
+        argv = [
+            "gen_sanitizer_dashboard",
+            "--history-root", str(out / "runs"),
+            "--baselines",
+            str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+            "--out-dir", str(out),
+        ]
+        if with_survey:
+            info = tmp_path / "informational"
+            (info / "consan-gemm").mkdir(parents=True)
+            (info / "consan-gemm" / "sanitizer_report.json").write_text(
+                json.dumps(_informational_report("combined_hook_timeout"))
+            )
+            argv += ["--informational-results-dir", str(info)]
+        monkeypatch.setattr(sys, "argv", argv)
+        assert gen.main() == 0
+
+    older = (out / "runs/2026-08-05-33/index.html").read_text(encoding="utf-8")
+    assert "Workload survey" in older
+    assert 'href="survey/consan-gemm/">run area</a>' in older
+    assert "None" not in older
+    # The newest run has no survey cases of its own, so no empty section.
+    assert "Workload survey" not in (
+        out / "runs/2026-08-06-44/index.html"
+    ).read_text(encoding="utf-8")
+
+
+def test_older_survey_areas_published_before_run_areas_are_retrofitted(
+    tmp_path, monkeypatch
+):
+    # History co-published before #384 holds survey dirs with only a report. They
+    # get the same retrofit as an older guardrail case, so retained history is
+    # uniformly browsable instead of holding areas with no landing page.
+    out = tmp_path / "dashboard"
+    out.mkdir()
+    _write_history_run(out / "runs", "2026-08-05-33")
+    bare = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    bare.mkdir(parents=True)
+    (bare / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    _write_history_run(out / "runs", "2026-08-06-44")
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(out / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(out),
+    ])
+    assert gen.main() == 0
+
+    assert (bare / "index.html").is_file()
+    env = json.loads((bare / "env.json").read_text(encoding="utf-8"))
+    assert env["class"] == "survey"
+    assert env["recipe"] == "recipes/sanitizers/daily-consan-gemm.yaml"
+    # Retrofitted from the report alone, so it claims no live provenance and no
+    # recipe copy -- neither is knowable for a run this job did not execute.
+    assert "container_image" not in env
+    assert not (bare / "recipe.yaml").exists()
+    # And it is now reachable from the run page rather than only by direct URL.
+    page = (out / "runs/2026-08-05-33/index.html").read_text(encoding="utf-8")
+    assert 'href="survey/consan-gemm/">run area</a>' in page
+
+
+def test_survey_entries_from_published_degrades_on_a_missing_manifest(tmp_path):
+    run_dir = tmp_path / "runs" / "r"
+    (run_dir / "survey" / "good").mkdir(parents=True)
+    (run_dir / "survey" / "bare").mkdir(parents=True)
+    (run_dir / "survey" / "good" / "sanitizer_report.json").write_text("{}")
+    (run_dir / "survey" / "good" / "env.json").write_text(
+        json.dumps({"case": "good", "command": "aorta sweep run", "observed": {}})
+    )
+
+    entries = gen.survey_entries_from_published(run_dir)
+
+    # An area with no manifest is skipped rather than rendered from guesses.
+    assert [e["name"] for e in entries] == ["good"]
+    # A recorded verdict may be absent; the table must not print "None" for it.
+    assert entries[0]["summary"]["verdict"] is None
+    page = gen._run_index_survey_html(entries)
+    assert "None" not in page and gen._DASH in page
+    assert gen.survey_entries_from_published(tmp_path / "runs" / "absent") == []
+
+
+def test_build_case_env_takes_provenance_rather_than_reading_the_environment(monkeypatch):
+    # Keeping it a parameter is what makes it impossible to relabel an older run
+    # by accident; the function stays pure and testable.
+    monkeypatch.setenv("AORTA_CI_IMAGE", "rocm/pytorch@sha256:leak")
+    kwargs = {
+        "case": "waitcheck", "cls": "guardrail", "recipe": "r.yaml",
+        "command": "aorta sweep run", "meta": {}, "summary": {},
+        "report": None, "built_refs": [], "inputs": [],
+    }
+    assert "container_image" not in gen.build_case_env(**kwargs)
+    assert gen.provenance_from_environ()["container_image"] == "rocm/pytorch@sha256:leak"
+    stamped = gen.build_case_env(**kwargs, provenance=gen.provenance_from_environ())
+    assert stamped["container_image"] == "rocm/pytorch@sha256:leak"
+
+
+def test_run_area_renders_em_dash_for_a_report_missing_its_verdict():
+    # summarize_case keeps a structurally-degraded report as present, so verdict /
+    # execution can be None. Rendering those as the literal "None" is the bug this
+    # guards; env.json still records null, which is honest for a machine consumer.
+    env = gen.build_case_env(
+        case="consan-gemm", cls="survey",
+        recipe="recipes/sanitizers/daily-consan-gemm.yaml", command="aorta sweep run",
+        meta={"run": "r", "commit_full": "abc", "date": "2026-08-05", "gpu": "gfx950"},
+        summary=gen.summarize_case({"schema": "aorta.sanitizer_report/0.1"}, None),
+        report=None, built_refs=[], inputs=[],
+    )
+    assert env["observed"]["verdict"] is None
+    assert env["observed"]["execution"] is None
+
+    md = gen.build_reproduce_md(env, built_refs=[])
+    assert f"- Verdict: `{gen._DASH}`" in md
+    assert f"- Execution: `{gen._DASH}`" in md
+    assert "None" not in md
+
+    page = gen.build_case_index_html(env, [], built_refs=[], up="../../")
+    assert ">None<" not in page
+    assert gen._DASH in page

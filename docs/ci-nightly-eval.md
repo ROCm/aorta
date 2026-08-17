@@ -64,14 +64,15 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    previous green page). Only sanitizer data produced by a `main` run is
    published.
 
-   Each nightly's raw per-case `sanitizer_report.json` files are co-located on the
-   `sanitizer-results` data branch under `dashboard/runs/<YYYY-MM-DD>-<run_id>/`
-   (one `<case>/sanitizer_report.json` per recipe plus a `meta.json` with commit /
-   date / gpu / run_url / gate), and the rendered page links to them: the latest
-   run table has a per-recipe **Report** link, the kernel-detail sections carry a
-   "view raw report" link, and each **Run** row in the history table links to its
-   `runs/<id>/` area. A tiny `runs/<id>/index.html` landing page lists that run's
-   three reports. Because `pages.yml` copies `dashboard/*` recursively into
+   Each nightly's per-case results are co-located on the `sanitizer-results` data
+   branch under `dashboard/runs/<YYYY-MM-DD>-<run_id>/` (one directory per
+   guardrail recipe, one under `survey/` per observed-only case, plus a
+   `meta.json` with commit / date / gpu / run_url / gate), and the rendered page
+   links to them: the latest run table has a per-recipe **Report** link, each
+   kernel-detail card carries a **run area** link to the case's directory, and
+   each **Run** row in the history table links to its `runs/<id>/` area. A
+   `runs/<id>/index.html` landing page lists that run's guardrail reports and its
+   survey cases. Because `pages.yml` copies `dashboard/*` recursively into
    `_site/sanitizers/`, everything under `runs/` is served at
    `/sanitizers/runs/...` with relative links and no change to `pages.yml`. The
    publish job keeps a rolling window of the newest **30** run directories
@@ -79,6 +80,33 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    pruned. Previously these raw reports lived only in an expiring Actions
    artifact and were never linked; the rolling window makes them durable and
    reachable from the page.
+
+   **Run areas (#384).** A case directory is not just its report -- it carries
+   everything needed to reproduce that case locally, so the copy-paste command
+   the dashboard shows is actionable:
+
+   | File | What it is |
+   | --- | --- |
+   | `index.html` | Landing page: the command, run identity, observed verdict, and every file below as a download. GitHub Pages does not auto-index a directory, so this is what makes the run-area link resolve. |
+   | `sanitizer_report.json` | The full `aorta.sanitizer_report/0.1` document the dashboard renders from. |
+   | `consan/consan.log.gz`, `waitcheck/waitcheck-*.log.gz` | The sanitizer output the verdict was derived from, gzipped. |
+   | `recipe.yaml` | The recipe exactly as it ran, pinned to this run. |
+   | `inputs/` | The recipe's source-level fixture inputs (the `.hip` repro sources, the GEMM shape CSV) -- a few KB in total. |
+   | `REPRODUCE.md` | Commit, command, required env, fixture rebuild steps, and the digests of the artifacts that are not published. |
+   | `env.json` | The same provenance, machine-readable (`aorta.sanitizer_run_area/0.1`). |
+
+   CI-built artifacts are deliberately **not** published: a GEMM `.hsaco` is
+   ~16MB, and shipping one per retained run would bloat the data branch and
+   Pages. `REPRODUCE.md` / `env.json` instead record each one's path and SHA-256
+   (taken from the report, which already carries the waitcheck binary digest, the
+   ConSan repro command and hook digests, and every kernel's `code_object_sha256`)
+   plus the command to rebuild it, so a local rebuild can be verified.
+
+   Logs, the recipe copy and its inputs are kept only for the newest **7** runs
+   (`--keep-logs 7`) -- guardrail and survey areas alike -- while reports stay for
+   the full 30. An older run keeps its report, manifests and landing page, and
+   both are re-rendered when it is pruned so the page lists only the files still
+   present and `env.json` stops naming the inputs it no longer carries.
 
    The dashboard previously lived at `/ci/`, so that path is kept: `/ci/`
    redirects to the root and `/ci/data.json` is published alongside
