@@ -112,7 +112,7 @@ def resolve():
     # /opt/venv/bin/python via PATH, not /usr/bin/python3.
     try:
         spec = importlib.util.find_spec(WHEEL_CORE_PACKAGE)
-    except (ImportError, ValueError):
+    except Exception:  # noqa: BLE001 -- mirrors rocm_paths: resolution never raises
         spec = None
     if spec is not None:
         core = None

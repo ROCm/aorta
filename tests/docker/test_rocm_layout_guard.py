@@ -245,6 +245,30 @@ class TestParity:
     def test_nothing_found(self, agree):
         assert agree().source == "none"
 
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ImportError("half-installed package"),
+            ValueError("__spec__ is not set"),
+            OSError("stale NFS handle on site-packages"),
+            RuntimeError("broken meta path finder"),
+        ],
+    )
+    def test_a_raising_find_spec_degrades_identically(self, agree, sandbox, exc):
+        """Both sides must swallow the same set, or one fails a build the other passes.
+
+        find_spec runs arbitrary path-finder code, so a damaged install can raise
+        more than ImportError/ValueError. Neither implementation may propagate it:
+        the resolver documents that resolution never raises, and the guard has to
+        reach its own diagnostics rather than dying with a traceback.
+        """
+
+        def boom(name):
+            raise exc
+
+        sandbox.setattr("importlib.util.find_spec", boom)
+        assert agree().source == "none"
+
 
 class TestGuardVerdict:
     """The guard's own contract: accept both layouts, still fail closed."""

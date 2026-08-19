@@ -11,8 +11,15 @@ contained no f32 kernels. hipBLASLt Tensile libraries are open-source ROCm conte
 the extracted objects contain no customer data.
 
 With ``--consan-object PATH`` it also writes one representative heavy f32 SS object
-(the NT / ``Ailk_Bjlk`` layout, ~16 MB / ~490 kernels) for driving ConSan over a real
-code object via ``source.consan_command``.
+(the NT / ``Ailk_Bjlk`` layout) for driving ConSan over a real code object via
+``source.consan_command``.
+
+Size is deliberately not quoted here: the extracted gfx950 object measures ~183 MiB
+on the current CI base (ROCm 7.2.4), so the "~16 MB" this docstring used to claim
+had already drifted by more than a factor of ten. It is a per-release property of
+the shipped Tensile libraries -- ROCm 7.14 splits the same layout into CU-count and
+solution-ID variants of ~156-168 MiB -- so treat any figure as version-specific and
+measure rather than trust a comment.
 """
 
 from __future__ import annotations
@@ -44,7 +51,8 @@ _LAYOUT = {
     ("T", "N"): "Alik_Bljk",
     ("T", "T"): "Alik_Bjlk",
 }
-# The heavy f32 GEMM library variant (unbundles to ~16 MB / ~490 kernels on gfx950).
+# The heavy f32 GEMM library variant. Unbundles to a large gfx950 object -- ~183 MiB
+# measured on ROCm 7.2.4; see the module docstring on why no fixed size is asserted.
 _SS_HEAVY = "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_{layout}_Cijk_Dijk_" + GFX + ".co"
 
 

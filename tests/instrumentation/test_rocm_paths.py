@@ -298,12 +298,40 @@ class TestNeverRaises:
         roots = resolve_rocm_roots({"ROCM_PATH": "/mnt/gone"})
         assert roots.source == "none"
 
-    def test_find_spec_failure_is_treated_as_absent(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ImportError("half-installed package"),
+            ValueError("__spec__ is not set"),
+            # find_spec runs arbitrary path-finder code, so a damaged install or
+            # an unreadable site-packages mount can raise these instead. The
+            # module documents that resolution never raises, so a narrow catch
+            # would break that contract on exactly the broken installs the probe
+            # exists to describe.
+            OSError("stale NFS handle on site-packages"),
+            RuntimeError("broken meta path finder"),
+        ],
+    )
+    def test_find_spec_failure_is_treated_as_absent(self, monkeypatch, exc):
         def boom(name):
-            raise ValueError("__spec__ is not set")
+            raise exc
 
         monkeypatch.setattr("importlib.util.find_spec", boom)
         assert rocm_paths._installed_wheel_component("_rocm_sdk_core") is None
+
+    def test_resolution_never_raises_when_find_spec_explodes(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """The end-to-end contract, not just the helper."""
+
+        def boom(name):
+            raise OSError("site-packages unreadable")
+
+        monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", tmp_path / "absent")
+        monkeypatch.setattr("importlib.util.find_spec", boom)
+        roots = resolve_rocm_roots({})
+        assert roots.source == "none"
+        assert roots.core.is_absolute()
 
     def test_injected_environ_is_used_instead_of_os_environ(self, no_rocm, tmp_path: Path):
         """The injected mapping must fully replace the process environment.

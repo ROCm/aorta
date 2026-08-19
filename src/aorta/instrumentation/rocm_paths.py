@@ -182,9 +182,16 @@ def _installed_wheel_component(package: str) -> Path | None:
     """
     try:
         spec = importlib.util.find_spec(package)
-    except (ImportError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 -- resolve_rocm_roots must never raise
         # A half-installed or shadowed package raises rather than returning
         # None; treat it as absent rather than letting it escape into a probe.
+        #
+        # Deliberately broader than ImportError/ValueError: find_spec runs
+        # arbitrary path-finder code, so a broken install or an unreadable
+        # site-packages mount can surface OSError/RuntimeError instead. This
+        # module's contract is that resolution never raises, and a narrow catch
+        # here would have made that contract a lie on exactly the damaged
+        # installs the probe exists to describe.
         log.debug("find_spec(%s) failed: %s", package, exc)
         return None
     if spec is None:

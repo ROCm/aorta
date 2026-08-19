@@ -340,6 +340,14 @@ Cron is 15:00 UTC, clear of gpu-tests (08:00), the nightly eval (after the 11:00
 wheels) and the sanitizer nightly (12:00); the lane is best-effort, so being
 squeezed out is acceptable where starving the gate is not.
 
+Publishing is a **separate `ubuntu-latest` job**, the same split
+`nightly-eval.yml` uses and for the same two reasons: the GPU job installs and
+executes a wheel, so it holds `contents: read` only and checks out with
+`persist-credentials: false`; and because the workflow is
+`workflow_dispatch`-triggerable, the publish job is gated to
+`github.ref == 'refs/heads/main'` so a run from an unreviewed branch cannot write
+to the shared `ci-results` branch (it still produces the artifact).
+
 **Not done yet:** rendering these rows on the dashboard as observed-only is the
 remaining half of #382. Until it lands the data accumulates on the `ci-results`
 branch and each run's numbers are in its artifact and step summary.

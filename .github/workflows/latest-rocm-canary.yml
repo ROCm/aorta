@@ -64,8 +64,11 @@ jobs:
     if: github.event_name != 'schedule' || github.repository == 'ROCm/aorta'
     runs-on: [self-hosted, gpu]
     timeout-minutes: 180
+    # Read-only on purpose. This job pip-installs a wheel and runs workloads, so
+    # it must not hold a token that could push to a data branch; publishing is a
+    # separate job below. Same split nightly-eval.yml uses.
     permissions:
-      contents: write   # publish canary history to the ci-results branch
+      contents: read
       actions: read
 
     steps:
@@ -85,6 +88,11 @@ jobs:
 
       - name: Check out code
         uses: actions/checkout@v5
+        with:
+          # This job installs and executes a wheel from the dev index. Don't
+          # leave a usable credential in .git/config where install-time or
+          # workload code could recover it.
+          persist-credentials: false
 
       - name: Verify Docker access
         run: |
@@ -185,23 +193,29 @@ jobs:
           docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws 2>/dev/null \
             || sudo -n chown -R "$uidgid" "$ws" 2>/dev/null || true
 
+      # Deliberately `python3 -c '...'` and not a heredoc: an indented closer
+      # inside a `run: |` block does not terminate a heredoc, and a column-0
+      # closer breaks the YAML block scalar -- a failure that only shows up in
+      # CI. The payload is single-quoted so the backticks below stay literal
+      # instead of becoming command substitution, which also means it must
+      # contain no single quotes of its own.
       - name: Summarise the observed stack
         if: always()
         run: |
           set -uo pipefail
           [ -f gpu-canary-results.json ] || { echo "no results JSON produced"; exit 0; }
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          python3 -c '
           import json
-          # nightly_eval.py puts build_metadata() under "build" (same key
+          # nightly_eval.py puts build_metadata() under "build" (the same key
           # gen_dashboard.py reads), not "metadata".
           doc = json.load(open("gpu-canary-results.json"))
           build = doc.get("build") or {}
           for key in ("lane", "base_image", "rocm", "torch", "hip", "amd_aorta_version"):
-              print(f"- {key}: `{build.get(key)}`")
+              print("- " + key + ": `" + str(build.get(key)) + "`")
           summary = doc.get("summary") or {}
           if summary:
-              print(f"- summary: `{json.dumps(summary, sort_keys=True)}`")
-          PY
+              print("- summary: `" + json.dumps(summary, sort_keys=True) + "`")
+          ' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload canary results
         if: always()
@@ -214,15 +228,43 @@ jobs:
             .nightly-eval/**/recipe.resolved.yaml
           if-no-files-found: warn
 
+      - name: Tear down canary container
+        if: always()
+        working-directory: docker
+        run: |
+          envfile="${CANARY_ENV_FILE:-${RUNNER_TEMP}/canary.env}"
+          [ -f "$envfile" ] || { echo "no canary env file; nothing to tear down"; exit 0; }
+          bash ../scripts/ci/docker_compose.sh --env-file "$envfile" \
+            -f docker-compose.build.yaml -f docker-compose.canary.yaml down -v
+
+  # Separate job so the write-capable token never sits in the environment that
+  # installs and runs a wheel, mirroring nightly-eval.yml's eval/publish split.
+  publish:
+    name: publish canary history
+    needs: canary
+    # Gated to the default branch: this workflow is workflow_dispatch-triggerable,
+    # so without this a run from an unreviewed branch could write to the shared
+    # ci-results data branch. Branch runs still produce the artifact.
+    if: always() && needs.canary.result != 'skipped' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # publish canary history to the ci-results branch
+
+    steps:
+      - name: Download canary results
+        uses: actions/download-artifact@v6
+        with:
+          name: canary-results-${{ github.run_id }}
+          path: incoming
+
       # Published under results/canary/ so the gated dashboard cannot see it:
       # gen_dashboard.py globs results/*.json non-recursively.
-      - name: Publish canary history (ci-results)
-        if: always()
+      - name: Update history branch (ci-results)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          [ -f gpu-canary-results.json ] || { echo "no results JSON; skipping publish"; exit 0; }
+          [ -f incoming/gpu-canary-results.json ] || { echo "no results JSON; skipping publish"; exit 0; }
           date="$(date -u +%Y-%m-%d)"
           repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           tmp="$(mktemp -d)"
@@ -244,7 +286,7 @@ jobs:
             exit 1
           fi
           mkdir -p "$tmp/results/canary"
-          cp gpu-canary-results.json "$tmp/results/canary/${date}.json"
+          cp incoming/gpu-canary-results.json "$tmp/results/canary/${date}.json"
           # Own retention, independent of the gated lane's 180.
           ls -1 "$tmp"/results/canary/*.json 2>/dev/null | sort | head -n -180 | xargs -r rm -f
           ( cd "$tmp"
@@ -255,12 +297,3 @@ jobs:
             else
               echo "no changes to commit"
             fi )
-
-      - name: Tear down canary container
-        if: always()
-        working-directory: docker
-        run: |
-          envfile="${CANARY_ENV_FILE:-${RUNNER_TEMP}/canary.env}"
-          [ -f "$envfile" ] || { echo "no canary env file; nothing to tear down"; exit 0; }
-          bash ../scripts/ci/docker_compose.sh --env-file "$envfile" \
-            -f docker-compose.build.yaml -f docker-compose.canary.yaml down -v
