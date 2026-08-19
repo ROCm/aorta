@@ -465,8 +465,14 @@ jobs:
           # The digest-pinned ROCm base image the sanitizers actually ran in.
           AORTA_CI_IMAGE="$(sed -n 's/^FROM  *//p' docker/Dockerfile.ci-gpu | tail -n1)"
           export AORTA_CI_IMAGE
+          # --current-run names the run THIS job staged. Without it the generator
+          # assumes the newest retained run, which is wrong when an older workflow
+          # is re-run after a newer same-day one: the re-run reuses its lower
+          # GITHUB_RUN_ID, so its dir sorts behind and the newer area would be
+          # stamped with this job's container/bundle/recipe (#384).
           python scripts/sanitizers/gen_sanitizer_dashboard.py \
             --history-root "$runs_dir" --keep "$keep" --keep-logs 7 \
+            --current-run "$run_dir_id" \
             --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
             --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
             --status status.json \

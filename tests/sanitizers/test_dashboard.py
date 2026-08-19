@@ -2937,6 +2937,167 @@ def test_survey_area_link_rejects_an_unsafe_caller_supplied_name():
     assert "&mdash;" in forced
 
 
+def test_current_run_is_the_staged_one_not_merely_the_newest(tmp_path, monkeypatch):
+    """A re-run of an older workflow must not stamp the newer run's area.
+
+    The dir id is ``<date>-<GITHUB_RUN_ID>`` and a re-run reuses its original,
+    lower run id -- so it sorts *behind* a newer same-day run. Keying "the run this
+    job produced" on list position then wrote this job's container image, rocjitsu
+    bundle and recipe copy into the newer run's area, and published this job's
+    survey under a run that did not produce it.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    older, newer = "2026-08-05-10", "2026-08-05-99"
+    for run_id in (older, newer):
+        _write_history_run(dashboard / "runs", run_id)
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    monkeypatch.setenv("AORTA_CI_IMAGE", "rocm/pytorch@sha256:rerun")
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+        "--informational-results-dir", str(info),
+        # This job re-ran the OLDER workflow; the newer run is already published.
+        "--current-run", older,
+    ])
+    assert gen.main() == 0
+
+    def _env(run_id, case):
+        path = dashboard / "runs" / run_id / case / "env.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    # The re-run's provenance lands on its own area...
+    assert _env(older, "waitcheck").get("container_image") == "rocm/pytorch@sha256:rerun"
+    assert (dashboard / "runs" / older / "waitcheck" / "recipe.yaml").is_file()
+    # ...and never on the newer run that a different job produced.
+    assert "container_image" not in _env(newer, "waitcheck")
+    assert not (dashboard / "runs" / newer / "waitcheck" / "recipe.yaml").exists()
+    # The survey is co-published under the run that swept it.
+    assert (dashboard / "runs" / older / "survey" / "consan-gemm").is_dir()
+    assert not (dashboard / "runs" / newer / "survey").exists()
+    # data.json attaches the survey to that run too.
+    data = json.loads((dashboard / "data.json").read_text(encoding="utf-8"))
+    by_run = {run["meta"]["run"]: run for run in data}
+    assert by_run[older].get("survey")
+    assert not by_run[newer].get("survey")
+
+
+def test_a_survey_spec_name_is_not_treated_as_staged_by_the_copublish_loop(
+    tmp_path, monkeypatch
+):
+    # staged_now gated the run loop's refresh, but the co-publish loop only rewrites
+    # --informational-results-dir entries. Including a spec name skipped an area
+    # that nothing later rewrote, so it kept raw logs even under --keep-logs 0.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    spec_area = dashboard / "runs" / "2026-08-05-33" / "survey" / "spec-case"
+    (spec_area / "consan").mkdir(parents=True)
+    (spec_area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (spec_area / "consan" / "consan.log").write_text("raw log\n")
+    spec = tmp_path / "survey.json"
+    spec.write_text(json.dumps({"cases": [{
+        "name": "spec-case", "label": "spec case", "staged": True,
+        "report_rel": "runs/2026-08-05-33/survey/spec-case/sanitizer_report.json",
+        "report": _consan_racy_report(),
+    }]}))
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+        "--survey", str(spec),
+        "--informational-results-dir", str(info),
+        "--keep-logs", "0",
+    ])
+    assert gen.main() == 0
+
+    # The spec area is not staged by this job, so the run loop prunes it.
+    assert not list(spec_area.rglob("*.log")), "spec area escaped --keep-logs 0"
+    assert not list(spec_area.rglob("*.log.gz"))
+
+
+def test_staged_requires_the_report_to_sit_in_the_named_case_directory():
+    # The run page builds survey/<name>/ while the card footer takes report_rel's
+    # directory, so a spec naming one and pointing at the other advertised two
+    # different run areas -- one of them wrong.
+    mismatched = gen.survey_cases_from_spec({"cases": [{
+        "name": "foo", "label": "mismatched", "staged": True,
+        "report_rel": "runs/x/survey/bar/sanitizer_report.json",
+        "report": _consan_racy_report(),
+    }]})
+    assert mismatched[0]["staged"] is False
+    html = gen.build_html([_healthy_guardrail_run()], survey=mismatched)
+    assert "run area</a>" not in html
+    assert "run area" not in gen._run_index_survey_html(mismatched)
+
+    agreeing = gen.survey_cases_from_spec({"cases": [{
+        "name": "foo", "label": "agreeing", "staged": True,
+        "report_rel": "runs/x/survey/foo/sanitizer_report.json",
+        "report": _consan_racy_report(),
+    }]})
+    assert agreeing[0]["staged"] is True
+    assert 'href="survey/foo/">run area</a>' in gen._run_index_survey_html(agreeing)
+    assert gen._report_rel_case_segment("runs/x/survey/foo/sanitizer_report.json") == "foo"
+    assert gen._report_rel_case_segment("javascript:alert(1)") is None
+    assert gen._report_rel_case_segment(None) is None
+
+
+def test_pruning_is_irreversible_when_keep_logs_is_raised_later(tmp_path):
+    # The logs were deleted from the published history and cannot be recovered from
+    # it, so a later, larger --keep-logs must not claim they are available again.
+    area = tmp_path / "dashboard" / "runs" / "r" / "survey" / "c"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text("{}")
+    (area / "env.json").write_text(json.dumps({
+        "case": "c", "command": "aorta sweep run", "target": "gfx950",
+        "observed": {}, "logs_published": False, "inputs": [],
+        "artifacts_not_published": [],
+    }))
+
+    assert gen.refresh_published_case_area(
+        area, tmp_path / "dashboard", logs=True
+    ) is True
+
+    env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+    assert env["logs_published"] is False
+    page = (area / "index.html").read_text(encoding="utf-8")
+    assert "pruned" in page
+    assert "Logs are gzipped" not in page
+
+
+def test_reproduce_md_runs_top_to_bottom(tmp_path, monkeypatch):
+    # The fixtures the sweep needs are gitignored, so a document that invokes the
+    # sweep before the rebuild steps fails on a fresh clone before the reader ever
+    # reaches them.
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    md = (
+        out / "runs/2026-08-05-33/survey/consan-gemm/REPRODUCE.md"
+    ).read_text(encoding="utf-8")
+
+    checkout = md.index("git clone https://github.com/ROCm/aorta")
+    rebuild = md.index("prepare_gemm_isa.py")
+    env_note = md.index("ROCJITSU_PREBUILT")
+    sweep = md.index("aorta sweep run --recipe")
+    assert checkout < rebuild < sweep, "sweep must come after the rebuild steps"
+    assert env_note < sweep, "required env must be set before the sweep"
+
+
 def test_refresh_published_case_area_reports_an_unusable_manifest(tmp_path):
     # env.json is the only input for re-rendering an older area, so a missing or
     # malformed one must be reported (the caller then writes a fresh area) rather

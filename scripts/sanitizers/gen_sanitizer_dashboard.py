@@ -979,10 +979,18 @@ def survey_cases_from_spec(
                 # publish complete areas can say so with `"staged": true` -- but
                 # only a name that is one plain path segment can be claimed, since
                 # the area link is built from it and `..` would traverse.
+                #
+                # The name must also *agree* with report_rel. The two renderers use
+                # different sources -- the run page builds survey/<name>/ while the
+                # card footer takes the directory of report_rel -- so a spec naming
+                # "foo" with a report under survey/bar/ advertised two different run
+                # areas, one of which is wrong. Validating them independently was
+                # not enough; they have to describe the same directory.
                 "staged": (
                     case.get("staged") is True
                     and summary["present"]
                     and _safe_case_segment(name) is not None
+                    and _report_rel_case_segment(case.get("report_rel")) == name
                 ),
                 "cls": "survey",
                 "summary": summary,
@@ -1188,6 +1196,21 @@ def _safe_case_segment(name: Any) -> str | None:
     if any(char.isspace() or ord(char) < 0x20 for char in name):
         return None
     return name
+
+
+def _report_rel_case_segment(report_rel: Any) -> str | None:
+    """The case-directory name a ``report_rel`` points at, validated (pure).
+
+    Used to cross-check the two sources the renderers use for one area: the run
+    page builds ``survey/<name>/`` from the case name while the card footer takes
+    the directory of ``report_rel``. Validating each on its own still allowed a
+    spec to name ``foo`` while its report sat under ``survey/bar/``, advertising two
+    different directories for one case.
+    """
+    area = _case_dir_rel(_safe_report_rel(report_rel))
+    if not area:
+        return None
+    return _safe_case_segment(area.rstrip("/").rsplit("/", 1)[-1])
 
 
 def _case_dir_rel(report_rel: str | None) -> str | None:
@@ -1866,26 +1889,26 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
     ]
     if observed.get("reason"):
         lines.append(f"- Reason: `{observed['reason']}`")
+    # Ordered so the document runs top to bottom. The sweep command comes *last*:
+    # the fixtures it needs are gitignored, so on a fresh clone it fails before the
+    # reader would ever reach a rebuild section printed after it.
     lines += [
         "",
         "## Run it yourself",
+        "",
+        "First, the checkout this run used:",
         "",
         "```",
         "git clone https://github.com/ROCm/aorta && cd aorta",
         f"git checkout {env.get('commit', '')}",
         "pip install -e .",
-        f"{env.get('command', '')}",
         "```",
-        "",
-        required_env_note(env.get("required_env") or []),
         "",
     ]
     hints = _rebuild_hints(plan_from_env(env, built_refs))
     if hints:
         lines += [
-            "## Rebuild the fixtures",
-            "",
-            "This case needs CI-built fixtures that are not published here (see "
+            "Then rebuild the CI-built fixtures, which are not published here (see "
             "'Artifacts not published' below). Run these from the repo root, the "
             "directory the clone above leaves you in:",
             "",
@@ -1894,6 +1917,17 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
             _REBUILD_NOTE,
             "",
         ]
+    env_note = required_env_note(env.get("required_env") or [])
+    if env_note:
+        lines += [env_note, ""]
+    lines += [
+        "Finally, the sweep itself:",
+        "",
+        "```",
+        f"{env.get('command', '')}",
+        "```",
+        "",
+    ]
     if env.get("artifacts_not_published"):
         lines += [
             "## Artifacts not published",
@@ -2180,7 +2214,12 @@ def refresh_published_case_area(case_dir: Path, out_dir: Path, *, logs: bool) ->
         # The manifest described an area that still had its bulk. Restate it for
         # what is left, so it does not name inputs that are no longer there.
         env["inputs"] = []
-    env["logs_published"] = logs
+    # Pruning is one-way: the files were deleted from the published history and
+    # cannot be recovered from it, so raising --keep-logs later must not flip this
+    # back to true and have the page and REPRODUCE.md offer logs that are gone.
+    # Only re-staging from the source sweep can restore them, which goes through
+    # write_case_run_area rather than here.
+    env["logs_published"] = bool(env.get("logs_published", True)) and logs
     built_refs = [
         str(item["path"])
         for item in env.get("artifacts_not_published") or []
@@ -3621,6 +3660,14 @@ def main() -> int:
         "is pruned so the data branch stays bounded (#384).",
     )
     ap.add_argument(
+        "--current-run",
+        default="",
+        help="the <YYYY-MM-DD>-<run_id> this job just staged. Only that run's area "
+        "is written from the live checkout and environment; without it the newest "
+        "retained run is assumed, which is wrong when an older workflow is re-run "
+        "after a newer same-day one (its lower run id sorts behind).",
+    )
+    ap.add_argument(
         "--repo-root",
         type=Path,
         default=Path(__file__).resolve().parents[2],
@@ -3680,6 +3727,27 @@ def main() -> int:
     else:
         runs = runs_from_history_root(args.history_root, baselines, keep=args.keep)
 
+    # Which retained run this job actually produced. NOT simply the newest one:
+    # re-running an older workflow reuses its lower GITHUB_RUN_ID, so its
+    # <date>-<run_id> sorts *behind* a newer same-day run. Taking position 0 then
+    # stamps the newer area with this job's container/bundle/recipe and publishes
+    # this job's survey under the wrong run. Fall back to the newest run only when
+    # the caller did not say (the results-dir / runs-root modes, and older callers).
+    current_index: int | None = None
+    if runs:
+        if args.current_run:
+            current_index = next(
+                (
+                    index
+                    for index, run in enumerate(runs)
+                    if str(run["meta"].get("run", "")) == args.current_run
+                ),
+                None,  # staged run already pruned out of the window: nothing is current
+            )
+        else:
+            current_index = 0
+    current_rel = runs[current_index].get("rel") if current_index is not None else None
+
     # Observed-only survey cases for Tab 2. A malformed/absent spec degrades to an
     # empty survey (Tab 2 renders its empty-state note) rather than crashing render.
     survey: list[dict[str, Any]] = []
@@ -3692,15 +3760,17 @@ def main() -> int:
     # after any explicit --survey spec cases so an explicit spec (if wired) leads, and
     # their report_rel is threaded to the latest run's published area so per-case /
     # per-kernel raw-report links resolve once the reports are co-published below.
+    informational_survey: list[dict[str, Any]] = []
     if args.informational_results_dir is not None:
-        survey += survey_cases_from_informational_dir(
+        informational_survey = survey_cases_from_informational_dir(
             args.informational_results_dir,
-            rel=runs[0].get("rel") if runs else None,
+            rel=current_rel,
         )
-    # Mirror the two-class split into data.json: attach the survey list to the
-    # latest run record (additive; existing per-run keys are untouched).
-    if runs:
-        runs[0]["survey"] = survey
+        survey += informational_survey
+    # Mirror the two-class split into data.json: attach the survey list to the run
+    # this job produced (additive; existing per-run keys are untouched).
+    if current_index is not None:
+        runs[current_index]["survey"] = survey
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(
@@ -3726,9 +3796,12 @@ def main() -> int:
         # own results. Every *other* published area -- an older run's, or one this
         # run inherited from the history being re-rendered -- is refreshed in the
         # run loop instead, so no published area is left without a landing page.
-        staged_now = (
-            {str(entry.get("name")) for entry in survey} if info_dir is not None else set()
-        )
+        #
+        # Only the informational entries, never a --survey spec's: the co-publish
+        # loop stages only those. Including a spec name here skipped an area in the
+        # run loop that nothing later rewrote, so it kept its raw logs even under
+        # --keep-logs 0.
+        staged_now = {str(entry.get("name")) for entry in informational_survey}
         runs_out = args.out_dir / "runs"
         runs_out_res = runs_out.resolve()
         history_res = args.history_root.resolve()
@@ -3775,7 +3848,7 @@ def main() -> int:
             # written from the live checkout and environment (see
             # write_case_run_area); older ones are re-rendered from what they
             # captured themselves.
-            current = position == 0
+            current = position == current_index
             for case, _key, label, _backend in CASES:
                 row = run["rows"][case]
                 case_out = run_out / case
@@ -3867,17 +3940,19 @@ def main() -> int:
                 ),
                 encoding="utf-8",
             )
-        # Co-publish each caller-supplied ConSan report (#347) under the latest run's
-        # survey area so the report_rel links threaded above (survey/<name>/...)
-        # resolve. Done after the stale-clear (shutil.rmtree) and the per-run loop
-        # that (re)creates out_dir/<rel>, using the same rel + case name as
-        # survey_cases_from_informational_dir so the copied path matches the link.
-        latest_rel = runs[0].get("rel") if runs else None
-        if latest_rel and info_dir is not None and info_dir.is_dir():
-            # The latest run's own retention decision, so --keep-logs applies to
+        # Co-publish each caller-supplied ConSan report (#347) under the survey area
+        # of the run this job produced, so the report_rel links threaded above
+        # (survey/<name>/...) resolve. Done after the stale-clear (shutil.rmtree)
+        # and the per-run loop that (re)creates out_dir/<rel>, using the same rel +
+        # case name as survey_cases_from_informational_dir so the copied path
+        # matches the link. current_rel, not runs[0]: on a re-run of an older
+        # workflow these differ, and staging under the newer run would attribute
+        # this job's sweep to a run that did not produce it.
+        if current_rel and info_dir is not None and info_dir.is_dir():
+            # That run's own retention decision, so --keep-logs applies to
             # guardrail and survey areas alike as documented (with --keep-logs 0
             # the survey area is pruned too, not left as the one unbounded thing).
-            latest_keeps_logs = 0 < max(args.keep_logs, 0)
+            latest_keeps_logs = (current_index or 0) < max(args.keep_logs, 0)
             survey_by_name = {str(entry.get("name")): entry for entry in survey}
             for case_dir in sorted(p for p in info_dir.iterdir() if p.is_dir()):
                 src_report = case_dir / "sanitizer_report.json"
@@ -3892,7 +3967,7 @@ def main() -> int:
                 entry = survey_by_name.get(case_dir.name)
                 if entry is None:
                     continue
-                dest = args.out_dir / latest_rel / "survey" / case_dir.name
+                dest = args.out_dir / current_rel / "survey" / case_dir.name
                 # Replace the destination rather than merging into it: a file that
                 # disappeared from this sweep (an old log especially) would
                 # otherwise survive and be listed on the landing page as evidence
@@ -3919,7 +3994,7 @@ def main() -> int:
                     cls="survey",
                     recipe_stem=_survey_recipe_for(case_dir.name),
                     command=str(entry.get("command") or ""),
-                    meta=runs[0]["meta"],
+                    meta=runs[current_index or 0]["meta"],
                     summary=entry.get("summary") or {},
                     report=_load(dest / "sanitizer_report.json"),
                     repo_root=args.repo_root,
