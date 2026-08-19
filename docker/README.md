@@ -57,12 +57,21 @@ customer's stack, a specific `amdgpu` build, a bisect point). Bumping them would
 turn a reproducer into noise. New general-purpose tooling belongs in
 `Dockerfile.rocm-latest`.
 
-7.2.4 is the newest ROCm **production** release we can currently use. ROCm
+7.2.4 is the newest ROCm **production** release these images track. ROCm
 7.9–7.13 are the technology *preview* stream (a higher number there is not an
-upgrade), and while 7.14+ is production, its `rocm/pytorch` images are
-wheel-based (TheRock) with no `/opt/rocm` — which everything here reads ROCm
-from. Issue #381 makes that discovery layout-agnostic; the base flips to 7.14
-once it lands.
+upgrade). 7.14+ is production and ships wheel-based (TheRock) `rocm/pytorch`
+images with no `/opt/rocm`; issue #381 made ROCm discovery layout-agnostic, so
+that layout is readable now, and moving the base onto it is issue #383.
+
+`Dockerfile.ci-gpu` and `Dockerfile.rocm-latest` run
+[`rocm_layout_guard.py`](rocm_layout_guard.py) at build time. It accepts either
+layout and fails the build only when neither yields a readable ROCm version and
+lib directory, so a digest bump onto an unreadable base is loud instead of
+silently reporting `null`. Run it inside a container to debug a bad image:
+
+```bash
+docker run --rm --entrypoint python <image> /usr/local/share/aorta/rocm_layout_guard.py
+```
 
 ## CI configuration (`.env.ci`)
 

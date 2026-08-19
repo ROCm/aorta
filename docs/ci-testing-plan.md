@@ -256,18 +256,32 @@ a bump proposal — from a human or from automation — must clear both:
 2. **Install layout.** 7.14 onward is production, but its `rocm/pytorch` images
    are wheel-based (see below), which this repo cannot read yet.
 
-#### ROCm install layout: classic `/opt/rocm` (decided)
+#### ROCm install layout: both are supported (issue #381)
 
 TheRock publishes ROCm both as a system install rooted at `/opt/rocm` (DEB/RPM,
 tarballs) and as a Python wheel rooted under `site-packages` with no `/opt/rocm`.
-**CI images must currently use the classic layout.**
+**Both layouts are readable.** Discovery goes through
+`aorta.instrumentation.rocm_paths.resolve_rocm_roots`, which resolves three roots
+(core / libraries / include) so the wheel layout's split across
+`_rocm_sdk_core`, `_rocm_sdk_libraries` and `_rocm_sdk_devel` can be expressed.
+On a classic install all three coincide at `/opt/rocm`, so nothing changed there.
 
-The reason is capability, not preference: everything we use to read a ROCm install
-is bound to `/opt/rocm` — the env probe's ROCm version plus its hipBLASLt-commit
-and rocBLAS capture, `scripts/audit_env_knobs.py`, and the sanitizer GEMM
-fixtures. On a wheel image those degrade to `null`/empty rather than failing, so
-the loss would be silent. `Dockerfile.ci-gpu` therefore asserts the layout at
-build time and fails closed.
+What still has to fail closed is an install we cannot *read*. Everything we use
+to read ROCm degrades to `null`/empty rather than erroring — the env probe's
+version plus its hipBLASLt-commit and rocBLAS capture,
+`scripts/audit_env_knobs.py`, and the sanitizer GEMM fixtures — so a bad base
+image would gut the evidence while CI stayed green. `docker/rocm_layout_guard.py`
+runs at build time in `Dockerfile.ci-gpu` and `Dockerfile.rocm-latest`, accepts
+either layout, and fails the build when neither yields a readable version marker
+and lib directory. It is pinned to the resolver by
+`tests/docker/test_rocm_layout_guard.py`, which runs both implementations over
+the same synthetic trees.
+
+Neither image sets `ENV ROCM_HOME=/opt/rocm` any more. An explicit override
+ranks above autodetection, so declaring it unconditionally lets a stale
+`/opt/rocm` stub win over a correct wheel install; the classic base already
+exports `/opt/rocm/bin` on `PATH` and `/opt/rocm/lib` on `LD_LIBRARY_PATH`
+itself, so removing it changes nothing there.
 
 Which images are which, and how to tell before pulling:
 
@@ -289,13 +303,18 @@ docker buildx imagetools inspect rocm/pytorch:<tag> \
 docker buildx imagetools inspect rocm/pytorch:<tag> --format '{{json .Image.Config.Labels}}'
 ```
 
-This is not a permanent stance. A wheel install is *richer* in provenance —
-`share/therock/therock_manifest.json` carries the full 40-char `rocm-libraries`
-commit (the classic header only exposes its first 8 as `..._VERSION_TWEAK`), plus
-the build's `github_run_id` and any applied patches. Issue #381 makes discovery
-layout-agnostic and manifest-aware, after which the base flips to 7.14 and the
-guard above verifies the flip. Issue #382 covers the wheel lane's other payoff:
-cheap ROCm version bisection in a venv, plus a non-gating latest-ROCm canary.
+The wheel layout is *richer* in provenance, which is why reading it was worth
+doing rather than merely tolerating: `share/therock/therock_manifest.json`
+carries the full 40-char `rocm-libraries` commit — the classic header only
+exposes a truncated `..._VERSION_TWEAK` (measured 10 chars on 7.2.4) — plus the
+build's `the_rock_commit`, `github_run_id` and any patches applied on top of
+each upstream pin. Schema 1.16 records all of it under `therock`, and the GEMM
+libraries' `upstream_commit`.
+
+The base image itself is still the classic 7.2.4 line; flipping it to 7.14 is
+issue #383 and a deliberate separate step, since it moves ROCm, Python and
+PyTorch at once. Issue #382 covers the wheel lane's other payoff: cheap ROCm
+version bisection in a venv, plus a non-gating latest-ROCm canary.
 
 ### Triggers and frequency
 

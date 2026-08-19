@@ -14,31 +14,25 @@
 # the newest Ubuntu, Python and PyTorch on the 7.2.4 line, and py3.12 is also
 # where our own pyproject classifiers stop.
 #
-# This is the newest ROCm PRODUCTION release we can currently use:
+# This is the newest ROCm PRODUCTION release this image currently tracks:
 #   * 7.9-7.13 are the technology PREVIEW stream, not newer production;
-#   * 7.14+ is production but ships wheel-based (TheRock) images with no
-#     /opt/rocm, which this image's ROCM_HOME below assumes -- see issue #381.
+#   * 7.14+ is production and ships wheel-based (TheRock) images with no
+#     /opt/rocm. Issue #381 made discovery layout-agnostic, so that layout is
+#     readable now; moving this image onto it is issue #383.
 #
 # Tag-pinned rather than `:latest`: `rocm/pytorch:latest` moves whenever a new
 # ROCm-tested PyTorch is published, which would silently change the stack under
-# a running experiment. It is also wheel-based today, so it would not work here.
-# Bump this tag deliberately. (GPU CI additionally pins a digest -- see
-# Dockerfile.ci-gpu -- because CI must be byte-reproducible.)
+# a running experiment. Bump this tag deliberately. (GPU CI additionally pins a
+# digest -- see Dockerfile.ci-gpu -- because CI must be byte-reproducible.)
 FROM rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
 
 USER root
 
-# Require the classic system ROCm layout (same guard and rationale as
-# Dockerfile.ci-gpu). This image sets ROCM_HOME=/opt/rocm below, which would be
-# a lie on a wheel-based (TheRock) base where ROCm lives under ROCM_PATH in
-# site-packages -- and the aorta env probe would then report a null ROCm version
-# instead of failing. Fail at build time rather than shipping a container whose
-# tooling silently misreports. Drop only once issue #381 lands.
-RUN if [ ! -f /opt/rocm/.info/version ] && [ ! -f /opt/rocm/.info/version-dev ]; then \
-        echo "ERROR: no /opt/rocm/.info/version{,-dev}; base image is not a classic ROCm install." >&2; \
-        echo "       ROCM_PATH=${ROCM_PATH:-<unset>} -- a wheel-based (TheRock) image needs issue #381 first." >&2; \
-        exit 1; \
-    fi
+# Require a readable ROCm install in either layout (same guard as
+# Dockerfile.ci-gpu). Fail at build time rather than shipping a container whose
+# tooling silently misreports a null ROCm version.
+COPY rocm_layout_guard.py /usr/local/share/aorta/rocm_layout_guard.py
+RUN python /usr/local/share/aorta/rocm_layout_guard.py
 
 # Analysis tooling used by the report/trace workflows. Unpinned and non-fatal
 # (`|| true`) to match the other dev images: a transient GitHub outage should
@@ -48,9 +42,12 @@ RUN pip install git+https://github.com/AMD-AGI/TraceLens.git || true
 RUN pip install git+https://github.com/AMD-AGI/Magpie.git || true
 RUN pip install openpyxl seaborn
 
-ENV ROCM_HOME=/opt/rocm
-ENV PATH=$ROCM_HOME/bin:$PATH
-ENV LD_LIBRARY_PATH=$ROCM_HOME/lib:$LD_LIBRARY_PATH
+# Deliberately NO `ENV ROCM_HOME=/opt/rocm` here -- same reason as
+# Dockerfile.ci-gpu (issue #381): it is an explicit override that ranks above
+# autodetection, so on a wheel base that also has any /opt/rocm stub it wins
+# over the real install. The classic base already exports /opt/rocm/bin on PATH
+# and /opt/rocm/lib on LD_LIBRARY_PATH itself, so dropping it changes nothing
+# here.
 
 WORKDIR /workspace/aorta
 
