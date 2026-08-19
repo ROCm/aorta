@@ -103,6 +103,13 @@ the run failed some other way. Note that on `1` the process itself still exits
 fails afterwards — that is the expected post-fix state described above, not a
 second defect.
 
+The hooked run is bounded by `--timeout` (default 2400 s, against a measured
+~1290 s end-to-end); hitting the ceiling reports `3`, not a hang, which matters
+because a pre-#9964 hook never terminates MOI inventory for this object. If the
+local hipBLASLt does not carry the Tensile bundle — it has shipped both flat
+under `library/` and under `library/gfx950/`, and slim installs may omit it —
+pass `--object` with an already-unbundled gfx950 code object.
+
 ## Environment where this was observed
 
 - gfx950 (cdna4), ROCm 7.0.2.2, 8 GPUs

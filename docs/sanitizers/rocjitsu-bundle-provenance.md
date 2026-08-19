@@ -41,18 +41,35 @@ after which `--run latest` resolves to something else entirely.
 
 ## Recommendations, cheapest first
 
-**1. Stop the local cache from lingering unnoticed.** `.sanitizer-nightly/` is
-now in `.gitignore`, so it no longer shows up as untracked noise that people
-learn to skip past. For local runs, prefer a throwaway `--dest` per session over
-a long-lived directory, and re-download rather than reuse.
+**1. Stop the local cache from lingering unnoticed.** Adding `.sanitizer-nightly/`
+to `.gitignore` is commit hygiene only — it keeps a ~53 MB bundle plus its run
+output from being committed by accident, and drops it out of `git status`. It
+does **not** mitigate
+staleness, and it slightly works against you: an ignored directory survives an
+ordinary `git clean -fd` (you need `-x`), so the cache can now outlive a cleanup
+that people assume is thorough.
 
-**2. Record bundle provenance in the report.** The downloader already writes a
-`MANIFEST.json` next to the hook containing `commit`, `run_id` and `run_url`.
+The actual mitigation has to be explicit. For local runs, either re-download
+before use the way CI does (`rm -rf "${dest}"` then `--force`, as in
+`sanitizers-nightly.yml`), or prefer a throwaway `--dest` per session over a
+long-lived directory. Reusing a directory is only safe with the freshness check
+in recommendation 5.
+
+**2. Record bundle provenance in the report.** The bundles published by the
+rocjitsu build workflow ship a `MANIFEST.json` alongside `lib/` and `bin/`, and it
+already carries `commit`, `run_id` and `run_url`. Note this comes from the
+artifact, not from us: `download_sanitizer_artifacts.py` only extracts the zip and
+verifies `sha256sums.txt`, so a bundle built without a manifest — or a hook
+supplied via `ROCJITSU_BUILD` from a local source build — has no provenance to
+read.
+
 Reading it in `run_consan()` and storing those three fields in the `backend` dict
 alongside the existing `hook_sha256` is a small, self-contained change, and it is
 what turns `hook_sha256: ca39f6c6…` from an opaque digest into something a reader
-can act on. Without it, answering "which rocjitsu produced this row?" means
-keeping an out-of-band digest-to-commit table.
+can act on. Treat the manifest as optional input: record the fields when present
+and leave them absent otherwise, rather than failing the run. Without this,
+answering "which rocjitsu produced this row?" means keeping an out-of-band
+digest-to-commit table.
 
 **3. Show it on the dashboard.** Once the report carries the commit, render a
 short `rocjitsu db0c47df` caption per run. That makes each row self-describing
