@@ -4144,6 +4144,7 @@ class TestEnvVars:
             # Forward-compat (absent from the 1.4.0 .so)
             "TENSILE_STREAMK5_FORCE_MODE",
             "TENSILE_STREAMK_TILES",
+            "TENSILE_ADAPTIVE_GEMM_NTAB_ALGO",
             "TENSILE_STREAMK_SPLIT",
             # In-library numeric checking
             "HIPBLASLT_CHECK_NUMERICS",
@@ -4277,6 +4278,7 @@ class TestEnvKnobRegistry:
             "TENSILE_STREAMK5_FORCE_MODE",
             "TENSILE_STREAMK_TILES",
             "TENSILE_STREAMK_SPLIT",
+            "TENSILE_ADAPTIVE_GEMM_NTAB_ALGO",
             "HIPBLASLT_BENCH_PERF_ALL",
         ):
             knob = env_mod.ENV_KNOBS_BY_NAME[name]
@@ -4853,6 +4855,12 @@ class TestCKPytorchBundledProbe:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
+        # Faking torch.__file__ only removes the PRIMARY lookup path. The
+        # /proc/self/maps fallback would still find a real libtorch_hip.so
+        # mapped into this process, which is exactly what happens when the
+        # suite runs inside a ROCm-torch CI image -- the probe then reports
+        # present=True and the "lib is gone" premise never gets tested.
+        monkeypatch.setattr(env_mod, "_loaded_lib_path_from_maps", lambda sonames: None)
         reasons: list[str] = []
         block = env_mod._probe_pytorch_bundled_ck(reasons)
         assert block == {"present": False, "symbol_count": None}

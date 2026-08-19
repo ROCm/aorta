@@ -12,17 +12,25 @@ than trusting the copy, these tests run **both** implementations over the same
 synthetic trees and require identical answers. Add a resolution rule to one
 side without the other and this file goes red.
 
-The trees are built rather than mocked, and the importable-wheel case really
-does go on ``sys.path``, so both sides exercise their own ``find_spec`` code
-path rather than a shared stub.
+The trees are built rather than mocked. Wheel discovery is driven by stubbing
+``importlib.util.find_spec``, which BOTH implementations call, so each still
+runs its own spec-interpretation logic (``spec.origin`` for a regular package,
+``submodule_search_locations`` for a namespace one) -- that is the part that
+can drift. Stubbing rather than using ``sys.path`` is deliberate: these tests
+run inside the CI image, which on the wheel layout has a real
+``_rocm_sdk_core`` installed, and a namespace portion placed earlier on the
+path loses to a regular package found later, so a path-based test would
+silently resolve to the image's own ROCm instead of the fixture. That
+discovery works against a genuinely installed wheel is verified directly
+against real images, not here.
 """
 
 from __future__ import annotations
 
-import importlib
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,10 +85,17 @@ def build_wheel(
 
 @pytest.fixture
 def sandbox(tmp_path: Path, monkeypatch):
-    """Hide host ROCm from BOTH implementations, symmetrically."""
+    """Hide host ROCm from BOTH implementations, symmetrically.
+
+    That includes an importable wheel: these tests run inside the CI image,
+    which on the wheel layout has one installed, so without stubbing
+    ``find_spec`` the "nothing found" cases would discover the image's own
+    ROCm.
+    """
     absent = tmp_path / "absent_opt_rocm"
     monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", absent)
     monkeypatch.setattr(guard, "CLASSIC_ROCM_ROOT", absent)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
     for name in ("ROCM_PATH", "ROCM_HOME"):
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
@@ -100,16 +115,28 @@ def classic_at(sandbox):
 
 @pytest.fixture
 def importable_wheel(sandbox, tmp_path: Path):
-    """Install a wheel tree on sys.path so real ``find_spec`` resolves it."""
+    """Make a wheel tree discoverable via ``importlib.util.find_spec``.
+
+    ``regular_package`` picks which spec shape the resolvers have to
+    interpret: a real ``_rocm_sdk_core`` ships an ``__init__.py`` (so
+    ``spec.origin`` is set, and that is the production path), while a
+    namespace package leaves ``origin`` None and exposes only
+    ``submodule_search_locations``.
+    """
 
     def _install(*, regular_package: bool = True, **kwargs) -> Path:
         site = tmp_path / "site-packages"
         core = build_wheel(site, **kwargs)
         if regular_package:
-            (core / "__init__.py").write_text("", encoding="utf-8")
-        sandbox.delitem(sys.modules, "_rocm_sdk_core", raising=False)
-        sandbox.syspath_prepend(str(site))
-        importlib.invalidate_caches()
+            init = core / "__init__.py"
+            init.write_text("", encoding="utf-8")
+            spec = SimpleNamespace(origin=str(init), submodule_search_locations=[str(core)])
+        else:
+            spec = SimpleNamespace(origin=None, submodule_search_locations=[str(core)])
+        sandbox.setattr(
+            "importlib.util.find_spec",
+            lambda name: spec if name == "_rocm_sdk_core" else None,
+        )
         return core
 
     return _install
