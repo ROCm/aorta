@@ -105,11 +105,15 @@ ${ROCM}/lib/hipblaslt/library (looked for ${BUNDLE_NAME} flat and under gfx950/)
 Pass --object with an already-unbundled gfx950 code object to skip extraction."
 fi
 
+# Without `set -e` a failed mktemp/mkdir would leave WORKDIR empty and every
+# derived path would land at the filesystem root, which a root ROCm container
+# would happily create. Check both explicitly.
 if [ -z "${WORKDIR}" ]; then
-    WORKDIR="$(mktemp -d)"
+    WORKDIR="$(mktemp -d)" || die "mktemp -d failed"
+    [ -n "${WORKDIR}" ] || die "mktemp -d produced an empty path"
     [ "${KEEP}" -eq 1 ] || trap 'rm -rf "${WORKDIR}"' EXIT
 fi
-mkdir -p "${WORKDIR}"
+mkdir -p "${WORKDIR}" || die "cannot create work directory: ${WORKDIR}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOADER_SRC="${HERE}/consan_4112_load.hip"

@@ -40,10 +40,16 @@ sanitizer_plan:
     # MOI inventory + patching). A 300s ceiling still cuts that off, reporting a
     # timeout for a phase that now completes, so the ceiling has to clear the run.
     #
-    # 1800s is ~40% headroom over the measured 1283s. That headroom is the point: the
-    # timing was measured on ROCm 7.0.2.2, while CI now builds fixtures against ROCm
-    # 7.2.4 (#380), whose hipBLASLt may extract a differently sized object. Budget
-    # ~21-30 min of nightly wall-clock for this case.
-    timeout_seconds: 1800
+    # Three runs of the same object on the same host spread more than the first
+    # measurement suggested: 1283s, 1291s and 1416s end-to-end, with MOI inventory
+    # alone ranging 659-715s. 2000s is ~40% over the slowest of those (1416s).
+    #
+    # That headroom is the point, and it is a ceiling rather than a duration -- a
+    # healthy run still exits on its own in ~21-24 min, so raising it costs nothing
+    # unless the phase genuinely regresses. It has to absorb both the run-to-run
+    # spread above and the fact that the timings come from ROCm 7.0.2.2 while CI now
+    # builds fixtures against ROCm 7.2.4 (#380), whose hipBLASLt may extract a
+    # differently sized object. Budget ~21-33 min of nightly wall-clock for this case.
+    timeout_seconds: 2000
   output:
     report: sanitizer_report.json

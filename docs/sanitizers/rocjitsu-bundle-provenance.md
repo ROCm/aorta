@@ -3,8 +3,10 @@
 A sanitizer verdict only means something relative to the hook that produced it.
 Right now a `sanitizer_report.json` records the hook's path and SHA-256 but not
 which rocjitsu commit it was built from, and there are two ways to end up running
-an older hook than you think. Both were hit while verifying the fixes for
-ROCm/rocm-systems#9964, #9970 and #9972.
+an older hook than you think. Both were hit while verifying the upstream fixes
+claimed for ROCm/rocm-systems#9964, #9970 and #9972 — a verification that only
+reached a trustworthy answer *because* the stale hook was caught, and which found
+#9964/#9970 fixed but #9972 unchanged.
 
 ## The two staleness paths
 
