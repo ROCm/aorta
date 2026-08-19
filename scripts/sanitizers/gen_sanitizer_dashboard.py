@@ -976,8 +976,14 @@ def survey_cases_from_spec(
                 # out-of-tree report_path, so by default nothing stages the
                 # directory and no run-area link may be emitted for it (a present
                 # report is not evidence the directory exists). A caller that does
-                # publish complete areas can say so with `"staged": true`.
-                "staged": case.get("staged") is True and summary["present"],
+                # publish complete areas can say so with `"staged": true` -- but
+                # only a name that is one plain path segment can be claimed, since
+                # the area link is built from it and `..` would traverse.
+                "staged": (
+                    case.get("staged") is True
+                    and summary["present"]
+                    and _safe_case_segment(name) is not None
+                ),
                 "cls": "survey",
                 "summary": summary,
             }
@@ -1162,6 +1168,26 @@ def provenance_from_environ() -> dict[str, str]:
     alongside it (see ``write_case_run_area``).
     """
     return {key: os.environ[var] for key, var in _RUN_AREA_ENV_VARS if os.environ.get(var)}
+
+
+def _safe_case_segment(name: Any) -> str | None:
+    """A survey case name accepted only as one plain path segment.
+
+    The run page's area link is ``survey/<name>/``, and ``name`` on a ``--survey``
+    entry is caller-supplied JSON. HTML-escaping that attribute does not neutralise
+    path semantics, so a name like ``../../other`` would render a traversal link --
+    and would also disagree with the card footer, which derives its link from the
+    separately-validated ``report_rel``. Requiring a single segment makes the two
+    agree by construction, since ``report_rel`` is built as
+    ``<rel>/survey/<name>/sanitizer_report.json`` from this same value.
+    """
+    if not isinstance(name, str) or not name or name in {".", ".."}:
+        return None
+    if "/" in name or "\\" in name or ":" in name:
+        return None
+    if any(char.isspace() or ord(char) < 0x20 for char in name):
+        return None
+    return name
 
 
 def _case_dir_rel(report_rel: str | None) -> str | None:
@@ -1412,33 +1438,96 @@ _REBUILD_NOTE = (
 # ``aorta.sanitizer_run_area/0.1`` can read the variables instead of parsing them
 # out of a sentence. ``set_by`` says whether the operator must export it or
 # ``aorta`` derives it from the recipe's policy block.
-_REQUIRED_ENV: tuple[dict[str, str], ...] = (
+# ``consan_only`` keeps the manifest honest per case: the prose has always said
+# these four are what "ConSan additionally requires", so listing them for a
+# waitcheck reproduction would have the machine-readable field contradict it.
+_REQUIRED_ENV: tuple[dict[str, Any], ...] = (
     {
         "var": "ROCJITSU_PREBUILT",
         "set_by": "operator",
         "purpose": "unpacked rocjitsu bundle supplying rj_waitcheck and the ConSan hook",
+        "consan_only": False,
     },
-    {"var": "HSA_TOOLS_LIB", "set_by": "aorta", "purpose": "ConSan hook to load"},
+    {
+        "var": "HSA_TOOLS_LIB",
+        "set_by": "aorta",
+        "purpose": "ConSan hook to load",
+        "consan_only": True,
+    },
     {
         "var": "HSA_TOOLS_DISABLE_REGISTER",
         "set_by": "aorta",
         "purpose": "must be 1 so the hook is not double-registered",
+        "consan_only": True,
     },
-    {"var": "RJ_CONSAN_MODE", "set_by": "aorta", "purpose": "ConSan detection mode"},
-    {"var": "RJ_CONSAN_POLICY", "set_by": "aorta", "purpose": "ConSan reporting policy"},
+    {
+        "var": "RJ_CONSAN_MODE",
+        "set_by": "aorta",
+        "purpose": "ConSan detection mode",
+        "consan_only": True,
+    },
+    {
+        "var": "RJ_CONSAN_POLICY",
+        "set_by": "aorta",
+        "purpose": "ConSan reporting policy",
+        "consan_only": True,
+    },
 )
 
-# The prose rendering of exactly those facts, shared by both renderings so the
-# page and the downloadable file cannot drift (#384 decision 9 renders
-# REPRODUCE.md into the landing page, so the reproduction details are on both).
-# ``test_required_env_note_names_every_machine_readable_variable`` binds the two.
-_REQUIRED_ENV_NOTE = (
-    "The sanitizer backends (`rj_waitcheck`, the ConSan hook) come from the "
-    "prebuilt rocjitsu bundle; point `ROCJITSU_PREBUILT` at an unpacked bundle "
-    "before running. ConSan additionally requires `HSA_TOOLS_LIB`, "
-    "`HSA_TOOLS_DISABLE_REGISTER=1`, `RJ_CONSAN_MODE` and `RJ_CONSAN_POLICY`, "
-    "which `aorta` sets for you from the recipe's policy block."
-)
+
+def required_env_for(*, case: str, report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The env a *this* case's reproduction needs (pure).
+
+    ConSan's four variables are dropped for a waitcheck-only case, so the
+    machine-readable list cannot claim more than the prose does. Whether ConSan
+    ran is taken from the report's own check/finding sanitizers where possible,
+    falling back to the case name -- the naming convention every guardrail and
+    survey case follows (``consan-*`` / ``*-consan``).
+    """
+    names: set[str] = set()
+    checks = (report or {}).get("checks")
+    for check in checks if isinstance(checks, list) else []:
+        if not isinstance(check, dict):
+            continue
+        if isinstance(check.get("sanitizer"), str):
+            names.add(check["sanitizer"].lower())
+        for finding in check.get("findings") or []:
+            if isinstance(finding, dict) and isinstance(finding.get("sanitizer"), str):
+                names.add(finding["sanitizer"].lower())
+    consan = (
+        any("consan" in name for name in names)
+        if names
+        else "consan" in case.lower()
+    )
+    return [
+        {key: value for key, value in item.items() if key != "consan_only"}
+        for item in _REQUIRED_ENV
+        if consan or not item["consan_only"]
+    ]
+
+def required_env_note(required_env: list[dict[str, Any]]) -> str:
+    """Markdown prose for exactly the variables a manifest lists (pure).
+
+    Generated from ``env["required_env"]`` rather than written beside it, so the
+    sentence is per-case (a waitcheck area does not describe ConSan's variables)
+    and a retained area's prose keeps describing what *it* recorded even after
+    the module's own table changes.
+    """
+    operator = [item for item in required_env if item.get("set_by") == "operator"]
+    derived = [item for item in required_env if item.get("set_by") == "aorta"]
+    parts: list[str] = []
+    for item in operator:
+        parts.append(
+            f"Set `{item['var']}` ({item.get('purpose', '')}) before running."
+            if item.get("purpose")
+            else f"Set `{item['var']}` before running."
+        )
+    if derived:
+        names = ", ".join(f"`{item['var']}`" for item in derived)
+        parts.append(
+            f"`aorta` sets {names} for you from the recipe's policy block."
+        )
+    return " ".join(parts)
 
 
 def _md_code_to_html(text: str) -> str:
@@ -1499,9 +1588,23 @@ _BIN_OBJECT = {
     "fixtures/bin/consan_gemm_load": "fixtures/isa/consan_gemm_f32.hsaco",
     "fixtures/bin/lds_dispatch": "fixtures/isa/lds.hsaco",
 }
+# Recipe-relative paths (how a recipe names a fixture, and how this run area
+# records one) are NOT runnable paths. REPRODUCE.md puts the reader at the repo
+# root after ``cd aorta``, where there is no top-level ``fixtures/`` -- the tree
+# lives here, which is also what the nightly's own ``FIXTURES`` variable is set
+# to. Every emitted command is prefixed with this so it can be pasted and run;
+# only the recorded ``path`` stays recipe-relative.
+_FIXTURES_FROM_ROOT = "recipes/sanitizers/fixtures"
+
+
+def _runnable(ref: str) -> str:
+    """A recipe-relative fixture path rewritten to run from the repo root."""
+    return f"{_FIXTURES_FROM_ROOT}{ref[len('fixtures'):]}" if ref.startswith("fixtures") else ref
+
+
 _GEMM_ISA_SCRIPT = (
     "python scripts/sanitizers/prepare_gemm_isa.py "
-    "--csv fixtures/gemm_shapes_unique.csv --out fixtures/isa"
+    f"--csv {_FIXTURES_FROM_ROOT}/gemm_shapes_unique.csv --out {_FIXTURES_FROM_ROOT}/isa"
 )
 
 
@@ -1514,37 +1617,53 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
     landing page, REPRODUCE.md and the manifest cannot disagree about how an
     artifact was built.
 
-    Each entry is ``{"path", "what", "commands", "caveat"}``. ``commands`` are the
-    nightly's own invocations (see the tables above): they are per-artifact and
-    not interchangeable, because a rebuild that differs from them will not
-    reproduce the SHA-256 recorded beside the artifact. An unrecognised reference
-    yields commands ``[]`` rather than a guess.
+    Each entry is ``{"path", "what", "commands", "caveat"}``. ``path`` stays
+    recipe-relative, matching how a recipe names the artifact and how
+    ``artifacts_not_published`` records it; ``commands`` are rewritten to run from
+    the repo root, which is where REPRODUCE.md leaves the reader, and create the
+    gitignored output directory first. They are the nightly's own invocations
+    (see the tables above): per-artifact and not interchangeable, because a
+    rebuild that differs from them will not reproduce the SHA-256 recorded beside
+    the artifact. An unrecognised reference yields commands ``[]`` rather than a
+    guess.
+
+    Anything a consumer must branch on is encoded *in* a command rather than left
+    to ``caveat`` prose, so the list can be executed as-is.
     """
     plan: list[dict[str, Any]] = []
     for ref in built_refs:
+        out = _runnable(ref)
+        mkdir = f"mkdir -p {_FIXTURES_FROM_ROOT}"
         source = _GENCO_ISA_SOURCES.get(ref)
         if source:
             plan.append({
                 "path": ref,
                 "what": f"a gfx code object built from {source}",
                 "commands": [
-                    f"hipcc --genco --offload-arch={target} {source} -o tmp.o",
-                    f"clang-offload-bundler --type=o --unbundle --input=tmp.o "
-                    f"--targets=hipv4-amdgcn-amd-amdhsa--{target} --output={ref}",
+                    f"{mkdir}/isa",
+                    f"hipcc --genco --offload-arch={target} {_runnable(source)} -o tmp.o",
+                    # One command, because which branch is correct depends on the
+                    # ROCm build: --genco emits a raw object on some and a bundle
+                    # on others, and the recorded digest is of the unbundled one.
+                    "if head -c 24 tmp.o | grep -qF __CLANG_OFFLOAD_BUNDLE__; then "
+                    "clang-offload-bundler --type=o --unbundle --input=tmp.o "
+                    f"--targets=hipv4-amdgcn-amd-amdhsa--{target} --output={out}; "
+                    f"else cp tmp.o {out}; fi",
                 ],
                 "caveat": (
-                    "Run the second command only if the first produced a bundle "
-                    "(`head -c 24 tmp.o | grep -qF __CLANG_OFFLOAD_BUNDLE__`), "
-                    "otherwise copy tmp.o into place: --genco emits a raw object on "
-                    "some ROCm builds and a bundle on others. The recorded digest is "
-                    "of the unbundled object, so skipping the check will not match."
+                    "The conditional matters: --genco emits a raw code object on "
+                    "some ROCm builds and a clang-offload bundle on others, and the "
+                    "recorded digest is of the unbundled object."
                 ),
             })
         elif ref == "fixtures/isa/consan_gemm_f32.hsaco":
             plan.append({
                 "path": ref,
                 "what": "one representative heavy f32 SS GEMM code object",
-                "commands": [f"{_GEMM_ISA_SCRIPT} --top-n 0 --consan-object {ref}"],
+                "commands": [
+                    f"{mkdir}/isa",
+                    f"{_GEMM_ISA_SCRIPT} --top-n 0 --consan-object {out}",
+                ],
                 "caveat": (
                     "Extracted from the shipped Tensile libraries, never compiled "
                     "from a .hip source."
@@ -1555,7 +1674,7 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
             plan.append({
                 "path": ref,
                 "what": "the per-transpose f32 GEMM code objects (sol_<n>.hsaco)",
-                "commands": [f"{_GEMM_ISA_SCRIPT} --top-n 3"],
+                "commands": [f"{mkdir}/isa", f"{_GEMM_ISA_SCRIPT} --top-n 3"],
                 "caveat": (
                     "Extracted from the shipped Tensile libraries, never compiled "
                     "from a .hip source."
@@ -1567,11 +1686,16 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
             if extra:
                 flags += f" {extra}"
             if define:
-                flags += f' -D{define}="\\"$(pwd)/{_BIN_OBJECT[ref]}\\""'
+                # $(pwd) is the repo root here, so the define must carry the
+                # root-relative path to the object, not the recipe-relative one.
+                flags += f' -D{define}="\\"$(pwd)/{_runnable(_BIN_OBJECT[ref])}\\""'
             plan.append({
                 "path": ref,
                 "what": f"a host repro binary built from {source}",
-                "commands": [f"hipcc {flags} {source} -o {ref}"],
+                "commands": [
+                    f"{mkdir}/bin",
+                    f"hipcc {flags} {_runnable(source)} -o {out}",
+                ],
                 "caveat": (
                     f"The -D{define} define is required: it is how the binary learns "
                     "which code object to load."
@@ -1584,15 +1708,30 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
     return plan
 
 
-def _rebuild_hints(built_refs: list[str], *, target: str) -> list[str]:
-    """One prose rebuild hint per artifact, rendered from ``rebuild_plan`` (pure).
+def plan_from_env(env: dict[str, Any], built_refs: list[str]) -> list[dict[str, Any]]:
+    """A run area's rebuild plan, preferring the one it persisted (pure).
+
+    Every retained area is re-rendered nightly while its ``env.json`` is
+    preserved, so recomputing the commands from the module's current tables would
+    rewrite historical instructions and leave the prose contradicting the
+    manifest sitting beside it. Fall back to recomputation only for an area
+    published before the field existed.
+    """
+    stored = env.get("rebuild")
+    if isinstance(stored, list) and all(isinstance(item, dict) for item in stored):
+        return stored
+    return rebuild_plan(built_refs, target=str(env.get("target") or "gfx950"))
+
+
+def _rebuild_hints(plan: list[dict[str, Any]]) -> list[str]:
+    """One prose rebuild hint per artifact, rendered from a ``rebuild_plan`` (pure).
 
     Markdown, so REPRODUCE.md uses it verbatim and the landing page runs it
     through ``_md_code_to_html``. A reference with no known recipe degrades to
     its bare path rather than a plausible-looking wrong command.
     """
     hints: list[str] = []
-    for entry in rebuild_plan(built_refs, target=target):
+    for entry in plan:
         if not entry["commands"]:
             hints.append(str(entry["path"]))
             continue
@@ -1659,7 +1798,7 @@ def build_case_env(
         # prose, so a consumer of this schema does not have to parse English to
         # learn which variables to export or how to rebuild an artifact. Both
         # renderings are generated from these, not written alongside them.
-        "required_env": [dict(item) for item in _REQUIRED_ENV],
+        "required_env": required_env_for(case=case, report=report),
         "rebuild": rebuild_plan(built_refs, target=str(meta.get("gpu") or "")),
         "artifacts_not_published": [
             {"path": ref, "sha256": by_basename.get(_basename(ref))} for ref in built_refs
@@ -1738,16 +1877,17 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
         f"{env.get('command', '')}",
         "```",
         "",
-        _REQUIRED_ENV_NOTE,
+        required_env_note(env.get("required_env") or []),
         "",
     ]
-    hints = _rebuild_hints(built_refs, target=str(env.get("target") or "gfx950"))
+    hints = _rebuild_hints(plan_from_env(env, built_refs))
     if hints:
         lines += [
             "## Rebuild the fixtures",
             "",
             "This case needs CI-built fixtures that are not published here (see "
-            "'Artifacts not published' below). Rebuild them with:",
+            "'Artifacts not published' below). Run these from the repo root, the "
+            "directory the clone above leaves you in:",
             "",
             *(f"- {hint}" for hint in hints),
             "",
@@ -1842,7 +1982,7 @@ def build_case_index_html(
         if reason
         else ""
     )
-    hints = _rebuild_hints(built_refs, target=str(env.get("target") or "gfx950"))
+    hints = _rebuild_hints(plan_from_env(env, built_refs))
     steps_html = (
         (
             '<p class="cap">Rebuild the fixtures</p><ul class="steps">'
@@ -1922,7 +2062,7 @@ def build_case_index_html(
         f"{reason_html}\n"
         '<div class="repro"><span class="lbl">Reproduce</span>'
         f'<code>{_esc(str(env.get("command", "")))}</code></div>\n'
-        f'<p class="note">{_md_code_to_html(_REQUIRED_ENV_NOTE)}</p>\n'
+        f'<p class="note">{_md_code_to_html(required_env_note(env.get("required_env") or []))}</p>\n'
         f"{steps_html}{np_html}{digests_html}"
         "</section>\n"
         '<section class="panel"><h2>Files</h2>\n'
@@ -3113,18 +3253,26 @@ def _run_index_survey_html(survey: list[dict[str, Any]] | None) -> str:
     or an out-of-tree ``report_path``, while only ``--informational-results-dir``
     entries are staged under ``survey/<case>/``. Keying on presence therefore
     emitted a 404 on exactly that invocation.
+
+    The link path itself goes through ``_safe_case_segment``, because ``name`` is
+    caller-supplied on a spec entry: a staged spec naming ``../../other`` would
+    otherwise render a traversal link here while the card footer -- which derives
+    its link from the validated ``report_rel`` -- pointed somewhere else entirely.
     """
     if not survey:
         return ""
+
+    def _area_cell(entry: dict[str, Any]) -> str:
+        segment = _safe_case_segment(entry.get("name")) if entry.get("staged") else None
+        if not segment:
+            return '<td><span class="dash">&mdash;</span></td>'
+        return f'<td><a href="survey/{_esc(segment)}/">run area</a></td>'
+
     rows = "".join(
         f"<tr><td class=mono>{_esc(str(entry.get('label') or entry.get('name', '')))}</td>"
         f"<td>{_verdict_html((entry.get('summary') or {}).get('verdict') or _DASH)}</td>"
         f"<td class=mono>{_esc(str(entry.get('command') or ''))}</td>"
-        + (
-            f'<td><a href="survey/{_esc(str(entry.get("name", "")))}/">run area</a></td>'
-            if entry.get("staged")
-            else '<td><span class="dash">&mdash;</span></td>'
-        )
+        + _area_cell(entry)
         + "</tr>"
         for entry in survey
     )
@@ -3667,7 +3815,12 @@ def main() -> int:
             ):
                 if current and survey_case.name in staged_now:
                     continue  # rewritten from this job's own results further below
-                if not keep_logs:
+                # Same treatment as a guardrail area: an in-window area still has
+                # to be gzipped, or a disjoint history (or an area published before
+                # run areas existed) publishes its raw *.log uncompressed.
+                if keep_logs:
+                    _gzip_logs(survey_case)
+                else:
                     _prune_run_area_bulk(survey_case)
                 if refresh_published_case_area(
                     survey_case, args.out_dir, logs=keep_logs
@@ -3740,6 +3893,18 @@ def main() -> int:
                 if entry is None:
                     continue
                 dest = args.out_dir / latest_rel / "survey" / case_dir.name
+                # Replace the destination rather than merging into it: a file that
+                # disappeared from this sweep (an old log especially) would
+                # otherwise survive and be listed on the landing page as evidence
+                # for the *new* report. The nightly clears its run dir first, but
+                # this co-publish path is documented for reusable output trees too.
+                # Skip the clear if the source somehow sits underneath it, which
+                # would delete the very tree about to be read.
+                if dest.exists() and not (
+                    dest.resolve() == case_dir.resolve()
+                    or dest.resolve() in case_dir.resolve().parents
+                ):
+                    shutil.rmtree(dest)
                 # The whole case dir, so the ConSan/waitcheck logs behind the
                 # observed verdict ship with the report (#384).
                 shutil.copytree(case_dir, dest, dirs_exist_ok=True)

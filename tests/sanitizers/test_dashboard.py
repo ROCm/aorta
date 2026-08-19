@@ -2120,7 +2120,7 @@ def test_rebuild_hint_binary_flags_match_the_workflow():
         assert built_with_o1g == ("-O1 -g" in extra), (
             f"{ref}: workflow uses -O1 -g = {built_with_o1g}, hint says {extra!r}"
         )
-        hint = gen._rebuild_hints([ref], target="gfx950")[0]
+        hint = gen._rebuild_hints(gen.rebuild_plan([ref], target="gfx950"))[0]
         assert ("-O1 -g" in hint) == built_with_o1g, ref
 
 
@@ -2163,7 +2163,7 @@ def test_publish_recipe_inputs_never_writes_outside_the_case_inputs_dir(tmp_path
 
 def test_rebuild_hints_match_the_nightly_commands_per_artifact():
     def hint(ref: str) -> str:
-        return gen._rebuild_hints([ref], target="gfx950")[0]
+        return gen._rebuild_hints(gen.rebuild_plan([ref], target="gfx950"))[0]
 
     hints = {
         ref: hint(ref)
@@ -2179,7 +2179,10 @@ def test_rebuild_hints_match_the_nightly_commands_per_artifact():
     # and the recorded digest is of the unbundled object -- so the conditional
     # unbundle is part of the instruction, not an optional detail.
     lds = hints["fixtures/isa/lds.hsaco"]
-    assert "hipcc --genco --offload-arch=gfx950 fixtures/kernels/lds_reduce.hip" in lds
+    assert (
+        "hipcc --genco --offload-arch=gfx950 "
+        "recipes/sanitizers/fixtures/kernels/lds_reduce.hip" in lds
+    )
     assert "__CLANG_OFFLOAD_BUNDLE__" in lds
     assert "clang-offload-bundler --type=o --unbundle" in lds
     # The GEMM objects are extracted from Tensile libraries, never compiled.
@@ -2188,16 +2191,68 @@ def test_rebuild_hints_match_the_nightly_commands_per_artifact():
     assert "--top-n 3" in hints["fixtures/isa"]
     # A loader binary needs the define naming its object, or it builds the wrong one.
     assert "-DLDS_HSACO=" in hints["fixtures/bin/lds_dispatch"]
-    assert "fixtures/isa/lds.hsaco" in hints["fixtures/bin/lds_dispatch"]
+    assert "recipes/sanitizers/fixtures/isa/lds.hsaco" in hints["fixtures/bin/lds_dispatch"]
     # A plain repro binary has no define to add.
     assert "-D" not in hints["fixtures/bin/consan_lds_race"]
-    assert "fixtures/repro/consan_lds_race.hip" in hints["fixtures/bin/consan_lds_race"]
+    assert (
+        "recipes/sanitizers/fixtures/repro/consan_lds_race.hip"
+        in hints["fixtures/bin/consan_lds_race"]
+    )
     # An unknown reference degrades to the bare path rather than a wrong command.
-    assert gen._rebuild_hints(["fixtures/other/x"], target="gfx950") == ["fixtures/other/x"]
+    assert gen._rebuild_hints(
+        gen.rebuild_plan(["fixtures/other/x"], target="gfx950")
+    ) == ["fixtures/other/x"]
     # Every hint's backticks are balanced, so the page renders them as <code>
     # spans rather than leaving a stray literal backtick in the markup.
     for ref, text in hints.items():
         assert text.count("`") % 2 == 0, ref
+
+
+def test_rebuild_commands_are_runnable_from_the_repo_root():
+    """Every emitted command must work from where REPRODUCE.md leaves the reader.
+
+    The manifest records artifacts recipe-relative (``fixtures/isa/...``), but
+    ``cd aorta`` puts you at the repo root where no top-level ``fixtures/`` exists
+    -- so a command carrying the recorded path verbatim fails immediately. The
+    output directories are gitignored, so they also have to be created.
+    """
+    refs = [
+        "fixtures/isa/lds.hsaco",
+        "fixtures/isa/consan_gemm_f32.hsaco",
+        "fixtures/isa",
+        "fixtures/bin/consan_gemm_load",
+        "fixtures/bin/consan_lds_race",
+    ]
+    for entry in gen.rebuild_plan(refs, target="gfx950"):
+        # The recorded path stays recipe-relative; only the commands are rewritten.
+        assert entry["path"].startswith("fixtures/"), entry["path"]
+        assert entry["commands"], entry["path"]
+        assert entry["commands"][0].startswith("mkdir -p recipes/sanitizers/fixtures/")
+        for command in entry["commands"]:
+            # No bare recipe-relative path survives into an executable command:
+            # every fixtures/ token must be reached through recipes/sanitizers/.
+            unrooted = re.findall(r"(?<![\w/.])fixtures/[\w./-]+", command)
+            assert not unrooted, f"{entry['path']}: unrooted {unrooted} in {command!r}"
+    # The paths a command does name resolve in this checkout (sources at least;
+    # bin/ and isa/ are gitignored build outputs).
+    for entry in gen.rebuild_plan(refs, target="gfx950"):
+        for command in entry["commands"]:
+            for token in re.findall(r"recipes/sanitizers/fixtures/[\w./-]+", command):
+                if "/isa/" in token or "/bin/" in token or token.endswith("/isa"):
+                    continue
+                assert (_REPO_ROOT / token).exists(), f"{entry['path']}: {token}"
+
+
+def test_genco_rebuild_encodes_the_bundle_check_as_one_command():
+    # A consumer executing `commands` in order cannot branch on prose, so the
+    # raw-ELF-vs-bundle decision has to live inside a command.
+    entry = gen.rebuild_plan(["fixtures/isa/tiny.hsaco"], target="gfx950")[0]
+    conditional = [c for c in entry["commands"] if c.startswith("if ")]
+    assert len(conditional) == 1
+    assert "__CLANG_OFFLOAD_BUNDLE__" in conditional[0]
+    assert "clang-offload-bundler" in conditional[0]
+    # ...and the else-branch copies rather than silently skipping.
+    assert "else cp tmp.o recipes/sanitizers/fixtures/isa/tiny.hsaco; fi" in conditional[0]
 
 
 def test_case_index_page_carries_the_reproduction_details(tmp_path, monkeypatch):
@@ -2214,11 +2269,15 @@ def test_case_index_page_carries_the_reproduction_details(tmp_path, monkeypatch)
     assert env["digests"]["code_object:sol_1.hsaco"] == "93f09ae670abcdef"
     for key, value in env["digests"].items():
         assert key in page and value in page
-    # The env a reproduction needs is on the page too, from the same constant as
-    # REPRODUCE.md, so the two cannot drift.
+    # The env a reproduction needs is on the page too, rendered from this area's
+    # own required_env, so the page and REPRODUCE.md cannot drift.
+    note = gen.required_env_note(env["required_env"])
     assert "ROCJITSU_PREBUILT" in page
     assert "<code>ROCJITSU_PREBUILT</code>" in page
-    assert gen._REQUIRED_ENV_NOTE in (case / "REPRODUCE.md").read_text(encoding="utf-8")
+    assert note in (case / "REPRODUCE.md").read_text(encoding="utf-8")
+    # This is a waitcheck case, so ConSan's variables are not claimed for it.
+    assert [item["var"] for item in env["required_env"]] == ["ROCJITSU_PREBUILT"]
+    assert "HSA_TOOLS_LIB" not in page
     # Execution status was in the MD twin but missing from the page.
     assert "Execution" in page
     # The rebuild commands render as code, not as literal Markdown backticks.
@@ -2226,16 +2285,32 @@ def test_case_index_page_carries_the_reproduction_details(tmp_path, monkeypatch)
     assert "`" not in page
 
 
-def test_required_env_note_names_every_machine_readable_variable():
-    # env.json carries required_env as data; the prose is the human rendering of
-    # the same facts. Bind them so a new variable cannot be added to one only.
-    for item in gen._REQUIRED_ENV:
-        assert item["var"] in gen._REQUIRED_ENV_NOTE, item["var"]
-        assert item["set_by"] in {"operator", "aorta"}
-        assert item["purpose"]
-    # ...and no variable is described in the prose that the data omits.
-    named = set(re.findall(r"`([A-Z][A-Z0-9_]+)(?:=\S+)?`", gen._REQUIRED_ENV_NOTE))
-    assert named == {item["var"] for item in gen._REQUIRED_ENV}
+def test_required_env_is_per_case_and_the_note_names_exactly_it():
+    # The prose has always said the four HSA/RJ variables are what ConSan
+    # *additionally* requires, so listing them for a waitcheck reproduction would
+    # make the machine-readable field contradict it.
+    waitcheck = gen.required_env_for(case="waitcheck", report=_waitcheck_report())
+    assert [item["var"] for item in waitcheck] == ["ROCJITSU_PREBUILT"]
+
+    consan = gen.required_env_for(case="consan-racy", report=_consan_racy_report())
+    assert [item["var"] for item in consan] == [item["var"] for item in gen._REQUIRED_ENV]
+    # The internal flag is not leaked into the published manifest.
+    assert all("consan_only" not in item for item in consan)
+
+    # With no usable report the case name decides, following the naming convention
+    # every guardrail and survey case uses.
+    assert len(gen.required_env_for(case="consan-gemm", report=None)) == len(consan)
+    assert len(gen.required_env_for(case="waitcheck-gemm", report=None)) == 1
+
+    # The note names exactly the variables it was given -- no more, no fewer.
+    for required in (waitcheck, consan):
+        note = gen.required_env_note(required)
+        named = set(re.findall(r"`([A-Z][A-Z0-9_]+)`", note))
+        assert named == {item["var"] for item in required}
+        for item in required:
+            assert item["set_by"] in {"operator", "aorta"}
+            assert item["purpose"]
+    assert gen.required_env_note([]) == ""
 
 
 def test_rebuild_plan_is_machine_readable_and_prose_is_generated_from_it():
@@ -2248,18 +2323,27 @@ def test_rebuild_plan_is_machine_readable_and_prose_is_generated_from_it():
 
     lds = plan[0]
     assert lds["commands"] == [
-        "hipcc --genco --offload-arch=gfx950 fixtures/kernels/lds_reduce.hip -o tmp.o",
+        "mkdir -p recipes/sanitizers/fixtures/isa",
+        "hipcc --genco --offload-arch=gfx950 "
+        "recipes/sanitizers/fixtures/kernels/lds_reduce.hip -o tmp.o",
+        "if head -c 24 tmp.o | grep -qF __CLANG_OFFLOAD_BUNDLE__; then "
         "clang-offload-bundler --type=o --unbundle --input=tmp.o "
-        "--targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output=fixtures/isa/lds.hsaco",
+        "--targets=hipv4-amdgcn-amd-amdhsa--gfx950 "
+        "--output=recipes/sanitizers/fixtures/isa/lds.hsaco; "
+        "else cp tmp.o recipes/sanitizers/fixtures/isa/lds.hsaco; fi",
     ]
-    assert "__CLANG_OFFLOAD_BUNDLE__" in lds["caveat"]
-    assert "-O1 -g" not in plan[1]["commands"][0]  # loader binaries are built without
-    assert "-DLDS_HSACO=" in plan[1]["commands"][0]
+    # The bundle check lives in a command, not only in the prose caveat, so an
+    # automated consumer can execute the branch.
+    assert "__CLANG_OFFLOAD_BUNDLE__" in " ".join(lds["commands"])
+    assert "--genco" in lds["caveat"]
+    hipcc = plan[1]["commands"][1]
+    assert "-O1 -g" not in hipcc  # loader binaries are built without
+    assert "-DLDS_HSACO=" in hipcc
     # An unknown reference yields no command rather than a plausible wrong one.
     assert plan[2]["commands"] == []
 
     # Every command in the plan appears verbatim in the rendered prose.
-    hints = gen._rebuild_hints(refs, target="gfx950")
+    hints = gen._rebuild_hints(plan)
     assert len(hints) == len(plan)
     for index, entry in enumerate(plan):
         for command in entry["commands"]:
@@ -2275,14 +2359,16 @@ def test_env_json_records_required_env_and_rebuild_commands(tmp_path, monkeypatc
         )
     )
 
+    # A ConSan case, so it carries the full set.
     assert [item["var"] for item in env["required_env"]] == [
         item["var"] for item in gen._REQUIRED_ENV
     ]
     rebuild = {entry["path"]: entry for entry in env["rebuild"]}
     # The recipe's built refs each carry their own commands, at this run's target.
     assert "fixtures/isa/consan_gemm_f32.hsaco" in rebuild
-    assert "prepare_gemm_isa.py" in rebuild["fixtures/isa/consan_gemm_f32.hsaco"]["commands"][0]
-    gemm_bin = rebuild["fixtures/bin/consan_gemm_load"]["commands"][0]
+    gemm_isa = rebuild["fixtures/isa/consan_gemm_f32.hsaco"]["commands"]
+    assert any("prepare_gemm_isa.py" in command for command in gemm_isa)
+    gemm_bin = " ".join(rebuild["fixtures/bin/consan_gemm_load"]["commands"])
     assert "--offload-arch=gfx950" in gemm_bin
     assert "-DOBJECT=" in gemm_bin
 
@@ -2408,9 +2494,13 @@ def test_run_area_records_unpublished_artifacts_by_digest(tmp_path, monkeypatch)
     # generic "hipcc it" hint would build a different file than the recorded
     # digest, which is the whole point of recording the digest.
     assert "prepare_gemm_isa.py" in survey_md
-    assert "--consan-object fixtures/isa/consan_gemm_f32.hsaco" in survey_md
+    # Root-relative in the command, because that is where the clone leaves you.
+    assert (
+        "--consan-object recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco"
+        in survey_md
+    )
     assert "-DOBJECT=" in survey_md
-    assert "fixtures/kernels/consan_load.hip" in survey_md
+    assert "recipes/sanitizers/fixtures/kernels/consan_load.hip" in survey_md
 
 
 def test_case_index_lists_every_published_file(tmp_path, monkeypatch):
@@ -2686,6 +2776,159 @@ def test_disjoint_history_and_output_trees_keep_the_survey_subtree(
     assert (published / "index.html").is_file()
     # The source history is untouched by the copy.
     assert (area / "sanitizer_report.json").is_file()
+
+
+def test_prose_is_rendered_from_the_persisted_manifest_not_current_constants():
+    """A retained area's instructions must not be rewritten by a later code change.
+
+    Every retained area is re-rendered nightly while its ``env.json`` is
+    preserved, so recomputing the commands from the module's current tables would
+    silently rewrite historical instructions and leave the prose contradicting the
+    manifest beside it.
+    """
+    env = {
+        "case": "consan-gemm",
+        "target": "gfx950",
+        "required_env": [
+            {"var": "OLD_VAR", "set_by": "operator", "purpose": "what this run needed"}
+        ],
+        "rebuild": [{
+            "path": "fixtures/isa/x.hsaco",
+            "what": "an object built the way this run built it",
+            "commands": ["hipcc --historical-flag x.hip -o x.hsaco"],
+            "caveat": "",
+        }],
+        "observed": {},
+        "artifacts_not_published": [{"path": "fixtures/isa/x.hsaco", "sha256": "ab"}],
+    }
+    md = gen.build_reproduce_md(env, built_refs=["fixtures/isa/x.hsaco"])
+    assert "hipcc --historical-flag x.hip -o x.hsaco" in md
+    assert "OLD_VAR" in md
+    # Today's tables are not consulted when the manifest has its own answer.
+    assert "prepare_gemm_isa.py" not in md
+    assert "ROCJITSU_PREBUILT" not in md
+
+    page = gen.build_case_index_html(
+        env, [], built_refs=["fixtures/isa/x.hsaco"], up="../../"
+    )
+    assert "hipcc --historical-flag x.hip -o x.hsaco" in page
+    assert "OLD_VAR" in page
+
+    # An area published before the fields existed still gets instructions.
+    legacy = {k: v for k, v in env.items() if k not in {"rebuild", "required_env"}}
+    fallback = gen.build_reproduce_md(legacy, built_refs=["fixtures/isa/lds.hsaco"])
+    assert "hipcc --genco" in fallback
+
+
+def test_refresh_keeps_the_manifests_own_instructions(tmp_path, monkeypatch):
+    # End-to-end version of the above: refreshing an older area must not restamp
+    # its rebuild commands from the current module tables.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    area = dashboard / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (area / "env.json").write_text(json.dumps({
+        "case": "consan-gemm", "command": "aorta sweep run", "target": "gfx950",
+        "observed": {"verdict": "error"},
+        "required_env": [{"var": "OLD_VAR", "set_by": "operator", "purpose": "historic"}],
+        "rebuild": [{"path": "fixtures/isa/x.hsaco", "what": "historic",
+                     "commands": ["hipcc --historical-flag"], "caveat": ""}],
+        "artifacts_not_published": [{"path": "fixtures/isa/x.hsaco", "sha256": "ab"}],
+    }))
+    _write_history_run(dashboard / "runs", "2026-08-06-44")
+    assert _publish_into(dashboard, monkeypatch) == 0
+
+    md = (area / "REPRODUCE.md").read_text(encoding="utf-8")
+    assert "hipcc --historical-flag" in md
+    assert "OLD_VAR" in md
+    env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+    assert env["rebuild"][0]["commands"] == ["hipcc --historical-flag"]
+
+
+def test_copublish_replaces_the_destination_instead_of_merging(tmp_path, monkeypatch):
+    # A file that vanished from this sweep must not survive and be listed on the
+    # landing page as evidence for the new report.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    stale = dashboard / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    (stale / "consan").mkdir(parents=True)
+    (stale / "consan" / "consan.log.gz").write_bytes(b"stale evidence")
+    (stale / "sanitizer_report.json").write_text("{}")
+
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    assert _publish_into(dashboard, monkeypatch, info=info) == 0
+
+    # This sweep produced no log, so none is published or listed.
+    assert not list(stale.rglob("*.log.gz"))
+    assert not (stale / "consan").exists()
+    assert ".log.gz" not in (stale / "index.html").read_text(encoding="utf-8")
+
+
+def test_in_window_survey_areas_are_gzipped_like_guardrail_areas(tmp_path, monkeypatch):
+    # An area carried in from a disjoint history (or published before run areas
+    # existed) holds raw *.log; the log window must compress it, not publish it.
+    history = tmp_path / "history"
+    out = tmp_path / "dashboard"
+    _write_history_run(history, "2026-08-05-33")
+    area = history / "2026-08-05-33" / "survey" / "consan-gemm"
+    (area / "consan").mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (area / "consan" / "consan.log").write_text("raw uncompressed log\n")
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(history),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(out),
+    ])
+    assert gen.main() == 0
+
+    published = out / "runs/2026-08-05-33/survey/consan-gemm"
+    assert (published / "consan" / "consan.log.gz").is_file()
+    assert not (published / "consan" / "consan.log").exists()
+    assert gzip.decompress(
+        (published / "consan" / "consan.log.gz").read_bytes()
+    ) == b"raw uncompressed log\n"
+
+
+def test_survey_area_link_rejects_an_unsafe_caller_supplied_name():
+    # `name` is caller JSON on a --survey entry and the run page's link is
+    # survey/<name>/. HTML-escaping the attribute does not neutralize path
+    # semantics, so a staged spec naming ../../other would traverse -- and would
+    # disagree with the card footer, which derives its link from report_rel.
+    for unsafe in ("../../other", "a/b", "..", "", "a b", "http://x", "a\\b"):
+        assert gen._safe_case_segment(unsafe) is None, unsafe
+    assert gen._safe_case_segment("consan-gemm") == "consan-gemm"
+
+    survey = gen.survey_cases_from_spec({"cases": [{
+        "name": "../../other", "label": "traversal", "staged": True,
+        "report_rel": "runs/x/survey/other/sanitizer_report.json",
+        "report": _consan_racy_report(),
+    }]})
+    # An unsafe name cannot be claimed as staged at all, so no renderer links it.
+    assert survey[0]["staged"] is False
+    page = gen._run_index_survey_html(survey)
+    assert "href=" not in page
+    assert "run area" not in page
+    # Even if an entry arrives already marked staged, the renderer still refuses to
+    # build a link from it. The name may still appear as escaped label *text* --
+    # that is display, not a path -- but never inside an href.
+    forced = gen._run_index_survey_html([
+        {"name": "../../other", "staged": True, "summary": {"verdict": "fail"}}
+    ])
+    assert "href=" not in forced
+    assert "&mdash;" in forced
 
 
 def test_refresh_published_case_area_reports_an_unusable_manifest(tmp_path):
