@@ -1,7 +1,8 @@
 # ConSan transform rejection `status=4112` — overlapping anchor patches
 
 Status: open upstream defect in rocjitsu, found while verifying the fixes for
-ROCm/rocm-systems#9964, #9970 and #9972.
+ROCm/rocm-systems#9964, #9970 and #9972. Filed upstream as
+[ROCm/rocm-systems#10378](https://github.com/ROCm/rocm-systems/issues/10378).
 Affects: `daily-consan-gemm.yaml` (dashboard Tab 2, observed-only, non-gating).
 Repro: [`repro/consan_4112_repro.sh`](repro/consan_4112_repro.sh).
 
@@ -26,7 +27,7 @@ Strict policy correctly terminates rather than emitting a patched image built
 from conflicting rewrites, so this is a fail-closed outcome, not a false pass.
 
 `status=4112` is distinct from the `status=4104` ABI-capacity rejection of #9970,
-which is fixed. No upstream issue covers 4112 yet.
+which is fixed. 4112 is tracked upstream as ROCm/rocm-systems#10378.
 
 ## Why it only became visible now
 
