@@ -2233,12 +2233,18 @@ def test_rebuild_commands_are_runnable_from_the_repo_root():
             # every fixtures/ token must be reached through recipes/sanitizers/.
             unrooted = re.findall(r"(?<![\w/.])fixtures/[\w./-]+", command)
             assert not unrooted, f"{entry['path']}: unrooted {unrooted} in {command!r}"
-    # The paths a command does name resolve in this checkout (sources at least;
-    # bin/ and isa/ are gitignored build outputs).
+    # Every *input* path a command names resolves in a clean checkout. The two
+    # build-output roots are gitignored, so they are skipped by prefix rather than
+    # by substring -- an earlier version matched "/bin/" and so happened to pass
+    # only on a machine where a previous run had already created those dirs.
+    generated = (
+        "recipes/sanitizers/fixtures/isa",
+        "recipes/sanitizers/fixtures/bin",
+    )
     for entry in gen.rebuild_plan(refs, target="gfx950"):
         for command in entry["commands"]:
             for token in re.findall(r"recipes/sanitizers/fixtures/[\w./-]+", command):
-                if "/isa/" in token or "/bin/" in token or token.endswith("/isa"):
+                if any(token == root or token.startswith(f"{root}/") for root in generated):
                     continue
                 assert (_REPO_ROOT / token).exists(), f"{entry['path']}: {token}"
 
