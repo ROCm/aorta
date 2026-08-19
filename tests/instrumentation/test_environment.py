@@ -1501,6 +1501,56 @@ class TestCollectEnvContract:
         assert set(snap.nics.keys()) == {"ainic", "broadcom", "cx7"}
         assert all(snap.nics[v] == {"present": None} for v in snap.nics)
 
+    def test_disaster_snapshot_nested_blocks_match_the_happy_path_shape(
+        self, all_disabled
+    ):
+        """Guard the NESTED shapes, not just the top-level field list.
+
+        ``test_disaster_snapshot_populates_every_envsnapshot_field`` catches a new
+        top-level field, but a new key inside an existing block slips past it: the
+        disaster path built ``rocm`` / ``hipblaslt`` / ``rocblas`` from inline
+        literals, so schema 1.16's ``root``/``layout``/``upstream_commit`` keys were
+        added to the happy path only. A crash artifact then advertised
+        ``schema_version: "1.16"`` while omitting keys a 1.16 consumer indexes,
+        which is the exact opposite of what the disaster path is for.
+
+        Comparing against the all-unavailable happy-path snapshot ties the two
+        together for every future bump instead of re-listing keys here.
+        """
+        happy = collect_env()
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=[], unexpected_reason="collect_env: boom"
+        )
+        for block in ("rocm", "hipblaslt", "rocblas", "hip", "therock"):
+            assert set(getattr(snap, block)) == set(getattr(happy, block)), block
+
+    def test_disaster_snapshot_keeps_rocm_root_attribution(self):
+        """A crash must not lose WHERE the probe looked.
+
+        Root resolution happens at import and cannot fail, so the attribution
+        keys are answerable even when the version reads never ran -- and they are
+        what makes the resulting nulls interpretable.
+        """
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=[], unexpected_reason="collect_env: boom"
+        )
+        assert snap.rocm["root"] == str(env_mod.ROCM_ROOT)
+        assert snap.rocm["lib_root"] == str(env_mod.ROCM_LIB_ROOT)
+        assert snap.rocm["root_source"] == env_mod.ROCM_ROOT_SOURCE
+        assert snap.rocm["layout"] == env_mod.ROCM_LAYOUT
+        assert snap.rocm["version"] is None
+        assert snap.rocm["version_source"] is None
+
+    def test_disaster_snapshot_gemm_blocks_carry_the_1_16_fields(self):
+        """The hipBLASLt commit is the evidence the NaN escalations rest on."""
+        snap = env_mod._disaster_snapshot(
+            preceding_reasons=[], unexpected_reason="collect_env: boom"
+        )
+        for block in (snap.hipblaslt, snap.rocblas):
+            assert block["upstream_commit"] is None
+            assert block["upstream_commit_matches_tweak"] is None
+            assert block["applied_prs"] == {}
+
     def test_disaster_snapshot_populates_every_envsnapshot_field(self):
         """Hard guard against a future PR adding a field to EnvSnapshot
         without updating _disaster_snapshot.

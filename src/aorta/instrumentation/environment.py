@@ -2483,7 +2483,7 @@ def _disaster_snapshot(
         schema_version=SCHEMA_VERSION,
         captured_at=captured_at,
         system_health=None,
-        rocm={"version": None, "version_dev": None, "kmd_version": None},
+        rocm=_empty_rocm(),
         amdgpu_driver=_empty_amdgpu_driver(),
         hip={
             "version": None,
@@ -2492,20 +2492,8 @@ def _disaster_snapshot(
             "runtime": None,
             "cpp_config": None,
         },
-        hipblaslt={
-            "rocm_release_tweak": None,
-            "package_version": None,
-            "lib_hash": None,
-            "kernel_db_revision": None,
-            "applied_prs": {},
-        },
-        rocblas={
-            "rocm_release_tweak": None,
-            "package_version": None,
-            "lib_hash": None,
-            "kernel_db_revision": None,
-            "applied_prs": {},
-        },
+        hipblaslt=_empty_gemm_library(),
+        rocblas=_empty_gemm_library(),
         composable_kernel={
             "system": {
                 "version": None,
@@ -3077,6 +3065,47 @@ def _rocm_version_from_torch() -> str | None:
         return match.group(1)
     hip_version = getattr(getattr(torch, "version", None), "hip", None)
     return str(hip_version) if hip_version else None
+
+
+def _empty_rocm() -> dict[str, Any]:
+    """The ``rocm`` block with no version data but full schema-1.16 attribution.
+
+    Used by :func:`_disaster_snapshot`, whose contract is that a crash artifact
+    still carries the shape a 1.16 consumer expects. The attribution keys are
+    filled rather than nulled because root resolution happens at import time and
+    cannot fail, so even a crashed probe can say WHERE it looked -- which is the
+    whole reason those keys exist. Only the version reads, which is what the
+    crash prevented, come back ``None``.
+    """
+    return {
+        "version": None,
+        "version_dev": None,
+        "kmd_version": None,
+        "version_source": None,
+        "root": str(ROCM_ROOT),
+        "lib_root": str(ROCM_LIB_ROOT),
+        "root_source": ROCM_ROOT_SOURCE,
+        "layout": ROCM_LAYOUT,
+    }
+
+
+def _empty_gemm_library() -> dict[str, Any]:
+    """The null-shaped hipBLASLt / rocBLAS block, including the 1.16 fields.
+
+    Both libraries share one shape (see ``_capture_rocblas``), so they share one
+    builder -- otherwise the next field added to the pair drifts into only one of
+    them, which is exactly how ``upstream_commit`` went missing from the disaster
+    path when schema 1.16 landed.
+    """
+    return {
+        "rocm_release_tweak": None,
+        "package_version": None,
+        "lib_hash": None,
+        "kernel_db_revision": None,
+        "upstream_commit": None,
+        "upstream_commit_matches_tweak": None,
+        "applied_prs": {},
+    }
 
 
 def _empty_therock() -> dict[str, Any]:
