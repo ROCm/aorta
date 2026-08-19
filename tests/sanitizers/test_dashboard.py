@@ -2089,10 +2089,76 @@ def test_rebuild_hint_sources_all_exist_in_the_repo():
     recipes = _REPO_ROOT / "recipes" / "sanitizers"
     for ref, source in gen._GENCO_ISA_SOURCES.items():
         assert (recipes / source).is_file(), f"{ref} -> {source}"
-    for ref, (source, define) in gen._BIN_SOURCES.items():
+    for ref, (source, define, _extra) in gen._BIN_SOURCES.items():
         assert (recipes / source).is_file(), f"{ref} -> {source}"
         # A define means the binary is bound to a code object it must be told about.
         assert (define is None) == (ref not in gen._BIN_OBJECT), ref
+
+
+def test_rebuild_hint_binary_flags_match_the_workflow():
+    """Cross-check the flags against the workflow that actually builds them.
+
+    Optimisation/debug flags change the executable, so a hint that drops them
+    cannot reproduce the recorded `command_sha256`. The nightly builds the two
+    guardrail repro binaries `-O1 -g` and the loader binaries without, and this
+    asserts the map still agrees rather than trusting it to stay in step.
+    """
+    workflow = (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+    # Join shell line continuations so one hipcc invocation is one line.
+    joined = workflow.replace("\\\n", " ")
+    for ref, (_source, _define, extra) in gen._BIN_SOURCES.items():
+        name = ref.rsplit("/", 1)[-1]
+        lines = [
+            line
+            for line in joined.splitlines()
+            if "hipcc" in line and f'/bin/{name}"' in line
+        ]
+        assert len(lines) == 1, f"{ref}: expected one build line, got {len(lines)}"
+        built_with_o1g = "-O1 -g" in lines[0]
+        assert built_with_o1g == ("-O1 -g" in extra), (
+            f"{ref}: workflow uses -O1 -g = {built_with_o1g}, hint says {extra!r}"
+        )
+        hint = gen._rebuild_hints([ref], target="gfx950")[0]
+        assert ("-O1 -g" in hint) == built_with_o1g, ref
+
+
+def test_recipe_fixture_refs_rejects_parent_traversal():
+    # _FIXTURE_REF_RE admits "." so it can match an extension, which also matched
+    # a parent segment. The copy checked the source against the repo root but then
+    # joined the same value onto the destination, writing outside the case dir.
+    source, built = gen._recipe_fixture_refs(
+        "source:\n  path: fixtures/../../../README.md\n"
+        "  hip: fixtures/repro/consan_lds_race.hip\n"
+        "  code_object: fixtures/isa/../../../etc/passwd\n"
+    )
+    assert source == ["fixtures/repro/consan_lds_race.hip"]
+    assert built == []
+
+
+def test_publish_recipe_inputs_never_writes_outside_the_case_inputs_dir(tmp_path):
+    case_dir = tmp_path / "runs" / "id" / "case"
+    case_dir.mkdir(parents=True)
+    recipe = tmp_path / "repo" / "recipes" / "sanitizers" / "evil.yaml"
+    recipe.parent.mkdir(parents=True)
+    (tmp_path / "repo" / "secret.txt").write_text("do not publish me")
+    # The ref must actually resolve to a real file inside repo_root, or the copy
+    # is skipped for an unrelated reason and this test proves nothing. From
+    # recipes/sanitizers/fixtures that is three parent segments up.
+    recipe.write_text("source:\n  path: fixtures/../../../secret.txt\n")
+    assert (recipe.parent / "fixtures/../../../secret.txt").resolve().is_file()
+
+    copied, built = gen._publish_recipe_inputs(
+        case_dir, recipe_src=recipe, repo_root=tmp_path / "repo"
+    )
+
+    assert copied == [] and built == []
+    # recipe.yaml is the only thing written, and nothing escaped the case dir.
+    written = sorted(p.name for p in case_dir.rglob("*") if p.is_file())
+    assert written == ["recipe.yaml"]
+    assert not (tmp_path / "runs" / "id" / "secret.txt").exists()
+    assert not (tmp_path / "runs" / "secret.txt").exists()
 
 
 def test_rebuild_hints_match_the_nightly_commands_per_artifact():
@@ -2158,6 +2224,67 @@ def test_case_index_page_carries_the_reproduction_details(tmp_path, monkeypatch)
     # The rebuild commands render as code, not as literal Markdown backticks.
     assert "prepare_gemm_isa.py" in page
     assert "`" not in page
+
+
+def test_required_env_note_names_every_machine_readable_variable():
+    # env.json carries required_env as data; the prose is the human rendering of
+    # the same facts. Bind them so a new variable cannot be added to one only.
+    for item in gen._REQUIRED_ENV:
+        assert item["var"] in gen._REQUIRED_ENV_NOTE, item["var"]
+        assert item["set_by"] in {"operator", "aorta"}
+        assert item["purpose"]
+    # ...and no variable is described in the prose that the data omits.
+    named = set(re.findall(r"`([A-Z][A-Z0-9_]+)(?:=\S+)?`", gen._REQUIRED_ENV_NOTE))
+    assert named == {item["var"] for item in gen._REQUIRED_ENV}
+
+
+def test_rebuild_plan_is_machine_readable_and_prose_is_generated_from_it():
+    # A consumer of aorta.sanitizer_run_area/0.1 should read commands as data
+    # rather than parse them out of English, and the prose must not be able to
+    # disagree with them.
+    refs = ["fixtures/isa/lds.hsaco", "fixtures/bin/lds_dispatch", "fixtures/other/x"]
+    plan = gen.rebuild_plan(refs, target="gfx950")
+    assert [entry["path"] for entry in plan] == refs
+
+    lds = plan[0]
+    assert lds["commands"] == [
+        "hipcc --genco --offload-arch=gfx950 fixtures/kernels/lds_reduce.hip -o tmp.o",
+        "clang-offload-bundler --type=o --unbundle --input=tmp.o "
+        "--targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output=fixtures/isa/lds.hsaco",
+    ]
+    assert "__CLANG_OFFLOAD_BUNDLE__" in lds["caveat"]
+    assert "-O1 -g" not in plan[1]["commands"][0]  # loader binaries are built without
+    assert "-DLDS_HSACO=" in plan[1]["commands"][0]
+    # An unknown reference yields no command rather than a plausible wrong one.
+    assert plan[2]["commands"] == []
+
+    # Every command in the plan appears verbatim in the rendered prose.
+    hints = gen._rebuild_hints(refs, target="gfx950")
+    assert len(hints) == len(plan)
+    for index, entry in enumerate(plan):
+        for command in entry["commands"]:
+            assert f"`{command}`" in hints[index], entry["path"]
+    assert hints[2] == "fixtures/other/x"
+
+
+def test_env_json_records_required_env_and_rebuild_commands(tmp_path, monkeypatch):
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    env = json.loads(
+        (out / "runs/2026-08-05-33/survey/consan-gemm/env.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert [item["var"] for item in env["required_env"]] == [
+        item["var"] for item in gen._REQUIRED_ENV
+    ]
+    rebuild = {entry["path"]: entry for entry in env["rebuild"]}
+    # The recipe's built refs each carry their own commands, at this run's target.
+    assert "fixtures/isa/consan_gemm_f32.hsaco" in rebuild
+    assert "prepare_gemm_isa.py" in rebuild["fixtures/isa/consan_gemm_f32.hsaco"]["commands"][0]
+    gemm_bin = rebuild["fixtures/bin/consan_gemm_load"]["commands"][0]
+    assert "--offload-arch=gfx950" in gemm_bin
+    assert "-DOBJECT=" in gemm_bin
 
 
 def test_md_code_to_html_escapes_before_converting_backticks():
@@ -2443,6 +2570,122 @@ def test_keep_logs_window_also_bounds_survey_logs(tmp_path, monkeypatch):
         for href in re.findall(r'href="([^"#]+)"', page):
             if not href.startswith("http"):
                 assert (area / href).resolve().exists(), f"{run_id}: {href}"
+
+
+def _publish_into(dashboard, monkeypatch, *, info=None, keep_logs=None):
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+    ]
+    if info is not None:
+        argv += ["--informational-results-dir", str(info)]
+    if keep_logs is not None:
+        argv += ["--keep-logs", str(keep_logs)]
+    monkeypatch.setattr(sys, "argv", argv)
+    return gen.main()
+
+
+def test_a_rejected_survey_report_never_persists_and_cannot_abort_a_later_publish(
+    tmp_path, monkeypatch
+):
+    """A malformed best-effort report must not take the whole dashboard down.
+
+    ``survey_cases_from_informational_dir`` deliberately skips a report whose
+    nested shape makes the reduction raise. The copy loop ran before that
+    decision was consulted, so the directory was published anyway with no
+    manifest -- and on the *next* nightly the retrofit path re-read that same
+    report and raised, aborting publication days later for a non-gating input.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    # A dict (so the isinstance guard passes) whose nested shape breaks reduction.
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps({"schema": "aorta.sanitizer_report/0.1", "checks": None})
+    )
+    assert gen.survey_cases_from_informational_dir(info, rel="runs/2026-08-05-33") == []
+
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    assert _publish_into(dashboard, monkeypatch, info=info) == 0
+    # Nothing the survey loader refused to read is left in the published history.
+    assert not (dashboard / "runs/2026-08-05-33/survey/consan-gemm").exists()
+
+    # And an orphan already on the data branch degrades instead of aborting.
+    orphan = dashboard / "runs/2026-08-05-33/survey/consan-gemm"
+    orphan.mkdir(parents=True)
+    (orphan / "sanitizer_report.json").write_text(
+        json.dumps({"schema": "aorta.sanitizer_report/0.1", "checks": None})
+    )
+    _write_history_run(dashboard / "runs", "2026-08-06-44")
+    assert _publish_into(dashboard, monkeypatch) == 0
+    assert not (orphan / "index.html").exists()
+
+
+def test_keep_logs_zero_prunes_the_current_runs_survey_area_too(tmp_path, monkeypatch):
+    # --keep-logs is documented as applying to "guardrail and survey areas alike".
+    # The survey co-publish always gzipped and defaulted logs=True, so with
+    # --keep-logs 0 the survey area was the one unbounded thing left.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    info = tmp_path / "informational"
+    (info / "consan-gemm" / "consan").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (info / "consan-gemm" / "consan" / "consan.log").write_text("hook timeout\n")
+    run_dir = _write_history_run(dashboard / "runs", "2026-08-05-33")
+    (run_dir / "waitcheck" / "waitcheck").mkdir(parents=True)
+    (run_dir / "waitcheck" / "waitcheck" / "waitcheck-0.log").write_text("scan\n")
+
+    assert _publish_into(dashboard, monkeypatch, info=info, keep_logs=0) == 0
+
+    guardrail = dashboard / "runs/2026-08-05-33/waitcheck"
+    area = dashboard / "runs/2026-08-05-33/survey/consan-gemm"
+    assert not list(guardrail.rglob("*.log*"))
+    assert not list(area.rglob("*.log*")), "survey bulk escaped --keep-logs 0"
+    env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+    assert env["logs_published"] is False
+    # Still browsable, like a pruned guardrail area.
+    assert (area / "index.html").is_file()
+    assert ".log" not in (area / "index.html").read_text(encoding="utf-8")
+
+
+def test_disjoint_history_and_output_trees_keep_the_survey_subtree(
+    tmp_path, monkeypatch
+):
+    # With --history-root separate from <out-dir>/runs the output tree is cleared
+    # and re-copied. Copying only the guardrail case dirs dropped the survey areas
+    # the history holds, so retained runs lost their survey downloads.
+    history = tmp_path / "history"
+    out = tmp_path / "dashboard"
+    _write_history_run(history, "2026-08-05-33")
+    area = history / "2026-08-05-33" / "survey" / "consan-gemm"
+    (area / "consan").mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (area / "consan" / "consan.log.gz").write_bytes(b"x")
+    (area / "env.json").write_text(json.dumps({
+        "case": "consan-gemm", "command": "aorta sweep run", "observed": {"verdict": "error"},
+    }))
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(history),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(out),
+    ])
+    assert gen.main() == 0
+
+    published = out / "runs/2026-08-05-33/survey/consan-gemm"
+    assert (published / "sanitizer_report.json").is_file()
+    assert (published / "index.html").is_file()
+    # The source history is untouched by the copy.
+    assert (area / "sanitizer_report.json").is_file()
 
 
 def test_refresh_published_case_area_reports_an_unusable_manifest(tmp_path):

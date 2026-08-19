@@ -93,7 +93,7 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    | `recipe.yaml` | The recipe exactly as it ran, pinned to this run. |
    | `inputs/` | The recipe's source-level fixture inputs (the `.hip` repro sources, the GEMM shape CSV) -- a few KB in total. |
    | `REPRODUCE.md` | Commit, command, required env, fixture rebuild steps, and the digests of the artifacts that are not published. |
-   | `env.json` | The same provenance, machine-readable (`aorta.sanitizer_run_area/0.1`). |
+   | `env.json` | The same provenance, machine-readable (`aorta.sanitizer_run_area/0.1`), including `required_env` (each variable, who sets it, and why) and `rebuild` (the per-artifact commands). `REPRODUCE.md` and the landing page are rendered *from* those two fields, so the prose cannot disagree with them. |
 
    CI-built artifacts are deliberately **not** published: a GEMM `.hsaco` is
    ~16MB, and shipping one per retained run would bloat the data branch and

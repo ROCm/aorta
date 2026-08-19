@@ -1187,10 +1187,21 @@ def _recipe_fixture_refs(recipe_text: str) -> tuple[list[str], list[str]]:
     Source inputs (the ``.hip`` repro sources, the GEMM shape CSV) are small --
     hundreds of bytes to a few KB -- and are copied into the run area. Built
     artifacts are recorded by digest only. Order is first-seen and de-duplicated.
+
+    References containing a ``..`` segment are dropped here, at the one boundary
+    both consumers share. ``_FIXTURE_REF_RE`` admits ``.`` so it can match a file
+    extension, which also let ``fixtures/../../../README.md`` through -- and while
+    the copy validated that the *source* stayed inside the repo, it then joined the
+    same unchecked value onto the destination and wrote outside the case
+    directory. Nothing under ``fixtures/`` legitimately needs a parent segment,
+    and rejecting it here keeps the copied inputs and the recorded
+    not-published list consistent about which refs exist.
     """
     source: list[str] = []
     built: list[str] = []
     for ref in dict.fromkeys(_FIXTURE_REF_RE.findall(recipe_text)):
+        if ".." in ref.split("/"):
+            continue
         (built if _is_built_fixture(ref) else source).append(ref)
     return source, built
 
@@ -1331,6 +1342,7 @@ def _publish_recipe_inputs(
     source_refs, built_refs = _recipe_fixture_refs(recipe_text)
     recipe_dir = recipe_src.parent
     copied: list[str] = []
+    inputs_root = (case_dir / "inputs").resolve()
     for ref in source_refs:
         src = recipe_dir / ref
         # Recipe text is repo-authored, but resolve defensively anyway: an input
@@ -1344,6 +1356,14 @@ def _publish_recipe_inputs(
         if not resolved.is_file():
             continue
         dest = case_dir / "inputs" / ref
+        # ...and the same check on the *write*, not just the read.
+        # ``_recipe_fixture_refs`` already drops parent segments; this is the
+        # belt-and-braces half, because a validator that covers only one use of a
+        # value is how the traversal got through in the first place.
+        try:
+            dest.resolve().relative_to(inputs_root)
+        except (OSError, ValueError):
+            continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(resolved, dest)
         copied.append(ref)
@@ -1388,9 +1408,30 @@ _REBUILD_NOTE = (
     ".github/workflows/sanitizers-nightly.yml."
 )
 
-# The env a reproduction needs, shared by both renderings so the page and the
-# downloadable file cannot drift (#384 decision 9 renders REPRODUCE.md into the
-# landing page, so its reproduction details have to be on both).
+# The env a reproduction needs, as data, so a consumer of
+# ``aorta.sanitizer_run_area/0.1`` can read the variables instead of parsing them
+# out of a sentence. ``set_by`` says whether the operator must export it or
+# ``aorta`` derives it from the recipe's policy block.
+_REQUIRED_ENV: tuple[dict[str, str], ...] = (
+    {
+        "var": "ROCJITSU_PREBUILT",
+        "set_by": "operator",
+        "purpose": "unpacked rocjitsu bundle supplying rj_waitcheck and the ConSan hook",
+    },
+    {"var": "HSA_TOOLS_LIB", "set_by": "aorta", "purpose": "ConSan hook to load"},
+    {
+        "var": "HSA_TOOLS_DISABLE_REGISTER",
+        "set_by": "aorta",
+        "purpose": "must be 1 so the hook is not double-registered",
+    },
+    {"var": "RJ_CONSAN_MODE", "set_by": "aorta", "purpose": "ConSan detection mode"},
+    {"var": "RJ_CONSAN_POLICY", "set_by": "aorta", "purpose": "ConSan reporting policy"},
+)
+
+# The prose rendering of exactly those facts, shared by both renderings so the
+# page and the downloadable file cannot drift (#384 decision 9 renders
+# REPRODUCE.md into the landing page, so the reproduction details are on both).
+# ``test_required_env_note_names_every_machine_readable_variable`` binds the two.
 _REQUIRED_ENV_NOTE = (
     "The sanitizer backends (`rj_waitcheck`, the ConSan hook) come from the "
     "prebuilt rocjitsu bundle; point `ROCJITSU_PREBUILT` at an unpacked bundle "
@@ -1432,16 +1473,25 @@ _GENCO_ISA_SOURCES = {
     "fixtures/isa/lds.hsaco": "fixtures/kernels/lds_reduce.hip",
     "fixtures/isa/tiny.hsaco": "fixtures/kernels/tiny_vecadd.hip",
 }
-# ref -> (source, define name or None). A define binds the binary to its object.
-_BIN_SOURCES: dict[str, tuple[str, str | None]] = {
-    "fixtures/bin/consan_lds_race": ("fixtures/repro/consan_lds_race.hip", None),
+# ref -> (source, define name or None, extra flags). A define binds the binary to
+# its object. ``extra`` is verbatim from the workflow: the two guardrail repro
+# binaries are built ``-O1 -g`` and the loader binaries are not, and optimisation
+# /debug flags change the executable -- so dropping them would not reproduce the
+# recorded ``command_sha256`` any more than dropping the define would.
+_BIN_SOURCES: dict[str, tuple[str, str | None, str]] = {
+    "fixtures/bin/consan_lds_race": (
+        "fixtures/repro/consan_lds_race.hip",
+        None,
+        "-O1 -g",
+    ),
     "fixtures/bin/consan_lds_race_2wave": (
         "fixtures/repro/consan_lds_race_2wave.hip",
         None,
+        "-O1 -g",
     ),
-    "fixtures/bin/consan_tiny_load": ("fixtures/kernels/consan_load.hip", "OBJECT"),
-    "fixtures/bin/consan_gemm_load": ("fixtures/kernels/consan_load.hip", "OBJECT"),
-    "fixtures/bin/lds_dispatch": ("fixtures/kernels/lds_dispatch.hip", "LDS_HSACO"),
+    "fixtures/bin/consan_tiny_load": ("fixtures/kernels/consan_load.hip", "OBJECT", ""),
+    "fixtures/bin/consan_gemm_load": ("fixtures/kernels/consan_load.hip", "OBJECT", ""),
+    "fixtures/bin/lds_dispatch": ("fixtures/kernels/lds_dispatch.hip", "LDS_HSACO", ""),
 }
 # The code object each defined binary loads, so the define can name it.
 _BIN_OBJECT = {
@@ -1449,58 +1499,108 @@ _BIN_OBJECT = {
     "fixtures/bin/consan_gemm_load": "fixtures/isa/consan_gemm_f32.hsaco",
     "fixtures/bin/lds_dispatch": "fixtures/isa/lds.hsaco",
 }
-_GEMM_ISA_HINT = (
-    "extracted from the shipped Tensile libraries (not compiled from a .hip "
-    "source) by `python scripts/sanitizers/prepare_gemm_isa.py --csv "
-    "fixtures/gemm_shapes_unique.csv --out fixtures/isa"
+_GEMM_ISA_SCRIPT = (
+    "python scripts/sanitizers/prepare_gemm_isa.py "
+    "--csv fixtures/gemm_shapes_unique.csv --out fixtures/isa"
 )
 
 
-def _rebuild_hints(built_refs: list[str], *, target: str) -> list[str]:
-    """One rebuild hint per artifact the run area deliberately does not ship (pure).
+def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
+    """How to rebuild each unpublished artifact, as data (pure).
 
-    Single source of truth so the REPRODUCE.md and landing-page renderings of
-    the rebuild section stay in parity. Each hint is the command the nightly
-    actually ran (see the tables above), because a rebuild that differs from it
-    will not reproduce the SHA-256 recorded next to the artifact.
+    ``env.json`` carries this so a consumer of ``aorta.sanitizer_run_area/0.1``
+    can read the exact commands rather than parse them out of a sentence, and
+    both prose renderings are generated from it by ``_rebuild_hints`` -- so the
+    landing page, REPRODUCE.md and the manifest cannot disagree about how an
+    artifact was built.
+
+    Each entry is ``{"path", "what", "commands", "caveat"}``. ``commands`` are the
+    nightly's own invocations (see the tables above): they are per-artifact and
+    not interchangeable, because a rebuild that differs from them will not
+    reproduce the SHA-256 recorded beside the artifact. An unrecognised reference
+    yields commands ``[]`` rather than a guess.
     """
-    hints: list[str] = []
+    plan: list[dict[str, Any]] = []
     for ref in built_refs:
         source = _GENCO_ISA_SOURCES.get(ref)
         if source:
-            hints.append(
-                f"{ref} -- a gfx code object: `hipcc --genco --offload-arch={target} "
-                f"{source} -o tmp.o`, then unbundle only if the result is a bundle "
-                "(`head -c 24 tmp.o | grep -qF __CLANG_OFFLOAD_BUNDLE__`) with "
-                "`clang-offload-bundler --type=o --unbundle --input=tmp.o "
-                f"--targets=hipv4-amdgcn-amd-amdhsa--{target} --output={ref}`, "
-                "otherwise copy tmp.o to it. The recorded digest is of the "
-                "unbundled object, so skipping that check will not match."
-            )
+            plan.append({
+                "path": ref,
+                "what": f"a gfx code object built from {source}",
+                "commands": [
+                    f"hipcc --genco --offload-arch={target} {source} -o tmp.o",
+                    f"clang-offload-bundler --type=o --unbundle --input=tmp.o "
+                    f"--targets=hipv4-amdgcn-amd-amdhsa--{target} --output={ref}",
+                ],
+                "caveat": (
+                    "Run the second command only if the first produced a bundle "
+                    "(`head -c 24 tmp.o | grep -qF __CLANG_OFFLOAD_BUNDLE__`), "
+                    "otherwise copy tmp.o into place: --genco emits a raw object on "
+                    "some ROCm builds and a bundle on others. The recorded digest is "
+                    "of the unbundled object, so skipping the check will not match."
+                ),
+            })
         elif ref == "fixtures/isa/consan_gemm_f32.hsaco":
-            hints.append(f"{ref} -- {_GEMM_ISA_HINT} --top-n 0 --consan-object {ref}`.")
+            plan.append({
+                "path": ref,
+                "what": "one representative heavy f32 SS GEMM code object",
+                "commands": [f"{_GEMM_ISA_SCRIPT} --top-n 0 --consan-object {ref}"],
+                "caveat": (
+                    "Extracted from the shipped Tensile libraries, never compiled "
+                    "from a .hip source."
+                ),
+            })
         elif f"{ref}/".startswith("fixtures/isa/") or ref == "fixtures/isa":
             # sol_<n>.hsaco, or a bare isa_dir reference covering them.
-            hints.append(
-                f"{ref} -- per-transpose f32 GEMM code objects (sol_<n>.hsaco), "
-                f"{_GEMM_ISA_HINT} --top-n 3`."
-            )
+            plan.append({
+                "path": ref,
+                "what": "the per-transpose f32 GEMM code objects (sol_<n>.hsaco)",
+                "commands": [f"{_GEMM_ISA_SCRIPT} --top-n 3"],
+                "caveat": (
+                    "Extracted from the shipped Tensile libraries, never compiled "
+                    "from a .hip source."
+                ),
+            })
         elif ref in _BIN_SOURCES:
-            source, define = _BIN_SOURCES[ref]
+            source, define, extra = _BIN_SOURCES[ref]
             flags = f"--offload-arch={target}"
+            if extra:
+                flags += f" {extra}"
             if define:
                 flags += f' -D{define}="\\"$(pwd)/{_BIN_OBJECT[ref]}\\""'
-            hints.append(
-                f"{ref} -- a host repro binary: `hipcc {flags} {source} -o {ref}`."
-                + (
-                    ""
-                    if not define
-                    else f" The -D{define} define is required: it is how the binary "
-                    "learns which code object to load."
-                )
-            )
+            plan.append({
+                "path": ref,
+                "what": f"a host repro binary built from {source}",
+                "commands": [f"hipcc {flags} {source} -o {ref}"],
+                "caveat": (
+                    f"The -D{define} define is required: it is how the binary learns "
+                    "which code object to load."
+                    if define
+                    else ""
+                ),
+            })
         else:
-            hints.append(ref)
+            plan.append({"path": ref, "what": "", "commands": [], "caveat": ""})
+    return plan
+
+
+def _rebuild_hints(built_refs: list[str], *, target: str) -> list[str]:
+    """One prose rebuild hint per artifact, rendered from ``rebuild_plan`` (pure).
+
+    Markdown, so REPRODUCE.md uses it verbatim and the landing page runs it
+    through ``_md_code_to_html``. A reference with no known recipe degrades to
+    its bare path rather than a plausible-looking wrong command.
+    """
+    hints: list[str] = []
+    for entry in rebuild_plan(built_refs, target=target):
+        if not entry["commands"]:
+            hints.append(str(entry["path"]))
+            continue
+        commands = "; ".join(f"`{command}`" for command in entry["commands"])
+        hint = f"{entry['path']} -- {entry['what']}: {commands}."
+        if entry["caveat"]:
+            hint += f" {entry['caveat']}"
+        hints.append(hint)
     return hints
 
 
@@ -1555,6 +1655,12 @@ def build_case_env(
         },
         "inputs": inputs,
         "logs_published": logs,
+        # Machine-readable counterparts of the two things REPRODUCE.md explains in
+        # prose, so a consumer of this schema does not have to parse English to
+        # learn which variables to export or how to rebuild an artifact. Both
+        # renderings are generated from these, not written alongside them.
+        "required_env": [dict(item) for item in _REQUIRED_ENV],
+        "rebuild": rebuild_plan(built_refs, target=str(meta.get("gpu") or "")),
         "artifacts_not_published": [
             {"path": ref, "sha256": by_basename.get(_basename(ref))} for ref in built_refs
         ],
@@ -3468,6 +3574,13 @@ def main() -> int:
         # published now and never onto the older runs re-rendered beside it.
         provenance = provenance_from_environ()
         info_dir = args.informational_results_dir
+        # Survey areas the co-publish loop further below rewrites from this job's
+        # own results. Every *other* published area -- an older run's, or one this
+        # run inherited from the history being re-rendered -- is refreshed in the
+        # run loop instead, so no published area is left without a landing page.
+        staged_now = (
+            {str(entry.get("name")) for entry in survey} if info_dir is not None else set()
+        )
         runs_out = args.out_dir / "runs"
         runs_out_res = runs_out.resolve()
         history_res = args.history_root.resolve()
@@ -3498,6 +3611,13 @@ def main() -> int:
                     src_case = src_run / case
                     if src_case.is_dir():
                         shutil.copytree(src_case, run_out / case, dirs_exist_ok=True)
+                # The survey subtree belongs to the run too. The stale-clear above
+                # emptied the output tree, so without this a retained run silently
+                # loses the survey areas its history holds -- their downloads 404
+                # and the regenerated run index drops the survey table.
+                src_survey = src_run / "survey"
+                if src_survey.is_dir():
+                    shutil.copytree(src_survey, run_out / "survey", dirs_exist_ok=True)
                 # Carry the run manifest too so the published layout
                 # (runs/<id>/meta.json) is complete, not just the reports.
                 src_meta = src_run / "meta.json"
@@ -3542,42 +3662,51 @@ def main() -> int:
             # time, so it ages out of the log window with the rest of that run --
             # without this its ConSan log, the bulkiest thing published, would
             # outlive the guardrail logs beside it by --keep minus --keep-logs.
-            # The current run's areas are (re)written from this job's own results
-            # further below, so they are not touched here.
-            if not current:
-                for survey_case in sorted(
-                    p for p in (run_out / "survey").glob("*") if p.is_dir()
+            for survey_case in sorted(
+                p for p in (run_out / "survey").glob("*") if p.is_dir()
+            ):
+                if current and survey_case.name in staged_now:
+                    continue  # rewritten from this job's own results further below
+                if not keep_logs:
+                    _prune_run_area_bulk(survey_case)
+                if refresh_published_case_area(
+                    survey_case, args.out_dir, logs=keep_logs
                 ):
-                    if not keep_logs:
-                        _prune_run_area_bulk(survey_case)
-                    if refresh_published_case_area(
-                        survey_case, args.out_dir, logs=keep_logs
-                    ):
-                        continue
-                    # Co-published before run areas existed: retrofit one, the same
-                    # way an older guardrail case is handled above. Without this an
-                    # area with a report but no manifest stays invisible -- it gets
-                    # no landing page, and survey_entries_from_published skips it.
-                    survey_report = _load(survey_case / "sanitizer_report.json")
-                    if not isinstance(survey_report, dict):
-                        continue
-                    stem = _survey_recipe_for(survey_case.name)
-                    up, run_up = case_dir_up(survey_case, args.out_dir)
-                    write_case_run_area(
-                        survey_case,
-                        case=survey_case.name,
-                        cls="survey",
-                        recipe_stem=stem,
-                        command=f"aorta sweep run --recipe recipes/sanitizers/{stem}.yaml",
-                        meta=run["meta"],
-                        summary=summarize_case(survey_report, None),
-                        report=survey_report,
-                        repo_root=args.repo_root,
-                        up=up,
-                        run_up=run_up,
-                        logs=keep_logs,
-                        current=False,
-                    )
+                    continue
+                # Co-published before run areas existed: retrofit one, the same way
+                # an older guardrail case is handled above. Without this an area
+                # with a report but no manifest stays invisible -- it gets no
+                # landing page, and survey_entries_from_published skips it.
+                survey_report = _load(survey_case / "sanitizer_report.json")
+                if not isinstance(survey_report, dict):
+                    continue
+                # A top-level dict can still hold a malformed *nested* shape
+                # (``{"checks": null}``) that makes the reduction raise, which is
+                # why survey_cases_from_informational_dir isolates the same call.
+                # Without this an orphan area left on the data branch by an earlier
+                # publish aborts the entire dashboard, days later and for a
+                # non-gating input. Skip it as unreadable instead.
+                try:
+                    survey_summary = summarize_case(survey_report, None)
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    continue
+                stem = _survey_recipe_for(survey_case.name)
+                up, run_up = case_dir_up(survey_case, args.out_dir)
+                write_case_run_area(
+                    survey_case,
+                    case=survey_case.name,
+                    cls="survey",
+                    recipe_stem=stem,
+                    command=f"aorta sweep run --recipe recipes/sanitizers/{stem}.yaml",
+                    meta=run["meta"],
+                    summary=survey_summary,
+                    report=survey_report,
+                    repo_root=args.repo_root,
+                    up=up,
+                    run_up=run_up,
+                    logs=keep_logs,
+                    current=False,
+                )
             (run_out / "index.html").write_text(
                 build_run_index_html(
                     run,
@@ -3592,19 +3721,32 @@ def main() -> int:
         # survey_cases_from_informational_dir so the copied path matches the link.
         latest_rel = runs[0].get("rel") if runs else None
         if latest_rel and info_dir is not None and info_dir.is_dir():
+            # The latest run's own retention decision, so --keep-logs applies to
+            # guardrail and survey areas alike as documented (with --keep-logs 0
+            # the survey area is pruned too, not left as the one unbounded thing).
+            latest_keeps_logs = 0 < max(args.keep_logs, 0)
             survey_by_name = {str(entry.get("name")): entry for entry in survey}
             for case_dir in sorted(p for p in info_dir.iterdir() if p.is_dir()):
                 src_report = case_dir / "sanitizer_report.json"
                 if not src_report.is_file():
                     continue
+                # Resolve the entry BEFORE copying. A case whose report was
+                # rejected as malformed has no entry, and copying it anyway left an
+                # orphan directory with no manifest: the next nightly then treats
+                # it as an older survey area and retrofits one from that same
+                # unusable report. Nothing should persist into history that the
+                # survey loader already decided it could not read.
+                entry = survey_by_name.get(case_dir.name)
+                if entry is None:
+                    continue
                 dest = args.out_dir / latest_rel / "survey" / case_dir.name
                 # The whole case dir, so the ConSan/waitcheck logs behind the
                 # observed verdict ship with the report (#384).
                 shutil.copytree(case_dir, dest, dirs_exist_ok=True)
-                _gzip_logs(dest)
-                entry = survey_by_name.get(case_dir.name)
-                if entry is None:
-                    continue
+                if latest_keeps_logs:
+                    _gzip_logs(dest)
+                else:
+                    _prune_run_area_bulk(dest)
                 up, run_up = case_dir_up(dest, args.out_dir)
                 write_case_run_area(
                     dest,
@@ -3618,6 +3760,7 @@ def main() -> int:
                     repo_root=args.repo_root,
                     up=up,
                     run_up=run_up,
+                    logs=latest_keeps_logs,
                     provenance=provenance,
                 )
     (args.out_dir / "summary.md").write_text(
