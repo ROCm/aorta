@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -245,3 +246,61 @@ def test_refresh_refuses_when_entry_ran_but_failed(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit):
         refresh_baselines.build_baselines(matrix_doc, tmp_path, 0.25, 0.15, False)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard metadata: the `rocm` column on both install layouts (issue #381)
+# ---------------------------------------------------------------------------
+
+
+def _roots(core: Path, libraries: Path | None = None):
+    """Stand-in for rocm_paths.RocmRoots with only what build_metadata reads."""
+    libraries = libraries or core
+    return SimpleNamespace(
+        core=core,
+        libraries=libraries,
+        version_file=core / ".info" / "version",
+        version_dev_file=core / ".info" / "version-dev",
+        lib_dir=libraries / "lib",
+    )
+
+
+def _write_version(root: Path, name: str, text: str) -> Path:
+    info = root / ".info"
+    info.mkdir(parents=True, exist_ok=True)
+    path = info / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_metadata_reads_rocm_version_on_a_classic_layout(tmp_path, monkeypatch):
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version", "7.2.4\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4"
+
+
+def test_metadata_reads_rocm_version_on_a_wheel_layout(tmp_path, monkeypatch):
+    """The regression #381 fixed: a wheel install left this column null.
+
+    `torch` and `hip` still populated from the same run, so the dashboard row
+    looked complete while the ROCm version -- the thing rows are compared
+    across -- was silently missing.
+    """
+    core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    _write_version(core, "version", "7.14.0\n")
+    libraries = tmp_path / "site-packages" / "_rocm_sdk_libraries"
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(core, libraries))
+    assert nightly_eval.build_metadata()["rocm"] == "7.14.0"
+
+
+def test_metadata_falls_back_to_version_dev(tmp_path, monkeypatch):
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version-dev", "7.2.4.50311-abc1234\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4.50311-abc1234"
+
+
+def test_metadata_rocm_is_null_when_no_install_is_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
+    assert nightly_eval.build_metadata()["rocm"] is None

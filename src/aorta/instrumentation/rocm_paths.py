@@ -242,7 +242,7 @@ def resolve_rocm_roots(environ: dict[str, str] | None = None) -> RocmRoots:
     that merely happens to be importable.
 
     Never raises and never returns ``None``: when nothing is found the
-    classic root is returned with ``source="default"``, so every derived
+    classic root is returned with ``source="none"``, so every derived
     constant stays an absolute path and the probe's fail-soft contract holds
     (a missing file yields ``None``, it does not crash).
     """

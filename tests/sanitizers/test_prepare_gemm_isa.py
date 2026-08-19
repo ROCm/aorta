@@ -63,3 +63,41 @@ def test_library_for_returns_matching_bundle(monkeypatch, tmp_path):
     lib = tmp_path / gen._SS_HEAVY.format(layout="Ailk_Bjlk")
     lib.write_bytes(b"stub")
     assert gen._library_for("Ailk_Bjlk") == lib
+
+
+def test_library_for_resolves_nested_gfx_subdir(monkeypatch, tmp_path):
+    """The TheRock wheel layout nests bundles under ``library/<gfx>/`` (#381).
+
+    Measured: classic ROCm 7.2.4 has a flat ``library/`` with ~3000 bundles,
+    while the 7.14 wheel splits them per target and ``library/`` holds only
+    the gfx directories. Looking only at the flat path finds nothing there,
+    which is a hard failure -- the sanitizer GEMM fixtures cannot be built.
+    """
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    nested = tmp_path / gen.GFX
+    nested.mkdir()
+    lib = nested / gen._SS_HEAVY.format(layout="Ailk_Bjlk")
+    lib.write_bytes(b"stub")
+    assert gen._library_for("Ailk_Bjlk") == lib
+
+
+def test_library_for_prefers_the_flat_bundle_when_both_exist(monkeypatch, tmp_path):
+    """Classic behaviour is unchanged when a per-gfx dir happens to sit beside it."""
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    bundle = gen._SS_HEAVY.format(layout="Ailk_Bjlk")
+    flat = tmp_path / bundle
+    flat.write_bytes(b"flat")
+    nested = tmp_path / gen.GFX
+    nested.mkdir()
+    (nested / bundle).write_bytes(b"nested")
+    assert gen._library_for("Ailk_Bjlk") == flat
+
+
+def test_library_for_error_names_both_candidate_paths(monkeypatch, tmp_path):
+    """A miss must say where it looked, or the wheel case is undebuggable."""
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    with pytest.raises(SystemExit) as excinfo:
+        gen._library_for("Ailk_Bjlk")
+    message = str(excinfo.value)
+    assert str(tmp_path / gen._SS_HEAVY.format(layout="Ailk_Bjlk")) in message
+    assert str(tmp_path / gen.GFX) in message

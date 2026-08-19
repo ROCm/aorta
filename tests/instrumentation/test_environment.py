@@ -23,6 +23,7 @@ Coverage matrix (per the updated A1 spec):
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import hashlib
 import importlib.metadata
@@ -32,6 +33,7 @@ import logging
 import os
 import subprocess
 import sys
+import types
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -2889,6 +2891,285 @@ class TestRocmVersionFiles:
         # Must not raise, must return None for the bad file
         result = env_mod._capture_rocm_version_files(reasons)
         assert result["kmd_version"] is None
+
+
+# ---------------------------------------------------------------------------
+# ROCm version fallback chain + TheRock provenance (schema 1.16, issue #381)
+# ---------------------------------------------------------------------------
+
+
+class TestRocmVersionFallbackChain:
+    """Each source in the chain, isolated (#381 acceptance).
+
+    Ordered most to least authoritative: the version file, then TheRock's
+    build manifest, then what pip says is installed, then the ROCm release
+    torch happens to have been compiled against. ``version_source`` has to
+    name the winner, because "7.14.0 read from a file" and "7.14.0 inferred
+    from a torch wheel" are not equally strong claims.
+    """
+
+    @pytest.fixture
+    def no_version_file(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", tmp_path / "absent")
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", tmp_path / "absent_dev")
+        monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", tmp_path / "absent_kmd")
+        monkeypatch.setattr(env_mod, "_distribution_version", lambda name: None)
+        monkeypatch.setattr(env_mod, "_rocm_version_from_torch", lambda: None)
+        return monkeypatch
+
+    def test_version_file_wins_and_short_circuits(self, tmp_path: Path, monkeypatch):
+        version = tmp_path / "version"
+        version.write_text("7.2.4\n", encoding="utf-8")
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", version)
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", tmp_path / "absent")
+        monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", tmp_path / "absent_kmd")
+
+        def fail(*args, **kwargs):
+            raise AssertionError("a later fallback ran despite the file resolving")
+
+        monkeypatch.setattr(env_mod, "_distribution_version", fail)
+        monkeypatch.setattr(env_mod, "_rocm_version_from_torch", fail)
+
+        result = env_mod._capture_rocm_version_files([], {"rocm_version": "9.9.9"})
+        assert result["version"] == "7.2.4"
+        assert result["version_source"] == "version_file"
+
+    def test_manifest_used_when_no_version_file(self, no_version_file):
+        result = env_mod._capture_rocm_version_files([], {"rocm_version": "7.14.0"})
+        assert result["version"] == "7.14.0"
+        assert result["version_source"] == "therock_manifest"
+
+    def test_pip_rocm_used_when_no_file_and_no_manifest(self, no_version_file):
+        no_version_file.setattr(
+            env_mod,
+            "_distribution_version",
+            lambda name: "7.15.0a20260716" if name == "rocm" else None,
+        )
+        result = env_mod._capture_rocm_version_files([], None)
+        assert result["version"] == "7.15.0a20260716"
+        assert result["version_source"] == "pip:rocm"
+
+    def test_pip_falls_through_to_rocm_sdk_core(self, no_version_file):
+        no_version_file.setattr(
+            env_mod,
+            "_distribution_version",
+            lambda name: "7.15.0" if name == "rocm-sdk-core" else None,
+        )
+        result = env_mod._capture_rocm_version_files([], None)
+        assert result["version_source"] == "pip:rocm-sdk-core"
+
+    def test_torch_is_the_last_resort(self, no_version_file):
+        no_version_file.setattr(env_mod, "_rocm_version_from_torch", lambda: "7.14.0")
+        result = env_mod._capture_rocm_version_files([], None)
+        assert result["version"] == "7.14.0"
+        assert result["version_source"] == "torch"
+
+    def test_all_sources_absent_yields_null_and_a_reason(self, no_version_file):
+        reasons: list[str] = []
+        result = env_mod._capture_rocm_version_files(reasons, None)
+        assert result["version"] is None
+        assert result["version_source"] is None
+        assert any(r.startswith("rocm.version:") for r in reasons)
+
+    def test_version_dev_falls_back_to_the_manifest_package_version(
+        self, no_version_file
+    ):
+        """The wheel layout ships no ``version-dev``.
+
+        ``rocm_package_version`` is its analogue: the precise build rather
+        than the release tag.
+        """
+        result = env_mod._capture_rocm_version_files(
+            [], {"rocm_version": "7.14.0", "rocm_package_version": "7.14.0rc20260801"}
+        )
+        assert result["version_dev"] == "7.14.0rc20260801"
+
+
+class TestRocmVersionFromTorch:
+    @staticmethod
+    def _fake_torch(monkeypatch, version: str, hip: str | None):
+        module = types.SimpleNamespace(
+            __version__=version, version=types.SimpleNamespace(hip=hip)
+        )
+        monkeypatch.setitem(sys.modules, "torch", module)
+
+    def test_local_segment_is_preferred_over_torch_version_hip(self, monkeypatch):
+        """``+rocm...`` carries the full package version; ``.hip`` truncates it."""
+        self._fake_torch(monkeypatch, "2.10.0+rocm7.15.0a20260716", "7.15.0")
+        assert env_mod._rocm_version_from_torch() == "7.15.0a20260716"
+
+    def test_falls_back_to_torch_version_hip(self, monkeypatch):
+        self._fake_torch(monkeypatch, "2.12.0", "7.14.60850")
+        assert env_mod._rocm_version_from_torch() == "7.14.60850"
+
+    def test_cpu_only_torch_yields_none(self, monkeypatch):
+        self._fake_torch(monkeypatch, "2.12.0+cpu", None)
+        assert env_mod._rocm_version_from_torch() is None
+
+    def test_broken_torch_import_does_not_raise(self, monkeypatch):
+        def boom(name, *args, **kwargs):
+            if name == "torch":
+                raise RuntimeError("half-installed torch")
+            return original(name, *args, **kwargs)
+
+        original = builtins.__import__
+        monkeypatch.delitem(sys.modules, "torch", raising=False)
+        monkeypatch.setattr(builtins, "__import__", boom)
+        assert env_mod._rocm_version_from_torch() is None
+
+
+class TestTheRockManifest:
+    """Manifest parsing (#381 acceptance: full SHA recorded when present)."""
+
+    MANIFEST = {
+        "rocm_version": "7.14.0",
+        "rocm_package_version": "7.14.0",
+        "the_rock_commit": "418cd5f63abb7a604bad5874cd7b2e29334e640f",
+        "github_run_id": "29052710811",
+        "github_job": "build_stage",
+        "submodules": [
+            {
+                "submodule_name": "llvm-project",
+                "submodule_url": "https://github.com/ROCm/llvm-project.git",
+                "pin_sha": "46fcb339fb61119b337f973c7ca9e710a319fdd0",
+                "patches": ["patches/amd-mainline/llvm-project/0002-hipcc.patch"],
+            },
+            {
+                "submodule_name": "rocm-libraries",
+                "submodule_url": "https://github.com/ROCm/rocm-libraries",
+                "pin_sha": "cd9574023093742434e8c992d13b89ab9a6c1cf8",
+                "patches": [],
+            },
+        ],
+    }
+
+    def test_absent_manifest_is_a_documented_absence(self, tmp_path, monkeypatch):
+        """Classic installs have no manifest and never will."""
+        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", tmp_path / "absent.json")
+        assert env_mod._read_therock_manifest() is None
+        block = env_mod._capture_therock(None)
+        assert block["status"] == "absent"
+        assert block["gemm_libraries_commit"] is None
+        assert block["submodules"] == []
+
+    def test_manifest_is_read_and_parsed(self, tmp_path, monkeypatch):
+        path = tmp_path / "therock_manifest.json"
+        path.write_text(json.dumps(self.MANIFEST), encoding="utf-8")
+        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", path)
+        assert env_mod._read_therock_manifest() == self.MANIFEST
+
+    def test_unparseable_manifest_is_treated_as_absent(self, tmp_path, monkeypatch):
+        path = tmp_path / "therock_manifest.json"
+        path.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", path)
+        assert env_mod._read_therock_manifest() is None
+
+    def test_non_dict_manifest_is_treated_as_absent(self, tmp_path, monkeypatch):
+        path = tmp_path / "therock_manifest.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", path)
+        assert env_mod._read_therock_manifest() is None
+
+    def test_capture_records_build_provenance(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            env_mod, "THEROCK_MANIFEST_FILE", tmp_path / "therock_manifest.json"
+        )
+        block = env_mod._capture_therock(self.MANIFEST)
+        assert block["status"] == "present"
+        assert block["rocm_version"] == "7.14.0"
+        assert block["the_rock_commit"] == "418cd5f63abb7a604bad5874cd7b2e29334e640f"
+        assert block["github_run_id"] == "29052710811"
+        assert block["github_job"] == "build_stage"
+
+    def test_gemm_libraries_commit_is_the_full_forty_char_pin(self):
+        """The whole point of the manifest.
+
+        The classic header exposes only a truncated tweak; this is the same
+        commit at full width, and it is the hipBLASLt provenance the NaN
+        escalations are argued from.
+        """
+        block = env_mod._capture_therock(self.MANIFEST)
+        assert block["gemm_libraries_commit"] == (
+            "cd9574023093742434e8c992d13b89ab9a6c1cf8"
+        )
+        assert len(block["gemm_libraries_commit"]) == 40
+
+    def test_patches_are_recorded_against_their_pin(self):
+        """A non-empty patch list means the build is NOT that commit alone."""
+        block = env_mod._capture_therock(self.MANIFEST)
+        llvm = next(s for s in block["submodules"] if s["name"] == "llvm-project")
+        assert llvm["patches"] == [
+            "patches/amd-mainline/llvm-project/0002-hipcc.patch"
+        ]
+        gemm = next(s for s in block["submodules"] if s["name"] == "rocm-libraries")
+        assert gemm["patches"] == []
+
+    def test_malformed_submodule_entries_are_skipped(self):
+        block = env_mod._capture_therock(
+            {"submodules": ["not-a-dict", {"submodule_name": "x", "pin_sha": None}]}
+        )
+        assert [s["name"] for s in block["submodules"]] == ["x"]
+        assert block["gemm_libraries_commit"] is None
+
+    def test_non_list_submodules_does_not_raise(self):
+        block = env_mod._capture_therock({"submodules": "nope"})
+        assert block["submodules"] == []
+
+
+class TestGemmProvenanceInvariant:
+    """The tweak/manifest cross-check (#381 acceptance).
+
+    Synthetic data only, and deliberately so: no real image ships both sides.
+    The classic layout has the headers but no manifest, and the runtime wheel
+    has the manifest but no headers, so on every image available today the
+    field is ``None``. It exists for the devel-wheel case and as a mis-parse
+    guard.
+    """
+
+    MANIFEST_SHA = "5b515cf1bcaa0d2f3e4c5d6a7b8c9d0e1f2a3b4c"
+
+    def test_matching_prefix_is_true(self):
+        assert env_mod._gemm_provenance_matches("5b515cf1bc", self.MANIFEST_SHA) is True
+
+    def test_prefix_is_compared_at_the_tweaks_own_length(self):
+        """Not a fixed 8 chars.
+
+        Measured on ROCm 7.2.4 the tweak is 10 characters, and the field is
+        documented as 7-12, so a hardcoded width would either truncate the
+        comparison or fail a correct install.
+        """
+        assert len("5b515cf1bc") == 10
+        assert env_mod._gemm_provenance_matches("5b515cf", self.MANIFEST_SHA) is True
+        assert env_mod._gemm_provenance_matches("5b515cf1bcaa", self.MANIFEST_SHA) is True
+
+    def test_mismatch_is_false(self):
+        assert (
+            env_mod._gemm_provenance_matches("deadbeef12", self.MANIFEST_SHA) is False
+        )
+
+    def test_comparison_is_case_insensitive(self):
+        assert (
+            env_mod._gemm_provenance_matches("5B515CF1BC", self.MANIFEST_SHA.upper())
+            is True
+        )
+
+    @pytest.mark.parametrize(
+        "tweak,manifest_sha",
+        [
+            (None, MANIFEST_SHA),
+            ("5b515cf1bc", None),
+            (None, None),
+            ("", MANIFEST_SHA),
+            ("5b515cf1bc", ""),
+        ],
+    )
+    def test_absent_side_yields_none_not_false(self, tweak, manifest_sha):
+        """``None`` means "could not check", ``False`` means "checked, mismatched".
+
+        Collapsing them would report every real image today as a provenance
+        mismatch.
+        """
+        assert env_mod._gemm_provenance_matches(tweak, manifest_sha) is None
 
 
 # ---------------------------------------------------------------------------
