@@ -87,7 +87,7 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
 
    | File | What it is |
    | --- | --- |
-   | `index.html` | Landing page: the command, run identity, observed verdict, and every file below as a download. GitHub Pages does not auto-index a directory, so this is what makes the run-area link resolve. |
+   | `index.html` | Landing page: the command, the env a reproduction needs, run identity, observed verdict, the recorded digests (including each `code_object_sha256`), the fixture rebuild steps, and every file below as a download. GitHub Pages does not auto-index a directory, so this is what makes the run-area link resolve. |
    | `sanitizer_report.json` | The full `aorta.sanitizer_report/0.1` document the dashboard renders from. |
    | `consan/consan.log.gz`, `waitcheck/waitcheck-*.log.gz` | The sanitizer output the verdict was derived from, gzipped. |
    | `recipe.yaml` | The recipe exactly as it ran, pinned to this run. |
@@ -97,10 +97,20 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
 
    CI-built artifacts are deliberately **not** published: a GEMM `.hsaco` is
    ~16MB, and shipping one per retained run would bloat the data branch and
-   Pages. `REPRODUCE.md` / `env.json` instead record each one's path and SHA-256
-   (taken from the report, which already carries the waitcheck binary digest, the
-   ConSan repro command and hook digests, and every kernel's `code_object_sha256`)
-   plus the command to rebuild it, so a local rebuild can be verified.
+   Pages. `index.html` / `REPRODUCE.md` / `env.json` instead record each one's
+   path and SHA-256 (taken from the report, which already carries the waitcheck
+   binary digest, the ConSan repro command and hook digests, and every kernel's
+   `code_object_sha256`) plus the command to rebuild it, so a local rebuild can
+   be verified.
+
+   Those rebuild commands are per-artifact, because they are not
+   interchangeable: a `--genco` code object is a raw ELF on some ROCm builds and
+   a clang-offload bundle on others, so it must be unbundled conditionally (the
+   recorded digest is of the unbundled object the loader opens); the GEMM objects
+   are *extracted* from the shipped Tensile libraries by `prepare_gemm_isa.py`
+   rather than compiled; and each `consan_load` / `lds_dispatch` binary needs the
+   `-DOBJECT` / `-DLDS_HSACO` define naming the object it loads. A generic
+   "`hipcc` it" hint would build a different file and fail the digest check.
 
    Logs, the recipe copy and its inputs are kept only for the newest **7** runs
    (`--keep-logs 7`) -- guardrail and survey areas alike -- while reports stay for

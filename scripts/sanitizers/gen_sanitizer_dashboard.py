@@ -971,6 +971,13 @@ def survey_cases_from_spec(
                 "report_rel": (
                     _safe_report_rel(case.get("report_rel")) if summary["present"] else None
                 ),
+                # Whether this case's whole run-area *directory* is published, not
+                # just its report. A spec entry renders from an inline report or an
+                # out-of-tree report_path, so by default nothing stages the
+                # directory and no run-area link may be emitted for it (a present
+                # report is not evidence the directory exists). A caller that does
+                # publish complete areas can say so with `"staged": true`.
+                "staged": case.get("staged") is True and summary["present"],
                 "cls": "survey",
                 "summary": summary,
             }
@@ -1082,6 +1089,13 @@ def survey_cases_from_informational_dir(
                     f"recipes/sanitizers/{_survey_recipe_for(name)}.yaml"
                 ),
                 "report_rel": report_rel,
+                # These are the cases ``main`` co-publishes as complete run areas
+                # (report + logs + manifests + index.html) under
+                # ``<rel>/survey/<name>/``, so unlike a ``--survey`` spec entry the
+                # directory link is safe to emit. Gated on ``rel`` for the same
+                # reason ``report_rel`` is: the results-dir / runs-root modes
+                # publish nothing co-located.
+                "staged": rel is not None and summary["present"],
                 "cls": "survey",
                 "summary": summary,
             }
@@ -1374,25 +1388,116 @@ _REBUILD_NOTE = (
     ".github/workflows/sanitizers-nightly.yml."
 )
 
+# The env a reproduction needs, shared by both renderings so the page and the
+# downloadable file cannot drift (#384 decision 9 renders REPRODUCE.md into the
+# landing page, so its reproduction details have to be on both).
+_REQUIRED_ENV_NOTE = (
+    "The sanitizer backends (`rj_waitcheck`, the ConSan hook) come from the "
+    "prebuilt rocjitsu bundle; point `ROCJITSU_PREBUILT` at an unpacked bundle "
+    "before running. ConSan additionally requires `HSA_TOOLS_LIB`, "
+    "`HSA_TOOLS_DISABLE_REGISTER=1`, `RJ_CONSAN_MODE` and `RJ_CONSAN_POLICY`, "
+    "which `aorta` sets for you from the recipe's policy block."
+)
+
+
+def _md_code_to_html(text: str) -> str:
+    """Render a shared Markdown prose constant's ``backticks`` as ``<code>``.
+
+    Lets the page and REPRODUCE.md render the same constant natively rather than
+    keeping two hand-synced copies of the same sentence. Escaping happens first,
+    so the split can never introduce markup from the text itself.
+    """
+    parts = _esc(text).split("`")
+    return "".join(
+        part if index % 2 == 0 else f"<code>{part}</code>"
+        for index, part in enumerate(parts)
+    )
+
+# Which source each unpublished fixture is built from, and how. Paths are
+# recipe-relative, matching how a recipe names them.
+#
+# These are per-artifact rather than one hint per directory because the commands
+# are NOT interchangeable, and a generic "hipcc it" hint produces a file whose
+# digest does not match the one recorded beside it:
+#
+# * an ``--genco`` object is a raw code object on some ROCm builds and a
+#   clang-offload bundle on others, so it must be unbundled conditionally -- the
+#   recorded digest is of the unbundled object the loader opens;
+# * the GEMM objects are *extracted* from the shipped Tensile libraries by
+#   prepare_gemm_isa.py, never compiled from a .hip source;
+# * every consan_load / lds_dispatch binary is one source compiled with a define
+#   naming the code object it loads, so omitting the define builds the wrong
+#   binary rather than failing loudly.
+_GENCO_ISA_SOURCES = {
+    "fixtures/isa/lds.hsaco": "fixtures/kernels/lds_reduce.hip",
+    "fixtures/isa/tiny.hsaco": "fixtures/kernels/tiny_vecadd.hip",
+}
+# ref -> (source, define name or None). A define binds the binary to its object.
+_BIN_SOURCES: dict[str, tuple[str, str | None]] = {
+    "fixtures/bin/consan_lds_race": ("fixtures/repro/consan_lds_race.hip", None),
+    "fixtures/bin/consan_lds_race_2wave": (
+        "fixtures/repro/consan_lds_race_2wave.hip",
+        None,
+    ),
+    "fixtures/bin/consan_tiny_load": ("fixtures/kernels/consan_load.hip", "OBJECT"),
+    "fixtures/bin/consan_gemm_load": ("fixtures/kernels/consan_load.hip", "OBJECT"),
+    "fixtures/bin/lds_dispatch": ("fixtures/kernels/lds_dispatch.hip", "LDS_HSACO"),
+}
+# The code object each defined binary loads, so the define can name it.
+_BIN_OBJECT = {
+    "fixtures/bin/consan_tiny_load": "fixtures/isa/tiny.hsaco",
+    "fixtures/bin/consan_gemm_load": "fixtures/isa/consan_gemm_f32.hsaco",
+    "fixtures/bin/lds_dispatch": "fixtures/isa/lds.hsaco",
+}
+_GEMM_ISA_HINT = (
+    "extracted from the shipped Tensile libraries (not compiled from a .hip "
+    "source) by `python scripts/sanitizers/prepare_gemm_isa.py --csv "
+    "fixtures/gemm_shapes_unique.csv --out fixtures/isa"
+)
+
 
 def _rebuild_hints(built_refs: list[str], *, target: str) -> list[str]:
     """One rebuild hint per artifact the run area deliberately does not ship (pure).
 
     Single source of truth so the REPRODUCE.md and landing-page renderings of
-    the rebuild section stay in parity.
+    the rebuild section stay in parity. Each hint is the command the nightly
+    actually ran (see the tables above), because a rebuild that differs from it
+    will not reproduce the SHA-256 recorded next to the artifact.
     """
     hints: list[str] = []
     for ref in built_refs:
-        if f"{ref}/".startswith("fixtures/isa/"):
+        source = _GENCO_ISA_SOURCES.get(ref)
+        if source:
             hints.append(
-                f"{ref} -- a gfx code object: `hipcc --genco --offload-arch={target}` "
-                "from the matching fixtures/kernels/*.hip source, or "
-                "scripts/sanitizers/prepare_gemm_isa.py for the GEMM objects."
+                f"{ref} -- a gfx code object: `hipcc --genco --offload-arch={target} "
+                f"{source} -o tmp.o`, then unbundle only if the result is a bundle "
+                "(`head -c 24 tmp.o | grep -qF __CLANG_OFFLOAD_BUNDLE__`) with "
+                "`clang-offload-bundler --type=o --unbundle --input=tmp.o "
+                f"--targets=hipv4-amdgcn-amd-amdhsa--{target} --output={ref}`, "
+                "otherwise copy tmp.o to it. The recorded digest is of the "
+                "unbundled object, so skipping that check will not match."
             )
-        elif f"{ref}/".startswith("fixtures/bin/"):
+        elif ref == "fixtures/isa/consan_gemm_f32.hsaco":
+            hints.append(f"{ref} -- {_GEMM_ISA_HINT} --top-n 0 --consan-object {ref}`.")
+        elif f"{ref}/".startswith("fixtures/isa/") or ref == "fixtures/isa":
+            # sol_<n>.hsaco, or a bare isa_dir reference covering them.
             hints.append(
-                f"{ref} -- a host repro binary: "
-                f"`hipcc --offload-arch={target} <source>.hip -o {ref}`."
+                f"{ref} -- per-transpose f32 GEMM code objects (sol_<n>.hsaco), "
+                f"{_GEMM_ISA_HINT} --top-n 3`."
+            )
+        elif ref in _BIN_SOURCES:
+            source, define = _BIN_SOURCES[ref]
+            flags = f"--offload-arch={target}"
+            if define:
+                flags += f' -D{define}="\\"$(pwd)/{_BIN_OBJECT[ref]}\\""'
+            hints.append(
+                f"{ref} -- a host repro binary: `hipcc {flags} {source} -o {ref}`."
+                + (
+                    ""
+                    if not define
+                    else f" The -D{define} define is required: it is how the binary "
+                    "learns which code object to load."
+                )
             )
         else:
             hints.append(ref)
@@ -1527,11 +1632,7 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
         f"{env.get('command', '')}",
         "```",
         "",
-        "The sanitizer backends (`rj_waitcheck`, the ConSan hook) come from the "
-        "prebuilt rocjitsu bundle; point `ROCJITSU_PREBUILT` at an unpacked bundle "
-        "before running. ConSan additionally requires `HSA_TOOLS_LIB`, "
-        "`HSA_TOOLS_DISABLE_REGISTER=1`, `RJ_CONSAN_MODE` and `RJ_CONSAN_POLICY`, "
-        "which `aorta` sets for you from the recipe's policy block.",
+        _REQUIRED_ENV_NOTE,
         "",
     ]
     hints = _rebuild_hints(built_refs, target=str(env.get("target") or "gfx950"))
@@ -1620,6 +1721,7 @@ def build_case_index_html(
         ("Date", _esc(str(env.get("date", "")))),
         ("Target", _esc(str(env.get("target", "")))),
         ("Recipe", _esc(str(env.get("recipe", "")))),
+        ("Execution", _esc(str(observed.get("execution") or _DASH))),
         ("Findings", _esc(str(observed.get("findings", 0)))),
     ]
     if env.get("container_image"):
@@ -1638,7 +1740,9 @@ def build_case_index_html(
     steps_html = (
         (
             '<p class="cap">Rebuild the fixtures</p><ul class="steps">'
-            + "".join(f"<li>{_esc(hint)}</li>" for hint in hints)
+            # The hints are one shared Markdown constant per artifact, so their
+            # `backticks` become <code> here rather than rendering literally.
+            + "".join(f"<li>{_md_code_to_html(hint)}</li>" for hint in hints)
             + f'</ul><p class="note">{_esc(_REBUILD_NOTE)}</p>'
         )
         if hints
@@ -1656,6 +1760,23 @@ def build_case_index_html(
             '<p class="cap">Artifacts not published</p><div class="table-wrap"><table>'
             "<thead><tr><th>Path</th><th>SHA-256</th></tr></thead>"
             f"<tbody>{np_rows}</tbody></table></div>"
+        )
+    # #384 requires the code-object SHA-256 on this page, and the artifacts table
+    # above cannot carry it on its own: a recipe that names only a bare
+    # ``isa_dir: fixtures/isa`` has one row and no per-object digest, so without
+    # this section those digests would exist only in env.json / REPRODUCE.md.
+    digests_html = ""
+    digests = env.get("digests") or {}
+    if isinstance(digests, dict) and digests:
+        digest_rows = "".join(
+            f"<tr><td class=mono>{_esc(str(key))}</td>"
+            f'<td class="mono wrap-any">{_esc(str(value))}</td></tr>'
+            for key, value in sorted(digests.items())
+        )
+        digests_html = (
+            '<p class="cap">Recorded digests</p><div class="table-wrap"><table>'
+            "<thead><tr><th>Key</th><th>Value</th></tr></thead>"
+            f"<tbody>{digest_rows}</tbody></table></div>"
         )
     run_link = (
         f'<a href="{_esc(str(env["run_url"]))}">workflow run</a>'
@@ -1695,7 +1816,8 @@ def build_case_index_html(
         f"{reason_html}\n"
         '<div class="repro"><span class="lbl">Reproduce</span>'
         f'<code>{_esc(str(env.get("command", "")))}</code></div>\n'
-        f"{steps_html}{np_html}"
+        f'<p class="note">{_md_code_to_html(_REQUIRED_ENV_NOTE)}</p>\n'
+        f"{steps_html}{np_html}{digests_html}"
         "</section>\n"
         '<section class="panel"><h2>Files</h2>\n'
         f'<p class="cap">{_esc(files_caption)}</p>\n'
@@ -2128,7 +2250,7 @@ def _kernel_tables_html(
     )
 
 
-def _raw_link_html(report_rel: str | None) -> str:
+def _raw_link_html(report_rel: str | None, *, staged: bool = True) -> str:
     """The run-area link, as a card footer.
 
     Points at the case's published *directory*, not just its
@@ -2138,10 +2260,17 @@ def _raw_link_html(report_rel: str | None) -> str:
     (#384). The per-kernel-row ``Report`` column still links the JSON directly
     for a schema drill-down.
 
+    ``staged=False`` emits nothing. A directory link needs an ``index.html`` that
+    only the publisher of the area can write, so a case whose *report* was staged
+    by someone else (a ``--survey`` spec supplying an inline report) has a
+    reachable JSON but no reachable directory. Guardrail rows default to ``True``:
+    their ``report_rel`` is generator-computed for present cases, and the same
+    loop publishes the area it names.
+
     Deliberately in the card body rather than the ``<summary>`` row: a link
     inside a summary competes with the disclosure toggle.
     """
-    rel = _case_dir_rel(report_rel)
+    rel = _case_dir_rel(report_rel) if staged else None
     if not rel:
         return ""
     return f'<div class="card-foot"><a href="{_esc(rel)}">run area</a></div>'
@@ -2671,7 +2800,7 @@ def _survey_case_html(entry: dict[str, Any], *, heading: str, kind: str = "") ->
             + _survey_message_html(row)
             + _survey_howto_html(entry)
             + _kernel_tables_html(row, report_rel=entry.get("report_rel"))
-            + _raw_link_html(entry.get("report_rel"))
+            + _raw_link_html(entry.get("report_rel"), staged=bool(entry.get("staged")))
         )
     return (
         f'<details class="kcard {accent}">{summary}'
@@ -2867,10 +2996,17 @@ def _run_index_survey_html(survey: list[dict[str, Any]] | None) -> str:
 
     Without this the page lists only the three gated guardrail recipes, so the
     top-nav "raw reports" link never mentions the survey cases published
-    alongside them under ``survey/<case>/`` (#384). Links are case-local, and
-    only a present report gets one so the page never points at a 404. For a past
-    run the entries come from ``survey_entries_from_published``, whose recorded
-    verdict can be absent -- hence the em-dash fallback rather than a "None".
+    alongside them under ``survey/<case>/`` (#384). For a past run the entries
+    come from ``survey_entries_from_published``, whose recorded verdict can be
+    absent -- hence the em-dash fallback rather than a "None".
+
+    A run-area link is emitted only for an entry marked ``staged`` -- i.e. one
+    whose whole directory was published -- never from the case name plus report
+    presence. A report can be *present* (it parsed) without its directory
+    existing at all: a ``--survey`` spec's entries render from an inline report
+    or an out-of-tree ``report_path``, while only ``--informational-results-dir``
+    entries are staged under ``survey/<case>/``. Keying on presence therefore
+    emitted a 404 on exactly that invocation.
     """
     if not survey:
         return ""
@@ -2880,7 +3016,7 @@ def _run_index_survey_html(survey: list[dict[str, Any]] | None) -> str:
         f"<td class=mono>{_esc(str(entry.get('command') or ''))}</td>"
         + (
             f'<td><a href="survey/{_esc(str(entry.get("name", "")))}/">run area</a></td>'
-            if (entry.get("summary") or {}).get("present")
+            if entry.get("staged")
             else '<td><span class="dash">&mdash;</span></td>'
         )
         + "</tr>"
@@ -2904,6 +3040,9 @@ def survey_entries_from_published(run_dir: Path) -> list[dict[str, Any]]:
     from -- leaving the survey areas still on the data branch under it reachable
     only by typing the URL, on a site that cannot auto-index a directory. Each
     area's own ``env.json`` already records everything that table shows.
+
+    Every entry is ``staged``: these are read off disk, so the directory is known
+    to exist by construction.
     """
     entries: list[dict[str, Any]] = []
     for case_dir in sorted(p for p in (run_dir / "survey").glob("*") if p.is_dir()):
@@ -2915,6 +3054,7 @@ def survey_entries_from_published(run_dir: Path) -> list[dict[str, Any]]:
             "name": case_dir.name,
             "label": str(env.get("case") or case_dir.name),
             "command": str(env.get("command") or ""),
+            "staged": True,
             "summary": {
                 "verdict": observed.get("verdict"),
                 "present": (case_dir / "sanitizer_report.json").is_file(),
@@ -3327,6 +3467,7 @@ def main() -> int:
         # Describes this job's GPU run only, so it is stamped onto the run being
         # published now and never onto the older runs re-rendered beside it.
         provenance = provenance_from_environ()
+        info_dir = args.informational_results_dir
         runs_out = args.out_dir / "runs"
         runs_out_res = runs_out.resolve()
         history_res = args.history_root.resolve()
@@ -3450,7 +3591,6 @@ def main() -> int:
         # that (re)creates out_dir/<rel>, using the same rel + case name as
         # survey_cases_from_informational_dir so the copied path matches the link.
         latest_rel = runs[0].get("rel") if runs else None
-        info_dir = args.informational_results_dir
         if latest_rel and info_dir is not None and info_dir.is_dir():
             survey_by_name = {str(entry.get("name")): entry for entry in survey}
             for case_dir in sorted(p for p in info_dir.iterdir() if p.is_dir()):
