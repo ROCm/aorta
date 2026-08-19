@@ -1590,6 +1590,13 @@ def test_survey_report_rel_rejects_unsafe_links():
         " runs/x/report.json",  # leading whitespace browsers would strip
         "../runs/x/report.json",  # parent-directory traversal
         "a/../../b/report.json",  # traversal buried mid-path
+        # URL syntax the browser acts on but a directory does not: the tail of each
+        # of these is a query/fragment on the segment before it, so the request
+        # never reaches the published path -- and a percent-escape can be
+        # normalised back into "..".
+        "runs/x?old/survey/foo/sanitizer_report.json",
+        "runs/x#old/survey/foo/sanitizer_report.json",
+        "runs/%2e%2e/survey/foo/sanitizer_report.json",
     ):
         spec = {"cases": [{"name": "s", "report_rel": unsafe, "report": _consan_racy_report()}]}
         entry = gen.survey_cases_from_spec(spec)[0]
@@ -1983,6 +1990,10 @@ def test_case_dir_rel_points_at_the_directory_and_rejects_unsafe_values():
         None, "", "sanitizer_report.json", "javascript:alert(1)",
         "/runs/x/c/sanitizer_report.json", "../../etc/passwd",
         "//evil.example/x/sanitizer_report.json",
+        # A query/fragment makes the emitted URL address "runs/x", not the case
+        # directory, so there is no safe area link to derive from it.
+        "runs/x?old/survey/foo/sanitizer_report.json",
+        "runs/x#old/survey/foo/sanitizer_report.json",
     ):
         assert gen._case_dir_rel(unsafe) is None, unsafe
 
@@ -2227,7 +2238,8 @@ def test_rebuild_commands_are_runnable_from_the_repo_root():
         # The recorded path stays recipe-relative; only the commands are rewritten.
         assert entry["path"].startswith("fixtures/"), entry["path"]
         assert entry["commands"], entry["path"]
-        assert entry["commands"][0].startswith("mkdir -p recipes/sanitizers/fixtures/")
+        assert entry["commands"][0] == gen._ROCM_LLVM_PATH_EXPORT
+        assert entry["commands"][1].startswith("mkdir -p recipes/sanitizers/fixtures/")
         for command in entry["commands"]:
             # No bare recipe-relative path survives into an executable command:
             # every fixtures/ token must be reached through recipes/sanitizers/.
@@ -2247,6 +2259,35 @@ def test_rebuild_commands_are_runnable_from_the_repo_root():
                 if any(token == root or token.startswith(f"{root}/") for root in generated):
                     continue
                 assert (_REPO_ROOT / token).exists(), f"{entry['path']}: {token}"
+
+
+def test_rebuild_commands_export_the_rocm_llvm_path():
+    """The bundler is not on PATH in the image that produced these artifacts.
+
+    The ROCm container exports only ``/opt/rocm/bin``, so the nightly adds the LLVM
+    bindir before building any fixture -- hipcc shells out to
+    ``clang-offload-bundler``, ``prepare_gemm_isa.py`` looks it up with
+    ``shutil.which``, and the genco branch calls it directly. A pasteable command
+    that names it bare fails the way that job's fixture build once did, so every
+    entry opens with the export and it has to stay the workflow's own.
+    """
+    workflow = (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+    assert gen._ROCM_LLVM_PATH_EXPORT in workflow
+    refs = [
+        "fixtures/isa/lds.hsaco",  # hipcc --genco + an explicit unbundle
+        "fixtures/isa/consan_gemm_f32.hsaco",  # prepare_gemm_isa.py
+        "fixtures/isa",
+        "fixtures/bin/consan_lds_race",  # hipcc host+device compile
+    ]
+    for entry in gen.rebuild_plan(refs, target="gfx950"):
+        assert entry["commands"][0] == gen._ROCM_LLVM_PATH_EXPORT, entry["path"]
+    # Rendered into the prose too, since the hints are generated from the plan.
+    hint = gen._rebuild_hints(gen.rebuild_plan(["fixtures/isa"], target="gfx950"))[0]
+    assert f"`{gen._ROCM_LLVM_PATH_EXPORT}`" in hint
+    # An unrecognised reference still yields no commands rather than a bare export.
+    assert gen.rebuild_plan(["fixtures/other/x"], target="gfx950")[0]["commands"] == []
 
 
 def test_genco_rebuild_encodes_the_bundle_check_as_one_command():
@@ -2329,6 +2370,7 @@ def test_rebuild_plan_is_machine_readable_and_prose_is_generated_from_it():
 
     lds = plan[0]
     assert lds["commands"] == [
+        gen._ROCM_LLVM_PATH_EXPORT,
         "mkdir -p recipes/sanitizers/fixtures/isa",
         "hipcc --genco --offload-arch=gfx950 "
         "recipes/sanitizers/fixtures/kernels/lds_reduce.hip -o tmp.o",
@@ -2342,7 +2384,7 @@ def test_rebuild_plan_is_machine_readable_and_prose_is_generated_from_it():
     # automated consumer can execute the branch.
     assert "__CLANG_OFFLOAD_BUNDLE__" in " ".join(lds["commands"])
     assert "--genco" in lds["caveat"]
-    hipcc = plan[1]["commands"][1]
+    hipcc = plan[1]["commands"][2]
     assert "-O1 -g" not in hipcc  # loader binaries are built without
     assert "-DLDS_HSACO=" in hipcc
     # An unknown reference yields no command rather than a plausible wrong one.
@@ -2913,9 +2955,16 @@ def test_survey_area_link_rejects_an_unsafe_caller_supplied_name():
     # survey/<name>/. HTML-escaping the attribute does not neutralize path
     # semantics, so a staged spec naming ../../other would traverse -- and would
     # disagree with the card footer, which derives its link from report_rel.
-    for unsafe in ("../../other", "a/b", "..", "", "a b", "http://x", "a\\b"):
+    for unsafe in (
+        "../../other", "a/b", "..", "", "a b", "http://x", "a\\b",
+        # A URL delimiter is as wrong as a path one: the browser reads the tail as a
+        # fragment/query on "foo", so the link misses the published directory
+        # entirely, and a percent-escape can be normalised back into traversal.
+        "foo#bar", "foo?x=1", "%2e%2e", "foo%2Fbar",
+    ):
         assert gen._safe_case_segment(unsafe) is None, unsafe
-    assert gen._safe_case_segment("consan-gemm") == "consan-gemm"
+    for ok in ("consan-gemm", "waitcheck-gemm", "consan-lds-dispatch", "sol_1.hsaco"):
+        assert gen._safe_case_segment(ok) == ok
 
     survey = gen.survey_cases_from_spec({"cases": [{
         "name": "../../other", "label": "traversal", "staged": True,
@@ -3030,6 +3079,95 @@ def test_a_survey_spec_name_is_not_treated_as_staged_by_the_copublish_loop(
     # The spec area is not staged by this job, so the run loop prunes it.
     assert not list(spec_area.rglob("*.log")), "spec area escaped --keep-logs 0"
     assert not list(spec_area.rglob("*.log.gz"))
+
+
+def test_a_spec_entry_cannot_publish_a_rejected_informational_case(tmp_path, monkeypatch):
+    # The copy loop resolves each case dir against the survey entries, but keying
+    # that lookup on the combined list let a --survey spec entry stand in for a
+    # report the informational loader had refused to read: the directory was
+    # published anyway, with a summary and command describing a different report.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    # A malformed nested shape: it passes the isinstance guard, then makes the
+    # reduction raise, so survey_cases_from_informational_dir skips the case.
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(json.dumps({"checks": None}))
+    spec = tmp_path / "survey.json"
+    spec.write_text(json.dumps({"cases": [{
+        # Same name, a healthy inline report, and staged -- so before the fix this
+        # entry satisfied the lookup for the rejected directory.
+        "name": "consan-gemm", "label": "spec case", "staged": True,
+        "report_rel": "runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json",
+        "report": _consan_racy_report(),
+    }]}))
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+        "--survey", str(spec),
+        "--informational-results-dir", str(info),
+    ])
+    assert gen.main() == 0
+
+    assert not (dashboard / "runs/2026-08-05-33/survey/consan-gemm").exists()
+
+
+def test_the_page_renders_the_survey_of_the_run_it_calls_latest(tmp_path, monkeypatch):
+    """Tab 1 and Tab 2 must describe the same run.
+
+    ``build_html``/``build_summary_md`` take their guardrail data from the newest
+    run, so on a re-run of an older workflow (see ``--current-run``) passing this
+    job's survey to them labelled the newer run "Latest run" while showing the
+    older re-run's observations under it -- and regenerating data.json dropped the
+    newer run's own published survey.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    older, newer = "2026-08-05-10", "2026-08-05-99"
+    for run_id in (older, newer):
+        _write_history_run(dashboard / "runs", run_id)
+    # The newer run published a survey area of its own on the day it ran.
+    published = dashboard / "runs" / newer / "survey" / "waitcheck-gemm"
+    published.mkdir(parents=True)
+    (published / "sanitizer_report.json").write_text(json.dumps(_waitcheck_report()))
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+        "--informational-results-dir", str(info),
+        "--current-run", older,  # this job re-ran the older workflow
+    ])
+    assert gen.main() == 0
+
+    page = (dashboard / "index.html").read_text(encoding="utf-8")
+    # The newest run's own survey is what the page shows, rebuilt from the area
+    # published under it -- links, reproduce command and all.
+    assert f"runs/{newer}/survey/waitcheck-gemm/" in page
+    assert "daily-waitcheck-gemm-object.yaml" in page
+    # ...and this job's survey is not rendered as if it belonged to that run.
+    assert "daily-consan-gemm.yaml" not in page
+    assert f"runs/{older}/survey/" not in page
+    summary_md = (dashboard / "summary.md").read_text(encoding="utf-8")
+    assert "daily-waitcheck-gemm-object.yaml" in summary_md
+    assert "daily-consan-gemm.yaml" not in summary_md
+    # Each run's record keeps its own survey, so neither is dropped or reattributed.
+    by_run = {
+        run["meta"]["run"]: run
+        for run in json.loads((dashboard / "data.json").read_text(encoding="utf-8"))
+    }
+    assert [e["name"] for e in by_run[older].get("survey", [])] == ["consan-gemm"]
+    assert [e["name"] for e in by_run[newer].get("survey", [])] == ["waitcheck-gemm"]
 
 
 def test_staged_requires_the_report_to_sit_in_the_named_case_directory():

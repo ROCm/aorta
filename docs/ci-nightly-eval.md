@@ -114,10 +114,13 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
 
    The commands are also written to be pasted as-is from the repo root, which is
    where the `git clone` in `REPRODUCE.md` leaves you: fixture paths are rooted at
-   `recipes/sanitizers/fixtures/...` (there is no top-level `fixtures/`), the
-   gitignored output directory is created first, and the conditional unbundle is a
-   single `if ... else cp ... fi` command rather than a prose aside, so an
-   automated consumer of `rebuild` can execute the list without interpreting it.
+   `recipes/sanitizers/fixtures/...` (there is no top-level `fixtures/`), each one
+   starts by putting the ROCm LLVM bindir on `PATH` (the container exports only
+   `/opt/rocm/bin`, while `clang-offload-bundler` -- which `hipcc` and
+   `prepare_gemm_isa.py` both need -- lives beside the compilers) and creating the
+   gitignored output directory, and the conditional unbundle is a single
+   `if ... else cp ... fi` command rather than a prose aside, so an automated
+   consumer of `rebuild` can execute the list without interpreting it.
 
    Logs, the recipe copy and its inputs are kept only for the newest **7** runs
    (`--keep-logs 7`) -- guardrail and survey areas alike -- while reports stay for

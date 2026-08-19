@@ -680,8 +680,8 @@ def _run_record(
     rel: str | None = None,
 ) -> dict[str, Any]:
     # Guardrail rows are the baseline-checked class (Tab 1). Tag them so data.json
-    # carries the guardrail/survey case-class split; survey cases live in the
-    # separate ``survey`` list attached to the latest run.
+    # carries the guardrail/survey case-class split; survey cases live in a separate
+    # ``survey`` list attached by ``main`` to the run each list describes.
     for r in rows.values():
         r.setdefault("cls", "guardrail")
     # Fail closed: a missing report (present=False -> match=False) turns the gate
@@ -841,8 +841,10 @@ def _safe_report_rel(value: Any) -> str | None:
     executable or off-origin ``<a href>`` -- HTML-escaping the attribute does not
     neutralize a URL scheme. Reject anything that is not a plain relative path:
     a URL scheme (``scheme:``), absolute or protocol-relative paths (leading
-    ``/``), backslashes, ``..`` parent-directory traversal, and embedded
-    control/whitespace characters. The internally-computed guardrail/history
+    ``/``), backslashes, ``..`` parent-directory traversal, embedded
+    control/whitespace characters, and the URL delimiters ``?``, ``#`` and ``%``
+    -- which address something other than the path they appear in. The
+    internally-computed guardrail/history
     links already have this shape, so this only tightens the untrusted survey
     field. Rejecting ``..`` also makes the value safe to join onto a base
     directory when it is (re)used as a filesystem ``report_path`` (see
@@ -853,6 +855,15 @@ def _safe_report_rel(value: Any) -> str | None:
     if value != value.strip() or any(ord(ch) < 0x20 for ch in value):
         return None
     if value.startswith("/") or "\\" in value:
+        return None
+    # URL syntax has to go as well, not just filesystem-unsafe characters: the
+    # value is used verbatim in an ``href``, where ``?`` and ``#`` turn the rest of
+    # the path into a query/fragment on the segment before them, and a
+    # percent-escape can be normalised back into ``..`` by URL resolution. So
+    # ``runs/x?old/survey/foo/sanitizer_report.json`` passes every check below
+    # while the browser requests ``runs/x``. None of the paths this generator
+    # builds contain any of them.
+    if any(ch in value for ch in "?#%"):
         return None
     # A relative path never carries a URL scheme; a colon in the first segment
     # (before the first "/", e.g. ``javascript:``) means it is a scheme, not a path.
@@ -1178,8 +1189,18 @@ def provenance_from_environ() -> dict[str, str]:
     return {key: os.environ[var] for key, var in _RUN_AREA_ENV_VARS if os.environ.get(var)}
 
 
+# The characters a survey case directory is actually named with (``consan-gemm``,
+# ``waitcheck-gemm``, ``consan-lds-dispatch``), leading with an alphanumeric so
+# ``.``/``..`` cannot match. An allowlist rather than a list of things to reject,
+# because the value is simultaneously a path segment and a URL segment: excluding
+# only the filesystem-dangerous characters still admitted ``foo#bar`` and ``foo?x``
+# -- which a browser reads as a fragment/query on ``foo`` -- and ``%2e%2e``, which
+# URL resolution can normalise back into traversal.
+_CASE_SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
 def _safe_case_segment(name: Any) -> str | None:
-    """A survey case name accepted only as one plain path segment.
+    """A survey case name accepted only as one plain, URL-safe path segment.
 
     The run page's area link is ``survey/<name>/``, and ``name`` on a ``--survey``
     entry is caller-supplied JSON. HTML-escaping that attribute does not neutralise
@@ -1189,11 +1210,7 @@ def _safe_case_segment(name: Any) -> str | None:
     agree by construction, since ``report_rel`` is built as
     ``<rel>/survey/<name>/sanitizer_report.json`` from this same value.
     """
-    if not isinstance(name, str) or not name or name in {".", ".."}:
-        return None
-    if "/" in name or "\\" in name or ":" in name:
-        return None
-    if any(char.isspace() or ord(char) < 0x20 for char in name):
+    if not isinstance(name, str) or not _CASE_SEGMENT_RE.fullmatch(name):
         return None
     return name
 
@@ -1630,6 +1647,18 @@ _GEMM_ISA_SCRIPT = (
     f"--csv {_FIXTURES_FROM_ROOT}/gemm_shapes_unique.csv --out {_FIXTURES_FROM_ROOT}/isa"
 )
 
+# Every rebuild starts here, because the tool none of them can run without is not
+# on PATH in the image that built the artifact: the ROCm container exports only
+# ``/opt/rocm/bin``, while ``clang-offload-bundler`` lives in the LLVM bindir. hipcc
+# shells out to it, ``prepare_gemm_isa.py`` requires it (``shutil.which``), and the
+# genco branch invokes it directly -- so a command that names it by bare name fails
+# exactly as the nightly's own fixture build once did ("clang-offload-bundler not
+# found on PATH"). Byte-identical to the export in sanitizers-nightly.yml, which
+# ``test_rebuild_commands_export_the_rocm_llvm_path`` cross-checks.
+_ROCM_LLVM_PATH_EXPORT = (
+    'export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"'
+)
+
 
 def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
     """How to rebuild each unpublished artifact, as data (pure).
@@ -1643,8 +1672,9 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
     Each entry is ``{"path", "what", "commands", "caveat"}``. ``path`` stays
     recipe-relative, matching how a recipe names the artifact and how
     ``artifacts_not_published`` records it; ``commands`` are rewritten to run from
-    the repo root, which is where REPRODUCE.md leaves the reader, and create the
-    gitignored output directory first. They are the nightly's own invocations
+    the repo root, which is where REPRODUCE.md leaves the reader, and open with the
+    two prerequisites a fresh shell lacks -- the ROCm LLVM bindir on ``PATH`` and
+    the gitignored output directory. They are the nightly's own invocations
     (see the tables above): per-artifact and not interchangeable, because a
     rebuild that differs from them will not reproduce the SHA-256 recorded beside
     the artifact. An unrecognised reference yields commands ``[]`` rather than a
@@ -1653,17 +1683,21 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
     Anything a consumer must branch on is encoded *in* a command rather than left
     to ``caveat`` prose, so the list can be executed as-is.
     """
+
+    def prelude(sub: str) -> list[str]:
+        """What every rebuild needs before its first tool call, shell order."""
+        return [_ROCM_LLVM_PATH_EXPORT, f"mkdir -p {_FIXTURES_FROM_ROOT}/{sub}"]
+
     plan: list[dict[str, Any]] = []
     for ref in built_refs:
         out = _runnable(ref)
-        mkdir = f"mkdir -p {_FIXTURES_FROM_ROOT}"
         source = _GENCO_ISA_SOURCES.get(ref)
         if source:
             plan.append({
                 "path": ref,
                 "what": f"a gfx code object built from {source}",
                 "commands": [
-                    f"{mkdir}/isa",
+                    *prelude("isa"),
                     f"hipcc --genco --offload-arch={target} {_runnable(source)} -o tmp.o",
                     # One command, because which branch is correct depends on the
                     # ROCm build: --genco emits a raw object on some and a bundle
@@ -1684,7 +1718,7 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
                 "path": ref,
                 "what": "one representative heavy f32 SS GEMM code object",
                 "commands": [
-                    f"{mkdir}/isa",
+                    *prelude("isa"),
                     f"{_GEMM_ISA_SCRIPT} --top-n 0 --consan-object {out}",
                 ],
                 "caveat": (
@@ -1697,7 +1731,7 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
             plan.append({
                 "path": ref,
                 "what": "the per-transpose f32 GEMM code objects (sol_<n>.hsaco)",
-                "commands": [f"{mkdir}/isa", f"{_GEMM_ISA_SCRIPT} --top-n 3"],
+                "commands": [*prelude("isa"), f"{_GEMM_ISA_SCRIPT} --top-n 3"],
                 "caveat": (
                     "Extracted from the shipped Tensile libraries, never compiled "
                     "from a .hip source."
@@ -1716,7 +1750,7 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
                 "path": ref,
                 "what": f"a host repro binary built from {source}",
                 "commands": [
-                    f"{mkdir}/bin",
+                    *prelude("bin"),
                     f"hipcc {flags} {_runnable(source)} -o {out}",
                 ],
                 "caveat": (
@@ -3771,10 +3805,26 @@ def main() -> int:
     # this job produced (additive; existing per-run keys are untouched).
     if current_index is not None:
         runs[current_index]["survey"] = survey
+    # What the dashboard page and the job summary show on Tab 2. Both take their
+    # guardrail data from runs[0], so the survey rendered beside it has to describe
+    # that same run -- and the run this job staged is not always the newest one (see
+    # --current-run). Passing this job's survey there would label the newer run
+    # "Latest run" while showing an older re-run's observations under it, and would
+    # drop the newer run's own published survey from data.json, which nothing else
+    # reconstructs. A published ``survey/`` has the same <case>/sanitizer_report.json
+    # layout an informational results dir does, so the newest run's list is rebuilt
+    # from the areas already published under it, at full card fidelity.
+    displayed_survey = survey
+    if runs and current_index != 0 and args.history_root is not None:
+        displayed_survey = survey_cases_from_informational_dir(
+            args.history_root / str(runs[0]["meta"].get("run", "")) / "survey",
+            rel=runs[0].get("rel"),
+        )
+        runs[0]["survey"] = displayed_survey
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "index.html").write_text(
-        build_html(runs, status=status, survey=survey),
+        build_html(runs, status=status, survey=displayed_survey),
         encoding="utf-8",
     )
     # In published-history mode, write each retained run's tiny landing page next
@@ -3948,12 +3998,26 @@ def main() -> int:
         # matches the link. current_rel, not runs[0]: on a re-run of an older
         # workflow these differ, and staging under the newer run would attribute
         # this job's sweep to a run that did not produce it.
-        if current_rel and info_dir is not None and info_dir.is_dir():
+        if (
+            current_index is not None
+            and current_rel
+            and info_dir is not None
+            and info_dir.is_dir()
+        ):
             # That run's own retention decision, so --keep-logs applies to
             # guardrail and survey areas alike as documented (with --keep-logs 0
             # the survey area is pruned too, not left as the one unbounded thing).
-            latest_keeps_logs = (current_index or 0) < max(args.keep_logs, 0)
-            survey_by_name = {str(entry.get("name")): entry for entry in survey}
+            # The staged run's position, never a fallback to the newest one: that
+            # substitution is the mistake --current-run exists to prevent.
+            staged_keeps_logs = current_index < max(args.keep_logs, 0)
+            # Informational entries only, never a --survey spec's: this loop copies
+            # only what info_dir holds, and a spec entry that happens to share a
+            # rejected case's name would satisfy the lookup below and publish the
+            # very directory the survey loader refused to read -- with a summary and
+            # command describing a different report.
+            survey_by_name = {
+                str(entry.get("name")): entry for entry in informational_survey
+            }
             for case_dir in sorted(p for p in info_dir.iterdir() if p.is_dir()):
                 src_report = case_dir / "sanitizer_report.json"
                 if not src_report.is_file():
@@ -3983,7 +4047,7 @@ def main() -> int:
                 # The whole case dir, so the ConSan/waitcheck logs behind the
                 # observed verdict ship with the report (#384).
                 shutil.copytree(case_dir, dest, dirs_exist_ok=True)
-                if latest_keeps_logs:
+                if staged_keeps_logs:
                     _gzip_logs(dest)
                 else:
                     _prune_run_area_bulk(dest)
@@ -3994,17 +4058,17 @@ def main() -> int:
                     cls="survey",
                     recipe_stem=_survey_recipe_for(case_dir.name),
                     command=str(entry.get("command") or ""),
-                    meta=runs[current_index or 0]["meta"],
+                    meta=runs[current_index]["meta"],
                     summary=entry.get("summary") or {},
                     report=_load(dest / "sanitizer_report.json"),
                     repo_root=args.repo_root,
                     up=up,
                     run_up=run_up,
-                    logs=latest_keeps_logs,
+                    logs=staged_keeps_logs,
                     provenance=provenance,
                 )
     (args.out_dir / "summary.md").write_text(
-        build_summary_md(runs, status=status, survey=survey),
+        build_summary_md(runs, status=status, survey=displayed_survey),
         encoding="utf-8",
     )
     (args.out_dir / "data.json").write_text(
