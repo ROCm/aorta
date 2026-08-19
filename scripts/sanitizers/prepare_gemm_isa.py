@@ -31,7 +31,9 @@ from aorta.instrumentation.rocm_paths import resolve_rocm_roots  # noqa: E402
 # Resolved rather than hardcoded to /opt/rocm (issue #381) so the fixtures can
 # be built from a TheRock wheel install, which keeps the Tensile database
 # under site-packages.
-HIPBLASLT_LIBRARY = resolve_rocm_roots().lib_dir / "hipblaslt" / "library"
+_ROCM_ROOTS = resolve_rocm_roots()
+HIPBLASLT_LIBRARY = _ROCM_ROOTS.lib_dir / "hipblaslt" / "library"
+LLVM_BIN_DIR = _ROCM_ROOTS.llvm_bin_dir
 GFX = "gfx950"
 TARGET = f"hipv4-amdgcn-amd-amdhsa--{GFX}"
 
@@ -53,12 +55,24 @@ def _read_rows(csv_path: Path, top_n: int) -> list[dict[str, str]]:
 
 
 def _bundler() -> str:
+    """Locate clang-offload-bundler, on PATH or in ROCm's LLVM bindir.
+
+    The bindir is on PATH in neither layout -- the classic image exports only
+    /opt/rocm/bin and the wheel image only the venv's bin -- so falling back to
+    the resolved location is what lets this run without the caller having to
+    prepend it first (issue #381).
+    """
     import shutil
 
     bundler = shutil.which("clang-offload-bundler")
-    if bundler is None:
-        raise SystemExit("clang-offload-bundler not found on PATH")
-    return bundler
+    if bundler is not None:
+        return bundler
+    resolved = LLVM_BIN_DIR / "clang-offload-bundler"
+    if resolved.is_file():
+        return str(resolved)
+    raise SystemExit(
+        f"clang-offload-bundler not found on PATH or in {LLVM_BIN_DIR}"
+    )
 
 
 def _library_for(layout: str) -> Path:

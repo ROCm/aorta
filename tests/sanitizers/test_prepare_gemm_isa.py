@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,34 @@ def test_library_for_prefers_the_flat_bundle_when_both_exist(monkeypatch, tmp_pa
     nested.mkdir()
     (nested / bundle).write_bytes(b"nested")
     assert gen._library_for("Ailk_Bjlk") == flat
+
+
+def test_bundler_prefers_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/clang-offload-bundler")
+    assert gen._bundler() == "/usr/bin/clang-offload-bundler"
+
+
+def test_bundler_falls_back_to_the_resolved_llvm_bindir(monkeypatch, tmp_path):
+    """ROCm's LLVM bindir is on PATH in neither install layout (#381).
+
+    The classic image exports only /opt/rocm/bin and the wheel image only the
+    venv's bin, so without this fallback the fixture build depends on the
+    caller having prepended the bindir first.
+    """
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    llvm_bin = tmp_path / "lib" / "llvm" / "bin"
+    llvm_bin.mkdir(parents=True)
+    bundler = llvm_bin / "clang-offload-bundler"
+    bundler.write_bytes(b"stub")
+    monkeypatch.setattr(gen, "LLVM_BIN_DIR", llvm_bin)
+    assert gen._bundler() == str(bundler)
+
+
+def test_bundler_missing_everywhere_names_the_bindir_it_tried(monkeypatch, tmp_path):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(gen, "LLVM_BIN_DIR", tmp_path / "absent")
+    with pytest.raises(SystemExit, match=str(tmp_path / "absent")):
+        gen._bundler()
 
 
 def test_library_for_error_names_both_candidate_paths(monkeypatch, tmp_path):

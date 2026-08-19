@@ -130,6 +130,19 @@ class RocmRoots:
     def include_dir(self) -> Path:
         return self.include / "include"
 
+    @property
+    def llvm_bin_dir(self) -> Path:
+        """ROCm's LLVM bindir, which holds ``clang-offload-bundler``.
+
+        Hangs off the core root, and is the same relative path in both
+        layouts. Worth a property because it is *not* on ``PATH`` in either
+        one: the classic image exports only ``/opt/rocm/bin``, and the wheel
+        image exports only the venv's ``bin``. Anything that shells out to a
+        ROCm LLVM tool -- ``hipcc`` does, for offload bundling -- has to put
+        this directory on ``PATH`` itself.
+        """
+        return self.core / "lib" / "llvm" / "bin"
+
 
 def _classic_roots(source: str) -> RocmRoots:
     """The classic single-root layout, where all three roots coincide."""

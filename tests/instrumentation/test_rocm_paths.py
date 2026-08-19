@@ -241,6 +241,7 @@ class TestClassicRegression:
         assert roots.lib_dir == Path("/opt/rocm/lib")
         assert roots.include_dir == Path("/opt/rocm/include")
         assert roots.manifest_file == Path("/opt/rocm/share/therock/therock_manifest.json")
+        assert roots.llvm_bin_dir == Path("/opt/rocm/lib/llvm/bin")
 
     def test_opt_rocm_symlink_is_not_resolved(self, tmp_path: Path, monkeypatch):
         """``/opt/rocm`` normally points at ``/opt/rocm-7.2.4``.
@@ -271,6 +272,9 @@ class TestDerivedPaths:
         assert roots.manifest_file == core / "share" / "therock" / "therock_manifest.json"
         assert roots.lib_dir == libraries / "lib"
         assert roots.include_dir == devel / "include"
+        # The LLVM tools ship with the core component in both layouts, not
+        # with the math libraries and not with the devel headers.
+        assert roots.llvm_bin_dir == core / "lib" / "llvm" / "bin"
 
     def test_roots_are_frozen(self, no_rocm, tmp_path: Path):
         roots = resolve_rocm_roots({})

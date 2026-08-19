@@ -179,11 +179,21 @@ jobs:
               "${ROCJITSU_PREBUILT}/MANIFEST.json" > "${SANITIZER_ROOT}/rocjitsu_run_id.txt"
 
             # hipcc shells out to clang-offload-bundler, which lives in the ROCm
-            # LLVM bindir but is not on PATH -- the image only exports
-            # /opt/rocm/bin -- so the fixture
-            # build failed with "clang-offload-bundler not found on PATH" (run
-            # 31161251100). Add the LLVM bindir so hipcc can find its tools.
-            export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"
+            # LLVM bindir but is not on PATH in either install layout -- the
+            # classic image exports only /opt/rocm/bin and the wheel image only
+            # the venv's bin -- so the fixture build failed with
+            # "clang-offload-bundler not found on PATH" (run 31161251100). Add
+            # the LLVM bindir so hipcc can find its tools.
+            #
+            # Derived from the resolver rather than ${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}
+            # (issue #381): that shell chain does no validation, so on a
+            # wheel-layout image -- where both vars are unset and /opt/rocm does
+            # not exist -- it silently expanded to a nonexistent directory and
+            # left the bundler unreachable. aorta is pip-installed above, so the
+            # resolver is importable here.
+            LLVM_BIN_DIR="$(python -c 'from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)')"
+            echo "[$(date +%T)] setup: ROCm LLVM bindir resolved to ${LLVM_BIN_DIR}"
+            export PATH="${LLVM_BIN_DIR}:${PATH}"
 
             mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
             echo "[$(date +%T)] fixture build: hipcc consan_lds_race (clean single-wave LDS repro) …"
