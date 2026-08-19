@@ -13,9 +13,10 @@
 #   --hook PATH     the ConSan hook to load (or set HSA_TOOLS_LIB)
 #   --gpu N         HIP_VISIBLE_DEVICES value, default 0
 #   --workdir DIR   keep intermediates here instead of a temp dir
-#   --timeout SEC   wall-clock ceiling for the hooked run, default 2400
-#                   (measured end-to-end is ~1290 s; a pre-#9964 hook never
-#                   terminates MOI inventory, so an unbounded run would hang)
+#   --timeout SEC   wall-clock ceiling for the hooked run, default 2400 (or set
+#                   CONSAN_4112_TIMEOUT). The measured end-to-end is ~1290 s; a
+#                   pre-#9964 hook never terminates MOI inventory, so an
+#                   unbounded run would hang instead of reporting inconclusive
 #   --object PATH   use an already-unbundled gfx950 code object instead of
 #                   extracting one from the local hipBLASLt install
 #   --keep          do not delete the work directory on exit
@@ -40,8 +41,10 @@ KEEP=0
 TIMEOUT="${CONSAN_4112_TIMEOUT:-2400}"
 OBJECT_IN=""
 
+# Print the header block itself rather than a hardcoded line range, so editing
+# the documentation above cannot silently truncate --help.
 usage() {
-    sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"
     exit 2
 }
 
