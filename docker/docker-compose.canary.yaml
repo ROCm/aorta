@@ -1,0 +1,21 @@
+# Compose override for the latest-ROCm canary lane (issue #382).
+#
+# Use as an override on top of docker-compose.build.yaml -- the same pattern
+# docker-compose.rccl.yaml uses -- so the canary inherits the GPU device,
+# privilege and mount configuration rather than duplicating it:
+#
+#   CANARY_BASE_IMAGE="rocm/pytorch:latest@sha256:..." \
+#   docker compose --env-file .env.canary \
+#     -f docker-compose.build.yaml -f docker-compose.canary.yaml build
+#
+# Its only job is to plumb the resolved base image into Dockerfile.rocm-canary's
+# BASE_IMAGE arg. The `:?` form is deliberate: an unset CANARY_BASE_IMAGE aborts
+# compose instead of building against an implicit "whatever :latest is now",
+# which would produce an unattributable canary row -- the one outcome #382 is
+# written to prevent.
+
+services:
+  torchenv:
+    build:
+      args:
+        BASE_IMAGE: ${CANARY_BASE_IMAGE:?CANARY_BASE_IMAGE must be a digest-pinned image (e.g. rocm/pytorch:latest@sha256:...)}

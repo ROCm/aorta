@@ -313,8 +313,36 @@ libraries' `upstream_commit`.
 
 The base image itself is still the classic 7.2.4 line; flipping it to 7.14 is
 issue #383 and a deliberate separate step, since it moves ROCm, Python and
-PyTorch at once. Issue #382 covers the wheel lane's other payoff: cheap ROCm
-version bisection in a venv, plus a non-gating latest-ROCm canary.
+PyTorch at once.
+
+#### The latest-ROCm canary lane (non-gating)
+
+`.github/workflows/latest-rocm-canary.yml` follows `rocm/pytorch:latest` — a
+wheel-layout image, hence dependent on the discovery work above — so a new ROCm
+release is noticed early. Pointing the *gate* at a moving tag is what this
+deliberately avoids: a red result would be ambiguous (our regression, or did the
+base change?) and neither reproducible nor bisectable afterwards. So the lane
+resolves `:latest` to a concrete digest at job start, records it with the
+results, and stays out of the gate's way.
+
+Non-gating is structural here, not just intended:
+
+| Mechanism | Effect |
+|---|---|
+| its own workflow | cannot appear in `nightly-eval.yml`'s graph, cannot be added to branch protection by accident |
+| eval exit code captured, not propagated | a regression on a brand-new ROCm records a row instead of a red X nobody can action |
+| results published to `results/canary/` | `gen_dashboard.py` globs `results/*.json` **non-recursively**, so canary rows cannot enter the gated dashboard's history or trends (pinned by `test_load_results_ignores_the_canary_subdirectory`) |
+| distinct container name (`aorta-rocm-canary`) | cannot tear down the gate's container on the shared MI350 runner |
+
+Each row carries `lane` (`"gate"` / `"canary"`) and `base_image` (the resolved
+digest, `null` in the gated lane where the Dockerfile pin already records it).
+Cron is 15:00 UTC, clear of gpu-tests (08:00), the nightly eval (after the 11:00
+wheels) and the sanitizer nightly (12:00); the lane is best-effort, so being
+squeezed out is acceptable where starving the gate is not.
+
+**Not done yet:** rendering these rows on the dashboard as observed-only is the
+remaining half of #382. Until it lands the data accumulates on the `ci-results`
+branch and each run's numbers are in its artifact and step summary.
 
 ### Triggers and frequency
 

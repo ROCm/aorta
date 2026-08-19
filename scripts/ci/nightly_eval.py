@@ -93,6 +93,21 @@ def build_metadata() -> dict[str, Any]:
     meta["upstream_run_id"] = os.environ.get("UPSTREAM_RUN_ID")
     meta["head_sha"] = os.environ.get("UPSTREAM_HEAD_SHA")
     meta["wheel_file"] = os.environ.get("WHEEL_FILE")
+    # Which lane produced this row, and the base image it ran on (issue #382).
+    #
+    # `lane` defaults to "gate" so every existing caller keeps describing itself
+    # correctly without being changed; the latest-ROCm canary sets "canary" so a
+    # consumer can tell an observed-only row from a gating one. Recording it here
+    # rather than inferring it downstream means the row is self-describing even in
+    # a raw artifact.
+    #
+    # `base_image` is the whole point of the canary: "ran :latest" is not
+    # attributable, "ran :latest, which resolved to sha256:..." is. The canary
+    # resolves the moving tag to a digest at job start and passes it in. It stays
+    # None in the gated lane, where the digest is already pinned in the Dockerfile
+    # and visible in review.
+    meta["lane"] = os.environ.get("AORTA_CI_LANE") or "gate"
+    meta["base_image"] = os.environ.get("AORTA_CI_BASE_IMAGE")
     return meta
 
 

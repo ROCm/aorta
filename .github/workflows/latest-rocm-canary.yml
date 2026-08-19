@@ -1,0 +1,266 @@
+name: Latest ROCm canary
+
+# Non-gating early warning for new ROCm releases (issue #382).
+#
+# The motivating idea was to point CI at `rocm/pytorch:latest` so we notice
+# version regressions. Tracking versions is right; pointing the GATE at a moving
+# tag is the part that backfires -- a red nightly becomes ambiguous (our
+# regression, or did the base change under us?), and the run is neither
+# reproducible nor bisectable afterwards. So this is a separate lane:
+#
+#   * the merge gate stays on the digest pin in docker/Dockerfile.ci-gpu, bumped
+#     deliberately via PR, so bump-validate.yml still shows the numeric/perf
+#     impact before a stack change lands;
+#   * this lane follows `:latest`, but resolves it to a CONCRETE DIGEST at job
+#     start and records that digest with the results. "Ran :latest" is not
+#     attributable; "ran :latest, which resolved to sha256:..., ROCm 7.14.0,
+#     torch 2.12.0" is.
+#
+# Non-gating is enforced three ways, not just intended:
+#   1. it is its own workflow, so it cannot appear in nightly-eval.yml's graph
+#      and cannot be added to branch protection by accident;
+#   2. the eval step captures its exit code instead of propagating it, so a
+#      workload regression on a brand-new ROCm records a row rather than
+#      painting a red X that nobody can action;
+#   3. results are published under `results/canary/` on the ci-results branch.
+#      scripts/ci/gen_dashboard.py reads `results/*.json` NON-recursively, so
+#      canary rows cannot contaminate the gated dashboard's history or trends.
+#
+# Rendering those rows on the dashboard as observed-only is the remaining half of
+# #382 and is NOT done yet -- the data accumulates here so that work has history
+# to draw on. Until then, read a canary run from its artifact.
+#
+# This lane only became possible with issue #381: `rocm/pytorch:latest` is a
+# wheel-based (TheRock) image with no /opt/rocm, so before layout-agnostic
+# discovery it would have reported `rocm: null` and could not have built the GEMM
+# fixtures, which defeats the purpose.
+
+on:
+  # 15:00 UTC: deliberately clear of the other GPU consumers on the shared MI350
+  # runner -- gpu-tests 08:00, nightly-eval after the 11:00 wheels, sanitizers
+  # 12:00. This lane is best-effort, so if it is ever squeezed out that is an
+  # acceptable outcome; starving the gate is not.
+  schedule:
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: latest-rocm-canary-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CANARY_TAG: rocm/pytorch:latest
+  CONTAINER_NAME: aorta-rocm-canary
+  DEV_WHEELS_INDEX: https://github.com/ROCm/aorta/releases/expanded_assets/dev-wheels
+
+jobs:
+  canary:
+    name: latest ROCm canary (MI350, observed-only)
+    # Scheduled runs only on the canonical repo: a fork has no MI350 runner, so
+    # the cron would queue forever there.
+    if: github.event_name != 'schedule' || github.repository == 'ROCm/aorta'
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 180
+    permissions:
+      contents: write   # publish canary history to the ci-results branch
+      actions: read
+
+    steps:
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Verify Docker access
+        run: |
+          bash scripts/ci/docker_cmd.sh info >/dev/null
+          bash scripts/ci/docker_compose.sh version
+
+      # Optional, and only to avoid Docker Hub pull rate limits: the base is
+      # public. Never hard-fail the canary on a login problem.
+      - name: Log in to container registry
+        env:
+          ROCM_SHARED_KEY: ${{ secrets.ROCM_SHARED_KEY }}
+        run: |
+          if [ -z "${ROCM_SHARED_KEY}" ]; then
+            echo "ROCM_SHARED_KEY not set; using anonymous pulls (base image is public)."
+            exit 0
+          fi
+          if ! printf '%s' "${ROCM_SHARED_KEY}" | bash scripts/ci/docker_cmd.sh login -u rocmshared --password-stdin; then
+            echo "::warning::Docker Hub login failed; continuing with anonymous pulls."
+          fi
+
+      # The step that makes this lane attributable. Resolve the moving tag ONCE,
+      # here, and use the digest for both the build and the recorded results --
+      # so even a tag that moves mid-run cannot make the row ambiguous.
+      - name: Resolve :latest to a digest
+        id: resolve
+        run: |
+          set -euo pipefail
+          digest="$(bash scripts/ci/docker_cmd.sh buildx imagetools inspect "${CANARY_TAG}" \
+            --format '{{println .Manifest.Digest}}' | head -n1 | tr -d '[:space:]')"
+          if [ -z "${digest}" ]; then
+            echo "::error::could not resolve ${CANARY_TAG} to a digest; refusing to build an unattributable canary"
+            exit 1
+          fi
+          base="${CANARY_TAG}@${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "base_image=${base}" >> "$GITHUB_OUTPUT"
+          echo "Resolved ${CANARY_TAG} -> ${base}"
+          { echo "### Latest ROCm canary"; echo; echo "- base image: \`${base}\`"; } >> "$GITHUB_STEP_SUMMARY"
+
+      # Written to RUNNER_TEMP rather than exported: scripts/ci/docker_env.sh may
+      # resolve docker to `sudo docker`, and sudo strips the environment, so a
+      # plain env var would not reach compose's interpolation. Compose reads
+      # --env-file for interpolation too, which survives sudo.
+      - name: Build and start canary container
+        working-directory: docker
+        env:
+          BASE_IMAGE: ${{ steps.resolve.outputs.base_image }}
+        run: |
+          set -euo pipefail
+          envfile="${RUNNER_TEMP}/canary.env"
+          cp .env.canary "$envfile"
+          printf 'CANARY_BASE_IMAGE=%s\n' "${BASE_IMAGE}" >> "$envfile"
+          echo "CANARY_ENV_FILE=$envfile" >> "$GITHUB_ENV"
+          bash ../scripts/ci/docker_compose.sh --env-file "$envfile" \
+            -f docker-compose.build.yaml -f docker-compose.canary.yaml build
+          bash ../scripts/ci/docker_compose.sh --env-file "$envfile" \
+            -f docker-compose.build.yaml -f docker-compose.canary.yaml up -d
+
+      # Deliberately does NOT fail the job on a non-zero eval: see the
+      # non-gating note in the header. The exit code is surfaced in the step
+      # summary and the results JSON instead.
+      - name: Install wheel and run evaluation (observed-only)
+        id: eval
+        env:
+          AORTA_CI_LANE: canary
+          AORTA_CI_BASE_IMAGE: ${{ steps.resolve.outputs.base_image }}
+        run: |
+          set -uo pipefail
+          rc=0
+          bash scripts/ci/docker_cmd.sh exec \
+            -e AORTA_CI_LANE="${AORTA_CI_LANE}" \
+            -e AORTA_CI_BASE_IMAGE="${AORTA_CI_BASE_IMAGE}" \
+            -e UPSTREAM_HEAD_SHA="${GITHUB_SHA}" \
+            -e DEV_WHEELS_INDEX="${{ env.DEV_WHEELS_INDEX }}" \
+            "${CONTAINER_NAME}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            python -m pip install --upgrade pip
+            constraint=""
+            [ -f config/ci/ci-constraints.txt ] && constraint="-c config/ci/ci-constraints.txt"
+            # No exact-wheel path here: this lane tests a ROCm base, not a
+            # specific aorta build, so it always takes the latest rc.
+            pip install --pre "amd-aorta[hw-queue]" -f "$DEV_WHEELS_INDEX" $constraint
+            python scripts/ci/nightly_eval.py --out gpu-canary-results.json
+          ' || rc=$?
+          echo "eval_rc=${rc}" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::canary eval exited ${rc} on ${{ steps.resolve.outputs.base_image }} (observed-only; not a gate)"
+          fi
+          echo "- eval exit code: \`${rc}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Reclaim results ownership
+        if: always()
+        run: |
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws 2>/dev/null \
+            || sudo -n chown -R "$uidgid" "$ws" 2>/dev/null || true
+
+      - name: Summarise the observed stack
+        if: always()
+        run: |
+          set -uo pipefail
+          [ -f gpu-canary-results.json ] || { echo "no results JSON produced"; exit 0; }
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          # nightly_eval.py puts build_metadata() under "build" (same key
+          # gen_dashboard.py reads), not "metadata".
+          doc = json.load(open("gpu-canary-results.json"))
+          build = doc.get("build") or {}
+          for key in ("lane", "base_image", "rocm", "torch", "hip", "amd_aorta_version"):
+              print(f"- {key}: `{build.get(key)}`")
+          summary = doc.get("summary") or {}
+          if summary:
+              print(f"- summary: `{json.dumps(summary, sort_keys=True)}`")
+          PY
+
+      - name: Upload canary results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: canary-results-${{ github.run_id }}
+          path: |
+            gpu-canary-results.json
+            .nightly-eval/**/matrix.json
+            .nightly-eval/**/recipe.resolved.yaml
+          if-no-files-found: warn
+
+      # Published under results/canary/ so the gated dashboard cannot see it:
+      # gen_dashboard.py globs results/*.json non-recursively.
+      - name: Publish canary history (ci-results)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -f gpu-canary-results.json ] || { echo "no results JSON; skipping publish"; exit 0; }
+          date="$(date -u +%Y-%m-%d)"
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          tmp="$(mktemp -d)"
+          # Same fail-closed branch probe as nightly-eval.yml: 0=present,
+          # 2=absent, anything else is a transport/auth failure that must NOT be
+          # mistaken for "absent" (that would truncate history to one day).
+          set +e
+          git ls-remote --exit-code --heads "$repo_url" ci-results >/dev/null 2>&1
+          lsr=$?
+          set -e
+          if [ "$lsr" -eq 0 ]; then
+            git clone --depth 1 --branch ci-results "$repo_url" "$tmp"
+          elif [ "$lsr" -eq 2 ]; then
+            echo "ci-results branch absent; creating it"
+            git clone --depth 1 "$repo_url" "$tmp"
+            ( cd "$tmp" && git checkout --orphan ci-results && git rm -rf . >/dev/null 2>&1 || true )
+          else
+            echo "::error::cannot reach ci-results (git ls-remote exit ${lsr}); failing closed"
+            exit 1
+          fi
+          mkdir -p "$tmp/results/canary"
+          cp gpu-canary-results.json "$tmp/results/canary/${date}.json"
+          # Own retention, independent of the gated lane's 180.
+          ls -1 "$tmp"/results/canary/*.json 2>/dev/null | sort | head -n -180 | xargs -r rm -f
+          ( cd "$tmp"
+            git add -A
+            if git -c user.name=aorta-ci -c user.email=aorta-ci@users.noreply.github.com \
+                 commit -m "canary results ${date}"; then
+              git push origin ci-results
+            else
+              echo "no changes to commit"
+            fi )
+
+      - name: Tear down canary container
+        if: always()
+        working-directory: docker
+        run: |
+          envfile="${CANARY_ENV_FILE:-${RUNNER_TEMP}/canary.env}"
+          [ -f "$envfile" ] || { echo "no canary env file; nothing to tear down"; exit 0; }
+          bash ../scripts/ci/docker_compose.sh --env-file "$envfile" \
+            -f docker-compose.build.yaml -f docker-compose.canary.yaml down -v

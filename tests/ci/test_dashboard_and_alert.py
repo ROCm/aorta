@@ -1375,3 +1375,50 @@ def test_change_summary_footer_splits_correctness_from_thresholded():
     html = gen_dashboard.build_change_summary(runs)
     assert "and 2 more correctness changes" in html
     assert "past 10%" not in html
+
+
+# ---------------------------------------------------------------------------
+# The canary lane must stay invisible to the gated dashboard (issue #382)
+# ---------------------------------------------------------------------------
+
+
+def test_load_results_ignores_the_canary_subdirectory(tmp_path):
+    """Structural isolation, not a naming convention.
+
+    latest-rocm-canary.yml publishes observed-only rows to
+    ``results/canary/<date>.json`` on the ci-results branch, and relies on this
+    glob being NON-recursive to keep them out of the gated dashboard's history
+    and trends. If that ever becomes ``rglob`` / ``**/*.json``, a red canary on a
+    brand-new ROCm would start moving the gated page -- which is exactly the
+    ambiguity #382 exists to avoid -- so the property is pinned here rather than
+    left to a comment.
+    """
+    results = tmp_path / "results"
+    (results / "canary").mkdir(parents=True)
+    (results / "2026-08-01.json").write_text(
+        json.dumps(_results("2026-08-01T00:00:00Z", [], build={"lane": "gate"})),
+        encoding="utf-8",
+    )
+    (results / "canary" / "2026-08-01.json").write_text(
+        json.dumps(_results("2026-08-01T12:00:00Z", [], build={"lane": "canary"})),
+        encoding="utf-8",
+    )
+
+    loaded = gen_dashboard.load_results(results)
+    assert [doc["build"]["lane"] for doc in loaded] == ["gate"]
+
+
+def test_dashboard_is_unchanged_by_a_canary_row_on_disk(tmp_path):
+    """#382 acceptance: the pinned gate is unchanged by this work."""
+    results = tmp_path / "results"
+    (results / "canary").mkdir(parents=True)
+    gate_doc = _results("2026-08-01T00:00:00Z", [], build={"lane": "gate"})
+    (results / "2026-08-01.json").write_text(json.dumps(gate_doc), encoding="utf-8")
+    before = gen_dashboard.build_dashboard_html(gen_dashboard.load_results(results))
+
+    (results / "canary" / "2026-08-01.json").write_text(
+        json.dumps(_results("2026-08-01T12:00:00Z", [], build={"lane": "canary"})),
+        encoding="utf-8",
+    )
+    after = gen_dashboard.build_dashboard_html(gen_dashboard.load_results(results))
+    assert before == after

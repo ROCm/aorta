@@ -304,3 +304,38 @@ def test_metadata_falls_back_to_version_dev(tmp_path, monkeypatch):
 def test_metadata_rocm_is_null_when_no_install_is_found(tmp_path, monkeypatch):
     monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
     assert nightly_eval.build_metadata()["rocm"] is None
+
+
+# ---------------------------------------------------------------------------
+# Lane + base-image attribution for the latest-ROCm canary (issue #382)
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_defaults_to_the_gate_lane(tmp_path, monkeypatch):
+    """Existing callers keep describing themselves correctly, unchanged."""
+    monkeypatch.delenv("AORTA_CI_LANE", raising=False)
+    monkeypatch.delenv("AORTA_CI_BASE_IMAGE", raising=False)
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
+    meta = nightly_eval.build_metadata()
+    assert meta["lane"] == "gate"
+    # The gated lane's digest is pinned in the Dockerfile and visible in review,
+    # so there is nothing to record here.
+    assert meta["base_image"] is None
+
+
+def test_metadata_records_the_canary_lane_and_resolved_digest(tmp_path, monkeypatch):
+    """"Ran :latest" is not attributable; the resolved digest is (#382)."""
+    base = "rocm/pytorch:latest@sha256:" + "ab" * 32
+    monkeypatch.setenv("AORTA_CI_LANE", "canary")
+    monkeypatch.setenv("AORTA_CI_BASE_IMAGE", base)
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
+    meta = nightly_eval.build_metadata()
+    assert meta["lane"] == "canary"
+    assert meta["base_image"] == base
+
+
+def test_empty_lane_env_falls_back_to_gate(tmp_path, monkeypatch):
+    """An exported-but-empty var must not produce a row labelled "" ."""
+    monkeypatch.setenv("AORTA_CI_LANE", "")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
+    assert nightly_eval.build_metadata()["lane"] == "gate"

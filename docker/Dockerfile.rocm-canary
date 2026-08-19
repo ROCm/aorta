@@ -1,0 +1,48 @@
+# Image for the non-gating "latest ROCm canary" lane (issue #382).
+#
+# Deliberately NOT a copy of Dockerfile.ci-gpu with a different tag. The two
+# have opposite requirements:
+#
+#   * Dockerfile.ci-gpu pins its base by digest IN THE FILE, because the merge
+#     gate must be byte-reproducible and a stack change must be visible in
+#     review.
+#   * this lane exists to notice what a NEW ROCm release does to us, so its base
+#     has to move -- but a moving tag is not attributable, and "the canary went
+#     red" is useless if you cannot say which version did it.
+#
+# The resolution: the base is a build ARG, and the workflow resolves
+# `rocm/pytorch:latest` to a concrete digest at job start, passes it here, and
+# records it alongside the results. So the tag moves between runs while any
+# individual run stays reproducible and bisectable.
+#
+# BASE_IMAGE has no default on purpose. Building this file without one is a
+# mistake (it would silently mean "whatever :latest is right now", which is the
+# exact thing this lane is designed not to do), so it fails closed instead --
+# see docker-compose.canary.yaml, which requires CANARY_BASE_IMAGE.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+
+# Same layout guard as the gated images (issue #381), and here it earns its
+# keep: `rocm/pytorch:latest` is a wheel-based (TheRock) image with no
+# /opt/rocm, so before #381 this lane could not have read ROCm at all. If a
+# future :latest ships a shape we cannot read, this fails the canary build
+# loudly instead of publishing a row full of nulls that looks like a regression.
+COPY rocm_layout_guard.py /usr/local/share/aorta/rocm_layout_guard.py
+RUN python /usr/local/share/aorta/rocm_layout_guard.py
+
+# Match the gated image's extra deps so a canary/gate difference is attributable
+# to ROCm rather than to a missing report dependency. Unpinned here (the gate
+# pins them): pinning against a moving base is what would actually break, since
+# a new base may not have wheels for a year-old pin.
+RUN python -m pip install --no-cache-dir openpyxl seaborn
+
+# No `ENV ROCM_HOME=/opt/rocm` -- see Dockerfile.ci-gpu. It matters more here
+# than anywhere else: this base genuinely has no /opt/rocm, so asserting it
+# would be the one thing that could still defeat layout-agnostic discovery
+# (#381, #382 design notes).
+
+WORKDIR /workspace/aorta
+
+CMD ["/bin/bash"]
