@@ -328,6 +328,67 @@ def test_wrap_argv_cli_accepts_pytest_target(tmp_path):
     assert argv[-3:] == ["pytest", "-k", "gemm"]
 
 
+def test_wrap_argv_cli_accepts_the_dash_m_pytest_spelling(tmp_path):
+    """``python -m pytest`` is the usual venv/CI spelling of ``pytest``."""
+    argv = wrap_argv(["python", "-m", "pytest", "-k", "gemm"], tmp_path, env={})
+    assert argv[:3] == ["python", "-m", PROTON_MODULE]
+    # Normalised onto the bare target: Proton dispatches on basename ==
+    # 'pytest' and runs ``pytest.main(args)``, so ``-m`` must not survive
+    # into the target -- Proton's own ``-m`` is ``--mode``.
+    assert argv[-3:] == ["pytest", "-k", "gemm"]
+
+
+def test_dash_m_pytest_and_bare_pytest_wrap_to_the_same_target(tmp_path):
+    """The finding behind this test: same target, different spelling."""
+    from_module = wrap_argv(["python", "-m", "pytest", "tests/", "-q"], tmp_path, env={})
+    from_bare = wrap_argv(["pytest", "tests/", "-q"], tmp_path, env={})
+    target = ["pytest", "tests/", "-q"]
+    assert from_module[-3:] == target
+    assert from_bare[-3:] == target
+    # Only argv[0] may differ: the bare spelling has no interpreter to reuse,
+    # so ``resolve_python`` falls back to ``sys.executable``.
+    assert from_module[1:] == from_bare[1:]
+
+
+def test_wrap_argv_cli_accepts_the_attached_dash_m_spelling(tmp_path):
+    argv = wrap_argv(["python", "-mpytest", "-k", "gemm"], tmp_path, env={})
+    assert argv[:3] == ["python", "-m", PROTON_MODULE]
+    assert argv[-3:] == ["pytest", "-k", "gemm"]
+
+
+def test_wrap_argv_cli_keeps_interpreter_flags_before_a_dash_m_target(tmp_path):
+    argv = wrap_argv(["python", "-u", "-m", "pytest", "-x"], tmp_path, env={})
+    assert argv[:4] == ["python", "-u", "-m", PROTON_MODULE]
+    assert argv[-2:] == ["pytest", "-x"]
+
+
+def test_wrap_argv_cli_rejects_a_module_proton_cannot_run(tmp_path):
+    """``runpy.run_path`` takes a path, so a module name has no equivalent."""
+    with pytest.raises(ProtonWrapError, match="cannot wrap 'python -m torch.distributed.run'"):
+        wrap_argv(["python", "-m", "torch.distributed.run", "train.py"], tmp_path, env={})
+
+
+def test_module_rejection_names_the_spellings_that_do_work(tmp_path):
+    with pytest.raises(ProtonWrapError) as excinfo:
+        wrap_argv(["python", "-m", "http.server"], tmp_path, env={})
+    message = str(excinfo.value)
+    assert "runpy.run_path" in message
+    assert "pytest" in message
+    assert "mode: env" in message
+
+
+def test_wrap_argv_cli_rejects_dash_m_with_no_module(tmp_path):
+    with pytest.raises(ProtonWrapError, match="no module name"):
+        wrap_argv(["python", "-m"], tmp_path, env={})
+
+
+def test_unknown_interpreter_flag_error_names_the_dash_m_escape(tmp_path):
+    """The supported-spellings list must stay in step with the code."""
+    with pytest.raises(ProtonWrapError) as excinfo:
+        wrap_argv(["python", "-c", "print(1)"], tmp_path, env={})
+    assert "'-m' with ['pytest']" in str(excinfo.value)
+
+
 def test_wrap_argv_cli_rejects_a_non_python_command(tmp_path):
     with pytest.raises(ProtonWrapError, match="mode: env"):
         wrap_argv(["/tmp/aorta_hip_gemm", "512"], tmp_path, env={})

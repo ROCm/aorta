@@ -212,16 +212,34 @@ python train.py --steps 10
       --context shadow --data tree train.py --steps 10
 ```
 
-Proton's front-end **`exec`s a script**; it is not a generic command runner.
-So the CLI wrap only applies to a Python launch (`python`, `python3`,
-`python3.12`, or `pytest`), plus a small set of no-argument interpreter
-flags that are kept in front of `-m` where they belong: `-u`, `-B`, `-E`,
-`-s`, `-S`, `-O`, `-OO`, `-I`, `-b`, `-q`. Anything else — a HIP binary, a
-shell script, `torchrun`, `python -c`, an interpreter option outside that
-set — raises a `ProtonWrapError` naming `mode: env` as the escape hatch.
-This is deliberate: requesting a measurement that cannot be taken is a
-clean setup failure, not a silently unprofiled run. `rocprof`, by contrast,
-wraps anything.
+Proton's front-end **runs a script** (through `runpy.run_path`); it is not a
+generic command runner. So the CLI wrap only applies to a Python launch
+(`python`, `python3`, `python3.12`, or `pytest`), plus a small set of
+no-argument interpreter flags that are kept in front of `-m` where they
+belong: `-u`, `-B`, `-E`, `-s`, `-S`, `-O`, `-OO`, `-I`, `-b`, `-q`.
+
+`python -m pytest ...` is accepted and normalised onto the bare
+`pytest ...` spelling, because Proton dispatches on the target's basename
+and runs it as `pytest.main(args)` — the same call `python -m pytest`
+makes. The two spellings therefore produce an identical wrap:
+
+```
+pytest -k gemm
+python -m pytest -k gemm
+→ python -m triton.profiler.proton -n <out>/proton \
+      --context shadow --data tree pytest -k gemm
+```
+
+**No other `-m <module>` works**, and the difference is Proton's, not
+aorta's: `runpy.run_path` resolves a filesystem path, so a module name has
+no spelling Proton can execute. `python -m torch.distributed.run ...` is
+refused at setup with a message naming the working spellings, rather than
+failing later inside Proton. Anything else — a HIP binary, a shell script,
+`torchrun`, `python -c`, an interpreter option outside the set above —
+raises a `ProtonWrapError` naming `mode: env` as the escape hatch. This is
+deliberate: requesting a measurement that cannot be taken is a clean setup
+failure, not a silently unprofiled run. `rocprof`, by contrast, wraps
+anything.
 
 **`mode: env`** leaves the command's own argv alone and hands it
 `AORTA_PROTON_*` variables, for a workload that calls `proton.start()` /
@@ -434,6 +452,12 @@ front-end executes a script. Either invoke the workload as
 `<python> <script.py> ...`, or switch the recipe to `proton: {mode: env}`
 and have the workload drive `proton.start()` / `proton.finalize()` itself.
 A `torchrun` or `docker run` command will always hit this.
+
+**`proton mode 'cli' cannot wrap 'python -m <module>'`.** Proton runs its
+target through `runpy.run_path`, which needs a path; `pytest` is the one
+module it also accepts. Pass the module's script by path, or use
+`mode: env`. `python -m pytest` does *not* hit this — it is normalised onto
+the bare `pytest` spelling.
 
 **`No module named triton`, from the Proton wrap.** The interpreter running
 the workload has no Triton. Run inside a container / venv that has it, or

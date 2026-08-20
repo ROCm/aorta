@@ -14,8 +14,10 @@ Two attach modes, both driven from the same recipe options:
   ``AORTA_PROTON_*`` variables, for a workload that calls ``proton.start()`` /
   ``proton.finalize()`` itself to get scoped or intra-kernel measurement.
 
-Because Proton's CLI front-end ``exec``s a *script* (it is not a generic
-command runner), the CLI wrap only applies to Python launches; anything else
+Because Proton's CLI front-end runs a *script* (it is not a generic command
+runner), the CLI wrap only applies to Python launches: a script path, a bare
+``pytest ...``, or ``<python> -m pytest ...``, which is normalised onto the
+bare spelling since Proton runs both as ``pytest.main(args)``. Anything else
 raises :class:`ProtonWrapError` with the ``mode: env`` escape hatch named,
 rather than silently running unprofiled.
 
@@ -85,6 +87,13 @@ _PYTHON_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
 # ``-m triton.profiler.proton``. Anything else means we cannot confidently
 # locate the script, so the wrap refuses instead of guessing.
 _SAFE_PYTHON_FLAGS = frozenset({"-u", "-B", "-E", "-s", "-S", "-O", "-OO", "-I", "-b", "-q"})
+# ``python -m <module>`` launches the wrap can forward. Proton's front-end
+# runs its target through ``runpy.run_path``, which resolves a *path* and not
+# a module name -- with exactly one exception: a target whose basename is
+# ``pytest`` is run in-process as ``pytest.main(args)``, which is precisely
+# what ``python -m pytest args`` does. So that spelling has an exact
+# equivalent and is translated to it; other modules have none.
+_WRAPPABLE_MODULES = frozenset({"pytest"})
 
 
 class ProtonWrapError(RuntimeError):
@@ -198,16 +207,47 @@ def build_env(
     return env
 
 
+def _module_target(module: str, module_args: list[str], argv: list[str]) -> list[str]:
+    """Translate a ``python -m <module>`` launch into Proton's target argv.
+
+    Only :data:`_WRAPPABLE_MODULES` can be forwarded, and they are forwarded
+    as the bare spelling Proton special-cases -- ``-m pytest`` becomes the
+    ``pytest`` target, which Proton runs as ``pytest.main(args)``, the same
+    call ``python -m pytest`` makes. Refusing here rather than forwarding an
+    unrunnable module name keeps the failure at setup, where it names a fix,
+    instead of surfacing as a ``run_path`` error from inside Proton.
+
+    Raises:
+        ProtonWrapError: ``-m`` carried no module, or one Proton cannot run.
+    """
+    if not module:
+        raise ProtonWrapError(f"proton mode 'cli' saw '-m' with no module name in {argv!r}.")
+    if module not in _WRAPPABLE_MODULES:
+        raise ProtonWrapError(
+            f"proton mode 'cli' cannot wrap 'python -m {module}'. Proton's "
+            "front-end runs its target through runpy.run_path, which resolves "
+            "a script path and not a module name; the only module it also "
+            f"accepts is {sorted(_WRAPPABLE_MODULES)}. Invoke the module's "
+            "script by path, or use 'proton: {mode: env}'."
+        )
+    return [module, *module_args]
+
+
 def _split_python_launch(argv: list[str]) -> tuple[list[str], list[str]]:
     """Split ``python -u script.py a b`` into interpreter flags and the target.
 
+    Accepts the three launch spellings Proton's front-end can take over: a
+    bare ``pytest ...``, a ``<python> <script.py> ...`` script launch, and a
+    ``<python> -m pytest ...`` module launch (see :func:`_module_target`,
+    which normalises the last onto the first).
+
     Raises:
-        ProtonWrapError: the command is not a Python script launch Proton's
-            front-end can take over.
+        ProtonWrapError: the command is not a launch Proton's front-end can
+            take over.
     """
     if not argv:
         raise ProtonWrapError("cannot wrap an empty argv with proton")
-    if Path(argv[0]).name == "pytest":
+    if Path(argv[0]).name in _WRAPPABLE_MODULES:
         return [], list(argv)
     if not _is_python(argv[0]):
         raise ProtonWrapError(
@@ -223,11 +263,22 @@ def _split_python_launch(argv: list[str]) -> tuple[list[str], list[str]]:
         if arg in _SAFE_PYTHON_FLAGS:
             flags.append(arg)
             continue
+        # ``-m`` before the generic option guard: a module launch is a target,
+        # not an interpreter flag, and ``python -m pytest`` must not fail
+        # where the equivalent bare ``pytest`` succeeds. Both the separate
+        # (``-m pytest``) and attached (``-mpytest``) spellings are handled,
+        # for the same reason.
+        if arg == "-m":
+            module = rest[index + 1] if index + 1 < len(rest) else ""
+            return flags, _module_target(module, rest[index + 2 :], argv)
+        if arg.startswith("-m"):
+            return flags, _module_target(arg[2:], rest[index + 1 :], argv)
         if arg.startswith("-"):
             raise ProtonWrapError(
                 f"proton mode 'cli' cannot wrap interpreter option {arg!r} "
-                f"(supported: {sorted(_SAFE_PYTHON_FLAGS)}). Invoke the script "
-                "directly, or use 'proton: {mode: env}'."
+                f"(supported: {sorted(_SAFE_PYTHON_FLAGS)}, plus '-m' with "
+                f"{sorted(_WRAPPABLE_MODULES)}). Invoke the script directly, "
+                "or use 'proton: {mode: env}'."
             )
         return flags, rest[index:]
     raise ProtonWrapError(
