@@ -120,8 +120,16 @@ jobs:
             tmp="$(mktemp -d)"
             git clone --depth 1 --branch ci-results "$repo_url" "$tmp"
             if ls "$tmp"/results/*.json >/dev/null 2>&1; then
+              # --canary-results-dir is the observed-only latest-ROCm lane (#382).
+              # Passed unconditionally: the generator treats an absent directory
+              # as an empty state, so this is safe before the canary's first run
+              # and needs no branch here. It cannot affect the gated page --
+              # results/*.json is globbed non-recursively, and the canary rows go
+              # to a separate render path that feeds neither status.json nor
+              # data.json.
               python3 scripts/ci/gen_dashboard.py \
-                --results-dir "$tmp/results" --out-dir _site --max-builds 180
+                --results-dir "$tmp/results" --out-dir _site --max-builds 180 \
+                --canary-results-dir "$tmp/results/canary"
               echo "dashboard at / ($(ls -1 "$tmp"/results/*.json | wc -l) build(s))"
             else
               echo "ci-results exists but has no results yet"

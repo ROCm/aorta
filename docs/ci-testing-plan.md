@@ -348,9 +348,17 @@ executes a wheel, so it holds `contents: read` only and checks out with
 `github.ref == 'refs/heads/main'` so a run from an unreviewed branch cannot write
 to the shared `ci-results` branch (it still produces the artifact).
 
-**Not done yet:** rendering these rows on the dashboard as observed-only is the
-remaining half of #382. Until it lands the data accumulates on the `ci-results`
-branch and each run's numbers are in its artifact and step summary.
+The rows render on the dashboard under **Latest ROCm canary · observed only**
+(`#canary`). That section is deliberately colour-free: no verdict chips, no
+status classes, and it feeds neither the page banner, the pass-rate trend,
+`status.json` nor `data.json` — `gen_dashboard.py` takes the lane as a separate
+`--canary-results-dir` argument precisely so it cannot reach anything gated. A
+red canary row means a new ROCm release moved something, which is a question to
+investigate rather than a regression on the branch, and colouring it would
+recreate the ambiguity the separate lane exists to avoid.
+
+The section always renders, including an explicit "no canary runs recorded yet"
+state, so the `#canary` anchor resolves before the lane's first run.
 
 ### Triggers and frequency
 

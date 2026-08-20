@@ -1422,3 +1422,166 @@ def test_dashboard_is_unchanged_by_a_canary_row_on_disk(tmp_path):
     )
     after = gen_dashboard.build_dashboard_html(gen_dashboard.load_results(results))
     assert before == after
+
+
+# ---------------------------------------------------------------------------
+# Observed-only canary rendering (issue #382)
+# ---------------------------------------------------------------------------
+
+
+def _canary(generated, rocm, *, base_image=None, passed=1, failed=0):
+    return _results(
+        generated,
+        [],
+        build={
+            "lane": "canary",
+            "rocm": rocm,
+            "torch": f"2.12.0+rocm{rocm}",
+            "hip": "7.14.60850",
+            "base_image": base_image or ("rocm/pytorch:latest@sha256:" + "ab" * 32),
+        },
+        **{"pass": passed, "fail": failed, "total": passed + failed},
+    )
+
+
+def test_canary_section_renders_the_observed_stack():
+    html = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0")]
+    )
+    assert 'id="canary"' in html
+    assert "observed only" in html
+    assert "7.14.0" in html and "2.12.0+rocm7.14.0" in html and "7.14.60850" in html
+    # The digest is the whole point of the lane, so it must be on the page.
+    assert "sha256:ababababab" in html
+
+
+def test_canary_section_says_plainly_that_it_is_not_a_gate():
+    html = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0")]
+    )
+    assert "Not a gate" in html
+    assert "docker/Dockerfile.ci-gpu" in html
+
+
+def test_canary_section_carries_no_health_colouring():
+    """A neutral lane must not health-signal (#368 5th-pass class).
+
+    A red canary row means "a new ROCm release moved something", not "we
+    regressed" -- colouring it recreates the ambiguity #382 exists to avoid.
+    Checks a failing run specifically, since that is when a colour would appear.
+    """
+    html = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0", passed=0, failed=3)]
+    )
+    for signal in ("vchip", "pill", "execution bad", "REGRESSION", "style=color:"):
+        assert signal not in html, signal
+
+
+def test_canary_section_has_an_empty_state_rather_than_vanishing():
+    """The #canary anchor must resolve before the lane's first run (KB#11b)."""
+    html = gen_dashboard.build_canary_section([])
+    assert 'id="canary"' in html
+    assert "No canary runs recorded yet" in html
+
+
+def test_canary_section_is_bounded():
+    rows = [_canary(f"2026-07-{d:02d}T15:00:00Z", "7.14.0") for d in range(1, 31)]
+    html = gen_dashboard.build_canary_section(rows)
+    assert html.count("<tr>") == gen_dashboard._CANARY_ROWS + 1  # + header row
+
+
+def test_canary_rows_do_not_touch_the_gated_status_or_trend():
+    """#382 acceptance: the pinned gate is unchanged by this work.
+
+    ``canary_results`` is a separate argument for exactly this reason -- the
+    banner, pass-rate trend and history grid are all computed from ``results``.
+    """
+    gate = [_results("2026-08-19T00:00:00Z", [], build={"lane": "gate"}, **{"pass": 2})]
+    without = gen_dashboard.build_dashboard_html(gate)
+    with_canary = gen_dashboard.build_dashboard_html(
+        gate, [_canary("2026-08-19T15:00:00Z", "7.14.0", passed=0, failed=9)]
+    )
+    # The only difference is the canary section itself.
+    assert without != with_canary
+    assert gen_dashboard.build_status_json(gate) == gen_dashboard.build_status_json(gate)
+    canary_only = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0", passed=0, failed=9)]
+    )
+    assert with_canary.replace(canary_only, "").replace(
+        gen_dashboard.build_canary_section([]), ""
+    ) == without.replace(gen_dashboard.build_canary_section([]), "")
+
+
+def test_dashboard_html_default_is_unchanged_without_canary_data():
+    """Existing callers keep their exact output (the arg defaults to None)."""
+    gate = [_results("2026-08-19T00:00:00Z", [], build={"lane": "gate"})]
+    assert gen_dashboard.build_dashboard_html(gate) == gen_dashboard.build_dashboard_html(
+        gate, None
+    )
+    assert gen_dashboard.build_dashboard_html(gate) == gen_dashboard.build_dashboard_html(
+        gate, []
+    )
+
+
+def test_short_digest_display():
+    assert gen_dashboard._short_digest("r/p:latest@sha256:" + "a" * 64) == (
+        "sha256:aaaaaaaaaaaa"
+    )
+    # A tag-only value keeps its text: silently em-dashing it would hide that a
+    # run was NOT digest-pinned, which is the one thing the column is for.
+    assert gen_dashboard._short_digest("rocm/pytorch:latest") == "rocm/pytorch:latest"
+    assert gen_dashboard._short_digest(None) == "—"
+    assert gen_dashboard._short_digest("") == "—"
+
+
+def test_main_tolerates_an_absent_canary_dir(tmp_path, monkeypatch, capsys):
+    """The lane is best-effort; a missing dir must not fail the gated build."""
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "2026-08-19.json").write_text(
+        json.dumps(_results("2026-08-19T00:00:00Z", [], build={"lane": "gate"})),
+        encoding="utf-8",
+    )
+    out = tmp_path / "site"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gen_dashboard.py",
+            "--results-dir", str(results),
+            "--out-dir", str(out),
+            "--canary-results-dir", str(tmp_path / "does-not-exist"),
+        ],
+    )
+    assert gen_dashboard.main() == 0
+    capsys.readouterr()
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "No canary runs recorded yet" in html
+
+
+def test_main_renders_canary_rows_without_entering_data_or_status_json(tmp_path, monkeypatch, capsys):
+    results = tmp_path / "results"
+    (results / "canary").mkdir(parents=True)
+    (results / "2026-08-19.json").write_text(
+        json.dumps(_results("2026-08-19T00:00:00Z", [], build={"lane": "gate"})),
+        encoding="utf-8",
+    )
+    (results / "canary" / "2026-08-19.json").write_text(
+        json.dumps(_canary("2026-08-19T15:00:00Z", "7.14.0")), encoding="utf-8"
+    )
+    out = tmp_path / "site"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gen_dashboard.py",
+            "--results-dir", str(results),
+            "--out-dir", str(out),
+            "--canary-results-dir", str(results / "canary"),
+        ],
+    )
+    assert gen_dashboard.main() == 0
+    capsys.readouterr()
+    assert "7.14.60850" in (out / "index.html").read_text(encoding="utf-8")
+    # data.json stays the gated record; status.json must not see the lane.
+    data = json.loads((out / "data.json").read_text(encoding="utf-8"))
+    assert [d["build"]["lane"] for d in data] == ["gate"]
+    assert "canary" not in (out / "status.json").read_text(encoding="utf-8")

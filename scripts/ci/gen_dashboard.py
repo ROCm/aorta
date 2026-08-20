@@ -94,6 +94,11 @@ _VERDICT_ORDER = ("fail", "record", "skip", "pass")
 _UNKNOWN_COLOR = "#8250df"
 _UNKNOWN_GLYPH = "?"
 
+# How many canary runs the observed-only section shows (issue #382). Short on
+# purpose: the value of the lane is "which ROCm version changed something
+# recently", and the full history is on the ci-results branch.
+_CANARY_ROWS = 14
+
 # How many nightly runs the history grid shows before it starts scrolling. The
 # full history still ships in data.json; this only bounds the rendered rows.
 _GRID_RUNS = 14
@@ -570,6 +575,82 @@ def build_category_summary(
         "<p class='muted'>Worst verdict in each area from tonight's run. "
         "Click a tile to jump to workloads.</p>"
         f"<div class='cat-grid'>{''.join(tiles)}</div>"
+    )
+
+
+def _short_digest(base_image: Any) -> str:
+    """``repo:tag@sha256:abcdef12`` -> ``sha256:abcdef12`` for display.
+
+    Renders the whole value when it carries no digest, so a malformed or
+    tag-only entry stays visible rather than silently becoming an em dash --
+    the digest is the entire point of the canary row.
+    """
+    text = str(base_image or "").strip()
+    if not text:
+        return "—"
+    _, _, digest = text.rpartition("@")
+    if not digest:
+        return text
+    algo, _, hexpart = digest.partition(":")
+    return f"{algo}:{hexpart[:12]}" if hexpart else digest
+
+
+def build_canary_section(canary_results: list[dict[str, Any]]) -> str:
+    """The observed-only latest-ROCm canary lane (issue #382).
+
+    Rendered **neutral on purpose**: no verdict chips, no status colours, no
+    contribution to the page banner or ``status.json``. This lane follows a
+    moving tag, so a red row means "this ROCm release did something", not "we
+    regressed" -- health-colouring it would recreate exactly the ambiguity #382
+    exists to avoid, and is the trap #368's survey tab fell into (KB: a neutral
+    view must sweep *every* health-signalling render path, not just the obvious
+    one).
+
+    Always renders a section, including an explicit empty state, so the
+    ``#canary`` anchor resolves before the lane's first successful run instead
+    of 404ing a promised route (KB#11b).
+    """
+    rows = []
+    for doc in canary_results[-_CANARY_ROWS:]:
+        build = doc.get("build") or {}
+        summary = doc.get("summary") or {}
+        graded = f"{_count(summary.get('pass'))}/{_count(summary.get('pass')) + _count(summary.get('fail'))}"
+        rows.append(
+            "<tr>"
+            f"<td>{_esc(str(doc.get('generated_at') or '—')[:10])}</td>"
+            f"<td>{_esc(str(build.get('rocm') or '—'))}</td>"
+            f"<td>{_esc(str(build.get('torch') or '—'))}</td>"
+            f"<td>{_esc(str(build.get('hip') or '—'))}</td>"
+            f"<td><code>{_esc(_short_digest(build.get('base_image')))}</code></td>"
+            f"<td>{_esc(graded)}</td>"
+            "</tr>"
+        )
+
+    if rows:
+        body = (
+            "<table><thead><tr><th>date</th><th>ROCm</th><th>torch</th>"
+            "<th>HIP</th><th>base image</th><th>passed/graded</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+    else:
+        body = (
+            '<p class="muted">No canary runs recorded yet. The lane is scheduled '
+            "daily and best-effort, so it may also be skipped when the shared "
+            "GPU runner is busy.</p>"
+        )
+
+    return (
+        '<section class="dash-section" id="canary">'
+        '<h2>Latest ROCm canary <span class="muted">· observed only</span></h2>'
+        '<p class="muted">Tracks <code>rocm/pytorch:latest</code>, resolved to a '
+        "concrete digest per run. <strong>Not a gate:</strong> these rows never "
+        "affect the status above, the pass-rate trend, or any required check -- "
+        "the merge gate stays on the digest pinned in "
+        "<code>docker/Dockerfile.ci-gpu</code>. A change here says a new ROCm "
+        "release moved something, which is a question to investigate, not a "
+        "regression on this branch.</p>"
+        f"{body}"
+        "</section>"
     )
 
 
@@ -1293,8 +1374,19 @@ def build_workload_cards(
     return "".join(blocks)
 
 
-def build_dashboard_html(results: list[dict[str, Any]]) -> str:
-    """Render the full dashboard HTML from the results history (pure)."""
+def build_dashboard_html(
+    results: list[dict[str, Any]],
+    canary_results: list[dict[str, Any]] | None = None,
+) -> str:
+    """Render the full dashboard HTML from the results history (pure).
+
+    ``canary_results`` is the observed-only latest-ROCm lane (issue #382). It is
+    a separate argument rather than merged into ``results`` precisely so it
+    cannot reach the status banner, the pass-rate trend, the history grid or
+    ``build_status_json`` -- everything gated is computed from ``results`` alone.
+    Defaults to ``None`` so every existing caller keeps its current output
+    byte-for-byte.
+    """
     status, status_color = _latest_status(results)
     customer_status = _customer_status_label(status)
     latest = results[-1] if results else {"build": {}, "summary": {}, "entries": []}
@@ -1500,6 +1592,7 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     history_html = build_history_grid(results)
     category_html = build_category_summary(latest_entries)
     scaling_html = build_scaling_summary(latest_entries)
+    canary_html = build_canary_section(canary_results or [])
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1766,6 +1859,8 @@ def build_dashboard_html(results: list[dict[str, Any]]) -> str:
     {workloads_html}
     <p class="legend">Results: <strong>pass</strong>/<strong>fail</strong> = compared against a blessed baseline · <strong>record</strong> = baseline not set yet · <strong>skip</strong> = not enough GPUs. Expand cards for reproduction steps or optional detailed metrics.</p>
     </section>
+
+    {canary_html}
   </div>
 <script>
 (function () {{
@@ -1810,17 +1905,40 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument("--max-builds", type=int, default=180,
                     help="render at most the most recent N builds (bounds trend size)")
+    ap.add_argument(
+        "--canary-results-dir",
+        type=Path,
+        default=None,
+        help=(
+            "observed-only latest-ROCm canary results (issue #382). Optional and "
+            "may be absent: the section renders an empty state rather than "
+            "failing, since the lane is non-gating and best-effort."
+        ),
+    )
     args = ap.parse_args()
 
     results = load_results(args.results_dir)
     if args.max_builds > 0:
         results = results[-args.max_builds:]
+    # Absent dir is normal (no canary run yet, or the data branch predates the
+    # lane), so this must not fail the gated dashboard build.
+    canary_results: list[dict[str, Any]] = []
+    if args.canary_results_dir is not None and args.canary_results_dir.is_dir():
+        canary_results = load_results(args.canary_results_dir)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "index.html").write_text(build_dashboard_html(results), encoding="utf-8")
+    (args.out_dir / "index.html").write_text(
+        build_dashboard_html(results, canary_results), encoding="utf-8")
+    # data.json stays the GATED history only -- machine consumers treat it as the
+    # gate's record, and folding an observed-only lane into it would change that
+    # contract silently. The canary's own history lives on the ci-results branch.
     (args.out_dir / "data.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
     (args.out_dir / "status.json").write_text(
         json.dumps(build_status_json(results), indent=2), encoding="utf-8")
-    print(f"dashboard: {len(results)} build(s) -> {args.out_dir / 'index.html'}", flush=True)
+    print(
+        f"dashboard: {len(results)} build(s), {len(canary_results)} canary run(s) "
+        f"-> {args.out_dir / 'index.html'}",
+        flush=True,
+    )
     return 0
 
 

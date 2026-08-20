@@ -24,11 +24,15 @@ name: Latest ROCm canary
 #      painting a red X that nobody can action;
 #   3. results are published under `results/canary/` on the ci-results branch.
 #      scripts/ci/gen_dashboard.py reads `results/*.json` NON-recursively, so
-#      canary rows cannot contaminate the gated dashboard's history or trends.
+#      canary rows cannot contaminate the gated dashboard's history or trends,
+#      and they reach the page only through a separate render path that feeds
+#      neither status.json nor data.json.
 #
-# Rendering those rows on the dashboard as observed-only is the remaining half of
-# #382 and is NOT done yet -- the data accumulates here so that work has history
-# to draw on. Until then, read a canary run from its artifact.
+# The rows render on the dashboard under "Latest ROCm canary - observed only"
+# (the #canary anchor), fed by gen_dashboard.py's --canary-results-dir. That is a
+# separate argument from the gated --results-dir so the lane cannot reach the
+# banner, the pass-rate trend, status.json or data.json, and the section carries
+# no verdict colouring.
 #
 # This lane only became possible with issue #381: `rocm/pytorch:latest` is a
 # wheel-based (TheRock) image with no /opt/rocm, so before layout-agnostic
