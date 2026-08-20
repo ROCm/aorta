@@ -148,6 +148,14 @@ jobs:
               print(\"ROCJITSU bundle commit:\", m.get(\"commit\"), \
               \"run:\", m.get(\"run_url\"))" \
               "${ROCJITSU_PREBUILT}/MANIFEST.json"
+            # Carry that provenance into the uploaded results so the publish job
+            # (a different runner, which never sees the bundle) can record which
+            # sanitizer build produced each report in its run area (#384).
+            mkdir -p "${SANITIZER_OUT}"
+            python -c "import json,sys; m=json.load(open(sys.argv[1])); \
+              json.dump({\"commit\": m.get(\"commit\"), \"run_url\": m.get(\"run_url\")}, \
+              open(sys.argv[2], \"w\"), indent=2, sort_keys=True)" \
+              "${ROCJITSU_PREBUILT}/MANIFEST.json" "${SANITIZER_OUT}/rocjitsu.json"
 
             # hipcc shells out to clang-offload-bundler, which lives in the ROCm
             # LLVM bindir but is not on PATH -- the image only exports
@@ -392,13 +400,23 @@ jobs:
           # a now-missing case (the generator fails such a case closed).
           rm -rf "$dest"
           mkdir -p "$dest"
+          # Copy the whole case directory, not just the report: the sanitizer
+          # logs the verdict was derived from (waitcheck/*.log, consan/consan.log)
+          # are what make the published run area reproducible (#384). The
+          # generator gzips them and prunes them outside its --keep-logs window.
           for case in waitcheck consan-clean consan-racy; do
-            report="incoming/${case}/sanitizer_report.json"
-            if [ -f "$report" ]; then
-              mkdir -p "$dest/${case}"
-              cp -a "$report" "$dest/${case}/sanitizer_report.json"
+            if [ -f "incoming/${case}/sanitizer_report.json" ]; then
+              cp -a "incoming/${case}" "$dest/${case}"
             fi
           done
+
+          # Report what this run adds. --keep-logs bounds the checkout, but a blob
+          # stays reachable from the commit that added it, so anything published
+          # here is permanent in the branch history -- if real ConSan logs turn out
+          # large, capping them is a code change now and a history rewrite later
+          # (#384). Print the number every night so that is never a surprise.
+          echo "[$(date +%T)] staged case-dir sizes (pre-gzip):"
+          du -sh "$dest"/* 2>/dev/null | sed 's/^/  /' || true
 
           # Per-run manifest read back by gen_sanitizer_dashboard.py --history-root.
           # gate mirrors the GPU job result (its comparator step is the gate); the
@@ -444,8 +462,25 @@ jobs:
           if [ -d incoming/informational ]; then
             info_arg=(--informational-results-dir incoming/informational)
           fi
+          # Provenance the reports themselves cannot carry, recorded into each
+          # run area's env.json / REPRODUCE.md (#384). Both are best-effort: an
+          # absent value is omitted rather than published empty.
+          if [ -f incoming/rocjitsu.json ]; then
+            AORTA_ROCJITSU_COMMIT="$(python -c "import json;print(json.load(open('incoming/rocjitsu.json')).get('commit') or '')")"
+            AORTA_ROCJITSU_RUN_URL="$(python -c "import json;print(json.load(open('incoming/rocjitsu.json')).get('run_url') or '')")"
+            export AORTA_ROCJITSU_COMMIT AORTA_ROCJITSU_RUN_URL
+          fi
+          # The digest-pinned ROCm base image the sanitizers actually ran in.
+          AORTA_CI_IMAGE="$(sed -n 's/^FROM  *//p' docker/Dockerfile.ci-gpu | tail -n1)"
+          export AORTA_CI_IMAGE
+          # --current-run names the run THIS job staged. Without it the generator
+          # assumes the newest retained run, which is wrong when an older workflow
+          # is re-run after a newer same-day one: the re-run reuses its lower
+          # GITHUB_RUN_ID, so its dir sorts behind and the newer area would be
+          # stamped with this job's container/bundle/recipe (#384).
           python scripts/sanitizers/gen_sanitizer_dashboard.py \
-            --history-root "$runs_dir" --keep "$keep" \
+            --history-root "$runs_dir" --keep "$keep" --keep-logs 7 \
+            --current-run "$run_dir_id" \
             --baselines recipes/sanitizers/fixtures/expected/verdict_baselines.json \
             --commit "${GITHUB_SHA}" --run-label "run ${GITHUB_RUN_ID}" \
             --status status.json \

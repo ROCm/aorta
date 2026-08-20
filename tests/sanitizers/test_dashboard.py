@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
 import re
@@ -649,8 +650,10 @@ def test_build_html_emits_relative_report_links(tmp_path):
 
     # Latest-run table links each case to its raw JSON, relative to /sanitizers/.
     assert 'href="runs/2026-08-05-33/waitcheck/sanitizer_report.json"' in html
-    # A "view raw report" link appears in the kernel-detail section.
-    assert "view raw report" in html
+    # The kernel-detail card footer links the case's run area (its directory),
+    # not just the report, so the logs/recipe/inputs are one click away (#384).
+    assert 'href="runs/2026-08-05-33/waitcheck/">run area</a>' in html
+    assert "view raw report" not in html
     # The run area is linked from the latest-run header and the history table.
     assert 'href="runs/2026-08-05-33/"' in html
     assert 'href="runs/2026-08-04-22/"' in html
@@ -1587,6 +1590,13 @@ def test_survey_report_rel_rejects_unsafe_links():
         " runs/x/report.json",  # leading whitespace browsers would strip
         "../runs/x/report.json",  # parent-directory traversal
         "a/../../b/report.json",  # traversal buried mid-path
+        # URL syntax the browser acts on but a directory does not: the tail of each
+        # of these is a query/fragment on the segment before it, so the request
+        # never reaches the published path -- and a percent-escape can be
+        # normalised back into "..".
+        "runs/x?old/survey/foo/sanitizer_report.json",
+        "runs/x#old/survey/foo/sanitizer_report.json",
+        "runs/%2e%2e/survey/foo/sanitizer_report.json",
     ):
         spec = {"cases": [{"name": "s", "report_rel": unsafe, "report": _consan_racy_report()}]}
         entry = gen.survey_cases_from_spec(spec)[0]
@@ -1733,20 +1743,46 @@ def test_build_html_survey_fail_is_color_coded_but_never_a_regression():
 def test_build_html_survey_report_link_and_graceful_absence():
     survey = gen.survey_cases_from_spec(
         {"cases": [
-            {"name": "linked", "label": "linked survey",
+            # "staged" says the whole directory was published, so the card footer
+            # may link it; report_rel alone only makes the JSON reachable.
+            {"name": "linked", "label": "linked survey", "staged": True,
              "report_rel": "runs/x/survey/linked/sanitizer_report.json",
              "report": _consan_racy_report()},
             {"name": "nolink", "label": "nolink survey", "report": _waitcheck_report()},
-        ]}
+        ]},
+        rel="runs/x",
     )
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
 
-    # the linked survey case drills down to its raw report; the unlinked one still
-    # renders (degrades to no link). Guardrail rows carry no report_rel here, so the
-    # only "view raw report" link comes from the linked survey case.
+    # the linked survey case drills down to its raw report (per-kernel row) and to
+    # its run area (card footer); the unlinked one still renders, degrading to
+    # neither link. Guardrail rows carry no report_rel here, so the only run-area
+    # footer comes from the linked survey case.
     assert 'href="runs/x/survey/linked/sanitizer_report.json"' in html
-    assert html.count("view raw report") == 1
+    assert html.count('href="runs/x/survey/linked/">run area</a>') == 1
+    assert html.count("run area</a>") == 1
     assert "linked survey" in html and "nolink survey" in html
+
+
+def test_build_html_survey_report_without_staged_area_emits_no_directory_link():
+    # A spec entry's report can be staged by the caller while its *directory* is
+    # not: a directory link needs an index.html only the area's publisher writes.
+    # Linking it anyway published a 404 on every --survey invocation.
+    survey = gen.survey_cases_from_spec(
+        {"cases": [{
+            "name": "linked", "label": "linked survey",
+            "report_rel": "runs/x/survey/linked/sanitizer_report.json",
+            "report": _consan_racy_report(),
+        }]}
+    )
+    assert survey[0]["staged"] is False
+    html = gen.build_html([_healthy_guardrail_run()], survey=survey)
+
+    # The per-kernel Report column still reaches the JSON the caller did stage.
+    assert 'href="runs/x/survey/linked/sanitizer_report.json"' in html
+    # ...but nothing claims the directory.
+    assert 'href="runs/x/survey/linked/"' not in html
+    assert "run area</a>" not in html
 
 
 def test_kernel_tables_html_links_each_row_to_report():
@@ -1782,9 +1818,10 @@ def test_build_html_kernel_rows_link_reports_on_both_tabs(tmp_path):
     _write_history_run(root, "2026-08-05-33")
     runs = gen.runs_from_history_root(root, _baselines())
     survey = gen.survey_cases_from_spec(
-        {"cases": [{"name": "s", "label": "survey linked",
+        {"cases": [{"name": "s", "label": "survey linked", "staged": True,
                     "report_rel": "runs/x/survey/s/sanitizer_report.json",
-                    "report": _consan_racy_report()}]}
+                    "report": _consan_racy_report()}]},
+        rel="runs/x",
     )
     html = gen.build_html(runs, survey=survey)
 
@@ -1793,9 +1830,11 @@ def test_build_html_kernel_rows_link_reports_on_both_tabs(tmp_path):
     # twice: the latest-run table cell and the per-kernel-row Report column.
     wc = 'href="runs/2026-08-05-33/waitcheck/sanitizer_report.json">report</a>'
     assert html.count(wc) == 2
-    # Survey kernel row links to the survey case's report_rel (the heading uses the
-    # distinct "view raw report" text, so a "report" link here is the per-row one).
+    # Survey kernel row links to the survey case's report_rel (the card footer uses
+    # the distinct "run area" text pointing at the directory, so a "report" link
+    # here is the per-row one).
     assert 'href="runs/x/survey/s/sanitizer_report.json">report</a>' in html
+    assert 'href="runs/x/survey/s/">run area</a>' in html
     # no dead/unsafe links leaked in
     assert 'href="/runs/' not in html and "javascript:" not in html
 
@@ -1902,3 +1941,1671 @@ def test_main_without_survey_omits_survey_rows_but_renders_tab(tmp_path, monkeyp
     assert "No workload-survey kernels in this run." in html
     data = json.loads((out / "data.json").read_text(encoding="utf-8"))
     assert data[0]["survey"] == []
+
+
+# --------------------------------------------------------------------------
+# Run area (#384): the case directory a card footer links to
+# --------------------------------------------------------------------------
+
+
+def _publish_with_logs(tmp_path, monkeypatch, *, run_ids, keep_logs=None, survey=True):
+    """Publish a history (each case carrying a sweep log) plus one survey case."""
+    root = tmp_path / "runs"
+    for run_id in run_ids:
+        run_dir = _write_history_run(root, run_id)
+        (run_dir / "waitcheck" / "waitcheck").mkdir(parents=True)
+        (run_dir / "waitcheck" / "waitcheck" / "waitcheck-0.log").write_text("scan output\n")
+        (run_dir / "consan-racy" / "consan").mkdir(parents=True)
+        (run_dir / "consan-racy" / "consan" / "consan.log").write_text("race detected\n")
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(root),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(tmp_path / "dashboard"),
+    ]
+    if survey:
+        info = tmp_path / "informational"
+        (info / "consan-gemm" / "consan").mkdir(parents=True)
+        (info / "consan-gemm" / "sanitizer_report.json").write_text(
+            json.dumps(_informational_report("combined_hook_timeout"))
+        )
+        (info / "consan-gemm" / "consan" / "consan.log").write_text("hook timeout\n")
+        argv += ["--informational-results-dir", str(info)]
+    if keep_logs is not None:
+        argv += ["--keep-logs", str(keep_logs)]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gen.main() == 0
+    return tmp_path / "dashboard"
+
+
+def test_case_dir_rel_points_at_the_directory_and_rejects_unsafe_values():
+    # The footer link is the case's directory, derived from report_rel so it
+    # inherits the same relative-only guarantee as the report link.
+    assert (
+        gen._case_dir_rel("runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json")
+        == "runs/2026-08-05-33/survey/consan-gemm/"
+    )
+    assert gen._case_dir_rel("runs/x/waitcheck/sanitizer_report.json") == "runs/x/waitcheck/"
+    # No safe directory to link -> no link at all, never a dead or unsafe href.
+    for unsafe in (
+        None, "", "sanitizer_report.json", "javascript:alert(1)",
+        "/runs/x/c/sanitizer_report.json", "../../etc/passwd",
+        "//evil.example/x/sanitizer_report.json",
+        # A query/fragment makes the emitted URL address "runs/x", not the case
+        # directory, so there is no safe area link to derive from it.
+        "runs/x?old/survey/foo/sanitizer_report.json",
+        "runs/x#old/survey/foo/sanitizer_report.json",
+    ):
+        assert gen._case_dir_rel(unsafe) is None, unsafe
+
+
+def test_raw_link_html_renders_run_area_or_nothing():
+    linked = gen._raw_link_html("runs/x/survey/s/sanitizer_report.json")
+    assert 'href="runs/x/survey/s/">run area</a>' in linked
+    assert "view raw report" not in linked
+    assert gen._raw_link_html(None) == ""
+    assert gen._raw_link_html("javascript:alert(1)") == ""
+
+
+def test_recipe_fixture_refs_splits_source_inputs_from_built_artifacts():
+    # Source inputs are copied into the run area; CI-built artifacts (gitignored,
+    # ~16MB for a GEMM object) are recorded by digest instead.
+    recipe = (
+        "sanitizer_plan:\n"
+        "  source:\n"
+        "    hip: fixtures/repro/consan_lds_race.hip\n"
+        "    path: fixtures/gemm_shapes_unique.csv\n"
+        "    code_object: fixtures/isa/consan_gemm_f32.hsaco\n"
+        "    consan_command: fixtures/bin/consan_gemm_load\n"
+        "    isa_dir: fixtures/isa\n"
+    )
+    source, built = gen._recipe_fixture_refs(recipe)
+    assert source == ["fixtures/repro/consan_lds_race.hip", "fixtures/gemm_shapes_unique.csv"]
+    assert built == [
+        "fixtures/isa/consan_gemm_f32.hsaco",
+        "fixtures/bin/consan_gemm_load",
+        "fixtures/isa",
+    ]
+
+
+def test_report_digests_flattens_backend_and_code_object_provenance():
+    # waitcheck records its binary path/sha256; every worklist kernel records its
+    # code-object digest. Both are already in the report and rendered nowhere.
+    # .get() throughout: whether the key was picked up at all is exactly what is
+    # under test, so a miss should read as the assertion it is rather than a
+    # KeyError that hides which digest went missing.
+    digests = gen.report_digests(_waitcheck_report())
+    assert digests.get("path") == "/tmp/build/tools/rj_waitcheck"
+    assert digests.get("sha256") == "472fcf288714beef"
+    assert digests.get("code_object:sol_1.hsaco") == "93f09ae670abcdef"
+    # ConSan's repro command / hook digests are picked up from the same field.
+    consan = _consan_clean_report()
+    consan["checks"][0]["backend"] = {
+        "command": "/w/fixtures/bin/consan_gemm_load", "command_sha256": "deadbeef",
+        "hook": "/w/librocjitsu_dbi_hooks.so", "hook_sha256": "feedface",
+    }
+    assert gen.report_digests(consan).get("command_sha256") == "deadbeef"
+    # A malformed report degrades to {} rather than raising.
+    for bad in (None, [], "oops", {"checks": None}, {"worklist": {"kernels": [1]}}):
+        assert gen.report_digests(bad) == {}
+
+
+def test_main_with_a_survey_spec_emits_no_run_area_link_it_cannot_publish(
+    tmp_path, monkeypatch
+):
+    # --survey entries render from an inline report; only
+    # --informational-results-dir entries get their directory staged. Keying the
+    # run-index link on report presence published a dead survey/<case>/ link on
+    # exactly this invocation.
+    out = tmp_path / "dashboard"
+    out.mkdir()
+    _write_history_run(out / "runs", "2026-08-05-33")
+    spec = tmp_path / "survey.json"
+    spec.write_text(json.dumps({"cases": [{
+        "name": "consan-gemm", "label": "gemm - ConSan",
+        "command": "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml",
+        "report_rel": "runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json",
+        "report": _consan_racy_report(),
+    }]}))
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(out / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(out),
+        "--survey", str(spec),
+    ])
+    assert gen.main() == 0
+
+    assert not (out / "runs/2026-08-05-33/survey").exists()
+    # The case is still listed on both pages; it just carries no directory link.
+    run_page = (out / "runs/2026-08-05-33/index.html").read_text(encoding="utf-8")
+    assert "Workload survey" in run_page
+    assert "survey/consan-gemm/" not in run_page
+    # Same on the dashboard's Tab 2 card footer: no directory link is claimed.
+    # (The per-row Report link to the JSON is the caller's to stage, unchanged.)
+    dashboard = (out / "index.html").read_text(encoding="utf-8")
+    assert 'href="runs/2026-08-05-33/survey/consan-gemm/"' not in dashboard
+    # Every relative link on the run page resolves.
+    for href in re.findall(r'href="([^"#]+)"', run_page):
+        if href.startswith("http"):
+            continue
+        target = (out / "runs/2026-08-05-33" / href).resolve()
+        ok = (target / "index.html").is_file() if target.is_dir() else target.exists()
+        assert ok, href
+
+
+def test_rebuild_hint_sources_all_exist_in_the_repo():
+    # The hints name concrete source paths so a rebuild reproduces the recorded
+    # digest. A rename must break here rather than silently ship a stale command.
+    recipes = _REPO_ROOT / "recipes" / "sanitizers"
+    for ref, source in gen._GENCO_ISA_SOURCES.items():
+        assert (recipes / source).is_file(), f"{ref} -> {source}"
+    for ref, (source, define, _extra) in gen._BIN_SOURCES.items():
+        assert (recipes / source).is_file(), f"{ref} -> {source}"
+        # A define means the binary is bound to a code object it must be told about.
+        assert (define is None) == (ref not in gen._BIN_OBJECT), ref
+
+
+def test_rebuild_hint_binary_flags_match_the_workflow():
+    """Cross-check the flags against the workflow that actually builds them.
+
+    Optimisation/debug flags change the executable, so a hint that drops them
+    cannot reproduce the recorded `command_sha256`. The nightly builds the two
+    guardrail repro binaries `-O1 -g` and the loader binaries without, and this
+    asserts the map still agrees rather than trusting it to stay in step.
+    """
+    workflow = (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+    # Join shell line continuations so one hipcc invocation is one line.
+    joined = workflow.replace("\\\n", " ")
+    for ref, (_source, _define, extra) in gen._BIN_SOURCES.items():
+        name = ref.rsplit("/", 1)[-1]
+        lines = [
+            line
+            for line in joined.splitlines()
+            if "hipcc" in line and f'/bin/{name}"' in line
+        ]
+        assert len(lines) == 1, f"{ref}: expected one build line, got {len(lines)}"
+        built_with_o1g = "-O1 -g" in lines[0]
+        assert built_with_o1g == ("-O1 -g" in extra), (
+            f"{ref}: workflow uses -O1 -g = {built_with_o1g}, hint says {extra!r}"
+        )
+        hint = gen._rebuild_hints(gen.rebuild_plan([ref], target="gfx950"))[0]
+        assert ("-O1 -g" in hint) == built_with_o1g, ref
+
+
+def test_recipe_fixture_refs_rejects_parent_traversal():
+    # _FIXTURE_REF_RE admits "." so it can match an extension, which also matched
+    # a parent segment. The copy checked the source against the repo root but then
+    # joined the same value onto the destination, writing outside the case dir.
+    source, built = gen._recipe_fixture_refs(
+        "source:\n  path: fixtures/../../../README.md\n"
+        "  hip: fixtures/repro/consan_lds_race.hip\n"
+        "  code_object: fixtures/isa/../../../etc/passwd\n"
+    )
+    assert source == ["fixtures/repro/consan_lds_race.hip"]
+    assert built == []
+
+
+def test_publish_recipe_inputs_never_writes_outside_the_case_inputs_dir(tmp_path):
+    case_dir = tmp_path / "runs" / "id" / "case"
+    case_dir.mkdir(parents=True)
+    recipe = tmp_path / "repo" / "recipes" / "sanitizers" / "evil.yaml"
+    recipe.parent.mkdir(parents=True)
+    (tmp_path / "repo" / "secret.txt").write_text("do not publish me")
+    # The ref must actually resolve to a real file inside repo_root, or the copy
+    # is skipped for an unrelated reason and this test proves nothing. From
+    # recipes/sanitizers/fixtures that is three parent segments up.
+    recipe.write_text("source:\n  path: fixtures/../../../secret.txt\n")
+    assert (recipe.parent / "fixtures/../../../secret.txt").resolve().is_file()
+
+    copied, built = gen._publish_recipe_inputs(
+        case_dir, recipe_src=recipe, repo_root=tmp_path / "repo"
+    )
+
+    assert copied == [] and built == []
+    # recipe.yaml is the only thing written, and nothing escaped the case dir.
+    written = sorted(p.name for p in case_dir.rglob("*") if p.is_file())
+    assert written == ["recipe.yaml"]
+    assert not (tmp_path / "runs" / "id" / "secret.txt").exists()
+    assert not (tmp_path / "runs" / "secret.txt").exists()
+
+
+def test_rebuild_hints_match_the_nightly_commands_per_artifact():
+    def hint(ref: str) -> str:
+        return gen._rebuild_hints(gen.rebuild_plan([ref], target="gfx950"))[0]
+
+    hints = {
+        ref: hint(ref)
+        for ref in (
+            "fixtures/isa/lds.hsaco",
+            "fixtures/isa/consan_gemm_f32.hsaco",
+            "fixtures/isa",
+            "fixtures/bin/lds_dispatch",
+            "fixtures/bin/consan_lds_race",
+        )
+    }
+    # A --genco object may be a bundle or a raw ELF depending on the ROCm build,
+    # and the recorded digest is of the unbundled object -- so the conditional
+    # unbundle is part of the instruction, not an optional detail.
+    lds = hints["fixtures/isa/lds.hsaco"]
+    assert (
+        "hipcc --genco --offload-arch=gfx950 "
+        "recipes/sanitizers/fixtures/kernels/lds_reduce.hip" in lds
+    )
+    assert "__CLANG_OFFLOAD_BUNDLE__" in lds
+    assert "clang-offload-bundler --type=o --unbundle" in lds
+    # The GEMM objects are extracted from Tensile libraries, never compiled.
+    assert "prepare_gemm_isa.py" in hints["fixtures/isa/consan_gemm_f32.hsaco"]
+    assert "hipcc" not in hints["fixtures/isa/consan_gemm_f32.hsaco"]
+    assert "--top-n 3" in hints["fixtures/isa"]
+    # A loader binary needs the define naming its object, or it builds the wrong one.
+    assert "-DLDS_HSACO=" in hints["fixtures/bin/lds_dispatch"]
+    assert "recipes/sanitizers/fixtures/isa/lds.hsaco" in hints["fixtures/bin/lds_dispatch"]
+    # A plain repro binary has no define to add.
+    assert "-D" not in hints["fixtures/bin/consan_lds_race"]
+    assert (
+        "recipes/sanitizers/fixtures/repro/consan_lds_race.hip"
+        in hints["fixtures/bin/consan_lds_race"]
+    )
+    # An unknown reference degrades to the bare path rather than a wrong command.
+    assert gen._rebuild_hints(
+        gen.rebuild_plan(["fixtures/other/x"], target="gfx950")
+    ) == ["fixtures/other/x"]
+    # Every hint's backticks are balanced, so the page renders them as <code>
+    # spans rather than leaving a stray literal backtick in the markup.
+    for ref, text in hints.items():
+        assert text.count("`") % 2 == 0, ref
+
+
+def test_rebuild_commands_are_runnable_from_the_repo_root():
+    """Every emitted command must work from where REPRODUCE.md leaves the reader.
+
+    The manifest records artifacts recipe-relative (``fixtures/isa/...``), but
+    ``cd aorta`` puts you at the repo root where no top-level ``fixtures/`` exists
+    -- so a command carrying the recorded path verbatim fails immediately. The
+    output directories are gitignored, so they also have to be created.
+    """
+    refs = [
+        "fixtures/isa/lds.hsaco",
+        "fixtures/isa/consan_gemm_f32.hsaco",
+        "fixtures/isa",
+        "fixtures/bin/consan_gemm_load",
+        "fixtures/bin/consan_lds_race",
+    ]
+    for entry in gen.rebuild_plan(refs, target="gfx950"):
+        # The recorded path stays recipe-relative; only the commands are rewritten.
+        assert entry["path"].startswith("fixtures/"), entry["path"]
+        assert entry["commands"], entry["path"]
+        assert entry["commands"][0] == gen._ROCM_LLVM_PATH_EXPORT
+        assert entry["commands"][1].startswith("mkdir -p recipes/sanitizers/fixtures/")
+        for command in entry["commands"]:
+            # No bare recipe-relative path survives into an executable command:
+            # every fixtures/ token must be reached through recipes/sanitizers/.
+            unrooted = re.findall(r"(?<![\w/.])fixtures/[\w./-]+", command)
+            assert not unrooted, f"{entry['path']}: unrooted {unrooted} in {command!r}"
+    # Every *input* path a command names resolves in a clean checkout. The two
+    # build-output roots are gitignored, so they are skipped by prefix rather than
+    # by substring -- an earlier version matched "/bin/" and so happened to pass
+    # only on a machine where a previous run had already created those dirs.
+    generated = (
+        "recipes/sanitizers/fixtures/isa",
+        "recipes/sanitizers/fixtures/bin",
+    )
+    for entry in gen.rebuild_plan(refs, target="gfx950"):
+        for command in entry["commands"]:
+            for token in re.findall(r"recipes/sanitizers/fixtures/[\w./-]+", command):
+                if any(token == root or token.startswith(f"{root}/") for root in generated):
+                    continue
+                assert (_REPO_ROOT / token).exists(), f"{entry['path']}: {token}"
+
+
+def test_rebuild_commands_export_the_rocm_llvm_path():
+    """The bundler is not on PATH in the image that produced these artifacts.
+
+    The ROCm container exports only ``/opt/rocm/bin``, so the nightly adds the LLVM
+    bindir before building any fixture -- hipcc shells out to
+    ``clang-offload-bundler``, ``prepare_gemm_isa.py`` looks it up with
+    ``shutil.which``, and the genco branch calls it directly. A pasteable command
+    that names it bare fails the way that job's fixture build once did, so every
+    entry opens with the export and it has to stay the workflow's own.
+    """
+    workflow = (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+    assert gen._ROCM_LLVM_PATH_EXPORT in workflow
+    refs = [
+        "fixtures/isa/lds.hsaco",  # hipcc --genco + an explicit unbundle
+        "fixtures/isa/consan_gemm_f32.hsaco",  # prepare_gemm_isa.py
+        "fixtures/isa",
+        "fixtures/bin/consan_lds_race",  # hipcc host+device compile
+    ]
+    for entry in gen.rebuild_plan(refs, target="gfx950"):
+        assert entry["commands"][0] == gen._ROCM_LLVM_PATH_EXPORT, entry["path"]
+    # Rendered into the prose too, since the hints are generated from the plan.
+    hint = gen._rebuild_hints(gen.rebuild_plan(["fixtures/isa"], target="gfx950"))[0]
+    assert f"`{gen._ROCM_LLVM_PATH_EXPORT}`" in hint
+    # An unrecognised reference still yields no commands rather than a bare export.
+    assert gen.rebuild_plan(["fixtures/other/x"], target="gfx950")[0]["commands"] == []
+
+
+def test_run_area_ships_every_source_its_rebuild_commands_read():
+    """Decision 10 asks for the inputs a reproduction needs, not just the named ones.
+
+    A recipe names only the built artifact it *consumes*: every ``daily-consan-*``
+    lists a ``.hsaco`` and a loader binary and nothing else. Scanning the recipe
+    text alone therefore left ``inputs/`` empty for exactly the cases whose
+    published rebuild commands read the most.
+    """
+    recipes = _REPO_ROOT / "recipes" / "sanitizers"
+    generated = ("fixtures/isa", "fixtures/bin")
+    for recipe in sorted(recipes.glob("daily-*.yaml")):
+        text = recipe.read_text(encoding="utf-8")
+        named, built = gen._recipe_fixture_refs(text)
+        published = set(named) | set(gen.rebuild_input_sources(built))
+        # Every non-generated fixture path the commands name must be published.
+        for entry in gen.rebuild_plan(built, target="gfx950"):
+            for command in entry["commands"]:
+                for token in re.findall(
+                    r"recipes/sanitizers/fixtures/[\w./-]+", command
+                ):
+                    ref = f"fixtures{token[len('recipes/sanitizers/fixtures'):]}"
+                    if any(
+                        ref == root or ref.startswith(f"{root}/") for root in generated
+                    ):
+                        continue
+                    assert ref in published, f"{recipe.name}: {ref} not in inputs/"
+        # ...and each one is a real file, so the copy actually happens.
+        for ref in published:
+            assert (recipes / ref).is_file(), f"{recipe.name}: {ref}"
+
+
+def test_consan_recipes_publish_their_transitive_sources(tmp_path, monkeypatch):
+    # End-to-end: the ConSan survey case used to ship an empty inputs/ even though
+    # its own commands read the shape CSV and the loader source.
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    area = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+
+    inputs = sorted(
+        p.relative_to(area / "inputs").as_posix()
+        for p in (area / "inputs").rglob("*")
+        if p.is_file()
+    )
+    assert inputs == [
+        "fixtures/gemm_shapes_unique.csv",
+        "fixtures/kernels/consan_load.hip",
+    ]
+    env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+    assert sorted(env["inputs"]) == inputs
+    # They are listed as downloads on the landing page, like any published file.
+    page = (area / "index.html").read_text(encoding="utf-8")
+    for rel in inputs:
+        assert f'href="inputs/{rel}"' in page
+
+
+def test_drilldown_pages_link_one_stylesheet_instead_of_inlining_it(
+    tmp_path, monkeypatch
+):
+    """_CSS was over 80% of every run and run-area page, duplicated per run.
+
+    At ``--keep 30`` with five areas per run that is ~2.7MB of byte-identical CSS
+    in the published tree -- more than everything else in it, and past the gzipped
+    logs ``--keep-logs`` exists to bound.
+    """
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    asset = out / gen.RUN_AREA_CSS_REL
+    assert asset.is_file()
+    assert asset.read_text(encoding="utf-8") == gen.run_area_stylesheet()
+
+    drilldowns = sorted(out.glob("runs/*/index.html")) + sorted(
+        out.glob("runs/*/*/index.html")
+    ) + sorted(out.glob("runs/*/survey/*/index.html"))
+    assert drilldowns
+    for page in drilldowns:
+        html = page.read_text(encoding="utf-8")
+        # Linked, not inlined...
+        assert "<style>" not in html, page
+        assert gen._CSS not in html, page
+        href = re.search(r'href="([^"]*run-area\.css)"', html)
+        assert href, page
+        # ...and the link resolves from this page's depth.
+        assert (page.parent / href.group(1)).resolve() == asset.resolve(), page
+        # A drill-down page is now a small document.
+        assert page.stat().st_size < len(gen._CSS), page
+
+    # The root dashboard keeps its inline copy: one of it, and it must render
+    # standalone (its empty state carries the stale banner).
+    root = (out / "index.html").read_text(encoding="utf-8")
+    assert "<style>" in root and ".stale {" in root
+
+
+def test_run_area_stylesheet_carries_the_rules_those_pages_use():
+    sheet = gen.run_area_stylesheet()
+    assert gen._CSS in sheet
+    # The rules the two drill-down pages add on top of the dashboard sheet.
+    for selector in (".wrap {", ".note {", ".steps {", ".steps li {"):
+        assert selector in sheet, selector
+    # Byte-stable, so re-publishing does not churn the data branch.
+    assert gen.run_area_stylesheet() == sheet
+
+
+def test_genco_rebuild_cleans_up_its_temporary_object():
+    # The command runs in the reader's repo root, so without the trailing rm it
+    # drops an untracked tmp.o next to pyproject.toml. The workflow's own
+    # genco_object uses mktemp + rm -f.
+    entry = gen.rebuild_plan(["fixtures/isa/lds.hsaco"], target="gfx950")[0]
+    conditional = [c for c in entry["commands"] if c.startswith("if ")][0]
+    assert conditional.endswith("&& rm -f tmp.o")
+    # Every command that creates tmp.o is paired with a command that removes it.
+    creates = [c for c in entry["commands"] if "-o tmp.o" in c]
+    removes = [c for c in entry["commands"] if "rm -f tmp.o" in c]
+    assert len(creates) == len(removes) == 1
+
+
+def test_files_caption_only_claims_gzipped_logs_when_a_log_is_listed():
+    env = {"case": "c", "observed": {}, "logs_published": True}
+    with_log = gen.build_case_index_html(
+        env, [("consan/consan.log.gz", 34)], built_refs=[], up="../../"
+    )
+    assert "Logs are gzipped." in with_log
+
+    # An in-window case that produced no log at all claimed one anyway.
+    without = gen.build_case_index_html(
+        env, [("sanitizer_report.json", 12)], built_refs=[], up="../../"
+    )
+    assert "Every file published for this case." in without
+    assert "gzipped" not in without
+
+    pruned = gen.build_case_index_html(
+        {**env, "logs_published": False}, [("sanitizer_report.json", 12)],
+        built_refs=[], up="../../",
+    )
+    assert "pruned" in pruned and "gzipped" not in pruned
+
+
+def test_genco_rebuild_encodes_the_bundle_check_as_one_command():
+    # A consumer executing `commands` in order cannot branch on prose, so the
+    # raw-ELF-vs-bundle decision has to live inside a command.
+    entry = gen.rebuild_plan(["fixtures/isa/tiny.hsaco"], target="gfx950")[0]
+    conditional = [c for c in entry["commands"] if c.startswith("if ")]
+    assert len(conditional) == 1
+    assert "__CLANG_OFFLOAD_BUNDLE__" in conditional[0]
+    assert "clang-offload-bundler" in conditional[0]
+    # ...and the else-branch copies rather than silently skipping.
+    assert "else cp tmp.o recipes/sanitizers/fixtures/isa/tiny.hsaco; fi" in conditional[0]
+
+
+def test_case_index_page_carries_the_reproduction_details(tmp_path, monkeypatch):
+    # #384 requires the code-object SHA-256 on the landing page, and decision 9
+    # renders REPRODUCE.md's reproduction details there. The artifacts table alone
+    # cannot carry the digests: the waitcheck GEMM recipe names only a bare
+    # `isa_dir: fixtures/isa`, so it has one row and no per-object digest.
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    case = out / "runs" / "2026-08-05-33" / "waitcheck"
+    page = (case / "index.html").read_text(encoding="utf-8")
+    env = json.loads((case / "env.json").read_text(encoding="utf-8"))
+
+    assert "Recorded digests" in page
+    assert env["digests"]["code_object:sol_1.hsaco"] == "93f09ae670abcdef"
+    for key, value in env["digests"].items():
+        assert key in page and value in page
+    # The env a reproduction needs is on the page too, rendered from this area's
+    # own required_env, so the page and REPRODUCE.md cannot drift.
+    note = gen.required_env_note(env["required_env"])
+    assert "ROCJITSU_PREBUILT" in page
+    assert "<code>ROCJITSU_PREBUILT</code>" in page
+    assert note in (case / "REPRODUCE.md").read_text(encoding="utf-8")
+    # This is a waitcheck case, so ConSan's variables are not claimed for it.
+    assert [item["var"] for item in env["required_env"]] == ["ROCJITSU_PREBUILT"]
+    assert "HSA_TOOLS_LIB" not in page
+    # Execution status was in the MD twin but missing from the page.
+    assert "Execution" in page
+    # The rebuild commands render as code, not as literal Markdown backticks.
+    assert "prepare_gemm_isa.py" in page
+    assert "`" not in page
+
+
+def test_required_env_is_per_case_and_the_note_names_exactly_it():
+    # The prose has always said the four HSA/RJ variables are what ConSan
+    # *additionally* requires, so listing them for a waitcheck reproduction would
+    # make the machine-readable field contradict it.
+    waitcheck = gen.required_env_for(case="waitcheck", report=_waitcheck_report())
+    assert [item["var"] for item in waitcheck] == ["ROCJITSU_PREBUILT"]
+
+    consan = gen.required_env_for(case="consan-racy", report=_consan_racy_report())
+    assert [item["var"] for item in consan] == [item["var"] for item in gen._REQUIRED_ENV]
+    # The internal flag is not leaked into the published manifest.
+    assert all("consan_only" not in item for item in consan)
+
+    # With no usable report the case name decides, following the naming convention
+    # every guardrail and survey case uses.
+    assert len(gen.required_env_for(case="consan-gemm", report=None)) == len(consan)
+    assert len(gen.required_env_for(case="waitcheck-gemm", report=None)) == 1
+
+    # The note names exactly the variables it was given -- no more, no fewer.
+    for required in (waitcheck, consan):
+        note = gen.required_env_note(required)
+        named = set(re.findall(r"`([A-Z][A-Z0-9_]+)`", note))
+        assert named == {item["var"] for item in required}
+        for item in required:
+            assert item["set_by"] in {"operator", "aorta"}
+            assert item["purpose"]
+    assert gen.required_env_note([]) == ""
+
+
+def test_rebuild_plan_is_machine_readable_and_prose_is_generated_from_it():
+    # A consumer of aorta.sanitizer_run_area/0.1 should read commands as data
+    # rather than parse them out of English, and the prose must not be able to
+    # disagree with them.
+    refs = ["fixtures/isa/lds.hsaco", "fixtures/bin/lds_dispatch", "fixtures/other/x"]
+    plan = gen.rebuild_plan(refs, target="gfx950")
+    assert [entry["path"] for entry in plan] == refs
+
+    lds = plan[0]
+    assert lds["commands"] == [
+        gen._ROCM_LLVM_PATH_EXPORT,
+        "mkdir -p recipes/sanitizers/fixtures/isa",
+        "hipcc --genco --offload-arch=gfx950 "
+        "recipes/sanitizers/fixtures/kernels/lds_reduce.hip -o tmp.o",
+        "if head -c 24 tmp.o | grep -qF __CLANG_OFFLOAD_BUNDLE__; then "
+        "clang-offload-bundler --type=o --unbundle --input=tmp.o "
+        "--targets=hipv4-amdgcn-amd-amdhsa--gfx950 "
+        "--output=recipes/sanitizers/fixtures/isa/lds.hsaco; "
+        "else cp tmp.o recipes/sanitizers/fixtures/isa/lds.hsaco; fi && rm -f tmp.o",
+    ]
+    # The bundle check lives in a command, not only in the prose caveat, so an
+    # automated consumer can execute the branch.
+    assert "__CLANG_OFFLOAD_BUNDLE__" in " ".join(lds["commands"])
+    assert "--genco" in lds["caveat"]
+    hipcc = plan[1]["commands"][2]
+    assert "-O1 -g" not in hipcc  # loader binaries are built without
+    assert "-DLDS_HSACO=" in hipcc
+    # An unknown reference yields no command rather than a plausible wrong one.
+    assert plan[2]["commands"] == []
+
+    # Every command in the plan appears verbatim in the rendered prose.
+    hints = gen._rebuild_hints(plan)
+    assert len(hints) == len(plan)
+    for index, entry in enumerate(plan):
+        for command in entry["commands"]:
+            assert f"`{command}`" in hints[index], entry["path"]
+    assert hints[2] == "fixtures/other/x"
+
+
+def test_env_json_records_required_env_and_rebuild_commands(tmp_path, monkeypatch):
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    env = json.loads(
+        (out / "runs/2026-08-05-33/survey/consan-gemm/env.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    # A ConSan case, so it carries the full set.
+    assert [item["var"] for item in env["required_env"]] == [
+        item["var"] for item in gen._REQUIRED_ENV
+    ]
+    rebuild = {entry["path"]: entry for entry in env["rebuild"]}
+    # The recipe's built refs each carry their own commands, at this run's target.
+    assert "fixtures/isa/consan_gemm_f32.hsaco" in rebuild
+    gemm_isa = rebuild["fixtures/isa/consan_gemm_f32.hsaco"]["commands"]
+    assert any("prepare_gemm_isa.py" in command for command in gemm_isa)
+    gemm_bin = " ".join(rebuild["fixtures/bin/consan_gemm_load"]["commands"])
+    assert "--offload-arch=gfx950" in gemm_bin
+    assert "-DOBJECT=" in gemm_bin
+
+
+def test_md_code_to_html_escapes_before_converting_backticks():
+    assert gen._md_code_to_html("use `X` now") == "use <code>X</code> now"
+    # Escaping happens first, so text cannot inject markup of its own.
+    assert gen._md_code_to_html("<b>&`x`") == "&lt;b&gt;&amp;<code>x</code>"
+    assert gen._md_code_to_html("plain") == "plain"
+
+
+def test_artifact_digest_index_covers_every_key_shape_a_sanitizer_writes():
+    # The unpublished-artifact table looks digests up by basename, because the two
+    # sanitizers name the same kind of artifact under different report keys.
+    index = gen.artifact_digest_index({
+        "path": "/tmp/build/tools/rj_waitcheck", "sha256": "aa",
+        "command": "/w/fixtures/bin/consan_gemm_load", "command_sha256": "bb",
+        "hook": "/w/librocjitsu_dbi_hooks.so", "hook_sha256": "cc",
+        "code_object:consan_gemm_f32.hsaco": "dd",
+    })
+    assert index == {
+        "rj_waitcheck": "aa", "consan_gemm_load": "bb",
+        "librocjitsu_dbi_hooks.so": "cc", "consan_gemm_f32.hsaco": "dd",
+    }
+    # A half-recorded pair contributes nothing rather than a partial entry.
+    assert gen.artifact_digest_index({"command": "/w/x", "sha256": "aa"}) == {}
+    assert gen.artifact_digest_index({}) == {}
+
+
+def test_run_area_names_the_consan_repro_binary_digest_not_an_em_dash():
+    # ConSan records the repro binary as command/command_sha256. Keying only on
+    # "code_object:" left every fixtures/bin/ artifact with a null digest, so the
+    # "rebuild it and check the digest" instruction had nothing to check against.
+    report = _consan_clean_report()
+    report["checks"][0]["backend"] = {
+        "command": "/w/fixtures/bin/consan_gemm_load", "command_sha256": "deadbeef",
+    }
+    env = gen.build_case_env(
+        case="consan-gemm", cls="survey",
+        recipe="recipes/sanitizers/daily-consan-gemm.yaml", command="aorta sweep run",
+        meta={}, summary={}, report=report,
+        built_refs=["fixtures/bin/consan_gemm_load", "fixtures/isa"], inputs=[],
+    )
+    by_path = {item["path"]: item["sha256"] for item in env["artifacts_not_published"]}
+    assert by_path["fixtures/bin/consan_gemm_load"] == "deadbeef"
+    # A bare directory reference still has no digest to record; that stays honest.
+    assert by_path["fixtures/isa"] is None
+    assert "deadbeef" in gen.build_reproduce_md(env, built_refs=list(by_path))
+
+
+def test_case_dir_up_matches_the_published_depth_of_each_tab(tmp_path):
+    out = tmp_path / "dashboard"
+    guardrail = out / "runs" / "2026-08-05-33" / "waitcheck"
+    survey = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    guardrail.mkdir(parents=True)
+    survey.mkdir(parents=True)
+    # A guardrail case sits one level shallower than a survey case, so a single
+    # hardcoded "up" would break the back-link on one of the two tabs.
+    assert gen.case_dir_up(guardrail, out) == ("../../../", "../")
+    assert gen.case_dir_up(survey, out) == ("../../../../", "../../")
+
+
+def test_main_publishes_full_case_dirs_with_gzipped_logs(tmp_path, monkeypatch):
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    case = out / "runs" / "2026-08-05-33" / "waitcheck"
+    survey_case = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+
+    # The logs the verdict came from are published, gzipped, and still readable.
+    log = case / "waitcheck" / "waitcheck-0.log.gz"
+    assert log.is_file() and not (case / "waitcheck" / "waitcheck-0.log").exists()
+    assert gzip.decompress(log.read_bytes()) == b"scan output\n"
+    survey_log = survey_case / "consan" / "consan.log.gz"
+    assert gzip.decompress(survey_log.read_bytes()) == b"hook timeout\n"
+
+    # Every run area carries the inputs needed to reproduce it.
+    for area in (case, survey_case):
+        assert (area / "sanitizer_report.json").is_file()
+        assert (area / "recipe.yaml").is_file()
+        assert (area / "REPRODUCE.md").is_file()
+        assert (area / "env.json").is_file()
+        assert (area / "index.html").is_file()
+    # Source-level recipe inputs are copied; the CI-built artifacts are not.
+    assert (case / "inputs" / "fixtures" / "gemm_shapes_unique.csv").is_file()
+    assert not list(case.rglob("*.hsaco"))
+    assert not (survey_case / "inputs" / "fixtures" / "isa").exists()
+
+
+def test_run_area_records_unpublished_artifacts_by_digest(tmp_path, monkeypatch):
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    case = out / "runs" / "2026-08-05-33" / "waitcheck"
+
+    env = json.loads((case / "env.json").read_text(encoding="utf-8"))
+    assert env["schema"] == gen.RUN_AREA_ENV_SCHEMA
+    assert env["class"] == "guardrail"
+    assert env["recipe"] == "recipes/sanitizers/daily-waitcheck-gemm.yaml"
+    assert env["command"] == (
+        "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml"
+    )
+    # The full SHA is recorded, not the display-shortened one, so the reproduce
+    # instructions name a revision you can actually check out.
+    assert env["commit"] == "0123456789abcdef"
+    assert env["observed"]["verdict"] == "warn"
+    assert env["digests"]["sha256"] == "472fcf288714beef"
+
+    md = (case / "REPRODUCE.md").read_text(encoding="utf-8")
+    assert "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm.yaml" in md
+    assert "git checkout 0123456789abcdef" in md
+    assert "472fcf288714beef" in md
+
+    # The survey case's recipe references built artifacts, so they are named with
+    # their digest under "artifacts not published" rather than shipped.
+    survey_env = json.loads(
+        (out / "runs/2026-08-05-33/survey/consan-gemm/env.json").read_text(encoding="utf-8")
+    )
+    paths = [item["path"] for item in survey_env["artifacts_not_published"]]
+    assert "fixtures/isa/consan_gemm_f32.hsaco" in paths
+    survey_md = (
+        out / "runs/2026-08-05-33/survey/consan-gemm/REPRODUCE.md"
+    ).read_text(encoding="utf-8")
+    assert "Artifacts not published" in survey_md
+    # The GEMM object is *extracted* by prepare_gemm_isa.py, not compiled from a
+    # .hip source, and the binary that loads it needs the -DOBJECT define. A
+    # generic "hipcc it" hint would build a different file than the recorded
+    # digest, which is the whole point of recording the digest.
+    assert "prepare_gemm_isa.py" in survey_md
+    # Root-relative in the command, because that is where the clone leaves you.
+    assert (
+        "--consan-object recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco"
+        in survey_md
+    )
+    assert "-DOBJECT=" in survey_md
+    assert "recipes/sanitizers/fixtures/kernels/consan_load.hip" in survey_md
+
+
+def test_case_index_lists_every_published_file(tmp_path, monkeypatch):
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    case = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    page = (case / "index.html").read_text(encoding="utf-8")
+
+    # Pages does not auto-index a directory, so this page is what makes the
+    # footer's directory link resolve; it must link everything actually present.
+    for rel, _size in gen.run_area_files(case):
+        assert f'href="{rel}"' in page
+    assert 'href="consan/consan.log.gz"' in page
+    assert 'href="sanitizer_report.json"' in page
+    # It never links itself, and every link resolves on disk.
+    assert 'href="index.html"' not in page
+    for href in re.findall(r'href="([^"#]+)"', page):
+        if href.startswith("http"):
+            continue
+        target = (case / href).resolve()
+        assert target.exists(), href
+        if target.is_dir():
+            assert (target / "index.html").is_file(), href
+
+
+def test_keep_logs_window_prunes_bulk_but_keeps_report_and_page(tmp_path, monkeypatch):
+    # Reports are retained for --keep runs; logs and copied inputs only for the
+    # newest --keep-logs, so the data branch stays bounded (#384).
+    out = _publish_with_logs(
+        tmp_path,
+        monkeypatch,
+        run_ids=["2026-08-05-33", "2026-08-04-22", "2026-08-03-11"],
+        keep_logs=2,
+        survey=False,
+    )
+    latest = out / "runs" / "2026-08-05-33" / "waitcheck"
+    inside = out / "runs" / "2026-08-04-22" / "waitcheck"
+    outside = out / "runs" / "2026-08-03-11" / "waitcheck"
+
+    assert (inside / "waitcheck" / "waitcheck-0.log.gz").is_file()
+    # The recipe and its inputs are pinned to the checkout that ran the case, so
+    # only the run this job staged gets them -- publishing today's recipe into an
+    # older area would contradict the commit its env.json names.
+    assert (latest / "recipe.yaml").is_file()
+    assert (latest / "inputs").is_dir()
+    assert not (inside / "recipe.yaml").exists()
+    assert not (inside / "inputs").exists()
+
+    # The pruned run keeps what makes it still readable and still drillable.
+    assert (outside / "sanitizer_report.json").is_file()
+    assert (outside / "index.html").is_file()
+    assert (outside / "env.json").is_file()
+    assert not list(outside.rglob("*.log.gz"))
+    assert not (outside / "inputs").exists()
+    assert not (outside / "recipe.yaml").exists()
+    # Both renderings say the area was pruned rather than promising its logs.
+    env = json.loads((outside / "env.json").read_text(encoding="utf-8"))
+    assert env["logs_published"] is False
+    assert env["inputs"] == []
+    assert "pruned" in (outside / "REPRODUCE.md").read_text(encoding="utf-8")
+    assert json.loads((inside / "env.json").read_text(encoding="utf-8"))["logs_published"] is True
+    # An empty per-sanitizer log dir is removed rather than left as a stub, and
+    # the page lists only files that survived -- no dead links.
+    assert not (outside / "waitcheck").exists()
+    page = (outside / "index.html").read_text(encoding="utf-8")
+    assert ".log.gz" not in page
+    for href in re.findall(r'href="([^"#]+)"', page):
+        if not href.startswith("http"):
+            assert (outside / href).resolve().exists(), href
+
+
+def test_run_index_lists_survey_cases_and_run_areas(tmp_path):
+    root = tmp_path / "runs"
+    _write_history_run(root, "2026-08-05-33")
+    run = gen.runs_from_history_root(root, _baselines())[0]
+    survey = gen.survey_cases_from_spec(
+        {"cases": [{
+            "name": "consan-gemm", "label": "gemm - ConSan",
+            "command": "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml",
+            "report_rel": "runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json",
+            "report": _consan_racy_report(),
+        }]}
+    )
+
+    page = gen.build_run_index_html(run, survey=survey)
+
+    # Without this the run page lists only the three gated guardrail recipes, so
+    # the top-nav "raw reports" link never mentions the survey cases beside them.
+    assert "Workload survey" in page
+    assert "daily-consan-gemm.yaml" in page
+    # A spec entry carries no area_rel: its report parsed, but nothing staged the
+    # directory, so the case is listed with no run-area link rather than a 404.
+    assert "survey/consan-gemm/" not in page
+    assert "&mdash;" in page
+    # Once the caller has actually published the area it may claim it.
+    staged = [{**survey[0], "staged": True}]
+    linked = gen.build_run_index_html(run, survey=staged)
+    assert 'href="survey/consan-gemm/">run area</a>' in linked
+    # Guardrail rows link their own run area alongside the raw report.
+    assert 'href="waitcheck/">run area</a>' in page
+    assert 'href="waitcheck/sanitizer_report.json"' in page
+
+    # A run with no survey cases renders exactly as before (no empty section).
+    assert "Workload survey" not in gen.build_run_index_html(run)
+
+
+def test_keep_logs_window_also_bounds_survey_logs(tmp_path, monkeypatch):
+    """The log window must bound the survey areas, not just the guardrail cases.
+
+    A survey area is only ever published under the run that was latest at the
+    time, and then persists on the data branch under that run -- so it is only
+    reachable for pruning on a *later* publish. Publishing once per run into one
+    output tree is what the nightly does to the ``sanitizer-results`` branch, and
+    it is the only way this shows up: a single publish leaves every survey area
+    inside the window and looks correct.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    run_ids = ["2026-08-03-11", "2026-08-04-22", "2026-08-05-33"]
+    for run_id in run_ids:
+        run_dir = _write_history_run(dashboard / "runs", run_id)
+        (run_dir / "consan-racy" / "consan").mkdir(parents=True)
+        (run_dir / "consan-racy" / "consan" / "consan.log").write_text("race\n")
+        info = tmp_path / f"informational-{run_id}"
+        (info / "consan-gemm" / "consan").mkdir(parents=True)
+        (info / "consan-gemm" / "sanitizer_report.json").write_text(
+            json.dumps(_informational_report("combined_hook_timeout"))
+        )
+        (info / "consan-gemm" / "consan" / "consan.log").write_text("hook timeout\n")
+        monkeypatch.setattr(sys, "argv", [
+            "gen_sanitizer_dashboard",
+            "--history-root", str(dashboard / "runs"),
+            "--baselines",
+            str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+            "--out-dir", str(dashboard),
+            "--keep-logs", "1",
+            "--informational-results-dir", str(info),
+        ])
+        assert gen.main() == 0
+
+    latest = dashboard / "runs/2026-08-05-33/survey/consan-gemm"
+    assert (latest / "consan" / "consan.log.gz").is_file()
+
+    for run_id in run_ids[:-1]:
+        area = dashboard / "runs" / run_id / "survey" / "consan-gemm"
+        # ConSan survey logs are the bulkiest thing published; unbounded here they
+        # would outlive the guardrail logs beside them by --keep / --keep-logs.
+        assert not list(area.rglob("*.log.gz")), run_id
+        assert not list(area.rglob("*.log")), run_id
+        # Still readable and still drillable, like a pruned guardrail area.
+        assert (area / "sanitizer_report.json").is_file(), run_id
+        env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+        assert env["logs_published"] is False, run_id
+        # The page is re-rendered from that manifest, so it cannot keep linking
+        # the log it no longer has.
+        page = (area / "index.html").read_text(encoding="utf-8")
+        assert ".log.gz" not in page, run_id
+        for href in re.findall(r'href="([^"#]+)"', page):
+            if not href.startswith("http"):
+                assert (area / href).resolve().exists(), f"{run_id}: {href}"
+
+
+def _publish_into(dashboard, monkeypatch, *, info=None, keep_logs=None):
+    argv = [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+    ]
+    if info is not None:
+        argv += ["--informational-results-dir", str(info)]
+    if keep_logs is not None:
+        argv += ["--keep-logs", str(keep_logs)]
+    monkeypatch.setattr(sys, "argv", argv)
+    return gen.main()
+
+
+def test_a_rejected_survey_report_never_persists_and_cannot_abort_a_later_publish(
+    tmp_path, monkeypatch
+):
+    """A malformed best-effort report must not take the whole dashboard down.
+
+    ``survey_cases_from_informational_dir`` deliberately skips a report whose
+    nested shape makes the reduction raise. The copy loop ran before that
+    decision was consulted, so the directory was published anyway with no
+    manifest -- and on the *next* nightly the retrofit path re-read that same
+    report and raised, aborting publication days later for a non-gating input.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    # A dict (so the isinstance guard passes) whose nested shape breaks reduction.
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps({"schema": "aorta.sanitizer_report/0.1", "checks": None})
+    )
+    assert gen.survey_cases_from_informational_dir(info, rel="runs/2026-08-05-33") == []
+
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    assert _publish_into(dashboard, monkeypatch, info=info) == 0
+    # Nothing the survey loader refused to read is left in the published history.
+    assert not (dashboard / "runs/2026-08-05-33/survey/consan-gemm").exists()
+
+    # And an orphan already on the data branch degrades instead of aborting.
+    orphan = dashboard / "runs/2026-08-05-33/survey/consan-gemm"
+    orphan.mkdir(parents=True)
+    (orphan / "sanitizer_report.json").write_text(
+        json.dumps({"schema": "aorta.sanitizer_report/0.1", "checks": None})
+    )
+    _write_history_run(dashboard / "runs", "2026-08-06-44")
+    assert _publish_into(dashboard, monkeypatch) == 0
+    assert not (orphan / "index.html").exists()
+
+
+def test_keep_logs_zero_prunes_the_current_runs_survey_area_too(tmp_path, monkeypatch):
+    # --keep-logs is documented as applying to "guardrail and survey areas alike".
+    # The survey co-publish always gzipped and defaulted logs=True, so with
+    # --keep-logs 0 the survey area was the one unbounded thing left.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    info = tmp_path / "informational"
+    (info / "consan-gemm" / "consan").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (info / "consan-gemm" / "consan" / "consan.log").write_text("hook timeout\n")
+    run_dir = _write_history_run(dashboard / "runs", "2026-08-05-33")
+    (run_dir / "waitcheck" / "waitcheck").mkdir(parents=True)
+    (run_dir / "waitcheck" / "waitcheck" / "waitcheck-0.log").write_text("scan\n")
+
+    assert _publish_into(dashboard, monkeypatch, info=info, keep_logs=0) == 0
+
+    guardrail = dashboard / "runs/2026-08-05-33/waitcheck"
+    area = dashboard / "runs/2026-08-05-33/survey/consan-gemm"
+    assert not list(guardrail.rglob("*.log*"))
+    assert not list(area.rglob("*.log*")), "survey bulk escaped --keep-logs 0"
+    env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+    assert env["logs_published"] is False
+    # Still browsable, like a pruned guardrail area.
+    assert (area / "index.html").is_file()
+    assert ".log" not in (area / "index.html").read_text(encoding="utf-8")
+
+
+def test_disjoint_history_and_output_trees_keep_the_survey_subtree(
+    tmp_path, monkeypatch
+):
+    # With --history-root separate from <out-dir>/runs the output tree is cleared
+    # and re-copied. Copying only the guardrail case dirs dropped the survey areas
+    # the history holds, so retained runs lost their survey downloads.
+    history = tmp_path / "history"
+    out = tmp_path / "dashboard"
+    _write_history_run(history, "2026-08-05-33")
+    area = history / "2026-08-05-33" / "survey" / "consan-gemm"
+    (area / "consan").mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (area / "consan" / "consan.log.gz").write_bytes(b"x")
+    (area / "env.json").write_text(json.dumps({
+        "case": "consan-gemm", "command": "aorta sweep run", "observed": {"verdict": "error"},
+    }))
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(history),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(out),
+    ])
+    assert gen.main() == 0
+
+    published = out / "runs/2026-08-05-33/survey/consan-gemm"
+    assert (published / "sanitizer_report.json").is_file()
+    assert (published / "index.html").is_file()
+    # The source history is untouched by the copy.
+    assert (area / "sanitizer_report.json").is_file()
+
+
+def test_published_survey_area_keeps_its_recorded_command(tmp_path):
+    """Reconstructing a published run must not recompute its reproduce command.
+
+    ``displayed_survey`` rebuilds the newest run's Tab 2 list from the areas
+    published under it. Recomputing the command from the current
+    ``_survey_recipe_for`` map meant a recipe rename would rewrite a historical
+    run's advertised command, even though that area's manifest records the one it
+    actually ran -- the same rule the run-area renderers already follow.
+    """
+    published = tmp_path / "survey"
+    (published / "consan-gemm").mkdir(parents=True)
+    (published / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (published / "consan-gemm" / "env.json").write_text(
+        json.dumps({"case": "consan-gemm", "command": "aorta sweep run --recipe old/name.yaml"})
+    )
+    entries = gen.survey_cases_from_informational_dir(published, rel="runs/x")
+    assert entries[0]["command"] == "aorta sweep run --recipe old/name.yaml"
+
+    # A fresh sweep's results dir has no manifest, so the recipe map still applies.
+    fresh = tmp_path / "informational"
+    (fresh / "consan-gemm").mkdir(parents=True)
+    (fresh / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    fresh_entries = gen.survey_cases_from_informational_dir(fresh, rel="runs/x")
+    assert fresh_entries[0]["command"] == (
+        "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml"
+    )
+    # A malformed manifest degrades to the recipe map rather than raising.
+    (published / "consan-gemm" / "env.json").write_text("[]")
+    assert gen.survey_cases_from_informational_dir(published, rel="runs/x")[0][
+        "command"
+    ] == fresh_entries[0]["command"]
+
+
+def test_prose_is_rendered_from_the_persisted_manifest_not_current_constants():
+    """A retained area's instructions must not be rewritten by a later code change.
+
+    Every retained area is re-rendered nightly while its ``env.json`` is
+    preserved, so recomputing the commands from the module's current tables would
+    silently rewrite historical instructions and leave the prose contradicting the
+    manifest beside it.
+    """
+    env = {
+        "case": "consan-gemm",
+        "target": "gfx950",
+        "required_env": [
+            {"var": "OLD_VAR", "set_by": "operator", "purpose": "what this run needed"}
+        ],
+        "rebuild": [{
+            "path": "fixtures/isa/x.hsaco",
+            "what": "an object built the way this run built it",
+            "commands": ["hipcc --historical-flag x.hip -o x.hsaco"],
+            "caveat": "",
+        }],
+        "observed": {},
+        "artifacts_not_published": [{"path": "fixtures/isa/x.hsaco", "sha256": "ab"}],
+    }
+    md = gen.build_reproduce_md(env, built_refs=["fixtures/isa/x.hsaco"])
+    assert "hipcc --historical-flag x.hip -o x.hsaco" in md
+    assert "OLD_VAR" in md
+    # Today's tables are not consulted when the manifest has its own answer.
+    assert "prepare_gemm_isa.py" not in md
+    assert "ROCJITSU_PREBUILT" not in md
+
+    page = gen.build_case_index_html(
+        env, [], built_refs=["fixtures/isa/x.hsaco"], up="../../"
+    )
+    assert "hipcc --historical-flag x.hip -o x.hsaco" in page
+    assert "OLD_VAR" in page
+
+    # An area published before the fields existed still gets instructions.
+    legacy = {k: v for k, v in env.items() if k not in {"rebuild", "required_env"}}
+    fallback = gen.build_reproduce_md(legacy, built_refs=["fixtures/isa/lds.hsaco"])
+    assert "hipcc --genco" in fallback
+
+
+def test_refresh_keeps_the_manifests_own_instructions(tmp_path, monkeypatch):
+    # End-to-end version of the above: refreshing an older area must not restamp
+    # its rebuild commands from the current module tables.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    area = dashboard / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (area / "env.json").write_text(json.dumps({
+        "case": "consan-gemm", "command": "aorta sweep run", "target": "gfx950",
+        "observed": {"verdict": "error"},
+        "required_env": [{"var": "OLD_VAR", "set_by": "operator", "purpose": "historic"}],
+        "rebuild": [{"path": "fixtures/isa/x.hsaco", "what": "historic",
+                     "commands": ["hipcc --historical-flag"], "caveat": ""}],
+        "artifacts_not_published": [{"path": "fixtures/isa/x.hsaco", "sha256": "ab"}],
+    }))
+    _write_history_run(dashboard / "runs", "2026-08-06-44")
+    assert _publish_into(dashboard, monkeypatch) == 0
+
+    md = (area / "REPRODUCE.md").read_text(encoding="utf-8")
+    assert "hipcc --historical-flag" in md
+    assert "OLD_VAR" in md
+    env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+    assert env["rebuild"][0]["commands"] == ["hipcc --historical-flag"]
+
+
+def test_copublish_replaces_the_destination_instead_of_merging(tmp_path, monkeypatch):
+    # A file that vanished from this sweep must not survive and be listed on the
+    # landing page as evidence for the new report.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    stale = dashboard / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    (stale / "consan").mkdir(parents=True)
+    (stale / "consan" / "consan.log.gz").write_bytes(b"stale evidence")
+    (stale / "sanitizer_report.json").write_text("{}")
+
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    assert _publish_into(dashboard, monkeypatch, info=info) == 0
+
+    # This sweep produced no log, so none is published or listed.
+    assert not list(stale.rglob("*.log.gz"))
+    assert not (stale / "consan").exists()
+    assert ".log.gz" not in (stale / "index.html").read_text(encoding="utf-8")
+
+
+def test_in_window_survey_areas_are_gzipped_like_guardrail_areas(tmp_path, monkeypatch):
+    # An area carried in from a disjoint history (or published before run areas
+    # existed) holds raw *.log; the log window must compress it, not publish it.
+    history = tmp_path / "history"
+    out = tmp_path / "dashboard"
+    _write_history_run(history, "2026-08-05-33")
+    area = history / "2026-08-05-33" / "survey" / "consan-gemm"
+    (area / "consan").mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (area / "consan" / "consan.log").write_text("raw uncompressed log\n")
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(history),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(out),
+    ])
+    assert gen.main() == 0
+
+    published = out / "runs/2026-08-05-33/survey/consan-gemm"
+    assert (published / "consan" / "consan.log.gz").is_file()
+    assert not (published / "consan" / "consan.log").exists()
+    assert gzip.decompress(
+        (published / "consan" / "consan.log.gz").read_bytes()
+    ) == b"raw uncompressed log\n"
+
+
+def test_survey_area_link_rejects_an_unsafe_caller_supplied_name():
+    # `name` is caller JSON on a --survey entry and the run page's link is
+    # survey/<name>/. HTML-escaping the attribute does not neutralize path
+    # semantics, so a staged spec naming ../../other would traverse -- and would
+    # disagree with the card footer, which derives its link from report_rel.
+    for unsafe in (
+        "../../other", "a/b", "..", "", "a b", "http://x", "a\\b",
+        # A URL delimiter is as wrong as a path one: the browser reads the tail as a
+        # fragment/query on "foo", so the link misses the published directory
+        # entirely, and a percent-escape can be normalised back into traversal.
+        "foo#bar", "foo?x=1", "%2e%2e", "foo%2Fbar",
+    ):
+        assert gen._safe_case_segment(unsafe) is None, unsafe
+    for ok in ("consan-gemm", "waitcheck-gemm", "consan-lds-dispatch", "sol_1.hsaco"):
+        assert gen._safe_case_segment(ok) == ok
+
+    survey = gen.survey_cases_from_spec({"cases": [{
+        "name": "../../other", "label": "traversal", "staged": True,
+        "report_rel": "runs/x/survey/other/sanitizer_report.json",
+        "report": _consan_racy_report(),
+    }]})
+    # An unsafe name cannot be claimed as staged at all, so no renderer links it.
+    assert survey[0]["staged"] is False
+    page = gen._run_index_survey_html(survey)
+    assert "href=" not in page
+    assert "run area" not in page
+    # Even if an entry arrives already marked staged, the renderer still refuses to
+    # build a link from it. The name may still appear as escaped label *text* --
+    # that is display, not a path -- but never inside an href.
+    forced = gen._run_index_survey_html([
+        {"name": "../../other", "staged": True, "summary": {"verdict": "fail"}}
+    ])
+    assert "href=" not in forced
+    assert "&mdash;" in forced
+
+
+def test_current_run_is_the_staged_one_not_merely_the_newest(tmp_path, monkeypatch):
+    """A re-run of an older workflow must not stamp the newer run's area.
+
+    The dir id is ``<date>-<GITHUB_RUN_ID>`` and a re-run reuses its original,
+    lower run id -- so it sorts *behind* a newer same-day run. Keying "the run this
+    job produced" on list position then wrote this job's container image, rocjitsu
+    bundle and recipe copy into the newer run's area, and published this job's
+    survey under a run that did not produce it.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    older, newer = "2026-08-05-10", "2026-08-05-99"
+    for run_id in (older, newer):
+        _write_history_run(dashboard / "runs", run_id)
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    monkeypatch.setenv("AORTA_CI_IMAGE", "rocm/pytorch@sha256:rerun")
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+        "--informational-results-dir", str(info),
+        # This job re-ran the OLDER workflow; the newer run is already published.
+        "--current-run", older,
+    ])
+    assert gen.main() == 0
+
+    def _env(run_id, case):
+        path = dashboard / "runs" / run_id / case / "env.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    # The re-run's provenance lands on its own area...
+    assert _env(older, "waitcheck").get("container_image") == "rocm/pytorch@sha256:rerun"
+    assert (dashboard / "runs" / older / "waitcheck" / "recipe.yaml").is_file()
+    # ...and never on the newer run that a different job produced.
+    assert "container_image" not in _env(newer, "waitcheck")
+    assert not (dashboard / "runs" / newer / "waitcheck" / "recipe.yaml").exists()
+    # The survey is co-published under the run that swept it.
+    assert (dashboard / "runs" / older / "survey" / "consan-gemm").is_dir()
+    assert not (dashboard / "runs" / newer / "survey").exists()
+    # data.json attaches the survey to that run too.
+    data = json.loads((dashboard / "data.json").read_text(encoding="utf-8"))
+    by_run = {run["meta"]["run"]: run for run in data}
+    assert by_run[older].get("survey")
+    assert not by_run[newer].get("survey")
+
+
+def test_a_survey_spec_name_is_not_treated_as_staged_by_the_copublish_loop(
+    tmp_path, monkeypatch
+):
+    # staged_now gated the run loop's refresh, but the co-publish loop only rewrites
+    # --informational-results-dir entries. Including a spec name skipped an area
+    # that nothing later rewrote, so it kept raw logs even under --keep-logs 0.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    spec_area = dashboard / "runs" / "2026-08-05-33" / "survey" / "spec-case"
+    (spec_area / "consan").mkdir(parents=True)
+    (spec_area / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (spec_area / "consan" / "consan.log").write_text("raw log\n")
+    spec = tmp_path / "survey.json"
+    spec.write_text(json.dumps({"cases": [{
+        "name": "spec-case", "label": "spec case", "staged": True,
+        "report_rel": "runs/2026-08-05-33/survey/spec-case/sanitizer_report.json",
+        "report": _consan_racy_report(),
+    }]}))
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+        "--survey", str(spec),
+        "--informational-results-dir", str(info),
+        "--keep-logs", "0",
+    ])
+    assert gen.main() == 0
+
+    # The spec area is not staged by this job, so the run loop prunes it.
+    assert not list(spec_area.rglob("*.log")), "spec area escaped --keep-logs 0"
+    assert not list(spec_area.rglob("*.log.gz"))
+
+
+def test_a_spec_entry_cannot_publish_a_rejected_informational_case(tmp_path, monkeypatch):
+    # The copy loop resolves each case dir against the survey entries, but keying
+    # that lookup on the combined list let a --survey spec entry stand in for a
+    # report the informational loader had refused to read: the directory was
+    # published anyway, with a summary and command describing a different report.
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    _write_history_run(dashboard / "runs", "2026-08-05-33")
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    # A malformed nested shape: it passes the isinstance guard, then makes the
+    # reduction raise, so survey_cases_from_informational_dir skips the case.
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(json.dumps({"checks": None}))
+    spec = tmp_path / "survey.json"
+    spec.write_text(json.dumps({"cases": [{
+        # Same name, a healthy inline report, and staged -- so before the fix this
+        # entry satisfied the lookup for the rejected directory.
+        "name": "consan-gemm", "label": "spec case", "staged": True,
+        "report_rel": "runs/2026-08-05-33/survey/consan-gemm/sanitizer_report.json",
+        "report": _consan_racy_report(),
+    }]}))
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+        "--survey", str(spec),
+        "--informational-results-dir", str(info),
+    ])
+    assert gen.main() == 0
+
+    assert not (dashboard / "runs/2026-08-05-33/survey/consan-gemm").exists()
+
+
+def test_the_page_renders_the_survey_of_the_run_it_calls_latest(tmp_path, monkeypatch):
+    """Tab 1 and Tab 2 must describe the same run.
+
+    ``build_html``/``build_summary_md`` take their guardrail data from the newest
+    run, so on a re-run of an older workflow (see ``--current-run``) passing this
+    job's survey to them labelled the newer run "Latest run" while showing the
+    older re-run's observations under it -- and regenerating data.json dropped the
+    newer run's own published survey.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    older, newer = "2026-08-05-10", "2026-08-05-99"
+    for run_id in (older, newer):
+        _write_history_run(dashboard / "runs", run_id)
+    # The newer run published a survey area of its own on the day it ran.
+    published = dashboard / "runs" / newer / "survey" / "waitcheck-gemm"
+    published.mkdir(parents=True)
+    (published / "sanitizer_report.json").write_text(json.dumps(_waitcheck_report()))
+    info = tmp_path / "informational"
+    (info / "consan-gemm").mkdir(parents=True)
+    (info / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(dashboard / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(dashboard),
+        "--informational-results-dir", str(info),
+        "--current-run", older,  # this job re-ran the older workflow
+    ])
+    assert gen.main() == 0
+
+    page = (dashboard / "index.html").read_text(encoding="utf-8")
+    # The newest run's own survey is what the page shows, rebuilt from the area
+    # published under it -- links, reproduce command and all.
+    assert f"runs/{newer}/survey/waitcheck-gemm/" in page
+    assert "daily-waitcheck-gemm-object.yaml" in page
+    # ...and this job's survey is not rendered as if it belonged to that run.
+    assert "daily-consan-gemm.yaml" not in page
+    assert f"runs/{older}/survey/" not in page
+    summary_md = (dashboard / "summary.md").read_text(encoding="utf-8")
+    assert "daily-waitcheck-gemm-object.yaml" in summary_md
+    assert "daily-consan-gemm.yaml" not in summary_md
+    # Each run's record keeps its own survey, so neither is dropped or reattributed.
+    by_run = {
+        run["meta"]["run"]: run
+        for run in json.loads((dashboard / "data.json").read_text(encoding="utf-8"))
+    }
+    assert [e["name"] for e in by_run[older].get("survey", [])] == ["consan-gemm"]
+    assert [e["name"] for e in by_run[newer].get("survey", [])] == ["waitcheck-gemm"]
+
+
+def test_staged_requires_the_whole_area_to_match_the_run_being_rendered():
+    """The two renderers derive one link from different sources, so pin the area.
+
+    The run page builds ``survey/<name>/`` relative to the run it renders; the card
+    footer takes ``report_rel``'s directory. Comparing only the case segment left a
+    report under a *different run* passing, so the footer pointed into that other
+    run while the run page pointed at its own.
+    """
+    def spec(name, report_rel, rel="runs/x"):
+        return gen.survey_cases_from_spec(
+            {"cases": [{
+                "name": name, "label": name, "staged": True,
+                "report_rel": report_rel, "report": _consan_racy_report(),
+            }]},
+            rel=rel,
+        )
+
+    # Wrong case directory, and -- the case that survived the segment-only check --
+    # the right case under the wrong run.
+    for name, report_rel in (
+        ("foo", "runs/x/survey/bar/sanitizer_report.json"),
+        ("foo", "runs/other/survey/foo/sanitizer_report.json"),
+        ("foo", "runs/x/foo/sanitizer_report.json"),
+    ):
+        entries = spec(name, report_rel)
+        assert entries[0]["staged"] is False, report_rel
+        assert "run area</a>" not in gen.build_html(
+            [_healthy_guardrail_run()], survey=entries
+        )
+        assert "run area" not in gen._run_index_survey_html(entries)
+
+    agreeing = spec("foo", "runs/x/survey/foo/sanitizer_report.json")
+    assert agreeing[0]["staged"] is True
+    assert 'href="survey/foo/">run area</a>' in gen._run_index_survey_html(agreeing)
+
+    # With no run context nothing can be verified, so nothing may be claimed.
+    assert spec("foo", "runs/x/survey/foo/sanitizer_report.json", rel=None)[0][
+        "staged"
+    ] is False
+
+
+def test_pruning_is_irreversible_when_keep_logs_is_raised_later(tmp_path):
+    # The logs were deleted from the published history and cannot be recovered from
+    # it, so a later, larger --keep-logs must not claim they are available again.
+    area = tmp_path / "dashboard" / "runs" / "r" / "survey" / "c"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text("{}")
+    (area / "env.json").write_text(json.dumps({
+        "case": "c", "command": "aorta sweep run", "target": "gfx950",
+        "observed": {}, "logs_published": False, "inputs": [],
+        "artifacts_not_published": [],
+    }))
+
+    assert gen.refresh_published_case_area(
+        area, tmp_path / "dashboard", logs=True
+    ) is True
+
+    env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+    assert env["logs_published"] is False
+    page = (area / "index.html").read_text(encoding="utf-8")
+    assert "pruned" in page
+    assert "Logs are gzipped" not in page
+
+
+def test_reproduce_md_runs_top_to_bottom(tmp_path, monkeypatch):
+    # The fixtures the sweep needs are gitignored, so a document that invokes the
+    # sweep before the rebuild steps fails on a fresh clone before the reader ever
+    # reaches them.
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    md = (
+        out / "runs/2026-08-05-33/survey/consan-gemm/REPRODUCE.md"
+    ).read_text(encoding="utf-8")
+
+    checkout = md.index("git clone https://github.com/ROCm/aorta")
+    rebuild = md.index("prepare_gemm_isa.py")
+    env_note = md.index("ROCJITSU_PREBUILT")
+    sweep = md.index("aorta sweep run --recipe")
+    assert checkout < rebuild < sweep, "sweep must come after the rebuild steps"
+    assert env_note < sweep, "required env must be set before the sweep"
+
+
+def test_refresh_published_case_area_reports_an_unusable_manifest(tmp_path):
+    # env.json is the only input for re-rendering an older area, so a missing or
+    # malformed one must be reported (the caller then writes a fresh area) rather
+    # than raising and aborting the whole dashboard.
+    area = tmp_path / "dashboard" / "runs" / "r" / "survey" / "c"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text("{}")
+
+    assert gen.refresh_published_case_area(area, tmp_path / "dashboard", logs=True) is False
+    (area / "env.json").write_text("[]")  # valid JSON, wrong shape
+    assert gen.refresh_published_case_area(area, tmp_path / "dashboard", logs=True) is False
+
+
+def test_older_run_areas_keep_their_own_provenance_not_the_current_job(tmp_path, monkeypatch):
+    """An older area must not be relabelled with the publishing job's environment.
+
+    ``AORTA_CI_IMAGE`` / ``AORTA_ROCJITSU_*`` describe the GPU run being published
+    now. Every retained run's area is re-rendered on every nightly, so stamping
+    them unconditionally would tell a reader that a three-week-old run used
+    today's container image and sanitizer build.
+    """
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    for run_id, image, bundle in (
+        ("2026-08-04-22", "rocm/pytorch@sha256:old", "oldbundle"),
+        ("2026-08-05-33", "rocm/pytorch@sha256:new", "newbundle"),
+    ):
+        _write_history_run(dashboard / "runs", run_id)
+        monkeypatch.setenv("AORTA_CI_IMAGE", image)
+        monkeypatch.setenv("AORTA_ROCJITSU_COMMIT", bundle)
+        monkeypatch.setattr(sys, "argv", [
+            "gen_sanitizer_dashboard",
+            "--history-root", str(dashboard / "runs"),
+            "--baselines",
+            str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+            "--out-dir", str(dashboard),
+        ])
+        assert gen.main() == 0
+
+    def _env(run_id):
+        path = dashboard / "runs" / run_id / "waitcheck" / "env.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    assert _env("2026-08-04-22")["container_image"] == "rocm/pytorch@sha256:old"
+    assert _env("2026-08-04-22")["rocjitsu_commit"] == "oldbundle"
+    assert _env("2026-08-05-33")["container_image"] == "rocm/pytorch@sha256:new"
+    # It also survives into the rendering, not just the manifest.
+    assert "rocm/pytorch@sha256:old" in (
+        dashboard / "runs/2026-08-04-22/waitcheck/REPRODUCE.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_past_run_pages_still_list_the_survey_areas_published_under_them(
+    tmp_path, monkeypatch
+):
+    # The live survey list only covers the run being published now, so a past
+    # run's page has to be rebuilt from the areas on disk -- otherwise the areas
+    # kept under it are reachable only by typing the URL, on a site with no
+    # directory listing. Uses the nightly's layout (history nested under the
+    # output tree); with disjoint trees runs/ is cleared and re-copied instead.
+    out = tmp_path / "dashboard"
+    out.mkdir()
+    for run_id, with_survey in (("2026-08-05-33", True), ("2026-08-06-44", False)):
+        _write_history_run(out / "runs", run_id)
+        argv = [
+            "gen_sanitizer_dashboard",
+            "--history-root", str(out / "runs"),
+            "--baselines",
+            str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+            "--out-dir", str(out),
+        ]
+        if with_survey:
+            info = tmp_path / "informational"
+            (info / "consan-gemm").mkdir(parents=True)
+            (info / "consan-gemm" / "sanitizer_report.json").write_text(
+                json.dumps(_informational_report("combined_hook_timeout"))
+            )
+            argv += ["--informational-results-dir", str(info)]
+        monkeypatch.setattr(sys, "argv", argv)
+        assert gen.main() == 0
+
+    older = (out / "runs/2026-08-05-33/index.html").read_text(encoding="utf-8")
+    assert "Workload survey" in older
+    assert 'href="survey/consan-gemm/">run area</a>' in older
+    assert "None" not in older
+    # The newest run has no survey cases of its own, so no empty section.
+    assert "Workload survey" not in (
+        out / "runs/2026-08-06-44/index.html"
+    ).read_text(encoding="utf-8")
+
+
+def test_older_survey_areas_published_before_run_areas_are_retrofitted(
+    tmp_path, monkeypatch
+):
+    # History co-published before #384 holds survey dirs with only a report. They
+    # get the same retrofit as an older guardrail case, so retained history is
+    # uniformly browsable instead of holding areas with no landing page.
+    out = tmp_path / "dashboard"
+    out.mkdir()
+    _write_history_run(out / "runs", "2026-08-05-33")
+    bare = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+    bare.mkdir(parents=True)
+    (bare / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    _write_history_run(out / "runs", "2026-08-06-44")
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard",
+        "--history-root", str(out / "runs"),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(out),
+    ])
+    assert gen.main() == 0
+
+    assert (bare / "index.html").is_file()
+    env = json.loads((bare / "env.json").read_text(encoding="utf-8"))
+    assert env["class"] == "survey"
+    assert env["recipe"] == "recipes/sanitizers/daily-consan-gemm.yaml"
+    # Retrofitted from the report alone, so it claims no live provenance and no
+    # recipe copy -- neither is knowable for a run this job did not execute.
+    assert "container_image" not in env
+    assert not (bare / "recipe.yaml").exists()
+    # And it is now reachable from the run page rather than only by direct URL.
+    page = (out / "runs/2026-08-05-33/index.html").read_text(encoding="utf-8")
+    assert 'href="survey/consan-gemm/">run area</a>' in page
+
+
+def test_survey_entries_from_published_degrades_on_a_missing_manifest(tmp_path):
+    run_dir = tmp_path / "runs" / "r"
+    (run_dir / "survey" / "good").mkdir(parents=True)
+    (run_dir / "survey" / "bare").mkdir(parents=True)
+    (run_dir / "survey" / "good" / "sanitizer_report.json").write_text("{}")
+    (run_dir / "survey" / "good" / "env.json").write_text(
+        json.dumps({"case": "good", "command": "aorta sweep run", "observed": {}})
+    )
+
+    entries = gen.survey_entries_from_published(run_dir)
+
+    # An area with no manifest is skipped rather than rendered from guesses.
+    assert [e["name"] for e in entries] == ["good"]
+    # A recorded verdict may be absent; the table must not print "None" for it.
+    assert entries[0]["summary"]["verdict"] is None
+    page = gen._run_index_survey_html(entries)
+    assert "None" not in page and gen._DASH in page
+    assert gen.survey_entries_from_published(tmp_path / "runs" / "absent") == []
+
+
+def test_build_case_env_takes_provenance_rather_than_reading_the_environment(monkeypatch):
+    # Keeping it a parameter is what makes it impossible to relabel an older run
+    # by accident; the function stays pure and testable.
+    monkeypatch.setenv("AORTA_CI_IMAGE", "rocm/pytorch@sha256:leak")
+    kwargs = {
+        "case": "waitcheck", "cls": "guardrail", "recipe": "r.yaml",
+        "command": "aorta sweep run", "meta": {}, "summary": {},
+        "report": None, "built_refs": [], "inputs": [],
+    }
+    assert "container_image" not in gen.build_case_env(**kwargs)
+    assert gen.provenance_from_environ()["container_image"] == "rocm/pytorch@sha256:leak"
+    stamped = gen.build_case_env(**kwargs, provenance=gen.provenance_from_environ())
+    assert stamped["container_image"] == "rocm/pytorch@sha256:leak"
+
+
+def test_run_area_renders_em_dash_for_a_report_missing_its_verdict():
+    # summarize_case keeps a structurally-degraded report as present, so verdict /
+    # execution can be None. Rendering those as the literal "None" is the bug this
+    # guards; env.json still records null, which is honest for a machine consumer.
+    env = gen.build_case_env(
+        case="consan-gemm", cls="survey",
+        recipe="recipes/sanitizers/daily-consan-gemm.yaml", command="aorta sweep run",
+        meta={"run": "r", "commit_full": "abc", "date": "2026-08-05", "gpu": "gfx950"},
+        summary=gen.summarize_case({"schema": "aorta.sanitizer_report/0.1"}, None),
+        report=None, built_refs=[], inputs=[],
+    )
+    assert env["observed"]["verdict"] is None
+    assert env["observed"]["execution"] is None
+
+    md = gen.build_reproduce_md(env, built_refs=[])
+    assert f"- Verdict: `{gen._DASH}`" in md
+    assert f"- Execution: `{gen._DASH}`" in md
+    assert "None" not in md
+
+    page = gen.build_case_index_html(env, [], built_refs=[], up="../../")
+    assert ">None<" not in page
+    assert gen._DASH in page

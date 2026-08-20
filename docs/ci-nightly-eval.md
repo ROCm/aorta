@@ -64,14 +64,15 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    previous green page). Only sanitizer data produced by a `main` run is
    published.
 
-   Each nightly's raw per-case `sanitizer_report.json` files are co-located on the
-   `sanitizer-results` data branch under `dashboard/runs/<YYYY-MM-DD>-<run_id>/`
-   (one `<case>/sanitizer_report.json` per recipe plus a `meta.json` with commit /
-   date / gpu / run_url / gate), and the rendered page links to them: the latest
-   run table has a per-recipe **Report** link, the kernel-detail sections carry a
-   "view raw report" link, and each **Run** row in the history table links to its
-   `runs/<id>/` area. A tiny `runs/<id>/index.html` landing page lists that run's
-   three reports. Because `pages.yml` copies `dashboard/*` recursively into
+   Each nightly's per-case results are co-located on the `sanitizer-results` data
+   branch under `dashboard/runs/<YYYY-MM-DD>-<run_id>/` (one directory per
+   guardrail recipe, one under `survey/` per observed-only case, plus a
+   `meta.json` with commit / date / gpu / run_url / gate), and the rendered page
+   links to them: the latest run table has a per-recipe **Report** link, each
+   kernel-detail card carries a **run area** link to the case's directory, and
+   each **Run** row in the history table links to its `runs/<id>/` area. A
+   `runs/<id>/index.html` landing page lists that run's guardrail reports and its
+   survey cases. Because `pages.yml` copies `dashboard/*` recursively into
    `_site/sanitizers/`, everything under `runs/` is served at
    `/sanitizers/runs/...` with relative links and no change to `pages.yml`. The
    publish job keeps a rolling window of the newest **30** run directories
@@ -79,6 +80,53 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    pruned. Previously these raw reports lived only in an expiring Actions
    artifact and were never linked; the rolling window makes them durable and
    reachable from the page.
+
+   **Run areas (#384).** A case directory is not just its report -- it carries
+   everything needed to reproduce that case locally, so the copy-paste command
+   the dashboard shows is actionable:
+
+   | File | What it is |
+   | --- | --- |
+   | `index.html` | Landing page: the command, the env a reproduction needs, run identity, observed verdict, the recorded digests (including each `code_object_sha256`), the fixture rebuild steps, and every file below as a download. GitHub Pages does not auto-index a directory, so this is what makes the run-area link resolve. |
+   | `sanitizer_report.json` | The full `aorta.sanitizer_report/0.1` document the dashboard renders from. |
+   | `consan/consan.log.gz`, `waitcheck/waitcheck-*.log.gz` | The sanitizer output the verdict was derived from, gzipped. |
+   | `recipe.yaml` | The recipe exactly as it ran, pinned to this run. |
+   | `inputs/` | The recipe's source-level fixture inputs (the `.hip` repro sources, the GEMM shape CSV) -- a few KB in total. |
+   | `REPRODUCE.md` | Commit, command, required env, fixture rebuild steps, and the digests of the artifacts that are not published. |
+   | `env.json` | The same provenance, machine-readable (`aorta.sanitizer_run_area/0.1`), including `required_env` (each variable, who sets it, and why -- ConSan's four are listed only for a case that ran ConSan) and `rebuild` (the per-artifact commands, runnable from the repo root). `REPRODUCE.md` and the landing page are rendered *from* those two stored fields, so the prose cannot disagree with them and a retained area keeps describing what it actually recorded. |
+
+   CI-built artifacts are deliberately **not** published: a GEMM `.hsaco` is
+   ~16MB, and shipping one per retained run would bloat the data branch and
+   Pages. `index.html` / `REPRODUCE.md` / `env.json` instead record each one's
+   path and SHA-256 (taken from the report, which already carries the waitcheck
+   binary digest, the ConSan repro command and hook digests, and every kernel's
+   `code_object_sha256`) plus the command to rebuild it, so a local rebuild can
+   be verified.
+
+   Those rebuild commands are per-artifact, because they are not
+   interchangeable: a `--genco` code object is a raw ELF on some ROCm builds and
+   a clang-offload bundle on others, so it must be unbundled conditionally (the
+   recorded digest is of the unbundled object the loader opens); the GEMM objects
+   are *extracted* from the shipped Tensile libraries by `prepare_gemm_isa.py`
+   rather than compiled; and each `consan_load` / `lds_dispatch` binary needs the
+   `-DOBJECT` / `-DLDS_HSACO` define naming the object it loads. A generic
+   "`hipcc` it" hint would build a different file and fail the digest check.
+
+   The commands are also written to be pasted as-is from the repo root, which is
+   where the `git clone` in `REPRODUCE.md` leaves you: fixture paths are rooted at
+   `recipes/sanitizers/fixtures/...` (there is no top-level `fixtures/`), each one
+   starts by putting the ROCm LLVM bindir on `PATH` (the container exports only
+   `/opt/rocm/bin`, while `clang-offload-bundler` -- which `hipcc` and
+   `prepare_gemm_isa.py` both need -- lives beside the compilers) and creating the
+   gitignored output directory, and the conditional unbundle is a single
+   `if ... else cp ... fi` command rather than a prose aside, so an automated
+   consumer of `rebuild` can execute the list without interpreting it.
+
+   Logs, the recipe copy and its inputs are kept only for the newest **7** runs
+   (`--keep-logs 7`) -- guardrail and survey areas alike -- while reports stay for
+   the full 30. An older run keeps its report, manifests and landing page, and
+   both are re-rendered when it is pruned so the page lists only the files still
+   present and `env.json` stops naming the inputs it no longer carries.
 
    The dashboard previously lived at `/ci/`, so that path is kept: `/ci/`
    redirects to the root and `/ci/data.json` is published alongside
@@ -163,13 +211,34 @@ the `ci-results` data branch (older ones are pruned), and the dashboard renders 
 most the last 180 builds (`gen_dashboard.py --max-builds`). Files are tiny; adjust
 the cap in `nightly-eval.yml` / the flag if a longer window is wanted.
 
-The **sanitizer** nightly keeps a separate rolling window on the
-`sanitizer-results` data branch: the newest **30** `dashboard/runs/<id>/`
-directories (each holding that run's three raw `sanitizer_report.json` files and a
-`meta.json`). The publish job prunes older ones and re-renders with
-`gen_sanitizer_dashboard.py --history-root dashboard/runs --keep 30`; adjust
-`keep` in `sanitizers-nightly.yml` (and the matching `--keep`) to change the
-window.
+The **sanitizer** nightly keeps its own rolling window on the `sanitizer-results`
+data branch, and it has **two** bounds rather than one:
+
+- **Reports: newest 30 runs.** `dashboard/runs/<id>/` holds one directory per
+  guardrail recipe, one under `survey/` per observed-only case, and a `meta.json`.
+  Each case directory is a *run area* (report, gzipped logs, `recipe.yaml`,
+  `inputs/`, `REPRODUCE.md`, `env.json`, `index.html`) — see the run-area table
+  earlier in this document. The publish job prunes older runs and re-renders with
+  `gen_sanitizer_dashboard.py --history-root dashboard/runs --keep 30`.
+- **Bulk: newest 7 runs.** `--keep-logs 7` bounds the logs, the recipe copy and
+  the copied inputs, for guardrail and survey areas alike. An older run keeps its
+  report, manifests and landing page; its bulk is pruned and the area is
+  re-rendered so the page lists only what is still there. Pruning is one-way —
+  raising `--keep-logs` later does not bring deleted logs back.
+
+Adjust `keep` in `sanitizers-nightly.yml` (and the matching `--keep`) for the
+report window, and `--keep-logs` for the bulk window.
+
+Both windows bound the **checkout**, not the branch history. Pruning deletes a
+file from the working tree, but the blob stays reachable from the commit that
+added it, so every log ever published remains in `.git` even after its area is
+pruned — `sanitizer-results` accumulates ordinary commits indefinitely. Day to
+day that costs nothing (the publish job clones `--depth 1` and Pages deploys from
+the workspace copy), so the exposure is remote repository size. It does change the
+deadline for one decision, though: if real ConSan logs turn out large, capping
+their size is a code change *before* the first publish and a history rewrite
+afterwards. Measure them on the first nightly (`du -sh` the staged case dirs in
+the publish job) rather than waiting for the branch to grow.
 
 ## Operating checklist
 
