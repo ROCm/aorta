@@ -223,6 +223,31 @@ class TestParity:
         root = classic_at(build_classic(tmp_path / "opt_rocm"))
         assert agree().core == root
 
+    def test_bin_only_opt_rocm_stub_does_not_shadow_a_wheel(
+        self, agree, classic_at, importable_wheel, tmp_path: Path
+    ):
+        """Autodetection is held to the stricter 'usable' test on both sides.
+
+        If only one implementation adopted it, the guard would fail a build the
+        resolver reads fine (or pass one it cannot), which is precisely the drift
+        this parity suite exists to catch.
+        """
+        stub = tmp_path / "opt_rocm"
+        (stub / "bin").mkdir(parents=True)
+        classic_at(stub)
+        core = importable_wheel()
+        result = agree()
+        assert result.core == core
+        assert result.layout == "wheel"
+
+    def test_a_lib_dir_alone_is_still_a_usable_classic_root(
+        self, agree, classic_at, tmp_path: Path
+    ):
+        root = tmp_path / "opt_rocm"
+        (root / "lib").mkdir(parents=True)
+        classic_at(root)
+        assert agree().source == "opt_rocm"
+
     def test_env_var_on_a_component_directory(self, agree, tmp_path: Path):
         site = tmp_path / "site-packages"
         core = build_wheel(site, devel=True)

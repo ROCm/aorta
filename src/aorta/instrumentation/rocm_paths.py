@@ -69,7 +69,21 @@ THEROCK_MANIFEST_RELPATH = Path("share") / "therock" / "therock_manifest.json"
 
 # A directory only counts as a ROCm root if it looks like one. Without this an
 # empty leftover ``/opt/rocm`` would shadow a perfectly good wheel install.
+#
+# This is the loose test, used for an EXPLICIT ``$ROCM_PATH`` / ``$ROCM_HOME``:
+# an operator who names a root gets it, and ``root_source`` records that they
+# did, so a resulting null is attributable to their override.
 _ROOT_MARKERS: tuple[str, ...] = (".info", "bin", "lib")
+
+# Autodetection is held to a stricter test than an explicit override -- see
+# ``_is_usable_rocm_root``. "Looks like a root" is too weak to *outrank a working
+# wheel install* on its own, because a bin-only compat shim (a plausible thing
+# for a wheel-based image to ship so ``hipcc`` stays on PATH) satisfies it while
+# offering nothing any consumer can read.
+_USABLE_VERSION_MARKERS: tuple[Path, ...] = (
+    Path(".info") / "version",
+    Path(".info") / "version-dev",
+)
 
 LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
@@ -161,6 +175,38 @@ def _is_rocm_root(path: Path) -> bool:
         if not path.is_dir():
             return False
         return any((path / marker).exists() for marker in _ROOT_MARKERS)
+    except OSError as exc:  # unreadable mount, permission denied
+        log.debug("cannot inspect candidate ROCm root %s: %s", path, exc)
+        return False
+
+
+def _is_usable_rocm_root(path: Path) -> bool:
+    """True when ``path`` offers something a consumer can actually read.
+
+    Stricter than :func:`_is_rocm_root`, and used only for autodetected
+    ``/opt/rocm``: it must carry a version marker or a ``lib/`` directory --
+    i.e. at least one of the two things every caller wants (the version for the
+    probe and the dashboard, ``lib/`` for the env-knob audit and the Tensile
+    database).
+
+    Why the asymmetry: autodetection has to *outrank an importable wheel*, and
+    "the directory exists and has a ``bin/``" is not evidence enough to do that.
+    A wheel-based image can reasonably ship a bin-only ``/opt/rocm`` compat shim
+    so ``hipcc`` stays on ``PATH``; treating that as the install would report a
+    null version on a perfectly working box, which is the failure mode #381
+    exists to remove rather than relocate. An explicit override keeps the loose
+    test, because there the operator has stated intent and ``root_source`` says
+    so.
+
+    A tarball install with ``lib/`` but no ``.info/`` still passes, so this does
+    not narrow the classic layouts that genuinely work.
+    """
+    try:
+        if not path.is_dir():
+            return False
+        if any((path / marker).exists() for marker in _USABLE_VERSION_MARKERS):
+            return True
+        return (path / "lib").is_dir()
     except OSError as exc:  # unreadable mount, permission denied
         log.debug("cannot inspect candidate ROCm root %s: %s", path, exc)
         return False
@@ -261,6 +307,13 @@ def resolve_rocm_roots(environ: dict[str, str] | None = None) -> RocmRoots:
     autodetection, and the classic system path keeps priority over a wheel
     that merely happens to be importable.
 
+    The two candidate tests differ on purpose. An explicit override only has to
+    *look* like a root (:func:`_is_rocm_root`) -- stated intent wins, and
+    ``source`` records whose choice it was. Autodetected ``/opt/rocm`` has to be
+    *usable* (:func:`_is_usable_rocm_root`), because outranking a working wheel
+    install on the strength of a bin-only compat shim would report a null
+    version on a healthy box.
+
     Never raises and never returns ``None``: when nothing is found the
     classic root is returned with ``source="none"``, so every derived
     constant stays an absolute path and the probe's fail-soft contract holds
@@ -277,7 +330,7 @@ def resolve_rocm_roots(environ: dict[str, str] | None = None) -> RocmRoots:
             return roots
         log.debug("%s=%s does not look like a ROCm install; continuing", name, value)
 
-    if _is_rocm_root(CLASSIC_ROCM_ROOT):
+    if _is_usable_rocm_root(CLASSIC_ROCM_ROOT):
         return _classic_roots("opt_rocm")
 
     core = _installed_wheel_component(WHEEL_CORE_PACKAGE)

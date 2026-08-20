@@ -139,6 +139,83 @@ class TestResolutionOrder:
         assert roots.layout == LAYOUT_WHEEL
         assert roots.source == "import:_rocm_sdk_core"
 
+    def test_bin_only_opt_rocm_stub_does_not_shadow_a_wheel(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """A compat shim is not an install.
+
+        Stricter than the empty-directory case above, and the one that actually
+        bites: a wheel-based image can reasonably ship a bin-only ``/opt/rocm``
+        so ``hipcc`` stays on ``PATH``. "Has a bin/" is not evidence enough to
+        outrank a working wheel -- doing so reports a null version on a healthy
+        box, relocating the #381 failure instead of removing it.
+        """
+        stub = tmp_path / "opt_rocm"
+        (stub / "bin").mkdir(parents=True)
+        (stub / "bin" / "hipcc").write_text("#!/bin/sh\n", encoding="utf-8")
+        core = build_wheel(tmp_path / "site-packages")
+        monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", stub)
+        monkeypatch.setattr(rocm_paths, "_installed_wheel_component", lambda p: core)
+        roots = resolve_rocm_roots({})
+        assert roots.core == core
+        assert roots.layout == LAYOUT_WHEEL
+
+    def test_bin_only_stub_with_no_wheel_reports_nothing_found(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """With no wheel to fall back to, the stub is still not an install."""
+        stub = tmp_path / "opt_rocm"
+        (stub / "bin").mkdir(parents=True)
+        monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", stub)
+        monkeypatch.setattr(rocm_paths, "_installed_wheel_component", lambda p: None)
+        roots = resolve_rocm_roots({})
+        assert roots.source == "none"
+        assert roots.core == stub  # still absolute, still the classic root
+
+    @pytest.mark.parametrize("marker", ["version", "version-dev"])
+    def test_a_version_marker_alone_makes_opt_rocm_usable(
+        self, tmp_path: Path, monkeypatch, marker
+    ):
+        stub = tmp_path / "opt_rocm"
+        (stub / "bin").mkdir(parents=True)
+        (stub / ".info").mkdir()
+        (stub / ".info" / marker).write_text("7.2.4\n", encoding="utf-8")
+        monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", stub)
+        monkeypatch.setattr(rocm_paths, "_installed_wheel_component", lambda p: None)
+        assert resolve_rocm_roots({}).source == "opt_rocm"
+
+    def test_a_lib_dir_alone_makes_opt_rocm_usable(self, tmp_path: Path, monkeypatch):
+        """A tarball install with no ``.info/`` must still be accepted.
+
+        The stricter autodetect test must not narrow the classic layouts that
+        genuinely work -- only reject the ones nothing can be read from.
+        """
+        root = tmp_path / "opt_rocm"
+        (root / "lib").mkdir(parents=True)
+        monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", root)
+        monkeypatch.setattr(rocm_paths, "_installed_wheel_component", lambda p: None)
+        assert resolve_rocm_roots({}).source == "opt_rocm"
+
+    def test_an_explicit_override_still_wins_on_a_bin_only_stub(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Stated intent beats autodetection, and ``source`` records whose it was.
+
+        The loose/strict asymmetry is deliberate: an operator who names a root
+        gets it even if we cannot read anything from it, because
+        ``root_source: "ROCM_HOME"`` makes the resulting null attributable to
+        their override rather than to a discovery failure.
+        """
+        stub = tmp_path / "stub"
+        (stub / "bin").mkdir(parents=True)
+        core = build_wheel(tmp_path / "site-packages")
+        monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", tmp_path / "absent")
+        monkeypatch.setattr(rocm_paths, "_installed_wheel_component", lambda p: core)
+        roots = resolve_rocm_roots({"ROCM_HOME": str(stub)})
+        assert roots.core == stub
+        assert roots.source == "ROCM_HOME"
+        assert roots.layout == LAYOUT_CLASSIC
+
     def test_importable_wheel_used_when_nothing_else_is_found(self, tmp_path: Path, monkeypatch):
         core = build_wheel(tmp_path / "site-packages")
         monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", tmp_path / "absent")

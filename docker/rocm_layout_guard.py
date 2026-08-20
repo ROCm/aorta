@@ -47,14 +47,35 @@ WHEEL_CORE_PACKAGE = "_rocm_sdk_core"
 WHEEL_LIBRARIES_PACKAGE = "_rocm_sdk_libraries"
 WHEEL_DEVEL_PACKAGE = "_rocm_sdk_devel"
 ROOT_MARKERS = (".info", "bin", "lib")
+USABLE_VERSION_MARKERS = (".info/version", ".info/version-dev")
 
 LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
 
 
 def _is_rocm_root(path: Path) -> bool:
+    """Loose test, for an explicit ROCM_PATH / ROCM_HOME override."""
     try:
         return path.is_dir() and any((path / marker).exists() for marker in ROOT_MARKERS)
+    except OSError:
+        return False
+
+
+def _is_usable_rocm_root(path: Path) -> bool:
+    """Stricter test, for autodetected /opt/rocm only.
+
+    Autodetection outranks an importable wheel, so it needs more than "the
+    directory exists": a bin-only compat shim (which a wheel-based image may
+    ship to keep hipcc on PATH) would otherwise be treated as the install and
+    make this guard fail a perfectly good image. Mirrors
+    rocm_paths._is_usable_rocm_root.
+    """
+    try:
+        if not path.is_dir():
+            return False
+        if any((path / marker).exists() for marker in USABLE_VERSION_MARKERS):
+            return True
+        return (path / "lib").is_dir()
     except OSError:
         return False
 
@@ -97,7 +118,7 @@ def resolve():
         if roots is not None:
             return roots
 
-    if _is_rocm_root(CLASSIC_ROCM_ROOT):
+    if _is_usable_rocm_root(CLASSIC_ROCM_ROOT):
         return (
             CLASSIC_ROCM_ROOT,
             CLASSIC_ROCM_ROOT,
