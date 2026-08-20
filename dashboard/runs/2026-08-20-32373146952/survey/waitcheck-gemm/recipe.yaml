@@ -1,0 +1,31 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-WAITCHECK-GEMM-OBJECT
+description: >
+  Observed-only (non-gating) gfx950 waitcheck static s_waitcnt wait-count hazard
+  scan over the SAME real, heavy f32 Type_SS hipBLASLt Tensile code object
+  (consan_gemm_f32.hsaco) that the ConSan gemm survey case scans. Paired with
+  daily-consan-gemm so the dashboard Workload survey (Tab 2) shows both sanitizers
+  for the one GEMM kernel. Distinct from the gated Tab-1 daily-waitcheck-gemm
+  guardrail (which scans the top-3 CSV shapes); this one is survey-only and does
+  NOT gate the nightly.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: gemm_f32_ss
+      code_object: fixtures/isa/consan_gemm_f32.hsaco
+      code_object_index: 0
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - waitcheck
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<title>Sanitizers Nightly &middot; waitcheck-gemm</title>
+<link rel=stylesheet href="../../../../assets/run-area.css"></head>
+<body><div class=wrap>
+<div class=navrow><span><a href="../../../../">&larr; back to sanitizer dashboard</a> &middot; <a href="../../">run 2026-08-13-31714026084</a></span>
+<a href="https://github.com/ROCm/aorta/actions/runs/31714026084">workflow run</a></div>
+<div class=topbar>
+<header class="page-header"><div class="brand-tile"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div><div>
+<h1>waitcheck-gemm</h1>
+<p class="subtitle">Run area &mdash; everything needed to reproduce this case locally</p></div></header>
+</div>
+<section class="panel">
+<h2>Case <span class="v warn">warn</span></h2>
+<div class="kv"><span><span class="k">Run</span><span class="val mono">2026-08-13-31714026084</span></span><span><span class="k">Commit</span><span class="val mono">68c980aa449f656a870923831f63a8aa34c145a3</span></span><span><span class="k">Date</span><span class="val mono">2026-08-13</span></span><span><span class="k">Target</span><span class="val mono">gfx950</span></span><span><span class="k">Recipe</span><span class="val mono">recipes/sanitizers/daily-waitcheck-gemm-object.yaml</span></span><span><span class="k">Execution</span><span class="val mono">complete</span></span><span><span class="k">Findings</span><span class="val mono">32</span></span></div>
+
+<div class="repro"><span class="lbl">Reproduce</span><code>aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml</code></div>
+<p class="note">Set <code>ROCJITSU_PREBUILT</code> (unpacked rocjitsu bundle supplying rj_waitcheck and the ConSan hook) before running.</p>
+<p class="cap">Rebuild the fixtures</p><ul class="steps"><li>fixtures/isa/consan_gemm_f32.hsaco -- one representative heavy f32 SS GEMM code object: <code>export PATH=&quot;${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}&quot;</code>; <code>mkdir -p recipes/sanitizers/fixtures/isa</code>; <code>python scripts/sanitizers/prepare_gemm_isa.py --csv recipes/sanitizers/fixtures/gemm_shapes_unique.csv --out recipes/sanitizers/fixtures/isa --top-n 0 --consan-object recipes/sanitizers/fixtures/isa/consan_gemm_f32.hsaco</code>. Extracted from the shipped Tensile libraries, never compiled from a .hip source.</li></ul><p class="note">The exact invocations the nightly used are in .github/workflows/sanitizers-nightly.yml.</p><p class="cap">Artifacts not published</p><div class="table-wrap"><table><thead><tr><th>Path</th><th>SHA-256</th></tr></thead><tbody><tr><td class=mono>fixtures/isa/consan_gemm_f32.hsaco</td><td class="mono wrap-any">c1190d2005185bbf797b913022a681d52fb8ea90748901495dde56cc06f359b3</td></tr></tbody></table></div><p class="cap">Recorded digests</p><div class="table-wrap"><table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody><tr><td class=mono>code_object:consan_gemm_f32.hsaco</td><td class="mono wrap-any">c1190d2005185bbf797b913022a681d52fb8ea90748901495dde56cc06f359b3</td></tr><tr><td class=mono>path</td><td class="mono wrap-any">/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck</td></tr><tr><td class=mono>sha256</td><td class="mono wrap-any">5c02eee0055cfa17524ceebece462936da2fcccbc629dad82cd1c388ec0909e3</td></tr></tbody></table></div></section>
+<section class="panel"><h2>Files</h2>
+<p class="cap">Every file published for this case. Its logs, recipe copy and inputs were pruned for falling outside the nightly&#x27;s log-retention window.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>File</th><th class=num>Size</th></tr></thead>
+<tbody><tr><td class=mono><a href="REPRODUCE.md">REPRODUCE.md</a></td><td class=num>2.6 KB</td></tr><tr><td class=mono><a href="env.json">env.json</a></td><td class=num>1.9 KB</td></tr><tr><td class=mono><a href="sanitizer_report.json">sanitizer_report.json</a></td><td class=num>45.5 KB</td></tr></tbody>
+</table></div></section>
+</div></body></html>

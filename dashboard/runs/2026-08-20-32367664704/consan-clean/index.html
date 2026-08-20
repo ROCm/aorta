@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<title>Sanitizers Nightly &middot; consan-clean</title>
+<link rel=stylesheet href="../../../assets/run-area.css"></head>
+<body><div class=wrap>
+<div class=navrow><span><a href="../../../">&larr; back to sanitizer dashboard</a> &middot; <a href="../">run 2026-08-20-32367664704</a></span>
+<a href="https://github.com/ROCm/aorta/actions/runs/32367664704">workflow run</a></div>
+<div class=topbar>
+<header class="page-header"><div class="brand-tile"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div><div>
+<h1>consan-clean</h1>
+<p class="subtitle">Run area &mdash; everything needed to reproduce this case locally</p></div></header>
+</div>
+<section class="panel">
+<h2>Case <span class="v pass">pass</span></h2>
+<div class="kv"><span><span class="k">Run</span><span class="val mono">2026-08-20-32367664704</span></span><span><span class="k">Commit</span><span class="val mono">b4be48fdd6dd7e12056a6141c93377feed9f1688</span></span><span><span class="k">Date</span><span class="val mono">2026-08-20</span></span><span><span class="k">Target</span><span class="val mono">gfx950</span></span><span><span class="k">Recipe</span><span class="val mono">recipes/sanitizers/daily-consan-clean.yaml</span></span><span><span class="k">Execution</span><span class="val mono">complete</span></span><span><span class="k">Findings</span><span class="val mono">0</span></span></div>
+
+<div class="repro"><span class="lbl">Reproduce</span><code>aorta sweep run --recipe recipes/sanitizers/daily-consan-clean.yaml</code></div>
+<p class="note">Set <code>ROCJITSU_PREBUILT</code> (unpacked rocjitsu bundle supplying rj_waitcheck and the ConSan hook) before running. <code>aorta</code> sets <code>HSA_TOOLS_LIB</code>, <code>HSA_TOOLS_DISABLE_REGISTER</code>, <code>RJ_CONSAN_MODE</code>, <code>RJ_CONSAN_POLICY</code> for you from the recipe&#x27;s policy block.</p>
+<p class="cap">Rebuild the fixtures</p><ul class="steps"><li>fixtures/bin/consan_lds_race -- a host repro binary built from fixtures/repro/consan_lds_race.hip: <code>export PATH=&quot;${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}&quot;</code>; <code>mkdir -p recipes/sanitizers/fixtures/bin</code>; <code>hipcc --offload-arch=gfx950 -O1 -g recipes/sanitizers/fixtures/repro/consan_lds_race.hip -o recipes/sanitizers/fixtures/bin/consan_lds_race</code>.</li></ul><p class="note">The exact invocations the nightly used are in .github/workflows/sanitizers-nightly.yml.</p><p class="cap">Artifacts not published</p><div class="table-wrap"><table><thead><tr><th>Path</th><th>SHA-256</th></tr></thead><tbody><tr><td class=mono>fixtures/bin/consan_lds_race</td><td class="mono wrap-any">759c96c9016e8c7596c3f38b5948c0fc7f3dade8cff5b45c5e06ead7e92389b8</td></tr></tbody></table></div><p class="cap">Recorded digests</p><div class="table-wrap"><table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody><tr><td class=mono>command</td><td class="mono wrap-any">/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_lds_race</td></tr><tr><td class=mono>command_sha256</td><td class="mono wrap-any">759c96c9016e8c7596c3f38b5948c0fc7f3dade8cff5b45c5e06ead7e92389b8</td></tr><tr><td class=mono>hook</td><td class="mono wrap-any">/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so</td></tr><tr><td class=mono>hook_sha256</td><td class="mono wrap-any">00ef00a3a202d4bc79202d370fab4337c5f152f0d80d3e9e9c0833cd63d3fc97</td></tr><tr><td class=mono>selected_identity_sha256</td><td class="mono wrap-any">c309b9bffe94b6e47f08114af5391a49a508c70461bbd6d90b40356298da06f0</td></tr><tr><td class=mono>selected_kernel</td><td class="mono wrap-any">consan_lds_race</td></tr></tbody></table></div></section>
+<section class="panel"><h2>Files</h2>
+<p class="cap">Every file published for this case.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>File</th><th class=num>Size</th></tr></thead>
+<tbody><tr><td class=mono><a href="REPRODUCE.md">REPRODUCE.md</a></td><td class=num>2.7 KB</td></tr><tr><td class=mono><a href="env.json">env.json</a></td><td class=num>2.4 KB</td></tr><tr><td class=mono><a href="sanitizer_report.json">sanitizer_report.json</a></td><td class=num>5.6 KB</td></tr></tbody>
+</table></div></section>
+</div></body></html>
