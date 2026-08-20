@@ -229,6 +229,17 @@ data branch, and it has **two** bounds rather than one:
 Adjust `keep` in `sanitizers-nightly.yml` (and the matching `--keep`) for the
 report window, and `--keep-logs` for the bulk window.
 
+Both windows bound the **checkout**, not the branch history. Pruning deletes a
+file from the working tree, but the blob stays reachable from the commit that
+added it, so every log ever published remains in `.git` even after its area is
+pruned — `sanitizer-results` accumulates ordinary commits indefinitely. Day to
+day that costs nothing (the publish job clones `--depth 1` and Pages deploys from
+the workspace copy), so the exposure is remote repository size. It does change the
+deadline for one decision, though: if real ConSan logs turn out large, capping
+their size is a code change *before* the first publish and a history rewrite
+afterwards. Measure them on the first nightly (`du -sh` the staged case dirs in
+the publish job) rather than waiting for the branch to grow.
+
 ## Operating checklist
 
 1. Set GitHub Pages **source = "GitHub Actions"** (Settings -> Pages). This

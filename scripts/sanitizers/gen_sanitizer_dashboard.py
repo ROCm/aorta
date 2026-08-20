@@ -1590,6 +1590,43 @@ def required_env_note(required_env: list[dict[str, Any]]) -> str:
     return " ".join(parts)
 
 
+# The drill-down pages -- a run's landing page and each case's run area -- link
+# one stylesheet instead of inlining ``_CSS``. ``_CSS`` is ~18KB and over 80% of
+# such a page, and at ``--keep 30`` with five areas per run that is ~2.7MB of
+# byte-identical CSS in the published tree: more than everything else in it
+# combined, and well past the gzipped logs ``--keep-logs`` exists to bound. The
+# root dashboard page keeps its inline copy -- there is only ever one of it, and
+# it has to render standalone (including its empty-state stale banner).
+RUN_AREA_CSS_REL = "assets/run-area.css"
+
+# What those pages add on top of ``_CSS``. The union of both pages' needs, so one
+# file serves both; an unused selector costs nothing.
+_DRILLDOWN_CSS = """
+  .wrap { max-width:900px; }
+  .note { margin:0 0 14px; color:var(--text-3); font-size:13px; }
+  .steps { margin:0 0 6px; padding-left:18px; color:var(--text-2);
+    font-size:var(--fs-obs); }
+  .steps li { margin:3px 0; }
+"""
+
+
+def run_area_stylesheet() -> str:
+    """The stylesheet the drill-down pages link, as text (pure)."""
+    return f"{_CSS}{_DRILLDOWN_CSS}"
+
+
+def write_shared_assets(out_dir: Path) -> Path:
+    """Write the drill-down stylesheet under ``out_dir`` and return its path.
+
+    Byte-stable for unchanged input, like the gzipped logs, so re-publishing the
+    retained history does not churn the data branch.
+    """
+    path = out_dir / RUN_AREA_CSS_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(run_area_stylesheet(), encoding="utf-8")
+    return path
+
+
 def _md_code_to_html(text: str) -> str:
     """Render a shared Markdown prose constant's ``backticks`` as ``<code>``.
 
@@ -1754,10 +1791,15 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
                     # One command, because which branch is correct depends on the
                     # ROCm build: --genco emits a raw object on some and a bundle
                     # on others, and the recorded digest is of the unbundled one.
+                    # ...and clean up after itself. The workflow's genco_object
+                    # builds into a mktemp file and rm -f's it; this runs in the
+                    # reader's repo root, so without the trailing rm it drops an
+                    # untracked tmp.o next to pyproject.toml. `&&` keeps it for
+                    # inspection if the conversion failed.
                     "if head -c 24 tmp.o | grep -qF __CLANG_OFFLOAD_BUNDLE__; then "
                     "clang-offload-bundler --type=o --unbundle --input=tmp.o "
                     f"--targets=hipv4-amdgcn-amd-amdhsa--{target} --output={out}; "
-                    f"else cp tmp.o {out}; fi",
+                    f"else cp tmp.o {out}; fi && rm -f tmp.o",
                 ],
                 "caveat": (
                     "The conditional matters: --genco emits a raw code object on "
@@ -2149,22 +2191,23 @@ def build_case_index_html(
         if env.get("run_url")
         else "<span></span>"
     )
-    files_caption = (
-        "Every file published for this case. Logs are gzipped."
-        if env.get("logs_published", True)
-        else "Every file published for this case. Its logs, recipe copy and inputs "
-        "were pruned for falling outside the nightly's log-retention window."
-    )
+    # Only claim gzipped logs when the listing actually has one: an in-window case
+    # that produced no log at all still rendered "Logs are gzipped."
+    if not env.get("logs_published", True):
+        files_caption = (
+            "Every file published for this case. Its logs, recipe copy and inputs "
+            "were pruned for falling outside the nightly's log-retention window."
+        )
+    elif any(rel.endswith(".log.gz") for rel, _size in files):
+        files_caption = "Every file published for this case. Logs are gzipped."
+    else:
+        files_caption = "Every file published for this case."
     return (
         "<!doctype html>\n"
         "<html lang=en><head><meta charset=utf-8>\n"
         '<meta name=viewport content="width=device-width, initial-scale=1">\n'
         f"<title>{_esc(title)} &middot; {_esc(str(env.get('case', '')))}</title>\n"
-        f"<style>{_CSS}\n  .wrap {{ max-width:900px; }}\n"
-        "  .note { margin:0 0 14px; color:var(--text-3); font-size:13px; }\n"
-        "  .steps { margin:0 0 6px; padding-left:18px; color:var(--text-2);\n"
-        "    font-size:var(--fs-obs); }\n"
-        "  .steps li { margin:3px 0; }</style></head>\n"
+        f'<link rel=stylesheet href="{_esc(up)}{RUN_AREA_CSS_REL}"></head>\n'
         "<body><div class=wrap>\n"
         f'<div class=navrow><span><a href="{_esc(up)}">&larr; back to sanitizer dashboard</a>'
         f' &middot; <a href="{_esc(run_up)}">run {_esc(str(env.get("run", "")))}</a></span>\n'
@@ -3447,6 +3490,7 @@ def build_run_index_html(
     *,
     title: str = "Sanitizers Nightly",
     survey: list[dict[str, Any]] | None = None,
+    up: str = "../../",
 ) -> str:
     """A tiny, self-contained landing page for one published run (pure).
 
@@ -3484,13 +3528,14 @@ def build_run_index_html(
         for case, _key, label, _backend in CASES
     )
     # Shares the dashboard stylesheet so a drill-down does not look like a
-    # different product; only the narrower wrap differs.
+    # different product; only the narrower wrap differs. Linked rather than
+    # inlined -- there is one of these per retained run (see RUN_AREA_CSS_REL).
     return (
         "<!doctype html>\n"
         "<html lang=en><head><meta charset=utf-8>\n"
         '<meta name=viewport content="width=device-width, initial-scale=1">\n'
         f"<title>{_esc(title)} &middot; {_esc(meta.get('run', ''))}</title>\n"
-        f"<style>{_CSS}\n  .wrap {{ max-width:900px; }}</style></head>\n"
+        f'<link rel=stylesheet href="{_esc(up)}{RUN_AREA_CSS_REL}"></head>\n'
         "<body><div class=wrap>\n"
         '<div class=navrow><a href="../../">&larr; back to sanitizer dashboard</a>\n'
         f"{run_link}</div>\n"
@@ -3743,7 +3788,9 @@ def main() -> int:
         help="keep sanitizer logs + the recipe copy and its inputs for only the "
         "newest N runs (default 7), guardrail and survey areas alike. Older "
         "retained runs keep their report, manifests and landing page; their bulk "
-        "is pruned so the data branch stays bounded (#384).",
+        "is pruned so the published tree stays bounded (#384). Note this bounds the "
+        "checkout, not the branch history: a pruned blob stays reachable from the "
+        "commit that added it, so anything ever published is permanent.",
     )
     ap.add_argument(
         "--current-run",
@@ -3885,6 +3932,9 @@ def main() -> int:
     # to its co-located raw reports (out_dir/runs/<id>/index.html). Bounded by
     # --keep, so pruned runs stop getting a page.
     if args.history_root is not None:
+        # The one stylesheet every run and run-area page links, written once for
+        # the whole tree rather than inlined into each of them.
+        write_shared_assets(args.out_dir)
         # When the raw reports live in a separate tree from the output (the copy
         # branch below), a reused --out-dir would keep run dirs dropped by --keep
         # (or reports since removed from a retained run) as stale published output.

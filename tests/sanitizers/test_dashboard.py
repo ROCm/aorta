@@ -2346,6 +2346,86 @@ def test_consan_recipes_publish_their_transitive_sources(tmp_path, monkeypatch):
         assert f'href="inputs/{rel}"' in page
 
 
+def test_drilldown_pages_link_one_stylesheet_instead_of_inlining_it(
+    tmp_path, monkeypatch
+):
+    """_CSS was over 80% of every run and run-area page, duplicated per run.
+
+    At ``--keep 30`` with five areas per run that is ~2.7MB of byte-identical CSS
+    in the published tree -- more than everything else in it, and past the gzipped
+    logs ``--keep-logs`` exists to bound.
+    """
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    asset = out / gen.RUN_AREA_CSS_REL
+    assert asset.is_file()
+    assert asset.read_text(encoding="utf-8") == gen.run_area_stylesheet()
+
+    drilldowns = sorted(out.glob("runs/*/index.html")) + sorted(
+        out.glob("runs/*/*/index.html")
+    ) + sorted(out.glob("runs/*/survey/*/index.html"))
+    assert drilldowns
+    for page in drilldowns:
+        html = page.read_text(encoding="utf-8")
+        # Linked, not inlined...
+        assert "<style>" not in html, page
+        assert gen._CSS not in html, page
+        href = re.search(r'href="([^"]*run-area\.css)"', html)
+        assert href, page
+        # ...and the link resolves from this page's depth.
+        assert (page.parent / href.group(1)).resolve() == asset.resolve(), page
+        # A drill-down page is now a small document.
+        assert page.stat().st_size < len(gen._CSS), page
+
+    # The root dashboard keeps its inline copy: one of it, and it must render
+    # standalone (its empty state carries the stale banner).
+    root = (out / "index.html").read_text(encoding="utf-8")
+    assert "<style>" in root and ".stale {" in root
+
+
+def test_run_area_stylesheet_carries_the_rules_those_pages_use():
+    sheet = gen.run_area_stylesheet()
+    assert gen._CSS in sheet
+    # The rules the two drill-down pages add on top of the dashboard sheet.
+    for selector in (".wrap {", ".note {", ".steps {", ".steps li {"):
+        assert selector in sheet, selector
+    # Byte-stable, so re-publishing does not churn the data branch.
+    assert gen.run_area_stylesheet() == sheet
+
+
+def test_genco_rebuild_cleans_up_its_temporary_object():
+    # The command runs in the reader's repo root, so without the trailing rm it
+    # drops an untracked tmp.o next to pyproject.toml. The workflow's own
+    # genco_object uses mktemp + rm -f.
+    entry = gen.rebuild_plan(["fixtures/isa/lds.hsaco"], target="gfx950")[0]
+    conditional = [c for c in entry["commands"] if c.startswith("if ")][0]
+    assert conditional.endswith("&& rm -f tmp.o")
+    # Every command that creates tmp.o is paired with a command that removes it.
+    creates = [c for c in entry["commands"] if "-o tmp.o" in c]
+    removes = [c for c in entry["commands"] if "rm -f tmp.o" in c]
+    assert len(creates) == len(removes) == 1
+
+
+def test_files_caption_only_claims_gzipped_logs_when_a_log_is_listed():
+    env = {"case": "c", "observed": {}, "logs_published": True}
+    with_log = gen.build_case_index_html(
+        env, [("consan/consan.log.gz", 34)], built_refs=[], up="../../"
+    )
+    assert "Logs are gzipped." in with_log
+
+    # An in-window case that produced no log at all claimed one anyway.
+    without = gen.build_case_index_html(
+        env, [("sanitizer_report.json", 12)], built_refs=[], up="../../"
+    )
+    assert "Every file published for this case." in without
+    assert "gzipped" not in without
+
+    pruned = gen.build_case_index_html(
+        {**env, "logs_published": False}, [("sanitizer_report.json", 12)],
+        built_refs=[], up="../../",
+    )
+    assert "pruned" in pruned and "gzipped" not in pruned
+
+
 def test_genco_rebuild_encodes_the_bundle_check_as_one_command():
     # A consumer executing `commands` in order cannot branch on prose, so the
     # raw-ELF-vs-bundle decision has to live inside a command.
@@ -2434,7 +2514,7 @@ def test_rebuild_plan_is_machine_readable_and_prose_is_generated_from_it():
         "clang-offload-bundler --type=o --unbundle --input=tmp.o "
         "--targets=hipv4-amdgcn-amd-amdhsa--gfx950 "
         "--output=recipes/sanitizers/fixtures/isa/lds.hsaco; "
-        "else cp tmp.o recipes/sanitizers/fixtures/isa/lds.hsaco; fi",
+        "else cp tmp.o recipes/sanitizers/fixtures/isa/lds.hsaco; fi && rm -f tmp.o",
     ]
     # The bundle check lives in a command, not only in the prose caveat, so an
     # automated consumer can execute the branch.

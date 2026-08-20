@@ -410,6 +410,14 @@ jobs:
             fi
           done
 
+          # Report what this run adds. --keep-logs bounds the checkout, but a blob
+          # stays reachable from the commit that added it, so anything published
+          # here is permanent in the branch history -- if real ConSan logs turn out
+          # large, capping them is a code change now and a history rewrite later
+          # (#384). Print the number every night so that is never a surprise.
+          echo "[$(date +%T)] staged case-dir sizes (pre-gzip):"
+          du -sh "$dest"/* 2>/dev/null | sed 's/^/  /' || true
+
           # Per-run manifest read back by gen_sanitizer_dashboard.py --history-root.
           # gate mirrors the GPU job result (its comparator step is the gate); the
           # rendered history recomputes it from the reports + baselines regardless.
