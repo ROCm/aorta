@@ -2290,6 +2290,60 @@ def test_rebuild_commands_export_the_rocm_llvm_path():
     assert gen.rebuild_plan(["fixtures/other/x"], target="gfx950")[0]["commands"] == []
 
 
+def test_run_area_ships_every_source_its_rebuild_commands_read():
+    """Decision 10 asks for the inputs a reproduction needs, not just the named ones.
+
+    A recipe names only the built artifact it *consumes*: every ``daily-consan-*``
+    lists a ``.hsaco`` and a loader binary and nothing else. Scanning the recipe
+    text alone therefore left ``inputs/`` empty for exactly the cases whose
+    published rebuild commands read the most.
+    """
+    recipes = _REPO_ROOT / "recipes" / "sanitizers"
+    generated = ("fixtures/isa", "fixtures/bin")
+    for recipe in sorted(recipes.glob("daily-*.yaml")):
+        text = recipe.read_text(encoding="utf-8")
+        named, built = gen._recipe_fixture_refs(text)
+        published = set(named) | set(gen.rebuild_input_sources(built))
+        # Every non-generated fixture path the commands name must be published.
+        for entry in gen.rebuild_plan(built, target="gfx950"):
+            for command in entry["commands"]:
+                for token in re.findall(
+                    r"recipes/sanitizers/fixtures/[\w./-]+", command
+                ):
+                    ref = f"fixtures{token[len('recipes/sanitizers/fixtures'):]}"
+                    if any(
+                        ref == root or ref.startswith(f"{root}/") for root in generated
+                    ):
+                        continue
+                    assert ref in published, f"{recipe.name}: {ref} not in inputs/"
+        # ...and each one is a real file, so the copy actually happens.
+        for ref in published:
+            assert (recipes / ref).is_file(), f"{recipe.name}: {ref}"
+
+
+def test_consan_recipes_publish_their_transitive_sources(tmp_path, monkeypatch):
+    # End-to-end: the ConSan survey case used to ship an empty inputs/ even though
+    # its own commands read the shape CSV and the loader source.
+    out = _publish_with_logs(tmp_path, monkeypatch, run_ids=["2026-08-05-33"])
+    area = out / "runs" / "2026-08-05-33" / "survey" / "consan-gemm"
+
+    inputs = sorted(
+        p.relative_to(area / "inputs").as_posix()
+        for p in (area / "inputs").rglob("*")
+        if p.is_file()
+    )
+    assert inputs == [
+        "fixtures/gemm_shapes_unique.csv",
+        "fixtures/kernels/consan_load.hip",
+    ]
+    env = json.loads((area / "env.json").read_text(encoding="utf-8"))
+    assert sorted(env["inputs"]) == inputs
+    # They are listed as downloads on the landing page, like any published file.
+    page = (area / "index.html").read_text(encoding="utf-8")
+    for rel in inputs:
+        assert f'href="inputs/{rel}"' in page
+
+
 def test_genco_rebuild_encodes_the_bundle_check_as_one_command():
     # A consumer executing `commands` in order cannot branch on prose, so the
     # raw-ELF-vs-bundle decision has to live inside a command.

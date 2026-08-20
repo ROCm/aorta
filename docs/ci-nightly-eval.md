@@ -211,13 +211,23 @@ the `ci-results` data branch (older ones are pruned), and the dashboard renders 
 most the last 180 builds (`gen_dashboard.py --max-builds`). Files are tiny; adjust
 the cap in `nightly-eval.yml` / the flag if a longer window is wanted.
 
-The **sanitizer** nightly keeps a separate rolling window on the
-`sanitizer-results` data branch: the newest **30** `dashboard/runs/<id>/`
-directories (each holding that run's three raw `sanitizer_report.json` files and a
-`meta.json`). The publish job prunes older ones and re-renders with
-`gen_sanitizer_dashboard.py --history-root dashboard/runs --keep 30`; adjust
-`keep` in `sanitizers-nightly.yml` (and the matching `--keep`) to change the
-window.
+The **sanitizer** nightly keeps its own rolling window on the `sanitizer-results`
+data branch, and it has **two** bounds rather than one:
+
+- **Reports: newest 30 runs.** `dashboard/runs/<id>/` holds one directory per
+  guardrail recipe, one under `survey/` per observed-only case, and a `meta.json`.
+  Each case directory is a *run area* (report, gzipped logs, `recipe.yaml`,
+  `inputs/`, `REPRODUCE.md`, `env.json`, `index.html`) — see the run-area table
+  earlier in this document. The publish job prunes older runs and re-renders with
+  `gen_sanitizer_dashboard.py --history-root dashboard/runs --keep 30`.
+- **Bulk: newest 7 runs.** `--keep-logs 7` bounds the logs, the recipe copy and
+  the copied inputs, for guardrail and survey areas alike. An older run keeps its
+  report, manifests and landing page; its bulk is pruned and the area is
+  re-rendered so the page lists only what is still there. Pruning is one-way —
+  raising `--keep-logs` later does not bring deleted logs back.
+
+Adjust `keep` in `sanitizers-nightly.yml` (and the matching `--keep`) for the
+report window, and `--keep-logs` for the bulk window.
 
 ## Operating checklist
 

@@ -1406,6 +1406,12 @@ def _publish_recipe_inputs(
         return [], []
     (case_dir / "recipe.yaml").write_text(recipe_text, encoding="utf-8")
     source_refs, built_refs = _recipe_fixture_refs(recipe_text)
+    # Plus the sources the rebuild commands read. A recipe names only the built
+    # artifact it consumes -- every daily-consan-* recipe lists a .hsaco and a
+    # loader binary and nothing else -- so scanning the recipe text alone left
+    # inputs/ empty for exactly the cases whose published commands read the most
+    # (decision 10 asks for every input a reproduction needs).
+    source_refs = list(dict.fromkeys(source_refs + rebuild_input_sources(built_refs)))
     recipe_dir = recipe_src.parent
     copied: list[str] = []
     inputs_root = (case_dir / "inputs").resolve()
@@ -1642,10 +1648,42 @@ def _runnable(ref: str) -> str:
     return f"{_FIXTURES_FROM_ROOT}{ref[len('fixtures'):]}" if ref.startswith("fixtures") else ref
 
 
+_GEMM_ISA_CSV = "fixtures/gemm_shapes_unique.csv"
 _GEMM_ISA_SCRIPT = (
     "python scripts/sanitizers/prepare_gemm_isa.py "
-    f"--csv {_FIXTURES_FROM_ROOT}/gemm_shapes_unique.csv --out {_FIXTURES_FROM_ROOT}/isa"
+    f"--csv {_runnable(_GEMM_ISA_CSV)} --out {_FIXTURES_FROM_ROOT}/isa"
 )
+
+
+def rebuild_input_sources(built_refs: list[str]) -> list[str]:
+    """Recipe-relative source files the rebuild commands for these artifacts read.
+
+    Pure, and derived from the same tables ``rebuild_plan`` renders from, so the
+    inputs a run area copies cannot disagree with the commands it publishes.
+
+    Needed because a recipe names only the built artifact it *consumes*: every
+    ``daily-consan-*`` recipe lists a ``.hsaco`` and a loader binary and nothing
+    else, so scanning the recipe text alone left ``inputs/`` empty for exactly the
+    cases whose published commands read the most. A binary's loaded code object is
+    folded in too, since rebuilding the binary means rebuilding that object first
+    -- ``consan_gemm_load`` needs ``consan_load.hip`` *and* the GEMM shape CSV its
+    object is extracted with.
+    """
+    refs = list(built_refs) + [
+        _BIN_OBJECT[ref] for ref in built_refs if ref in _BIN_OBJECT
+    ]
+    sources: list[str] = []
+    for ref in dict.fromkeys(refs):
+        genco = _GENCO_ISA_SOURCES.get(ref)
+        if genco:
+            sources.append(genco)
+        elif f"{ref}/".startswith("fixtures/isa/") or ref == "fixtures/isa":
+            # Every isa/ artifact not built by --genco is extracted by
+            # prepare_gemm_isa.py, which reads the shape CSV.
+            sources.append(_GEMM_ISA_CSV)
+        if ref in _BIN_SOURCES:
+            sources.append(_BIN_SOURCES[ref][0])
+    return list(dict.fromkeys(sources))
 
 # Every rebuild starts here, because the tool none of them can run without is not
 # on PATH in the image that built the artifact: the ROCm container exports only
