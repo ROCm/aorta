@@ -898,7 +898,10 @@ def _load_survey_report(report_path: str, base_dir: Path | None) -> dict[str, An
 
 
 def survey_cases_from_spec(
-    spec: dict[str, Any] | list[Any], *, base_dir: Path | None = None
+    spec: dict[str, Any] | list[Any],
+    *,
+    base_dir: Path | None = None,
+    rel: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build ordered observed-only *survey* case entries from a spec (pure-ish).
 
@@ -991,17 +994,24 @@ def survey_cases_from_spec(
                 # only a name that is one plain path segment can be claimed, since
                 # the area link is built from it and `..` would traverse.
                 #
-                # The name must also *agree* with report_rel. The two renderers use
-                # different sources -- the run page builds survey/<name>/ while the
-                # card footer takes the directory of report_rel -- so a spec naming
-                # "foo" with a report under survey/bar/ advertised two different run
-                # areas, one of which is wrong. Validating them independently was
-                # not enough; they have to describe the same directory.
+                # The two renderers derive this link from different sources -- the
+                # run page builds ``survey/<name>/`` relative to the run it is
+                # rendering, the card footer takes the directory of ``report_rel``
+                # -- so they can only be trusted if the *whole* area is pinned to
+                # one run. Comparing only the case segment was not enough: a report
+                # under ``runs/other/survey/foo/`` matched ``name="foo"`` while the
+                # footer pointed into a different run. Require the complete path
+                # for the run being rendered, which is exactly what the
+                # informational builder constructs, so the two agree by
+                # construction. Without a run context (``rel=None``) nothing can be
+                # verified and no spec entry may claim an area.
                 "staged": (
                     case.get("staged") is True
                     and summary["present"]
                     and _safe_case_segment(name) is not None
-                    and _report_rel_case_segment(case.get("report_rel")) == name
+                    and bool(rel)
+                    and _safe_report_rel(case.get("report_rel"))
+                    == f"{rel}/survey/{name}/sanitizer_report.json"
                 ),
                 "cls": "survey",
                 "summary": summary,
@@ -1040,6 +1050,17 @@ def _split_survey_case(name: str) -> tuple[str, str | None]:
         if name.startswith(prefix):
             return name[len(prefix):], san
     return name, None
+
+
+def _published_command(case_dir: Path) -> str:
+    """The reproduce command a published run area recorded, or "" (no manifest).
+
+    A fresh sweep's results dir has no ``env.json``, so this is empty there and the
+    caller falls back to the recipe map.
+    """
+    env = _load(case_dir / "env.json")
+    command = env.get("command") if isinstance(env, dict) else None
+    return command if isinstance(command, str) and command else ""
 
 
 def survey_cases_from_informational_dir(
@@ -1109,7 +1130,15 @@ def survey_cases_from_informational_dir(
                 "sanitizer": sanitizer,
                 "backend": str(backend_name),
                 "workload": None,
-                "command": (
+                # An already-published area records the command it actually ran, so
+                # prefer it over recomputing from the current recipe map. This
+                # function also reconstructs a published run's survey (see
+                # ``displayed_survey`` in ``main``), and recomputing there let a
+                # recipe rename rewrite a historical run's reproduce command --
+                # the same "prose must not outlive its manifest" rule the run-area
+                # renderers follow.
+                "command": _published_command(case_dir)
+                or (
                     "aorta sweep run --recipe "
                     f"recipes/sanitizers/{_survey_recipe_for(name)}.yaml"
                 ),
@@ -1213,21 +1242,6 @@ def _safe_case_segment(name: Any) -> str | None:
     if not isinstance(name, str) or not _CASE_SEGMENT_RE.fullmatch(name):
         return None
     return name
-
-
-def _report_rel_case_segment(report_rel: Any) -> str | None:
-    """The case-directory name a ``report_rel`` points at, validated (pure).
-
-    Used to cross-check the two sources the renderers use for one area: the run
-    page builds ``survey/<name>/`` from the case name while the card footer takes
-    the directory of ``report_rel``. Validating each on its own still allowed a
-    spec to name ``foo`` while its report sat under ``survey/bar/``, advertising two
-    different directories for one case.
-    """
-    area = _case_dir_rel(_safe_report_rel(report_rel))
-    if not area:
-        return None
-    return _safe_case_segment(area.rstrip("/").rsplit("/", 1)[-1])
 
 
 def _case_dir_rel(report_rel: str | None) -> str | None:
@@ -3826,7 +3840,9 @@ def main() -> int:
     if args.survey is not None:
         spec = _load(args.survey)
         if isinstance(spec, (dict, list)):
-            survey = survey_cases_from_spec(spec, base_dir=args.survey.parent)
+            survey = survey_cases_from_spec(
+                spec, base_dir=args.survey.parent, rel=current_rel
+            )
     # Caller-supplied ConSan cases (#347) now render as observed-only workload-survey
     # (Tab 2) entries rather than a separate informational section. They are appended
     # after any explicit --survey spec cases so an explicit spec (if wired) leads, and

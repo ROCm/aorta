@@ -1749,7 +1749,8 @@ def test_build_html_survey_report_link_and_graceful_absence():
              "report_rel": "runs/x/survey/linked/sanitizer_report.json",
              "report": _consan_racy_report()},
             {"name": "nolink", "label": "nolink survey", "report": _waitcheck_report()},
-        ]}
+        ]},
+        rel="runs/x",
     )
     html = gen.build_html([_healthy_guardrail_run()], survey=survey)
 
@@ -1819,7 +1820,8 @@ def test_build_html_kernel_rows_link_reports_on_both_tabs(tmp_path):
     survey = gen.survey_cases_from_spec(
         {"cases": [{"name": "s", "label": "survey linked", "staged": True,
                     "report_rel": "runs/x/survey/s/sanitizer_report.json",
-                    "report": _consan_racy_report()}]}
+                    "report": _consan_racy_report()}]},
+        rel="runs/x",
     )
     html = gen.build_html(runs, survey=survey)
 
@@ -2880,6 +2882,43 @@ def test_disjoint_history_and_output_trees_keep_the_survey_subtree(
     assert (area / "sanitizer_report.json").is_file()
 
 
+def test_published_survey_area_keeps_its_recorded_command(tmp_path):
+    """Reconstructing a published run must not recompute its reproduce command.
+
+    ``displayed_survey`` rebuilds the newest run's Tab 2 list from the areas
+    published under it. Recomputing the command from the current
+    ``_survey_recipe_for`` map meant a recipe rename would rewrite a historical
+    run's advertised command, even though that area's manifest records the one it
+    actually ran -- the same rule the run-area renderers already follow.
+    """
+    published = tmp_path / "survey"
+    (published / "consan-gemm").mkdir(parents=True)
+    (published / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    (published / "consan-gemm" / "env.json").write_text(
+        json.dumps({"case": "consan-gemm", "command": "aorta sweep run --recipe old/name.yaml"})
+    )
+    entries = gen.survey_cases_from_informational_dir(published, rel="runs/x")
+    assert entries[0]["command"] == "aorta sweep run --recipe old/name.yaml"
+
+    # A fresh sweep's results dir has no manifest, so the recipe map still applies.
+    fresh = tmp_path / "informational"
+    (fresh / "consan-gemm").mkdir(parents=True)
+    (fresh / "consan-gemm" / "sanitizer_report.json").write_text(
+        json.dumps(_informational_report("combined_hook_timeout"))
+    )
+    fresh_entries = gen.survey_cases_from_informational_dir(fresh, rel="runs/x")
+    assert fresh_entries[0]["command"] == (
+        "aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml"
+    )
+    # A malformed manifest degrades to the recipe map rather than raising.
+    (published / "consan-gemm" / "env.json").write_text("[]")
+    assert gen.survey_cases_from_informational_dir(published, rel="runs/x")[0][
+        "command"
+    ] == fresh_entries[0]["command"]
+
+
 def test_prose_is_rendered_from_the_persisted_manifest_not_current_constants():
     """A retained area's instructions must not be rewritten by a later code change.
 
@@ -3224,30 +3263,45 @@ def test_the_page_renders_the_survey_of_the_run_it_calls_latest(tmp_path, monkey
     assert [e["name"] for e in by_run[newer].get("survey", [])] == ["waitcheck-gemm"]
 
 
-def test_staged_requires_the_report_to_sit_in_the_named_case_directory():
-    # The run page builds survey/<name>/ while the card footer takes report_rel's
-    # directory, so a spec naming one and pointing at the other advertised two
-    # different run areas -- one of them wrong.
-    mismatched = gen.survey_cases_from_spec({"cases": [{
-        "name": "foo", "label": "mismatched", "staged": True,
-        "report_rel": "runs/x/survey/bar/sanitizer_report.json",
-        "report": _consan_racy_report(),
-    }]})
-    assert mismatched[0]["staged"] is False
-    html = gen.build_html([_healthy_guardrail_run()], survey=mismatched)
-    assert "run area</a>" not in html
-    assert "run area" not in gen._run_index_survey_html(mismatched)
+def test_staged_requires_the_whole_area_to_match_the_run_being_rendered():
+    """The two renderers derive one link from different sources, so pin the area.
 
-    agreeing = gen.survey_cases_from_spec({"cases": [{
-        "name": "foo", "label": "agreeing", "staged": True,
-        "report_rel": "runs/x/survey/foo/sanitizer_report.json",
-        "report": _consan_racy_report(),
-    }]})
+    The run page builds ``survey/<name>/`` relative to the run it renders; the card
+    footer takes ``report_rel``'s directory. Comparing only the case segment left a
+    report under a *different run* passing, so the footer pointed into that other
+    run while the run page pointed at its own.
+    """
+    def spec(name, report_rel, rel="runs/x"):
+        return gen.survey_cases_from_spec(
+            {"cases": [{
+                "name": name, "label": name, "staged": True,
+                "report_rel": report_rel, "report": _consan_racy_report(),
+            }]},
+            rel=rel,
+        )
+
+    # Wrong case directory, and -- the case that survived the segment-only check --
+    # the right case under the wrong run.
+    for name, report_rel in (
+        ("foo", "runs/x/survey/bar/sanitizer_report.json"),
+        ("foo", "runs/other/survey/foo/sanitizer_report.json"),
+        ("foo", "runs/x/foo/sanitizer_report.json"),
+    ):
+        entries = spec(name, report_rel)
+        assert entries[0]["staged"] is False, report_rel
+        assert "run area</a>" not in gen.build_html(
+            [_healthy_guardrail_run()], survey=entries
+        )
+        assert "run area" not in gen._run_index_survey_html(entries)
+
+    agreeing = spec("foo", "runs/x/survey/foo/sanitizer_report.json")
     assert agreeing[0]["staged"] is True
     assert 'href="survey/foo/">run area</a>' in gen._run_index_survey_html(agreeing)
-    assert gen._report_rel_case_segment("runs/x/survey/foo/sanitizer_report.json") == "foo"
-    assert gen._report_rel_case_segment("javascript:alert(1)") is None
-    assert gen._report_rel_case_segment(None) is None
+
+    # With no run context nothing can be verified, so nothing may be claimed.
+    assert spec("foo", "runs/x/survey/foo/sanitizer_report.json", rel=None)[0][
+        "staged"
+    ] is False
 
 
 def test_pruning_is_irreversible_when_keep_logs_is_raised_later(tmp_path):
