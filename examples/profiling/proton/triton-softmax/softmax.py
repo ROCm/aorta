@@ -91,7 +91,11 @@ def main(argv: list[str] | None = None) -> int:
 
     out = softmax(x)
     torch.cuda.synchronize(device)
-    max_err = torch.max(torch.abs(out - torch.softmax(x, axis=-1))).item()
+    # ``dim``, not ``axis``: torch accepts both (``axis`` is its numpy-compat
+    # alias) but only ``dim`` is documented, and this file uses ``axis`` for
+    # Triton's own reduction API a few lines up. Keeping the two spellings on
+    # their own sides of the fence stops the mix reading as a bug.
+    max_err = torch.max(torch.abs(out - torch.softmax(x, dim=-1))).item()
 
     for _ in range(args.iters):
         softmax(x)
