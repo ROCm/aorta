@@ -1584,6 +1584,38 @@ def test_main_tolerates_an_absent_canary_dir(tmp_path, monkeypatch, capsys):
     assert "No canary runs recorded yet" in html
 
 
+def test_canary_rows_render_with_no_gated_history_at_all(tmp_path, monkeypatch, capsys):
+    """Neither lane may gate the other (#387).
+
+    The two lanes publish to `ci-results` from two different workflows, so the
+    canary can legitimately land first. `pages.yml` used to make the whole render
+    conditional on a top-level gated `results/*.json`, which hid canary history
+    until the first gated nightly; this pins the generator half of that fix.
+    """
+    results = tmp_path / "results"
+    (results / "canary").mkdir(parents=True)  # no gated *.json beside it
+    (results / "canary" / "2026-08-19.json").write_text(
+        json.dumps(_canary("2026-08-19T15:00:00Z", "7.14.0")), encoding="utf-8"
+    )
+    out = tmp_path / "site"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gen_dashboard.py",
+            "--results-dir", str(results),
+            "--out-dir", str(out),
+            "--canary-results-dir", str(results / "canary"),
+        ],
+    )
+    assert gen_dashboard.main() == 0
+    capsys.readouterr()
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "7.14.0" in html
+    assert 'id="canary"' in html
+    # The gated side is simply empty, and status.json still describes only it.
+    assert json.loads((out / "data.json").read_text(encoding="utf-8")) == []
+
+
 def test_main_renders_canary_rows_without_entering_data_or_status_json(tmp_path, monkeypatch, capsys):
     results = tmp_path / "results"
     (results / "canary").mkdir(parents=True)

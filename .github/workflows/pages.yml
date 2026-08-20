@@ -111,38 +111,52 @@ jobs:
           git ls-remote --exit-code --heads "$repo_url" ci-results >/dev/null 2>&1
           lsr=$?
           set -e
+          # Both result directories are OPTIONAL inputs, resolved independently.
+          # An absent one falls back to an empty directory, which gen_dashboard
+          # renders as its documented "no runs yet" state.
+          #
+          # Two lanes write to ci-results from two different workflows, so
+          # neither may gate the other: the canary publishes on its own schedule
+          # and can legitimately land first, and previously the whole render was
+          # conditional on a top-level gated results/*.json existing, so canary
+          # history stayed invisible until the first gated nightly (and the
+          # empty-state fallback dropped --canary-results-dir entirely). Same
+          # class as the "/sanitizers/ 404s before the first nightly" rule.
+          empty="${RUNNER_TEMP}/empty-results"
+          mkdir -p "$empty"
+          results_dir="$empty"
+          canary_dir="$empty/absent"   # deliberately non-existent; tolerated
+
           if [ "$lsr" -eq 2 ]; then
-            echo "ci-results branch absent; dashboard appears after the first nightly"
+            echo "ci-results branch absent; publishing the empty state"
           elif [ "$lsr" -ne 0 ]; then
             echo "::error::cannot reach ci-results (git ls-remote exit ${lsr}); failing closed"
             exit 1
           else
             tmp="$(mktemp -d)"
             git clone --depth 1 --branch ci-results "$repo_url" "$tmp"
-            if ls "$tmp"/results/*.json >/dev/null 2>&1; then
-              # --canary-results-dir is the observed-only latest-ROCm lane (#382).
-              # Passed unconditionally: the generator treats an absent directory
-              # as an empty state, so this is safe before the canary's first run
-              # and needs no branch here. It cannot affect the gated page --
-              # results/*.json is globbed non-recursively, and the canary rows go
-              # to a separate render path that feeds neither status.json nor
-              # data.json.
-              python3 scripts/ci/gen_dashboard.py \
-                --results-dir "$tmp/results" --out-dir _site --max-builds 180 \
-                --canary-results-dir "$tmp/results/canary"
-              echo "dashboard at / ($(ls -1 "$tmp"/results/*.json | wc -l) build(s))"
-            else
-              echo "ci-results exists but has no results yet"
+            if [ -d "$tmp/results" ]; then
+              results_dir="$tmp/results"
+            fi
+            if [ -d "$tmp/results/canary" ]; then
+              canary_dir="$tmp/results/canary"
             fi
           fi
 
-          # The root must never 404: without results, publish the dashboard's own
-          # empty state rather than leaving the site with no index at all.
+          # Rendered unconditionally, so / never 404s. The canary cannot affect
+          # the gated page: results/*.json is globbed non-recursively and the
+          # canary rows take a separate render path that feeds neither
+          # status.json nor data.json.
+          python3 scripts/ci/gen_dashboard.py \
+            --results-dir "$results_dir" --out-dir _site --max-builds 180 \
+            --canary-results-dir "$canary_dir"
+          gated_count="$(find "$results_dir" -maxdepth 1 -name '*.json' | wc -l)"
+          canary_count="$(find "$canary_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)"
+          echo "dashboard at / (${gated_count} gated build(s), ${canary_count} canary run(s))"
+
           if [ ! -f _site/index.html ]; then
-            mkdir -p "${RUNNER_TEMP}/empty-results"
-            python3 scripts/ci/gen_dashboard.py \
-              --results-dir "${RUNNER_TEMP}/empty-results" --out-dir _site
-            echo "no history yet; published the dashboard's empty state at /"
+            echo "::error::dashboard generation produced no index.html"
+            exit 1
           fi
 
       # History lives on the sanitizer-results data branch (written by
