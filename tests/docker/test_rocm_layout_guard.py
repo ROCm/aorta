@@ -248,6 +248,49 @@ class TestParity:
         classic_at(root)
         assert agree().source == "opt_rocm"
 
+    @pytest.mark.parametrize(
+        "marker_kind",
+        ["empty-file", "whitespace-only", "directory"],
+    )
+    def test_an_unusable_version_marker_does_not_shadow_a_wheel(
+        self, agree, classic_at, importable_wheel, tmp_path: Path, marker_kind
+    ):
+        """Both sides must agree that `exists()` is not enough (#387).
+
+        If only one adopted the readable-and-non-empty rule, the guard would fail
+        a build the resolver reads fine (or pass one it cannot) -- exactly the
+        drift this suite exists to catch.
+        """
+        stub = tmp_path / "opt_rocm"
+        (stub / ".info").mkdir(parents=True)
+        (stub / "bin").mkdir()
+        marker = stub / ".info" / "version"
+        if marker_kind == "empty-file":
+            marker.write_text("", encoding="utf-8")
+        elif marker_kind == "whitespace-only":
+            marker.write_text("\n \n", encoding="utf-8")
+        else:
+            marker.mkdir()
+        classic_at(stub)
+        core = importable_wheel()
+        assert agree().core == core
+
+    def test_a_stale_mount_degrades_identically_on_both_sides(
+        self, agree, sandbox, tmp_path: Path
+    ):
+        """Neither implementation may propagate an OSError from a probe.
+
+        The resolver documents that resolution never raises; the guard has to
+        reach its own diagnostics rather than dying with a traceback, since a
+        traceback fails the build without saying what it looked for.
+        """
+
+        def boom(self):
+            raise OSError("stale NFS handle")
+
+        sandbox.setattr(Path, "is_dir", boom)
+        assert agree({"ROCM_PATH": str(tmp_path / "gone")}).source == "none"
+
     def test_env_var_on_a_component_directory(self, agree, tmp_path: Path):
         site = tmp_path / "site-packages"
         core = build_wheel(site, devel=True)

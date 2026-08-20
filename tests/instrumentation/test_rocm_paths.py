@@ -19,6 +19,7 @@ real host state:
 from __future__ import annotations
 
 import dataclasses
+import os
 from pathlib import Path
 
 import pytest
@@ -359,6 +360,73 @@ class TestDerivedPaths:
             roots.core = Path("/somewhere/else")  # type: ignore[misc]
 
 
+class TestVersionMarkerMustBeReadable:
+    """``exists()`` is too weak to grant classic autodetection priority (#387).
+
+    Each of these would otherwise let a stale ``/opt/rocm`` outrank a healthy
+    importable wheel and then report a null version -- the same class as the
+    bin-only ``bin/`` shim, one marker further in.
+    """
+
+    @pytest.fixture
+    def wheel_beside(self, tmp_path: Path, monkeypatch):
+        """A real wheel install that a stale /opt/rocm must not outrank."""
+        core = build_wheel(tmp_path / "site-packages")
+        monkeypatch.setattr(rocm_paths, "_installed_wheel_component", lambda p: core)
+        return core
+
+    def _stub_root(self, tmp_path: Path, monkeypatch) -> Path:
+        stub = tmp_path / "opt_rocm"
+        (stub / "bin").mkdir(parents=True)
+        (stub / ".info").mkdir()
+        monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", stub)
+        return stub
+
+    def test_zero_byte_version_file_is_not_usable(
+        self, tmp_path: Path, monkeypatch, wheel_beside
+    ):
+        """An interrupted install leaves exactly this behind."""
+        stub = self._stub_root(tmp_path, monkeypatch)
+        (stub / ".info" / "version").write_text("", encoding="utf-8")
+        assert resolve_rocm_roots({}).core == wheel_beside
+
+    def test_whitespace_only_version_file_is_not_usable(
+        self, tmp_path: Path, monkeypatch, wheel_beside
+    ):
+        stub = self._stub_root(tmp_path, monkeypatch)
+        (stub / ".info" / "version").write_text("\n  \n", encoding="utf-8")
+        assert resolve_rocm_roots({}).core == wheel_beside
+
+    def test_a_directory_named_version_is_not_usable(
+        self, tmp_path: Path, monkeypatch, wheel_beside
+    ):
+        """``exists()`` accepts a directory; a read raises IsADirectoryError."""
+        stub = self._stub_root(tmp_path, monkeypatch)
+        (stub / ".info" / "version").mkdir()
+        assert resolve_rocm_roots({}).core == wheel_beside
+
+    def test_unreadable_version_file_is_not_usable(
+        self, tmp_path: Path, monkeypatch, wheel_beside
+    ):
+        stub = self._stub_root(tmp_path, monkeypatch)
+        marker = stub / ".info" / "version"
+        marker.write_text("7.2.4\n", encoding="utf-8")
+        marker.chmod(0o000)
+        try:
+            if os.access(marker, os.R_OK):  # running as root: chmod proves nothing
+                pytest.skip("cannot make a file unreadable as this user")
+            assert resolve_rocm_roots({}).core == wheel_beside
+        finally:
+            marker.chmod(0o644)
+
+    def test_a_real_version_file_is_still_usable(self, tmp_path: Path, monkeypatch):
+        """The whole point: this must not narrow a working classic install."""
+        stub = self._stub_root(tmp_path, monkeypatch)
+        (stub / ".info" / "version").write_text("7.2.4\n", encoding="utf-8")
+        monkeypatch.setattr(rocm_paths, "_installed_wheel_component", lambda p: None)
+        assert resolve_rocm_roots({}).source == "opt_rocm"
+
+
 class TestNeverRaises:
     def test_unreadable_candidate_is_not_a_root(self, tmp_path: Path, monkeypatch):
         def boom(self):
@@ -366,6 +434,45 @@ class TestNeverRaises:
 
         monkeypatch.setattr(Path, "is_dir", boom)
         assert rocm_paths._is_rocm_root(tmp_path) is False
+
+    def test_every_filesystem_probe_is_fail_soft(self, tmp_path: Path, monkeypatch):
+        """A stale mount must not escape as an exception (#387).
+
+        The module is imported at module scope by ``environment.py`` to build its
+        path constants, so an ``OSError`` from any probe here does not just
+        mis-resolve -- it can stop the env probe importing at all, on exactly the
+        damaged hosts it exists to describe. Blows up ``is_dir`` globally so
+        every probe on every resolution path is covered at once, rather than
+        naming the ones that happened to be flagged.
+        """
+
+        def boom(self):
+            raise OSError("stale NFS handle")
+
+        monkeypatch.setattr(Path, "is_dir", boom)
+        for environ in (
+            {},
+            {"ROCM_PATH": str(tmp_path / "rocm")},
+            {"ROCM_HOME": str(tmp_path / "rocm")},
+            {"ROCM_PATH": str(tmp_path / "site" / "_rocm_sdk_devel")},
+        ):
+            roots = resolve_rocm_roots(environ)
+            assert roots.source == "none", environ
+            assert roots.core.is_absolute()
+
+    def test_wheel_component_probe_is_fail_soft(self, tmp_path: Path, monkeypatch):
+        def boom(self):
+            raise OSError("stale NFS handle")
+
+        monkeypatch.setattr(Path, "is_dir", boom)
+        assert rocm_paths._wheel_component(tmp_path, "_rocm_sdk_core") is None
+
+    def test_version_marker_probe_is_fail_soft(self, tmp_path: Path, monkeypatch):
+        def boom(self, *args, **kwargs):
+            raise OSError("stale NFS handle")
+
+        monkeypatch.setattr(Path, "open", boom)
+        assert rocm_paths._has_readable_version(tmp_path) is False
 
     def test_resolution_survives_an_unreadable_env_path(self, no_rocm, tmp_path: Path):
         def boom(self):

@@ -85,6 +85,11 @@ _USABLE_VERSION_MARKERS: tuple[Path, ...] = (
     Path(".info") / "version-dev",
 )
 
+# Enough to tell "has content" from "empty/whitespace" without reading an
+# arbitrarily large file that merely happens to sit at the marker path. Real
+# markers are a single short version string.
+_VERSION_MARKER_PROBE_BYTES = 64
+
 LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
 
@@ -169,10 +174,56 @@ def _classic_roots(source: str) -> RocmRoots:
     )
 
 
+def _safe_is_dir(path: Path) -> bool:
+    """``path.is_dir()`` that never raises.
+
+    EVERY filesystem probe in this module goes through this or
+    :func:`_has_readable_version`. Not defensive habit: this module is imported
+    at module scope by ``environment.py`` to build its path constants, so an
+    ``OSError`` escaping a probe does not merely mis-resolve the roots -- it can
+    stop the env probe importing at all, on exactly the damaged hosts the probe
+    exists to describe. A stale or unreadable NFS ``site-packages`` mount is the
+    realistic case, and it is not hypothetical for the wheel layout, where
+    discovery walks into ``site-packages`` rather than a local ``/opt``.
+    """
+    try:
+        return path.is_dir()
+    except OSError as exc:  # stale mount, permission denied, ELOOP, ...
+        log.debug("cannot stat %s: %s", path, exc)
+        return False
+
+
+def _has_readable_version(path: Path) -> bool:
+    """True when ``path`` holds a readable, non-empty ``.info/version{,-dev}``.
+
+    ``exists()`` is too weak to be the thing that grants classic autodetection
+    priority over a working wheel install. It also accepts a zero-byte file left
+    behind by an interrupted install, a whitespace-only file, a *directory*
+    named ``.info/version``, and a file we cannot actually open. Any of those
+    would let a stale ``/opt/rocm`` outrank a healthy importable wheel and then
+    report a null version -- the same failure as the bin-only ``bin/`` shim, one
+    marker further in.
+
+    Implemented as a real (tiny) read rather than a stack of predicates so that
+    every one of those cases collapses into the same answer: a directory raises
+    ``IsADirectoryError``, an unreadable file ``PermissionError`` -- both
+    ``OSError`` -- and empty or whitespace-only content is simply falsy.
+    """
+    for marker in _USABLE_VERSION_MARKERS:
+        candidate = path / marker
+        try:
+            with candidate.open("rb") as handle:
+                if handle.read(_VERSION_MARKER_PROBE_BYTES).strip():
+                    return True
+        except OSError as exc:  # missing, a directory, unreadable, stale mount
+            log.debug("version marker %s unusable: %s", candidate, exc)
+    return False
+
+
 def _is_rocm_root(path: Path) -> bool:
     """True when ``path`` is a directory that looks like a ROCm install."""
     try:
-        if not path.is_dir():
+        if not _safe_is_dir(path):
             return False
         return any((path / marker).exists() for marker in _ROOT_MARKERS)
     except OSError as exc:  # unreadable mount, permission denied
@@ -201,20 +252,16 @@ def _is_usable_rocm_root(path: Path) -> bool:
     A tarball install with ``lib/`` but no ``.info/`` still passes, so this does
     not narrow the classic layouts that genuinely work.
     """
-    try:
-        if not path.is_dir():
-            return False
-        if any((path / marker).exists() for marker in _USABLE_VERSION_MARKERS):
-            return True
-        return (path / "lib").is_dir()
-    except OSError as exc:  # unreadable mount, permission denied
-        log.debug("cannot inspect candidate ROCm root %s: %s", path, exc)
+    if not _safe_is_dir(path):
         return False
+    if _has_readable_version(path):
+        return True
+    return _safe_is_dir(path / "lib")
 
 
 def _wheel_component(site_dir: Path, package: str) -> Path | None:
     candidate = site_dir / package
-    return candidate if candidate.is_dir() else None
+    return candidate if _safe_is_dir(candidate) else None
 
 
 def _installed_wheel_component(package: str) -> Path | None:
@@ -279,7 +326,7 @@ def _roots_from_candidate(candidate: Path, source: str) -> RocmRoots | None:
             return roots
         # A lone component with no _rocm_sdk_core beside it: use it for
         # everything rather than discarding an explicit operator override.
-        if candidate.is_dir():
+        if _safe_is_dir(candidate):
             return RocmRoots(
                 core=candidate,
                 libraries=candidate,

@@ -252,7 +252,7 @@ when the output directory/file cannot be created or validated.
 | `partial_reasons` | `list[str]` | per-probe | one human-readable line per fallback |
 | `system_health` | `dict \| null` | `rdhc --quick --json` (subprocess) | verbatim parsed JSON; `null` when rdhc absent / sudo unavailable / timeout / malformed |
 | `rocm` | `dict[str, str \| null]` | `<rocm-root>/.info/version{,-dev}`, `/sys/module/amdgpu/version`, then the TheRock manifest / pip metadata / `torch.__version__` | `version`, `version_dev`, `kmd_version`, plus schema 1.16 attribution: `root`, `lib_root`, `root_source` (`ROCM_PATH`/`ROCM_HOME`/`opt_rocm`/`import:_rocm_sdk_core`/`none`), `layout` (`classic`/`wheel`), `version_source` (`version_file`/`therock_manifest`/`pip:<dist>`/`torch`/null). The root is resolved rather than hardcoded to `/opt/rocm` (issue #381) so a wheel-layout install reads correctly; `root_source: "none"` is what distinguishes "no ROCm install found" from "install found but it has no version file". |
-| `therock` | `dict` | `<rocm-root>/share/therock/therock_manifest.json` | Schema 1.16. Build provenance for a wheel-layout (TheRock) install: `status` (`present`/`absent`), `manifest_path`, `rocm_version`, `rocm_package_version`, `the_rock_commit`, `github_run_id`, `github_job`, `gemm_libraries_commit`, `submodules` (`[{name, url, pin_sha, patches}]`). **Documented absence**: a classic `/opt/rocm` install ships no manifest, so `status:"absent"` there carries no `partial_reason`. Where present it is strictly richer than the header parse -- full 40-char upstream pins vs a truncated tweak, plus the applied-patch list, which is the only signal that a built library is *not* just what its pinned commit contains. |
+| `therock` | `dict` | `<rocm-root>/share/therock/therock_manifest.json` | Schema 1.16. Build provenance for a wheel-layout (TheRock) install: `status` (`present`/`absent`/`invalid`), `manifest_path`, `rocm_version`, `rocm_package_version`, `the_rock_commit`, `github_run_id`, `github_job`, `gemm_libraries_commit`, `submodules` (`[{name, url, pin_sha, patches}]`). **Documented absence**: a classic `/opt/rocm` install ships no manifest, so `status:"absent"` there carries no `partial_reason`. `status:"invalid"` is the opposite — the manifest is there but unusable (not JSON, not an object, empty, unreadable) — and *does* carry a `partial_reason`, so a corrupt wheel install is never mistaken for the classic absence. Where present it is strictly richer than the header parse -- full 40-char upstream pins vs a truncated tweak, plus the applied-patch list, which is the only signal that a built library is *not* just what its pinned commit contains. |
 | `amdgpu_driver` | `dict` | `dpkg-query`/`rpm` (package), `modinfo amdgpu` (module), `/sys/module/amdgpu/version` (reused from `rocm.kmd_version`), `/dev/kfd` + `/sys/class/kfd` (existence) | Schema 1.10. `scope` (constant `"host_kernel"`), `status` (`"present"`/`"absent"`), `package_name` (stable candidate family `amdgpu-dkms`/`amdgpu-kmod`/null), `package_version`, `package_full_name` (complete canonical identity — apt `name=version` or rpm NVRA — capturing kernel-suffixed package names such as `amdgpu-kmod-<kernel>-<driver-version>.<arch>` that `package_name` alone drops; the single field two host snapshots diff on), `package_manager` (`"dpkg"`/`"rpm"`/null), `module_version`, `module_srcversion`, `kmd_version`, `kfd_device_present`, `kfd_sysfs_present`. **HOST-KERNEL SCOPE applies only to `kfd_device_present`/`kfd_sysfs_present`/`kmd_version`**: the amdgpu KMD + KFD live in the host kernel a container *shares*, so these three fields report the **host's** driver even from inside a container — complementary to `rocm`/`hip` which read the container's `/opt/rocm` userspace. **`package_name`/`package_version`/`package_full_name`/`package_manager` and `module_version`/`module_srcversion` are NOT host-guaranteed** — dpkg/rpm and `modinfo` read the *current filesystem's* package DB and `/lib/modules`, so from inside a container these reflect the container's own (typically driver-less) view even while the three fields above still show the host's driver as present. **Documented absence**: a GPU-less host → `status:"absent"` with NO `partial`. Only a *conflict* — amdgpu module loaded (`modinfo` metadata present) but no dpkg/rpm package resolvable — records a `partial_reason`; `/dev/kfd` alone never does, since a passthrough container legitimately has the host's KFD node without a container-local package. Package lookup is a portable, **glob-capable** dpkg-then-rpm query parsed in Python (no shell pipe), so kernel-suffixed RPM names are matched. |
 | `hip` | `dict[str, str \| null]` | `hipconfig --version/--platform/--compiler/--runtime/--cpp_config` | five subprocesses; `--version` and `--platform` cannot be combined (no delimiter) |
 | `hipblaslt` | `dict` | header parse + `sha256(libhipblaslt.so)` + sorted-filenames hash of `lib/hipblaslt/library/*` (and `library/<gfx>/*` on the wheel layout) + the TheRock manifest | `rocm_release_tweak` (NOT a per-hipBLASLt commit -- it's the ROCm release identifier shared across every library in a release; see note below), `package_version`, `lib_hash`, `kernel_db_revision`, `applied_prs: {}`, and schema 1.16 `upstream_commit` / `upstream_commit_matches_tweak`. `upstream_commit` is the full 40-char `rocm-libraries` pin from the manifest -- ROCm consolidated hipBLASLt and rocBLAS into that monorepo, so it is now their upstream identity. It matters most on a wheel image, where the version header is a devel-only file that runtime images omit: without it the hipBLASLt provenance would read `null` exactly where the NaN escalations need it. `null` on a classic install is expected, not a fallback. `upstream_commit_matches_tweak` cross-checks the two sources by prefix at the tweak's own length (the tweak is a short hash of unspecified width -- measured 10 chars on ROCm 7.2.4), and is `null` whenever only one source is present. |
@@ -480,6 +480,17 @@ from a resolved root.
 One new top-level key (`therock`) and four changes to existing blocks; a 1.15
 snapshot loaded through `from_dict()` gains them as their empty/`null` shape.
 
+1.16 is the first bump that added keys **inside** existing blocks rather than
+only new top-level ones, so `from_dict()` merges `rocm`, `hipblaslt`, `rocblas`
+and `therock` over those null shapes (the same treatment `torchrec` got in
+1.15). Without that a 1.15 artifact would load with the keys *absent* rather
+than null and a consumer indexing the shape below would `KeyError`. The `rocm`
+attribution keys back-fill as `null`, not as the reading host's resolved roots:
+the older producer never recorded where it looked, and claiming the reader's
+`/opt/rocm` for someone else's capture would invent provenance. A genuinely
+missing `rocm` / `hipblaslt` / `rocblas` key still raises `TypeError`, since
+that means a malformed artifact rather than an older one.
+
 * **`rocm` gains attribution**: `root`, `lib_root`, `root_source`, `layout`,
   `version_source`. A null version used to be unattributable — "found an
   install with no version file" and "found no install at all" produced
@@ -490,7 +501,12 @@ snapshot loaded through `from_dict()` gains them as their empty/`null` shape.
   `version_source` records which one answered.
 * **New `therock` block** — full 40-char upstream submodule pins,
   `the_rock_commit`, `github_run_id`, and applied patches. `status:"absent"`
-  on a classic install is a documented absence, not a partial.
+  on a classic install is a documented absence, not a partial. A manifest that
+  is *present but unusable* (not JSON, not an object, empty, unreadable) is
+  `status:"invalid"` **and** raises a `partial_reason` — collapsing it into
+  `"absent"` would report a damaged wheel install as the expected classic
+  reading and drop its provenance in silence, which on a wheel image is the
+  only source of the full GEMM pin.
 * **`hipblaslt` / `rocblas` gain `upstream_commit`** (the full
   `rocm-libraries` pin the version header truncates) and
   `upstream_commit_matches_tweak`.

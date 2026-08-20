@@ -19,9 +19,13 @@ name: Latest ROCm canary
 # Non-gating is enforced three ways, not just intended:
 #   1. it is its own workflow, so it cannot appear in nightly-eval.yml's graph
 #      and cannot be added to branch protection by accident;
-#   2. the eval step captures its exit code instead of propagating it, so a
-#      workload regression on a brand-new ROCm records a row rather than
-#      painting a red X that nobody can action;
+#   2. the eval step captures a non-zero EVALUATOR verdict instead of
+#      propagating it, so a workload regression on a brand-new ROCm records a
+#      row rather than painting a red X that nobody can action. A failure before
+#      the evaluator even runs is different: it produces no row, so it is
+#      recorded as a synthesised failure document AND fails this job, because a
+#      silently-missing run is worse than a visible red one here. Either way it
+#      is a distinct workflow, so nothing gated can see it;
 #   3. results are published under `results/canary/` on the ci-results branch.
 #      scripts/ci/gen_dashboard.py reads `results/*.json` NON-recursively, so
 #      canary rows cannot contaminate the gated dashboard's history or trends,
@@ -155,9 +159,13 @@ jobs:
           bash ../scripts/ci/docker_compose.sh --env-file "$envfile" \
             -f docker-compose.build.yaml -f docker-compose.canary.yaml up -d
 
-      # Deliberately does NOT fail the job on a non-zero eval: see the
-      # non-gating note in the header. The exit code is surfaced in the step
-      # summary and the results JSON instead.
+      # A non-zero EVALUATOR verdict is suppressed (see the non-gating note in
+      # the header) -- but only once a results document exists. A failure BEFORE
+      # nightly_eval.py writes one (image start, wheel install, a :latest that
+      # cannot even be set up) leaves nothing behind, the publish step skips it,
+      # and the run vanishes from history -- losing precisely the
+      # latest-ROCm incompatibility this lane exists to surface. So a missing
+      # document gets an attributable row synthesised for it and fails the step.
       - name: Install wheel and run evaluation (observed-only)
         id: eval
         env:
@@ -183,10 +191,51 @@ jobs:
             python scripts/ci/nightly_eval.py --out gpu-canary-results.json
           ' || rc=$?
           echo "eval_rc=${rc}" >> "$GITHUB_OUTPUT"
+          echo "- eval exit code: \`${rc}\`" >> "$GITHUB_STEP_SUMMARY"
+
+          # Same quoting rules as the summary step below: single-quoted
+          # `python3 -c`, no heredoc, values passed through the environment so
+          # nothing needs escaping.
+          if [ ! -f gpu-canary-results.json ]; then
+            AORTA_CANARY_RC="${rc}" python3 -c '
+          import datetime, json, os
+          rc = os.environ.get("AORTA_CANARY_RC", "?")
+          base = os.environ.get("AORTA_CI_BASE_IMAGE") or None
+          json.dump(
+              {
+                  "schema_version": 1,
+                  "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  # Same keys build_metadata() emits, so the dashboard and any
+                  # jq pipeline read one shape. Everything the container would
+                  # have reported is null because it never got that far -- the
+                  # digest is the fact worth keeping.
+                  "build": {
+                      "lane": "canary",
+                      "base_image": base,
+                      "amd_aorta_version": None,
+                      "torch": None,
+                      "hip": None,
+                      "rocm": None,
+                      "upstream_run_id": None,
+                      "head_sha": os.environ.get("GITHUB_SHA"),
+                      "wheel_file": None,
+                  },
+                  "summary": {"total": 0, "pass": 0, "fail": 0, "record": 0, "skip": 0},
+                  "entries": [],
+                  "error": f"canary setup failed before the evaluator ran (exit {rc}); no workloads were evaluated",
+              },
+              open("gpu-canary-results.json", "w"),
+              indent=2,
+          )
+          '
+            echo "- result: \`setup failed before the evaluator ran\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::canary produced no results document (exit ${rc}) on ${{ steps.resolve.outputs.base_image }}; recorded an attributable failure row. This is isolated from the merge gate."
+            exit 1
+          fi
+
           if [ "$rc" -ne 0 ]; then
             echo "::warning::canary eval exited ${rc} on ${{ steps.resolve.outputs.base_image }} (observed-only; not a gate)"
           fi
-          echo "- eval exit code: \`${rc}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Reclaim results ownership
         if: always()

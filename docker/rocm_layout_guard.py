@@ -48,15 +48,48 @@ WHEEL_LIBRARIES_PACKAGE = "_rocm_sdk_libraries"
 WHEEL_DEVEL_PACKAGE = "_rocm_sdk_devel"
 ROOT_MARKERS = (".info", "bin", "lib")
 USABLE_VERSION_MARKERS = (".info/version", ".info/version-dev")
+VERSION_MARKER_PROBE_BYTES = 64
 
 LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
 
 
+def _safe_is_dir(path: Path) -> bool:
+    """``is_dir()`` that never raises. Mirrors rocm_paths._safe_is_dir.
+
+    Every probe here routes through this so an unreadable mount makes the guard
+    print its own diagnostics instead of dying with a traceback -- a traceback
+    fails the build with no statement of what it looked for.
+    """
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _has_readable_version(path: Path) -> bool:
+    """Readable, non-empty .info/version{,-dev}. Mirrors rocm_paths.
+
+    A real read, so an empty file, a whitespace-only file, a *directory* named
+    .info/version and an unreadable file all collapse to the same "no".
+    """
+    for marker in USABLE_VERSION_MARKERS:
+        candidate = path / marker
+        try:
+            with candidate.open("rb") as handle:
+                if handle.read(VERSION_MARKER_PROBE_BYTES).strip():
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def _is_rocm_root(path: Path) -> bool:
     """Loose test, for an explicit ROCM_PATH / ROCM_HOME override."""
     try:
-        return path.is_dir() and any((path / marker).exists() for marker in ROOT_MARKERS)
+        return _safe_is_dir(path) and any(
+            (path / marker).exists() for marker in ROOT_MARKERS
+        )
     except OSError:
         return False
 
@@ -70,26 +103,23 @@ def _is_usable_rocm_root(path: Path) -> bool:
     make this guard fail a perfectly good image. Mirrors
     rocm_paths._is_usable_rocm_root.
     """
-    try:
-        if not path.is_dir():
-            return False
-        if any((path / marker).exists() for marker in USABLE_VERSION_MARKERS):
-            return True
-        return (path / "lib").is_dir()
-    except OSError:
+    if not _safe_is_dir(path):
         return False
+    if _has_readable_version(path):
+        return True
+    return _safe_is_dir(path / "lib")
 
 
 def _wheel_roots(site_dir: Path, source: str) -> tuple[Path, Path, Path, str, str] | None:
     core = site_dir / WHEEL_CORE_PACKAGE
-    if not core.is_dir():
+    if not _safe_is_dir(core):
         return None
     libraries = site_dir / WHEEL_LIBRARIES_PACKAGE
     include = site_dir / WHEEL_DEVEL_PACKAGE
     return (
         core,
-        libraries if libraries.is_dir() else core,
-        include if include.is_dir() else core,
+        libraries if _safe_is_dir(libraries) else core,
+        include if _safe_is_dir(include) else core,
         LAYOUT_WHEEL,
         source,
     )
@@ -100,7 +130,7 @@ def _roots_from_candidate(candidate: Path, source: str):
         roots = _wheel_roots(candidate.parent, source)
         if roots is not None:
             return roots
-        if candidate.is_dir():
+        if _safe_is_dir(candidate):
             return (candidate, candidate, candidate, LAYOUT_WHEEL, source)
         return None
     if _is_rocm_root(candidate):
@@ -168,7 +198,11 @@ def main() -> int:
     for path in version_files:
         try:
             text = path.read_text(encoding="utf-8").strip()
-        except OSError:
+        # UnicodeDecodeError is NOT an OSError: a binary blob sitting at the
+        # marker path would otherwise crash the guard with a traceback instead of
+        # reporting which paths it tried. environment.py's _read_text_file treats
+        # non-UTF8 the same way, so the two agree on what "unreadable" means.
+        except (OSError, UnicodeDecodeError):
             continue
         if text:
             version = text
@@ -182,7 +216,7 @@ def main() -> int:
         )
 
     lib_dir = libraries / "lib"
-    if lib_dir.is_dir():
+    if _safe_is_dir(lib_dir):
         print(f"lib dir     : {lib_dir}")
     else:
         failures.append(

@@ -1523,6 +1523,32 @@ def test_dashboard_html_default_is_unchanged_without_canary_data():
     )
 
 
+def test_canary_section_renders_a_setup_failure_row(tmp_path):
+    """The row the workflow synthesises when setup fails before the evaluator.
+
+    That path exists so a `:latest` we cannot even install still appears in
+    history with its digest (#387). It must therefore render: everything the
+    container would have reported is null, and only the digest is real.
+    """
+    doc = _results(
+        "2026-08-19T15:00:00Z",
+        [],
+        build={
+            "lane": "canary",
+            "base_image": "rocm/pytorch:latest@sha256:deadbeef",
+            "rocm": None,
+            "torch": None,
+            "hip": None,
+        },
+    )
+    doc["error"] = "canary setup failed before the evaluator ran (exit 1)"
+    html = gen_dashboard.build_canary_section([doc])
+    assert "sha256:deadbeef" in html
+    # Nulls read as em dashes rather than the literal "None".
+    assert "None" not in html
+    assert "0/0" in html
+
+
 def test_short_digest_display():
     assert gen_dashboard._short_digest("r/p:latest@sha256:" + "a" * 64) == (
         "sha256:aaaaaaaaaaaa"

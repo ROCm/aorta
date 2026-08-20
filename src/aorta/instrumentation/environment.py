@@ -1336,6 +1336,14 @@ class EnvSnapshot:
           which carries only ``package_version`` / ``commit`` -- gains the
           1.15 ``source_*`` / ``distribution_version`` keys as ``null``
           instead of round-tripping into a short dict.
+        * ``rocm`` / ``hipblaslt`` / ``rocblas`` / ``therock`` are merged over
+          their 1.16 null shapes for the same reason (schema 1.16 added keys
+          *inside* existing blocks, not just new top-level ones): a 1.15
+          snapshot gains ``rocm.root`` / ``lib_root`` / ``root_source`` /
+          ``layout`` / ``version_source`` and the GEMM blocks'
+          ``upstream_commit`` / ``upstream_commit_matches_tweak`` as ``null``.
+          The ``rocm`` attribution keys back-fill as ``null`` rather than this
+          host's resolved roots -- see :func:`_null_rocm`.
 
         Strictly-required older fields (the schema-1.0/1.1 set) are NOT
         defaulted -- a missing ``rocm`` or ``hipblaslt`` key still
@@ -1358,6 +1366,25 @@ class EnvSnapshot:
         kwargs.setdefault("execution_context", _empty_execution_context())
         kwargs.setdefault("probe_namespace", None)
         kwargs["torchrec"] = {**_empty_torchrec(), **(kwargs.get("torchrec") or {})}
+        # Same merge for the blocks schema 1.16 grew keys inside. Without it a
+        # 1.15 snapshot round-trips into a SHORT dict: `rocm` without
+        # root/lib_root/root_source/layout/version_source, and hipblaslt/rocblas
+        # without upstream_commit{,_matches_tweak}. The 1.16 changelog promises
+        # those keys exist with a null shape, so a consumer indexing the
+        # documented shape would KeyError on an old artifact.
+        #
+        # Only merged when the key is PRESENT: a genuinely missing `rocm` /
+        # `hipblaslt` / `rocblas` must still raise TypeError (see the docstring
+        # above), because that means a malformed dict rather than an older
+        # producer, and defaulting it here would silence that.
+        for name, empty in (
+            ("rocm", _null_rocm),
+            ("hipblaslt", _empty_gemm_library),
+            ("rocblas", _empty_gemm_library),
+            ("therock", _empty_therock),
+        ):
+            if name in kwargs:
+                kwargs[name] = {**empty(), **(kwargs[name] or {})}
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -2245,8 +2272,8 @@ def collect_env(
         system_health = _run_rdhc(reasons)
         # Read once and share: the manifest backs both the ROCm version
         # fallback chain and the therock provenance block.
-        therock_manifest = _read_therock_manifest()
-        therock = _capture_therock(therock_manifest)
+        therock_manifest, therock_error = _read_therock_manifest()
+        therock = _capture_therock(therock_manifest, reasons, therock_error)
         rocm = _capture_rocm_version_files(reasons, therock_manifest)
         # Host-kernel scope: reuses rocm's kmd_version read (no second file
         # read) + package/modinfo/KFD-node probes. Absent on GPU-less hosts
@@ -3018,21 +3045,43 @@ def _clean_manifest_string(value: Any) -> str | None:
     return text or None
 
 
-def _read_therock_manifest() -> dict[str, Any] | None:
-    """Parse TheRock build manifest, or ``None`` when absent/unreadable.
+def _read_therock_manifest() -> tuple[dict[str, Any] | None, str | None]:
+    """Parse TheRock build manifest. Returns ``(manifest, error)``.
 
-    Wheel-layout only; a classic ``/opt/rocm`` install has no such file, so
-    absence here is normal and is not a partial reason on its own.
+    Both ``None`` means the file is genuinely absent -- the normal reading on a
+    classic ``/opt/rocm`` install, which has no such file and never will. A
+    non-``None`` ``error`` means the file IS there but could not be used:
+    unreadable, not JSON, or not a JSON object.
+
+    The two are reported separately because ``status="absent"`` is a
+    *documented* absence that deliberately does not raise a partial. Collapsing
+    a corrupt manifest into it would describe a damaged wheel install as the
+    expected classic reading and drop all of its provenance without a word --
+    the silent-degradation failure mode #381 exists to remove, reappearing one
+    level in.
     """
     text = _read_text_file(THEROCK_MANIFEST_FILE)
     if text is None:
-        return None
+        # _read_text_file collapses missing, empty, permission-denied and
+        # non-UTF8 into None, so ask the filesystem which of those it was.
+        try:
+            present = THEROCK_MANIFEST_FILE.exists()
+        except OSError:
+            present = False
+        if present:
+            return None, f"{THEROCK_MANIFEST_FILE} present but empty or unreadable"
+        return None, None
     try:
         manifest = json.loads(text)
     except ValueError as exc:
         log.debug("unparseable TheRock manifest %s: %s", THEROCK_MANIFEST_FILE, exc)
-        return None
-    return manifest if isinstance(manifest, dict) else None
+        return None, f"{THEROCK_MANIFEST_FILE} is not valid JSON ({exc})"
+    if not isinstance(manifest, dict):
+        return None, (
+            f"{THEROCK_MANIFEST_FILE} is a JSON {type(manifest).__name__}, "
+            "not an object"
+        )
+    return manifest, None
 
 
 def _distribution_version(name: str) -> str | None:
@@ -3067,6 +3116,20 @@ def _rocm_version_from_torch() -> str | None:
     return str(hip_version) if hip_version else None
 
 
+#: Every key the schema-1.16 ``rocm`` block carries. One tuple so the two
+#: builders below cannot drift into different shapes.
+_ROCM_BLOCK_KEYS: tuple[str, ...] = (
+    "version",
+    "version_dev",
+    "kmd_version",
+    "version_source",
+    "root",
+    "lib_root",
+    "root_source",
+    "layout",
+)
+
+
 def _empty_rocm() -> dict[str, Any]:
     """The ``rocm`` block with no version data but full schema-1.16 attribution.
 
@@ -3078,15 +3141,24 @@ def _empty_rocm() -> dict[str, Any]:
     crash prevented, come back ``None``.
     """
     return {
-        "version": None,
-        "version_dev": None,
-        "kmd_version": None,
-        "version_source": None,
+        **dict.fromkeys(_ROCM_BLOCK_KEYS),
         "root": str(ROCM_ROOT),
         "lib_root": str(ROCM_LIB_ROOT),
         "root_source": ROCM_ROOT_SOURCE,
         "layout": ROCM_LAYOUT,
     }
+
+
+def _null_rocm() -> dict[str, Any]:
+    """The same shape, but claiming nothing -- for back-filling an OLD snapshot.
+
+    Distinct from :func:`_empty_rocm` on purpose. That one reports THIS host's
+    resolved roots, which is correct for a local crash artifact and wrong for a
+    1.15 snapshot captured somewhere else: attributing the reader's ``/opt/rocm``
+    to another machine's capture would invent provenance rather than admit the
+    older producer never recorded any. ``None`` is the honest answer.
+    """
+    return dict.fromkeys(_ROCM_BLOCK_KEYS)
 
 
 def _empty_gemm_library() -> dict[str, Any]:
@@ -3108,10 +3180,15 @@ def _empty_gemm_library() -> dict[str, Any]:
     }
 
 
-def _empty_therock() -> dict[str, Any]:
-    """The ``therock`` block for an install that ships no manifest."""
+def _empty_therock(status: str = "absent") -> dict[str, Any]:
+    """The ``therock`` block with no provenance.
+
+    ``status`` distinguishes *why* there is none: ``"absent"`` (no manifest,
+    the normal classic reading) or ``"invalid"`` (a manifest is there but
+    unusable). Same keys either way, so a consumer indexes one shape.
+    """
     return {
-        "status": "absent",
+        "status": status,
         "manifest_path": str(THEROCK_MANIFEST_FILE),
         "rocm_version": None,
         "rocm_package_version": None,
@@ -3123,20 +3200,35 @@ def _empty_therock() -> dict[str, Any]:
     }
 
 
-def _capture_therock(manifest: dict[str, Any] | None) -> dict[str, Any]:
+def _capture_therock(
+    manifest: dict[str, Any] | None,
+    reasons: list[str] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
     """Record TheRock build provenance from the wheel-layout manifest.
 
-    A documented absence, not a partial: the classic layout has no manifest
-    and never will, so ``status="absent"`` is the expected reading on the
-    installs most customers run.
+    ``status="absent"`` is a documented absence, not a partial: the classic
+    layout has no manifest and never will, so that is the expected reading on
+    the installs most customers run.
 
-    Where it IS present it is strictly richer than the classic header parse.
-    ``hipblaslt-version.h`` yields a truncated tweak (measured 10 chars on
-    ROCm 7.2.4, and the field is documented as 7-12); the manifest carries
-    the full 40-char pin of the same commit, plus build provenance the
-    headers have no equivalent for (``the_rock_commit``, ``github_run_id``)
-    and any patches applied on top of each upstream pin.
+    ``status="invalid"`` is the opposite -- a manifest exists but is unusable --
+    and DOES raise a partial reason, because on a wheel install this block is
+    the only source of the full 40-char GEMM pin, so losing it quietly would
+    hide the very evidence the block was added for. ``error`` carries that
+    detail from :func:`_read_therock_manifest`; ``reasons`` is optional so
+    tests and direct callers can inspect the shape without one.
+
+    Where the manifest IS usable it is strictly richer than the classic header
+    parse. ``hipblaslt-version.h`` yields a truncated tweak (measured 10 chars
+    on ROCm 7.2.4, and the field is documented as 7-12); the manifest carries
+    the full 40-char pin of the same commit, plus build provenance the headers
+    have no equivalent for (``the_rock_commit``, ``github_run_id``) and any
+    patches applied on top of each upstream pin.
     """
+    if error is not None:
+        if reasons is not None:
+            reasons.append(f"therock: {error}")
+        return _empty_therock("invalid")
     if manifest is None:
         return _empty_therock()
 
@@ -5082,7 +5174,14 @@ def _enumerate_catalog_dir(
     as an entry so the hashing step below fails soft (``sha256=None``)
     and correctly downgrades the block to ``partial`` with a reason,
     instead of vanishing from ``files`` and leaving a clean ``status:
-    "ok"`` that silently omitted it. Only entries confirmed (not merely
+    "ok"`` that silently omitted it.
+
+    The same rule covers the nested ``gfx*`` directories of the wheel layout
+    (#387): a confirmed arch directory that cannot be listed hides EVERY kernel
+    for that target, so it forces ``status="partial"``, names the arch in
+    ``reason``, and suppresses ``combined_content_hash``. Emitting a hash there
+    would fingerprint the archs that happened to list -- a clean-looking value
+    for a different catalog than the one on disk. Only entries confirmed (not merely
     assumed) to be directories are excluded.
     """
     base = _empty_menu()
@@ -5104,13 +5203,30 @@ def _enumerate_catalog_dir(
     # one level of ``gfx*``-named directories on purpose -- see
     # ``_kernel_db_filename_fingerprint`` for why a blanket rglob is wrong.
     candidates: list[tuple[Path, str]] = [(p, p.name) for p in raw]
+    unlistable_arch_dirs: list[str] = []
     for entry in raw:
         try:
-            if not entry.is_dir() or not _GFX_ARCH_RE.fullmatch(entry.name):
-                continue
+            is_arch_dir = bool(_GFX_ARCH_RE.fullmatch(entry.name)) and entry.is_dir()
+        except OSError:
+            # Cannot confirm directory-ness (broken symlink, permission
+            # denied). The entry is already in ``candidates`` under its flat
+            # name, where the hashing loop below fails soft and downgrades the
+            # block -- the same contract the main loop documents, so there is
+            # nothing extra to record here.
+            continue
+        if not is_arch_dir:
+            continue
+        try:
             nested = list(entry.iterdir())
         except OSError as exc:
+            # A CONFIRMED arch directory we cannot read hides every kernel
+            # under that target. Skipping it silently would leave
+            # ``status: "ok"`` and a combined hash computed over the archs that
+            # did list -- a clean-looking fingerprint of a different catalog
+            # than the one on disk, which is exactly the partial-not-silent
+            # failure this function's docstring rules out.
             log.debug("%s arch dir not listable: %s (%s)", kind, entry, exc)
+            unlistable_arch_dirs.append(entry.name)
             continue
         candidates.extend((p, f"{entry.name}/{p.name}") for p in nested)
 
@@ -5160,7 +5276,19 @@ def _enumerate_catalog_dir(
     # EVERY file hashed cleanly: a value computed over a missing hash is
     # not a true content fingerprint (it would hash the literal "None"),
     # so it must be ``None`` rather than a misleading ``content-sha256:``.
+    # Two independent ways the catalog can be incomplete, reported separately
+    # so an operator can tell "a file would not hash" from "a whole gfx target
+    # is missing from this listing".
+    degraded_reasons: list[str] = []
     if any_hash_failed:
+        degraded_reasons.append(f"one or more {kind} files were unreadable")
+    if unlistable_arch_dirs:
+        degraded_reasons.append(
+            f"{kind} arch dir(s) not listable, so their kernels are absent from "
+            f"this catalog: {', '.join(sorted(unlistable_arch_dirs))}"
+        )
+
+    if degraded_reasons:
         combined_content_hash = None
     else:
         pair_lines = [f"{f['name']}\t{f['sha256']}" for f in files]
@@ -5169,12 +5297,8 @@ def _enumerate_catalog_dir(
 
     base.update(
         {
-            "status": "partial" if any_hash_failed else "ok",
-            "reason": (
-                f"one or more {kind} files were unreadable"
-                if any_hash_failed
-                else None
-            ),
+            "status": "partial" if degraded_reasons else "ok",
+            "reason": "; ".join(degraded_reasons) if degraded_reasons else None,
             "logic_file_count": logic_count,
             "file_count": len(files),
             "gfx_arch_coverage": _extract_gfx_archs(names),

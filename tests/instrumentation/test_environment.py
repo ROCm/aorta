@@ -423,10 +423,20 @@ def _example_snapshot(**overrides) -> object:
         "schema_version": SCHEMA_VERSION,
         "captured_at": "2026-04-28T12:00:00Z",
         "system_health": {"rdhc_version": "1.4.0", "tests": {}},
+        # Full schema-1.16 shape. It has to be complete for the round-trip
+        # tests to mean anything: from_dict() merges these blocks over their
+        # 1.16 null shapes (#387), so a fixture that omitted the added keys
+        # would round-trip unequal and, worse, would let a genuinely short
+        # emission from the probe pass unnoticed.
         "rocm": {
             "version": "7.2.1",
             "version_dev": "7.2.1-43",
             "kmd_version": "6.16.13",
+            "version_source": "version_file",
+            "root": "/opt/rocm",
+            "lib_root": "/opt/rocm",
+            "root_source": "opt_rocm",
+            "layout": "classic",
         },
         "hip": {
             "version": "7.2.5",
@@ -440,6 +450,8 @@ def _example_snapshot(**overrides) -> object:
             "package_version": "1.2.2",
             "lib_hash": "sha256:abc",
             "kernel_db_revision": "filenames-sha256:def",
+            "upstream_commit": None,
+            "upstream_commit_matches_tweak": None,
             "applied_prs": {},
         },
         "rocblas": {
@@ -447,6 +459,8 @@ def _example_snapshot(**overrides) -> object:
             "package_version": "5.2.0",
             "lib_hash": "sha256:bbb",
             "kernel_db_revision": "filenames-sha256:ccc",
+            "upstream_commit": None,
+            "upstream_commit_matches_tweak": None,
             "applied_prs": {},
         },
         "composable_kernel": {
@@ -702,6 +716,94 @@ class TestEnvSnapshot:
         del d["probe_namespace"]
         rebuilt = EnvSnapshot.from_dict(d)
         assert rebuilt.probe_namespace is None
+
+    # -- schema 1.16 added keys INSIDE existing blocks (#387) ----------------
+    #
+    # Every back-fill test above deletes a whole top-level key. 1.16 is the
+    # first bump that grew existing nested blocks, so a 1.15 artifact loads
+    # with the key present but SHORT -- which none of those tests would catch.
+
+    #: A schema-1.15 `rocm` / `hipblaslt` / `rocblas` block, verbatim: the keys
+    #: a 1.15 producer wrote, and nothing 1.16 added.
+    _V115_ROCM = {"version": "7.2.4", "version_dev": None, "kmd_version": "6.16.13"}
+    _V115_GEMM = {
+        "rocm_release_tweak": "5b515cf1bc",
+        "package_version": "1.2.2",
+        "lib_hash": "sha256:abc",
+        "kernel_db_revision": "filenames-sha256:def",
+        "applied_prs": {},
+    }
+
+    def _v115_dict(self):
+        d = _example_snapshot().to_dict()
+        d["schema_version"] = "1.15"
+        d["rocm"] = dict(self._V115_ROCM)
+        d["hipblaslt"] = dict(self._V115_GEMM)
+        d["rocblas"] = dict(self._V115_GEMM)
+        d.pop("therock", None)
+        return d
+
+    def test_from_dict_backfills_the_1_16_rocm_keys(self):
+        """A 1.15 snapshot must gain the documented 1.16 keys, not a short dict."""
+        rebuilt = EnvSnapshot.from_dict(self._v115_dict())
+        assert set(rebuilt.rocm) == set(env_mod._empty_rocm())
+        # Real 1.15 data survives the merge...
+        assert rebuilt.rocm["version"] == "7.2.4"
+        assert rebuilt.rocm["kmd_version"] == "6.16.13"
+        # ...and the added keys read null rather than claiming THIS host's
+        # roots, which the older producer never recorded.
+        for key in ("root", "lib_root", "root_source", "layout", "version_source"):
+            assert rebuilt.rocm[key] is None, key
+
+    def test_from_dict_backfills_the_1_16_gemm_keys(self):
+        rebuilt = EnvSnapshot.from_dict(self._v115_dict())
+        for block in (rebuilt.hipblaslt, rebuilt.rocblas):
+            assert set(block) == set(env_mod._empty_gemm_library())
+            assert block["rocm_release_tweak"] == "5b515cf1bc"
+            assert block["upstream_commit"] is None
+            assert block["upstream_commit_matches_tweak"] is None
+
+    def test_a_1_15_snapshot_exposes_the_whole_documented_1_16_shape(self):
+        """The reviewer's actual concern: no KeyError for a 1.16 consumer.
+
+        Indexes every key the 1.16 docs promise, the way a jq pipeline or the
+        dashboard would, instead of asserting key sets abstractly.
+        """
+        s = EnvSnapshot.from_dict(self._v115_dict())
+        for key in ("root", "lib_root", "root_source", "layout", "version_source"):
+            s.rocm[key]
+        for block in (s.hipblaslt, s.rocblas):
+            block["upstream_commit"]
+            block["upstream_commit_matches_tweak"]
+        s.therock["status"]
+        s.therock["gemm_libraries_commit"]
+
+    def test_a_short_therock_block_is_backfilled_too(self):
+        d = _example_snapshot().to_dict()
+        d["therock"] = {"status": "present", "rocm_version": "7.14.0"}
+        rebuilt = EnvSnapshot.from_dict(d)
+        assert set(rebuilt.therock) == set(env_mod._empty_therock())
+        assert rebuilt.therock["rocm_version"] == "7.14.0"
+        assert rebuilt.therock["submodules"] == []
+
+    @pytest.mark.parametrize("key", ["rocm", "hipblaslt", "rocblas"])
+    def test_a_genuinely_missing_required_block_still_raises(self, key):
+        """The back-fill must not silence a malformed dict.
+
+        ``from_dict``'s docstring is explicit that the schema-1.0/1.1 required
+        set is NOT defaulted, because absence there means a broken artifact
+        rather than an older producer. Merging only when the key is present
+        keeps that true.
+        """
+        d = _example_snapshot().to_dict()
+        del d[key]
+        with pytest.raises(TypeError):
+            EnvSnapshot.from_dict(d)
+
+    def test_backfill_shapes_match_what_the_probe_emits(self):
+        """The null and locally-attributed rocm shapes must not drift apart."""
+        assert set(env_mod._null_rocm()) == set(env_mod._empty_rocm())
+        assert all(v is None for v in env_mod._null_rocm().values())
 
     def test_summary_does_not_duplicate_partial_marker(self):
         """The brief returned by ``summary()`` is the *body* of what the
@@ -3096,29 +3198,77 @@ class TestTheRockManifest:
     def test_absent_manifest_is_a_documented_absence(self, tmp_path, monkeypatch):
         """Classic installs have no manifest and never will."""
         monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", tmp_path / "absent.json")
-        assert env_mod._read_therock_manifest() is None
-        block = env_mod._capture_therock(None)
+        assert env_mod._read_therock_manifest() == (None, None)
+        reasons: list[str] = []
+        block = env_mod._capture_therock(None, reasons)
         assert block["status"] == "absent"
         assert block["gemm_libraries_commit"] is None
         assert block["submodules"] == []
+        # A documented absence must NOT raise a partial.
+        assert reasons == []
 
     def test_manifest_is_read_and_parsed(self, tmp_path, monkeypatch):
         path = tmp_path / "therock_manifest.json"
         path.write_text(json.dumps(self.MANIFEST), encoding="utf-8")
         monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", path)
-        assert env_mod._read_therock_manifest() == self.MANIFEST
+        assert env_mod._read_therock_manifest() == (self.MANIFEST, None)
 
-    def test_unparseable_manifest_is_treated_as_absent(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "content,expected_in_error",
+        [
+            ("{not json", "not valid JSON"),
+            ("[1, 2, 3]", "not an object"),
+            ('"just a string"', "not an object"),
+            ("", "present but empty or unreadable"),
+        ],
+    )
+    def test_a_broken_manifest_is_distinguished_from_absence(
+        self, tmp_path, monkeypatch, content, expected_in_error
+    ):
+        """A corrupt manifest must not read as the classic-layout absence (#387).
+
+        ``status="absent"`` deliberately raises no partial, so collapsing a
+        damaged wheel install into it would report the expected classic reading
+        and silently drop the provenance -- on a wheel image this block is the
+        only source of the full 40-char GEMM pin, which is the evidence the NaN
+        escalations are argued from.
+        """
+        path = tmp_path / "therock_manifest.json"
+        path.write_text(content, encoding="utf-8")
+        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", path)
+
+        manifest, error = env_mod._read_therock_manifest()
+        assert manifest is None
+        assert error is not None and expected_in_error in error
+
+        reasons: list[str] = []
+        block = env_mod._capture_therock(manifest, reasons, error)
+        assert block["status"] == "invalid"
+        assert any(r.startswith("therock:") for r in reasons)
+        # Same key set as every other reading, so consumers index one shape.
+        assert set(block) == set(env_mod._empty_therock())
+
+    def test_a_non_utf8_manifest_is_reported_as_invalid(self, tmp_path, monkeypatch):
+        """`_read_text_file` returns None for non-UTF8 too, which is not absence."""
+        path = tmp_path / "therock_manifest.json"
+        path.write_bytes(b"\xff\xfe\x80not-utf8")
+        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", path)
+        manifest, error = env_mod._read_therock_manifest()
+        assert manifest is None
+        assert error is not None
+        assert env_mod._capture_therock(manifest, [], error)["status"] == "invalid"
+
+    def test_collect_env_flags_a_broken_manifest_as_partial(
+        self, all_disabled, tmp_path, monkeypatch
+    ):
+        """End-to-end: the reason reaches the snapshot, not just the helper."""
         path = tmp_path / "therock_manifest.json"
         path.write_text("{not json", encoding="utf-8")
         monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", path)
-        assert env_mod._read_therock_manifest() is None
-
-    def test_non_dict_manifest_is_treated_as_absent(self, tmp_path, monkeypatch):
-        path = tmp_path / "therock_manifest.json"
-        path.write_text("[1, 2, 3]", encoding="utf-8")
-        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", path)
-        assert env_mod._read_therock_manifest() is None
+        snapshot = collect_env()
+        assert snapshot.therock["status"] == "invalid"
+        assert snapshot.partial is True
+        assert any(r.startswith("therock:") for r in snapshot.partial_reasons)
 
     def test_capture_records_build_provenance(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -5544,6 +5694,110 @@ class TestMiopenCatalogBlock:
             "doc", "status", "package_version", "lib_hash", "kernel_db_revision",
             "db_dir", "db_dir_source", "env_overrides", "menu",
         }
+
+
+class TestCatalogNestedArchDirs:
+    """The wheel layout's ``gfx*`` subdirectories (#381), and #387's fix."""
+
+    @staticmethod
+    def _enumerate(directory):
+        return env_mod._enumerate_catalog_dir(
+            directory,
+            env_mod._suffix_classifier(
+                env_mod.MIOPEN_CATALOG_SUFFIXES, env_mod.MIOPEN_LOGIC_SUFFIXES
+            ),
+            kind="MIOpen db",
+        )
+
+    def _tree(self, tmp_path):
+        root = tmp_path / "db"
+        (root / "gfx950").mkdir(parents=True)
+        (root / "gfx950" / "a.kdb").write_bytes(b"nested")
+        (root / "flat.kdb").write_bytes(b"flat")
+        return root
+
+    def test_nested_arch_files_are_recorded_with_an_arch_prefix(self, tmp_path):
+        menu = self._enumerate(self._tree(tmp_path))
+        assert menu["status"] == "ok"
+        names = [f["name"] for f in menu["files"]]
+        assert "gfx950/a.kdb" in names and "flat.kdb" in names
+        assert menu["combined_content_hash"] is not None
+
+    def test_an_unlistable_arch_dir_forces_partial(self, tmp_path, monkeypatch):
+        """It hides EVERY kernel for that target, so it cannot read as "ok".
+
+        Silently dropping it left ``status: "ok"`` plus a combined hash computed
+        over the archs that did list -- a clean-looking fingerprint of a
+        different catalog than the one on disk (#387).
+        """
+        root = self._tree(tmp_path)
+        real_iterdir = Path.iterdir
+
+        def selective(self):
+            if self.name == "gfx950":
+                raise OSError("permission denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", selective)
+        menu = self._enumerate(root)
+
+        assert menu["status"] == "partial"
+        assert "gfx950" in menu["reason"]
+        assert "not listable" in menu["reason"]
+        # A hash over the surviving entries would misrepresent the catalog.
+        assert menu["combined_content_hash"] is None
+        # ...but whatever DID list is still reported, not thrown away.
+        assert [f["name"] for f in menu["files"]] == ["flat.kdb"]
+
+    def test_an_unconfirmable_entry_is_kept_and_not_blamed_on_an_arch_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """``is_dir()`` raising is already handled by the flat path.
+
+        Such an entry stays in ``candidates`` under its flat name and is hashed
+        there, so it must not ALSO be reported as an unlistable arch dir --
+        that reason is reserved for a confirmed directory whose contents are
+        genuinely missing from the catalog.
+        """
+        root = tmp_path / "db"
+        root.mkdir()
+        (root / "gfx942.kdb").write_bytes(b"x")
+        real_is_dir = Path.is_dir
+
+        def selective(self):
+            if self.name == "gfx942.kdb":
+                raise OSError("permission denied")
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", selective)
+        menu = self._enumerate(root)
+        # It hashed fine, so nothing is missing and "ok" is the honest reading.
+        assert menu["status"] == "ok"
+        assert [f["name"] for f in menu["files"]] == ["gfx942.kdb"]
+        assert menu["reason"] is None
+
+    def test_both_degradations_are_reported_together(self, tmp_path, monkeypatch):
+        """A hash failure and an unlistable arch dir are different problems."""
+        root = self._tree(tmp_path)
+        real_iterdir = Path.iterdir
+        real_open = Path.open
+
+        def selective_iterdir(self):
+            if self.name == "gfx950":
+                raise OSError("permission denied")
+            return real_iterdir(self)
+
+        def selective_open(self, *args, **kwargs):
+            if self.name == "flat.kdb":
+                raise OSError("permission denied")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "iterdir", selective_iterdir)
+        monkeypatch.setattr(Path, "open", selective_open)
+        menu = self._enumerate(root)
+        assert menu["status"] == "partial"
+        assert "unreadable" in menu["reason"]
+        assert "not listable" in menu["reason"]
 
 
 # ---------------------------------------------------------------------------
