@@ -276,3 +276,20 @@ def test_hand_written_result_json_carries_no_collector_metrics(tmp_path):
     assert not [key for key in doc if key.startswith(("rocprof_", "proton_"))]
     # The metrics channel is where they live, and it points back at result.json.
     assert result.metrics["result_json_path"] == str(tmp_path / "trial_0" / "result.json")
+
+
+def test_result_json_records_the_wrapped_argv(tmp_path, rocprofv3_on_path):
+    """``result.json`` records the argv that actually ran, so an attached
+    collector -- and any environment rewriting it did, such as Proton's
+    HIP_VISIBLE_DEVICES translation -- is auditable from the artifact rather
+    than only from a log line."""
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    _rocprof_artifacts(collect_dir)
+    wl = _make_workload(tmp_path, ["true"], collect=["rocprof"])
+    wl.setup()
+    wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    recorded = doc.get("argv")
+    assert recorded is not None
+    assert Path(recorded[0]).name == "rocprofv3"
+    assert recorded[-1] == "true"

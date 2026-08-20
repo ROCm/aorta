@@ -161,8 +161,13 @@ Precedence and scope:
   `mitigation_axis x diagnostic_axis`, so the recipe-level collectors apply
   to every one of them.
 - CLI `--collect` is an operator override applied to every cell; it clears
-  per-cell overrides. **It carries names only** — there is no CLI syntax
-  for per-collector options, so a run that needs options needs a recipe.
+  per-cell overrides. It selects **names only** — there is no CLI syntax for
+  per-collector options, so a run that needs new options needs a recipe. The
+  recipe's options for the collectors that survive the override are kept, so
+  `--collect rocprof,proton` against a recipe that pins
+  `proton: {backend: instrumentation}` runs with that backend (and is
+  accepted, because those options are what resolve the conflict below).
+  Options for collectors the override dropped are discarded with them.
 - Every option is validated at recipe-load time. A typo fails the whole
   recipe up front rather than producing a run with no measurements in it.
 
@@ -321,6 +326,15 @@ The directory is created whether or not the payload produced GPU activity,
 so the trial tree has the same shape either way. `aorta bundle` copies every
 file under the run directory, so collector artifacts travel with a bundle
 automatically.
+
+The probe flow's `trial_<n>/result.json` records the argv that actually ran,
+which is the *wrapped* one. So the exact profiler invocation — including any
+environment rewriting the wrap did, such as the `HIP_VISIBLE_DEVICES`
+translation below — is auditable from the artifact, not just from a log line:
+
+```bash
+jq -r '.argv | join(" ")' <run_dir>/<cell>/trial_0/result.json
+```
 
 On the file names: the collector passes `rocprofv3 -o aorta` for
 determinism, which produces the flat `aorta_*.csv` files above. Run
