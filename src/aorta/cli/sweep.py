@@ -355,9 +355,10 @@ def sweep() -> None:
     default="",
     help=(
         "Comma-separated collector recipe names to attach to every cell "
-        "(e.g. 'layer_numerics' for the per-layer NaN logger). Cross-cutting "
-        "capture, not a matrix axis -- allowed together with --recipe, where "
-        "it overrides any recipe-pinned 'collect:'. Workload flow only."
+        "(e.g. 'rocprof' or 'proton' to profile, 'layer_numerics' for the "
+        "per-layer NaN logger). Cross-cutting capture, not a matrix axis -- "
+        "allowed together with --recipe, where it overrides any recipe-pinned "
+        "'collect:'. Valid on both the workload and the probe/subprocess flow."
     ),
 )
 @click.option(
@@ -499,12 +500,6 @@ def sweep_run(
 
     is_probe_flow = has_command or recipe_mode == "probe"
     if is_probe_flow:
-        if parse_csv(collect):
-            raise click.UsageError(
-                "--collect applies to the workload flow only; it has no effect "
-                "on a probe/subprocess run (a user command after '--' or a "
-                "'mode: probe' recipe)."
-            )
         if strict:
             raise click.UsageError(
                 "--strict applies to the workload flow only; a probe/subprocess "
@@ -529,6 +524,7 @@ def sweep_run(
             steps=steps,
             baseline_cell=baseline_cell,
             confound_threshold=confound_threshold,
+            collect=collect,
         )
     else:
         _dispatch_workload_flow(
@@ -573,8 +569,16 @@ def _dispatch_probe_flow(
     steps: int | None,
     baseline_cell: str | None,
     confound_threshold: float | None,
+    collect: str = "",
 ) -> None:
-    """Validate probe-flow-specific preconditions, then run the subprocess flow."""
+    """Validate probe-flow-specific preconditions, then run the subprocess flow.
+
+    ``--collect`` is honoured here as well as on the workload flow: a probe
+    collector attaches by wrapping the user command's argv (see
+    :func:`aorta.run.collectors.wrap_argv_for_collectors`), so profiling an
+    opaque ``-- <command>`` is exactly what it is for. The names REPLACE a
+    recipe-level ``collect:`` block, matching the workload flow's precedence.
+    """
     _reject_triage_only_flags_in_probe_flow(
         workload=workload,
         mitigation_axis=mitigation_axis,
@@ -601,6 +605,7 @@ def _dispatch_probe_flow(
         mitigation_files=mitigation_files,
         argv=argv,
         command_label="aorta sweep run",
+        collect=tuple(parse_csv(collect)),
     )
 
 

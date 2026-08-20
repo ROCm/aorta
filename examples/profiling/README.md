@@ -1,0 +1,125 @@
+# Profiling examples
+
+Runnable, open-source payloads for aorta's profiling collectors. Each one is
+a small GPU workload plus the recipe that captures it, so you can verify a
+collector works on your machine before pointing it at something expensive.
+
+Collectors attach by wrapping the command's argv, so none of these payloads
+knows it is being profiled. Any command you can run, you can profile —
+these examples are just cheap, license-clean things to point the collectors
+at.
+
+## The examples
+
+| Example | What it profiles | Requires | Run it |
+|---|---|---|---|
+| [`rocprof/hip-gemm`](rocprof/hip-gemm/) | One hand-written tiled SGEMM kernel (`sgemm_tiled`) | `hipcc`, a GPU. **No Python deps.** | `aorta sweep run --recipe examples/profiling/rocprof/hip-gemm/recipe.yaml --output ./profiling_results -- /tmp/hip_gemm 512 20` |
+| [`rocprof/torch-matmul`](rocprof/torch-matmul/) | hipBLASLt / rocBLAS GEMM kernels PyTorch picks for `a @ b` | `torch` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/rocprof/torch-matmul/recipe.yaml --output ./profiling_results -- python examples/profiling/rocprof/torch-matmul/matmul.py` |
+| [`proton/triton-vecadd`](proton/triton-vecadd/) | One Triton elementwise kernel, launch-site attribution | `torch` + `triton` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/proton/triton-vecadd/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/triton-vecadd/vecadd.py` |
+| [`proton/triton-softmax`](proton/triton-softmax/) | A Triton fused reduction, Python-frame attribution | `torch` + `triton` for ROCm. Container. | `aorta sweep run --recipe examples/profiling/proton/triton-softmax/recipe.yaml --output ./profiling_results -- python examples/profiling/proton/triton-softmax/softmax.py` |
+
+## Start here
+
+`rocprof/hip-gemm` is the quickstart. It is the only example with zero
+Python dependencies — `hipcc` compiles one file and you have a GPU payload —
+so it is the fastest way to find out whether profiling works at all on a
+given host:
+
+```bash
+hipcc -O3 -o /tmp/hip_gemm examples/profiling/rocprof/hip-gemm/gemm.hip
+aorta sweep run \
+  --recipe examples/profiling/rocprof/hip-gemm/recipe.yaml \
+  --output ./profiling_results \
+  -- /tmp/hip_gemm 512 20
+```
+
+The other three need a PyTorch-for-ROCm interpreter (and Triton, for the
+Proton pair). The reference way to get one is a ROCm PyTorch container with
+aorta installed **inside** it — see each example's README. Running
+`aorta sweep run -- docker run ...` from the host instead would attach the
+profiler to the docker client, which dispatches no kernels and produces an
+empty capture.
+
+## Categories
+
+| Directory | Collector | Notes |
+|---|---|---|
+| `rocprof/` | `rocprof` (`rocprofv3`) | Whole-process kernel and API tracing. Writes CSV / JSON / pftrace. |
+| `proton/` | `proton` (Triton's profiler) | Runs inside the workload's interpreter; writes a hatchet tree. |
+
+`rocprof` and `proton` both intercept HSA queues and will fight if enabled
+together, so the pairing is rejected at recipe load. Only Proton's
+`instrumentation` backend coexists with `rocprof`.
+
+The Proton examples leave `backend: "auto"`, which omits Proton's `-b` and
+lets Proton pick the backend matching the active runtime. That is what makes
+them run out of the box across Triton versions: `rocprofiler` is the
+preferred AMD backend upstream, but Triton 3.7.x and earlier accept only
+`cupti`/`roctracer`/`instrumentation` and exit with an argparse
+`invalid choice: 'rocprofiler'` before the payload runs.
+
+## Where the collector options live
+
+Each example's `recipe.yaml` carries its collector configuration as a
+`collect:` block, so the commands above need no `--collect` flag — the
+recipe is the whole story, and the option values are reviewable,
+copy-pasteable text sitting next to the payload they profile.
+
+`--collect <name>` still works and takes precedence: passing it REPLACES the
+recipe's collector list, keeping only the option blocks of the collectors
+that survive. That is the way to run one example under a different
+collector, or to compare a profiled and an unprofiled run of the same
+payload:
+
+```bash
+# recipe's own collector, with its options
+aorta sweep run --recipe .../hip-gemm/recipe.yaml -- /tmp/hip_gemm 512 20
+
+# override to a different collector (drops rocprof's option block)
+aorta sweep run --recipe .../hip-gemm/recipe.yaml --collect proton -- /tmp/hip_gemm 512 20
+```
+
+To run a payload with no capture at all, comment out the recipe's `collect:`
+block — a useful way to separate "my payload is broken" from "my profiler is
+broken".
+
+## Adding an example
+
+One directory per example, nested under its collector's category. Three
+files, no more:
+
+```
+examples/profiling/<collector>/<example-name>/
+  <payload>.{hip,py,sh}   the workload: standalone-runnable, self-checking,
+                          open-source, cheap by default
+  recipe.yaml             mode: probe, plus the collector's option block
+  README.md               requirements, standalone run, aorta run, artifacts
+```
+
+The conventions the existing four follow, and that a new one should too:
+
+1. **Standalone-runnable.** A user must be able to reproduce the payload
+   without aorta. Every README shows the bare command first.
+2. **Self-checking.** The payload verifies its own output and exits
+   non-zero when wrong, so a bad result is a failed trial rather than a
+   suspiciously fast one.
+3. **Cheap by default.** Defaults finish in seconds. Size and iteration
+   count come from CLI arguments (or environment variables), never a hard
+   constant.
+4. **Open source, no host specifics.** Payloads are original or adapted
+   from permissively licensed upstreams, with the upstream and its license
+   named in the README's Provenance section. No customer content, no
+   internal repository content, no absolute host paths, no environment
+   dumps.
+5. **One collector per example.** Two collectors in one recipe makes a
+   failure ambiguous, and some combinations conflict outright.
+
+Adding a category is the same move one level up: a new directory beside
+`rocprof/` and `proton/`, plus a row in the Categories table above.
+
+## See also
+
+- `docs/profiling-collectors.md` — collector reference: options, artifact
+  layout, analysis recipes, troubleshooting.
+- `recipes/README.md` — recipe schema.
+- `recipes/README-running-recipes.md` — running recipes on a cluster.

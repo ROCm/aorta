@@ -2,6 +2,29 @@
 
 This guide covers how to capture, analyze, and interpret profiling data from AORTA benchmark runs.
 
+## Start here: the profiling collectors
+
+For **new work, use the `rocprof` and `proton` collectors** — the supported,
+first-class way to attach a GPU profiler to anything aorta runs:
+
+```bash
+aorta sweep run --recipe <recipe>.yaml --collect rocprof -- <your command>
+```
+
+They attach by wrapping the launch argv, so no payload edit is needed; they
+write artifacts next to the trial JSON; and they parse themselves into
+`rocprof_gpu_time_ms` / `proton_gpu_time_ms` and friends, which show up in
+`perf.md` and `matrix.json` for every cell of a sweep.
+
+Full reference — options, artifact layout, analysis recipes, troubleshooting:
+[Profiling Collectors](profiling-collectors.md). Runnable examples:
+[`examples/profiling/`](../examples/profiling/README.md).
+
+The rest of this guide covers two other things: the benchmark harness's own
+built-in telemetry (below), which is independent of the collectors, and the
+older hand-rolled `rocprofv3` capture scripts, which are kept working but are
+no longer the recommended route.
+
 ## Profiling Outputs
 
 Each rank writes `artifacts/rank_<rank>_metrics.jsonl` containing iteration-level telemetry:
@@ -38,7 +61,16 @@ torchrun --nproc_per_node 4 train.py \
 - Adjust `wait`, `warmup`, `active`, and `repeat` to control capture cadence
 - Shapes and memory statistics are recorded by default
 
-## ROCm `rocprofv3` Capture
+## ROCm `rocprofv3` Capture (manual / legacy)
+
+> **Legacy route.** These scripts predate the `rocprof` collector and are kept
+> for reproducing existing captures. They hard-code this repo's `train.py`
+> launch, write outside the sweep results tree, and parse nothing — so their
+> numbers do not reach `perf.md` or `matrix.json`. For new work prefer
+> `--collect rocprof` ([Profiling Collectors](profiling-collectors.md)), which
+> profiles any command and lands its artifacts and metrics in the trial tree.
+
+### Single-node: `scripts/rocprof_capture.sh`
 
 Use the wrapper script to profile an entire ROCm run:
 
@@ -46,11 +78,11 @@ Use the wrapper script to profile an entire ROCm run:
 bash scripts/rocprof_capture.sh config/default.yaml --override training.max_steps=50
 ```
 
-### Output Location
+#### Output Location
 
 Outputs land under `rocprof_traces/run_<timestamp>/`.
 
-### Environment Variables
+#### Environment Variables
 
 Override location or extra flags with environment variables:
 
@@ -58,6 +90,18 @@ Override location or extra flags with environment variables:
 - `ROCPROF_ARGS="--att --kernel-trace --kernel-symbols"`
 
 The script mirrors `launch_rocm.sh` but executes through `rocprofv3`, so you can merge traces with the JSONL metrics using the shared iteration timestamps.
+
+### Multi-node: `scripts/multi_node/local_launch.sh`
+
+The multi-node launcher has its own opt-in `rocprofv3` path, driven by
+positional arguments rather than environment variables: pass `ENABLE_ROCPROF`
+as `true`, optionally followed by `ROCPROF_STATS` (`true` adds `--stats`) and
+`ROCPROF_INPUT` (a `rocprofv3 -i` input file, e.g.
+`scripts/gemm_analysis/rocprof_input.yaml`). When enabled it runs the
+in-container training command under `rocprofv3` and writes to
+`<experiment_dir>/<threads>thread_<channels>channels/rocprof_traces/node_<rank>/`.
+Same caveat as above: a manual capture route tied to this launcher, with no
+parsing and no metrics.
 
 ## Generating Reports
 
@@ -104,6 +148,7 @@ For deeper inspection, combine these scripts with `nsys`, `rocprof`, or PyTorch 
 
 ## Next Steps
 
+- [Profiling Collectors](profiling-collectors.md) - `--collect rocprof` / `--collect proton`: the supported way to profile any command aorta runs
 - [eBPF Usage Guide](ebpf-usage-guide.md) - Kernel-level GPU queue and memory tracing with eBPF
 - [Troubleshooting](troubleshooting.md) - Common issues and solutions
 - [Configuration Guide](configuration.md) - Tune parameters for better overlap

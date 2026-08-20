@@ -307,6 +307,23 @@ class SubprocessWorkload(Workload):
                 f"{[type(a).__name__ for a in argv]}"
             )
 
+        # Collector opt-in: when the dispatcher threaded ``_aorta_collect``
+        # into this trial, rewrite the opaque user argv so the requested
+        # profilers attach (``rocprofv3 ... -- <argv>``, ``python -m
+        # triton.profiler.proton ... <script>``). Returns the argv unchanged
+        # when no attaching collector was requested, so a run without
+        # ``--collect`` is byte-for-byte what it was.
+        #
+        # Applied BEFORE the emulation wrap so the profiler ends up *inside*
+        # the emulated environment: ``mirage run -- rocprofv3 -- <argv>``, not
+        # the reverse, which would profile the emulator's own launcher.
+        # A requested-but-unattachable collector (rocprofv3 missing, Proton CLI
+        # wrap of a non-Python command) raises here and is reported as a clean
+        # setup failure rather than a silently unprofiled run.
+        from aorta.run.collectors import wrap_argv_for_collectors
+
+        argv = wrap_argv_for_collectors(self.config, argv)
+
         # GPU-emulation opt-in: when the dispatcher-threaded environment
         # (``_aorta_environment``) targets the mirage emulator, transparently
         # rewrite the opaque user argv to ``mirage run --profile <p> -- <argv>``
@@ -858,6 +875,25 @@ class SubprocessWorkload(Workload):
         # contract from PR #194 round 4 is independent of the
         # matrix-side semantic.
         passed = verdict_obj.verdict == "pass"
+        # Collector summaries ride the same ``metrics`` channel as the verdict
+        # bookkeeping, so the numeric ones (``rocprof_gpu_time_ms`` etc.) land
+        # in perf.md's metrics table and all of them in matrix.json. Merged
+        # under the platform keys so a collector can never shadow ``verdict``
+        # or ``exit_code``; fail-soft, returning ``{}`` when nothing was
+        # collected.
+        from aorta.run.collectors import summarize_collectors
+
+        metrics: dict[str, Any] = dict(summarize_collectors(self.config))
+        metrics.update(
+            {
+                "verdict": verdict_obj.verdict,
+                "exit_code": exit_code,
+                "result_json_path": str(result_path),
+                "failure_detectors_fired": list(verdict_obj.failure_detectors_fired),
+                "error_detectors_fired": list(verdict_obj.error_detectors_fired),
+                "warn_detectors_fired": list(verdict_obj.warn_detectors_fired),
+            }
+        )
         return WorkloadResult(
             passed=passed,
             failure_count=0 if passed else 1,
@@ -881,14 +917,7 @@ class SubprocessWorkload(Workload):
             executed_iterations=1 if launched else 0,
             configured_iterations=1,
             elapsed_sec=walltime_sec,
-            metrics={
-                "verdict": verdict_obj.verdict,
-                "exit_code": exit_code,
-                "result_json_path": str(result_path),
-                "failure_detectors_fired": list(verdict_obj.failure_detectors_fired),
-                "error_detectors_fired": list(verdict_obj.error_detectors_fired),
-                "warn_detectors_fired": list(verdict_obj.warn_detectors_fired),
-            },
+            metrics=metrics,
         )
 
     def _write_env_file_failure_result(

@@ -174,7 +174,12 @@ not how it is merged. For distributed details, see
   write to them directly.
 - **`collect`** -- optional `list[str]` or mapping, default absent (no
   collectors). Names one or more cross-cutting collectors to attach to every
-  cell (e.g. `[layer_numerics]` for the per-layer NaN/magnitude logger).
+  cell: `[rocprof]` or `[proton]` to attach a GPU profiler
+  ([`docs/profiling-collectors.md`](../docs/profiling-collectors.md)),
+  `[layer_numerics]` for the per-layer NaN/magnitude logger. Valid in
+  `mode: probe` recipes as well as triage recipes -- the profiling collectors
+  attach by wrapping the launch argv, so they are meaningful for an opaque
+  `-- <command>` run.
   List form enables collectors with default options; mapping form passes
   per-collector options:
 
@@ -200,7 +205,14 @@ not how it is merged. For distributed details, see
   applies to every cell, clearing any per-cell collector overrides.
 
   Unknown collector names are rejected at load time (validated against
-  `aorta.run.collectors.KNOWN_RECIPES`).
+  `aorta.run.collectors.KNOWN_RECIPES`), as are per-collector options outside
+  their declared schema and collector combinations that cannot run together
+  (`rocprof` alongside a queue-intercepting `proton` backend).
+
+  `rocprof` and `proton` need **no workload opt-in** -- the platform launches
+  them itself in the subprocess seam and parses their artifacts into
+  `rocprof_*` / `proton_*` trial metrics. The caveat below is specific to
+  `layer_numerics`.
 
   For `layer_numerics` (the per-layer NaN/magnitude logger), see
   [`docs/layer-numerics.md`](../docs/layer-numerics.md) for worked Stage 1 /

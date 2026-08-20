@@ -1,24 +1,315 @@
-"""Reserved collector recipe names.
+"""Collector recipe registry.
 
-Collectors are profiling/instrumentation tools that can be attached to
-workload runs. MVP implementation validates names but does not attach
-actual collectors (deferred to P1).
+Collectors are profiling / instrumentation tools attached to a workload run via
+``--collect`` or a recipe's ``collect:`` block. This module is the dispatch
+layer between the reserved ``_aorta_collect*`` config keys the dispatcher
+threads into every trial and the per-collector packages under
+:mod:`aorta.instrumentation`.
 
 Supported recipes:
-    rocprof: AMD ROCm profiler integration
+    rocprof: ``rocprofv3`` kernel/API tracing (:mod:`aorta.instrumentation.rocprof`)
+    proton: Triton Proton profiler (:mod:`aorta.instrumentation.proton`)
     numerics: Numeric health monitoring (NaN/Inf detection)
-    layer_numerics: Per-layer NaN/magnitude logger (aorta.instrumentation.layer_numerics)
+    layer_numerics: Per-layer NaN/magnitude logger (:mod:`aorta.instrumentation.layer_numerics`)
     amd_log: AMD internal logging collector
+
+``rocprof`` and ``proton`` attach generically, by wrapping the launch argv --
+the same seam :func:`aorta.emulation.mirage_launch.wrap_argv_for_environment`
+uses -- so any subprocess-shaped workload, including an opaque ``aorta probe --
+<command>``, can be profiled. The remaining names are still validated-only:
+they are consumed by workload wrappers that opt in (see the ``layer_numerics``
+package docstring).
 """
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+log = logging.getLogger(__name__)
 
 KNOWN_RECIPES: frozenset[str] = frozenset(
     {
         "rocprof",
+        "proton",
         "numerics",
         "layer_numerics",
         "amd_log",
     }
 )
 
+#: Reserved config keys the dispatcher threads into every trial. Mirrored as
+#: literals (not imported from the dispatcher) to keep this module a leaf --
+#: :mod:`aorta.triage.recipe` imports it during recipe load.
+CONFIG_KEY_COLLECT = "_aorta_collect"
+CONFIG_KEY_COLLECT_OPTIONS = "_aorta_collect_options"
+CONFIG_KEY_COLLECT_DIR = "_aorta_collect_dir"
 
-__all__ = ["KNOWN_RECIPES"]
+#: Argv-wrapping order, outermost first. ``rocprof`` runs a whole command under
+#: the profiler while ``proton`` takes over a Python script's execution, so
+#: rocprof must be the outer process for the pair to compose at all. Relative
+#: to the emulator: collectors wrap first and the mirage wrap goes outside
+#: them, i.e. the profiler runs *inside* the emulated environment.
+WRAP_ORDER: tuple[str, ...] = ("rocprof", "proton")
+
+
+@dataclass(frozen=True)
+class CollectorSpec:
+    """How one collector validates, attaches, and reports.
+
+    Attributes:
+        name: The recipe name (a member of :data:`KNOWN_RECIPES`).
+        output_subdir: Subdirectory of the trial's collector directory the
+            collector writes artifacts into.
+        validate: Validates a recipe's option mapping, raising ``ValueError``
+            with an actionable message. Every collector has one; a
+            validated-only collector accepts anything a wrapper defines.
+        wrap: Rewrites the launch argv to attach the collector, or ``None``
+            for a collector the platform does not launch itself.
+        summarize: Parses the collector's artifacts into flat trial metrics,
+            or ``None`` for a collector the platform does not parse.
+    """
+
+    name: str
+    output_subdir: str | None
+    validate: Callable[[Mapping[str, str] | None], Any]
+    wrap: Callable[..., list[str]] | None = None
+    summarize: Callable[[Path], dict[str, Any]] | None = None
+
+
+def _accept_any(options: Mapping[str, str] | None) -> dict[str, str]:
+    """Option validator for collectors whose knobs belong to a wrapper.
+
+    ``layer_numerics`` takes ``NANLOG_*`` env knobs interpreted by the workload
+    wrapper, not by the platform, so the platform has no schema to check them
+    against. The recipe loader has already enforced ``str -> str``.
+    """
+    return dict(options or {})
+
+
+def _registry() -> dict[str, CollectorSpec]:
+    """Build the collector registry.
+
+    The instrumentation packages are imported here rather than at module scope
+    because :mod:`aorta.triage.recipe` imports this module during recipe load;
+    a call-time import keeps that path free of import-order coupling. Both
+    packages are stdlib-only, so the import is cheap.
+    """
+    from aorta.instrumentation import proton, rocprof
+
+    return {
+        "rocprof": CollectorSpec(
+            name="rocprof",
+            output_subdir=rocprof.OUTPUT_SUBDIR,
+            validate=rocprof.validate_options,
+            wrap=rocprof.wrap_argv,
+            summarize=rocprof.parse_summary,
+        ),
+        "proton": CollectorSpec(
+            name="proton",
+            output_subdir=proton.OUTPUT_SUBDIR,
+            validate=proton.validate_options,
+            wrap=proton.wrap_argv,
+            summarize=proton.parse_summary,
+        ),
+        "numerics": CollectorSpec("numerics", None, _accept_any),
+        "layer_numerics": CollectorSpec("layer_numerics", "layer_numerics", _accept_any),
+        "amd_log": CollectorSpec("amd_log", None, _accept_any),
+    }
+
+
+def active_collectors(config: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the requested collector names, in :data:`WRAP_ORDER`.
+
+    Unknown / non-string entries are dropped: ``run_trials`` and the recipe
+    loader both reject them up front, so anything left here came from a
+    hand-built config and must not crash a trial.
+    """
+    raw = config.get(CONFIG_KEY_COLLECT)
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    names = [n for n in raw if isinstance(n, str) and n in KNOWN_RECIPES]
+    ordered = [n for n in WRAP_ORDER if n in names]
+    ordered += [n for n in dict.fromkeys(names) if n not in WRAP_ORDER]
+    return tuple(ordered)
+
+
+def _options_for(config: Mapping[str, Any], name: str) -> dict[str, str]:
+    all_options = config.get(CONFIG_KEY_COLLECT_OPTIONS)
+    if not isinstance(all_options, dict):
+        return {}
+    per_collector = all_options.get(name)
+    if not isinstance(per_collector, dict):
+        return {}
+    return {str(k): str(v) for k, v in per_collector.items()}
+
+
+def _collect_root(config: Mapping[str, Any]) -> Path | None:
+    """Resolve the per-trial collector output root, or ``None``.
+
+    The dispatcher only injects :data:`CONFIG_KEY_COLLECT_DIR` on the
+    artifact-writing rank, so a non-writing rank has nowhere to put artifacts
+    and the collector is skipped rather than scattering files into the cwd.
+    """
+    raw = config.get(CONFIG_KEY_COLLECT_DIR)
+    return Path(raw) if isinstance(raw, str) and raw else None
+
+
+def validate_collectors(
+    names: Sequence[str],
+    options: Mapping[str, Mapping[str, str]] | None = None,
+) -> None:
+    """Validate a collect request: per-collector options plus cross-collector conflicts.
+
+    Called at recipe-load time (and by any programmatic caller building a run
+    request) so a typo or an unrunnable combination fails before a single trial
+    starts.
+
+    Args:
+        names: The requested collector names. Already checked against
+            :data:`KNOWN_RECIPES` by the caller; unknown names are ignored here
+            so the caller's own error message stays the one the operator sees.
+        options: The per-collector option mapping (the recipe's mapping form).
+
+    Raises:
+        ValueError: an option is invalid for its collector, or ``rocprof`` is
+            combined with a Proton backend that also intercepts HSA queues.
+    """
+    from aorta.instrumentation.proton import AUTO_BACKEND, QUEUE_INTERCEPTING_BACKENDS
+
+    registry = _registry()
+    requested = [n for n in names if n in registry]
+    opts = options or {}
+    effective: dict[str, dict[str, str]] = {}
+    for name in requested:
+        effective[name] = dict(registry[name].validate(opts.get(name)))
+
+    if "rocprof" in effective and "proton" in effective:
+        backend = effective["proton"]["backend"]
+        if backend in QUEUE_INTERCEPTING_BACKENDS:
+            resolved = (
+                " (which resolves to rocprofiler or roctracer on AMD)"
+                if backend == AUTO_BACKEND
+                else ""
+            )
+            raise ValueError(
+                "'rocprof' and 'proton' cannot run together with "
+                f"proton backend {backend!r}{resolved} -- both install an HSA "
+                "queue interceptor and the second one to attach will fail or "
+                "report nothing. Use 'proton: {backend: instrumentation}' "
+                "(intra-kernel measurement, no queue interception) to combine "
+                "them, or run rocprof and proton as two separate cells."
+            )
+
+
+def wrap_argv_for_collectors(
+    config: Mapping[str, Any],
+    argv: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Return ``argv`` wrapped in every active collector that attaches via argv.
+
+    The counterpart of
+    :func:`aorta.emulation.mirage_launch.wrap_argv_for_environment`: it returns
+    the argv unchanged when no attaching collector is active, so a run without
+    ``--collect`` is byte-for-byte what it was. Collectors are applied in
+    :data:`WRAP_ORDER` (rocprof outermost), and the caller should apply the
+    emulation wrap *after* this one so the profiler runs inside the emulator.
+
+    Each collector's output directory (``<collect_dir>/<subdir>``) is created
+    here, so the trial tree has the same shape whether or not the workload
+    produced any GPU activity -- ``rocprofv3`` writes nothing at all when the
+    command does no GPU work.
+
+    Args:
+        config: The trial config carrying the reserved ``_aorta_collect*`` keys.
+        argv: The command the trial would otherwise have run.
+        env: Environment the command will run with, forwarded to collectors
+            that need to inspect it (Proton's device-variable translation).
+            Defaults to :data:`os.environ` inside the collector.
+
+    Raises:
+        ValueError: a collector option is invalid.
+        RuntimeError: a requested collector cannot attach (rocprofv3 missing,
+            or a Proton CLI wrap of a non-Python command). Requesting a
+            measurement that cannot be taken is a clean setup failure, not a
+            silently unprofiled run.
+    """
+    wrapped = list(argv)
+    names = active_collectors(config)
+    if not names:
+        return wrapped
+    root = _collect_root(config)
+    registry = _registry()
+    # Reversed so the first entry of WRAP_ORDER ends up outermost.
+    for name in reversed(names):
+        spec = registry.get(name)
+        if spec is None or spec.wrap is None or spec.output_subdir is None:
+            continue
+        if root is None:
+            log.warning(
+                "collect: %s requested but no %s was threaded into the trial "
+                "config (non-writing rank?); skipping.",
+                name,
+                CONFIG_KEY_COLLECT_DIR,
+            )
+            continue
+        out_dir = root / spec.output_subdir
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("collect: cannot create %s: %s; skipping %s.", out_dir, exc, name)
+            continue
+        wrapped = spec.wrap(wrapped, out_dir, _options_for(config, name), env=env)
+    return wrapped
+
+
+def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Parse every active collector's artifacts into flat trial metrics.
+
+    Fail-soft by construction: returns ``{}`` when nothing was collected, and a
+    collector whose artifacts are missing, partial, or malformed contributes
+    fewer keys rather than raising. An opt-in measurement must never turn an
+    otherwise-healthy trial into a failure.
+
+    Returns:
+        A flat mapping merged into ``WorkloadResult.metrics``. Numeric values
+        (``rocprof_gpu_time_ms``, ``proton_kernel_count``, ...) are picked up by
+        the ``perf.md`` metrics table; the non-numeric ones (top-kernel name
+        lists, artifact directories) are skipped there but retained in
+        ``matrix.json``.
+    """
+    root = _collect_root(config)
+    if root is None:
+        return {}
+    metrics: dict[str, Any] = {}
+    registry = _registry()
+    for name in active_collectors(config):
+        spec = registry.get(name)
+        if spec is None or spec.summarize is None or spec.output_subdir is None:
+            continue
+        try:
+            metrics.update(spec.summarize(root / spec.output_subdir))
+        except Exception:
+            # An opt-in measurement must never turn a healthy trial into a
+            # failure, so the catch is deliberately unbounded.
+            log.warning("collect: %s summary parsing failed; skipping.", name, exc_info=True)
+    return metrics
+
+
+__all__ = [
+    "CONFIG_KEY_COLLECT",
+    "CONFIG_KEY_COLLECT_DIR",
+    "CONFIG_KEY_COLLECT_OPTIONS",
+    "KNOWN_RECIPES",
+    "WRAP_ORDER",
+    "CollectorSpec",
+    "active_collectors",
+    "summarize_collectors",
+    "validate_collectors",
+    "wrap_argv_for_collectors",
+]

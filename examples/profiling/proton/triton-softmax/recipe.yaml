@@ -1,0 +1,32 @@
+# Proton capture of a Triton fused softmax, attributed to Python frames.
+#
+# Same attach mechanism as triton-vecadd, but with `context: python` so the
+# hatchet tree is keyed by Python call stack rather than by launch site --
+# the configuration you want once a script has more than one kernel.
+#
+#   aorta sweep run \
+#       --recipe examples/profiling/proton/triton-softmax/recipe.yaml \
+#       --output ./profiling_results \
+#       -- python examples/profiling/proton/triton-softmax/softmax.py \
+#            --rows 4096 --cols 1024 --iters 20
+schema_version: 1
+mode: probe
+
+ticket: PROFILING-TRITON-SOFTMAX
+
+trials: 1
+timeout_per_trial: 1800
+
+mitigation_axis: [none]
+diagnostic_axis: [none]
+
+env_passthrough_mode: inherit
+
+# `context: python` is the only difference from triton-vecadd's block. See
+# that recipe for why the backend is left on `auto`.
+collect:
+  proton:
+    mode: "cli"
+    backend: "auto"
+    context: "python"
+    data: "tree"
