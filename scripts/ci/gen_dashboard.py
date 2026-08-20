@@ -1384,8 +1384,14 @@ def build_dashboard_html(
     a separate argument rather than merged into ``results`` precisely so it
     cannot reach the status banner, the pass-rate trend, the history grid or
     ``build_status_json`` -- everything gated is computed from ``results`` alone.
-    Defaults to ``None`` so every existing caller keeps its current output
-    byte-for-byte.
+
+    It defaults to ``None``, and ``None`` / ``[]`` / omitted all render
+    identically. That is NOT byte-identical to the pre-#382 page: the canary
+    section is always emitted, showing its "no runs recorded yet" state when
+    there is nothing to show, so the ``#canary`` anchor resolves before the
+    lane's first run instead of 404ing a promised route. What is unchanged is
+    everything gated -- same banner, same trend, same history grid, same
+    ``status.json`` and ``data.json``.
     """
     status, status_color = _latest_status(results)
     customer_status = _customer_status_label(status)

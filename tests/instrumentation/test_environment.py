@@ -3315,6 +3315,62 @@ class TestTheRockManifest:
         block = env_mod._capture_therock({"submodules": "nope"})
         assert block["submodules"] == []
 
+    def test_an_unstatable_manifest_is_invalid_not_absent(self, tmp_path, monkeypatch):
+        """Only a path confirmed missing earns "absent" (#387, 3rd pass).
+
+        A stale mount or an unreadable parent makes even ``exists()`` raise;
+        calling that the documented classic absence is the same conflation this
+        function exists to undo.
+        """
+        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", tmp_path / "m.json")
+        monkeypatch.setattr(env_mod, "_read_text_file", lambda path: None)
+
+        def boom(self):
+            raise OSError("stale NFS handle")
+
+        monkeypatch.setattr(Path, "exists", boom)
+        manifest, error = env_mod._read_therock_manifest()
+        assert manifest is None
+        assert error is not None and "could not be checked" in error
+        assert env_mod._capture_therock(manifest, [], error)["status"] == "invalid"
+
+    def test_malformed_submodule_entries_are_surfaced_not_swallowed(self):
+        """Kept-with-null-name is visible; dropped is indistinguishable from absent.
+
+        ``submodules`` is provenance, so under-reporting what the manifest
+        listed is its own silent degradation. The entries stay, and a reason
+        makes the malformed shape actionable (#387, 3rd pass).
+        """
+        reasons: list[str] = []
+        block = env_mod._capture_therock(
+            {
+                "submodules": [
+                    "not-a-dict",
+                    {"submodule_name": "rocm-libraries", "pin_sha": "a" * 40},
+                    {"pin_sha": "b" * 40},
+                ]
+            },
+            reasons,
+        )
+        # The unnamed entry is retained, with its pin, and visibly unnamed.
+        assert [s["name"] for s in block["submodules"]] == ["rocm-libraries", None]
+        assert block["submodules"][1]["pin_sha"] == "b" * 40
+        # ...and the shape problem is reported rather than inferred from counts.
+        assert any(r.startswith("therock.submodules:") for r in reasons)
+        # A nameless entry can never be mistaken for the GEMM pin.
+        assert block["gemm_libraries_commit"] == "a" * 40
+
+    def test_a_non_list_submodules_key_is_surfaced(self):
+        """Distinct from "no submodules": the key was present and unusable."""
+        reasons: list[str] = []
+        env_mod._capture_therock({"submodules": "nope"}, reasons)
+        assert any(r.startswith("therock.submodules:") for r in reasons)
+
+    def test_a_well_formed_manifest_raises_no_submodule_reason(self):
+        reasons: list[str] = []
+        env_mod._capture_therock(self.MANIFEST, reasons)
+        assert reasons == []
+
 
 class TestGemmProvenanceInvariant:
     """The tweak/manifest cross-check (#381 acceptance).

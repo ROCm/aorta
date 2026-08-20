@@ -1512,8 +1512,15 @@ def test_canary_rows_do_not_touch_the_gated_status_or_trend():
     ) == without.replace(gen_dashboard.build_canary_section([]), "")
 
 
-def test_dashboard_html_default_is_unchanged_without_canary_data():
-    """Existing callers keep their exact output (the arg defaults to None)."""
+def test_omitted_none_and_empty_canary_render_identically():
+    """The three "no canary data" spellings agree.
+
+    Note this is NOT byte-identity with the pre-#382 page: the canary section is
+    always emitted (its empty state when there is nothing to show) so the
+    `#canary` anchor resolves before the lane's first run. What must not change
+    is everything gated -- covered by
+    ``test_canary_rows_do_not_touch_the_gated_status_or_trend``.
+    """
     gate = [_results("2026-08-19T00:00:00Z", [], build={"lane": "gate"})]
     assert gen_dashboard.build_dashboard_html(gate) == gen_dashboard.build_dashboard_html(
         gate, None
@@ -1521,6 +1528,8 @@ def test_dashboard_html_default_is_unchanged_without_canary_data():
     assert gen_dashboard.build_dashboard_html(gate) == gen_dashboard.build_dashboard_html(
         gate, []
     )
+    # The empty state really is present in all three.
+    assert "No canary runs recorded yet" in gen_dashboard.build_dashboard_html(gate)
 
 
 def test_canary_section_renders_a_setup_failure_row(tmp_path):

@@ -3066,8 +3066,13 @@ def _read_therock_manifest() -> tuple[dict[str, Any] | None, str | None]:
         # non-UTF8 into None, so ask the filesystem which of those it was.
         try:
             present = THEROCK_MANIFEST_FILE.exists()
-        except OSError:
-            present = False
+        except OSError as exc:
+            # Cannot even stat it. That is NOT the documented classic absence
+            # -- a stale mount or an unreadable parent directory is a broken
+            # install, and calling it "absent" is the same conflation this
+            # function exists to undo. Only a path we can positively confirm is
+            # missing earns "absent".
+            return None, f"{THEROCK_MANIFEST_FILE} could not be checked ({exc})"
         if present:
             return None, f"{THEROCK_MANIFEST_FILE} present but empty or unreadable"
         return None, None
@@ -3235,10 +3240,25 @@ def _capture_therock(
     submodules: list[dict[str, Any]] = []
     gemm_commit: str | None = None
     raw_submodules = manifest.get("submodules")
+    # Malformed shapes are counted, not swallowed. `submodules` is provenance,
+    # so under-reporting what the manifest listed is its own failure: an entry
+    # kept with `name: null` is visibly unidentifiable, whereas a dropped entry
+    # is indistinguishable from a manifest that never listed it. Consumers that
+    # key by name (and the `gemm_libraries_commit` lookup below, which can only
+    # match a real name) are unaffected either way, so the reason is what makes
+    # the difference actionable.
+    malformed_entries = 0
+    unnamed_entries = 0
+    if raw_submodules is not None and not isinstance(raw_submodules, list):
+        # Distinct from "no submodules": the key was there and unusable.
+        malformed_entries += 1
     for entry in raw_submodules if isinstance(raw_submodules, list) else []:
         if not isinstance(entry, dict):
+            malformed_entries += 1
             continue
         name = _clean_manifest_string(entry.get("submodule_name"))
+        if name is None:
+            unnamed_entries += 1
         pin_sha = _clean_manifest_string(entry.get("pin_sha"))
         patches = entry.get("patches")
         submodules.append(
@@ -3253,6 +3273,13 @@ def _capture_therock(
         )
         if name == THEROCK_GEMM_SUBMODULE:
             gemm_commit = pin_sha
+
+    if reasons is not None and (malformed_entries or unnamed_entries):
+        reasons.append(
+            f"therock.submodules: {malformed_entries} unusable and "
+            f"{unnamed_entries} unnamed entry/entries in "
+            f"{THEROCK_MANIFEST_FILE}"
+        )
 
     return {
         "status": "present",
