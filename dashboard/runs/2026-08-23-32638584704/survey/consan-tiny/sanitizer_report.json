@@ -1,0 +1,76 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_tiny_load",
+        "command_sha256": "0190807d3c4127fd159b1f40ce955962817387afc6bc7345813d7ef07482ce46",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "00ef00a3a202d4bc79202d370fab4337c5f152f0d80d3e9e9c0833cd63d3fc97",
+        "selected_identity_sha256": "5e78584d6b9d0dbf66581c4a4ea2805f9ea65a31aeaad2608a1ea0d293a31307",
+        "selected_kernel": "tiny_vecadd"
+      },
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
+            "code_object_index": 0,
+            "code_object_sha256": "e93f041b4a82b4bf48bb2758d4ca3de084a25e1dcbd0e2496f6090b1d73affa3",
+            "entry_offset": null,
+            "name": "tiny_vecadd",
+            "target": "gfx950"
+          },
+          "reason": "combined_hook_exit_86",
+          "returncode": 86,
+          "state": "error",
+          "verdict": "error"
+        }
+      ],
+      "reason": "combined_hook_exit_86",
+      "returncode": 86,
+      "sanitizer": "consan",
+      "state": "error",
+      "verdict": "error"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [],
+      "reason": "combined_hook_exit_86",
+      "returncode": 86,
+      "sanitizer": "waitcheck_preflight",
+      "state": "error",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
+          "code_object_index": 0,
+          "code_object_sha256": "e93f041b4a82b4bf48bb2758d4ca3de084a25e1dcbd0e2496f6090b1d73affa3",
+          "entry_offset": null,
+          "name": "tiny_vecadd",
+          "target": "gfx950"
+        },
+        "sources": [
+          "kernel_list"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
