@@ -201,25 +201,23 @@ jobs:
             # (see GPU_RESULT below), so the run still fails closed. That is the correct
             # outcome for a gate and is not what changed here.
             #
-            # What it buys is evidence, and how much depends on how the run dies:
+            # What this ordering changes is narrow, so state it exactly rather than
+            # claiming a mitigation it does not provide. The three control sweeps above
+            # already write their reports before the survey in either arrangement, and
+            # the comparator only reads them. So on a graceful cancellation those reports
+            # and their Tab 1 rows were already safe via the `if: always()` upload, and on
+            # the abrupt kill #370 records -- where nothing later runs at all -- they were
+            # already lost. Moving the comparator affects neither case.
             #
-            #   * Graceful cancellation (the workflow timeout-minutes is exhausted, or
-            #     someone cancels). Later steps marked `if: always()` still run, so
-            #     "Upload sanitizer results" publishes the control reports and the
-            #     dashboard recomputes Tab 1 from reports + baselines. Judging the
-            #     controls first is what makes those reports exist to upload.
-            #   * Abrupt kill. #370 records an effective ~20-min cap on this runner that
-            #     kills the job outright rather than cancelling it. Nothing later runs,
-            #     `if: always()` included, so the reports die in the workspace. All the
-            #     ordering buys here is the comparator verdict in the captured log --
-            #     better than never running it, but not dashboard evidence.
+            # The one thing it adds: on any interrupted run, the verdict for the three
+            # daily controls is already in the captured log rather than never having been
+            # computed. That is a triage aid, not a gate guarantee.
             #
-            # So this ordering is a partial mitigation, not a fix, and deliberately so.
-            # Making the controls survive an abrupt kill means persisting them before the
-            # survey starts -- a separate upload step, which needs this container payload
-            # split in two -- or moving the survey to its own job. Both are real changes
-            # to a workflow only the scheduled nightly exercises, so neither is folded in
-            # here; #370 is the tracking issue.
+            # Making the controls genuinely survive an abrupt kill needs them persisted
+            # before the survey starts -- a separate upload step, which needs this
+            # container payload split in two -- or the survey moved to its own job. Only
+            # the scheduled nightly exercises this path, so neither is folded in here;
+            # #370 tracks it.
             echo "[$(date +%T)] gate: comparing reports against verdict_baselines.json …"
             gate_rc=0
             python scripts/sanitizers/compare_verdict_baselines.py "${SANITIZER_OUT}" || gate_rc=$?
