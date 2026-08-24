@@ -13,23 +13,29 @@ Timeline:
 | 4112 (#10378) | filed from this document; **fixed in `dc7c8e04`**, closed 2026-08-24, verified here |
 | #9972 | diagnostics only in `db0c47df`, re-open requested; **fixed in `15275dad`**, closed 2026-08-24, verified here |
 
-Every measurement below was taken on `db0c47df`, which is the state this document
-was written against and still the behaviour a consumer sees, because **no
-published bundle carries either fix**: `rocjitsu-sanitizer-artifacts` has been red
-since 2026-08-23, so the newest green bundle predates the #9972 fix. Branch head
-additionally GPU-faults any LDS-touching dispatch with the hook merely loaded.
-Both blockers are tracked in
-[ROCm/rocm-systems#10622](https://github.com/ROCm/rocm-systems/issues/10622); the
-fixes themselves were verified from source builds. So nothing on the dashboard
-changes until a green bundle ships.
+Every measurement below was taken on `db0c47df` — the bundle this document was
+written against, and the last one the nightly consumed. **A bundle carrying both
+fixes is now published**: after
+[ROCm/rocm-systems#10622](https://github.com/ROCm/rocm-systems/issues/10622)
+(artifact build red since 2026-08-23, plus a branch-head regression that faulted
+any LDS-touching dispatch) was fixed in `4227d40fb5` and closed,
+`rocjitsu-sanitizer-artifacts` run 32745941408 went green on 2026-08-24. Since the
+downloader selects the newest successful run, the next nightly picks that up
+rather than `db0c47df`.
+
+So the `db0c47df` numbers here are historical from the next nightly onward. Expect
+`consan-gemm` to stop reporting `status=4112` and to end on strict require-records
+instead — that outcome is measured, but from source builds of the fixes rather
+than from this bundle, so the first nightly on `4227d40fb5` is what confirms it
+end to end.
 
 Affects: `daily-consan-gemm.yaml` (dashboard Tab 2, observed-only, non-gating).
 Repro: [`repro/consan_4112_repro.sh`](repro/consan_4112_repro.sh).
 
 ## What happens
 
-This section describes the defect as observed on `db0c47df` — still what a
-consumer gets, per the status note above. Under the combined rocjitsu ConSan hook
+This section describes the defect as observed on `db0c47df`, per the status note
+above; it is fixed in `dc7c8e04`. Under the combined rocjitsu ConSan hook
 in `record-replay` / `strict` mode on gfx950, loading a large hipBLASLt f32
 Tensile code object (16,265,200 bytes, 490 kernels) gets all the way through MOI
 inventory and report planning, and is then rejected by the transform's final
@@ -91,11 +97,12 @@ exit 86
 No load rejection: the transform succeeded and the failure moved to the
 require-records check. So:
 
-The first column is what the nightly still reports, since it is the newest bundle
-a consumer can get. The second is measured from source builds of the fixes, not
-predicted. The third remains a projection — it needs work nobody has done yet.
+The first column is what the dashboard showed while `db0c47df` was the newest
+bundle. The second is measured from source builds of the fixes, not predicted, and
+is what the nightly should start reporting once it picks up `4227d40fb5`. The
+third remains a projection — it needs work nobody has done yet.
 
-| Case | On `db0c47df` (what the dashboard shows) | With the `dc7c8e04` / `15275dad` fixes (measured, source build) | Additionally **with a dispatching driver** (not built) |
+| Case | On `db0c47df` (through 2026-08-24) | With the `dc7c8e04` / `15275dad` fixes (measured, source build) | Additionally **with a dispatching driver** (not built) |
 |---|---|---|---|
 | `consan-gemm` (Tab 2) | `error`, exit 92 `consan_strict_load_rejection` | `error`, exit 86 `combined_hook_exit_86` — transform now succeeds | could reach a real `pass`/`fail` verdict |
 | `consan-lds-dispatch` (Tab 2) | `error`, exit 86 | records captured, `dynamic_complete=true`, exit 0 at `STRIDE=16` | `pass`/`fail` |
