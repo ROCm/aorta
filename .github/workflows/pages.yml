@@ -155,9 +155,21 @@ jobs:
           python3 scripts/ci/gen_dashboard.py \
             --results-dir "$results_dir" --out-dir _site --max-builds 180 \
             --canary-results-dir "$canary_dir"
-          gated_count="$(find "$results_dir" -maxdepth 1 -name '*.json' | wc -l)"
-          canary_count="$(find "$canary_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)"
-          echo "dashboard at / (${gated_count} gated build(s), ${canary_count} canary run(s))"
+          # Counted with a directory guard, not `2>/dev/null`: redirecting
+          # stderr hides find's message but not its exit code, and under
+          # `set -euo pipefail` a failing command substitution in an assignment
+          # aborts the step. `canary_dir` is deliberately non-existent on the
+          # normal pre-first-run path, so that would have failed the Pages job
+          # right after the dashboard was generated -- never deploying the empty
+          # state this block exists to publish.
+          count_json() {
+            if [ -d "$1" ]; then
+              find "$1" -maxdepth 1 -name '*.json' | wc -l
+            else
+              echo 0
+            fi
+          }
+          echo "dashboard at / ($(count_json "$results_dir") gated build(s), $(count_json "$canary_dir") canary run(s))"
 
           if [ ! -f _site/index.html ]; then
             echo "::error::dashboard generation produced no index.html"

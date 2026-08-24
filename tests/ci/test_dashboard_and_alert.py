@@ -1558,6 +1558,36 @@ def test_canary_section_renders_a_setup_failure_row(tmp_path):
     assert "0/0" in html
 
 
+def test_canary_setup_failure_row_shows_why(tmp_path):
+    """The synthesised row carries its only explanation in top-level `error`.
+
+    Without rendering it the row is an unexplained line of em dashes and 0/0 --
+    it would say a :latest was broken without saying how, which is most of the
+    value of recording it at all (#387). Plain text, no health class: the lane
+    stays neutral.
+    """
+    doc = _results(
+        "2026-08-19T15:00:00Z",
+        [],
+        build={"lane": "canary", "base_image": "rocm/pytorch:latest@sha256:dead", "rocm": None},
+    )
+    doc["error"] = "canary setup failed before the evaluator ran (exit 1)"
+    html = gen_dashboard.build_canary_section([doc])
+    assert "canary setup failed before the evaluator ran" in html
+    # Still neutral -- no verdict/health signalling on an explained failure.
+    for signal in ("vchip", "pill", "execution bad", "REGRESSION", "style=color:"):
+        assert signal not in html, signal
+
+
+def test_canary_row_without_an_error_shows_a_placeholder(tmp_path):
+    """A healthy row must not render the literal "None" in the note column."""
+    html = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0")]
+    )
+    assert "None" not in html
+    assert "—" in html
+
+
 def test_short_digest_display():
     assert gen_dashboard._short_digest("r/p:latest@sha256:" + "a" * 64) == (
         "sha256:aaaaaaaaaaaa"

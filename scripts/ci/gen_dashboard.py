@@ -615,6 +615,13 @@ def build_canary_section(canary_results: list[dict[str, Any]]) -> str:
         build = doc.get("build") or {}
         summary = doc.get("summary") or {}
         graded = f"{_count(summary.get('pass'))}/{_count(summary.get('pass')) + _count(summary.get('fail'))}"
+        # The workflow synthesises a row when setup died before the evaluator
+        # ran, and puts the only explanation in top-level `error`. Without
+        # rendering it such a row is an unexplained line of em dashes and 0/0 --
+        # it would say a :latest was broken without saying how, which is most of
+        # the value. Plain text, no health class: this lane stays neutral (a red
+        # canary is a question about a new ROCm release, not a regression here).
+        note = str(doc.get("error") or "").strip()
         rows.append(
             "<tr>"
             f"<td>{_esc(str(doc.get('generated_at') or '—')[:10])}</td>"
@@ -623,13 +630,15 @@ def build_canary_section(canary_results: list[dict[str, Any]]) -> str:
             f"<td>{_esc(str(build.get('hip') or '—'))}</td>"
             f"<td><code>{_esc(_short_digest(build.get('base_image')))}</code></td>"
             f"<td>{_esc(graded)}</td>"
+            f"<td>{_esc(note) if note else '—'}</td>"
             "</tr>"
         )
 
     if rows:
         body = (
             "<table><thead><tr><th>date</th><th>ROCm</th><th>torch</th>"
-            "<th>HIP</th><th>base image</th><th>passed/graded</th></tr></thead>"
+            "<th>HIP</th><th>base image</th><th>passed/graded</th>"
+            "<th>note</th></tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table>"
         )
     else:

@@ -240,7 +240,8 @@ That tag is the newest published combination on every axis at once — ROCm 7.2.
 is the newest classic-layout production release, and 24.04 / py3.12 / torch
 2.10.0 are the newest Ubuntu, Python and PyTorch that line ships. Newer Python
 (3.13, 3.14) and newer PyTorch (2.11, 2.12) exist **only** on the wheel-based
-7.14 line, so they arrive with the #381 flip rather than separately.
+7.14 line, so they arrive with the **#383** base-image flip. Reading that layout
+is no longer the blocker (#381 landed); moving the pinned base onto it is.
 
 Python's second, independent cap has now been lifted: `pyproject.toml` declares
 through 3.14 and the CPU matrix tests 3.10–3.14 (issue #383). The GPU gate stays
@@ -253,8 +254,11 @@ a bump proposal — from a human or from automation — must clear both:
 
 1. **Preview stream.** ROCm 7.9 through 7.13 are the *technology preview* stream,
    not newer production releases, so a higher number there is not an upgrade.
-2. **Install layout.** 7.14 onward is production, but its `rocm/pytorch` images
-   are wheel-based (see below), which this repo cannot read yet.
+2. **A deliberate flip, not a digest bump.** 7.14 onward is production and
+   wheel-based (see below). The repo **can** read that layout as of #381, so the
+   remaining blocker is not capability — it is that moving the pinned base is
+   issue #383, which changes ROCm, Ubuntu, Python and PyTorch at once and needs
+   baselines re-blessed. Not something to do by editing a digest.
 
 #### ROCm install layout: both are supported (issue #381)
 
