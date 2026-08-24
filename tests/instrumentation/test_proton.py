@@ -856,6 +856,24 @@ def test_parse_summary_still_reads_a_good_time_key_after_a_bad_one(tmp_path):
     assert parse_summary(tmp_path)["proton_gpu_time_ms"] == pytest.approx(2.0)
 
 
+def test_parse_summary_drops_metrics_when_the_total_overflows(tmp_path):
+    """``_time_ms`` checks each leaf, but finite leaves still sum to infinity.
+
+    Spelled in ``ms`` so the values reach the accumulator unscaled -- the same
+    magnitude in ``ns`` is divided down to a comfortably finite number.
+    """
+
+    def leaf(name):
+        return {
+            "frame": {"name": name},
+            "metrics": {"count": 1, "time (ms)": 1e308},
+            "children": [],
+        }
+
+    _hatchet(tmp_path, _tree([leaf("a"), leaf("b"), leaf("c")]))
+    assert parse_summary(tmp_path) == {"proton_artifact_dir": str(tmp_path)}
+
+
 @pytest.mark.parametrize("bad_count", [float("inf"), 10**400, -5])
 def test_parse_summary_survives_an_unusable_count(tmp_path, bad_count):
     """``int(float(...))`` raises ``OverflowError`` for an infinite or huge

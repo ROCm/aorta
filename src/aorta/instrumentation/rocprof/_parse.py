@@ -158,9 +158,18 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
         return metrics
 
     ranked = sorted(ns_by_kernel.items(), key=lambda item: item[1], reverse=True)
+    total_ms = sum(ns_by_kernel.values()) / _NS_PER_MS
+    top_ms = ranked[0][1] / _NS_PER_MS
+    # Per-row finiteness is not enough: finite rows still sum to infinity
+    # (1e308 + 1e308), in the aggregate or within one kernel's accumulator.
+    # The metrics channel promises strictly serialisable JSON, so a total that
+    # overflowed degrades to the artifact directory like any other unusable
+    # capture rather than publishing an ``Infinity`` token.
+    if not (math.isfinite(total_ms) and math.isfinite(top_ms)):
+        return metrics
     metrics["rocprof_kernel_count"] = sum(calls_by_kernel.values())
-    metrics["rocprof_gpu_time_ms"] = sum(ns_by_kernel.values()) / _NS_PER_MS
-    metrics["rocprof_top_kernel_ms"] = ranked[0][1] / _NS_PER_MS
+    metrics["rocprof_gpu_time_ms"] = total_ms
+    metrics["rocprof_top_kernel_ms"] = top_ms
     metrics["rocprof_top_kernels"] = [name for name, _ in ranked[:TOP_N]]
     return metrics
 

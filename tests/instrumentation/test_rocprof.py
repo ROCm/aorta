@@ -488,6 +488,16 @@ def test_parse_summary_skips_non_finite_and_negative_durations(tmp_path):
     assert math.isfinite(metrics["rocprof_top_kernel_ms"])
 
 
+def test_parse_summary_drops_metrics_when_the_total_overflows(tmp_path):
+    """Individually-finite rows can still sum to infinity, which would put an
+    ``Infinity`` token in the trial JSON despite the per-row guard."""
+    (tmp_path / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"a",1,1e308\n"b",1,1e308\n"c",1,1e308\n',
+        encoding="utf-8",
+    )
+    assert parse_summary(tmp_path) == {"rocprof_artifact_dir": str(tmp_path)}
+
+
 def test_parse_summary_counts_one_dispatch_when_calls_is_unreadable(tmp_path):
     """A stats row without a readable ``Calls`` column still evidences one
     dispatch, so it counts as one rather than being dropped."""

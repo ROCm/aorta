@@ -1,9 +1,17 @@
 # Profiling Collectors (`rocprof` / `proton`)
 
-Attach a GPU profiler to **any command aorta runs**, without editing the
-command. Both collectors work by rewriting the launch argv — the same seam
-the mirage emulator uses — so an opaque `aorta sweep run ... -- <command>`
-gets profiled for free and the payload never learns it is being measured.
+Attach a GPU profiler to a command aorta runs, without editing the command.
+Both collectors work by rewriting the launch argv — the same seam the mirage
+emulator uses — so an opaque `aorta sweep run ... -- <command>` gets profiled
+and the payload never learns it is being measured.
+
+How wide "a command" is differs by collector, and it is the first thing to
+check: `rocprof` wraps **anything**, while Proton's default `mode: cli` takes
+over a Python *script*, so it attaches only to `python ... <script>.py`, a
+bare `pytest`, or `python -m pytest`. Proton's `mode: env` accepts any argv
+but is not edit-free — it hands the payload `AORTA_PROTON_*` variables that
+the payload itself must act on by calling `proton.start()` / `proton.finalize()`.
+See [Proton attach modes](#proton-attach-modes).
 
 Two collectors ship today:
 
@@ -109,8 +117,12 @@ jq -r '.result.metrics | to_entries[]
        | "\(.key)=\(.value)"' <run_dir>/<cell>/<workload>/trial_d0_m0_t0.json
 ```
 
-If only `rocprof_artifact_dir` comes back, the profiler attached but found
-no kernel data.
+If only `rocprof_artifact_dir` comes back, the profiler attached but nothing
+*parseable* came out of it. That is the expected result for a command that
+dispatched no kernels, but parsing is fail-soft, so it also covers a
+non-CSV `output_format` (the parser reads the CSVs), a partial capture from
+a killed run, and a malformed one. Look in the artifact directory the metric
+points at before concluding the payload did no GPU work.
 
 ## Configuration
 

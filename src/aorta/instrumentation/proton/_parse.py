@@ -151,9 +151,17 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
         return metrics
 
     ranked = sorted(by_name.items(), key=lambda item: item[1], reverse=True)
+    total_ms = sum(by_name.values())
+    top_ms = ranked[0][1]
+    # The per-leaf finiteness check in ``_time_ms`` does not survive addition:
+    # finite leaves still sum to infinity, across the tree or within one
+    # kernel name. Degrade to the artifact directory rather than writing an
+    # ``Infinity`` token into the trial JSON.
+    if not (math.isfinite(total_ms) and math.isfinite(top_ms)):
+        return metrics
     metrics["proton_kernel_count"] = sum(counts.values())
-    metrics["proton_gpu_time_ms"] = sum(by_name.values())
-    metrics["proton_top_kernel_ms"] = ranked[0][1]
+    metrics["proton_gpu_time_ms"] = total_ms
+    metrics["proton_top_kernel_ms"] = top_ms
     metrics["proton_top_kernels"] = [name for name, _ in ranked[:TOP_N]]
     return metrics
 
