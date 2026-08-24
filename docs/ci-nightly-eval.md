@@ -65,7 +65,7 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    published.
 
    Each nightly's per-case results are co-located on the `sanitizer-results` data
-   branch under `dashboard/runs/<YYYY-MM-DD>-<run_id>/` (one directory per
+   branch under `dashboard/runs/<YYYY-MM-DD>T<HHMMSS>-<run_id>/` (one directory per
    guardrail recipe, one under `survey/` per observed-only case, plus a
    `meta.json` with commit / date / gpu / run_url / gate), and the rendered page
    links to them: the latest run table has a per-recipe **Report** link, each

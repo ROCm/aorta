@@ -39,8 +39,10 @@ Three input shapes are supported:
   ``out/<case>/sanitizer_report.json``; used locally to render a history/trend.
 * ``--history-root DIR`` -- the PUBLISHED data-branch layout
   ``DIR/<id>/<case>/sanitizer_report.json`` plus a per-run ``DIR/<id>/meta.json``
-  (keys: commit, date, gpu, run_url, gate). ``<id>`` is ``<YYYY-MM-DD>-<run_id>``
-  (date-sortable, unique), enumerated newest-first and capped by ``--keep N``
+  (keys: commit, date, gpu, run_url, gate). ``<id>`` is
+  ``<YYYY-MM-DD>T<HHMMSS>-<run_id>`` (sortable to the second, unique; runs
+  published before the time was added keep their date-only names and are never
+  renamed), enumerated newest-first and capped by ``--keep N``
   (default 30). This is the shape the nightly publishes and Pages serves under
   ``/sanitizers/``: each run's case dirs are co-located under ``runs/<id>/`` and
   linked from the rendered page, and a ``runs/<id>/index.html`` landing page is
@@ -484,7 +486,7 @@ def _run_card_html(meta: dict[str, Any]) -> str:
     rows = (
         ("Run", meta.get("run", "")),
         ("Commit", meta.get("commit", "")),
-        ("Date", meta.get("date", "")),
+        ("Date", format_instant(meta.get("date", ""))),
         ("Target", meta.get("gpu", "gfx950")),
     )
     body = "".join(
@@ -528,6 +530,35 @@ def _short(value: str | None, width: int = 10) -> str:
 
 def _basename(path: str | None) -> str:
     return path.rsplit("/", 1)[-1] if path else ""
+
+
+def format_instant(value: Any) -> str:
+    """A recorded timestamp as something a reader can act on (pure).
+
+    ``meta.json`` and ``status.json`` record an ISO-8601 instant; this renders it
+    as ``YYYY-MM-DD HH:MM:SS UTC`` -- the zone spelled out, because a reader
+    comparing a run against their own logs has to know which one it is in.
+
+    Anything that is not an instant is returned **unchanged**: a date-only value
+    from a run published before the id carried a time, or a malformed manifest.
+    Requiring a time separator before parsing is what makes that safe --
+    ``datetime.fromisoformat("2026-08-23")`` succeeds and would render a
+    confident ``00:00:00`` for a run that happened at nine in the morning.
+    """
+    text = str(value or "").strip()
+    if "T" not in text and " " not in text:
+        return text
+    try:
+        # `Z` is only accepted by fromisoformat from 3.11; the writers here emit
+        # an explicit offset, but a hand-edited manifest may not.
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        # Naive means UTC by construction: every writer uses `date -u` or
+        # datetime.now(tz=timezone.utc).
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _clean_msg(message: str, limit: int = 160) -> str:
@@ -769,7 +800,7 @@ def runs_from_runs_root(runs_root: Path, baselines: dict) -> list[dict[str, Any]
 def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
     """Read a published run's ``meta.json`` (commit, date, gpu, run_url, gate).
 
-    The run id (``<YYYY-MM-DD>-<run_id>``) is authoritative from the directory
+    The run id (see ``_RUN_ID_RE``) is authoritative from the directory
     name; ``meta.json`` supplies the rest. A missing/corrupt manifest degrades to
     an id-only record rather than crashing the whole dashboard render.
     """
@@ -795,23 +826,33 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
     return meta
 
 
-# A published run directory is ``<YYYY-MM-DD>-<run_id>`` (run_id an integer).
-_RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d+$")
+# A published run directory is ``<YYYY-MM-DD>T<HHMMSS>-<run_id>`` (run_id an
+# integer). The time is optional because runs published before it was added keep
+# their ``<YYYY-MM-DD>-<run_id>`` names -- they are never renamed, so both shapes
+# are live in the retained window and in the data branch's history.
+_RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{6})?-\d+$")
+# The instant embedded in a run id, if it carries one.
+_RUN_ID_STAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2})(\d{2})(\d{2})-")
 
 
 def _is_run_id(name: str) -> bool:
-    """Whether a directory name is a well-formed ``<YYYY-MM-DD>-<run_id>`` id."""
+    """Whether a directory name is a well-formed run id, with or without a time."""
     return _RUN_ID_RE.match(name) is not None
 
 
 def _history_sort_key(name: str) -> tuple[str, int]:
-    """Order key for a published run id (``<YYYY-MM-DD>-<run_id>``).
+    """Order key for a published run id (see ``_RUN_ID_RE``).
 
     Enumeration is already filtered to well-formed ids (``_is_run_id``); this key
     exists because the trailing run id is a *variable-width* integer, so a plain
     name sort mis-orders ``...-9`` after ``...-10`` and would pick the wrong
     latest run (and prune the wrong dir). Split the numeric suffix off and compare
     it as an int. The malformed fallback ``(name, -1)`` is defensive only.
+
+    Both id shapes sort correctly against each other without special-casing: the
+    head is a zero-padded date optionally followed by ``T<HHMMSS>``, and a bare
+    date is a prefix of any timestamped id for the same day, so it compares as
+    the earlier one. That is also what the workflow's field-wise ``sort`` does.
     """
     head, sep, tail = name.rpartition("-")
     if sep and tail.isdigit():
@@ -824,14 +865,14 @@ def runs_from_history_root(
 ) -> list[dict[str, Any]]:
     """Enumerate the PUBLISHED ``DIR/<id>/<case>/sanitizer_report.json`` layout.
 
-    Runs are ordered newest-first by ``<id>`` (``<YYYY-MM-DD>-<run_id>``) using a
+    Runs are ordered newest-first by ``<id>`` (see ``_RUN_ID_RE``) using a
     date-then-numeric key (see ``_history_sort_key``; a plain string sort would
     put ``...-9`` after ``...-10``) and capped to the newest ``keep``. Each
     summarized row is tagged with a ``report_rel`` pointing at its raw JSON
     relative to the dashboard root, and each record with the run's ``rel`` area,
     so ``build_html`` can emit relative links that work under ``/sanitizers/``.
     """
-    # Only enumerate well-formed <YYYY-MM-DD>-<run_id> dirs: a stray child (e.g. a
+    # Only enumerate well-formed run-id dirs: a stray child (e.g. a
     # leftover `source/` from a nested --history-root layout) must not become a
     # phantom "latest" pseudo-run or consume a --keep slot.
     run_dirs = sorted(
@@ -2222,7 +2263,7 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
         "## Run",
         "",
         f"- Commit: `{env.get('commit', '')}`",
-        f"- Date: {env.get('date', '')}",
+        f"- Date: {format_instant(env.get('date', ''))}",
         f"- Target: `{env.get('target', '')}`",
         f"- Class: {env.get('class', '')} "
         + ("(gated guardrail)" if env.get("class") == "guardrail" else "(observed-only, non-gating)"),
@@ -2356,7 +2397,7 @@ def build_case_index_html(
     facts = [
         ("Run", _esc(str(env.get("run", "")))),
         ("Commit", _esc(str(env.get("commit", "")))),
-        ("Date", _esc(str(env.get("date", "")))),
+        ("Date", _esc(format_instant(env.get("date", "")))),
         ("Target", _esc(str(env.get("target", "")))),
         ("Recipe", _esc(str(env.get("recipe", "")))),
         ("Execution", _esc(str(observed.get("execution") or _DASH))),
@@ -2599,7 +2640,7 @@ def _status_banner_html(status: dict[str, Any] | None) -> str:
     run_id = str(status.get("run_id", "") or "")
     url = str(status.get("run_url", "") or "")
     conclusion = str(status.get("conclusion", "") or "unknown")
-    when = str(status.get("date", "") or "")
+    when = format_instant(status.get("date", ""))
     run_txt = f" run {_esc(run_id)}" if run_id else ""
     link = f' <a href="{_esc(url)}">view failed run</a>' if url else ""
     when_txt = f" ({_esc(when)})" if when else ""
@@ -3537,7 +3578,7 @@ def build_html(
     hist_rows = "".join(
         f"<tr><td class=mono>{_run_cell_html(run)}</td>"
         f"<td class=mono>{_esc(run['meta'].get('commit', ''))}</td>"
-        f"<td>{_esc(run['meta'].get('date', ''))}</td>"
+        f"<td>{_esc(format_instant(run['meta'].get('date', '')))}</td>"
         + "".join(f"<td>{_history_case_html(run['rows'][c])}</td>" for c, _k, _l, _b in CASES)
         + _history_gate_html(run)
         + "</tr>"
@@ -3883,7 +3924,7 @@ def build_summary_md(
         lines += [banner, ""]
     lines += [
         f"Run `{meta.get('run', '')}` \u00b7 commit `{meta.get('commit', '')}` \u00b7 "
-        f"{meta.get('date', '')}",
+        f"{format_instant(meta.get('date', ''))}",
         "",
         gate,
         "",
@@ -4011,7 +4052,7 @@ def main() -> int:
     ap.add_argument(
         "--current-run",
         default="",
-        help="the <YYYY-MM-DD>-<run_id> this job just staged. Only that run's area "
+        help="the run id this job just staged. Only that run's area "
         "is written from the live checkout and environment; without it the newest "
         "retained run is assumed, which is wrong when an older workflow is re-run "
         "after a newer same-day one (its lower run id sorts behind).",

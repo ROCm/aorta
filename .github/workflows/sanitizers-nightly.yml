@@ -605,8 +605,14 @@ jobs:
         run: |
           set -euo pipefail
           keep=30
-          date="$(date -u +%Y-%m-%d)"
-          run_dir_id="${date}-${GITHUB_RUN_ID}"   # <YYYY-MM-DD>-<run_id>: date-sortable + unique
+          # One clock read for the directory name and the recorded instant alike,
+          # so a published area cannot report a time its own directory disagrees
+          # with. run_dir_id is resolved after the clone -- it may reuse a name
+          # already on the branch (see below).
+          now="$(date -u +%s)"
+          date="$(date -u -d "@${now}" +%Y-%m-%d)"
+          started_id="$(date -u -d "@${now}" +%Y-%m-%dT%H%M%S)"
+          started_iso="$(date -u -d "@${now}" +%Y-%m-%dT%H:%M:%S+00:00)"
           repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           tmp="$(mktemp -d)"
           # Fail closed: distinguish a genuinely-absent sanitizer-results branch
@@ -632,11 +638,26 @@ jobs:
           # dashboard/runs/). A failed/absent report is simply not copied; the
           # generator then renders that case as missing -> a red per-run gate.
           runs_dir="$tmp/dashboard/runs"
+          # <YYYY-MM-DD>T<HHMMSS>-<run_id>: sortable to the second, unique, and the
+          # T keeps the run id in the 4th "-" field, so the prune sort below is
+          # unchanged and still orders a mixed old/new history correctly.
+          #
+          # A re-run reuses GITHUB_RUN_ID (only GITHUB_RUN_ATTEMPT changes) and has
+          # to land on the directory its first attempt minted. Stamping a fresh
+          # time would create a second directory for one workflow run: two of the
+          # keep slots, two rows in history, and the earlier attempt reports left
+          # in place -- which is exactly what the rm -rf below exists to prevent.
+          # Reuse whatever name already carries this run id, old shape included.
+          run_dir_id=""
+          for existing in "$runs_dir"/*-"${GITHUB_RUN_ID}"; do
+            if [ -d "$existing" ]; then run_dir_id="$(basename "$existing")"; break; fi
+          done
+          : "${run_dir_id:=${started_id}-${GITHUB_RUN_ID}}"
           dest="$runs_dir/${run_dir_id}"
-          # A same-day Actions re-run reuses GITHUB_RUN_ID (only GITHUB_RUN_ATTEMPT
-          # changes), so it targets this same directory. Clear it first so a report
-          # absent from the current attempt cannot survive from a prior one and mask
-          # a now-missing case (the generator fails such a case closed).
+          echo "[$(date +%T)] publishing run ${run_dir_id}"
+          # Clear it first so a report absent from the current attempt cannot
+          # survive from a prior one and mask a now-missing case (the generator
+          # fails such a case closed).
           rm -rf "$dest"
           mkdir -p "$dest"
           # Copy the whole case directory, not just the report: the sanitizer
@@ -661,12 +682,19 @@ jobs:
           # gate mirrors the GPU job result (its comparator step is the gate); the
           # rendered history recomputes it from the reports + baselines regardless.
           if [ "${GPU_RESULT}" = "success" ]; then gate=true; else gate=false; fi
-          python - "$run_dir_id" "$date" "$gate" > "$dest/meta.json" <<'PY'
-          import json, os, sys
-          run_id, date, gate = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+          python - "$run_dir_id" "$started_iso" "$gate" > "$dest/meta.json" <<'PY'
+          import json, os, re, sys
+          run_id, started_iso, gate = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
           server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
           repo = os.environ.get("GITHUB_REPOSITORY", "")
           gh_run = os.environ.get("GITHUB_RUN_ID", "")
+          # Take the instant from the directory name so the two cannot disagree: a
+          # re-run reuses the name its first attempt minted, and recording this
+          # attempt clock beside that name would contradict it. A name from before
+          # the timestamped scheme carries no instant, so this publish supplies one
+          # rather than inventing a midnight.
+          stamped = re.match(r"^(\d{4}-\d{2}-\d{2})T(\d{2})(\d{2})(\d{2})-", run_id)
+          date = "{}T{}:{}:{}+00:00".format(*stamped.groups()) if stamped else started_iso
           print(json.dumps({
               "run": run_id,
               "commit": os.environ.get("GITHUB_SHA", ""),
@@ -677,13 +705,24 @@ jobs:
           }, indent=2, sort_keys=True))
           PY
 
-          # Rolling window: drop all but the newest N run directories. Sort by the
-          # date fields then the run-id numerically (-t- splits <YYYY-MM-DD>-<run_id>
-          # into fields 1-4), so a variable-width run id (...-9 vs ...-10) still
-          # orders newest-first -- a plain lexical sort would prune the wrong dir.
+          # Rolling window: drop all but the newest N run directories, in exactly
+          # the order the generator renders them (_history_sort_key) -- if the two
+          # disagree this deletes a directory the page still lists. That key is
+          # "everything before the trailing run id, lexically; then that id as an
+          # integer", the integer part because it is variable-width and a plain
+          # lexical sort puts ...-9 after ...-10. sed splits the id onto its own
+          # field so sort can treat the two halves differently, and tr rejoins it
+          # (a run id has no spaces -- the schema is digits and dashes).
+          #
+          # One pass covers both id shapes: the timestamp lives in the lexical
+          # half, so a date-only name from before the timestamped scheme compares
+          # as that day's earliest, which is what it is. LC_ALL=C so the lexical
+          # half is byte-ordered like Python's, not collated by the runner locale.
           if [ -d "$runs_dir" ]; then
             ls -1 "$runs_dir" \
-              | sort -t- -k1,1nr -k2,2nr -k3,3nr -k4,4nr \
+              | sed 's/-\([0-9][0-9]*\)$/ \1/' \
+              | LC_ALL=C sort -k1,1r -k2,2nr \
+              | tr ' ' '-' \
               | tail -n +"$((keep + 1))" | while IFS= read -r old; do
               [ -n "$old" ] && rm -rf "${runs_dir:?}/${old}"
             done

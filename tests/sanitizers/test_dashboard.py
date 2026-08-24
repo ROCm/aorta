@@ -5,7 +5,10 @@ from __future__ import annotations
 import gzip
 import importlib.util
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -625,6 +628,188 @@ def test_history_root_ignores_malformed_run_dirs(tmp_path):
     runs = gen.runs_from_history_root(root, _baselines())
 
     assert [r["meta"]["run"] for r in runs] == ["2026-08-05-33"]
+
+
+# --- Timestamped run ids (#392) ------------------------------------------------
+
+
+def _publish_step() -> str:
+    """The nightly's publish step, so tests can exercise its shell directly."""
+    return (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+
+
+def _run_shell(script: str, cwd: Path, env: dict[str, str]) -> str:
+    proc = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _dedent_block(workflow: str, start: str, end: str) -> str:
+    """Lift a run-step fragment out of the workflow, YAML indentation removed."""
+    lines = workflow.splitlines()
+    first = next(i for i, line in enumerate(lines) if line.strip().startswith(start))
+    last = next(
+        i for i, line in enumerate(lines[first:], first)
+        if line.strip().startswith(end)
+    )
+    block = lines[first : last + 1]
+    pad = min(len(line) - len(line.lstrip()) for line in block if line.strip())
+    return "\n".join(line[pad:] for line in block)
+
+
+def test_run_id_accepts_both_shapes_and_still_rejects_junk():
+    # Runs published before the time was added keep their date-only names -- they
+    # are never renamed, so both shapes are live in the retained window.
+    for name in ("2026-08-23T094112-32638584704", "2026-08-23-32638584704",
+                 "2026-08-23-9", "2026-08-23T000000-1"):
+        assert gen._is_run_id(name), name
+    for name in ("source", "not-a-run", "2026-08-23", "2026-08-23T0941-7",
+                 "2026-08-23T094112", "2026-08-23T094112-", "2026-8-3T094112-7"):
+        assert not gen._is_run_id(name), name
+
+
+def test_history_order_is_correct_across_a_mixed_shape_history(tmp_path):
+    # The two shapes have to sort against each other without special-casing: a
+    # bare date is a prefix of any timestamped id for the same day, so it reads
+    # as the earlier one, and the variable-width run id still breaks ties.
+    root = tmp_path / "runs"
+    ids = [
+        "2026-08-23-32638584704",          # pre-change, same day
+        "2026-08-23T094112-32638584705",
+        "2026-08-24T031500-32700000001",
+        "2026-08-23T094112-9",
+        "2026-08-23T094112-10",
+    ]
+    for run_id in ids:
+        _write_history_run(root, run_id)
+
+    ordered = [r["meta"]["run"] for r in gen.runs_from_history_root(root, _baselines())]
+    assert ordered == [
+        "2026-08-24T031500-32700000001",
+        "2026-08-23T094112-32638584705",
+        "2026-08-23T094112-10",
+        "2026-08-23T094112-9",
+        "2026-08-23-32638584704",
+    ]
+    # --keep counts from the newest end of that same order.
+    kept = gen.runs_from_history_root(root, _baselines(), keep=2)
+    assert [r["meta"]["run"] for r in kept] == ordered[:2]
+
+
+def test_workflow_prune_order_matches_the_generator_exactly(tmp_path):
+    # The shell prunes and the generator renders from the same directory list, so
+    # a disagreement deletes a directory the page still lists. Run the workflow's
+    # own pipeline rather than a paraphrase of it.
+    lines = _publish_step().splitlines()
+    start = next(i for i, line in enumerate(lines) if 'ls -1 "$runs_dir"' in line)
+    end = next(i for i, line in enumerate(lines[start:], start) if "| tr " in line)
+    pipeline = " ".join(line.strip().rstrip("\\").strip() for line in lines[start : end + 1])
+
+    ids = [
+        "2026-08-23-32638584704",        # pre-change shape, same day
+        "2026-08-23T094112-32638584705",
+        "2026-08-24T031500-32700000001",
+        "2026-08-23T094112-9",           # variable-width run ids on one instant
+        "2026-08-23T094112-10",
+        "2026-08-22T235959-1",
+    ]
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    for run_id in ids:
+        (runs / run_id).mkdir()
+
+    shell = _run_shell(pipeline, tmp_path, {"runs_dir": str(runs)}).splitlines()
+    assert shell == sorted(ids, key=gen._history_sort_key, reverse=True)
+
+
+def test_workflow_reuses_the_directory_a_rerun_already_minted(tmp_path):
+    # A re-run reuses GITHUB_RUN_ID, so it must land on the directory its first
+    # attempt minted. A fresh timestamp would give one workflow run two
+    # directories: two --keep slots, two history rows, and the earlier attempt's
+    # reports left in place -- which is what the step's `rm -rf` exists to stop.
+    block = _dedent_block(_publish_step(), 'run_dir_id=""', ': "${run_dir_id:=')
+    script = f'{block}\nprintf "%s" "$run_dir_id"'
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    env = {"runs_dir": str(runs), "GITHUB_RUN_ID": "32638584704",
+           "started_id": "2026-08-24T031500"}
+
+    # Nothing published yet: mint a name from this attempt's clock.
+    assert _run_shell(script, tmp_path, env) == "2026-08-24T031500-32638584704"
+
+    # A re-run of a timestamped run reuses that name, not the current time.
+    (runs / "2026-08-23T094112-32638584704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-23T094112-32638584704"
+
+    # ...and a re-run of a run published before the scheme keeps its old name,
+    # so no directory is ever renamed underneath a published URL.
+    shutil.rmtree(runs / "2026-08-23T094112-32638584704")
+    (runs / "2026-08-23-32638584704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-23-32638584704"
+
+    # A different run id is not mistaken for this one, including a suffix match.
+    shutil.rmtree(runs / "2026-08-23-32638584704")
+    (runs / "2026-08-23T094112-4704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-24T031500-32638584704"
+
+
+def test_workflow_and_generator_agree_on_the_embedded_instant():
+    # The workflow derives meta.json's date from the resolved directory name so a
+    # re-run cannot report a clock its own directory contradicts. It parses that
+    # name with the same pattern the generator uses; pin them together.
+    assert gen._RUN_ID_STAMP_RE.pattern in _publish_step()
+
+
+def test_format_instant_renders_a_time_and_never_invents_one():
+    assert gen.format_instant("2026-08-23T09:41:12+00:00") == "2026-08-23 09:41:12 UTC"
+    # An explicit Z, which fromisoformat only accepts from 3.11.
+    assert gen.format_instant("2026-08-23T09:41:12Z") == "2026-08-23 09:41:12 UTC"
+    # Naive means UTC by construction: every writer uses `date -u` or utcnow.
+    assert gen.format_instant("2026-08-23T09:41:12") == "2026-08-23 09:41:12 UTC"
+    # A non-UTC offset is normalised rather than shown in the writer's zone.
+    assert gen.format_instant("2026-08-23T11:41:12+02:00") == "2026-08-23 09:41:12 UTC"
+
+    # A date-only value comes from a run published before the id carried a time.
+    # fromisoformat() would accept it and render a confident 00:00:00, so the
+    # value is returned untouched instead of inventing a midnight.
+    assert gen.format_instant("2026-08-23") == "2026-08-23"
+    # Malformed or absent values pass through: the run identity around them is
+    # still worth rendering.
+    for junk in ("", None, "d", "not a date", "2026-08-23T0941"):
+        assert gen.format_instant(junk) == (junk or "")
+
+
+def test_published_pages_show_the_instant_but_env_json_keeps_it_machine_readable(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "runs"
+    run_id = "2026-08-23T094112-32638584705"
+    _write_history_run(root, run_id, meta={"date": "2026-08-23T09:41:12+00:00"})
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard", "--history-root", str(root),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(tmp_path / "dashboard"),
+    ])
+    assert gen.main() == 0
+    out = tmp_path / "dashboard"
+
+    human = "2026-08-23 09:41:12 UTC"
+    for page in (out / "index.html", out / "runs" / run_id / "waitcheck" / "index.html"):
+        assert human in page.read_text(encoding="utf-8"), page
+    assert human in (out / "summary.md").read_text(encoding="utf-8")
+
+    # The manifest a consumer of aorta.sanitizer_run_area/0.1 reads keeps the
+    # ISO instant: the human rendering is a display concern, not a stored one.
+    env = json.loads(
+        (out / "runs" / run_id / "waitcheck" / "env.json").read_text(encoding="utf-8")
+    )
+    assert env["date"] == "2026-08-23T09:41:12+00:00"
 
 
 def test_history_root_missing_report_has_no_report_rel(tmp_path):
