@@ -778,6 +778,28 @@ class TestEnvSnapshot:
         s.therock["status"]
         s.therock["gemm_libraries_commit"]
 
+    def test_a_pre_1_16_snapshot_gets_unknown_therock_not_absent(self):
+        """`absent` is a positive claim the old producer never made (#387).
+
+        It means "this install ships no manifest". A pre-1.16 snapshot may well
+        have been a wheel layout with a perfectly good manifest nobody looked
+        for, so asserting `absent` -- and stamping the READING host's
+        manifest_path onto someone else's capture -- invents both facts. Same
+        reasoning as `_null_rocm` for the attribution keys.
+        """
+        d = _example_snapshot().to_dict()
+        d["schema_version"] = "1.15"
+        del d["therock"]
+        rebuilt = EnvSnapshot.from_dict(d)
+        assert rebuilt.therock["status"] == "unknown"
+        assert rebuilt.therock["manifest_path"] is None
+        # Still the full shape, so a 1.16 consumer can index it.
+        assert set(rebuilt.therock) == set(env_mod._empty_therock())
+
+    def test_a_locally_built_snapshot_still_says_absent(self, all_disabled):
+        """The local default is unchanged: here we DID look and found none."""
+        assert collect_env().therock["status"] == "absent"
+
     def test_a_short_therock_block_is_backfilled_too(self):
         d = _example_snapshot().to_dict()
         d["therock"] = {"status": "present", "rocm_version": "7.14.0"}

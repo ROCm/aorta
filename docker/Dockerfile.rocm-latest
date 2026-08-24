@@ -11,8 +11,9 @@
 # Base: rocm/pytorch ROCm 7.2.4, Ubuntu 24.04, Python 3.12, PyTorch 2.10.0
 # Kept in step with Dockerfile.ci-gpu so local runs match what CI validates.
 # Newest published combination on every axis: 24.04 / py3.12 / torch 2.10.0 are
-# the newest Ubuntu, Python and PyTorch on the 7.2.4 line, and py3.12 is also
-# where our own pyproject classifiers stop.
+# the newest Ubuntu, Python and PyTorch on the 7.2.4 line. py3.12 is purely what
+# that ROCM line offers -- our own packaging no longer caps it, since pyproject
+# declares through 3.14 and the CPU matrix tests 3.10-3.14 (#383).
 #
 # This is the newest ROCm PRODUCTION release this image currently tracks:
 #   * 7.9-7.13 are the technology PREVIEW stream, not newer production;

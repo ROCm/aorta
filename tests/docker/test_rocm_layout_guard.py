@@ -313,6 +313,16 @@ class TestParity:
     def test_nothing_found(self, agree):
         assert agree().source == "none"
 
+    def test_a_relative_override_is_anchored_on_both_sides(
+        self, agree, tmp_path: Path, monkeypatch
+    ):
+        """Both must anchor a relative override, or they disagree on the roots."""
+        build_classic(tmp_path / "rocm")
+        monkeypatch.chdir(tmp_path)
+        result = agree({"ROCM_PATH": "rocm"})
+        assert result.core.is_absolute()
+        assert result.core == tmp_path / "rocm"
+
     @pytest.mark.parametrize(
         "exc",
         [
@@ -358,8 +368,26 @@ class TestGuardVerdict:
     def test_no_rocm_at_all_fails(self, sandbox, capsys):
         assert guard.main() == 1
         err = capsys.readouterr().err
-        assert "no readable ROCm install" in err
+        assert "no ROCm install found in either layout" in err
         assert "source=none" in err
+        assert "neither was found" in err
+
+    def test_an_incomplete_install_does_not_claim_neither_layout_was_found(
+        self, classic_at, tmp_path: Path, capsys
+    ):
+        """The diagnostic must match the state it just printed (#387).
+
+        When discovery DID resolve a tree that is merely incomplete, saying
+        "neither layout was found" contradicts the layout/source printed two
+        lines above and sends the reader hunting the wrong problem.
+        """
+        classic_at(build_classic(tmp_path / "opt_rocm", version=None))
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        assert "found a classic ROCm install" in err
+        assert "source=opt_rocm" in err
+        assert "incomplete or damaged" in err
+        assert "neither was found" not in err
 
     def test_install_without_a_version_file_fails(self, classic_at, tmp_path: Path, capsys):
         """The exact silent-degradation case the guard exists to catch.

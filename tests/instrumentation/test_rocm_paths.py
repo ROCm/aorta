@@ -236,6 +236,40 @@ class TestResolutionOrder:
         assert roots.core == classic
         assert roots.layout == LAYOUT_CLASSIC
 
+    def test_a_relative_override_is_anchored_to_an_absolute_path(
+        self, no_rocm, tmp_path: Path, monkeypatch
+    ):
+        """Relative roots would change meaning with the working directory (#387).
+
+        ``environment.py`` freezes these into module constants at import, so a
+        relative ``$ROCM_PATH`` would make the same snapshot describe different
+        trees before and after a ``chdir`` -- and it breaks the absolute-path
+        invariant ``TestPathConstants`` asserts over those constants.
+        """
+        build_classic(tmp_path / "rocm")
+        monkeypatch.chdir(tmp_path)
+        roots = resolve_rocm_roots({"ROCM_PATH": "rocm"})
+        assert roots.core.is_absolute()
+        assert roots.core == tmp_path / "rocm"
+        # Every derived path inherits it.
+        for derived in (roots.lib_dir, roots.include_dir, roots.version_file):
+            assert derived.is_absolute()
+
+    def test_anchoring_does_not_resolve_symlinks(self, tmp_path: Path, monkeypatch):
+        """``/opt/rocm`` is normally a symlink and must stay reported as such.
+
+        Lexical anchoring only -- ``resolve()`` would report the versioned target
+        (``/opt/rocm-7.2.4``), which is exactly what CLASSIC_ROCM_ROOT documents
+        it does not do, so two hosts on one release would stop comparing equal.
+        """
+        target = build_classic(tmp_path / "rocm-7.2.4")
+        link = tmp_path / "rocm"
+        link.symlink_to(target, target_is_directory=True)
+        monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", tmp_path / "absent")
+        monkeypatch.setattr(rocm_paths, "_installed_wheel_component", lambda p: None)
+        monkeypatch.chdir(tmp_path)
+        assert resolve_rocm_roots({"ROCM_PATH": "rocm"}).core == link
+
     def test_nothing_found_returns_classic_root_with_source_none(self, no_rocm, tmp_path: Path):
         """The all-absent case: never raise, never return None.
 

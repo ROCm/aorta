@@ -174,6 +174,23 @@ def _classic_roots(source: str) -> RocmRoots:
     )
 
 
+def _absolute(path: Path) -> Path:
+    """Anchor a possibly-relative override, WITHOUT resolving symlinks.
+
+    A relative ``$ROCM_PATH`` / ``$ROCM_HOME`` would otherwise yield relative
+    roots, and ``environment.py`` freezes these into module constants at import.
+    Their meaning would then change with the process working directory -- so the
+    same snapshot could describe two different trees -- and it breaks the
+    absolute-path invariant ``TestPathConstants`` asserts over those constants.
+
+    Deliberately lexical (``os.path.abspath``, not ``Path.resolve``): ``/opt/rocm``
+    is normally a symlink to the active versioned tree, and resolving it would
+    report ``/opt/rocm-7.2.4`` instead of the stable path an operator would type,
+    which is the one thing :data:`CLASSIC_ROCM_ROOT` documents it does not do.
+    """
+    return Path(os.path.abspath(path))
+
+
 def _safe_is_dir(path: Path) -> bool:
     """``path.is_dir()`` that never raises.
 
@@ -372,7 +389,7 @@ def resolve_rocm_roots(environ: dict[str, str] | None = None) -> RocmRoots:
         value = env.get(name)
         if not value:
             continue
-        roots = _roots_from_candidate(Path(value), name)
+        roots = _roots_from_candidate(_absolute(Path(value)), name)
         if roots is not None:
             return roots
         log.debug("%s=%s does not look like a ROCm install; continuing", name, value)

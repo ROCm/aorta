@@ -54,6 +54,16 @@ LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
 
 
+def _absolute(path: Path) -> Path:
+    """Anchor a relative override without resolving symlinks.
+
+    Mirrors rocm_paths._absolute: a relative ROCM_PATH/ROCM_HOME would make the
+    reported roots depend on the working directory. Lexical on purpose, so a
+    /opt/rocm symlink is still reported as /opt/rocm.
+    """
+    return Path(os.path.abspath(path))
+
+
 def _safe_is_dir(path: Path) -> bool:
     """``is_dir()`` that never raises. Mirrors rocm_paths._safe_is_dir.
 
@@ -144,7 +154,7 @@ def resolve():
         value = os.environ.get(name)
         if not value:
             continue
-        roots = _roots_from_candidate(Path(value), name)
+        roots = _roots_from_candidate(_absolute(Path(value)), name)
         if roots is not None:
             return roots
 
@@ -227,8 +237,21 @@ def main() -> int:
     if not failures:
         return 0
 
+    # Two distinct failures, and the message has to say which one happened.
+    # "neither layout was found" is only true when discovery came up empty; when
+    # it resolved a tree that is merely incomplete, saying that contradicts the
+    # resolved layout/source printed directly above it and sends the reader
+    # looking for the wrong problem.
+    nothing_found = source == "none"
     print("", file=sys.stderr)
-    print("ERROR: base image has no readable ROCm install.", file=sys.stderr)
+    if nothing_found:
+        print("ERROR: no ROCm install found in either layout.", file=sys.stderr)
+    else:
+        print(
+            f"ERROR: found a {layout} ROCm install (via {source}) but it is not "
+            "readable.",
+            file=sys.stderr,
+        )
     for failure in failures:
         print(f"  - {failure}", file=sys.stderr)
     print(
@@ -237,10 +260,21 @@ def main() -> int:
     )
     for name in ROOT_ENV_VARS:
         print(f"  {name}={os.environ.get(name, '<unset>')}", file=sys.stderr)
+    if nothing_found:
+        print(
+            "  Both the classic (/opt/rocm) and wheel (TheRock, under\n"
+            "  site-packages) layouts are accepted; neither was found.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "  The layout was recognised, so this is an incomplete or damaged\n"
+            "  install rather than an unsupported one -- check the paths above.",
+            file=sys.stderr,
+        )
     print(
-        "  Both the classic (/opt/rocm) and wheel (TheRock, under site-packages)\n"
-        "  layouts are accepted; neither was found. Fix the base image or the\n"
-        "  digest pin -- do not delete this guard to make a bump pass (#381).",
+        "  Fix the base image or the digest pin -- do not delete this guard to\n"
+        "  make a bump pass (#381).",
         file=sys.stderr,
     )
     return 1

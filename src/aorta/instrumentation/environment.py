@@ -1343,7 +1343,10 @@ class EnvSnapshot:
           ``layout`` / ``version_source`` and the GEMM blocks'
           ``upstream_commit`` / ``upstream_commit_matches_tweak`` as ``null``.
           The ``rocm`` attribution keys back-fill as ``null`` rather than this
-          host's resolved roots -- see :func:`_null_rocm`.
+          host's resolved roots -- see :func:`_null_rocm`. ``therock`` is
+          additive, so a pre-1.16 snapshot that lacks it entirely gets
+          ``status="unknown"`` (see :func:`_null_therock`), not the ``"absent"``
+          the local default would assert on its behalf.
 
         Strictly-required older fields (the schema-1.0/1.1 set) are NOT
         defaulted -- a missing ``rocm`` or ``hipblaslt`` key still
@@ -1381,10 +1384,17 @@ class EnvSnapshot:
             ("rocm", _null_rocm),
             ("hipblaslt", _empty_gemm_library),
             ("rocblas", _empty_gemm_library),
-            ("therock", _empty_therock),
+            ("therock", _null_therock),
         ):
             if name in kwargs:
                 kwargs[name] = {**empty(), **(kwargs[name] or {})}
+        # `therock` is additive (1.16), so unlike the three above it can be
+        # wholly absent. It must NOT fall through to the dataclass default,
+        # which is `_empty_therock()` -- correct for a snapshot built here, but
+        # for a loaded pre-1.16 artifact it would assert "this install shipped
+        # no manifest" and stamp the reading host's manifest_path onto someone
+        # else's capture.
+        kwargs.setdefault("therock", _null_therock())
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -3192,6 +3202,21 @@ def _empty_gemm_library() -> dict[str, Any]:
         "upstream_commit_matches_tweak": None,
         "applied_prs": {},
     }
+
+
+def _null_therock() -> dict[str, Any]:
+    """The ``therock`` shape for a snapshot that PREDATES the block.
+
+    Distinct from ``_empty_therock()`` for the same reason :func:`_null_rocm` is
+    distinct from :func:`_empty_rocm`: ``status="absent"`` is a positive claim
+    ("this install ships no manifest"), and a pre-1.16 producer made no such
+    claim -- it may well have been a wheel layout with a perfectly good manifest
+    it never looked for. Reporting ``absent`` plus the *reading* host's
+    ``manifest_path`` would invent both facts.
+
+    ``status="unknown"`` says only that the artifact predates the block.
+    """
+    return {**_empty_therock(), "status": "unknown", "manifest_path": None}
 
 
 def _empty_therock(status: str = "absent") -> dict[str, Any]:
