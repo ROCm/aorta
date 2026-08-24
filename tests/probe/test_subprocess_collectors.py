@@ -185,7 +185,9 @@ def _rocprof_artifacts(collect_dir: Path, total_ns: int = 539404, calls: int = 2
 
     Call this *after* ``setup()``: the real rocprofv3 writes while the wrapped
     command runs, and ``setup()`` deliberately empties the collector directory
-    so a resumed trial cannot summarise the attempt it is replacing.
+    so a resumed trial cannot summarise the attempt it is replacing. Calling it
+    before ``setup()`` therefore seeds a stale previous attempt, which is what
+    ``test_setup_discards_an_interrupted_attempts_artifacts`` wants.
     """
     out_dir = collect_dir / rocprof.OUTPUT_SUBDIR
     out_dir.mkdir(parents=True, exist_ok=True)

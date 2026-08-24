@@ -1103,8 +1103,10 @@ class SubprocessWorkload(Workload):
             return None
         outcome = self._prune_collector_tree(trial_dir, level, outcome)
         if outcome.deleted:
+            # "for" rather than "from": the count can span both the trial dir
+            # and the sibling collector tree.
             log.info(
-                "retention[%s]: pruned %d artifact(s) (~%d bytes) from %s",
+                "retention[%s]: pruned %d artifact(s) (~%d bytes) for trial %s",
                 level,
                 len(outcome.deleted),
                 outcome.freed_bytes,
