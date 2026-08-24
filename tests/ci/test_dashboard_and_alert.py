@@ -1652,3 +1652,74 @@ def test_main_renders_canary_rows_without_entering_data_or_status_json(tmp_path,
     data = json.loads((out / "data.json").read_text(encoding="utf-8"))
     assert [d["build"]["lane"] for d in data] == ["gate"]
     assert "canary" not in (out / "status.json").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Workflow wiring the dashboard depends on (issue #387)
+# ---------------------------------------------------------------------------
+
+
+def _load_workflow(name: str):
+    import yaml
+
+    return yaml.safe_load((_REPO_ROOT / ".github/workflows" / name).read_text("utf-8"))
+
+
+def test_pages_refreshes_after_every_workflow_that_writes_a_rendered_branch():
+    """A published row that never triggers a deploy is invisible.
+
+    `pages.yml` renders both the gated lane and the canary lane from data
+    branches, so every workflow that WRITES one has to be in its
+    `workflow_run.workflows` list -- otherwise those rows sit unpublished until
+    some unrelated later deploy. The canary was missing, which made its
+    (already-rendering) section stale by default.
+    """
+    pages = _load_workflow("pages.yml")
+    # PyYAML parses the `on:` key as the boolean True.
+    listed = pages[True]["workflow_run"]["workflows"]
+    canary_name = _load_workflow("latest-rocm-canary.yml")["name"]
+    # Matched by NAME, so a rename of the canary workflow silently unhooks it.
+    assert canary_name in listed, (
+        f"{canary_name!r} writes results/canary/ on ci-results but does not "
+        f"trigger Pages; listed = {listed}"
+    )
+
+
+def test_canary_eval_step_runs_even_when_the_container_failed_to_start():
+    """The synthesis path is worthless behind an implicit success().
+
+    If the image build/start fails -- notably when the layout guard rejects a
+    newly published :latest -- an implicit `success()` skips the eval step, so no
+    attributable row is synthesised and the broken release disappears from
+    history. That is the hole the synthesis exists to close.
+    """
+    canary = _load_workflow("latest-rocm-canary.yml")
+    step = [s for s in canary["jobs"]["canary"]["steps"] if s.get("id") == "eval"][0]
+    condition = step.get("if", "")
+    assert "always()" in condition, condition
+    # ...but only once there is a digest to attribute the row to.
+    assert "steps.resolve.outcome" in condition, condition
+
+
+def test_canary_compose_project_is_isolated_from_the_gate():
+    """A distinct container name does not isolate a Compose project.
+
+    Both lanes invoke compose from `docker/` with the same `torchenv` service, so
+    without an explicit COMPOSE_PROJECT_NAME both default to project `docker` --
+    and the canary's `down -v` would remove the gate's service and volumes
+    mid-run on the shared MI350 runner.
+    """
+    def env_file(name):
+        text = (_REPO_ROOT / "docker" / name).read_text("utf-8")
+        return dict(
+            line.split("=", 1)
+            for line in (ln.strip() for ln in text.splitlines())
+            if line and not line.startswith("#") and "=" in line
+        )
+
+    canary = env_file(".env.canary")
+    gate = env_file(".env.ci")
+    assert canary.get("COMPOSE_PROJECT_NAME"), ".env.canary must pin a project name"
+    assert canary["COMPOSE_PROJECT_NAME"] != gate.get("COMPOSE_PROJECT_NAME")
+    # The container name still has to differ too, for docker exec / ps.
+    assert canary["CONTAINER_NAME"] != gate["CONTAINER_NAME"]

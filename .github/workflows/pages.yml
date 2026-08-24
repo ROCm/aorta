@@ -6,14 +6,19 @@ name: Pages (landing + nightly dashboard)
 # (Jekyll render of README.md, under /docs/ alongside the rest of the rendered
 # docs). It runs on main pushes, after each "Nightly Evaluation" completes (pick
 # up fresh history from the ci-results branch), after each "Sanitizers Nightly"
-# completes (pick up fresh history from the sanitizer-results branch), and on
+# completes (pick up fresh history from the sanitizer-results branch), after each
+# "Latest ROCm canary" completes (also ci-results, under results/canary/), and on
 # demand.
+#
+# Every workflow that WRITES a data branch this page renders has to be listed
+# below, or its rows sit on the branch unpublished until some unrelated later
+# deploy happens to pick them up. The canary is the newest such writer.
 
 on:
   push:
     branches: [main]
   workflow_run:
-    workflows: ["Nightly Evaluation", "Sanitizers Nightly"]
+    workflows: ["Nightly Evaluation", "Sanitizers Nightly", "Latest ROCm canary"]
     types: [completed]
   workflow_dispatch:
 

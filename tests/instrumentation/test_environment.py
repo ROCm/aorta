@@ -3328,11 +3328,38 @@ class TestTheRockManifest:
         def boom(self):
             raise OSError("stale NFS handle")
 
-        monkeypatch.setattr(Path, "exists", boom)
+        # The presence probe is lstat(), not exists() -- see the dangling-symlink
+        # test below for why.
+        monkeypatch.setattr(Path, "lstat", boom)
         manifest, error = env_mod._read_therock_manifest()
         assert manifest is None
         assert error is not None and "could not be checked" in error
         assert env_mod._capture_therock(manifest, [], error)["status"] == "invalid"
+
+    def test_a_dangling_symlink_manifest_is_invalid_not_absent(self, tmp_path, monkeypatch):
+        """`exists()` follows symlinks, so a broken link looked like absence.
+
+        A dangling symlink IS a present directory entry on a damaged install, so
+        it belongs in "invalid" -- the same absent/invalid conflation as the
+        previous two rounds, one filesystem call further in (#387).
+        """
+        link = tmp_path / "therock_manifest.json"
+        link.symlink_to(tmp_path / "gone.json")
+        assert not link.exists()          # the old check said "absent"
+        assert link.is_symlink()          # ...but the entry is right there
+        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", link)
+        manifest, error = env_mod._read_therock_manifest()
+        assert manifest is None
+        assert error is not None
+        assert env_mod._capture_therock(manifest, [], error)["status"] == "invalid"
+
+    def test_a_truly_absent_manifest_is_still_absent(self, tmp_path, monkeypatch):
+        """The lstat change must not turn the normal classic reading into a partial."""
+        monkeypatch.setattr(env_mod, "THEROCK_MANIFEST_FILE", tmp_path / "nope.json")
+        assert env_mod._read_therock_manifest() == (None, None)
+        reasons: list[str] = []
+        assert env_mod._capture_therock(None, reasons)["status"] == "absent"
+        assert reasons == []
 
     def test_malformed_submodule_entries_are_surfaced_not_swallowed(self):
         """Kept-with-null-name is visible; dropped is indistinguishable from absent.

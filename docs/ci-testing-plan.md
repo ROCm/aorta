@@ -332,7 +332,7 @@ Non-gating is structural here, not just intended:
 | its own workflow | cannot appear in `nightly-eval.yml`'s graph, cannot be added to branch protection by accident |
 | eval exit code captured, not propagated | a regression on a brand-new ROCm records a row instead of a red X nobody can action |
 | results published to `results/canary/` | `gen_dashboard.py` globs `results/*.json` **non-recursively**, so canary rows cannot enter the gated dashboard's history or trends (pinned by `test_load_results_ignores_the_canary_subdirectory`) |
-| distinct container name (`aorta-rocm-canary`) | cannot tear down the gate's container on the shared MI350 runner |
+| distinct `COMPOSE_PROJECT_NAME` (`aorta-canary`) **and** container name | cannot recreate or tear down the gate's service on the shared MI350 runner. Both are needed: compose addresses the *service*, and with the project name unset it derives one from the working directory — both lanes run compose from `docker/` with the same `torchenv` service, so both would land in project `docker` and the canary's `down -v` would take the gate's container and volumes with it |
 
 Each row carries `lane` (`"gate"` / `"canary"`) and `base_image` (the resolved
 digest, `null` in the gated lane where the Dockerfile pin already records it).

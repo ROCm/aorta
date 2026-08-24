@@ -3064,8 +3064,17 @@ def _read_therock_manifest() -> tuple[dict[str, Any] | None, str | None]:
     if text is None:
         # _read_text_file collapses missing, empty, permission-denied and
         # non-UTF8 into None, so ask the filesystem which of those it was.
+        #
+        # lstat, not exists(): exists() follows symlinks, so a DANGLING symlink
+        # at the manifest path answers False and would be reported as the
+        # documented classic absence. A dangling symlink is a present directory
+        # entry on a damaged install, which is exactly the "invalid" case. lstat
+        # answers "is there an entry here", which is the question being asked.
         try:
-            present = THEROCK_MANIFEST_FILE.exists()
+            THEROCK_MANIFEST_FILE.lstat()
+            present = True
+        except FileNotFoundError:
+            present = False
         except OSError as exc:
             # Cannot even stat it. That is NOT the documented classic absence
             # -- a stale mount or an unreadable parent directory is a broken

@@ -31,6 +31,11 @@ name: Latest ROCm canary
 #      canary rows cannot contaminate the gated dashboard's history or trends,
 #      and they reach the page only through a separate render path that feeds
 #      neither status.json nor data.json.
+#   4. .env.canary pins its own COMPOSE_PROJECT_NAME. Compose addresses the
+#      SERVICE, and derives the project from the working directory when unset --
+#      both lanes run compose from docker/ with the same `torchenv` service, so
+#      without that pin this lane's `down -v` would delete the gate's container
+#      and volumes mid-run. A distinct container name alone does not prevent it.
 #
 # The rows render on the dashboard under "Latest ROCm canary - observed only"
 # (the #canary anchor), fed by gen_dashboard.py's --canary-results-dir. That is a
@@ -168,6 +173,15 @@ jobs:
       # document gets an attributable row synthesised for it and fails the step.
       - name: Install wheel and run evaluation (observed-only)
         id: eval
+        # always(), gated on the digest having resolved. Without this the step
+        # keeps its implicit success() and is SKIPPED when the build/start step
+        # fails -- including the case that matters most, where the layout guard
+        # rejects a newly published :latest. The synthesis path below would then
+        # never run, no attributable row would be uploaded, and the broken
+        # release would vanish from history: the exact hole the synthesis was
+        # added to close, one step earlier in the job. Gated on `resolve` because
+        # without a digest there is nothing attributable to record.
+        if: always() && steps.resolve.outcome == 'success'
         env:
           AORTA_CI_LANE: canary
           AORTA_CI_BASE_IMAGE: ${{ steps.resolve.outputs.base_image }}
