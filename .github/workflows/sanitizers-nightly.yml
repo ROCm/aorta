@@ -648,9 +648,13 @@ jobs:
           # keep slots, two rows in history, and the earlier attempt reports left
           # in place -- which is exactly what the rm -rf below exists to prevent.
           # Reuse whatever name already carries this run id, old shape included.
+          # No break: the glob expands in ascending order, so the last match wins
+          # and the newest directory is reused. The old scheme could leave two for
+          # one run id -- a re-run that crossed midnight got a second date -- and
+          # re-publishing into the older of those would strand the newer one.
           run_dir_id=""
           for existing in "$runs_dir"/*-"${GITHUB_RUN_ID}"; do
-            if [ -d "$existing" ]; then run_dir_id="$(basename "$existing")"; break; fi
+            if [ -d "$existing" ]; then run_dir_id="$(basename "$existing")"; fi
           done
           : "${run_dir_id:=${started_id}-${GITHUB_RUN_ID}}"
           dest="$runs_dir/${run_dir_id}"

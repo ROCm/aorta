@@ -757,6 +757,13 @@ def test_workflow_reuses_the_directory_a_rerun_already_minted(tmp_path):
     (runs / "2026-08-23T094112-4704").mkdir()
     assert _run_shell(script, tmp_path, env) == "2026-08-24T031500-32638584704"
 
+    # The old scheme could leave two directories for one run id -- a re-run that
+    # crossed midnight got a second date -- so reuse the newest of them rather
+    # than re-publishing into the older one and stranding the newer.
+    (runs / "2026-08-23-32638584704").mkdir()
+    (runs / "2026-08-24-32638584704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-24-32638584704"
+
 
 def test_workflow_and_generator_agree_on_the_embedded_instant():
     # The workflow derives meta.json's date from the resolved directory name so a
@@ -809,7 +816,7 @@ def test_published_pages_show_the_instant_but_env_json_keeps_it_machine_readable
     env = json.loads(
         (out / "runs" / run_id / "waitcheck" / "env.json").read_text(encoding="utf-8")
     )
-    assert env["date"] == "2026-08-23T09:41:12+00:00"
+    assert env.get("date") == "2026-08-23T09:41:12+00:00"
 
 
 def test_history_root_missing_report_has_no_report_rel(tmp_path):
