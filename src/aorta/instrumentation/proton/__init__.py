@@ -104,18 +104,73 @@ def _is_python(arg: str) -> bool:
     return bool(_PYTHON_RE.match(Path(arg).name))
 
 
+def _shebang_interpreter(command: str) -> str | None:
+    """Return the Python interpreter a console script's ``#!`` line names.
+
+    A ``pytest`` on ``$PATH`` is a generated console script shebanged to the
+    interpreter that installed it, which in probe mode is frequently *not*
+    the one aorta is running under. Reading it back is what keeps the wrap on
+    the environment the operator's command would have used.
+
+    Returns ``None`` when the target cannot be resolved or read, is not a
+    script, or names a non-Python interpreter -- all cases the caller handles
+    by falling back rather than guessing.
+    """
+    resolved = shutil.which(command)
+    if resolved is None:
+        return None
+    try:
+        with open(resolved, "rb") as stream:
+            first_line = stream.readline(256)
+    except OSError:
+        return None
+    if not first_line.startswith(b"#!"):
+        return None
+    try:
+        parts = first_line[2:].decode("utf-8").split()
+    except UnicodeDecodeError:
+        return None
+    if not parts:
+        return None
+    # ``#!/usr/bin/env python3`` names the interpreter in the argument.
+    if Path(parts[0]).name == "env" and len(parts) > 1:
+        parts = parts[1:]
+    return parts[0] if _is_python(parts[0]) else None
+
+
 def resolve_python(argv: list[str] | tuple[str, ...]) -> str:
     """Pick the interpreter that runs Proton's command front-end.
 
     Precedence: ``$AORTA_PROTON_PYTHON`` (an operator override for the case
     where Triton lives elsewhere), then the workload's own ``argv[0]`` when it
-    is a Python interpreter, then :data:`sys.executable`.
+    is a Python interpreter, then -- for the bare ``pytest`` spelling, whose
+    ``argv[0]`` is a console script rather than an interpreter -- the
+    interpreter named by that script's shebang, and finally
+    :data:`sys.executable`.
+
+    The shebang step matters because the wrap replaces the command's own
+    interpreter with this one. Falling straight through to
+    :data:`sys.executable` for ``/some/venv/bin/pytest`` would profile a
+    different environment than the one the operator asked to run, which can
+    import a different dependency set or fail outright on a command that works
+    unprofiled.
     """
     override = os.environ.get(ENV_PROTON_PYTHON)
     if override:
         return os.path.expandvars(os.path.expanduser(override))
     if argv and _is_python(argv[0]):
         return argv[0]
+    if argv and Path(argv[0]).name in _WRAPPABLE_MODULES:
+        interpreter = _shebang_interpreter(argv[0])
+        if interpreter is not None:
+            return interpreter
+        log.warning(
+            "proton: could not read an interpreter from %r; running Proton "
+            "under %s instead. Set $%s if that is the wrong environment.",
+            argv[0],
+            sys.executable,
+            ENV_PROTON_PYTHON,
+        )
     return sys.executable
 
 

@@ -82,10 +82,13 @@ The same artifact set as `hip-gemm` — `<stem>_kernel_stats.csv`,
 API rows, because this example's options (documented in
 [`recipe.yaml`](recipe.yaml)) set `trace: "kernel,hip"`.
 
-`kernel_include_regex: "Cijk|gemm|matmul"` restricts the summary to GEMM
+`kernel_include_regex: "Cijk|gemm|matmul"` narrows the capture to GEMM
 kernels so `rocprof_top_kernel_ms` reports the matmul rather than a
-`fill`/`copy` kernel. Widen or drop it if a kernel you expected is missing
-from the summary — the raw `_kernel_trace.csv` is unfiltered either way.
+`fill`/`copy` kernel. It is a **collection** filter, not a post-filter: the
+collector passes it to `rocprofv3` as `--kernel-include-regex`, so an excluded
+kernel never reaches `_kernel_trace.csv` either. If a kernel you expected is
+missing, widen or drop the regex and re-run — it is not waiting in the raw
+trace.
 
 ## Notes
 

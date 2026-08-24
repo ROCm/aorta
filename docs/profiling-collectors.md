@@ -602,8 +602,17 @@ Two consequences worth internalising:
 - **Every trial of every cell gets a capture.** With N cells × M trials you
   get N×M artifact directories. Keep payload sizes and trial counts small
   when a collector is on.
-- **A collector never changes the verdict.** Summary parsing is fail-soft by
-  construction; the worst case is fewer metrics.
+- **Summary *parsing* never changes the verdict — attaching a collector
+  can.** Parsing is fail-soft by construction: a missing, partial or malformed
+  capture costs you metrics, never the trial. The attach path is deliberately
+  the opposite. A collector that cannot run (no `rocprofv3`, a Proton wrap of
+  a command its front end cannot execute, no `env(1)` for a device
+  translation, an artifact directory that cannot be prepared) fails the
+  trial's setup rather than running it unprofiled. And a profiler is a real
+  process in the trial: its own non-zero exit is the trial's exit code, and
+  `rocprof`'s `simple_timer` stderr lines are visible to the classifier's
+  stderr detectors (see [Troubleshooting](#troubleshooting)). Profiling is a
+  measurement mode, not a transparent one.
 
 Runnable end-to-end examples for both collectors, with payloads and
 recipes, live in [`examples/profiling/`](../examples/profiling/README.md).
@@ -617,7 +626,7 @@ collector expects it".
 | Var | Read by | Purpose | Default |
 |---|---|---|---|
 | `ROCPROF_BIN` | `rocprof` | Profiler binary: a bare name resolved on `$PATH`, or a path to an executable | `rocprofv3` from `$PATH` |
-| `AORTA_PROTON_PYTHON` | `proton` | Interpreter to run Proton's front-end under; needed when Triton lives in a different interpreter than the workload | the workload's own `argv[0]` when it is a Python interpreter, else the running `sys.executable` |
+| `AORTA_PROTON_PYTHON` | `proton` | Interpreter to run Proton's front-end under; needed when Triton lives in a different interpreter than the workload | the workload's own `argv[0]` when it is a Python interpreter; for a bare `pytest`, the interpreter its console script is shebanged to; else the running `sys.executable` |
 | `AORTA_PROTON_*` | the workload | Exported *by* `mode: env` for a workload that drives Proton itself; see [Proton attach modes](#proton-attach-modes) | — |
 
 `ROCR_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` are not collector knobs, but

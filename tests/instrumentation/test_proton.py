@@ -254,6 +254,54 @@ def test_resolve_python_env_override_wins(monkeypatch):
     assert resolve_python(["python", "script.py"]) == "/rocm/bin/python"
 
 
+def _console_script(tmp_path, first_line: str, name: str = "pytest"):
+    """Write an executable ``pytest`` console script on ``$PATH``."""
+    script = tmp_path / "scriptbin" / name
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f"{first_line}\nraise SystemExit(0)\n")
+    script.chmod(0o755)
+    return script
+
+
+def test_resolve_python_reads_the_pytest_shebang(tmp_path, monkeypatch):
+    """The wrap replaces the command's interpreter, so a bare ``pytest`` must
+    keep the one its console script names -- otherwise a venv's test run gets
+    profiled under aorta's interpreter and a different dependency set."""
+    script = _console_script(tmp_path, "#!/opt/venv/bin/python3.12")
+    monkeypatch.delenv(ENV_PROTON_PYTHON, raising=False)
+    monkeypatch.setenv("PATH", str(script.parent))
+    assert resolve_python(["pytest", "-q"]) == "/opt/venv/bin/python3.12"
+
+
+def test_resolve_python_reads_an_env_style_shebang(tmp_path, monkeypatch):
+    script = _console_script(tmp_path, "#!/usr/bin/env python3")
+    monkeypatch.delenv(ENV_PROTON_PYTHON, raising=False)
+    monkeypatch.setenv("PATH", str(script.parent))
+    assert resolve_python([str(script), "-q"]) == "python3"
+
+
+def test_resolve_python_ignores_a_non_python_shebang(tmp_path, monkeypatch):
+    """A shell wrapper names no interpreter we can run Proton under, so the
+    fallback is honest rather than a guess at ``/bin/sh``."""
+    script = _console_script(tmp_path, "#!/bin/sh")
+    monkeypatch.delenv(ENV_PROTON_PYTHON, raising=False)
+    monkeypatch.setenv("PATH", str(script.parent))
+    assert resolve_python(["pytest"]) == sys.executable
+
+
+def test_resolve_python_falls_back_when_pytest_is_not_on_path(tmp_path, monkeypatch):
+    monkeypatch.delenv(ENV_PROTON_PYTHON, raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert resolve_python(["pytest"]) == sys.executable
+
+
+def test_resolve_python_override_beats_the_shebang(tmp_path, monkeypatch):
+    script = _console_script(tmp_path, "#!/opt/venv/bin/python3.12")
+    monkeypatch.setenv("PATH", str(script.parent))
+    monkeypatch.setenv(ENV_PROTON_PYTHON, "/rocm/bin/python")
+    assert resolve_python(["pytest"]) == "/rocm/bin/python"
+
+
 # ---- CLI-mode argv construction -----------------------------------------
 
 
