@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<title>Sanitizers Nightly &middot; 2026-08-24-32725903878</title>
+<link rel=stylesheet href="../../assets/run-area.css"></head>
+<body><div class=wrap>
+<div class=navrow><a href="../../">&larr; back to sanitizer dashboard</a>
+<a href="https://github.com/ROCm/aorta/actions/runs/32725903878">workflow run</a></div>
+<div class=topbar>
+<header class="page-header"><div class="brand-tile"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div>
+<h1>Sanitizers Nightly</h1>
+<p class="subtitle">run 2026-08-24-32725903878</p></div></header>
+<aside class="runcard"><div class="runrow"><span class="k">Run</span><span class="rv">2026-08-24-32725903878</span></div><div class="runrow"><span class="k">Commit</span><span class="rv">78d1ae686dc3</span></div><div class="runrow"><span class="k">Date</span><span class="rv">2026-08-24</span></div><div class="runrow"><span class="k">Target</span><span class="rv">gfx950</span></div></aside>
+</div>
+<div class="gate ok"><span class="gate-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><span class="gate-text"><strong>HEALTHY</strong>3/3 sanitizer outcomes match their baselines</span></div>
+<section class="panel"><h2>Raw reports</h2><div class="table-wrap"><table>
+<thead><tr><th>Recipe</th><th>Baseline status</th><th>Raw report</th><th>Files</th></tr></thead>
+<tbody><tr><td class=mono>daily-waitcheck-gemm</td><td><span class="pill ok">Expected outcome</span> <span class="v warn">warn</span></td><td><a href="waitcheck/sanitizer_report.json">sanitizer_report.json</a></td><td><a href="waitcheck/">run area</a></td></tr><tr><td class=mono>daily-consan-clean</td><td><span class="pill ok">Expected outcome</span> <span class="v pass">pass</span></td><td><a href="consan-clean/sanitizer_report.json">sanitizer_report.json</a></td><td><a href="consan-clean/">run area</a></td></tr><tr><td class=mono>daily-consan-racy</td><td><span class="pill ok">Expected outcome</span> <span class="v fail">fail</span></td><td><a href="consan-racy/sanitizer_report.json">sanitizer_report.json</a></td><td><a href="consan-racy/">run area</a></td></tr></tbody>
+</table></div></section>
+<section class="panel"><h2>Workload survey <span class=count>6 observed-only</span></h2><div class="table-wrap"><table>
+<thead><tr><th>Case</th><th>Observed</th><th>Reproduce</th><th>Files</th></tr></thead>
+<tbody><tr><td class=mono>consan-gemm</td><td><span class="v error">error</span></td><td class=mono>aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml</td><td><a href="survey/consan-gemm/">run area</a></td></tr><tr><td class=mono>consan-lds-dispatch</td><td><span class="v error">error</span></td><td class=mono>aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml</td><td><a href="survey/consan-lds-dispatch/">run area</a></td></tr><tr><td class=mono>consan-tiny</td><td><span class="v error">error</span></td><td class=mono>aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml</td><td><a href="survey/consan-tiny/">run area</a></td></tr><tr><td class=mono>waitcheck-gemm</td><td><span class="v warn">warn</span></td><td class=mono>aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml</td><td><a href="survey/waitcheck-gemm/">run area</a></td></tr><tr><td class=mono>waitcheck-lds-dispatch</td><td><span class="v pass">pass</span></td><td class=mono>aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml</td><td><a href="survey/waitcheck-lds-dispatch/">run area</a></td></tr><tr><td class=mono>waitcheck-tiny</td><td><span class="v pass">pass</span></td><td class=mono>aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml</td><td><a href="survey/waitcheck-tiny/">run area</a></td></tr></tbody>
+</table></div></section>
+</div></body></html>
