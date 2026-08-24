@@ -33,9 +33,16 @@ purely a local-development trap, which is what makes it easy to miss.
 
 **2. `--run latest` is a moving target.**
 `download_sanitizer_artifacts.py` defaults to the newest successful run on
-`shared/rocjitsu/sanitizers`. Two nightlies a week apart can therefore use
-different sanitizers, and nothing in the published dashboard says so. Comparing
-this week's Tab 2 against last week's can silently compare two different tools.
+`shared/rocjitsu/sanitizers`, so two nightlies a week apart can be produced by
+different sanitizers. Since #386 the published dashboard does say which: each run
+area records the bundle commit and run URL in `env.json`, `REPRODUCE.md` and the
+run-area page, so a reader comparing this week's Tab 2 against last week's can
+now see that the tool changed.
+
+What remains is that the selection is still unpinned — the dashboard reports
+which bundle was used after the fact, it does not hold it steady — and that a
+`sanitizer_report.json` read on its own, away from its run area, still carries no
+bundle identity. That detached case is what recommendation 2 below addresses.
 
 There is a third, time-boxed variant: these are 30-day GitHub Actions artifacts.
 Run 31716952381 (the one carrying all three fixes) expires around 2026-09-12,
@@ -71,21 +78,25 @@ what turns `hook_sha256: ca39f6c6…` from an opaque digest into something a rea
 can act on. Treat the manifest as optional input: record the fields when present
 and leave them absent otherwise, rather than failing the run.
 
-**Partly delivered by #386, at a different layer.** The nightly now copies
-`commit`/`run_url` out of the bundle manifest into `rocjitsu.json`, and the
-publish job exports them so the dashboard renders a `rocjitsu bundle: <commit>`
-fact per run. That covers the CI reader, and it is the reason recommendation 3
-below is already done. It does not replace per-report provenance: the fields
-travel beside the reports rather than inside them, they describe the run as a
-whole rather than each report, and a locally produced `sanitizer_report.json` —
-the case where a stale `ROCJITSU_PREBUILT` actually bites, per path 1 above —
-still carries nothing. Recording them in the report keeps the answer attached to
-the artifact that gets copied, archived and compared.
+**Largely delivered by #386, at a different layer.** The nightly now copies
+`commit`/`run_url` out of the bundle manifest into `rocjitsu.json`; the publish
+job exports them as `AORTA_ROCJITSU_COMMIT`/`AORTA_ROCJITSU_RUN_URL`, and
+`gen_sanitizer_dashboard.py` records them in each run area's `env.json`, its
+`REPRODUCE.md`, and the run-area page.
 
-**3. Show it on the dashboard.** ✅ Shipped in #386: `gen_sanitizer_dashboard.py`
-renders the bundle commit per run in both the HTML and Markdown outputs, sourced
-from `AORTA_ROCJITSU_COMMIT`. Recommendation 2 would let that caption come from
-the report itself rather than from run-scoped environment.
+That covers every reader who arrives through a run area, which is the common
+case. The remaining gap is narrow and deliberate — `_RUN_AREA_ENV_VARS` is
+introduced in that file as "provenance the workflow knows but the report does
+not". So a `sanitizer_report.json` read on its own, detached from its run area,
+still cannot answer "which rocjitsu produced this?": the fields travel beside the
+report rather than inside it, they describe the run rather than the report, and a
+locally produced report — the case where a stale `ROCJITSU_PREBUILT` actually
+bites, per path 1 above — has no run area at all. Recording them in the report
+keeps the answer attached to the artifact that gets copied, archived and compared.
+
+**3. Show it on the dashboard.** ✅ Shipped in #386, per the paragraph above.
+Recommendation 2 would additionally let that caption be reconstructed from the
+report itself rather than only from run-scoped environment.
 
 **4. Pin `--run` for the gate.** This is the existing `#330` TODO in
 `sanitizers-nightly.yml`. Pinning an explicit reviewed run ID makes the gate
