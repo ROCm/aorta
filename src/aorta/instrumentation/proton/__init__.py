@@ -293,21 +293,33 @@ def _device_env_prefix(
 ) -> list[str]:
     """Build an ``env(1)`` prefix carrying device translation + extra vars.
 
-    Proton on AMD raises outright when ``HIP_VISIBLE_DEVICES`` is set for a
+    Proton on AMD raises outright when ``HIP_VISIBLE_DEVICES`` is *set* for a
     queue-intercepting backend, so the variable is unset and its value moved to
-    ``ROCR_VISIBLE_DEVICES`` (unless the trial already set one). Returns ``[]``
-    when there is nothing to carry, keeping the common argv unchanged.
+    ``ROCR_VISIBLE_DEVICES`` (unless the trial already set one). Presence, not
+    truthiness, drives both halves: Proton rejects the variable on presence
+    alone, and an explicitly empty device list conventionally means "hide every
+    device", which is a selection to preserve rather than an absent one to
+    ignore. Returns ``[]`` when there is nothing to carry, keeping the common
+    argv unchanged.
+
+    Raises:
+        ProtonWrapError: there is something to carry but no ``env(1)`` to carry
+            it with. Argv rewriting is the only environment channel the
+            collector seam has, so an empty prefix here would run the command
+            with none of ``assignments`` -- silently unprofiled in ``mode:
+            env``, and on the wrong device (or crashing inside Proton) when a
+            device translation was requested.
     """
     assignments = dict(extra or {})
     unset: list[str] = []
     hip = env.get("HIP_VISIBLE_DEVICES")
-    if hip and backend in QUEUE_INTERCEPTING_BACKENDS:
+    if hip is not None and backend in QUEUE_INTERCEPTING_BACKENDS:
         unset.append("HIP_VISIBLE_DEVICES")
         rocr = env.get("ROCR_VISIBLE_DEVICES")
-        assignments.setdefault("ROCR_VISIBLE_DEVICES", rocr or hip)
+        assignments.setdefault("ROCR_VISIBLE_DEVICES", hip if rocr is None else rocr)
         log.warning(
-            "proton: HIP_VISIBLE_DEVICES=%s is not honoured by Proton's %s "
-            "backend; running with ROCR_VISIBLE_DEVICES=%s instead.",
+            "proton: HIP_VISIBLE_DEVICES=%r is not honoured by Proton's %s "
+            "backend; running with ROCR_VISIBLE_DEVICES=%r instead.",
             hip,
             backend,
             assignments["ROCR_VISIBLE_DEVICES"],
@@ -316,12 +328,14 @@ def _device_env_prefix(
         return []
     env_bin = shutil.which("env")
     if env_bin is None:
-        log.warning(
-            "proton: 'env' not found on $PATH; cannot apply %s. The profile "
-            "may target the wrong device or be missing.",
-            sorted({*assignments, *unset}),
+        raise ProtonWrapError(
+            "proton needs 'env' on $PATH to apply "
+            f"{sorted({*assignments, *unset})}, and it was not found. Argv "
+            "rewriting is the only channel the collector seam has for these "
+            "variables, so continuing would run the command unprofiled or on "
+            "the wrong device. Install coreutils, or drop 'proton' from the "
+            "collect request."
         )
-        return []
     prefix = [env_bin]
     for name in unset:
         prefix += ["-u", name]
@@ -356,7 +370,8 @@ def wrap_argv(
     Raises:
         ValueError: an option key or value is invalid.
         ProtonWrapError: ``mode: cli`` was requested for a command Proton's
-            front-end cannot execute.
+            front-end cannot execute, or the wrap needs ``env(1)`` to carry
+            variables into the command and it is not on ``$PATH``.
     """
     effective = validate_options(options)
     inner = list(argv)

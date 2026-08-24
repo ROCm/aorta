@@ -17,6 +17,8 @@ Two verified behaviours drive the shape of this module:
 from __future__ import annotations
 
 import csv
+import math
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -39,20 +41,40 @@ _TRACE_END = "End_Timestamp"
 _KERNEL_DISPATCH = "KERNEL_DISPATCH"
 
 
-def _read_rows(path: Path) -> list[dict[str, str]]:
-    """Read a CSV into dict rows, returning ``[]`` on any read/parse error."""
+def _iter_rows(path: Path) -> Iterator[dict[str, str]]:
+    """Stream a CSV as dict rows, yielding nothing more on a read/parse error.
+
+    A generator rather than a list: with ``stats: false`` a
+    ``*_kernel_trace.csv`` carries one row per dispatch and can reach hundreds
+    of MB, and materialising that before aggregating would add the whole file
+    to the trial process's peak RSS. Both aggregators make a single forward
+    pass, so no caller needs the rows twice.
+
+    Fail-soft like the rest of the module: a truncated or undecodable file
+    contributes the rows read so far and then stops, rather than raising.
+    """
     try:
         with path.open(newline="", encoding="utf-8") as stream:
-            return [dict(row) for row in csv.DictReader(stream)]
+            for row in csv.DictReader(stream):
+                yield dict(row)
     except (OSError, csv.Error, UnicodeDecodeError):
-        return []
+        return
 
 
 def _to_float(value: Any) -> float | None:
+    """Parse a CSV cell into a *finite* float, or ``None`` if it is not one.
+
+    ``float()`` accepts ``"NaN"`` / ``"Infinity"``, and a metric built from
+    those is both meaningless and unserialisable as strict JSON --
+    :func:`json.dump` writes the non-standard ``NaN`` / ``Infinity`` tokens,
+    which a downstream reader is entitled to reject. A row carrying one is
+    dropped like any other malformed row.
+    """
     try:
-        return float(str(value).strip())
+        parsed = float(str(value).strip())
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, int]]:
@@ -60,11 +82,14 @@ def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, i
     ns_by_kernel: dict[str, float] = {}
     calls_by_kernel: dict[str, int] = {}
     for path in paths:
-        for row in _read_rows(path):
+        for row in _iter_rows(path):
             name = (row.get(_STATS_NAME) or "").strip()
             total_ns = _to_float(row.get(_STATS_TOTAL_NS))
             calls = _to_float(row.get(_STATS_CALLS))
-            if not name or total_ns is None:
+            # A negative duration is as malformed as an unparseable one: no
+            # dispatch takes less than no time, and letting it through would
+            # silently subtract from the run's total.
+            if not name or total_ns is None or total_ns < 0:
                 continue
             ns_by_kernel[name] = ns_by_kernel.get(name, 0.0) + total_ns
             # A row with no readable ``Calls`` column still evidences one
@@ -72,7 +97,7 @@ def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, i
             # word: ``rocprof_kernel_count`` claims dispatches, so inventing
             # one would over-count.
             calls_by_kernel[name] = calls_by_kernel.get(name, 0) + (
-                1 if calls is None else int(calls)
+                1 if calls is None or calls < 0 else int(calls)
             )
     return ns_by_kernel, calls_by_kernel
 
@@ -82,7 +107,7 @@ def _totals_from_trace(paths: list[Path]) -> tuple[dict[str, float], dict[str, i
     ns_by_kernel: dict[str, float] = {}
     calls_by_kernel: dict[str, int] = {}
     for path in paths:
-        for row in _read_rows(path):
+        for row in _iter_rows(path):
             kind = (row.get(_TRACE_KIND) or "").strip()
             if kind and kind != _KERNEL_DISPATCH:
                 continue

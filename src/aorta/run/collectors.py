@@ -24,6 +24,7 @@ package docstring).
 from __future__ import annotations
 
 import logging
+import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,6 +159,27 @@ def _collect_root(config: Mapping[str, Any]) -> Path | None:
     return Path(raw) if isinstance(raw, str) and raw else None
 
 
+def _reset_output_dir(out_dir: Path) -> None:
+    """Create ``out_dir`` empty, discarding any earlier attempt's artifacts.
+
+    Probe resume replays an interrupted trial onto the *same* paths, so a
+    retry would otherwise inherit the previous attempt's profile files and
+    :func:`summarize_collectors` would report the old run's numbers -- or a
+    blend of both, when the retry writes fewer per-rank files than the attempt
+    it replaces. Clearing is safe precisely because this directory belongs to
+    one trial of one collector: nothing else writes here, and the trial record
+    (``result.json``) lives in a different tree.
+
+    Raises:
+        OSError: the directory could not be cleared or created.
+    """
+    if out_dir.is_symlink() or out_dir.is_file():
+        out_dir.unlink()
+    elif out_dir.is_dir():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+
+
 def validate_collectors(
     names: Sequence[str],
     options: Mapping[str, Mapping[str, str]] | None = None,
@@ -221,9 +243,10 @@ def wrap_argv_for_collectors(
     emulation wrap *after* this one so the profiler runs inside the emulator.
 
     Each collector's output directory (``<collect_dir>/<subdir>``) is created
-    here, so the trial tree has the same shape whether or not the workload
-    produced any GPU activity -- ``rocprofv3`` writes nothing at all when the
-    command does no GPU work.
+    empty here, so the trial tree has the same shape whether or not the
+    workload produced any GPU activity -- ``rocprofv3`` writes nothing at all
+    when the command does no GPU work -- and so a resumed trial never
+    summarises the artifacts of the attempt it is replacing.
 
     Args:
         config: The trial config carrying the reserved ``_aorta_collect*`` keys.
@@ -235,9 +258,10 @@ def wrap_argv_for_collectors(
     Raises:
         ValueError: a collector option is invalid.
         RuntimeError: a requested collector cannot attach (rocprofv3 missing,
-            or a Proton CLI wrap of a non-Python command). Requesting a
-            measurement that cannot be taken is a clean setup failure, not a
-            silently unprofiled run.
+            a Proton CLI wrap of a non-Python command, or an artifact
+            directory that cannot be prepared). Requesting a measurement that
+            cannot be taken is a clean setup failure, not a silently
+            unprofiled run.
     """
     wrapped = list(argv)
     names = active_collectors(config)
@@ -260,10 +284,14 @@ def wrap_argv_for_collectors(
             continue
         out_dir = root / spec.output_subdir
         try:
-            out_dir.mkdir(parents=True, exist_ok=True)
+            _reset_output_dir(out_dir)
         except OSError as exc:
-            log.warning("collect: cannot create %s: %s; skipping %s.", out_dir, exc, name)
-            continue
+            raise RuntimeError(
+                f"collect: cannot prepare the {name} artifact directory "
+                f"{out_dir}: {exc}. The collector has nowhere to write, so the "
+                "trial would run unprofiled; fix the path or drop "
+                f"'{name}' from the collect request."
+            ) from exc
         wrapped = spec.wrap(wrapped, out_dir, _options_for(config, name), env=env)
     return wrapped
 

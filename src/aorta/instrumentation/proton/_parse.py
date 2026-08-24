@@ -13,6 +13,7 @@ or a Proton build that emitted nothing all degrade to fewer metrics.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,11 @@ def _time_ms(metrics: dict[str, Any]) -> float | None:
     Proton names the metric ``time (<unit>)``. ``cpu_time (...)`` and the
     derived ``(inc)`` columns are deliberately not matched: the former is host
     time and the latter would double-count parents.
+
+    A value that is unreadable, non-finite, or negative is skipped and the
+    remaining metric keys are still inspected: ``NaN`` / infinity would
+    propagate into ``proton_gpu_time_ms`` and be written to the trial JSON as
+    a non-standard token, and no kernel runs for a negative time.
     """
     for key, value in metrics.items():
         head, _, tail = key.partition("(")
@@ -44,17 +50,30 @@ def _time_ms(metrics: dict[str, Any]) -> float | None:
         if factor is None:
             continue
         try:
-            return float(value) * factor
-        except (TypeError, ValueError):
+            elapsed_ms = float(value) * factor
+        except (TypeError, ValueError, OverflowError):
             continue
+        if not math.isfinite(elapsed_ms) or elapsed_ms < 0:
+            continue
+        return elapsed_ms
     return None
 
 
 def _count(metrics: dict[str, Any]) -> int:
+    """Return a leaf's dispatch count, defaulting to 1 when unreadable.
+
+    ``OverflowError`` is caught alongside the parse errors because it is what
+    a huge integer count raises on the conversion to float, and ``int()`` of
+    an infinity raises it too -- both would otherwise escape
+    :func:`parse_summary` and break its never-raises contract.
+    """
     try:
-        return int(float(metrics.get("count", 1)))
-    except (TypeError, ValueError):
+        parsed = float(metrics.get("count", 1))
+    except (TypeError, ValueError, OverflowError):
         return 1
+    if not math.isfinite(parsed) or parsed < 0:
+        return 1
+    return int(parsed)
 
 
 def _walk(node: Any, by_name: dict[str, float], counts: dict[str, int]) -> None:

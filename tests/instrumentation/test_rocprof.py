@@ -17,6 +17,7 @@ Both must parse, because an operator pointing the parser at their own
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
@@ -465,6 +466,26 @@ def test_parse_summary_skips_rows_with_unparseable_duration(tmp_path):
     assert metrics["rocprof_top_kernels"] == ["good"]
     assert metrics["rocprof_gpu_time_ms"] == pytest.approx(1.0)
     assert metrics["rocprof_kernel_count"] == 2
+
+
+def test_parse_summary_skips_non_finite_and_negative_durations(tmp_path):
+    """``float()`` accepts ``NaN`` / ``Infinity``, and letting either through
+    would write a non-standard token into the trial JSON that a strict reader
+    is entitled to reject. A negative duration is malformed for the same
+    reason an inverted trace span is."""
+    (tmp_path / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n'
+        '"good",2,1000000\n'
+        '"nan",1,NaN\n'
+        '"inf",1,Infinity\n'
+        '"negative",1,-5000\n',
+        encoding="utf-8",
+    )
+    metrics = parse_summary(tmp_path)
+    assert metrics["rocprof_top_kernels"] == ["good"]
+    assert metrics["rocprof_gpu_time_ms"] == pytest.approx(1.0)
+    assert metrics["rocprof_kernel_count"] == 2
+    assert math.isfinite(metrics["rocprof_top_kernel_ms"])
 
 
 def test_parse_summary_counts_one_dispatch_when_calls_is_unreadable(tmp_path):

@@ -73,11 +73,21 @@ payload:
 
 ```bash
 # recipe's own collector, with its options
-aorta sweep run --recipe .../hip-gemm/recipe.yaml -- /tmp/hip_gemm 512 20
+aorta sweep run --recipe .../torch-matmul/recipe.yaml \
+  -- python .../torch-matmul/matmul.py
 
 # override to a different collector (drops rocprof's option block)
-aorta sweep run --recipe .../hip-gemm/recipe.yaml --collect proton -- /tmp/hip_gemm 512 20
+aorta sweep run --recipe .../torch-matmul/recipe.yaml --collect proton \
+  -- python .../torch-matmul/matmul.py
 ```
+
+The override is `torch-matmul` rather than `hip-gemm` because the two
+collectors do not accept the same commands. `rocprof` wraps any command, but
+Proton's `mode: cli` takes over a *script*, so it attaches only to `python
+... <script>.py`, a bare `pytest`, or `python -m pytest`. Pointing
+`--collect proton` at a native binary such as `/tmp/hip_gemm` fails at setup
+with a `ProtonWrapError` naming `mode: env` as the escape hatch — deliberately,
+rather than running the payload unprofiled.
 
 To run a payload with no capture at all, comment out the recipe's `collect:`
 block — a useful way to separate "my payload is broken" from "my profiler is

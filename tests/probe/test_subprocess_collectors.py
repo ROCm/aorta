@@ -28,19 +28,50 @@ from aorta.workloads._subprocess import (
     SubprocessWorkload,
 )
 
+#: Stand-in for ``rocprofv3``: drop the profiler's own flags up to the ``--``
+#: separator, then exec the profiled command so the trial observes the
+#: payload's exit code. Every test in this module needs it -- a host that
+#: happens to have ROCm installed must not change what these tests assert.
+_FAKE_ROCPROFV3 = """#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--" ]; then
+        shift
+        break
+    fi
+    shift
+done
+[ "$#" -eq 0 ] && exit 0
+exec "$@"
+"""
+
 
 @pytest.fixture
 def rocprofv3_on_path(tmp_path, monkeypatch):
+    """Make ``rocprofv3`` resolution hermetic.
+
+    ``resolve_binary()`` raises when rocprofv3 is absent, so without this the
+    tests below pass only on a ROCm host and fail everywhere else (CI). The
+    stub is a real executable rather than a patched ``resolve_binary`` because
+    these tests run the wrapped argv end-to-end through ``run()``.
+    """
     fake = tmp_path / "fakebin" / "rocprofv3"
     fake.parent.mkdir(parents=True, exist_ok=True)
-    fake.write_text('#!/bin/sh\nexec "$@"\n')
+    fake.write_text(_FAKE_ROCPROFV3)
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:/usr/bin:/bin")
     monkeypatch.delenv(rocprof.ENV_ROCPROF_BIN, raising=False)
     return fake
 
 
-def _make_workload(tmp_path: Path, argv: list[str], *, collect=(), options=None, collect_dir=None):
+def _make_workload(
+    tmp_path: Path,
+    argv: list[str],
+    *,
+    collect=(),
+    options=None,
+    collect_dir=None,
+    retain=None,
+):
     """Build a workload with the log-prefix / collect-dir shape the runner sets.
 
     The dispatcher sets ``_aorta_log_prefix`` to
@@ -61,6 +92,8 @@ def _make_workload(tmp_path: Path, argv: list[str], *, collect=(), options=None,
             "cell_env_vars": {},
         },
     }
+    if retain is not None:
+        config[CONFIG_KEY_PROBE_EXTRAS]["retain"] = retain
     if collect:
         config[CONFIG_KEY_COLLECT] = list(collect)
         config[CONFIG_KEY_COLLECT_DIR] = str(collect_dir if collect_dir is not None else prefix)
@@ -148,6 +181,12 @@ def test_setup_argv_validation_runs_before_the_collector_wrap(tmp_path, rocprofv
 
 
 def _rocprof_artifacts(collect_dir: Path, total_ns: int = 539404, calls: int = 23) -> Path:
+    """Write the capture a profiled run would have produced.
+
+    Call this *after* ``setup()``: the real rocprofv3 writes while the wrapped
+    command runs, and ``setup()`` deliberately empties the collector directory
+    so a resumed trial cannot summarise the attempt it is replacing.
+    """
     out_dir = collect_dir / rocprof.OUTPUT_SUBDIR
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "aorta_kernel_stats.csv").write_text(
@@ -157,11 +196,11 @@ def _rocprof_artifacts(collect_dir: Path, total_ns: int = 539404, calls: int = 2
     return out_dir
 
 
-def test_run_merges_collector_metrics(tmp_path):
+def test_run_merges_collector_metrics(tmp_path, rocprofv3_on_path):
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
     wl = _make_workload(tmp_path, ["true"], collect=["rocprof"])
-    _rocprof_artifacts(collect_dir)
     wl.setup()
+    _rocprof_artifacts(collect_dir)
     result = wl.run()
     assert result.metrics["rocprof_kernel_count"] == 23
     assert result.metrics["rocprof_gpu_time_ms"] == pytest.approx(0.539404)
@@ -182,7 +221,7 @@ def test_run_metrics_unchanged_without_a_collector(tmp_path):
     }
 
 
-def test_run_collector_cannot_shadow_the_platform_keys(tmp_path, monkeypatch):
+def test_run_collector_cannot_shadow_the_platform_keys(tmp_path, monkeypatch, rocprofv3_on_path):
     """The collector summary is merged UNDER the platform bookkeeping, so a
     collector emitting ``verdict`` / ``exit_code`` cannot rewrite the trial's
     outcome."""
@@ -201,7 +240,7 @@ def test_run_collector_cannot_shadow_the_platform_keys(tmp_path, monkeypatch):
     assert result.metrics["rocprof_gpu_time_ms"] == 1.0
 
 
-def test_run_survives_a_collector_that_produced_nothing(tmp_path):
+def test_run_survives_a_collector_that_produced_nothing(tmp_path, rocprofv3_on_path):
     """rocprofv3 writes no files at all for a command with no GPU work."""
     wl = _make_workload(tmp_path, ["true"], collect=["rocprof"])
     wl.setup()
@@ -211,33 +250,99 @@ def test_run_survives_a_collector_that_produced_nothing(tmp_path):
     assert result.metrics["verdict"] == "pass"
 
 
-def test_run_survives_a_malformed_capture(tmp_path):
+def test_run_survives_a_malformed_capture(tmp_path, rocprofv3_on_path):
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
-    out_dir = collect_dir / rocprof.OUTPUT_SUBDIR
-    out_dir.mkdir(parents=True)
-    (out_dir / "aorta_kernel_stats.csv").write_text("garbage\n", encoding="utf-8")
     wl = _make_workload(tmp_path, ["true"], collect=["rocprof"])
     wl.setup()
+    out_dir = collect_dir / rocprof.OUTPUT_SUBDIR
+    (out_dir / "aorta_kernel_stats.csv").write_text("garbage\n", encoding="utf-8")
     result = wl.run()
     assert result.passed is True
     assert "rocprof_kernel_count" not in result.metrics
 
 
-def test_run_still_reports_metrics_for_a_failing_trial(tmp_path):
+def test_run_still_reports_metrics_for_a_failing_trial(tmp_path, rocprofv3_on_path):
     """A profiled crash is exactly the case an operator wants numbers for."""
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
-    _rocprof_artifacts(collect_dir)
     wl = _make_workload(tmp_path, ["false"], collect=["rocprof"])
     wl.setup()
+    _rocprof_artifacts(collect_dir)
     result = wl.run()
     assert result.passed is False
     assert result.metrics["rocprof_kernel_count"] == 23
 
 
+def test_setup_discards_an_interrupted_attempts_artifacts(tmp_path, rocprofv3_on_path):
+    """Probe resume replays a trial onto the same paths.
+
+    Without a reset the retry would summarise the interrupted attempt's
+    capture -- reporting kernel counts for work the resumed trial never did.
+    """
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    stale = _rocprof_artifacts(collect_dir, total_ns=999_999_999, calls=4242)
+    (stale / "leftover_rank_1.csv").write_text("stale\n", encoding="utf-8")
+
+    wl = _make_workload(tmp_path, ["true"], collect=["rocprof"])
+    wl.setup()
+    assert list(stale.iterdir()) == []
+
+    _rocprof_artifacts(collect_dir)
+    result = wl.run()
+    assert result.metrics["rocprof_kernel_count"] == 23
+
+
+# ---- Retention ---------------------------------------------------------
+
+
+def test_retention_prunes_the_collector_tree(tmp_path, rocprofv3_on_path):
+    """Profiler traces are the artifact class retention exists for, but they
+    land in a tree that is a *sibling* of the trial dir. Pruning only the
+    trial dir would keep every capture in a sweep regardless of ``retain``.
+    """
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    wl = _make_workload(tmp_path, ["true"], collect=["rocprof"], retain={"on_pass": "none"})
+    wl.setup()
+    _rocprof_artifacts(collect_dir)
+    result = wl.run()
+
+    # Summaries are parsed before pruning, so the numbers outlive the trace.
+    assert result.metrics["rocprof_kernel_count"] == 23
+    assert not (collect_dir / rocprof.OUTPUT_SUBDIR / "aorta_kernel_stats.csv").exists()
+
+    # The audit trail names the pruned file and where it came from.
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    recorded = doc.get("capture", {}).get("retention", {})
+    deleted = recorded.get("deleted", [])
+    assert any(entry.endswith("aorta_kernel_stats.csv") for entry in deleted)
+    assert any(entry.startswith("..") for entry in deleted)
+    assert recorded.get("freed_bytes", 0) > 0
+
+
+def test_retention_full_keeps_the_collector_tree(tmp_path, rocprofv3_on_path):
+    """``full`` is the keep-everything default; the collector tree follows it."""
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    wl = _make_workload(tmp_path, ["true"], collect=["rocprof"], retain={"on_pass": "full"})
+    wl.setup()
+    _rocprof_artifacts(collect_dir)
+    wl.run()
+    assert (collect_dir / rocprof.OUTPUT_SUBDIR / "aorta_kernel_stats.csv").exists()
+
+
+def test_retention_without_a_collector_is_unchanged(tmp_path):
+    """A run with no ``--collect`` must not gain a collector-tree scan."""
+    wl = _make_workload(tmp_path, ["true"], retain={"on_pass": "none"})
+    wl.setup()
+    wl.run()
+    doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
+    assert doc.get("capture", {}).get("retention", {}).get("level") == "none"
+
+
 # ---- Artifact / metrics location --------------------------------------
 
 
-def test_collector_artifacts_are_a_sibling_of_the_hand_written_trial_dir(tmp_path):
+def test_collector_artifacts_are_a_sibling_of_the_hand_written_trial_dir(
+    tmp_path, rocprofv3_on_path
+):
     """Pin the real layout, which is not the obvious one.
 
     ``SubprocessWorkload`` hand-writes ``<cell>/trial_<n>/result.json`` from
@@ -248,9 +353,9 @@ def test_collector_artifacts_are_a_sibling_of_the_hand_written_trial_dir(tmp_pat
     ``WorkloadResult.metrics`` into the dispatcher's trial JSON instead.
     """
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
-    _rocprof_artifacts(collect_dir)
     wl = _make_workload(tmp_path, ["true"], collect=["rocprof"])
     wl.setup()
+    _rocprof_artifacts(collect_dir)
     wl.run()
 
     artifact_dir = collect_dir / rocprof.OUTPUT_SUBDIR
@@ -266,11 +371,11 @@ def test_collector_artifacts_are_a_sibling_of_the_hand_written_trial_dir(tmp_pat
     assert hand_written.is_relative_to(tmp_path)
 
 
-def test_hand_written_result_json_carries_no_collector_metrics(tmp_path):
+def test_hand_written_result_json_carries_no_collector_metrics(tmp_path, rocprofv3_on_path):
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
-    _rocprof_artifacts(collect_dir)
     wl = _make_workload(tmp_path, ["true"], collect=["rocprof"])
     wl.setup()
+    _rocprof_artifacts(collect_dir)
     result = wl.run()
     doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
     assert not [key for key in doc if key.startswith(("rocprof_", "proton_"))]
@@ -284,9 +389,9 @@ def test_result_json_records_the_wrapped_argv(tmp_path, rocprofv3_on_path):
     HIP_VISIBLE_DEVICES translation -- is auditable from the artifact rather
     than only from a log line."""
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
-    _rocprof_artifacts(collect_dir)
     wl = _make_workload(tmp_path, ["true"], collect=["rocprof"])
     wl.setup()
+    _rocprof_artifacts(collect_dir)
     wl.run()
     doc = json.loads((tmp_path / "trial_0" / "result.json").read_text(encoding="utf-8"))
     recorded = doc.get("argv")

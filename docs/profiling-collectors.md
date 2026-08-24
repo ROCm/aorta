@@ -288,9 +288,15 @@ env -u HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES=<value> <proton wrap...>
 ```
 
 and a warning is logged. An explicit `ROCR_VISIBLE_DEVICES` already in the
-environment wins. No translation happens on the `instrumentation` or
-`cupti` backends, and none happens if `env` is not on `$PATH` (a warning
-says so, and the profile may target the wrong device).
+environment wins — including an explicitly empty one, since an empty device
+list means "hide every device" rather than "unset". The same applies to
+`HIP_VISIBLE_DEVICES`: Proton rejects it on presence, so an empty value is
+translated like any other.
+
+No translation happens on the `instrumentation` or `cupti` backends. If a
+translation *is* needed and `env` is not on `$PATH`, the trial fails setup:
+argv rewriting is the only channel the collector has for these variables, so
+continuing would profile the wrong device or not at all.
 
 ### Combining collectors
 
@@ -341,9 +347,20 @@ directory is reported as the `rocprof_artifact_dir` / `proton_artifact_dir`
 metric, so `jq` it out of the trial JSON and use that.
 
 The directory is created whether or not the payload produced GPU activity,
-so the trial tree has the same shape either way. `aorta bundle` copies every
-file under the run directory, so collector artifacts travel with a bundle
-automatically.
+so the trial tree has the same shape either way. It is created **empty**: a
+resumed trial replays onto the same paths, and inheriting the interrupted
+attempt's files would make the summary report the previous run's numbers.
+`aorta bundle` copies every file under the run directory, so collector
+artifacts travel with a bundle automatically.
+
+Being a sibling of `trial_<n>/` does not exempt the collector directory from
+retention. Profiler traces are the artifact class a recipe's `retain` block
+exists for, so its level prunes this tree too — a sweep with
+`retain: {on_pass: none}` keeps captures only for the trials that failed. The
+metrics are parsed *before* pruning, so `rocprof_gpu_time_ms` and friends
+survive in the trial JSON even at a level that deletes the trace they came
+from, and `result.json` lists each pruned file (with a leading `../`, marking
+it as coming from the collector tree) under `capture.retention.deleted`.
 
 The probe flow's `trial_<n>/result.json` records the argv that actually ran,
 which is the *wrapped* one. So the exact profiler invocation — including any
@@ -446,6 +463,17 @@ or set `$ROCPROF_BIN` to the binary. `$ROCPROF_BIN` accepts either a bare
 name resolved through `$PATH` or a path, which must point at an executable
 file. A missing profiler fails the trial's setup deliberately, rather than
 running unprofiled and reporting nothing.
+
+**`collect: cannot prepare the <name> artifact directory ...`.** The
+collector has nowhere to write — usually a file sitting where the directory
+should be, a read-only output path, or a full disk. Like a missing
+`rocprofv3` this fails setup rather than running the trial unprofiled. Fix
+the `--output` path or drop the collector from the request.
+
+**`proton needs 'env' on $PATH ...`.** The wrap had variables to deliver —
+the `AORTA_PROTON_*` bundle in `mode: env`, or a `HIP_VISIBLE_DEVICES`
+translation — and argv rewriting is its only channel for them. Install
+coreutils in the image, or drop `proton`.
 
 **`proton mode 'cli' needs a Python script launch, got '...'`.** Proton's
 front-end executes a script. Either invoke the workload as

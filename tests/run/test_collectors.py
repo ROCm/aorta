@@ -226,13 +226,18 @@ def test_wrap_skips_when_no_collect_dir_was_threaded(profilers_on_path, caplog):
     assert CONFIG_KEY_COLLECT_DIR in caplog.text
 
 
-def test_wrap_skips_when_the_output_dir_cannot_be_created(profilers_on_path, tmp_path, caplog):
+def test_wrap_fails_when_the_output_dir_cannot_be_created(profilers_on_path, tmp_path):
+    """An artifact directory that cannot be prepared is a setup failure.
+
+    The collector would have nowhere to write, so letting the trial proceed
+    would run it unprofiled while the operator believes it was measured --
+    the same contract as a missing rocprofv3.
+    """
     blocker = tmp_path / "blocked"
     blocker.write_text("")  # a file where the collector wants a directory
     config = _config(["rocprof"], collect_dir=blocker)
-    with caplog.at_level("WARNING"):
-        assert wrap_argv_for_collectors(config, _INNER) == _INNER
-    assert "cannot create" in caplog.text
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(config, _INNER)
 
 
 # ---- wrap_argv_for_collectors: attaching -------------------------------

@@ -445,6 +445,44 @@ def test_wrap_argv_keeps_an_explicit_rocr_visible_devices(tmp_path, env_on_path)
     assert "ROCR_VISIBLE_DEVICES=0" in argv
 
 
+def test_wrap_argv_translates_an_empty_hip_visible_devices(tmp_path, env_on_path):
+    """Proton rejects ``HIP_VISIBLE_DEVICES`` on presence, not on value.
+
+    An empty device list is also a meaningful selection -- it conventionally
+    hides every device -- so it must be carried across to ROCR rather than
+    dropped, which would silently expose the GPUs the trial hid.
+    """
+    argv = wrap_argv(
+        ["python", "vecadd.py"],
+        tmp_path,
+        {"backend": "roctracer"},
+        env={"HIP_VISIBLE_DEVICES": ""},
+    )
+    assert "HIP_VISIBLE_DEVICES" in argv
+    assert "ROCR_VISIBLE_DEVICES=" in argv
+
+
+def test_wrap_argv_keeps_an_explicitly_empty_rocr_visible_devices(tmp_path, env_on_path):
+    """An empty ROCR value is an explicit "hide everything", so the documented
+    "explicit ROCR wins" precedence must not overwrite it with the HIP list."""
+    argv = wrap_argv(
+        ["python", "vecadd.py"],
+        tmp_path,
+        {"backend": "roctracer"},
+        env={"HIP_VISIBLE_DEVICES": "1", "ROCR_VISIBLE_DEVICES": ""},
+    )
+    assert "ROCR_VISIBLE_DEVICES=" in argv
+    assert "ROCR_VISIBLE_DEVICES=1" not in argv
+
+
+def test_env_mode_fails_when_env_binary_is_missing(tmp_path, monkeypatch):
+    """``mode: env`` always has an ``AORTA_PROTON_*`` bundle to deliver, so a
+    missing ``env(1)`` would hand back the bare command and profile nothing."""
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    with pytest.raises(ProtonWrapError, match="env"):
+        wrap_argv(["/tmp/gemm", "512"], tmp_path, {"mode": "env"}, env={})
+
+
 def test_wrap_argv_no_env_prefix_for_instrumentation_backend(tmp_path, env_on_path):
     """The instrumentation backend installs no queue interceptor, so the
     device variables mean what they normally mean and are left alone."""
@@ -462,17 +500,23 @@ def test_wrap_argv_no_env_prefix_when_no_device_pin(tmp_path, env_on_path):
     assert argv[0] == "python"
 
 
-def test_wrap_argv_survives_env_binary_missing(tmp_path, monkeypatch):
-    """No ``env(1)`` means the translation cannot be applied; the wrap still
-    profiles rather than failing the trial outright."""
+def test_wrap_argv_fails_when_env_binary_is_missing(tmp_path, monkeypatch):
+    """No ``env(1)`` means the device translation cannot be applied at all.
+
+    Argv rewriting is the collector seam's only environment channel, so
+    continuing would hand the command back unchanged -- with
+    ``HIP_VISIBLE_DEVICES`` still set, which Proton rejects outright. A
+    measurement that cannot be taken is a setup failure, not a silent
+    downgrade.
+    """
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-    argv = wrap_argv(
-        ["python", "vecadd.py"],
-        tmp_path,
-        {"backend": "roctracer"},
-        env={"HIP_VISIBLE_DEVICES": "1"},
-    )
-    assert argv[0] == "python"
+    with pytest.raises(ProtonWrapError, match="env"):
+        wrap_argv(
+            ["python", "vecadd.py"],
+            tmp_path,
+            {"backend": "roctracer"},
+            env={"HIP_VISIBLE_DEVICES": "1"},
+        )
 
 
 def test_wrap_argv_reads_os_environ_by_default(tmp_path, env_on_path, monkeypatch):
@@ -739,6 +783,39 @@ def test_parse_summary_tolerates_non_numeric_time(tmp_path):
     }
     _hatchet(tmp_path, _tree([node]))
     assert parse_summary(tmp_path) == {"proton_artifact_dir": str(tmp_path)}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1_000_000])
+def test_parse_summary_skips_non_finite_and_negative_time(tmp_path, bad):
+    """A ``NaN`` / infinite / negative duration must not reach
+    ``proton_gpu_time_ms``: the first two serialise as non-standard JSON
+    tokens, and none of them is a time a kernel can take."""
+    _hatchet(tmp_path, _tree([_leaf("bad", bad), _leaf("good", 1_000_000)]))
+    metrics = parse_summary(tmp_path)
+    assert metrics["proton_top_kernels"] == ["good"]
+    assert metrics["proton_gpu_time_ms"] == pytest.approx(1.0)
+
+
+def test_parse_summary_still_reads_a_good_time_key_after_a_bad_one(tmp_path):
+    """The scan continues past an unusable ``time (...)`` entry rather than
+    giving up on the leaf, so a profile carrying both still reports."""
+    node = {
+        "frame": {"name": "k"},
+        "metrics": {"count": 1, "time (s)": float("nan"), "time (ns)": 2_000_000},
+        "children": [],
+    }
+    _hatchet(tmp_path, _tree([node]))
+    assert parse_summary(tmp_path)["proton_gpu_time_ms"] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("bad_count", [float("inf"), 10**400, -5])
+def test_parse_summary_survives_an_unusable_count(tmp_path, bad_count):
+    """``int(float(...))`` raises ``OverflowError`` for an infinite or huge
+    count, which would escape ``parse_summary()``'s never-raises contract."""
+    _hatchet(tmp_path, _tree([_leaf("k", 1_000_000, count=bad_count)]))
+    metrics = parse_summary(tmp_path)
+    assert metrics["proton_kernel_count"] == 1
+    assert metrics["proton_gpu_time_ms"] == pytest.approx(1.0)
 
 
 def test_parse_summary_tolerates_non_numeric_count(tmp_path):
