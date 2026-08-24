@@ -2661,6 +2661,32 @@ def test_rebuild_commands_are_runnable_from_the_repo_root():
                 assert (_REPO_ROOT / token).exists(), f"{entry['path']}: {token}"
 
 
+def test_sanitizer_nightly_payload_has_no_apostrophes():
+    """The fixture-build step is ONE single-quoted `bash -lc` payload.
+
+    Any literal apostrophe inside it -- in code, in an echo marker, or in a
+    comment -- closes that quote early, so the HOST shell misparses the
+    remainder and the step dies before running anything. The YAML stays valid
+    and no CPU check runs the GPU nightly, so the breakage would surface only on
+    the 12:00 UTC schedule; it has already been introduced and fixed once
+    (#369 -> #372), and again by the resolver change on this branch.
+    """
+    lines = (
+        (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    start = next(i for i, line in enumerate(lines) if "bash -lc '" in line)
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "'")
+    offenders = [
+        (i + 1, lines[i].strip()) for i in range(start + 1, end) if "'" in lines[i]
+    ]
+    assert not offenders, (
+        "apostrophe(s) inside the single-quoted bash -lc payload would break the "
+        f"host shell: {offenders}"
+    )
+
+
 def test_rebuild_commands_export_the_rocm_llvm_path():
     """The bundler is not on PATH in the image that produced these artifacts.
 

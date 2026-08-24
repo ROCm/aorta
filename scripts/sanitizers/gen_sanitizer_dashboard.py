@@ -1891,14 +1891,23 @@ def rebuild_input_sources(built_refs: list[str]) -> list[str]:
 
 # Every rebuild starts here, because the tool none of them can run without is not
 # on PATH in the image that built the artifact: the ROCm container exports only
-# ``/opt/rocm/bin``, while ``clang-offload-bundler`` lives in the LLVM bindir. hipcc
+# its own bin dir, while ``clang-offload-bundler`` lives in the LLVM bindir. hipcc
 # shells out to it, ``prepare_gemm_isa.py`` requires it (``shutil.which``), and the
 # genco branch invokes it directly -- so a command that names it by bare name fails
 # exactly as the nightly's own fixture build once did ("clang-offload-bundler not
 # found on PATH"). Byte-identical to the export in sanitizers-nightly.yml, which
 # ``test_rebuild_commands_export_the_rocm_llvm_path`` cross-checks.
+#
+# Asks the resolver for the bindir rather than expanding
+# ``${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}`` (issue #381). That shell chain
+# validates nothing, so on a wheel-layout (TheRock) image -- where both vars are
+# unset and there is no /opt/rocm -- it expanded to a directory that does not
+# exist and the pasted command silently failed to put the bundler on PATH, which
+# is the same way the nightly broke in the first place. The bindir is
+# ``<core>/lib/llvm/bin`` in both layouts, so one form covers both.
 _ROCM_LLVM_PATH_EXPORT = (
-    'export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"'
+    'export PATH="$(python -c "from aorta.instrumentation.rocm_paths import '
+    'resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"'
 )
 
 
