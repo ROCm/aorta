@@ -69,13 +69,23 @@ Reading it in `run_consan()` and storing those three fields in the `backend` dic
 alongside the existing `hook_sha256` is a small, self-contained change, and it is
 what turns `hook_sha256: ca39f6c6…` from an opaque digest into something a reader
 can act on. Treat the manifest as optional input: record the fields when present
-and leave them absent otherwise, rather than failing the run. Without this,
-answering "which rocjitsu produced this row?" means keeping an out-of-band
-digest-to-commit table.
+and leave them absent otherwise, rather than failing the run.
 
-**3. Show it on the dashboard.** Once the report carries the commit, render a
-short `rocjitsu db0c47df` caption per run. That makes each row self-describing
-and makes run-to-run comparisons honest.
+**Partly delivered by #386, at a different layer.** The nightly now copies
+`commit`/`run_url` out of the bundle manifest into `rocjitsu.json`, and the
+publish job exports them so the dashboard renders a `rocjitsu bundle: <commit>`
+fact per run. That covers the CI reader, and it is the reason recommendation 3
+below is already done. It does not replace per-report provenance: the fields
+travel beside the reports rather than inside them, they describe the run as a
+whole rather than each report, and a locally produced `sanitizer_report.json` —
+the case where a stale `ROCJITSU_PREBUILT` actually bites, per path 1 above —
+still carries nothing. Recording them in the report keeps the answer attached to
+the artifact that gets copied, archived and compared.
+
+**3. Show it on the dashboard.** ✅ Shipped in #386: `gen_sanitizer_dashboard.py`
+renders the bundle commit per run in both the HTML and Markdown outputs, sourced
+from `AORTA_ROCJITSU_COMMIT`. Recommendation 2 would let that caption come from
+the report itself rather than from run-scoped environment.
 
 **4. Pin `--run` for the gate.** This is the existing `#330` TODO in
 `sanitizers-nightly.yml`. Pinning an explicit reviewed run ID makes the gate

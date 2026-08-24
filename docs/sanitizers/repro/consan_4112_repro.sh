@@ -23,15 +23,17 @@
 #
 # Exit codes:
 #   0  reproduced   -- object rejected with status=4112 (defect still present)
-#   1  fixed        -- the transform succeeded and the module loaded. Note the
-#                     process still exits 86 in that case: this driver never
-#                     dispatches, so strict require-records fails afterwards. That
-#                     is expected and is not a 4112 reproduction.
+#   1  fixed        -- the object transformed and the module loaded, AND the hook
+#                     terminated the run with its own exit 86. Both are required:
+#                     this driver never dispatches, so strict require-records is
+#                     expected to fail afterwards, and the loader's success marker
+#                     alone would also appear if no hook had loaded at all.
 #   2  environment unusable (missing tool, no gfx950 bundle, hook not found,
 #                     bad --timeout value)
-#   3  inconclusive -- the run failed some other way (timeout, a different
-#                     rejection status, ...). Read the log; deliberately NOT
-#                     reported as "fixed".
+#   3  inconclusive -- no verdict could be established: the ceiling was hit, the
+#                     hook never announced itself, a different rejection status
+#                     came back, or the module loaded without the expected exit
+#                     86. Read the log; deliberately NOT reported as "fixed".
 set -uo pipefail
 
 HOOK="${HSA_TOOLS_LIB:-}"
@@ -76,8 +78,13 @@ die() { echo "ERROR: $*" >&2; exit 2; }
 ROCM="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}"
 export PATH="${ROCM}/lib/llvm/bin:${ROCM}/bin:${PATH}"
 command -v hipcc >/dev/null || die "hipcc not on PATH (looked under ${ROCM})"
-command -v clang-offload-bundler >/dev/null || die "clang-offload-bundler not on PATH"
 command -v timeout >/dev/null || die "timeout(1) not on PATH (coreutils)"
+# Only needed for extraction; --object supplies an already-unbundled object, and
+# demanding the bundler there would reject a perfectly usable invocation.
+if [ -z "${OBJECT_IN}" ]; then
+    command -v clang-offload-bundler >/dev/null \
+        || die "clang-offload-bundler not on PATH (or pass --object to skip extraction)"
+fi
 
 case "${TIMEOUT}" in
     ''|*[!0-9]*) die "--timeout wants whole seconds, got: ${TIMEOUT}" ;;
@@ -133,7 +140,13 @@ else
 fi
 
 bytes=$(stat -c%s "${OBJECT}")
-kernels=$(llvm-readelf --symbols "${OBJECT}" 2>/dev/null | grep -c 'FUNC.*GLOBAL')
+# Kernel count is informational only, so a missing llvm-readelf should say so
+# rather than silently reporting "0 kernels" and looking like a wrong object.
+if command -v llvm-readelf >/dev/null; then
+    kernels="$(llvm-readelf --symbols "${OBJECT}" 2>/dev/null | grep -c 'FUNC.*GLOBAL')"
+else
+    kernels="unknown (llvm-readelf not on PATH)"
+fi
 echo "   object: ${bytes} bytes, ${kernels} kernels"
 echo "   (originally observed at 16265200 bytes / 490 kernels on ROCm 7.0.2.2)"
 
@@ -171,8 +184,22 @@ if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
     if ! grep -q "MOI inventory end" "${LOG}"; then
         echo "        MOI inventory never ended; this looks like a pre-#9964 hook."
     else
-        echo "        Raise --timeout if this hook is simply slower than 2400s."
+        echo "        Raise --timeout if this hook is simply slower than ${TIMEOUT}s."
     fi
+    echo "        Full log: ${LOG}"
+    trap - EXIT
+    exit 3
+fi
+
+# Establish that the hook actually loaded before reading anything into the run.
+# The loader's own marker below only proves hipModuleLoad returned success, which
+# it also does with no hook at all -- so without this check a missing, unreadable
+# or non-rocjitsu HSA_TOOLS_LIB produces "marker present, rc=0" and would be
+# reported as "fixed" when nothing was ever instrumented.
+if ! grep -q "installed ConSan hook" "${LOG}"; then
+    echo "RESULT: inconclusive -- the ConSan hook never announced itself."
+    echo "        ${HOOK}"
+    echo "        may not be a rocjitsu DBI hook, or failed to load under HSA_TOOLS_LIB."
     echo "        Full log: ${LOG}"
     trap - EXIT
     exit 3
@@ -185,17 +212,25 @@ if grep -q "status=4112" "${LOG}"; then
     exit 0
 fi
 
-# Key on the loader marker, not on rc: this driver never dispatches, so once the
-# transform succeeds the hook still terminates the process with exit 86 under
-# strict moi_require_records ("no kernel dispatch packet was observed"). A clean
-# transform therefore looks like "marker present, rc=86", not "rc=0".
+# A clean transform is "loader marker AND exit 86": this driver never dispatches,
+# so once the transform succeeds the hook itself terminates the process under
+# strict moi_require_records ("no kernel dispatch packet was observed"). Requiring
+# that hook-owned exit code, rather than the marker alone, keeps "the module
+# loaded for some other reason" from being read as "the defect is gone".
 if grep -q "loaded and instrumented" "${LOG}"; then
-    echo "RESULT: fixed -- the object transformed and the module loaded (exit ${rc})."
     if [ "${rc}" -eq 86 ]; then
-        echo "        exit 86 here is expected: strict require-records with no dispatch."
+        echo "RESULT: fixed -- the object transformed and the module loaded."
+        echo "        exit 86 is the expected post-fix state here: strict require-records"
+        echo "        with no dispatch, not a second defect."
+        [ "${KEEP}" -eq 1 ] && echo "log: ${LOG}"
+        exit 1
     fi
-    [ "${KEEP}" -eq 1 ] && echo "log: ${LOG}"
-    exit 1
+    echo "RESULT: inconclusive -- the module loaded, but the run ended with exit ${rc}"
+    echo "        rather than the exit 86 strict require-records should produce here,"
+    echo "        so this is not evidence that the transform defect is fixed."
+    echo "        Full log: ${LOG}"
+    trap - EXIT
+    exit 3
 fi
 
 # No 4112 and no successful load: a different rejection status, a timeout, or a

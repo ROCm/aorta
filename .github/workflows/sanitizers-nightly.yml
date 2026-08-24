@@ -191,10 +191,27 @@ jobs:
 
             # Evaluate the gate BEFORE the survey below, and exit with its status at the
             # very end. The survey is non-gating but no longer cheap: consan-gemm can now
-            # run ~21-30 min because #9964 is fixed and the object reaches a real terminal
-            # state instead of being cut off at 300s (see daily-consan-gemm.yaml). If a
-            # job-level timeout lands inside that case, running the comparator first means
-            # the three daily controls have already been judged rather than discarded.
+            # run ~21-33 min because #9964 is fixed and the object reaches a real terminal
+            # state instead of being cut off at 300s (see daily-consan-gemm.yaml).
+            #
+            # Be precise about what this ordering does and does not buy. It does NOT
+            # preserve the gate *conclusion* across a job-level timeout: cancellation
+            # kills this shell before `exit "${gate_rc}"`, the job resolves as
+            # cancelled/failed, and meta.gate in the publish job mirrors that job result
+            # (see GPU_RESULT below), so the run still fails closed. That is the correct
+            # outcome for a gate and is not what changed here.
+            #
+            # What it buys is evidence. Run after the survey, a mid-survey timeout means
+            # the comparator never executes at all and the night yields nothing about the
+            # three daily controls. Run before it, the controls are judged, their verdicts
+            # are in the log, and their reports are on disk -- and "Upload sanitizer
+            # results" is `if: always()`, so they still reach the dashboard, which
+            # recomputes Tab 1 from reports + baselines. A timeout then costs the survey
+            # row rather than every signal the night would have produced.
+            #
+            # Keeping the survey out of the timeout budget of this job would need it
+            # split into a separate job; that is the real fix for the wall-clock risk in
+            # #370 and is deliberately not folded in here.
             echo "[$(date +%T)] gate: comparing reports against verdict_baselines.json …"
             gate_rc=0
             python scripts/sanitizers/compare_verdict_baselines.py "${SANITIZER_OUT}" || gate_rc=$?
@@ -270,7 +287,9 @@ jobs:
 
             # Gate is the three daily controls only, judged above before the survey ran.
             # The guarded survey block cannot reach this line with a non-zero status, so
-            # the job status is exactly the comparator verdict.
+            # whenever this line is reached the job status is exactly the comparator
+            # verdict. If the job is cancelled before it (timeout), the job fails closed
+            # instead -- see the note above the comparator.
             echo "[$(date +%T)] gate: verdict rc=${gate_rc}"
             exit "${gate_rc}"
           '

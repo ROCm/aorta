@@ -91,21 +91,28 @@ capture zero records.
 
 ## Reproducing
 
-`repro/consan_4112_repro.sh` is self-contained — no aorta imports, no fixtures
-from this repo — so it can be attached to an upstream issue as-is. It extracts
-the object from the local public hipBLASLt install, compiles a ~20-line loader,
-runs it under the hook, and asserts on the outcome.
+The reproducer is a **pair of files that must travel together**:
+`repro/consan_4112_repro.sh` and `repro/consan_4112_load.hip`. The script compiles
+the loader from the `.hip` at runtime and looks for it as a sibling, so shipping
+only the shell script fails immediately with `loader source not found next to this
+script`. Both are attached to the upstream issue for that reason.
+
+Together they are self-contained — no aorta imports, no fixtures from this repo.
+The script extracts the object from the local public hipBLASLt install, compiles
+the ~20-line loader, runs it under the hook, and asserts on the outcome.
 
 ```bash
 docs/sanitizers/repro/consan_4112_repro.sh --hook /path/to/librocjitsu_dbi_hooks.so
 ```
 
-It exits `0` when it reproduces the 4112 rejection, `1` when the object loads
-cleanly (the defect is fixed), `2` when the environment is unusable, and `3` when
-the run failed some other way. Note that on `1` the process itself still exits
-86, because the load-only driver never dispatches and strict require-records
-fails afterwards — that is the expected post-fix state described above, not a
-second defect.
+It exits `0` when it reproduces the 4112 rejection, `1` when the defect is fixed,
+`2` when the environment is unusable, and `3` when no verdict could be
+established. `1` requires *both* that the module loaded and that the hook ended
+the run with its own exit 86 — the load-only driver never dispatches, so strict
+require-records is expected to fail afterwards, and that is the post-fix state
+described above rather than a second defect. Demanding the hook-owned exit code
+as well as the loader's success marker is deliberate: the marker alone would also
+appear if no hook had loaded at all, which would otherwise read as "fixed".
 
 The hooked run is bounded by `--timeout` (default 2400 s, against a measured
 ~1290 s end-to-end); hitting the ceiling reports `3`, not a hang, which matters
