@@ -2386,10 +2386,201 @@ def test_run_area_stylesheet_carries_the_rules_those_pages_use():
     sheet = gen.run_area_stylesheet()
     assert gen._CSS in sheet
     # The rules the two drill-down pages add on top of the dashboard sheet.
-    for selector in (".wrap {", ".note {", ".steps {", ".steps li {"):
+    for selector in (
+        ".wrap {",
+        ".note {",
+        # The rebuild section renders structurally now, so `.steps` (its old
+        # bullet list) is gone and these carry the command block instead.
+        ".rb {",
+        ".rb .path {",
+        ".rb pre {",
+        ".rb pre code {",
+        # `.cap`'s heading bar reads `var(--accent, ...)`, which only the root
+        # dashboard's kernel cards define -- without this these pages render it
+        # in the same grey as the `th` text beneath it.
+        ".panel { --accent:",
+    ):
         assert selector in sheet, selector
+    assert ".steps {" not in sheet
     # Byte-stable, so re-publishing does not churn the data branch.
     assert gen.run_area_stylesheet() == sheet
+
+
+# --- Run area rendering (#391) -------------------------------------------------
+
+
+def _css_rule(sheet: str, selector: str) -> str:
+    """One selector's declaration block, so a test can assert on it alone."""
+    start = sheet.index(selector) + len(selector)
+    return sheet[start : sheet.index("}", start)]
+
+
+def test_fact_row_sizes_each_fact_to_its_content():
+    # Equal-width tracks gave a 1-char Findings the same width as a 51-char
+    # Recipe: ~555px of dead space on one row while Commit and Recipe wrapped
+    # for want of ~330px.
+    sheet = gen.run_area_stylesheet()
+    row = _css_rule(sheet, ".kv {")
+    assert "display:flex" in row and "flex-wrap:wrap" in row
+    # The uniform grid is gone, not merely overridden by a later rule.
+    assert "minmax(170px, 1fr)" not in sheet
+    # A long value wraps inside its own item instead of widening the row.
+    item = _css_rule(sheet, ".kv > span {")
+    assert "min-width:0" in item and "max-width:100%" in item
+
+
+def test_long_mono_facts_break_rather_than_overflow_their_neighbour():
+    # A 40-char SHA painted over Date; a 136-char digest-pinned image ref ran off
+    # the page. break-word fixes only the first -- it breaks a word just when the
+    # word cannot fit a line by itself.
+    rule = _css_rule(gen.run_area_stylesheet(), ".kv .val.mono {")
+    assert "word-break:break-all" in rule
+    assert "break-word" not in rule
+
+    image = (
+        "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0"
+        "@sha256:" + "4" * 64
+    )
+    commit = "78d1ae686dc3a786e8cfdb1216efc4b7516c8896"
+    page = gen.build_case_index_html(
+        {
+            "case": "c",
+            "observed": {},
+            "commit": commit,
+            "date": "2026-08-23",
+            "container_image": image,
+        },
+        [],
+        built_refs=[],
+        up="../../",
+    )
+    # Both survive in full: the fix is wrapping, not truncation. The image digest
+    # is what makes the run reproducible at all.
+    assert commit in page
+    assert image in page
+
+
+def test_reproduce_label_sits_outside_the_command_box():
+    # The box is a copy target. With the label inside it, the box read as a code
+    # block whose first token was REPRODUCE, and selecting it to copy the command
+    # picked the label up too.
+    command = "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml"
+    page = gen.build_case_index_html(
+        {"case": "c", "observed": {}, "command": command},
+        [], built_refs=[], up="../../",
+    )
+    assert '<p class="cap">Reproduce</p><div class="repro"><code>' in page
+    assert 'class="lbl">Reproduce' not in page
+
+    # The dashboard's Tab 2 strip is the same markup, so the two cannot diverge.
+    strip = gen._survey_howto_html({"command": command})
+    assert '<p class="cap">Reproduce</p><div class="repro"><code>' in strip
+    assert 'class="lbl">Reproduce' not in strip
+    assert gen._survey_howto_html({"command": ""}) == ""
+
+    # Holding only the command, the box no longer needs a flex row.
+    assert "display:block" in _css_rule(gen.run_area_stylesheet(), ".repro {")
+
+
+def test_section_headings_own_their_separation_from_the_previous_section():
+    # `.cap` shipped with margin-top:0, so the space above a heading was whatever
+    # the previous element left -- 14px, against the 8px binding a heading to its
+    # own content -- and it was delegated to a `.cap + .table-wrap` adjacency
+    # rule that any element inserted between the two silently broke.
+    sheet = gen.run_area_stylesheet()
+    above, below = 24, 8
+    assert f"margin:{above}px 0 {below}px" in _css_rule(sheet, ".cap {")
+    # Separation has to be clearly greater than the binding or neither reads as
+    # grouping the section with its heading.
+    assert above >= 3 * below
+    # A panel's first heading must not double the panel's own padding.
+    assert ".cap:first-child { margin-top:0; }" in sheet
+    # The fragile adjacency rule is removed, not worked around. Matching the
+    # declaration rather than the bare selector, which the comment above it names.
+    assert ".cap + .table-wrap {" not in sheet
+
+
+def test_rebuild_section_renders_its_commands_as_one_runnable_block():
+    # `_rebuild_hints` flattens path/what/commands/caveat into one sentence. That
+    # is right for REPRODUCE.md and wrong here: the commands became inline <code>
+    # runs joined by a prose ";", with the sentence period stuck to the final
+    # path, so nothing on the page could be selected and run.
+    plan = gen.rebuild_plan(["fixtures/isa/consan_gemm_f32.hsaco"], target="gfx950")
+    html = gen._rebuild_section_html(plan)
+    entry = plan[0]
+
+    block = re.search(r"<pre><code>(.*?)</code></pre>", html, re.S)
+    assert block
+    body = block.group(1)
+    # Every command, one per line, in a single block.
+    assert body.split("\n") == [gen._esc(command) for command in entry["commands"]]
+    # No prose inside the copy target...
+    assert entry["what"] not in body
+    assert entry["caveat"] not in body
+    # ...no "; " joining the commands as prose, and no sentence period abutting
+    # the final path (which made it a path that does not exist).
+    assert "; " not in body
+    assert not body.endswith(".")
+    # One artifact is a titled block, not a one-item bullet list.
+    assert "<ul" not in html and "<li>" not in html
+    # what and caveat are still shown, outside the block.
+    assert entry["what"] in html and entry["caveat"] in html
+
+
+def test_rebuild_section_names_an_unknown_reference_without_inventing_a_command():
+    # Same contract as the Markdown hints: never a plausible-looking guess.
+    plan = gen.rebuild_plan(["fixtures/other/x"], target="gfx950")
+    assert plan[0]["commands"] == []
+    html = gen._rebuild_section_html(plan)
+    assert "fixtures/other/x" in html
+    assert "<pre>" not in html
+    assert gen._rebuild_section_html([]) == ""
+
+
+def test_reproduce_md_keeps_the_flattened_markdown_hints():
+    # The page renders structurally now. REPRODUCE.md consumes the Markdown
+    # verbatim, so it must be untouched by that change.
+    refs = ["fixtures/isa/lds.hsaco"]
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="r.yaml", command="c",
+        meta={"gpu": "gfx950"}, summary={}, report=None,
+        built_refs=refs, inputs=[],
+    )
+    md = gen.build_reproduce_md(env, built_refs=refs)
+    for hint in gen._rebuild_hints(gen.rebuild_plan(refs, target="gfx950")):
+        assert hint in md
+
+
+def test_files_caption_discloses_an_input_that_is_excluded_by_design():
+    # "Every file published for this case" is true and, on its own, misleading:
+    # for a kernel-source recipe the one input the recipe names is CI-built and
+    # recorded by digest instead of copied. Nothing linked the two sections, so a
+    # reader could not tell a deliberate omission from a missing file.
+    env = {
+        "case": "c",
+        "observed": {},
+        "logs_published": True,
+        "artifacts_not_published": [
+            {"path": "fixtures/isa/consan_gemm_f32.hsaco", "sha256": "ab"}
+        ],
+    }
+    files = [("sanitizer_report.json", 12)]
+    caption = gen.files_caption(env, files)
+    assert "1 required input is" in caption
+    assert f'href="#{gen._NOT_PUBLISHED_ID}"' in caption
+
+    page = gen.build_case_index_html(env, files, built_refs=[], up="../../")
+    # The anchor the caption points at exists on the page.
+    assert f'id="{gen._NOT_PUBLISHED_ID}"' in page
+    # And the header no longer makes the absolute claim the caption walks back.
+    assert "everything needed to reproduce" not in page
+
+    # Plural agreement, and no claim at all when there is nothing to disclose.
+    two = {**env, "artifacts_not_published": [{"path": "a"}, {"path": "b"}]}
+    assert "2 required inputs are" in gen.files_caption(two, files)
+    assert gen.files_caption({**env, "artifacts_not_published": []}, files) == (
+        "Every file published for this case."
+    )
 
 
 def test_genco_rebuild_cleans_up_its_temporary_object():
