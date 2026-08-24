@@ -1,20 +1,39 @@
 # ConSan transform rejection `status=4112` — overlapping anchor patches
 
-Status: open upstream defect in rocjitsu, found while verifying the upstream
-fixes claimed for ROCm/rocm-systems#9964, #9970 and #9972. #9964 and #9970 hold;
-#9972 does not — its capture behaviour is unchanged and a re-open has been
-requested, which is why this document treats it as still open below. Filed
-upstream as
+**Status: fixed upstream, not yet reachable from a published bundle.**
+
+Found while verifying the upstream fixes claimed for ROCm/rocm-systems#9964,
+#9970 and #9972, and filed as
 [ROCm/rocm-systems#10378](https://github.com/ROCm/rocm-systems/issues/10378).
+Timeline:
+
+| | |
+|---|---|
+| #9964, #9970 | fixed in `db0c47df`; verified here |
+| 4112 (#10378) | filed from this document; **fixed in `dc7c8e04`**, closed 2026-08-24, verified here |
+| #9972 | diagnostics only in `db0c47df`, re-open requested; **fixed in `15275dad`**, closed 2026-08-24, verified here |
+
+Every measurement below was taken on `db0c47df`, which is the state this document
+was written against and still the behaviour a consumer sees, because **no
+published bundle carries either fix**: `rocjitsu-sanitizer-artifacts` has been red
+since 2026-08-23, so the newest green bundle predates the #9972 fix. Branch head
+additionally GPU-faults any LDS-touching dispatch with the hook merely loaded.
+Both blockers are tracked in
+[ROCm/rocm-systems#10622](https://github.com/ROCm/rocm-systems/issues/10622); the
+fixes themselves were verified from source builds. So nothing on the dashboard
+changes until a green bundle ships.
+
 Affects: `daily-consan-gemm.yaml` (dashboard Tab 2, observed-only, non-gating).
 Repro: [`repro/consan_4112_repro.sh`](repro/consan_4112_repro.sh).
 
 ## What happens
 
-Under the combined rocjitsu ConSan hook in `record-replay` / `strict` mode on
-gfx950, loading a large hipBLASLt f32 Tensile code object (16,265,200 bytes,
-490 kernels) now gets all the way through MOI inventory and report planning, and
-is then rejected by the transform's final validation:
+This section describes the defect as observed on `db0c47df` — still what a
+consumer gets, per the status note above. Under the combined rocjitsu ConSan hook
+in `record-replay` / `strict` mode on gfx950, loading a large hipBLASLt f32
+Tensile code object (16,265,200 bytes, 490 kernels) gets all the way through MOI
+inventory and report planning, and is then rejected by the transform's final
+validation:
 
 ```
 ConSan MOI emitted 3950 barrier record probe(s)
@@ -30,7 +49,8 @@ Strict policy correctly terminates rather than emitting a patched image built
 from conflicting rewrites, so this is a fail-closed outcome, not a false pass.
 
 `status=4112` is distinct from the `status=4104` ABI-capacity rejection of #9970,
-which is fixed. 4112 is tracked upstream as ROCm/rocm-systems#10378.
+which is fixed. 4112 was tracked upstream as ROCm/rocm-systems#10378 and is fixed
+there in `dc7c8e04`.
 
 ## Why it only became visible now
 
@@ -71,23 +91,29 @@ exit 86
 No load rejection: the transform succeeded and the failure moved to the
 require-records check. So:
 
-| Case | Today | After 4112 is fixed | After 4112 **and** #9972 are fixed, **with dispatch** |
+The first column is what the nightly still reports, since it is the newest bundle
+a consumer can get. The second is measured from source builds of the fixes, not
+predicted. The third remains a projection — it needs work nobody has done yet.
+
+| Case | On `db0c47df` (what the dashboard shows) | With the `dc7c8e04` / `15275dad` fixes (measured, source build) | Additionally **with a dispatching driver** (not built) |
 |---|---|---|---|
-| `consan-gemm` (Tab 2) | `error`, exit 92 `consan_strict_load_rejection` | `error`, exit 86 `combined_hook_exit_86` | could reach a real `pass`/`fail` verdict |
-| `consan-lds-dispatch` (Tab 2) | `error`, exit 86 | unchanged (different defect, #9972) | `pass`/`fail` |
+| `consan-gemm` (Tab 2) | `error`, exit 92 `consan_strict_load_rejection` | `error`, exit 86 `combined_hook_exit_86` — transform now succeeds | could reach a real `pass`/`fail` verdict |
+| `consan-lds-dispatch` (Tab 2) | `error`, exit 86 | records captured, `dynamic_complete=true`, exit 0 at `STRIDE=16` | `pass`/`fail` |
 | `consan-tiny` (Tab 2) | `error`, exit 86 | unchanged (no sites, by design) | unchanged |
 | `consan-clean` / `consan-racy` (Tab 1) | `pass` / `fail` | unchanged | unchanged |
 
-The concrete thing that starts working is the **ConSan transform of a large
-production code object**: the patched image is produced and the module loads. That
-is what the repro script asserts on, and it is the assertion that will flip from
-fail to pass.
+The concrete thing that started working is the **ConSan transform of a large
+production code object**. On `dc7c8e04` the same object patches cleanly —
+`outcome=modified-valid errors=0 patches=75996`, no load rejection, and MOI
+inventory down to 436 s from 685 s — which is exactly the assertion the repro
+script makes, and it now reports `fixed` rather than `reproduced`.
 
-Turning `consan-gemm` into a genuine pass/fail verdict additionally needs a driver
-that dispatches a GEMM kernel from the instrumented module (hipBLASLt, or a
-hand-written launcher for one extracted Tensile kernel), plus a resolution to
-ROCm/rocm-systems#9972, under which dispatched caller-supplied objects still
-capture zero records.
+`consan-gemm` still cannot produce a race verdict, and that part of the original
+prediction stands: the driver is load-only, so the run ends on strict
+require-records at exit 86. Turning it into a genuine pass/fail additionally needs
+a driver that dispatches a GEMM kernel from the instrumented module (hipBLASLt, or
+a hand-written launcher for one extracted Tensile kernel). That is unbuilt, and it
+is the only remaining blocker now that #9972 is fixed.
 
 ## Reproducing
 

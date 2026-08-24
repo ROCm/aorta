@@ -170,6 +170,12 @@ rc=$?
 elapsed=$(( $(date +%s) - start ))
 echo "   exit ${rc} after ${elapsed}s"
 
+# Every line the hook emits carries this prefix. Anchoring the checks below to it
+# keeps caller-controlled text out of the verdict: the loader echoes the object
+# path when hipModuleLoad fails, so an --object filename chosen to look like hook
+# output would otherwise land in the same log the verdict is read from.
+HOOK_LINE='\[rocjitsu-dbi-hooks\]'
+
 echo
 echo "== relevant hook output"
 grep -E "MOI inventory (begin|end)|auto report plan|final validation|load rejection|loaded and instrumented" \
@@ -181,7 +187,7 @@ echo
 # pre-#9964 hook does not terminate MOI inventory for this object at all.
 if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
     echo "RESULT: inconclusive -- killed at the ${TIMEOUT}s ceiling, no verdict reached."
-    if ! grep -q "MOI inventory end" "${LOG}"; then
+    if ! grep -qE "${HOOK_LINE} ConSan MOI inventory end" "${LOG}"; then
         echo "        MOI inventory never ended; this looks like a pre-#9964 hook."
     else
         echo "        Raise --timeout if this hook is simply slower than ${TIMEOUT}s."
@@ -196,7 +202,7 @@ fi
 # it also does with no hook at all -- so without this check a missing, unreadable
 # or non-rocjitsu HSA_TOOLS_LIB produces "marker present, rc=0" and would be
 # reported as "fixed" when nothing was ever instrumented.
-if ! grep -q "installed ConSan hook" "${LOG}"; then
+if ! grep -qE "${HOOK_LINE} installed ConSan hook" "${LOG}"; then
     echo "RESULT: inconclusive -- the ConSan hook never announced itself."
     echo "        ${HOOK}"
     echo "        may not be a rocjitsu DBI hook, or failed to load under HSA_TOOLS_LIB."
@@ -205,11 +211,22 @@ if ! grep -q "installed ConSan hook" "${LOG}"; then
     exit 3
 fi
 
-if grep -q "status=4112" "${LOG}"; then
-    echo "RESULT: reproduced -- transform rejected with status=4112"
-    grep -E "final validation found" "${LOG}" | head -1
-    [ "${KEEP}" -eq 1 ] && echo "log: ${LOG}"
-    exit 0
+# Match the hook's own rejection line and its exit code, not a bare "status=4112"
+# substring. The loader echoes the object path when hipModuleLoad fails, so an
+# --object argument whose filename contains that substring would otherwise be
+# echoed back into the log and read as a reproduction.
+if grep -qE "${HOOK_LINE} ConSan load rejection .*reason=transform-error .*status=4112" "${LOG}"; then
+    if [ "${rc}" -eq 92 ]; then
+        echo "RESULT: reproduced -- transform rejected with status=4112"
+        grep -E "final validation found" "${LOG}" | head -1
+        [ "${KEEP}" -eq 1 ] && echo "log: ${LOG}"
+        exit 0
+    fi
+    echo "RESULT: inconclusive -- the hook logged the 4112 transform rejection, but the"
+    echo "        process exited ${rc} rather than the 92 that strict policy should give."
+    echo "        Full log: ${LOG}"
+    trap - EXIT
+    exit 3
 fi
 
 # A clean transform is "loader marker AND exit 86": this driver never dispatches,

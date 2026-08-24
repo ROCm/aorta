@@ -5,8 +5,10 @@ Right now a `sanitizer_report.json` records the hook's path and SHA-256 but not
 which rocjitsu commit it was built from, and there are two ways to end up running
 an older hook than you think. Both were hit while verifying the upstream fixes
 claimed for ROCm/rocm-systems#9964, #9970 and #9972 — a verification that only
-reached a trustworthy answer *because* the stale hook was caught, and which found
-#9964/#9970 fixed but #9972 unchanged.
+reached a trustworthy answer *because* the stale hook was caught. On the bundle
+under test it found #9964/#9970 fixed and #9972 unchanged; #9972 has since been
+fixed in `15275dad` and closed, which does not weaken the point — the answer was
+only trustworthy because the hook the answer came from was known.
 
 ## The two staleness paths
 
