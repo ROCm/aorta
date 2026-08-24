@@ -1,6 +1,10 @@
 # ConSan transform rejection `status=4112` — overlapping anchor patches
 
-**Status: fixed upstream, not yet reachable from a published bundle.**
+**Status: fixed upstream and now published.** Fixed in `dc7c8e04`; a bundle
+carrying it (and the #9972 fix) went green on 2026-08-24, so the next nightly
+picks it up. This document is kept as the record of the defect and of what it
+predicted, since the dashboard row it explains only changes once that bundle is
+consumed.
 
 Found while verifying the upstream fixes claimed for ROCm/rocm-systems#9964,
 #9970 and #9972, and filed as
