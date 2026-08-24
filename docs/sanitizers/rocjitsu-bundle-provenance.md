@@ -45,7 +45,8 @@ which bundle was used after the fact, it does not hold it steady — and that a
 bundle identity. That detached case is what recommendation 2 below addresses.
 
 There is a third, time-boxed variant: these are 30-day GitHub Actions artifacts.
-Run 31716952381 (the one carrying all three fixes) expires around 2026-09-12,
+Run 31716952381 (the bundle this verification used, carrying the #9964 and #9970
+fixes — #9972 got diagnostics only) expires around 2026-09-12,
 after which `--run latest` resolves to something else entirely.
 
 ## Recommendations, cheapest first
