@@ -1735,6 +1735,11 @@ _BIN_OBJECT = {
 # only the recorded ``path`` stays recipe-relative.
 _FIXTURES_FROM_ROOT = "recipes/sanitizers/fixtures"
 
+# The keys every ``rebuild_plan`` entry carries, and that both renderings index
+# directly. ``plan_from_env`` checks a *stored* plan against these before
+# trusting it, since that one comes off the data branch rather than from here.
+_REBUILD_KEYS = frozenset({"path", "what", "commands", "caveat"})
+
 
 def _runnable(ref: str) -> str:
     """A recipe-relative fixture path rewritten to run from the repo root."""
@@ -1908,10 +1913,17 @@ def plan_from_env(env: dict[str, Any], built_refs: list[str]) -> list[dict[str, 
     preserved, so recomputing the commands from the module's current tables would
     rewrite historical instructions and leave the prose contradicting the
     manifest sitting beside it. Fall back to recomputation only for an area
-    published before the field existed.
+    published before the field existed -- or one whose stored entries do not
+    carry the keys both renderers read. Both renderers index those keys directly,
+    and this runs over a manifest read off the data branch, so accepting a
+    partial entry here would turn one hand-edited or half-written ``env.json``
+    into a ``KeyError`` that fails the whole dashboard render rather than one
+    area's rebuild section.
     """
     stored = env.get("rebuild")
-    if isinstance(stored, list) and all(isinstance(item, dict) for item in stored):
+    if isinstance(stored, list) and all(
+        isinstance(item, dict) and _REBUILD_KEYS <= item.keys() for item in stored
+    ):
         return stored
     return rebuild_plan(built_refs, target=str(env.get("target") or "gfx950"))
 
@@ -1985,7 +1997,7 @@ def _rebuild_section_html(plan: list[dict[str, Any]]) -> str:
     )
 
 
-def files_caption(env: dict[str, Any], files: list[tuple[str, int]]) -> str:
+def _files_caption(env: dict[str, Any], files: list[tuple[str, int]]) -> str:
     """The Files table's caption, as HTML (pure).
 
     "Every file published for this case" is true and, on its own, misleading:
@@ -2320,7 +2332,7 @@ def build_case_index_html(
         f"<h1>{_esc(str(env.get('case', '')))}</h1>\n"
         # Not "everything needed to reproduce this case locally": for a
         # kernel-source recipe the one input the recipe names is CI-built and
-        # recorded by digest rather than published (see ``files_caption``).
+        # recorded by digest rather than published (see ``_files_caption``).
         '<p class="subtitle">Run area &mdash; the reproduce command, what this '
         "case observed, and every file published for it</p></div></header>\n"
         "</div>\n"
@@ -2336,7 +2348,7 @@ def build_case_index_html(
         f"{steps_html}{np_html}{digests_html}"
         "</section>\n"
         '<section class="panel"><h2>Files</h2>\n'
-        f'<p class="note">{files_caption(env, files)}</p>\n'
+        f'<p class="note">{_files_caption(env, files)}</p>\n'
         '<div class="table-wrap"><table>\n'
         "<thead><tr><th>File</th><th class=num>Size</th></tr></thead>\n"
         f"<tbody>{rows}</tbody>\n"

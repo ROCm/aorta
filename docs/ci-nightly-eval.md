@@ -82,8 +82,9 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    reachable from the page.
 
    **Run areas (#384).** A case directory is not just its report -- it carries
-   everything needed to reproduce that case locally, so the copy-paste command
-   the dashboard shows is actionable:
+   the recipe as it ran, the logs the verdict came from, the source-level inputs
+   and a rebuild command for the ones it deliberately does not publish, so the
+   copy-paste command the dashboard shows is actionable:
 
    | File | What it is |
    | --- | --- |
@@ -101,7 +102,11 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    path and SHA-256 (taken from the report, which already carries the waitcheck
    binary digest, the ConSan repro command and hook digests, and every kernel's
    `code_object_sha256`) plus the command to rebuild it, so a local rebuild can
-   be verified.
+   be verified. Since that means the file list is *not* the whole recipe -- for a
+   `source.kind: kernel` recipe the one input the recipe names is exactly the
+   excluded one -- the landing page's Files caption says how many inputs are held
+   back and links to the section carrying their digests and rebuild commands,
+   rather than leaving a reader to tell a deliberate omission from a lost file.
 
    Those rebuild commands are per-artifact, because they are not
    interchangeable: a `--genco` code object is a raw ELF on some ROCm builds and

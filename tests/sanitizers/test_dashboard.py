@@ -2537,6 +2537,28 @@ def test_rebuild_section_names_an_unknown_reference_without_inventing_a_command(
     assert gen._rebuild_section_html([]) == ""
 
 
+def test_stored_rebuild_plan_is_only_trusted_when_it_carries_every_key():
+    # A retained area's own env.json is preferred over recomputation so history
+    # keeps its instructions. But it is read off the data branch, and both
+    # renderers index the four keys directly -- so a half-written or hand-edited
+    # entry has to fall back, not KeyError the whole dashboard render.
+    refs = ["fixtures/isa/lds.hsaco"]
+    full = gen.rebuild_plan(refs, target="gfx950")
+    assert gen.plan_from_env({"rebuild": full, "target": "gfx950"}, refs) is full
+
+    for missing in sorted(gen._REBUILD_KEYS):
+        partial = [{k: v for k, v in full[0].items() if k != missing}]
+        recovered = gen.plan_from_env({"rebuild": partial, "target": "gfx950"}, refs)
+        assert recovered == full, missing
+        # Both renderers survive the fallback.
+        assert gen._rebuild_hints(recovered)
+        assert gen._rebuild_section_html(recovered)
+
+    # A non-list or a list of non-dicts falls back the same way.
+    for junk in ("nope", [1, 2], {"path": "x"}):
+        assert gen.plan_from_env({"rebuild": junk, "target": "gfx950"}, refs) == full
+
+
 def test_reproduce_md_keeps_the_flattened_markdown_hints():
     # The page renders structurally now. REPRODUCE.md consumes the Markdown
     # verbatim, so it must be untouched by that change.
@@ -2565,7 +2587,7 @@ def test_files_caption_discloses_an_input_that_is_excluded_by_design():
         ],
     }
     files = [("sanitizer_report.json", 12)]
-    caption = gen.files_caption(env, files)
+    caption = gen._files_caption(env, files)
     assert "1 required input is" in caption
     assert f'href="#{gen._NOT_PUBLISHED_ID}"' in caption
 
@@ -2577,8 +2599,8 @@ def test_files_caption_discloses_an_input_that_is_excluded_by_design():
 
     # Plural agreement, and no claim at all when there is nothing to disclose.
     two = {**env, "artifacts_not_published": [{"path": "a"}, {"path": "b"}]}
-    assert "2 required inputs are" in gen.files_caption(two, files)
-    assert gen.files_caption({**env, "artifacts_not_published": []}, files) == (
+    assert "2 required inputs are" in gen._files_caption(two, files)
+    assert gen._files_caption({**env, "artifacts_not_published": []}, files) == (
         "Every file published for this case."
     )
 
