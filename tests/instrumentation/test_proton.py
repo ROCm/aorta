@@ -531,6 +531,24 @@ def test_wrap_argv_does_not_touch_cuda_visible_devices_under_auto(tmp_path):
     assert not any(part.startswith("ROCR_VISIBLE_DEVICES=") for part in argv)
 
 
+def test_wrap_argv_translates_cuda_under_auto_when_rocr_establishes_amd(tmp_path, env_on_path):
+    """``ROCR_VISIBLE_DEVICES`` is ROCm-only, so its presence establishes AMD.
+
+    It is the variable Proton *reads* on AMD, so a trial that sets it is already
+    on that path -- leaving ``CUDA_VISIBLE_DEVICES`` beside it just hands Proton
+    a variable it refuses before profiling starts.
+    """
+    argv = wrap_argv(
+        ["python", "vecadd.py"],
+        tmp_path,
+        {"backend": "auto"},
+        env={"ROCR_VISIBLE_DEVICES": "0", "CUDA_VISIBLE_DEVICES": "2"},
+    )
+    assert "CUDA_VISIBLE_DEVICES" in argv
+    # The explicit ROCR value wins; it is not overwritten by the CUDA list.
+    assert "ROCR_VISIBLE_DEVICES=0" in argv
+
+
 def test_wrap_argv_translates_cuda_under_auto_when_hip_establishes_amd(tmp_path, env_on_path):
     """HIP_VISIBLE_DEVICES present means AMD, so the CUDA pin is rewritten too."""
     argv = wrap_argv(

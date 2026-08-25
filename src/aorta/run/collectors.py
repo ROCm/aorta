@@ -159,6 +159,27 @@ def _collect_root(config: Mapping[str, Any]) -> Path | None:
     return Path(raw) if isinstance(raw, str) and raw else None
 
 
+def collector_root_is_traversable(root: Path) -> bool:
+    """True when ``root`` can be walked without following a symlink out of the tree.
+
+    Checked **again after the command has run**, not only before it launches.
+    The profiled command is handed this path (``rocprofv3 -d``, ``proton -n``),
+    so between the pre-launch reset and any post-run pass it can delete the
+    directory and leave a symlink in its place. Every later step --
+    ``Path.is_dir()``, ``rglob``, and :func:`aorta.run.retention.apply_retention`
+    -- follows links, so traversing one would read, and for retention *delete*,
+    files outside the results tree entirely.
+
+    The parent is checked too, for the same reason
+    :func:`_reset_output_dir` checks it: ``is_dir()`` resolves every component,
+    not just the last.
+    """
+    try:
+        return not (root.is_symlink() or root.parent.is_symlink())
+    except OSError:
+        return False
+
+
 def _reset_output_dir(out_dir: Path) -> None:
     """Create ``out_dir`` empty, discarding any earlier attempt's artifacts.
 
@@ -335,6 +356,17 @@ def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
     root = _collect_root(config)
     if root is None:
         return {}
+    if not collector_root_is_traversable(root):
+        # Read-only here, but the parsers glob the tree, so a root swapped for a
+        # symlink while the command ran would pull file contents from outside
+        # the results tree into the trial metrics. Same guard as the retention
+        # pass, which has the destructive version of this exposure.
+        log.warning(
+            "collect: %s is (or is under) a symlink after the run; refusing to "
+            "parse artifacts through it. No collector metrics for this trial.",
+            root,
+        )
+        return {}
     metrics: dict[str, Any] = {}
     registry = _registry()
     for name in active_collectors(config):
@@ -358,6 +390,7 @@ __all__ = [
     "WRAP_ORDER",
     "CollectorSpec",
     "active_collectors",
+    "collector_root_is_traversable",
     "summarize_collectors",
     "validate_collectors",
     "wrap_argv_for_collectors",

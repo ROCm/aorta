@@ -1134,7 +1134,11 @@ class SubprocessWorkload(Workload):
         of retention: a failure here leaves the collector artifacts in place
         and returns the trial-dir outcome unchanged.
         """
-        from aorta.run.collectors import CONFIG_KEY_COLLECT_DIR, active_collectors
+        from aorta.run.collectors import (
+            CONFIG_KEY_COLLECT_DIR,
+            active_collectors,
+            collector_root_is_traversable,
+        )
 
         if not active_collectors(self.config):
             return outcome
@@ -1142,6 +1146,19 @@ class SubprocessWorkload(Workload):
         if not isinstance(raw, str) or not raw:
             return outcome
         collect_root = Path(raw)
+        # Re-checked here, after the command ran, and not only by the pre-launch
+        # reset: the payload is handed this path and can replace the directory
+        # with a symlink while it executes. ``is_dir()`` and
+        # ``apply_retention()`` both follow links, so pruning through one would
+        # delete files in the link's target -- outside the results tree, at any
+        # level below ``full``. Keep the artifacts rather than risk that.
+        if not collector_root_is_traversable(collect_root):
+            log.warning(
+                "retention: %s is (or is under) a symlink after the run; "
+                "refusing to prune through it. Collector artifacts kept.",
+                collect_root,
+            )
+            return outcome
         if not collect_root.is_dir():
             return outcome
         try:

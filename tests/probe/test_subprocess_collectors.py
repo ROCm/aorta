@@ -11,6 +11,7 @@ from reading the code alone.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -318,6 +319,52 @@ def test_retention_prunes_the_collector_tree(tmp_path, rocprofv3_on_path):
     assert any(entry.endswith("aorta_kernel_stats.csv") for entry in deleted)
     assert any(entry.startswith("..") for entry in deleted)
     assert recorded.get("freed_bytes", 0) > 0
+
+
+def test_retention_refuses_a_collector_root_swapped_for_a_symlink(tmp_path, rocprofv3_on_path):
+    """The payload can replace the collector root with a symlink while it runs.
+
+    This is the time-of-check/time-of-use gap the pre-launch reset cannot close:
+    the profiled command is handed this path (``rocprofv3 -d``), so a guard that
+    only ran before launch proves nothing afterwards. ``apply_retention()``
+    follows links, so pruning through one would delete files in its target,
+    outside the results tree, at any level below ``full``.
+    """
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    outside = tmp_path / "precious"
+    (outside / rocprof.OUTPUT_SUBDIR).mkdir(parents=True)
+    victim = outside / rocprof.OUTPUT_SUBDIR / "aorta_kernel_stats.csv"
+    victim.write_text("not yours to delete", encoding="utf-8")
+
+    wl = _make_workload(tmp_path, ["true"], collect=["rocprof"], retain={"on_pass": "none"})
+    wl.setup()  # creates the real directory, as a launch would
+    shutil.rmtree(collect_dir)
+    collect_dir.symlink_to(outside, target_is_directory=True)
+
+    wl.run()
+
+    # The whole point: the tree behind the symlink is untouched.
+    assert victim.read_text(encoding="utf-8") == "not yours to delete"
+
+
+def test_summary_refuses_a_collector_root_swapped_for_a_symlink(tmp_path, rocprofv3_on_path):
+    """The read path has the same exposure: the parsers glob the tree.
+
+    Not destructive, but it would pull file contents from outside the results
+    tree into the trial metrics, so it is refused with the same guard.
+    """
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    outside = tmp_path / "elsewhere"
+    _rocprof_artifacts(outside)
+
+    wl = _make_workload(tmp_path, ["true"], collect=["rocprof"], retain={"on_pass": "full"})
+    wl.setup()
+    shutil.rmtree(collect_dir)
+    collect_dir.symlink_to(outside, target_is_directory=True)
+
+    result = wl.run()
+    assert "rocprof_kernel_count" not in result.metrics
+    assert "rocprof_artifact_dir" not in result.metrics
 
 
 def test_retention_full_keeps_the_collector_tree(tmp_path, rocprofv3_on_path):

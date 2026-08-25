@@ -94,6 +94,12 @@ _REJECTED_DEVICE_VARS: tuple[str, ...] = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_D
 #: real device pin that must be left alone.
 _AMD_BACKENDS: frozenset[str] = frozenset({"rocprofiler", "roctracer"})
 
+#: ROCm-only environment variables whose presence establishes an AMD host, so
+#: the ambiguous ``CUDA_VISIBLE_DEVICES`` can be translated under
+#: ``backend: auto`` too. ``ROCR_VISIBLE_DEVICES`` is the variable Proton reads
+#: on AMD; ``HIP_VISIBLE_DEVICES`` is the one it refuses.
+_AMD_ENV_SIGNALS: tuple[str, ...] = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+
 _PYTHON_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
 # Interpreter flags that take no argument and can safely stay in front of
 # ``-m triton.profiler.proton``. Anything else means we cannot confidently
@@ -390,10 +396,16 @@ def _device_env_prefix(
         # resolves to CUPTI on an NVIDIA host, where that variable is a normal,
         # honoured device pin -- rewriting it to ROCR would silently drop the
         # restriction and profile the wrong GPU. So the CUDA spelling is only
-        # translated once AMD is established, either by an explicitly AMD
-        # backend or by HIP_VISIBLE_DEVICES being set alongside it.
+        # translated once AMD is established -- by an explicitly AMD backend,
+        # or by any ROCm-only variable in ``_AMD_ENV_SIGNALS`` being present.
+        # ``ROCR_VISIBLE_DEVICES`` counts among those: it is the variable Proton
+        # *reads* on AMD, so a trial that sets it is already on that path, and
+        # leaving CUDA_VISIBLE_DEVICES beside it just hands Proton a variable it
+        # refuses before profiling starts.
         candidates = list(_REJECTED_DEVICE_VARS)
-        amd_established = backend in _AMD_BACKENDS or env.get("HIP_VISIBLE_DEVICES") is not None
+        amd_established = backend in _AMD_BACKENDS or any(
+            env.get(name) is not None for name in _AMD_ENV_SIGNALS
+        )
         if not amd_established:
             candidates = [name for name in candidates if name != "CUDA_VISIBLE_DEVICES"]
         present = [(name, env[name]) for name in candidates if env.get(name) is not None]
