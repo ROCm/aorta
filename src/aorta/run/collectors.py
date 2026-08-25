@@ -171,8 +171,23 @@ def _reset_output_dir(out_dir: Path) -> None:
     (``result.json``) lives in a different tree.
 
     Raises:
-        OSError: the directory could not be cleared or created.
+        OSError: the directory could not be cleared or created, or its parent is
+            a symlink (see below).
     """
+    # ``Path.is_dir()`` follows symlinks in *every* component, not just the
+    # last, so checking ``out_dir`` alone is not enough: if the per-trial
+    # collector root is a pre-existing symlink, ``out_dir`` resolves through it
+    # and ``rmtree`` would recursively delete the link target -- a tree outside
+    # the results directory entirely. The results tree is created by the
+    # dispatcher, so a symlink here is anomalous; refuse rather than guess.
+    parent = out_dir.parent
+    if parent.is_symlink():
+        raise OSError(
+            f"refusing to prepare {out_dir}: its parent {parent} is a symlink, "
+            "and clearing through it would delete the link target outside the "
+            "results tree. Remove the symlink or point --results-dir at a real "
+            "directory."
+        )
     if out_dir.is_symlink() or out_dir.is_file():
         out_dir.unlink()
     elif out_dir.is_dir():

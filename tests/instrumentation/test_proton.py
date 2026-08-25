@@ -483,6 +483,48 @@ def test_wrap_argv_translates_hip_visible_devices(tmp_path, env_on_path):
     assert argv[argv.index("-m") - 1].endswith("python")
 
 
+def test_wrap_argv_translates_cuda_visible_devices(tmp_path, env_on_path):
+    """Proton rejects the CUDA spelling on AMD too, and it is the likelier one.
+
+    ROCm's PyTorch presents its devices as ``cuda``, so an operator pinning a
+    GPU commonly reaches for ``CUDA_VISIBLE_DEVICES``. Handling only the HIP
+    spelling left that trial reaching Proton with a variable it refuses.
+    """
+    argv = wrap_argv(
+        ["python", "vecadd.py"],
+        tmp_path,
+        {"backend": "roctracer"},
+        env={"CUDA_VISIBLE_DEVICES": "2"},
+    )
+    assert "CUDA_VISIBLE_DEVICES" in argv
+    assert "ROCR_VISIBLE_DEVICES=2" in argv
+
+
+def test_wrap_argv_unsets_both_device_spellings_and_prefers_hip(tmp_path, env_on_path):
+    """Both are unset; HIP supplies the ROCR value, matching ROCm's preference."""
+    argv = wrap_argv(
+        ["python", "vecadd.py"],
+        tmp_path,
+        {"backend": "rocprofiler"},
+        env={"HIP_VISIBLE_DEVICES": "1", "CUDA_VISIBLE_DEVICES": "2"},
+    )
+    assert "HIP_VISIBLE_DEVICES" in argv
+    assert "CUDA_VISIBLE_DEVICES" in argv
+    assert "ROCR_VISIBLE_DEVICES=1" in argv
+
+
+def test_wrap_argv_leaves_device_vars_alone_on_a_non_intercepting_backend(tmp_path):
+    """``instrumentation`` installs no queue interceptor, so nothing to rewrite."""
+    argv = wrap_argv(
+        ["python", "vecadd.py"],
+        tmp_path,
+        {"backend": "instrumentation"},
+        env={"CUDA_VISIBLE_DEVICES": "2", "HIP_VISIBLE_DEVICES": "1"},
+    )
+    assert "CUDA_VISIBLE_DEVICES" not in argv
+    assert "ROCR_VISIBLE_DEVICES=2" not in argv
+
+
 def test_wrap_argv_keeps_an_explicit_rocr_visible_devices(tmp_path, env_on_path):
     argv = wrap_argv(
         ["python", "vecadd.py"],
@@ -748,10 +790,24 @@ def test_parse_summary_sums_repeated_kernel_names(tmp_path):
     assert metrics["proton_kernel_count"] == 5
 
 
-def test_parse_summary_defaults_missing_count_to_one(tmp_path):
+def test_parse_summary_omits_the_count_when_a_leaf_has_none(tmp_path):
+    """A leaf with no ``count`` yields no ``proton_kernel_count``, not a 1.
+
+    The checked-in real capture has ``count: 6`` on its ``add_kernel`` leaf,
+    which is the proof that a leaf is an aggregate over launches rather than a
+    single dispatch -- so there is nothing 1 could legitimately mean here.
+    """
     node = {"frame": {"name": "k"}, "metrics": {"time (ns)": 1_000_000}, "children": []}
     _hatchet(tmp_path, _tree([node]))
-    assert parse_summary(tmp_path)["proton_kernel_count"] == 1
+    metrics = parse_summary(tmp_path)
+    assert "proton_kernel_count" not in metrics
+    assert metrics.get("proton_gpu_time_ms") == pytest.approx(1.0)
+
+
+def test_parse_summary_real_fixture_counts_aggregate_launches(tmp_path):
+    """Guards the premise above: the real fixture's count exceeds its leaf count."""
+    metrics = parse_summary(FIXTURES / "tree_capture")
+    assert metrics.get("proton_kernel_count", 0) > len(metrics.get("proton_top_kernels", []))
 
 
 def test_parse_summary_ranks_and_caps_top_kernels(tmp_path):
@@ -877,11 +933,16 @@ def test_parse_summary_drops_metrics_when_the_total_overflows(tmp_path):
 @pytest.mark.parametrize("bad_count", [float("inf"), 10**400, -5])
 def test_parse_summary_survives_an_unusable_count(tmp_path, bad_count):
     """``int(float(...))`` raises ``OverflowError`` for an infinite or huge
-    count, which would escape ``parse_summary()``'s never-raises contract."""
+    count, which would escape ``parse_summary()``'s never-raises contract.
+
+    The count is omitted rather than defaulted: a Proton leaf aggregates every
+    launch of its kernel (the real fixture carries ``count: 6``), so 1 is not
+    a safe stand-in. The timing is unaffected and still published.
+    """
     _hatchet(tmp_path, _tree([_leaf("k", 1_000_000, count=bad_count)]))
     metrics = parse_summary(tmp_path)
-    assert metrics["proton_kernel_count"] == 1
-    assert metrics["proton_gpu_time_ms"] == pytest.approx(1.0)
+    assert "proton_kernel_count" not in metrics
+    assert metrics.get("proton_gpu_time_ms") == pytest.approx(1.0)
 
 
 def test_parse_summary_tolerates_non_numeric_count(tmp_path):
@@ -891,7 +952,24 @@ def test_parse_summary_tolerates_non_numeric_count(tmp_path):
         "children": [],
     }
     _hatchet(tmp_path, _tree([node]))
-    assert parse_summary(tmp_path)["proton_kernel_count"] == 1
+    metrics = parse_summary(tmp_path)
+    assert "proton_kernel_count" not in metrics
+    assert metrics.get("proton_gpu_time_ms") == pytest.approx(1.0)
+
+
+def test_parse_summary_one_unreadable_leaf_drops_only_the_count(tmp_path):
+    """A single bad leaf must not poison the timings of its siblings."""
+    good = _leaf("good", 2_000_000, count=4)
+    bad = {
+        "frame": {"name": "bad"},
+        "metrics": {"time (ns)": 1_000_000},  # no ``count`` at all
+        "children": [],
+    }
+    _hatchet(tmp_path, _tree([good, bad]))
+    metrics = parse_summary(tmp_path)
+    assert "proton_kernel_count" not in metrics
+    assert metrics.get("proton_gpu_time_ms") == pytest.approx(3.0)
+    assert metrics.get("proton_top_kernels") == ["good", "bad"]
 
 
 def test_parse_summary_tolerates_non_dict_children(tmp_path):

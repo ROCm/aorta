@@ -240,6 +240,30 @@ def test_wrap_fails_when_the_output_dir_cannot_be_created(profilers_on_path, tmp
         wrap_argv_for_collectors(config, _INNER)
 
 
+def test_wrap_refuses_to_clear_through_a_symlinked_collect_root(profilers_on_path, tmp_path):
+    """A symlinked collector root must not let ``rmtree`` escape the run tree.
+
+    ``Path.is_dir()`` follows symlinks in *every* component, so a per-trial
+    collector root that is a symlink would resolve the output directory through
+    it and delete the link target -- a tree outside the results directory
+    entirely. This is the destructive case, so it fails closed.
+    """
+    outside = tmp_path / "precious"
+    outside.mkdir()
+    (outside / "rocprof").mkdir()
+    (outside / "rocprof" / "keep_me.txt").write_text("not yours to delete", encoding="utf-8")
+
+    link = tmp_path / "trial_d0_m0_t0"
+    link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(_config(["rocprof"], collect_dir=link), _INNER)
+    # The whole point: the tree behind the symlink is untouched.
+    assert (outside / "rocprof" / "keep_me.txt").read_text(encoding="utf-8") == (
+        "not yours to delete"
+    )
+
+
 # ---- wrap_argv_for_collectors: attaching -------------------------------
 
 

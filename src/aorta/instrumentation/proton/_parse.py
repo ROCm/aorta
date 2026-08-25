@@ -59,25 +59,38 @@ def _time_ms(metrics: dict[str, Any]) -> float | None:
     return None
 
 
-def _count(metrics: dict[str, Any]) -> int:
-    """Return a leaf's dispatch count, defaulting to 1 when unreadable.
+def _count(metrics: dict[str, Any]) -> int | None:
+    """Return a leaf's dispatch count, or ``None`` when it is not readable.
+
+    A Proton leaf aggregates every launch of that kernel -- the checked-in real
+    fixture carries ``count: 6`` -- so a missing, non-finite, negative or
+    otherwise malformed value gives no basis for assuming one dispatch.
+    Returning ``None`` lets :func:`parse_summary` drop
+    ``proton_kernel_count`` while still publishing the timings, rather than
+    fabricating a count that reads as measured.
 
     ``OverflowError`` is caught alongside the parse errors because it is what
     a huge integer count raises on the conversion to float, and ``int()`` of
     an infinity raises it too -- both would otherwise escape
     :func:`parse_summary` and break its never-raises contract.
     """
+    if "count" not in metrics:
+        return None
     try:
-        parsed = float(metrics.get("count", 1))
+        parsed = float(metrics["count"])
     except (TypeError, ValueError, OverflowError):
-        return 1
+        return None
     if not math.isfinite(parsed) or parsed < 0:
-        return 1
+        return None
     return int(parsed)
 
 
-def _walk(node: Any, by_name: dict[str, float], counts: dict[str, int]) -> None:
-    """Accumulate leaf-frame time/count into ``by_name`` / ``counts``."""
+def _walk(node: Any, by_name: dict[str, float], counts: dict[str, int | None]) -> None:
+    """Accumulate leaf-frame time/count into ``by_name`` / ``counts``.
+
+    A ``None`` in ``counts`` is sticky: once one leaf of a kernel had an
+    unreadable count, the total for that name can no longer be trusted.
+    """
     if not isinstance(node, dict):
         return
     children = node.get("children")
@@ -95,17 +108,20 @@ def _walk(node: Any, by_name: dict[str, float], counts: dict[str, int]) -> None:
     if not name or elapsed_ms is None:
         return
     by_name[name] = by_name.get(name, 0.0) + elapsed_ms
-    counts[name] = counts.get(name, 0) + _count(metrics)
+    leaf_count = _count(metrics)
+    previous = counts.get(name, 0)
+    counts[name] = None if leaf_count is None or previous is None else previous + leaf_count
 
 
-def parse_profile(path: Path | str) -> tuple[dict[str, float], dict[str, int]]:
+def parse_profile(path: Path | str) -> tuple[dict[str, float], dict[str, int | None]]:
     """Aggregate one ``.hatchet`` file into per-kernel ms totals + call counts.
 
     Returns ``({}, {})`` when the file is missing, unreadable, or not a Proton
-    tree profile.
+    tree profile. A ``None`` count means that kernel's launch total was not
+    readable, so it must not be summed into a published metric.
     """
     by_name: dict[str, float] = {}
-    counts: dict[str, int] = {}
+    counts: dict[str, int | None] = {}
     try:
         with Path(path).open(encoding="utf-8") as stream:
             database = json.load(stream)
@@ -128,7 +144,10 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
         ``{"proton_artifact_dir": str}`` plus, when a tree profile with timing
         was found, the flat numeric ``proton_kernel_count`` /
         ``proton_gpu_time_ms`` / ``proton_top_kernel_ms`` and the non-numeric
-        ``proton_top_kernels`` name list.
+        ``proton_top_kernels`` name list. ``proton_kernel_count`` is omitted --
+        while the timings are still reported -- when any leaf's launch count
+        was unreadable, since a leaf aggregates launches and there is no safe
+        substitute for the real number.
     """
     root = Path(out_dir)
     try:
@@ -140,13 +159,14 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
 
     metrics: dict[str, Any] = {"proton_artifact_dir": str(root)}
     by_name: dict[str, float] = {}
-    counts: dict[str, int] = {}
+    counts: dict[str, int | None] = {}
     for profile in profiles:
         file_by_name, file_counts = parse_profile(profile)
         for name, elapsed_ms in file_by_name.items():
             by_name[name] = by_name.get(name, 0.0) + elapsed_ms
         for name, calls in file_counts.items():
-            counts[name] = counts.get(name, 0) + calls
+            previous = counts.get(name, 0)
+            counts[name] = None if calls is None or previous is None else previous + calls
     if not by_name:
         return metrics
 
@@ -159,7 +179,11 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
     # ``Infinity`` token into the trial JSON.
     if not (math.isfinite(total_ms) and math.isfinite(top_ms)):
         return metrics
-    metrics["proton_kernel_count"] = sum(counts.values())
+    # Omitted rather than fabricated when any leaf's launch count was
+    # unreadable; a Proton leaf aggregates launches, so there is no safe
+    # substitute. The timings above stand on their own.
+    if all(value is not None for value in counts.values()):
+        metrics["proton_kernel_count"] = sum(counts.values())  # type: ignore[arg-type]
     metrics["proton_gpu_time_ms"] = total_ms
     metrics["proton_top_kernel_ms"] = top_ms
     metrics["proton_top_kernels"] = [name for name, _ in ranked[:TOP_N]]

@@ -418,7 +418,7 @@ Each collector contributes the same five keys under its own prefix.
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `<c>_kernel_count` | numeric | Total dispatches summed across kernels |
+| `<c>_kernel_count` | numeric | Total dispatches summed across kernels. Omitted (while the timings are still reported) when the capture gave no trustworthy launch count: an unreadable `Calls` column in a rocprof stats row, or a Proton leaf with no readable `count`. Both are per-kernel aggregates, so there is no safe number to substitute, and a fabricated count would read as measured. |
 | `<c>_gpu_time_ms` | numeric | Total GPU time in ms across all kernels |
 | `<c>_top_kernel_ms` | numeric | GPU time in ms of the single hottest kernel |
 | `<c>_top_kernels` | list | The 5 hottest kernel names, hottest first |

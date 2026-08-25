@@ -77,10 +77,20 @@ def _to_float(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, int]]:
-    """Aggregate ``*_kernel_stats.csv`` into per-kernel ns totals + call counts."""
+def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, int] | None]:
+    """Aggregate ``*_kernel_stats.csv`` into per-kernel ns totals + call counts.
+
+    Returns ``None`` for the counts when any otherwise-usable row had an
+    unreadable ``Calls`` column. A stats row is aggregated **per kernel, not
+    per dispatch**, so an unreadable count could stand for one dispatch or ten
+    thousand; substituting 1 would publish a confident-looking
+    ``rocprof_kernel_count`` that is simply wrong. Omitting the metric while
+    keeping the timings is the fail-soft behaviour the module promises -- fewer
+    metrics, never invented ones.
+    """
     ns_by_kernel: dict[str, float] = {}
     calls_by_kernel: dict[str, int] = {}
+    counts_trustworthy = True
     for path in paths:
         for row in _iter_rows(path):
             name = (row.get(_STATS_NAME) or "").strip()
@@ -92,18 +102,21 @@ def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, i
             if not name or total_ns is None or total_ns < 0:
                 continue
             ns_by_kernel[name] = ns_by_kernel.get(name, 0.0) + total_ns
-            # A row with no readable ``Calls`` column still evidences one
-            # dispatch, so it counts as one. A readable zero is taken at its
-            # word: ``rocprof_kernel_count`` claims dispatches, so inventing
-            # one would over-count.
-            calls_by_kernel[name] = calls_by_kernel.get(name, 0) + (
-                1 if calls is None or calls < 0 else int(calls)
-            )
-    return ns_by_kernel, calls_by_kernel
+            if calls is None or calls < 0:
+                counts_trustworthy = False
+                continue
+            # A readable zero is taken at its word: ``rocprof_kernel_count``
+            # claims dispatches, so rounding it up would over-count.
+            calls_by_kernel[name] = calls_by_kernel.get(name, 0) + int(calls)
+    return ns_by_kernel, (calls_by_kernel if counts_trustworthy else None)
 
 
-def _totals_from_trace(paths: list[Path]) -> tuple[dict[str, float], dict[str, int]]:
-    """Aggregate ``*_kernel_trace.csv`` dispatch rows into the same shape."""
+def _totals_from_trace(paths: list[Path]) -> tuple[dict[str, float], dict[str, int] | None]:
+    """Aggregate ``*_kernel_trace.csv`` dispatch rows into the same shape.
+
+    Counts are always trustworthy here: a trace row *is* one dispatch, so
+    there is no per-kernel aggregate to misread.
+    """
     ns_by_kernel: dict[str, float] = {}
     calls_by_kernel: dict[str, int] = {}
     for path in paths:
@@ -137,8 +150,11 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
         ``{"rocprof_artifact_dir": str}`` plus, when kernel data was found,
         the flat numeric ``rocprof_kernel_count`` / ``rocprof_gpu_time_ms`` /
         ``rocprof_top_kernel_ms`` and the non-numeric ``rocprof_top_kernels``
-        name list. Never raises: an unreadable or malformed artifact tree
-        degrades to the artifact-dir-only result.
+        name list. ``rocprof_kernel_count`` is omitted -- while the timings
+        are still reported -- when a stats row's ``Calls`` column was
+        unreadable, because a per-kernel aggregate row gives no basis for
+        guessing how many dispatches it stood for. Never raises: an unreadable
+        or malformed artifact tree degrades to the artifact-dir-only result.
     """
     root = Path(out_dir)
     try:
@@ -157,7 +173,7 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
     # would otherwise suppress a complete kernel trace sitting beside it, and
     # report no kernels on a host where profiling works.
     ns_by_kernel: dict[str, float] = {}
-    calls_by_kernel: dict[str, int] = {}
+    calls_by_kernel: dict[str, int] | None = {}
     if stats_paths:
         ns_by_kernel, calls_by_kernel = _totals_from_stats(stats_paths)
     if not ns_by_kernel and trace_paths:
@@ -175,7 +191,10 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
     # capture rather than publishing an ``Infinity`` token.
     if not (math.isfinite(total_ms) and math.isfinite(top_ms)):
         return metrics
-    metrics["rocprof_kernel_count"] = sum(calls_by_kernel.values())
+    # Omitted rather than fabricated when a stats row's ``Calls`` was
+    # unreadable; the timings above are still sound.
+    if calls_by_kernel is not None:
+        metrics["rocprof_kernel_count"] = sum(calls_by_kernel.values())
     metrics["rocprof_gpu_time_ms"] = total_ms
     metrics["rocprof_top_kernel_ms"] = top_ms
     metrics["rocprof_top_kernels"] = [name for name, _ in ranked[:TOP_N]]

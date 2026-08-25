@@ -82,6 +82,13 @@ ENV_PROTON_PYTHON: str = "AORTA_PROTON_PYTHON"
 #: Proton itself.
 ENV_PREFIX: str = "AORTA_PROTON_"
 
+#: Device-selection variables Proton does not honour on AMD, in precedence
+#: order. Both spellings are rejected by Proton for the queue-intercepting
+#: backends -- ``ROCR_VISIBLE_DEVICES`` is the one it reads -- and the CUDA
+#: spelling matters in practice because ROCm's PyTorch presents its devices as
+#: ``cuda``, so operators pin them with that name.
+_REJECTED_DEVICE_VARS: tuple[str, ...] = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+
 _PYTHON_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
 # Interpreter flags that take no argument and can safely stay in front of
 # ``-m triton.profiler.proton``. Anything else means we cannot confidently
@@ -367,18 +374,24 @@ def _device_env_prefix(
     """
     assignments = dict(extra or {})
     unset: list[str] = []
-    hip = env.get("HIP_VISIBLE_DEVICES")
-    if hip is not None and backend in QUEUE_INTERCEPTING_BACKENDS:
-        unset.append("HIP_VISIBLE_DEVICES")
-        rocr = env.get("ROCR_VISIBLE_DEVICES")
-        assignments.setdefault("ROCR_VISIBLE_DEVICES", hip if rocr is None else rocr)
-        log.warning(
-            "proton: HIP_VISIBLE_DEVICES=%r is not honoured by Proton's %s "
-            "backend; running with ROCR_VISIBLE_DEVICES=%r instead.",
-            hip,
-            backend,
-            assignments["ROCR_VISIBLE_DEVICES"],
-        )
+    if backend in QUEUE_INTERCEPTING_BACKENDS:
+        # Proton rejects BOTH spellings on AMD, not just the HIP one. The CUDA
+        # spelling is the likelier of the two to be set in practice, because
+        # ROCm's PyTorch reports its devices as ``cuda`` and operators pin them
+        # accordingly. Ordered by precedence: HIP wins when both are present,
+        # matching the ROCm runtime's own preference.
+        present = [(name, env[name]) for name in _REJECTED_DEVICE_VARS if env.get(name) is not None]
+        if present:
+            unset.extend(name for name, _ in present)
+            rocr = env.get("ROCR_VISIBLE_DEVICES")
+            assignments.setdefault("ROCR_VISIBLE_DEVICES", present[0][1] if rocr is None else rocr)
+            log.warning(
+                "proton: %s not honoured by Proton's %s backend; running with "
+                "ROCR_VISIBLE_DEVICES=%r instead.",
+                ", ".join(f"{name}={value!r}" for name, value in present),
+                backend,
+                assignments["ROCR_VISIBLE_DEVICES"],
+            )
     if not assignments and not unset:
         return []
     env_bin = shutil.which("env")

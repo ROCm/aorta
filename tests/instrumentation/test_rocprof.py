@@ -542,13 +542,29 @@ def test_parse_summary_drops_metrics_when_the_total_overflows(tmp_path):
     assert parse_summary(tmp_path) == {"rocprof_artifact_dir": str(tmp_path)}
 
 
-def test_parse_summary_counts_one_dispatch_when_calls_is_unreadable(tmp_path):
-    """A stats row without a readable ``Calls`` column still evidences one
-    dispatch, so it counts as one rather than being dropped."""
+def test_parse_summary_omits_the_count_when_calls_is_unreadable(tmp_path):
+    """An unreadable ``Calls`` column drops the count but keeps the timings.
+
+    A stats row is a **per-kernel aggregate**, not one dispatch, so an
+    unreadable count could stand for a single launch or ten thousand.
+    Substituting 1 would publish a confident-looking ``rocprof_kernel_count``
+    that is simply wrong; the fail-soft contract is fewer metrics, never
+    invented ones.
+    """
     (tmp_path / "aorta_kernel_stats.csv").write_text(
         '"Name","TotalDurationNs"\n"k",1000000\n', encoding="utf-8"
     )
-    assert parse_summary(tmp_path)["rocprof_kernel_count"] == 1
+    metrics = parse_summary(tmp_path)
+    assert "rocprof_kernel_count" not in metrics
+    assert metrics.get("rocprof_gpu_time_ms") == pytest.approx(1.0)
+    assert metrics.get("rocprof_top_kernels") == ["k"]
+
+
+def test_parse_summary_keeps_the_count_from_a_trace_without_calls(tmp_path):
+    """The trace path is immune: one row *is* one dispatch, so it can count."""
+    trace = FIXTURES / "flat_with_o" / "aorta_kernel_trace.csv"
+    (tmp_path / "aorta_kernel_trace.csv").write_bytes(trace.read_bytes())
+    assert parse_summary(tmp_path).get("rocprof_kernel_count") == _TRACE_ROWS
 
 
 def test_parse_summary_takes_a_zero_call_count_at_its_word(tmp_path):
