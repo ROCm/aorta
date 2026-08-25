@@ -87,7 +87,13 @@ def test_library_for_resolves_nested_gfx_subdir(monkeypatch, tmp_path):
 
 
 def test_library_for_prefers_the_flat_bundle_when_both_exist(monkeypatch, tmp_path):
-    """Classic behaviour is unchanged when a per-gfx dir happens to sit beside it."""
+    """Classic behaviour is unchanged when a per-gfx dir happens to sit beside it.
+
+    Same name in both trees, so the two bundles have identical predicates. That
+    makes this necessary but not sufficient on its own: it cannot distinguish
+    "the flat tree wins" from "the tie-break happened to pick flat" -- which is
+    what the next test is for.
+    """
     monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
     bundle = gen._SS_HEAVY.format(layout="Ailk_Bjlk")
     flat = tmp_path / bundle
@@ -183,6 +189,69 @@ def test_variant_tokens_parse_into_the_predicates_they_encode(monkeypatch, tmp_p
 def test_gate_defaults_name_the_measured_mi350x(monkeypatch, tmp_path):
     """rocprofv3 agent info on the gate reports Device_Id 30112 / Cu_Count 256."""
     assert (gen.GATE_CHIP_ID, gen.GATE_CU_COUNT) == (0x75A0, 256)
+
+
+# One tree per layout. The two library directories are alternative *layouts*, so
+# resolution stops at the first that holds anything -- otherwise predicate
+# specificity, which is settled first, lets a nested bundle outrank the flat
+# install it sits beside. No real image can exercise the interaction: the classic
+# base has no nested tree and the wheel image nothing at the flat level.
+
+
+def test_a_more_specific_nested_bundle_does_not_outrank_the_flat_tree(monkeypatch, tmp_path):
+    """The flat tree wins outright, not merely on a tie-break.
+
+    This is the case that separates "one tree per layout" from "merge both and
+    rank": a tokenised nested bundle is *more specific* than an untokenised flat
+    one, so any merge -- however it orders directories -- resolves to the nested
+    file and silently changes the extracted object and the digest recorded beside
+    it. The same-name test above cannot see this, since equal predicates are
+    exactly the case where a directory tie-break is reached.
+    """
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    flat = _plant(tmp_path, "Ailk_Bjlk", _V_75A0)[_V_75A0]
+    nested = _plant(tmp_path / gen.GFX, "Ailk_Bjlk", _V_CU256_75A0)[_V_CU256_75A0]
+    bundles = gen._variants_for("Ailk_Bjlk")
+    assert [v.path for v in bundles.variants] == [flat], "the nested tree must not contribute"
+    assert gen._library_for("Ailk_Bjlk") == flat
+    # The nested bundle really is what a merged ranking would have picked.
+    assert nested.is_file()
+    assert (
+        gen._Variant(nested, 256, frozenset({0x75A0})).row_order
+        < gen._Variant(flat, None, frozenset({0x75A0})).row_order
+    )
+
+
+def test_a_stale_tree_of_unparsed_names_does_not_fall_through_to_the_other_layout(
+    monkeypatch, tmp_path
+):
+    """Stopping at the first *populated* tree counts names that do not parse.
+
+    Otherwise a leftover tree whose tokens this script does not recognise would
+    silently hand resolution to the other layout -- the one shape where falling
+    through looks like success instead of failing.
+    """
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    stale = _plant(tmp_path, "Ailk_Bjlk", "_XPACK7")["_XPACK7"]
+    _plant(tmp_path / gen.GFX, "Ailk_Bjlk", *_SHIPPED_714)
+    bundles = gen._variants_for("Ailk_Bjlk")
+    assert bundles.variants == [] and bundles.unparsed == [stale]
+    with pytest.raises(SystemExit, match="none with a recognised device-token block"):
+        gen._library_for("Ailk_Bjlk")
+
+
+def test_the_nested_tree_is_used_when_the_flat_one_holds_nothing_for_this_layout(
+    monkeypatch, tmp_path
+):
+    """The real wheel shape: ``library/`` holds only the per-arch directories.
+
+    A flat tree that exists but holds nothing *for this layout* must not count as
+    populated, or the 7.14 layout would never be reached at all.
+    """
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    _plant(tmp_path, "Alik_Bljk", _V_CU256_75A0)  # a different layout, flat
+    nested = _plant(tmp_path / gen.GFX, "Ailk_Bjlk", *_SHIPPED_714)
+    assert gen._library_for("Ailk_Bjlk") == nested[_V_CU256_75A0]
 
 
 def test_classic_single_bundle_is_chosen_for_every_device(monkeypatch, tmp_path):
@@ -291,6 +360,31 @@ def test_an_unregistered_chip_id_still_fails_closed(monkeypatch, tmp_path):
     # Naming what *was* shipped is what makes the failure actionable.
     for variant in _SHIPPED_714:
         assert f"{variant}_{gen.GFX}.co" in message
+    # And since the registry mirror cannot be diffed against any image, this
+    # error is its only drift signal -- so it has to name that as the cause.
+    assert "ChipIdRegistry mirror" in message
+
+
+def test_a_registered_chip_that_finds_nothing_does_not_blame_the_registry(
+    monkeypatch, tmp_path
+):
+    """The mirror hint must not fire for an id the mirror already knows.
+
+    0x75a3 is registered, so a miss here means the layout ships nothing usable --
+    pointing at the registry would send the reader to the wrong place.
+    """
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    _plant(tmp_path, "Ailk_Bjlk", "_CU999_ID75a3")
+    with pytest.raises(SystemExit) as excinfo:
+        gen._library_for("Ailk_Bjlk", 0x75A3, 256)
+    message = str(excinfo.value)
+    assert "0x75a3" in message
+    assert "ChipIdRegistry mirror" not in message
+    # The fallback root has no entry of its own, so it must not be blamed either.
+    _plant(tmp_path, "Ailk_Bjlk", "_CU999_ID75a0")
+    with pytest.raises(SystemExit) as excinfo:
+        gen._library_for("Ailk_Bjlk", gen._CHIP_ID_FALLBACK_ROOT, 256)
+    assert "ChipIdRegistry mirror" not in str(excinfo.value)
 
 
 def test_selection_does_not_depend_on_directory_enumeration_order(monkeypatch, tmp_path):
