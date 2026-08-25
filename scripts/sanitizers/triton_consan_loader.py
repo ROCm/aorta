@@ -27,7 +27,9 @@ Two modes, mirroring the two committed HIP loaders:
     Additionally launch the kernel once, for record/replay's dynamic coverage.
     This needs the argument signature, which Triton does **not** always write to
     the metadata JSON (it is absent in 3.7.1), so pass ``--launch-spec`` when the
-    metadata has no ``signature``. Note that dispatching a caller-supplied object
+    metadata has no ``signature`` -- preferably as an array of ``[name, type]``
+    pairs, since argument order is load-bearing and JSON object key order is not
+    (see ``parse_signature``). Note that dispatching a caller-supplied object
     currently fails closed on the shipping RocJITsu build for the same reason
     ``daily-consan-lds-dispatch.yaml`` does (zero captured records -> exit 86,
     ROCm/rocm-systems#9972).
@@ -408,6 +410,10 @@ def pack_arguments(
     sanitizer run into a memory fault. Callers who want the kernel to touch
     memory supply both the extents (``--buffer-bytes``) and the scalars
     (``--arg``).
+
+    Every pointer gets a fresh zeroed allocation, so a ``--arg`` naming one is
+    rejected rather than silently discarded -- as is a name the signature does
+    not contain.
     """
 
     known = {spec.name for spec in specs}
