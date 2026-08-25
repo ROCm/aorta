@@ -1,0 +1,45 @@
+# Proton capture of a Triton elementwise kernel.
+#
+# Proton runs inside the workload's own interpreter (`python -m
+# triton.profiler.proton`), so this recipe must be driven from an
+# interpreter that has Triton installed -- normally a ROCm PyTorch
+# container. See README.md.
+#
+#   aorta sweep run \
+#       --recipe examples/profiling/proton/triton-vecadd/recipe.yaml \
+#       --output ./profiling_results \
+#       -- python examples/profiling/proton/triton-vecadd/vecadd.py \
+#            --size 1048576 --iters 20
+schema_version: 1
+mode: probe
+
+ticket: PROFILING-TRITON-VECADD
+
+trials: 1
+# Triton JIT-compiles on first launch; a cold kernel cache dominates the
+# wall time of a one-kernel payload.
+timeout_per_trial: 1800
+
+mitigation_axis: [none]
+diagnostic_axis: [none]
+
+env_passthrough_mode: inherit
+
+# Baseline Proton configuration on AMD: CLI attach, shadow context so time
+# is attributed to the launching frame, hatchet tree output. These are also
+# the collector's defaults -- spelled out here because this is the example
+# people copy.
+#
+# `backend: "auto"` omits Proton's `-b` and lets Proton pick the backend
+# matching the active runtime: `rocprofiler` where rocprofiler-sdk is
+# available, `roctracer` otherwise. That is the only portable spelling --
+# naming `rocprofiler` explicitly is correct on current upstream Triton but
+# exits with an argparse "invalid choice: 'rocprofiler'" on Triton 3.7.x and
+# earlier, before your payload runs. Pin a backend explicitly only when you
+# need to know exactly which one measured.
+collect:
+  proton:
+    mode: "cli"
+    backend: "auto"
+    context: "shadow"
+    data: "tree"
