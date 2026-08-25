@@ -157,9 +157,14 @@ python3 scripts/sanitizers/triton_consan_loader.py emit-command \
 
 `run_consan` executes `consan_command` as a bare argv with no arguments, so
 `emit-command` writes a small executable shim with the resolved arguments baked
-in -- the run-time analogue of the `-DOBJECT` build step. Because `run_consan`
-records `command_sha256`, hashing that shim pins the exact object the run
-loaded. `recipes/sanitizers/consan-triton-kernel.yaml` is a worked example.
+in -- the run-time analogue of the `-DOBJECT` build step. The shim also carries a
+SHA-256 for every input whose bytes decide what runs (the code object, the
+metadata, and the launch spec), and `run` re-checks each before touching the
+device. That is what makes the `command_sha256` `run_consan` records meaningful:
+a Triton cache entry can be evicted and repopulated, so pinning the paths alone
+would let a rebuilt cache feed different code to the same recorded command and
+selected identity. Re-run `emit-command` after any recompile.
+`recipes/sanitizers/consan-triton-kernel.yaml` is a worked example.
 
 Two modes mirror the two committed HIP loaders:
 

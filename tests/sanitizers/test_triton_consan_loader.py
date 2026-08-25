@@ -6,6 +6,7 @@ resolution, launch-ABI packing, and shim generation around it.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -263,6 +264,15 @@ def test_float_scalar_rejects_non_numeric():
         loader.pack_arguments(specs, pointers={}, scalars={"v": "not-a-number"})
 
 
+@pytest.mark.parametrize(("ttype", "value"), [("fp16", "70000"), ("fp32", "1e300")])
+def test_float_scalar_too_wide_for_its_type_fails_closed(ttype, value):
+    # struct.pack raises OverflowError, not ValueError; without translating it the
+    # loader would traceback instead of exiting non-zero like every other error.
+    specs = loader.parse_signature({"v": ttype})
+    with pytest.raises(loader.LoaderError, match=f"does not fit in {ttype}"):
+        loader.pack_arguments(specs, pointers={}, scalars={"v": value})
+
+
 def test_block_dim_multiplies_warps_by_warp_size():
     assert loader.block_dim(_METADATA) == 256
     assert loader.block_dim({"num_warps": 2, "warp_size": 64}) == 128
@@ -296,6 +306,72 @@ def test_parse_grid_rejects_malformed_input(bad):
 
 def test_parse_grid_accepts_three_dimensions():
     assert loader.parse_grid("4, 2,1") == (4, 2, 1)
+
+
+# --------------------------------------------------------------------------
+# Narrowing into fixed-width C types
+#
+# ctypes wraps silently -- c_uint(2**32 + 1) is 1 -- so an oversized launch
+# dimension would quietly become a tiny one and invalidate the run.
+# --------------------------------------------------------------------------
+
+
+def test_require_in_range_bounds_both_ends():
+    assert loader.require_in_range(5, name="v", minimum=1, maximum=10) == 5
+    with pytest.raises(loader.LoaderError, match=r"v must be in 1\.\.10, got 0"):
+        loader.require_in_range(0, name="v", minimum=1, maximum=10)
+    with pytest.raises(loader.LoaderError, match=r"v must be in 1\.\.10, got 11"):
+        loader.require_in_range(11, name="v", minimum=1, maximum=10)
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_grid_dimension_above_c_uint_fails_closed(axis):
+    dims = ["1", "1", "1"]
+    dims[axis] = str(loader._UINT_MAX + 1)
+    with pytest.raises(loader.LoaderError, match="--grid"):
+        loader.parse_grid(",".join(dims))
+
+
+def test_grid_dimension_at_the_c_uint_ceiling_is_allowed():
+    assert loader.parse_grid(f"{loader._UINT_MAX},1,1") == (loader._UINT_MAX, 1, 1)
+
+
+def test_block_size_above_c_uint_fails_closed():
+    with pytest.raises(loader.LoaderError, match="block size"):
+        loader.block_dim({"num_warps": loader._UINT_MAX, "warp_size": 64})
+
+
+def test_shared_bytes_above_c_uint_fails_closed():
+    with pytest.raises(loader.LoaderError, match="metadata 'shared'"):
+        loader.shared_bytes({"shared": loader._UINT_MAX + 1})
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", str(2**64 + 1), "abc"])
+def test_buffer_bytes_rejects_values_that_would_wrap(bad):
+    # argparse surfaces ArgumentTypeError as SystemExit(2), so a wrapping size
+    # never reaches HIP nor gets baked into a shim.
+    with pytest.raises(SystemExit):
+        loader.build_parser().parse_args(
+            ["run", "--hsaco", "/tmp/k.hsaco", "--buffer-bytes", bad]
+        )
+
+
+def test_buffer_bytes_accepts_hex_and_plain_sizes():
+    args = loader.build_parser().parse_args(
+        ["run", "--hsaco", "/tmp/k.hsaco", "--buffer-bytes", "0x1000"]
+    )
+    assert args.buffer_bytes == 4096
+
+
+@pytest.mark.parametrize("bad", ["4294967296,1,1", "0,1,1", "1,1", "a,b,c"])
+def test_grid_is_validated_at_parse_time_so_no_shim_can_bake_a_bad_one(bad):
+    with pytest.raises(SystemExit):
+        loader.build_parser().parse_args(["emit-command", "--hsaco", "/tmp/k.hsaco", "--output", "/tmp/s", "--grid", bad])
+
+
+def test_grid_defaults_to_a_single_block():
+    args = loader.build_parser().parse_args(["run", "--hsaco", "/tmp/k.hsaco"])
+    assert args.grid == (1, 1, 1)
 
 
 def test_parse_arg_overrides_splits_on_first_equals():
@@ -350,6 +426,134 @@ def test_check_kernarg_fit_rejects_only_the_overrun_direction():
     # Hidden arguments make the compiled segment larger than the explicit args.
     loader.check_kernarg_fit(32, 48, kernel="add_kernel")
     loader.check_kernarg_fit(999, None, kernel="add_kernel")
+
+
+# --------------------------------------------------------------------------
+# Content pinning
+#
+# A Triton cache entry is keyed by a content hash, but it can be evicted and
+# repopulated, so a path alone does not pin the bytes that get loaded.
+# --------------------------------------------------------------------------
+
+
+def test_sha256_file_matches_hashlib(tmp_path):
+    path = tmp_path / "blob"
+    path.write_bytes(b"triton code object")
+    assert loader.sha256_file(path) == hashlib.sha256(b"triton code object").hexdigest()
+
+
+def test_verify_digest_accepts_unchanged_bytes(tmp_path):
+    path = tmp_path / "blob"
+    path.write_bytes(b"same")
+    loader.verify_digest(path, loader.sha256_file(path), what="code object")
+
+
+def test_verify_digest_without_a_pin_is_a_no_op(tmp_path):
+    path = tmp_path / "blob"
+    path.write_bytes(b"whatever")
+    loader.verify_digest(path, None, what="code object")
+
+
+def test_verify_digest_rejects_repopulated_bytes(tmp_path):
+    path = tmp_path / "blob"
+    path.write_bytes(b"original")
+    pinned = loader.sha256_file(path)
+    path.write_bytes(b"recompiled")
+    with pytest.raises(loader.LoaderError, match="code object digest mismatch") as excinfo:
+        loader.verify_digest(path, pinned, what="code object")
+    assert "re-run emit-command" in str(excinfo.value)
+
+
+def test_emitted_shim_pins_object_and_metadata_digests(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    output = tmp_path / "shim"
+    assert loader.main(["emit-command", "--cache-entry", str(entry_dir), "--output", str(output)]) == 0
+    flattened = output.read_text(encoding="utf-8").replace(" \\\n    ", " ")
+    assert f"--expect-object-sha256 {loader.sha256_file(entry_dir / 'add_kernel.hsaco')}" in flattened
+    assert (
+        f"--expect-metadata-sha256 {loader.sha256_file(entry_dir / 'add_kernel.json')}" in flattened
+    )
+
+
+def test_emitted_shim_pins_the_launch_spec_in_dispatch_mode(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    spec = tmp_path / "launch.json"
+    spec.write_text(json.dumps({"signature": {"x": "*fp32"}}), encoding="utf-8")
+    output = tmp_path / "shim"
+    assert (
+        loader.main(
+            [
+                "emit-command",
+                "--cache-entry",
+                str(entry_dir),
+                "--output",
+                str(output),
+                "--mode",
+                "dispatch",
+                "--launch-spec",
+                str(spec),
+            ]
+        )
+        == 0
+    )
+    flattened = output.read_text(encoding="utf-8").replace(" \\\n    ", " ")
+    assert f"--expect-launch-spec-sha256 {loader.sha256_file(spec)}" in flattened
+
+
+def test_run_fails_closed_when_the_pinned_object_changed(tmp_path, capsys, monkeypatch):
+    """The whole point of the pin: a recompiled cache entry must not silently run.
+
+    ``Hip`` is patched to a sentinel that raises, proving the digest check runs
+    before anything touches the device.
+    """
+
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    hsaco = entry_dir / "add_kernel.hsaco"
+    pinned = loader.sha256_file(hsaco)
+    hsaco.write_bytes(b"\x7fELF a different, recompiled object")
+
+    def _explode():
+        raise AssertionError("device must not be touched before the digest is verified")
+
+    monkeypatch.setattr(loader, "Hip", _explode)
+    assert (
+        loader.main(
+            [
+                "run",
+                "--hsaco",
+                str(hsaco),
+                "--expect-object-sha256",
+                pinned,
+            ]
+        )
+        == 1
+    )
+    assert "code object digest mismatch" in capsys.readouterr().err
+
+
+def test_run_fails_closed_when_the_pinned_metadata_changed(tmp_path, capsys, monkeypatch):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    metadata = entry_dir / "add_kernel.json"
+    pinned = loader.sha256_file(metadata)
+    metadata.write_text(json.dumps({**_METADATA, "num_warps": 8}), encoding="utf-8")
+
+    def _explode():
+        raise AssertionError("device must not be touched before the digest is verified")
+
+    monkeypatch.setattr(loader, "Hip", _explode)
+    assert (
+        loader.main(
+            [
+                "run",
+                "--hsaco",
+                str(entry_dir / "add_kernel.hsaco"),
+                "--expect-metadata-sha256",
+                pinned,
+            ]
+        )
+        == 1
+    )
+    assert "Triton metadata digest mismatch" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------
@@ -431,6 +635,10 @@ def test_loader_argv_omits_dispatch_flags_in_load_mode(tmp_path):
     argv = loader._loader_argv(args, entry)
     assert "--grid" not in argv
     assert argv[:2] == ["run", "--hsaco"]
+    # The object/metadata pins are not dispatch-only: load mode runs the kernel's
+    # code object too, so both are always baked in.
+    assert "--expect-object-sha256" in argv
+    assert "--expect-metadata-sha256" in argv
 
 
 # --------------------------------------------------------------------------

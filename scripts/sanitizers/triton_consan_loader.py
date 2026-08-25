@@ -35,9 +35,12 @@ Two modes, mirroring the two committed HIP loaders:
 ``run_consan`` executes ``source.consan_command`` as a bare argv with no
 arguments, so a parameterised loader cannot be named directly. ``emit-command``
 bridges that: it writes a tiny executable shim with the resolved arguments baked
-in, which is the run-time analogue of the ``-DOBJECT`` build step. Hashing the
-shim (``run_consan`` records ``command_sha256``) then pins the exact object the
-run loaded.
+in, which is the run-time analogue of the ``-DOBJECT`` build step. It also bakes
+in a SHA-256 for every input whose bytes decide what runs, and ``run`` re-checks
+each one before touching the device. That is what makes the ``command_sha256``
+``run_consan`` records meaningful: a cache entry can be evicted and repopulated,
+so pinning the paths alone would let a rebuilt cache feed different code to the
+same recorded command and selected identity.
 
 Usage:
 
@@ -54,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import re
 import shlex
@@ -91,9 +95,24 @@ _HIP_LAUNCH_PARAM_END = ctypes.c_void_p(0x03)
 
 _DEFAULT_BUFFER_BYTES = 8 * 1024 * 1024
 
+# Widths of the C types every launch parameter is narrowed into. ctypes wraps
+# silently on overflow -- c_uint(2**32 + 1) is 1 -- which would turn an oversized
+# grid or buffer into a quietly tiny launch, so each value is range-checked
+# against the real platform width before conversion.
+_UINT_MAX = 2 ** (8 * ctypes.sizeof(ctypes.c_uint)) - 1
+_SIZE_MAX = 2 ** (8 * ctypes.sizeof(ctypes.c_size_t)) - 1
+
 
 class LoaderError(Exception):
     """A fail-closed loader error: never degrade into a vacuous clean run."""
+
+
+def require_in_range(value: int, *, name: str, minimum: int, maximum: int) -> int:
+    """Reject a value that would wrap when narrowed into its C type."""
+
+    if value < minimum or value > maximum:
+        raise LoaderError(f"{name} must be in {minimum}..{maximum}, got {value}")
+    return value
 
 
 # --------------------------------------------------------------------------
@@ -125,6 +144,36 @@ class CacheEntry:
                 return arch
         arch = self.metadata.get("arch")
         return arch if isinstance(arch, str) else None
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_digest(path: Path, expected: str | None, *, what: str) -> None:
+    """Fail closed when a pinned input's bytes have changed since emission.
+
+    A Triton cache entry is keyed by a content hash, but the entry can be evicted
+    and repopulated, so a path alone does not pin the bytes. Baking the digest
+    into the emitted shim and re-checking it here means the ``command_sha256``
+    ``run_consan`` records covers *what* is loaded, not just where it lives --
+    otherwise a rebuilt cache could feed different code to the same recorded
+    command and selected identity.
+    """
+
+    if expected is None:
+        return
+    actual = sha256_file(path)
+    if actual != expected:
+        raise LoaderError(
+            f"{what} digest mismatch for {path}: expected {expected}, found {actual}. "
+            "The Triton cache entry changed since this command was emitted; "
+            "re-run emit-command against the current cache."
+        )
 
 
 def read_json_object(path: Path, *, what: str = "Triton metadata") -> dict[str, object]:
@@ -282,14 +331,16 @@ def block_dim(metadata: dict[str, object]) -> int:
     num_warps = metadata.get("num_warps")
     if not isinstance(num_warps, int) or num_warps <= 0:
         raise LoaderError("metadata has no positive 'num_warps'")
-    return num_warps * warp_size
+    return require_in_range(
+        num_warps * warp_size, name="block size (num_warps * warp_size)", minimum=1, maximum=_UINT_MAX
+    )
 
 
 def shared_bytes(metadata: dict[str, object]) -> int:
     value = metadata.get("shared", 0)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise LoaderError("metadata 'shared' must be a non-negative integer")
-    return value
+    return require_in_range(value, name="metadata 'shared'", minimum=0, maximum=_UINT_MAX)
 
 
 def pack_arguments(
@@ -332,14 +383,22 @@ def _pack_float(spec: ArgSpec, raw: str) -> bytes:
         value = float(raw)
     except ValueError as exc:
         raise LoaderError(f"argument {spec.name!r} expects a float, got {raw!r}") from exc
-    if spec.ttype == "fp32":
-        return struct.pack("<f", value)
-    if spec.ttype == "fp64":
-        return struct.pack("<d", value)
-    if spec.ttype == "fp16":
-        return struct.pack("<e", value)
-    # bf16 is the upper half of the fp32 bit pattern (round-to-nearest-even).
-    bits = int.from_bytes(struct.pack("<f", value), "little")
+    # struct.pack raises OverflowError for a finite value too wide for the target
+    # format (fp16 above 65504, fp32 above ~3.4e38). Surface it as a loader error
+    # so an out-of-range --arg fails closed instead of raising a traceback.
+    try:
+        if spec.ttype == "fp32":
+            return struct.pack("<f", value)
+        if spec.ttype == "fp64":
+            return struct.pack("<d", value)
+        if spec.ttype == "fp16":
+            return struct.pack("<e", value)
+        # bf16 is the upper half of the fp32 bit pattern (round-to-nearest-even).
+        bits = int.from_bytes(struct.pack("<f", value), "little")
+    except OverflowError as exc:
+        raise LoaderError(
+            f"argument {spec.name!r} value {value} does not fit in {spec.ttype}"
+        ) from exc
     rounded = (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
     return (rounded & 0xFFFF).to_bytes(2, "little")
 
@@ -402,8 +461,8 @@ def parse_grid(raw: str) -> tuple[int, int, int]:
         dims = tuple(int(part) for part in parts)
     except ValueError as exc:
         raise LoaderError(f"--grid must be three integers, got {raw!r}") from exc
-    if any(dim < 1 for dim in dims):
-        raise LoaderError(f"--grid dimensions must be >= 1, got {raw!r}")
+    for axis, dim in zip("xyz", dims, strict=True):
+        require_in_range(dim, name=f"--grid {axis}", minimum=1, maximum=_UINT_MAX)
     return dims  # type: ignore[return-value]
 
 
@@ -473,6 +532,7 @@ class Hip:
         return function
 
     def malloc(self, size: int) -> ctypes.c_void_p:
+        require_in_range(size, name="buffer bytes", minimum=1, maximum=_SIZE_MAX)
         pointer = ctypes.c_void_p()
         self.check(self._lib.hipMalloc(ctypes.byref(pointer), ctypes.c_size_t(size)), "hipMalloc")
         try:
@@ -599,7 +659,11 @@ def render_shim(loader: Path, argv: list[str], *, entry: CacheEntry) -> str:
         f"# Metadata:    {entry.metadata_path}\n"
         "#\n"
         "# sanitizer_plan.source.consan_command must be a bare executable taking no\n"
-        "# arguments, so the loader's arguments are baked in here instead.\n"
+        "# arguments, so the loader's arguments are baked in here instead. The\n"
+        "# --expect-*-sha256 digests pin the bytes this was generated against: a\n"
+        "# Triton cache entry can be evicted and repopulated, so the paths alone\n"
+        "# would not stop a rebuilt cache from feeding different code to the same\n"
+        "# recorded command. Re-run emit-command after any recompile.\n"
         "set -e\n"
         f"exec {shlex.quote(sys.executable)} {shlex.quote(str(loader))} \\\n    {quoted}\n"
     )
@@ -608,6 +672,37 @@ def render_shim(loader: Path, argv: list[str], *, entry: CacheEntry) -> str:
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+
+
+# Inputs whose bytes decide what actually runs, so the emitted shim pins each by
+# digest: the code object is loaded, the metadata sets the kernel name / block /
+# LDS, and the launch spec sets the argument signature.
+_PINNED_INPUTS = {
+    "object": "code object",
+    "metadata": "Triton metadata",
+    "launch-spec": "launch spec",
+}
+
+
+def _buffer_bytes(raw: str) -> int:
+    """Validate ``--buffer-bytes`` at parse time, before it reaches a shim or HIP."""
+
+    try:
+        value = int(raw, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"must be an integer, got {raw!r}") from exc
+    if value < 1 or value > _SIZE_MAX:
+        raise argparse.ArgumentTypeError(f"must be in 1..{_SIZE_MAX}, got {value}")
+    return value
+
+
+def _grid(raw: str) -> tuple[int, int, int]:
+    """Validate ``--grid`` at parse time, so emit-command cannot bake a bad one in."""
+
+    try:
+        return parse_grid(raw)
+    except LoaderError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _add_selection_arguments(parser: argparse.ArgumentParser) -> None:
@@ -638,10 +733,15 @@ def _add_selection_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="JSON supplying 'signature' when the Triton metadata omits it",
     )
-    parser.add_argument("--grid", default="1,1,1", help="dispatch grid 'X,Y,Z' (default 1,1,1)")
+    parser.add_argument(
+        "--grid",
+        type=_grid,
+        default=(1, 1, 1),
+        help="dispatch grid 'X,Y,Z' (default 1,1,1)",
+    )
     parser.add_argument(
         "--buffer-bytes",
-        type=int,
+        type=_buffer_bytes,
         default=_DEFAULT_BUFFER_BYTES,
         help="bytes to allocate per pointer argument in dispatch mode",
     )
@@ -677,11 +777,22 @@ def _loader_argv(args: argparse.Namespace, entry: CacheEntry) -> list[str]:
         str(entry.metadata_path),
         "--mode",
         args.mode,
+        "--expect-object-sha256",
+        sha256_file(entry.hsaco),
+        "--expect-metadata-sha256",
+        sha256_file(entry.metadata_path),
     ]
     if args.mode == "dispatch":
-        argv += ["--grid", args.grid, "--buffer-bytes", str(args.buffer_bytes)]
+        grid = ",".join(str(dim) for dim in args.grid)
+        argv += ["--grid", grid, "--buffer-bytes", str(args.buffer_bytes)]
         if args.launch_spec is not None:
-            argv += ["--launch-spec", str(args.launch_spec.resolve())]
+            launch_spec = args.launch_spec.resolve()
+            argv += [
+                "--launch-spec",
+                str(launch_spec),
+                "--expect-launch-spec-sha256",
+                sha256_file(launch_spec),
+            ]
         for override in args.arg:
             argv += ["--arg", override]
     return argv
@@ -689,19 +800,24 @@ def _loader_argv(args: argparse.Namespace, entry: CacheEntry) -> list[str]:
 
 def _command_run(args: argparse.Namespace) -> int:
     entry = _resolve_entry(args)
+    # Check every pinned input before touching the device, so a cache that was
+    # repopulated since emission fails closed instead of loading other bytes.
+    verify_digest(entry.hsaco, args.expect_object_sha256, what="code object")
+    verify_digest(entry.metadata_path, args.expect_metadata_sha256, what="Triton metadata")
     hip = Hip()
     if args.mode == "load":
         run_load(hip, entry)
         return 0
-    launch_spec = (
-        read_json_object(args.launch_spec, what="launch spec") if args.launch_spec else None
-    )
+    launch_spec = None
+    if args.launch_spec:
+        verify_digest(args.launch_spec, args.expect_launch_spec_sha256, what="launch spec")
+        launch_spec = read_json_object(args.launch_spec, what="launch spec")
     specs = parse_signature(resolve_signature(entry, launch_spec))
     run_dispatch(
         hip,
         entry,
         specs=specs,
-        grid=parse_grid(args.grid),
+        grid=args.grid,
         buffer_bytes=args.buffer_bytes,
         scalars=parse_arg_overrides(args.arg),
     )
@@ -732,6 +848,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser("run", help="load (and optionally dispatch) the code object")
     _add_selection_arguments(run)
+    # Set by emit-command so the shim pins the bytes it was generated against, not
+    # just their paths. Optional when running by hand against a live cache.
+    for name, what in _PINNED_INPUTS.items():
+        run.add_argument(
+            f"--expect-{name}-sha256",
+            default=None,
+            help=f"fail unless the {what} matches this SHA-256 (set by emit-command)",
+        )
     run.set_defaults(handler=_command_run)
 
     emit = subparsers.add_parser(
