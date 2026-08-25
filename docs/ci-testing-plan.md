@@ -36,9 +36,9 @@ Workflow: [`.github/workflows/cpu-tests.yml`](../.github/workflows/cpu-tests.yml
 - **Triggers:** `pull_request` and `push` to `main`. On PRs a cheap `changes`
   job first decides whether the suite is relevant (see "Path gate" below); it
   always runs on pushes to `main`.
-- **Runner / matrix:** `ubuntu-latest`, Python `3.10`, `3.11`, `3.12` (the
-  versions declared in `pyproject.toml`). `fail-fast: false` so one version's
-  failure still reports the others.
+- **Runner / matrix:** `ubuntu-latest`, Python `3.10`, `3.11`, `3.12`, `3.13`,
+  `3.14` (the versions declared in `pyproject.toml`). `fail-fast: false` so one
+  version's failure still reports the others.
 - **Concurrency:** newer pushes to the same ref cancel the older run.
 - **Selection:** `pytest -m "not gpu and not rocm"`. The `gpu` and `rocm`
   markers already exist (`pytest.ini`); GPU-only tests are deferred to Phase 2.
@@ -137,7 +137,7 @@ first and a job-level `if` decides whether the matrix runs -- the same pattern
 There is one crucial difference from the GPU gate, though. GPU's gated job is a
 single, non-matrix job (`pytest (GPU, MI350)`): when skipped, its one static
 check context still reports (as *skipped* == success), so it can be the required
-check directly. The CPU job is a **matrix** (py3.10/3.11/3.12). GitHub evaluates
+check directly. The CPU job is a **matrix** (py3.10 through py3.14). GitHub evaluates
 a job-level `if` *before* expanding the matrix, so a skipped `tests` job never
 creates the `pytest (CPU, py3.x)` contexts at all -- and a required check pinned
 to a context that never reports hangs the PR forever
@@ -180,7 +180,7 @@ checks to pass before merging`, then select:
 
 - `CPU tests`
 
-Do **not** require the per-version `pytest (CPU, py3.10/3.11/3.12)` legs: because
+Do **not** require the per-version `pytest (CPU, py3.x)` legs: because
 the matrix is skipped by a job-level `if` on irrelevant PRs, those contexts are
 not emitted and a required check pinned to them would hang the PR forever
 ([actions/runner#952](https://github.com/actions/runner/issues/952)). The `CPU
@@ -240,11 +240,13 @@ That tag is the newest published combination on every axis at once — ROCm 7.2.
 is the newest classic-layout production release, and 24.04 / py3.12 / torch
 2.10.0 are the newest Ubuntu, Python and PyTorch that line ships. Newer Python
 (3.13, 3.14) and newer PyTorch (2.11, 2.12) exist **only** on the wheel-based
-7.14 line, so they arrive with the #381 flip rather than separately.
+7.14 line, so they arrive with the **#383** base-image flip. Reading that layout
+is no longer the blocker (#381 landed); moving the pinned base onto it is.
 
-Python has a second, independent cap: `pyproject.toml`'s classifiers stop at
-3.12 and the CPU matrix tests 3.10–3.12. Moving the GPU gate past 3.12 therefore
-means declaring the support and extending that matrix first — see issue #383.
+Python's second, independent cap has now been lifted: `pyproject.toml` declares
+through 3.14 and the CPU matrix tests 3.10–3.14 (issue #383). The GPU gate stays
+on py3.12 only because that is the newest Python the classic ROCm line ships, so
+the remaining move is the base-image flip, not a packaging change.
 
 CI tracks the newest ROCm production release it can actually run, so the nightly
 eval reports against the stack customers run. Two constraints bound "newest", and
@@ -252,21 +254,38 @@ a bump proposal — from a human or from automation — must clear both:
 
 1. **Preview stream.** ROCm 7.9 through 7.13 are the *technology preview* stream,
    not newer production releases, so a higher number there is not an upgrade.
-2. **Install layout.** 7.14 onward is production, but its `rocm/pytorch` images
-   are wheel-based (see below), which this repo cannot read yet.
+2. **A deliberate flip, not a digest bump.** 7.14 onward is production and
+   wheel-based (see below). The repo **can** read that layout as of #381, so the
+   remaining blocker is not capability — it is that moving the pinned base is
+   issue #383, which changes ROCm, Ubuntu, Python and PyTorch at once and needs
+   baselines re-blessed. Not something to do by editing a digest.
 
-#### ROCm install layout: classic `/opt/rocm` (decided)
+#### ROCm install layout: both are supported (issue #381)
 
 TheRock publishes ROCm both as a system install rooted at `/opt/rocm` (DEB/RPM,
 tarballs) and as a Python wheel rooted under `site-packages` with no `/opt/rocm`.
-**CI images must currently use the classic layout.**
+**Both layouts are readable.** Discovery goes through
+`aorta.instrumentation.rocm_paths.resolve_rocm_roots`, which resolves three roots
+(core / libraries / include) so the wheel layout's split across
+`_rocm_sdk_core`, `_rocm_sdk_libraries` and `_rocm_sdk_devel` can be expressed.
+On a classic install all three coincide at `/opt/rocm`, so nothing changed there.
 
-The reason is capability, not preference: everything we use to read a ROCm install
-is bound to `/opt/rocm` — the env probe's ROCm version plus its hipBLASLt-commit
-and rocBLAS capture, `scripts/audit_env_knobs.py`, and the sanitizer GEMM
-fixtures. On a wheel image those degrade to `null`/empty rather than failing, so
-the loss would be silent. `Dockerfile.ci-gpu` therefore asserts the layout at
-build time and fails closed.
+What still has to fail closed is an install we cannot *read*. Everything we use
+to read ROCm degrades to `null`/empty rather than erroring — the env probe's
+version plus its hipBLASLt-commit and rocBLAS capture,
+`scripts/audit_env_knobs.py`, and the sanitizer GEMM fixtures — so a bad base
+image would gut the evidence while CI stayed green. `docker/rocm_layout_guard.py`
+runs at build time in `Dockerfile.ci-gpu` and `Dockerfile.rocm-latest`, accepts
+either layout, and fails the build when neither yields a readable version marker
+and lib directory. It is pinned to the resolver by
+`tests/docker/test_rocm_layout_guard.py`, which runs both implementations over
+the same synthetic trees.
+
+Neither image sets `ENV ROCM_HOME=/opt/rocm` any more. An explicit override
+ranks above autodetection, so declaring it unconditionally lets a stale
+`/opt/rocm` stub win over a correct wheel install; the classic base already
+exports `/opt/rocm/bin` on `PATH` and `/opt/rocm/lib` on `LD_LIBRARY_PATH`
+itself, so removing it changes nothing there.
 
 Which images are which, and how to tell before pulling:
 
@@ -288,13 +307,62 @@ docker buildx imagetools inspect rocm/pytorch:<tag> \
 docker buildx imagetools inspect rocm/pytorch:<tag> --format '{{json .Image.Config.Labels}}'
 ```
 
-This is not a permanent stance. A wheel install is *richer* in provenance —
-`share/therock/therock_manifest.json` carries the full 40-char `rocm-libraries`
-commit (the classic header only exposes its first 8 as `..._VERSION_TWEAK`), plus
-the build's `github_run_id` and any applied patches. Issue #381 makes discovery
-layout-agnostic and manifest-aware, after which the base flips to 7.14 and the
-guard above verifies the flip. Issue #382 covers the wheel lane's other payoff:
-cheap ROCm version bisection in a venv, plus a non-gating latest-ROCm canary.
+The wheel layout is *richer* in provenance, which is why reading it was worth
+doing rather than merely tolerating: `share/therock/therock_manifest.json`
+carries the full 40-char `rocm-libraries` commit — the classic header only
+exposes a truncated `..._VERSION_TWEAK` (measured 10 chars on 7.2.4) — plus the
+build's `the_rock_commit`, `github_run_id` and any patches applied on top of
+each upstream pin. Schema 1.16 records all of it under `therock`, and the GEMM
+libraries' `upstream_commit`.
+
+The base image itself is still the classic 7.2.4 line; flipping it to 7.14 is
+issue #383 and a deliberate separate step, since it moves ROCm, Python and
+PyTorch at once.
+
+#### The latest-ROCm canary lane (non-gating)
+
+`.github/workflows/latest-rocm-canary.yml` follows `rocm/pytorch:latest` — a
+wheel-layout image, hence dependent on the discovery work above — so a new ROCm
+release is noticed early. Pointing the *gate* at a moving tag is what this
+deliberately avoids: a red result would be ambiguous (our regression, or did the
+base change?) and neither reproducible nor bisectable afterwards. So the lane
+resolves `:latest` to a concrete digest at job start, records it with the
+results, and stays out of the gate's way.
+
+Non-gating is structural here, not just intended:
+
+| Mechanism | Effect |
+|---|---|
+| its own workflow | cannot appear in `nightly-eval.yml`'s graph, cannot be added to branch protection by accident |
+| eval exit code captured, not propagated | a regression on a brand-new ROCm records a row instead of a red X nobody can action |
+| results published to `results/canary/` | `gen_dashboard.py` globs `results/*.json` **non-recursively**, so canary rows cannot enter the gated dashboard's history or trends (pinned by `test_load_results_ignores_the_canary_subdirectory`) |
+| distinct `COMPOSE_PROJECT_NAME` (`aorta-canary`) **and** container name | cannot recreate or tear down the gate's service on the shared MI350 runner. Both are needed: compose addresses the *service*, and with the project name unset it derives one from the working directory — both lanes run compose from `docker/` with the same `torchenv` service, so both would land in project `docker` and the canary's `down -v` would take the gate's container and volumes with it |
+
+Each row carries `lane` (`"gate"` / `"canary"`) and `base_image` (the resolved
+digest, `null` in the gated lane where the Dockerfile pin already records it).
+Cron is 15:00 UTC, clear of gpu-tests (08:00), the nightly eval (after the 11:00
+wheels) and the sanitizer nightly (12:00); the lane is best-effort, so being
+squeezed out is acceptable where starving the gate is not.
+
+Publishing is a **separate `ubuntu-latest` job**, the same split
+`nightly-eval.yml` uses and for the same two reasons: the GPU job installs and
+executes a wheel, so it holds `contents: read` only and checks out with
+`persist-credentials: false`; and because the workflow is
+`workflow_dispatch`-triggerable, the publish job is gated to
+`github.ref == 'refs/heads/main'` so a run from an unreviewed branch cannot write
+to the shared `ci-results` branch (it still produces the artifact).
+
+The rows render on the dashboard under **Latest ROCm canary · observed only**
+(`#canary`). That section is deliberately colour-free: no verdict chips, no
+status classes, and it feeds neither the page banner, the pass-rate trend,
+`status.json` nor `data.json` — `gen_dashboard.py` takes the lane as a separate
+`--canary-results-dir` argument precisely so it cannot reach anything gated. A
+red canary row means a new ROCm release moved something, which is a question to
+investigate rather than a regression on the branch, and colouring it would
+recreate the ambiguity the separate lane exists to avoid.
+
+The section always renders, including an explicit "no canary runs recorded yet"
+state, so the `#canary` anchor resolves before the lane's first run.
 
 ### Triggers and frequency
 
@@ -429,5 +497,5 @@ per-version `pytest (CPU, py3.x)` legs -- see "Making it a required check".)
 
 | Phase | Runner | Selection | Status |
 | --- | --- | --- | --- |
-| 1 - CPU gate | `ubuntu-latest` (3.10-3.12) | `not gpu and not rocm`, `-n auto` | Implemented (`cpu-tests.yml`) |
+| 1 - CPU gate | `ubuntu-latest` (3.10-3.14) | `not gpu and not rocm`, `-n auto` | Implemented (`cpu-tests.yml`) |
 | 2 - GPU gate | `[self-hosted, gpu]` | `gpu or rocm`, `-n 4` + nightly workload regression | Implemented (`gpu-tests.yml`) |

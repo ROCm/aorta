@@ -1011,6 +1011,18 @@ ENV_KNOB_REGISTRY: tuple[EnvironmentKnob, ...] = (
         reference_build=REFERENCE_BUILD_GEMM,
     ),
     EnvironmentKnob(
+        name="TENSILE_ADAPTIVE_GEMM_NTAB_ALGO",
+        library="hipblaslt",
+        consumer=(
+            "adaptive-GEMM N-table algorithm selection; the name is in ROCm 7.14's "
+            "libhipblaslt string table but its call site is not traced, so the "
+            "classification is forward-compat rather than a behaviour claim"
+        ),
+        category="gemm_forward_compat",
+        source_reference=ABSENT_FROM_REFERENCE_BUILD,
+        reference_build=REFERENCE_BUILD_GEMM,
+    ),
+    EnvironmentKnob(
         name="TENSILE_STREAMK_SPLIT",
         library="hipblaslt",
         consumer=(

@@ -2661,6 +2661,97 @@ def test_rebuild_commands_are_runnable_from_the_repo_root():
                 assert (_REPO_ROOT / token).exists(), f"{entry['path']}: {token}"
 
 
+def _sanitizer_nightly_payloads() -> tuple[list[str], list[tuple[int, int]]]:
+    """Every single-quoted ``bash -lc`` payload in the sanitizer nightly.
+
+    Returns the workflow's lines and, per payload, its (start, end) line
+    indices -- callers need the lines to report which one offended. There is
+    more than one payload:
+    #385 split the workflow into a gated job and a non-gating survey job, each
+    with its own provisioning block. A helper that took only the FIRST match
+    would have silently stopped covering the survey job the day it landed --
+    the same non-unique-marker trap #394 hit when lifting shell out of a
+    workflow by its first occurrence.
+    """
+    lines = (
+        (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    spans = []
+    for start, line in enumerate(lines):
+        if "bash -lc '" in line:
+            end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "'")
+            spans.append((start, end))
+    return lines, spans
+
+
+def test_sanitizer_nightly_payloads_have_no_apostrophes():
+    """Each fixture-build step is ONE single-quoted `bash -lc` payload.
+
+    Any literal apostrophe inside one -- in code, in an echo marker, or in a
+    comment -- closes that quote early, so the HOST shell misparses the
+    remainder and the step dies before running anything. The YAML stays valid
+    and no CPU check runs the GPU nightly, so the breakage would surface only on
+    the 12:00 UTC schedule; it has already been introduced and fixed twice
+    (#369 -> #372, then the resolver change on this branch).
+
+    Checks EVERY payload, not the first: the survey job added by #385 carries
+    its own, and this branch now writes the resolver export into both.
+    """
+    lines, spans = _sanitizer_nightly_payloads()
+    assert len(spans) >= 2, (
+        "expected a payload per provisioning block (gate + survey); found "
+        f"{len(spans)} -- has the workflow been restructured?"
+    )
+    offenders = [
+        (i + 1, lines[i].strip())
+        for start, end in spans
+        for i in range(start + 1, end)
+        if "'" in lines[i]
+    ]
+    assert not offenders, (
+        "apostrophe(s) inside a single-quoted bash -lc payload would break the "
+        f"host shell: {offenders}"
+    )
+
+
+def test_every_llvm_bindir_export_goes_through_the_resolver():
+    """Both provisioning blocks must derive the bindir, not guess it (#381).
+
+    `${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin` does no validation: on a
+    wheel-layout image both vars are unset and /opt/rocm does not exist, so it
+    expands to a directory that is not there and leaves clang-offload-bundler
+    unreachable -- the exact failure the export was added to fix, on a different
+    layout.
+
+    Asserted over every occurrence rather than "the resolver form appears
+    somewhere", because #385 added a SECOND copy of the un-validated chain in
+    its new survey job while the gate job already had the fix. One converted
+    occurrence beside one un-converted one reads as done and is not.
+    """
+    workflow = (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+    # Both spellings, so an UNCONVERTED occurrence is found rather than missed:
+    # the resolver form names `llvm_bin_dir`, the shell chain names the literal
+    # path. Matching only one of them makes the test blind to what it exists to
+    # catch. Comments are excluded -- both strings are discussed in the prose
+    # above each export.
+    exports = [
+        stripped
+        for line in workflow.splitlines()
+        if (stripped := line.strip()).startswith("export PATH=")
+        and ("llvm_bin_dir" in stripped or "lib/llvm/bin" in stripped)
+    ]
+    assert len(exports) >= 2, f"expected an export per job; found {exports}"
+    for export in exports:
+        assert export == gen._ROCM_LLVM_PATH_EXPORT, (
+            "this line still guesses the ROCm LLVM bindir instead of asking the "
+            f"resolver: {export}"
+        )
+
+
 def test_rebuild_commands_export_the_rocm_llvm_path():
     """The bundler is not on PATH in the image that produced these artifacts.
 
@@ -2921,7 +3012,20 @@ def test_rebuild_section_renders_its_commands_as_one_runnable_block():
     assert entry["caveat"] not in body
     # ...no "; " joining the commands as prose, and no sentence period abutting
     # the final path (which made it a path that does not exist).
-    assert "; " not in body
+    #
+    # Checked at each join rather than as a bare `"; " not in body` substring
+    # test. A single command may legitimately contain "; ": the ROCm LLVM bindir
+    # export is a `python -c "from ... import resolve_rocm_roots; print(...)"`
+    # one-liner (#381), and that payload cannot use apostrophes to avoid the
+    # semicolon because it lives inside a single-quoted `bash -lc` block. The
+    # substring form therefore forbade a valid command rather than the prose
+    # flattening it was written to catch. Asserting the separator keeps the
+    # regression covered without constraining what a command may contain.
+    # strict=False: the two sequences are offset by one BY DESIGN (consecutive
+    # pairs), so the length difference is the point, not a bug to catch.
+    for first, second in zip(entry["commands"], entry["commands"][1:], strict=False):
+        assert f"{gen._esc(first)}; {gen._esc(second)}" not in body
+        assert f"{gen._esc(first)}\n{gen._esc(second)}" in body
     assert not body.endswith(".")
     # One artifact is a titled block, not a one-item bullet list.
     assert "<ul" not in html and "<li>" not in html

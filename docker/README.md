@@ -50,19 +50,54 @@ image to reproduce a stack against.
 | `Dockerfile.rocm70_2-ubuntu-nan` | 7.0.2.1 build #17, plus NaN debugging | Debugging NaN issues |
 | `Dockerfile.rocm-ubuntu-ebpf` | 7.2.0.1 build #5, plus eBPF tracing (bpftrace, bcc) | eBPF-based GPU queue/memory tracing |
 | `Dockerfile.ci-gpu` | 7.2.4 / PyTorch 2.10, pinned by digest | GPU CI on self-hosted runners (see `.env.ci`) |
+| `Dockerfile.rocm-canary` | whatever `rocm/pytorch:latest` resolves to, via a `BASE_IMAGE` build arg | Non-gating latest-ROCm canary (see `.env.canary`, issue #382) |
 
-Except for `Dockerfile.rocm-latest` and `Dockerfile.ci-gpu`, the images above are
+Except for `Dockerfile.rocm-latest`, `Dockerfile.ci-gpu` and
+`Dockerfile.rocm-canary`, the images above are
 pinned to older ROCm **on purpose** — the version is the thing under test (a
 customer's stack, a specific `amdgpu` build, a bisect point). Bumping them would
 turn a reproducer into noise. New general-purpose tooling belongs in
 `Dockerfile.rocm-latest`.
 
-7.2.4 is the newest ROCm **production** release we can currently use. ROCm
+7.2.4 is the newest ROCm **production** release these images track. ROCm
 7.9–7.13 are the technology *preview* stream (a higher number there is not an
-upgrade), and while 7.14+ is production, its `rocm/pytorch` images are
-wheel-based (TheRock) with no `/opt/rocm` — which everything here reads ROCm
-from. Issue #381 makes that discovery layout-agnostic; the base flips to 7.14
-once it lands.
+upgrade). 7.14+ is production and ships wheel-based (TheRock) `rocm/pytorch`
+images with no `/opt/rocm`; issue #381 made ROCm discovery layout-agnostic, so
+that layout is readable now, and moving the base onto it is issue #383.
+
+`Dockerfile.ci-gpu`, `Dockerfile.rocm-latest` and `Dockerfile.rocm-canary` run
+[`rocm_layout_guard.py`](rocm_layout_guard.py) at build time. It accepts either
+layout and fails the build only when neither yields a readable ROCm version and
+lib directory, so a digest bump onto an unreadable base is loud instead of
+silently reporting `null`. Run it inside a container to debug a bad image:
+
+```bash
+docker run --rm --entrypoint python <image> /usr/local/share/aorta/rocm_layout_guard.py
+```
+
+## The latest-ROCm canary (`Dockerfile.rocm-canary`)
+
+The one image here whose base is *meant* to move. It exists so a new ROCm
+release is noticed early without the merge gate depending on a moving tag —
+`.github/workflows/latest-rocm-canary.yml` resolves `rocm/pytorch:latest` to a
+concrete digest at job start, passes it in as `BASE_IMAGE`, and records it with
+the results, so the tag moves between runs while each run stays reproducible.
+
+`BASE_IMAGE` has no default and `docker-compose.canary.yaml` requires
+`CANARY_BASE_IMAGE`, so building it without a resolved digest fails rather than
+quietly meaning "whatever `:latest` is right now". Build it the way CI does:
+
+```bash
+cd docker
+cp .env.canary /tmp/canary.env
+echo "CANARY_BASE_IMAGE=rocm/pytorch:latest@sha256:<digest>" >> /tmp/canary.env
+docker compose --env-file /tmp/canary.env \
+  -f docker-compose.build.yaml -f docker-compose.canary.yaml build
+```
+
+This lane is a wheel-layout (TheRock) image in practice, which is why it needed
+issue #381 first — before layout-agnostic discovery it would have reported
+`rocm: null`.
 
 ## CI configuration (`.env.ci`)
 

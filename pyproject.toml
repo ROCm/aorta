@@ -24,6 +24,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: System :: Hardware",
 ]
@@ -126,7 +128,7 @@ tests = [
 dev = [
     "amd-aorta[tests]",
     "pre-commit>=3.0.0",
-    "black>=23.0.0",
+    "black>=25.9.0",  # first release with a py314 formatting target
     "isort>=5.12.0",
     "mypy>=1.0.0",
     "ruff>=0.1.0",
@@ -209,7 +211,9 @@ markers = [
 
 [tool.black]
 line-length = 100
-target-version = ['py310', 'py311', 'py312']
+# Must list every interpreter in the `Programming Language :: Python` classifiers.
+# `py314` is only a valid target from black 25.9.0, hence the `dev` extra's floor.
+target-version = ['py310', 'py311', 'py312', 'py313', 'py314']
 include = '\.pyi?$'
 # Vendored verbatim from ROCm/rocm-systems (see the file header); kept in sync
 # with upstream rather than reformatted to our style.

@@ -1375,3 +1375,479 @@ def test_change_summary_footer_splits_correctness_from_thresholded():
     html = gen_dashboard.build_change_summary(runs)
     assert "and 2 more correctness changes" in html
     assert "past 10%" not in html
+
+
+# ---------------------------------------------------------------------------
+# The canary lane must stay invisible to the gated dashboard (issue #382)
+# ---------------------------------------------------------------------------
+
+
+def test_load_results_ignores_the_canary_subdirectory(tmp_path):
+    """Structural isolation, not a naming convention.
+
+    latest-rocm-canary.yml publishes observed-only rows to
+    ``results/canary/<date>.json`` on the ci-results branch, and relies on this
+    glob being NON-recursive to keep them out of the gated dashboard's history
+    and trends. If that ever becomes ``rglob`` / ``**/*.json``, a red canary on a
+    brand-new ROCm would start moving the gated page -- which is exactly the
+    ambiguity #382 exists to avoid -- so the property is pinned here rather than
+    left to a comment.
+    """
+    results = tmp_path / "results"
+    (results / "canary").mkdir(parents=True)
+    (results / "2026-08-01.json").write_text(
+        json.dumps(_results("2026-08-01T00:00:00Z", [], build={"lane": "gate"})),
+        encoding="utf-8",
+    )
+    (results / "canary" / "2026-08-01.json").write_text(
+        json.dumps(_results("2026-08-01T12:00:00Z", [], build={"lane": "canary"})),
+        encoding="utf-8",
+    )
+
+    loaded = gen_dashboard.load_results(results)
+    assert [doc["build"]["lane"] for doc in loaded] == ["gate"]
+
+
+def test_dashboard_is_unchanged_by_a_canary_row_on_disk(tmp_path):
+    """#382 acceptance: the pinned gate is unchanged by this work."""
+    results = tmp_path / "results"
+    (results / "canary").mkdir(parents=True)
+    gate_doc = _results("2026-08-01T00:00:00Z", [], build={"lane": "gate"})
+    (results / "2026-08-01.json").write_text(json.dumps(gate_doc), encoding="utf-8")
+    before = gen_dashboard.build_dashboard_html(gen_dashboard.load_results(results))
+
+    (results / "canary" / "2026-08-01.json").write_text(
+        json.dumps(_results("2026-08-01T12:00:00Z", [], build={"lane": "canary"})),
+        encoding="utf-8",
+    )
+    after = gen_dashboard.build_dashboard_html(gen_dashboard.load_results(results))
+    assert before == after
+
+
+# ---------------------------------------------------------------------------
+# Observed-only canary rendering (issue #382)
+# ---------------------------------------------------------------------------
+
+
+def _canary(generated, rocm, *, base_image=None, passed=1, failed=0):
+    return _results(
+        generated,
+        [],
+        build={
+            "lane": "canary",
+            "rocm": rocm,
+            "torch": f"2.12.0+rocm{rocm}",
+            "hip": "7.14.60850",
+            "base_image": base_image or ("rocm/pytorch:latest@sha256:" + "ab" * 32),
+        },
+        **{"pass": passed, "fail": failed, "total": passed + failed},
+    )
+
+
+def test_canary_section_renders_the_observed_stack():
+    html = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0")]
+    )
+    assert 'id="canary"' in html
+    assert "observed only" in html
+    assert "7.14.0" in html and "2.12.0+rocm7.14.0" in html and "7.14.60850" in html
+    # The digest is the whole point of the lane, so it must be on the page.
+    assert "sha256:ababababab" in html
+
+
+def test_canary_section_says_plainly_that_it_is_not_a_gate():
+    html = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0")]
+    )
+    assert "Not a gate" in html
+    assert "docker/Dockerfile.ci-gpu" in html
+
+
+def test_canary_section_carries_no_health_colouring():
+    """A neutral lane must not health-signal (#368 5th-pass class).
+
+    A red canary row means "a new ROCm release moved something", not "we
+    regressed" -- colouring it recreates the ambiguity #382 exists to avoid.
+    Checks a failing run specifically, since that is when a colour would appear.
+    """
+    html = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0", passed=0, failed=3)]
+    )
+    for signal in ("vchip", "pill", "execution bad", "REGRESSION", "style=color:"):
+        assert signal not in html, signal
+
+
+def test_canary_section_has_an_empty_state_rather_than_vanishing():
+    """The #canary anchor must resolve before the lane's first run (KB#11b)."""
+    html = gen_dashboard.build_canary_section([])
+    assert 'id="canary"' in html
+    assert "No canary runs recorded yet" in html
+
+
+def test_canary_section_is_bounded():
+    rows = [_canary(f"2026-07-{d:02d}T15:00:00Z", "7.14.0") for d in range(1, 31)]
+    html = gen_dashboard.build_canary_section(rows)
+    assert html.count("<tr>") == gen_dashboard._CANARY_ROWS + 1  # + header row
+
+
+def test_canary_rows_do_not_touch_the_gated_status_or_trend():
+    """#382 acceptance: the pinned gate is unchanged by this work.
+
+    ``canary_results`` is a separate argument for exactly this reason -- the
+    banner, pass-rate trend and history grid are all computed from ``results``.
+    """
+    gate = [_results("2026-08-19T00:00:00Z", [], build={"lane": "gate"}, **{"pass": 2})]
+    without = gen_dashboard.build_dashboard_html(gate)
+    with_canary = gen_dashboard.build_dashboard_html(
+        gate, [_canary("2026-08-19T15:00:00Z", "7.14.0", passed=0, failed=9)]
+    )
+    # The only difference is the canary section itself.
+    assert without != with_canary
+    assert gen_dashboard.build_status_json(gate) == gen_dashboard.build_status_json(gate)
+    canary_only = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0", passed=0, failed=9)]
+    )
+    assert with_canary.replace(canary_only, "").replace(
+        gen_dashboard.build_canary_section([]), ""
+    ) == without.replace(gen_dashboard.build_canary_section([]), "")
+
+
+def test_omitted_none_and_empty_canary_render_identically():
+    """The three "no canary data" spellings agree.
+
+    Note this is NOT byte-identity with the pre-#382 page: the canary section is
+    always emitted (its empty state when there is nothing to show) so the
+    `#canary` anchor resolves before the lane's first run. What must not change
+    is everything gated -- covered by
+    ``test_canary_rows_do_not_touch_the_gated_status_or_trend``.
+    """
+    gate = [_results("2026-08-19T00:00:00Z", [], build={"lane": "gate"})]
+    assert gen_dashboard.build_dashboard_html(gate) == gen_dashboard.build_dashboard_html(
+        gate, None
+    )
+    assert gen_dashboard.build_dashboard_html(gate) == gen_dashboard.build_dashboard_html(
+        gate, []
+    )
+    # The empty state really is present in all three.
+    assert "No canary runs recorded yet" in gen_dashboard.build_dashboard_html(gate)
+
+
+def test_canary_section_renders_a_setup_failure_row(tmp_path):
+    """The row the workflow synthesises when setup fails before the evaluator.
+
+    That path exists so a `:latest` we cannot even install still appears in
+    history with its digest (#387). It must therefore render: everything the
+    container would have reported is null, and only the digest is real.
+    """
+    doc = _results(
+        "2026-08-19T15:00:00Z",
+        [],
+        build={
+            "lane": "canary",
+            "base_image": "rocm/pytorch:latest@sha256:deadbeef",
+            "rocm": None,
+            "torch": None,
+            "hip": None,
+        },
+    )
+    doc["error"] = "canary setup failed before the evaluator ran (exit 1)"
+    html = gen_dashboard.build_canary_section([doc])
+    assert "sha256:deadbeef" in html
+    # Nulls read as em dashes rather than the literal "None".
+    assert "None" not in html
+    assert "0/0" in html
+
+
+def test_canary_setup_failure_row_shows_why(tmp_path):
+    """The synthesised row carries its only explanation in top-level `error`.
+
+    Without rendering it the row is an unexplained line of em dashes and 0/0 --
+    it would say a :latest was broken without saying how, which is most of the
+    value of recording it at all (#387). Plain text, no health class: the lane
+    stays neutral.
+    """
+    doc = _results(
+        "2026-08-19T15:00:00Z",
+        [],
+        build={"lane": "canary", "base_image": "rocm/pytorch:latest@sha256:dead", "rocm": None},
+    )
+    doc["error"] = "canary setup failed before the evaluator ran (exit 1)"
+    html = gen_dashboard.build_canary_section([doc])
+    assert "canary setup failed before the evaluator ran" in html
+    # Still neutral -- no verdict/health signalling on an explained failure.
+    for signal in ("vchip", "pill", "execution bad", "REGRESSION", "style=color:"):
+        assert signal not in html, signal
+
+
+def test_canary_row_without_an_error_shows_a_placeholder(tmp_path):
+    """A healthy row must not render the literal "None" in the note column."""
+    html = gen_dashboard.build_canary_section(
+        [_canary("2026-08-19T15:00:00Z", "7.14.0")]
+    )
+    assert "None" not in html
+    assert "—" in html
+
+
+def test_short_digest_display():
+    assert gen_dashboard._short_digest("r/p:latest@sha256:" + "a" * 64) == (
+        "sha256:aaaaaaaaaaaa"
+    )
+    # A tag-only value keeps its text: silently em-dashing it would hide that a
+    # run was NOT digest-pinned, which is the one thing the column is for.
+    assert gen_dashboard._short_digest("rocm/pytorch:latest") == "rocm/pytorch:latest"
+    assert gen_dashboard._short_digest(None) == "—"
+    assert gen_dashboard._short_digest("") == "—"
+
+
+def test_main_tolerates_an_absent_canary_dir(tmp_path, monkeypatch, capsys):
+    """The lane is best-effort; a missing dir must not fail the gated build."""
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "2026-08-19.json").write_text(
+        json.dumps(_results("2026-08-19T00:00:00Z", [], build={"lane": "gate"})),
+        encoding="utf-8",
+    )
+    out = tmp_path / "site"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gen_dashboard.py",
+            "--results-dir", str(results),
+            "--out-dir", str(out),
+            "--canary-results-dir", str(tmp_path / "does-not-exist"),
+        ],
+    )
+    assert gen_dashboard.main() == 0
+    capsys.readouterr()
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "No canary runs recorded yet" in html
+
+
+def test_canary_rows_render_with_no_gated_history_at_all(tmp_path, monkeypatch, capsys):
+    """Neither lane may gate the other (#387).
+
+    The two lanes publish to `ci-results` from two different workflows, so the
+    canary can legitimately land first. `pages.yml` used to make the whole render
+    conditional on a top-level gated `results/*.json`, which hid canary history
+    until the first gated nightly; this pins the generator half of that fix.
+    """
+    results = tmp_path / "results"
+    (results / "canary").mkdir(parents=True)  # no gated *.json beside it
+    (results / "canary" / "2026-08-19.json").write_text(
+        json.dumps(_canary("2026-08-19T15:00:00Z", "7.14.0")), encoding="utf-8"
+    )
+    out = tmp_path / "site"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gen_dashboard.py",
+            "--results-dir", str(results),
+            "--out-dir", str(out),
+            "--canary-results-dir", str(results / "canary"),
+        ],
+    )
+    assert gen_dashboard.main() == 0
+    capsys.readouterr()
+    html = (out / "index.html").read_text(encoding="utf-8")
+    assert "7.14.0" in html
+    assert 'id="canary"' in html
+    # The gated side is simply empty, and status.json still describes only it.
+    assert json.loads((out / "data.json").read_text(encoding="utf-8")) == []
+
+
+def test_main_renders_canary_rows_without_entering_data_or_status_json(tmp_path, monkeypatch, capsys):
+    results = tmp_path / "results"
+    (results / "canary").mkdir(parents=True)
+    (results / "2026-08-19.json").write_text(
+        json.dumps(_results("2026-08-19T00:00:00Z", [], build={"lane": "gate"})),
+        encoding="utf-8",
+    )
+    (results / "canary" / "2026-08-19.json").write_text(
+        json.dumps(_canary("2026-08-19T15:00:00Z", "7.14.0")), encoding="utf-8"
+    )
+    out = tmp_path / "site"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gen_dashboard.py",
+            "--results-dir", str(results),
+            "--out-dir", str(out),
+            "--canary-results-dir", str(results / "canary"),
+        ],
+    )
+    assert gen_dashboard.main() == 0
+    capsys.readouterr()
+    assert "7.14.60850" in (out / "index.html").read_text(encoding="utf-8")
+    # data.json stays the gated record; status.json must not see the lane.
+    data = json.loads((out / "data.json").read_text(encoding="utf-8"))
+    assert [d["build"]["lane"] for d in data] == ["gate"]
+    assert "canary" not in (out / "status.json").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Workflow wiring the dashboard depends on (issue #387)
+# ---------------------------------------------------------------------------
+
+
+def _load_workflow(name: str):
+    import yaml
+
+    return yaml.safe_load((_REPO_ROOT / ".github/workflows" / name).read_text("utf-8"))
+
+
+def test_pages_refreshes_after_every_workflow_that_writes_a_rendered_branch():
+    """A published row that never triggers a deploy is invisible.
+
+    `pages.yml` renders both the gated lane and the canary lane from data
+    branches, so every workflow that WRITES one has to be in its
+    `workflow_run.workflows` list -- otherwise those rows sit unpublished until
+    some unrelated later deploy. The canary was missing, which made its
+    (already-rendering) section stale by default.
+    """
+    pages = _load_workflow("pages.yml")
+    # PyYAML parses the `on:` key as the boolean True.
+    listed = pages[True]["workflow_run"]["workflows"]
+    canary_name = _load_workflow("latest-rocm-canary.yml")["name"]
+    # Matched by NAME, so a rename of the canary workflow silently unhooks it.
+    assert canary_name in listed, (
+        f"{canary_name!r} writes results/canary/ on ci-results but does not "
+        f"trigger Pages; listed = {listed}"
+    )
+
+
+def test_canary_eval_step_runs_even_when_the_container_failed_to_start():
+    """The synthesis path is worthless behind an implicit success().
+
+    If the image build/start fails -- notably when the layout guard rejects a
+    newly published :latest -- an implicit `success()` skips the eval step, so no
+    attributable row is synthesised and the broken release disappears from
+    history. That is the hole the synthesis exists to close.
+    """
+    canary = _load_workflow("latest-rocm-canary.yml")
+    step = [s for s in canary["jobs"]["canary"]["steps"] if s.get("id") == "eval"][0]
+    condition = step.get("if", "")
+    assert "always()" in condition, condition
+    # ...but only once there is a digest to attribute the row to.
+    assert "steps.resolve.outcome" in condition, condition
+
+
+def test_canary_compose_project_is_isolated_from_the_gate():
+    """A distinct container name does not isolate a Compose project.
+
+    Both lanes invoke compose from `docker/` with the same `torchenv` service, so
+    without an explicit COMPOSE_PROJECT_NAME both default to project `docker` --
+    and the canary's `down -v` would remove the gate's service and volumes
+    mid-run on the shared MI350 runner.
+    """
+    def env_file(name):
+        text = (_REPO_ROOT / "docker" / name).read_text("utf-8")
+        return dict(
+            line.split("=", 1)
+            for line in (ln.strip() for ln in text.splitlines())
+            if line and not line.startswith("#") and "=" in line
+        )
+
+    canary = env_file(".env.canary")
+    gate = env_file(".env.ci")
+    assert canary.get("COMPOSE_PROJECT_NAME"), ".env.canary must pin a project name"
+    assert canary["COMPOSE_PROJECT_NAME"] != gate.get("COMPOSE_PROJECT_NAME")
+    # The container name still has to differ too, for docker exec / ps.
+    assert canary["CONTAINER_NAME"] != gate["CONTAINER_NAME"]
+
+
+def test_both_ci_results_publishers_share_one_concurrency_group():
+    """Two workflows push the same branch, so they must not overlap (#387).
+
+    Writing different directories does not help: git pushes a whole ref, so an
+    overlap means both commit from the same head and the loser gets a
+    non-fast-forward rejection -- dropping that run's history entirely. The
+    group name is global to the repo, so the two must match exactly.
+    """
+    canary = _load_workflow("latest-rocm-canary.yml")["jobs"]["publish"]
+    nightly = _load_workflow("nightly-eval.yml")["jobs"]["publish"]
+    for job, label in ((canary, "canary"), (nightly, "nightly-eval")):
+        assert "concurrency" in job, f"{label} publish has no concurrency group"
+        assert job["concurrency"]["cancel-in-progress"] is False, label
+    assert (
+        canary["concurrency"]["group"] == nightly["concurrency"]["group"]
+    ), "publishers must share ONE group or they are not serialised"
+
+
+def test_every_shared_group_publisher_is_gated_to_main():
+    """`cancel-in-progress: false` queues rather than drops -- but only for two.
+
+    GitHub keeps ONE pending job per group and cancels it when a third arrives,
+    so the shared group is only safe while at most two jobs can reach it. Each
+    workflow's own concurrency group caps it at one in-flight run, but those
+    groups are keyed on `github.ref`: both workflows are workflow_dispatch-able,
+    so branch runs are not capped against each other and several publishers can
+    pile in (#387, 9th pass -- the previous comment asserted a two-job bound
+    that did not hold).
+
+    Discovered rather than hardcoded, so a third publisher added to the group
+    later has to satisfy the same condition.
+    """
+    group = _load_workflow("latest-rocm-canary.yml")["jobs"]["publish"]["concurrency"][
+        "group"
+    ]
+    found = 0
+    for path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        for name, job in (_load_workflow(path.name).get("jobs") or {}).items():
+            if (job.get("concurrency") or {}).get("group") != group:
+                continue
+            found += 1
+            assert "refs/heads/main" in str(job.get("if", "")), (
+                f"{path.name}:{name} joins the {group} group without a main gate, "
+                "so concurrent branch dispatches can drop a queued publisher"
+            )
+    assert found == 2, f"expected both publishers in {group}, found {found}"
+
+
+def test_canary_publish_survives_a_run_that_produced_no_artifact():
+    """A canary that died before writing a row must not fail its publisher (#387).
+
+    The upload step is ``if-no-files-found: warn``, so a canary whose eval step
+    was skipped (digest resolution failed) uploads nothing -- and
+    download-artifact treats a missing artifact as an error. Without
+    continue-on-error the non-gating lane gets a red X for an upstream registry
+    hiccup, AND the "skipping publish" guard below it becomes unreachable.
+    """
+    steps = _load_workflow("latest-rocm-canary.yml")["jobs"]["publish"]["steps"]
+    download = next(s for s in steps if "download-artifact" in s.get("uses", ""))
+    assert download.get("continue-on-error") is True
+
+    # The guard the above keeps reachable: absent JSON is a no-op, not a crash.
+    update = next(s for s in steps if "ci-results" in s.get("name", ""))
+    assert "gpu-canary-results.json ] ||" in update["run"]
+    assert "skipping publish" in update["run"]
+
+
+def test_hidden_path_uploads_declare_include_hidden_files():
+    """A glob under a dot-directory contributes nothing without this (#387).
+
+    upload-artifact excludes hidden paths by default, and `.nightly-eval` is a
+    hidden component relative to the workspace search root -- so the artifact
+    was created (the top-level JSON is not hidden) while every debug file the
+    step advertises was silently dropped. Listing them in `path:` is not enough.
+
+    Checked as an invariant over all workflows rather than for the two known
+    steps: any future upload that globs into a dot-directory hits this too.
+    A literal directory path like `.sanitizer-nightly/out` is NOT affected --
+    it becomes the search root itself, so its contents are not hidden relative
+    to it, which is why this went unnoticed for so long.
+    """
+    offenders = []
+    for path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        doc = _load_workflow(path.name)
+        for job in (doc.get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                if "upload-artifact" not in (step.get("uses") or ""):
+                    continue
+                with_ = step.get("with") or {}
+                globs_hidden_dir = any(
+                    line.strip().startswith(".") and "*" in line
+                    for line in str(with_.get("path", "")).splitlines()
+                )
+                if globs_hidden_dir and not with_.get("include-hidden-files"):
+                    offenders.append(f"{path.name}: {step.get('name')}")
+    assert offenders == []

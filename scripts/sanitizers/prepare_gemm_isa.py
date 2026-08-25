@@ -11,8 +11,15 @@ contained no f32 kernels. hipBLASLt Tensile libraries are open-source ROCm conte
 the extracted objects contain no customer data.
 
 With ``--consan-object PATH`` it also writes one representative heavy f32 SS object
-(the NT / ``Ailk_Bjlk`` layout, ~16 MB / ~490 kernels) for driving ConSan over a real
-code object via ``source.consan_command``.
+(the NT / ``Ailk_Bjlk`` layout) for driving ConSan over a real code object via
+``source.consan_command``.
+
+Size is deliberately not quoted here: the extracted gfx950 object measures ~183 MiB
+on the current CI base (ROCm 7.2.4), so the "~16 MB" this docstring used to claim
+had already drifted by more than a factor of ten. It is a per-release property of
+the shipped Tensile libraries -- ROCm 7.14 splits the same layout into CU-count and
+solution-ID variants of ~156-168 MiB -- so treat any figure as version-specific and
+measure rather than trust a comment.
 """
 
 from __future__ import annotations
@@ -20,9 +27,20 @@ from __future__ import annotations
 import argparse
 import csv
 import subprocess
+import sys
 from pathlib import Path
 
-HIPBLASLT_LIBRARY = Path("/opt/rocm/lib/hipblaslt/library")
+_SRC = Path(__file__).resolve().parents[2] / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+from aorta.instrumentation.rocm_paths import resolve_rocm_roots  # noqa: E402
+
+# Resolved rather than hardcoded to /opt/rocm (issue #381) so the fixtures can
+# be built from a TheRock wheel install, which keeps the Tensile database
+# under site-packages.
+_ROCM_ROOTS = resolve_rocm_roots()
+HIPBLASLT_LIBRARY = _ROCM_ROOTS.lib_dir / "hipblaslt" / "library"
+LLVM_BIN_DIR = _ROCM_ROOTS.llvm_bin_dir
 GFX = "gfx950"
 TARGET = f"hipv4-amdgcn-amd-amdhsa--{GFX}"
 
@@ -33,7 +51,8 @@ _LAYOUT = {
     ("T", "N"): "Alik_Bljk",
     ("T", "T"): "Alik_Bjlk",
 }
-# The heavy f32 GEMM library variant (unbundles to ~16 MB / ~490 kernels on gfx950).
+# The heavy f32 GEMM library variant. Unbundles to a large gfx950 object -- ~183 MiB
+# measured on ROCm 7.2.4; see the module docstring on why no fixed size is asserted.
 _SS_HEAVY = "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_{layout}_Cijk_Dijk_" + GFX + ".co"
 
 
@@ -44,19 +63,36 @@ def _read_rows(csv_path: Path, top_n: int) -> list[dict[str, str]]:
 
 
 def _bundler() -> str:
+    """Locate clang-offload-bundler, on PATH or in ROCm's LLVM bindir.
+
+    The bindir is on PATH in neither layout -- the classic image exports only
+    /opt/rocm/bin and the wheel image only the venv's bin -- so falling back to
+    the resolved location is what lets this run without the caller having to
+    prepend it first (issue #381).
+    """
     import shutil
 
     bundler = shutil.which("clang-offload-bundler")
-    if bundler is None:
-        raise SystemExit("clang-offload-bundler not found on PATH")
-    return bundler
+    if bundler is not None:
+        return bundler
+    resolved = LLVM_BIN_DIR / "clang-offload-bundler"
+    if resolved.is_file():
+        return str(resolved)
+    raise SystemExit(
+        f"clang-offload-bundler not found on PATH or in {LLVM_BIN_DIR}"
+    )
 
 
 def _library_for(layout: str) -> Path:
-    candidate = HIPBLASLT_LIBRARY / _SS_HEAVY.format(layout=layout)
-    if not candidate.is_file():
-        raise SystemExit(f"no gfx950 f32 SS Tensile bundle for layout {layout}: {candidate}")
-    return candidate
+    bundle = _SS_HEAVY.format(layout=layout)
+    # The classic layout is flat; the TheRock wheel layout nests the bundles
+    # one level deeper under the gfx target (library/gfx950/...). Try both.
+    candidates = [HIPBLASLT_LIBRARY / bundle, HIPBLASLT_LIBRARY / GFX / bundle]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    tried = " or ".join(str(c) for c in candidates)
+    raise SystemExit(f"no {GFX} f32 SS Tensile bundle for layout {layout}: {tried}")
 
 
 def _unbundle(bundler: str, src: Path, dst: Path) -> None:

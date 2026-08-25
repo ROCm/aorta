@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 from pathlib import Path
 
 import pytest
@@ -63,3 +64,69 @@ def test_library_for_returns_matching_bundle(monkeypatch, tmp_path):
     lib = tmp_path / gen._SS_HEAVY.format(layout="Ailk_Bjlk")
     lib.write_bytes(b"stub")
     assert gen._library_for("Ailk_Bjlk") == lib
+
+
+def test_library_for_resolves_nested_gfx_subdir(monkeypatch, tmp_path):
+    """The TheRock wheel layout nests bundles under ``library/<gfx>/`` (#381).
+
+    Measured: classic ROCm 7.2.4 has a flat ``library/`` with ~3000 bundles,
+    while the 7.14 wheel splits them per target and ``library/`` holds only
+    the gfx directories. Looking only at the flat path finds nothing there,
+    which is a hard failure -- the sanitizer GEMM fixtures cannot be built.
+    """
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    nested = tmp_path / gen.GFX
+    nested.mkdir()
+    lib = nested / gen._SS_HEAVY.format(layout="Ailk_Bjlk")
+    lib.write_bytes(b"stub")
+    assert gen._library_for("Ailk_Bjlk") == lib
+
+
+def test_library_for_prefers_the_flat_bundle_when_both_exist(monkeypatch, tmp_path):
+    """Classic behaviour is unchanged when a per-gfx dir happens to sit beside it."""
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    bundle = gen._SS_HEAVY.format(layout="Ailk_Bjlk")
+    flat = tmp_path / bundle
+    flat.write_bytes(b"flat")
+    nested = tmp_path / gen.GFX
+    nested.mkdir()
+    (nested / bundle).write_bytes(b"nested")
+    assert gen._library_for("Ailk_Bjlk") == flat
+
+
+def test_bundler_prefers_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/clang-offload-bundler")
+    assert gen._bundler() == "/usr/bin/clang-offload-bundler"
+
+
+def test_bundler_falls_back_to_the_resolved_llvm_bindir(monkeypatch, tmp_path):
+    """ROCm's LLVM bindir is on PATH in neither install layout (#381).
+
+    The classic image exports only /opt/rocm/bin and the wheel image only the
+    venv's bin, so without this fallback the fixture build depends on the
+    caller having prepended the bindir first.
+    """
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    llvm_bin = tmp_path / "lib" / "llvm" / "bin"
+    llvm_bin.mkdir(parents=True)
+    bundler = llvm_bin / "clang-offload-bundler"
+    bundler.write_bytes(b"stub")
+    monkeypatch.setattr(gen, "LLVM_BIN_DIR", llvm_bin)
+    assert gen._bundler() == str(bundler)
+
+
+def test_bundler_missing_everywhere_names_the_bindir_it_tried(monkeypatch, tmp_path):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(gen, "LLVM_BIN_DIR", tmp_path / "absent")
+    with pytest.raises(SystemExit, match=str(tmp_path / "absent")):
+        gen._bundler()
+
+
+def test_library_for_error_names_both_candidate_paths(monkeypatch, tmp_path):
+    """A miss must say where it looked, or the wheel case is undebuggable."""
+    monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
+    with pytest.raises(SystemExit) as excinfo:
+        gen._library_for("Ailk_Bjlk")
+    message = str(excinfo.value)
+    assert str(tmp_path / gen._SS_HEAVY.format(layout="Ailk_Bjlk")) in message
+    assert str(tmp_path / gen.GFX) in message

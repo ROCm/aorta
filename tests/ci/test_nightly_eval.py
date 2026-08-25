@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -245,3 +246,172 @@ def test_refresh_refuses_when_entry_ran_but_failed(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit):
         refresh_baselines.build_baselines(matrix_doc, tmp_path, 0.25, 0.15, False)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard metadata: the `rocm` column on both install layouts (issue #381)
+# ---------------------------------------------------------------------------
+
+
+def _roots(core: Path, libraries: Path | None = None):
+    """Stand-in for rocm_paths.RocmRoots with only what build_metadata reads."""
+    libraries = libraries or core
+    return SimpleNamespace(
+        core=core,
+        libraries=libraries,
+        version_file=core / ".info" / "version",
+        version_dev_file=core / ".info" / "version-dev",
+        lib_dir=libraries / "lib",
+    )
+
+
+def _write_version(root: Path, name: str, text: str) -> Path:
+    info = root / ".info"
+    info.mkdir(parents=True, exist_ok=True)
+    path = info / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_metadata_reads_rocm_version_on_a_classic_layout(tmp_path, monkeypatch):
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version", "7.2.4\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4"
+
+
+def test_metadata_reads_rocm_version_on_a_wheel_layout(tmp_path, monkeypatch):
+    """The regression #381 fixed: a wheel install left this column null.
+
+    `torch` and `hip` still populated from the same run, so the dashboard row
+    looked complete while the ROCm version -- the thing rows are compared
+    across -- was silently missing.
+    """
+    core = tmp_path / "site-packages" / "_rocm_sdk_core"
+    _write_version(core, "version", "7.14.0\n")
+    libraries = tmp_path / "site-packages" / "_rocm_sdk_libraries"
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(core, libraries))
+    assert nightly_eval.build_metadata()["rocm"] == "7.14.0"
+
+
+def test_metadata_falls_back_to_version_dev(tmp_path, monkeypatch):
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version-dev", "7.2.4.50311-abc1234\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4.50311-abc1234"
+
+
+def test_metadata_rocm_is_null_when_no_install_is_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
+    assert nightly_eval.build_metadata()["rocm"] is None
+
+
+# ---------------------------------------------------------------------------
+# Lane + base-image attribution for the latest-ROCm canary (issue #382)
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_defaults_to_the_gate_lane(tmp_path, monkeypatch):
+    """Existing callers keep describing themselves correctly, unchanged."""
+    monkeypatch.delenv("AORTA_CI_LANE", raising=False)
+    monkeypatch.delenv("AORTA_CI_BASE_IMAGE", raising=False)
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
+    meta = nightly_eval.build_metadata()
+    assert meta["lane"] == "gate"
+    # The gated lane's digest is pinned in the Dockerfile and visible in review,
+    # so there is nothing to record here.
+    assert meta["base_image"] is None
+
+
+def test_metadata_records_the_canary_lane_and_resolved_digest(tmp_path, monkeypatch):
+    """"Ran :latest" is not attributable; the resolved digest is (#382)."""
+    base = "rocm/pytorch:latest@sha256:" + "ab" * 32
+    monkeypatch.setenv("AORTA_CI_LANE", "canary")
+    monkeypatch.setenv("AORTA_CI_BASE_IMAGE", base)
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
+    meta = nightly_eval.build_metadata()
+    assert meta["lane"] == "canary"
+    assert meta["base_image"] == base
+
+
+def test_empty_lane_env_falls_back_to_gate(tmp_path, monkeypatch):
+    """An exported-but-empty var must not produce a row labelled "" ."""
+    monkeypatch.setenv("AORTA_CI_LANE", "")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
+    assert nightly_eval.build_metadata()["lane"] == "gate"
+
+
+def test_an_empty_version_does_not_shadow_a_valid_version_dev(tmp_path, monkeypatch):
+    """An interrupted install leaves a zero-byte marker (#387).
+
+    The loop used to break on mere existence, so the empty file won and the
+    dashboard's ROCm column went blank with a perfectly good `version-dev`
+    sitting behind it -- indistinguishable from having no ROCm at all.
+    """
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version", "")
+    _write_version(root, "version-dev", "7.2.4.50311-abc1234\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4.50311-abc1234"
+
+
+def test_a_whitespace_only_version_does_not_shadow_a_valid_one(tmp_path, monkeypatch):
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version", "   \n\t\n")
+    _write_version(root, "version-dev", "7.14.0\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.14.0"
+
+
+def test_an_unreadable_first_marker_falls_through_instead_of_raising(tmp_path, monkeypatch):
+    """A directory named `.info/version` must not take down build_metadata().
+
+    read_text() raised IsADirectoryError straight out of build_metadata, and
+    nothing above it catches -- so the whole results document was lost over a
+    cosmetic dashboard column. Same for a permission-denied marker.
+    """
+    root = tmp_path / "opt_rocm"
+    (root / ".info" / "version").mkdir(parents=True)
+    _write_version(root, "version-dev", "7.2.4\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4"
+
+
+def test_a_non_utf8_marker_is_null_not_a_crash(tmp_path, monkeypatch):
+    """Undecodable is unusable -- but it must not raise, either.
+
+    Null matches what `environment.py` reports for the same file, so the
+    dashboard column and `rocm.version` agree. The point of the test is that
+    the read is fail-soft: `read_text()` raised `UnicodeDecodeError`, which is
+    not an `OSError` and so escaped `build_metadata()` entirely.
+    """
+    root = tmp_path / "opt_rocm"
+    info = root / ".info"
+    info.mkdir(parents=True)
+    (info / "version").write_bytes(b"\xff\xfe7.2.4")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] is None
+
+
+def test_a_non_utf8_marker_does_not_shadow_a_valid_one(tmp_path, monkeypatch):
+    root = tmp_path / "opt_rocm"
+    info = root / ".info"
+    info.mkdir(parents=True)
+    (info / "version").write_bytes(b"\xff\xfe")
+    _write_version(root, "version-dev", "7.2.4\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4"
+
+
+def test_a_multibyte_version_is_not_reported_as_corrupt(tmp_path, monkeypatch):
+    """The bounded read must not turn a split character into "unreadable".
+
+    Contrived content, but it pins the reason the decode is incremental: a
+    plain bytes.decode() on a truncated buffer raises, which would report a
+    perfectly readable marker as non-UTF-8.
+    """
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version", "7.2.4-" + "\u00e9" * 3000)
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    value = nightly_eval.build_metadata()["rocm"]
+    assert value is not None and value.startswith("7.2.4-")
