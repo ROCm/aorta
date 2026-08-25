@@ -2604,6 +2604,19 @@ def test_stored_rebuild_plan_is_only_trusted_when_both_renderers_can_read_it():
         assert gen._rebuild_hints(recovered)
         assert gen._rebuild_section_html(recovered)
 
+    # A list of the right type but the wrong elements does not crash -- it
+    # publishes the element's repr as a command line, in the one block on the
+    # page that promises to be runnable. Fabricating a command is worse than
+    # falling back to the module's own tables, so the elements are checked too.
+    for bad_elements in ([{"a": 1}], [123], [None], ["ok", 7]):
+        entry = [{**full[0], "commands": bad_elements}]
+        recovered = gen.plan_from_env({"rebuild": entry, "target": "gfx950"}, refs)
+        assert recovered == full, bad_elements
+        rendered = gen._rebuild_section_html(recovered) + " ".join(
+            gen._rebuild_hints(recovered)
+        )
+        assert "{'a': 1}" not in rendered and "None" not in rendered
+
     # An empty command list is legitimate (an unrecognised reference), so it is
     # trusted rather than recomputed.
     empty = [{**full[0], "commands": []}]
@@ -2693,6 +2706,83 @@ def test_files_caption_claims_only_what_the_listing_actually_carries():
     # anchor, because the anchored table does not carry one.
     for case in (undigested, mixed):
         assert "rebuild" not in gen._files_caption(case, files).lower()
+
+
+def _np_body_rows(page: str) -> int:
+    """Body rows of the "Artifacts not published" table, header excluded."""
+    anchor = f'id="{gen._NOT_PUBLISHED_ID}"'
+    assert anchor in page, "the page has no artifacts-not-published section"
+    start = page.index(anchor)
+    return page[start : page.index("</table>", start)].count("<tr><td")
+
+
+def _np_md_rows(md: str) -> int:
+    """Rows of REPRODUCE.md's "Artifacts not published" table."""
+    assert "## Artifacts not published" in md, "REPRODUCE.md has no such section"
+    section = md[md.index("## Artifacts not published") :].split("\n\n")[2]
+    return len([line for line in section.splitlines() if line.startswith("| `")])
+
+
+def test_every_reading_of_artifacts_not_published_agrees_and_survives_a_bad_entry():
+    # The caption counts this field, agrees its noun and verb with the count and
+    # links to it; the page renders it as a table; REPRODUCE.md renders it again.
+    # All three read it off the data branch, and two of them used to index
+    # `item["path"]` directly -- so one hand-edited env.json raised KeyError (a
+    # dict with no path) or TypeError (a bare string) and failed the whole
+    # dashboard render, while `refresh_published_case_area` was already filtering
+    # the same field to derive built_refs. One reader now serves all three, so
+    # the count in the prose cannot disagree with the rows beneath it.
+    env = {"case": "c", "observed": {}, "logs_published": True}
+    files = [("sanitizer_report.json", 12)]
+
+    good = [{"path": "fixtures/isa/x.hsaco", "sha256": "ab"}]
+    for stored in (
+        good,
+        [{"sha256": "ab"}],              # dict with no path
+        ["fixtures/isa/x.hsaco"],        # bare string, as hand-edited
+        [None],
+        good + [{"sha256": "cd"}],       # one good, one unreadable
+    ):
+        case = {**env, "artifacts_not_published": stored}
+        page = gen.build_case_index_html(case, files, built_refs=[], up="../../")
+        md = gen.build_reproduce_md(case, built_refs=[])
+
+        # The count in the caption is the number of rows in the table it links
+        # to, and the same number of rows reaches REPRODUCE.md.
+        assert _np_body_rows(page) == len(stored), stored
+        assert _np_md_rows(md) == len(stored), stored
+
+        # Nothing is dropped: an unreadable entry is still disclosed, because
+        # silently omitting it restores the overstatement this section fixes.
+        caption = gen._files_caption(case, files)
+        assert f"{len(stored)} required input" in caption, stored
+        assert "It is not the whole recipe" in caption, stored
+
+    # The digest claim still tracks the digest column and nothing else. An entry
+    # that lost its path but kept its sha256 does render a SHA-256, so the claim
+    # holds; one with no digest withdraws it, whether or not it is readable.
+    assert "SHA-256" in gen._files_caption(
+        {**env, "artifacts_not_published": good}, files
+    )
+    assert "SHA-256" in gen._files_caption(
+        {**env, "artifacts_not_published": good + [{"sha256": "cd"}]}, files
+    )
+    for undigested in ([{"path": "y"}], ["fixtures/isa/y.hsaco"], [None]):
+        assert "SHA-256" not in gen._files_caption(
+            {**env, "artifacts_not_published": good + undigested}, files
+        ), undigested
+
+    # A field that is not a list at all yields no section, not a row per char.
+    for junk in ("fixtures/isa/x.hsaco", {"path": "x"}, 7):
+        case = {**env, "artifacts_not_published": junk}
+        assert gen._not_published_rows(case) == []
+        assert f'id="{gen._NOT_PUBLISHED_ID}"' not in gen.build_case_index_html(
+            case, files, built_refs=[], up="../../"
+        )
+        assert "Artifacts not published" not in gen.build_reproduce_md(
+            case, built_refs=[]
+        )
+        assert gen._files_caption(case, files) == "Every file published for this case."
 
 
 def test_genco_rebuild_cleans_up_its_temporary_object():
