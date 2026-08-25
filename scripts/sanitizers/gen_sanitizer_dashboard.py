@@ -2035,17 +2035,19 @@ def _rebuild_section_html(plan: list[dict[str, Any]]) -> str:
 def _not_published_rows(env: dict[str, Any]) -> list[tuple[str, str]]:
     """The excluded inputs as ``(path, sha256)`` pairs (pure).
 
-    One reader for the three places that describe this field -- the Files
-    caption, the table it links to, and REPRODUCE.md -- so the count in the
-    prose cannot disagree with the rows beneath it. Missing values come back as
-    ``""`` and each renderer supplies its own dash.
+    The *only* reader of this field: the Files caption that counts it, the table
+    it links to, REPRODUCE.md, and the ``built_refs`` that
+    ``refresh_published_case_area`` derives from it. So the count in the prose
+    cannot disagree with the rows beneath it. Missing values come back as ``""``
+    and each renderer supplies its own dash.
 
     Tolerant of a malformed entry for the same reason ``plan_from_env`` is: this
     is read off the data branch, and indexing it directly turned one hand-edited
     or half-written ``env.json`` into a ``KeyError``/``TypeError`` that failed
-    the whole dashboard render rather than one area's table.
-    ``refresh_published_case_area`` already filters the same field this way to
-    derive ``built_refs``, then passed the unfiltered list to both renderers.
+    the whole dashboard render rather than one area's table. Being the only
+    reader is what makes that true -- while ``refresh_published_case_area``
+    iterated the field itself, a non-list value still aborted the render before
+    either renderer was reached, however careful the renderers were.
 
     Nothing is dropped, though, which is the one place this differs from
     ``plan_from_env``: there a rejected plan is recomputed, so nothing is lost,
@@ -2054,17 +2056,22 @@ def _not_published_rows(env: dict[str, Any]) -> list[tuple[str, str]]:
     to correct. An unreadable entry is counted and shown as a dash instead.
 
     A bare string is read as the path, which is how the field gets hand-edited.
-    Anything else becomes a dash rather than its ``repr``: a cell reading
+    Anything else -- including a *value* of the wrong type inside an otherwise
+    well-formed entry -- becomes a dash rather than its ``repr``: a cell reading
     ``['a', 'b']`` would be inventing a path the manifest never recorded, and
     the dash already says "this entry could not be read".
     """
+
+    def cell(value: Any) -> str:
+        return value if isinstance(value, str) else ""
+
     stored = env.get("artifacts_not_published")
     if not isinstance(stored, list):
         return []
     return [
-        (str(item.get("path") or ""), str(item.get("sha256") or ""))
+        (cell(item.get("path")), cell(item.get("sha256")))
         if isinstance(item, dict)
-        else (item if isinstance(item, str) else "", "")
+        else (cell(item), "")
         for item in stored
     ]
 
@@ -2556,11 +2563,10 @@ def refresh_published_case_area(case_dir: Path, out_dir: Path, *, logs: bool) ->
     # Only re-staging from the source sweep can restore them, which goes through
     # write_case_run_area rather than here.
     env["logs_published"] = bool(env.get("logs_published", True)) and logs
-    built_refs = [
-        str(item["path"])
-        for item in env.get("artifacts_not_published") or []
-        if isinstance(item, dict) and item.get("path")
-    ]
+    # Through the same reader as the two renderings, so this path cannot be the
+    # one that still trips over the field: iterating it directly here meant a
+    # non-list value raised ``TypeError`` before either renderer was reached.
+    built_refs = [path for path, _sha in _not_published_rows(env) if path]
     up, run_up = case_dir_up(case_dir, out_dir)
     (case_dir / "env.json").write_text(
         json.dumps(env, indent=2, sort_keys=True) + "\n", encoding="utf-8"

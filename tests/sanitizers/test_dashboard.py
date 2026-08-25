@@ -2784,6 +2784,41 @@ def test_every_reading_of_artifacts_not_published_agrees_and_survives_a_bad_entr
         )
         assert gen._files_caption(case, files) == "Every file published for this case."
 
+    # A wrongly-typed value inside a well-formed entry is a dash too, not its
+    # repr: `{"path": ["a", "b"]}` publishing `['a', 'b']` would invent a path
+    # the manifest never recorded, which is the fault this reader exists to stop.
+    assert gen._not_published_rows(
+        {"artifacts_not_published": [{"path": ["a", "b"], "sha256": 7}]}
+    ) == [("", "")]
+    page = gen.build_case_index_html(
+        {**env, "artifacts_not_published": [{"path": ["a", "b"]}]},
+        files,
+        built_refs=[],
+        up="../../",
+    )
+    assert "['a', 'b']" not in page and _np_body_rows(page) == 1
+
+
+def test_a_malformed_artifact_list_does_not_abort_a_retained_area_refresh(tmp_path):
+    # The renderers being careful is not enough on its own: the nightly re-renders
+    # every retained area through refresh_published_case_area, which derived
+    # built_refs from this same field. While it iterated the field itself, a
+    # non-list value raised TypeError there -- before either renderer was
+    # reached -- so one hand-edited env.json still aborted the whole render.
+    area = tmp_path / "dashboard" / "runs" / "r" / "survey" / "c"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text("{}")
+
+    for junk in (7, "fixtures/isa/x.hsaco", {"path": "x"}, [None], [{"sha256": "ab"}]):
+        (area / "env.json").write_text(
+            json.dumps({"case": "c", "observed": {}, "artifacts_not_published": junk})
+        )
+        assert (
+            gen.refresh_published_case_area(area, tmp_path / "dashboard", logs=True)
+            is True
+        ), junk
+        assert "['a', 'b']" not in (area / "index.html").read_text()
+
 
 def test_genco_rebuild_cleans_up_its_temporary_object():
     # The command runs in the reader's repo root, so without the trailing rm it
