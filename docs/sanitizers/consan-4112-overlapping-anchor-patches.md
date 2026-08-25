@@ -27,11 +27,27 @@ any LDS-touching dispatch) was fixed in `4227d40fb5` and closed,
 downloader selects the newest successful run, the next nightly picks that up
 rather than `db0c47df`.
 
-So the `db0c47df` numbers here are historical from the next nightly onward. Expect
-`consan-gemm` to stop reporting `status=4112` and to end on strict require-records
-instead — that outcome is measured, but from source builds of the fixes rather
-than from this bundle, so the first nightly on `4227d40fb5` is what confirms it
-end to end.
+So the `db0c47df` numbers here are historical from the next nightly onward.
+Re-running this document's own reproducer against `4227d40fb5` confirms the fix
+end to end, and the prediction below held exactly — `consan-gemm` stops reporting
+`status=4112` and ends on strict require-records instead:
+
+```
+ConSan MOI inventory end   elapsed_ms=246060.502
+ConSan patch end  outcome=modified-valid errors=0 warnings=11 patches=75978 patch_ms=137307.900
+ConSan coverage   analysis_complete=true access_discovered=68894
+[consan_4112_load] loaded and instrumented … (no dispatch)
+RJ_CONSAN_MOI_REQUIRE_RECORDS requested, but … no kernel dispatch packet was observed
+exit 86 after 4152s
+```
+
+⚠️ **That run takes 4152 s — roughly 2.9× the 1416 s this case needed on
+`db0c47df`, and well past any ceiling sized against it.** The defect used to abort
+the run early; now the transform succeeds and the object is genuinely instrumented
+(75,978 patches over 68,894 discovered access sites), so the work that follows is
+work the old path never reached. Any timeout for this case has to be sized against
+the ~69 min figure, not the ~24 min one — see the ceiling discussion in
+`daily-consan-gemm.yaml`.
 
 Affects: `daily-consan-gemm.yaml` (dashboard Tab 2, observed-only, non-gating).
 Repro: [`repro/consan_4112_repro.sh`](repro/consan_4112_repro.sh).
