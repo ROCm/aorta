@@ -2392,6 +2392,7 @@ def test_run_area_stylesheet_carries_the_rules_those_pages_use():
         # The rebuild section renders structurally now, so `.steps` (its old
         # bullet list) is gone and these carry the command block instead.
         ".rb {",
+        ".rb-last {",
         ".rb .path {",
         ".rb pre {",
         ".rb pre code {",
@@ -2431,8 +2432,11 @@ def test_fact_row_sizes_each_fact_to_its_content():
 
 def test_long_mono_facts_break_rather_than_overflow_their_neighbour():
     # A 40-char SHA painted over Date; a 136-char digest-pinned image ref ran off
-    # the page. break-word fixes only the first -- it breaks a word just when the
-    # word cannot fit a line by itself.
+    # the page. break-all rather than break-word: break-word would break these
+    # too once the item is narrower than the token, but the opportunities it
+    # introduces are not counted toward min-content, so each mono fact would keep
+    # the whole token as its intrinsic minimum and the row would hold only for as
+    # long as `.kv > span` keeps min-width:0. break-all's breaks do count.
     rule = _css_rule(gen.run_area_stylesheet(), ".kv .val.mono {")
     assert "word-break:break-all" in rule
     assert "break-word" not in rule
@@ -2537,7 +2541,38 @@ def test_rebuild_section_names_an_unknown_reference_without_inventing_a_command(
     assert gen._rebuild_section_html([]) == ""
 
 
-def test_stored_rebuild_plan_is_only_trusted_when_it_carries_every_key():
+def test_final_rebuild_block_is_marked_by_class_not_last_of_type():
+    # `.rb:last-of-type` keys off the tag, not the class: it matches the last
+    # `div` sibling only if that div happens to be a `.rb`. On a real page it
+    # never is -- a case with rebuild blocks has built refs, so `build_case_env`
+    # also gives it an "Artifacts not published" `.table-wrap` after them.
+    sheet = gen.run_area_stylesheet()
+    assert ".rb-last {" in sheet
+    assert ".rb:last-of-type" not in sheet
+
+    plan = gen.rebuild_plan(
+        ["fixtures/isa/lds.hsaco", "fixtures/bin/consan_load"], target="gfx950"
+    )
+    html = gen._rebuild_section_html(plan)
+    assert html.count('<div class="rb">') == len(plan) - 1
+    assert html.count('<div class="rb rb-last">') == 1
+    # It is the last one, not merely one of them.
+    assert html.rindex('<div class="rb rb-last">') > html.rindex('<div class="rb">')
+
+    # A single-artifact case still gets the marker, and it reaches the page.
+    single = gen._rebuild_section_html(plan[:1])
+    assert single.count('<div class="rb rb-last">') == 1
+    assert '<div class="rb">' not in single
+    page = gen.build_case_index_html(
+        {"case": "c", "observed": {}},
+        [],
+        built_refs=["fixtures/isa/lds.hsaco"],
+        up="../../",
+    )
+    assert 'class="rb rb-last"' in page
+
+
+def test_stored_rebuild_plan_is_only_trusted_when_both_renderers_can_read_it():
     # A retained area's own env.json is preferred over recomputation so history
     # keeps its instructions. But it is read off the data branch, and both
     # renderers index the four keys directly -- so a half-written or hand-edited
@@ -2557,6 +2592,22 @@ def test_stored_rebuild_plan_is_only_trusted_when_it_carries_every_key():
     # A non-list or a list of non-dicts falls back the same way.
     for junk in ("nope", [1, 2], {"path": "x"}):
         assert gen.plan_from_env({"rebuild": junk, "target": "gfx950"}, refs) == full
+
+    # Key presence is not enough: `commands` is the one field the renderers
+    # iterate rather than stringify, so its type is part of the contract. An int
+    # is a TypeError mid-render and a string degrades into one command per
+    # character -- either way the whole dashboard render, not one area, breaks.
+    for bad in (1, "hipcc x.hip", None, {"0": "hipcc x.hip"}):
+        entry = [{**full[0], "commands": bad}]
+        recovered = gen.plan_from_env({"rebuild": entry, "target": "gfx950"}, refs)
+        assert recovered == full, bad
+        assert gen._rebuild_hints(recovered)
+        assert gen._rebuild_section_html(recovered)
+
+    # An empty command list is legitimate (an unrecognised reference), so it is
+    # trusted rather than recomputed.
+    empty = [{**full[0], "commands": []}]
+    assert gen.plan_from_env({"rebuild": empty, "target": "gfx950"}, refs) is empty
 
 
 def test_reproduce_md_keeps_the_flattened_markdown_hints():
@@ -2590,6 +2641,7 @@ def test_files_caption_discloses_an_input_that_is_excluded_by_design():
     caption = gen._files_caption(env, files)
     assert "1 required input is" in caption
     assert f'href="#{gen._NOT_PUBLISHED_ID}"' in caption
+    assert "its SHA-256" in caption
 
     page = gen.build_case_index_html(env, files, built_refs=[], up="../../")
     # The anchor the caption points at exists on the page.
@@ -2598,11 +2650,49 @@ def test_files_caption_discloses_an_input_that_is_excluded_by_design():
     assert "everything needed to reproduce" not in page
 
     # Plural agreement, and no claim at all when there is nothing to disclose.
-    two = {**env, "artifacts_not_published": [{"path": "a"}, {"path": "b"}]}
+    two = {
+        **env,
+        "artifacts_not_published": [
+            {"path": "a", "sha256": "ab"}, {"path": "b", "sha256": "cd"}
+        ],
+    }
     assert "2 required inputs are" in gen._files_caption(two, files)
+    assert "their SHA-256s" in gen._files_caption(two, files)
     assert gen._files_caption({**env, "artifacts_not_published": []}, files) == (
         "Every file published for this case."
     )
+
+
+def test_files_caption_claims_only_what_the_listing_actually_carries():
+    # `artifacts_not_published` records sha256 from the report by basename, so a
+    # bare `isa_dir: fixtures/isa` reference has none and its row is an em dash.
+    # The caption must not promise a digest for it. Rebuild commands are never
+    # promised under this anchor either: that table is Path + SHA-256, the
+    # commands are their own section above it, and an unrecognised reference has
+    # no command at all.
+    env = {"case": "c", "observed": {}, "logs_published": True}
+    files = [("sanitizer_report.json", 12)]
+
+    undigested = {**env, "artifacts_not_published": [{"path": "fixtures/isa"}]}
+    caption = gen._files_caption(undigested, files)
+    assert "1 required input is" in caption
+    assert f'href="#{gen._NOT_PUBLISHED_ID}"' in caption
+    assert "SHA-256" not in caption
+
+    # One entry without a digest is enough to drop the claim for the whole list.
+    mixed = {
+        **env,
+        "artifacts_not_published": [
+            {"path": "fixtures/isa/x.hsaco", "sha256": "ab"},
+            {"path": "fixtures/isa", "sha256": None},
+        ],
+    }
+    assert "SHA-256" not in gen._files_caption(mixed, files)
+
+    # No caption on any of these paths claims a rebuild command under the
+    # anchor, because the anchored table does not carry one.
+    for case in (undigested, mixed):
+        assert "rebuild" not in gen._files_caption(case, files).lower()
 
 
 def test_genco_rebuild_cleans_up_its_temporary_object():

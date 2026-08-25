@@ -288,8 +288,13 @@ _CSS = """
   .kv .k { display:block; font-size:var(--fs-kvk); color:var(--text-3); text-transform:uppercase;
     letter-spacing:.05em; font-weight:600; margin-bottom:3px; }
   .kv .val { display:block; font-size:var(--fs-kvv); color:var(--text-1); }
-  /* break-all, not break-word: break-word only breaks a word that cannot fit a
-     line by itself, which still leaves a digest-pinned image ref overflowing. */
+  /* break-all, not break-word. Both break a 40-char SHA or a 136-char
+     digest-pinned image ref once the item is narrower than the token, but the
+     soft wrap opportunities break-word introduces are not counted toward
+     min-content, so each mono fact would keep the whole token as its intrinsic
+     minimum and the row would hold only for as long as the min-width:0 above
+     survives. break-all's breaks do count, and breaking between characters is
+     what a token with no word boundaries wants anyway. */
   .kv .val.mono { font-family:var(--mono); word-break:break-all; }
 
   .observation { font-size:var(--fs-obs); color:var(--text-2); line-height:1.5;
@@ -1640,7 +1645,13 @@ _DRILLDOWN_CSS = """
      prose sentence. pre-wrap so a long command is never hidden off-screen, and
      so a soft wrap does not become a newline when the block is copied. */
   .rb { margin:0 0 18px; }
-  .rb:last-of-type { margin-bottom:8px; }
+  /* The closing note belongs to the section, not to a gap, so the final block
+     sits 8px above it. Marked by class rather than `:last-of-type`, which keys
+     off the tag and not the class: whether it matched depended on what other
+     divs the panel happened to emit afterwards, and on a real page it never did
+     -- a case with rebuild blocks has built refs, so it also has the
+     "Artifacts not published" `.table-wrap` sitting after them. */
+  .rb-last { margin-bottom:8px; }
   .rb .path { margin:0 0 4px; font-family:var(--mono); font-size:13.5px;
     color:var(--text-1); word-break:break-all; }
   .rb .what { margin:0 0 8px; color:var(--text-3); font-size:13px; }
@@ -1741,6 +1752,22 @@ _FIXTURES_FROM_ROOT = "recipes/sanitizers/fixtures"
 _REBUILD_KEYS = frozenset({"path", "what", "commands", "caveat"})
 
 
+def _is_rebuild_entry(item: Any) -> bool:
+    """Whether a stored ``rebuild`` entry is safe for both renderings (pure).
+
+    Key presence alone is not enough. ``commands`` is the one field the
+    renderings do more than stringify -- they iterate it -- so its *type* is
+    part of the contract: an int raises ``TypeError`` mid-render, and a string
+    silently degrades into one command per character. Every other field only
+    ever reaches ``_esc(str(...))`` or an f-string, which accept anything.
+    """
+    return (
+        isinstance(item, dict)
+        and _REBUILD_KEYS <= item.keys()
+        and isinstance(item["commands"], list)
+    )
+
+
 def _runnable(ref: str) -> str:
     """A recipe-relative fixture path rewritten to run from the repo root."""
     return f"{_FIXTURES_FROM_ROOT}{ref[len('fixtures'):]}" if ref.startswith("fixtures") else ref
@@ -1801,9 +1828,11 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
 
     ``env.json`` carries this so a consumer of ``aorta.sanitizer_run_area/0.1``
     can read the exact commands rather than parse them out of a sentence, and
-    both prose renderings are generated from it by ``_rebuild_hints`` -- so the
-    landing page, REPRODUCE.md and the manifest cannot disagree about how an
-    artifact was built.
+    both prose renderings are generated from it -- REPRODUCE.md's Markdown by
+    ``_rebuild_hints``, the landing page's HTML by ``_rebuild_section_html`` --
+    so the landing page, REPRODUCE.md and the manifest cannot disagree about how
+    an artifact was built. The two renderers share this structure, not a code
+    path: changing one does not change the other.
 
     Each entry is ``{"path", "what", "commands", "caveat"}``. ``path`` stays
     recipe-relative, matching how a recipe names the artifact and how
@@ -1913,17 +1942,16 @@ def plan_from_env(env: dict[str, Any], built_refs: list[str]) -> list[dict[str, 
     preserved, so recomputing the commands from the module's current tables would
     rewrite historical instructions and leave the prose contradicting the
     manifest sitting beside it. Fall back to recomputation only for an area
-    published before the field existed -- or one whose stored entries do not
-    carry the keys both renderers read. Both renderers index those keys directly,
-    and this runs over a manifest read off the data branch, so accepting a
-    partial entry here would turn one hand-edited or half-written ``env.json``
-    into a ``KeyError`` that fails the whole dashboard render rather than one
-    area's rebuild section.
+    published before the field existed -- or one whose stored entries are not
+    shaped the way both renderers read them (see ``_is_rebuild_entry``). Those
+    renderers index and iterate the entry directly, and this runs over a
+    manifest read off the data branch, so trusting a partial or wrongly-typed
+    entry here would turn one hand-edited or half-written ``env.json`` into a
+    ``KeyError``/``TypeError`` that fails the whole dashboard render rather
+    than one area's rebuild section.
     """
     stored = env.get("rebuild")
-    if isinstance(stored, list) and all(
-        isinstance(item, dict) and _REBUILD_KEYS <= item.keys() for item in stored
-    ):
+    if isinstance(stored, list) and all(_is_rebuild_entry(item) for item in stored):
         return stored
     return rebuild_plan(built_refs, target=str(env.get("target") or "gfx950"))
 
@@ -1971,7 +1999,7 @@ def _rebuild_section_html(plan: list[dict[str, Any]]) -> str:
     if not plan:
         return ""
     blocks: list[str] = []
-    for entry in plan:
+    for index, entry in enumerate(plan):
         commands = [str(command) for command in entry.get("commands") or []]
         parts = [f'<p class="path">{_esc(str(entry["path"]))}</p>']
         what = entry.get("what")
@@ -1989,7 +2017,8 @@ def _rebuild_section_html(plan: list[dict[str, Any]]) -> str:
         caveat = entry.get("caveat")
         if caveat:
             parts.append(f'<p class="caveat">{_esc(str(caveat))}</p>')
-        blocks.append(f'<div class="rb">{"".join(parts)}</div>')
+        last = " rb-last" if index == len(plan) - 1 else ""
+        blocks.append(f'<div class="rb{last}">{"".join(parts)}</div>')
     return (
         '<p class="cap">Rebuild the fixtures</p>'
         + "".join(blocks)
@@ -2005,7 +2034,15 @@ def _files_caption(env: dict[str, Any], files: list[tuple[str, int]]) -> str:
     CI-built, so it is recorded under *Artifacts not published* by digest
     instead of being copied here. Nothing linked the two sections, so a reader
     could not tell a deliberate omission from a missing file. Say it, and point
-    at where the digest and rebuild command actually are.
+    at the listing.
+
+    Claims only what that listing actually carries. The digest is mentioned
+    only when every excluded entry has one -- ``artifacts_not_published``
+    records ``sha256`` from the report by basename, so a bare ``isa_dir:
+    fixtures/isa`` reference has none and its row renders an em dash. The
+    rebuild commands are deliberately not promised under this anchor: they are
+    their own section further up the page, and an unrecognised reference has no
+    command at all.
     """
     if not env.get("logs_published", True):
         base = (
@@ -2022,10 +2059,16 @@ def _files_caption(env: dict[str, Any], files: list[tuple[str, int]]) -> str:
     count = len(missing)
     noun = "input" if count == 1 else "inputs"
     verb = "is" if count == 1 else "are"
+    listing = f'<a href="#{_NOT_PUBLISHED_ID}">artifacts not published</a>'
+    has_digests = all(isinstance(item, dict) and item.get("sha256") for item in missing)
+    where = (
+        f"listed under {listing} with {'its SHA-256' if count == 1 else 'their SHA-256s'}"
+        if has_digests
+        else f"listed under {listing}"
+    )
     return (
         f"{_esc(base)} It is not the whole recipe: {count} required {noun} {verb} "
-        f'CI-built and excluded by design, listed under <a href="#{_NOT_PUBLISHED_ID}">'
-        f"artifacts not published</a> with a SHA-256 and a command to rebuild it."
+        f"CI-built and excluded by design, {where}."
     )
 
 
@@ -2104,8 +2147,9 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
 
     The downloadable companion to the landing page rather than a strict twin of
     it: the two share the run identity, the reproduce command and the rebuild
-    section (via ``_rebuild_hints``), and this file additionally carries the
-    required env and the recorded digests that the page links it for.
+    plan -- rendered here as Markdown by ``_rebuild_hints`` and on the page
+    structurally by ``_rebuild_section_html`` -- and this file additionally
+    carries the required env and the recorded digests that the page links it for.
     """
     observed = env.get("observed") or {}
     # Point at the file table rather than restating an inventory here: what a run

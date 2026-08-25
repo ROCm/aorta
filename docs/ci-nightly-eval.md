@@ -99,14 +99,22 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    CI-built artifacts are deliberately **not** published: a GEMM `.hsaco` is
    ~16MB, and shipping one per retained run would bloat the data branch and
    Pages. `index.html` / `REPRODUCE.md` / `env.json` instead record each one's
-   path and SHA-256 (taken from the report, which already carries the waitcheck
-   binary digest, the ConSan repro command and hook digests, and every kernel's
-   `code_object_sha256`) plus the command to rebuild it, so a local rebuild can
-   be verified. Since that means the file list is *not* the whole recipe -- for a
+   path, the SHA-256 the report carries for it (the waitcheck binary digest, the
+   ConSan repro command and hook digests, every kernel's `code_object_sha256`)
+   and the command that rebuilds it, so a local rebuild can be verified. Neither
+   is universal: a digest is only recorded when the report has one under that
+   artifact's basename, so a bare `isa_dir: fixtures/isa` reference has none, and
+   a reference the module's rebuild tables do not recognise is named without a
+   command rather than given a plausible-looking guess.
+
+   Since that means the file list is *not* the whole recipe -- for a
    `source.kind: kernel` recipe the one input the recipe names is exactly the
    excluded one -- the landing page's Files caption says how many inputs are held
-   back and links to the section carrying their digests and rebuild commands,
-   rather than leaving a reader to tell a deliberate omission from a lost file.
+   back and links to the *Artifacts not published* table that lists them, naming
+   their SHA-256s only when every entry has one. The rebuild commands are their
+   own section higher up the page, so the caption does not promise them under
+   that anchor. Either way a reader can tell a deliberate omission from a lost
+   file.
 
    Those rebuild commands are per-artifact, because they are not
    interchangeable: a `--genco` code object is a raw ELF on some ROCm builds and
