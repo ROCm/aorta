@@ -2947,7 +2947,20 @@ def test_rebuild_section_renders_its_commands_as_one_runnable_block():
     assert entry["caveat"] not in body
     # ...no "; " joining the commands as prose, and no sentence period abutting
     # the final path (which made it a path that does not exist).
-    assert "; " not in body
+    #
+    # Checked at each join rather than as a bare `"; " not in body` substring
+    # test. A single command may legitimately contain "; ": the ROCm LLVM bindir
+    # export is a `python -c "from ... import resolve_rocm_roots; print(...)"`
+    # one-liner (#381), and that payload cannot use apostrophes to avoid the
+    # semicolon because it lives inside a single-quoted `bash -lc` block. The
+    # substring form therefore forbade a valid command rather than the prose
+    # flattening it was written to catch. Asserting the separator keeps the
+    # regression covered without constraining what a command may contain.
+    # strict=False: the two sequences are offset by one BY DESIGN (consecutive
+    # pairs), so the length difference is the point, not a bug to catch.
+    for first, second in zip(entry["commands"], entry["commands"][1:], strict=False):
+        assert f"{gen._esc(first)}; {gen._esc(second)}" not in body
+        assert f"{gen._esc(first)}\n{gen._esc(second)}" in body
     assert not body.endswith(".")
     # One artifact is a titled block, not a one-item bullet list.
     assert "<ul" not in html and "<li>" not in html
