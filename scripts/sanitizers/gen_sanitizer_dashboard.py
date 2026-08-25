@@ -831,8 +831,9 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
 # their ``<YYYY-MM-DD>-<run_id>`` names -- they are never renamed, so both shapes
 # are live in the retained window and in the data branch's history.
 _RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{6})?-\d+$")
-# The instant embedded in a run id, if it carries one.
-_RUN_ID_STAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2})(\d{2})(\d{2})-")
+# Nothing here parses the instant back out of an id: the publisher records it in
+# ``meta.json`` and this renders that value (``format_instant``). Reading it off
+# the directory name too would be a second source for one fact.
 
 
 def _is_run_id(name: str) -> bool:
@@ -4118,8 +4119,9 @@ def main() -> int:
         runs = runs_from_history_root(args.history_root, baselines, keep=args.keep)
 
     # Which retained run this job actually produced. NOT simply the newest one:
-    # re-running an older workflow reuses its lower GITHUB_RUN_ID, so its
-    # <date>-<run_id> sorts *behind* a newer same-day run. Taking position 0 then
+    # re-running an older workflow reuses its lower GITHUB_RUN_ID and the run
+    # directory it already minted, so it sorts *behind* a newer same-day run
+    # (under either id shape -- see _RUN_ID_RE). Taking position 0 then
     # stamps the newer area with this job's container/bundle/recipe and publishes
     # this job's survey under the wrong run. Fall back to the newest run only when
     # the caller did not say (the results-dir / runs-root modes, and older callers).

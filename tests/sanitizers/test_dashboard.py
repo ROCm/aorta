@@ -772,9 +772,9 @@ def test_workflow_reuses_the_directory_a_rerun_already_minted(tmp_path):
 def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
     # The workflow derives meta.json's date from the resolved directory name so a
     # re-run cannot report a clock its own directory contradicts. Run the step's
-    # own metadata writer over both id shapes: asserting that its copy of
-    # _RUN_ID_STAMP_RE appears in the file would still pass if the block stopped
-    # consulting the directory name at all.
+    # own metadata writer over both id shapes and render what it wrote: asserting
+    # that its parsing pattern appears in the file would still pass if the block
+    # stopped consulting the directory name at all.
     block = _dedent_block(
         _publish_step(), 'if [ "${GPU_RESULT}" = "success" ]; then gate=true', "PY"
     )
@@ -797,29 +797,30 @@ def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
         "started_iso": started_iso,
     }
 
-    for run_id, expected in (
+    for run_id, expected, rendered in (
         # A timestamped name reports the instant it carries, not this attempt's
         # clock -- that is what makes a re-run's manifest match its directory.
-        ("2026-08-23T094112-32638584704", "2026-08-23T09:41:12+00:00"),
+        (
+            "2026-08-23T094112-32638584704",
+            "2026-08-23T09:41:12+00:00",
+            "2026-08-23 09:41:12 UTC",
+        ),
         # A name from before the scheme carries no instant, so this publish
         # supplies its own rather than inventing that date's midnight.
-        ("2026-08-23-32638584704", started_iso),
+        ("2026-08-23-32638584704", started_iso, "2026-08-24 03:15:00 UTC"),
     ):
         dest = tmp_path / run_id
         dest.mkdir()
         _run_shell(block, tmp_path, {**env, "dest": str(dest), "run_dir_id": run_id})
 
         meta = json.loads((dest / "meta.json").read_text(encoding="utf-8"))
-        assert meta["date"] == expected, run_id
-        assert meta["run"] == run_id
-        assert meta["gate"] is True  # mirrors GPU_RESULT=success
-        # The generator parses the same name with its own copy of the pattern, so
-        # the two have to read the same instant out of it.
-        stamp = gen._RUN_ID_STAMP_RE.match(run_id)
-        if stamp:
-            assert meta["date"] == "{}T{}:{}:{}+00:00".format(*stamp.groups())
-        # Either way the recorded value is one the renderer can render.
-        assert gen.format_instant(meta["date"]).endswith(" UTC")
+        assert meta.get("date") == expected, run_id
+        assert meta.get("run") == run_id
+        assert meta.get("gate") is True  # mirrors GPU_RESULT=success
+        # What the generator will put on the page for that manifest -- for the
+        # timestamped name, the 094112 its own directory carries. Agreement is
+        # asserted through the renderer rather than by pinning a shared pattern.
+        assert gen.format_instant(meta.get("date")) == rendered, run_id
 
 
 def test_format_instant_renders_a_time_and_never_invents_one():
