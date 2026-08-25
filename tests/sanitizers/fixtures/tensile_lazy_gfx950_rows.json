@@ -7,6 +7,12 @@
     "library_type": "Hardware",
     "family": "SS_SS_HA_Bias_SAV_UA"
   },
+  "_resolution_comment": "This table is the row DATA only. How the rows are walked is not in it and cannot be inferred from it -- notably that a row whose predicate matches but which offers nothing for a family does not end the walk (findBestSolution guards its return with `if(rv)`), and that a chip id may match a row via the fallback graph. Both come from tensilelite, cited below and mirrored in prepare_gemm_isa.py.",
+  "resolution": {
+    "walk": "tensilelite include/Tensile/ExactLogicLibrary.hpp -- ExactLogicLibrary::findBestSolution, HardwarePredicate::isFallbackMatch",
+    "chip_id_registry": "tensilelite include/Tensile/AMDGPUPredicates.hpp -- ChipIdRegistry::chipIdFallbacks, PciChipIdEqual::operator()",
+    "row_ordering": "hipBLASLt docs, 'PCI chip ID predicates walkthrough' -- Build-time row ordering (fallback-aware)"
+  },
   "rows": [
     {
       "row": 0,
