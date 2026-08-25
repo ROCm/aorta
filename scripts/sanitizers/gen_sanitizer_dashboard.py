@@ -1267,8 +1267,8 @@ def survey_cases_from_informational_dir(
 # ---------------------------------------------------------------------------
 
 # Fixture paths under these prefixes are CI-built (see
-# recipes/sanitizers/fixtures/.gitignore): a ~16MB Tensile code object or a
-# compiled repro binary. They are never copied into a run area -- publishing
+# recipes/sanitizers/fixtures/.gitignore): a Tensile code object of hundreds of
+# MB, or a compiled repro binary. They are never copied into a run area -- publishing
 # them for every retained run would bloat the data branch and Pages -- so their
 # SHA-256 is recorded instead and a local rebuild can be verified against it.
 _BUILT_FIXTURE_DIRS = ("fixtures/bin/", "fixtures/isa/")

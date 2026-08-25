@@ -2408,7 +2408,7 @@ def test_raw_link_html_renders_run_area_or_nothing():
 
 def test_recipe_fixture_refs_splits_source_inputs_from_built_artifacts():
     # Source inputs are copied into the run area; CI-built artifacts (gitignored,
-    # ~16MB for a GEMM object) are recorded by digest instead.
+    # hundreds of MB for a GEMM object) are recorded by digest instead.
     recipe = (
         "sanitizer_plan:\n"
         "  source:\n"

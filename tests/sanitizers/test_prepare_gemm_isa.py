@@ -300,9 +300,18 @@ def test_selection_reproduces_the_shipped_lazy_master_mapping(monkeypatch, tmp_p
     must resolve to a *later* row's library, or to nothing at all.
     """
     truth = json.loads(_LAZY_ROWS.read_text(encoding="utf-8"))
-    rows = truth["rows"]
-    assert truth["source"]["library_type"] == "Hardware", "first-match row semantics"
-    assert all(row["processor"] == gen.GFX for row in rows)
+    # Validate the recorded table's shape up front: a bare KeyError from deep in
+    # the loop below would say far less about a mangled fixture than this does.
+    assert truth.get("source", {}).get("library_type") == "Hardware", (
+        "fixture must record a Hardware library, whose rows are resolved first-match"
+    )
+    rows = truth.get("rows")
+    assert isinstance(rows, list) and rows, "fixture must record the predicate rows"
+    for row in rows:
+        assert row.get("processor") == gen.GFX, f"unexpected processor in row {row}"
+        assert isinstance(row.get("chip_ids"), list), f"row {row} has no chip_ids"
+        assert isinstance(row.get("libraries"), dict), f"row {row} has no libraries"
+        assert row.get("cu_count") is None or isinstance(row["cu_count"], int), row
 
     def first_match(chip_id: int, cu_count: int, layout: str) -> str | None:
         """What the index resolves to: first row that matches *and* has a library."""
