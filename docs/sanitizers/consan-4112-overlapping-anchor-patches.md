@@ -42,7 +42,11 @@ RJ_CONSAN_MOI_REQUIRE_RECORDS requested, but … no kernel dispatch packet was o
 exit 86 after 4152s
 ```
 
-⚠️ **That run takes 4152 s — roughly 2.9× the 1416 s this case needed on
+Two runs of that path completed in **3696 s and 4152 s** (~62–69 min), emitting an
+identical 508,727 log lines, so the spread is host contention rather than workload
+variance.
+
+⚠️ **That is roughly 2.9× the 1416 s this case needed on
 `db0c47df`, and well past any ceiling sized against it.** The defect used to abort
 the run early; now the transform succeeds and the object is genuinely instrumented
 (75,978 patches over 68,894 discovered access sites), so the work that follows is

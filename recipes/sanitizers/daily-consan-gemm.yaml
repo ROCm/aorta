@@ -47,15 +47,16 @@ sanitizer_plan:
     #
     # #10378 is now fixed (dc7c8e04) and published in bundle 4227d40fb5, which the
     # downloader selects. Re-measured against it, the same object transforms cleanly
-    # (outcome=modified-valid, 75978 patches over 68894 access sites) and takes 4152s
-    # -- ~69 min -- before ending on strict require-records at exit 86. 2000s would
-    # have guaranteed combined_hook_timeout: the exact failure this recipe change
-    # exists to remove.
+    # (outcome=modified-valid, 75978 patches over 68894 access sites) and takes
+    # 3696s and 4152s across two runs -- ~62-69 min -- before ending on strict
+    # require-records at exit 86. 2000s would have guaranteed combined_hook_timeout:
+    # the exact failure this recipe change exists to remove.
     #
-    # 6000s is ~45% over that 4152s measurement. The headroom absorbs the run-to-run
-    # spread seen on the old bundle (659-715s in MOI inventory alone) and the fact
-    # that the timing comes from ROCm 7.0.2.2 while CI builds fixtures against 7.2.4
-    # (#380), whose hipBLASLt may extract a differently sized object.
+    # 6000s is ~45% over the slower of the two. The headroom absorbs that spread
+    # (both runs emitted an identical 508727 log lines, so the ~12% difference is
+    # host contention, not workload variance) and the fact that the timing comes from
+    # ROCm 7.0.2.2 while CI builds fixtures against 7.2.4 (#380), whose hipBLASLt may
+    # extract a differently sized object.
     #
     # This case runs in the non-gating sanitizers-survey job, not on the gate job --
     # a ~69-min observed-only row does not belong in front of the Tab 1 verdict.
