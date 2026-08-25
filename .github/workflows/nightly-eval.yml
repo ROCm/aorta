@@ -47,7 +47,16 @@ jobs:
     # Run even when the eval failed (to record the failure), but NOT when it was
     # skipped (upstream "Nightly wheels" failed/cancelled) -- there'd be no
     # results artifact and publish would fail misleadingly.
-    if: always() && needs.nightly-eval.result != 'skipped'
+    #
+    # Gated to the default branch for the same two reasons as the canary's
+    # publisher: this workflow is workflow_dispatch-triggerable, so without it a
+    # run from an unreviewed branch could write the shared ci-results data
+    # branch; and the workflow-level group above is ref-scoped, so branch runs
+    # are NOT capped against each other and several could reach the shared
+    # publish group at once. Branch runs still produce the artifact.
+    if: >-
+      always() && needs.nightly-eval.result != 'skipped'
+      && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # Shared with latest-rocm-canary.yml's publish job -- see the note there.
     # Both push the ci-results branch, so they must not overlap: the loser of a

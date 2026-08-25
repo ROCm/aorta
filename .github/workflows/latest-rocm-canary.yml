@@ -328,10 +328,16 @@ jobs:
     # that run's history entirely. The group name is global to the repo, so
     # naming it identically in both places is what serialises them.
     # cancel-in-progress stays false so the loser queues instead of dying. That
-    # is only safe because each workflow ALSO has a workflow-level group above,
-    # capping this one at a single in-flight run per workflow: at most two jobs
-    # can ever contend here, and GitHub only cancels a pending job when a THIRD
-    # arrives. Drop either workflow-level group and this needs rethinking.
+    # is only safe while at most TWO jobs can contend, because GitHub keeps just
+    # one job pending per group and cancels it when a third arrives. Two things
+    # are load-bearing for that bound, and BOTH must hold:
+    #   1. each workflow has a workflow-level concurrency group, capping it at
+    #      one in-flight run;
+    #   2. both publishers are gated to refs/heads/main -- those workflow-level
+    #      groups are keyed on github.ref, so without the gate concurrent
+    #      dispatches from different branches are not capped against each other
+    #      and can pile into this group.
+    # Weaken either and a queued publisher can be dropped, losing a history row.
     concurrency:
       group: ci-results-publish
       cancel-in-progress: false

@@ -1773,6 +1773,36 @@ def test_both_ci_results_publishers_share_one_concurrency_group():
     ), "publishers must share ONE group or they are not serialised"
 
 
+def test_every_shared_group_publisher_is_gated_to_main():
+    """`cancel-in-progress: false` queues rather than drops -- but only for two.
+
+    GitHub keeps ONE pending job per group and cancels it when a third arrives,
+    so the shared group is only safe while at most two jobs can reach it. Each
+    workflow's own concurrency group caps it at one in-flight run, but those
+    groups are keyed on `github.ref`: both workflows are workflow_dispatch-able,
+    so branch runs are not capped against each other and several publishers can
+    pile in (#387, 9th pass -- the previous comment asserted a two-job bound
+    that did not hold).
+
+    Discovered rather than hardcoded, so a third publisher added to the group
+    later has to satisfy the same condition.
+    """
+    group = _load_workflow("latest-rocm-canary.yml")["jobs"]["publish"]["concurrency"][
+        "group"
+    ]
+    found = 0
+    for path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        for name, job in (_load_workflow(path.name).get("jobs") or {}).items():
+            if (job.get("concurrency") or {}).get("group") != group:
+                continue
+            found += 1
+            assert "refs/heads/main" in str(job.get("if", "")), (
+                f"{path.name}:{name} joins the {group} group without a main gate, "
+                "so concurrent branch dispatches can drop a queued publisher"
+            )
+    assert found == 2, f"expected both publishers in {group}, found {found}"
+
+
 def test_canary_publish_survives_a_run_that_produced_no_artifact():
     """A canary that died before writing a row must not fail its publisher (#387).
 

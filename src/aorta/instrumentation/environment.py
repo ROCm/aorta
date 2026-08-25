@@ -3060,6 +3060,9 @@ def _clean_manifest_string(value: Any) -> str | None:
 
 
 _THEROCK_PIN_SHA_RE = re.compile(r"[0-9a-f]{40}")
+# The hipBLASLt/rocBLAS header tweak, when it is an abbreviated commit at all.
+# Documented as 7-12 chars; measured 10 on ROCm 7.2.4.
+_GEMM_TWEAK_RE = re.compile(r"[A-Fa-f0-9]{7,12}")
 
 
 def _clean_manifest_pin(value: Any) -> str | None:
@@ -3380,8 +3383,22 @@ def _gemm_provenance_matches(tweak: str | None, manifest_sha: str | None) -> boo
     Compared by prefix at the tweak's own length rather than a fixed 8
     characters: the tweak is a short hash of unspecified width (measured 10
     on ROCm 7.2.4's hipblaslt-version.h).
+
+    ``None`` also when the tweak is not a plausible abbreviated SHA. The header
+    regex accepts any ``[A-Za-z0-9_.+-]`` token, because that is what the
+    reported ``version_tweak`` field should carry verbatim -- but a *comparison*
+    needs both sides valid or its boolean means nothing. Two concrete ways it
+    lied: a one-character tweak prefix-matches roughly one manifest SHA in
+    sixteen and reports ``True`` off almost no evidence, and a non-hex build
+    string (``unknown``, ``dirty``) reported ``False`` -- a positive claim of
+    *mismatch* -- when the honest answer is "not comparable". Bounded at 7-12
+    to match the documented width, mirroring the 7-40 bound the CK commit
+    regex above already applies for the same reason.
     """
     if not tweak or not manifest_sha:
+        return None
+    if not _GEMM_TWEAK_RE.fullmatch(tweak):
+        log.debug("hipblaslt/rocblas tweak %r is not an abbreviated SHA", tweak)
         return None
     return manifest_sha.lower().startswith(tweak.lower())
 
@@ -5123,9 +5140,13 @@ def _capture_tensile(reasons: list[str]) -> dict[str, Any]:
         [HIPBLASLT_TENSILE_DIR, ROCBLAS_TENSILE_DIR]
     )
     if combined_hash is None:
+        # "or unreadable" is load-bearing: the fingerprint is now invalidated by
+        # an incomplete listing as well as by an empty one, and a reader chasing
+        # this reason needs to know a permissions problem produces it too.
         reasons.append(
-            "tensile.kernel_db_combined_hash: no kernel files under "
-            f"{HIPBLASLT_TENSILE_DIR} or {ROCBLAS_TENSILE_DIR}"
+            "tensile.kernel_db_combined_hash: no kernel files found, or the "
+            f"listing was incomplete, under {HIPBLASLT_TENSILE_DIR} or "
+            f"{ROCBLAS_TENSILE_DIR}"
         )
     return {
         "package_version": package_version,
@@ -5158,8 +5179,19 @@ def _combined_kernel_db_fingerprint(
     yields byte-identical output to before: the nested branch adds nothing when
     there are no ``gfx*`` subdirectories.
 
-    Returns ``None`` only when *every* input directory is missing or
-    empty.
+    Returns ``None`` when every input directory is missing or empty, and *also*
+    whenever enumeration was incomplete -- a directory that exists but cannot be
+    listed, or an entry that cannot be stat'ed, invalidates the whole answer
+    rather than being skipped (#387, 9th pass).
+
+    Skipping was the wrong failure mode for a *fingerprint* specifically. The
+    value's only use is comparison: two hosts agree or they do not. Hashing the
+    subset that happened to be readable yields a confident-looking digest over
+    an unknown fraction of the database, so two identical installs compare
+    unequal because one had a permissions problem -- and because the result is
+    non-null, the caller records no partial reason to explain it. A missing
+    directory is different and still skipped: only hipBLASLt being installed is
+    a normal layout, not a failure to read one.
     """
     pairs: list[str] = []
     for d in directories:
@@ -5172,7 +5204,7 @@ def _combined_kernel_db_fingerprint(
             entries = list(d.iterdir())
         except OSError as exc:
             log.debug("combined kernel-db listing failed for %s: %s", d, exc)
-            continue
+            return None
         for p in entries:
             try:
                 if p.is_file() and p.suffix in suffixes:
@@ -5183,13 +5215,14 @@ def _combined_kernel_db_fingerprint(
                 nested = list(p.iterdir())
             except OSError as exc:
                 log.debug("combined kernel-db entry unreadable: %s (%s)", p, exc)
-                continue
+                return None
             for q in nested:
                 try:
                     if q.is_file() and q.suffix in suffixes:
                         pairs.append(f"{tag}/{p.name}/{q.name}")
                 except OSError as exc:
                     log.debug("combined kernel-db entry unreadable: %s (%s)", q, exc)
+                    return None
     if not pairs:
         return None
     pairs.sort()

@@ -35,6 +35,7 @@ Stdlib only, and it must stay that way: it runs before any pip install.
 
 from __future__ import annotations
 
+import codecs
 import importlib.util
 import os
 import sys
@@ -49,6 +50,9 @@ WHEEL_DEVEL_PACKAGE = "_rocm_sdk_devel"
 ROOT_MARKERS = (".info", "bin", "lib")
 USABLE_VERSION_MARKERS = (".info/version", ".info/version-dev")
 VERSION_MARKER_PROBE_BYTES = 64
+# Mirrors rocm_paths._VERSION_MARKER_VALUE_BYTES: bounded, but large enough
+# that no real release tag is truncated when the value itself is wanted.
+VERSION_MARKER_VALUE_BYTES = 4096
 
 LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
@@ -84,28 +88,42 @@ def _safe_is_dir(path: Path) -> bool:
         return False
 
 
-def _has_readable_version(path: Path) -> bool:
-    """Readable, non-empty .info/version{,-dev}. Mirrors rocm_paths.
+def read_version_marker(path: Path, limit: int = VERSION_MARKER_VALUE_BYTES) -> str | None:
+    """The stripped contents of a version marker, or None. Mirrors rocm_paths.
 
-    A real read, so an empty file, a whitespace-only file, a *directory* named
-    .info/version and an unreadable file all collapse to the same "no".
+    ONE reader for both users in this file -- the discovery predicate below and
+    main()'s verification. They diverged once: discovery accepted a marker that
+    main() then rejected, so resolve() selected an install and the build failed
+    with "no readable version" about the very file discovery had just read.
 
-    Decode before stripping, matching rocm_paths.read_version_marker: bytes.strip()
-    only strips ASCII whitespace, so a marker holding nothing but a non-breaking
-    space would read as usable here and unusable there. Obscure, but a guard that
-    disagrees with the resolver is worse than no guard -- it passes an image the
-    probe then reads as versionless.
+    Every unusable case collapses to None: absent, a *directory* named
+    .info/version, unreadable (all OSError), empty or whitespace-only content,
+    and non-UTF-8 bytes. That last one is deliberately not salvaged with
+    errors="replace" -- environment.py reports such a marker as null, and
+    main()'s failure text promises exactly that.
+
+    Decoded incrementally with final=False because the read is bounded and can
+    split a multi-byte character at the limit; a plain decode would report that
+    as corruption.
     """
-    for marker in USABLE_VERSION_MARKERS:
-        candidate = path / marker
-        try:
-            with candidate.open("rb") as handle:
-                raw = handle.read(VERSION_MARKER_PROBE_BYTES)
-        except OSError:
-            continue
-        if raw.decode("utf-8", errors="replace").strip():
-            return True
-    return False
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(limit)
+    except OSError:
+        return None
+    try:
+        text = codecs.getincrementaldecoder("utf-8")().decode(raw, False)
+    except UnicodeDecodeError:
+        return None
+    return text.strip() or None
+
+
+def _has_readable_version(path: Path) -> bool:
+    """Readable, non-empty .info/version{,-dev}. Mirrors rocm_paths."""
+    return any(
+        read_version_marker(path / marker, VERSION_MARKER_PROBE_BYTES) is not None
+        for marker in USABLE_VERSION_MARKERS
+    )
 
 
 def _is_rocm_root(path: Path) -> bool:
@@ -223,15 +241,10 @@ def main() -> int:
     version_files = [core / ".info" / "version", core / ".info" / "version-dev"]
     version = None
     for path in version_files:
-        try:
-            text = path.read_text(encoding="utf-8").strip()
-        # UnicodeDecodeError is NOT an OSError: a binary blob sitting at the
-        # marker path would otherwise crash the guard with a traceback instead of
-        # reporting which paths it tried. environment.py's _read_text_file treats
-        # non-UTF8 the same way, so the two agree on what "unreadable" means.
-        except (OSError, UnicodeDecodeError):
-            continue
-        if text:
+        # Same reader discovery used, so a marker good enough to select this
+        # root cannot be one this loop then reports as missing.
+        text = read_version_marker(path)
+        if text is not None:
             version = text
             print(f"ROCm version: {text}  (from {path})")
             break

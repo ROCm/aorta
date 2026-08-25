@@ -37,6 +37,7 @@ env probe without pulling in torch.
 
 from __future__ import annotations
 
+import codecs
 import importlib.util
 import logging
 import os
@@ -274,6 +275,14 @@ def read_version_marker(path: Path, limit: int = _VERSION_MARKER_VALUE_BYTES) ->
     file at this path cannot be slurped into memory. The default is generous
     enough that no real version string is truncated, while validation passes the
     much smaller probe size since it only needs truthiness.
+
+    Non-UTF-8 content is unusable, not salvageable-with-replacement. That
+    matches ``environment.py``'s ``_read_text_file``, which has always returned
+    ``None`` for a locale-mismatched or binary marker so the caller records a
+    partial reason. Decoding with replacement instead would put U+FFFD into
+    ``rocm.version`` -- a field consumers compare across hosts -- and would
+    contradict the docker guard's own error text, which promises that a marker
+    it rejects is one the probe reports as null.
     """
     try:
         with path.open("rb") as handle:
@@ -281,9 +290,16 @@ def read_version_marker(path: Path, limit: int = _VERSION_MARKER_VALUE_BYTES) ->
     except OSError as exc:  # missing, a directory, unreadable, stale mount
         log.debug("version marker %s unusable: %s", path, exc)
         return None
-    # errors="replace" so a mojibake marker still reports *something* rather
-    # than raising -- a garbled version is a better diagnostic than no probe.
-    return raw.decode("utf-8", errors="replace").strip() or None
+    # Incremental decoder with final=False, not bytes.decode(): the read above
+    # is bounded, so it can cut a multi-byte character in half at the limit.
+    # A plain decode reports that as corruption; this buffers the incomplete
+    # tail and still raises on genuinely invalid bytes.
+    try:
+        text = codecs.getincrementaldecoder("utf-8")().decode(raw, False)
+    except UnicodeDecodeError as exc:  # NOT an OSError; would escape the caller
+        log.debug("non-utf8 version marker %s: %s", path, exc)
+        return None
+    return text.strip() or None
 
 
 def _is_rocm_root(path: Path) -> bool:

@@ -377,12 +377,41 @@ def test_an_unreadable_first_marker_falls_through_instead_of_raising(tmp_path, m
     assert nightly_eval.build_metadata()["rocm"] == "7.2.4"
 
 
-def test_a_non_utf8_marker_is_reported_not_raised(tmp_path, monkeypatch):
-    """Mojibake is a better diagnostic than a lost result document."""
+def test_a_non_utf8_marker_is_null_not_a_crash(tmp_path, monkeypatch):
+    """Undecodable is unusable -- but it must not raise, either.
+
+    Null matches what `environment.py` reports for the same file, so the
+    dashboard column and `rocm.version` agree. The point of the test is that
+    the read is fail-soft: `read_text()` raised `UnicodeDecodeError`, which is
+    not an `OSError` and so escaped `build_metadata()` entirely.
+    """
     root = tmp_path / "opt_rocm"
     info = root / ".info"
     info.mkdir(parents=True)
     (info / "version").write_bytes(b"\xff\xfe7.2.4")
     monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] is None
+
+
+def test_a_non_utf8_marker_does_not_shadow_a_valid_one(tmp_path, monkeypatch):
+    root = tmp_path / "opt_rocm"
+    info = root / ".info"
+    info.mkdir(parents=True)
+    (info / "version").write_bytes(b"\xff\xfe")
+    _write_version(root, "version-dev", "7.2.4\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4"
+
+
+def test_a_multibyte_version_is_not_reported_as_corrupt(tmp_path, monkeypatch):
+    """The bounded read must not turn a split character into "unreadable".
+
+    Contrived content, but it pins the reason the decode is incremental: a
+    plain bytes.decode() on a truncated buffer raises, which would report a
+    perfectly readable marker as non-UTF-8.
+    """
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version", "7.2.4-" + "\u00e9" * 3000)
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
     value = nightly_eval.build_metadata()["rocm"]
-    assert value is not None and "7.2.4" in value
+    assert value is not None and value.startswith("7.2.4-")

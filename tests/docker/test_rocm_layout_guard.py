@@ -329,6 +329,7 @@ class TestParity:
             pytest.param(b"", id="empty"),
             pytest.param(b"   \n\t", id="ascii-whitespace"),
             pytest.param("\u00a0\u2003".encode(), id="unicode-whitespace"),
+            pytest.param(b"\xff\xfe", id="non-utf8"),
         ],
     )
     def test_marker_usability_agrees_on_degenerate_content(
@@ -354,19 +355,43 @@ class TestParity:
         # both must decline the root. `agree` raises if they disagree.
         assert agree().source == "none"
 
-    def test_a_mojibake_marker_is_accepted_by_both(self, agree, classic_at, tmp_path: Path):
-        """Undecodable content is still *content*, and both must say so.
+    def test_a_mojibake_marker_does_not_hide_a_present_install(
+        self, agree, classic_at, tmp_path: Path
+    ):
+        """An undecodable marker is unusable; the *install* is still found.
 
-        Deliberately not grouped with the degenerate cases above: bytes that do
-        not decode are replaced, not discarded, so the marker reads as non-empty
-        and the root is accepted. A garbled version reaching the snapshot is a
-        usable diagnostic; declining the root here would report "no ROCm found"
-        for an install that is plainly present.
+        The two verdicts are separate, and conflating them is how an earlier
+        revision of this went wrong. The marker is rejected (so the reported
+        version is null rather than U+FFFD), but the root still resolves via its
+        lib/ directory -- reporting "no ROCm found" for an install that is
+        plainly present would be the worse error.
         """
         root = classic_at(tmp_path / "rocm")
         (root / ".info").mkdir(parents=True)
         (root / ".info" / "version").write_bytes(b"\xff\xfe")
+        (root / "lib").mkdir()
         assert agree().core == root
+        assert rocm_paths.read_version_marker(root / ".info" / "version") is None
+
+    def test_the_guard_never_rejects_a_marker_discovery_accepted(
+        self, classic_at, tmp_path: Path, capsys
+    ):
+        """resolve() and main() must not disagree about the same file (#387, round 9).
+
+        They did: discovery accepted a non-UTF-8 marker with errors="replace"
+        while main() rejected it, so the guard selected the root and then failed
+        the build with "no readable .info/version" naming the file it had just
+        read. Both now share one reader.
+        """
+        root = classic_at(tmp_path / "rocm")
+        (root / ".info").mkdir(parents=True)
+        (root / ".info" / "version").write_bytes(b"\xff\xfe")
+        (root / "lib").mkdir()
+        # Discovery finds the root, main() reports the version as missing, and
+        # the two agree the marker is the unusable part.
+        assert guard.resolve()[0] == root
+        assert guard.main() == 1
+        assert "no readable" in capsys.readouterr().err
 
     def test_an_unanchorable_override_degrades_identically(
         self, agree, sandbox, monkeypatch
@@ -496,4 +521,4 @@ class TestGuardIsSelfContained:
             for line in source.splitlines()
             if line.startswith(("import ", "from ")) and "__future__" not in line
         }
-        assert imported <= {"importlib", "os", "sys", "pathlib"}
+        assert imported <= {"codecs", "importlib", "os", "sys", "pathlib"}

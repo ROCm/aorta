@@ -3534,6 +3534,47 @@ class TestGemmProvenanceInvariant:
             env_mod._gemm_provenance_matches("deadbeef12", self.MANIFEST_SHA) is False
         )
 
+    @pytest.mark.parametrize(
+        "tweak",
+        [
+            pytest.param("5", id="one-char"),
+            pytest.param("5b515c", id="six-chars-under-documented-min"),
+            pytest.param("5b515cf1bcaa0", id="thirteen-chars-over-max"),
+            pytest.param("unknown", id="non-hex-build-string"),
+            pytest.param("dirty", id="non-hex-short"),
+            pytest.param("5b515cf-", id="trailing-punctuation"),
+            pytest.param("v5b515cf", id="leading-letter"),
+        ],
+    )
+    def test_an_implausible_tweak_is_not_comparable(self, tweak):
+        """A boolean here has to mean something (#387, round 9).
+
+        The header regex accepts any ``[A-Za-z0-9_.+-]`` token, so two distinct
+        lies were reachable. A one-character tweak prefix-matches about one SHA
+        in sixteen and returned ``True`` off almost no evidence; a non-hex build
+        string returned ``False``, asserting a *mismatch* between two things
+        that were never comparable. Both are now ``None``.
+        """
+        assert env_mod._gemm_provenance_matches(tweak, self.MANIFEST_SHA) is None
+
+    def test_a_one_char_tweak_no_longer_matches_by_luck(self):
+        """The concrete false positive, stated as such."""
+        assert self.MANIFEST_SHA.startswith("5")
+        assert env_mod._gemm_provenance_matches("5", self.MANIFEST_SHA) is None
+
+    def test_both_sides_must_be_valid_for_a_verdict(self):
+        """An invalid pin and an invalid tweak are both "not comparable".
+
+        Pairs with the manifest-side validation: neither side alone can produce
+        a verdict, so no combination of junk yields True/False.
+        """
+        short_pin = env_mod._capture_therock(
+            {"submodules": [{"submodule_name": "rocm-libraries", "pin_sha": "5b515cf1bc"}]},
+            [],
+        )["gemm_libraries_commit"]
+        assert env_mod._gemm_provenance_matches("5b515cf1bc", short_pin) is None
+        assert env_mod._gemm_provenance_matches("unknown", self.MANIFEST_SHA) is None
+
     def test_comparison_is_case_insensitive(self):
         assert (
             env_mod._gemm_provenance_matches("5B515CF1BC", self.MANIFEST_SHA.upper())
@@ -5497,6 +5538,69 @@ class TestCombinedKernelDbFingerprint:
         assert env_mod._combined_kernel_db_fingerprint(
             [flat]
         ) == env_mod._combined_kernel_db_fingerprint([with_empty_arch])
+
+    def test_an_unlistable_arch_dir_invalidates_the_whole_digest(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """A partial union must not be published as a complete fingerprint.
+
+        This value exists only to be compared, so hashing whatever happened to
+        be readable makes two identical installs differ because one had a
+        permissions problem -- and being non-null, it carries no partial reason
+        to explain it (#387, 9th pass).
+        """
+        library = tmp_path / "hipblaslt" / "library"
+        (library / "gfx950").mkdir(parents=True)
+        (library / "gfx950" / "TensileLibrary_A.dat").write_bytes(b"x")
+        # A second, readable library so there is a non-empty subset to publish.
+        other = tmp_path / "rocblas" / "library"
+        other.mkdir(parents=True)
+        (other / "TensileLibrary_B.dat").write_bytes(b"y")
+        assert env_mod._combined_kernel_db_fingerprint([library, other]) is not None
+
+        real_iterdir = Path.iterdir
+
+        def boom(self):
+            if self.name == "gfx950":
+                raise PermissionError(13, "Permission denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", boom)
+        assert env_mod._combined_kernel_db_fingerprint([library, other]) is None
+
+    def test_an_unlistable_library_dir_invalidates_the_whole_digest(
+        self, tmp_path: Path, monkeypatch
+    ):
+        a = tmp_path / "hipblaslt" / "library"
+        a.mkdir(parents=True)
+        (a / "TensileLibrary_A.dat").write_bytes(b"x")
+        b = tmp_path / "rocblas" / "library"
+        b.mkdir(parents=True)
+        (b / "TensileLibrary_B.dat").write_bytes(b"y")
+
+        real_iterdir = Path.iterdir
+
+        def boom(self):
+            if self.parent.name == "rocblas":
+                raise PermissionError(13, "Permission denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", boom)
+        assert env_mod._combined_kernel_db_fingerprint([a, b]) is None
+
+    def test_a_missing_dir_is_still_not_a_failure(self, tmp_path: Path):
+        """The distinction that keeps the above from being over-strict.
+
+        Only hipBLASLt being installed is a normal layout, not a failure to read
+        anything, so an absent directory is skipped as before.
+        """
+        a = tmp_path / "hipblaslt" / "library"
+        a.mkdir(parents=True)
+        (a / "TensileLibrary_A.dat").write_bytes(b"x")
+        assert (
+            env_mod._combined_kernel_db_fingerprint([a, tmp_path / "rocblas" / "library"])
+            is not None
+        )
 
     def test_dir_basename_namespaces_collisions(self, tmp_path: Path):
         a = tmp_path / "a"
