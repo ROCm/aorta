@@ -253,7 +253,13 @@ def wrap_argv_for_collectors(
         argv: The command the trial would otherwise have run.
         env: Environment the command will run with, forwarded to collectors
             that need to inspect it (Proton's device-variable translation).
-            Defaults to :data:`os.environ` inside the collector.
+            The default is load-bearing rather than a fallback: no production
+            caller passes this. ``SubprocessWorkload`` wraps in ``setup()`` but
+            assembles the child environment later in ``run()``, and that
+            environment is ``os.environ`` plus ``AORTA_ENV_FILE``, so the
+            collector's own :data:`os.environ` default already describes what
+            the child gets. The parameter exists so a caller that does know its
+            child env sooner can supply it, and so tests can.
 
     Raises:
         ValueError: a collector option is invalid.

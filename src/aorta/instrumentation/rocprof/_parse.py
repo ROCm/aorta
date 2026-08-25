@@ -125,8 +125,9 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
     """Summarise a ``rocprofv3`` output directory into trial metrics.
 
     Prefers the ``--stats`` CSVs (rocprofv3 already did the aggregation) and
-    falls back to summing dispatch spans from the kernel trace when ``stats``
-    is off.
+    falls back to summing dispatch spans from the kernel trace whenever the
+    stats CSVs are absent *or* yield no usable rows -- a truncated or
+    column-renamed stats file must not mask a readable trace.
 
     Args:
         out_dir: The directory passed to ``rocprofv3 -d``.
@@ -150,9 +151,16 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
 
     metrics: dict[str, Any] = {"rocprof_artifact_dir": str(root)}
 
+    # The fallback keys off absence of *data*, not absence of files. A stats
+    # CSV that exists but yields nothing -- rocprofv3 killed mid-write by a
+    # trial timeout, or a future release renaming the columns pinned above --
+    # would otherwise suppress a complete kernel trace sitting beside it, and
+    # report no kernels on a host where profiling works.
+    ns_by_kernel: dict[str, float] = {}
+    calls_by_kernel: dict[str, int] = {}
     if stats_paths:
         ns_by_kernel, calls_by_kernel = _totals_from_stats(stats_paths)
-    else:
+    if not ns_by_kernel and trace_paths:
         ns_by_kernel, calls_by_kernel = _totals_from_trace(trace_paths)
     if not ns_by_kernel:
         return metrics

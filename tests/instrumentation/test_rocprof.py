@@ -13,6 +13,12 @@ output captured on a gfx950 host, because the layout depends on a flag:
 
 Both must parse, because an operator pointing the parser at their own
 ``rocprofv3 -d`` tree will have whichever one they ran.
+
+Three further trees are hand-made to pin degradation paths: ``malformed/``
+(garbage stats beside a header-only trace), and ``stats_truncated_trace_ok/`` /
+``stats_renamed_columns_trace_ok/``, which pair an unusable stats CSV with a
+*populated* trace so the fallback is exercised on absence of data rather than
+absence of files.
 """
 
 from __future__ import annotations
@@ -420,6 +426,44 @@ def test_parse_summary_prefers_stats_over_trace():
     metrics = parse_summary(FIXTURES / "flat_with_o")
     assert metrics["rocprof_kernel_count"] == _FLAT_CALLS
     assert metrics["rocprof_kernel_count"] != _TRACE_ROWS
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["stats_truncated_trace_ok", "stats_renamed_columns_trace_ok"],
+)
+def test_parse_summary_falls_back_when_stats_yields_no_data(fixture):
+    """A stats CSV that *exists* but parses to nothing must not mask the trace.
+
+    The fallback keys off absence of data, not absence of files. Both fixtures
+    pair an unusable ``_kernel_stats.csv`` with the same populated
+    ``_kernel_trace.csv``, covering the two ways this happens in the field:
+
+    * ``stats_truncated_trace_ok`` -- rocprofv3 killed mid-write (a trial
+      timeout or an OOM kill) leaves a header and a half-written row.
+    * ``stats_renamed_columns_trace_ok`` -- version skew. This module pins
+      ``TotalDurationNs`` / ``Calls`` / ``Name`` by name, so a future rocprofv3
+      renaming a ``--stats`` column zeroes the stats path. Gating the fallback
+      on file presence would disable it in exactly that case and report no
+      kernels on a host where profiling works, which is the failure mode
+      hardest to spot from a green run.
+
+    ``fixtures/rocprof/malformed/`` cannot pin this: its trace is header-only,
+    so it yields the artifact-dir-only result under either behaviour.
+    """
+    # ``.get()`` rather than ``[...]``: a regression here drops the keys
+    # entirely, and a KeyError would mask which metric went missing.
+    metrics = parse_summary(FIXTURES / fixture)
+    assert metrics.get("rocprof_kernel_count") == _TRACE_ROWS
+    assert metrics.get("rocprof_gpu_time_ms") == pytest.approx(_TRACE_TOTAL_NS / 1e6)
+    assert metrics.get("rocprof_top_kernels") == [_FLAT_KERNEL]
+
+
+def test_parse_summary_still_degrades_when_neither_source_has_data(tmp_path):
+    """The data-driven fallback must not turn an unusable capture into metrics."""
+    (tmp_path / "aorta_kernel_stats.csv").write_text("garbage\n", encoding="utf-8")
+    (tmp_path / "aorta_kernel_trace.csv").write_text("garbage\n", encoding="utf-8")
+    assert parse_summary(tmp_path) == {"rocprof_artifact_dir": str(tmp_path)}
 
 
 # ---- Summary parsing: fail-soft ------------------------------------------

@@ -68,7 +68,8 @@ torchrun --nproc_per_node 4 train.py \
 > launch, write outside the sweep results tree, and parse nothing — so their
 > numbers do not reach `perf.md` or `matrix.json`. For new work prefer
 > `--collect rocprof` ([Profiling Collectors](profiling-collectors.md)), which
-> profiles any command and lands its artifacts and metrics in the trial tree.
+> profiles any command a sweep runs as a subprocess and lands its artifacts and
+> metrics in the trial tree.
 
 ### Single-node: `scripts/rocprof_capture.sh`
 

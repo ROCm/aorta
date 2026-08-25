@@ -129,11 +129,23 @@ points at before concluding the payload did no GPU work.
 Collectors are selected either on the command line or in the recipe.
 
 ```bash
-# Names only. Works on both the workload (triage) flow and the
-# subprocess (probe) flow, and overrides any recipe-pinned collect:.
+# Names only; overrides any recipe-pinned collect:.
 aorta sweep run --recipe r.yaml --collect rocprof -- ./my_gpu_binary
 aorta sweep run --recipe r.yaml --collect proton -- python train.py
 ```
+
+`--collect` is *accepted* on both the workload (triage) flow and the
+subprocess (probe) flow, but the two argv-wrapping profilers only *measure*
+on the subprocess flow — both commands above are subprocess-flow invocations,
+which is what the trailing `-- <command>` marks. `wrap_argv_for_collectors`
+and `summarize_collectors` are each called from one place,
+`SubprocessWorkload`, so on an in-process workload `collect: [rocprof]`
+validates and lands in the trial config and then does nothing: no argv wrap,
+no artifact directory, no `rocprof_*` metrics. This is the one
+requested-but-not-measured path here that does not announce itself, unlike a
+missing `rocprofv3`, an unpreparable artifact directory, or a missing `env(1)`,
+which all fail the trial's setup. An in-process workload can still opt in by
+reading `_aorta_collect` itself, the way `layer_numerics` does.
 
 Note that `--collect rocprof,proton` is rejected: with no options to carry,
 the CLI flag gets Proton's default `backend: auto`, which resolves to a
@@ -189,7 +201,7 @@ Precedence and scope:
 |---|---|---|---|
 | `trace` | comma- or space-separated: `kernel`, `hip`, `hip_runtime`, `memory_copy`, `rccl`, `marker`, `scratch` | `kernel` | Maps one-to-one onto `--kernel-trace`, `--hip-trace`, `--hip-runtime-trace`, `--memory-copy-trace`, `--rccl-trace`, `--marker-trace`, `--scratch-memory-trace`. Must name at least one domain. `kernel` is the only domain the summary parser aggregates. |
 | `output_format` | `csv`, `json`, `pftrace`, `otf2`, `rocpd` | `csv` | Only `csv` yields the numeric metrics below — the parser reads CSV. The others are for out-of-band analysis. |
-| `stats` | `1/true/yes/on` or `0/false/no/off` | `true` | Adds `--stats`, i.e. the pre-aggregated `*_kernel_stats.csv`. With `stats` off the parser falls back to summing dispatch spans from the kernel trace. |
+| `stats` | `1/true/yes/on` or `0/false/no/off` | `true` | Adds `--stats`, i.e. the pre-aggregated `*_kernel_stats.csv`. The parser falls back to summing dispatch spans from the kernel trace whenever the stats CSVs are absent (`stats` off) or yield no usable rows (a capture truncated mid-write, or a column this parser pins renamed by a future rocprofv3). |
 | `pmc` | comma- or space-separated counter names | (unset) | Hardware counters. Rendered last before the `--` separator because `--pmc` is variadic. Must name at least one counter. |
 | `kernel_include_regex` | regex | (unset) | `--kernel-include-regex`; must be non-empty. |
 | `summary_units` | `sec`, `msec`, `usec`, `nsec` | (unset → rocprofv3's own default) | Unit for the human-readable summary file only. Does not change the parsed metrics, which are always ms. |
