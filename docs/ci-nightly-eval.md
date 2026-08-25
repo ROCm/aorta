@@ -82,9 +82,10 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    reachable from the page.
 
    **Run areas (#384).** A case directory is not just its report -- it carries
-   the recipe as it ran, the logs the verdict came from, the source-level inputs
-   and a rebuild command for the ones it deliberately does not publish, so the
-   copy-paste command the dashboard shows is actionable:
+   the recipe as it ran, the logs the verdict came from, the source-level inputs,
+   and for the artifacts it deliberately does not publish a rebuild command
+   wherever the module's tables know one (see below), so the copy-paste command
+   the dashboard shows is actionable:
 
    | File | What it is |
    | --- | --- |

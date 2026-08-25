@@ -1518,8 +1518,9 @@ _REBUILD_NOTE = (
 )
 
 # Anchor on the landing page's "Artifacts not published" heading, so the Files
-# caption can point a reader at the digest and rebuild command for an input it
-# deliberately does not list.
+# caption can point a reader at the listing of the inputs it deliberately does
+# not carry. That table is Path + SHA-256; the rebuild commands are their own
+# section above it, which is why the caption does not promise them here.
 _NOT_PUBLISHED_ID = "artifacts-not-published"
 
 # The env a reproduction needs, as data, so a consumer of
