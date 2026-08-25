@@ -191,8 +191,11 @@ jobs:
 
             # Evaluate the gate BEFORE the survey below, and exit with its status at the
             # very end. The survey is non-gating but no longer cheap: consan-gemm can now
-            # run ~21-33 min because #9964 is fixed and the object reaches a real terminal
-            # state instead of being cut off at 300s (see daily-consan-gemm.yaml).
+            # run far longer than the 300s it was capped at, because #9964 is fixed and
+            # the object reaches a real terminal state. Measured at ~69 min against the
+            # currently-published bundle, which is why the ceiling in
+            # daily-consan-gemm.yaml is still an open question on #385 rather than a
+            # settled number -- read that comment before trusting a duration here.
             #
             # Be precise about what this ordering does and does not buy. It does NOT
             # preserve the gate *conclusion* across a job-level timeout: cancellation

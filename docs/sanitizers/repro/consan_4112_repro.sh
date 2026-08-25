@@ -13,10 +13,13 @@
 #   --hook PATH     the ConSan hook to load (or set HSA_TOOLS_LIB)
 #   --gpu N         HIP_VISIBLE_DEVICES value, default 0
 #   --workdir DIR   keep intermediates here instead of a temp dir
-#   --timeout SEC   wall-clock ceiling for the hooked run, default 2400 (or set
-#                   CONSAN_4112_TIMEOUT). The measured end-to-end is ~1290 s; a
-#                   pre-#9964 hook never terminates MOI inventory, so an
-#                   unbounded run would hang instead of reporting inconclusive
+#   --timeout SEC   wall-clock ceiling for the hooked run, default 6000 (or set
+#                   CONSAN_4112_TIMEOUT). Sized against the slower of the two
+#                   outcomes: a hook that still has the defect rejects the object
+#                   after ~1420 s, but a fixed hook instruments it and runs for
+#                   ~4150 s. A pre-#9964 hook never terminates MOI inventory at
+#                   all, so an unbounded run would hang instead of reporting
+#                   inconclusive
 #   --object PATH   use an already-unbundled gfx950 code object instead of
 #                   extracting one from the local hipBLASLt install
 #   --keep          do not delete the work directory on exit
@@ -40,7 +43,7 @@ HOOK="${HSA_TOOLS_LIB:-}"
 GPU="${HIP_VISIBLE_DEVICES:-0}"
 WORKDIR=""
 KEEP=0
-TIMEOUT="${CONSAN_4112_TIMEOUT:-2400}"
+TIMEOUT="${CONSAN_4112_TIMEOUT:-6000}"
 OBJECT_IN=""
 
 # Print the header block itself rather than a hardcoded line range, so editing

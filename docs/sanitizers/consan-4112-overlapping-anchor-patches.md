@@ -167,9 +167,13 @@ described above rather than a second defect. Demanding the hook-owned exit code
 as well as the loader's success marker is deliberate: the marker alone would also
 appear if no hook had loaded at all, which would otherwise read as "fixed".
 
-The hooked run is bounded by `--timeout` (default 2400 s, against a measured
-~1290 s end-to-end); hitting the ceiling reports `3`, not a hang, which matters
-because a pre-#9964 hook never terminates MOI inventory for this object. If the
+The hooked run is bounded by `--timeout`, defaulting to 6000 s. That is sized
+against the *slower* of the two outcomes, which is the fixed one: a hook that
+still has the defect rejects the object after ~1420 s, but a fixed hook
+instruments it and runs for ~4150 s, so a ceiling sized against the defect would
+kill the very case it is meant to confirm. Hitting the ceiling reports `3`, not a
+hang, which matters because a pre-#9964 hook never terminates MOI inventory for
+this object at all. If the
 local hipBLASLt does not carry the Tensile bundle — it has shipped both flat
 under `library/` and under `library/gfx950/`, and slim installs may omit it —
 pass `--object` with an already-unbundled gfx950 code object.

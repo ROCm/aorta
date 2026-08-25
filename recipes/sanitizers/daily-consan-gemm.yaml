@@ -35,21 +35,29 @@ sanitizer_plan:
     # Raised from the 300s cap of #364, which was chosen only because ROCm/rocm-systems#9964
     # made MOI inventory non-terminating: every ceiling produced the same
     # combined_hook_timeout, so a short one bought the identical row for a fraction of
-    # the nightly. #9964 is fixed as of rocjitsu db0c47df, and the case was measured
-    # reaching a terminal state in ~1283s on gfx950 (~59s load-time waitcheck + ~659s
-    # MOI inventory + patching). A 300s ceiling still cuts that off, reporting a
-    # timeout for a phase that now completes, so the ceiling has to clear the run.
+    # the nightly. #9964 is fixed, so a ceiling that clears the run is now meaningful.
     #
-    # Three runs of the same object on the same host spread more than the first
-    # measurement suggested: 1283s, 1291s and 1416s end-to-end, with MOI inventory
-    # alone ranging 659-715s. 2000s is ~40% over the slowest of those (1416s).
+    # !! The value below is NOT yet correct, and is pending the structural decision on
+    # !! PR #385 -- do not read it as reviewed. Sizing history, because the trap here is
+    # !! subtle and worth recording:
     #
-    # That headroom is the point, and it is a ceiling rather than a duration -- a
-    # healthy run still exits on its own in ~21-24 min, so raising it costs nothing
-    # unless the phase genuinely regresses. It has to absorb both the run-to-run
-    # spread above and the fact that the timings come from ROCm 7.0.2.2 while CI now
-    # builds fixtures against ROCm 7.2.4 (#380), whose hipBLASLt may extract a
-    # differently sized object. Budget ~21-33 min of nightly wall-clock for this case.
+    # Three runs on db0c47df measured 1283s, 1291s and 1416s, and 2000s was chosen as
+    # ~40% over the slowest. Every one of those runs ended in the status=4112 transform
+    # rejection of ROCm/rocm-systems#10378 -- the object was never actually instrumented,
+    # so they measured a run that gave up early, not the work this case represents.
+    #
+    # #10378 is now fixed (dc7c8e04) and published in bundle 4227d40fb5, which the
+    # downloader selects. Re-measured against it, the same object transforms cleanly
+    # (outcome=modified-valid, 75978 patches over 68894 access sites) and runs
+    # 4152s -- ~69 min -- before ending on strict require-records at exit 86. So 2000s
+    # would now guarantee combined_hook_timeout: the exact failure this change exists
+    # to remove.
+    #
+    # Sizing honestly means ~69 min for this case, i.e. ~55-70 min of ADDITIONAL
+    # nightly wall clock. That is what makes it a structural question rather than a
+    # number: see the review thread on #385. Whichever way it goes -- this case moved
+    # to a weekly, or the survey split off this job -- the ceiling gets set from the
+    # 4152s measurement plus margin, not from the db0c47df figures above.
     timeout_seconds: 2000
   output:
     report: sanitizer_report.json
