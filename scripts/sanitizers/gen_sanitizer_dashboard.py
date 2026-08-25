@@ -544,7 +544,7 @@ def _basename(path: str | None) -> str:
 # digits that no interpreter parses, which is a claim this gate should not make.
 _INSTANT_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}"
-    r"(:[0-9]{2}(\.[0-9]{3}|\.[0-9]{6})?)?([+-][0-9]{2}:[0-9]{2}|Z)?$"
+    r"(:[0-9]{2}(\.[0-9]{3}|\.[0-9]{6})?)?([+-][0-9]{2}:[0-9]{2}|Z)?\Z"
 )
 
 
@@ -854,8 +854,11 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
 # ASCII digits, not ``\d``: the nightly's prune filter and directory-reuse guard
 # spell the same shapes with ``[0-9]``, and this enumeration has to admit exactly
 # what they admit -- a name of Unicode decimal digits that only this side accepted
-# would be rendered on the page while the prune ignored it.
-_RUN_ID_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{6})?-[0-9]+$")
+# would be rendered on the page while the prune ignored it. `\Z` not `$` for the
+# same reason: `$` also matches before a trailing newline, and a directory name
+# may contain one, so `$` would accept a name the shell -- which reads `ls` output
+# a line at a time -- can only ever see as two records, and reject.
+_RUN_ID_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{6})?-[0-9]+\Z")
 # Nothing here parses the instant back out of an id: the publisher records it in
 # ``meta.json`` and this renders that value (``format_instant``). Reading it off
 # the directory name too would be a second source for one fact.
@@ -2669,12 +2672,14 @@ def _status_banner_html(status: dict[str, Any] | None) -> str:
     when = format_instant(status.get("date", ""))
     run_txt = f" run {_esc(run_id)}" if run_id else ""
     link = f' <a href="{_esc(url)}">view failed run</a>' if url else ""
+    # The instant belongs to the run, not to the link that follows the sentence.
     when_txt = f" ({_esc(when)})" if when else ""
     return (
         '<div class="stale">'
         "<span>&#9888;</span><span><strong>Stale.</strong> "
-        f"Latest sanitizer nightly{run_txt} did not complete successfully "
-        f"({_esc(conclusion)}) &mdash; the data below may be stale.{link}{when_txt}"
+        f"Latest sanitizer nightly{run_txt}{when_txt} did not complete "
+        f"successfully ({_esc(conclusion)}) &mdash; the data below may be "
+        f"stale.{link}"
         "</span></div>"
     )
 
@@ -2692,9 +2697,9 @@ def _status_banner_md(status: dict[str, Any] | None) -> str:
     link = f" [view failed run]({url})" if url else ""
     when_txt = f" ({when})" if when else ""
     return (
-        f"> \u26a0\ufe0f **Stale** \u2014 latest sanitizer nightly{run_txt} did not "
-        f"complete successfully ({conclusion}); the data below may be stale."
-        f"{link}{when_txt}"
+        f"> \u26a0\ufe0f **Stale** \u2014 latest sanitizer nightly{run_txt}{when_txt} "
+        f"did not complete successfully ({conclusion}); the data below may be "
+        f"stale.{link}"
     )
 
 

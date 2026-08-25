@@ -809,6 +809,10 @@ def test_every_implementation_of_the_run_id_shape_admits_the_same_names(tmp_path
         "2026-08-23T0941-32638584704": False,
         "2026-8-3T094112-32638584704": False,
         "\u0662\u0660\u0662\u0666-08-23-32638584704": False,  # Unicode digits
+        # A name may contain a newline, and Python's `$` matches before a
+        # trailing one -- the shell reads `ls` a line at a time and can only see
+        # this as two records, so `$` here would be a name only Python accepts.
+        "2026-08-23T094112-32638584704\n": False,
     }
     runs = tmp_path / "runs"
     reuse = _dedent_block(_publish_step(), 'run_dir_id=""', ': "${run_dir_id:=')
