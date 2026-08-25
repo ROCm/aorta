@@ -17,9 +17,10 @@ Timeline:
 | 4112 (#10378) | filed from this document; **fixed in `dc7c8e04`**, closed 2026-08-24, verified here |
 | #9972 | diagnostics only in `db0c47df`, re-open requested; **fixed in `15275dad`**, closed 2026-08-24, verified here |
 
-Every measurement below was taken on `db0c47df` — the bundle this document was
-written against, and the last one the nightly consumed. **A bundle carrying both
-fixes is now published**: after
+The defect measurements below — the ones describing the rejection itself — were
+taken on `db0c47df`, the bundle this document was written against and the last
+one the nightly consumed. Post-fix figures are labelled with the bundle they come
+from. **A bundle carrying both fixes is now published**: after
 [ROCm/rocm-systems#10622](https://github.com/ROCm/rocm-systems/issues/10622)
 (artifact build red since 2026-08-23, plus a branch-head regression that faulted
 any LDS-touching dispatch) was fixed in `4227d40fb5` and closed,

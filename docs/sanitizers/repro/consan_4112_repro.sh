@@ -157,8 +157,11 @@ echo "== building load-only driver"
 hipcc --offload-arch=gfx950 -DOBJECT="\"${OBJECT}\"" "${LOADER_SRC}" -o "${LOADER}" \
     >/dev/null 2>&1 || die "hipcc failed to build the loader"
 
-echo "== running under the ConSan hook (record-replay / strict); this takes ~20 min"
-echo "   MOI inventory alone is ~11 min for this object"
+echo "== running under the ConSan hook (record-replay / strict)"
+echo "   Expect ~24 min against a hook that still has the defect (it is rejected"
+echo "   at the transform), or ~69 min against a fixed one, which instruments the"
+echo "   object and does the work the rejection used to skip. MOI inventory alone"
+echo "   is ~4-11 min either way."
 echo "   timeout ${TIMEOUT}s"
 start=$(date +%s)
 timeout --kill-after=30s "${TIMEOUT}" \

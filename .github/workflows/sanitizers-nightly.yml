@@ -35,6 +35,10 @@ jobs:
     # `self-hosted, gpu, mi350x` (same set the other GPU workflows target, e.g.
     # gpu-tests.yml / eval-reusable.yml use `self-hosted, gpu`).
     runs-on: [self-hosted, gpu]
+    outputs:
+      # The rocjitsu Actions run this job downloaded, so sanitizers-survey can pin the
+      # same bundle rather than re-resolving `--run latest` against a moving branch.
+      rocjitsu_run_id: ${{ steps.rocjitsu-run.outputs.run_id }}
     # This job is fixtures + the three daily controls + the comparator; the ~69-min
     # survey now lives in sanitizers-survey. Recent nightlies ran 20.7/21.7/21.8 min
     # WITH the survey included, so 45 min is generous for what is left.
@@ -160,9 +164,19 @@ jobs:
             # sanitizer build produced each report in its run area (#384).
             mkdir -p "${SANITIZER_OUT}"
             python -c "import json,sys; m=json.load(open(sys.argv[1])); \
-              json.dump({\"commit\": m.get(\"commit\"), \"run_url\": m.get(\"run_url\")}, \
+              json.dump({\"commit\": m.get(\"commit\"), \"run_url\": m.get(\"run_url\"), \
+              \"run_id\": m.get(\"run_id\")}, \
               open(sys.argv[2], \"w\"), indent=2, sort_keys=True)" \
               "${ROCJITSU_PREBUILT}/MANIFEST.json" "${SANITIZER_OUT}/rocjitsu.json"
+            # Surface the resolved run id to the host so sanitizers-survey can pin the
+            # SAME bundle instead of re-resolving `--run latest`. Two serialized
+            # downloads can otherwise straddle a new rocjitsu build, and the publish job
+            # would then stamp the gate bundle commit onto survey run areas built from a
+            # different one -- exactly the provenance ambiguity this PR documents.
+            # Written outside SANITIZER_OUT so it does not enter the uploaded artifact.
+            python -c "import json,sys; \
+              print(json.load(open(sys.argv[1])).get(\"run_id\") or \"\")" \
+              "${ROCJITSU_PREBUILT}/MANIFEST.json" > "${SANITIZER_ROOT}/rocjitsu_run_id.txt"
 
             # hipcc shells out to clang-offload-bundler, which lives in the ROCm
             # LLVM bindir but is not on PATH -- the image only exports
@@ -224,6 +238,19 @@ jobs:
           else
             sudo chown -R "$uidgid" "$ws" || true
           fi
+
+      - name: Record the rocjitsu run this job selected
+        # Read before the cleanup step below deletes .sanitizer-nightly. Empty when
+        # the job died before the download; sanitizers-survey falls back to `latest`
+        # in that case, which is no worse than today.
+        id: rocjitsu-run
+        if: always()
+        run: |
+          f=.sanitizer-nightly/rocjitsu_run_id.txt
+          run_id=""
+          [ -f "$f" ] && run_id="$(tr -d '[:space:]' < "$f")"
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "selected rocjitsu run: ${run_id:-<unresolved>}"
 
       - name: Upload sanitizer results
         # Always upload whatever ran, even when an earlier step (e.g. the baseline
@@ -314,6 +341,7 @@ jobs:
         run: |
           bash scripts/ci/docker_cmd.sh exec \
             -e ROCJITSU_REF="${ROCJITSU_REF}" \
+            -e ROCJITSU_RUN="${{ needs.sanitizers-gpu.outputs.rocjitsu_run_id }}" \
             -e GH_TOKEN="${ROCJITSU_ARTIFACTS_TOKEN}" \
             "${{ env.CONTAINER_NAME }}" bash -lc '
             set -euo pipefail
@@ -352,7 +380,8 @@ jobs:
             # artifacts token -- a moving/compromised branch could otherwise run
             # arbitrary code in this job and exfiltrate the PAT.
             python scripts/sanitizers/download_sanitizer_artifacts.py \
-              --branch "${ROCJITSU_REF}" --dest "${ROCJITSU_PREBUILT}" --force
+              --branch "${ROCJITSU_REF}" --run "${ROCJITSU_RUN:-latest}" \
+              --dest "${ROCJITSU_PREBUILT}" --force
             export ROCJITSU_PREBUILT="$(cd "${ROCJITSU_PREBUILT}" && pwd)"
             echo "ROCJITSU_PREBUILT=${ROCJITSU_PREBUILT}"
             # Fail closed: the downloader only *warns* when sha256sums.txt is
@@ -373,15 +402,37 @@ jobs:
             # (waitcheck static + ConSan dynamic) so Tab 2 shows both outcomes per
             # kernel.
             #
-            # This used to run inside the gate job, wrapped in a guarded subshell so a
-            # bad genco/bundler/compile could not abort the gate. That guard is gone
-            # because the job boundary now provides the same isolation and more: a
-            # failure, a timeout, or an abrupt runner kill here cannot touch the Tab 1
-            # verdict, which has already been judged and uploaded by sanitizers-gpu.
-            # Failures are still best-effort in effect -- a missing report simply omits
-            # that dashboard row -- but they now surface as a red survey job instead of
-            # being swallowed, which is the honest signal.
+            # This used to run inside the gate job, wrapped in one guarded subshell so a
+            # bad genco/bundler/compile could not abort the gate. The job boundary now
+            # provides that isolation and more: nothing here can touch the Tab 1
+            # verdict, which sanitizers-gpu has already judged and uploaded.
+            #
+            # The per-case `|| true` below is a DIFFERENT and still necessary guard, and
+            # it is not cosmetic: `aorta sweep run` exits non-zero for a FAIL/ERROR
+            # verdict or any non-complete execution (cli/sweep.py), and the *healthy*
+            # post-fix consan-gemm result is exit 86 -- an error execution. Under the
+            # `set -euo pipefail` at the top of this payload, an unguarded first case
+            # would kill the job after ~69 min and the remaining five Tab 2 rows would
+            # never run. Each
+            # survey case is independent and its report is the deliverable, so a
+            # non-zero sweep is data, not a job failure.
+            #
+            # The fixture build above is deliberately NOT guarded: a broken
+            # genco/bundler/compile is infrastructure breakage, not an observation, and
+            # should fail this job loudly.
             echo "[$(date +%T)] survey: ConSan + waitcheck over real GPU kernels (Tab 2; non-gating) …"
+
+            # Same PATH fix the gate job needs: hipcc shells out to
+            # clang-offload-bundler, which lives in the ROCm LLVM bindir and is not on
+            # PATH in this image. prepare_gemm_isa.py also resolves it via PATH and
+            # exits if absent, so both the extraction and genco_object below depend on
+            # this line.
+            export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"
+            # This job builds its own fixtures from scratch -- the gate job removes
+            # these directories in its cleanup step, and on a fresh runner they never
+            # existed -- so create them rather than assuming a previous job did.
+            mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
+
             KROOT="${FIXTURES}/kernels"
             # hipcc --genco emits either a raw gfx950 code object or a clang-offload
             # bundle depending on the ROCm build; unbundle only when it is a bundle
@@ -414,11 +465,11 @@ jobs:
               mkdir -p "${SANITIZER_OUT}/informational/${c}"
             done
             aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/consan-gemm"
+              --output-dir "${SANITIZER_OUT}/informational/consan-gemm" || true
             aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/consan-lds-dispatch"
+              --output-dir "${SANITIZER_OUT}/informational/consan-lds-dispatch" || true
             aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/consan-tiny"
+              --output-dir "${SANITIZER_OUT}/informational/consan-tiny" || true
 
             # Observed-only waitcheck static scans over the SAME survey objects, so
             # Tab 2 shows both sanitizers per kernel (#374 C). Case dirs are named
@@ -433,11 +484,11 @@ jobs:
             # the consan-gemm survey case uses (distinct from the gated top-3-CSV
             # daily-waitcheck-gemm guardrail, which is left untouched).
             aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/waitcheck-gemm"
+              --output-dir "${SANITIZER_OUT}/informational/waitcheck-gemm" || true
             aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/waitcheck-lds-dispatch"
+              --output-dir "${SANITIZER_OUT}/informational/waitcheck-lds-dispatch" || true
             aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml \
-              --output-dir "${SANITIZER_OUT}/informational/waitcheck-tiny"
+              --output-dir "${SANITIZER_OUT}/informational/waitcheck-tiny" || true
           '
 
       - name: Reclaim results ownership
