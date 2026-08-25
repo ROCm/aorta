@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "mitigations": {
+    "ts_gemm_gluon_bf16": {
+      "TS_KERNEL_NAME": "gluon_mm_a16w16_gfx950",
+      "TS_KERNEL_DTYPE": "bf16",
+      "TS_KERNEL_DTYPE_ROLE": "a"
+    },
+    "ts_gemm_torch_bf16": {
+      "TS_KERNEL_NAME": "torch_mm",
+      "TS_KERNEL_DTYPE": "bf16",
+      "TS_KERNEL_DTYPE_ROLE": "a"
+    },
+    "ts_gemm_triton_fp8_blockscale": {
+      "TS_KERNEL_NAME": "triton_mm_fp8_blockscale",
+      "TS_KERNEL_DTYPE": "fp8",
+      "TS_KERNEL_DTYPE_ROLE": "a"
+    },
+    "ts_gemm_torch_fp8_blockscale": {
+      "TS_KERNEL_NAME": "torch_mm_fp8_blockscale",
+      "TS_KERNEL_DTYPE": "fp8",
+      "TS_KERNEL_DTYPE_ROLE": "a"
+    },
+    "ts_gemm_all_bf16": {
+      "TS_KERNEL_OP": "gemm.mm",
+      "TS_KERNEL_DTYPE": "bf16",
+      "TS_KERNEL_DTYPE_ROLE": "a"
+    }
+  }
+}

@@ -55,6 +55,9 @@ overlap_debug*/
 *.logs
 # Exception: example sidecar files that ship with the repo
 !examples/*.json
+# Exception: the tokenspeed kernel recipe does not load without its mitigations
+# sidecar, so that file has to be tracked despite the *.json rule above.
+!recipes/tokenspeed/*.json
 *_merged_enhanced.json
 nccl_thread_sweep_*.log
 nccl_thread_sweep_summary_*.txt

@@ -1,0 +1,758 @@
+"""Tests for the TokenSpeed probe scripts and recipes.
+
+None of these need a GPU, a container, or a TokenSpeed install. They cover the
+parts of the integration that are easy to get wrong and expensive to discover on
+hardware:
+
+  * the shell scripts parse, and their guardrails fire (NFS bind-mount refusal,
+    missing entry script, missing selector);
+  * the numerics gate in ``ts_kernel_probe.sh`` fails a trial when the exported
+    benchmark JSON reports a mismatch. This is the one verdict the upstream CLI
+    does not signal through its exit code -- ``tokenspeed_kernel.benchmark``
+    ends in an unconditional ``return 0`` even when ``--verify`` finds a wrong
+    answer -- so without this gate a numerically broken kernel would produce a
+    green aorta cell. It cannot be covered by running a real kernel, because the
+    shipped kernels pass, hence the stubbed export;
+  * the recipes and the mitigations sidecar stay loadable, and the sidecar's
+    kernel/dtype pairings stay self-consistent.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+import yaml
+
+_REPO = Path(__file__).resolve().parents[2]
+_SOURCE = _REPO / "src" / "aorta" / "workloads" / "tokenspeed"
+_RECIPES = _REPO / "recipes" / "tokenspeed"
+
+_SCRIPTS = (
+    "host_launch.sh",
+    "ts_serve_probe.sh",
+    "ts_kernel_probe.sh",
+    "ts_pytest_probe.sh",
+    "stage_scripts.sh",
+)
+
+# Exit codes are a documented interface: the recipes' custom_patterns and anyone
+# reading result.json depend on them, so pin them here.
+_EXIT_USAGE = 64
+_EXIT_NO_RECORDS = 31
+_EXIT_NUMERICS = 32
+_EXIT_PYTEST_FAILED = 40
+_EXIT_PYTEST_NOTHING_RAN = 41
+
+
+@pytest.fixture(scope="module")
+def bash() -> str:
+    found = shutil.which("bash")
+    if found is None:  # pragma: no cover - bash is present everywhere we run
+        pytest.skip("bash not available")
+    return found
+
+
+@pytest.mark.parametrize("name", _SCRIPTS)
+def test_script_is_syntactically_valid(bash: str, name: str) -> None:
+    script = _SOURCE / name
+    assert script.exists(), f"{name} missing from {_SOURCE}"
+    proc = subprocess.run([bash, "-n", str(script)], capture_output=True, text=True)
+    assert proc.returncode == 0, f"{name} syntax error: {proc.stderr}"
+
+
+@pytest.mark.parametrize("name", _SCRIPTS)
+def test_script_is_executable(name: str) -> None:
+    assert os.access(_SOURCE / name, os.X_OK), f"{name} is not executable"
+
+
+def test_host_launch_requires_image(bash: str, tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "host_launch.sh")],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+    )
+    assert proc.returncode != 0
+    assert "TS_IMAGE" in proc.stdout + proc.stderr
+
+
+def test_host_launch_refuses_nfs_mount(bash: str, tmp_path: Path) -> None:
+    """A /home path must be rejected before docker is ever invoked.
+
+    The daemon runs as root against a root-squashed export, so the bind mount
+    fails with an opaque "mkdir /home/<user>: permission denied" from docker
+    itself. Refusing early keeps the error actionable.
+    """
+    env = dict(os.environ)
+    env.update(
+        {
+            "TS_IMAGE": "example/image:tag",
+            "TS_SCRIPTS_DIR": "/home/someone/scripts",
+            "TS_HF_DIR": str(tmp_path / "hf"),
+            "TS_OUT_DIR": str(tmp_path / "out"),
+        }
+    )
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "host_launch.sh")], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == _EXIT_USAGE
+    assert "root-squashed" in proc.stderr
+
+
+def test_host_launch_reports_missing_entry_script(bash: str, tmp_path: Path) -> None:
+    """A stale staging dir must be named as such, not surface from inside docker."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "host_launch.sh").write_text("#!/bin/sh\n")
+    env = dict(os.environ)
+    env.update(
+        {
+            "TS_IMAGE": "example/image:tag",
+            "TS_SCRIPTS_DIR": str(scripts),
+            "TS_HF_DIR": str(tmp_path / "hf"),
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ENTRY": "ts_kernel_probe.sh",
+        }
+    )
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "host_launch.sh")], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == _EXIT_USAGE
+    assert "entry script ts_kernel_probe.sh not found" in proc.stderr
+
+
+def _run_host_launch_with_docker_stub(bash: str, tmp_path: Path, tag: str) -> str:
+    """Run host_launch.sh against a docker that records its argv instead of running.
+
+    Returns the recorded ``docker run`` command line.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    record = tmp_path / f"argv.{tag}"
+    stub = bin_dir / "docker"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "image" ]; then exit 0; fi\n'
+        f'printf "%s\\n" "$@" > "{record}"\n'
+    )
+    stub.chmod(0o755)
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(exist_ok=True)
+    for name in ("host_launch.sh", "ts_kernel_probe.sh"):
+        shutil.copy2(_SOURCE / name, scripts / name)
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "TS_IMAGE": "example/image:tag",
+            "TS_SCRIPTS_DIR": str(scripts),
+            "TS_HF_DIR": str(tmp_path / "hf"),
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ENTRY": "ts_kernel_probe.sh",
+        }
+    )
+    env.pop("TS_RUN_TOKEN", None)
+    proc = subprocess.run(
+        [bash, str(scripts / "host_launch.sh")], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return record.read_text()
+
+
+def _token_from(argv: str) -> str:
+    for line in argv.splitlines():
+        if line.startswith("TS_RUN_TOKEN="):
+            return line.split("=", 1)[1]
+    raise AssertionError(f"TS_RUN_TOKEN not forwarded to docker; argv was:\n{argv}")
+
+
+def test_host_launch_forwards_a_unique_run_token(bash: str, tmp_path: Path) -> None:
+    """Each trial must get its own output token, minted host-side.
+
+    Output files are named after this token, and TS_OUT_DIR is a single host
+    directory shared by every trial in the matrix. The tempting in-container
+    ``$$`` cannot serve: each ``docker run`` gets a fresh PID namespace, so the
+    entry script is always PID 1 and all trials would collide on one filename,
+    leaving only the last trial's evidence. This test would have caught exactly
+    that -- it was observed on hardware as 12 trials producing 1 export file.
+    """
+    first = _token_from(_run_host_launch_with_docker_stub(bash, tmp_path, "a"))
+    second = _token_from(_run_host_launch_with_docker_stub(bash, tmp_path, "b"))
+
+    assert first != second, "two trials received the same run token"
+    # A bare PID-like token is the failure mode described above.
+    assert first not in ("1", ""), f"token {first!r} is not per-trial"
+
+
+def test_host_launch_respects_a_caller_supplied_token(bash: str, tmp_path: Path) -> None:
+    """An explicit TS_RUN_TOKEN wins, so a caller can correlate artifacts."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    record = tmp_path / "argv.explicit"
+    stub = bin_dir / "docker"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "image" ]; then exit 0; fi\n'
+        f'printf "%s\\n" "$@" > "{record}"\n'
+    )
+    stub.chmod(0o755)
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(exist_ok=True)
+    for name in ("host_launch.sh", "ts_kernel_probe.sh"):
+        shutil.copy2(_SOURCE / name, scripts / name)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "TS_IMAGE": "example/image:tag",
+            "TS_SCRIPTS_DIR": str(scripts),
+            "TS_HF_DIR": str(tmp_path / "hf"),
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ENTRY": "ts_kernel_probe.sh",
+            "TS_RUN_TOKEN": "cell7-trial2",
+        }
+    )
+    proc = subprocess.run(
+        [bash, str(scripts / "host_launch.sh")], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _token_from(record.read_text()) == "cell7-trial2"
+
+
+def test_kernel_probe_names_its_export_after_the_token(bash: str, tmp_path: Path) -> None:
+    """The export path must carry the token, or per-trial evidence is lost."""
+    fixture = tmp_path / "export.json"
+    fixture.write_text(json.dumps([_record(passed=True, m=1)]))
+    bin_dir = _stub_bin(tmp_path, fixture)
+    out_dir = tmp_path / "out"
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "TS_OUT_DIR": str(out_dir),
+            "TS_KERNEL_MODE": "bench",
+            "TS_KERNEL_NAME": "gluon_mm_a16w16_gfx950",
+            "TS_RUN_TOKEN": "tok123",
+        }
+    )
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "ts_kernel_probe.sh")], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (out_dir / "kernel_bench.tok123.json").exists(), sorted(
+        p.name for p in out_dir.iterdir()
+    )
+
+
+def test_kernel_probe_requires_a_selector(bash: str, tmp_path: Path) -> None:
+    env = dict(os.environ)
+    env["TS_OUT_DIR"] = str(tmp_path / "out")
+    env.pop("TS_KERNEL_OP", None)
+    env.pop("TS_KERNEL_NAME", None)
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "ts_kernel_probe.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == _EXIT_USAGE
+    assert "set TS_KERNEL_OP" in proc.stdout
+
+
+def test_kernel_probe_rejects_unknown_mode(bash: str, tmp_path: Path) -> None:
+    env = dict(os.environ)
+    env.update(
+        {
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_KERNEL_MODE": "sideways",
+            "TS_KERNEL_NAME": "k",
+        }
+    )
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "ts_kernel_probe.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == _EXIT_USAGE
+    assert "TS_KERNEL_MODE must be" in proc.stdout
+
+
+def _stub_bin(tmp_path: Path, fixture: Path) -> Path:
+    """Build a PATH dir whose python3 fakes the benchmark CLI.
+
+    The stub mimics the real CLI's behaviour precisely where it matters: it
+    writes the export file and exits 0 regardless of what the export says. Any
+    other python3 call (the probe parses its own export with an inline script on
+    stdin) falls through to the real interpreter.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    real_python = shutil.which("python3")
+    assert real_python is not None
+    # Placeholder tokens rather than str.format/f-string: the body is shell and
+    # is dense with ${...}, which would all need brace-doubling.
+    template = """#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "${arg}" = "tokenspeed_kernel.benchmark" ]; then
+    prev=""
+    for a in "$@"; do
+      if [ "${prev}" = "--export" ]; then cp "@FIXTURE@" "${a}"; fi
+      prev="${a}"
+    done
+    echo "(stub benchmark)"
+    exit 0
+  fi
+done
+exec @PYTHON@ "$@"
+"""
+    stub = bin_dir / "python3"
+    stub.write_text(template.replace("@FIXTURE@", str(fixture)).replace("@PYTHON@", real_python))
+    stub.chmod(0o755)
+    tokenspeed = bin_dir / "tokenspeed"
+    tokenspeed.write_text("#!/bin/sh\necho stub\n")
+    tokenspeed.chmod(0o755)
+    return bin_dir
+
+
+def _record(*, passed: bool | None, m: int) -> dict:
+    return {
+        "kernel_name": "gluon_mm_a16w16_gfx950",
+        "solution": "gluon",
+        "shape_params": {"M": m, "N": 4096, "K": 4096},
+        "platform_arch": "amd:9.5",
+        "median_latency_us": 21.3,
+        "p99_latency_us": 37.5,
+        "tflops": 1.57,
+        "bandwidth_gb_s": 1574.6,
+        "numerics_passed": passed,
+        "max_abs_diff": 0.0 if passed else 0.5,
+        "max_rel_diff": 0.0 if passed else 0.25,
+    }
+
+
+def _run_bench_probe(bash: str, tmp_path: Path, export: object) -> subprocess.CompletedProcess:
+    fixture = tmp_path / "export.json"
+    fixture.write_text(json.dumps(export))
+    bin_dir = _stub_bin(tmp_path, fixture)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_KERNEL_MODE": "bench",
+            "TS_KERNEL_NAME": "gluon_mm_a16w16_gfx950",
+        }
+    )
+    return subprocess.run(
+        [bash, str(_SOURCE / "ts_kernel_probe.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_clean_export_passes(bash: str, tmp_path: Path) -> None:
+    proc = _run_bench_probe(
+        bash, tmp_path, [_record(passed=True, m=1), _record(passed=True, m=4096)]
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "TS_KERNEL_RESULT: pass" in proc.stdout
+    assert proc.stdout.count("TS_KERNEL_METRIC") == 2
+
+
+def test_numerics_mismatch_fails_despite_cli_success(bash: str, tmp_path: Path) -> None:
+    """The stub exits 0, as the real CLI does; the gate must still fail."""
+    proc = _run_bench_probe(
+        bash, tmp_path, [_record(passed=True, m=1), _record(passed=False, m=4096)]
+    )
+    assert proc.returncode == _EXIT_NUMERICS, proc.stdout + proc.stderr
+    assert "TS_KERNEL_FAIL: numerics_mismatch count=1" in proc.stdout
+    # The offending record must be named, with the diffs, so triage does not
+    # require re-running the kernel.
+    assert "TS_KERNEL_FAILREC" in proc.stdout
+    assert "max_abs_diff=0.5" in proc.stdout
+    assert "TS_KERNEL_RESULT: pass" not in proc.stdout
+
+
+def test_unverified_records_do_not_fail(bash: str, tmp_path: Path) -> None:
+    """``numerics_passed: null`` means "not checked", not "failed".
+
+    The reference solutions (torch_mm) report null because they are what the
+    others are compared against; treating that as a failure would fail every
+    reference cell in the matrix.
+    """
+    proc = _run_bench_probe(bash, tmp_path, [_record(passed=None, m=1)])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "TS_KERNEL_RESULT: pass" in proc.stdout
+
+
+def test_empty_export_fails(bash: str, tmp_path: Path) -> None:
+    """An empty export means the selector matched nothing -- a recipe bug."""
+    proc = _run_bench_probe(bash, tmp_path, [])
+    assert proc.returncode == _EXIT_NO_RECORDS, proc.stdout + proc.stderr
+    assert "benchmark_exported_no_records" in proc.stdout
+
+
+# --- recipes -------------------------------------------------------------
+
+
+def _recipes() -> list[Path]:
+    return sorted(_RECIPES.glob("*.yaml"))
+
+
+def _sidecars() -> list[Path]:
+    return sorted(_RECIPES.glob("*.json"))
+
+
+def test_recipes_exist() -> None:
+    assert _recipes(), f"no recipes found in {_RECIPES}"
+
+
+def test_recipe_files_are_not_gitignored() -> None:
+    """Every file in the recipe dir must be trackable.
+
+    The repo's .gitignore has a blanket ``*.json`` rule for experiment output,
+    which also swallows the mitigations sidecar. That fails in the worst way:
+    the sidecar stays present locally so everything works for whoever wrote it,
+    but a fresh clone has no sidecar and the kernel recipe dies with
+    ``unknown mitigation 'ts_gemm_gluon_bf16'``. A negation in .gitignore keeps
+    it tracked; this test is what notices if that negation is dropped or a new
+    ignored extension shows up here.
+    """
+    if not (_REPO / ".git").exists():
+        pytest.skip("not a git checkout")
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+
+    files = sorted(p for p in _RECIPES.iterdir() if p.is_file())
+    assert files, f"no files in {_RECIPES}"
+    proc = subprocess.run(
+        ["git", "check-ignore", "--no-index", *(str(p) for p in files)],
+        capture_output=True,
+        text=True,
+        cwd=_REPO,
+    )
+    # check-ignore exits 0 when it matched something, 1 when nothing is ignored.
+    ignored = [line for line in proc.stdout.splitlines() if line.strip()]
+    assert not ignored, (
+        "these recipe files are gitignored and would be missing from a clone: "
+        f"{ignored}. Add a '!' negation in .gitignore."
+    )
+
+
+@pytest.mark.parametrize("recipe", _recipes(), ids=lambda p: p.name)
+def test_recipe_is_wellformed(recipe: Path) -> None:
+    doc = yaml.safe_load(recipe.read_text())
+    assert doc["schema_version"] == 1
+    assert doc["mode"] == "probe"
+    assert doc["ticket"]
+    assert doc["mitigation_axis"]
+    assert doc["diagnostic_axis"]
+
+    # docker does not inherit the parent environment, so `inherit` mode would
+    # silently drop every per-cell mitigation and make all cells identical.
+    assert doc["env_passthrough_mode"] == "file", (
+        f"{recipe.name} must use env_passthrough_mode: file -- the wrapped "
+        "command is `docker run`, which does not inherit os.environ"
+    )
+
+    # The monitored PID is a bash wrapper blocking on `docker run`, so the hang
+    # detector sees an idle process for the whole trial. The grace period has to
+    # cover the trial or every cell latches a false tier2:hang.
+    assert (
+        doc["hang_grace_period_at_start"] >= doc["timeout_per_trial"]
+    ), f"{recipe.name}: hang_grace_period_at_start must be >= timeout_per_trial"
+
+
+@pytest.mark.parametrize("recipe", _recipes(), ids=lambda p: p.name)
+def test_recipe_patterns_are_valid_regexes(recipe: Path) -> None:
+    import re
+
+    doc = yaml.safe_load(recipe.read_text())
+    patterns = doc.get("custom_patterns") or []
+    assert patterns, f"{recipe.name} declares no custom_patterns"
+    seen = set()
+    for pattern in patterns:
+        assert pattern["id"] not in seen, f"duplicate pattern id {pattern['id']}"
+        seen.add(pattern["id"])
+        re.compile(pattern["match"]["regex"])
+        assert pattern["on_match"] in {"fail", "error", "warn"}
+
+
+def _fake_workspace(tmp_path: Path, body: str) -> Path:
+    """A minimal stand-in for /workspace holding one suite at pkg/test/ops.
+
+    The `test` directory matters: ts_pytest_probe.sh derives the working
+    directory from it, mirroring how both real TokenSpeed suites are laid out.
+    """
+    suite_dir = tmp_path / "pkg" / "test" / "ops"
+    suite_dir.mkdir(parents=True)
+    (suite_dir / "test_stub.py").write_text(body)
+    return tmp_path
+
+
+def _run_pytest_probe(bash: str, workspace: Path, out: Path, **env: str):
+    """Run ts_pytest_probe.sh against a stub workspace.
+
+    The script invokes `python3 -m pytest`, and the bare `python3` on PATH is
+    not necessarily the interpreter running these tests -- nor does it
+    necessarily have pytest. A shim directory pointed at sys.executable makes
+    the script exercise the real pytest without hardcoding an interpreter.
+    """
+    import sys
+
+    shim_dir = out / "shim"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    shim = shim_dir / "python3"
+    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    shim.chmod(0o755)
+
+    return subprocess.run(
+        [bash, str(_SOURCE / "ts_pytest_probe.sh")],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{shim_dir}:{os.environ['PATH']}",
+            "TS_WORKSPACE": str(workspace),
+            "TS_OUT_DIR": str(out),
+            **env,
+        },
+    )
+
+
+def test_pytest_probe_requires_a_suite(bash: str, tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "ts_pytest_probe.sh")],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], "TS_OUT_DIR": str(tmp_path)},
+    )
+    assert proc.returncode == _EXIT_USAGE
+    assert "TS_PYTEST_SUITE" in proc.stdout + proc.stderr
+
+
+def test_pytest_probe_rejects_a_missing_suite(bash: str, tmp_path: Path) -> None:
+    workspace = _fake_workspace(tmp_path, "def test_ok():\n    assert True\n")
+    proc = _run_pytest_probe(
+        bash,
+        workspace,
+        tmp_path / "out",
+        TS_PYTEST_SUITE="pkg/test/ops/test_absent.py",
+    )
+    assert proc.returncode == _EXIT_USAGE
+    assert "does not exist" in proc.stdout
+
+
+def test_pytest_probe_passes_and_reports_counts(bash: str, tmp_path: Path) -> None:
+    workspace = _fake_workspace(
+        tmp_path,
+        "import pytest\n\n"
+        "def test_ok():\n    assert True\n\n"
+        "@pytest.mark.skip(reason='not on this platform')\n"
+        "def test_skipped():\n    assert False\n",
+    )
+    proc = _run_pytest_probe(
+        bash,
+        workspace,
+        tmp_path / "out",
+        TS_PYTEST_SUITE="pkg/test/ops/test_stub.py",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "TS_PYTEST_METRIC: tests_passed=1" in proc.stdout
+    assert "TS_PYTEST_METRIC: tests_skipped=1" in proc.stdout
+    assert "TS_PYTEST_RESULT: pass" in proc.stdout
+
+
+def test_pytest_probe_fails_the_trial_on_a_test_failure(bash: str, tmp_path: Path) -> None:
+    workspace = _fake_workspace(tmp_path, "def test_bad():\n    assert False\n")
+    proc = _run_pytest_probe(
+        bash,
+        workspace,
+        tmp_path / "out",
+        TS_PYTEST_SUITE="pkg/test/ops/test_stub.py",
+    )
+    assert proc.returncode == _EXIT_PYTEST_FAILED
+    assert "TS_PYTEST_FAIL: tests_failed" in proc.stdout
+
+
+def test_pytest_probe_rejects_an_all_skipped_run(bash: str, tmp_path: Path) -> None:
+    """The silent-pass guard.
+
+    pytest exits 0 when every test was skipped, and these suites skip heavily --
+    NVIDIA-only solutions are simply not registered on AMD, so a single file can
+    report hundreds of skips. Without this guard a cell that proved nothing would
+    be indistinguishable from a cell that verified the kernel.
+    """
+    workspace = _fake_workspace(
+        tmp_path,
+        "import pytest\n\n"
+        "@pytest.mark.skip(reason='solution not registered')\n"
+        "def test_skipped():\n    assert False\n",
+    )
+    proc = _run_pytest_probe(
+        bash,
+        workspace,
+        tmp_path / "out",
+        TS_PYTEST_SUITE="pkg/test/ops/test_stub.py",
+    )
+    assert proc.returncode == _EXIT_PYTEST_NOTHING_RAN, proc.stdout
+    assert "TS_PYTEST_FAIL: nothing_executed" in proc.stdout
+
+
+def test_pytest_probe_rejects_an_empty_selection(bash: str, tmp_path: Path) -> None:
+    """Same guard, reached via -k rather than skips: deselection also exits 0."""
+    workspace = _fake_workspace(tmp_path, "def test_ok():\n    assert True\n")
+    proc = _run_pytest_probe(
+        bash,
+        workspace,
+        tmp_path / "out",
+        TS_PYTEST_SUITE="pkg/test/ops/test_stub.py",
+        TS_PYTEST_K="no_such_selector",
+    )
+    assert proc.returncode == _EXIT_PYTEST_NOTHING_RAN, proc.stdout
+    assert "TS_PYTEST_FAIL: nothing_executed" in proc.stdout
+
+
+def test_pytest_probe_report_is_token_qualified(bash: str, tmp_path: Path) -> None:
+    """Per-trial JUnit reports must not collide.
+
+    Every `docker run` gets a fresh PID namespace, so an in-container $$ is
+    always 1 and every trial in a matrix would write the same filename, leaving
+    only the last trial's evidence. host_launch.sh mints the token host-side.
+    """
+    workspace = _fake_workspace(tmp_path, "def test_ok():\n    assert True\n")
+    out = tmp_path / "out"
+    proc = _run_pytest_probe(
+        bash,
+        workspace,
+        out,
+        TS_PYTEST_SUITE="pkg/test/ops/test_stub.py",
+        TS_RUN_TOKEN="tok-abc123",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (out / "pytest.tok-abc123.xml").exists(), sorted(p.name for p in out.iterdir())
+
+
+def test_pytest_sidecar_entries_all_pin_a_suite() -> None:
+    """Every pytest selector must set TS_PYTEST_SUITE.
+
+    An entry that sets nothing would not fail loudly: the probe would report a
+    usage error for a missing suite, which reads as a script bug rather than an
+    incomplete sidecar.
+    """
+    sidecar = json.loads((_RECIPES / "tokenspeed-pytest-sidecar.json").read_text())
+    assert sidecar["version"] == 1
+    assert sidecar["mitigations"], "sidecar defines no selectors"
+    for name, env in sidecar["mitigations"].items():
+        assert "TS_PYTEST_SUITE" in env, f"{name} pins no suite"
+        suite = env["TS_PYTEST_SUITE"]
+        assert not suite.startswith("/"), f"{name}: suite must be workspace-relative"
+        # The probe derives its working directory from a `test` path component,
+        # because each suite is a package rooted at that directory's parent.
+        assert "/test/" in suite, f"{name}: {suite} has no /test/ component"
+
+
+def test_harvest_stages_code_objects_content_addressed() -> None:
+    """Staged filenames must include a digest.
+
+    The Triton cache keeps one directory per shape specialization and reuses
+    file names across them -- a single attention run emits ten distinct
+    ``_fwd_kernel.hsaco``. Staging by bare name overwrites them in turn, so the
+    generated recipe pins digests that match nothing on disk but the last copy,
+    and Waitcheck then rejects every earlier entry for a digest mismatch.
+    """
+    source = (_SOURCE / "harvest_code_objects.py").read_text()
+    assert 'f"{obj.stem}.{digest[:12]}{obj.suffix}"' in source, (
+        "harvest must stage code objects under a digest-qualified name; "
+        "staging by obj.name silently collides across shape specializations"
+    )
+
+
+def test_harvest_suite_root_matches_the_probe_script() -> None:
+    """The harvest tool and the probe must agree on a suite's package root.
+
+    Both compute it as the parent of the `test` directory. If they diverge, the
+    harvest compiles from the wrong working directory and collects nothing,
+    which surfaces as a confusing "produced no .hsaco" rather than a path bug.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_ts_harvest", _SOURCE / "harvest_code_objects.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._suite_root("tokenspeed-kernel/test/ops/test_attention.py") == (
+        "tokenspeed-kernel"
+    )
+    assert module._suite_root("tokenspeed-kernel-amd/test/ops") == "tokenspeed-kernel-amd"
+    # No `test` component: fall back rather than guessing a parent.
+    assert module._suite_root("some/other/path.py") == "."
+
+
+def test_sidecar_pairings_are_self_consistent() -> None:
+    """Each cell must carry a dtype its kernel actually accepts.
+
+    A mismatched pairing does not fail loudly in an obvious place -- the harness
+    just matches no signature -- so the constraint is asserted here instead.
+    Derived from the registered format signatures on
+    tokenspeed-amd:nightly-20260714.
+    """
+    sidecar = json.loads((_RECIPES / "tokenspeed-kernel-sidecar.json").read_text())
+    assert sidecar["version"] == 1
+    assert set(sidecar) <= {
+        "version",
+        "mitigations",
+        "environments",
+    }, "the sidecar schema rejects unknown top-level keys, comments included"
+
+    fp8_only = {"triton_mm_fp8_blockscale", "torch_mm_fp8_blockscale"}
+    non_fp8 = {"gluon_mm_a16w16_gfx950", "torch_mm"}
+
+    for name, env in sidecar["mitigations"].items():
+        assert "TS_KERNEL_DTYPE" in env, f"{name} pins no dtype"
+        assert "TS_KERNEL_DTYPE_ROLE" in env, f"{name} pins no dtype role"
+        # gemm.mm's dtype-selectable roles are its two operands.
+        assert env["TS_KERNEL_DTYPE_ROLE"] in {"a", "b"}, name
+        assert ("TS_KERNEL_NAME" in env) or ("TS_KERNEL_OP" in env), name
+
+        kernel = env.get("TS_KERNEL_NAME")
+        if kernel in fp8_only:
+            assert env["TS_KERNEL_DTYPE"] == "fp8", f"{name}: {kernel} is fp8-only"
+        elif kernel in non_fp8:
+            assert env["TS_KERNEL_DTYPE"] != "fp8", f"{name}: {kernel} has no fp8 signature"
+
+
+def test_recipes_reference_only_resolvable_mitigations() -> None:
+    """Every axis entry must resolve through the real registry.
+
+    Resolved the way the CLI does it -- ``load_mitigations`` over the built-ins
+    plus every sidecar in the recipe dir -- rather than against a hand-copied
+    list of names. That way renaming a built-in, or dropping an entry from a
+    sidecar, fails here instead of part-way into a matrix run with
+    ``unknown mitigation 'ts_gemm_gluon_bf16'``.
+    """
+    from aorta.registry.mitigations import load_mitigations
+
+    sidecars = _sidecars()
+    assert sidecars, f"no sidecars found in {_RECIPES}"
+    resolvable = set(load_mitigations(extra_files=sidecars))
+
+    for recipe in _recipes():
+        doc = yaml.safe_load(recipe.read_text())
+        for axis in ("mitigation_axis", "diagnostic_axis"):
+            for entry in doc[axis]:
+                assert entry in resolvable, (
+                    f"{recipe.name}: {axis} entry '{entry}' does not resolve "
+                    "from the built-ins or any sidecar in recipes/tokenspeed/"
+                )

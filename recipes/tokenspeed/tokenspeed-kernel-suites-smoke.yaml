@@ -1,0 +1,130 @@
+# Kernel triage across TokenSpeed's whole operator set, on gfx950.
+#
+# What this proves: aorta can drive the TokenSpeed kernels that its own
+# benchmark harness cannot reach. That harness needs a registered input
+# generator plus a shape list, and only gemm.mm has both -- so
+# tokenspeed-kernel-gemm-smoke.yaml covers 8 AMD-relevant kernels and nothing
+# else. TokenSpeed's op test suites build their own inputs, which brings
+# attention, MoE, quantization, sampling and transform into reach: 32 of the 37
+# AMD-relevant kernels on nightly-20260714.
+#
+# What it does NOT do: measure anything. These suites assert, they do not
+# benchmark, so there are no TFLOPs or latency figures here. Use
+# tokenspeed-kernel-gemm-smoke.yaml for gemm perf. What you get is a per-family
+# correctness verdict plus, as a side effect, a JIT cache that
+# harvest_code_objects.py can turn into a Waitcheck corpus -- which is how the
+# sanitizer track reaches attention and MoE rather than only gemm.
+#
+# Hardware: gfx950 only. TokenSpeed's platform check accepts gfx950 and gfx1250
+# and raises on anything else, so MI300X (gfx942) cannot run this.
+#
+# Coverage caveat: these suites skip heavily, because NVIDIA-only solutions
+# (flashinfer, fa4, cuda) are not registered on AMD. That is expected. pytest
+# exits 0 when everything skips, so ts_pytest_probe.sh requires at least one
+# passing test -- otherwise an empty selection would look like a green cell.
+#
+# Pre-reqs:
+#   1. A gfx950 node with docker. On a SLURM cluster:
+#        salloc --no-shell -p interactive -N1 -t 4:00:00
+#   2. The image pulled on that node. If ~/.docker/config.json holds an expired
+#      Docker Hub credential, docker uses it instead of falling back to
+#      anonymous and every pull fails with "authentication required"; override
+#      it rather than editing the file:
+#        mkdir -p /tmp/dockercfg-anon && echo '{}' > /tmp/dockercfg-anon/config.json
+#        DOCKER_CONFIG=/tmp/dockercfg-anon \
+#          docker pull lightseekorg/tokenspeed-amd:nightly-20260714
+#   3. Scripts staged node-locally (the docker daemon cannot read a
+#      root-squashed NFS home). Stage from the compute node, not the login
+#      node -- /tmp is per-node, so staging on the login node leaves the trials
+#      running whatever older copy the compute node already had:
+#        srun --jobid=$JOBID --overlap \
+#          bash src/aorta/workloads/tokenspeed/stage_scripts.sh
+#
+# Run:
+#   export TS_IMAGE=lightseekorg/tokenspeed-amd:nightly-20260714
+#   export TS_SCRIPTS_DIR=/tmp/ts-work/scripts
+#   export TS_ENTRY=ts_pytest_probe.sh TS_GPUS=0
+#   aorta sweep run \
+#     --recipe recipes/tokenspeed/tokenspeed-kernel-suites-smoke.yaml \
+#     --mitigations-file recipes/tokenspeed/tokenspeed-pytest-sidecar.json \
+#     --output-dir /tmp/ts-work/suites-out --ticket TOKENSPEED-SUITES \
+#     -- bash /tmp/ts-work/scripts/host_launch.sh
+
+schema_version: 1
+mode: probe
+
+ticket: TOKENSPEED-SUITES
+
+# One trial per cell. These suites are deterministic assertions rather than
+# timing measurements, so repeats would buy flakiness detection only; raise this
+# if you are chasing an intermittent failure.
+trials: 1
+
+# Rows: operator family. `mode: probe` forwards one argv across every cell, so
+# the per-cell suite selection has to travel as environment -- hence a
+# mitigations sidecar whose entries are really suite selectors.
+mitigation_axis:
+  - ts_suite_attention
+  - ts_suite_attention_mla
+  - ts_suite_attention_dsa
+  - ts_suite_quantization
+  - ts_suite_moe_gluon_bf16
+  - ts_suite_sampling_gluon
+
+# Columns: launch behaviour. hip_launch_blocking serializes every kernel launch,
+# which separates "this kernel computes the wrong answer" from "the pipelining
+# around it is wrong" -- the usual first question for an async-ordering bug.
+diagnostic_axis:
+  - none
+  - hip_launch_blocking
+
+# docker does not inherit the parent environment, so the per-cell suite
+# selection has to arrive as a file that host_launch.sh turns into --env-file.
+# With `inherit`, every cell would silently run the same default suite.
+env_passthrough_mode: file
+
+# The slowest suite here is attention at roughly 20 s of tests, but the first
+# trial in a cell also pays container start and Triton JIT. 900 s leaves room
+# for a cold cache without being so loose that a genuine hang goes unnoticed.
+timeout_per_trial: 900
+
+# Must equal timeout_per_trial: these trials produce no output until pytest
+# finishes, so a shorter grace would classify a normal cold-cache run as a hang.
+hang_grace_period_at_start: 900
+
+# Named failure modes, so a red cell says what broke rather than just
+# "nonzero exit". Keyed to the TS_PYTEST_FAIL markers the probe emits.
+custom_patterns:
+  # The signal worth chasing: a kernel computed the wrong answer or raised.
+  - id: ts_pytest_tests_failed
+    match:
+      regex: 'TS_PYTEST_FAIL: tests_failed'
+    on_match: fail
+
+  # pytest exits 0 when everything skips or is deselected, so the probe counts
+  # executed tests itself. Its own detector, because an empty selection is a
+  # recipe bug rather than a GPU finding.
+  - id: ts_pytest_nothing_executed
+    match:
+      regex: 'TS_PYTEST_FAIL: nothing_executed'
+    on_match: fail
+
+  - id: ts_pytest_report_missing
+    match:
+      regex: 'TS_PYTEST_FAIL: report_(missing|unparseable)'
+    on_match: fail
+
+  # Caught before pytest ran: missing TS_PYTEST_SUITE, a path that does not
+  # exist, or an uncreatable output dir.
+  - id: ts_pytest_usage
+    match:
+      regex: 'TS_PYTEST_FAIL: usage'
+    on_match: fail
+
+  # On gfx950 this is more often an unwritable TRITON_CACHE_DIR than a real
+  # platform problem: TokenSpeed catches the driver probe failure with a bare
+  # `except BaseException` and reports it as an unsupported platform.
+  - id: ts_unsupported_arch
+    match:
+      regex: 'requires an NVIDIA CUDA or AMD ROCm GPU|not supported on the current platform'
+    on_match: fail

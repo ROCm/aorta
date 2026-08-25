@@ -35,6 +35,7 @@ Recipes are grouped by workload:
 | `hrx/` | HRX launch-probe and perf (GEMM / triad) recipes. |
 | `probe/` | Subprocess-flow templates for wrapping opaque launch commands. |
 | `emulated/` | Variants that run under the mirage GPU emulator (no real GPU). |
+| `tokenspeed/` | TokenSpeed (third-party inference engine) kernel, operator-suite and serving probes, gfx950. See [`docs/tokenspeed.md`](../docs/tokenspeed.md). |
 
 ## Quick reference
 

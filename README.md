@@ -279,6 +279,7 @@ The standalone `aorta mitigations list` and `aorta environments list` groups are
 | [`aorta sweep`](docs/probe/usage.md) | Unified matrix runner — built-in workloads **or** opaque launch commands |
 | [LLM Determinism](docs/llm-determinism.md) | Bit-exact double-run nondeterminism probe |
 | [Layer Numerics](docs/layer-numerics.md) | Per-layer / per-stage NaN, magnitude, and out-of-range logger |
+| [TokenSpeed](docs/tokenspeed.md) | Third-party inference engine under `mode: probe` — kernel, operator-suite and serving triage, plus Waitcheck over its JIT attention/gemm kernels (gfx950) |
 | [`aorta agent`](docs/agent/agentic-testing-guide.md) | Closed-loop mitigation search (optional LLM proposer) |
 | [`aorta bundle`](docs/probe/bundle.md) | Package sweep artifacts with recipe-driven redaction |
 | [Recipes](recipes/README.md) | Recipe schema and running recipes |

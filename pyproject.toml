@@ -193,6 +193,9 @@ aorta = [
     "ebpf/scripts/PROVENANCE.md",
     "workloads/hrx_kernels/*.cpp",
     "workloads/hrx_kernels/README.md",
+    "workloads/tokenspeed/*.sh",
+    "workloads/tokenspeed/*.py",
+    "workloads/tokenspeed/README.md",
 ]
 
 [tool.pytest.ini_options]
