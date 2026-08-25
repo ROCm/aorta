@@ -175,6 +175,9 @@ echo "   exit ${rc} after ${elapsed}s"
 # path when hipModuleLoad fails, so an --object filename chosen to look like hook
 # output would otherwise land in the same log the verdict is read from.
 HOOK_LINE='\[rocjitsu-dbi-hooks\]'
+# Same reasoning for the loader marker: it is the loader that prints it, but the
+# loader also echoes the object path on failure, so anchor to its prefix too.
+LOADER_LINE='\[consan_4112_load\]'
 
 echo
 echo "== relevant hook output"
@@ -234,7 +237,7 @@ fi
 # strict moi_require_records ("no kernel dispatch packet was observed"). Requiring
 # that hook-owned exit code, rather than the marker alone, keeps "the module
 # loaded for some other reason" from being read as "the defect is gone".
-if grep -q "loaded and instrumented" "${LOG}"; then
+if grep -qE "${LOADER_LINE} loaded and instrumented" "${LOG}"; then
     if [ "${rc}" -eq 86 ]; then
         echo "RESULT: fixed -- the object transformed and the module loaded."
         echo "        exit 86 is the expected post-fix state here: strict require-records"
