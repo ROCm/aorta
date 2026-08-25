@@ -1,0 +1,76 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_lds_race_2wave",
+        "command_sha256": "9cb8228032743efcf05ec805cee056eff5933e34e44e9f85b6a48d6c3814110c",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "17d54c42f5483e01a19413187775d7f173651b99ff23f603fb033225eb1e9964",
+        "selected_identity_sha256": "1452dfe001bd4d91c933990dac33f91555d78b4ddc919ba7cb35ae2a691eacde",
+        "selected_kernel": "consan_lds_race_2wave"
+      },
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": null,
+            "code_object_index": null,
+            "code_object_sha256": null,
+            "entry_offset": null,
+            "name": "consan_lds_race_2wave",
+            "target": "gfx950"
+          },
+          "reason": "combined_hook_exit_86",
+          "returncode": 86,
+          "state": "error",
+          "verdict": "error"
+        }
+      ],
+      "reason": "combined_hook_exit_86",
+      "returncode": 86,
+      "sanitizer": "consan",
+      "state": "error",
+      "verdict": "error"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [],
+      "reason": "combined_hook_exit_86",
+      "returncode": 86,
+      "sanitizer": "waitcheck_preflight",
+      "state": "error",
+      "verdict": "error"
+    }
+  ],
+  "execution_status": "error",
+  "overall_verdict": "error",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": null,
+          "code_object_index": null,
+          "code_object_sha256": null,
+          "entry_offset": null,
+          "name": "consan_lds_race_2wave",
+          "target": "gfx950"
+        },
+        "sources": [
+          "consan_repro:racy"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}

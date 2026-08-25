@@ -1,16 +1,18 @@
 # Sanitizers Nightly · gfx950
 
-Run `2026-08-24-32725903878` · commit `78d1ae686dc3` · 2026-08-24
+> ⚠️ **Stale** — latest sanitizer nightly run `32846400271` did not complete successfully (failure); the data below may be stale. [view failed run](https://github.com/ROCm/aorta/actions/runs/32846400271)
 
-✅ **HEALTHY** — 3/3 sanitizer outcomes match their baselines
+Run `2026-08-25-32846400271` · commit `905b1f9e3e16` · 2026-08-25
+
+❌ **REGRESSION** — investigate 2/3 sanitizer outcomes that do not match their baselines
 
 Observed `WARN` or `FAIL` verdicts may be expected positive-control outcomes. Baseline status is the regression-health signal.
 
 | Recipe | Backend | Baseline status | Observed | Expected | Execution | Findings | Coverage |
 |---|---|---|---|---|---|--:|---|
 | daily-waitcheck-gemm | waitcheck (static) | ✅ **Expected outcome** | `warn` | `warn` | complete | 64 | — |
-| daily-consan-clean | consan (dynamic) | ✅ **Expected outcome** | `pass` | `pass` | complete | 0 | 0/0, 2/2 |
-| daily-consan-racy | consan (dynamic) | ✅ **Expected outcome** | `fail` | `fail` | complete | 64 | 0/0, 2/2 |
+| daily-consan-clean | consan (dynamic) | ❌ **Unexpected outcome** | `error` | `pass` | ❌ **error** | 0 | — |
+| daily-consan-racy | consan (dynamic) | ❌ **Unexpected outcome** | `error` | `fail` | ❌ **error** | 0 | — |
 
 Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate) and **Workload survey (observed-only)** (non-gating).
 
@@ -20,7 +22,7 @@ Two views below: **Expected behavior (guardrails)** (baseline-checked, the gate)
 
 Observed sanitizer verdict `warn` · expected `warn`
 Observation: waitcheck warn; 64 finding(s) (wait_hazard)
-backend `rj_waitcheck` `47bcf0f888f9` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
+backend `rj_waitcheck` `a70945fb1135` · selection `top_dispatch_count` top-3 · 3 kernel(s) · execution complete
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
@@ -34,31 +36,27 @@ backend `rj_waitcheck` `47bcf0f888f9` · selection `top_dispatch_count` top-3 ·
 
 </details>
 
-<details><summary><b>daily-consan-clean</b> — ✅ **Expected outcome**</summary>
+<details><summary><b>daily-consan-clean</b> — ❌ **Unexpected outcome**</summary>
 
-Observed sanitizer verdict `pass` · expected `pass`
-Observation: consan pass; preflight pass
-backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
+Observed sanitizer verdict `error` · expected `pass`
+Observation: consan error; reason combined_hook_exit_86; preflight error
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution ❌ **error**
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `consan_lds_race` | 1 | `pass` | 0 | `—` | `—` |
+| `consan_lds_race` | 1 | `error` | 0 | `—` | `—` |
 
 </details>
 
-<details><summary><b>daily-consan-racy</b> — ✅ **Expected outcome**</summary>
+<details><summary><b>daily-consan-racy</b> — ❌ **Unexpected outcome**</summary>
 
-Observed sanitizer verdict `fail` · expected `fail`
-Observation: consan fail; 64 finding(s) (1); preflight pass
-backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution complete
+Observed sanitizer verdict `error` · expected `fail`
+Observation: consan error; reason combined_hook_exit_86; preflight error
+backend `—` · selection `top_dispatch_count` top-1 · 1 kernel(s) · execution ❌ **error**
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `consan_lds_race_2wave` | 1 | `fail` | 64 | `—` | `—` |
-
-| Sanitizer | Code | Severity | Count | Example |
-|---|---|---|--:|---|
-| consan | `1` | race | 64 | [rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=21664928 index=0 kind=1 code_object=fnv1a64:7db8350dfcf3fedf report_generation=2 generation=2 epo… |
+| `consan_lds_race_2wave` | 1 | `error` | 0 | `—` | `—` |
 
 </details>
 
@@ -98,7 +96,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatc
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `error` | 0 | `lds.hsaco` | `b92ac0c64b` |
+| `lds_reduce` | 1 | `error` | 0 | `lds.hsaco` | `16ebcd6d90` |
 
 </details>
 
@@ -112,7 +110,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml`
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `5ddeb735dd` |
+| `tiny_vecadd` | 1 | `error` | 0 | `tiny.hsaco` | `9c79698c11` |
 
 </details>
 
@@ -138,7 +136,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-disp
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `b92ac0c64b` |
+| `lds_reduce` | 1 | `pass` | 0 | `lds.hsaco` | `16ebcd6d90` |
 
 </details>
 
@@ -150,7 +148,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Kernel | Dispatch | Observed sanitizer verdict | Findings | Code object | SHA-256 |
 |---|--:|---|--:|---|---|
-| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `5ddeb735dd` |
+| `tiny_vecadd` | 1 | `pass` | 0 | `tiny.hsaco` | `9c79698c11` |
 
 </details>
 
@@ -158,6 +156,7 @@ Reproduce: `aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yam
 
 | Run | Commit | daily-waitcheck-gemm | daily-consan-clean | daily-consan-racy | Gate |
 |---|---|---|---|---|---|
+| 2026-08-25-32846400271 | `905b1f9e3e16` | ✅ **Match**<br>Observed: `warn` | ❌ **Mismatch**<br>Observed: `error`; expected `pass` | ❌ **Mismatch**<br>Observed: `error`; expected `fail` | Regression |
 | 2026-08-24-32725903878 | `78d1ae686dc3` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-23-32638584704 | `78d1ae686dc3` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |
 | 2026-08-22-32572213077 | `78d1ae686dc3` | ✅ **Match**<br>Observed: `warn` | ✅ **Match**<br>Observed: `pass` | ✅ **Match**<br>Observed: `fail` | Healthy |

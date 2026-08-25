@@ -173,13 +173,29 @@
   details[open] > summary .chevron { transform:rotate(180deg); }
   .kcard-body { padding:14px; }
 
-  /* Borderless label/value facts. Bordered boxes in a row read as tabs. */
-  .kv { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px 24px;
+  /* Borderless label/value facts. Bordered boxes in a row read as tabs.
+     Sized to content rather than uniformly: equal-width tracks gave a 1-char
+     Findings the same width as a 51-char Recipe, so short facts sat on ~555px
+     of dead space while Commit and Recipe wrapped for want of ~330px. Flex
+     trades the column alignment between rows for giving each fact the width it
+     needs. Derived from content on purpose -- a per-field width table would be
+     wrong as soon as Run and Date grow. */
+  .kv { display:flex; flex-wrap:wrap; gap:12px 28px;
     padding-bottom:14px; margin-bottom:14px; border-bottom:1px solid var(--border); }
+  /* min-width:0 lets a long value wrap inside its own item instead of forcing
+     the row wider; max-width keeps the widest of them within the panel. */
+  .kv > span { flex:0 1 auto; min-width:0; max-width:100%; }
   .kv .k { display:block; font-size:var(--fs-kvk); color:var(--text-3); text-transform:uppercase;
     letter-spacing:.05em; font-weight:600; margin-bottom:3px; }
   .kv .val { display:block; font-size:var(--fs-kvv); color:var(--text-1); }
-  .kv .val.mono { font-family:var(--mono); }
+  /* break-all, not break-word. Both break a 40-char SHA or a 136-char
+     digest-pinned image ref once the item is narrower than the token, but the
+     soft wrap opportunities break-word introduces are not counted toward
+     min-content, so each mono fact would keep the whole token as its intrinsic
+     minimum and the row would hold only for as long as the min-width:0 above
+     survives. break-all's breaks do count, and breaking between characters is
+     what a token with no word boundaries wants anyway. */
+  .kv .val.mono { font-family:var(--mono); word-break:break-all; }
 
   .observation { font-size:var(--fs-obs); color:var(--text-2); line-height:1.5;
     background:rgba(148,163,184,.05); border-left:2px solid rgba(148,163,184,.26);
@@ -190,18 +206,25 @@
     letter-spacing:.06em; font-weight:600; margin-bottom:3px; }
   .observation .msg { font-family:var(--mono); font-size:14px; word-break:break-word; color:var(--text-1); }
 
-  .repro { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:var(--sunken);
+  /* Holds the command and nothing else. With the label inside, this box read as
+     a code block whose first token was "REPRODUCE", and selecting it to copy
+     picked the label up along with the command. The label sits above it now. */
+  .repro { display:block; background:var(--sunken);
     border:1px solid var(--border); border-radius:8px; padding:10px 13px; margin-bottom:14px; }
-  .repro .lbl { color:var(--text-3); font-size:12px; text-transform:uppercase;
-    letter-spacing:.05em; font-weight:600; }
   .repro code { font-family:var(--mono); font-size:14px; color:#A5D6FF; word-break:break-all; }
 
-  /* A caption must not share colour, case and weight with the th beneath it. */
+  /* A section heading. Must not share colour, case and weight with the th
+     beneath it -- and has to own its own separation. With margin-top:0 the space
+     above a heading was whatever the previous element happened to leave (14px,
+     against the 8px binding the heading to its own content), so sections ran
+     together; and it was delegated to a `.cap + .table-wrap` adjacency rule, so
+     inserting anything between a heading and its table silently deleted the gap.
+     24px here makes separation ~3x the binding and independent of what precedes. */
   .cap { display:flex; align-items:center; gap:9px; font-size:var(--fs-cap); font-weight:700;
-    text-transform:uppercase; letter-spacing:.06em; color:var(--text-1); margin:0 0 8px; }
+    text-transform:uppercase; letter-spacing:.06em; color:var(--text-1); margin:24px 0 8px; }
+  .cap:first-child { margin-top:0; }
   .cap::before { content:""; width:3px; height:15px; border-radius:2px;
     background:var(--accent, var(--text-3)); flex:0 0 auto; }
-  .cap + .table-wrap { margin-bottom:14px; }
   .card-foot { display:flex; justify-content:flex-end; font-size:13px; }
 
   details.panel { padding:0; }
@@ -272,7 +295,32 @@
   @media (max-width:720px) { .toolgrid, .chips { grid-template-columns:1fr; } }
 
   .wrap { max-width:900px; }
+  /* `.cap`'s heading bar is `var(--accent, var(--text-3))`, and --accent is only
+     defined on the root dashboard's kernel cards. These pages have no such
+     ancestor, so every bar fell back to exactly the grey of the th text beneath
+     it -- leaving nothing to tell a section heading from a table header. Scoped
+     here rather than on `.cap` so the root dashboard keeps its per-kind hues. */
+  .panel { --accent:var(--blue); }
   .note { margin:0 0 14px; color:var(--text-3); font-size:13px; }
-  .steps { margin:0 0 6px; padding-left:18px; color:var(--text-2);
-    font-size:var(--fs-obs); }
-  .steps li { margin:3px 0; }
+  .note a { color:#7CB0F8; }
+  /* One rebuild recipe per artifact: path, what it is, the commands as a real
+     block, then the caveat. These pages had no multi-line code affordance at
+     all, which is how the commands ended up as inline <code> runs inside a
+     prose sentence. pre-wrap so a long command is never hidden off-screen, and
+     so a soft wrap does not become a newline when the block is copied. */
+  .rb { margin:0 0 18px; }
+  /* The closing note belongs to the section, not to a gap, so the final block
+     sits 8px above it. Marked by class rather than `:last-of-type`, which keys
+     off the tag and not the class: whether it matched depended on what other
+     divs the panel happened to emit afterwards, and on a real page it never did
+     -- a case with rebuild blocks has built refs, so it also has the
+     "Artifacts not published" `.table-wrap` sitting after them. */
+  .rb-last { margin-bottom:8px; }
+  .rb .path { margin:0 0 4px; font-family:var(--mono); font-size:13.5px;
+    color:var(--text-1); word-break:break-all; }
+  .rb .what { margin:0 0 8px; color:var(--text-3); font-size:13px; }
+  .rb .caveat { margin:0; color:var(--text-3); font-size:13px; }
+  .rb pre { margin:0 0 8px; background:var(--sunken); border:1px solid var(--border);
+    border-radius:8px; padding:11px 13px; }
+  .rb pre code { display:block; font-family:var(--mono); font-size:13px;
+    color:#A5D6FF; white-space:pre-wrap; overflow-wrap:anywhere; }

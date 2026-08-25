@@ -1,0 +1,32 @@
+schema_version: 1
+mode: sanitizer
+ticket: DAILY-CONSAN-TINY
+description: >
+  Informational (non-gating) gfx950 ConSan run over a trivial single-kernel object
+  (tiny_vecadd) with no LDS/atomic/barrier sites, driven via the source.consan_command
+  path added in #347. Demonstrates the guardrail's fail-closed behavior when there is
+  nothing analyzable: static analysis is complete but strict require-records fails
+  closed (exit 86) rather than emitting a false pass. Rendered on the dashboard's
+  Workload survey tab (Tab 2) as an observed-only case; it does NOT gate the nightly.
+sanitizer_plan:
+  target: gfx950
+  source:
+    kind: kernel
+    kernel:
+      name: tiny_vecadd
+      code_object: fixtures/isa/tiny.hsaco
+      code_object_index: 0
+    consan_command: fixtures/bin/consan_tiny_load
+    consan_log: true
+  scope:
+    kind: kernel
+  selection:
+    requirement: top_dispatch_count
+    top_n: 1
+  sanitizers:
+    - consan
+  policy:
+    consan_policy: strict
+    on_missing_backend: fail
+  output:
+    report: sanitizer_report.json
