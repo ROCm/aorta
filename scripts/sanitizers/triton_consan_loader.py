@@ -45,12 +45,20 @@ same recorded command and selected identity.
 Usage:
 
     # One shim per code object, named as source.consan_command in a recipe.
+    # --copy-object lifts the object out of the scratch cache so the recipe's
+    # code_object has a stable path.
     ./triton_consan_loader.py emit-command \\
         --cache-entry "$TRITON_CACHE_DIR/M3AQ...SCA" \\
-        --output fixtures/bin/consan_add_kernel
+        --copy-object recipes/sanitizers/fixtures/isa/add_kernel.hsaco \\
+        --output recipes/sanitizers/fixtures/bin/consan_add_kernel
 
     # Or run it directly to check an object loads before wiring up a recipe.
     ./triton_consan_loader.py run --cache-entry "$TRITON_CACHE_DIR/M3AQ...SCA"
+
+Note for anyone importing this module by path rather than running it: register it
+in ``sys.modules`` before ``exec_module``, because ``@dataclass`` resolves
+annotations through there. Its sibling ``prepare_gemm_isa.py`` has no such
+requirement, so the two scripts load differently (see the companion test).
 """
 
 from __future__ import annotations
@@ -61,14 +69,17 @@ import hashlib
 import json
 import re
 import shlex
+import shutil
 import stat
 import struct
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-# Scalar Triton signature types -> (struct size, alignment) in the launch buffer.
-# Pointers are handled separately: every ``*T`` is one device address.
+# Scalar Triton signature type -> its size in bytes in the launch buffer, which
+# is also its natural alignment there. Pointers are handled separately: every
+# ``*T`` is one device address.
 _POINTER_SIZE = 8
 _SCALAR_TYPES: dict[str, int] = {
     "i1": 1,
@@ -299,37 +310,78 @@ class ArgSpec:
 
 
 def parse_signature(signature: object) -> tuple[ArgSpec, ...]:
-    """Turn a Triton ``signature`` mapping into ordered, packable arg specs.
+    """Turn a Triton ``signature`` into ordered, packable arg specs.
+
+    Two forms are accepted, and the difference matters. A JSON *object*
+    (``{"x_ptr": "*fp32", "n": "i32"}``) is what Triton itself emits, and its key
+    order is the argument order. A JSON *array* of ``[name, type]`` pairs states
+    that order explicitly.
+
+    Prefer the array form for a hand-authored ``--launch-spec``. Key order is not
+    semantically meaningful in JSON, so nothing stops an editor or
+    ``json.dumps(sort_keys=True)`` from reordering an object -- and a permutation
+    keeps the packed buffer exactly the same size, so ``check_kernarg_fit`` cannot
+    catch it. The kernel would then read a scalar where a pointer belongs.
 
     ``constexpr`` parameters are compiled into the kernel rather than passed, so
     they are dropped from the launch buffer.
     """
 
-    if not isinstance(signature, dict):
-        raise LoaderError("signature must be a JSON object of {arg_name: triton_type}")
+    if isinstance(signature, dict):
+        items: list[tuple[object, object]] = list(signature.items())
+    elif isinstance(signature, list):
+        items = []
+        for index, pair in enumerate(signature):
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                raise LoaderError(
+                    f"signature[{index}] must be a [name, triton_type] pair, got {pair!r}"
+                )
+            items.append((pair[0], pair[1]))
+    else:
+        raise LoaderError(
+            "signature must be a JSON object of {arg_name: triton_type} or a JSON "
+            "array of [name, triton_type] pairs"
+        )
+
     specs = []
-    for name, ttype in signature.items():
+    seen: set[str] = set()
+    for name, ttype in items:
         if not isinstance(ttype, str):
             raise LoaderError(f"signature entry {name!r} must map to a type string")
+        key = str(name)
+        if key in seen:
+            raise LoaderError(f"signature names a duplicate argument {key!r}")
+        seen.add(key)
         if ttype == "constexpr":
             continue
-        specs.append(ArgSpec(name=str(name), ttype=ttype))
+        specs.append(ArgSpec(name=key, ttype=ttype))
     return tuple(specs)
+
+
+def _positive_int(value: object) -> int | None:
+    """Return a positive integer, or ``None``.
+
+    ``bool`` is excluded deliberately: ``isinstance(True, int)`` is true, so a
+    metadata file with ``"num_warps": true`` would otherwise yield block size 1
+    instead of failing.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def block_dim(metadata: dict[str, object]) -> int:
     """Derive the Triton launch block size (``num_warps`` lanes of ``warp_size``)."""
 
     target = metadata.get("target")
-    warp_size = None
-    if isinstance(target, dict):
-        warp_size = target.get("warp_size")
-    if not isinstance(warp_size, int):
-        warp_size = metadata.get("warp_size")
-    if not isinstance(warp_size, int) or warp_size <= 0:
+    warp_size = _positive_int(target.get("warp_size")) if isinstance(target, dict) else None
+    if warp_size is None:
+        warp_size = _positive_int(metadata.get("warp_size"))
+    if warp_size is None:
         raise LoaderError("metadata has no positive 'warp_size'")
-    num_warps = metadata.get("num_warps")
-    if not isinstance(num_warps, int) or num_warps <= 0:
+    num_warps = _positive_int(metadata.get("num_warps"))
+    if num_warps is None:
         raise LoaderError("metadata has no positive 'num_warps'")
     return require_in_range(
         num_warps * warp_size, name="block size (num_warps * warp_size)", minimum=1, maximum=_UINT_MAX
@@ -357,6 +409,21 @@ def pack_arguments(
     memory supply both the extents (``--buffer-bytes``) and the scalars
     (``--arg``).
     """
+
+    known = {spec.name for spec in specs}
+    unknown = sorted(set(scalars) - known)
+    if unknown:
+        raise LoaderError(f"--arg names not in the kernel signature: {', '.join(unknown)}")
+    # Pointers always get a fresh zeroed allocation, so an --arg on one would be
+    # accepted and then quietly discarded -- a launch that differs from the one
+    # the caller asked for.
+    pointers_overridden = sorted(set(scalars) & {s.name for s in specs if s.is_pointer})
+    if pointers_overridden:
+        raise LoaderError(
+            f"--arg cannot set pointer arguments: {', '.join(pointers_overridden)}. "
+            "Pointer arguments are allocated by the loader; use --buffer-bytes to "
+            "size them."
+        )
 
     buffer = bytearray()
     for spec in specs:
@@ -589,16 +656,31 @@ class Hip:
 # --------------------------------------------------------------------------
 
 
+def _release(action: Callable[[], None], *, what: str) -> None:
+    """Run one cleanup step without letting it replace the failure being unwound.
+
+    ``Hip.check`` raises, so a failing ``hipFree`` in a ``finally`` would abort the
+    remaining cleanup and overwrite the in-flight exception -- the operator would
+    read "hipFree failed" instead of the launch error they need. Cleanup reports
+    itself and steps aside.
+    """
+
+    try:
+        action()
+    except LoaderError as exc:
+        print(f"[triton-consan-loader] warning: {what}: {exc}", file=sys.stderr)
+
+
 def run_load(hip: Hip, entry: CacheEntry) -> None:
     module = hip.module_load(entry.hsaco)
     try:
         hip.module_get_function(module, entry.kernel_name)
         print(
-            f"[triton-consan-loader] loaded+instrumented {entry.kernel_name} "
-            f"arch={entry.arch} from {entry.hsaco} (no dispatch)"
+            f"[triton-consan-loader] loaded+instrumented {one_line(entry.kernel_name)} "
+            f"arch={one_line(entry.arch)} from {one_line(entry.hsaco)} (no dispatch)"
         )
     finally:
-        hip.module_unload(module)
+        _release(lambda: hip.module_unload(module), what="hipModuleUnload")
 
 
 def run_dispatch(
@@ -610,10 +692,6 @@ def run_dispatch(
     buffer_bytes: int,
     scalars: dict[str, str],
 ) -> None:
-    unknown = sorted(set(scalars) - {spec.name for spec in specs})
-    if unknown:
-        raise LoaderError(f"--arg names not in the kernel signature: {', '.join(unknown)}")
-
     module = hip.module_load(entry.hsaco)
     allocations: list[ctypes.c_void_p] = []
     try:
@@ -637,14 +715,33 @@ def run_dispatch(
             arguments=arguments,
         )
         print(
-            f"[triton-consan-loader] dispatched {entry.kernel_name} "
+            f"[triton-consan-loader] dispatched {one_line(entry.kernel_name)} "
             f"grid={grid} block={block} shared={shared} "
             f"args={len(arguments)}B buffers={len(allocations)}x{buffer_bytes}B"
         )
     finally:
         for allocation in allocations:
-            hip.free(allocation)
-        hip.module_unload(module)
+            _release(lambda a=allocation: hip.free(a), what="hipFree")  # type: ignore[misc]
+        _release(lambda: hip.module_unload(module), what="hipModuleUnload")
+
+
+def one_line(value: object) -> str:
+    """Escape CR/LF so a value cannot forge a new line of shell or of log output.
+
+    Newlines are legal in Linux paths, and this loader puts paths into two places
+    where a line break changes meaning: shell comments in the generated shim
+    (where the remainder would become a command that runs before the quoted
+    ``exec``), and stdout, which ``run_consan`` folds into ``consan.log`` and
+    parses for ``[rocjitsu-dbi-hooks]`` verdict lines.
+    """
+
+    return str(value).replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+
+
+def shell_comment(label: str, value: object) -> str:
+    """Render one ``#`` comment line that cannot break out of its own comment."""
+
+    return f"# {label}: {one_line(value)}\n"
 
 
 def render_shim(loader: Path, argv: list[str], *, entry: CacheEntry) -> str:
@@ -654,17 +751,17 @@ def render_shim(loader: Path, argv: list[str], *, entry: CacheEntry) -> str:
     return (
         "#!/bin/sh\n"
         "# Generated by scripts/sanitizers/triton_consan_loader.py -- do not edit.\n"
-        f"# ConSan target for Triton kernel '{entry.kernel_name}' (arch {entry.arch}).\n"
-        f"# Code object: {entry.hsaco}\n"
-        f"# Metadata:    {entry.metadata_path}\n"
-        "#\n"
+        + shell_comment("Kernel", entry.kernel_name)
+        + shell_comment("Arch", entry.arch)
+        + shell_comment("Code object", entry.hsaco)
+        + shell_comment("Metadata", entry.metadata_path)
+        + "#\n"
         "# sanitizer_plan.source.consan_command must be a bare executable taking no\n"
         "# arguments, so the loader's arguments are baked in here instead. The\n"
         "# --expect-*-sha256 digests pin the bytes this was generated against: a\n"
         "# Triton cache entry can be evicted and repopulated, so the paths alone\n"
         "# would not stop a rebuilt cache from feeding different code to the same\n"
         "# recorded command. Re-run emit-command after any recompile.\n"
-        "set -e\n"
         f"exec {shlex.quote(sys.executable)} {shlex.quote(str(loader))} \\\n    {quoted}\n"
     )
 
@@ -731,7 +828,11 @@ def _add_selection_arguments(parser: argparse.ArgumentParser) -> None:
         "--launch-spec",
         type=Path,
         default=None,
-        help="JSON supplying 'signature' when the Triton metadata omits it",
+        help=(
+            "JSON supplying 'signature' when the Triton metadata omits it, as either "
+            "an object (key order is the argument order) or, preferably for a "
+            "hand-authored file, an array of [name, type] pairs"
+        ),
     )
     parser.add_argument(
         "--grid",
@@ -827,8 +928,38 @@ def _command_run(args: argparse.Namespace) -> int:
     return 0
 
 
+_COPIED_SIDECARS = (
+    # The metadata is required (kernel name, block size, LDS); the assembly
+    # listing is optional but carries .kernarg_segment_size, and losing it would
+    # silently disable the dispatch-time kernarg cross-check.
+    ".json",
+    ".amdgcn",
+)
+
+
+def copy_entry(entry: CacheEntry, destination: Path) -> CacheEntry:
+    """Copy a cache entry out to a stable location and return the copy.
+
+    A Triton cache is scratch space: entries are evicted and recompiled, and the
+    recipe's ``code_object`` has to point at something that still exists at run
+    time. Copying the object *and* its sidecars out, then pointing the shim at the
+    copy, makes the harvested artifact the thing that gets pinned.
+    """
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(entry.hsaco, destination)
+    for suffix in _COPIED_SIDECARS:
+        source = entry.hsaco.with_suffix(suffix)
+        if source.is_file():
+            shutil.copy2(source, destination.with_suffix(suffix))
+    return entry_from_hsaco(destination)
+
+
 def _command_emit(args: argparse.Namespace) -> int:
     entry = _resolve_entry(args)
+    if args.copy_object is not None:
+        entry = copy_entry(entry, args.copy_object)
+        print(f"[triton-consan-loader] copied {one_line(entry.kernel_name)} -> {args.copy_object}")
     loader = Path(__file__).resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
@@ -841,7 +972,8 @@ def _command_emit(args: argparse.Namespace) -> int:
 
 def _command_list(args: argparse.Namespace) -> int:
     for entry in discover_entries(args.cache_entry):
-        print(f"{entry.kernel_name}\t{entry.metadata.get('hash', '?')}\t{entry.arch}\t{entry.hsaco}")
+        fields = (entry.kernel_name, entry.metadata.get("hash", "?"), entry.arch, entry.hsaco)
+        print("\t".join(one_line(field) for field in fields))
     return 0
 
 
@@ -866,6 +998,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_selection_arguments(emit)
     emit.add_argument("--output", type=Path, required=True, help="shim path to write")
+    emit.add_argument(
+        "--copy-object",
+        type=Path,
+        default=None,
+        metavar="DEST.hsaco",
+        help=(
+            "copy the code object and its sidecars here and point the shim at the "
+            "copy, so a recipe's code_object has a stable path the Triton cache "
+            "cannot evict"
+        ),
+    )
     emit.set_defaults(handler=_command_emit)
 
     listing = subparsers.add_parser("list", help="list the Triton cache entries under a directory")

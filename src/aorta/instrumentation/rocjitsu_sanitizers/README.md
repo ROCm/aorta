@@ -152,8 +152,18 @@ python3 scripts/sanitizers/triton_consan_loader.py list --cache-entry "$TRITON_C
 python3 scripts/sanitizers/triton_consan_loader.py emit-command \
   --cache-entry "$TRITON_CACHE_DIR" \
   --kernel-name _mfma_lds_mediumm_kernel \
-  --output fixtures/bin/consan_triton_kernel
+  --copy-object recipes/sanitizers/fixtures/isa/_mfma_lds_mediumm_kernel.hsaco \
+  --output recipes/sanitizers/fixtures/bin/consan_triton_kernel
 ```
+
+Both paths are recipe-relative: a recipe resolves `consan_command` and
+`code_object` against its own directory, so writing them under
+`recipes/sanitizers/fixtures/` is what makes
+`recipes/sanitizers/consan-triton-kernel.yaml` runnable as written.
+`--copy-object` lifts the object and its sidecars out of the Triton cache, which
+is scratch space that gets evicted and recompiled, and points the shim at the
+copy -- so the recipe's `code_object` and the object the shim loads are the same
+file, and it still exists on the next run.
 
 `run_consan` executes `consan_command` as a bare argv with no arguments, so
 `emit-command` writes a small executable shim with the resolved arguments baked
@@ -177,6 +187,18 @@ Two modes mirror the two committed HIP loaders:
   version (it is absent in 3.7.1), so pass `--launch-spec` with an explicit
   `signature` when the metadata has none. Block size comes from
   `num_warps * warp_size` and dynamic LDS from `shared`.
+
+A `--launch-spec` signature accepts either a JSON object (what Triton emits,
+where key order is the argument order) or a JSON array of `[name, type]` pairs.
+Prefer the array form when hand-authoring one: key order carries no meaning in
+JSON, so an editor or `json.dumps(sort_keys=True)` can silently reorder an
+object, and a permutation keeps the packed buffer the same size — so the kernarg
+cross-check below cannot catch it and the kernel reads a scalar where a pointer
+belongs.
+
+```json
+{"signature": [["x_ptr", "*fp32"], ["y_ptr", "*fp32"], ["n_elements", "i32"]]}
+```
 
 Scalar arguments default to zero and pointer arguments get a fresh zeroed
 buffer, because a synthesized size or stride would index buffers whose real

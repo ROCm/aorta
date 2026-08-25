@@ -17,16 +17,18 @@ description: >
     python3 scripts/sanitizers/triton_consan_loader.py emit-command \
       --cache-entry "$TRITON_CACHE_DIR" \
       --kernel-name _mfma_lds_mediumm_kernel \
+      --copy-object recipes/sanitizers/fixtures/isa/_mfma_lds_mediumm_kernel.hsaco \
       --output recipes/sanitizers/fixtures/bin/consan_triton_kernel
 
-  Both paths below are per-run artifacts of that harvest, not committed fixtures.
-  Point code_object at the same .hsaco the shim loads: the loader hashes it at
-  recipe load time so ConSan attributes its verdict to a real identity.
+  That one command writes both paths below, which are per-run artifacts of the
+  harvest rather than committed fixtures. --copy-object matters: the Triton cache
+  is scratch space that gets evicted and recompiled, so the object is lifted out
+  to a stable path that the shim loads and code_object names -- the same file, so
+  the digest the recipe loader computes describes what actually runs.
 
   The shim also pins the SHA-256 of the object, the metadata, and any launch
-  spec, because a Triton cache entry can be evicted and repopulated under the
-  same path. So a shim goes stale whenever the kernel is recompiled, and refuses
-  to run rather than loading the new bytes under the old identity: re-run
+  spec. A shim therefore goes stale whenever the kernel is recompiled, and
+  refuses to run rather than loading new bytes under the old identity: re-run
   emit-command after any recompile.
 
   One logical Triton kernel often compiles to several objects (shape-selected

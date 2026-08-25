@@ -12,6 +12,7 @@ import json
 import os
 import stat
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -176,10 +177,57 @@ def test_parse_signature_drops_constexpr_and_keeps_order():
     assert specs[0].is_pointer and not specs[1].is_pointer
 
 
-@pytest.mark.parametrize("bad", [["*fp32"], "*fp32", 3])
-def test_parse_signature_rejects_non_mapping(bad):
-    with pytest.raises(loader.LoaderError, match="signature must be a JSON object"):
+def test_parse_signature_accepts_an_explicitly_ordered_pair_list():
+    """The ordered form exists because JSON key order is not load-bearing.
+
+    An editor or ``json.dumps(sort_keys=True)`` can permute a hand-authored
+    object, and a permutation preserves the packed size, so the kernarg check
+    cannot see it. The pair list states the order instead of implying it.
+    """
+
+    specs = loader.parse_signature(
+        [["x_ptr", "*fp32"], ["n_elements", "i32"], ["BLOCK_SIZE", "constexpr"]]
+    )
+    assert [spec.name for spec in specs] == ["x_ptr", "n_elements"]
+
+
+def test_ordered_and_mapping_forms_pack_identically():
+    mapping = loader.parse_signature({"x_ptr": "*fp32", "n": "i32"})
+    ordered = loader.parse_signature([["x_ptr", "*fp32"], ["n", "i32"]])
+    pack = {"pointers": {"x_ptr": 0xDEAD0000}, "scalars": {"n": "7"}}
+    assert loader.pack_arguments(mapping, **pack) == loader.pack_arguments(ordered, **pack)
+
+
+def test_a_permuted_signature_packs_different_bytes_at_the_same_size():
+    """Pins the hazard the ordered form exists to avoid."""
+
+    declared = loader.parse_signature([["x_ptr", "*fp32"], ["n", "i32"], ["stride", "i64"]])
+    permuted = loader.parse_signature([["n", "i32"], ["stride", "i64"], ["x_ptr", "*fp32"]])
+    pack = {"pointers": {"x_ptr": 0xDEAD0000}, "scalars": {"n": "7", "stride": "3"}}
+    a = loader.pack_arguments(declared, **pack)
+    b = loader.pack_arguments(permuted, **pack)
+    assert len(a) == len(b)
+    assert a != b
+    # Same size, so the kernarg cross-check accepts both -- ordering has to be
+    # stated by the caller, it cannot be recovered here.
+    loader.check_kernarg_fit(len(b), 48, kernel="k")
+
+
+@pytest.mark.parametrize("bad", ["*fp32", 3, None])
+def test_parse_signature_rejects_a_form_that_is_neither_object_nor_pair_list(bad):
+    with pytest.raises(loader.LoaderError, match="must be a JSON object .* or a JSON array"):
         loader.parse_signature(bad)
+
+
+@pytest.mark.parametrize("bad", [["*fp32"], [["x", "i32", "extra"]], [{"x": "i32"}]])
+def test_parse_signature_rejects_malformed_pairs(bad):
+    with pytest.raises(loader.LoaderError, match=r"must be a \[name, triton_type\] pair"):
+        loader.parse_signature(bad)
+
+
+def test_parse_signature_rejects_a_duplicate_argument():
+    with pytest.raises(loader.LoaderError, match="duplicate argument 'x'"):
+        loader.parse_signature([["x", "i32"], ["x", "i64"]])
 
 
 def test_parse_signature_rejects_non_string_type():
@@ -222,6 +270,20 @@ def test_pack_arguments_aligns_a_wide_scalar_after_a_narrow_one():
     # i64 must start at offset 8, not 1.
     assert len(packed) == 16
     assert struct.unpack_from("<q", packed, 8) == (1,)
+
+
+def test_pack_arguments_rejects_an_override_for_a_pointer():
+    # Pointers always get a fresh zeroed allocation, so accepting --arg on one
+    # would silently launch something other than what was asked for.
+    specs = loader.parse_signature({"x_ptr": "*fp32", "n": "i32"})
+    with pytest.raises(loader.LoaderError, match="cannot set pointer arguments: x_ptr"):
+        loader.pack_arguments(specs, pointers={"x_ptr": 0x1000}, scalars={"x_ptr": "0x2000"})
+
+
+def test_pack_arguments_rejects_an_unknown_override():
+    specs = loader.parse_signature({"n": "i32"})
+    with pytest.raises(loader.LoaderError, match="not in the kernel signature: nope"):
+        loader.pack_arguments(specs, pointers={}, scalars={"nope": "1"})
 
 
 def test_pack_arguments_defaults_every_scalar_to_zero():
@@ -284,11 +346,20 @@ def test_block_dim_multiplies_warps_by_warp_size():
         ({"num_warps": 4}, "warp_size"),
         ({"warp_size": 64}, "num_warps"),
         ({"num_warps": 0, "warp_size": 64}, "num_warps"),
+        # isinstance(True, int) is true, so bool needs an explicit guard or a
+        # malformed metadata file yields block size 1 instead of failing.
+        ({"num_warps": True, "warp_size": True}, "warp_size"),
+        ({"num_warps": True, "warp_size": 64}, "num_warps"),
     ],
 )
 def test_block_dim_fails_closed_on_incomplete_metadata(metadata, match):
     with pytest.raises(loader.LoaderError, match=match):
         loader.block_dim(metadata)
+
+
+def test_block_dim_prefers_the_target_warp_size_then_the_flat_key():
+    assert loader.block_dim({"target": {"warp_size": 32}, "num_warps": 2, "warp_size": 64}) == 64
+    assert loader.block_dim({"target": {}, "num_warps": 2, "warp_size": 64}) == 128
 
 
 def test_shared_bytes_reads_lds_requirement():
@@ -641,6 +712,60 @@ def test_shim_bakes_in_dispatch_options(tmp_path):
     assert f"--launch-spec {spec.resolve()}" in flattened
 
 
+def test_shell_comment_cannot_be_escaped_by_a_newline():
+    # A newline is the only way to end a shell comment, and it is legal in a
+    # Linux path -- so this is the whole guard.
+    rendered = loader.shell_comment("Code object", "/cache/ent\ntouch /tmp/OWNED   #/k.hsaco")
+    assert rendered.count("\n") == 1
+    assert rendered.endswith("\n")
+    assert "\\n" in rendered
+
+
+def test_emitted_shim_seals_its_comment_block_against_a_newline_in_a_path(tmp_path):
+    """Every line before the exec must still be a comment.
+
+    The exec line itself may legitimately span lines, because shlex.quote wraps a
+    newline-containing path in single quotes where the newline is inert data.
+    """
+
+    entry_dir = _entry_dir(tmp_path / "ent\ntouch OWNED   #")
+    output = tmp_path / "shim"
+    assert loader.main(["emit-command", "--cache-entry", str(entry_dir), "--output", str(output)]) == 0
+    body = output.read_text(encoding="utf-8")
+    preamble, _, _ = body.partition("exec ")
+    for line in preamble.splitlines()[1:]:  # skip the #! line
+        assert line.startswith("#"), line
+
+
+def test_a_newline_in_a_cache_path_does_not_execute(tmp_path):
+    """The reviewer's reproduction, as a regression test.
+
+    The injected text ran *before* the quoted exec, so it fired even with a bogus
+    loader path. Running the shim must not produce the sentinel; the loader
+    itself is expected to fail here (fake code object / no HIP), which is fine --
+    the point is what does *not* happen first.
+    """
+
+    entry_dir = _entry_dir(tmp_path / "ent\ntouch OWNED   #")
+    shim = tmp_path / "shim"
+    assert loader.main(["emit-command", "--cache-entry", str(entry_dir), "--output", str(shim)]) == 0
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    subprocess.run(["sh", str(shim)], cwd=sandbox, capture_output=True, timeout=120, check=False)
+    assert not (sandbox / "OWNED").exists(), "shim comment block executed injected text"
+
+
+def test_emitted_shim_neutralises_a_newline_in_the_kernel_name(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY", name="add_kernel")
+    metadata = entry_dir / "add_kernel.json"
+    metadata.write_text(
+        json.dumps({**_METADATA, "name": "k\ntouch OWNED   #"}), encoding="utf-8"
+    )
+    output = tmp_path / "shim"
+    assert loader.main(["emit-command", "--cache-entry", str(entry_dir), "--output", str(output)]) == 0
+    assert "\ntouch OWNED" not in output.read_text(encoding="utf-8")
+
+
 def test_shim_quotes_paths_containing_spaces(tmp_path):
     entry_dir = _entry_dir(tmp_path / "cache dir")
     output = tmp_path / "shim"
@@ -664,8 +789,88 @@ def test_loader_argv_omits_dispatch_flags_in_load_mode(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Lifting the object out of the scratch cache
+# --------------------------------------------------------------------------
+
+
+def test_copy_object_writes_the_object_and_its_sidecars(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    (entry_dir / "add_kernel.amdgcn").write_text(
+        "  .kernarg_segment_size: 48\n", encoding="utf-8"
+    )
+    destination = tmp_path / "fixtures" / "isa" / "harvested.hsaco"
+    copied = loader.copy_entry(
+        loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco"), destination
+    )
+    assert copied.hsaco == destination.resolve()
+    assert copied.kernel_name == "add_kernel"
+    assert destination.with_suffix(".json").is_file()
+    # The .amdgcn carries .kernarg_segment_size; dropping it would silently
+    # disable the dispatch-time kernarg cross-check.
+    assert loader.kernarg_segment_size(copied) == 48
+
+
+def test_copy_object_tolerates_a_missing_optional_sidecar(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    destination = tmp_path / "isa" / "harvested.hsaco"
+    copied = loader.copy_entry(
+        loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco"), destination
+    )
+    assert loader.kernarg_segment_size(copied) is None
+
+
+def test_emit_command_points_the_shim_at_the_copy_not_the_cache(tmp_path):
+    """The recipe's code_object and the shim's object must be the same file."""
+
+    entry_dir = _entry_dir(tmp_path / "CACHE")
+    destination = tmp_path / "fixtures" / "isa" / "harvested.hsaco"
+    output = tmp_path / "fixtures" / "bin" / "shim"
+    assert (
+        loader.main(
+            [
+                "emit-command",
+                "--cache-entry",
+                str(entry_dir),
+                "--copy-object",
+                str(destination),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    flattened = output.read_text(encoding="utf-8").replace(" \\\n    ", " ")
+    assert str(destination.resolve()) in flattened
+    assert str(entry_dir.resolve()) not in flattened
+    # The pinned digest describes the copy, so evicting the cache changes nothing.
+    assert f"--expect-object-sha256 {loader.sha256_file(destination)}" in flattened
+
+
+# --------------------------------------------------------------------------
 # CLI wiring
 # --------------------------------------------------------------------------
+
+
+def test_release_reports_a_cleanup_failure_without_replacing_the_real_one(capsys):
+    """Cleanup must not out-prioritise the failure being unwound.
+
+    ``Hip.check`` raises, so a failing hipFree in a ``finally`` would otherwise
+    overwrite the launch error the operator actually needs to read.
+    """
+
+    def _boom():
+        raise loader.LoaderError("hipFree failed: invalid argument")
+
+    try:
+        try:
+            raise loader.LoaderError("hipModuleLaunchKernel failed: the real problem")
+        finally:
+            loader._release(_boom, what="hipFree")
+    except loader.LoaderError as exc:
+        assert "the real problem" in str(exc)
+    else:
+        raise AssertionError("the original error must still propagate")
+    assert "hipFree failed" in capsys.readouterr().err
 
 
 def test_main_reports_loader_errors_without_a_traceback(tmp_path, capsys):
