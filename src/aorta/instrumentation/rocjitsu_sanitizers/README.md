@@ -129,6 +129,71 @@ still wins, and `rj_waitcheck` on `PATH` is a final fallback):
 
 When both are set, the prebuilt bundle wins.
 
+## Driving ConSan over a JIT-compiled Triton/Gluon kernel
+
+ConSan only runs against a caller-supplied `source.consan_command`; it never
+wraps a whole application to reach a few selected kernels. For a code object
+built from HIP source that command is a small loader compiled per object with
+`-DOBJECT` (`consan_load.hip`). A Triton/Gluon kernel cannot use that pattern:
+the `.hsaco` does not exist until the kernel runs, it is keyed by a content hash
+under `TRITON_CACHE_DIR`, and it is specific to the image, the GPU target, and
+the compiled shapes -- there is nothing to pin in a fixture directory and no
+source to compile ([#399](https://github.com/ROCm/aorta/issues/399)).
+
+`scripts/sanitizers/triton_consan_loader.py` is the generic equivalent. It binds
+`libamdhip64` through ctypes, so the object path is resolved at *run* time and no
+compiler is involved. Point it at a Triton cache entry -- a `.hsaco` plus the
+adjacent `.json` Triton writes beside it -- and it loads that object under
+whatever hook the parent set in `HSA_TOOLS_LIB`:
+
+```bash
+# List what the JIT actually compiled, then emit one shim per code object.
+python3 scripts/sanitizers/triton_consan_loader.py list --cache-entry "$TRITON_CACHE_DIR"
+python3 scripts/sanitizers/triton_consan_loader.py emit-command \
+  --cache-entry "$TRITON_CACHE_DIR" \
+  --kernel-name _mfma_lds_mediumm_kernel \
+  --output fixtures/bin/consan_triton_kernel
+```
+
+`run_consan` executes `consan_command` as a bare argv with no arguments, so
+`emit-command` writes a small executable shim with the resolved arguments baked
+in -- the run-time analogue of the `-DOBJECT` build step. Because `run_consan`
+records `command_sha256`, hashing that shim pins the exact object the run
+loaded. `recipes/sanitizers/consan-triton-kernel.yaml` is a worked example.
+
+Two modes mirror the two committed HIP loaders:
+
+- **`load` (default)** -- `hipModuleLoad` the object and resolve the kernel
+  symbol. ConSan instruments a code object when it is loaded, so this is enough
+  to reach the kernel, and it needs no knowledge of the launch ABI. Works for
+  any Triton kernel.
+- **`dispatch`** -- additionally launch the kernel once. This needs the argument
+  signature, which Triton does **not** write to the metadata JSON in every
+  version (it is absent in 3.7.1), so pass `--launch-spec` with an explicit
+  `signature` when the metadata has none. Block size comes from
+  `num_warps * warp_size` and dynamic LDS from `shared`.
+
+Scalar arguments default to zero and pointer arguments get a fresh zeroed
+buffer, because a synthesized size or stride would index buffers whose real
+extents are unknowable and turn a sanitizer run into a memory fault. Use
+`--arg NAME=VALUE` / `--buffer-bytes` to make the kernel touch memory. HIP does
+not validate the launch buffer against the kernel descriptor, so the loader
+cross-checks the packed buffer against `.kernarg_segment_size` from the
+`.amdgcn` listing Triton writes beside the object and refuses to dispatch a
+buffer that would over-run the segment.
+
+Two limits are worth stating plainly. One logical Triton kernel usually compiles
+to several objects (shape-selected variants), and ConSan takes exactly one code
+object per run, so harvest one shim and one recipe per object; an ambiguous
+selection fails closed and lists the candidates. And on the currently shipping
+RocJITsu build, record/replay reports itself as `an inventory-only stub`, so a
+dispatch captures no dynamic records and strict policy fails closed with exit 86
+— the same outcome the committed `daily-consan-tiny.yaml` and
+`daily-consan-lds-dispatch.yaml` lanes document
+([ROCm/rocm-systems#9972](https://github.com/ROCm/rocm-systems/issues/9972)).
+The loader removes the aorta-side gap; the dynamic-coverage half stays blocked
+upstream.
+
 ## Verdict and health rules
 
 - Waitcheck structured hazard → `warn`.
