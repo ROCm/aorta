@@ -68,8 +68,17 @@ matmul: device=... dtype=float16
 matmul: size=2048 iters=20 warmup=3
 matmul: mean_kernel_ms=...
 matmul: gflops=...
+matmul: max_rel_err=...
 matmul: PASS
 ```
+
+`PASS` means the product was verified, not merely finite. The payload samples
+a handful of off-diagonal `c[i, j]` entries against `dot(a[i, :], b[:, j])`
+recomputed in float32 and fails when the relative error exceeds a
+dtype-appropriate ceiling (`1e-3` float32, matching `hip-gemm`; `2e-2`
+float16; `5e-2` bfloat16). A full reference GEMM would cost as much as the
+payload, and the samples avoid the diagonal on purpose — a transposed result
+leaves `c[i, i]` unchanged, so diagonal probes could never catch one.
 
 The payload exits `2` if torch sees no GPU rather than falling back to CPU:
 a silent CPU run would yield an empty profile and read as a collector bug.

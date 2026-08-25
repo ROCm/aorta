@@ -53,6 +53,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for name in ("size", "iters", "block_size"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be >= 1")
+    # ``tl.arange(0, block_size)`` requires a power-of-two extent. Rejecting it
+    # here keeps the failure an argparse message instead of a Triton
+    # compilation error raised from inside the kernel launch, which is what a
+    # value like 1000 produced before.
+    if args.block_size & (args.block_size - 1):
+        parser.error(
+            f"--block-size must be a power of two (tl.arange requires one); got "
+            f"{args.block_size}, nearest is {triton.next_power_of_2(args.block_size)}"
+        )
     return args
 
 

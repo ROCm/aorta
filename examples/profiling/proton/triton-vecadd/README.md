@@ -49,7 +49,9 @@ ROCm venv with `torch` + `triton` on the host works the same way.
 python examples/profiling/proton/triton-vecadd/vecadd.py --size 1048576 --iters 20
 ```
 
-Options: `--size`, `--iters`, `--block-size`. Output:
+Options: `--size`, `--iters`, `--block-size` (must be a power of two, since
+`tl.arange` requires one — a non-power-of-two is rejected by argparse rather
+than failing later inside Triton's compiler). Output:
 
 ```
 vecadd: device=...
