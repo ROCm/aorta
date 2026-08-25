@@ -564,7 +564,10 @@ def format_instant(value: Any) -> str:
     from 3.11 ``fromisoformat("2026-08-23T0941")`` succeeds too. The output is
     committed to the data branch, so it must not depend on the interpreter.
     """
-    text = str(value or "").strip()
+    # Only an absent value is empty. `value or ""` would also swallow 0 and
+    # False, i.e. render a malformed manifest as a blank cell instead of showing
+    # what it holds -- which is the opposite of returning it unchanged.
+    text = "" if value is None else str(value).strip()
     if not _INSTANT_RE.match(text):
         return text
     try:

@@ -969,6 +969,11 @@ def test_format_instant_renders_a_time_and_never_invents_one():
     for junk in ("", None, "d", "not a date", "2026-08-23 morning",
                  "2026-13-23T09:41:12+00:00"):
         assert gen.format_instant(junk) == (junk or "")
+    # Only *absent* renders as empty. A falsy value from a malformed manifest is
+    # shown, not swallowed -- a blank cell reads as "no date recorded", which is
+    # a different fact and hides the one that needs fixing.
+    for falsy, shown in ((0, "0"), (False, "False")):
+        assert gen.format_instant(falsy) == shown
 
 
 def test_format_instant_renders_the_same_on_every_supported_interpreter():
