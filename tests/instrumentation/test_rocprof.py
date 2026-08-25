@@ -560,6 +560,24 @@ def test_parse_summary_omits_the_count_when_calls_is_unreadable(tmp_path):
     assert metrics.get("rocprof_top_kernels") == ["k"]
 
 
+def test_parse_summary_omits_the_count_for_a_fractional_calls_value(tmp_path):
+    """Dispatches are whole; ``int()`` would truncate 1.9 to 1 and publish it."""
+    (tmp_path / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"k",1.9,1000000\n', encoding="utf-8"
+    )
+    metrics = parse_summary(tmp_path)
+    assert "rocprof_kernel_count" not in metrics
+    assert metrics.get("rocprof_gpu_time_ms") == pytest.approx(1.0)
+
+
+def test_parse_summary_accepts_an_integral_float_calls_value(tmp_path):
+    """A whole number written as ``3.0`` is still a usable count."""
+    (tmp_path / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"k",3.0,1000000\n', encoding="utf-8"
+    )
+    assert parse_summary(tmp_path).get("rocprof_kernel_count") == 3
+
+
 def test_parse_summary_keeps_the_count_from_a_trace_without_calls(tmp_path):
     """The trace path is immune: one row *is* one dispatch, so it can count."""
     trace = FIXTURES / "flat_with_o" / "aorta_kernel_trace.csv"

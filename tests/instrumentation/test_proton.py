@@ -513,6 +513,49 @@ def test_wrap_argv_unsets_both_device_spellings_and_prefers_hip(tmp_path, env_on
     assert "ROCR_VISIBLE_DEVICES=1" in argv
 
 
+def test_wrap_argv_does_not_touch_cuda_visible_devices_under_auto(tmp_path):
+    """``auto`` resolves to CUPTI on NVIDIA, where a CUDA pin is real.
+
+    Translating it there would silently drop the device restriction and profile
+    the wrong GPU, so the CUDA spelling is only rewritten once AMD is
+    established -- by an explicitly AMD backend, or by HIP_VISIBLE_DEVICES
+    being set alongside it.
+    """
+    argv = wrap_argv(
+        ["python", "vecadd.py"],
+        tmp_path,
+        {"backend": "auto"},
+        env={"CUDA_VISIBLE_DEVICES": "2"},
+    )
+    assert "CUDA_VISIBLE_DEVICES" not in argv
+    assert not any(part.startswith("ROCR_VISIBLE_DEVICES=") for part in argv)
+
+
+def test_wrap_argv_translates_cuda_under_auto_when_hip_establishes_amd(tmp_path, env_on_path):
+    """HIP_VISIBLE_DEVICES present means AMD, so the CUDA pin is rewritten too."""
+    argv = wrap_argv(
+        ["python", "vecadd.py"],
+        tmp_path,
+        {"backend": "auto"},
+        env={"HIP_VISIBLE_DEVICES": "1", "CUDA_VISIBLE_DEVICES": "2"},
+    )
+    assert "HIP_VISIBLE_DEVICES" in argv
+    assert "CUDA_VISIBLE_DEVICES" in argv
+    assert "ROCR_VISIBLE_DEVICES=1" in argv
+
+
+def test_wrap_argv_still_translates_hip_under_auto(tmp_path, env_on_path):
+    """HIP_VISIBLE_DEVICES is an AMD signal by itself, so ``auto`` still acts."""
+    argv = wrap_argv(
+        ["python", "vecadd.py"],
+        tmp_path,
+        {"backend": "auto"},
+        env={"HIP_VISIBLE_DEVICES": "1"},
+    )
+    assert "HIP_VISIBLE_DEVICES" in argv
+    assert "ROCR_VISIBLE_DEVICES=1" in argv
+
+
 def test_wrap_argv_leaves_device_vars_alone_on_a_non_intercepting_backend(tmp_path):
     """``instrumentation`` installs no queue interceptor, so nothing to rewrite."""
     argv = wrap_argv(

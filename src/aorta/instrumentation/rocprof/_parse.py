@@ -102,7 +102,10 @@ def _totals_from_stats(paths: list[Path]) -> tuple[dict[str, float], dict[str, i
             if not name or total_ns is None or total_ns < 0:
                 continue
             ns_by_kernel[name] = ns_by_kernel.get(name, 0.0) + total_ns
-            if calls is None or calls < 0:
+            # A fractional count is as unreadable as a missing one: dispatches
+            # are whole, and ``int()`` would silently truncate 1.9 to 1 and
+            # publish it as measured.
+            if calls is None or calls < 0 or not calls.is_integer():
                 counts_trustworthy = False
                 continue
             # A readable zero is taken at its word: ``rocprof_kernel_count``

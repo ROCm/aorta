@@ -24,6 +24,10 @@ import torch
 import triton
 import triton.language as tl
 
+#: Absolute-error ceiling against ``torch.softmax``. Not exact equality (unlike
+#: the vector-add example) because the reduction reassociates.
+_MAX_ABS_ERR = 1e-6
+
 
 @triton.jit
 def softmax_kernel(
@@ -102,7 +106,11 @@ def main(argv: list[str] | None = None) -> int:
     torch.cuda.synchronize(device)
 
     print(f"softmax: max_abs_err={max_err:.3e}")
-    if max_err > 1e-6:
+    # Negated bounded comparison, not ``max_err > tol``: every comparison with
+    # NaN is false, so the direct form lets a non-finite result print PASS --
+    # the exact condition this check exists to catch. ``not (x <= tol)`` is
+    # true for NaN.
+    if not (max_err <= _MAX_ABS_ERR):
         print("softmax: FAIL result differs from torch.softmax", file=sys.stderr)
         return 1
     print("softmax: PASS")

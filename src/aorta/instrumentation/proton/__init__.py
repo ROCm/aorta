@@ -89,6 +89,11 @@ ENV_PREFIX: str = "AORTA_PROTON_"
 #: ``cuda``, so operators pin them with that name.
 _REJECTED_DEVICE_VARS: tuple[str, ...] = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
+#: Backends that establish an AMD host on their own. ``auto`` deliberately is
+#: not one: it resolves to CUPTI on NVIDIA, where ``CUDA_VISIBLE_DEVICES`` is a
+#: real device pin that must be left alone.
+_AMD_BACKENDS: frozenset[str] = frozenset({"rocprofiler", "roctracer"})
+
 _PYTHON_RE = re.compile(r"^python(\d+(\.\d+)?)?$")
 # Interpreter flags that take no argument and can safely stay in front of
 # ``-m triton.profiler.proton``. Anything else means we cannot confidently
@@ -380,7 +385,18 @@ def _device_env_prefix(
         # ROCm's PyTorch reports its devices as ``cuda`` and operators pin them
         # accordingly. Ordered by precedence: HIP wins when both are present,
         # matching the ROCm runtime's own preference.
-        present = [(name, env[name]) for name in _REJECTED_DEVICE_VARS if env.get(name) is not None]
+        # ``HIP_VISIBLE_DEVICES`` is itself an AMD signal, so it is always safe
+        # to translate. ``CUDA_VISIBLE_DEVICES`` is NOT: ``backend: auto``
+        # resolves to CUPTI on an NVIDIA host, where that variable is a normal,
+        # honoured device pin -- rewriting it to ROCR would silently drop the
+        # restriction and profile the wrong GPU. So the CUDA spelling is only
+        # translated once AMD is established, either by an explicitly AMD
+        # backend or by HIP_VISIBLE_DEVICES being set alongside it.
+        candidates = list(_REJECTED_DEVICE_VARS)
+        amd_established = backend in _AMD_BACKENDS or env.get("HIP_VISIBLE_DEVICES") is not None
+        if not amd_established:
+            candidates = [name for name in candidates if name != "CUDA_VISIBLE_DEVICES"]
+        present = [(name, env[name]) for name in candidates if env.get(name) is not None]
         if present:
             unset.extend(name for name, _ in present)
             rocr = env.get("ROCR_VISIBLE_DEVICES")
