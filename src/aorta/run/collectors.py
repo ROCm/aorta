@@ -235,8 +235,10 @@ def collector_root_is_traversable(root: Path, trusted_root: Path | None = None) 
       whole chain, so this catches a swap at any depth rather than only at the
       leaf or its parent.
 
-    ``trusted_root`` defaults to ``root.parent``, which for the collector layout
-    is the dispatcher-created results directory.
+    ``trusted_root`` defaults to ``root.parent`` when the caller omits it.
+    That fallback is only for a programmatic caller that did not thread
+    :data:`CONFIG_KEY_RESULTS_ROOT`; it still misses a swapped ancestor, which
+    is why the dispatcher always supplies the operator's ``--results-dir``.
     """
     trusted = trusted_root if trusted_root is not None else root.parent
     try:

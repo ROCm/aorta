@@ -644,8 +644,9 @@ class TestRunTrials:
         assert "_aorta_log_prefix" not in captured_config
 
     def test_collect_dir_absent_without_collector(self, tmp_path):
-        """No ``_aorta_collect_dir`` for a run with no collector -- back-compat
-        (the key only appears when a collector was requested)."""
+        """No collector keys for a run with no collector -- back-compat
+        (``_aorta_collect_dir`` and ``_aorta_results_root`` only appear when a
+        collector was requested)."""
         captured_config: dict = {}
 
         class ConfigCapturingWorkload(Workload):
@@ -671,6 +672,7 @@ class TestRunTrials:
             req = RunRequest(workload="nocollectdir", trials=1, results_dir=tmp_path)
             run_trials(req)
         assert "_aorta_collect_dir" not in captured_config
+        assert "_aorta_results_root" not in captured_config
 
     def test_collect_survives_trial_json_roundtrip(self, tmp_path):
         """``_aorta_collect`` is a plain list, so the trial JSON dump needs
