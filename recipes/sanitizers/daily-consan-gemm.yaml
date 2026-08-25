@@ -59,6 +59,15 @@ sanitizer_plan:
     #
     # This case runs in the non-gating sanitizers-survey job, not on the gate job --
     # a ~69-min observed-only row does not belong in front of the Tab 1 verdict.
+    #
+    # Worth knowing before anyone tunes this again: ~76% of that 4152s is the hook
+    # debug logging, not the instrumentation. The same object at RJ_CONSAN_LOG=1
+    # completes in 991s with byte-identical results (75978 patches, 68894 sites);
+    # the timed phases differ by ~3%. We cannot simply lower the level -- consan_log
+    # maps to kLogDebug because the coverage cross-check needs the per-site records,
+    # which no lower level emits -- so it is filed upstream as
+    # ROCm/rocm-systems#10686. If that lands, this ceiling can drop to roughly a
+    # quarter of its current value.
     timeout_seconds: 6000
   output:
     report: sanitizer_report.json
