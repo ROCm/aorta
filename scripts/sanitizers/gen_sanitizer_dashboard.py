@@ -1757,15 +1757,20 @@ def _is_rebuild_entry(item: Any) -> bool:
     """Whether a stored ``rebuild`` entry is safe for both renderings (pure).
 
     Key presence alone is not enough. ``commands`` is the one field the
-    renderings do more than stringify -- they iterate it -- so its *type* is
-    part of the contract: an int raises ``TypeError`` mid-render, and a string
-    silently degrades into one command per character. Every other field only
-    ever reaches ``_esc(str(...))`` or an f-string, which accept anything.
+    renderings do more than stringify -- they iterate it and publish each
+    element as a line a reader is invited to paste -- so both its type and its
+    elements are part of the contract. An int raises ``TypeError`` mid-render, a
+    string silently degrades into one command per character, and a non-string
+    element renders its ``repr`` as a command line (``[{"a": 1}]`` publishes
+    ``{'a': 1}``): no crash, but a fabricated command in the one block on the
+    page that promises to be runnable. Every other field only ever reaches
+    ``_esc(str(...))`` or an f-string, which accept anything.
     """
     return (
         isinstance(item, dict)
         and _REBUILD_KEYS <= item.keys()
         and isinstance(item["commands"], list)
+        and all(isinstance(command, str) for command in item["commands"])
     )
 
 
@@ -2027,6 +2032,50 @@ def _rebuild_section_html(plan: list[dict[str, Any]]) -> str:
     )
 
 
+def _not_published_rows(env: dict[str, Any]) -> list[tuple[str, str]]:
+    """The excluded inputs as ``(path, sha256)`` pairs (pure).
+
+    The *only* reader of this field: the Files caption that counts it, the table
+    it links to, REPRODUCE.md, and the ``built_refs`` that
+    ``refresh_published_case_area`` derives from it. So the count in the prose
+    cannot disagree with the rows beneath it. Missing values come back as ``""``
+    and each renderer supplies its own dash.
+
+    Tolerant of a malformed entry for the same reason ``plan_from_env`` is: this
+    is read off the data branch, and indexing it directly turned one hand-edited
+    or half-written ``env.json`` into a ``KeyError``/``TypeError`` that failed
+    the whole dashboard render rather than one area's table. Being the only
+    reader is what makes that true -- while ``refresh_published_case_area``
+    iterated the field itself, a non-list value still aborted the render before
+    either renderer was reached, however careful the renderers were.
+
+    Nothing is dropped, though, which is the one place this differs from
+    ``plan_from_env``: there a rejected plan is recomputed, so nothing is lost,
+    whereas an entry skipped here would stop the caption disclosing an input
+    that genuinely is being held back -- the overstatement this section exists
+    to correct. An unreadable entry is counted and shown as a dash instead.
+
+    A bare string is read as the path, which is how the field gets hand-edited.
+    Anything else -- including a *value* of the wrong type inside an otherwise
+    well-formed entry -- becomes a dash rather than its ``repr``: a cell reading
+    ``['a', 'b']`` would be inventing a path the manifest never recorded, and
+    the dash already says "this entry could not be read".
+    """
+
+    def cell(value: Any) -> str:
+        return value if isinstance(value, str) else ""
+
+    stored = env.get("artifacts_not_published")
+    if not isinstance(stored, list):
+        return []
+    return [
+        (cell(item.get("path")), cell(item.get("sha256")))
+        if isinstance(item, dict)
+        else (cell(item), "")
+        for item in stored
+    ]
+
+
 def _files_caption(env: dict[str, Any], files: list[tuple[str, int]]) -> str:
     """The Files table's caption, as HTML (pure).
 
@@ -2054,14 +2103,14 @@ def _files_caption(env: dict[str, Any], files: list[tuple[str, int]]) -> str:
         base = "Every file published for this case. Logs are gzipped."
     else:
         base = "Every file published for this case."
-    missing = env.get("artifacts_not_published") or []
+    missing = _not_published_rows(env)
     if not missing:
         return _esc(base)
     count = len(missing)
     noun = "input" if count == 1 else "inputs"
     verb = "is" if count == 1 else "are"
     listing = f'<a href="#{_NOT_PUBLISHED_ID}">artifacts not published</a>'
-    has_digests = all(isinstance(item, dict) and item.get("sha256") for item in missing)
+    has_digests = all(sha for _path, sha in missing)
     where = (
         f"listed under {listing} with {'its SHA-256' if count == 1 else 'their SHA-256s'}"
         if has_digests
@@ -2236,7 +2285,8 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
         "```",
         "",
     ]
-    if env.get("artifacts_not_published"):
+    not_published = _not_published_rows(env)
+    if not_published:
         lines += [
             "## Artifacts not published",
             "",
@@ -2246,8 +2296,8 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
             "| Path | SHA-256 |",
             "|---|---|",
         ]
-        for item in env["artifacts_not_published"]:
-            lines.append(f"| `{item['path']}` | `{item.get('sha256') or _DASH}` |")
+        for path, sha in not_published:
+            lines.append(f"| `{path or _DASH}` | `{sha or _DASH}` |")
         lines.append("")
     if env.get("digests"):
         lines += ["## Recorded digests", "", "| Key | Value |", "|---|---|"]
@@ -2325,13 +2375,13 @@ def build_case_index_html(
         else ""
     )
     steps_html = _rebuild_section_html(plan_from_env(env, built_refs))
-    not_published = env.get("artifacts_not_published") or []
+    not_published = _not_published_rows(env)
     np_html = ""
     if not_published:
         np_rows = "".join(
-            f'<tr><td class=mono>{_esc(str(item["path"]))}</td>'
-            f'<td class="mono wrap-any">{_esc(str(item.get("sha256") or "")) or "&mdash;"}</td></tr>'
-            for item in not_published
+            f"<tr><td class=mono>{_esc(path) or '&mdash;'}</td>"
+            f'<td class="mono wrap-any">{_esc(sha) or "&mdash;"}</td></tr>'
+            for path, sha in not_published
         )
         np_html = (
             f'<p class="cap" id="{_NOT_PUBLISHED_ID}">Artifacts not published</p>'
@@ -2513,11 +2563,10 @@ def refresh_published_case_area(case_dir: Path, out_dir: Path, *, logs: bool) ->
     # Only re-staging from the source sweep can restore them, which goes through
     # write_case_run_area rather than here.
     env["logs_published"] = bool(env.get("logs_published", True)) and logs
-    built_refs = [
-        str(item["path"])
-        for item in env.get("artifacts_not_published") or []
-        if isinstance(item, dict) and item.get("path")
-    ]
+    # Through the same reader as the two renderings, so this path cannot be the
+    # one that still trips over the field: iterating it directly here meant a
+    # non-list value raised ``TypeError`` before either renderer was reached.
+    built_refs = [path for path, _sha in _not_published_rows(env) if path]
     up, run_up = case_dir_up(case_dir, out_dir)
     (case_dir / "env.json").write_text(
         json.dumps(env, indent=2, sort_keys=True) + "\n", encoding="utf-8"
