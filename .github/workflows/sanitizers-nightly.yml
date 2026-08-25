@@ -610,7 +610,6 @@ jobs:
           # with. run_dir_id is resolved after the clone -- it may reuse a name
           # already on the branch (see below).
           now="$(date -u +%s)"
-          date="$(date -u -d "@${now}" +%Y-%m-%d)"
           started_id="$(date -u -d "@${now}" +%Y-%m-%dT%H%M%S)"
           started_iso="$(date -u -d "@${now}" +%Y-%m-%dT%H:%M:%S+00:00)"
           repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -778,10 +777,18 @@ jobs:
           cp -a "$tmp/dashboard" dashboard
           cat dashboard/summary.md >> "$GITHUB_STEP_SUMMARY"
 
+          # Two identifiers because they answer different questions and a re-run
+          # moves only one: run_dir_id is the area this commit published (reused
+          # from the first attempt), started_iso is when this publish ran. A
+          # date-only title gave two same-day runs the same subject; run_dir_id
+          # alone would give a re-run the same subject as the attempt it
+          # replaces. Reading git log, equal instants mean a first attempt and
+          # different ones a re-run. run_dir_id already ends in GITHUB_RUN_ID, so
+          # naming the run id again would just print it twice.
           ( cd "$tmp"
             git add -A
             if git -c user.name=aorta-ci -c user.email=aorta-ci@users.noreply.github.com \
-                 commit -m "sanitizer dashboard ${date} (run ${GITHUB_RUN_ID})"; then
+                 commit -m "sanitizer dashboard ${run_dir_id} (published ${started_iso})"; then
               git push origin sanitizer-results   # not swallowed -- a push failure fails the job
             else
               echo "no changes to commit"

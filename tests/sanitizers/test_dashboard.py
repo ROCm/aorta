@@ -823,6 +823,49 @@ def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
         assert gen.format_instant(meta.get("date")) == rendered, run_id
 
 
+def test_workflow_commit_message_names_the_area_and_the_publish(tmp_path):
+    # A date-only subject gave two same-day runs the same commit title on the data
+    # branch, and a subject named only by run_dir_id would give a re-run the same
+    # title as the attempt it replaces (the name is reused). Naming both makes
+    # every publish distinct and self-consistent with the directory it wrote.
+    # Run the step's own tail -- that also proves both variables are in scope
+    # inside the subshell and the message survives as one -m argument.
+    block = _dedent_block(_publish_step(), "# Mirror the rendered dashboard", "fi )")
+
+    remote = tmp_path / "remote.git"
+    work = tmp_path / "checkout"
+    (work / "dashboard").mkdir(parents=True)
+    (work / "dashboard" / "summary.md").write_text("# summary\n", encoding="utf-8")
+    # symbolic-ref / checkout -b rather than `git init -b`, which needs git 2.28.
+    _run_shell(
+        f'git init -q --bare "{remote}"'
+        f' && git -C "{remote}" symbolic-ref HEAD refs/heads/sanitizer-results'
+        f' && git init -q "{work}" && git -C "{work}" checkout -q -b sanitizer-results'
+        f' && git -C "{work}" remote add origin "{remote}"',
+        tmp_path,
+        {},
+    )
+    env = {
+        "tmp": str(work),
+        "run_dir_id": "2026-08-23T094112-32638584704",
+        "started_iso": "2026-08-24T03:15:00+00:00",
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "step_summary.md"),
+    }
+    _run_shell(block, tmp_path, env)
+
+    # The subject the reader of `git log` on sanitizer-results sees, and it is on
+    # the branch the step pushes to -- read back from the remote, not the clone.
+    subject = _run_shell(f'git -C "{remote}" log -1 --format=%s sanitizer-results',
+                         tmp_path, {})
+    assert subject == (
+        "sanitizer dashboard 2026-08-23T094112-32638584704 "
+        "(published 2026-08-24T03:15:00+00:00)"
+    )
+    # A re-run reuses run_dir_id, so only the publish instant moves it -- that is
+    # what keeps the two commits distinguishable.
+    assert env["run_dir_id"] in subject and env["started_iso"] in subject
+
+
 def test_format_instant_renders_a_time_and_never_invents_one():
     assert gen.format_instant("2026-08-23T09:41:12+00:00") == "2026-08-23 09:41:12 UTC"
     # An explicit Z, which fromisoformat only accepts from 3.11.
