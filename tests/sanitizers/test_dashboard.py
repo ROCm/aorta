@@ -795,6 +795,48 @@ def test_workflow_reuses_the_directory_a_rerun_already_minted(tmp_path):
     assert _run_shell(script, tmp_path, env) == "2026-08-24-32638584704"
 
 
+def test_every_implementation_of_the_run_id_shape_admits_the_same_names(tmp_path):
+    # The shape is spelled three times -- _RUN_ID_RE, the prune filter and the
+    # reuse guard -- because a workflow cannot import a Python constant. Assert
+    # they agree on one table rather than eyeballing three regexes: a name only
+    # the generator accepts is rendered but never pruned, and a name only the
+    # reuse glob accepts is published where nothing ever looks.
+    names = {
+        "2026-08-23T094112-32638584704": True,
+        "2026-08-23-32638584704": True,       # published before the time existed
+        "2026-13-99-32638584704": True,       # the regex does not range-check
+        "source-32638584704": False,          # the glob's suffix match is not enough
+        "2026-08-23T0941-32638584704": False,
+        "2026-8-3T094112-32638584704": False,
+        "\u0662\u0660\u0662\u0666-08-23-32638584704": False,  # Unicode digits
+    }
+    runs = tmp_path / "runs"
+    reuse = _dedent_block(_publish_step(), 'run_dir_id=""', ': "${run_dir_id:=')
+    env = {"runs_dir": str(runs), "GITHUB_RUN_ID": "32638584704",
+           "started_id": "2026-08-24T031500"}
+
+    for name, want in names.items():
+        assert gen._is_run_id(name) is want, name
+        # The reuse guard: only a name the generator would enumerate may be
+        # published into; anything else has to be passed over for a fresh one.
+        shutil.rmtree(runs, ignore_errors=True)
+        runs.mkdir()
+        (runs / name).mkdir()
+        resolved = _run_shell(f'{reuse}\nprintf "%s" "$run_dir_id"', tmp_path, env)
+        assert resolved == (name if want else "2026-08-24T031500-32638584704"), name
+
+    # The prune filter, over the whole table at once -- what it keeps is exactly
+    # what the generator enumerates, so neither spends a keep slot the other does
+    # not. (Ordering is asserted separately, over ids that differ.)
+    shutil.rmtree(runs, ignore_errors=True)
+    runs.mkdir()
+    for name in names:
+        (runs / name).mkdir()
+    pipeline = _dedent_block(_publish_step(), "ls -1", "| tr ").rstrip().rstrip("\\")
+    kept = _run_shell(pipeline, tmp_path, {"runs_dir": str(runs)}).splitlines()
+    assert sorted(kept) == sorted(n for n, want in names.items() if want)
+
+
 def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
     # The workflow derives meta.json's date from the resolved directory name so a
     # re-run cannot report a clock its own directory contradicts. Run the step's

@@ -539,9 +539,12 @@ def _basename(path: str | None) -> str:
 # `+0000` began parsing; 1-digit fractions too). Gating on this shape is what
 # keeps the rendering identical on every interpreter the repo supports -- what it
 # admits, 3.10 and 3.13 parse the same way; what it rejects is passed through
-# untouched on both. This is what the publishers emit.
+# untouched on both. This is what the publishers emit. ASCII digits, since that
+# is what `fromisoformat` itself accepts -- `\d` would admit Unicode decimal
+# digits that no interpreter parses, which is a claim this gate should not make.
 _INSTANT_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{3}|\.\d{6})?)?([+-]\d{2}:\d{2}|Z)?$"
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}"
+    r"(:[0-9]{2}(\.[0-9]{3}|\.[0-9]{6})?)?([+-][0-9]{2}:[0-9]{2}|Z)?$"
 )
 
 
@@ -847,7 +850,12 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
 # integer). The time is optional because runs published before it was added keep
 # their ``<YYYY-MM-DD>-<run_id>`` names -- they are never renamed, so both shapes
 # are live in the retained window and in the data branch's history.
-_RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{6})?-\d+$")
+#
+# ASCII digits, not ``\d``: the nightly's prune filter and directory-reuse guard
+# spell the same shapes with ``[0-9]``, and this enumeration has to admit exactly
+# what they admit -- a name of Unicode decimal digits that only this side accepted
+# would be rendered on the page while the prune ignored it.
+_RUN_ID_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{6})?-[0-9]+$")
 # Nothing here parses the instant back out of an id: the publisher records it in
 # ``meta.json`` and this renders that value (``format_instant``). Reading it off
 # the directory name too would be a second source for one fact.
