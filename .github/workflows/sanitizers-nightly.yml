@@ -638,9 +638,12 @@ jobs:
           # dashboard/runs/). A failed/absent report is simply not copied; the
           # generator then renders that case as missing -> a red per-run gate.
           runs_dir="$tmp/dashboard/runs"
-          # <YYYY-MM-DD>T<HHMMSS>-<run_id>: sortable to the second, unique, and the
-          # T keeps the run id in the 4th "-" field, so the prune sort below is
-          # unchanged and still orders a mixed old/new history correctly.
+          # <YYYY-MM-DD>T<HHMMSS>-<run_id>: sortable to the second, and unique.
+          # The T puts the time *inside* the date field rather than adding another
+          # "-" field, so a field-wise numeric sort of the date parts reads only
+          # the day and would order same-day runs by run id alone. The prune below
+          # therefore splits the trailing run id off and sorts the rest lexically,
+          # mirroring the generator's _history_sort_key -- see that sort's comment.
           #
           # A re-run reuses GITHUB_RUN_ID (only GITHUB_RUN_ATTEMPT changes) and has
           # to land on the directory its first attempt minted. Stamping a fresh

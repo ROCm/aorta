@@ -652,7 +652,11 @@ def _run_shell(script: str, cwd: Path, env: dict[str, str]) -> str:
 def _dedent_block(workflow: str, start: str, end: str) -> str:
     """Lift a run-step fragment out of the workflow, YAML indentation removed."""
     lines = workflow.splitlines()
-    first = next(i for i, line in enumerate(lines) if line.strip().startswith(start))
+    starts = [i for i, line in enumerate(lines) if line.strip().startswith(start)]
+    # A marker matching twice would lift some other step's block, and that shell
+    # can still exit 0 -- the test would then pass without running the subject.
+    assert len(starts) == 1, f"{start!r} matches {len(starts)} lines, want 1"
+    first = starts[0]
     last = next(
         i for i, line in enumerate(lines[first:], first)
         if line.strip().startswith(end)
@@ -765,11 +769,57 @@ def test_workflow_reuses_the_directory_a_rerun_already_minted(tmp_path):
     assert _run_shell(script, tmp_path, env) == "2026-08-24-32638584704"
 
 
-def test_workflow_and_generator_agree_on_the_embedded_instant():
+def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
     # The workflow derives meta.json's date from the resolved directory name so a
-    # re-run cannot report a clock its own directory contradicts. It parses that
-    # name with the same pattern the generator uses; pin them together.
-    assert gen._RUN_ID_STAMP_RE.pattern in _publish_step()
+    # re-run cannot report a clock its own directory contradicts. Run the step's
+    # own metadata writer over both id shapes: asserting that its copy of
+    # _RUN_ID_STAMP_RE appears in the file would still pass if the block stopped
+    # consulting the directory name at all.
+    block = _dedent_block(
+        _publish_step(), 'if [ "${GPU_RESULT}" = "success" ]; then gate=true', "PY"
+    )
+    # That block runs `python`; the interpreter running these tests may only be
+    # on PATH under another name, so shim the name the workflow uses.
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "python").write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
+    )
+    (shim / "python").chmod(0o755)
+    started_iso = "2026-08-24T03:15:00+00:00"
+    env = {
+        "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "ROCm/aorta",
+        "GITHUB_RUN_ID": "32638584704",
+        "GITHUB_SHA": "f" * 40,
+        "GPU_RESULT": "success",
+        "started_iso": started_iso,
+    }
+
+    for run_id, expected in (
+        # A timestamped name reports the instant it carries, not this attempt's
+        # clock -- that is what makes a re-run's manifest match its directory.
+        ("2026-08-23T094112-32638584704", "2026-08-23T09:41:12+00:00"),
+        # A name from before the scheme carries no instant, so this publish
+        # supplies its own rather than inventing that date's midnight.
+        ("2026-08-23-32638584704", started_iso),
+    ):
+        dest = tmp_path / run_id
+        dest.mkdir()
+        _run_shell(block, tmp_path, {**env, "dest": str(dest), "run_dir_id": run_id})
+
+        meta = json.loads((dest / "meta.json").read_text(encoding="utf-8"))
+        assert meta["date"] == expected, run_id
+        assert meta["run"] == run_id
+        assert meta["gate"] is True  # mirrors GPU_RESULT=success
+        # The generator parses the same name with its own copy of the pattern, so
+        # the two have to read the same instant out of it.
+        stamp = gen._RUN_ID_STAMP_RE.match(run_id)
+        if stamp:
+            assert meta["date"] == "{}T{}:{}:{}+00:00".format(*stamp.groups())
+        # Either way the recorded value is one the renderer can render.
+        assert gen.format_instant(meta["date"]).endswith(" UTC")
 
 
 def test_format_instant_renders_a_time_and_never_invents_one():
