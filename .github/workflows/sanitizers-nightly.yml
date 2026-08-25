@@ -212,7 +212,7 @@ jobs:
             echo "[$(date +%T)] fixture build: hipcc consan_lds_race_2wave (racy two-wave LDS repro) …"
             hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race_2wave.hip" \
               -o "${FIXTURES}/bin/consan_lds_race_2wave"
-            echo "[$(date +%T)] fixture build: extracting real per-transpose f32 GEMM code objects for the top-3 shapes (~16MB each; distinct SHA per transpose layout) …"
+            echo "[$(date +%T)] fixture build: extracting real per-transpose f32 GEMM code objects for the top-3 shapes (hundreds of MB each; distinct SHA per transpose layout) …"
             python scripts/sanitizers/prepare_gemm_isa.py \
               --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 3
 

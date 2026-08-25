@@ -99,8 +99,8 @@ Triggered by `workflow_run` on **"Nightly wheels"** success (+ `workflow_dispatc
    | `REPRODUCE.md` | Commit, command, required env, fixture rebuild steps, and the digests of the artifacts that are not published. |
    | `env.json` | The same provenance, machine-readable (`aorta.sanitizer_run_area/0.1`), including `required_env` (each variable, who sets it, and why -- ConSan's four are listed only for a case that ran ConSan) and `rebuild` (the per-artifact commands, runnable from the repo root). `REPRODUCE.md` and the landing page are rendered *from* those two stored fields, so the prose cannot disagree with them and a retained area keeps describing what it actually recorded. |
 
-   CI-built artifacts are deliberately **not** published: a GEMM `.hsaco` is
-   ~16MB, and shipping one per retained run would bloat the data branch and
+   CI-built artifacts are deliberately **not** published: a GEMM `.hsaco` runs to
+   hundreds of MB, and shipping one per retained run would bloat the data branch and
    Pages. `index.html` / `REPRODUCE.md` / `env.json` instead record each one's
    path, the SHA-256 the report carries for it (the waitcheck binary digest, the
    ConSan repro command and hook digests, every kernel's `code_object_sha256`)
