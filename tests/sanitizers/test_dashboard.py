@@ -5,7 +5,10 @@ from __future__ import annotations
 import gzip
 import importlib.util
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -428,9 +431,14 @@ def test_build_html_no_banner_when_healthy():
 
 def test_build_summary_md_stale_banner():
     status = {"healthy": False, "conclusion": "failure", "run_id": "9",
-              "run_url": "https://x/9", "date": "d"}
+              "run_url": "https://x/9", "date": "2026-08-23T09:41:12+00:00"}
     md = gen.build_summary_md([], status=status)
     assert "Stale" in md and "https://x/9" in md
+    # Both banners name when the failed nightly ran, and render it identically:
+    # a job-summary reader has to be able to tell a fresh failure from a stale
+    # one without opening the page.
+    assert "2026-08-23 09:41:12 UTC" in md
+    assert "2026-08-23 09:41:12 UTC" in gen._status_banner_html(status)
 
 
 def test_main_empty_runs_root_publishes_placeholder(tmp_path, monkeypatch):
@@ -625,6 +633,396 @@ def test_history_root_ignores_malformed_run_dirs(tmp_path):
     runs = gen.runs_from_history_root(root, _baselines())
 
     assert [r["meta"]["run"] for r in runs] == ["2026-08-05-33"]
+
+
+# --- Timestamped run ids (#392) ------------------------------------------------
+
+
+def _publish_step() -> str:
+    """The nightly's publish step, so tests can exercise its shell directly."""
+    return (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+
+
+def _run_shell(script: str, cwd: Path, env: dict[str, str]) -> str:
+    proc = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _dedent_block(workflow: str, start: str, end: str) -> str:
+    """Lift a run-step fragment out of the workflow, YAML indentation removed."""
+    lines = workflow.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.strip().startswith(start)]
+    # A marker matching twice would lift some other step's block, and that shell
+    # can still exit 0 -- the test would then pass without running the subject.
+    assert len(starts) == 1, f"{start!r} matches {len(starts)} lines, want 1"
+    first = starts[0]
+    last = next(
+        i for i, line in enumerate(lines[first:], first)
+        if line.strip().startswith(end)
+    )
+    block = lines[first : last + 1]
+    pad = min(len(line) - len(line.lstrip()) for line in block if line.strip())
+    return "\n".join(line[pad:] for line in block)
+
+
+def test_run_id_accepts_both_shapes_and_still_rejects_junk():
+    # Runs published before the time was added keep their date-only names -- they
+    # are never renamed, so both shapes are live in the retained window.
+    for name in ("2026-08-23T094112-32638584704", "2026-08-23-32638584704",
+                 "2026-08-23-9", "2026-08-23T000000-1"):
+        assert gen._is_run_id(name), name
+    for name in ("source", "not-a-run", "2026-08-23", "2026-08-23T0941-7",
+                 "2026-08-23T094112", "2026-08-23T094112-", "2026-8-3T094112-7"):
+        assert not gen._is_run_id(name), name
+
+
+def test_history_order_is_correct_across_a_mixed_shape_history(tmp_path):
+    # The two shapes have to sort against each other without special-casing: a
+    # bare date is a prefix of any timestamped id for the same day, so it reads
+    # as the earlier one, and the variable-width run id still breaks ties.
+    root = tmp_path / "runs"
+    ids = [
+        "2026-08-23-32638584704",          # pre-change, same day
+        "2026-08-23T094112-32638584705",
+        "2026-08-24T031500-32700000001",
+        "2026-08-23T094112-9",
+        "2026-08-23T094112-10",
+    ]
+    for run_id in ids:
+        _write_history_run(root, run_id)
+
+    ordered = [r["meta"]["run"] for r in gen.runs_from_history_root(root, _baselines())]
+    assert ordered == [
+        "2026-08-24T031500-32700000001",
+        "2026-08-23T094112-32638584705",
+        "2026-08-23T094112-10",
+        "2026-08-23T094112-9",
+        "2026-08-23-32638584704",
+    ]
+    # --keep counts from the newest end of that same order.
+    kept = gen.runs_from_history_root(root, _baselines(), keep=2)
+    assert [r["meta"]["run"] for r in kept] == ordered[:2]
+
+
+def test_workflow_prune_order_matches_the_generator_exactly(tmp_path):
+    # The shell prunes and the generator renders from the same directory list, so
+    # a disagreement deletes a directory the page still lists. Run the workflow's
+    # own pipeline rather than a paraphrase of it.
+    # Anchored on `ls`, not on its flags, so a change to those fails on the
+    # behaviour below rather than on finding nothing; _dedent_block still asserts
+    # the marker is unique, so it cannot silently lift some other step's shell.
+    # Cut before `tail`, so this asserts what the prune sees and not what it
+    # deletes; that leaves the continuation joining the two, which has to go.
+    pipeline = _dedent_block(_publish_step(), "ls -1", "| tr ").rstrip().rstrip("\\")
+
+    ids = [
+        "2026-08-23-32638584704",        # pre-change shape, same day
+        "2026-08-23T094112-32638584705",
+        "2026-08-24T031500-32700000001",
+        "2026-08-23T094112-9",           # variable-width run ids on one instant
+        "2026-08-23T094112-10",
+        "2026-08-22T235959-1",
+        "2026-13-99-1",                  # the generator's regex admits this; mirror it
+    ]
+    # The generator enumerates well-formed ids only, so anything else here must
+    # not reach the prune either: it would spend a keep slot the page does not,
+    # pushing the oldest run the page still lists past the tail -- deleting it.
+    strays = ["source", "assets", "2026-08-23T0941-7", "2026-08-23"]
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    for run_id in ids + strays:
+        (runs / run_id).mkdir()
+    # The enumeration takes directories only, so a *file* is skipped however it
+    # is named -- both halves of `p.is_dir() and _is_run_id(p.name)` have to
+    # mirror or the shell spends a slot on something the page never shows.
+    (runs / "index.html").write_text("", encoding="utf-8")
+    (runs / "2026-08-25T031500-2").write_text("", encoding="utf-8")
+
+    shell = _run_shell(pipeline, tmp_path, {"runs_dir": str(runs)}).splitlines()
+    # Same filter and same order as the enumeration, asserted through the
+    # generator's own predicate and key rather than a copy of either.
+    assert shell == [
+        p.name for p in sorted(
+            (p for p in runs.iterdir() if p.is_dir() and gen._is_run_id(p.name)),
+            key=lambda p: gen._history_sort_key(p.name),
+            reverse=True,
+        )
+    ]
+    assert shell == sorted(ids, key=gen._history_sort_key, reverse=True)
+
+
+def test_workflow_reuses_the_directory_a_rerun_already_minted(tmp_path):
+    # A re-run reuses GITHUB_RUN_ID, so it must land on the directory its first
+    # attempt minted. A fresh timestamp would give one workflow run two
+    # directories: two --keep slots, two history rows, and the earlier attempt's
+    # reports left in place -- which is what the step's `rm -rf` exists to stop.
+    block = _dedent_block(_publish_step(), 'run_dir_id=""', ': "${run_dir_id:=')
+    script = f'{block}\nprintf "%s" "$run_dir_id"'
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    env = {"runs_dir": str(runs), "GITHUB_RUN_ID": "32638584704",
+           "started_id": "2026-08-24T031500"}
+
+    # Nothing published yet: mint a name from this attempt's clock.
+    assert _run_shell(script, tmp_path, env) == "2026-08-24T031500-32638584704"
+
+    # A re-run of a timestamped run reuses that name, not the current time.
+    (runs / "2026-08-23T094112-32638584704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-23T094112-32638584704"
+
+    # ...and a re-run of a run published before the scheme keeps its old name,
+    # so no directory is ever renamed underneath a published URL.
+    shutil.rmtree(runs / "2026-08-23T094112-32638584704")
+    (runs / "2026-08-23-32638584704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-23-32638584704"
+
+    # A different run id is not mistaken for this one, including a suffix match.
+    shutil.rmtree(runs / "2026-08-23-32638584704")
+    (runs / "2026-08-23T094112-4704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-24T031500-32638584704"
+
+    # The old scheme could leave two directories for one run id -- a re-run that
+    # crossed midnight got a second date -- so reuse the newest of them rather
+    # than re-publishing into the older one and stranding the newer.
+    (runs / "2026-08-23-32638584704").mkdir()
+    (runs / "2026-08-24-32638584704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-24-32638584704"
+
+
+def test_every_implementation_of_the_run_id_shape_admits_the_same_names(tmp_path):
+    # The shape is spelled three times -- _RUN_ID_RE, the prune filter and the
+    # reuse guard -- because a workflow cannot import a Python constant. Assert
+    # they agree on one table rather than eyeballing three regexes: a name only
+    # the generator accepts is rendered but never pruned, and a name only the
+    # reuse glob accepts is published where nothing ever looks.
+    names = {
+        "2026-08-23T094112-32638584704": True,
+        "2026-08-23-32638584704": True,       # published before the time existed
+        "2026-13-99-32638584704": True,       # the regex does not range-check
+        "source-32638584704": False,          # the glob's suffix match is not enough
+        "2026-08-23T0941-32638584704": False,
+        "2026-8-3T094112-32638584704": False,
+        "\u0662\u0660\u0662\u0666-08-23-32638584704": False,  # Unicode digits
+        # A name may contain a newline, and Python's `$` matches before a
+        # trailing one -- the shell reads `ls` a line at a time and can only see
+        # this as two records, so `$` here would be a name only Python accepts.
+        "2026-08-23T094112-32638584704\n": False,
+    }
+    runs = tmp_path / "runs"
+    reuse = _dedent_block(_publish_step(), 'run_dir_id=""', ': "${run_dir_id:=')
+    env = {"runs_dir": str(runs), "GITHUB_RUN_ID": "32638584704",
+           "started_id": "2026-08-24T031500"}
+
+    for name, want in names.items():
+        assert gen._is_run_id(name) is want, name
+        # The reuse guard: only a name the generator would enumerate may be
+        # published into; anything else has to be passed over for a fresh one.
+        shutil.rmtree(runs, ignore_errors=True)
+        runs.mkdir()
+        (runs / name).mkdir()
+        resolved = _run_shell(f'{reuse}\nprintf "%s" "$run_dir_id"', tmp_path, env)
+        assert resolved == (name if want else "2026-08-24T031500-32638584704"), name
+
+    # The prune filter, over the whole table at once -- what it keeps is exactly
+    # what the generator enumerates, so neither spends a keep slot the other does
+    # not. (Ordering is asserted separately, over ids that differ.)
+    shutil.rmtree(runs, ignore_errors=True)
+    runs.mkdir()
+    for name in names:
+        (runs / name).mkdir()
+    pipeline = _dedent_block(_publish_step(), "ls -1", "| tr ").rstrip().rstrip("\\")
+    kept = _run_shell(pipeline, tmp_path, {"runs_dir": str(runs)}).splitlines()
+    assert sorted(kept) == sorted(n for n, want in names.items() if want)
+
+
+def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
+    # The workflow derives meta.json's date from the resolved directory name so a
+    # re-run cannot report a clock its own directory contradicts. Run the step's
+    # own metadata writer over both id shapes and render what it wrote: asserting
+    # that its parsing pattern appears in the file would still pass if the block
+    # stopped consulting the directory name at all.
+    block = _dedent_block(
+        _publish_step(), 'if [ "${GPU_RESULT}" = "success" ]; then gate=true', "PY"
+    )
+    # That block runs `python`; the interpreter running these tests may only be
+    # on PATH under another name, so shim the name the workflow uses.
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "python").write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
+    )
+    (shim / "python").chmod(0o755)
+    started_iso = "2026-08-24T03:15:00+00:00"
+    env = {
+        "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "ROCm/aorta",
+        "GITHUB_RUN_ID": "32638584704",
+        "GITHUB_SHA": "f" * 40,
+        "GPU_RESULT": "success",
+        "started_iso": started_iso,
+    }
+
+    for run_id, expected, rendered in (
+        # A timestamped name reports the instant it carries, not this attempt's
+        # clock -- that is what makes a re-run's manifest match its directory.
+        (
+            "2026-08-23T094112-32638584704",
+            "2026-08-23T09:41:12+00:00",
+            "2026-08-23 09:41:12 UTC",
+        ),
+        # A name from before the scheme carries no time, but it does carry its
+        # day, and re-publishing into one must keep that day: `rm -rf` cleared a
+        # manifest that already held it, so taking this attempt's clock instead
+        # would render an August instant for a July directory. Pinned as the
+        # rendering too, because what must not move is what the page shows.
+        ("2026-08-23-32638584704", "2026-08-23", "2026-08-23"),
+        # Only a name of neither shape has no day to keep; then the publish clock
+        # is all there is. Not reachable from the naming scheme -- the fallback
+        # exists so an unexpected name still gets a manifest.
+        ("nightly-32638584704", started_iso, "2026-08-24 03:15:00 UTC"),
+    ):
+        dest = tmp_path / run_id
+        dest.mkdir()
+        _run_shell(block, tmp_path, {**env, "dest": str(dest), "run_dir_id": run_id})
+
+        meta = json.loads((dest / "meta.json").read_text(encoding="utf-8"))
+        assert meta.get("date") == expected, run_id
+        assert meta.get("run") == run_id
+        assert meta.get("gate") is True  # mirrors GPU_RESULT=success
+        # What the generator will put on the page for that manifest -- for the
+        # timestamped name, the 094112 its own directory carries. Agreement is
+        # asserted through the renderer rather than by pinning a shared pattern.
+        assert gen.format_instant(meta.get("date")) == rendered, run_id
+
+
+def test_workflow_commit_message_names_the_area_and_the_publish(tmp_path):
+    # A date-only subject gave two same-day runs the same commit title on the data
+    # branch, and a subject named only by run_dir_id would give a re-run the same
+    # title as the attempt it replaces (the name is reused). Naming both makes
+    # every publish distinct and self-consistent with the directory it wrote.
+    # Run the step's own tail -- that also proves both variables are in scope
+    # inside the subshell and the message survives as one -m argument.
+    block = _dedent_block(_publish_step(), "# Mirror the rendered dashboard", "fi )")
+
+    remote = tmp_path / "remote.git"
+    work = tmp_path / "checkout"
+    (work / "dashboard").mkdir(parents=True)
+    (work / "dashboard" / "summary.md").write_text("# summary\n", encoding="utf-8")
+    # symbolic-ref / checkout -b rather than `git init -b`, which needs git 2.28.
+    _run_shell(
+        f'git init -q --bare "{remote}"'
+        f' && git -C "{remote}" symbolic-ref HEAD refs/heads/sanitizer-results'
+        f' && git init -q "{work}" && git -C "{work}" checkout -q -b sanitizer-results'
+        f' && git -C "{work}" remote add origin "{remote}"',
+        tmp_path,
+        {},
+    )
+    env = {
+        "tmp": str(work),
+        "run_dir_id": "2026-08-23T094112-32638584704",
+        "started_iso": "2026-08-24T03:15:00+00:00",
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "step_summary.md"),
+    }
+    _run_shell(block, tmp_path, env)
+
+    # The subject the reader of `git log` on sanitizer-results sees, and it is on
+    # the branch the step pushes to -- read back from the remote, not the clone.
+    subject = _run_shell(f'git -C "{remote}" log -1 --format=%s sanitizer-results',
+                         tmp_path, {})
+    assert subject == (
+        "sanitizer dashboard 2026-08-23T094112-32638584704 "
+        "(published 2026-08-24T03:15:00+00:00)"
+    )
+    # A re-run reuses run_dir_id, so only the publish instant moves it -- that is
+    # what keeps the two commits distinguishable.
+    assert env["run_dir_id"] in subject and env["started_iso"] in subject
+
+
+def test_format_instant_renders_a_time_and_never_invents_one():
+    assert gen.format_instant("2026-08-23T09:41:12+00:00") == "2026-08-23 09:41:12 UTC"
+    # An explicit Z, which fromisoformat only accepts from 3.11.
+    assert gen.format_instant("2026-08-23T09:41:12Z") == "2026-08-23 09:41:12 UTC"
+    # Naive means UTC by construction: every writer uses `date -u` or utcnow.
+    assert gen.format_instant("2026-08-23T09:41:12") == "2026-08-23 09:41:12 UTC"
+    # A non-UTC offset is normalised rather than shown in the writer's zone.
+    assert gen.format_instant("2026-08-23T11:41:12+02:00") == "2026-08-23 09:41:12 UTC"
+
+    # Sub-second precision from a hand-written manifest still renders, truncated.
+    assert (
+        gen.format_instant("2026-08-23T09:41:12.500000+00:00")
+        == "2026-08-23 09:41:12 UTC"
+    )
+
+    # A date-only value comes from a run published before the id carried a time.
+    # fromisoformat() would accept it and render a confident 00:00:00, so the
+    # value is returned untouched instead of inventing a midnight.
+    assert gen.format_instant("2026-08-23") == "2026-08-23"
+    # Malformed or absent values pass through: the run identity around them is
+    # still worth rendering. A shape-valid impossible date lands here too.
+    for junk in ("", None, "d", "not a date", "2026-08-23 morning",
+                 "2026-13-23T09:41:12+00:00"):
+        assert gen.format_instant(junk) == (junk or "")
+    # Only *absent* renders as empty. A falsy value from a malformed manifest is
+    # shown, not swallowed -- a blank cell reads as "no date recorded", which is
+    # a different fact and hides the one that needs fixing.
+    for falsy, shown in ((0, "0"), (False, "False")):
+        assert gen.format_instant(falsy) == shown
+
+
+def test_format_instant_renders_the_same_on_every_supported_interpreter():
+    # datetime.fromisoformat's accepted set widened in 3.11 (ISO 8601 basic
+    # format, and 1-2 digit fractional seconds), and the repo's CI matrix spans
+    # 3.10-3.12. Left to fromisoformat these shapes render a time on 3.11+ and
+    # pass through on 3.10 -- for output that is committed to the data branch,
+    # which is a byte-diff that depends on which runner published. format_instant
+    # gates on an explicit shape so every interpreter passes them through.
+    for widened in (
+        "2026-08-23T0941",  # basic format, minutes
+        "2026-08-23T094112",  # basic format -- the form a run id embeds
+        "2026-08-23T09:41:12+0000",  # offset without its colon
+        "2026-08-23T09:41:12.1",  # a fraction 3.10 rejects
+    ):
+        assert gen.format_instant(widened) == widened
+
+    # The run id carries that compact stamp, and its own directory name must not
+    # be mistaken for a rendered instant anywhere it is displayed.
+    run_id = "2026-08-23T094112-32638584704"
+    assert gen.format_instant(run_id) == run_id
+
+
+def test_published_pages_show_the_instant_but_env_json_keeps_it_machine_readable(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "runs"
+    run_id = "2026-08-23T094112-32638584705"
+    _write_history_run(root, run_id, meta={"date": "2026-08-23T09:41:12+00:00"})
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard", "--history-root", str(root),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(tmp_path / "dashboard"),
+    ])
+    assert gen.main() == 0
+    out = tmp_path / "dashboard"
+
+    human = "2026-08-23 09:41:12 UTC"
+    for page in (out / "index.html", out / "runs" / run_id / "waitcheck" / "index.html"):
+        assert human in page.read_text(encoding="utf-8"), page
+    assert human in (out / "summary.md").read_text(encoding="utf-8")
+
+    # The manifest a consumer of aorta.sanitizer_run_area/0.1 reads keeps the
+    # ISO instant: the human rendering is a display concern, not a stored one.
+    env = json.loads(
+        (out / "runs" / run_id / "waitcheck" / "env.json").read_text(encoding="utf-8")
+    )
+    assert env.get("date") == "2026-08-23T09:41:12+00:00"
 
 
 def test_history_root_missing_report_has_no_report_rel(tmp_path):

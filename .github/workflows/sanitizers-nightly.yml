@@ -605,8 +605,13 @@ jobs:
         run: |
           set -euo pipefail
           keep=30
-          date="$(date -u +%Y-%m-%d)"
-          run_dir_id="${date}-${GITHUB_RUN_ID}"   # <YYYY-MM-DD>-<run_id>: date-sortable + unique
+          # One clock read for the directory name and the recorded instant alike,
+          # so a published area cannot report a time its own directory disagrees
+          # with. run_dir_id is resolved after the clone -- it may reuse a name
+          # already on the branch (see below).
+          now="$(date -u +%s)"
+          started_id="$(date -u -d "@${now}" +%Y-%m-%dT%H%M%S)"
+          started_iso="$(date -u -d "@${now}" +%Y-%m-%dT%H:%M:%S+00:00)"
           repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           tmp="$(mktemp -d)"
           # Fail closed: distinguish a genuinely-absent sanitizer-results branch
@@ -632,11 +637,50 @@ jobs:
           # dashboard/runs/). A failed/absent report is simply not copied; the
           # generator then renders that case as missing -> a red per-run gate.
           runs_dir="$tmp/dashboard/runs"
+          # <YYYY-MM-DD>T<HHMMSS>-<run_id>: sortable to the second, and unique.
+          # The T puts the time *inside* the date field rather than adding another
+          # "-" field, so a field-wise numeric sort of the date parts reads only
+          # the day and would order same-day runs by run id alone. The prune below
+          # therefore splits the trailing run id off and sorts the rest lexically,
+          # mirroring the generator's _history_sort_key -- see that sort's comment.
+          #
+          # A re-run reuses GITHUB_RUN_ID (only GITHUB_RUN_ATTEMPT changes) and has
+          # to land on the directory its first attempt minted. Stamping a fresh
+          # time would create a second directory for one workflow run: two of the
+          # keep slots, two rows in history, and the earlier attempt reports left
+          # in place -- which is exactly what the rm -rf below exists to prevent.
+          # Reuse whatever name already carries this run id, old shape included.
+          # No break, so the last match wins. Only the old scheme could leave two
+          # names for one run id -- a re-run that crossed midnight got a second
+          # date -- and re-publishing into the older of those would strand the
+          # newer one, so the last match has to be the later day. Those two names
+          # differ in a date digit, which every collation orders the same way, so
+          # glob order settles it without pinning LC_COLLATE here; the prune below
+          # compares "-" against "T" across run ids and does need LC_ALL=C. A
+          # timestamped name cannot collide with either: one is minted only when
+          # this loop found nothing.
+          run_dir_id=""
+          for existing in "$runs_dir"/*-"${GITHUB_RUN_ID}"; do
+            name="$(basename "$existing")"
+            # The glob matches any name ending in this run id, but only a name
+            # the generator recognises may be reused: publishing into, say, a
+            # stray source-${GITHUB_RUN_ID} would write a run that neither the
+            # prune nor the page ever enumerates, so tonight's results would be
+            # invisible on the dashboard and would never rotate out either. It
+            # is also what makes the ordering argument above hold, since such a
+            # name could otherwise sort last and win. The shapes are _RUN_ID_RE's.
+            # [[:digit:]] rather than [0-9]: a bracket *range* is collation-based,
+            # and under a UTF-8 locale bash matches Unicode decimal digits with
+            # [0-9] -- the POSIX class is the ASCII digits on both sides.
+            [[ "$name" =~ ^[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}(T[[:digit:]]{6})?-[[:digit:]]+$ ]] || continue
+            if [ -d "$existing" ]; then run_dir_id="$name"; fi
+          done
+          : "${run_dir_id:=${started_id}-${GITHUB_RUN_ID}}"
           dest="$runs_dir/${run_dir_id}"
-          # A same-day Actions re-run reuses GITHUB_RUN_ID (only GITHUB_RUN_ATTEMPT
-          # changes), so it targets this same directory. Clear it first so a report
-          # absent from the current attempt cannot survive from a prior one and mask
-          # a now-missing case (the generator fails such a case closed).
+          echo "[$(date +%T)] publishing run ${run_dir_id}"
+          # Clear it first so a report absent from the current attempt cannot
+          # survive from a prior one and mask a now-missing case (the generator
+          # fails such a case closed).
           rm -rf "$dest"
           mkdir -p "$dest"
           # Copy the whole case directory, not just the report: the sanitizer
@@ -661,12 +705,28 @@ jobs:
           # gate mirrors the GPU job result (its comparator step is the gate); the
           # rendered history recomputes it from the reports + baselines regardless.
           if [ "${GPU_RESULT}" = "success" ]; then gate=true; else gate=false; fi
-          python - "$run_dir_id" "$date" "$gate" > "$dest/meta.json" <<'PY'
-          import json, os, sys
-          run_id, date, gate = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+          python - "$run_dir_id" "$started_iso" "$gate" > "$dest/meta.json" <<'PY'
+          import json, os, re, sys
+          run_id, started_iso, gate = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
           server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
           repo = os.environ.get("GITHUB_REPOSITORY", "")
           gh_run = os.environ.get("GITHUB_RUN_ID", "")
+          # Take the date from the directory name so the two cannot disagree: a
+          # re-run reuses the name its first attempt minted, and recording this
+          # attempt clock beside that name would contradict it. A name from before
+          # the timestamped scheme still carries its day, and re-publishing into
+          # one must keep that day rather than stamp it with today: rm -rf cleared
+          # a meta.json that already held the right date-only value, and
+          # format_instant passes such a value through unchanged, so nothing has
+          # to be invented (docs/ci-nightly-eval.md -- those runs keep their
+          # date-only manifests). Only a name of neither shape has no date to take.
+          stamped = re.match(r"^(\d{4}-\d{2}-\d{2})(?:T(\d{2})(\d{2})(\d{2}))?-", run_id)
+          if stamped and stamped.group(2):
+              date = "{}T{}:{}:{}+00:00".format(*stamped.groups())
+          elif stamped:
+              date = stamped.group(1)
+          else:
+              date = started_iso
           print(json.dumps({
               "run": run_id,
               "commit": os.environ.get("GITHUB_SHA", ""),
@@ -677,13 +737,36 @@ jobs:
           }, indent=2, sort_keys=True))
           PY
 
-          # Rolling window: drop all but the newest N run directories. Sort by the
-          # date fields then the run-id numerically (-t- splits <YYYY-MM-DD>-<run_id>
-          # into fields 1-4), so a variable-width run id (...-9 vs ...-10) still
-          # orders newest-first -- a plain lexical sort would prune the wrong dir.
+          # Rolling window: drop all but the newest N run directories, in exactly
+          # the order the generator renders them (_history_sort_key) -- if the two
+          # disagree this deletes a directory the page still lists. That key is
+          # "everything before the trailing run id, lexically; then that id as an
+          # integer", the integer part because it is variable-width and a plain
+          # lexical sort puts ...-9 after ...-10. sed splits the id onto its own
+          # field so sort can treat the two halves differently, and tr rejoins it
+          # (a run id has no spaces -- the schema is digits and dashes).
+          #
+          # One pass covers both id shapes: the timestamp lives in the lexical
+          # half, so a date-only name from before the timestamped scheme compares
+          # as that day's earliest, which is what it is. LC_ALL=C so the lexical
+          # half is byte-ordered like Python's, not collated by the runner locale.
+          #
+          # The sed only prints entries the generator would also count, so the two
+          # spend the same keep slots: it enumerates directories whose name is a
+          # well-formed id (p.is_dir() and _is_run_id / _RUN_ID_RE), so anything
+          # else here -- a leftover source/ from a nested --history-root layout,
+          # say -- would take a slot the page does not spend and push the oldest
+          # run the page still lists past the tail, i.e. delete it. `ls -p` marks
+          # directories with a trailing slash and the pattern requires it, which
+          # is the is_dir() half; the rest of the pattern is deliberately exactly
+          # as permissive as that regex, and spells its digits the same way the
+          # reuse guard above does and for the same reason. This mirrors the
+          # enumeration, it does not tighten it.
           if [ -d "$runs_dir" ]; then
-            ls -1 "$runs_dir" \
-              | sort -t- -k1,1nr -k2,2nr -k3,3nr -k4,4nr \
+            ls -1p "$runs_dir" \
+              | sed -n 's|^\([[:digit:]]\{4\}-[[:digit:]]\{2\}-[[:digit:]]\{2\}\(T[[:digit:]]\{6\}\)\{0,1\}\)-\([[:digit:]][[:digit:]]*\)/$|\1 \3|p' \
+              | LC_ALL=C sort -k1,1r -k2,2nr \
+              | tr ' ' '-' \
               | tail -n +"$((keep + 1))" | while IFS= read -r old; do
               [ -n "$old" ] && rm -rf "${runs_dir:?}/${old}"
             done
@@ -732,10 +815,18 @@ jobs:
           cp -a "$tmp/dashboard" dashboard
           cat dashboard/summary.md >> "$GITHUB_STEP_SUMMARY"
 
+          # Two identifiers because they answer different questions and a re-run
+          # moves only one: run_dir_id is the area this commit published (reused
+          # from the first attempt), started_iso is when this publish ran. A
+          # date-only title gave two same-day runs the same subject; run_dir_id
+          # alone would give a re-run the same subject as the attempt it
+          # replaces. Reading git log, equal instants mean a first attempt and
+          # different ones a re-run. run_dir_id already ends in GITHUB_RUN_ID, so
+          # naming the run id again would just print it twice.
           ( cd "$tmp"
             git add -A
             if git -c user.name=aorta-ci -c user.email=aorta-ci@users.noreply.github.com \
-                 commit -m "sanitizer dashboard ${date} (run ${GITHUB_RUN_ID})"; then
+                 commit -m "sanitizer dashboard ${run_dir_id} (published ${started_iso})"; then
               git push origin sanitizer-results   # not swallowed -- a push failure fails the job
             else
               echo "no changes to commit"
