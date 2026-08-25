@@ -531,6 +531,28 @@ def test_run_fails_closed_when_the_pinned_object_changed(tmp_path, capsys, monke
     assert "code object digest mismatch" in capsys.readouterr().err
 
 
+def test_pinned_launch_spec_without_a_launch_spec_fails_closed(tmp_path, capsys, monkeypatch):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+
+    def _explode():
+        raise AssertionError("device must not be touched")
+
+    monkeypatch.setattr(loader, "Hip", _explode)
+    assert (
+        loader.main(
+            [
+                "run",
+                "--hsaco",
+                str(entry_dir / "add_kernel.hsaco"),
+                "--expect-launch-spec-sha256",
+                "deadbeef",
+            ]
+        )
+        == 1
+    )
+    assert "--expect-launch-spec-sha256 given without --launch-spec" in capsys.readouterr().err
+
+
 def test_run_fails_closed_when_the_pinned_metadata_changed(tmp_path, capsys, monkeypatch):
     entry_dir = _entry_dir(tmp_path / "ENTRY")
     metadata = entry_dir / "add_kernel.json"

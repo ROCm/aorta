@@ -23,6 +23,12 @@ description: >
   Point code_object at the same .hsaco the shim loads: the loader hashes it at
   recipe load time so ConSan attributes its verdict to a real identity.
 
+  The shim also pins the SHA-256 of the object, the metadata, and any launch
+  spec, because a Triton cache entry can be evicted and repopulated under the
+  same path. So a shim goes stale whenever the kernel is recompiled, and refuses
+  to run rather than loading the new bytes under the old identity: re-run
+  emit-command after any recompile.
+
   One logical Triton kernel often compiles to several objects (shape-selected
   variants). ConSan takes exactly one code object per run, so harvest one shim
   and one recipe per object; the loader fails closed and lists the candidates if

@@ -804,6 +804,9 @@ def _command_run(args: argparse.Namespace) -> int:
     # repopulated since emission fails closed instead of loading other bytes.
     verify_digest(entry.hsaco, args.expect_object_sha256, what="code object")
     verify_digest(entry.metadata_path, args.expect_metadata_sha256, what="Triton metadata")
+    if args.expect_launch_spec_sha256 is not None and not args.launch_spec:
+        # A requested check that silently does not run is worse than no check.
+        raise LoaderError("--expect-launch-spec-sha256 given without --launch-spec")
     hip = Hip()
     if args.mode == "load":
         run_load(hip, entry)
