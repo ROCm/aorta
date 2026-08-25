@@ -2677,11 +2677,16 @@ def _status_banner_md(status: dict[str, Any] | None) -> str:
     run_id = str(status.get("run_id", "") or "")
     url = str(status.get("run_url", "") or "")
     conclusion = str(status.get("conclusion", "") or "unknown")
+    # Same instant as the HTML banner: both name when the failed nightly ran, so
+    # a reader of the job summary can tell a fresh failure from a stale one.
+    when = format_instant(status.get("date", ""))
     run_txt = f" run `{run_id}`" if run_id else ""
     link = f" [view failed run]({url})" if url else ""
+    when_txt = f" ({when})" if when else ""
     return (
         f"> \u26a0\ufe0f **Stale** \u2014 latest sanitizer nightly{run_txt} did not "
-        f"complete successfully ({conclusion}); the data below may be stale.{link}"
+        f"complete successfully ({conclusion}); the data below may be stale."
+        f"{link}{when_txt}"
     )
 
 

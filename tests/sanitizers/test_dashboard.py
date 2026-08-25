@@ -431,9 +431,14 @@ def test_build_html_no_banner_when_healthy():
 
 def test_build_summary_md_stale_banner():
     status = {"healthy": False, "conclusion": "failure", "run_id": "9",
-              "run_url": "https://x/9", "date": "d"}
+              "run_url": "https://x/9", "date": "2026-08-23T09:41:12+00:00"}
     md = gen.build_summary_md([], status=status)
     assert "Stale" in md and "https://x/9" in md
+    # Both banners name when the failed nightly ran, and render it identically:
+    # a job-summary reader has to be able to tell a fresh failure from a stale
+    # one without opening the page.
+    assert "2026-08-23 09:41:12 UTC" in md
+    assert "2026-08-23 09:41:12 UTC" in gen._status_banner_html(status)
 
 
 def test_main_empty_runs_root_publishes_placeholder(tmp_path, monkeypatch):
@@ -709,10 +714,12 @@ def test_workflow_prune_order_matches_the_generator_exactly(tmp_path):
     # The shell prunes and the generator renders from the same directory list, so
     # a disagreement deletes a directory the page still lists. Run the workflow's
     # own pipeline rather than a paraphrase of it.
-    lines = _publish_step().splitlines()
-    start = next(i for i, line in enumerate(lines) if 'ls -1 "$runs_dir"' in line)
-    end = next(i for i, line in enumerate(lines[start:], start) if "| tr " in line)
-    pipeline = " ".join(line.strip().rstrip("\\").strip() for line in lines[start : end + 1])
+    # Anchored on `ls`, not on its flags, so a change to those fails on the
+    # behaviour below rather than on finding nothing; _dedent_block still asserts
+    # the marker is unique, so it cannot silently lift some other step's shell.
+    # Cut before `tail`, so this asserts what the prune sees and not what it
+    # deletes; that leaves the continuation joining the two, which has to go.
+    pipeline = _dedent_block(_publish_step(), "ls -1", "| tr ").rstrip().rstrip("\\")
 
     ids = [
         "2026-08-23-32638584704",        # pre-change shape, same day
@@ -721,13 +728,32 @@ def test_workflow_prune_order_matches_the_generator_exactly(tmp_path):
         "2026-08-23T094112-9",           # variable-width run ids on one instant
         "2026-08-23T094112-10",
         "2026-08-22T235959-1",
+        "2026-13-99-1",                  # the generator's regex admits this; mirror it
     ]
+    # The generator enumerates well-formed ids only, so anything else here must
+    # not reach the prune either: it would spend a keep slot the page does not,
+    # pushing the oldest run the page still lists past the tail -- deleting it.
+    strays = ["source", "assets", "2026-08-23T0941-7", "2026-08-23"]
     runs = tmp_path / "runs"
     runs.mkdir()
-    for run_id in ids:
+    for run_id in ids + strays:
         (runs / run_id).mkdir()
+    # The enumeration takes directories only, so a *file* is skipped however it
+    # is named -- both halves of `p.is_dir() and _is_run_id(p.name)` have to
+    # mirror or the shell spends a slot on something the page never shows.
+    (runs / "index.html").write_text("", encoding="utf-8")
+    (runs / "2026-08-25T031500-2").write_text("", encoding="utf-8")
 
     shell = _run_shell(pipeline, tmp_path, {"runs_dir": str(runs)}).splitlines()
+    # Same filter and same order as the enumeration, asserted through the
+    # generator's own predicate and key rather than a copy of either.
+    assert shell == [
+        p.name for p in sorted(
+            (p for p in runs.iterdir() if p.is_dir() and gen._is_run_id(p.name)),
+            key=lambda p: gen._history_sort_key(p.name),
+            reverse=True,
+        )
+    ]
     assert shell == sorted(ids, key=gen._history_sort_key, reverse=True)
 
 
@@ -805,9 +831,16 @@ def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
             "2026-08-23T09:41:12+00:00",
             "2026-08-23 09:41:12 UTC",
         ),
-        # A name from before the scheme carries no instant, so this publish
-        # supplies its own rather than inventing that date's midnight.
-        ("2026-08-23-32638584704", started_iso, "2026-08-24 03:15:00 UTC"),
+        # A name from before the scheme carries no time, but it does carry its
+        # day, and re-publishing into one must keep that day: `rm -rf` cleared a
+        # manifest that already held it, so taking this attempt's clock instead
+        # would render an August instant for a July directory. Pinned as the
+        # rendering too, because what must not move is what the page shows.
+        ("2026-08-23-32638584704", "2026-08-23", "2026-08-23"),
+        # Only a name of neither shape has no day to keep; then the publish clock
+        # is all there is. Not reachable from the naming scheme -- the fallback
+        # exists so an unexpected name still gets a manifest.
+        ("nightly-32638584704", started_iso, "2026-08-24 03:15:00 UTC"),
     ):
         dest = tmp_path / run_id
         dest.mkdir()
