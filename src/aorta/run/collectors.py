@@ -48,6 +48,12 @@ KNOWN_RECIPES: frozenset[str] = frozenset(
 CONFIG_KEY_COLLECT = "_aorta_collect"
 CONFIG_KEY_COLLECT_OPTIONS = "_aorta_collect_options"
 CONFIG_KEY_COLLECT_DIR = "_aorta_collect_dir"
+#: The dispatcher's ``--results-dir``, threaded so the symlink guards have a
+#: trust anchor that does **not** come from the path being validated. Every
+#: directory at or below the collector root is payload-writable during the run,
+#: so a boundary derived from the collector root itself proves nothing; this key
+#: is the operator-declared root above all of it.
+CONFIG_KEY_RESULTS_ROOT = "_aorta_results_root"
 
 #: Argv-wrapping order, outermost first. ``rocprof`` runs a whole command under
 #: the profiler while ``proton`` takes over a Python script's execution, so
@@ -159,6 +165,26 @@ def _collect_root(config: Mapping[str, Any]) -> Path | None:
     return Path(raw) if isinstance(raw, str) and raw else None
 
 
+def _trusted_root(config: Mapping[str, Any], root: Path) -> Path:
+    """The directory every collector path must resolve inside.
+
+    Prefers the dispatcher-threaded ``--results-dir``
+    (:data:`CONFIG_KEY_RESULTS_ROOT`), because a trust anchor must not be
+    derived from the path it is validating: everything at or below the collector
+    root is payload-writable while the trial runs, so ``root.parent`` can itself
+    be the symlink doing the escaping.
+
+    Falls back to ``root.parent`` when the key is absent, which only happens for
+    a direct programmatic caller -- the dispatcher always supplies it alongside
+    ``_aorta_collect_dir``. That fallback still catches a swapped collector root
+    or subdirectory; it cannot catch a swapped ancestor.
+    """
+    raw = config.get(CONFIG_KEY_RESULTS_ROOT)
+    if isinstance(raw, str) and raw:
+        return Path(raw)
+    return root.parent
+
+
 def unsafe_collector_paths(config: Mapping[str, Any]) -> list[Path]:
     """Every collector path for this trial that cannot be safely traversed.
 
@@ -176,36 +202,51 @@ def unsafe_collector_paths(config: Mapping[str, Any]) -> list[Path]:
     if root is None:
         return []
     registry = _registry()
+    trusted = _trusted_root(config, root)
     candidates = [root]
     for name in active_collectors(config):
         spec = registry.get(name)
         if spec is not None and spec.output_subdir is not None:
             candidates.append(root / spec.output_subdir)
-    return [path for path in candidates if not collector_root_is_traversable(path)]
+    return [path for path in candidates if not collector_root_is_traversable(path, trusted)]
 
 
-def collector_root_is_traversable(root: Path) -> bool:
-    """True when ``root`` can be walked without following a symlink out of the tree.
+def collector_root_is_traversable(root: Path, trusted_root: Path | None = None) -> bool:
+    """True when ``root`` resolves to somewhere inside ``trusted_root``.
 
     Checked **again after the command has run**, not only before it launches.
     The profiled command is handed this path (``rocprofv3 -d``, ``proton -n``),
-    so between the pre-launch reset and any post-run pass it can delete the
+    so between the pre-launch reset and any post-run pass it can delete a
     directory and leave a symlink in its place. Every later step --
     ``Path.is_dir()``, ``rglob``, and :func:`aorta.run.retention.apply_retention`
-    -- follows links, so traversing one would read, and for retention *delete*,
-    files outside the results tree entirely.
+    -- follows links in *every* path component, so traversing one would read,
+    and for retention *delete*, files outside the results tree.
 
-    The parent is checked too, for the same reason
-    :func:`_reset_output_dir` checks it: ``is_dir()`` resolves every component,
-    not just the last.
+    Containment against a trusted root, rather than a per-component symlink
+    scan, because the two cases look identical component-by-component and only
+    differ in who owns the link:
+
+    * **Above** the trusted root the path is the operator's own -- a
+      ``--results-dir`` that legitimately lives under a symlink is normal, and
+      following it is the intended behaviour. Resolving the trusted root first
+      allows that.
+    * **At or below** it, every component is payload-writable, so a link there
+      is an escape regardless of how deep it sits. ``resolve()`` collapses the
+      whole chain, so this catches a swap at any depth rather than only at the
+      leaf or its parent.
+
+    ``trusted_root`` defaults to ``root.parent``, which for the collector layout
+    is the dispatcher-created results directory.
     """
+    trusted = trusted_root if trusted_root is not None else root.parent
     try:
-        return not (root.is_symlink() or root.parent.is_symlink())
-    except OSError:
+        return root.resolve().is_relative_to(trusted.resolve())
+    except (OSError, RuntimeError):
+        # RuntimeError: a symlink loop that ``resolve()`` refuses to follow.
         return False
 
 
-def _reset_output_dir(out_dir: Path) -> None:
+def _reset_output_dir(out_dir: Path, trusted_root: Path) -> None:
     """Create ``out_dir`` empty, discarding any earlier attempt's artifacts.
 
     Probe resume replays an interrupted trial onto the *same* paths, so a
@@ -216,22 +257,23 @@ def _reset_output_dir(out_dir: Path) -> None:
     one trial of one collector: nothing else writes here, and the trial record
     (``result.json``) lives in a different tree.
 
+    Args:
+        out_dir: The collector's output directory for this trial.
+        trusted_root: The dispatcher-created results directory ``out_dir`` must
+            resolve inside. Checked because ``rmtree`` is recursive and
+            ``is_dir()`` follows symlinks in *every* component, so a link
+            anywhere at or below the trusted root would redirect the delete
+            outside the results tree.
+
     Raises:
-        OSError: the directory could not be cleared or created, or its parent is
-            a symlink (see below).
+        OSError: the directory could not be cleared or created, or it does not
+            resolve inside ``trusted_root``.
     """
-    # ``Path.is_dir()`` follows symlinks in *every* component, not just the
-    # last, so checking ``out_dir`` alone is not enough: if the per-trial
-    # collector root is a pre-existing symlink, ``out_dir`` resolves through it
-    # and ``rmtree`` would recursively delete the link target -- a tree outside
-    # the results directory entirely. The results tree is created by the
-    # dispatcher, so a symlink here is anomalous; refuse rather than guess.
-    parent = out_dir.parent
-    if parent.is_symlink():
+    if not collector_root_is_traversable(out_dir, trusted_root):
         raise OSError(
-            f"refusing to prepare {out_dir}: its parent {parent} is a symlink, "
-            "and clearing through it would delete the link target outside the "
-            "results tree. Remove the symlink or point --results-dir at a real "
+            f"refusing to prepare {out_dir}: it resolves outside {trusted_root}, "
+            "so clearing it would delete a tree outside the results directory. "
+            "Remove the symlink in that path, or point --results-dir at a real "
             "directory."
         )
     if out_dir.is_symlink() or out_dir.is_file():
@@ -351,7 +393,7 @@ def wrap_argv_for_collectors(
             continue
         out_dir = root / spec.output_subdir
         try:
-            _reset_output_dir(out_dir)
+            _reset_output_dir(out_dir, _trusted_root(config, root))
         except OSError as exc:
             raise RuntimeError(
                 f"collect: cannot prepare the {name} artifact directory "
@@ -418,6 +460,7 @@ __all__ = [
     "CONFIG_KEY_COLLECT",
     "CONFIG_KEY_COLLECT_DIR",
     "CONFIG_KEY_COLLECT_OPTIONS",
+    "CONFIG_KEY_RESULTS_ROOT",
     "KNOWN_RECIPES",
     "WRAP_ORDER",
     "CollectorSpec",

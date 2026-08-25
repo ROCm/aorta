@@ -27,6 +27,7 @@ from aorta.run.collectors import (
     CONFIG_KEY_COLLECT,
     CONFIG_KEY_COLLECT_DIR,
     CONFIG_KEY_COLLECT_OPTIONS,
+    CONFIG_KEY_RESULTS_ROOT,
     KNOWN_RECIPES,
     WRAP_ORDER,
     CollectorSpec,
@@ -55,12 +56,14 @@ def profilers_on_path(tmp_path, monkeypatch):
     return bin_dir
 
 
-def _config(names, *, collect_dir=None, options=None):
+def _config(names, *, collect_dir=None, options=None, results_root=None):
     config = {CONFIG_KEY_COLLECT: list(names)}
     if collect_dir is not None:
         config[CONFIG_KEY_COLLECT_DIR] = str(collect_dir)
     if options is not None:
         config[CONFIG_KEY_COLLECT_OPTIONS] = options
+    if results_root is not None:
+        config[CONFIG_KEY_RESULTS_ROOT] = str(results_root)
     return config
 
 
@@ -240,6 +243,57 @@ def test_wrap_fails_when_the_output_dir_cannot_be_created(profilers_on_path, tmp
         wrap_argv_for_collectors(config, _INNER)
 
 
+def test_wrap_refuses_a_symlink_in_any_component_below_the_trusted_root(
+    profilers_on_path, tmp_path
+):
+    """A symlink *anywhere* at or below the trusted root redirects the delete.
+
+    Checking only the leaf and its parent is not enough: ``is_dir()`` and
+    ``rmtree()`` follow links in every component, so a link further up -- but
+    still inside the payload-writable run tree -- reaches outside just as well.
+    Here ``<results>/linked -> <outside>`` with the collector root two levels
+    below it, and neither the leaf nor its parent is itself a symlink.
+    """
+    results = tmp_path / "results"
+    results.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "trial_d0_m0_t0" / "rocprof").mkdir(parents=True)
+    victim = outside / "trial_d0_m0_t0" / "rocprof" / "precious.txt"
+    victim.write_text("not yours to delete", encoding="utf-8")
+    (results / "linked").symlink_to(outside, target_is_directory=True)
+
+    collect_dir = results / "linked" / "trial_d0_m0_t0"
+    assert not collect_dir.is_symlink()  # the gap: nothing local looks wrong
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(
+            _config(["rocprof"], collect_dir=collect_dir, results_root=results), _INNER
+        )
+    assert victim.read_text(encoding="utf-8") == "not yours to delete"
+
+
+def test_wrap_allows_a_results_dir_that_legitimately_lives_under_a_symlink(
+    profilers_on_path, tmp_path
+):
+    """The operator's own layout above the trusted root must keep working.
+
+    A ``--results-dir`` under a symlink (a mounted scratch path, a symlinked
+    home) is ordinary, and following it is the intended behaviour -- which is
+    why the check is containment against a *resolved* trusted root rather than
+    a per-component symlink scan that could not tell the two cases apart.
+    """
+    real = tmp_path / "real_results"
+    real.mkdir()
+    link = tmp_path / "results_link"
+    link.symlink_to(real, target_is_directory=True)
+
+    argv = wrap_argv_for_collectors(
+        _config(["rocprof"], collect_dir=link / "trial_d0_m0_t0", results_root=link), _INNER
+    )
+    assert argv != _INNER  # the collector attached rather than being refused
+    assert (real / "trial_d0_m0_t0" / "rocprof").is_dir()
+
+
 def test_wrap_refuses_to_clear_through_a_symlinked_collect_root(profilers_on_path, tmp_path):
     """A symlinked collector root must not let ``rmtree`` escape the run tree.
 
@@ -248,16 +302,22 @@ def test_wrap_refuses_to_clear_through_a_symlinked_collect_root(profilers_on_pat
     it and delete the link target -- a tree outside the results directory
     entirely. This is the destructive case, so it fails closed.
     """
+    # ``precious`` sits outside the results directory, which is the boundary
+    # the guard is defending -- not merely outside the trial directory.
+    results = tmp_path / "results"
+    results.mkdir()
     outside = tmp_path / "precious"
     outside.mkdir()
     (outside / "rocprof").mkdir()
     (outside / "rocprof" / "keep_me.txt").write_text("not yours to delete", encoding="utf-8")
 
-    link = tmp_path / "trial_d0_m0_t0"
+    link = results / "trial_d0_m0_t0"
     link.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
-        wrap_argv_for_collectors(_config(["rocprof"], collect_dir=link), _INNER)
+        wrap_argv_for_collectors(
+            _config(["rocprof"], collect_dir=link, results_root=results), _INNER
+        )
     # The whole point: the tree behind the symlink is untouched.
     assert (outside / "rocprof" / "keep_me.txt").read_text(encoding="utf-8") == (
         "not yours to delete"

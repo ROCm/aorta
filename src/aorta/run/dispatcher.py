@@ -1065,6 +1065,11 @@ def _run_single_trial(
             f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
         )
         config["_aorta_collect_dir"] = str((results_dir / trial_basename).absolute())
+        # The trust anchor for the collector symlink guards. It has to come
+        # from here rather than be derived from the collector directory: the
+        # profiled command can replace anything at or below that directory
+        # while it runs, so a boundary computed from it proves nothing.
+        config["_aorta_results_root"] = str(results_dir.absolute())
 
     # Compute the effective controlled overlay in the platform env-precedence
     # order (lowest to highest):

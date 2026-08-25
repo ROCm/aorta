@@ -631,6 +631,14 @@ class TestRunTrials:
         collect_dir = captured_config["_aorta_collect_dir"]
         assert Path(collect_dir).is_absolute()
         assert collect_dir.endswith("trial_d0_m0_t0")
+        # The trust anchor for the collector symlink guards travels with it. It
+        # must come from here rather than be derived from ``_aorta_collect_dir``,
+        # because everything at or below that path is payload-writable while the
+        # trial runs -- so if this key ever stops being threaded, the guards fall
+        # back to a boundary the payload controls.
+        results_root = captured_config["_aorta_results_root"]
+        assert Path(results_root).is_absolute()
+        assert Path(collect_dir).parent == Path(results_root)
         # No log prefix, because save_logs was not requested -- proves the two
         # are decoupled.
         assert "_aorta_log_prefix" not in captured_config
