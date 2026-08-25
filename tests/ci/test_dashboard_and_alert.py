@@ -1790,3 +1790,34 @@ def test_canary_publish_survives_a_run_that_produced_no_artifact():
     update = next(s for s in steps if "ci-results" in s.get("name", ""))
     assert "gpu-canary-results.json ] ||" in update["run"]
     assert "skipping publish" in update["run"]
+
+
+def test_hidden_path_uploads_declare_include_hidden_files():
+    """A glob under a dot-directory contributes nothing without this (#387).
+
+    upload-artifact excludes hidden paths by default, and `.nightly-eval` is a
+    hidden component relative to the workspace search root -- so the artifact
+    was created (the top-level JSON is not hidden) while every debug file the
+    step advertises was silently dropped. Listing them in `path:` is not enough.
+
+    Checked as an invariant over all workflows rather than for the two known
+    steps: any future upload that globs into a dot-directory hits this too.
+    A literal directory path like `.sanitizer-nightly/out` is NOT affected --
+    it becomes the search root itself, so its contents are not hidden relative
+    to it, which is why this went unnoticed for so long.
+    """
+    offenders = []
+    for path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        doc = _load_workflow(path.name)
+        for job in (doc.get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                if "upload-artifact" not in (step.get("uses") or ""):
+                    continue
+                with_ = step.get("with") or {}
+                globs_hidden_dir = any(
+                    line.strip().startswith(".") and "*" in line
+                    for line in str(with_.get("path", "")).splitlines()
+                )
+                if globs_hidden_dir and not with_.get("include-hidden-files"):
+                    offenders.append(f"{path.name}: {step.get('name')}")
+    assert offenders == []

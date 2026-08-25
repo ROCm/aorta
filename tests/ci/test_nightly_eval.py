@@ -339,3 +339,50 @@ def test_empty_lane_env_falls_back_to_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("AORTA_CI_LANE", "")
     monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(tmp_path / "absent"))
     assert nightly_eval.build_metadata()["lane"] == "gate"
+
+
+def test_an_empty_version_does_not_shadow_a_valid_version_dev(tmp_path, monkeypatch):
+    """An interrupted install leaves a zero-byte marker (#387).
+
+    The loop used to break on mere existence, so the empty file won and the
+    dashboard's ROCm column went blank with a perfectly good `version-dev`
+    sitting behind it -- indistinguishable from having no ROCm at all.
+    """
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version", "")
+    _write_version(root, "version-dev", "7.2.4.50311-abc1234\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4.50311-abc1234"
+
+
+def test_a_whitespace_only_version_does_not_shadow_a_valid_one(tmp_path, monkeypatch):
+    root = tmp_path / "opt_rocm"
+    _write_version(root, "version", "   \n\t\n")
+    _write_version(root, "version-dev", "7.14.0\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.14.0"
+
+
+def test_an_unreadable_first_marker_falls_through_instead_of_raising(tmp_path, monkeypatch):
+    """A directory named `.info/version` must not take down build_metadata().
+
+    read_text() raised IsADirectoryError straight out of build_metadata, and
+    nothing above it catches -- so the whole results document was lost over a
+    cosmetic dashboard column. Same for a permission-denied marker.
+    """
+    root = tmp_path / "opt_rocm"
+    (root / ".info" / "version").mkdir(parents=True)
+    _write_version(root, "version-dev", "7.2.4\n")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    assert nightly_eval.build_metadata()["rocm"] == "7.2.4"
+
+
+def test_a_non_utf8_marker_is_reported_not_raised(tmp_path, monkeypatch):
+    """Mojibake is a better diagnostic than a lost result document."""
+    root = tmp_path / "opt_rocm"
+    info = root / ".info"
+    info.mkdir(parents=True)
+    (info / "version").write_bytes(b"\xff\xfe7.2.4")
+    monkeypatch.setattr(nightly_eval, "_ROCM_ROOTS", _roots(root))
+    value = nightly_eval.build_metadata()["rocm"]
+    assert value is not None and "7.2.4" in value

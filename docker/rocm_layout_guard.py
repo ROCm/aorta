@@ -89,15 +89,22 @@ def _has_readable_version(path: Path) -> bool:
 
     A real read, so an empty file, a whitespace-only file, a *directory* named
     .info/version and an unreadable file all collapse to the same "no".
+
+    Decode before stripping, matching rocm_paths.read_version_marker: bytes.strip()
+    only strips ASCII whitespace, so a marker holding nothing but a non-breaking
+    space would read as usable here and unusable there. Obscure, but a guard that
+    disagrees with the resolver is worse than no guard -- it passes an image the
+    probe then reads as versionless.
     """
     for marker in USABLE_VERSION_MARKERS:
         candidate = path / marker
         try:
             with candidate.open("rb") as handle:
-                if handle.read(VERSION_MARKER_PROBE_BYTES).strip():
-                    return True
+                raw = handle.read(VERSION_MARKER_PROBE_BYTES)
         except OSError:
             continue
+        if raw.decode("utf-8", errors="replace").strip():
+            return True
     return False
 
 

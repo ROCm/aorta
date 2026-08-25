@@ -323,6 +323,51 @@ class TestParity:
         assert result.core.is_absolute()
         assert result.core == tmp_path / "rocm"
 
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(b"", id="empty"),
+            pytest.param(b"   \n\t", id="ascii-whitespace"),
+            pytest.param("\u00a0\u2003".encode(), id="unicode-whitespace"),
+        ],
+    )
+    def test_marker_usability_agrees_on_degenerate_content(
+        self, agree, classic_at, tmp_path: Path, content: bytes
+    ):
+        """Both must reach the same verdict on a marker that is not a version.
+
+        The unicode-whitespace case is the one that actually diverged: bytes
+        .strip() only strips ASCII, so a marker holding a non-breaking space read
+        as usable in the guard and unusable in the resolver. A guard that is more
+        lenient than the probe is the bad direction -- it passes the image, then
+        the probe reports no version and nothing explains why.
+
+        Deliberately NO ``lib/`` here: ``_is_usable_rocm_root`` accepts a version
+        marker OR a lib dir, so creating one makes the root usable regardless of
+        the marker and the assertion stops testing anything. (It did, first
+        attempt -- reverting the guard fix still passed.)
+        """
+        root = classic_at(tmp_path / "rocm")
+        (root / ".info").mkdir(parents=True)
+        (root / ".info" / "version").write_bytes(content)
+        # Not a usable marker on either side, and no lib/ to fall back on, so
+        # both must decline the root. `agree` raises if they disagree.
+        assert agree().source == "none"
+
+    def test_a_mojibake_marker_is_accepted_by_both(self, agree, classic_at, tmp_path: Path):
+        """Undecodable content is still *content*, and both must say so.
+
+        Deliberately not grouped with the degenerate cases above: bytes that do
+        not decode are replaced, not discarded, so the marker reads as non-empty
+        and the root is accepted. A garbled version reaching the snapshot is a
+        usable diagnostic; declining the root here would report "no ROCm found"
+        for an install that is plainly present.
+        """
+        root = classic_at(tmp_path / "rocm")
+        (root / ".info").mkdir(parents=True)
+        (root / ".info" / "version").write_bytes(b"\xff\xfe")
+        assert agree().core == root
+
     def test_an_unanchorable_override_degrades_identically(
         self, agree, sandbox, monkeypatch
     ):

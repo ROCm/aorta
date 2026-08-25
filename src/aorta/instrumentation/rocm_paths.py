@@ -89,6 +89,10 @@ _USABLE_VERSION_MARKERS: tuple[Path, ...] = (
 # arbitrarily large file that merely happens to sit at the marker path. Real
 # markers are a single short version string.
 _VERSION_MARKER_PROBE_BYTES = 64
+# Cap for reading a marker's *value* (not just probing that one exists). Larger
+# than the probe so no real release tag is truncated, still bounded so a wrong
+# file at this path cannot be read into memory wholesale.
+_VERSION_MARKER_VALUE_BYTES = 4096
 
 LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
@@ -244,15 +248,42 @@ def _has_readable_version(path: Path) -> bool:
     ``IsADirectoryError``, an unreadable file ``PermissionError`` -- both
     ``OSError`` -- and empty or whitespace-only content is simply falsy.
     """
-    for marker in _USABLE_VERSION_MARKERS:
-        candidate = path / marker
-        try:
-            with candidate.open("rb") as handle:
-                if handle.read(_VERSION_MARKER_PROBE_BYTES).strip():
-                    return True
-        except OSError as exc:  # missing, a directory, unreadable, stale mount
-            log.debug("version marker %s unusable: %s", candidate, exc)
-    return False
+    return any(
+        read_version_marker(path / marker, limit=_VERSION_MARKER_PROBE_BYTES) is not None
+        for marker in _USABLE_VERSION_MARKERS
+    )
+
+
+def read_version_marker(path: Path, limit: int = _VERSION_MARKER_VALUE_BYTES) -> str | None:
+    """The stripped contents of a version marker, or ``None`` if unusable.
+
+    One definition of "usable version marker" for both the caller that only
+    needs the yes/no (:func:`_has_readable_version`, which grants classic
+    autodetection priority) and the callers that need the value. They must agree:
+    a marker that validation accepts but a reader then reports as ``None`` is
+    the null-with-no-explanation that #381 set out to remove.
+
+    ``None`` covers every unusable case identically -- absent, a directory, an
+    unreadable or stale-mount file (all ``OSError``), and empty or
+    whitespace-only content. That last one matters most to callers walking a
+    fallback chain: a zero-byte ``version`` left by an interrupted install must
+    not shadow a perfectly good ``version-dev`` behind it, which is what
+    testing ``exists()`` and then breaking did.
+
+    Bounded read: these files hold a release tag, so a pathological (or wrong)
+    file at this path cannot be slurped into memory. The default is generous
+    enough that no real version string is truncated, while validation passes the
+    much smaller probe size since it only needs truthiness.
+    """
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(limit)
+    except OSError as exc:  # missing, a directory, unreadable, stale mount
+        log.debug("version marker %s unusable: %s", path, exc)
+        return None
+    # errors="replace" so a mojibake marker still reports *something* rather
+    # than raising -- a garbled version is a better diagnostic than no probe.
+    return raw.decode("utf-8", errors="replace").strip() or None
 
 
 def _is_rocm_root(path: Path) -> bool:

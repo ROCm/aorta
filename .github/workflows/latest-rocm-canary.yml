@@ -293,6 +293,13 @@ jobs:
             gpu-canary-results.json
             .nightly-eval/**/matrix.json
             .nightly-eval/**/recipe.resolved.yaml
+          # Required, or the two globs above contribute nothing: hidden paths
+          # are excluded by default and `.nightly-eval` is a hidden component
+          # relative to the workspace search root, so the artifact would
+          # silently contain only the top-level JSON. Naming the files in
+          # `path:` is not enough. Safe here because the globs are narrow --
+          # this does not sweep in other dotfiles.
+          include-hidden-files: true
           if-no-files-found: warn
 
       - name: Tear down canary container

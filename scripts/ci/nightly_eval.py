@@ -37,7 +37,7 @@ BASELINES = REPO_ROOT / "config" / "ci" / "regression_baselines.yaml"
 _SRC = REPO_ROOT / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
-from aorta.instrumentation.rocm_paths import resolve_rocm_roots  # noqa: E402
+from aorta.instrumentation.rocm_paths import read_version_marker, resolve_rocm_roots  # noqa: E402
 
 _ROCM_ROOTS = resolve_rocm_roots()
 
@@ -83,9 +83,15 @@ def build_metadata() -> dict[str, Any]:
     # literal path there left the dashboard's `rocm` column silently null
     # while `torch` and `hip` still populated -- the worst kind of gap,
     # because the row still looked complete.
+    # Via the shared reader, not exists()+read_text(): a zero-byte `version`
+    # from an interrupted install used to shadow a valid `version-dev` (the
+    # loop broke on mere existence), and an unreadable or non-UTF-8 marker
+    # raised out of build_metadata() -- losing the whole result document over a
+    # cosmetic dashboard column. Both now fall through to the next candidate.
     for candidate in (_ROCM_ROOTS.version_file, _ROCM_ROOTS.version_dev_file):
-        if candidate.exists():
-            meta["rocm"] = candidate.read_text(encoding="utf-8").strip()
+        value = read_version_marker(candidate)
+        if value is not None:
+            meta["rocm"] = value
             break
     # Provenance of the exact triggering wheel/commit (set by the workflow) so a
     # dashboard result is attributable to a specific source, not "whatever was

@@ -119,6 +119,12 @@ jobs:
             .nightly-eval/**/matrix.json
             .nightly-eval/**/recipe.resolved.yaml
             .nightly-eval/**/cells/**
+          # See the identical note in latest-rocm-canary.yml: hidden paths are
+          # excluded by default, so without this the three globs above have
+          # never contributed anything and the "debug artifacts" in this step's
+          # name were only ever the top-level JSON. Pre-existing, fixed here
+          # because the canary was modelled on this step and hit it too.
+          include-hidden-files: true
           if-no-files-found: warn
 
       - name: Alert on regression

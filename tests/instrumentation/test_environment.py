@@ -650,6 +650,28 @@ class TestEnvSnapshot:
         d = snap.to_dict()
         assert set(d.keys()) == REQUIRED_TOP_KEYS
 
+    def test_partial_reasons_stays_the_trailer(self):
+        """The documented trailer convention, asserted rather than assumed.
+
+        Any field missing from ``_OUTPUT_KEY_ORDER`` is appended after it, so a
+        new block silently lands *past* ``partial_reasons`` -- which is exactly
+        what happened to ``therock`` (#387, 8th pass). Pinning the tail catches
+        the next one without needing a rule per block.
+        """
+        keys = list(_example_snapshot().to_dict())
+        assert keys[-2:] == ["partial", "partial_reasons"]
+
+    def test_therock_is_emitted_with_the_rocm_block(self):
+        """It is that install's build provenance; it belongs next to `rocm`."""
+        keys = list(_example_snapshot().to_dict())
+        assert keys[keys.index("rocm") + 1] == "therock"
+
+    def test_every_field_is_ordered_explicitly_or_appended_once(self):
+        """No duplicates and no drops, whichever path a field takes."""
+        keys = list(_example_snapshot().to_dict())
+        assert len(keys) == len(set(keys))
+        assert set(keys) == REQUIRED_TOP_KEYS
+
     def test_round_trip_via_dict(self):
         original = _example_snapshot()
         rebuilt = EnvSnapshot.from_dict(original.to_dict())
@@ -3420,6 +3442,66 @@ class TestTheRockManifest:
         env_mod._capture_therock(self.MANIFEST, reasons)
         assert reasons == []
 
+    @pytest.mark.parametrize(
+        "pin",
+        [
+            pytest.param("cd95740", id="abbreviated"),
+            pytest.param("c" * 39, id="one-short"),
+            pytest.param("c" * 41, id="one-long"),
+            pytest.param("z" * 40, id="right-length-not-hex"),
+            pytest.param("cd9574023093742434e8c992d13b89ab9a6c1cf ", id="embedded-space"),
+            pytest.param(12345, id="numeric-scalar"),
+            pytest.param("HEAD", id="symbolic"),
+        ],
+    )
+    def test_a_pin_that_is_not_a_full_sha_is_not_reported_as_provenance(self, pin):
+        """``pin_sha`` makes a checkable claim, so a half-valid one is worse than null.
+
+        ``_clean_manifest_string`` accepted any scalar, so an abbreviated or
+        non-hex pin became ``pin_sha`` *and* was promoted to
+        ``gemm_libraries_commit`` -> ``upstream_commit``, while the block stayed
+        ``status="present"`` with no reason. The schema documents these as full
+        40-char SHAs, so that was provenance which looked authoritative and was
+        not -- and it fed the tweak prefix comparison (#387, 8th pass).
+        """
+        reasons: list[str] = []
+        block = env_mod._capture_therock(
+            {"submodules": [{"submodule_name": "rocm-libraries", "pin_sha": pin}]},
+            reasons,
+        )
+        # The entry survives (it names a real submodule) but claims no commit.
+        assert [s["name"] for s in block["submodules"]] == ["rocm-libraries"]
+        assert block["submodules"][0]["pin_sha"] is None
+        # Never promoted -- this is what upstream_commit reads.
+        assert block["gemm_libraries_commit"] is None
+        assert any("full 40-char pin_sha" in r for r in reasons)
+
+    def test_an_uppercase_pin_is_accepted_and_normalised(self):
+        """Case is not a defect: normalise so it compares against lowercase tweaks."""
+        reasons: list[str] = []
+        block = env_mod._capture_therock(
+            {"submodules": [{"submodule_name": "rocm-libraries", "pin_sha": "AB" * 20}]},
+            reasons,
+        )
+        assert block["gemm_libraries_commit"] == "ab" * 20
+        assert reasons == []
+
+    def test_an_invalid_pin_cannot_satisfy_the_tweak_invariant(self):
+        """The reason the promotion matters, asserted end to end.
+
+        A tweak is compared as a prefix of the manifest pin. Before this, a
+        manifest whose pin was merely the tweak itself would "match" and report
+        ``upstream_commit_matches_tweak=True`` off nothing.
+        """
+        block = env_mod._capture_therock(
+            {"submodules": [{"submodule_name": "rocm-libraries", "pin_sha": "cd95740230"}]},
+            [],
+        )
+        assert (
+            env_mod._gemm_provenance_matches("cd95740230", block["gemm_libraries_commit"])
+            is None
+        )
+
 
 class TestGemmProvenanceInvariant:
     """The tweak/manifest cross-check (#381 acceptance).
@@ -3624,6 +3706,82 @@ class TestTensileFingerprint:
         (d / "README.txt").write_text("not a kernel file")
         monkeypatch.setattr(env_mod, "HIPBLASLT_TENSILE_DIR", d)
         assert env_mod._tensile_fingerprint() is None
+
+
+class TestKernelDbFingerprintPerArch:
+    """The wheel layout nests the kernel DB per target (#387, 8th pass).
+
+    ``library/`` on a TheRock install contains *only* ``gfx*`` directories, so a
+    flat-only scan returned ``None`` and added a partial reason for a kernel
+    database that was entirely present. These cover the per-arch loop directly:
+    the nested-directory tests elsewhere exercise ``_enumerate_catalog_dir``,
+    which is a separate implementation of the same idea, so deleting this loop
+    left ``hipblaslt.kernel_db_revision`` null with the suite still green.
+    """
+
+    def test_a_wheel_layout_kernel_db_is_fingerprinted(self, tmp_path: Path):
+        library = tmp_path / "library"
+        (library / "gfx950").mkdir(parents=True)
+        (library / "gfx950" / "TensileLibrary_A.dat").write_bytes(b"x")
+        fp = env_mod._kernel_db_filename_fingerprint(library)
+        assert fp is not None and fp.startswith("filenames-sha256:")
+
+    def test_the_arch_qualifies_the_name(self, tmp_path: Path):
+        """The same kernel under two targets must not collapse to one entry."""
+        one = tmp_path / "one" / "library"
+        (one / "gfx950").mkdir(parents=True)
+        (one / "gfx950" / "TensileLibrary_A.dat").write_bytes(b"x")
+
+        two = tmp_path / "two" / "library"
+        (two / "gfx950").mkdir(parents=True)
+        (two / "gfx950" / "TensileLibrary_A.dat").write_bytes(b"x")
+        (two / "gfx942").mkdir(parents=True)
+        (two / "gfx942" / "TensileLibrary_A.dat").write_bytes(b"x")
+
+        assert env_mod._kernel_db_filename_fingerprint(
+            one
+        ) != env_mod._kernel_db_filename_fingerprint(two)
+
+    def test_a_flat_layout_digest_is_unchanged_by_the_nested_branch(
+        self, tmp_path: Path
+    ):
+        """Classic installs must see no fingerprint churn from this feature.
+
+        Pinned by construction rather than by a recorded literal: a flat
+        directory and the same directory with an *empty* gfx subdirectory must
+        agree, because the nested branch contributes no names.
+        """
+        flat = tmp_path / "flat" / "library"
+        flat.mkdir(parents=True)
+        (flat / "TensileLibrary_A.dat").write_bytes(b"x")
+
+        with_empty_arch = tmp_path / "mixed" / "library"
+        with_empty_arch.mkdir(parents=True)
+        (with_empty_arch / "TensileLibrary_A.dat").write_bytes(b"x")
+        (with_empty_arch / "gfx950").mkdir()
+
+        assert env_mod._kernel_db_filename_fingerprint(
+            flat
+        ) == env_mod._kernel_db_filename_fingerprint(with_empty_arch)
+
+    def test_non_gfx_subdirectories_are_ignored(self, tmp_path: Path):
+        """A packager's cache dir alongside the DB must not enter the digest."""
+        library = tmp_path / "library"
+        library.mkdir()
+        (library / "TensileLibrary_A.dat").write_bytes(b"x")
+        baseline = env_mod._kernel_db_filename_fingerprint(library)
+
+        noise = library / "__pycache__"
+        noise.mkdir()
+        (noise / "TensileLibrary_Z.dat").write_bytes(b"z")
+        assert env_mod._kernel_db_filename_fingerprint(library) == baseline
+
+    def test_recursion_stops_at_one_level(self, tmp_path: Path):
+        library = tmp_path / "library"
+        deep = library / "gfx950" / "nested"
+        deep.mkdir(parents=True)
+        (deep / "TensileLibrary_A.dat").write_bytes(b"x")
+        assert env_mod._kernel_db_filename_fingerprint(library) is None
 
 
 class TestHipblasltBlockShape:
@@ -5275,6 +5433,70 @@ class TestCombinedKernelDbFingerprint:
         assert env_mod._combined_kernel_db_fingerprint(
             [tmp_path / "a", tmp_path / "b"]
         ) is None
+
+    def test_a_wheel_layout_kernel_db_is_not_null(self, tmp_path: Path):
+        """``tensile.kernel_db_combined_hash`` on a TheRock install (#387, 8th pass).
+
+        ``library/`` there holds nothing but ``gfx*`` directories, so the
+        flat-only scan produced ``null`` *and* a partial reason for a kernel
+        database that was fully present -- which reads as a damaged install and
+        points triage at the wrong thing.
+        """
+        library = tmp_path / "hipblaslt" / "library"
+        (library / "gfx950").mkdir(parents=True)
+        (library / "gfx950" / "TensileLibrary_A.dat").write_bytes(b"x")
+        fp = env_mod._combined_kernel_db_fingerprint([library])
+        assert fp is not None and fp.startswith("filenames-sha256:")
+
+    def test_nested_entries_are_tagged_by_library_and_arch(self, tmp_path: Path):
+        """One kernel name, two libraries, two targets -- four distinct entries.
+
+        The tag is ``<library>/<arch>/<file>``, so neither the library nor the
+        architecture may collapse. Asserted as inequality against each partial
+        layout rather than a recorded digest, so the test survives a hash change.
+        """
+
+        def build(root: Path, spec: dict[str, list[str]]) -> Path:
+            for arch, libs in spec.items():
+                for lib in libs:
+                    d = root / lib / "library" / arch
+                    d.mkdir(parents=True)
+                    (d / "TensileLibrary_A.dat").write_bytes(b"x")
+            return root
+
+        both = build(tmp_path / "both", {"gfx950": ["hipblaslt", "rocblas"]})
+        one_lib = build(tmp_path / "one_lib", {"gfx950": ["hipblaslt"]})
+        two_arch = build(
+            tmp_path / "two_arch", {"gfx950": ["hipblaslt"], "gfx942": ["hipblaslt"]}
+        )
+
+        def fp(root: Path) -> str | None:
+            return env_mod._combined_kernel_db_fingerprint(
+                sorted(root.glob("*/library"))
+            )
+
+        assert fp(both) != fp(one_lib)
+        assert fp(two_arch) != fp(one_lib)
+        assert fp(both) != fp(two_arch)
+
+    def test_a_flat_layout_digest_is_unchanged_by_the_nested_branch(
+        self, tmp_path: Path
+    ):
+        """Classic installs must not see churn: the nested branch adds nothing."""
+        flat = tmp_path / "flat" / "library"
+        flat.mkdir(parents=True)
+        (flat / "TensileLibrary_A.dat").write_bytes(b"x")
+
+        with_empty_arch = tmp_path / "flat" / "library2"
+        with_empty_arch.mkdir(parents=True)
+        (with_empty_arch / "TensileLibrary_A.dat").write_bytes(b"x")
+        (with_empty_arch / "gfx950").mkdir()
+
+        # Same parent (`flat`), so the library tag matches and only the nested
+        # branch can differ.
+        assert env_mod._combined_kernel_db_fingerprint(
+            [flat]
+        ) == env_mod._combined_kernel_db_fingerprint([with_empty_arch])
 
     def test_dir_basename_namespaces_collisions(self, tmp_path: Path):
         a = tmp_path / "a"

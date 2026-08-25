@@ -1251,6 +1251,10 @@ class EnvSnapshot:
         "docker",
         # ROCm runtime + the host-kernel driver that pairs with it
         "rocm",
+        # Directly after `rocm`: it is that install's build provenance, and
+        # without an entry here it fell to the appended tail, landing AFTER
+        # `partial_reasons` and breaking the trailer convention below.
+        "therock",
         "amdgpu_driver",
         "hip",
         # GPU + fabric hardware
@@ -3055,6 +3059,31 @@ def _clean_manifest_string(value: Any) -> str | None:
     return text or None
 
 
+_THEROCK_PIN_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def _clean_manifest_pin(value: Any) -> str | None:
+    """A manifest ``pin_sha`` as a full 40-char commit, or ``None``.
+
+    Stricter than :func:`_clean_manifest_string` because this field is *used*,
+    not just reported: it is promoted to ``gemm_libraries_commit`` and then
+    prefix-compared against the hipBLASLt header tweak. An abbreviated,
+    non-hex, or numeric-scalar value there would either fail that comparison
+    for the wrong reason or -- worse -- be reported as provenance that looks
+    authoritative and is not. The manifest documents these as full SHAs, so
+    anything else is a manifest we do not understand rather than a shorter
+    answer to the same question.
+
+    Normalised to lowercase so a manifest emitting uppercase hex is accepted
+    and compares equal to the lowercase tweaks we compare it against.
+    """
+    text = _clean_manifest_string(value)
+    if text is None:
+        return None
+    lowered = text.lower()
+    return lowered if _THEROCK_PIN_SHA_RE.fullmatch(lowered) else None
+
+
 def _read_therock_manifest() -> tuple[dict[str, Any] | None, str | None]:
     """Parse TheRock build manifest. Returns ``(manifest, error)``.
 
@@ -3283,6 +3312,7 @@ def _capture_therock(
     # the difference actionable.
     malformed_entries = 0
     unnamed_entries = 0
+    unpinned_entries = 0
     if raw_submodules is not None and not isinstance(raw_submodules, list):
         # Distinct from "no submodules": the key was there and unusable.
         malformed_entries += 1
@@ -3293,7 +3323,13 @@ def _capture_therock(
         name = _clean_manifest_string(entry.get("submodule_name"))
         if name is None:
             unnamed_entries += 1
-        pin_sha = _clean_manifest_string(entry.get("pin_sha"))
+        # A pin that is not a full SHA is dropped rather than reported, because
+        # unlike `name` this field makes a verifiable claim -- someone can check
+        # out `pin_sha` -- and a half-valid commit is worse than a null one. The
+        # count below is what keeps it from being a silent drop.
+        pin_sha = _clean_manifest_pin(entry.get("pin_sha"))
+        if pin_sha is None:
+            unpinned_entries += 1
         patches = entry.get("patches")
         submodules.append(
             {
@@ -3308,11 +3344,11 @@ def _capture_therock(
         if name == THEROCK_GEMM_SUBMODULE:
             gemm_commit = pin_sha
 
-    if reasons is not None and (malformed_entries or unnamed_entries):
+    if reasons is not None and (malformed_entries or unnamed_entries or unpinned_entries):
         reasons.append(
-            f"therock.submodules: {malformed_entries} unusable and "
-            f"{unnamed_entries} unnamed entry/entries in "
-            f"{THEROCK_MANIFEST_FILE}"
+            f"therock.submodules: {malformed_entries} unusable, "
+            f"{unnamed_entries} unnamed and {unpinned_entries} without a "
+            f"full 40-char pin_sha in {THEROCK_MANIFEST_FILE}"
         )
 
     return {
