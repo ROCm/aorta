@@ -76,9 +76,12 @@ proton-viewer -m time/s vecadd.hatchet
 
 A `.hatchet` JSON tree in the trial's `proton/` directory; the absolute path
 is reported as `proton_artifact_dir`. The collector walks the tree and emits
-`proton_kernel_count`, `proton_gpu_time_ms`, `proton_top_kernel_ms`, and the
-non-numeric `proton_top_kernels` list, which reach `perf.md` and
-`matrix.json`.
+`proton_kernel_count`, `proton_gpu_time_ms` and `proton_top_kernel_ms`, which
+reach `perf.md` and `matrix.json::cells[*].metrics_summary` because those
+reports aggregate numeric scalars only. The non-numeric `proton_top_kernels`
+list and `proton_artifact_dir` ride the same metrics channel but appear only
+in the per-trial dispatcher JSON (`.result.metrics`) — look there, not in
+`perf.md`, for the kernel names.
 
 Read the raw tree yourself with `proton-viewer -m time/s <file>.hatchet`
 (run it in the same environment as the capture).

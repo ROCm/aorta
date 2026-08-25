@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <vector>
 
 #define HIP_CHECK(expr)                                                                 \
@@ -166,7 +167,15 @@ int main(int argc, char** argv) {
         }
         const double actual = host_c[static_cast<size_t>(row) * n + col];
         const double scale = std::fmax(std::fabs(reference), 1.0);
-        max_rel_err = std::fmax(max_rel_err, static_cast<float>(std::fabs(actual - reference) / scale));
+        const double rel = std::fabs(actual - reference) / scale;
+        // std::fmax returns its non-NaN operand, so folding a NaN sample
+        // through it would discard the NaN and still print PASS. Propagate it
+        // instead: the negated tolerance comparison below rejects a NaN.
+        if (!std::isfinite(rel)) {
+            max_rel_err = std::numeric_limits<float>::quiet_NaN();
+            break;
+        }
+        max_rel_err = std::fmax(max_rel_err, static_cast<float>(rel));
     }
 
     const double mean_kernel_ms = elapsed_ms / static_cast<double>(iters);
