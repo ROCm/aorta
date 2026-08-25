@@ -39,8 +39,10 @@ Three input shapes are supported:
   ``out/<case>/sanitizer_report.json``; used locally to render a history/trend.
 * ``--history-root DIR`` -- the PUBLISHED data-branch layout
   ``DIR/<id>/<case>/sanitizer_report.json`` plus a per-run ``DIR/<id>/meta.json``
-  (keys: commit, date, gpu, run_url, gate). ``<id>`` is ``<YYYY-MM-DD>-<run_id>``
-  (date-sortable, unique), enumerated newest-first and capped by ``--keep N``
+  (keys: commit, date, gpu, run_url, gate). ``<id>`` is
+  ``<YYYY-MM-DD>T<HHMMSS>-<run_id>`` (sortable to the second, unique; runs
+  published before the time was added keep their date-only names and are never
+  renamed), enumerated newest-first and capped by ``--keep N``
   (default 30). This is the shape the nightly publishes and Pages serves under
   ``/sanitizers/``: each run's case dirs are co-located under ``runs/<id>/`` and
   linked from the rendered page, and a ``runs/<id>/index.html`` landing page is
@@ -273,13 +275,29 @@ _CSS = """
   details[open] > summary .chevron { transform:rotate(180deg); }
   .kcard-body { padding:14px; }
 
-  /* Borderless label/value facts. Bordered boxes in a row read as tabs. */
-  .kv { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px 24px;
+  /* Borderless label/value facts. Bordered boxes in a row read as tabs.
+     Sized to content rather than uniformly: equal-width tracks gave a 1-char
+     Findings the same width as a 51-char Recipe, so short facts sat on ~555px
+     of dead space while Commit and Recipe wrapped for want of ~330px. Flex
+     trades the column alignment between rows for giving each fact the width it
+     needs. Derived from content on purpose -- a per-field width table would be
+     wrong as soon as Run and Date grow. */
+  .kv { display:flex; flex-wrap:wrap; gap:12px 28px;
     padding-bottom:14px; margin-bottom:14px; border-bottom:1px solid var(--border); }
+  /* min-width:0 lets a long value wrap inside its own item instead of forcing
+     the row wider; max-width keeps the widest of them within the panel. */
+  .kv > span { flex:0 1 auto; min-width:0; max-width:100%; }
   .kv .k { display:block; font-size:var(--fs-kvk); color:var(--text-3); text-transform:uppercase;
     letter-spacing:.05em; font-weight:600; margin-bottom:3px; }
   .kv .val { display:block; font-size:var(--fs-kvv); color:var(--text-1); }
-  .kv .val.mono { font-family:var(--mono); }
+  /* break-all, not break-word. Both break a 40-char SHA or a 136-char
+     digest-pinned image ref once the item is narrower than the token, but the
+     soft wrap opportunities break-word introduces are not counted toward
+     min-content, so each mono fact would keep the whole token as its intrinsic
+     minimum and the row would hold only for as long as the min-width:0 above
+     survives. break-all's breaks do count, and breaking between characters is
+     what a token with no word boundaries wants anyway. */
+  .kv .val.mono { font-family:var(--mono); word-break:break-all; }
 
   .observation { font-size:var(--fs-obs); color:var(--text-2); line-height:1.5;
     background:rgba(148,163,184,.05); border-left:2px solid rgba(148,163,184,.26);
@@ -290,18 +308,25 @@ _CSS = """
     letter-spacing:.06em; font-weight:600; margin-bottom:3px; }
   .observation .msg { font-family:var(--mono); font-size:14px; word-break:break-word; color:var(--text-1); }
 
-  .repro { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:var(--sunken);
+  /* Holds the command and nothing else. With the label inside, this box read as
+     a code block whose first token was "REPRODUCE", and selecting it to copy
+     picked the label up along with the command. The label sits above it now. */
+  .repro { display:block; background:var(--sunken);
     border:1px solid var(--border); border-radius:8px; padding:10px 13px; margin-bottom:14px; }
-  .repro .lbl { color:var(--text-3); font-size:12px; text-transform:uppercase;
-    letter-spacing:.05em; font-weight:600; }
   .repro code { font-family:var(--mono); font-size:14px; color:#A5D6FF; word-break:break-all; }
 
-  /* A caption must not share colour, case and weight with the th beneath it. */
+  /* A section heading. Must not share colour, case and weight with the th
+     beneath it -- and has to own its own separation. With margin-top:0 the space
+     above a heading was whatever the previous element happened to leave (14px,
+     against the 8px binding the heading to its own content), so sections ran
+     together; and it was delegated to a `.cap + .table-wrap` adjacency rule, so
+     inserting anything between a heading and its table silently deleted the gap.
+     24px here makes separation ~3x the binding and independent of what precedes. */
   .cap { display:flex; align-items:center; gap:9px; font-size:var(--fs-cap); font-weight:700;
-    text-transform:uppercase; letter-spacing:.06em; color:var(--text-1); margin:0 0 8px; }
+    text-transform:uppercase; letter-spacing:.06em; color:var(--text-1); margin:24px 0 8px; }
+  .cap:first-child { margin-top:0; }
   .cap::before { content:""; width:3px; height:15px; border-radius:2px;
     background:var(--accent, var(--text-3)); flex:0 0 auto; }
-  .cap + .table-wrap { margin-bottom:14px; }
   .card-foot { display:flex; justify-content:flex-end; font-size:13px; }
 
   details.panel { padding:0; }
@@ -461,7 +486,7 @@ def _run_card_html(meta: dict[str, Any]) -> str:
     rows = (
         ("Run", meta.get("run", "")),
         ("Commit", meta.get("commit", "")),
-        ("Date", meta.get("date", "")),
+        ("Date", format_instant(meta.get("date", ""))),
         ("Target", meta.get("gpu", "gfx950")),
     )
     body = "".join(
@@ -505,6 +530,58 @@ def _short(value: str | None, width: int = 10) -> str:
 
 def _basename(path: str | None) -> str:
     return path.rsplit("/", 1)[-1] if path else ""
+
+
+# The one timestamp spelling this renders: an ISO date, a `T`/space separator and
+# a **colon-separated** clock, optionally seconds, 3/6-digit fractional seconds
+# and a `Z`/`+HH:MM` offset. Deliberately narrower than `datetime.fromisoformat`,
+# whose accepted set *widened in 3.11* (ISO 8601 basic format, so `T094112` and
+# `+0000` began parsing; 1-digit fractions too). Gating on this shape is what
+# keeps the rendering identical on every interpreter the repo supports -- what it
+# admits, 3.10 and 3.13 parse the same way; what it rejects is passed through
+# untouched on both. This is what the publishers emit. ASCII digits, since that
+# is what `fromisoformat` itself accepts -- `\d` would admit Unicode decimal
+# digits that no interpreter parses, which is a claim this gate should not make.
+_INSTANT_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}"
+    r"(:[0-9]{2}(\.[0-9]{3}|\.[0-9]{6})?)?([+-][0-9]{2}:[0-9]{2}|Z)?\Z"
+)
+
+
+def format_instant(value: Any) -> str:
+    """A recorded timestamp as something a reader can act on (pure).
+
+    ``meta.json`` and ``status.json`` record an ISO-8601 instant; this renders it
+    as ``YYYY-MM-DD HH:MM:SS UTC`` -- the zone spelled out, because a reader
+    comparing a run against their own logs has to know which one it is in.
+
+    Anything that is not that shape (see ``_INSTANT_RE``) is returned
+    **unchanged**: a date-only value from a run published before the id carried a
+    time, the compact ``T094112`` a run id embeds, or a malformed manifest.
+    Requiring a real clock before parsing is what makes that safe --
+    ``datetime.fromisoformat("2026-08-23")`` succeeds and would render a
+    confident ``00:00:00`` for a run that happened at nine in the morning, and
+    from 3.11 ``fromisoformat("2026-08-23T0941")`` succeeds too. The output is
+    committed to the data branch, so it must not depend on the interpreter.
+    """
+    # Only an absent value is empty. `value or ""` would also swallow 0 and
+    # False, i.e. render a malformed manifest as a blank cell instead of showing
+    # what it holds -- which is the opposite of returning it unchanged.
+    text = "" if value is None else str(value).strip()
+    if not _INSTANT_RE.match(text):
+        return text
+    try:
+        # `Z` is only accepted by fromisoformat from 3.11; the writers here emit
+        # an explicit offset, but a hand-edited manifest may not.
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        # Shape-valid but not a real date (month 13, day 32).
+        return text
+    if parsed.tzinfo is None:
+        # Naive means UTC by construction: every writer uses `date -u` or
+        # datetime.now(tz=timezone.utc).
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _clean_msg(message: str, limit: int = 160) -> str:
@@ -746,7 +823,7 @@ def runs_from_runs_root(runs_root: Path, baselines: dict) -> list[dict[str, Any]
 def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
     """Read a published run's ``meta.json`` (commit, date, gpu, run_url, gate).
 
-    The run id (``<YYYY-MM-DD>-<run_id>``) is authoritative from the directory
+    The run id (see ``_RUN_ID_RE``) is authoritative from the directory
     name; ``meta.json`` supplies the rest. A missing/corrupt manifest degrades to
     an id-only record rather than crashing the whole dashboard render.
     """
@@ -772,23 +849,42 @@ def _run_meta_from_history(run_dir: Path) -> dict[str, Any]:
     return meta
 
 
-# A published run directory is ``<YYYY-MM-DD>-<run_id>`` (run_id an integer).
-_RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d+$")
+# A published run directory is ``<YYYY-MM-DD>T<HHMMSS>-<run_id>`` (run_id an
+# integer). The time is optional because runs published before it was added keep
+# their ``<YYYY-MM-DD>-<run_id>`` names -- they are never renamed, so both shapes
+# are live in the retained window and in the data branch's history.
+#
+# ASCII digits, not ``\d``: the nightly's prune filter and directory-reuse guard
+# spell the same shapes with ``[0-9]``, and this enumeration has to admit exactly
+# what they admit -- a name of Unicode decimal digits that only this side accepted
+# would be rendered on the page while the prune ignored it. `\Z` not `$` for the
+# same reason: `$` also matches before a trailing newline, and a directory name
+# may contain one, so `$` would accept a name the shell -- which reads `ls` output
+# a line at a time -- can only ever see as two records, and reject.
+_RUN_ID_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{6})?-[0-9]+\Z")
+# Nothing here parses the instant back out of an id: the publisher records it in
+# ``meta.json`` and this renders that value (``format_instant``). Reading it off
+# the directory name too would be a second source for one fact.
 
 
 def _is_run_id(name: str) -> bool:
-    """Whether a directory name is a well-formed ``<YYYY-MM-DD>-<run_id>`` id."""
+    """Whether a directory name is a well-formed run id, with or without a time."""
     return _RUN_ID_RE.match(name) is not None
 
 
 def _history_sort_key(name: str) -> tuple[str, int]:
-    """Order key for a published run id (``<YYYY-MM-DD>-<run_id>``).
+    """Order key for a published run id (see ``_RUN_ID_RE``).
 
     Enumeration is already filtered to well-formed ids (``_is_run_id``); this key
     exists because the trailing run id is a *variable-width* integer, so a plain
     name sort mis-orders ``...-9`` after ``...-10`` and would pick the wrong
     latest run (and prune the wrong dir). Split the numeric suffix off and compare
     it as an int. The malformed fallback ``(name, -1)`` is defensive only.
+
+    Both id shapes sort correctly against each other without special-casing: the
+    head is a zero-padded date optionally followed by ``T<HHMMSS>``, and a bare
+    date is a prefix of any timestamped id for the same day, so it compares as
+    the earlier one. That is also what the workflow's field-wise ``sort`` does.
     """
     head, sep, tail = name.rpartition("-")
     if sep and tail.isdigit():
@@ -801,14 +897,14 @@ def runs_from_history_root(
 ) -> list[dict[str, Any]]:
     """Enumerate the PUBLISHED ``DIR/<id>/<case>/sanitizer_report.json`` layout.
 
-    Runs are ordered newest-first by ``<id>`` (``<YYYY-MM-DD>-<run_id>``) using a
+    Runs are ordered newest-first by ``<id>`` (see ``_RUN_ID_RE``) using a
     date-then-numeric key (see ``_history_sort_key``; a plain string sort would
     put ``...-9`` after ``...-10``) and capped to the newest ``keep``. Each
     summarized row is tagged with a ``report_rel`` pointing at its raw JSON
     relative to the dashboard root, and each record with the run's ``rel`` area,
     so ``build_html`` can emit relative links that work under ``/sanitizers/``.
     """
-    # Only enumerate well-formed <YYYY-MM-DD>-<run_id> dirs: a stray child (e.g. a
+    # Only enumerate well-formed run-id dirs: a stray child (e.g. a
     # leftover `source/` from a nested --history-root layout) must not become a
     # phantom "latest" pseudo-run or consume a --keep slot.
     run_dirs = sorted(
@@ -1494,6 +1590,12 @@ _REBUILD_NOTE = (
     ".github/workflows/sanitizers-nightly.yml."
 )
 
+# Anchor on the landing page's "Artifacts not published" heading, so the Files
+# caption can point a reader at the listing of the inputs it deliberately does
+# not carry. That table is Path + SHA-256; the rebuild commands are their own
+# section above it, which is why the caption does not promise them here.
+_NOT_PUBLISHED_ID = "artifacts-not-published"
+
 # The env a reproduction needs, as data, so a consumer of
 # ``aorta.sanitizer_run_area/0.1`` can read the variables instead of parsing them
 # out of a sentence. ``set_by`` says whether the operator must export it or
@@ -1603,10 +1705,35 @@ RUN_AREA_CSS_REL = "assets/run-area.css"
 # file serves both; an unused selector costs nothing.
 _DRILLDOWN_CSS = """
   .wrap { max-width:900px; }
+  /* `.cap`'s heading bar is `var(--accent, var(--text-3))`, and --accent is only
+     defined on the root dashboard's kernel cards. These pages have no such
+     ancestor, so every bar fell back to exactly the grey of the th text beneath
+     it -- leaving nothing to tell a section heading from a table header. Scoped
+     here rather than on `.cap` so the root dashboard keeps its per-kind hues. */
+  .panel { --accent:var(--blue); }
   .note { margin:0 0 14px; color:var(--text-3); font-size:13px; }
-  .steps { margin:0 0 6px; padding-left:18px; color:var(--text-2);
-    font-size:var(--fs-obs); }
-  .steps li { margin:3px 0; }
+  .note a { color:#7CB0F8; }
+  /* One rebuild recipe per artifact: path, what it is, the commands as a real
+     block, then the caveat. These pages had no multi-line code affordance at
+     all, which is how the commands ended up as inline <code> runs inside a
+     prose sentence. pre-wrap so a long command is never hidden off-screen, and
+     so a soft wrap does not become a newline when the block is copied. */
+  .rb { margin:0 0 18px; }
+  /* The closing note belongs to the section, not to a gap, so the final block
+     sits 8px above it. Marked by class rather than `:last-of-type`, which keys
+     off the tag and not the class: whether it matched depended on what other
+     divs the panel happened to emit afterwards, and on a real page it never did
+     -- a case with rebuild blocks has built refs, so it also has the
+     "Artifacts not published" `.table-wrap` sitting after them. */
+  .rb-last { margin-bottom:8px; }
+  .rb .path { margin:0 0 4px; font-family:var(--mono); font-size:13.5px;
+    color:var(--text-1); word-break:break-all; }
+  .rb .what { margin:0 0 8px; color:var(--text-3); font-size:13px; }
+  .rb .caveat { margin:0; color:var(--text-3); font-size:13px; }
+  .rb pre { margin:0 0 8px; background:var(--sunken); border:1px solid var(--border);
+    border-radius:8px; padding:11px 13px; }
+  .rb pre code { display:block; font-family:var(--mono); font-size:13px;
+    color:#A5D6FF; white-space:pre-wrap; overflow-wrap:anywhere; }
 """
 
 
@@ -1693,6 +1820,32 @@ _BIN_OBJECT = {
 # only the recorded ``path`` stays recipe-relative.
 _FIXTURES_FROM_ROOT = "recipes/sanitizers/fixtures"
 
+# The keys every ``rebuild_plan`` entry carries, and that both renderings index
+# directly. ``plan_from_env`` checks a *stored* plan against these before
+# trusting it, since that one comes off the data branch rather than from here.
+_REBUILD_KEYS = frozenset({"path", "what", "commands", "caveat"})
+
+
+def _is_rebuild_entry(item: Any) -> bool:
+    """Whether a stored ``rebuild`` entry is safe for both renderings (pure).
+
+    Key presence alone is not enough. ``commands`` is the one field the
+    renderings do more than stringify -- they iterate it and publish each
+    element as a line a reader is invited to paste -- so both its type and its
+    elements are part of the contract. An int raises ``TypeError`` mid-render, a
+    string silently degrades into one command per character, and a non-string
+    element renders its ``repr`` as a command line (``[{"a": 1}]`` publishes
+    ``{'a': 1}``): no crash, but a fabricated command in the one block on the
+    page that promises to be runnable. Every other field only ever reaches
+    ``_esc(str(...))`` or an f-string, which accept anything.
+    """
+    return (
+        isinstance(item, dict)
+        and _REBUILD_KEYS <= item.keys()
+        and isinstance(item["commands"], list)
+        and all(isinstance(command, str) for command in item["commands"])
+    )
+
 
 def _runnable(ref: str) -> str:
     """A recipe-relative fixture path rewritten to run from the repo root."""
@@ -1754,9 +1907,11 @@ def rebuild_plan(built_refs: list[str], *, target: str) -> list[dict[str, Any]]:
 
     ``env.json`` carries this so a consumer of ``aorta.sanitizer_run_area/0.1``
     can read the exact commands rather than parse them out of a sentence, and
-    both prose renderings are generated from it by ``_rebuild_hints`` -- so the
-    landing page, REPRODUCE.md and the manifest cannot disagree about how an
-    artifact was built.
+    both prose renderings are generated from it -- REPRODUCE.md's Markdown by
+    ``_rebuild_hints``, the landing page's HTML by ``_rebuild_section_html`` --
+    so the landing page, REPRODUCE.md and the manifest cannot disagree about how
+    an artifact was built. The two renderers share this structure, not a code
+    path: changing one does not change the other.
 
     Each entry is ``{"path", "what", "commands", "caveat"}``. ``path`` stays
     recipe-relative, matching how a recipe names the artifact and how
@@ -1866,10 +2021,16 @@ def plan_from_env(env: dict[str, Any], built_refs: list[str]) -> list[dict[str, 
     preserved, so recomputing the commands from the module's current tables would
     rewrite historical instructions and leave the prose contradicting the
     manifest sitting beside it. Fall back to recomputation only for an area
-    published before the field existed.
+    published before the field existed -- or one whose stored entries are not
+    shaped the way both renderers read them (see ``_is_rebuild_entry``). Those
+    renderers index and iterate the entry directly, and this runs over a
+    manifest read off the data branch, so trusting a partial or wrongly-typed
+    entry here would turn one hand-edited or half-written ``env.json`` into a
+    ``KeyError``/``TypeError`` that fails the whole dashboard render rather
+    than one area's rebuild section.
     """
     stored = env.get("rebuild")
-    if isinstance(stored, list) and all(isinstance(item, dict) for item in stored):
+    if isinstance(stored, list) and all(_is_rebuild_entry(item) for item in stored):
         return stored
     return rebuild_plan(built_refs, target=str(env.get("target") or "gfx950"))
 
@@ -1877,9 +2038,15 @@ def plan_from_env(env: dict[str, Any], built_refs: list[str]) -> list[dict[str, 
 def _rebuild_hints(plan: list[dict[str, Any]]) -> list[str]:
     """One prose rebuild hint per artifact, rendered from a ``rebuild_plan`` (pure).
 
-    Markdown, so REPRODUCE.md uses it verbatim and the landing page runs it
-    through ``_md_code_to_html``. A reference with no known recipe degrades to
-    its bare path rather than a plausible-looking wrong command.
+    Markdown for REPRODUCE.md, which uses it verbatim. A reference with no known
+    recipe degrades to its bare path rather than a plausible-looking wrong
+    command.
+
+    The landing page does NOT go through here: flattening the four fields into
+    one sentence is right for Markdown and wrong for HTML, where it produced a
+    prose paragraph with the commands as inline ``<code>`` runs joined by
+    prose ``;`` -- nothing on the page a reader could select and run. That page
+    renders the same plan structurally instead (``_rebuild_section_html``).
     """
     hints: list[str] = []
     for entry in plan:
@@ -1892,6 +2059,140 @@ def _rebuild_hints(plan: list[dict[str, Any]]) -> list[str]:
             hint += f" {entry['caveat']}"
         hints.append(hint)
     return hints
+
+
+def _rebuild_section_html(plan: list[dict[str, Any]]) -> str:
+    """The landing page's rebuild section, rendered from ``rebuild_plan`` (pure).
+
+    ``rebuild_plan`` already separates ``path`` / ``what`` / ``commands`` /
+    ``caveat`` -- its docstring's whole point is that a consumer can read the
+    commands "rather than parse them out of a sentence", and that anything to
+    branch on is encoded *in* a command "so the list can be executed as-is".
+    Rendering that structure keeps the same promise for a human: the commands
+    land in one block, one per line, with no prose inside it and no sentence
+    period stuck to the final path.
+
+    Each artifact is a titled block rather than a list item, so a case with one
+    unpublished artifact no longer renders a one-item bullet list.
+    """
+    if not plan:
+        return ""
+    blocks: list[str] = []
+    for index, entry in enumerate(plan):
+        commands = [str(command) for command in entry.get("commands") or []]
+        parts = [f'<p class="path">{_esc(str(entry["path"]))}</p>']
+        what = entry.get("what")
+        if what:
+            parts.append(f'<p class="what">{_esc(str(what))}</p>')
+        if commands:
+            body = "\n".join(_esc(command) for command in commands)
+            parts.append(f"<pre><code>{body}</code></pre>")
+        else:
+            # Same contract as ``_rebuild_hints``: an unrecognised reference is
+            # named and left at that, never given a plausible-looking guess.
+            parts.append(
+                '<p class="what">No rebuild command is recorded for this reference.</p>'
+            )
+        caveat = entry.get("caveat")
+        if caveat:
+            parts.append(f'<p class="caveat">{_esc(str(caveat))}</p>')
+        last = " rb-last" if index == len(plan) - 1 else ""
+        blocks.append(f'<div class="rb{last}">{"".join(parts)}</div>')
+    return (
+        '<p class="cap">Rebuild the fixtures</p>'
+        + "".join(blocks)
+        + f'<p class="note">{_esc(_REBUILD_NOTE)}</p>'
+    )
+
+
+def _not_published_rows(env: dict[str, Any]) -> list[tuple[str, str]]:
+    """The excluded inputs as ``(path, sha256)`` pairs (pure).
+
+    The *only* reader of this field: the Files caption that counts it, the table
+    it links to, REPRODUCE.md, and the ``built_refs`` that
+    ``refresh_published_case_area`` derives from it. So the count in the prose
+    cannot disagree with the rows beneath it. Missing values come back as ``""``
+    and each renderer supplies its own dash.
+
+    Tolerant of a malformed entry for the same reason ``plan_from_env`` is: this
+    is read off the data branch, and indexing it directly turned one hand-edited
+    or half-written ``env.json`` into a ``KeyError``/``TypeError`` that failed
+    the whole dashboard render rather than one area's table. Being the only
+    reader is what makes that true -- while ``refresh_published_case_area``
+    iterated the field itself, a non-list value still aborted the render before
+    either renderer was reached, however careful the renderers were.
+
+    Nothing is dropped, though, which is the one place this differs from
+    ``plan_from_env``: there a rejected plan is recomputed, so nothing is lost,
+    whereas an entry skipped here would stop the caption disclosing an input
+    that genuinely is being held back -- the overstatement this section exists
+    to correct. An unreadable entry is counted and shown as a dash instead.
+
+    A bare string is read as the path, which is how the field gets hand-edited.
+    Anything else -- including a *value* of the wrong type inside an otherwise
+    well-formed entry -- becomes a dash rather than its ``repr``: a cell reading
+    ``['a', 'b']`` would be inventing a path the manifest never recorded, and
+    the dash already says "this entry could not be read".
+    """
+
+    def cell(value: Any) -> str:
+        return value if isinstance(value, str) else ""
+
+    stored = env.get("artifacts_not_published")
+    if not isinstance(stored, list):
+        return []
+    return [
+        (cell(item.get("path")), cell(item.get("sha256")))
+        if isinstance(item, dict)
+        else (cell(item), "")
+        for item in stored
+    ]
+
+
+def _files_caption(env: dict[str, Any], files: list[tuple[str, int]]) -> str:
+    """The Files table's caption, as HTML (pure).
+
+    "Every file published for this case" is true and, on its own, misleading:
+    for a ``source.kind: kernel`` recipe the one input the recipe names is
+    CI-built, so it is recorded under *Artifacts not published* by digest
+    instead of being copied here. Nothing linked the two sections, so a reader
+    could not tell a deliberate omission from a missing file. Say it, and point
+    at the listing.
+
+    Claims only what that listing actually carries. The digest is mentioned
+    only when every excluded entry has one -- ``artifacts_not_published``
+    records ``sha256`` from the report by basename, so a bare ``isa_dir:
+    fixtures/isa`` reference has none and its row renders an em dash. The
+    rebuild commands are deliberately not promised under this anchor: they are
+    their own section further up the page, and an unrecognised reference has no
+    command at all.
+    """
+    if not env.get("logs_published", True):
+        base = (
+            "Every file published for this case. Its logs, recipe copy and inputs "
+            "were pruned for falling outside the nightly's log-retention window."
+        )
+    elif any(rel.endswith(".log.gz") for rel, _size in files):
+        base = "Every file published for this case. Logs are gzipped."
+    else:
+        base = "Every file published for this case."
+    missing = _not_published_rows(env)
+    if not missing:
+        return _esc(base)
+    count = len(missing)
+    noun = "input" if count == 1 else "inputs"
+    verb = "is" if count == 1 else "are"
+    listing = f'<a href="#{_NOT_PUBLISHED_ID}">artifacts not published</a>'
+    has_digests = all(sha for _path, sha in missing)
+    where = (
+        f"listed under {listing} with {'its SHA-256' if count == 1 else 'their SHA-256s'}"
+        if has_digests
+        else f"listed under {listing}"
+    )
+    return (
+        f"{_esc(base)} It is not the whole recipe: {count} required {noun} {verb} "
+        f"CI-built and excluded by design, {where}."
+    )
 
 
 def build_case_env(
@@ -1969,8 +2270,9 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
 
     The downloadable companion to the landing page rather than a strict twin of
     it: the two share the run identity, the reproduce command and the rebuild
-    section (via ``_rebuild_hints``), and this file additionally carries the
-    required env and the recorded digests that the page links it for.
+    plan -- rendered here as Markdown by ``_rebuild_hints`` and on the page
+    structurally by ``_rebuild_section_html`` -- and this file additionally
+    carries the required env and the recorded digests that the page links it for.
     """
     observed = env.get("observed") or {}
     # Point at the file table rather than restating an inventory here: what a run
@@ -1993,7 +2295,7 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
         "## Run",
         "",
         f"- Commit: `{env.get('commit', '')}`",
-        f"- Date: {env.get('date', '')}",
+        f"- Date: {format_instant(env.get('date', ''))}",
         f"- Target: `{env.get('target', '')}`",
         f"- Class: {env.get('class', '')} "
         + ("(gated guardrail)" if env.get("class") == "guardrail" else "(observed-only, non-gating)"),
@@ -2056,7 +2358,8 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
         "```",
         "",
     ]
-    if env.get("artifacts_not_published"):
+    not_published = _not_published_rows(env)
+    if not_published:
         lines += [
             "## Artifacts not published",
             "",
@@ -2066,8 +2369,8 @@ def build_reproduce_md(env: dict[str, Any], *, built_refs: list[str]) -> str:
             "| Path | SHA-256 |",
             "|---|---|",
         ]
-        for item in env["artifacts_not_published"]:
-            lines.append(f"| `{item['path']}` | `{item.get('sha256') or _DASH}` |")
+        for path, sha in not_published:
+            lines.append(f"| `{path or _DASH}` | `{sha or _DASH}` |")
         lines.append("")
     if env.get("digests"):
         lines += ["## Recorded digests", "", "| Key | Value |", "|---|---|"]
@@ -2126,7 +2429,7 @@ def build_case_index_html(
     facts = [
         ("Run", _esc(str(env.get("run", "")))),
         ("Commit", _esc(str(env.get("commit", "")))),
-        ("Date", _esc(str(env.get("date", "")))),
+        ("Date", _esc(format_instant(env.get("date", "")))),
         ("Target", _esc(str(env.get("target", "")))),
         ("Recipe", _esc(str(env.get("recipe", "")))),
         ("Execution", _esc(str(observed.get("execution") or _DASH))),
@@ -2144,28 +2447,18 @@ def build_case_index_html(
         if reason
         else ""
     )
-    hints = _rebuild_hints(plan_from_env(env, built_refs))
-    steps_html = (
-        (
-            '<p class="cap">Rebuild the fixtures</p><ul class="steps">'
-            # The hints are one shared Markdown constant per artifact, so their
-            # `backticks` become <code> here rather than rendering literally.
-            + "".join(f"<li>{_md_code_to_html(hint)}</li>" for hint in hints)
-            + f'</ul><p class="note">{_esc(_REBUILD_NOTE)}</p>'
-        )
-        if hints
-        else ""
-    )
-    not_published = env.get("artifacts_not_published") or []
+    steps_html = _rebuild_section_html(plan_from_env(env, built_refs))
+    not_published = _not_published_rows(env)
     np_html = ""
     if not_published:
         np_rows = "".join(
-            f'<tr><td class=mono>{_esc(str(item["path"]))}</td>'
-            f'<td class="mono wrap-any">{_esc(str(item.get("sha256") or "")) or "&mdash;"}</td></tr>'
-            for item in not_published
+            f"<tr><td class=mono>{_esc(path) or '&mdash;'}</td>"
+            f'<td class="mono wrap-any">{_esc(sha) or "&mdash;"}</td></tr>'
+            for path, sha in not_published
         )
         np_html = (
-            '<p class="cap">Artifacts not published</p><div class="table-wrap"><table>'
+            f'<p class="cap" id="{_NOT_PUBLISHED_ID}">Artifacts not published</p>'
+            '<div class="table-wrap"><table>'
             "<thead><tr><th>Path</th><th>SHA-256</th></tr></thead>"
             f"<tbody>{np_rows}</tbody></table></div>"
         )
@@ -2191,17 +2484,6 @@ def build_case_index_html(
         if env.get("run_url")
         else "<span></span>"
     )
-    # Only claim gzipped logs when the listing actually has one: an in-window case
-    # that produced no log at all still rendered "Logs are gzipped."
-    if not env.get("logs_published", True):
-        files_caption = (
-            "Every file published for this case. Its logs, recipe copy and inputs "
-            "were pruned for falling outside the nightly's log-retention window."
-        )
-    elif any(rel.endswith(".log.gz") for rel, _size in files):
-        files_caption = "Every file published for this case. Logs are gzipped."
-    else:
-        files_caption = "Every file published for this case."
     return (
         "<!doctype html>\n"
         "<html lang=en><head><meta charset=utf-8>\n"
@@ -2216,20 +2498,25 @@ def build_case_index_html(
         '<header class="page-header"><div class="brand-tile">'
         f"{_svg(_ICON_FILE, size=24, width=2)}</div><div>\n"
         f"<h1>{_esc(str(env.get('case', '')))}</h1>\n"
-        '<p class="subtitle">Run area &mdash; everything needed to reproduce this '
-        "case locally</p></div></header>\n"
+        # Not "everything needed to reproduce this case locally": for a
+        # kernel-source recipe the one input the recipe names is CI-built and
+        # recorded by digest rather than published (see ``_files_caption``).
+        '<p class="subtitle">Run area &mdash; the reproduce command, what this '
+        "case observed, and every file published for it</p></div></header>\n"
         "</div>\n"
         '<section class="panel">\n'
         f"<h2>Case {_verdict_html(observed.get('verdict') or _DASH)}</h2>\n"
         f'<div class="kv">{kv}</div>\n'
         f"{reason_html}\n"
-        '<div class="repro"><span class="lbl">Reproduce</span>'
-        f'<code>{_esc(str(env.get("command", "")))}</code></div>\n'
+        # The label sits outside the box, so selecting the box yields a command
+        # that runs rather than one prefixed with the word "Reproduce".
+        '<p class="cap">Reproduce</p>'
+        f'<div class="repro"><code>{_esc(str(env.get("command", "")))}</code></div>\n'
         f'<p class="note">{_md_code_to_html(required_env_note(env.get("required_env") or []))}</p>\n'
         f"{steps_html}{np_html}{digests_html}"
         "</section>\n"
         '<section class="panel"><h2>Files</h2>\n'
-        f'<p class="cap">{_esc(files_caption)}</p>\n'
+        f'<p class="note">{_files_caption(env, files)}</p>\n'
         '<div class="table-wrap"><table>\n'
         "<thead><tr><th>File</th><th class=num>Size</th></tr></thead>\n"
         f"<tbody>{rows}</tbody>\n"
@@ -2349,11 +2636,10 @@ def refresh_published_case_area(case_dir: Path, out_dir: Path, *, logs: bool) ->
     # Only re-staging from the source sweep can restore them, which goes through
     # write_case_run_area rather than here.
     env["logs_published"] = bool(env.get("logs_published", True)) and logs
-    built_refs = [
-        str(item["path"])
-        for item in env.get("artifacts_not_published") or []
-        if isinstance(item, dict) and item.get("path")
-    ]
+    # Through the same reader as the two renderings, so this path cannot be the
+    # one that still trips over the field: iterating it directly here meant a
+    # non-list value raised ``TypeError`` before either renderer was reached.
+    built_refs = [path for path, _sha in _not_published_rows(env) if path]
     up, run_up = case_dir_up(case_dir, out_dir)
     (case_dir / "env.json").write_text(
         json.dumps(env, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -2386,15 +2672,17 @@ def _status_banner_html(status: dict[str, Any] | None) -> str:
     run_id = str(status.get("run_id", "") or "")
     url = str(status.get("run_url", "") or "")
     conclusion = str(status.get("conclusion", "") or "unknown")
-    when = str(status.get("date", "") or "")
+    when = format_instant(status.get("date", ""))
     run_txt = f" run {_esc(run_id)}" if run_id else ""
     link = f' <a href="{_esc(url)}">view failed run</a>' if url else ""
+    # The instant belongs to the run, not to the link that follows the sentence.
     when_txt = f" ({_esc(when)})" if when else ""
     return (
         '<div class="stale">'
         "<span>&#9888;</span><span><strong>Stale.</strong> "
-        f"Latest sanitizer nightly{run_txt} did not complete successfully "
-        f"({_esc(conclusion)}) &mdash; the data below may be stale.{link}{when_txt}"
+        f"Latest sanitizer nightly{run_txt}{when_txt} did not complete "
+        f"successfully ({_esc(conclusion)}) &mdash; the data below may be "
+        f"stale.{link}"
         "</span></div>"
     )
 
@@ -2405,11 +2693,16 @@ def _status_banner_md(status: dict[str, Any] | None) -> str:
     run_id = str(status.get("run_id", "") or "")
     url = str(status.get("run_url", "") or "")
     conclusion = str(status.get("conclusion", "") or "unknown")
+    # Same instant as the HTML banner: both name when the failed nightly ran, so
+    # a reader of the job summary can tell a fresh failure from a stale one.
+    when = format_instant(status.get("date", ""))
     run_txt = f" run `{run_id}`" if run_id else ""
     link = f" [view failed run]({url})" if url else ""
+    when_txt = f" ({when})" if when else ""
     return (
-        f"> \u26a0\ufe0f **Stale** \u2014 latest sanitizer nightly{run_txt} did not "
-        f"complete successfully ({conclusion}); the data below may be stale.{link}"
+        f"> \u26a0\ufe0f **Stale** \u2014 latest sanitizer nightly{run_txt}{when_txt} "
+        f"did not complete successfully ({conclusion}); the data below may be "
+        f"stale.{link}"
     )
 
 
@@ -2927,9 +3220,12 @@ def _survey_howto_html(entry: dict[str, Any]) -> str:
     command = entry.get("command")
     if not command:
         return ""
+    # Label outside the box, matching the run area: with it inside, the box read
+    # as a code block whose first token was "REPRODUCE", and selecting the box to
+    # copy the command picked the label up too.
     return (
-        '<div class="repro"><span class="lbl">Reproduce</span>'
-        f"<code>{_esc(str(command))}</code></div>"
+        '<p class="cap">Reproduce</p>'
+        f'<div class="repro"><code>{_esc(str(command))}</code></div>'
     )
 
 
@@ -3321,7 +3617,7 @@ def build_html(
     hist_rows = "".join(
         f"<tr><td class=mono>{_run_cell_html(run)}</td>"
         f"<td class=mono>{_esc(run['meta'].get('commit', ''))}</td>"
-        f"<td>{_esc(run['meta'].get('date', ''))}</td>"
+        f"<td>{_esc(format_instant(run['meta'].get('date', '')))}</td>"
         + "".join(f"<td>{_history_case_html(run['rows'][c])}</td>" for c, _k, _l, _b in CASES)
         + _history_gate_html(run)
         + "</tr>"
@@ -3667,7 +3963,7 @@ def build_summary_md(
         lines += [banner, ""]
     lines += [
         f"Run `{meta.get('run', '')}` \u00b7 commit `{meta.get('commit', '')}` \u00b7 "
-        f"{meta.get('date', '')}",
+        f"{format_instant(meta.get('date', ''))}",
         "",
         gate,
         "",
@@ -3795,7 +4091,7 @@ def main() -> int:
     ap.add_argument(
         "--current-run",
         default="",
-        help="the <YYYY-MM-DD>-<run_id> this job just staged. Only that run's area "
+        help="the run id this job just staged. Only that run's area "
         "is written from the live checkout and environment; without it the newest "
         "retained run is assumed, which is wrong when an older workflow is re-run "
         "after a newer same-day one (its lower run id sorts behind).",
@@ -3861,8 +4157,9 @@ def main() -> int:
         runs = runs_from_history_root(args.history_root, baselines, keep=args.keep)
 
     # Which retained run this job actually produced. NOT simply the newest one:
-    # re-running an older workflow reuses its lower GITHUB_RUN_ID, so its
-    # <date>-<run_id> sorts *behind* a newer same-day run. Taking position 0 then
+    # re-running an older workflow reuses its lower GITHUB_RUN_ID and the run
+    # directory it already minted, so it sorts *behind* a newer same-day run
+    # (under either id shape -- see _RUN_ID_RE). Taking position 0 then
     # stamps the newer area with this job's container/bundle/recipe and publishes
     # this job's survey under the wrong run. Fall back to the newest run only when
     # the caller did not say (the results-dir / runs-root modes, and older callers).

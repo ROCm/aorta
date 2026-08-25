@@ -5,7 +5,10 @@ from __future__ import annotations
 import gzip
 import importlib.util
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -428,9 +431,14 @@ def test_build_html_no_banner_when_healthy():
 
 def test_build_summary_md_stale_banner():
     status = {"healthy": False, "conclusion": "failure", "run_id": "9",
-              "run_url": "https://x/9", "date": "d"}
+              "run_url": "https://x/9", "date": "2026-08-23T09:41:12+00:00"}
     md = gen.build_summary_md([], status=status)
     assert "Stale" in md and "https://x/9" in md
+    # Both banners name when the failed nightly ran, and render it identically:
+    # a job-summary reader has to be able to tell a fresh failure from a stale
+    # one without opening the page.
+    assert "2026-08-23 09:41:12 UTC" in md
+    assert "2026-08-23 09:41:12 UTC" in gen._status_banner_html(status)
 
 
 def test_main_empty_runs_root_publishes_placeholder(tmp_path, monkeypatch):
@@ -625,6 +633,396 @@ def test_history_root_ignores_malformed_run_dirs(tmp_path):
     runs = gen.runs_from_history_root(root, _baselines())
 
     assert [r["meta"]["run"] for r in runs] == ["2026-08-05-33"]
+
+
+# --- Timestamped run ids (#392) ------------------------------------------------
+
+
+def _publish_step() -> str:
+    """The nightly's publish step, so tests can exercise its shell directly."""
+    return (_REPO_ROOT / ".github/workflows/sanitizers-nightly.yml").read_text(
+        encoding="utf-8"
+    )
+
+
+def _run_shell(script: str, cwd: Path, env: dict[str, str]) -> str:
+    proc = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _dedent_block(workflow: str, start: str, end: str) -> str:
+    """Lift a run-step fragment out of the workflow, YAML indentation removed."""
+    lines = workflow.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.strip().startswith(start)]
+    # A marker matching twice would lift some other step's block, and that shell
+    # can still exit 0 -- the test would then pass without running the subject.
+    assert len(starts) == 1, f"{start!r} matches {len(starts)} lines, want 1"
+    first = starts[0]
+    last = next(
+        i for i, line in enumerate(lines[first:], first)
+        if line.strip().startswith(end)
+    )
+    block = lines[first : last + 1]
+    pad = min(len(line) - len(line.lstrip()) for line in block if line.strip())
+    return "\n".join(line[pad:] for line in block)
+
+
+def test_run_id_accepts_both_shapes_and_still_rejects_junk():
+    # Runs published before the time was added keep their date-only names -- they
+    # are never renamed, so both shapes are live in the retained window.
+    for name in ("2026-08-23T094112-32638584704", "2026-08-23-32638584704",
+                 "2026-08-23-9", "2026-08-23T000000-1"):
+        assert gen._is_run_id(name), name
+    for name in ("source", "not-a-run", "2026-08-23", "2026-08-23T0941-7",
+                 "2026-08-23T094112", "2026-08-23T094112-", "2026-8-3T094112-7"):
+        assert not gen._is_run_id(name), name
+
+
+def test_history_order_is_correct_across_a_mixed_shape_history(tmp_path):
+    # The two shapes have to sort against each other without special-casing: a
+    # bare date is a prefix of any timestamped id for the same day, so it reads
+    # as the earlier one, and the variable-width run id still breaks ties.
+    root = tmp_path / "runs"
+    ids = [
+        "2026-08-23-32638584704",          # pre-change, same day
+        "2026-08-23T094112-32638584705",
+        "2026-08-24T031500-32700000001",
+        "2026-08-23T094112-9",
+        "2026-08-23T094112-10",
+    ]
+    for run_id in ids:
+        _write_history_run(root, run_id)
+
+    ordered = [r["meta"]["run"] for r in gen.runs_from_history_root(root, _baselines())]
+    assert ordered == [
+        "2026-08-24T031500-32700000001",
+        "2026-08-23T094112-32638584705",
+        "2026-08-23T094112-10",
+        "2026-08-23T094112-9",
+        "2026-08-23-32638584704",
+    ]
+    # --keep counts from the newest end of that same order.
+    kept = gen.runs_from_history_root(root, _baselines(), keep=2)
+    assert [r["meta"]["run"] for r in kept] == ordered[:2]
+
+
+def test_workflow_prune_order_matches_the_generator_exactly(tmp_path):
+    # The shell prunes and the generator renders from the same directory list, so
+    # a disagreement deletes a directory the page still lists. Run the workflow's
+    # own pipeline rather than a paraphrase of it.
+    # Anchored on `ls`, not on its flags, so a change to those fails on the
+    # behaviour below rather than on finding nothing; _dedent_block still asserts
+    # the marker is unique, so it cannot silently lift some other step's shell.
+    # Cut before `tail`, so this asserts what the prune sees and not what it
+    # deletes; that leaves the continuation joining the two, which has to go.
+    pipeline = _dedent_block(_publish_step(), "ls -1", "| tr ").rstrip().rstrip("\\")
+
+    ids = [
+        "2026-08-23-32638584704",        # pre-change shape, same day
+        "2026-08-23T094112-32638584705",
+        "2026-08-24T031500-32700000001",
+        "2026-08-23T094112-9",           # variable-width run ids on one instant
+        "2026-08-23T094112-10",
+        "2026-08-22T235959-1",
+        "2026-13-99-1",                  # the generator's regex admits this; mirror it
+    ]
+    # The generator enumerates well-formed ids only, so anything else here must
+    # not reach the prune either: it would spend a keep slot the page does not,
+    # pushing the oldest run the page still lists past the tail -- deleting it.
+    strays = ["source", "assets", "2026-08-23T0941-7", "2026-08-23"]
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    for run_id in ids + strays:
+        (runs / run_id).mkdir()
+    # The enumeration takes directories only, so a *file* is skipped however it
+    # is named -- both halves of `p.is_dir() and _is_run_id(p.name)` have to
+    # mirror or the shell spends a slot on something the page never shows.
+    (runs / "index.html").write_text("", encoding="utf-8")
+    (runs / "2026-08-25T031500-2").write_text("", encoding="utf-8")
+
+    shell = _run_shell(pipeline, tmp_path, {"runs_dir": str(runs)}).splitlines()
+    # Same filter and same order as the enumeration, asserted through the
+    # generator's own predicate and key rather than a copy of either.
+    assert shell == [
+        p.name for p in sorted(
+            (p for p in runs.iterdir() if p.is_dir() and gen._is_run_id(p.name)),
+            key=lambda p: gen._history_sort_key(p.name),
+            reverse=True,
+        )
+    ]
+    assert shell == sorted(ids, key=gen._history_sort_key, reverse=True)
+
+
+def test_workflow_reuses_the_directory_a_rerun_already_minted(tmp_path):
+    # A re-run reuses GITHUB_RUN_ID, so it must land on the directory its first
+    # attempt minted. A fresh timestamp would give one workflow run two
+    # directories: two --keep slots, two history rows, and the earlier attempt's
+    # reports left in place -- which is what the step's `rm -rf` exists to stop.
+    block = _dedent_block(_publish_step(), 'run_dir_id=""', ': "${run_dir_id:=')
+    script = f'{block}\nprintf "%s" "$run_dir_id"'
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    env = {"runs_dir": str(runs), "GITHUB_RUN_ID": "32638584704",
+           "started_id": "2026-08-24T031500"}
+
+    # Nothing published yet: mint a name from this attempt's clock.
+    assert _run_shell(script, tmp_path, env) == "2026-08-24T031500-32638584704"
+
+    # A re-run of a timestamped run reuses that name, not the current time.
+    (runs / "2026-08-23T094112-32638584704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-23T094112-32638584704"
+
+    # ...and a re-run of a run published before the scheme keeps its old name,
+    # so no directory is ever renamed underneath a published URL.
+    shutil.rmtree(runs / "2026-08-23T094112-32638584704")
+    (runs / "2026-08-23-32638584704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-23-32638584704"
+
+    # A different run id is not mistaken for this one, including a suffix match.
+    shutil.rmtree(runs / "2026-08-23-32638584704")
+    (runs / "2026-08-23T094112-4704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-24T031500-32638584704"
+
+    # The old scheme could leave two directories for one run id -- a re-run that
+    # crossed midnight got a second date -- so reuse the newest of them rather
+    # than re-publishing into the older one and stranding the newer.
+    (runs / "2026-08-23-32638584704").mkdir()
+    (runs / "2026-08-24-32638584704").mkdir()
+    assert _run_shell(script, tmp_path, env) == "2026-08-24-32638584704"
+
+
+def test_every_implementation_of_the_run_id_shape_admits_the_same_names(tmp_path):
+    # The shape is spelled three times -- _RUN_ID_RE, the prune filter and the
+    # reuse guard -- because a workflow cannot import a Python constant. Assert
+    # they agree on one table rather than eyeballing three regexes: a name only
+    # the generator accepts is rendered but never pruned, and a name only the
+    # reuse glob accepts is published where nothing ever looks.
+    names = {
+        "2026-08-23T094112-32638584704": True,
+        "2026-08-23-32638584704": True,       # published before the time existed
+        "2026-13-99-32638584704": True,       # the regex does not range-check
+        "source-32638584704": False,          # the glob's suffix match is not enough
+        "2026-08-23T0941-32638584704": False,
+        "2026-8-3T094112-32638584704": False,
+        "\u0662\u0660\u0662\u0666-08-23-32638584704": False,  # Unicode digits
+        # A name may contain a newline, and Python's `$` matches before a
+        # trailing one -- the shell reads `ls` a line at a time and can only see
+        # this as two records, so `$` here would be a name only Python accepts.
+        "2026-08-23T094112-32638584704\n": False,
+    }
+    runs = tmp_path / "runs"
+    reuse = _dedent_block(_publish_step(), 'run_dir_id=""', ': "${run_dir_id:=')
+    env = {"runs_dir": str(runs), "GITHUB_RUN_ID": "32638584704",
+           "started_id": "2026-08-24T031500"}
+
+    for name, want in names.items():
+        assert gen._is_run_id(name) is want, name
+        # The reuse guard: only a name the generator would enumerate may be
+        # published into; anything else has to be passed over for a fresh one.
+        shutil.rmtree(runs, ignore_errors=True)
+        runs.mkdir()
+        (runs / name).mkdir()
+        resolved = _run_shell(f'{reuse}\nprintf "%s" "$run_dir_id"', tmp_path, env)
+        assert resolved == (name if want else "2026-08-24T031500-32638584704"), name
+
+    # The prune filter, over the whole table at once -- what it keeps is exactly
+    # what the generator enumerates, so neither spends a keep slot the other does
+    # not. (Ordering is asserted separately, over ids that differ.)
+    shutil.rmtree(runs, ignore_errors=True)
+    runs.mkdir()
+    for name in names:
+        (runs / name).mkdir()
+    pipeline = _dedent_block(_publish_step(), "ls -1", "| tr ").rstrip().rstrip("\\")
+    kept = _run_shell(pipeline, tmp_path, {"runs_dir": str(runs)}).splitlines()
+    assert sorted(kept) == sorted(n for n, want in names.items() if want)
+
+
+def test_workflow_and_generator_agree_on_the_embedded_instant(tmp_path):
+    # The workflow derives meta.json's date from the resolved directory name so a
+    # re-run cannot report a clock its own directory contradicts. Run the step's
+    # own metadata writer over both id shapes and render what it wrote: asserting
+    # that its parsing pattern appears in the file would still pass if the block
+    # stopped consulting the directory name at all.
+    block = _dedent_block(
+        _publish_step(), 'if [ "${GPU_RESULT}" = "success" ]; then gate=true', "PY"
+    )
+    # That block runs `python`; the interpreter running these tests may only be
+    # on PATH under another name, so shim the name the workflow uses.
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "python").write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
+    )
+    (shim / "python").chmod(0o755)
+    started_iso = "2026-08-24T03:15:00+00:00"
+    env = {
+        "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "ROCm/aorta",
+        "GITHUB_RUN_ID": "32638584704",
+        "GITHUB_SHA": "f" * 40,
+        "GPU_RESULT": "success",
+        "started_iso": started_iso,
+    }
+
+    for run_id, expected, rendered in (
+        # A timestamped name reports the instant it carries, not this attempt's
+        # clock -- that is what makes a re-run's manifest match its directory.
+        (
+            "2026-08-23T094112-32638584704",
+            "2026-08-23T09:41:12+00:00",
+            "2026-08-23 09:41:12 UTC",
+        ),
+        # A name from before the scheme carries no time, but it does carry its
+        # day, and re-publishing into one must keep that day: `rm -rf` cleared a
+        # manifest that already held it, so taking this attempt's clock instead
+        # would render an August instant for a July directory. Pinned as the
+        # rendering too, because what must not move is what the page shows.
+        ("2026-08-23-32638584704", "2026-08-23", "2026-08-23"),
+        # Only a name of neither shape has no day to keep; then the publish clock
+        # is all there is. Not reachable from the naming scheme -- the fallback
+        # exists so an unexpected name still gets a manifest.
+        ("nightly-32638584704", started_iso, "2026-08-24 03:15:00 UTC"),
+    ):
+        dest = tmp_path / run_id
+        dest.mkdir()
+        _run_shell(block, tmp_path, {**env, "dest": str(dest), "run_dir_id": run_id})
+
+        meta = json.loads((dest / "meta.json").read_text(encoding="utf-8"))
+        assert meta.get("date") == expected, run_id
+        assert meta.get("run") == run_id
+        assert meta.get("gate") is True  # mirrors GPU_RESULT=success
+        # What the generator will put on the page for that manifest -- for the
+        # timestamped name, the 094112 its own directory carries. Agreement is
+        # asserted through the renderer rather than by pinning a shared pattern.
+        assert gen.format_instant(meta.get("date")) == rendered, run_id
+
+
+def test_workflow_commit_message_names_the_area_and_the_publish(tmp_path):
+    # A date-only subject gave two same-day runs the same commit title on the data
+    # branch, and a subject named only by run_dir_id would give a re-run the same
+    # title as the attempt it replaces (the name is reused). Naming both makes
+    # every publish distinct and self-consistent with the directory it wrote.
+    # Run the step's own tail -- that also proves both variables are in scope
+    # inside the subshell and the message survives as one -m argument.
+    block = _dedent_block(_publish_step(), "# Mirror the rendered dashboard", "fi )")
+
+    remote = tmp_path / "remote.git"
+    work = tmp_path / "checkout"
+    (work / "dashboard").mkdir(parents=True)
+    (work / "dashboard" / "summary.md").write_text("# summary\n", encoding="utf-8")
+    # symbolic-ref / checkout -b rather than `git init -b`, which needs git 2.28.
+    _run_shell(
+        f'git init -q --bare "{remote}"'
+        f' && git -C "{remote}" symbolic-ref HEAD refs/heads/sanitizer-results'
+        f' && git init -q "{work}" && git -C "{work}" checkout -q -b sanitizer-results'
+        f' && git -C "{work}" remote add origin "{remote}"',
+        tmp_path,
+        {},
+    )
+    env = {
+        "tmp": str(work),
+        "run_dir_id": "2026-08-23T094112-32638584704",
+        "started_iso": "2026-08-24T03:15:00+00:00",
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "step_summary.md"),
+    }
+    _run_shell(block, tmp_path, env)
+
+    # The subject the reader of `git log` on sanitizer-results sees, and it is on
+    # the branch the step pushes to -- read back from the remote, not the clone.
+    subject = _run_shell(f'git -C "{remote}" log -1 --format=%s sanitizer-results',
+                         tmp_path, {})
+    assert subject == (
+        "sanitizer dashboard 2026-08-23T094112-32638584704 "
+        "(published 2026-08-24T03:15:00+00:00)"
+    )
+    # A re-run reuses run_dir_id, so only the publish instant moves it -- that is
+    # what keeps the two commits distinguishable.
+    assert env["run_dir_id"] in subject and env["started_iso"] in subject
+
+
+def test_format_instant_renders_a_time_and_never_invents_one():
+    assert gen.format_instant("2026-08-23T09:41:12+00:00") == "2026-08-23 09:41:12 UTC"
+    # An explicit Z, which fromisoformat only accepts from 3.11.
+    assert gen.format_instant("2026-08-23T09:41:12Z") == "2026-08-23 09:41:12 UTC"
+    # Naive means UTC by construction: every writer uses `date -u` or utcnow.
+    assert gen.format_instant("2026-08-23T09:41:12") == "2026-08-23 09:41:12 UTC"
+    # A non-UTC offset is normalised rather than shown in the writer's zone.
+    assert gen.format_instant("2026-08-23T11:41:12+02:00") == "2026-08-23 09:41:12 UTC"
+
+    # Sub-second precision from a hand-written manifest still renders, truncated.
+    assert (
+        gen.format_instant("2026-08-23T09:41:12.500000+00:00")
+        == "2026-08-23 09:41:12 UTC"
+    )
+
+    # A date-only value comes from a run published before the id carried a time.
+    # fromisoformat() would accept it and render a confident 00:00:00, so the
+    # value is returned untouched instead of inventing a midnight.
+    assert gen.format_instant("2026-08-23") == "2026-08-23"
+    # Malformed or absent values pass through: the run identity around them is
+    # still worth rendering. A shape-valid impossible date lands here too.
+    for junk in ("", None, "d", "not a date", "2026-08-23 morning",
+                 "2026-13-23T09:41:12+00:00"):
+        assert gen.format_instant(junk) == (junk or "")
+    # Only *absent* renders as empty. A falsy value from a malformed manifest is
+    # shown, not swallowed -- a blank cell reads as "no date recorded", which is
+    # a different fact and hides the one that needs fixing.
+    for falsy, shown in ((0, "0"), (False, "False")):
+        assert gen.format_instant(falsy) == shown
+
+
+def test_format_instant_renders_the_same_on_every_supported_interpreter():
+    # datetime.fromisoformat's accepted set widened in 3.11 (ISO 8601 basic
+    # format, and 1-2 digit fractional seconds), and the repo's CI matrix spans
+    # 3.10-3.12. Left to fromisoformat these shapes render a time on 3.11+ and
+    # pass through on 3.10 -- for output that is committed to the data branch,
+    # which is a byte-diff that depends on which runner published. format_instant
+    # gates on an explicit shape so every interpreter passes them through.
+    for widened in (
+        "2026-08-23T0941",  # basic format, minutes
+        "2026-08-23T094112",  # basic format -- the form a run id embeds
+        "2026-08-23T09:41:12+0000",  # offset without its colon
+        "2026-08-23T09:41:12.1",  # a fraction 3.10 rejects
+    ):
+        assert gen.format_instant(widened) == widened
+
+    # The run id carries that compact stamp, and its own directory name must not
+    # be mistaken for a rendered instant anywhere it is displayed.
+    run_id = "2026-08-23T094112-32638584704"
+    assert gen.format_instant(run_id) == run_id
+
+
+def test_published_pages_show_the_instant_but_env_json_keeps_it_machine_readable(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "runs"
+    run_id = "2026-08-23T094112-32638584705"
+    _write_history_run(root, run_id, meta={"date": "2026-08-23T09:41:12+00:00"})
+    monkeypatch.setattr(sys, "argv", [
+        "gen_sanitizer_dashboard", "--history-root", str(root),
+        "--baselines",
+        str(_REPO_ROOT / "recipes/sanitizers/fixtures/expected/verdict_baselines.json"),
+        "--out-dir", str(tmp_path / "dashboard"),
+    ])
+    assert gen.main() == 0
+    out = tmp_path / "dashboard"
+
+    human = "2026-08-23 09:41:12 UTC"
+    for page in (out / "index.html", out / "runs" / run_id / "waitcheck" / "index.html"):
+        assert human in page.read_text(encoding="utf-8"), page
+    assert human in (out / "summary.md").read_text(encoding="utf-8")
+
+    # The manifest a consumer of aorta.sanitizer_run_area/0.1 reads keeps the
+    # ISO instant: the human rendering is a display concern, not a stored one.
+    env = json.loads(
+        (out / "runs" / run_id / "waitcheck" / "env.json").read_text(encoding="utf-8")
+    )
+    assert env.get("date") == "2026-08-23T09:41:12+00:00"
 
 
 def test_history_root_missing_report_has_no_report_rel(tmp_path):
@@ -2386,10 +2784,438 @@ def test_run_area_stylesheet_carries_the_rules_those_pages_use():
     sheet = gen.run_area_stylesheet()
     assert gen._CSS in sheet
     # The rules the two drill-down pages add on top of the dashboard sheet.
-    for selector in (".wrap {", ".note {", ".steps {", ".steps li {"):
+    for selector in (
+        ".wrap {",
+        ".note {",
+        # The rebuild section renders structurally now, so `.steps` (its old
+        # bullet list) is gone and these carry the command block instead.
+        ".rb {",
+        ".rb-last {",
+        ".rb .path {",
+        ".rb pre {",
+        ".rb pre code {",
+        # `.cap`'s heading bar reads `var(--accent, ...)`, which only the root
+        # dashboard's kernel cards define -- without this these pages render it
+        # in the same grey as the `th` text beneath it.
+        ".panel { --accent:",
+    ):
         assert selector in sheet, selector
+    assert ".steps {" not in sheet
     # Byte-stable, so re-publishing does not churn the data branch.
     assert gen.run_area_stylesheet() == sheet
+
+
+# --- Run area rendering (#391) -------------------------------------------------
+
+
+def _css_rule(sheet: str, selector: str) -> str:
+    """One selector's declaration block, so a test can assert on it alone."""
+    start = sheet.index(selector) + len(selector)
+    return sheet[start : sheet.index("}", start)]
+
+
+def test_fact_row_sizes_each_fact_to_its_content():
+    # Equal-width tracks gave a 1-char Findings the same width as a 51-char
+    # Recipe: ~555px of dead space on one row while Commit and Recipe wrapped
+    # for want of ~330px.
+    sheet = gen.run_area_stylesheet()
+    row = _css_rule(sheet, ".kv {")
+    assert "display:flex" in row and "flex-wrap:wrap" in row
+    # The uniform grid is gone, not merely overridden by a later rule.
+    assert "minmax(170px, 1fr)" not in sheet
+    # A long value wraps inside its own item instead of widening the row.
+    item = _css_rule(sheet, ".kv > span {")
+    assert "min-width:0" in item and "max-width:100%" in item
+
+
+def test_long_mono_facts_break_rather_than_overflow_their_neighbour():
+    # A 40-char SHA painted over Date; a 136-char digest-pinned image ref ran off
+    # the page. break-all rather than break-word: break-word would break these
+    # too once the item is narrower than the token, but the opportunities it
+    # introduces are not counted toward min-content, so each mono fact would keep
+    # the whole token as its intrinsic minimum and the row would hold only for as
+    # long as `.kv > span` keeps min-width:0. break-all's breaks do count.
+    rule = _css_rule(gen.run_area_stylesheet(), ".kv .val.mono {")
+    assert "word-break:break-all" in rule
+    assert "break-word" not in rule
+
+    image = (
+        "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0"
+        "@sha256:" + "4" * 64
+    )
+    commit = "78d1ae686dc3a786e8cfdb1216efc4b7516c8896"
+    page = gen.build_case_index_html(
+        {
+            "case": "c",
+            "observed": {},
+            "commit": commit,
+            "date": "2026-08-23",
+            "container_image": image,
+        },
+        [],
+        built_refs=[],
+        up="../../",
+    )
+    # Both survive in full: the fix is wrapping, not truncation. The image digest
+    # is what makes the run reproducible at all.
+    assert commit in page
+    assert image in page
+
+
+def test_reproduce_label_sits_outside_the_command_box():
+    # The box is a copy target. With the label inside it, the box read as a code
+    # block whose first token was REPRODUCE, and selecting it to copy the command
+    # picked the label up too.
+    command = "aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml"
+    page = gen.build_case_index_html(
+        {"case": "c", "observed": {}, "command": command},
+        [], built_refs=[], up="../../",
+    )
+    assert '<p class="cap">Reproduce</p><div class="repro"><code>' in page
+    assert 'class="lbl">Reproduce' not in page
+
+    # The dashboard's Tab 2 strip is the same markup, so the two cannot diverge.
+    strip = gen._survey_howto_html({"command": command})
+    assert '<p class="cap">Reproduce</p><div class="repro"><code>' in strip
+    assert 'class="lbl">Reproduce' not in strip
+    assert gen._survey_howto_html({"command": ""}) == ""
+
+    # Holding only the command, the box no longer needs a flex row.
+    assert "display:block" in _css_rule(gen.run_area_stylesheet(), ".repro {")
+
+
+def test_section_headings_own_their_separation_from_the_previous_section():
+    # `.cap` shipped with margin-top:0, so the space above a heading was whatever
+    # the previous element left -- 14px, against the 8px binding a heading to its
+    # own content -- and it was delegated to a `.cap + .table-wrap` adjacency
+    # rule that any element inserted between the two silently broke.
+    sheet = gen.run_area_stylesheet()
+    above, below = 24, 8
+    assert f"margin:{above}px 0 {below}px" in _css_rule(sheet, ".cap {")
+    # Separation has to be clearly greater than the binding or neither reads as
+    # grouping the section with its heading.
+    assert above >= 3 * below
+    # A panel's first heading must not double the panel's own padding.
+    assert ".cap:first-child { margin-top:0; }" in sheet
+    # The fragile adjacency rule is removed, not worked around. Matching the
+    # declaration rather than the bare selector, which the comment above it names.
+    assert ".cap + .table-wrap {" not in sheet
+
+
+def test_rebuild_section_renders_its_commands_as_one_runnable_block():
+    # `_rebuild_hints` flattens path/what/commands/caveat into one sentence. That
+    # is right for REPRODUCE.md and wrong here: the commands became inline <code>
+    # runs joined by a prose ";", with the sentence period stuck to the final
+    # path, so nothing on the page could be selected and run.
+    plan = gen.rebuild_plan(["fixtures/isa/consan_gemm_f32.hsaco"], target="gfx950")
+    html = gen._rebuild_section_html(plan)
+    entry = plan[0]
+
+    block = re.search(r"<pre><code>(.*?)</code></pre>", html, re.S)
+    assert block
+    body = block.group(1)
+    # Every command, one per line, in a single block.
+    assert body.split("\n") == [gen._esc(command) for command in entry["commands"]]
+    # No prose inside the copy target...
+    assert entry["what"] not in body
+    assert entry["caveat"] not in body
+    # ...no "; " joining the commands as prose, and no sentence period abutting
+    # the final path (which made it a path that does not exist).
+    assert "; " not in body
+    assert not body.endswith(".")
+    # One artifact is a titled block, not a one-item bullet list.
+    assert "<ul" not in html and "<li>" not in html
+    # what and caveat are still shown, outside the block.
+    assert entry["what"] in html and entry["caveat"] in html
+
+
+def test_rebuild_section_names_an_unknown_reference_without_inventing_a_command():
+    # Same contract as the Markdown hints: never a plausible-looking guess.
+    plan = gen.rebuild_plan(["fixtures/other/x"], target="gfx950")
+    assert plan[0]["commands"] == []
+    html = gen._rebuild_section_html(plan)
+    assert "fixtures/other/x" in html
+    assert "<pre>" not in html
+    assert gen._rebuild_section_html([]) == ""
+
+
+def test_final_rebuild_block_is_marked_by_class_not_last_of_type():
+    # `.rb:last-of-type` keys off the tag, not the class: it matches the last
+    # `div` sibling only if that div happens to be a `.rb`. On a real page it
+    # never is -- a case with rebuild blocks has built refs, so `build_case_env`
+    # also gives it an "Artifacts not published" `.table-wrap` after them.
+    sheet = gen.run_area_stylesheet()
+    assert ".rb-last {" in sheet
+    assert ".rb:last-of-type" not in sheet
+
+    plan = gen.rebuild_plan(
+        ["fixtures/isa/lds.hsaco", "fixtures/bin/consan_load"], target="gfx950"
+    )
+    html = gen._rebuild_section_html(plan)
+    assert html.count('<div class="rb">') == len(plan) - 1
+    assert html.count('<div class="rb rb-last">') == 1
+    # It is the last one, not merely one of them.
+    assert html.rindex('<div class="rb rb-last">') > html.rindex('<div class="rb">')
+
+    # A single-artifact case still gets the marker, and it reaches the page.
+    single = gen._rebuild_section_html(plan[:1])
+    assert single.count('<div class="rb rb-last">') == 1
+    assert '<div class="rb">' not in single
+    page = gen.build_case_index_html(
+        {"case": "c", "observed": {}},
+        [],
+        built_refs=["fixtures/isa/lds.hsaco"],
+        up="../../",
+    )
+    assert 'class="rb rb-last"' in page
+
+
+def test_stored_rebuild_plan_is_only_trusted_when_both_renderers_can_read_it():
+    # A retained area's own env.json is preferred over recomputation so history
+    # keeps its instructions. But it is read off the data branch, and both
+    # renderers index the four keys directly -- so a half-written or hand-edited
+    # entry has to fall back, not KeyError the whole dashboard render.
+    refs = ["fixtures/isa/lds.hsaco"]
+    full = gen.rebuild_plan(refs, target="gfx950")
+    assert gen.plan_from_env({"rebuild": full, "target": "gfx950"}, refs) is full
+
+    for missing in sorted(gen._REBUILD_KEYS):
+        partial = [{k: v for k, v in full[0].items() if k != missing}]
+        recovered = gen.plan_from_env({"rebuild": partial, "target": "gfx950"}, refs)
+        assert recovered == full, missing
+        # Both renderers survive the fallback.
+        assert gen._rebuild_hints(recovered)
+        assert gen._rebuild_section_html(recovered)
+
+    # A non-list or a list of non-dicts falls back the same way.
+    for junk in ("nope", [1, 2], {"path": "x"}):
+        assert gen.plan_from_env({"rebuild": junk, "target": "gfx950"}, refs) == full
+
+    # Key presence is not enough: `commands` is the one field the renderers
+    # iterate rather than stringify, so its type is part of the contract. An int
+    # is a TypeError mid-render and a string degrades into one command per
+    # character -- either way the whole dashboard render, not one area, breaks.
+    for bad in (1, "hipcc x.hip", None, {"0": "hipcc x.hip"}):
+        entry = [{**full[0], "commands": bad}]
+        recovered = gen.plan_from_env({"rebuild": entry, "target": "gfx950"}, refs)
+        assert recovered == full, bad
+        assert gen._rebuild_hints(recovered)
+        assert gen._rebuild_section_html(recovered)
+
+    # A list of the right type but the wrong elements does not crash -- it
+    # publishes the element's repr as a command line, in the one block on the
+    # page that promises to be runnable. Fabricating a command is worse than
+    # falling back to the module's own tables, so the elements are checked too.
+    for bad_elements in ([{"a": 1}], [123], [None], ["ok", 7]):
+        entry = [{**full[0], "commands": bad_elements}]
+        recovered = gen.plan_from_env({"rebuild": entry, "target": "gfx950"}, refs)
+        assert recovered == full, bad_elements
+        rendered = gen._rebuild_section_html(recovered) + " ".join(
+            gen._rebuild_hints(recovered)
+        )
+        assert "{'a': 1}" not in rendered and "None" not in rendered
+
+    # An empty command list is legitimate (an unrecognised reference), so it is
+    # trusted rather than recomputed.
+    empty = [{**full[0], "commands": []}]
+    assert gen.plan_from_env({"rebuild": empty, "target": "gfx950"}, refs) is empty
+
+
+def test_reproduce_md_keeps_the_flattened_markdown_hints():
+    # The page renders structurally now. REPRODUCE.md consumes the Markdown
+    # verbatim, so it must be untouched by that change.
+    refs = ["fixtures/isa/lds.hsaco"]
+    env = gen.build_case_env(
+        case="waitcheck", cls="guardrail", recipe="r.yaml", command="c",
+        meta={"gpu": "gfx950"}, summary={}, report=None,
+        built_refs=refs, inputs=[],
+    )
+    md = gen.build_reproduce_md(env, built_refs=refs)
+    for hint in gen._rebuild_hints(gen.rebuild_plan(refs, target="gfx950")):
+        assert hint in md
+
+
+def test_files_caption_discloses_an_input_that_is_excluded_by_design():
+    # "Every file published for this case" is true and, on its own, misleading:
+    # for a kernel-source recipe the one input the recipe names is CI-built and
+    # recorded by digest instead of copied. Nothing linked the two sections, so a
+    # reader could not tell a deliberate omission from a missing file.
+    env = {
+        "case": "c",
+        "observed": {},
+        "logs_published": True,
+        "artifacts_not_published": [
+            {"path": "fixtures/isa/consan_gemm_f32.hsaco", "sha256": "ab"}
+        ],
+    }
+    files = [("sanitizer_report.json", 12)]
+    caption = gen._files_caption(env, files)
+    assert "1 required input is" in caption
+    assert f'href="#{gen._NOT_PUBLISHED_ID}"' in caption
+    assert "its SHA-256" in caption
+
+    page = gen.build_case_index_html(env, files, built_refs=[], up="../../")
+    # The anchor the caption points at exists on the page.
+    assert f'id="{gen._NOT_PUBLISHED_ID}"' in page
+    # And the header no longer makes the absolute claim the caption walks back.
+    assert "everything needed to reproduce" not in page
+
+    # Plural agreement, and no claim at all when there is nothing to disclose.
+    two = {
+        **env,
+        "artifacts_not_published": [
+            {"path": "a", "sha256": "ab"}, {"path": "b", "sha256": "cd"}
+        ],
+    }
+    assert "2 required inputs are" in gen._files_caption(two, files)
+    assert "their SHA-256s" in gen._files_caption(two, files)
+    assert gen._files_caption({**env, "artifacts_not_published": []}, files) == (
+        "Every file published for this case."
+    )
+
+
+def test_files_caption_claims_only_what_the_listing_actually_carries():
+    # `artifacts_not_published` records sha256 from the report by basename, so a
+    # bare `isa_dir: fixtures/isa` reference has none and its row is an em dash.
+    # The caption must not promise a digest for it. Rebuild commands are never
+    # promised under this anchor either: that table is Path + SHA-256, the
+    # commands are their own section above it, and an unrecognised reference has
+    # no command at all.
+    env = {"case": "c", "observed": {}, "logs_published": True}
+    files = [("sanitizer_report.json", 12)]
+
+    undigested = {**env, "artifacts_not_published": [{"path": "fixtures/isa"}]}
+    caption = gen._files_caption(undigested, files)
+    assert "1 required input is" in caption
+    assert f'href="#{gen._NOT_PUBLISHED_ID}"' in caption
+    assert "SHA-256" not in caption
+
+    # One entry without a digest is enough to drop the claim for the whole list.
+    mixed = {
+        **env,
+        "artifacts_not_published": [
+            {"path": "fixtures/isa/x.hsaco", "sha256": "ab"},
+            {"path": "fixtures/isa", "sha256": None},
+        ],
+    }
+    assert "SHA-256" not in gen._files_caption(mixed, files)
+
+    # No caption on any of these paths claims a rebuild command under the
+    # anchor, because the anchored table does not carry one.
+    for case in (undigested, mixed):
+        assert "rebuild" not in gen._files_caption(case, files).lower()
+
+
+def _np_body_rows(page: str) -> int:
+    """Body rows of the "Artifacts not published" table, header excluded."""
+    anchor = f'id="{gen._NOT_PUBLISHED_ID}"'
+    assert anchor in page, "the page has no artifacts-not-published section"
+    start = page.index(anchor)
+    return page[start : page.index("</table>", start)].count("<tr><td")
+
+
+def _np_md_rows(md: str) -> int:
+    """Rows of REPRODUCE.md's "Artifacts not published" table."""
+    assert "## Artifacts not published" in md, "REPRODUCE.md has no such section"
+    section = md[md.index("## Artifacts not published") :].split("\n\n")[2]
+    return len([line for line in section.splitlines() if line.startswith("| `")])
+
+
+def test_every_reading_of_artifacts_not_published_agrees_and_survives_a_bad_entry():
+    # The caption counts this field, agrees its noun and verb with the count and
+    # links to it; the page renders it as a table; REPRODUCE.md renders it again.
+    # All three read it off the data branch, and two of them used to index
+    # `item["path"]` directly -- so one hand-edited env.json raised KeyError (a
+    # dict with no path) or TypeError (a bare string) and failed the whole
+    # dashboard render, while `refresh_published_case_area` was already filtering
+    # the same field to derive built_refs. One reader now serves all three, so
+    # the count in the prose cannot disagree with the rows beneath it.
+    env = {"case": "c", "observed": {}, "logs_published": True}
+    files = [("sanitizer_report.json", 12)]
+
+    good = [{"path": "fixtures/isa/x.hsaco", "sha256": "ab"}]
+    for stored in (
+        good,
+        [{"sha256": "ab"}],              # dict with no path
+        ["fixtures/isa/x.hsaco"],        # bare string, as hand-edited
+        [None],
+        good + [{"sha256": "cd"}],       # one good, one unreadable
+    ):
+        case = {**env, "artifacts_not_published": stored}
+        page = gen.build_case_index_html(case, files, built_refs=[], up="../../")
+        md = gen.build_reproduce_md(case, built_refs=[])
+
+        # The count in the caption is the number of rows in the table it links
+        # to, and the same number of rows reaches REPRODUCE.md.
+        assert _np_body_rows(page) == len(stored), stored
+        assert _np_md_rows(md) == len(stored), stored
+
+        # Nothing is dropped: an unreadable entry is still disclosed, because
+        # silently omitting it restores the overstatement this section fixes.
+        caption = gen._files_caption(case, files)
+        assert f"{len(stored)} required input" in caption, stored
+        assert "It is not the whole recipe" in caption, stored
+
+    # The digest claim still tracks the digest column and nothing else. An entry
+    # that lost its path but kept its sha256 does render a SHA-256, so the claim
+    # holds; one with no digest withdraws it, whether or not it is readable.
+    assert "SHA-256" in gen._files_caption(
+        {**env, "artifacts_not_published": good}, files
+    )
+    assert "SHA-256" in gen._files_caption(
+        {**env, "artifacts_not_published": good + [{"sha256": "cd"}]}, files
+    )
+    for undigested in ([{"path": "y"}], ["fixtures/isa/y.hsaco"], [None]):
+        assert "SHA-256" not in gen._files_caption(
+            {**env, "artifacts_not_published": good + undigested}, files
+        ), undigested
+
+    # A field that is not a list at all yields no section, not a row per char.
+    for junk in ("fixtures/isa/x.hsaco", {"path": "x"}, 7):
+        case = {**env, "artifacts_not_published": junk}
+        assert gen._not_published_rows(case) == []
+        assert f'id="{gen._NOT_PUBLISHED_ID}"' not in gen.build_case_index_html(
+            case, files, built_refs=[], up="../../"
+        )
+        assert "Artifacts not published" not in gen.build_reproduce_md(
+            case, built_refs=[]
+        )
+        assert gen._files_caption(case, files) == "Every file published for this case."
+
+    # A wrongly-typed value inside a well-formed entry is a dash too, not its
+    # repr: `{"path": ["a", "b"]}` publishing `['a', 'b']` would invent a path
+    # the manifest never recorded, which is the fault this reader exists to stop.
+    assert gen._not_published_rows(
+        {"artifacts_not_published": [{"path": ["a", "b"], "sha256": 7}]}
+    ) == [("", "")]
+    page = gen.build_case_index_html(
+        {**env, "artifacts_not_published": [{"path": ["a", "b"]}]},
+        files,
+        built_refs=[],
+        up="../../",
+    )
+    assert "['a', 'b']" not in page and _np_body_rows(page) == 1
+
+
+def test_a_malformed_artifact_list_does_not_abort_a_retained_area_refresh(tmp_path):
+    # The renderers being careful is not enough on its own: the nightly re-renders
+    # every retained area through refresh_published_case_area, which derived
+    # built_refs from this same field. While it iterated the field itself, a
+    # non-list value raised TypeError there -- before either renderer was
+    # reached -- so one hand-edited env.json still aborted the whole render.
+    area = tmp_path / "dashboard" / "runs" / "r" / "survey" / "c"
+    area.mkdir(parents=True)
+    (area / "sanitizer_report.json").write_text("{}")
+
+    for junk in (7, "fixtures/isa/x.hsaco", {"path": "x"}, [None], [{"sha256": "ab"}]):
+        (area / "env.json").write_text(
+            json.dumps({"case": "c", "observed": {}, "artifacts_not_published": junk})
+        )
+        assert (
+            gen.refresh_published_case_area(area, tmp_path / "dashboard", logs=True)
+            is True
+        ), junk
+        assert "['a', 'b']" not in (area / "index.html").read_text()
 
 
 def test_genco_rebuild_cleans_up_its_temporary_object():

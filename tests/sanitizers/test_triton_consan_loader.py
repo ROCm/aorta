@@ -1,0 +1,894 @@
+"""Unit tests for the generic Triton ConSan loader (pure logic; no GPU/ROCm needed).
+
+Everything that touches HIP lives behind ``Hip``; these tests cover the cache
+resolution, launch-ABI packing, and shim generation around it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+import stat
+import struct
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Shape of a real Triton 3.7.1 metadata sidecar (gfx950). Note the absence of
+# ``signature``: that field is why dispatch mode needs --launch-spec.
+_METADATA = {
+    "hash": "66c1005ec4e1c371fab4395b6074084db48e3da68423542e611f0a14baf82c84",
+    "target": {"backend": "hip", "arch": "gfx950", "warp_size": 64},
+    "num_warps": 4,
+    "num_stages": 2,
+    "shared": 0,
+    "name": "add_kernel",
+}
+
+
+def _load():
+    path = _REPO_ROOT / "scripts" / "sanitizers" / "triton_consan_loader.py"
+    spec = importlib.util.spec_from_file_location("triton_consan_loader", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    # @dataclass resolves annotations through sys.modules, so register before exec.
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+loader = _load()
+
+
+def _entry_dir(root: Path, *, name: str = "add_kernel", **overrides) -> Path:
+    """Write one Triton-cache-shaped entry directory and return it."""
+
+    metadata = {**_METADATA, "name": name, **overrides}
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{name}.hsaco").write_bytes(b"\x7fELF fake code object")
+    (root / f"{name}.json").write_text(json.dumps(metadata), encoding="utf-8")
+    # Triton also writes a sibling group index that is not kernel metadata.
+    (root / f"__grp__{name}.json").write_text(json.dumps({"child_paths": {}}), encoding="utf-8")
+    return root
+
+
+# --------------------------------------------------------------------------
+# Cache entry resolution
+# --------------------------------------------------------------------------
+
+
+def test_entry_from_hsaco_pairs_the_adjacent_sidecar(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    entry = loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco")
+    assert entry.kernel_name == "add_kernel"
+    assert entry.arch == "gfx950"
+    assert entry.metadata_path == (entry_dir / "add_kernel.json").resolve()
+
+
+def test_entry_from_hsaco_without_metadata_fails_closed(tmp_path):
+    tmp_path.joinpath("orphan.hsaco").write_bytes(b"\x7fELF")
+    with pytest.raises(loader.LoaderError, match="no Triton metadata beside"):
+        loader.entry_from_hsaco(tmp_path / "orphan.hsaco")
+
+
+def test_entry_from_hsaco_missing_object_fails_closed(tmp_path):
+    with pytest.raises(loader.LoaderError, match="code object not found"):
+        loader.entry_from_hsaco(tmp_path / "absent.hsaco")
+
+
+def test_arch_falls_back_to_flat_key(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY", target={"backend": "hip"}, arch="gfx942")
+    assert loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco").arch == "gfx942"
+
+
+def test_kernel_name_missing_fails_closed(tmp_path):
+    entry_dir = tmp_path / "ENTRY"
+    entry_dir.mkdir()
+    (entry_dir / "k.hsaco").write_bytes(b"\x7fELF")
+    (entry_dir / "k.json").write_text(json.dumps({"target": {}}), encoding="utf-8")
+    entry = loader.entry_from_hsaco(entry_dir / "k.hsaco")
+    with pytest.raises(loader.LoaderError, match="metadata has no 'name'"):
+        _ = entry.kernel_name
+
+
+def test_read_json_object_rejects_non_object(tmp_path):
+    path = tmp_path / "meta.json"
+    path.write_text("[1, 2]", encoding="utf-8")
+    with pytest.raises(loader.LoaderError, match="Triton metadata must be a JSON object"):
+        loader.read_json_object(path)
+    with pytest.raises(loader.LoaderError, match="launch spec must be a JSON object"):
+        loader.read_json_object(path, what="launch spec")
+
+
+def test_read_json_object_reports_malformed_json(tmp_path):
+    path = tmp_path / "meta.json"
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(loader.LoaderError, match="cannot read Triton metadata"):
+        loader.read_json_object(path)
+
+
+def test_discover_entries_recurses_and_skips_group_index(tmp_path):
+    _entry_dir(tmp_path / "AAAA", name="mediumm_kernel")
+    _entry_dir(tmp_path / "BBBB", name="largem_kernel")
+    entries = loader.discover_entries(tmp_path)
+    assert sorted(entry.kernel_name for entry in entries) == [
+        "largem_kernel",
+        "mediumm_kernel",
+    ]
+
+
+def test_discover_entries_on_empty_cache_fails_closed(tmp_path):
+    with pytest.raises(loader.LoaderError, match="no Triton code objects under"):
+        loader.discover_entries(tmp_path)
+
+
+def test_discover_entries_missing_directory_fails_closed(tmp_path):
+    with pytest.raises(loader.LoaderError, match="cache directory not found"):
+        loader.discover_entries(tmp_path / "nope")
+
+
+def test_select_entry_is_ambiguous_when_several_objects_match(tmp_path):
+    """One logical Triton kernel compiles to several shape-selected objects.
+
+    ConSan takes exactly one code object per run, so an ambiguous selection must
+    fail closed and list the candidates rather than silently picking one.
+    """
+
+    _entry_dir(tmp_path / "AAAA", name="mm_kernel", hash="aaaa1111")
+    _entry_dir(tmp_path / "BBBB", name="mm_kernel", hash="bbbb2222")
+    entries = loader.discover_entries(tmp_path)
+    with pytest.raises(loader.LoaderError, match="2 Triton cache entries match") as excinfo:
+        loader.select_entry(entries)
+    assert "aaaa1111" in str(excinfo.value)
+    assert "bbbb2222" in str(excinfo.value)
+
+
+def test_select_entry_narrows_by_name_and_hash_prefix(tmp_path):
+    _entry_dir(tmp_path / "AAAA", name="mediumm_kernel", hash="aaaa1111")
+    _entry_dir(tmp_path / "BBBB", name="largem_kernel", hash="bbbb2222")
+    entries = loader.discover_entries(tmp_path)
+    assert loader.select_entry(entries, kernel_name="largem_kernel").kernel_name == "largem_kernel"
+    assert loader.select_entry(entries, cache_hash="aaaa").kernel_name == "mediumm_kernel"
+
+
+def test_select_entry_without_a_match_lists_what_is_available(tmp_path):
+    _entry_dir(tmp_path / "AAAA", name="mediumm_kernel")
+    entries = loader.discover_entries(tmp_path)
+    with pytest.raises(loader.LoaderError, match="mediumm_kernel"):
+        loader.select_entry(entries, kernel_name="absent_kernel")
+
+
+# --------------------------------------------------------------------------
+# Launch ABI
+# --------------------------------------------------------------------------
+
+
+def test_parse_signature_drops_constexpr_and_keeps_order():
+    specs = loader.parse_signature(
+        {"x_ptr": "*fp32", "n_elements": "i32", "BLOCK_SIZE": "constexpr"}
+    )
+    assert [spec.name for spec in specs] == ["x_ptr", "n_elements"]
+    assert specs[0].is_pointer and not specs[1].is_pointer
+
+
+def test_parse_signature_accepts_an_explicitly_ordered_pair_list():
+    """The ordered form exists because JSON key order is not load-bearing.
+
+    An editor or ``json.dumps(sort_keys=True)`` can permute a hand-authored
+    object, and a permutation preserves the packed size, so the kernarg check
+    cannot see it. The pair list states the order instead of implying it.
+    """
+
+    specs = loader.parse_signature(
+        [["x_ptr", "*fp32"], ["n_elements", "i32"], ["BLOCK_SIZE", "constexpr"]]
+    )
+    assert [spec.name for spec in specs] == ["x_ptr", "n_elements"]
+
+
+def test_ordered_and_mapping_forms_pack_identically():
+    mapping = loader.parse_signature({"x_ptr": "*fp32", "n": "i32"})
+    ordered = loader.parse_signature([["x_ptr", "*fp32"], ["n", "i32"]])
+    pack = {"pointers": {"x_ptr": 0xDEAD0000}, "scalars": {"n": "7"}}
+    assert loader.pack_arguments(mapping, **pack) == loader.pack_arguments(ordered, **pack)
+
+
+def test_a_permuted_signature_packs_different_bytes_at_the_same_size():
+    """Pins the hazard the ordered form exists to avoid."""
+
+    declared = loader.parse_signature([["x_ptr", "*fp32"], ["n", "i32"], ["stride", "i64"]])
+    permuted = loader.parse_signature([["n", "i32"], ["stride", "i64"], ["x_ptr", "*fp32"]])
+    pack = {"pointers": {"x_ptr": 0xDEAD0000}, "scalars": {"n": "7", "stride": "3"}}
+    a = loader.pack_arguments(declared, **pack)
+    b = loader.pack_arguments(permuted, **pack)
+    assert len(a) == len(b)
+    assert a != b
+    # Same size, so the kernarg cross-check accepts both -- ordering has to be
+    # stated by the caller, it cannot be recovered here.
+    loader.check_kernarg_fit(len(b), 48, kernel="k")
+
+
+@pytest.mark.parametrize("bad", ["*fp32", 3, None])
+def test_parse_signature_rejects_a_form_that_is_neither_object_nor_pair_list(bad):
+    with pytest.raises(loader.LoaderError, match="must be a JSON object .* or a JSON array"):
+        loader.parse_signature(bad)
+
+
+@pytest.mark.parametrize("bad", [["*fp32"], [["x", "i32", "extra"]], [{"x": "i32"}]])
+def test_parse_signature_rejects_malformed_pairs(bad):
+    with pytest.raises(loader.LoaderError, match=r"must be a \[name, triton_type\] pair"):
+        loader.parse_signature(bad)
+
+
+def test_parse_signature_rejects_a_duplicate_argument():
+    with pytest.raises(loader.LoaderError, match="duplicate argument 'x'"):
+        loader.parse_signature([["x", "i32"], ["x", "i64"]])
+
+
+def test_parse_signature_rejects_non_string_type():
+    with pytest.raises(loader.LoaderError, match="must map to a type string"):
+        loader.parse_signature({"x": 32})
+
+
+def test_unsupported_argument_type_fails_closed():
+    with pytest.raises(loader.LoaderError, match="unsupported Triton type"):
+        _ = loader.ArgSpec(name="x", ttype="tensor").size
+
+
+def test_pack_arguments_matches_the_real_add_kernel_layout():
+    """3 pointers + i32, padded to the widest member -- 32 bytes on the device.
+
+    Verified against a real gfx950 ``add_kernel`` dispatch.
+    """
+
+    specs = loader.parse_signature(
+        {
+            "x_ptr": "*fp32",
+            "y_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n_elements": "i32",
+            "BLOCK_SIZE": "constexpr",
+        }
+    )
+    packed = loader.pack_arguments(
+        specs,
+        pointers={"x_ptr": 0x1000, "y_ptr": 0x2000, "out_ptr": 0x3000},
+        scalars={"n_elements": "1024"},
+    )
+    assert len(packed) == 32
+    assert struct.unpack_from("<QQQi", packed) == (0x1000, 0x2000, 0x3000, 1024)
+
+
+def test_pack_arguments_aligns_a_wide_scalar_after_a_narrow_one():
+    specs = loader.parse_signature({"small": "i8", "wide": "i64"})
+    packed = loader.pack_arguments(specs, pointers={}, scalars={"small": "7", "wide": "1"})
+    # i64 must start at offset 8, not 1.
+    assert len(packed) == 16
+    assert struct.unpack_from("<q", packed, 8) == (1,)
+
+
+def test_pack_arguments_rejects_an_override_for_a_pointer():
+    # Pointers always get a fresh zeroed allocation, so accepting --arg on one
+    # would silently launch something other than what was asked for.
+    specs = loader.parse_signature({"x_ptr": "*fp32", "n": "i32"})
+    with pytest.raises(loader.LoaderError, match="cannot set pointer arguments: x_ptr"):
+        loader.pack_arguments(specs, pointers={"x_ptr": 0x1000}, scalars={"x_ptr": "0x2000"})
+
+
+def test_pack_arguments_rejects_an_unknown_override():
+    specs = loader.parse_signature({"n": "i32"})
+    with pytest.raises(loader.LoaderError, match="not in the kernel signature: nope"):
+        loader.pack_arguments(specs, pointers={}, scalars={"nope": "1"})
+
+
+def test_pack_arguments_defaults_every_scalar_to_zero():
+    specs = loader.parse_signature({"n": "i32", "m": "i32"})
+    assert loader.pack_arguments(specs, pointers={}, scalars={}) == b"\x00" * 8
+
+
+def test_pack_arguments_supports_hex_and_negative_integers():
+    specs = loader.parse_signature({"n": "i32"})
+    assert loader.pack_arguments(specs, pointers={}, scalars={"n": "0x10"}) == b"\x10\x00\x00\x00"
+    assert loader.pack_arguments(specs, pointers={}, scalars={"n": "-1"}) == b"\xff" * 4
+
+
+def test_pack_arguments_rejects_out_of_range_and_malformed_scalars():
+    specs = loader.parse_signature({"n": "i32"})
+    with pytest.raises(loader.LoaderError, match="does not fit in i32"):
+        loader.pack_arguments(specs, pointers={}, scalars={"n": str(2**40)})
+    with pytest.raises(loader.LoaderError, match="expects an integer"):
+        loader.pack_arguments(specs, pointers={}, scalars={"n": "abc"})
+
+
+@pytest.mark.parametrize(
+    ("ttype", "value", "expected"),
+    [
+        ("fp32", "1.5", struct.pack("<f", 1.5)),
+        ("fp64", "1.5", struct.pack("<d", 1.5)),
+        ("fp16", "1.5", struct.pack("<e", 1.5)),
+        ("bf16", "1.5", b"\xc0\x3f"),
+        ("bf16", "0", b"\x00\x00"),
+    ],
+)
+def test_float_scalars_pack_to_their_device_widths(ttype, value, expected):
+    specs = loader.parse_signature({"v": ttype})
+    assert loader.pack_arguments(specs, pointers={}, scalars={"v": value}) == expected
+
+
+def test_float_scalar_rejects_non_numeric():
+    specs = loader.parse_signature({"v": "fp32"})
+    with pytest.raises(loader.LoaderError, match="expects a float"):
+        loader.pack_arguments(specs, pointers={}, scalars={"v": "not-a-number"})
+
+
+@pytest.mark.parametrize(("ttype", "value"), [("fp16", "70000"), ("fp32", "1e300")])
+def test_float_scalar_too_wide_for_its_type_fails_closed(ttype, value):
+    # struct.pack raises OverflowError, not ValueError; without translating it the
+    # loader would traceback instead of exiting non-zero like every other error.
+    specs = loader.parse_signature({"v": ttype})
+    with pytest.raises(loader.LoaderError, match=f"does not fit in {ttype}"):
+        loader.pack_arguments(specs, pointers={}, scalars={"v": value})
+
+
+def test_block_dim_multiplies_warps_by_warp_size():
+    assert loader.block_dim(_METADATA) == 256
+    assert loader.block_dim({"num_warps": 2, "warp_size": 64}) == 128
+
+
+@pytest.mark.parametrize(
+    ("metadata", "match"),
+    [
+        ({"num_warps": 4}, "warp_size"),
+        ({"warp_size": 64}, "num_warps"),
+        ({"num_warps": 0, "warp_size": 64}, "num_warps"),
+        # isinstance(True, int) is true, so bool needs an explicit guard or a
+        # malformed metadata file yields block size 1 instead of failing.
+        ({"num_warps": True, "warp_size": True}, "warp_size"),
+        ({"num_warps": True, "warp_size": 64}, "num_warps"),
+    ],
+)
+def test_block_dim_fails_closed_on_incomplete_metadata(metadata, match):
+    with pytest.raises(loader.LoaderError, match=match):
+        loader.block_dim(metadata)
+
+
+def test_block_dim_prefers_the_target_warp_size_then_the_flat_key():
+    assert loader.block_dim({"target": {"warp_size": 32}, "num_warps": 2, "warp_size": 64}) == 64
+    assert loader.block_dim({"target": {}, "num_warps": 2, "warp_size": 64}) == 128
+
+
+def test_shared_bytes_reads_lds_requirement():
+    assert loader.shared_bytes({"shared": 16384}) == 16384
+    assert loader.shared_bytes({}) == 0
+    with pytest.raises(loader.LoaderError, match="non-negative integer"):
+        loader.shared_bytes({"shared": -1})
+
+
+@pytest.mark.parametrize("bad", ["1,1", "1,1,1,1", "a,b,c", "0,1,1"])
+def test_parse_grid_rejects_malformed_input(bad):
+    with pytest.raises(loader.LoaderError):
+        loader.parse_grid(bad)
+
+
+def test_parse_grid_accepts_three_dimensions():
+    assert loader.parse_grid("4, 2,1") == (4, 2, 1)
+
+
+# --------------------------------------------------------------------------
+# Narrowing into fixed-width C types
+#
+# ctypes wraps silently -- c_uint(2**32 + 1) is 1 -- so an oversized launch
+# dimension would quietly become a tiny one and invalidate the run.
+# --------------------------------------------------------------------------
+
+
+def test_require_in_range_bounds_both_ends():
+    assert loader.require_in_range(5, name="v", minimum=1, maximum=10) == 5
+    with pytest.raises(loader.LoaderError, match=r"v must be in 1\.\.10, got 0"):
+        loader.require_in_range(0, name="v", minimum=1, maximum=10)
+    with pytest.raises(loader.LoaderError, match=r"v must be in 1\.\.10, got 11"):
+        loader.require_in_range(11, name="v", minimum=1, maximum=10)
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_grid_dimension_above_c_uint_fails_closed(axis):
+    dims = ["1", "1", "1"]
+    dims[axis] = str(loader._UINT_MAX + 1)
+    with pytest.raises(loader.LoaderError, match="--grid"):
+        loader.parse_grid(",".join(dims))
+
+
+def test_grid_dimension_at_the_c_uint_ceiling_is_allowed():
+    assert loader.parse_grid(f"{loader._UINT_MAX},1,1") == (loader._UINT_MAX, 1, 1)
+
+
+def test_block_size_above_c_uint_fails_closed():
+    with pytest.raises(loader.LoaderError, match="block size"):
+        loader.block_dim({"num_warps": loader._UINT_MAX, "warp_size": 64})
+
+
+def test_shared_bytes_above_c_uint_fails_closed():
+    with pytest.raises(loader.LoaderError, match="metadata 'shared'"):
+        loader.shared_bytes({"shared": loader._UINT_MAX + 1})
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", str(2**64 + 1), "abc"])
+def test_buffer_bytes_rejects_values_that_would_wrap(bad):
+    # argparse surfaces ArgumentTypeError as SystemExit(2), so a wrapping size
+    # never reaches HIP nor gets baked into a shim.
+    with pytest.raises(SystemExit):
+        loader.build_parser().parse_args(
+            ["run", "--hsaco", "/tmp/k.hsaco", "--buffer-bytes", bad]
+        )
+
+
+def test_buffer_bytes_accepts_hex_and_plain_sizes():
+    args = loader.build_parser().parse_args(
+        ["run", "--hsaco", "/tmp/k.hsaco", "--buffer-bytes", "0x1000"]
+    )
+    assert args.buffer_bytes == 4096
+
+
+@pytest.mark.parametrize("bad", ["4294967296,1,1", "0,1,1", "1,1", "a,b,c"])
+def test_grid_is_validated_at_parse_time_so_no_shim_can_bake_a_bad_one(bad):
+    with pytest.raises(SystemExit):
+        loader.build_parser().parse_args(["emit-command", "--hsaco", "/tmp/k.hsaco", "--output", "/tmp/s", "--grid", bad])
+
+
+def test_grid_defaults_to_a_single_block():
+    args = loader.build_parser().parse_args(["run", "--hsaco", "/tmp/k.hsaco"])
+    assert args.grid == (1, 1, 1)
+
+
+def test_parse_arg_overrides_splits_on_first_equals():
+    assert loader.parse_arg_overrides(["n=1", "s=a=b"]) == {"n": "1", "s": "a=b"}
+    with pytest.raises(loader.LoaderError, match="must be 'name=value'"):
+        loader.parse_arg_overrides(["bare"])
+
+
+def test_resolve_signature_prefers_the_launch_spec(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY", signature={"a": "i32"})
+    entry = loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco")
+    assert loader.resolve_signature(entry, {"signature": {"b": "i64"}}) == {"b": "i64"}
+    assert loader.resolve_signature(entry, None) == {"a": "i32"}
+
+
+def test_resolve_signature_without_one_points_at_the_workaround(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    entry = loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco")
+    with pytest.raises(loader.LoaderError, match="--launch-spec") as excinfo:
+        loader.resolve_signature(entry, None)
+    assert "--mode load" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# kernarg cross-check
+# --------------------------------------------------------------------------
+
+
+def test_kernarg_segment_size_read_from_the_amdgcn_listing(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    (entry_dir / "add_kernel.amdgcn").write_text(
+        ".amdhsa_kernarg_size 48\n"
+        "  .kernarg_segment_align: 8\n"
+        "  .kernarg_segment_size: 48\n",
+        encoding="utf-8",
+    )
+    entry = loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco")
+    assert loader.kernarg_segment_size(entry) == 48
+
+
+def test_kernarg_segment_size_absent_listing_is_not_an_error(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    entry = loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco")
+    assert loader.kernarg_segment_size(entry) is None
+
+
+def test_check_kernarg_fit_rejects_only_the_overrun_direction():
+    # HIP does not validate the launch buffer size, so an over-long buffer is the
+    # one provably-wrong case we can catch before it scribbles past the segment.
+    with pytest.raises(loader.LoaderError, match="does not match this code object"):
+        loader.check_kernarg_fit(56, 48, kernel="add_kernel")
+    # Hidden arguments make the compiled segment larger than the explicit args.
+    loader.check_kernarg_fit(32, 48, kernel="add_kernel")
+    loader.check_kernarg_fit(999, None, kernel="add_kernel")
+
+
+# --------------------------------------------------------------------------
+# Content pinning
+#
+# A Triton cache entry is keyed by a content hash, but it can be evicted and
+# repopulated, so a path alone does not pin the bytes that get loaded.
+# --------------------------------------------------------------------------
+
+
+def test_sha256_file_matches_hashlib(tmp_path):
+    path = tmp_path / "blob"
+    path.write_bytes(b"triton code object")
+    assert loader.sha256_file(path) == hashlib.sha256(b"triton code object").hexdigest()
+
+
+def test_verify_digest_accepts_unchanged_bytes(tmp_path):
+    path = tmp_path / "blob"
+    path.write_bytes(b"same")
+    loader.verify_digest(path, loader.sha256_file(path), what="code object")
+
+
+def test_verify_digest_without_a_pin_is_a_no_op(tmp_path):
+    path = tmp_path / "blob"
+    path.write_bytes(b"whatever")
+    loader.verify_digest(path, None, what="code object")
+
+
+def test_verify_digest_rejects_repopulated_bytes(tmp_path):
+    path = tmp_path / "blob"
+    path.write_bytes(b"original")
+    pinned = loader.sha256_file(path)
+    path.write_bytes(b"recompiled")
+    with pytest.raises(loader.LoaderError, match="code object digest mismatch") as excinfo:
+        loader.verify_digest(path, pinned, what="code object")
+    assert "re-run emit-command" in str(excinfo.value)
+
+
+def test_emitted_shim_pins_object_and_metadata_digests(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    output = tmp_path / "shim"
+    assert loader.main(["emit-command", "--cache-entry", str(entry_dir), "--output", str(output)]) == 0
+    flattened = output.read_text(encoding="utf-8").replace(" \\\n    ", " ")
+    assert f"--expect-object-sha256 {loader.sha256_file(entry_dir / 'add_kernel.hsaco')}" in flattened
+    assert (
+        f"--expect-metadata-sha256 {loader.sha256_file(entry_dir / 'add_kernel.json')}" in flattened
+    )
+
+
+def test_emitted_shim_pins_the_launch_spec_in_dispatch_mode(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    spec = tmp_path / "launch.json"
+    spec.write_text(json.dumps({"signature": {"x": "*fp32"}}), encoding="utf-8")
+    output = tmp_path / "shim"
+    assert (
+        loader.main(
+            [
+                "emit-command",
+                "--cache-entry",
+                str(entry_dir),
+                "--output",
+                str(output),
+                "--mode",
+                "dispatch",
+                "--launch-spec",
+                str(spec),
+            ]
+        )
+        == 0
+    )
+    flattened = output.read_text(encoding="utf-8").replace(" \\\n    ", " ")
+    assert f"--expect-launch-spec-sha256 {loader.sha256_file(spec)}" in flattened
+
+
+def test_run_fails_closed_when_the_pinned_object_changed(tmp_path, capsys, monkeypatch):
+    """The whole point of the pin: a recompiled cache entry must not silently run.
+
+    ``Hip`` is patched to a sentinel that raises, proving the digest check runs
+    before anything touches the device.
+    """
+
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    hsaco = entry_dir / "add_kernel.hsaco"
+    pinned = loader.sha256_file(hsaco)
+    hsaco.write_bytes(b"\x7fELF a different, recompiled object")
+
+    def _explode():
+        raise AssertionError("device must not be touched before the digest is verified")
+
+    monkeypatch.setattr(loader, "Hip", _explode)
+    assert (
+        loader.main(
+            [
+                "run",
+                "--hsaco",
+                str(hsaco),
+                "--expect-object-sha256",
+                pinned,
+            ]
+        )
+        == 1
+    )
+    assert "code object digest mismatch" in capsys.readouterr().err
+
+
+def test_pinned_launch_spec_without_a_launch_spec_fails_closed(tmp_path, capsys, monkeypatch):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+
+    def _explode():
+        raise AssertionError("device must not be touched")
+
+    monkeypatch.setattr(loader, "Hip", _explode)
+    assert (
+        loader.main(
+            [
+                "run",
+                "--hsaco",
+                str(entry_dir / "add_kernel.hsaco"),
+                "--expect-launch-spec-sha256",
+                "deadbeef",
+            ]
+        )
+        == 1
+    )
+    assert "--expect-launch-spec-sha256 given without --launch-spec" in capsys.readouterr().err
+
+
+def test_run_fails_closed_when_the_pinned_metadata_changed(tmp_path, capsys, monkeypatch):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    metadata = entry_dir / "add_kernel.json"
+    pinned = loader.sha256_file(metadata)
+    metadata.write_text(json.dumps({**_METADATA, "num_warps": 8}), encoding="utf-8")
+
+    def _explode():
+        raise AssertionError("device must not be touched before the digest is verified")
+
+    monkeypatch.setattr(loader, "Hip", _explode)
+    assert (
+        loader.main(
+            [
+                "run",
+                "--hsaco",
+                str(entry_dir / "add_kernel.hsaco"),
+                "--expect-metadata-sha256",
+                pinned,
+            ]
+        )
+        == 1
+    )
+    assert "Triton metadata digest mismatch" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# consan_command shim
+# --------------------------------------------------------------------------
+
+
+def test_emitted_shim_is_executable_and_self_contained(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    output = tmp_path / "bin" / "consan_add_kernel"
+    assert (
+        loader.main(
+            [
+                "emit-command",
+                "--cache-entry",
+                str(entry_dir),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert os.access(output, os.X_OK)
+    assert output.stat().st_mode & stat.S_IXUSR
+    body = output.read_text(encoding="utf-8")
+    assert body.startswith("#!/bin/sh\n")
+    # The shim must name absolute paths: ConSan runs it with no arguments and
+    # from an unspecified working directory.
+    assert str((entry_dir / "add_kernel.hsaco").resolve()) in body
+    assert str((entry_dir / "add_kernel.json").resolve()) in body
+    assert "--mode load" in body.replace(" \\\n    ", " ")
+
+
+def test_shim_bakes_in_dispatch_options(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    output = tmp_path / "consan_dispatch"
+    spec = tmp_path / "launch.json"
+    spec.write_text(json.dumps({"signature": {"x": "*fp32"}}), encoding="utf-8")
+    assert (
+        loader.main(
+            [
+                "emit-command",
+                "--cache-entry",
+                str(entry_dir),
+                "--output",
+                str(output),
+                "--mode",
+                "dispatch",
+                "--grid",
+                "8,1,1",
+                "--arg",
+                "n_elements=1024",
+                "--launch-spec",
+                str(spec),
+            ]
+        )
+        == 0
+    )
+    flattened = output.read_text(encoding="utf-8").replace(" \\\n    ", " ")
+    assert "--mode dispatch" in flattened
+    assert "--grid 8,1,1" in flattened
+    assert "--arg n_elements=1024" in flattened
+    assert f"--launch-spec {spec.resolve()}" in flattened
+
+
+def test_shell_comment_cannot_be_escaped_by_a_newline():
+    # A newline is the only way to end a shell comment, and it is legal in a
+    # Linux path -- so this is the whole guard.
+    rendered = loader.shell_comment("Code object", "/cache/ent\ntouch /tmp/OWNED   #/k.hsaco")
+    assert rendered.count("\n") == 1
+    assert rendered.endswith("\n")
+    assert "\\n" in rendered
+
+
+def test_emitted_shim_seals_its_comment_block_against_a_newline_in_a_path(tmp_path):
+    """Every line before the exec must still be a comment.
+
+    The exec line itself may legitimately span lines, because shlex.quote wraps a
+    newline-containing path in single quotes where the newline is inert data.
+    """
+
+    entry_dir = _entry_dir(tmp_path / "ent\ntouch OWNED   #")
+    output = tmp_path / "shim"
+    assert loader.main(["emit-command", "--cache-entry", str(entry_dir), "--output", str(output)]) == 0
+    body = output.read_text(encoding="utf-8")
+    preamble, _, _ = body.partition("exec ")
+    for line in preamble.splitlines()[1:]:  # skip the #! line
+        assert line.startswith("#"), line
+
+
+def test_a_newline_in_a_cache_path_does_not_execute(tmp_path):
+    """The reviewer's reproduction, as a regression test.
+
+    The injected text ran *before* the quoted exec, so it fired even with a bogus
+    loader path. Running the shim must not produce the sentinel; the loader
+    itself is expected to fail here (fake code object / no HIP), which is fine --
+    the point is what does *not* happen first.
+    """
+
+    entry_dir = _entry_dir(tmp_path / "ent\ntouch OWNED   #")
+    shim = tmp_path / "shim"
+    assert loader.main(["emit-command", "--cache-entry", str(entry_dir), "--output", str(shim)]) == 0
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    subprocess.run(["sh", str(shim)], cwd=sandbox, capture_output=True, timeout=120, check=False)
+    assert not (sandbox / "OWNED").exists(), "shim comment block executed injected text"
+
+
+def test_emitted_shim_neutralises_a_newline_in_the_kernel_name(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY", name="add_kernel")
+    metadata = entry_dir / "add_kernel.json"
+    metadata.write_text(
+        json.dumps({**_METADATA, "name": "k\ntouch OWNED   #"}), encoding="utf-8"
+    )
+    output = tmp_path / "shim"
+    assert loader.main(["emit-command", "--cache-entry", str(entry_dir), "--output", str(output)]) == 0
+    assert "\ntouch OWNED" not in output.read_text(encoding="utf-8")
+
+
+def test_shim_quotes_paths_containing_spaces(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "cache dir")
+    output = tmp_path / "shim"
+    assert loader.main(["emit-command", "--cache-entry", str(entry_dir), "--output", str(output)]) == 0
+    assert "'" in output.read_text(encoding="utf-8")
+
+
+def test_loader_argv_omits_dispatch_flags_in_load_mode(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    entry = loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco")
+    args = loader.build_parser().parse_args(
+        ["run", "--cache-entry", str(entry_dir), "--grid", "4,1,1"]
+    )
+    argv = loader._loader_argv(args, entry)
+    assert "--grid" not in argv
+    assert argv[:2] == ["run", "--hsaco"]
+    # The object/metadata pins are not dispatch-only: load mode runs the kernel's
+    # code object too, so both are always baked in.
+    assert "--expect-object-sha256" in argv
+    assert "--expect-metadata-sha256" in argv
+
+
+# --------------------------------------------------------------------------
+# Lifting the object out of the scratch cache
+# --------------------------------------------------------------------------
+
+
+def test_copy_object_writes_the_object_and_its_sidecars(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    (entry_dir / "add_kernel.amdgcn").write_text(
+        "  .kernarg_segment_size: 48\n", encoding="utf-8"
+    )
+    destination = tmp_path / "fixtures" / "isa" / "harvested.hsaco"
+    copied = loader.copy_entry(
+        loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco"), destination
+    )
+    assert copied.hsaco == destination.resolve()
+    assert copied.kernel_name == "add_kernel"
+    assert destination.with_suffix(".json").is_file()
+    # The .amdgcn carries .kernarg_segment_size; dropping it would silently
+    # disable the dispatch-time kernarg cross-check.
+    assert loader.kernarg_segment_size(copied) == 48
+
+
+def test_copy_object_tolerates_a_missing_optional_sidecar(tmp_path):
+    entry_dir = _entry_dir(tmp_path / "ENTRY")
+    destination = tmp_path / "isa" / "harvested.hsaco"
+    copied = loader.copy_entry(
+        loader.entry_from_hsaco(entry_dir / "add_kernel.hsaco"), destination
+    )
+    assert loader.kernarg_segment_size(copied) is None
+
+
+def test_emit_command_points_the_shim_at_the_copy_not_the_cache(tmp_path):
+    """The recipe's code_object and the shim's object must be the same file."""
+
+    entry_dir = _entry_dir(tmp_path / "CACHE")
+    destination = tmp_path / "fixtures" / "isa" / "harvested.hsaco"
+    output = tmp_path / "fixtures" / "bin" / "shim"
+    assert (
+        loader.main(
+            [
+                "emit-command",
+                "--cache-entry",
+                str(entry_dir),
+                "--copy-object",
+                str(destination),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    flattened = output.read_text(encoding="utf-8").replace(" \\\n    ", " ")
+    assert str(destination.resolve()) in flattened
+    assert str(entry_dir.resolve()) not in flattened
+    # The pinned digest describes the copy, so evicting the cache changes nothing.
+    assert f"--expect-object-sha256 {loader.sha256_file(destination)}" in flattened
+
+
+# --------------------------------------------------------------------------
+# CLI wiring
+# --------------------------------------------------------------------------
+
+
+def test_release_reports_a_cleanup_failure_without_replacing_the_real_one(capsys):
+    """Cleanup must not out-prioritise the failure being unwound.
+
+    ``Hip.check`` raises, so a failing hipFree in a ``finally`` would otherwise
+    overwrite the launch error the operator actually needs to read.
+    """
+
+    def _boom():
+        raise loader.LoaderError("hipFree failed: invalid argument")
+
+    try:
+        try:
+            raise loader.LoaderError("hipModuleLaunchKernel failed: the real problem")
+        finally:
+            loader._release(_boom, what="hipFree")
+    except loader.LoaderError as exc:
+        assert "the real problem" in str(exc)
+    else:
+        raise AssertionError("the original error must still propagate")
+    assert "hipFree failed" in capsys.readouterr().err
+
+
+def test_main_reports_loader_errors_without_a_traceback(tmp_path, capsys):
+    assert loader.main(["list", "--cache-entry", str(tmp_path)]) == 1
+    assert "triton_consan_loader:" in capsys.readouterr().err
+
+
+def test_list_prints_one_row_per_code_object(tmp_path, capsys):
+    _entry_dir(tmp_path / "AAAA", name="mediumm_kernel", hash="aaaa1111")
+    _entry_dir(tmp_path / "BBBB", name="largem_kernel", hash="bbbb2222")
+    assert loader.main(["list", "--cache-entry", str(tmp_path)]) == 0
+    rows = capsys.readouterr().out.strip().splitlines()
+    assert len(rows) == 2
+    assert all(row.count("\t") == 3 for row in rows)
+
+
+def test_hsaco_and_cache_entry_are_mutually_exclusive(tmp_path):
+    with pytest.raises(SystemExit):
+        loader.build_parser().parse_args(
+            ["run", "--cache-entry", str(tmp_path), "--hsaco", str(tmp_path / "k.hsaco")]
+        )

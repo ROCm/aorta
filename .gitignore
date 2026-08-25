@@ -108,3 +108,8 @@ buck-out/
 
 # actionlint binary (dev tool for linting workflows; install locally, don't commit).
 /actionlint
+
+# Sanitizer-nightly scratch root: downloaded rocjitsu bundles and run output.
+# Untracked by design -- a lingering bundle here is a stale-hook trap, see
+# docs/sanitizers/rocjitsu-bundle-provenance.md.
+.sanitizer-nightly/
