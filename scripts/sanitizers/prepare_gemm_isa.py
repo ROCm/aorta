@@ -94,8 +94,9 @@ GATE_CU_COUNT = 256
 # so resolving by filename tracks the loader rather than guessing.
 #
 # Grammar note: both tokens are optional (ROCm <= 7.2.4 shipped neither), the
-# order is fixed, and the ids are lowercase hex. Anything else is not parsed --
-# see _variants_for on why that is a skip rather than a permissive read.
+# order is fixed, and the ids are lowercase hex. Anything else does not parse,
+# which is fatal rather than skipped -- see _library_for. Extending this regex is
+# the intended response to a release that adds a token.
 _VARIANT_RE = re.compile(r"^(?:_CU(?P<cu>[0-9]+))?(?:_ID(?P<ids>[0-9a-f]+(?:-[0-9a-f]+)*))?$")
 
 # tensilelite's ChipIdRegistry, mirrored as data. A gfx950 device may use a
@@ -247,9 +248,9 @@ def _variants_for(layout: str) -> _Bundles:
 
     Names whose token block does not parse are returned separately rather than
     dropped. Reading one as unconstrained would make it eligible for every device
-    -- the silent wrong answer this selector exists to avoid -- but discarding it
-    without trace is how a new release's added token would quietly widen the
-    choice to a broader bundle, so callers report them.
+    -- the silent wrong answer this selector exists to avoid -- while discarding
+    it without trace is how a new release's added token would quietly widen the
+    choice to a broader bundle. ``_library_for`` treats any of them as fatal.
     """
     prefix = _SS_HEAVY_STEM.format(layout=layout)
     suffix = f"_{GFX}.co"
@@ -302,29 +303,30 @@ def _select_variant(variants: list[_Variant], chip_id: int, cu_count: int) -> _V
 
 def _library_for(layout: str, chip_id: int = GATE_CHIP_ID, cu_count: int = GATE_CU_COUNT) -> Path:
     variants, unparsed = _variants_for(layout)
+    if unparsed:
+        # Fatal even when other bundles parsed. Selecting among candidates only
+        # means anything if every candidate's predicates are known: an
+        # unrecognised token block could be the loader's exact choice for this
+        # device, in which case resolution silently settles on a broader bundle.
+        # Warning and continuing was not enough -- this artifact's digest gets
+        # recorded and blessed into sanitizer baselines, so a plausible-but-wrong
+        # object outlives the log line that mentioned it. Failing here costs a
+        # loud nightly failure at the moment someone is already bumping ROCm,
+        # which is the cheapest time to extend the grammar.
+        names = ", ".join(sorted(path.name for path in unparsed))
+        shipped = len(variants) + len(unparsed)
+        detail = (
+            f"none of {shipped} with a recognised device-token block"
+            if not variants
+            else f"{len(unparsed)} of {shipped} with an unrecognised device-token block"
+        )
+        raise SystemExit(
+            f"no usable {GFX} f32 SS Tensile bundle for layout {layout}: {detail}, "
+            f"so the loader's choice cannot be established: {names}"
+        )
     if not variants:
-        # Distinguish "hipBLASLt shipped nothing" from "it shipped bundles whose
-        # names I did not understand" -- the latter is the expected failure mode of
-        # a release that adds a token, and sends the reader somewhere very different.
-        if unparsed:
-            names = ", ".join(sorted(path.name for path in unparsed))
-            raise SystemExit(
-                f"no usable {GFX} f32 SS Tensile bundle for layout {layout}: "
-                f"{len(unparsed)} shipped, none with a recognised device-token "
-                f"block: {names}"
-            )
         tried = " or ".join(str(d / _SS_HEAVY.format(layout=layout)) for d in _library_dirs())
         raise SystemExit(f"no {GFX} f32 SS Tensile bundle for layout {layout}: {tried}")
-    if unparsed:
-        # Usable bundles exist, so this is not fatal -- but the skipped name may
-        # have been the more specific one, in which case the choice below is
-        # broader than the loader's. Say so rather than widening silently.
-        for path in unparsed:
-            print(
-                f"warning: ignoring {path.name}: unrecognised device-token block; "
-                f"selection for layout {layout} may be broader than hipBLASLt's",
-                file=sys.stderr,
-            )
     selected = _select_variant(variants, chip_id, cu_count)
     if selected is None:
         offered = ", ".join(sorted(variant.path.name for variant in variants))

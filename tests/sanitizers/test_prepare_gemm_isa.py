@@ -236,7 +236,7 @@ def test_a_stale_tree_of_unparsed_names_does_not_fall_through_to_the_other_layou
     _plant(tmp_path / gen.GFX, "Ailk_Bjlk", *_SHIPPED_714)
     bundles = gen._variants_for("Ailk_Bjlk")
     assert bundles.variants == [] and bundles.unparsed == [stale]
-    with pytest.raises(SystemExit, match="none with a recognised device-token block"):
+    with pytest.raises(SystemExit, match="none of 1 with a recognised device-token block"):
         gen._library_for("Ailk_Bjlk")
 
 
@@ -365,9 +365,7 @@ def test_an_unregistered_chip_id_still_fails_closed(monkeypatch, tmp_path):
     assert "ChipIdRegistry mirror" in message
 
 
-def test_a_registered_chip_that_finds_nothing_does_not_blame_the_registry(
-    monkeypatch, tmp_path
-):
+def test_a_registered_chip_that_finds_nothing_does_not_blame_the_registry(monkeypatch, tmp_path):
     """The mirror hint must not fire for an id the mirror already knows.
 
     0x75a3 is registered, so a miss here means the layout ships nothing usable --
@@ -491,34 +489,45 @@ def test_bundles_that_ship_but_do_not_parse_are_named_not_reported_as_absent(
     with pytest.raises(SystemExit) as excinfo:
         gen._library_for("Ailk_Bjlk")
     message = str(excinfo.value)
-    assert "2 shipped" in message and "none with a recognised device-token block" in message
+    assert "none of 2 with a recognised device-token block" in message
     for name in ("_XPACK7_gfx950.co", "_CU256_ID75a0_XPACK7_gfx950.co"):
         assert name in message
     # And it must NOT claim the canonical 7.2.4 path was what was missing.
     assert str(tmp_path / gen._SS_HEAVY.format(layout="Ailk_Bjlk")) not in message
 
 
-def test_a_skipped_bundle_is_reported_when_others_still_resolve(monkeypatch, tmp_path, capsys):
-    """Skipping is safe but it widens, so it cannot also be silent.
+def test_an_unparsed_bundle_is_fatal_even_when_others_resolve(monkeypatch, tmp_path):
+    """The widening case fails closed rather than warning and continuing.
 
-    If a release tokenises the *specific* bundle and leaves a broader one
-    parseable, selection quietly moves to the broader file. The choice still
-    succeeds -- so a warning, not a failure -- but it has to be visible.
+    This is the shape that matters: a release tokenises the *specific* bundle and
+    leaves a broader one parseable. Selection would settle on `_ID75a0` and exit
+    0, even though the skipped `_CU256_ID75a0_*` may be the loader's exact choice
+    for this device. Ordering only means something when every candidate's
+    predicates are known, so with any of them unknown there is no answer to give.
+
+    Warning and continuing was the earlier behaviour and was not enough: this
+    artifact's digest is recorded and blessed into sanitizer baselines, so a
+    plausible-but-wrong object outlives the log line that mentioned it.
     """
     monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
     planted = _plant(tmp_path, "Ailk_Bjlk", "_CU256_ID75a0_XPACK7", _V_75A0)
-    assert gen._library_for("Ailk_Bjlk") == planted[_V_75A0]
-    stderr = capsys.readouterr().err
-    assert "_CU256_ID75a0_XPACK7_gfx950.co" in stderr
-    assert "may be broader than hipBLASLt's" in stderr
+    with pytest.raises(SystemExit) as excinfo:
+        gen._library_for("Ailk_Bjlk")
+    message = str(excinfo.value)
+    assert "_CU256_ID75a0_XPACK7_gfx950.co" in message
+    assert "1 of 2 with an unrecognised device-token block" in message
+    assert "the loader's choice cannot be established" in message
+    # The broader bundle is right there and parses -- that is the point.
+    assert planted[_V_75A0].is_file()
 
 
-def test_nothing_is_reported_when_every_bundle_parses(monkeypatch, tmp_path, capsys):
-    """The normal case stays quiet, so the warning above means something."""
+def test_every_bundle_parsing_is_what_makes_a_selection_possible(monkeypatch, tmp_path, capsys):
+    """The normal case resolves and says nothing, so a failure means something."""
     monkeypatch.setattr(gen, "HIPBLASLT_LIBRARY", tmp_path)
-    _plant(tmp_path, "Ailk_Bjlk", *_SHIPPED_714)
-    gen._library_for("Ailk_Bjlk")
-    assert capsys.readouterr().err == ""
+    planted = _plant(tmp_path, "Ailk_Bjlk", *_SHIPPED_714)
+    assert gen._library_for("Ailk_Bjlk") == planted[_V_CU256_75A0]
+    captured = capsys.readouterr()
+    assert captured.err == "" and captured.out == ""
 
 
 def test_selection_reproduces_the_shipped_lazy_master_mapping(monkeypatch, tmp_path):
