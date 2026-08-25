@@ -447,7 +447,20 @@ jobs:
             # PATH in this image. prepare_gemm_isa.py also resolves it via PATH and
             # exits if absent, so both the extraction and genco_object below depend on
             # this line.
-            export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"
+            #
+            # Byte-identical to the gate job version above, and derived from the
+            # resolver for the same reason (issue #381): the
+            # ${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}} chain this replaces does no
+            # validation, so on a wheel-layout image -- where both vars are unset
+            # and /opt/rocm does not exist -- it expands to a directory that is not
+            # there and leaves the bundler unreachable. This job pip-installs aorta
+            # above, so the resolver is importable here too.
+            #
+            # The apostrophe rule from the gate job applies to THIS payload as well:
+            # it is its own single-quoted bash -lc block, so any apostrophe below
+            # closes it early. Both payloads are now checked by
+            # test_sanitizer_nightly_payload_has_no_apostrophes.
+            export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
             # This job builds its own fixtures from scratch -- the gate job removes
             # these directories in its cleanup step, and on a fresh runner they never
             # existed -- so create them rather than assuming a previous job did.

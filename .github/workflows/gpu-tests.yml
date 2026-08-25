@@ -208,7 +208,17 @@ jobs:
           bash scripts/ci/docker_cmd.sh exec "${{ env.CONTAINER_NAME }}" bash -lc '
             set -euo pipefail
             cd /workspace/aorta
-            python scripts/audit_env_knobs.py --rocm-lib /opt/rocm/lib --strict
+            # --rocm-lib deliberately OMITTED (issue #381). Omitting it IS the
+            # resolver path: audit_env_knobs.py defaults to None and asks
+            # default_rocm_lib() for the layout-appropriate directory. Pinning
+            # /opt/rocm/lib here left that default with no CI coverage at all --
+            # green today on the classic base, an immediate exit 2 at the
+            # deferred wheel-layout flip (#383), and the failure would have read
+            # as "the audit broke" rather than "the workflow pinned a path the
+            # resolver was supposed to supply". This job is now the regression
+            # test for default_rocm_lib(). Pass --rocm-lib only to audit a tree
+            # that is NOT the resolved install.
+            python scripts/audit_env_knobs.py --strict
           '
 
       - name: Upload GPU test results

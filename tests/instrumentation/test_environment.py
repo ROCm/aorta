@@ -5705,6 +5705,7 @@ class TestCombinedKernelDbFingerprint:
             is not None
         )
 
+
     def test_dir_basename_namespaces_collisions(self, tmp_path: Path):
         a = tmp_path / "a"
         b = tmp_path / "b"
@@ -5758,6 +5759,127 @@ class TestCombinedKernelDbFingerprint:
             "the basename 'library'. The probe must tag by the library "
             "name (parent dir), not the immediate basename."
         )
+
+
+@pytest.fixture
+def python314_path_semantics(monkeypatch):
+    """Make ``Path.is_file`` / ``is_dir`` / ``exists`` suppress every OSError.
+
+    That is what Python 3.14 does (CPython gh-101357): they return ``False``
+    for ANY OSError instead of raising for some kinds. This branch is what adds
+    3.14 to the support matrix, and the CPU matrix does run it -- but the local
+    interpreter here is 3.13, where these still raise, so without this fixture
+    the 3.14 behaviour is simply not exercised and every assertion below passes
+    for the wrong reason.
+
+    Simulating the semantics rather than gating on ``sys.version_info`` keeps
+    the guarantee under test on every interpreter, which matters because the
+    bug is invisible on the one most of us run locally.
+    """
+
+    def suppressed(real):
+        def wrapper(self, *args, **kwargs):
+            try:
+                return real(self, *args, **kwargs)
+            except OSError:
+                return False
+
+        return wrapper
+
+    for name in ("is_file", "is_dir", "exists"):
+        monkeypatch.setattr(Path, name, suppressed(getattr(Path, name)))
+    return monkeypatch
+
+
+class TestKernelDbFingerprintUnderPython314PathSemantics:
+    """An unreadable entry must invalidate the digest on 3.14 too (#387).
+
+    The enclosing functions already catch ``OSError`` and return ``None`` so an
+    incomplete enumeration cannot ship as a confident hash. On 3.14 the
+    predicates they relied on stopped raising, so the exception never arrived
+    and the entry was silently OMITTED instead -- reinstating exactly the
+    "two identical hosts compare unequal, with no partial reason" failure the
+    invalidation was added to remove, on the newest supported interpreter.
+
+    These pass trivially if the code uses ``stat()``; they fail if it goes back
+    to ``is_file()`` / ``is_dir()``.
+    """
+
+    @staticmethod
+    def _unreadable(monkeypatch, name: str):
+        real_stat = Path.stat
+
+        def boom(self, *args, **kwargs):
+            if self.name == name:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", boom)
+
+    def test_unreadable_flat_entry_invalidates_the_combined_digest(
+        self, tmp_path: Path, python314_path_semantics
+    ):
+        library = tmp_path / "hipblaslt" / "library"
+        library.mkdir(parents=True)
+        (library / "TensileLibrary_A.dat").write_bytes(b"x")
+        (library / "locked.dat").write_bytes(b"y")
+        assert env_mod._combined_kernel_db_fingerprint([library]) is not None
+
+        self._unreadable(python314_path_semantics, "locked.dat")
+        assert env_mod._combined_kernel_db_fingerprint([library]) is None
+
+    def test_unreadable_arch_dir_invalidates_the_combined_digest(
+        self, tmp_path: Path, python314_path_semantics
+    ):
+        library = tmp_path / "hipblaslt" / "library"
+        (library / "gfx950").mkdir(parents=True)
+        (library / "gfx950" / "TensileLibrary_A.dat").write_bytes(b"x")
+        assert env_mod._combined_kernel_db_fingerprint([library]) is not None
+
+        self._unreadable(python314_path_semantics, "gfx950")
+        assert env_mod._combined_kernel_db_fingerprint([library]) is None
+
+    def test_unreadable_entry_invalidates_the_per_library_digest(
+        self, tmp_path: Path, python314_path_semantics
+    ):
+        library = tmp_path / "library"
+        library.mkdir()
+        (library / "TensileLibrary_A.dat").write_bytes(b"x")
+        (library / "locked.dat").write_bytes(b"y")
+        assert env_mod._kernel_db_filename_fingerprint(library) is not None
+
+        self._unreadable(python314_path_semantics, "locked.dat")
+        assert env_mod._kernel_db_filename_fingerprint(library) is None
+
+    def test_an_absent_root_is_still_skipped_not_invalidating(
+        self, tmp_path: Path, python314_path_semantics
+    ):
+        """The over-strictness guard, re-checked under the new semantics.
+
+        Absent is a layout (only hipBLASLt installed); unreadable is a failure.
+        Routing the root probe through stat() must not collapse the two.
+        """
+        a = tmp_path / "hipblaslt" / "library"
+        a.mkdir(parents=True)
+        (a / "TensileLibrary_A.dat").write_bytes(b"x")
+        assert (
+            env_mod._combined_kernel_db_fingerprint([a, tmp_path / "rocblas" / "library"])
+            is not None
+        )
+
+    def test_an_unreadable_root_invalidates_rather_than_being_skipped(
+        self, tmp_path: Path, python314_path_semantics
+    ):
+        """The other half of that distinction, which safe_is_dir could not make."""
+        a = tmp_path / "hipblaslt" / "library"
+        a.mkdir(parents=True)
+        (a / "TensileLibrary_A.dat").write_bytes(b"x")
+        b = tmp_path / "rocblas" / "library"
+        b.mkdir(parents=True)
+        (b / "TensileLibrary_B.dat").write_bytes(b"y")
+
+        self._unreadable(python314_path_semantics, "library")
+        assert env_mod._combined_kernel_db_fingerprint([a, b]) is None
 
 
 class TestTensileBlock:

@@ -40,8 +40,14 @@ from aorta.instrumentation.rocm_paths import resolve_rocm_roots
 _GUARD_PATH = Path(__file__).resolve().parents[2] / "docker" / "rocm_layout_guard.py"
 
 
-def _load_guard():
-    spec = importlib.util.spec_from_file_location("rocm_layout_guard", _GUARD_PATH)
+def _load_module_from_path(name: str, path: Path):
+    """Import a standalone script by path.
+
+    Neither the guard nor ``scripts/audit_env_knobs.py`` is importable as a
+    package member, and both are read here for the same reason: a test that
+    restates their constants instead of reading them cannot catch drift.
+    """
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -49,13 +55,34 @@ def _load_guard():
     return module
 
 
-guard = _load_guard()
+guard = _load_module_from_path("rocm_layout_guard", _GUARD_PATH)
 
 
-def build_classic(root: Path, *, version: str | None = "7.2.4", lib: bool = True) -> Path:
+def place_gemm_sonames(lib_dir: Path) -> Path:
+    """The GEMM libraries ``audit_env_knobs.py`` resolves, as a runtime tree ships them.
+
+    ``.so.<major>`` rather than a bare ``.so``: the bare link is the devel
+    package's, and a runtime-only image has only the versioned file. The guard
+    has to accept that shape, so it is what the healthy fixtures use.
+    """
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    for soname in guard.AUDIT_SONAMES:
+        (lib_dir / f"{soname}.1").write_bytes(b"\x7fELF")
+    return lib_dir
+
+
+def build_classic(
+    root: Path,
+    *,
+    version: str | None = "7.2.4",
+    lib: bool = True,
+    sonames: bool = True,
+) -> Path:
     (root / "bin").mkdir(parents=True, exist_ok=True)
     if lib:
         (root / "lib").mkdir(exist_ok=True)
+        if sonames:
+            place_gemm_sonames(root / "lib")
     if version is not None:
         info = root / ".info"
         info.mkdir(exist_ok=True)
@@ -69,6 +96,7 @@ def build_wheel(
     libraries: bool = True,
     devel: bool = False,
     version: str | None = "7.14.0",
+    sonames: bool = True,
 ) -> Path:
     core = site / "_rocm_sdk_core"
     (core / "bin").mkdir(parents=True)
@@ -77,7 +105,10 @@ def build_wheel(
         info.mkdir()
         (info / "version").write_text(f"{version}\n", encoding="utf-8")
     if libraries:
-        (site / "_rocm_sdk_libraries" / "lib").mkdir(parents=True)
+        libraries_lib = site / "_rocm_sdk_libraries" / "lib"
+        libraries_lib.mkdir(parents=True)
+        if sonames:
+            place_gemm_sonames(libraries_lib)
     if devel:
         (site / "_rocm_sdk_devel" / "include").mkdir(parents=True)
     return core
@@ -540,6 +571,65 @@ class TestGuardVerdict:
         classic_at(root)
         assert guard.main() == 0
         assert "7.2.4.50311-abc" in capsys.readouterr().out
+
+    def test_a_wheel_without_the_libraries_component_fails(
+        self, importable_wheel, capsys
+    ):
+        """A directory check cannot see a missing libraries component (#387).
+
+        ``_wheel_roots`` falls back ``libraries -> core`` when
+        ``_rocm_sdk_libraries`` is absent, and ``core/lib`` exists anyway
+        because the LLVM toolchain lives at ``core/lib/llvm/bin``. So the old
+        "is ``lib/`` a directory" assertion passed an image carrying neither
+        ``libhipblaslt`` nor ``librocblas``, and the breakage surfaced later in
+        ``audit_env_knobs.py`` -- the "a bad digest quietly guts the evidence"
+        case arriving THROUGH the fallback rather than around it.
+        """
+        core = importable_wheel(libraries=False)
+        # What makes core/lib exist on a real wheel image regardless.
+        (core / "lib" / "llvm" / "bin").mkdir(parents=True)
+
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        for soname in guard.AUDIT_SONAMES:
+            assert soname in err
+        assert "audit_env_knobs.py" in err
+        # The diagnostic names the likely cause rather than only the symptom.
+        assert "_rocm_sdk_libraries" in err
+
+    def test_a_wheel_with_the_libraries_component_still_passes(
+        self, importable_wheel, capsys
+    ):
+        """The fix must not reject the layout the canary actually runs."""
+        importable_wheel(libraries=True)
+        assert guard.main() == 0
+        assert "GEMM libs" in capsys.readouterr().out
+
+    def test_a_runtime_only_soname_is_accepted(self, classic_at, tmp_path: Path):
+        """Only the devel package ships the bare ``.so`` link.
+
+        Requiring it would fail every runtime-only image, which is most of
+        them -- ``resolve_library`` falls back to ``<soname>.<major>`` for
+        exactly this reason and the guard has to agree.
+        """
+        root = build_classic(tmp_path / "opt_rocm", sonames=False)
+        for soname in guard.AUDIT_SONAMES:
+            (root / "lib" / f"{soname}.5").write_bytes(b"\x7fELF")
+        classic_at(root)
+        assert guard.main() == 0
+
+    def test_guard_requires_the_sonames_the_audit_consumes(self):
+        """Read out of the audit, not restated, so the two cannot drift.
+
+        The guard's whole claim is that it mirrors a real consumer. If the
+        audit starts resolving a third library, a hardcoded copy here would
+        keep passing images the audit then fails on.
+        """
+        audit = _load_module_from_path(
+            "audit_env_knobs",
+            Path(__file__).resolve().parents[2] / "scripts" / "audit_env_knobs.py",
+        )
+        assert guard.AUDIT_SONAMES == audit.DEFAULT_SONAMES
 
 
 class TestGuardIsSelfContained:

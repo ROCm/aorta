@@ -210,7 +210,26 @@ jobs:
           # Same quoting rules as the summary step below: single-quoted
           # `python3 -c`, no heredoc, values passed through the environment so
           # nothing needs escaping.
-          if [ ! -f gpu-canary-results.json ]; then
+          #
+          # "Produced a row" means the document PARSES AS A JSON OBJECT, not
+          # merely that the path exists. nightly_eval.py writes it with
+          # Path.write_text, which is not atomic, so a container killed
+          # mid-write (OOM, disk exhaustion, the runner reclaiming the job)
+          # leaves a truncated file. A bare `[ ! -f ]` then takes the
+          # everything-is-fine branch: the evaluator failure stays suppressed,
+          # the malformed document is uploaded and published, and
+          # load_results() skips it without a word -- so the run disappears
+          # from history, which is precisely the outcome this block exists to
+          # prevent. Same class as the missing-file case, one step further in.
+          #
+          # An absent file fails this check too (open raises), so it replaces
+          # the -f test rather than sitting beside it.
+          #
+          # NOTE the 2>/dev/null is on the CONDITION of an `if`, where a
+          # non-zero exit is the answer being asked for, not an aborting
+          # command under `set -e` -- unlike the command substitution in
+          # pages.yml that this repo got wrong once.
+          if ! python3 -c 'import json, sys; d = json.load(open("gpu-canary-results.json")); sys.exit(0 if isinstance(d, dict) else 1)' 2>/dev/null; then
             AORTA_CANARY_RC="${rc}" python3 -c '
           import datetime, json, os
           rc = os.environ.get("AORTA_CANARY_RC", "?")
@@ -236,14 +255,14 @@ jobs:
                   },
                   "summary": {"total": 0, "pass": 0, "fail": 0, "record": 0, "skip": 0},
                   "entries": [],
-                  "error": f"canary setup failed before the evaluator ran (exit {rc}); no workloads were evaluated",
+                  "error": f"canary produced no usable results document (exit {rc}); it failed before the evaluator wrote one, or wrote one that does not parse",
               },
               open("gpu-canary-results.json", "w"),
               indent=2,
           )
           '
-            echo "- result: \`setup failed before the evaluator ran\`" >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::canary produced no results document (exit ${rc}) on ${{ steps.resolve.outputs.base_image }}; recorded an attributable failure row. This is isolated from the merge gate."
+            echo "- result: \`no usable results document (absent or unparseable)\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::canary produced no usable results document (exit ${rc}) on ${{ steps.resolve.outputs.base_image }}; recorded an attributable failure row. This is isolated from the merge gate."
             exit 1
           fi
 

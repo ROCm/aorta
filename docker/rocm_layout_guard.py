@@ -19,8 +19,28 @@ Two assertions, each mirroring a real consumer rather than a proxy for one:
 * a readable ``.info/version`` or ``.info/version-dev`` under the core root --
   ``scripts/ci/nightly_eval.py`` reads exactly these for the dashboard's
   ``rocm`` column;
-* a ``lib/`` directory under the libraries root -- ``scripts/audit_env_knobs.py``
-  exits 2 when its ``--rocm-lib`` is not a directory.
+* the GEMM sonames under the libraries root's ``lib/`` --
+  ``scripts/audit_env_knobs.py`` resolves exactly these, and reports every knob
+  as uncovered without them.
+
+The second assertion used to check only that ``lib/`` *was a directory*, on the
+grounds that the audit exits 2 when its ``--rocm-lib`` is not one. That mirrored
+the audit's argument validation rather than what it consumes, and the two
+stopped being the same thing once resolution could hand the check a *different
+component's* ``lib/``: ``_wheel_roots`` falls back ``libraries -> core`` when
+``_rocm_sdk_libraries`` is absent, and ``core/lib`` exists regardless because the
+LLVM toolchain lives at ``core/lib/llvm/bin``. So a wheel image carrying neither
+``libhipblaslt`` nor ``librocblas`` passed the guard and broke later in the
+audit -- the "a bad digest quietly guts the evidence" case above, arriving
+through the fallback rather than around it. Under the classic layout the two
+roots coincide, so the directory proxy held and the gap was invisible.
+
+Deliberately NOT implemented as "reject any wheel install whose libraries root
+fell back to core": that condition is also true for an explicit
+``$ROCM_PATH``/``$ROCM_HOME`` override naming a lone component (see
+``_roots_from_candidate``), and it is true by construction on every classic
+install, so it would reject working images while still not proving the
+libraries are readable. The sonames are what the consumer actually needs.
 
 **This duplicates the resolution rules in
 ``src/aorta/instrumentation/rocm_paths.py`` and that is deliberate.** The docker
@@ -49,6 +69,11 @@ WHEEL_LIBRARIES_PACKAGE = "_rocm_sdk_libraries"
 WHEEL_DEVEL_PACKAGE = "_rocm_sdk_devel"
 ROOT_MARKERS = (".info", "bin", "lib")
 USABLE_VERSION_MARKERS = (".info/version", ".info/version-dev")
+# Mirrors scripts/audit_env_knobs.py DEFAULT_SONAMES -- the libraries that
+# script resolves, and without which every knob reports as uncovered. Kept in
+# step by test_guard_requires_the_sonames_the_audit_consumes, which reads the
+# tuple out of the audit rather than restating it.
+AUDIT_SONAMES = ("libhipblaslt.so", "librocblas.so")
 # Mirrors rocm_paths._VERSION_MARKER_BYTES. ONE limit for both probing that a
 # marker is usable and reading its value: a larger read sees strictly more bytes
 # and can reject content a smaller probe accepted, which is how discovery came
@@ -126,6 +151,27 @@ def _has_readable_version(path: Path) -> bool:
     return any(
         read_version_marker(path / marker) is not None for marker in USABLE_VERSION_MARKERS
     )
+
+
+def _has_soname(lib_dir: Path, soname: str) -> bool:
+    """Whether audit_env_knobs.resolve_library would find ``soname``.
+
+    Mirrors that function's lookup: the bare ``<soname>`` link, which only the
+    devel package ships, else any ``<soname>.<major>`` a runtime-only tree
+    ships. Presence is all the guard needs, so this does not reproduce the
+    pick-the-highest-major rule -- the audit does that, and which major wins
+    cannot turn a found library into a missing one.
+
+    Fail-soft like every other probe here: an unreadable mount answers False
+    and the caller reports it as missing, rather than the build dying with a
+    traceback that says nothing about what was looked for.
+    """
+    try:
+        if (lib_dir / soname).exists():
+            return True
+        return any(lib_dir.glob(f"{soname}.*"))
+    except OSError:
+        return False
 
 
 def _is_rocm_root(path: Path) -> bool:
@@ -258,13 +304,31 @@ def main() -> int:
         )
 
     lib_dir = libraries / "lib"
-    if _safe_is_dir(lib_dir):
-        print(f"lib dir     : {lib_dir}")
-    else:
+    if not _safe_is_dir(lib_dir):
         failures.append(
             f"{lib_dir} is not a directory; "
             "scripts/audit_env_knobs.py --rocm-lib would find no libraries"
         )
+    else:
+        print(f"lib dir     : {lib_dir}")
+        # Not just "the directory exists" -- see the module docstring. On the
+        # wheel layout this directory may be core/lib, which exists for the LLVM
+        # toolchain alone, so the directory check cannot tell a libraries
+        # component from its absence.
+        missing = [soname for soname in AUDIT_SONAMES if not _has_soname(lib_dir, soname)]
+        if missing:
+            failures.append(
+                f"{lib_dir} has no " + " and no ".join(missing) + "; "
+                "scripts/audit_env_knobs.py would report every knob uncovered"
+                + (
+                    " (the libraries root fell back to the core component, so "
+                    f"{WHEEL_LIBRARIES_PACKAGE} is probably not installed)"
+                    if layout == LAYOUT_WHEEL and libraries == core
+                    else ""
+                )
+            )
+        else:
+            print(f"GEMM libs   : {', '.join(AUDIT_SONAMES)}")
 
     if not failures:
         return 0

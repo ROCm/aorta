@@ -659,9 +659,10 @@ class TestDefaultRocmLib:
     ):
         """The script is also run standalone, outside an aorta install.
 
-        A wrong default beats a traceback there, because ``--rocm-lib`` was
-        going to be passed explicitly anyway -- which is how gpu-tests.yml
-        invokes it.
+        A wrong default beats a traceback there: a caller in that situation can
+        still pass ``--rocm-lib`` explicitly. Note gpu-tests.yml no longer does
+        (see ``test_the_gpu_gate_exercises_the_resolved_default``), so in CI
+        this fallback is not the path taken -- aorta is installed there.
         """
         monkeypatch.setitem(sys.modules, "aorta.instrumentation.rocm_paths", None)
         assert audit.default_rocm_lib() == audit.DEFAULT_ROCM_LIB
@@ -670,7 +671,11 @@ class TestDefaultRocmLib:
     def test_explicit_rocm_lib_argument_bypasses_discovery(
         self, monkeypatch, tmp_path, capsys
     ):
-        """``--rocm-lib`` wins; gpu-tests.yml passes it and must not be second-guessed."""
+        """``--rocm-lib`` wins when passed, and must not be second-guessed.
+
+        Still supported and still tested -- it is how you audit a tree that is
+        NOT the resolved install. It is simply no longer what CI passes.
+        """
 
         def fail(environ=None):
             raise AssertionError("resolver consulted despite an explicit --rocm-lib")
@@ -722,3 +727,33 @@ class TestDefaultRocmLib:
         )
         assert audit.main() == 0
         capsys.readouterr()
+
+    def test_the_gpu_gate_exercises_the_resolved_default(self):
+        """The one job that can prove ``default_rocm_lib()`` must not bypass it.
+
+        Not reachable from a unit test of the code it breaks, so it is pinned
+        here the same way this branch pins the other workflow invariants.
+
+        gpu-tests.yml used to run ``--rocm-lib /opt/rocm/lib``, which left the
+        resolved default with no CI coverage anywhere: green on today's classic
+        base, an immediate exit 2 at the deferred wheel-layout flip (#383), and
+        the failure would have read as "the audit broke" rather than "the
+        workflow pinned a path the resolver was supposed to supply". Omitting
+        the argument IS the resolver path, so this job is now the regression
+        test for ``default_rocm_lib()`` -- and this assertion is what keeps it
+        one.
+        """
+        workflow = (
+            Path(__file__).parent.parent.parent / ".github" / "workflows" / "gpu-tests.yml"
+        ).read_text(encoding="utf-8")
+        invocations = [
+            line.strip()
+            for line in workflow.splitlines()
+            if "audit_env_knobs.py" in line and not line.strip().startswith("#")
+        ]
+        assert invocations, "the GPU gate no longer runs the env-knob audit at all"
+        for invocation in invocations:
+            assert "--rocm-lib" not in invocation, (
+                "pinning --rocm-lib here bypasses default_rocm_lib() and removes its "
+                f"only CI coverage: {invocation}"
+            )

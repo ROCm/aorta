@@ -72,6 +72,7 @@ import os
 import platform
 import re
 import shutil
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -3500,6 +3501,36 @@ def _capture_rocm_version_files(
     return block
 
 
+def _entry_kind(path: Path) -> str:
+    """``"file"``, ``"dir"`` or ``"other"`` -- and raises ``OSError`` if unreadable.
+
+    Deliberately NOT ``Path.is_file()`` / ``Path.is_dir()``. Since Python 3.14
+    (CPython gh-101357) those return ``False`` for **any** ``OSError`` rather
+    than raising for some kinds and suppressing others, and the pathlib docs
+    now name ``stat()`` as the way to tell "not a file" from "cannot be read".
+
+    That distinction is load-bearing for the kernel-database fingerprints. They
+    are compared across hosts, so an entry that cannot be classified has to
+    invalidate the whole value; a ``False`` makes it indistinguishable from an
+    entry that is simply not a kernel file, which silently converts "an
+    incomplete enumeration invalidates the fingerprint" back into "omit it and
+    publish a confident digest over whatever did read". Those call sites already
+    catch ``OSError`` to invalidate -- on 3.14 the exception just stopped
+    arriving, and this PR is what puts 3.14 in the support matrix.
+
+    ``stat()`` behaves identically on every version we support, so this needs no
+    version check. Callers that legitimately tolerate an ABSENT path still catch
+    ``FileNotFoundError`` themselves: absent is a layout, unreadable is a
+    failure.
+    """
+    mode = path.stat().st_mode
+    if stat_module.S_ISREG(mode):
+        return "file"
+    if stat_module.S_ISDIR(mode):
+        return "dir"
+    return "other"
+
+
 def _read_text_file(path: Path) -> str | None:
     """Read a small text file; return its stripped contents or ``None``.
 
@@ -3935,21 +3966,26 @@ def _kernel_db_filename_fingerprint(
     A flat directory yields exactly the same digest as before this handled
     subdirectories, so classic installs see no fingerprint churn.
     """
-    if not directory.is_dir():
+    if not safe_is_dir(directory):
         return None
     try:
+        # _entry_kind, not p.is_file(): on Python 3.14 that returns False for an
+        # unreadable entry instead of raising, so the invalidation below would
+        # never fire and a subset would be hashed as if complete.
         names = [
             p.name
             for p in directory.iterdir()
-            if p.is_file() and p.suffix in suffixes
+            if _entry_kind(p) == "file" and p.suffix in suffixes
         ]
         for arch_dir in directory.iterdir():
-            if not arch_dir.is_dir() or not _GFX_ARCH_RE.fullmatch(arch_dir.name):
+            if not _GFX_ARCH_RE.fullmatch(arch_dir.name):
+                continue
+            if _entry_kind(arch_dir) != "dir":
                 continue
             names.extend(
                 f"{arch_dir.name}/{p.name}"
                 for p in arch_dir.iterdir()
-                if p.is_file() and p.suffix in suffixes
+                if _entry_kind(p) == "file" and p.suffix in suffixes
             )
     except OSError as exc:
         log.debug("kernel-db dir listing failed for %s: %s", directory, exc)
@@ -5222,8 +5258,20 @@ def _combined_kernel_db_fingerprint(
     """
     pairs: list[str] = []
     for d in directories:
-        if not safe_is_dir(d):
+        # ABSENT is a layout (only hipBLASLt installed) and is skipped;
+        # UNREADABLE is a failure to read one and must invalidate. safe_is_dir
+        # collapses both to False, so the two are told apart by stat: it is the
+        # same distinction the loop below makes, applied to the root itself.
+        try:
+            if _entry_kind(d) != "dir":
+                continue
+        except FileNotFoundError:
             continue
+        except NotADirectoryError:
+            continue
+        except OSError as exc:
+            log.debug("combined kernel-db root unreadable: %s (%s)", d, exc)
+            return None
         # `d` is e.g. /opt/rocm/lib/hipblaslt/library; the meaningful
         # tag is the library name one level up.
         tag = d.parent.name or d.name
@@ -5233,11 +5281,15 @@ def _combined_kernel_db_fingerprint(
             log.debug("combined kernel-db listing failed for %s: %s", d, exc)
             return None
         for p in entries:
+            # _entry_kind rather than is_file()/is_dir(): those suppress every
+            # OSError on Python 3.14, which would turn each `return None` below
+            # into a silent `continue`.
             try:
-                if p.is_file() and p.suffix in suffixes:
+                kind = _entry_kind(p)
+                if kind == "file" and p.suffix in suffixes:
                     pairs.append(f"{tag}/{p.name}")
                     continue
-                if not (_GFX_ARCH_RE.fullmatch(p.name) and p.is_dir()):
+                if not (_GFX_ARCH_RE.fullmatch(p.name) and kind == "dir"):
                     continue
                 nested = list(p.iterdir())
             except OSError as exc:
@@ -5245,7 +5297,7 @@ def _combined_kernel_db_fingerprint(
                 return None
             for q in nested:
                 try:
-                    if q.is_file() and q.suffix in suffixes:
+                    if _entry_kind(q) == "file" and q.suffix in suffixes:
                         pairs.append(f"{tag}/{p.name}/{q.name}")
                 except OSError as exc:
                     log.debug("combined kernel-db entry unreadable: %s (%s)", q, exc)
@@ -5389,8 +5441,14 @@ def _enumerate_catalog_dir(
     candidates: list[tuple[Path, str]] = [(p, p.name) for p in raw]
     unlistable_arch_dirs: list[str] = []
     for entry in raw:
+        if not _GFX_ARCH_RE.fullmatch(entry.name):
+            continue
         try:
-            is_arch_dir = bool(_GFX_ARCH_RE.fullmatch(entry.name)) and entry.is_dir()
+            # _entry_kind, not entry.is_dir(): on Python 3.14 the latter answers
+            # False for an unreadable entry, so this except never fires and a
+            # gfx directory we cannot stat is dropped while the block still
+            # reports ok.
+            is_arch_dir = _entry_kind(entry) == "dir"
         except OSError:
             # Cannot confirm directory-ness (broken symlink, permission
             # denied). The entry is already in ``candidates`` under its flat
