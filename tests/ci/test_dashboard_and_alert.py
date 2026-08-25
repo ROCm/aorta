@@ -1753,3 +1753,40 @@ def test_canary_compose_project_is_isolated_from_the_gate():
     assert canary["COMPOSE_PROJECT_NAME"] != gate.get("COMPOSE_PROJECT_NAME")
     # The container name still has to differ too, for docker exec / ps.
     assert canary["CONTAINER_NAME"] != gate["CONTAINER_NAME"]
+
+
+def test_both_ci_results_publishers_share_one_concurrency_group():
+    """Two workflows push the same branch, so they must not overlap (#387).
+
+    Writing different directories does not help: git pushes a whole ref, so an
+    overlap means both commit from the same head and the loser gets a
+    non-fast-forward rejection -- dropping that run's history entirely. The
+    group name is global to the repo, so the two must match exactly.
+    """
+    canary = _load_workflow("latest-rocm-canary.yml")["jobs"]["publish"]
+    nightly = _load_workflow("nightly-eval.yml")["jobs"]["publish"]
+    for job, label in ((canary, "canary"), (nightly, "nightly-eval")):
+        assert "concurrency" in job, f"{label} publish has no concurrency group"
+        assert job["concurrency"]["cancel-in-progress"] is False, label
+    assert (
+        canary["concurrency"]["group"] == nightly["concurrency"]["group"]
+    ), "publishers must share ONE group or they are not serialised"
+
+
+def test_canary_publish_survives_a_run_that_produced_no_artifact():
+    """A canary that died before writing a row must not fail its publisher (#387).
+
+    The upload step is ``if-no-files-found: warn``, so a canary whose eval step
+    was skipped (digest resolution failed) uploads nothing -- and
+    download-artifact treats a missing artifact as an error. Without
+    continue-on-error the non-gating lane gets a red X for an upstream registry
+    hiccup, AND the "skipping publish" guard below it becomes unreachable.
+    """
+    steps = _load_workflow("latest-rocm-canary.yml")["jobs"]["publish"]["steps"]
+    download = next(s for s in steps if "download-artifact" in s.get("uses", ""))
+    assert download.get("continue-on-error") is True
+
+    # The guard the above keeps reachable: absent JSON is a no-op, not a crash.
+    update = next(s for s in steps if "ci-results" in s.get("name", ""))
+    assert "gpu-canary-results.json ] ||" in update["run"]
+    assert "skipping publish" in update["run"]

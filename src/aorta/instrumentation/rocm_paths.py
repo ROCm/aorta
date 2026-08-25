@@ -174,7 +174,7 @@ def _classic_roots(source: str) -> RocmRoots:
     )
 
 
-def _absolute(path: Path) -> Path:
+def _absolute(path: Path) -> Path | None:
     """Anchor a possibly-relative override, WITHOUT resolving symlinks.
 
     A relative ``$ROCM_PATH`` / ``$ROCM_HOME`` would otherwise yield relative
@@ -187,11 +187,24 @@ def _absolute(path: Path) -> Path:
     is normally a symlink to the active versioned tree, and resolving it would
     report ``/opt/rocm-7.2.4`` instead of the stable path an operator would type,
     which is the one thing :data:`CLASSIC_ROCM_ROOT` documents it does not do.
+
+    Returns ``None`` when a RELATIVE path cannot be anchored. ``abspath`` calls
+    ``getcwd()`` for one, and that raises ``FileNotFoundError`` when the
+    process's working directory has been deleted underneath it -- which would
+    escape ``resolve_rocm_roots`` before any guarded probe runs, and this module
+    is imported at module scope, so it would stop the env probe importing at all.
+    A relative override is meaningless without a cwd anyway, so the candidate is
+    skipped rather than used un-anchored. An already-absolute path never calls
+    ``getcwd`` and so cannot fail here.
     """
-    return Path(os.path.abspath(path))
+    try:
+        return Path(os.path.abspath(path))
+    except OSError as exc:  # cwd deleted, or otherwise unavailable
+        log.debug("cannot anchor relative candidate %s: %s", path, exc)
+        return None
 
 
-def _safe_is_dir(path: Path) -> bool:
+def safe_is_dir(path: Path) -> bool:
     """``path.is_dir()`` that never raises.
 
     EVERY filesystem probe in this module goes through this or
@@ -202,6 +215,11 @@ def _safe_is_dir(path: Path) -> bool:
     exists to describe. A stale or unreadable NFS ``site-packages`` mount is the
     realistic case, and it is not hypothetical for the wheel layout, where
     discovery walks into ``site-packages`` rather than a local ``/opt``.
+
+    Public because ``environment.py`` needs the same guarantee when it walks a
+    resolved root (the kernel-database fingerprint): a wheel install puts that
+    tree under ``site-packages``, so the stale-mount case applies there too, and
+    a second copy of this would be a drift risk for no gain.
     """
     try:
         return path.is_dir()
@@ -240,7 +258,7 @@ def _has_readable_version(path: Path) -> bool:
 def _is_rocm_root(path: Path) -> bool:
     """True when ``path`` is a directory that looks like a ROCm install."""
     try:
-        if not _safe_is_dir(path):
+        if not safe_is_dir(path):
             return False
         return any((path / marker).exists() for marker in _ROOT_MARKERS)
     except OSError as exc:  # unreadable mount, permission denied
@@ -269,16 +287,16 @@ def _is_usable_rocm_root(path: Path) -> bool:
     A tarball install with ``lib/`` but no ``.info/`` still passes, so this does
     not narrow the classic layouts that genuinely work.
     """
-    if not _safe_is_dir(path):
+    if not safe_is_dir(path):
         return False
     if _has_readable_version(path):
         return True
-    return _safe_is_dir(path / "lib")
+    return safe_is_dir(path / "lib")
 
 
 def _wheel_component(site_dir: Path, package: str) -> Path | None:
     candidate = site_dir / package
-    return candidate if _safe_is_dir(candidate) else None
+    return candidate if safe_is_dir(candidate) else None
 
 
 def _installed_wheel_component(package: str) -> Path | None:
@@ -343,7 +361,7 @@ def _roots_from_candidate(candidate: Path, source: str) -> RocmRoots | None:
             return roots
         # A lone component with no _rocm_sdk_core beside it: use it for
         # everything rather than discarding an explicit operator override.
-        if _safe_is_dir(candidate):
+        if safe_is_dir(candidate):
             return RocmRoots(
                 core=candidate,
                 libraries=candidate,
@@ -389,7 +407,10 @@ def resolve_rocm_roots(environ: dict[str, str] | None = None) -> RocmRoots:
         value = env.get(name)
         if not value:
             continue
-        roots = _roots_from_candidate(_absolute(Path(value)), name)
+        candidate = _absolute(Path(value))
+        if candidate is None:
+            continue
+        roots = _roots_from_candidate(candidate, name)
         if roots is not None:
             return roots
         log.debug("%s=%s does not look like a ROCm install; continuing", name, value)

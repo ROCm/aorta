@@ -49,6 +49,12 @@ jobs:
     # results artifact and publish would fail misleadingly.
     if: always() && needs.nightly-eval.result != 'skipped'
     runs-on: ubuntu-latest
+    # Shared with latest-rocm-canary.yml's publish job -- see the note there.
+    # Both push the ci-results branch, so they must not overlap: the loser of a
+    # race gets a non-fast-forward rejection and that run's history is lost.
+    concurrency:
+      group: ci-results-publish
+      cancel-in-progress: false
     permissions:
       contents: write   # push results history to the ci-results branch
 

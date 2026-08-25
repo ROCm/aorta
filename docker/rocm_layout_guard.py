@@ -54,14 +54,21 @@ LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
 
 
-def _absolute(path: Path) -> Path:
+def _absolute(path: Path) -> Path | None:
     """Anchor a relative override without resolving symlinks.
 
     Mirrors rocm_paths._absolute: a relative ROCM_PATH/ROCM_HOME would make the
     reported roots depend on the working directory. Lexical on purpose, so a
     /opt/rocm symlink is still reported as /opt/rocm.
+
+    None when a relative path cannot be anchored -- abspath calls getcwd() for
+    one, which raises if the working directory was deleted, and this must not
+    escape as a traceback. An absolute path never calls getcwd.
     """
-    return Path(os.path.abspath(path))
+    try:
+        return Path(os.path.abspath(path))
+    except OSError:
+        return None
 
 
 def _safe_is_dir(path: Path) -> bool:
@@ -154,7 +161,10 @@ def resolve():
         value = os.environ.get(name)
         if not value:
             continue
-        roots = _roots_from_candidate(_absolute(Path(value)), name)
+        candidate = _absolute(Path(value))
+        if candidate is None:
+            continue
+        roots = _roots_from_candidate(candidate, name)
         if roots is not None:
             return roots
 

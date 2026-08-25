@@ -323,6 +323,24 @@ class TestParity:
         assert result.core.is_absolute()
         assert result.core == tmp_path / "rocm"
 
+    def test_an_unanchorable_override_degrades_identically(
+        self, agree, sandbox, monkeypatch
+    ):
+        """A failing getcwd() must make both fall through, not one crash.
+
+        If only the guard raised, a base image with a relative ROCM_PATH would
+        fail the build with a traceback instead of the diagnostic; if only the
+        resolver raised, the guard would pass an image that then breaks at
+        collection time. Same degradation on both sides or the guard lies.
+        """
+
+        def _no_cwd(_path):
+            raise OSError(2, "No such file or directory")
+
+        for module in (rocm_paths, guard):
+            monkeypatch.setattr(module.os.path, "abspath", _no_cwd)
+        assert agree({"ROCM_PATH": "relative/rocm"}).source == "none"
+
     @pytest.mark.parametrize(
         "exc",
         [

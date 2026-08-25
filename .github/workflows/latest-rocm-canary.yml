@@ -314,11 +314,32 @@ jobs:
     # ci-results data branch. Branch runs still produce the artifact.
     if: always() && needs.canary.result != 'skipped' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Shared with nightly-eval.yml's publish job: two workflows now clone,
+    # commit and push the SAME ci-results branch. Writing different directories
+    # does not help -- git pushes a whole ref, so an overlap means both commit
+    # from the same head and the loser gets a non-fast-forward rejection, losing
+    # that run's history entirely. The group name is global to the repo, so
+    # naming it identically in both places is what serialises them.
+    # cancel-in-progress stays false so the loser queues instead of dying. That
+    # is only safe because each workflow ALSO has a workflow-level group above,
+    # capping this one at a single in-flight run per workflow: at most two jobs
+    # can ever contend here, and GitHub only cancels a pending job when a THIRD
+    # arrives. Drop either workflow-level group and this needs rethinking.
+    concurrency:
+      group: ci-results-publish
+      cancel-in-progress: false
     permissions:
       contents: write   # publish canary history to the ci-results branch
 
     steps:
       - name: Download canary results
+        # Non-fatal: the upload step is `if-no-files-found: warn`, so a canary
+        # that died before producing a row (a registry hiccup resolving :latest
+        # skips the eval step) leaves NO artifact, and download-artifact treats
+        # that as an error. Failing here would put a red X on a deliberately
+        # non-gating lane, and it would make the "no results JSON; skipping
+        # publish" guard in the next step unreachable dead code.
+        continue-on-error: true
         uses: actions/download-artifact@v6
         with:
           name: canary-results-${{ github.run_id }}

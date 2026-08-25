@@ -89,7 +89,7 @@ from aorta.instrumentation.env_knobs import (
     ENV_KNOBS_BY_NAME,  # noqa: F401 -- re-exported
     EnvironmentKnob,  # noqa: F401 -- re-exported
 )
-from aorta.instrumentation.rocm_paths import resolve_rocm_roots
+from aorta.instrumentation.rocm_paths import resolve_rocm_roots, safe_is_dir
 
 log = logging.getLogger(__name__)
 
@@ -5110,23 +5110,50 @@ def _combined_kernel_db_fingerprint(
     Using ``d.name`` directly would collapse to ``"library"`` for both
     hipBLASLt and rocBLAS -- ``d.parent.name`` is what makes this work.
 
+    Also descends ONE level of ``gfx*``-named subdirectories, because the
+    TheRock wheel layout nests the database per target (``library/gfx950/...``)
+    and ``library/`` there contains *only* those directories. Without this the
+    field was ``null`` with a partial reason on a wheel install whose kernel
+    database is perfectly present -- the same nesting the catalog menu already
+    handles, in the one other place that reads this tree (#387).
+
+    Nested entries are tagged ``<library>/<arch>/<filename>``, so a kernel
+    present for two targets stays distinguishable. A flat (classic) directory
+    yields byte-identical output to before: the nested branch adds nothing when
+    there are no ``gfx*`` subdirectories.
+
     Returns ``None`` only when *every* input directory is missing or
     empty.
     """
     pairs: list[str] = []
     for d in directories:
-        if not d.is_dir():
+        if not safe_is_dir(d):
             continue
         # `d` is e.g. /opt/rocm/lib/hipblaslt/library; the meaningful
         # tag is the library name one level up.
         tag = d.parent.name or d.name
         try:
-            for p in d.iterdir():
-                if p.is_file() and p.suffix in suffixes:
-                    pairs.append(f"{tag}/{p.name}")
+            entries = list(d.iterdir())
         except OSError as exc:
             log.debug("combined kernel-db listing failed for %s: %s", d, exc)
             continue
+        for p in entries:
+            try:
+                if p.is_file() and p.suffix in suffixes:
+                    pairs.append(f"{tag}/{p.name}")
+                    continue
+                if not (_GFX_ARCH_RE.fullmatch(p.name) and p.is_dir()):
+                    continue
+                nested = list(p.iterdir())
+            except OSError as exc:
+                log.debug("combined kernel-db entry unreadable: %s (%s)", p, exc)
+                continue
+            for q in nested:
+                try:
+                    if q.is_file() and q.suffix in suffixes:
+                        pairs.append(f"{tag}/{p.name}/{q.name}")
+                except OSError as exc:
+                    log.debug("combined kernel-db entry unreadable: %s (%s)", q, exc)
     if not pairs:
         return None
     pairs.sort()

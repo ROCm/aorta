@@ -255,6 +255,29 @@ class TestResolutionOrder:
         for derived in (roots.lib_dir, roots.include_dir, roots.version_file):
             assert derived.is_absolute()
 
+    def test_an_unanchorable_relative_override_falls_through(
+        self, no_rocm, tmp_path: Path, monkeypatch
+    ):
+        """A deleted working directory must not turn import into a traceback.
+
+        Anchoring a relative override calls ``getcwd()``, which raises when the
+        working directory was removed underneath the process. ``environment.py``
+        resolves at *import* time, so an escaping OSError would break collection
+        for every caller -- including the ones with no ROCm interest at all.
+        The override is simply unusable, so resolution continues past it.
+        """
+        classic = build_classic(tmp_path / "opt_rocm")
+        monkeypatch.setattr(rocm_paths, "CLASSIC_ROCM_ROOT", classic)
+
+        def _no_cwd(_path):
+            raise OSError(2, "No such file or directory")
+
+        monkeypatch.setattr(rocm_paths.os.path, "abspath", _no_cwd)
+        roots = resolve_rocm_roots({"ROCM_PATH": "relative/rocm"})
+        # Fell through to the classic root rather than raising.
+        assert roots.core == classic
+        assert roots.source == "opt_rocm"
+
     def test_anchoring_does_not_resolve_symlinks(self, tmp_path: Path, monkeypatch):
         """``/opt/rocm`` is normally a symlink and must stay reported as such.
 
