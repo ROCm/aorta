@@ -95,11 +95,20 @@ def test_kernel_name_missing_fails_closed(tmp_path):
         _ = entry.kernel_name
 
 
-def test_read_metadata_rejects_non_object(tmp_path):
+def test_read_json_object_rejects_non_object(tmp_path):
     path = tmp_path / "meta.json"
     path.write_text("[1, 2]", encoding="utf-8")
-    with pytest.raises(loader.LoaderError, match="must be a JSON object"):
-        loader.read_metadata(path)
+    with pytest.raises(loader.LoaderError, match="Triton metadata must be a JSON object"):
+        loader.read_json_object(path)
+    with pytest.raises(loader.LoaderError, match="launch spec must be a JSON object"):
+        loader.read_json_object(path, what="launch spec")
+
+
+def test_read_json_object_reports_malformed_json(tmp_path):
+    path = tmp_path / "meta.json"
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(loader.LoaderError, match="cannot read Triton metadata"):
+        loader.read_json_object(path)
 
 
 def test_discover_entries_recurses_and_skips_group_index(tmp_path):

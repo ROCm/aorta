@@ -63,10 +63,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# Triton writes one metadata JSON per cache entry next to the code object, plus a
-# ``__grp__``-prefixed index of sibling files that is not kernel metadata.
-_GROUP_PREFIX = "__grp__"
-
 # Scalar Triton signature types -> (struct size, alignment) in the launch buffer.
 # Pointers are handled separately: every ``*T`` is one device address.
 _POINTER_SIZE = 8
@@ -131,13 +127,13 @@ class CacheEntry:
         return arch if isinstance(arch, str) else None
 
 
-def read_metadata(path: Path) -> dict[str, object]:
+def read_json_object(path: Path, *, what: str = "Triton metadata") -> dict[str, object]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise LoaderError(f"{path}: cannot read Triton metadata: {exc}") from exc
+        raise LoaderError(f"{path}: cannot read {what}: {exc}") from exc
     if not isinstance(data, dict):
-        raise LoaderError(f"{path}: Triton metadata must be a JSON object")
+        raise LoaderError(f"{path}: {what} must be a JSON object")
     return data
 
 
@@ -155,7 +151,7 @@ def entry_from_hsaco(hsaco: Path, metadata_path: Path | None = None) -> CacheEnt
     return CacheEntry(
         hsaco=hsaco.resolve(),
         metadata_path=resolved_metadata.resolve(),
-        metadata=read_metadata(resolved_metadata),
+        metadata=read_json_object(resolved_metadata),
     )
 
 
@@ -171,9 +167,11 @@ def discover_entries(root: Path) -> list[CacheEntry]:
     if not root.is_dir():
         raise LoaderError(f"Triton cache directory not found: {root}")
     entries: list[CacheEntry] = []
+    # Driving off the code objects rather than the JSON files keeps Triton's
+    # ``__grp__`` sibling index out of the results: it has no matching .hsaco.
     for hsaco in sorted(root.rglob("*.hsaco")):
         sidecar = hsaco.with_suffix(".json")
-        if not sidecar.is_file() or sidecar.name.startswith(_GROUP_PREFIX):
+        if not sidecar.is_file():
             continue
         entries.append(entry_from_hsaco(hsaco, sidecar))
     if not entries:
@@ -477,10 +475,13 @@ class Hip:
     def malloc(self, size: int) -> ctypes.c_void_p:
         pointer = ctypes.c_void_p()
         self.check(self._lib.hipMalloc(ctypes.byref(pointer), ctypes.c_size_t(size)), "hipMalloc")
-        self.check(
-            self._lib.hipMemset(pointer, 0, ctypes.c_size_t(size)),
-            "hipMemset",
-        )
+        try:
+            self.check(self._lib.hipMemset(pointer, 0, ctypes.c_size_t(size)), "hipMemset")
+        except LoaderError:
+            # The allocation succeeded, so release it before propagating rather
+            # than leaking device memory the caller never learns about.
+            self._lib.hipFree(pointer)
+            raise
         return pointer
 
     def free(self, pointer: ctypes.c_void_p) -> None:
@@ -501,7 +502,7 @@ class Hip:
             _HIP_LAUNCH_PARAM_BUFFER_POINTER,
             ctypes.cast(buffer, ctypes.c_void_p),
             _HIP_LAUNCH_PARAM_BUFFER_SIZE,
-            ctypes.cast(ctypes.byref(size), ctypes.c_void_p),
+            ctypes.c_void_p(ctypes.addressof(size)),
             _HIP_LAUNCH_PARAM_END,
         )
         self.check(
@@ -692,7 +693,9 @@ def _command_run(args: argparse.Namespace) -> int:
     if args.mode == "load":
         run_load(hip, entry)
         return 0
-    launch_spec = read_metadata(args.launch_spec) if args.launch_spec else None
+    launch_spec = (
+        read_json_object(args.launch_spec, what="launch spec") if args.launch_spec else None
+    )
     specs = parse_signature(resolve_signature(entry, launch_spec))
     run_dispatch(
         hip,
@@ -709,7 +712,9 @@ def _command_emit(args: argparse.Namespace) -> int:
     entry = _resolve_entry(args)
     loader = Path(__file__).resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(render_shim(loader, _loader_argv(args, entry), entry=entry), "utf-8")
+    args.output.write_text(
+        render_shim(loader, _loader_argv(args, entry), entry=entry), encoding="utf-8"
+    )
     args.output.chmod(args.output.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     print(f"[triton-consan-loader] wrote {args.output} -> {entry.kernel_name} ({args.mode})")
     return 0
