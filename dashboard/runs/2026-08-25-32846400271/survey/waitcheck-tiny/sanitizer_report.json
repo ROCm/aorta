@@ -13,7 +13,7 @@
           "identity": {
             "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
             "code_object_index": 0,
-            "code_object_sha256": "9c79698c1178f23e625fdb4530004a5c5abfeed74bc442bec2fa081b85354b21",
+            "code_object_sha256": "6fe970b77a10ddf1b68e9ad28d3edb616004998b23e7dbedabfb4295c59689bd",
             "entry_offset": null,
             "name": "tiny_vecadd",
             "target": "gfx950"
@@ -43,7 +43,7 @@
         "identity": {
           "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/tiny.hsaco",
           "code_object_index": 0,
-          "code_object_sha256": "9c79698c1178f23e625fdb4530004a5c5abfeed74bc442bec2fa081b85354b21",
+          "code_object_sha256": "6fe970b77a10ddf1b68e9ad28d3edb616004998b23e7dbedabfb4295c59689bd",
           "entry_offset": null,
           "name": "tiny_vecadd",
           "target": "gfx950"

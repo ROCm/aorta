@@ -10,7 +10,7 @@ Sanitizer case `waitcheck-tiny` from run `2026-08-25-32846400271` of the AORTA s
 - Class: survey (observed-only, non-gating)
 - Workflow run: https://github.com/ROCm/aorta/actions/runs/32846400271
 - Container image: `rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e`
-- rocjitsu bundle: `4227d40fb5b4ea76273589c56dac069af08b7aab` (https://github.com/ROCm/rocm-systems/actions/runs/32745941408)
+- rocjitsu bundle: `97c1640b2f6529ef59a6dcf1068243107e190d09` (https://github.com/ROCm/rocm-systems/actions/runs/32857249576)
 
 ## Observed
 
@@ -48,13 +48,13 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 
 | Path | SHA-256 |
 |---|---|
-| `fixtures/isa/tiny.hsaco` | `9c79698c1178f23e625fdb4530004a5c5abfeed74bc442bec2fa081b85354b21` |
+| `fixtures/isa/tiny.hsaco` | `6fe970b77a10ddf1b68e9ad28d3edb616004998b23e7dbedabfb4295c59689bd` |
 
 ## Recorded digests
 
 | Key | Value |
 |---|---|
-| `code_object:tiny.hsaco` | `9c79698c1178f23e625fdb4530004a5c5abfeed74bc442bec2fa081b85354b21` |
+| `code_object:tiny.hsaco` | `6fe970b77a10ddf1b68e9ad28d3edb616004998b23e7dbedabfb4295c59689bd` |
 | `path` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/bin/rj_waitcheck` |
 | `sha256` | `a70945fb1135a436c13c83ed96a6cff3655784138f4db3d20ef7315ade0a8968` |
 

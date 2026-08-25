@@ -10,7 +10,7 @@ Sanitizer case `consan-gemm` from run `2026-08-25-32846400271` of the AORTA sani
 - Class: survey (observed-only, non-gating)
 - Workflow run: https://github.com/ROCm/aorta/actions/runs/32846400271
 - Container image: `rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e`
-- rocjitsu bundle: `4227d40fb5b4ea76273589c56dac069af08b7aab` (https://github.com/ROCm/rocm-systems/actions/runs/32745941408)
+- rocjitsu bundle: `97c1640b2f6529ef59a6dcf1068243107e190d09` (https://github.com/ROCm/rocm-systems/actions/runs/32857249576)
 
 ## Observed
 
@@ -61,7 +61,7 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 | `command` | `/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_gemm_load` |
 | `command_sha256` | `2e9e496e458823e17cbee41a48b3fdb848279682b44ebdd3096d9ce5bd442d65` |
 | `hook` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so` |
-| `hook_sha256` | `17d54c42f5483e01a19413187775d7f173651b99ff23f603fb033225eb1e9964` |
+| `hook_sha256` | `fac74fad3fd8f0eef4058d15dd5a9fe326e50119d87605b49e284582572b1d68` |
 | `selected_identity_sha256` | `990933656b83ac601425c2160ab393032a6c521021b196195ae0dd04673edb19` |
 | `selected_kernel` | `gemm_f32_ss` |
 

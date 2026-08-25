@@ -13,7 +13,7 @@
           "identity": {
             "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/lds.hsaco",
             "code_object_index": 0,
-            "code_object_sha256": "16ebcd6d90c1fb40fec578f3a551c6c6d78e40526c534fb11a31b937cf772209",
+            "code_object_sha256": "b7e52d2eae6821ed134655e22cb0a2a23f1d19d6dd613b8cb3786de815c615b8",
             "entry_offset": null,
             "name": "lds_reduce",
             "target": "gfx950"
@@ -43,7 +43,7 @@
         "identity": {
           "code_object": "/workspace/aorta/recipes/sanitizers/fixtures/isa/lds.hsaco",
           "code_object_index": 0,
-          "code_object_sha256": "16ebcd6d90c1fb40fec578f3a551c6c6d78e40526c534fb11a31b937cf772209",
+          "code_object_sha256": "b7e52d2eae6821ed134655e22cb0a2a23f1d19d6dd613b8cb3786de815c615b8",
           "entry_offset": null,
           "name": "lds_reduce",
           "target": "gfx950"

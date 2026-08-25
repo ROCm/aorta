@@ -10,14 +10,13 @@ Sanitizer case `consan-racy` from run `2026-08-25-32846400271` of the AORTA sani
 - Class: guardrail (gated guardrail)
 - Workflow run: https://github.com/ROCm/aorta/actions/runs/32846400271
 - Container image: `rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e`
-- rocjitsu bundle: `4227d40fb5b4ea76273589c56dac069af08b7aab` (https://github.com/ROCm/rocm-systems/actions/runs/32745941408)
+- rocjitsu bundle: `97c1640b2f6529ef59a6dcf1068243107e190d09` (https://github.com/ROCm/rocm-systems/actions/runs/32857249576)
 
 ## Observed
 
-- Verdict: `error`
-- Execution: `error`
-- Findings: 0
-- Reason: `combined_hook_exit_86`
+- Verdict: `fail`
+- Execution: `complete`
+- Findings: 64
 
 ## Run it yourself
 
@@ -58,7 +57,7 @@ These are CI-built and too large to publish for every retained run. Rebuild them
 | `command` | `/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_lds_race_2wave` |
 | `command_sha256` | `9cb8228032743efcf05ec805cee056eff5933e34e44e9f85b6a48d6c3814110c` |
 | `hook` | `/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so` |
-| `hook_sha256` | `17d54c42f5483e01a19413187775d7f173651b99ff23f603fb033225eb1e9964` |
+| `hook_sha256` | `fac74fad3fd8f0eef4058d15dd5a9fe326e50119d87605b49e284582572b1d68` |
 | `selected_identity_sha256` | `1452dfe001bd4d91c933990dac33f91555d78b4ddc919ba7cb35ae2a691eacde` |
 | `selected_kernel` | `consan_lds_race_2wave` |
 

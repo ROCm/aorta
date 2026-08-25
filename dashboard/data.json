@@ -1,11 +1,11 @@
 [
   {
-    "gate": false,
+    "gate": true,
     "meta": {
       "commit": "905b1f9e3e16",
       "commit_full": "905b1f9e3e16865eb1c6362e72846ffc391ec901",
       "date": "2026-08-25",
-      "gate": false,
+      "gate": true,
       "gpu": "gfx950",
       "run": "2026-08-25-32846400271",
       "run_url": "https://github.com/ROCm/aorta/actions/runs/32846400271"
@@ -15,8 +15,8 @@
       "consan-clean": {
         "backend": null,
         "cls": "guardrail",
-        "coverage": "",
-        "execution": "error",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
         "expected": "pass",
         "finding_groups": [],
         "findings": 0,
@@ -29,20 +29,20 @@
             "offset": null,
             "sha": "",
             "time_ms": 0.0,
-            "verdict": "error"
+            "verdict": "pass"
           }
         ],
-        "match": false,
-        "observation": "consan error; reason combined_hook_exit_86; preflight error",
+        "match": true,
+        "observation": "consan pass; preflight pass",
         "present": true,
         "primary": {
-          "preflight": "error",
-          "reason": "combined_hook_exit_86",
+          "preflight": "pass",
+          "reason": null,
           "sanitizer": "consan",
-          "verdict": "error"
+          "verdict": "pass"
         },
         "report_rel": "runs/2026-08-25-32846400271/consan-clean/sanitizer_report.json",
-        "verdict": "error",
+        "verdict": "pass",
         "worklist": {
           "kernel_count": 1,
           "requirement": "top_dispatch_count",
@@ -52,34 +52,42 @@
       "consan-racy": {
         "backend": null,
         "cls": "guardrail",
-        "coverage": "",
-        "execution": "error",
+        "coverage": "0/0, 2/2",
+        "execution": "complete",
         "expected": "fail",
-        "finding_groups": [],
-        "findings": 0,
+        "finding_groups": [
+          {
+            "code": "1",
+            "count": 64,
+            "example": "[rocjitsu-dbi-hooks] ConSan MOI auto replay diagnostic reader=39748944 index=0 kind=1 code_object=fnv1a64:7db8350dfcf3fedf report_generation=2 generation=2 epo\u2026",
+            "sanitizer": "consan",
+            "severity": "race"
+          }
+        ],
+        "findings": 64,
         "kernels": [
           {
             "code_object": "",
             "dispatch": 1,
-            "findings": 0,
+            "findings": 64,
             "name": "consan_lds_race_2wave",
             "offset": null,
             "sha": "",
             "time_ms": 0.0,
-            "verdict": "error"
+            "verdict": "fail"
           }
         ],
-        "match": false,
-        "observation": "consan error; reason combined_hook_exit_86; preflight error",
+        "match": true,
+        "observation": "consan fail; 64 finding(s) (1); preflight pass",
         "present": true,
         "primary": {
-          "preflight": "error",
-          "reason": "combined_hook_exit_86",
+          "preflight": "pass",
+          "reason": null,
           "sanitizer": "consan",
-          "verdict": "error"
+          "verdict": "fail"
         },
         "report_rel": "runs/2026-08-25-32846400271/consan-racy/sanitizer_report.json",
-        "verdict": "error",
+        "verdict": "fail",
         "worklist": {
           "kernel_count": 1,
           "requirement": "top_dispatch_count",
@@ -215,8 +223,8 @@
         "staged": true,
         "summary": {
           "backend": null,
-          "coverage": "",
-          "execution": "error",
+          "coverage": "5/5, 0/0",
+          "execution": "complete",
           "expected": null,
           "finding_groups": [],
           "findings": 0,
@@ -227,21 +235,21 @@
               "findings": 0,
               "name": "lds_reduce",
               "offset": null,
-              "sha": "16ebcd6d90",
+              "sha": "b7e52d2eae",
               "time_ms": 0.0,
-              "verdict": "error"
+              "verdict": "pass"
             }
           ],
           "match": true,
-          "observation": "consan error; reason combined_hook_exit_86; preflight error",
+          "observation": "consan pass; preflight pass",
           "present": true,
           "primary": {
-            "preflight": "error",
-            "reason": "combined_hook_exit_86",
+            "preflight": "pass",
+            "reason": null,
             "sanitizer": "consan",
-            "verdict": "error"
+            "verdict": "pass"
           },
-          "verdict": "error",
+          "verdict": "pass",
           "worklist": {
             "kernel_count": 1,
             "requirement": "top_dispatch_count",
@@ -274,7 +282,7 @@
               "findings": 0,
               "name": "tiny_vecadd",
               "offset": null,
-              "sha": "9c79698c11",
+              "sha": "6fe970b77a",
               "time_ms": 0.0,
               "verdict": "error"
             }
@@ -382,7 +390,7 @@
               "findings": 0,
               "name": "lds_reduce",
               "offset": null,
-              "sha": "16ebcd6d90",
+              "sha": "b7e52d2eae",
               "time_ms": 0.0,
               "verdict": "pass"
             }
@@ -432,7 +440,7 @@
               "findings": 0,
               "name": "tiny_vecadd",
               "offset": null,
-              "sha": "9c79698c11",
+              "sha": "6fe970b77a",
               "time_ms": 0.0,
               "verdict": "pass"
             }
