@@ -49,10 +49,11 @@ WHEEL_LIBRARIES_PACKAGE = "_rocm_sdk_libraries"
 WHEEL_DEVEL_PACKAGE = "_rocm_sdk_devel"
 ROOT_MARKERS = (".info", "bin", "lib")
 USABLE_VERSION_MARKERS = (".info/version", ".info/version-dev")
-VERSION_MARKER_PROBE_BYTES = 64
-# Mirrors rocm_paths._VERSION_MARKER_VALUE_BYTES: bounded, but large enough
-# that no real release tag is truncated when the value itself is wanted.
-VERSION_MARKER_VALUE_BYTES = 4096
+# Mirrors rocm_paths._VERSION_MARKER_BYTES. ONE limit for both probing that a
+# marker is usable and reading its value: a larger read sees strictly more bytes
+# and can reject content a smaller probe accepted, which is how discovery came
+# to accept a marker main() then rejected.
+VERSION_MARKER_BYTES = 4096
 
 LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
@@ -76,7 +77,7 @@ def _absolute(path: Path) -> Path | None:
 
 
 def _safe_is_dir(path: Path) -> bool:
-    """``is_dir()`` that never raises. Mirrors rocm_paths._safe_is_dir.
+    """``is_dir()`` that never raises. Mirrors rocm_paths.safe_is_dir.
 
     Every probe here routes through this so an unreadable mount makes the guard
     print its own diagnostics instead of dying with a traceback -- a traceback
@@ -88,13 +89,15 @@ def _safe_is_dir(path: Path) -> bool:
         return False
 
 
-def read_version_marker(path: Path, limit: int = VERSION_MARKER_VALUE_BYTES) -> str | None:
+def read_version_marker(path: Path, limit: int = VERSION_MARKER_BYTES) -> str | None:
     """The stripped contents of a version marker, or None. Mirrors rocm_paths.
 
-    ONE reader for both users in this file -- the discovery predicate below and
-    main()'s verification. They diverged once: discovery accepted a marker that
-    main() then rejected, so resolve() selected an install and the build failed
-    with "no readable version" about the very file discovery had just read.
+    ONE reader AT ONE LIMIT for both users in this file -- the discovery
+    predicate below and main()'s verification. They diverged twice: first on the
+    predicate, then on the byte limit, and both times discovery accepted a
+    marker main() then rejected, so resolve() selected an install and the build
+    failed with "no readable version" about the very file discovery had just
+    read. Sharing the function is not enough; they must share the limit too.
 
     Every unusable case collapses to None: absent, a *directory* named
     .info/version, unreadable (all OSError), empty or whitespace-only content,
@@ -121,8 +124,7 @@ def read_version_marker(path: Path, limit: int = VERSION_MARKER_VALUE_BYTES) -> 
 def _has_readable_version(path: Path) -> bool:
     """Readable, non-empty .info/version{,-dev}. Mirrors rocm_paths."""
     return any(
-        read_version_marker(path / marker, VERSION_MARKER_PROBE_BYTES) is not None
-        for marker in USABLE_VERSION_MARKERS
+        read_version_marker(path / marker) is not None for marker in USABLE_VERSION_MARKERS
     )
 
 

@@ -579,7 +579,10 @@ def build_category_summary(
 
 
 def _short_digest(base_image: Any) -> str:
-    """``repo:tag@sha256:abcdef12`` -> ``sha256:abcdef12`` for display.
+    """``repo:tag@sha256:abcdef123456...`` -> ``sha256:abcdef123456`` for display.
+
+    Truncated to 12 hex characters, which is enough to identify a digest in a
+    table without making the column unreadable.
 
     Renders the whole value when it carries no digest, so a malformed or
     tag-only entry stays visible rather than silently becoming an em dash --

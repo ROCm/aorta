@@ -67,6 +67,10 @@ CANONICAL_ENV_VARS = env_mod.CANONICAL_ENV_VARS
 # sys.modules because environment.py has already imported it -- so this adds no
 # import that the module under test did not already require.
 env_knobs = sys.modules["aorta.instrumentation.env_knobs"]
+# Same reasoning: the resolver is already imported by environment.py, and the
+# version-marker reader has to be the SAME object the probe reads through for a
+# consistency assertion over it to mean anything.
+rocm_paths = sys.modules["aorta.instrumentation.rocm_paths"]
 
 
 # -- Shared fixtures ---------------------------------------------------------
@@ -3179,6 +3183,105 @@ class TestRocmVersionFallbackChain:
             [], {"rocm_version": "7.14.0", "rocm_package_version": "7.14.0rc20260801"}
         )
         assert result["version_dev"] == "7.14.0rc20260801"
+
+    @pytest.mark.parametrize(
+        "pip_value", [pytest.param("", id="empty"), pytest.param("   ", id="whitespace")]
+    )
+    def test_an_empty_pip_version_does_not_block_the_torch_fallback(
+        self, no_version_file, pip_value: str
+    ):
+        """A falsy-but-not-None pip value used to end the chain silently (#387).
+
+        The loop assigned into ``version`` before testing it, while every step
+        around it is guarded on ``is None``. An empty version from the LAST
+        distribution consulted therefore left ``version == ""``: falsy, so
+        ``version_source`` was never set and the loop did not break, but not
+        ``None``, so torch was skipped and the reason loop appended nothing.
+        """
+        no_version_file.setattr(
+            env_mod,
+            "_distribution_version",
+            lambda name: pip_value if name == "rocm-sdk-core" else None,
+        )
+        no_version_file.setattr(env_mod, "_rocm_version_from_torch", lambda: "7.14.0")
+
+        result = env_mod._capture_rocm_version_files([], None)
+        assert result["version"] == "7.14.0"
+        assert result["version_source"] == "torch"
+
+    @pytest.mark.parametrize(
+        "pip_value", [pytest.param("", id="empty"), pytest.param("  \n ", id="whitespace")]
+    )
+    def test_an_empty_pip_version_with_no_torch_is_null_with_a_reason(
+        self, no_version_file, pip_value: str
+    ):
+        """Never ``version: ""`` with ``version_source: null`` and no reason.
+
+        That shape is a non-null nobody can attribute, which is exactly what
+        the schema-1.16 attribution keys exist to eliminate.
+        """
+        no_version_file.setattr(
+            env_mod, "_distribution_version", lambda name: pip_value
+        )
+        reasons: list[str] = []
+        result = env_mod._capture_rocm_version_files(reasons, None)
+
+        assert result["version"] is None
+        assert result["version_source"] is None
+        assert any(r.startswith("rocm.version:") for r in reasons)
+
+    @pytest.mark.parametrize(
+        ("source", "setter"),
+        [
+            pytest.param("pip:rocm", "_distribution_version", id="pip"),
+            pytest.param("torch", "_rocm_version_from_torch", id="torch"),
+        ],
+    )
+    def test_non_file_sources_are_stripped_like_the_file_sources(
+        self, no_version_file, source: str, setter: str
+    ):
+        """``_distribution_version`` and torch are the only unnormalised sources.
+
+        ``read_version_marker`` and ``_clean_manifest_string`` both strip, so a
+        padded value from either of these would otherwise be reported verbatim
+        into a field consumers compare across hosts.
+        """
+        value = " 7.14.0 "
+        if setter == "_distribution_version":
+            no_version_file.setattr(
+                env_mod, setter, lambda name: value if name == "rocm" else None
+            )
+        else:
+            no_version_file.setattr(env_mod, setter, lambda: value)
+
+        result = env_mod._capture_rocm_version_files([], None)
+        assert result["version"] == "7.14.0"
+        assert result["version_source"] == source
+
+    def test_version_markers_are_read_by_the_same_rule_discovery_validated_them(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """The probe must not reject a marker discovery accepted (#387).
+
+        These two files decide whether an autodetected ``/opt/rocm`` outranks an
+        importable wheel, so reading them with the unbounded ``_read_text_file``
+        while discovery validated them with the bounded
+        ``rocm_paths.read_version_marker`` reintroduced the divergence one module
+        out: valid UTF-8 through the 4096-byte read and invalid past it was
+        accepted as evidence of an install and then reported as ``None`` here.
+        """
+        version = tmp_path / "version"
+        version.write_bytes(b"7.2.4" + b"x" * 4995 + b"\xff")
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_FILE", version)
+        monkeypatch.setattr(env_mod, "ROCM_VERSION_DEV_FILE", tmp_path / "absent_dev")
+        monkeypatch.setattr(env_mod, "KMD_VERSION_FILE", tmp_path / "absent_kmd")
+        monkeypatch.setattr(env_mod, "_distribution_version", lambda name: None)
+        monkeypatch.setattr(env_mod, "_rocm_version_from_torch", lambda: None)
+
+        assert rocm_paths.read_version_marker(version) is not None
+        result = env_mod._capture_rocm_version_files([], None)
+        assert result["version"] == rocm_paths.read_version_marker(version)
+        assert result["version_source"] == "version_file"
 
 
 class TestRocmVersionFromTorch:

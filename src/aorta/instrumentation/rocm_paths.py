@@ -13,6 +13,12 @@ ROCm ships in two on-disk shapes and we must read both:
   Tensile kernel databases and ``share/miopen/db``), and optionally
   ``_rocm_sdk_devel`` (the development headers).
 
+  Both ``_rocm_sdk_core`` and ``_rocm_sdk_devel`` can carry an ``include/``.
+  When both are installed ``_rocm_sdk_devel`` wins, because it is the component
+  that ships the full development headers; core's is whatever the runtime needs.
+  Runtime-only images do not install devel at all, so the include root falls
+  back to core and simply does not exist -- see :func:`_wheel_roots`.
+
 Because those two shapes disagree about which root holds what, resolution
 yields **three** roots rather than one. On a classic install all three are
 the same directory, so every path derived from them is byte-identical to the
@@ -86,14 +92,19 @@ _USABLE_VERSION_MARKERS: tuple[Path, ...] = (
     Path(".info") / "version-dev",
 )
 
-# Enough to tell "has content" from "empty/whitespace" without reading an
-# arbitrarily large file that merely happens to sit at the marker path. Real
-# markers are a single short version string.
-_VERSION_MARKER_PROBE_BYTES = 64
-# Cap for reading a marker's *value* (not just probing that one exists). Larger
-# than the probe so no real release tag is truncated, still bounded so a wrong
-# file at this path cannot be read into memory wholesale.
-_VERSION_MARKER_VALUE_BYTES = 4096
+# ONE limit for both probing that a marker is usable and reading its value.
+# Bounded so a wrong (or pathological) file at this path cannot be slurped into
+# memory, and generous enough that no real release tag is truncated.
+#
+# Deliberately not a smaller probe limit with a larger value limit. A larger
+# read sees strictly more bytes, so it can reject content the probe accepted --
+# invalid UTF-8 past the probe window is the concrete case. That divergence let
+# `_has_readable_version` grant classic autodetection priority over a working
+# wheel install using a marker every reader then reports as None, which is the
+# null-with-no-explanation #381 exists to remove. Two constants also defeated
+# the guard parity suite: both copies carried the same pair, so they agreed with
+# each other and were wrong together.
+_VERSION_MARKER_BYTES = 4096
 
 LAYOUT_CLASSIC = "classic"
 LAYOUT_WHEEL = "wheel"
@@ -244,18 +255,22 @@ def _has_readable_version(path: Path) -> bool:
     report a null version -- the same failure as the bin-only ``bin/`` shim, one
     marker further in.
 
-    Implemented as a real (tiny) read rather than a stack of predicates so that
-    every one of those cases collapses into the same answer: a directory raises
+    Implemented as a real read rather than a stack of predicates so that every
+    one of those cases collapses into the same answer: a directory raises
     ``IsADirectoryError``, an unreadable file ``PermissionError`` -- both
     ``OSError`` -- and empty or whitespace-only content is simply falsy.
+
+    Delegates to :func:`read_version_marker` at its DEFAULT limit, so this
+    answers exactly the question every consumer will later ask of the same file.
+    A smaller probe limit would be an optimisation that changes the answer: a
+    larger read sees more bytes and can reject a marker the probe accepted.
     """
     return any(
-        read_version_marker(path / marker, limit=_VERSION_MARKER_PROBE_BYTES) is not None
-        for marker in _USABLE_VERSION_MARKERS
+        read_version_marker(path / marker) is not None for marker in _USABLE_VERSION_MARKERS
     )
 
 
-def read_version_marker(path: Path, limit: int = _VERSION_MARKER_VALUE_BYTES) -> str | None:
+def read_version_marker(path: Path, limit: int = _VERSION_MARKER_BYTES) -> str | None:
     """The stripped contents of a version marker, or ``None`` if unusable.
 
     One definition of "usable version marker" for both the caller that only
@@ -272,9 +287,10 @@ def read_version_marker(path: Path, limit: int = _VERSION_MARKER_VALUE_BYTES) ->
     testing ``exists()`` and then breaking did.
 
     Bounded read: these files hold a release tag, so a pathological (or wrong)
-    file at this path cannot be slurped into memory. The default is generous
-    enough that no real version string is truncated, while validation passes the
-    much smaller probe size since it only needs truthiness.
+    file at this path cannot be slurped into memory. Validation and the value
+    readers share the DEFAULT limit rather than validation passing a smaller
+    one -- see :data:`_VERSION_MARKER_BYTES`. ``limit`` stays a parameter for
+    tests that need to exercise the truncation boundary itself.
 
     Non-UTF-8 content is unusable, not salvageable-with-replacement. That
     matches ``environment.py``'s ``_read_text_file``, which has always returned

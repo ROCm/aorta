@@ -89,7 +89,11 @@ from aorta.instrumentation.env_knobs import (
     ENV_KNOBS_BY_NAME,  # noqa: F401 -- re-exported
     EnvironmentKnob,  # noqa: F401 -- re-exported
 )
-from aorta.instrumentation.rocm_paths import resolve_rocm_roots, safe_is_dir
+from aorta.instrumentation.rocm_paths import (
+    read_version_marker,
+    resolve_rocm_roots,
+    safe_is_dir,
+)
 
 log = logging.getLogger(__name__)
 
@@ -3422,24 +3426,47 @@ def _capture_rocm_version_files(
     ``version_source`` makes the answer attributable -- reporting ``7.15.0``
     from a file and inferring it from a torch wheel are not equally strong
     claims, and before #381 they were indistinguishable.
+
+    The two ``.info`` markers are read with ``rocm_paths.read_version_marker``,
+    not the local ``_read_text_file``, because those same two files decide
+    whether an autodetected ``/opt/rocm`` outranks an importable wheel. Reading
+    them by a different rule than discovery validated them by is what lets a
+    marker be accepted as evidence of an install and then reported as ``None``
+    here -- ``rocm.version: null`` with ``root_source: "opt_rocm"`` on a box
+    whose wheel install is fine. ``kmd_version`` is not a discovery marker and
+    keeps the general reader.
     """
-    version = _read_text_file(ROCM_VERSION_FILE)
+    version = read_version_marker(ROCM_VERSION_FILE)
     version_source: str | None = "version_file" if version else None
 
     if version is None and manifest is not None:
         version = _clean_manifest_string(manifest.get("rocm_version"))
         version_source = "therock_manifest" if version else None
+    # Each step below assigns into ``version`` only once its candidate is known
+    # good. Assigning first and testing after would leave a falsy-but-not-None
+    # value (an empty or whitespace-only pip version) in ``version``: the guard
+    # on the NEXT step tests ``is None``, so the remaining fallbacks would be
+    # skipped, ``version_source`` would stay unset, and the reason loop below
+    # (which also tests ``is None``) would append nothing -- emitting
+    # ``version: ""`` with ``version_source: null`` and no explanation, the
+    # unattributable shape schema 1.16 exists to eliminate.
+    #
+    # These two sources are also the only ones in the chain that are not
+    # already normalised (``read_version_marker`` and ``_clean_manifest_string``
+    # both strip and reject empties), so a "  " out of importlib.metadata would
+    # otherwise be truthy and reported verbatim.
     if version is None:
         for distribution in ("rocm", "rocm-sdk-core"):
-            version = _distribution_version(distribution)
-            if version:
-                version_source = f"pip:{distribution}"
+            candidate = (_distribution_version(distribution) or "").strip()
+            if candidate:
+                version, version_source = candidate, f"pip:{distribution}"
                 break
     if version is None:
-        version = _rocm_version_from_torch()
-        version_source = "torch" if version else None
+        candidate = (_rocm_version_from_torch() or "").strip()
+        if candidate:
+            version, version_source = candidate, "torch"
 
-    version_dev = _read_text_file(ROCM_VERSION_DEV_FILE)
+    version_dev = read_version_marker(ROCM_VERSION_DEV_FILE)
     if version_dev is None and manifest is not None:
         # The manifest's package version is the wheel-layout analogue of
         # .info/version-dev: the precise build, not the release tag.
@@ -3450,9 +3477,9 @@ def _capture_rocm_version_files(
         "version_dev": version_dev,
         "kmd_version": _read_text_file(KMD_VERSION_FILE),
     }
-    # Note: _read_text_file returns None for missing, empty, permission
-    # denied, AND non-utf8 cases. Reason wording covers all four so the
-    # operator does not assume "missing" when the file is just empty.
+    # Note: both readers return None for missing, empty, permission denied,
+    # AND non-utf8 cases. Reason wording covers all four so the operator does
+    # not assume "missing" when the file is just empty.
     unresolved = {
         "version": f"no version from {ROCM_VERSION_FILE}, TheRock manifest, "
         "pip metadata, or torch",

@@ -330,6 +330,11 @@ class TestParity:
             pytest.param(b"   \n\t", id="ascii-whitespace"),
             pytest.param("\u00a0\u2003".encode(), id="unicode-whitespace"),
             pytest.param(b"\xff\xfe", id="non-utf8"),
+            # Valid UTF-8 for the first 64 bytes, invalid at offset 64: unusable
+            # only to a reader that looks past the old 64-byte probe window.
+            pytest.param(
+                b"7.2.4-" + b"x" * 58 + b"\xff" + b"tail", id="non-utf8-past-old-probe"
+            ),
         ],
     )
     def test_marker_usability_agrees_on_degenerate_content(
@@ -389,6 +394,31 @@ class TestParity:
         (root / "lib").mkdir()
         # Discovery finds the root, main() reports the version as missing, and
         # the two agree the marker is the unusable part.
+        assert guard.resolve()[0] == root
+        assert guard.main() == 1
+        assert "no readable" in capsys.readouterr().err
+
+    def test_the_guard_uses_one_byte_limit_for_probe_and_value(
+        self, classic_at, tmp_path: Path, capsys
+    ):
+        """The same disagreement as above, reached via the byte limit (#387).
+
+        Sharing the reader fixed the predicate but not the limit: validation
+        probed 64 bytes while every value read took 4096, so a marker that is
+        valid UTF-8 only for its first 64 bytes was accepted by discovery and
+        rejected by main() -- the guard failing the build about the very file
+        discovery had just read. One limit now, so the two cannot part company.
+        """
+        root = classic_at(tmp_path / "rocm")
+        (root / ".info").mkdir(parents=True)
+        marker = root / ".info" / "version"
+        marker.write_bytes(b"7.2.4-" + b"x" * 58 + b"\xff" + b"tail")
+        (root / "lib").mkdir()
+
+        assert guard._has_readable_version(root) is False
+        assert guard.read_version_marker(marker) is None
+        # Still found via lib/, and still reported as having no readable
+        # version -- the two verdicts agree instead of contradicting.
         assert guard.resolve()[0] == root
         assert guard.main() == 1
         assert "no readable" in capsys.readouterr().err

@@ -483,6 +483,56 @@ class TestVersionMarkerMustBeReadable:
         monkeypatch.setattr(rocm_paths, "_installed_wheel_component", lambda p: None)
         assert resolve_rocm_roots({}).source == "opt_rocm"
 
+    def test_invalid_bytes_past_the_old_probe_window_are_not_usable(
+        self, tmp_path: Path, monkeypatch, wheel_beside
+    ):
+        """Validation and the value read must use the SAME byte limit (#387).
+
+        Validation once probed 64 bytes while every consumer read 4096. A larger
+        read sees strictly more bytes, so it can reject content the probe never
+        reached: this marker is valid UTF-8 for its first 64 bytes and has an
+        invalid byte at offset 64. Discovery therefore accepted it, autodetected
+        ``/opt/rocm`` outranked a healthy wheel, and every reader then reported
+        ``None`` -- ``rocm.version: null`` with ``root_source: "opt_rocm"`` on a
+        working box, which is the #381 failure mode relocated rather than
+        removed.
+
+        The guard parity suite could not catch it: both copies carried the same
+        constant pair, so they agreed with each other and were wrong together.
+        """
+        stub = self._stub_root(tmp_path, monkeypatch)
+        marker = stub / ".info" / "version"
+        marker.write_bytes(b"7.2.4-" + b"x" * 58 + b"\xff" + b"tail")
+
+        assert rocm_paths.read_version_marker(marker) is None
+        assert rocm_paths._has_readable_version(stub) is False
+        assert resolve_rocm_roots({}).core == wheel_beside
+
+    def test_validation_and_value_read_agree_on_every_marker(self, tmp_path: Path):
+        """The invariant behind the bug, asserted directly rather than by case.
+
+        ``_has_readable_version`` is exactly "some marker reads as non-None", so
+        a future limit or predicate split shows up here even for content nobody
+        thought to enumerate.
+        """
+        payloads = {
+            "short": b"7.2.4\n",
+            "long-valid": b"7.2.4-rocm-rel-7.2-24" + b"-pad" * 40,
+            "invalid-at-0": b"\xff\xfe",
+            "invalid-past-64": b"7.2.4-" + b"x" * 58 + b"\xff" + b"tail",
+            "invalid-past-4096": b"7.2.4" + b"x" * 4995 + b"\xff",
+            "empty": b"",
+            "whitespace": b"  \n\t ",
+        }
+        for name, payload in payloads.items():
+            root = tmp_path / name
+            (root / ".info").mkdir(parents=True)
+            marker = root / ".info" / "version"
+            marker.write_bytes(payload)
+            assert rocm_paths._has_readable_version(root) is (
+                rocm_paths.read_version_marker(marker) is not None
+            ), name
+
 
 class TestNeverRaises:
     def test_unreadable_candidate_is_not_a_root(self, tmp_path: Path, monkeypatch):
