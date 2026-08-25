@@ -489,21 +489,91 @@ do not expect per-instruction coverage detail here. And re-harvesting the same
 kernel on the same image and node reproduces byte-identical digests, which is
 what makes a report comparable across runs.
 
-### ConSan does not work here
+### ConSan reaches gemm, not attention
 
-Adding `consan` to the same recipe returns
-`not_checked: consan_command_not_provisioned — targeted repro required; refused
-to wrap the whole application for 2 selected kernels`. Failing closed is
-correct; the gap is that there is no way to satisfy it for a JIT kernel, because
-the documented `consan_command` loader pattern assumes a hand-compiled HIP file
-rather than a Triton object with a Triton launch ABI.
+ConSan used to be unreachable here: it only runs against a caller-supplied
+`source.consan_command`, and the documented loader pattern assumes a
+hand-compiled HIP file rather than a Triton object with a Triton launch ABI, so
+adding `consan` to a recipe could only ever return
+`not_checked: consan_command_not_provisioned`. That was
+[#399](https://github.com/ROCm/aorta/issues/399), closed by
+[#403](https://github.com/ROCm/aorta/pull/403), which added a generic loader
+that resolves a Triton cache entry at run time through ctypes.
 
-Filed as [#399](https://github.com/ROCm/aorta/issues/399). Waitcheck is
-unaffected.
+`--consan` wires the harvest into it:
+
+```bash
+python3 src/aorta/workloads/tokenspeed/harvest_code_objects.py \
+    --image lightseekorg/tokenspeed-amd:nightly-20260714 \
+    --kernel gluon_mm_a16w16_gfx950 --dtype bf16 --dtype-role a \
+    --dest /tmp/ts-work/consan-gemm \
+    --waitcheck "$ROCJITSU_PREBUILT/bin/rj_waitcheck" \
+    --consan
+
+for recipe in /tmp/ts-work/consan-gemm/consan/consan-*.yaml; do
+    aorta sweep run --recipe "$recipe" \
+        --output-dir "/tmp/ts-work/consan-out/$(basename "$recipe" .yaml)"
+done
+```
+
+One recipe per code object, not one over the list: ConSan takes exactly one
+object per run, and a TokenSpeed kernel compiles to several shape-specialized
+objects. `--consan-limit` caps the fan-out, which matters because an attention
+harvest yields 20. The shims are emitted with `--copy-object`, lifting each
+object and its sidecars out of the Triton cache before the next harvest deletes
+it.
+
+On the gemm kernels this works, with full static instrumentation:
+
+```
+pass | consan ran/pass | access 208/208 | analysis_complete=True | _mfma_lds_largem_kernel
+pass | consan ran/pass | access  77/77  | analysis_complete=True | _mfma_lds_mediumm_kernel
+```
+
+**On the attention kernels it does not**, and the reason is upstream rather than
+here. All 20 harvested objects discover their sites, report them supported, and
+then fail to lower every one of them — 2502 sites, `access_patched=0`,
+`lowering_reason=instrumentation_patch_missing`. Worse, the hook counts barrier
+sites without itemizing them on that path, so aorta's coverage cross-check fails
+closed with `consan_output_parse_error: barrier site count mismatch` and the real
+number never reaches the report. Filed as
+[#405](https://github.com/ROCm/aorta/issues/405).
+
+Waitcheck is unaffected and passes on all 20, so these kernels are reachable —
+ConSan simply cannot instrument them yet.
+
+#### Why the recipes default to `consan_policy: lenient`
+
+`strict` sets `RJ_CONSAN_MOI_REQUIRE_RECORDS`, which demands visible dynamic
+records. The loader runs in `load` mode: it loads and instruments the object but
+never dispatches it, so there is no dispatch packet and no records, and strict
+fails closed with `combined_hook_exit_86` however healthy the run was — measured,
+not assumed:
+
+```
+ConSan analysis verdict applicable=true static_complete=true dynamic_complete=false
+                        access=77/77 barrier=12/12 visible_evidence=0
+RJ_CONSAN_MOI_REQUIRE_RECORDS requested, but 1 auto MOI report buffer(s)
+contained zero visible records and no kernel dispatch packet was observed
+```
+
+So this lane verifies that ConSan can read, patch and analyze the JIT kernels —
+static coverage — and nothing about races at run time.
+
+Getting dynamic evidence is not a policy change. `dispatch` mode needs the
+argument signature, and Triton does not write one into the metadata for these
+kernels (confirmed against real cache entries: `num_warps`, `warp_size` and
+`shared` are present, `signature` is not). Supplying one by hand for a kernel
+with a 320-byte kernarg segment means reconstructing TokenSpeed's launch, and
+synthesized scalars default to zero, which gives a zero-trip kernel that records
+nothing anyway. The route that would actually work is ConSan over TokenSpeed's
+own dispatches, which needs the RocJITsu entry-point allowlist that
+`src/aorta/instrumentation/rocjitsu_sanitizers/README.md` already tracks as
+unavailable.
 
 ## Tests
 
-`tests/probe/test_tokenspeed_probe.py` — 42 tests, no GPU or container required.
+`tests/probe/test_tokenspeed_probe.py` — 50 tests, no GPU or container required.
 They cover script syntax, the guardrails (NFS refusal, missing entry script,
 missing selector), recipe and sidecar wellformedness, per-trial output naming,
 that every recipe axis entry resolves through the real mitigation registry, and
@@ -546,6 +616,12 @@ python -m pytest tests/probe/test_tokenspeed_probe.py -q
 - **5 Triton MoE variants.** No execution test exists anywhere upstream, so
   neither route reaches them — see
   [What the suites actually cover](#what-the-suites-actually-cover).
-- **ConSan.** Blocked on [#399](https://github.com/ROCm/aorta/issues/399).
+- **ConSan on the attention kernels.** Works on gemm; every site fails to lower
+  on attention, and the failure is reported as a parse error rather than as
+  incomplete coverage. Blocked on
+  [#405](https://github.com/ROCm/aorta/issues/405).
+- **Dynamic race evidence anywhere.** The loader instruments but does not
+  dispatch, so every ConSan lane here is static-coverage only — see
+  [Why the recipes default to `consan_policy: lenient`](#why-the-recipes-default-to-consan_policy-lenient).
 - **A larger model.** `gpt-oss-20b` is TokenSpeed's canonical AMD benchmark
   model; only Qwen3-0.6B has been run.

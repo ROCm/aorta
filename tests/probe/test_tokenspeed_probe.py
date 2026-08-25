@@ -19,6 +19,7 @@ hardware:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -674,6 +675,288 @@ def test_harvest_stages_code_objects_content_addressed() -> None:
         "harvest must stage code objects under a digest-qualified name; "
         "staging by obj.name silently collides across shape specializations"
     )
+
+
+def _harvest_module():
+    """Import harvest_code_objects.py by path.
+
+    It lives under a workloads directory that is not an importable package, and
+    it deliberately has no dependency beyond the standard library.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_ts_harvest_consan", _SOURCE / "harvest_code_objects.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_FAKE_LOADER = """\
+import json
+import sys
+
+argv = sys.argv[1:]
+opts = {}
+for index, item in enumerate(argv):
+    if item.startswith("--"):
+        opts[item] = argv[index + 1] if index + 1 < len(argv) else None
+
+obj = opts["--copy-object"]
+open(obj, "wb").write(b"fake-code-object")
+# The real loader lifts the sidecars too; a test only needs them to exist.
+open(obj.replace(".hsaco", ".json"), "w").write("{}")
+
+shim = opts["--output"]
+open(shim, "w").write("#!/bin/sh\\nexit 0\\n")
+
+# Record the argv so a test can assert on how the loader was driven. Named so
+# it does not look like a shim to a consan_* glob.
+import os
+
+record = os.path.join(
+    os.path.dirname(shim), "argv-" + os.path.basename(shim) + ".json"
+)
+with open(record, "w") as handle:
+    json.dump(argv, handle)
+"""
+
+
+def _fake_kernels(count: int, cache: Path) -> list[dict]:
+    """Harvest-shaped identities pointing at throwaway cache entries."""
+    kernels = []
+    for index in range(count):
+        entry = cache / f"HASH{index}"
+        entry.mkdir(parents=True, exist_ok=True)
+        obj = entry / "_fwd_kernel.hsaco"
+        payload = f"object-{index}".encode()
+        obj.write_bytes(payload)
+        kernels.append(
+            {
+                "name": "_fwd_kernel",
+                "code_object": str(obj),
+                # A real digest, so the 12-char prefixes differ. A counter
+                # padded to 64 hex digits collides on the prefix, which is
+                # exactly the collision the staging is designed to avoid.
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "code_object_index": 0,
+                "cache_object": str(obj),
+            }
+        )
+    return kernels
+
+
+def test_harvest_consan_reports_a_missing_loader(tmp_path: Path) -> None:
+    """``scripts/`` is not packaged, so an installed aorta has no loader.
+
+    The message has to name the flag, or the failure reads as a broken install
+    rather than a path that simply has to be supplied.
+    """
+    module = _harvest_module()
+    with pytest.raises(SystemExit) as excinfo:
+        module._write_consan_assets(
+            tmp_path,
+            _fake_kernels(1, tmp_path / "cache"),
+            "gfx950",
+            tmp_path / "absent" / "triton_consan_loader.py",
+            "lenient",
+            None,
+        )
+    message = str(excinfo.value)
+    assert "--consan-loader" in message
+    assert "wheel" in message
+
+
+def test_harvest_consan_emits_one_recipe_per_identity(tmp_path: Path) -> None:
+    """ConSan takes exactly one code object per run.
+
+    A TokenSpeed kernel compiles to many shape-specialized objects -- an
+    attention harvest yields twenty -- so a single kernel_list recipe cannot
+    express it and the harvest has to fan out.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    module._write_consan_assets(
+        tmp_path / "dest",
+        _fake_kernels(3, tmp_path / "cache"),
+        "gfx950",
+        loader,
+        "lenient",
+        None,
+    )
+
+    consan = tmp_path / "dest" / "consan"
+    recipes = sorted(consan.glob("consan-*.yaml"))
+    assert len(recipes) == 3
+    assert len(sorted((consan / "bin").glob("consan_*"))) == 3
+
+    manifest = json.loads((consan / "manifest.json").read_text())
+    assert manifest["consan_policy"] == "lenient"
+    assert manifest["skipped"] == 0
+    assert len(manifest["entries"]) == 3
+
+    # Digest-qualified, for the same reason the Waitcheck staging is: every
+    # object here is named _fwd_kernel, so bare names would collide and leave
+    # one recipe per name instead of one per object.
+    assert len({recipe.name for recipe in recipes}) == 3
+
+
+def test_harvest_consan_recipe_pins_the_identity_and_the_shim(tmp_path: Path) -> None:
+    """The recipe must name a single kernel, its digest, and the shim.
+
+    Without ``code_object_sha256`` the run would accept whatever bytes sit at
+    the path, which for a Triton cache is exactly the thing that changes.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+    kernels = _fake_kernels(1, tmp_path / "cache")
+
+    module._write_consan_assets(tmp_path / "dest", kernels, "gfx950", loader, "lenient", None)
+
+    recipe_path = next((tmp_path / "dest" / "consan").glob("consan-*.yaml"))
+    recipe = yaml.safe_load(recipe_path.read_text())
+    plan = recipe["sanitizer_plan"]
+
+    assert recipe["mode"] == "sanitizer"
+    assert plan["sanitizers"] == ["consan"]
+    assert plan["target"] == "gfx950"
+    # kind: kernel, not kernel_list -- ConSan is one object per run.
+    assert plan["source"]["kind"] == "kernel"
+    assert plan["source"]["kernel"]["name"] == "_fwd_kernel"
+    assert plan["source"]["kernel"]["code_object_sha256"] == kernels[0]["sha256"]
+    assert plan["source"]["consan_command"].endswith(
+        f"consan__fwd_kernel.{kernels[0]['sha256'][:12]}"
+    )
+    assert plan["policy"]["consan_policy"] == "lenient"
+
+
+def test_harvest_consan_default_policy_explains_itself(tmp_path: Path) -> None:
+    """A lenient default needs its reasoning in the file.
+
+    strict sets RJ_CONSAN_MOI_REQUIRE_RECORDS, which wants visible dynamic
+    records; the loader runs in load mode and never dispatches, so strict fails
+    closed with exit 86 however healthy the run was. Someone will otherwise
+    "fix" the policy and get an opaque failure.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    module._write_consan_assets(
+        tmp_path / "dest",
+        _fake_kernels(1, tmp_path / "cache"),
+        "gfx950",
+        loader,
+        "lenient",
+        None,
+    )
+    text = next((tmp_path / "dest" / "consan").glob("consan-*.yaml")).read_text()
+    assert "86" in text
+    assert "never dispatches" in text
+
+
+def test_harvest_consan_limit_caps_the_fan_out(tmp_path: Path) -> None:
+    """Each identity is a separate ConSan run, so 20 objects is 20 runs."""
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    module._write_consan_assets(
+        tmp_path / "dest",
+        _fake_kernels(5, tmp_path / "cache"),
+        "gfx950",
+        loader,
+        "lenient",
+        2,
+    )
+    consan = tmp_path / "dest" / "consan"
+    assert len(sorted(consan.glob("consan-*.yaml"))) == 2
+    assert json.loads((consan / "manifest.json").read_text())["skipped"] == 3
+
+
+def test_harvest_consan_limit_of_zero_is_an_error(tmp_path: Path) -> None:
+    """A limit of 0 is a caller mistake, not a request for everything.
+
+    Guarded because the natural implementation tests the limit for truthiness,
+    which silently turns 0 into "emit all 20".
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+    module._write_consan_assets(
+        tmp_path / "dest",
+        _fake_kernels(2, tmp_path / "cache"),
+        "gfx950",
+        loader,
+        "lenient",
+        0,
+    )
+    assert sorted((tmp_path / "dest" / "consan").glob("consan-*.yaml")) == []
+
+    # And the CLI rejects it up front rather than emitting nothing quietly.
+    proc = subprocess.run(
+        [
+            "python3",
+            str(_SOURCE / "harvest_code_objects.py"),
+            "--image",
+            "img",
+            "--kernel",
+            "k",
+            "--dest",
+            "/tmp/whatever",
+            "--consan-limit",
+            "0",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert "--consan-limit must be at least 1" in proc.stderr
+
+
+def test_harvest_consan_disambiguates_by_kernel_name(tmp_path: Path) -> None:
+    """One object can hold several kernels and the loader fails closed on that.
+
+    An attention harvest produces ten objects all called ``_fwd_kernel``, so
+    the selection has to be pinned rather than left to be inferred.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+
+    module._write_consan_assets(
+        tmp_path / "dest",
+        _fake_kernels(1, tmp_path / "cache"),
+        "gfx950",
+        loader,
+        "lenient",
+        None,
+    )
+    recorded = next((tmp_path / "dest" / "consan" / "bin").glob("argv-*.json"))
+    argv = json.loads(recorded.read_text())
+    assert "emit-command" in argv
+    assert "--kernel-name" in argv
+    assert argv[argv.index("--kernel-name") + 1] == "_fwd_kernel"
+    # --copy-object is what lifts the object out of the Triton cache, which the
+    # next harvest deletes.
+    assert "--copy-object" in argv
+
+
+def test_harvest_records_the_cache_object_not_just_the_staged_copy() -> None:
+    """ConSan needs the sidecars Triton wrote beside the object.
+
+    Waitcheck staging copies only the ``.hsaco``, so the loader has to be
+    pointed at the original cache entry to find the ``.json`` metadata and the
+    ``.amdgcn`` listing it reads the kernarg segment size from.
+    """
+    source = (_SOURCE / "harvest_code_objects.py").read_text()
+    assert '"cache_object": str(obj)' in source
+    assert 'kernel["cache_object"]' in source
 
 
 def test_harvest_suite_root_matches_the_probe_script() -> None:
