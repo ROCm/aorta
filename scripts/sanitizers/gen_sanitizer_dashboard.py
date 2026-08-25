@@ -532,6 +532,19 @@ def _basename(path: str | None) -> str:
     return path.rsplit("/", 1)[-1] if path else ""
 
 
+# The one timestamp spelling this renders: an ISO date, a `T`/space separator and
+# a **colon-separated** clock, optionally seconds, 3/6-digit fractional seconds
+# and a `Z`/`+HH:MM` offset. Deliberately narrower than `datetime.fromisoformat`,
+# whose accepted set *widened in 3.11* (ISO 8601 basic format, so `T094112` and
+# `+0000` began parsing; 1-digit fractions too). Gating on this shape is what
+# keeps the rendering identical on every interpreter the repo supports -- what it
+# admits, 3.10 and 3.13 parse the same way; what it rejects is passed through
+# untouched on both. This is what the publishers emit.
+_INSTANT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{3}|\.\d{6})?)?([+-]\d{2}:\d{2}|Z)?$"
+)
+
+
 def format_instant(value: Any) -> str:
     """A recorded timestamp as something a reader can act on (pure).
 
@@ -539,20 +552,24 @@ def format_instant(value: Any) -> str:
     as ``YYYY-MM-DD HH:MM:SS UTC`` -- the zone spelled out, because a reader
     comparing a run against their own logs has to know which one it is in.
 
-    Anything that is not an instant is returned **unchanged**: a date-only value
-    from a run published before the id carried a time, or a malformed manifest.
-    Requiring a time separator before parsing is what makes that safe --
+    Anything that is not that shape (see ``_INSTANT_RE``) is returned
+    **unchanged**: a date-only value from a run published before the id carried a
+    time, the compact ``T094112`` a run id embeds, or a malformed manifest.
+    Requiring a real clock before parsing is what makes that safe --
     ``datetime.fromisoformat("2026-08-23")`` succeeds and would render a
-    confident ``00:00:00`` for a run that happened at nine in the morning.
+    confident ``00:00:00`` for a run that happened at nine in the morning, and
+    from 3.11 ``fromisoformat("2026-08-23T0941")`` succeeds too. The output is
+    committed to the data branch, so it must not depend on the interpreter.
     """
     text = str(value or "").strip()
-    if "T" not in text and " " not in text:
+    if not _INSTANT_RE.match(text):
         return text
     try:
         # `Z` is only accepted by fromisoformat from 3.11; the writers here emit
         # an explicit offset, but a hand-edited manifest may not.
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
+        # Shape-valid but not a real date (month 13, day 32).
         return text
     if parsed.tzinfo is None:
         # Naive means UTC by construction: every writer uses `date -u` or

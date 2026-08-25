@@ -832,14 +832,42 @@ def test_format_instant_renders_a_time_and_never_invents_one():
     # A non-UTC offset is normalised rather than shown in the writer's zone.
     assert gen.format_instant("2026-08-23T11:41:12+02:00") == "2026-08-23 09:41:12 UTC"
 
+    # Sub-second precision from a hand-written manifest still renders, truncated.
+    assert (
+        gen.format_instant("2026-08-23T09:41:12.500000+00:00")
+        == "2026-08-23 09:41:12 UTC"
+    )
+
     # A date-only value comes from a run published before the id carried a time.
     # fromisoformat() would accept it and render a confident 00:00:00, so the
     # value is returned untouched instead of inventing a midnight.
     assert gen.format_instant("2026-08-23") == "2026-08-23"
     # Malformed or absent values pass through: the run identity around them is
-    # still worth rendering.
-    for junk in ("", None, "d", "not a date", "2026-08-23T0941"):
+    # still worth rendering. A shape-valid impossible date lands here too.
+    for junk in ("", None, "d", "not a date", "2026-08-23 morning",
+                 "2026-13-23T09:41:12+00:00"):
         assert gen.format_instant(junk) == (junk or "")
+
+
+def test_format_instant_renders_the_same_on_every_supported_interpreter():
+    # datetime.fromisoformat's accepted set widened in 3.11 (ISO 8601 basic
+    # format, and 1-2 digit fractional seconds), and the repo's CI matrix spans
+    # 3.10-3.12. Left to fromisoformat these shapes render a time on 3.11+ and
+    # pass through on 3.10 -- for output that is committed to the data branch,
+    # which is a byte-diff that depends on which runner published. format_instant
+    # gates on an explicit shape so every interpreter passes them through.
+    for widened in (
+        "2026-08-23T0941",  # basic format, minutes
+        "2026-08-23T094112",  # basic format -- the form a run id embeds
+        "2026-08-23T09:41:12+0000",  # offset without its colon
+        "2026-08-23T09:41:12.1",  # a fraction 3.10 rejects
+    ):
+        assert gen.format_instant(widened) == widened
+
+    # The run id carries that compact stamp, and its own directory name must not
+    # be mistaken for a rendered instant anywhere it is displayed.
+    run_id = "2026-08-23T094112-32638584704"
+    assert gen.format_instant(run_id) == run_id
 
 
 def test_published_pages_show_the_instant_but_env_json_keeps_it_machine_readable(
