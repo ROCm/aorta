@@ -1,2 +1,0 @@
-"Name","Calls","TotalDurationNs","AverageNs","Percentage","MinNs","MaxNs","StdDev"
-"sgemm_tiled(float const*, float const*, float*, in

@@ -295,18 +295,12 @@ def execute_triage_run(
             # overrides so the operator-requested collectors apply everywhere.
             cli_collect = parse_csv(collect)
             if cli_collect:
-                # Hand the loader its mapping form, carrying the recipe options
-                # of the collectors that survived: validating the bare name
-                # list would check them against their defaults, which both
-                # misses a conflict the recipe's options create and invents one
-                # they resolve.
-                collect_names, collect_options = _parse_collect(
-                    "--collect",
-                    {
-                        name: dict(r.collect_options.get(name) or {}) or None
-                        for name in dict.fromkeys(cli_collect)
-                    },
-                )
+                collect_names, _ = _parse_collect("--collect", list(cli_collect))
+                collect_options = {
+                    name: opts
+                    for name, opts in r.collect_options.items()
+                    if name in collect_names
+                }
                 r = dataclasses.replace(
                     r,
                     collect=collect_names,

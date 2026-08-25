@@ -1,8 +1,7 @@
 # aorta.instrumentation
 
-Platform-level introspection for AORTA: the environment probe (issue #147), the
-per-layer numerics logger, and the two GPU profiling collectors. Future
-submodules (drift watcher, etc.) will live here too.
+Platform-level introspection for AORTA: the environment probe (issue #147) and the
+per-layer numerics logger. Future submodules (drift watcher, etc.) will live here too.
 
 ## What's here
 
@@ -10,8 +9,6 @@ submodules (drift watcher, etc.) will live here too.
 | --- | --- | --- |
 | [`environment`](environment.py) | ROCm + ML stack version snapshot + container/python env detection. See block list below. | `collect_env(...) -> EnvSnapshot`, `capture_to(path, ...) -> EnvSnapshot` |
 | [`layer_numerics`](layer_numerics/README.md) | Per-layer / per-stage NaN, magnitude, and out-of-range logger. Runs standalone as a front-end around a training/repro script (the supported path); also a recognized `layer_numerics` sweep collector — the engine validates the name and threads it into workload config, but a workload must opt in for capture (see [`docs/layer-numerics.md`](../../../docs/layer-numerics.md)). Config via `NANLOG_SPEC` (structured, recommended) or the flat `NANLOG_*` vars. | `build_env(results_dir, overrides=None) -> dict`, `SCRIPT_PATH`, `OUTPUT_SUBDIR` |
-| [`rocprof`](rocprof/__init__.py) | `rocprofv3` kernel/API tracing as the `rocprof` sweep collector. Unlike `layer_numerics` it needs no workload opt-in: it attaches by wrapping the launch argv in the generic subprocess seam, so `aorta sweep run --collect rocprof -- <any command>` profiles an opaque command. Options validated at recipe load; artifacts parsed fail-soft into `rocprof_*` trial metrics. See [`docs/profiling-collectors.md`](../../../docs/profiling-collectors.md). | `wrap_argv(argv, out_dir, options, *, env=None) -> list[str]`, `build_argv_prefix(...)`, `parse_summary(out_dir) -> dict`, `validate_options(...)`, `resolve_binary()`, `OUTPUT_SUBDIR` |
-| [`proton`](proton/__init__.py) | Triton Proton profiler as the `proton` sweep collector, attributing GPU time to the launching Python frame. Same argv seam, but Proton's front-end `exec`s a script, so `mode: cli` attaches to Python launches only and `mode: env` exports `AORTA_PROTON_*` for a workload that drives Proton itself. Translates `HIP_VISIBLE_DEVICES` to `ROCR_VISIBLE_DEVICES` on AMD. See [`docs/profiling-collectors.md`](../../../docs/profiling-collectors.md). | `wrap_argv(argv, out_dir, options, *, env=None) -> list[str]`, `build_argv_prefix(...)`, `build_env(out_dir, options) -> dict`, `parse_summary(out_dir) -> dict`, `validate_options(...)`, `OUTPUT_SUBDIR` |
 | [`rocjitsu_sanitizers`](rocjitsu_sanitizers/README.md) | Experimental typed kernel worklists, deterministic top-N selection, exact-entry static Waitcheck, fail-closed Record/Replay parsing, versioned sanitizer reports, and `mode: sanitizer` recipe execution via `aorta sweep run`. Provisioning and scoped/top-K ConSan remain explicit follow-ups; ConSan never falls back to whole-application instrumentation. | `select_kernels(...)`, `run_waitcheck(...)`, `run_sanitizers(...)`, `execute_sanitizer_run(...)`, `SanitizerReport` |
 | [`build_system`](build_system.py) | Detects Buck2 build environments (issue #163, A1.2a). Wrapped by `collect_env()` and surfaced as the `build_system` field of `EnvSnapshot`. | `detect_build_system() -> dict` |
 | [`buck_invocation`](buck_invocation.py) | Frozen, ordered Buck invocation context: mode/flag files, `-c` overrides, `-m` modifiers, or explicit default confirmation. Builds atomic argv and a redacted comparison fingerprint; no shell/passthrough string. | `BuckInvocationContext` |

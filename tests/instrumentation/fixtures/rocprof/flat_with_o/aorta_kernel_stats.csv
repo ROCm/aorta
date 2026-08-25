@@ -1,2 +1,0 @@
-"Name","Calls","TotalDurationNs","AverageNs","Percentage","MinNs","MaxNs","StdDev"
-"sgemm_tiled(float const*, float const*, float*, int)",23,539404,23452.347826,100.00,22560,36320,2813.800546

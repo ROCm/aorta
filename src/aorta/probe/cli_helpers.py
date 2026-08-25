@@ -209,7 +209,6 @@ def apply_recipe_overrides(
     cli_stop_after_events: int | None = None,
     cli_max_trials: int | None = None,
     cli_disable_detectors: tuple[str, ...] = (),
-    cli_collect: tuple[str, ...] = (),
 ) -> Recipe:
     """Layer CLI flags on top of a loaded probe-mode ``Recipe``.
 
@@ -230,11 +229,6 @@ def apply_recipe_overrides(
       additive rather than a replacement (an operator silencing one
       more detector on top of a recipe shouldn't have to restate the
       recipe's list).
-    * ``--collect`` -- when passed, REPLACES the recipe's collector name
-      list, matching the workload flow's precedence (``aorta triage run``,
-      ``aorta.cli.triage``). Per-collector options are recipe-file-only (the
-      ``collect:`` mapping form), so options for collectors the CLI dropped
-      are discarded and options for the ones it kept survive.
 
     The caller must verify ``recipe.probe_extras is not None`` before
     invoking this helper (probe-mode discriminator is the CLI's
@@ -257,37 +251,7 @@ def apply_recipe_overrides(
         recipe = _overlay_stop_after(recipe, cli_stop_after_events, cli_max_trials)
     if cli_disable_detectors:
         recipe = _overlay_disable_detectors(recipe, cli_disable_detectors)
-    if cli_collect:
-        recipe = _overlay_collect(recipe, cli_collect)
     return recipe
-
-
-def _overlay_collect(recipe: Recipe, names: tuple[str, ...]) -> Recipe:
-    """Replace the recipe's collector list with the ``--collect`` names.
-
-    Runs the names through the recipe loader's own validator so an unknown
-    collector, a bad per-collector option, or an unrunnable pairing fails the
-    same way it would from a recipe file. Probe-mode cells are synthesised
-    without a cell-scope ``collect``, so replacing the recipe-level tuple is
-    enough for the operator's choice to apply to every cell.
-
-    The names are handed to the loader in its *mapping* form, carrying the
-    recipe options of the collectors that survived the replacement. Validating
-    the bare name list instead would check the surviving collectors against
-    their defaults, which both misses a conflict the recipe's options create
-    and invents one they resolve.
-    """
-    from aorta.triage.recipe import RecipeSchemaError, _parse_collect
-
-    surviving = {
-        name: dict(recipe.collect_options.get(name) or {}) or None for name in dict.fromkeys(names)
-    }
-    try:
-        # Already carries a ``--collect:`` label in its message.
-        collect_names, options = _parse_collect("--collect", surviving)
-    except RecipeSchemaError as exc:
-        raise ProbeUsageError(str(exc)) from exc
-    return dataclasses.replace(recipe, collect=collect_names, collect_options=options)
 
 
 def _overlay_stop_after(

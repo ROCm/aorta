@@ -89,14 +89,7 @@ from aorta.run.dispatcher import RunRequest, run_trials
     help="Directory to write per-trial JSON.",
 )
 @click.option(
-    "--collect",
-    default="",
-    help=(
-        "Comma-separated collector recipes. Validated and threaded into the "
-        "workload config; the argv-wrapping profilers (rocprof, proton) attach "
-        "on the subprocess flow ('aorta sweep run'), so on an in-process "
-        "workload a collector only produces output if the workload consumes it."
-    ),
+    "--collect", default="", help="Comma-separated collector recipes (MVP: validated, no-op)."
 )
 @click.option(
     "--extra-env", default="", help="Comma-separated KEY=VAL pairs (applied after mitigations)."

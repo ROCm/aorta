@@ -42,7 +42,6 @@ from aorta.triage.recipe import (
     RecipeCellError,
     RecipeSchemaError,
     RetainPolicy,
-    _parse_collect,
     _parse_retain,
     _parse_stop_after,
 )
@@ -337,12 +336,6 @@ def build_probe_recipe_from_dict(
         )
     tier3_vram_growth = tier3_vram_growth_raw
     stop_after = _parse_stop_after("recipe", data.get("stop_after"))
-    # Collectors are cross-cutting: probe-mode synthesises its own cells, so
-    # there is no cell scope to override at and the recipe-level names/options
-    # apply to every (mitigation, diagnostic) pair. ``_parse_collect`` is the
-    # same validator the triage loader uses, so option schemas and the
-    # rocprof/proton conflict guard fire identically in both modes.
-    collect, collect_options = _parse_collect("recipe", data.get("collect"))
     try:
         disable_detectors = normalize_detector_ids(data.get("disable_detectors"))
         disable_detector_tiers = normalize_tiers(data.get("disable_detector_tiers"))
@@ -510,8 +503,6 @@ def build_probe_recipe_from_dict(
         workload_config={},
         save_logs=False,
         stop_after=stop_after,
-        collect=collect,
-        collect_options=collect_options,
         probe_extras=probe_extras,
     )
 

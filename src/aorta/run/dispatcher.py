@@ -26,7 +26,7 @@ from aorta._env_rules import is_valid_env_name, value_has_nul
 from aorta.instrumentation.environment import collect_env
 from aorta.registry import Environment, get_environment, get_mitigation
 from aorta.run._process import TrialWorkerError, launch_trial_worker
-from aorta.run.collectors import KNOWN_RECIPES, validate_collectors
+from aorta.run.collectors import KNOWN_RECIPES
 from aorta.run.discovery import (
     get_workload_class,
     get_workload_policy,
@@ -497,11 +497,6 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
             "collect_options entries must be dict[str, str]; invalid collectors: "
             f"{bad_collect_options}"
         )
-    # Per-collector option schemas + cross-collector conflicts. The recipe
-    # loader already applied these, but ``run_trials`` is a public library API:
-    # a programmatic caller deserves to learn its rocprof/proton pairing cannot
-    # run before the first trial launches, not from an empty artifact dir.
-    validate_collectors(request.collect, request.collect_options)
 
     # 3. Validate ``extra_env``. The CLI and recipe loader validate their
     #    inputs, but library callers can construct ``RunRequest`` directly.

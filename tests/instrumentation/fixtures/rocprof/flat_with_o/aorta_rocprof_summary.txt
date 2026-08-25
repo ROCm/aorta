@@ -1,6 +1,0 @@
-
-ROCPROFV3 SUMMARY:
-
-|                         NAME                         |     DOMAIN      |      CALLS      | DURATION (msec) | AVERAGE (msec)  | PERCENT (INC) |   MIN (msec)    |   MAX (msec)    |     STDDEV      |
-|------------------------------------------------------|-----------------|-----------------|-----------------|-----------------|---------------|-----------------|-----------------|-----------------|
-| sgemm_tiled(float const*, float const*, float*, int) | KERNEL_DISPATCH |              23 |        0.539404 |       2.345e-02 |    100.000000 |         0.02256 |         0.03632 |       2.814e-03 |

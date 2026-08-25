@@ -414,7 +414,6 @@ def execute_probe(
     mitigation_files: tuple[Path, ...],
     argv: tuple[str, ...],
     command_label: str = "aorta probe",
-    collect: tuple[str, ...] = (),
 ) -> None:
     """Subprocess-flow body shared by ``aorta sweep run`` and ``aorta probe``.
 
@@ -428,10 +427,6 @@ def execute_probe(
     validating the trailing argv; ``aorta sweep run`` passes its own label
     so a leaked-flag error points at the invoked command, not the
     deprecated ``aorta probe`` alias.
-
-    ``collect`` carries already-split ``--collect`` names. Only
-    ``aorta sweep run`` exposes that flag today; ``aorta probe`` passes the
-    empty default, which leaves any recipe-level ``collect:`` block intact.
     """
     try:
         # ``--env-passthrough-mode`` defaults to None so the handler can
@@ -448,7 +443,7 @@ def execute_probe(
         r = apply_recipe_overrides(
             r, ticket=ticket, cli_passthrough_mode=cli_passthrough_mode,
             cli_stop_after_events=stop_after_events, cli_max_trials=max_trials,
-            cli_disable_detectors=disable_detectors, cli_collect=collect,
+            cli_disable_detectors=disable_detectors,
         )
     except (ProbeUsageError, RecipeSchemaError, RecipeCellError, RegistryError, LookupError) as exc:
         raise click.ClickException(str(exc)) from exc

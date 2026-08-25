@@ -1,6 +1,0 @@
-"Kind","Agent_Id","Queue_Id","Stream_Id","Thread_Id","Dispatch_Id","Kernel_Id","Kernel_Name","Correlation_Id","Start_Timestamp","End_Timestamp","LDS_Block_Size","Scratch_Size","VGPR_Count","Accum_VGPR_Count","SGPR_Count","Workgroup_Size_X","Workgroup_Size_Y","Workgroup_Size_Z","Grid_Size_X","Grid_Size_Y","Grid_Size_Z"
-"KERNEL_DISPATCH","Agent 2",1,0,4170503,1,11,"sgemm_tiled(float const*, float const*, float*, int)",1,1434937317843317,1434937317879637,2048,0,20,0,32,16,16,1,512,512,1
-"KERNEL_DISPATCH","Agent 2",1,0,4170503,2,11,"sgemm_tiled(float const*, float const*, float*, int)",2,1434937317879637,1434937317902677,2048,0,20,0,32,16,16,1,512,512,1
-"KERNEL_DISPATCH","Agent 2",1,0,4170503,3,11,"sgemm_tiled(float const*, float const*, float*, int)",3,1434937317902677,1434937317925477,2048,0,20,0,32,16,16,1,512,512,1
-"KERNEL_DISPATCH","Agent 2",1,0,4170503,4,11,"sgemm_tiled(float const*, float const*, float*, int)",4,1434937317960637,1434937317983997,2048,0,20,0,32,16,16,1,512,512,1
-"KERNEL_DISPATCH","Agent 2",1,0,4170503,5,11,"sgemm_tiled(float const*, float const*, float*, int)",5,1434937317983997,1434937318006638,2048,0,20,0,32,16,16,1,512,512,1

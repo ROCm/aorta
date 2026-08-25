@@ -40,7 +40,6 @@ Phase-1 minimum shape keeps working.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
 import os
@@ -307,24 +306,6 @@ class SubprocessWorkload(Workload):
                 f"{CONFIG_KEY_SUBPROCESS_ARGV} entries must be str, got "
                 f"{[type(a).__name__ for a in argv]}"
             )
-
-        # Collector opt-in: when the dispatcher threaded ``_aorta_collect``
-        # into this trial, rewrite the opaque user argv so the requested
-        # profilers attach (``rocprofv3 ... -- <argv>``, ``python -m
-        # triton.profiler.proton ... <script>``). Returns the argv unchanged
-        # when no attaching collector was requested, so a run without
-        # ``--collect`` is byte-for-byte what it was.
-        #
-        # Applied BEFORE the emulation wrap so the profiler ends up *inside*
-        # the emulated environment: ``mirage run -- rocprofv3 -- <argv>``, not
-        # the reverse, which would profile the emulator's own launcher.
-        # A requested-but-unattachable collector (rocprofv3 missing, Proton CLI
-        # wrap of a non-Python command, an artifact directory that cannot be
-        # prepared) raises here and is reported as a clean setup failure rather
-        # than a silently unprofiled run.
-        from aorta.run.collectors import wrap_argv_for_collectors
-
-        argv = wrap_argv_for_collectors(self.config, argv)
 
         # GPU-emulation opt-in: when the dispatcher-threaded environment
         # (``_aorta_environment``) targets the mirage emulator, transparently
@@ -850,24 +831,6 @@ class SubprocessWorkload(Workload):
             encoding="utf-8",
         )
 
-        # Collector summaries ride the same ``metrics`` channel as the verdict
-        # bookkeeping, so the numeric ones (``rocprof_gpu_time_ms`` etc.) land
-        # in perf.md's metrics table and in matrix.json's metrics_summary. The
-        # non-numeric ones (top-kernel lists, artifact dirs) reach neither --
-        # matrix aggregation takes numeric scalars only -- and are readable
-        # just from this trial's dispatcher JSON. Merged under the platform
-        # keys below so a collector can never shadow ``verdict`` or
-        # ``exit_code``; fail-soft, returning ``{}`` when nothing was
-        # collected.
-        #
-        # Parsed BEFORE retention: retention prunes the profiler artifacts
-        # this reads, so summarising afterwards would silently lose every
-        # metric at any level below ``full``. The numbers survive in the trial
-        # record even when the trace they came from is pruned.
-        from aorta.run.collectors import summarize_collectors
-
-        metrics: dict[str, Any] = dict(summarize_collectors(self.config))
-
         # Issue #231: prune heavy per-trial artifacts now that the verdict
         # is known, keeping the level mapped from this trial's verdict.
         # Runs AFTER result.json is written so the trial record (which
@@ -895,16 +858,6 @@ class SubprocessWorkload(Workload):
         # contract from PR #194 round 4 is independent of the
         # matrix-side semantic.
         passed = verdict_obj.verdict == "pass"
-        metrics.update(
-            {
-                "verdict": verdict_obj.verdict,
-                "exit_code": exit_code,
-                "result_json_path": str(result_path),
-                "failure_detectors_fired": list(verdict_obj.failure_detectors_fired),
-                "error_detectors_fired": list(verdict_obj.error_detectors_fired),
-                "warn_detectors_fired": list(verdict_obj.warn_detectors_fired),
-            }
-        )
         return WorkloadResult(
             passed=passed,
             failure_count=0 if passed else 1,
@@ -928,7 +881,14 @@ class SubprocessWorkload(Workload):
             executed_iterations=1 if launched else 0,
             configured_iterations=1,
             elapsed_sec=walltime_sec,
-            metrics=metrics,
+            metrics={
+                "verdict": verdict_obj.verdict,
+                "exit_code": exit_code,
+                "result_json_path": str(result_path),
+                "failure_detectors_fired": list(verdict_obj.failure_detectors_fired),
+                "error_detectors_fired": list(verdict_obj.error_detectors_fired),
+                "warn_detectors_fired": list(verdict_obj.warn_detectors_fired),
+            },
         )
 
     def _write_env_file_failure_result(
@@ -1061,10 +1021,6 @@ class SubprocessWorkload(Workload):
     ) -> RetentionOutcome | None:
         """Prune this trial's heavy artifacts per ``retain`` (issue #231).
 
-        Covers both trees a trial writes to: the hand-written ``trial_dir``
-        and, via :meth:`_prune_collector_tree`, the sibling collector artifact
-        directory that rocprof / Proton write into.
-
         Returns the :class:`~aorta.run.retention.RetentionOutcome` so the
         caller can record the applied level + deleted-artifact list into
         ``result.json`` for post-hoc auditability (a reader of a bundled or
@@ -1104,101 +1060,15 @@ class SubprocessWorkload(Workload):
                 exc,
             )
             return None
-        outcome = self._prune_collector_tree(trial_dir, level, outcome)
         if outcome.deleted:
-            # "for" rather than "from": the count can span both the trial dir
-            # and the sibling collector tree.
             log.info(
-                "retention[%s]: pruned %d artifact(s) (~%d bytes) for trial %s",
+                "retention[%s]: pruned %d artifact(s) (~%d bytes) from %s",
                 level,
                 len(outcome.deleted),
                 outcome.freed_bytes,
                 trial_dir,
             )
         return outcome
-
-    def _prune_collector_tree(
-        self, trial_dir: Path, level: str, outcome: RetentionOutcome
-    ) -> RetentionOutcome:
-        """Fold the collector artifact tree into this trial's retention outcome.
-
-        Profiler traces are the artifact class retention was built for (see
-        :mod:`aorta.run.retention`), but they do not live under ``trial_dir``:
-        the dispatcher threads ``_aorta_collect_dir`` as
-        ``<cell>/<workload>/trial_d<d>_m<m>_t<t>`` while the hand-written trial
-        record sits in ``<cell>/trial_<n>``, so the two trees are siblings.
-        Pruning only ``trial_dir`` would leave every rocprof/Proton capture on
-        disk regardless of ``retain``, which is hundreds of MB per trial across
-        a sweep.
-
-        Deleted paths are recorded relative to ``trial_dir`` (so they carry a
-        leading ``../``), keeping the ``result.json`` audit trail unambiguous
-        about which tree each pruned file came from. Best-effort like the rest
-        of retention: a failure here leaves the collector artifacts in place
-        and returns the trial-dir outcome unchanged.
-        """
-        from aorta.run.collectors import (
-            CONFIG_KEY_COLLECT_DIR,
-            active_collectors,
-            unsafe_collector_paths,
-        )
-
-        if not active_collectors(self.config):
-            return outcome
-        raw = self.config.get(CONFIG_KEY_COLLECT_DIR)
-        if not isinstance(raw, str) or not raw:
-            return outcome
-        collect_root = Path(raw)
-        # Re-checked here, after the command ran, and not only by the pre-launch
-        # reset: the payload is handed this path and can replace the directory
-        # with a symlink while it executes. ``is_dir()`` and
-        # ``apply_retention()`` both follow links, so pruning through one would
-        # delete files in the link's target -- outside the results tree, at any
-        # level below ``full``. Keep the artifacts rather than risk that.
-        #
-        # Every collector subdirectory is checked, not just the shared root:
-        # ``apply_retention`` recurses into ``<root>/rocprof`` and
-        # ``<root>/proton``, so swapping one of those is the same exposure one
-        # level down.
-        unsafe = unsafe_collector_paths(self.config)
-        if unsafe:
-            log.warning(
-                "retention: %s is (or is under) a symlink after the run; "
-                "refusing to prune through it. Collector artifacts kept.",
-                ", ".join(str(path) for path in unsafe),
-            )
-            return outcome
-        if not collect_root.is_dir():
-            return outcome
-        try:
-            collected = apply_retention(collect_root, level)
-        except Exception as exc:  # noqa: BLE001 -- retention is best-effort
-            log.warning(
-                "retention: pruning collector artifacts in %s at level %r "
-                "failed (%s); artifacts kept",
-                collect_root,
-                level,
-                exc,
-            )
-            return outcome
-        try:
-            prefix = Path(os.path.relpath(collect_root, trial_dir)).as_posix()
-        except ValueError:
-            # Only reachable if the two trees are not relatable (a different
-            # drive on Windows; probe is Linux-only by design). The directory
-            # name still says which tree the entry came from.
-            prefix = collect_root.name
-
-        def _rebase(paths: tuple[str, ...]) -> tuple[str, ...]:
-            return tuple(f"{prefix}/{path}" for path in paths)
-
-        return dataclasses.replace(
-            outcome,
-            deleted=outcome.deleted + _rebase(collected.deleted),
-            kept=outcome.kept + _rebase(collected.kept),
-            freed_bytes=outcome.freed_bytes + collected.freed_bytes,
-            no_op=outcome.no_op and collected.no_op,
-        )
 
     @staticmethod
     def _record_retention(result_doc: dict[str, Any], outcome: RetentionOutcome) -> None:

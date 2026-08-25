@@ -280,30 +280,6 @@ class TestRunTrials:
         with pytest.raises(ValueError, match=r"dict\[str, str\]"):
             run_trials(req)
 
-    def test_rejects_invalid_collector_option(self, tmp_path):
-        """``run_trials`` is a public library API: a programmatic caller that
-        never went through the recipe loader still gets its option typo caught
-        before the first trial launches, not from an empty artifact dir."""
-        req = RunRequest(
-            workload="anything",
-            trials=1,
-            collect=("rocprof",),
-            collect_options={"rocprof": {"trace": "gpu"}},
-            results_dir=tmp_path,
-        )
-        with pytest.raises(ValueError, match="unknown domain"):
-            run_trials(req)
-
-    def test_rejects_queue_intercepting_collector_pair(self, tmp_path):
-        req = RunRequest(
-            workload="anything",
-            trials=1,
-            collect=("rocprof", "proton"),
-            results_dir=tmp_path,
-        )
-        with pytest.raises(ValueError, match="queue interceptor"):
-            run_trials(req)
-
     def test_rejects_reserved_aorta_prefix_in_config_overrides(self, tmp_path):
         """``_aorta_*`` keys are reserved for platform-supplied values
         (currently ``_aorta_environment``).  A caller passing one in

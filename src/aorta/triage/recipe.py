@@ -95,13 +95,6 @@ _PROBE_TOP_LEVEL = frozenset(
         "tier3_vram_growth",
         # Issue #232: collect-until-N stopping rule (valid in both modes).
         "stop_after",
-        # Cross-cutting collector names/options (valid in both modes, like
-        # stop_after). A probe-mode collector attaches by wrapping the user
-        # command's argv in SubprocessWorkload.setup(), so it is meaningful
-        # here even though probe-mode synthesises its own cells -- and unlike
-        # the other triage-mode keys it does not describe a matrix axis or a
-        # workload the probe flow fixes internally.
-        "collect",
         # Issue #229: operator detector-disable knobs. Accepted only in
         # mode: probe (triage-mode check below rejects them otherwise).
         "disable_detectors",
@@ -857,17 +850,11 @@ def _parse_collect(
     first-seen order. Option values MUST be strings (they become environment
     variables / CLI-shaped knobs downstream); non-string values are rejected
     at load time rather than silently ``str()``-coerced.
-
-    Options are then handed to
-    :func:`aorta.run.collectors.validate_collectors`, which checks them against
-    each collector's own schema and rejects collector combinations that cannot
-    run together, so a bad knob or an unrunnable pairing fails the recipe
-    instead of producing a run with no measurements in it.
     """
     # Local import keeps the triage->run layering explicit; collectors is a
     # leaf module so there is no cycle, but importing at call time avoids any
     # top-of-module import-order coupling.
-    from aorta.run.collectors import KNOWN_RECIPES, validate_collectors
+    from aorta.run.collectors import KNOWN_RECIPES
 
     if raw is None:
         return (), {}
@@ -908,15 +895,7 @@ def _parse_collect(
             f"valid: {sorted(KNOWN_RECIPES)}"
         )
     # De-duplicate names, preserving first-seen order (dict keys are ordered).
-    deduped = tuple(dict.fromkeys(names))
-    # Per-collector option schemas and cross-collector conflicts (e.g. rocprof
-    # + a queue-intercepting proton backend) are the registry's business; it
-    # raises ValueError, which is a schema error at this layer.
-    try:
-        validate_collectors(deduped, options)
-    except ValueError as exc:
-        raise RecipeSchemaError(f"{label}: {exc}") from exc
-    return deduped, options
+    return tuple(dict.fromkeys(names)), options
 
 
 def _parse_cell(idx: int, raw: Any, inline_envs: dict[str, InlineEnv]) -> Cell:
