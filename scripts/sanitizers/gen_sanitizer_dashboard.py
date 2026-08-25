@@ -1763,14 +1763,27 @@ def _is_rebuild_entry(item: Any) -> bool:
     string silently degrades into one command per character, and a non-string
     element renders its ``repr`` as a command line (``[{"a": 1}]`` publishes
     ``{'a': 1}``): no crash, but a fabricated command in the one block on the
-    page that promises to be runnable. Every other field only ever reaches
-    ``_esc(str(...))`` or an f-string, which accept anything.
+    page that promises to be runnable.
+
+    ``path``, ``what`` and ``caveat`` only ever reach ``_esc(str(...))`` or an
+    f-string, which accept anything -- but accepting is not rendering honestly,
+    for the same reason ``_not_published_rows`` shows a dash rather than a
+    ``repr``. A ``path`` of ``["a", "b"]`` publishes ``['a', 'b']`` as the
+    artifact's recipe-relative name, which is a name the manifest never
+    recorded. So every value either rendering prints must be a real ``str``.
+
+    Rejecting one costs a reader nothing: ``plan_from_env`` recomputes the whole
+    plan from ``built_refs``, and ``rebuild_plan`` emits strings for all four
+    keys on every branch, so no valid historical plan starts falling back.
     """
     return (
         isinstance(item, dict)
         and _REBUILD_KEYS <= item.keys()
         and isinstance(item["commands"], list)
-        and all(isinstance(command, str) for command in item["commands"])
+        and all(
+            isinstance(value, str)
+            for value in (*item["commands"], item["path"], item["what"], item["caveat"])
+        )
     )
 
 
@@ -1954,7 +1967,8 @@ def plan_from_env(env: dict[str, Any], built_refs: list[str]) -> list[dict[str, 
     manifest read off the data branch, so trusting a partial or wrongly-typed
     entry here would turn one hand-edited or half-written ``env.json`` into a
     ``KeyError``/``TypeError`` that fails the whole dashboard render rather
-    than one area's rebuild section.
+    than one area's rebuild section -- or, where it does not crash, publish a
+    command or a path the manifest never recorded.
     """
     stored = env.get("rebuild")
     if isinstance(stored, list) and all(_is_rebuild_entry(item) for item in stored):

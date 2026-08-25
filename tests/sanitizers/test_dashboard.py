@@ -2617,6 +2617,22 @@ def test_stored_rebuild_plan_is_only_trusted_when_both_renderers_can_read_it():
         )
         assert "{'a': 1}" not in rendered and "None" not in rendered
 
+    # The other three keys are only stringified, so they never crash -- but
+    # accepting anything is not rendering it honestly. A `path` of ["a", "b"]
+    # published `['a', 'b']` into REPRODUCE.md as the artifact's
+    # recipe-relative name, a name the manifest never recorded, which is the
+    # same fabrication `_not_published_rows` shows a dash for.
+    for key in sorted(gen._REBUILD_KEYS - {"commands"}):
+        for bad in (["a", "b"], {"k": 1}, 7, None):
+            entry = [{**full[0], key: bad}]
+            recovered = gen.plan_from_env({"rebuild": entry, "target": "gfx950"}, refs)
+            assert recovered == full, (key, bad)
+            rendered = gen._rebuild_section_html(recovered) + " ".join(
+                gen._rebuild_hints(recovered)
+            )
+            assert "['a', 'b']" not in rendered, (key, bad)
+            assert "{'k': 1}" not in rendered, (key, bad)
+
     # An empty command list is legitimate (an unrecognised reference), so it is
     # trusted rather than recomputed.
     empty = [{**full[0], "commands": []}]
