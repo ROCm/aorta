@@ -1054,22 +1054,26 @@ def _run_single_trial(
     # ``_aorta_log_prefix``, which the dispatcher only sets when
     # ``save_logs=True``; that coupled an unrelated debug knob to collector
     # output landing in the right place (and being picked up by ``aorta
-    # bundle``). This is an absolute path stem with no extension, same
-    # shape/derivation as ``_aorta_log_prefix`` (``.absolute()`` so a relative
-    # ``results_dir`` still yields a usable path for a subprocess with a
-    # different cwd). Only set on rank 0 (matches the trial-JSON / log-capture
-    # write gate) and only when a collector was requested, so non-collector
-    # runs are unchanged.
+    # bundle``). This is an absolute path stem with no extension. Canonicalized
+    # with ``.resolve()`` so a relative ``results_dir`` still yields a usable
+    # path for a subprocess with a different cwd, and so the symlink guards
+    # pin a pre-launch trust anchor. Only set on rank 0 (matches the trial-JSON
+    # / log-capture write gate) and only when a collector was requested, so
+    # non-collector runs are unchanged.
     if request.collect and should_write:
         trial_basename = (
             f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
         )
-        config["_aorta_collect_dir"] = str((results_dir / trial_basename).absolute())
-        # The trust anchor for the collector symlink guards. It has to come
-        # from here rather than be derived from the collector directory: the
-        # profiled command can replace anything at or below that directory
-        # while it runs, so a boundary computed from it proves nothing.
-        config["_aorta_results_root"] = str(results_dir.absolute())
+        # Canonicalize before any trial runs. The payload can replace the
+        # results directory itself with a symlink after launch; the guards
+        # compare against this saved resolution and must not resolve it again.
+        # ``resolve()`` also folds operator-owned links *above* this root
+        # (a ``--results-dir`` that lives under a mounted scratch path), and
+        # the collect dir is built from the same canonical prefix so the
+        # payload-symlink walk has a lexical path inside that prefix.
+        results_root = results_dir.resolve()
+        config["_aorta_collect_dir"] = str(results_root / trial_basename)
+        config["_aorta_results_root"] = str(results_root)
 
     # Compute the effective controlled overlay in the platform env-precedence
     # order (lowest to highest):

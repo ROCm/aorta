@@ -48,11 +48,13 @@ KNOWN_RECIPES: frozenset[str] = frozenset(
 CONFIG_KEY_COLLECT = "_aorta_collect"
 CONFIG_KEY_COLLECT_OPTIONS = "_aorta_collect_options"
 CONFIG_KEY_COLLECT_DIR = "_aorta_collect_dir"
-#: The dispatcher's ``--results-dir``, threaded so the symlink guards have a
-#: trust anchor that does **not** come from the path being validated. Every
-#: directory at or below the collector root is payload-writable during the run,
-#: so a boundary derived from the collector root itself proves nothing; this key
-#: is the operator-declared root above all of it.
+#: The dispatcher's ``--results-dir``, canonicalized with :meth:`Path.resolve`
+#: **before any trial runs** and threaded so the symlink guards have a trust
+#: anchor that does **not** come from the path being validated -- and that is
+#: not re-resolved after the payload runs. Every directory at or below this
+#: root is payload-writable during the run, including the results directory
+#: inode itself, so a boundary derived from a live ``resolve()`` of this path
+#: after launch proves nothing.
 CONFIG_KEY_RESULTS_ROOT = "_aorta_results_root"
 
 #: Argv-wrapping order, outermost first. ``rocprof`` runs a whole command under
@@ -166,13 +168,14 @@ def _collect_root(config: Mapping[str, Any]) -> Path | None:
 
 
 def _trusted_root(config: Mapping[str, Any], root: Path) -> Path:
-    """The directory every collector path must resolve inside.
+    """The directory every collector path must stay inside.
 
     Prefers the dispatcher-threaded ``--results-dir``
-    (:data:`CONFIG_KEY_RESULTS_ROOT`), because a trust anchor must not be
-    derived from the path it is validating: everything at or below the collector
-    root is payload-writable while the trial runs, so ``root.parent`` can itself
-    be the symlink doing the escaping.
+    (:data:`CONFIG_KEY_RESULTS_ROOT`), already canonicalized at dispatch.
+    Callers must **not** :meth:`~pathlib.Path.resolve` this value again: the
+    profiled process can replace that directory with a symlink, and resolving
+    both the candidate and the anchor through the same link would make
+    containment succeed for a path that has left the operator's tree.
 
     Falls back to ``root.parent`` when the key is absent, which only happens for
     a direct programmatic caller -- the dispatcher always supplies it alongside
@@ -212,7 +215,7 @@ def unsafe_collector_paths(config: Mapping[str, Any]) -> list[Path]:
 
 
 def collector_root_is_traversable(root: Path, trusted_root: Path | None = None) -> bool:
-    """True when ``root`` resolves to somewhere inside ``trusted_root``.
+    """True when ``root`` can be walked without following a payload-owned symlink.
 
     Checked **again after the command has run**, not only before it launches.
     The profiled command is handed this path (``rocprofv3 -d``, ``proton -n``),
@@ -220,20 +223,20 @@ def collector_root_is_traversable(root: Path, trusted_root: Path | None = None) 
     directory and leave a symlink in its place. Every later step --
     ``Path.is_dir()``, ``rglob``, and :func:`aorta.run.retention.apply_retention`
     -- follows links in *every* path component, so traversing one would read,
-    and for retention *delete*, files outside the results tree.
+    and for retention *delete*, through the link.
 
-    Containment against a trusted root, rather than a per-component symlink
-    scan, because the two cases look identical component-by-component and only
-    differ in who owns the link:
+    Two checks, both required:
 
-    * **Above** the trusted root the path is the operator's own -- a
-      ``--results-dir`` that legitimately lives under a symlink is normal, and
-      following it is the intended behaviour. Resolving the trusted root first
-      allows that.
-    * **At or below** it, every component is payload-writable, so a link there
-      is an escape regardless of how deep it sits. ``resolve()`` collapses the
-      whole chain, so this catches a swap at any depth rather than only at the
-      leaf or its parent.
+    * **Containment.** ``root.resolve()`` must stay inside ``trusted_root``.
+      ``trusted_root`` is a pre-launch canonical path and is **not** resolved
+      again: resolving both sides after the payload replaced the results
+      directory with a symlink would make the escape look contained.
+    * **No payload symlink at or below the anchor.** A link whose target is
+      still inside the results tree (``trial -> sibling_trial``,
+      ``rocprof -> <results>``) also fails: ``rmtree`` / ``rglob`` would then
+      operate on the sibling. Operator-owned links *above* the anchor are
+      already folded away because the dispatcher stores
+      ``--results-dir.resolve()``.
 
     ``trusted_root`` defaults to ``root.parent`` when the caller omits it.
     That fallback is only for a programmatic caller that did not thread
@@ -242,10 +245,30 @@ def collector_root_is_traversable(root: Path, trusted_root: Path | None = None) 
     """
     trusted = trusted_root if trusted_root is not None else root.parent
     try:
-        return root.resolve().is_relative_to(trusted.resolve())
+        if not root.resolve().is_relative_to(trusted):
+            return False
+        return not _payload_symlink_at_or_below(root, trusted)
     except (OSError, RuntimeError):
         # RuntimeError: a symlink loop that ``resolve()`` refuses to follow.
         return False
+
+
+def _payload_symlink_at_or_below(path: Path, trusted: Path) -> bool:
+    """True when any component of ``path`` below ``trusted`` is a symlink.
+
+    ``trusted`` itself is not inspected: that inode is the operator's
+    ``--results-dir``. Everything below it is payload-writable.
+    """
+    current = path
+    while current != trusted:
+        if current.parent == current:
+            # Walked to the filesystem root without meeting the anchor, so
+            # ``path`` is not lexically inside the canonical results tree.
+            return True
+        if current.is_symlink():
+            return True
+        current = current.parent
+    return False
 
 
 def _reset_output_dir(out_dir: Path, trusted_root: Path) -> None:
@@ -261,22 +284,22 @@ def _reset_output_dir(out_dir: Path, trusted_root: Path) -> None:
 
     Args:
         out_dir: The collector's output directory for this trial.
-        trusted_root: The dispatcher-created results directory ``out_dir`` must
-            resolve inside. Checked because ``rmtree`` is recursive and
-            ``is_dir()`` follows symlinks in *every* component, so a link
-            anywhere at or below the trusted root would redirect the delete
-            outside the results tree.
+        trusted_root: Pre-launch canonical results directory. ``out_dir`` must
+            stay inside it with no payload-owned symlink on the path.
+            ``rmtree`` is recursive and ``is_dir()`` follows links in *every*
+            component, so a link at or below this root -- even to a sibling
+            inside the tree -- would redirect the delete.
 
     Raises:
-        OSError: the directory could not be cleared or created, or it does not
-            resolve inside ``trusted_root``.
+        OSError: the directory could not be cleared or created, or it is not
+            traversable inside ``trusted_root``.
     """
     if not collector_root_is_traversable(out_dir, trusted_root):
         raise OSError(
-            f"refusing to prepare {out_dir}: it resolves outside {trusted_root}, "
-            "so clearing it would delete a tree outside the results directory. "
-            "Remove the symlink in that path, or point --results-dir at a real "
-            "directory."
+            f"refusing to prepare {out_dir}: a path component at or below "
+            f"{trusted_root} is a symlink or resolves outside that directory, "
+            "so clearing it would delete through the link. Remove the symlink "
+            "in that path, or point --results-dir at a real directory."
         )
     if out_dir.is_symlink() or out_dir.is_file():
         out_dir.unlink()

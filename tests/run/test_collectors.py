@@ -267,7 +267,7 @@ def test_wrap_refuses_a_symlink_in_any_component_below_the_trusted_root(
 
     with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
         wrap_argv_for_collectors(
-            _config(["rocprof"], collect_dir=collect_dir, results_root=results), _INNER
+            _config(["rocprof"], collect_dir=collect_dir, results_root=results.resolve()), _INNER
         )
     assert victim.read_text(encoding="utf-8") == "not yours to delete"
 
@@ -278,9 +278,9 @@ def test_wrap_allows_a_results_dir_that_legitimately_lives_under_a_symlink(
     """The operator's own layout above the trusted root must keep working.
 
     A ``--results-dir`` under a symlink (a mounted scratch path, a symlinked
-    home) is ordinary, and following it is the intended behaviour -- which is
-    why the check is containment against a *resolved* trusted root rather than
-    a per-component symlink scan that could not tell the two cases apart.
+    home) is ordinary. The dispatcher canonicalizes that path *before* launch
+    and threads the resolved prefix as both the trust anchor and the collect
+    dir, so the payload-symlink walk never sees the operator's link.
     """
     real = tmp_path / "real_results"
     real.mkdir()
@@ -288,7 +288,8 @@ def test_wrap_allows_a_results_dir_that_legitimately_lives_under_a_symlink(
     link.symlink_to(real, target_is_directory=True)
 
     argv = wrap_argv_for_collectors(
-        _config(["rocprof"], collect_dir=link / "trial_d0_m0_t0", results_root=link), _INNER
+        _config(["rocprof"], collect_dir=link.resolve() / "trial_d0_m0_t0", results_root=link.resolve()),
+        _INNER,
     )
     assert argv != _INNER  # the collector attached rather than being refused
     assert (real / "trial_d0_m0_t0" / "rocprof").is_dir()
@@ -316,12 +317,59 @@ def test_wrap_refuses_to_clear_through_a_symlinked_collect_root(profilers_on_pat
 
     with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
         wrap_argv_for_collectors(
-            _config(["rocprof"], collect_dir=link, results_root=results), _INNER
+            _config(["rocprof"], collect_dir=link, results_root=results.resolve()), _INNER
         )
     # The whole point: the tree behind the symlink is untouched.
     assert (outside / "rocprof" / "keep_me.txt").read_text(encoding="utf-8") == (
         "not yours to delete"
     )
+
+
+def test_wrap_refuses_a_symlink_to_a_sibling_inside_the_results_tree(
+    profilers_on_path, tmp_path
+):
+    """Containment alone is not enough: a link to a sibling still resolves inside.
+
+    ``trial -> <results>/other_trial`` (or ``rocprof -> <results>``) stays
+    inside the trusted root after ``resolve()``, so a containment-only guard
+    would let ``rmtree`` erase the sibling. The payload-symlink walk refuses
+    any link at or below the anchor even when the target is in-tree.
+    """
+    results = tmp_path / "results"
+    results.mkdir()
+    sibling = results / "trial_other"
+    (sibling / "rocprof").mkdir(parents=True)
+    victim = sibling / "rocprof" / "keep_me.txt"
+    victim.write_text("sibling trial", encoding="utf-8")
+
+    collect_dir = results / "trial_d0_m0_t0"
+    collect_dir.symlink_to(sibling, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(
+            _config(["rocprof"], collect_dir=collect_dir, results_root=results.resolve()),
+            _INNER,
+        )
+    assert victim.read_text(encoding="utf-8") == "sibling trial"
+
+
+def test_wrap_refuses_a_collector_subdir_symlinked_at_the_results_root(
+    profilers_on_path, tmp_path
+):
+    """``<trial>/rocprof -> <results>`` would let ``rmtree`` wipe the whole tree."""
+    results = tmp_path / "results"
+    collect_dir = results / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    (collect_dir / "rocprof").symlink_to(results, target_is_directory=True)
+    marker = results / "keep_me.txt"
+    marker.write_text("results tree", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(
+            _config(["rocprof"], collect_dir=collect_dir, results_root=results.resolve()),
+            _INNER,
+        )
+    assert marker.read_text(encoding="utf-8") == "results tree"
 
 
 # ---- wrap_argv_for_collectors: attaching -------------------------------
@@ -507,3 +555,37 @@ def test_summarize_survives_a_parser_that_raises(tmp_path, monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         assert summarize_collectors(_config(["rocprof"], collect_dir=tmp_path)) == {}
     assert "summary parsing failed" in caplog.text
+
+
+def test_summarize_does_not_re_resolve_a_results_dir_swapped_for_a_symlink(tmp_path, caplog):
+    """The saved trust anchor must not be resolved again after the payload runs.
+
+    If the profiled process replaces the results directory with a symlink to
+    ``/outside``, resolving *both* the candidate and the anchor through that
+    link would make containment succeed and parse planted metrics. The
+    dispatcher stores a pre-launch ``resolve()``; this test keeps that string
+    and swaps the directory out from under it.
+    """
+    results = tmp_path / "results"
+    trial = results / "trial_d0_m0_t0"
+    (trial / rocprof.OUTPUT_SUBDIR).mkdir(parents=True)
+    trusted = str(results.resolve())
+    collect = str(trial)
+
+    outside = tmp_path / "outside"
+    planted = outside / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    planted.mkdir(parents=True)
+    (planted / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"sgemm",7,1000\n', encoding="utf-8"
+    )
+
+    results.rename(tmp_path / "results_orig")
+    (tmp_path / "results").symlink_to(outside, target_is_directory=True)
+
+    with caplog.at_level("WARNING"):
+        metrics = summarize_collectors(
+            _config(["rocprof"], collect_dir=collect, results_root=trusted)
+        )
+    assert metrics == {}
+    assert "rocprof_kernel_count" not in metrics
+    assert "symlink" in caplog.text

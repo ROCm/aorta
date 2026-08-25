@@ -639,9 +639,60 @@ class TestRunTrials:
         results_root = captured_config["_aorta_results_root"]
         assert Path(results_root).is_absolute()
         assert Path(collect_dir).parent == Path(results_root)
+        assert results_root == str(Path(results_root).resolve())
         # No log prefix, because save_logs was not requested -- proves the two
         # are decoupled.
         assert "_aorta_log_prefix" not in captured_config
+
+    def test_results_root_is_canonical_when_results_dir_is_a_symlink(self, tmp_path):
+        """The trust anchor is ``--results-dir.resolve()``, stored before launch.
+
+        A live ``.absolute()`` of a symlink is still the symlink. After the
+        payload replaces that directory, resolving the stored path again would
+        follow the new target; pinning the canonical path here is what makes
+        the post-run guard compare against the operator's tree.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        real = tmp_path / "real_results"
+        real.mkdir()
+        link = tmp_path / "results_link"
+        link.symlink_to(real, target_is_directory=True)
+
+        mock_ep = MagicMock()
+        mock_ep.name = "collect_dir_symlink"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="collect_dir_symlink",
+                trials=1,
+                results_dir=link,
+                collect=("layer_numerics",),
+            )
+            run_trials(req)
+        workload_dir = link / "collect_dir_symlink"
+        assert captured_config["_aorta_results_root"] == str(workload_dir.resolve())
+        assert captured_config["_aorta_results_root"] != str(workload_dir.absolute())
+        assert captured_config["_aorta_collect_dir"] == str(
+            workload_dir.resolve() / "trial_d0_m0_t0"
+        )
+        assert not Path(captured_config["_aorta_results_root"]).is_symlink()
 
     def test_collect_dir_absent_without_collector(self, tmp_path):
         """No collector keys for a run with no collector -- back-compat
