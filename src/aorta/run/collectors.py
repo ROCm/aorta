@@ -349,9 +349,13 @@ def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
     Returns:
         A flat mapping merged into ``WorkloadResult.metrics``. Numeric values
         (``rocprof_gpu_time_ms``, ``proton_kernel_count``, ...) are picked up by
-        the ``perf.md`` metrics table; the non-numeric ones (top-kernel name
-        lists, artifact directories) are skipped there but retained in
-        ``matrix.json``.
+        the ``perf.md`` metrics table and aggregated into
+        ``matrix.json::cells[*].metrics_summary``. The non-numeric ones
+        (top-kernel name lists, artifact directories) reach **neither**:
+        ``_aggregate_metrics`` takes only real int/float scalars, and
+        ``_aggregate_audit_metadata`` works from a fixed key allowlist that
+        does not include collector keys. They live solely in the per-trial
+        dispatcher JSON under ``.result.metrics``.
     """
     root = _collect_root(config)
     if root is None:

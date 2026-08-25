@@ -427,8 +427,9 @@ Each collector contributes the same five keys under its own prefix.
 `<c>` is `rocprof` or `proton`. The three numeric ones are picked up by the
 `perf.md` metrics table and aggregated per cell into
 `matrix.json::cells[*].metrics_summary` (mean / min / max / n across
-trials). The list and string values are skipped in `perf.md` — it only
-aggregates numeric scalars — but are retained in the per-trial JSON.
+trials). The list and string values reach **neither** report — both aggregate
+numeric scalars only — and are readable from the per-trial dispatcher JSON at
+`.result.metrics`, which is where the `jq` recipes below look for them.
 
 Only `<c>_artifact_dir` is guaranteed. A capture with no kernel data
 contributes just that key.

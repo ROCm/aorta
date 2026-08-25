@@ -852,10 +852,13 @@ class SubprocessWorkload(Workload):
 
         # Collector summaries ride the same ``metrics`` channel as the verdict
         # bookkeeping, so the numeric ones (``rocprof_gpu_time_ms`` etc.) land
-        # in perf.md's metrics table and all of them in matrix.json. Merged
-        # under the platform keys below so a collector can never shadow
-        # ``verdict`` or ``exit_code``; fail-soft, returning ``{}`` when
-        # nothing was collected.
+        # in perf.md's metrics table and in matrix.json's metrics_summary. The
+        # non-numeric ones (top-kernel lists, artifact dirs) reach neither --
+        # matrix aggregation takes numeric scalars only -- and are readable
+        # just from this trial's dispatcher JSON. Merged under the platform
+        # keys below so a collector can never shadow ``verdict`` or
+        # ``exit_code``; fail-soft, returning ``{}`` when nothing was
+        # collected.
         #
         # Parsed BEFORE retention: retention prunes the profiler artifacts
         # this reads, so summarising afterwards would silently lose every
