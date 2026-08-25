@@ -35,12 +35,23 @@ jobs:
     # `self-hosted, gpu, mi350x` (same set the other GPU workflows target, e.g.
     # gpu-tests.yml / eval-reusable.yml use `self-hosted, gpu`).
     runs-on: [self-hosted, gpu]
-    # 120 min is GitHub's ceiling for this job, not necessarily the binding
-    # limit: an effective ~20-min cap has been observed on the [self-hosted,
-    # gpu] runner (a runner/org Actions policy that a workflow's timeout-minutes
-    # can only lower, never raise). Confirming and raising that effective cap is
-    # tracked in #370 (split out of #366).
-    timeout-minutes: 120
+    outputs:
+      # The rocjitsu Actions run this job downloaded, so sanitizers-survey can pin the
+      # same bundle rather than re-resolving `--run latest` against a moving branch.
+      rocjitsu_run_id: ${{ steps.rocjitsu-run.outputs.run_id }}
+    # This job is fixtures + the three daily controls + the comparator; the ~69-min
+    # survey now lives in sanitizers-survey. Recent nightlies ran 20.7/21.7/21.8 min
+    # WITH the survey included, so 45 min is generous for what is left.
+    #
+    # Set deliberately low rather than left at GitHub's 120. A workflow
+    # timeout-minutes can only LOWER the binding cap, never raise it (#370), but it
+    # also decides WHICH kind of death you get: a GitHub-side timeout *cancels* the
+    # job, so the `if: always()` steps below still run and the Tab 1 reports still
+    # upload, whereas the runner-side kill #370 describes skips them entirely. A
+    # ceiling just above the real envelope means that whenever this job does run
+    # long, the graceful path is the one that fires. It does nothing if the binding
+    # cap is really ~20 min -- that is #370's to fix, not this file's.
+    timeout-minutes: 45
     steps:
       # Sibling GPU jobs (gpu-tests.yml et al.) run aorta in a root ROCm CI
       # container that leaves root-owned artifacts (e.g. results/gpu_smoke) in
@@ -153,9 +164,19 @@ jobs:
             # sanitizer build produced each report in its run area (#384).
             mkdir -p "${SANITIZER_OUT}"
             python -c "import json,sys; m=json.load(open(sys.argv[1])); \
-              json.dump({\"commit\": m.get(\"commit\"), \"run_url\": m.get(\"run_url\")}, \
+              json.dump({\"commit\": m.get(\"commit\"), \"run_url\": m.get(\"run_url\"), \
+              \"run_id\": m.get(\"run_id\")}, \
               open(sys.argv[2], \"w\"), indent=2, sort_keys=True)" \
               "${ROCJITSU_PREBUILT}/MANIFEST.json" "${SANITIZER_OUT}/rocjitsu.json"
+            # Surface the resolved run id to the host so sanitizers-survey can pin the
+            # SAME bundle instead of re-resolving `--run latest`. Two serialized
+            # downloads can otherwise straddle a new rocjitsu build, and the publish job
+            # would then stamp the gate bundle commit onto survey run areas built from a
+            # different one -- exactly the provenance ambiguity this PR documents.
+            # Written outside SANITIZER_OUT so it does not enter the uploaded artifact.
+            python -c "import json,sys; \
+              print(json.load(open(sys.argv[1])).get(\"run_id\") or \"\")" \
+              "${ROCJITSU_PREBUILT}/MANIFEST.json" > "${SANITIZER_ROOT}/rocjitsu_run_id.txt"
 
             # hipcc shells out to clang-offload-bundler, which lives in the ROCm
             # LLVM bindir but is not on PATH -- the image only exports
@@ -189,77 +210,17 @@ jobs:
             aorta sweep run --recipe recipes/sanitizers/daily-consan-racy.yaml \
               --output-dir "${SANITIZER_OUT}/consan-racy" || true
 
-            # Observed-only (non-gating) sanitizer survey over real GPU kernels,
-            # rendered on the dashboard Workload survey tab (Tab 2), NOT a separate
-            # informational section (#374). The ENTIRE survey path -- fixture build
-            # (hipcc/genco/unbundle) AND the sweeps -- runs in a guarded subshell so
-            # no failure here (a bad genco, bundler, or compile) can abort the job
-            # before the gate below. It is best-effort: a missing report simply omits
-            # that dashboard row. Each kernel is scanned by BOTH sanitizers (waitcheck
-            # static + ConSan dynamic) so Tab 2 shows both outcomes per kernel.
-            echo "[$(date +%T)] survey: ConSan + waitcheck over real GPU kernels (Tab 2; non-gating) …"
-            (
-              set +e
-              KROOT="${FIXTURES}/kernels"
-              # hipcc --genco emits either a raw gfx950 code object or a clang-offload
-              # bundle depending on the ROCm build; unbundle only when it is a bundle
-              # (a raw ELF fed back through --unbundle would fail).
-              genco_object() {  # <hip-source> <final .hsaco>
-                local tmp; tmp="$(mktemp --suffix=.o)" || return 1
-                hipcc --genco --offload-arch=gfx950 "$1" -o "$tmp" || return 1
-                if head -c 24 "$tmp" | grep -qF __CLANG_OFFLOAD_BUNDLE__; then
-                  clang-offload-bundler --type=o --unbundle --input="$tmp" \
-                    --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="$2" || return 1
-                else
-                  cp "$tmp" "$2" || return 1
-                fi
-                rm -f "$tmp"
-              }
-              # --top-n 0 extracts only the ConSan object, leaving the gated waitcheck
-              # fixtures (already built above) untouched.
-              python scripts/sanitizers/prepare_gemm_isa.py \
-                --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 0 \
-                --consan-object "${FIXTURES}/isa/consan_gemm_f32.hsaco"
-              genco_object "${KROOT}/lds_reduce.hip" "${FIXTURES}/isa/lds.hsaco"
-              genco_object "${KROOT}/tiny_vecadd.hip" "${FIXTURES}/isa/tiny.hsaco"
-              hipcc --offload-arch=gfx950 -DLDS_HSACO="\"$(pwd)/${FIXTURES}/isa/lds.hsaco\"" \
-                "${KROOT}/lds_dispatch.hip" -o "${FIXTURES}/bin/lds_dispatch"
-              hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/tiny.hsaco\"" \
-                "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_tiny_load"
-              hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/consan_gemm_f32.hsaco\"" \
-                "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_gemm_load"
-              for c in consan-gemm consan-lds-dispatch consan-tiny; do
-                mkdir -p "${SANITIZER_OUT}/informational/${c}"
-              done
-              aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml \
-                --output-dir "${SANITIZER_OUT}/informational/consan-gemm"
-              aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml \
-                --output-dir "${SANITIZER_OUT}/informational/consan-lds-dispatch"
-              aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml \
-                --output-dir "${SANITIZER_OUT}/informational/consan-tiny"
-
-              # Observed-only waitcheck static scans over the SAME survey objects, so
-              # Tab 2 shows both sanitizers per kernel (#374 C). Case dirs are named
-              # <sanitizer>-<group> so the dashboard groups e.g. consan-gemm and
-              # waitcheck-gemm under one "gemm" kernel heading. Each survey waitcheck
-              # scan is a dedicated best-effort run publishing its OWN report -- the
-              # gated Tab-1 waitcheck report is never reused here. Non-gating.
-              for c in waitcheck-gemm waitcheck-lds-dispatch waitcheck-tiny; do
-                mkdir -p "${SANITIZER_OUT}/informational/${c}"
-              done
-              # daily-waitcheck-gemm-object scans the same consan_gemm_f32.hsaco object
-              # the consan-gemm survey case uses (distinct from the gated top-3-CSV
-              # daily-waitcheck-gemm guardrail, which is left untouched).
-              aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml \
-                --output-dir "${SANITIZER_OUT}/informational/waitcheck-gemm"
-              aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml \
-                --output-dir "${SANITIZER_OUT}/informational/waitcheck-lds-dispatch"
-              aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml \
-                --output-dir "${SANITIZER_OUT}/informational/waitcheck-tiny"
-            ) || true
-
-            # Gate is the three daily controls only; the guarded informational block
-            # above cannot reach this line with a non-zero status.
+            # The gate is the three daily controls, and the comparator is the last thing
+            # this job does, so its exit status is the job status directly.
+            #
+            # The observed-only Tab 2 survey used to run here, between the controls and
+            # this line, which is why earlier revisions of this file argued about
+            # evaluation order. It now has its own job (sanitizers-survey) and that
+            # argument is moot. The reason for moving it: once ROCm/rocm-systems#10378
+            # was fixed the consan-gemm case stopped being rejected early and started
+            # being genuinely instrumented, which took it from ~5 min to a measured
+            # ~69 min. Leaving a 69-minute non-gating case in front of the gate verdict
+            # put Tab 1 behind it, under the effective runner cap tracked in #370.
             echo "[$(date +%T)] gate: comparing reports against verdict_baselines.json …"
             python scripts/sanitizers/compare_verdict_baselines.py "${SANITIZER_OUT}"
           '
@@ -277,6 +238,19 @@ jobs:
           else
             sudo chown -R "$uidgid" "$ws" || true
           fi
+
+      - name: Record the rocjitsu run this job selected
+        # Read before the cleanup step below deletes .sanitizer-nightly. Empty when
+        # the job died before the download; sanitizers-survey falls back to `latest`
+        # in that case, which is no worse than today.
+        id: rocjitsu-run
+        if: always()
+        run: |
+          f=.sanitizer-nightly/rocjitsu_run_id.txt
+          run_id=""
+          [ -f "$f" ] && run_id="$(tr -d '[:space:]' < "$f")"
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "selected rocjitsu run: ${run_id:-<unresolved>}"
 
       - name: Upload sanitizer results
         # Always upload whatever ran, even when an earlier step (e.g. the baseline
@@ -300,9 +274,267 @@ jobs:
         working-directory: docker
         run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
 
+
+  sanitizers-survey:
+    name: gfx950 workload survey (Tab 2, non-gating)
+    needs: sanitizers-gpu
+    # Always run, including when the gate failed: Tab 2 is observed-only and its
+    # rows are still worth publishing next to a red Tab 1. Skipped only when the
+    # gate job itself was skipped.
+    if: always() && needs.sanitizers-gpu.result != 'skipped'
+    # Same runner label set as the gate job; `needs` serialises them, so the gate
+    # verdict is recorded and uploaded before this job starts competing for the GPU.
+    runs-on: [self-hosted, gpu]
+    # consan-gemm alone measured 4152s (~69 min) against the currently-published
+    # bundle, so this needs a budget the gate job should never have carried. Note
+    # the caveat from #370: a workflow timeout-minutes can only LOWER the binding
+    # cap, and an effective ~20-min cap has been observed on this runner. If that
+    # cap is real this job gets killed early -- which is now the point. It is
+    # non-gating, so its death costs the Tab 2 rows and nothing else.
+    timeout-minutes: 120
+    steps:
+      # Sibling GPU jobs (gpu-tests.yml et al.) run aorta in a root ROCm CI
+      # container that leaves root-owned artifacts (e.g. results/gpu_smoke) in
+      # the mounted checkout. actions/checkout's `git clean` runs as the runner
+      # user and cannot delete them. Reclaim ownership first via a throwaway
+      # root container (repo scripts aren't checked out yet here).
+      - name: Reclaim workspace ownership
+        run: |
+          ws="${{ github.workspace }}"
+          [ -d "$ws" ] || exit 0
+          uidgid="$(id -u):$(id -g)"
+          # Pinned by digest for supply-chain safety / reproducibility on the
+          # self-hosted runner (busybox:1.37).
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          # Repo scripts aren't checked out yet, so resolve docker access inline.
+          # Support runners with direct docker, sudo docker, or only host sudo.
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up ROCm CI container
+        uses: ./.github/actions/rocm-ci-setup
+        with:
+          rocm-shared-key: ${{ secrets.ROCM_SHARED_KEY }}
+
+      # Same container and provisioning as the gate job -- this job re-downloads the
+      # rocjitsu bundle and rebuilds its own fixtures rather than inheriting them,
+      # so it stays independent of whether the gate job succeeded or was killed.
+      # Workspace-relative paths keep artifacts visible on the host for upload.
+      - name: Run workload survey (Tab 2)
+        env:
+          # Downloading GitHub Actions artifacts requires a token with
+          # `actions:read` -- even for a public repo. The default GITHUB_TOKEN is
+          # scoped to THIS repo (ROCm/aorta) only and CANNOT read another repo's
+          # (ROCm/rocm-systems) artifacts, so a PAT with `actions:read` on
+          # rocm-systems must be provided as the ROCJITSU_ARTIFACTS_TOKEN secret.
+          # The GITHUB_TOKEN fallback keeps the step wired, but will 403 on the
+          # cross-repo download until the secret is configured.
+          ROCJITSU_ARTIFACTS_TOKEN: ${{ secrets.ROCJITSU_ARTIFACTS_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/ci/docker_cmd.sh exec \
+            -e ROCJITSU_REF="${ROCJITSU_REF}" \
+            -e ROCJITSU_RUN="${{ needs.sanitizers-gpu.outputs.rocjitsu_run_id }}" \
+            -e GH_TOKEN="${ROCJITSU_ARTIFACTS_TOKEN}" \
+            "${{ env.CONTAINER_NAME }}" bash -lc '
+            set -euo pipefail
+            cd /workspace/aorta
+            SANITIZER_ROOT=".sanitizer-nightly"
+            ROCJITSU_PREBUILT="${SANITIZER_ROOT}/rocjitsu-prebuilt"
+            SANITIZER_OUT="${SANITIZER_ROOT}/out"
+            FIXTURES=recipes/sanitizers/fixtures
+
+            # Timestamped phase markers keep the job log alive: the sanitizer
+            # scans below are minutes of silent, CPU-bound static work, so an
+            # unannotated run looks frozen for ~15 min (#366). Each phase prints
+            # "[HH:MM:SS] <phase> …" so an operator can see what is executing and
+            # how long it takes.
+            echo "[$(date +%T)] setup: installing aorta (editable, [tests]) …"
+            python -m pip install --upgrade pip
+            pip install -e ".[tests]"
+
+            # Consume the prebuilt sanitizer bundle published by
+            # ROCm/rocm-systems (#350): run the vendored downloader to pull
+            # bin/rj_waitcheck + lib/librocjitsu_dbi_hooks.so for the latest
+            # successful run on ${ROCJITSU_REF}. This replaces the old
+            # clone + cmake source build, whose docker toolchain deps (cmake,
+            # ninja, libzstd-dev, g++-13, Findzstd shim) have been removed from
+            # docker/Dockerfile.ci-gpu.
+            # Downloading Actions artifacts requires a token with actions:read
+            # even though rocm-systems is public: the unauthenticated artifact
+            # /zip endpoint returns 401 and no equivalent GitHub Release exists.
+            # See the step env (GH_TOKEN) and the token note there.
+            echo "[$(date +%T)] setup: downloading prebuilt rocjitsu sanitizer bundle (${ROCJITSU_REF}) …"
+            rm -rf "${ROCJITSU_PREBUILT}"
+            mkdir -p "${SANITIZER_ROOT}"
+            # Run the VENDORED downloader (scripts/sanitizers/, copied from a
+            # reviewed rocm-systems commit) rather than fetching executable code
+            # from the mutable ${ROCJITSU_REF} branch and running it with the
+            # artifacts token -- a moving/compromised branch could otherwise run
+            # arbitrary code in this job and exfiltrate the PAT.
+            python scripts/sanitizers/download_sanitizer_artifacts.py \
+              --branch "${ROCJITSU_REF}" --run "${ROCJITSU_RUN:-latest}" \
+              --dest "${ROCJITSU_PREBUILT}" --force
+            export ROCJITSU_PREBUILT="$(cd "${ROCJITSU_PREBUILT}" && pwd)"
+            echo "ROCJITSU_PREBUILT=${ROCJITSU_PREBUILT}"
+            # Fail closed: the downloader only *warns* when sha256sums.txt is
+            # absent, which would admit an unverified bundle. Require it.
+            if [ ! -f "${ROCJITSU_PREBUILT}/sha256sums.txt" ]; then
+              echo "::error::prebuilt bundle has no sha256sums.txt; refusing unverified artifacts" >&2
+              exit 1
+            fi
+            # The token is only needed for the download above. Drop it before
+            # building fixtures or running any artifact-provided code
+            # (rj_waitcheck and the ConSan hook, which copies os.environ) so
+            # those never inherit the cross-repo PAT.
+            unset GH_TOKEN GITHUB_TOKEN
+
+            # Observed-only (non-gating) sanitizer survey over real GPU kernels,
+            # rendered on the dashboard Workload survey tab (Tab 2), NOT a separate
+            # informational section (#374). Each kernel is scanned by BOTH sanitizers
+            # (waitcheck static + ConSan dynamic) so Tab 2 shows both outcomes per
+            # kernel.
+            #
+            # This used to run inside the gate job, wrapped in one guarded subshell so a
+            # bad genco/bundler/compile could not abort the gate. The job boundary now
+            # provides that isolation and more: nothing here can touch the Tab 1
+            # verdict, which sanitizers-gpu has already judged and uploaded.
+            #
+            # The per-case `|| true` below is a DIFFERENT and still necessary guard, and
+            # it is not cosmetic: `aorta sweep run` exits non-zero for a FAIL/ERROR
+            # verdict or any non-complete execution (cli/sweep.py), and the *healthy*
+            # post-fix consan-gemm result is exit 86 -- an error execution. Under the
+            # `set -euo pipefail` at the top of this payload, an unguarded first case
+            # would kill the job after ~69 min and the remaining five Tab 2 rows would
+            # never run. Each
+            # survey case is independent and its report is the deliverable, so a
+            # non-zero sweep is data, not a job failure.
+            #
+            # The fixture build above is deliberately NOT guarded: a broken
+            # genco/bundler/compile is infrastructure breakage, not an observation, and
+            # should fail this job loudly.
+            echo "[$(date +%T)] survey: ConSan + waitcheck over real GPU kernels (Tab 2; non-gating) …"
+
+            # Same PATH fix the gate job needs: hipcc shells out to
+            # clang-offload-bundler, which lives in the ROCm LLVM bindir and is not on
+            # PATH in this image. prepare_gemm_isa.py also resolves it via PATH and
+            # exits if absent, so both the extraction and genco_object below depend on
+            # this line.
+            export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"
+            # This job builds its own fixtures from scratch -- the gate job removes
+            # these directories in its cleanup step, and on a fresh runner they never
+            # existed -- so create them rather than assuming a previous job did.
+            mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
+
+            KROOT="${FIXTURES}/kernels"
+            # hipcc --genco emits either a raw gfx950 code object or a clang-offload
+            # bundle depending on the ROCm build; unbundle only when it is a bundle
+            # (a raw ELF fed back through --unbundle would fail).
+            genco_object() {  # <hip-source> <final .hsaco>
+              local tmp; tmp="$(mktemp --suffix=.o)" || return 1
+              hipcc --genco --offload-arch=gfx950 "$1" -o "$tmp" || return 1
+              if head -c 24 "$tmp" | grep -qF __CLANG_OFFLOAD_BUNDLE__; then
+                clang-offload-bundler --type=o --unbundle --input="$tmp" \
+                  --targets=hipv4-amdgcn-amd-amdhsa--gfx950 --output="$2" || return 1
+              else
+                cp "$tmp" "$2" || return 1
+              fi
+              rm -f "$tmp"
+            }
+            # --top-n 0 extracts only the ConSan object, leaving the gated waitcheck
+            # fixtures (already built above) untouched.
+            python scripts/sanitizers/prepare_gemm_isa.py \
+              --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 0 \
+              --consan-object "${FIXTURES}/isa/consan_gemm_f32.hsaco"
+            genco_object "${KROOT}/lds_reduce.hip" "${FIXTURES}/isa/lds.hsaco"
+            genco_object "${KROOT}/tiny_vecadd.hip" "${FIXTURES}/isa/tiny.hsaco"
+            hipcc --offload-arch=gfx950 -DLDS_HSACO="\"$(pwd)/${FIXTURES}/isa/lds.hsaco\"" \
+              "${KROOT}/lds_dispatch.hip" -o "${FIXTURES}/bin/lds_dispatch"
+            hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/tiny.hsaco\"" \
+              "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_tiny_load"
+            hipcc --offload-arch=gfx950 -DOBJECT="\"$(pwd)/${FIXTURES}/isa/consan_gemm_f32.hsaco\"" \
+              "${KROOT}/consan_load.hip" -o "${FIXTURES}/bin/consan_gemm_load"
+            for c in consan-gemm consan-lds-dispatch consan-tiny; do
+              mkdir -p "${SANITIZER_OUT}/informational/${c}"
+            done
+            aorta sweep run --recipe recipes/sanitizers/daily-consan-gemm.yaml \
+              --output-dir "${SANITIZER_OUT}/informational/consan-gemm" || true
+            aorta sweep run --recipe recipes/sanitizers/daily-consan-lds-dispatch.yaml \
+              --output-dir "${SANITIZER_OUT}/informational/consan-lds-dispatch" || true
+            aorta sweep run --recipe recipes/sanitizers/daily-consan-tiny.yaml \
+              --output-dir "${SANITIZER_OUT}/informational/consan-tiny" || true
+
+            # Observed-only waitcheck static scans over the SAME survey objects, so
+            # Tab 2 shows both sanitizers per kernel (#374 C). Case dirs are named
+            # <sanitizer>-<group> so the dashboard groups e.g. consan-gemm and
+            # waitcheck-gemm under one "gemm" kernel heading. Each survey waitcheck
+            # scan is a dedicated best-effort run publishing its OWN report -- the
+            # gated Tab-1 waitcheck report is never reused here. Non-gating.
+            for c in waitcheck-gemm waitcheck-lds-dispatch waitcheck-tiny; do
+              mkdir -p "${SANITIZER_OUT}/informational/${c}"
+            done
+            # daily-waitcheck-gemm-object scans the same consan_gemm_f32.hsaco object
+            # the consan-gemm survey case uses (distinct from the gated top-3-CSV
+            # daily-waitcheck-gemm guardrail, which is left untouched).
+            aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-gemm-object.yaml \
+              --output-dir "${SANITIZER_OUT}/informational/waitcheck-gemm" || true
+            aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-lds-dispatch.yaml \
+              --output-dir "${SANITIZER_OUT}/informational/waitcheck-lds-dispatch" || true
+            aorta sweep run --recipe recipes/sanitizers/daily-waitcheck-tiny.yaml \
+              --output-dir "${SANITIZER_OUT}/informational/waitcheck-tiny" || true
+          '
+
+      - name: Reclaim results ownership
+        if: always()
+        run: |
+          ws="${{ github.workspace }}"
+          uidgid="$(id -u):$(id -g)"
+          busybox="busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          if docker info >/dev/null 2>&1; then
+            docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          elif sudo -n docker info >/dev/null 2>&1; then
+            sudo docker run --rm -v "$ws":/ws "$busybox" chown -R "$uidgid" /ws || true
+          else
+            sudo chown -R "$uidgid" "$ws" || true
+          fi
+
+      - name: Upload sanitizer survey results
+        # Separate artifact from the gate job so the publish job can merge them.
+        # `if: always()` for the same reason as the gate job: a partial survey is
+        # still worth publishing. Note the #370 caveat on the job timeout above --
+        # an abrupt runner kill skips this step, and the survey rows are simply
+        # absent from that night, which is the intended degradation.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-survey-${{ github.run_id }}
+          path: .sanitizer-nightly/out
+          if-no-files-found: warn
+
+      - name: Clean up build/temp state
+        if: always()
+        run: |
+          rm -rf .sanitizer-nightly \
+                 recipes/sanitizers/fixtures/bin recipes/sanitizers/fixtures/isa
+
+      - name: Tear down ROCm CI container
+        if: always()
+        working-directory: docker
+        run: bash ../scripts/ci/docker_compose.sh --env-file .env.ci -f docker-compose.build.yaml down -v
+
   publish:
     name: publish sanitizer dashboard
-    needs: sanitizers-gpu
+    # Both GPU jobs, so the dashboard renders Tab 1 and Tab 2 from the same run.
+    # Gated on the GATE job only: the survey is non-gating and may legitimately be
+    # killed by the cap in #370, and publishing Tab 1 must not depend on it.
+    needs: [sanitizers-gpu, sanitizers-survey]
     # Run even when the GPU job failed (to publish the failure, not a stale green
     # page) but NOT when it was skipped. Publish ONLY from main: a workflow_dispatch
     # branch run still executes sanitizers-gpu and uploads its artifact, but must
@@ -318,11 +550,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
-        # A failed GPU job may leave no artifact at all; don't hard-fail the
-        # publish job -- we still want to record the failure on the public page.
+        # Merge the gate artifact and the survey artifact into one `incoming` tree:
+        # the gate writes <case>/ and the survey writes informational/<case>/, so
+        # they do not collide and the staging loop below sees the same layout it
+        # did when one job produced both.
+        #
+        # A failed GPU job may leave no artifact at all, and a survey killed by the
+        # cap in #370 leaves none either; don't hard-fail the publish job -- we
+        # still want to record the failure on the public page.
         continue-on-error: true
         with:
-          name: sanitizer-nightly-${{ github.run_id }}
+          pattern: sanitizer-*-${{ github.run_id }}
+          merge-multiple: true
           path: incoming
       - name: Record run status
         # Manifest consumed by gen_sanitizer_dashboard.py (--status) to render a
