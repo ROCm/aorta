@@ -391,6 +391,54 @@ class TestParity:
         # both must decline the root. `agree` raises if they disagree.
         assert agree().source == "none"
 
+    @pytest.mark.parametrize(
+        ("content", "usable"),
+        [
+            pytest.param(b"7.2.4", True, id="clean"),
+            pytest.param("7.2.4\u00e9".encode(), True, id="valid-multibyte"),
+            # Truncated multi-byte sequences at the REAL end of the file. An
+            # unconditional final=False buffers the incomplete tail and drops
+            # it, so these decoded to "7.2.4" and a corrupt marker was
+            # published as a valid version -- contradicting the reader's own
+            # docstring and the guard error text that promises to match it.
+            pytest.param(b"7.2.4\xc3", False, id="corrupt-2-byte-seq-at-eof"),
+            pytest.param(b"7.2.4\xe2\x82", False, id="corrupt-3-byte-seq-at-eof"),
+            pytest.param(b"7.2.4\xff", False, id="never-a-lead-byte"),
+        ],
+    )
+    def test_marker_decoding_agrees_on_truncated_sequences(
+        self, tmp_path: Path, content: bytes, usable: bool
+    ):
+        """Both copies must finalise the decoder at a real EOF (#387).
+
+        The incremental decoder is there so a character the BYTE LIMIT cut in
+        half is not reported as corruption. ``final=False`` cannot tell that
+        from corruption at the genuine end of the file, so it accepted both.
+        Reading limit + 1 bytes distinguishes them.
+        """
+        marker = tmp_path / f"version_{len(content)}_{content[-1]}"
+        marker.write_bytes(content)
+        assert (rocm_paths.read_version_marker(marker) is not None) is usable
+        assert (guard.read_version_marker(marker) is not None) is usable
+
+    def test_a_character_split_by_the_byte_limit_is_still_tolerated(
+        self, tmp_path: Path
+    ):
+        """The property the incremental decoder exists for, kept intact.
+
+        Rejecting this would make a long-but-valid marker unreadable, which is
+        the over-correction the finalisation fix has to avoid: the tail is
+        incomplete only because the read stopped, not because the file is bad.
+        """
+        marker = tmp_path / "version"
+        limit = 32
+        # The 2-byte character starts at the last byte inside the limit.
+        marker.write_bytes(b"a" * (limit - 1) + "\u00e9".encode())
+
+        for reader in (rocm_paths.read_version_marker, guard.read_version_marker):
+            value = reader(marker, limit)
+            assert value == "a" * (limit - 1), reader
+
     def test_a_mojibake_marker_does_not_hide_a_present_install(
         self, agree, classic_at, tmp_path: Path
     ):
@@ -617,6 +665,78 @@ class TestGuardVerdict:
             (root / "lib" / f"{soname}.5").write_bytes(b"\x7fELF")
         classic_at(root)
         assert guard.main() == 0
+
+    @pytest.mark.parametrize(
+        ("name", "make_dir"),
+        [
+            # A permissive check is invisible against a well-formed tree, so
+            # every case here is a DECOY: something that looks like the library
+            # to a loose matcher and is not one to the audit.
+            pytest.param("libhipblaslt.so", True, id="directory-named-like-the-link"),
+            pytest.param("libhipblaslt.so.1", True, id="directory-named-like-a-major"),
+            pytest.param("libhipblaslt.so.debug", False, id="separate-debug-info-file"),
+        ],
+    )
+    def test_a_decoy_that_the_audit_would_not_resolve_does_not_satisfy_the_guard(
+        self, classic_at, tmp_path: Path, capsys, name: str, make_dir: bool
+    ):
+        """The guard must not be more permissive than the consumer it mirrors (#387).
+
+        Round 11 replaced the lib/-is-a-directory proxy precisely so the guard
+        would mirror the audit's real failure. The first version still used
+        ``exists()`` and an unrestricted ``{soname}.*`` glob, so each of these
+        passed the guard while ``resolve_library`` found nothing -- guard exits
+        0, audit exits 2, and the build-time check hands the problem downstream.
+        The debug-info file is the realistic one.
+        """
+        root = build_classic(tmp_path / "opt_rocm", sonames=False)
+        lib = root / "lib"
+        # rocBLAS present and well-formed, so the ONLY thing under test is
+        # whether the hipBLASLt decoy satisfies the guard.
+        (lib / "librocblas.so.5").write_bytes(b"\x7fELF")
+        decoy = lib / name
+        decoy.mkdir() if make_dir else decoy.write_bytes(b"\x7fELF")
+        classic_at(root)
+
+        assert guard.main() == 1
+        err = capsys.readouterr().err
+        assert "libhipblaslt.so" in err
+        # rocBLAS resolved, so it must not be blamed.
+        assert "librocblas.so" not in err
+
+    def test_the_guard_and_the_audit_agree_on_every_soname_shape(self, tmp_path: Path):
+        """Cross-check the two implementations directly, not case by case.
+
+        ``_has_soname`` claims to mirror ``resolve_library``; this asserts it
+        over the shapes that distinguish a loose matcher from a faithful one,
+        so a future relaxation of either side shows up here rather than as a
+        build that passes and an audit that exits 2.
+        """
+        audit = _load_module_from_path(
+            "audit_env_knobs",
+            Path(__file__).resolve().parents[2] / "scripts" / "audit_env_knobs.py",
+        )
+        soname = "libhipblaslt.so"
+        shapes = {
+            "bare-link-is-a-file": lambda d: (d / soname).write_bytes(b"\x7fELF"),
+            "bare-link-is-a-dir": lambda d: (d / soname).mkdir(),
+            "single-digit-major": lambda d: (d / f"{soname}.4").write_bytes(b"\x7fELF"),
+            "two-digit-major": lambda d: (d / f"{soname}.12").write_bytes(b"\x7fELF"),
+            "major-is-a-dir": lambda d: (d / f"{soname}.1").mkdir(),
+            "non-numeric-suffix": lambda d: (d / f"{soname}.debug").write_bytes(b"\x7fELF"),
+            "debug-beside-real-major": lambda d: (
+                (d / f"{soname}.debug").write_bytes(b"\x7fELF"),
+                (d / f"{soname}.3").write_bytes(b"\x7fELF"),
+            ),
+            "empty": lambda d: None,
+        }
+        for label, build in shapes.items():
+            lib = tmp_path / label / "lib"
+            lib.mkdir(parents=True)
+            build(lib)
+            assert guard._has_soname(lib, soname) is (
+                audit.resolve_library(lib, soname) is not None
+            ), label
 
     def test_guard_requires_the_sonames_the_audit_consumes(self):
         """Read out of the audit, not restated, so the two cannot drift.

@@ -2661,10 +2661,12 @@ def test_rebuild_commands_are_runnable_from_the_repo_root():
                 assert (_REPO_ROOT / token).exists(), f"{entry['path']}: {token}"
 
 
-def _sanitizer_nightly_payloads() -> list[tuple[int, int]]:
+def _sanitizer_nightly_payloads() -> tuple[list[str], list[tuple[int, int]]]:
     """Every single-quoted ``bash -lc`` payload in the sanitizer nightly.
 
-    Returns (start, end) line indices per payload. There is more than one:
+    Returns the workflow's lines and, per payload, its (start, end) line
+    indices -- callers need the lines to report which one offended. There is
+    more than one payload:
     #385 split the workflow into a gated job and a non-gating survey job, each
     with its own provisioning block. A helper that took only the FIRST match
     would have silently stopped covering the survey job the day it landed --

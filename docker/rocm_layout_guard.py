@@ -130,17 +130,23 @@ def read_version_marker(path: Path, limit: int = VERSION_MARKER_BYTES) -> str | 
     errors="replace" -- environment.py reports such a marker as null, and
     main()'s failure text promises exactly that.
 
-    Decoded incrementally with final=False because the read is bounded and can
-    split a multi-byte character at the limit; a plain decode would report that
-    as corruption.
+    Decoded incrementally because the read is bounded and can split a
+    multi-byte character at the limit; a plain decode would report that as
+    corruption. Reads limit + 1 bytes so a file that ENDED is distinguishable
+    from one the limit CUT, and finalises the decoder unless it was actually
+    cut -- with an unconditional final=False, `b"7.2.4\\xc3"` decoded to
+    "7.2.4" and a corrupt marker read as a valid version.
     """
     try:
         with path.open("rb") as handle:
-            raw = handle.read(limit)
+            raw = handle.read(limit + 1)
     except OSError:
         return None
+    truncated = len(raw) > limit
+    if truncated:
+        raw = raw[:limit]
     try:
-        text = codecs.getincrementaldecoder("utf-8")().decode(raw, False)
+        text = codecs.getincrementaldecoder("utf-8")().decode(raw, not truncated)
     except UnicodeDecodeError:
         return None
     return text.strip() or None
@@ -156,20 +162,33 @@ def _has_readable_version(path: Path) -> bool:
 def _has_soname(lib_dir: Path, soname: str) -> bool:
     """Whether audit_env_knobs.resolve_library would find ``soname``.
 
-    Mirrors that function's lookup: the bare ``<soname>`` link, which only the
-    devel package ships, else any ``<soname>.<major>`` a runtime-only tree
-    ships. Presence is all the guard needs, so this does not reproduce the
-    pick-the-highest-major rule -- the audit does that, and which major wins
-    cannot turn a found library into a missing one.
+    Mirrors that function's ACCEPTANCE RULE, not merely its shape: a bare
+    ``<soname>`` that is a FILE (the devel package link), else a
+    ``<soname>.<major>`` that is a file whose suffix is all digits (what a
+    runtime-only tree ships). The guard only needs presence, so it does not
+    reproduce the pick-the-highest-major part -- which major wins cannot turn a
+    found library into a missing one.
+
+    Being more permissive than the audit is not a harmless approximation, it is
+    the bug this whole check replaced, one level down. An earlier version used
+    exists() and an unrestricted ``{soname}.*`` glob, so a directory named
+    ``libhipblaslt.so``, a stray ``librocblas.so.debug`` from a separate-debug
+    -info tree, or a directory named ``libhipblaslt.so.1`` all passed the guard
+    while the audit found nothing -- guard exits 0, audit exits 2, and the
+    build-time check that exists to catch exactly that hands it downstream.
 
     Fail-soft like every other probe here: an unreadable mount answers False
     and the caller reports it as missing, rather than the build dying with a
     traceback that says nothing about what was looked for.
     """
     try:
-        if (lib_dir / soname).exists():
+        if (lib_dir / soname).is_file():
             return True
-        return any(lib_dir.glob(f"{soname}.*"))
+        for candidate in lib_dir.glob(f"{soname}.*"):
+            suffix = candidate.name[len(soname) + 1 :]
+            if suffix.isdigit() and candidate.is_file():
+                return True
+        return False
     except OSError:
         return False
 

@@ -302,16 +302,31 @@ def read_version_marker(path: Path, limit: int = _VERSION_MARKER_BYTES) -> str |
     """
     try:
         with path.open("rb") as handle:
-            raw = handle.read(limit)
+            # limit + 1, so a file that ENDED can be told from one the limit
+            # CUT. Reading exactly `limit` makes those two indistinguishable,
+            # which is what let a corrupt marker through -- see below.
+            raw = handle.read(limit + 1)
     except OSError as exc:  # missing, a directory, unreadable, stale mount
         log.debug("version marker %s unusable: %s", path, exc)
         return None
-    # Incremental decoder with final=False, not bytes.decode(): the read above
-    # is bounded, so it can cut a multi-byte character in half at the limit.
-    # A plain decode reports that as corruption; this buffers the incomplete
-    # tail and still raises on genuinely invalid bytes.
+    truncated = len(raw) > limit
+    if truncated:
+        raw = raw[:limit]
+    # Incremental decoder, not bytes.decode(): a bounded read can cut a
+    # multi-byte character in half AT THE LIMIT, and a plain decode reports
+    # that as corruption.
+    #
+    # `final` is the whole subtlety. With final=False an incomplete trailing
+    # sequence is buffered and silently dropped, which is right for a character
+    # the limit cut and WRONG at a real end of file: `b"7.2.4\xc3"` decoded as
+    # "7.2.4" and was published as a valid version, contradicting this
+    # docstring and the guard error text it promises to match. final=False
+    # cannot tell the two apart -- but the read above can, because a file
+    # shorter than limit+1 bytes was not cut by anything. So finalise unless
+    # the limit actually truncated, which rejects corruption at EOF while
+    # keeping the tolerance the incremental decoder is here for.
     try:
-        text = codecs.getincrementaldecoder("utf-8")().decode(raw, False)
+        text = codecs.getincrementaldecoder("utf-8")().decode(raw, not truncated)
     except UnicodeDecodeError as exc:  # NOT an OSError; would escape the caller
         log.debug("non-utf8 version marker %s: %s", path, exc)
         return None
