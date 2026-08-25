@@ -1140,7 +1140,7 @@ class SubprocessWorkload(Workload):
         from aorta.run.collectors import (
             CONFIG_KEY_COLLECT_DIR,
             active_collectors,
-            collector_root_is_traversable,
+            unsafe_collector_paths,
         )
 
         if not active_collectors(self.config):
@@ -1155,11 +1155,17 @@ class SubprocessWorkload(Workload):
         # ``apply_retention()`` both follow links, so pruning through one would
         # delete files in the link's target -- outside the results tree, at any
         # level below ``full``. Keep the artifacts rather than risk that.
-        if not collector_root_is_traversable(collect_root):
+        #
+        # Every collector subdirectory is checked, not just the shared root:
+        # ``apply_retention`` recurses into ``<root>/rocprof`` and
+        # ``<root>/proton``, so swapping one of those is the same exposure one
+        # level down.
+        unsafe = unsafe_collector_paths(self.config)
+        if unsafe:
             log.warning(
                 "retention: %s is (or is under) a symlink after the run; "
                 "refusing to prune through it. Collector artifacts kept.",
-                collect_root,
+                ", ".join(str(path) for path in unsafe),
             )
             return outcome
         if not collect_root.is_dir():

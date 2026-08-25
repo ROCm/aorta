@@ -159,6 +159,31 @@ def _collect_root(config: Mapping[str, Any]) -> Path | None:
     return Path(raw) if isinstance(raw, str) and raw else None
 
 
+def unsafe_collector_paths(config: Mapping[str, Any]) -> list[Path]:
+    """Every collector path for this trial that cannot be safely traversed.
+
+    Returns the collector root plus each active collector's own output
+    subdirectory -- ``<root>/rocprof``, ``<root>/proton`` -- because those are
+    the paths the post-run passes actually walk. Guarding only the root is not
+    enough: the profiled process can swap a *subdirectory* just as easily, and
+    ``parse_summary`` globs the subdirectory while ``apply_retention`` recurses
+    into it.
+
+    Empty when there is nothing to guard (no collector active, no threaded
+    collector directory) or when every path is a real directory.
+    """
+    root = _collect_root(config)
+    if root is None:
+        return []
+    registry = _registry()
+    candidates = [root]
+    for name in active_collectors(config):
+        spec = registry.get(name)
+        if spec is not None and spec.output_subdir is not None:
+            candidates.append(root / spec.output_subdir)
+    return [path for path in candidates if not collector_root_is_traversable(path)]
+
+
 def collector_root_is_traversable(root: Path) -> bool:
     """True when ``root`` can be walked without following a symlink out of the tree.
 
@@ -360,15 +385,18 @@ def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
     root = _collect_root(config)
     if root is None:
         return {}
-    if not collector_root_is_traversable(root):
-        # Read-only here, but the parsers glob the tree, so a root swapped for a
-        # symlink while the command ran would pull file contents from outside
-        # the results tree into the trial metrics. Same guard as the retention
-        # pass, which has the destructive version of this exposure.
+    unsafe = unsafe_collector_paths(config)
+    if unsafe:
+        # Read-only here, but the parsers ``rglob`` these directories, so one
+        # swapped for a symlink while the command ran would pull file contents
+        # from outside the results tree into the trial metrics. Checked per
+        # collector directory, not just the shared root -- the payload can swap
+        # either. Same guard as the retention pass, which has the destructive
+        # version of this exposure.
         log.warning(
             "collect: %s is (or is under) a symlink after the run; refusing to "
             "parse artifacts through it. No collector metrics for this trial.",
-            root,
+            ", ".join(str(path) for path in unsafe),
         )
         return {}
     metrics: dict[str, Any] = {}
@@ -396,6 +424,7 @@ __all__ = [
     "active_collectors",
     "collector_root_is_traversable",
     "summarize_collectors",
+    "unsafe_collector_paths",
     "validate_collectors",
     "wrap_argv_for_collectors",
 ]

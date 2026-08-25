@@ -367,6 +367,48 @@ def test_summary_refuses_a_collector_root_swapped_for_a_symlink(tmp_path, rocpro
     assert "rocprof_artifact_dir" not in result.metrics
 
 
+@pytest.mark.parametrize("retain_level", ["none", "full"])
+def test_collector_subdir_swapped_for_a_symlink_is_refused(
+    tmp_path, rocprofv3_on_path, retain_level
+):
+    """The guard must cover each collector *subdirectory*, not just the root.
+
+    The parsers glob ``<root>/rocprof``, so swapping that one directory is the
+    read exposure one level below the root. Mutation-verified: with the guard
+    narrowed back to the root alone, this fails with ``rocprof_kernel_count:
+    7`` -- a metric read straight out of a directory outside the run tree.
+
+    Both retention levels are covered, but only the read half is known to be
+    reachable: with the guard removed, ``apply_retention`` did *not* delete the
+    planted file through the symlinked subdirectory. The deletion assertion is
+    kept as a regression guard on that, not as a demonstrated exploit.
+    """
+    collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
+    # A *parseable* capture outside the run tree, so an unguarded read is
+    # observable as a leaked metric rather than a silently empty one.
+    outside = tmp_path / "outside_capture"
+    outside.mkdir()
+    victim = outside / "aorta_kernel_stats.csv"
+    victim.write_text(
+        '"Name","Calls","TotalDurationNs"\n"leaked_kernel",7,7000000\n',
+        encoding="utf-8",
+    )
+
+    wl = _make_workload(tmp_path, ["true"], collect=["rocprof"], retain={"on_pass": retain_level})
+    wl.setup()
+    subdir = collect_dir / rocprof.OUTPUT_SUBDIR
+    shutil.rmtree(subdir)
+    subdir.symlink_to(outside, target_is_directory=True)
+
+    result = wl.run()
+
+    # Nothing from outside the run tree may reach the metrics...
+    assert "rocprof_kernel_count" not in result.metrics
+    assert "leaked_kernel" not in str(result.metrics)
+    # ...and nothing out there may be deleted.
+    assert victim.read_text(encoding="utf-8").endswith("7,7000000\n")
+
+
 def test_retention_full_keeps_the_collector_tree(tmp_path, rocprofv3_on_path):
     """``full`` is the keep-everything default; the collector tree follows it."""
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
