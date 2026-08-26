@@ -62,6 +62,7 @@ import getpass
 import hashlib
 import json
 import os
+import posixpath
 import shutil
 import subprocess
 import sys
@@ -89,6 +90,16 @@ def _suite_root(suite: str) -> str:
     return "."
 
 
+def _in_container(path: str) -> str:
+    """Resolve a caller-supplied suite path against the container's /workspace.
+
+    Relative paths are taken as relative to the mount root; absolute ones are
+    already container paths and are returned unchanged. Prefixing an absolute
+    path would produce ``/workspace//workspace/...``.
+    """
+    return path if path.startswith("/") else f"/workspace/{path}"
+
+
 def _driver(args: argparse.Namespace) -> tuple[list[str], str, str]:
     """The in-container command that compiles the kernels, plus workdir + label.
 
@@ -99,12 +110,10 @@ def _driver(args: argparse.Namespace) -> tuple[list[str], str, str]:
     the only way to get those into a Waitcheck corpus today.
     """
     if args.pytest_suite:
-        suite = args.pytest_suite
         # Absolute, because the workdir below is the suite's package root rather
         # than /workspace -- a path relative to /workspace would not resolve
         # from there.
-        if not suite.startswith("/"):
-            suite = f"/workspace/{suite}"
+        suite = _in_container(args.pytest_suite)
         cmd = [
             "python3",
             "-m",
@@ -119,7 +128,11 @@ def _driver(args: argparse.Namespace) -> tuple[list[str], str, str]:
         ]
         if args.pytest_k:
             cmd += ["-k", args.pytest_k]
-        workdir = f"/workspace/{_suite_root(args.pytest_suite)}".rstrip("/")
+        # Derived from the already-absolute `suite`, so an absolute --pytest-suite
+        # is not prefixed a second time: `/workspace//workspace/...` makes docker
+        # fail with a path error before pytest ever starts, which reads as a
+        # broken image rather than a bad argument.
+        workdir = posixpath.normpath(_in_container(_suite_root(suite)))
         label = Path(args.pytest_suite).stem or "suite"
         return cmd, workdir, label
 
@@ -170,14 +183,42 @@ def _assert_cache_writable(cache_dir: Path) -> None:
         ) from exc
 
 
+def _force_remove_container(name: str, env: dict[str, str]) -> None:
+    """Stop and remove a container the docker client no longer supervises.
+
+    Best-effort and deliberately quiet: the caller is already raising the real
+    failure, and a cleanup error must not replace it with a less useful one.
+    ``docker rm -f`` covers both the still-running and the already-exited case,
+    so no ``docker stop`` is needed first.
+    """
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", name],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        sys.stderr.write(f"harvest: could not remove container {name}: {exc}\n")
+
+
 def _run_kernel(args: argparse.Namespace, cache_dir: Path) -> None:
     """Compile the kernels in-container so the JIT populates cache_dir."""
     _assert_cache_writable(cache_dir)
     driver, workdir, _ = _driver(args)
+    # Named so a timeout is recoverable. `subprocess.run(timeout=...)` kills the
+    # docker *client*, which does not stop the daemon-managed container: a hung
+    # compile would otherwise keep a GPU busy for the rest of the sweep with no
+    # handle left to stop it. `--rm` covers the normal exit; the name covers the
+    # abnormal one.
+    container = f"aorta-ts-harvest-{os.getpid()}"
     docker_cmd = [
         "docker",
         "run",
         "--rm",
+        "--name",
+        container,
         "--network",
         "host",
         # Some MoE and attention tests move data over shared memory; the 64MB
@@ -221,7 +262,13 @@ def _run_kernel(args: argparse.Namespace, cache_dir: Path) -> None:
         env["DOCKER_CONFIG"] = args.docker_config
 
     print(f"harvest: compiling via {' '.join(driver)}")
-    proc = subprocess.run(docker_cmd, env=env, capture_output=True, text=True, timeout=args.timeout)
+    try:
+        proc = subprocess.run(
+            docker_cmd, env=env, capture_output=True, text=True, timeout=args.timeout
+        )
+    except subprocess.TimeoutExpired:
+        _force_remove_container(container, env)
+        raise
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout[-4000:])
         sys.stderr.write(proc.stderr[-4000:])
@@ -250,7 +297,16 @@ def _inventory(waitcheck: Path | None, obj: Path) -> list[dict]:
         text=True,
     )
     if proc.returncode != 0:
-        return []
+        # A binary was supplied and it rejected the object, so this is a real
+        # inventory failure. Falling back to the guessed stem here would emit a
+        # recipe whose names and indices were never verified against the object
+        # -- Waitcheck would then attribute a finding to whatever kernel the
+        # guess happened to name. The fallback below is for the case where the
+        # caller intentionally omitted the binary, not for this one.
+        raise SystemExit(
+            f"harvest: {waitcheck} --list-kernels failed on {obj} "
+            f"(rc={proc.returncode}):\n{proc.stderr.strip()[-2000:]}"
+        )
     entries = []
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -263,6 +319,27 @@ def _inventory(waitcheck: Path | None, obj: Path) -> list[dict]:
         if record.get("kind") == "kernel":
             entries.append(record)
     return entries
+
+
+def _entry_offset(value: object) -> int | None:
+    """Parse Waitcheck's ``kernel_entry`` into an ``entry_offset``.
+
+    Accepts the hex form Waitcheck emits as well as a plain decimal, matching
+    what the sanitizer's own parser accepts. Returns ``None`` when the field is
+    absent or unusable so the entry degrades to a whole-object scan rather than
+    carrying a wrong offset -- a wrong offset would make Waitcheck reject the
+    identity outright.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = int(text, 16 if text.lower().startswith("0x") else 10)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _write_recipe(dest: Path, label: str, target: str, kernels: list[dict]) -> Path:
@@ -306,6 +383,11 @@ def _write_recipe(dest: Path, label: str, target: str, kernels: list[dict]) -> P
                 f"        code_object_index: {kernel['code_object_index']}",
             ]
         )
+        # Only when inventory resolved one: an absent entry_offset is a
+        # whole-object scan, which is a weaker but valid identity. Emitting a
+        # null would fail the recipe's integer validation instead.
+        if kernel.get("entry_offset") is not None:
+            lines.append(f"        entry_offset: {kernel['entry_offset']}")
     lines.extend(
         [
             "  scope:",
@@ -446,6 +528,11 @@ def _write_consan_recipe(
             f"      code_object: {staged_object}",
             f"      code_object_sha256: {kernel['sha256']}",
             f"      code_object_index: {kernel['code_object_index']}",
+            *(
+                [f"      entry_offset: {kernel['entry_offset']}"]
+                if kernel.get("entry_offset") is not None
+                else []
+            ),
             f"    consan_command: {shim}",
             "    consan_log: true",
             "  scope:",
@@ -646,8 +733,14 @@ def main() -> int:
                 targets.add(str(entry["target"]))
             name = str(entry.get("kernel_name", obj.stem))
             index = int(entry.get("code_object_index", 0))
+            # Carried through as entry_offset, which is what makes the recipe an
+            # exact-entry identity: without it KernelIdentity.exact is False,
+            # Waitcheck collapses every kernel sharing an object into one
+            # whole-object scan, and it reports findings with no kernel name --
+            # so a helper kernel's finding could be read as the harvested one's.
+            entry_offset = _entry_offset(entry.get("kernel_entry"))
             # Byte-identical objects compiled twice are one identity, not two.
-            key = (name, digest, index)
+            key = (name, digest, index, entry_offset)
             if key in seen:
                 continue
             seen.add(key)
@@ -657,6 +750,7 @@ def main() -> int:
                     "code_object": str(staged),
                     "sha256": digest,
                     "code_object_index": index,
+                    "entry_offset": entry_offset,
                     # The cache entry, not the staged copy: the ConSan loader
                     # needs the sidecars Triton wrote beside the object (.json
                     # for the launch metadata, .amdgcn for the kernarg segment

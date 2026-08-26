@@ -10,11 +10,12 @@ third-party engine it knows nothing about, with no new Python. A workload class
 only becomes necessary to get serving metrics into `result.json`'s `metrics`
 dict rather than on stdout.
 
-Two things run today, in increasing order of usefulness-per-second:
+Three probes run today, in increasing order of usefulness-per-second:
 
 | | What it exercises | Cost per trial | Recipe |
 |---|---|---|---|
 | **Kernel probe** | TokenSpeed's Gluon/Triton kernels via its own benchmark + numerics harness | ~17 s | `recipes/tokenspeed/tokenspeed-kernel-gemm-smoke.yaml` |
+| **[Suite probe](#suite-probe)** | TokenSpeed's own pytest suites — the only route that reaches the non-GEMM families (attention, MoE, quantize, sampling, transform), because they build their own inputs | ~1–4 min per suite | `recipes/tokenspeed/tokenspeed-kernel-suites-smoke.yaml` |
 | **Serving probe** | `tokenspeed serve` bring-up: readiness, one completion, teardown | ~5 min, noisy | `recipes/tokenspeed/tokenspeed-serve-probe-smoke.yaml` |
 
 Plus a third path that is not a probe: harvesting kernel code objects and
@@ -54,6 +55,18 @@ produces a confusing failure if missed:
 
    (The documented `:latest` tag does not exist; `nightly-20260714` and `tml`
    are what is published.)
+
+   Every measurement in this guide was taken against this exact image content:
+
+   ```
+   lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+   ```
+
+   A date tag is mutable — it can be retargeted upstream, and `docker image
+   inspect` only proves *a* image with that tag is on this node. Pull by digest
+   to reproduce these numbers exactly. `host_launch.sh` prints
+   `host_launch: image_digest=...` on every trial, so each run records the
+   content it actually used even when it was invoked by tag.
 
 3. **Nothing under a root-squashed `/home` can be bind-mounted.** The docker
    daemon runs as root, so on a root-squashed NFS export `-v /home/...` fails
@@ -229,13 +242,13 @@ harness when you want numbers and the suites when you want coverage.
 
 ## Suite probe
 
-The benchmark harness reaches 8 AMD-relevant kernels. Driving TokenSpeed's own
-op test suites instead reaches **32 of 37**, because those suites construct
-their own inputs rather than going through the input-generator registry.
+The benchmark harness only reaches `gemm.mm`, because that is the one operator
+with both an input generator and a shape list. TokenSpeed's own op test suites
+construct their inputs directly, which is what brings attention, MoE,
+quantization, sampling and transform into reach.
 
-(38 distinct kernel names are registered, of which `cublaslt_mm_nvfp4` is a
-cuBLASLt path and cannot run here, leaving 37. The "40" above counts
-family/kernel pairs, and two kernels are registered under two families each.)
+38 distinct kernel names are registered on `nightly-20260714`. Of those, the
+suites **dispatch 20**; see the table below for where the other 18 sit.
 
 ```bash
 export TS_IMAGE=lightseekorg/tokenspeed-amd:nightly-20260714
@@ -257,29 +270,45 @@ attention and MoE rather than only gemm.
 
 ### What the suites actually cover
 
-Measured with `map_kernel_test_coverage.py`, which wraps
-`KernelRegistry.get_for_operator` and runs the suites so a *resolved* kernel can
-be told from a *skipped* one. Static inspection cannot answer this, because the
-tests parametrize over solutions and skip at run time.
+Measured with `map_kernel_test_coverage.py`, which patches the registry and runs
+the suites, because static inspection cannot answer this — the tests parametrize
+over solutions and skip at run time.
 
-| Route | Kernels | Detail |
+The tool separates two things that are easy to conflate, and conflating them
+overstates coverage:
+
+- **Dispatched** (`covered`) comes from `KernelRegistry.get_impl(name)`, the
+  post-selection lookup a caller makes to obtain the callable for the one kernel
+  it is about to run.
+- **Candidate-only** comes from `get_for_operator`, which returns *every*
+  candidate for a family/mode. The upstream `require` fixture calls it only to
+  decide whether to skip, before narrowing by dtype — so a name there means "a
+  test looked at this operator", not that the kernel ran.
+
+Measured on `nightly-20260714`, all 38 registered kernels:
+
+| Status | Kernels | Detail |
 |---|---|---|
-| Registry-mediated suites | 23 | attention 15, `moe.apply` gluon 4, quantization 3, transform 1 |
-| Benchmark harness | 8 | `gemm.mm`, AMD-relevant |
-| Direct-import AMD suites | 1 | `gluon_argmax_gfx950` |
-| **Reachable** | **32 / 37** | |
-| No execution test anywhere | 5 | `triton_*_moe_apply` variants |
-| Out of scope | 1 | `cublaslt_mm_nvfp4` (cuBLASLt, NVIDIA) |
+| **Dispatched by the suites** | **20** | attention 15, quantization 3, transform 1, `moe.apply` 1 |
+| Candidate-only | 3 | `gluon_*_moe_apply` variants — the operator is reached, this implementation is not selected |
+| Reached only by the benchmark harness | 9 | `gemm.mm` (of which `cublaslt_mm_nvfp4` is a cuBLASLt path that cannot run here at all) |
+| Reached only by a direct-import suite | 1 | `gluon_argmax_gfx950` |
+| No executing test anywhere | 5 | `triton_*_moe_apply` variants |
 
-Read that tool's `covered` as "resolved through the registry", not "tested". It
-under-reports in two ways worth knowing. `tokenspeed-kernel-amd/test/ops`
-imports implementations directly and never consults the registry, so kernels it
-exercises look uncovered — `gluon_argmax_gfx950` passes 20 tests yet shows as
-uncovered. And expert-parallel (`_ep_`) solutions skip when too few GPUs are
-visible. The 5 Triton MoE variants are a real gap: `moe.apply::gluon` is the only
-MoE solution any test ever requests, and the `_ep_` names appear solely in
-`test_kernel_api_selection.py`, which tests selection logic rather than
-executing anything.
+Two blind spots, both of which make this an under-count rather than an
+over-count. `tokenspeed-kernel-amd/test/ops` imports implementations directly and
+never consults the registry, so kernels it exercises are invisible here —
+`gluon_argmax_gfx950` passes 20 tests yet reads as uncovered. And
+expert-parallel (`_ep_`) solutions skip when too few GPUs are visible, so run
+this with the full node exposed before concluding a kernel has no test.
+
+The 5 Triton MoE variants are a real upstream gap rather than a measurement
+artifact: `moe.apply::gluon` is the only MoE solution any test requests, and the
+`_ep_` names appear solely in `test_kernel_api_selection.py`, which tests
+selection logic without executing anything.
+
+Read `covered` as "this implementation was dispatched", not "asserted correct" —
+a test can dispatch a kernel and still assert weakly.
 
 ### These suites skip heavily, and pytest exits 0 when they do
 
@@ -435,6 +464,22 @@ aorta sweep run \
 Measured on `nightly-20260714`: that selection harvests **20 code objects and
 all 20 pass Waitcheck** (`state: ran`, `verdict: pass`, no findings), covering
 `_mha_prefill` ×6, `_mha_prefill_sliding` ×4 and `_fwd_kernel` ×10.
+
+The `--pytest-k mha_prefill` filter is load-bearing, and not only for runtime.
+Dropping it harvests 61 objects, and 24 of them — every `_mha_decode` and
+`_mha_extend` specialization — fail with `waitcheck analysis failed ... decode
+failed while building CFG: Invalid instruction opcode: DDF48000`. That is this
+Waitcheck build's instruction decoder reaching an opcode it does not know, not a
+finding about the kernel and not something the recipe can fix: the same object
+fails identically whether it is scanned whole or by exact entry. Widen the
+selection deliberately, and expect `verdict: error` on those two families until
+the decoder covers them.
+
+Each entry carries an `entry_offset` taken from `rj_waitcheck --list-kernels`,
+which is what makes these **exact-entry** identities. Without it the same recipe
+degrades to whole-code-object scans, and Waitcheck then reports findings with no
+kernel name — so a finding in a helper kernel sharing the object could be read
+as belonging to the harvested one.
 
 The multiplicity is the point, and it is why staging is content-addressed. The
 Triton cache keeps one directory per shape specialization and reuses file names

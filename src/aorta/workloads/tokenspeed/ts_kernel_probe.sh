@@ -26,6 +26,8 @@
 #   31  benchmark exported no records (bad --op / --dtype-role / shape filter)
 #   32  a record reported numerics_passed == false
 #   33  export file missing or unparseable
+#   34  export parsed but numerics_passed is absent or not bool|null, so the
+#       wrong-answer gate could not be evaluated (upstream schema change)
 #   64  usage / environment error
 #
 # Env:
@@ -146,7 +148,32 @@ if not isinstance(records, list) or not records:
     print("STATUS empty")
     raise SystemExit(0)
 
-failed = [r for r in records if r.get("numerics_passed") is False]
+# Validate the one field the verdict depends on, rather than reading it with
+# .get(). `numerics_passed` is legitimately null when verification was not
+# requested, so a renamed or removed field is indistinguishable from that under
+# .get() -- an upstream schema change would silently disable the wrong-answer
+# gate while every trial stayed green. Absent or wrongly-typed is a hard error;
+# null still means "not verified".
+schema_errors = []
+for index, rec in enumerate(records):
+    if not isinstance(rec, dict):
+        schema_errors.append(f"record[{index}] is {type(rec).__name__}, expected object")
+        continue
+    if "numerics_passed" not in rec:
+        schema_errors.append(f"record[{index}] has no numerics_passed field")
+        continue
+    value = rec["numerics_passed"]
+    if value is not None and not isinstance(value, bool):
+        schema_errors.append(
+            f"record[{index}].numerics_passed is {value!r}, expected bool or null"
+        )
+if schema_errors:
+    print(f"STATUS schema_error count={len(schema_errors)}")
+    for problem in schema_errors[:10]:
+        print(f"SCHEMAERR {problem}")
+    raise SystemExit(0)
+
+failed = [r for r in records if r["numerics_passed"] is False]
 print(f"STATUS ok records={len(records)} failed={len(failed)}")
 
 for rec in failed:
@@ -197,6 +224,18 @@ PY
     "STATUS missing")
       echo "TS_KERNEL_FAIL: export_missing path=${export_path}"
       exit 33
+      ;;
+    "STATUS schema_error"*)
+      # The verdict field this probe gates on is gone or the wrong type, so the
+      # export cannot be trusted either way. Reported as its own failure rather
+      # than folded into "unparseable": the file parsed fine, it is the contract
+      # that moved, and someone has to update this probe.
+      echo "TS_KERNEL_FAIL: export_schema_changed ${status_line}"
+      printf '%s\n' "${summary}" | grep '^SCHEMAERR ' | sed 's/^/TS_KERNEL_/'
+      echo "  numerics_passed is missing or not bool|null -- the wrong-answer"
+      echo "  gate cannot be evaluated. Re-check the tokenspeed_kernel export"
+      echo "  schema for this image and update ts_kernel_probe.sh."
+      exit 34
       ;;
     *)
       echo "TS_KERNEL_FAIL: export_unparseable ${status_line}"

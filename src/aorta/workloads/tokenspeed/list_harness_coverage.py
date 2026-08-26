@@ -47,13 +47,33 @@ _NUMERICS_MODULES = ("gemm", "moe", "quantize")
 
 
 def _load_numerics_registrations() -> list[str]:
-    loaded = []
+    """Import every numerics submodule, or abort.
+
+    These imports are what populate the generator and shape registries every
+    status below is derived from. A swallowed failure is the worst outcome
+    available: the survey still exits 0 and still emits normal-looking JSON, but
+    the affected operators are classified ``no_input_generator`` -- so an
+    incomplete survey reads as a coverage finding about TokenSpeed rather than a
+    broken run of this tool.
+    """
+    loaded: list[str] = []
+    failures: list[str] = []
     for name in _NUMERICS_MODULES:
         try:
             __import__(f"tokenspeed_kernel.numerics.{name}")
             loaded.append(name)
-        except Exception as exc:  # noqa: BLE001 - report, don't abort the survey
-            loaded.append(f"{name}(FAILED: {type(exc).__name__})")
+        except Exception as exc:  # noqa: BLE001 - any failure invalidates the survey
+            failures.append(f"{name}: {type(exc).__name__}: {exc}")
+    if failures:
+        sys.stderr.write(
+            "list_harness_coverage: cannot import numerics module(s), so the "
+            "registries this survey reads would be incomplete:\n  "
+            + "\n  ".join(failures)
+            + "\n"
+        )
+        # 64 is the usage/environment band the TokenSpeed scripts share, so a
+        # caller can tell "this tool could not run" from a coverage verdict.
+        raise SystemExit(64)
     return loaded
 
 

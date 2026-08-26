@@ -2,11 +2,17 @@
 #
 # What this proves: aorta can drive the TokenSpeed kernels that its own
 # benchmark harness cannot reach. That harness needs a registered input
-# generator plus a shape list, and only gemm.mm has both -- so
-# tokenspeed-kernel-gemm-smoke.yaml covers 8 AMD-relevant kernels and nothing
-# else. TokenSpeed's op test suites build their own inputs, which brings
-# attention, MoE, quantization, sampling and transform into reach: 32 of the 37
-# AMD-relevant kernels on nightly-20260714.
+# generator plus a shape list, and only gemm.mm has both. TokenSpeed's op test
+# suites build their own inputs, which brings attention, MoE, quantization,
+# sampling and transform into reach.
+#
+# Coverage, measured with map_kernel_test_coverage.py on nightly-20260714: the
+# eight cells below dispatch 20 of the 38 registered kernels. See
+# docs/tokenspeed.md#what-the-suites-actually-cover for the breakdown and for
+# why the remaining 18 are out of reach here (gemm belongs to the benchmark
+# harness, the MoE Triton variants have no executing test upstream, and
+# gluon_argmax_gfx950 is reached by a suite that imports it directly rather than
+# through the registry, so this tool cannot see it).
 #
 # What it does NOT do: measure anything. These suites assert, they do not
 # benchmark, so there are no TFLOPs or latency figures here. Use
@@ -63,11 +69,16 @@ trials: 1
 # Rows: operator family. `mode: probe` forwards one argv across every cell, so
 # the per-cell suite selection has to travel as environment -- hence a
 # mitigations sidecar whose entries are really suite selectors.
+# GDN and transform are here because this recipe claims to cover them: leaving
+# them to the sidecar alone meant the advertised attention-and-transform reach
+# could not be reproduced by running this file.
 mitigation_axis:
   - ts_suite_attention
   - ts_suite_attention_mla
   - ts_suite_attention_dsa
+  - ts_suite_attention_gdn
   - ts_suite_quantization
+  - ts_suite_transform
   - ts_suite_moe_gluon_bf16
   - ts_suite_sampling_gluon
 

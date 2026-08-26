@@ -31,6 +31,17 @@ case "${dest}" in
 esac
 
 mkdir -p "${dest}"
+
+# Clear the set this script owns before copying, so the destination really is a
+# mirror. A plain `cp` only ever adds: a probe that was renamed or deleted
+# upstream stays behind in the staging directory, and because the recipes name
+# their entry script by filename, a stale copy is not just dead weight -- it is
+# still executable, and a run pointed at the old name succeeds against code that
+# no longer exists in the tree. Scoped to *.sh / *.py rather than wiping the
+# directory, which may also hold caller-owned files (an env file, an out dir).
+rm -f "${dest}"/*.sh "${dest}"/*.py
+rm -rf "${dest}/__pycache__"
+
 cp "${src}"/*.sh "${src}"/*.py "${dest}/"
 chmod +x "${dest}"/*.sh
 
