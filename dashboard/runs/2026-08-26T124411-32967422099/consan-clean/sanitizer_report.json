@@ -1,0 +1,175 @@
+{
+  "checks": [
+    {
+      "backend": {
+        "command": "/workspace/aorta/recipes/sanitizers/fixtures/bin/consan_lds_race",
+        "command_sha256": "759c96c9016e8c7596c3f38b5948c0fc7f3dade8cff5b45c5e06ead7e92389b8",
+        "hook": "/workspace/aorta/.sanitizer-nightly/rocjitsu-prebuilt/lib/librocjitsu_dbi_hooks.so",
+        "hook_sha256": "fac74fad3fd8f0eef4058d15dd5a9fe326e50119d87605b49e284582572b1d68",
+        "selected_identity_sha256": "c309b9bffe94b6e47f08114af5391a49a508c70461bbd6d90b40356298da06f0",
+        "selected_kernel": "consan_lds_race"
+      },
+      "coverage": [
+        {
+          "access": "0/0",
+          "analysis_complete": true,
+          "applicable": false,
+          "complete": false,
+          "dynamic_complete": true,
+          "fields": {
+            "access_discovered": "0",
+            "access_expert_limit_omitted": "0",
+            "access_patched": "0",
+            "access_placement_or_lowering_failed": "0",
+            "access_resource_failed": "0",
+            "access_selected": "0",
+            "access_supported": "0",
+            "access_unsupported": "0",
+            "atomic_discovered": "0",
+            "atomic_expert_limit_omitted": "0",
+            "atomic_patched": "0",
+            "atomic_placement_or_lowering_failed": "0",
+            "atomic_resource_failed": "0",
+            "atomic_selected": "0",
+            "atomic_supported": "0",
+            "atomic_unsupported": "0",
+            "barrier_discovered": "0",
+            "barrier_expert_limit_omitted": "0",
+            "barrier_patched": "0",
+            "barrier_placement_or_lowering_failed": "0",
+            "barrier_resource_failed": "0",
+            "barrier_selected": "0",
+            "barrier_supported": "0",
+            "barrier_unsupported": "0",
+            "engine": "record_replay",
+            "fence_discovered": "0",
+            "fence_expert_limit_omitted": "0",
+            "fence_patched": "0",
+            "fence_placement_or_lowering_failed": "0",
+            "fence_resource_failed": "0",
+            "fence_selected": "0",
+            "fence_supported": "0",
+            "fence_unsupported": "0",
+            "flavor": "moi",
+            "load": "1",
+            "reader": "18212768"
+          },
+          "incomplete_code_objects": 0,
+          "object_id": "reader=18212768,load=1",
+          "static_complete": true,
+          "unsupported": 0
+        },
+        {
+          "access": "2/2",
+          "analysis_complete": true,
+          "applicable": true,
+          "complete": true,
+          "dynamic_complete": true,
+          "fields": {
+            "access_discovered": "2",
+            "access_expert_limit_omitted": "0",
+            "access_patched": "2",
+            "access_placement_or_lowering_failed": "0",
+            "access_resource_failed": "0",
+            "access_selected": "2",
+            "access_supported": "2",
+            "access_unsupported": "0",
+            "atomic_discovered": "0",
+            "atomic_expert_limit_omitted": "0",
+            "atomic_patched": "0",
+            "atomic_placement_or_lowering_failed": "0",
+            "atomic_resource_failed": "0",
+            "atomic_selected": "0",
+            "atomic_supported": "0",
+            "atomic_unsupported": "0",
+            "barrier_discovered": "0",
+            "barrier_expert_limit_omitted": "0",
+            "barrier_patched": "0",
+            "barrier_placement_or_lowering_failed": "0",
+            "barrier_resource_failed": "0",
+            "barrier_selected": "0",
+            "barrier_supported": "0",
+            "barrier_unsupported": "0",
+            "engine": "record_replay",
+            "fence_discovered": "0",
+            "fence_expert_limit_omitted": "0",
+            "fence_patched": "0",
+            "fence_placement_or_lowering_failed": "0",
+            "fence_resource_failed": "0",
+            "fence_selected": "0",
+            "fence_supported": "0",
+            "fence_unsupported": "0",
+            "flavor": "moi",
+            "load": "2",
+            "reader": "18335872"
+          },
+          "incomplete_code_objects": 0,
+          "object_id": "reader=18335872,load=2",
+          "static_complete": true,
+          "unsupported": 0
+        }
+      ],
+      "findings": [],
+      "kernel_results": [
+        {
+          "findings": [],
+          "identity": {
+            "code_object": null,
+            "code_object_index": null,
+            "code_object_sha256": null,
+            "entry_offset": null,
+            "name": "consan_lds_race",
+            "target": "gfx950"
+          },
+          "reason": null,
+          "returncode": 0,
+          "state": "ran",
+          "verdict": "pass"
+        }
+      ],
+      "reason": null,
+      "returncode": 0,
+      "sanitizer": "consan",
+      "state": "ran",
+      "verdict": "pass"
+    },
+    {
+      "backend": {},
+      "coverage": [],
+      "findings": [],
+      "kernel_results": [],
+      "reason": null,
+      "returncode": 0,
+      "sanitizer": "waitcheck_preflight",
+      "state": "ran",
+      "verdict": "pass"
+    }
+  ],
+  "execution_status": "complete",
+  "overall_verdict": "pass",
+  "schema": "aorta.sanitizer_report/0.1",
+  "target": "gfx950",
+  "worklist": {
+    "kernel_count": 1,
+    "kernels": [
+      {
+        "dispatch_count": 1,
+        "identity": {
+          "code_object": null,
+          "code_object_index": null,
+          "code_object_sha256": null,
+          "entry_offset": null,
+          "name": "consan_lds_race",
+          "target": "gfx950"
+        },
+        "sources": [
+          "consan_repro:clean"
+        ],
+        "total_time_ms": 0.0
+      }
+    ],
+    "requirement": "top_dispatch_count",
+    "schema": "aorta.kernel_worklist/0.1",
+    "top_n": 1
+  }
+}
