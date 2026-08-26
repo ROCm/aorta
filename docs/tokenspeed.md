@@ -3,23 +3,29 @@
 Runs [TokenSpeed](https://github.com/lightseekorg/tokenspeed) — an AMD-optimized
 LLM inference engine — under `aorta sweep`, on gfx950.
 
-There is **no workload class**. Everything here runs on the built-in
-`_subprocess` path (`aorta sweep run` with `mode: probe`), which wraps an opaque
-command and never parses its argv. That is the point: it shows aorta triaging a
-third-party engine it knows nothing about, with no new Python. A workload class
-only becomes necessary to get serving metrics into `result.json`'s `metrics`
-dict rather than on stdout.
+Everything in **this** document runs on the built-in `_subprocess` path (`aorta
+sweep run` with `mode: probe`), which wraps an opaque command and never parses
+its argv. That is the point: it shows aorta triaging a third-party engine it
+knows nothing about, with no new Python.
 
-Two things run today, in increasing order of usefulness-per-second:
+The trade-off is that `mode: probe` carries a verdict but no metrics. Serving
+*numbers* — TTFT, TPOT, throughput — need a workload class to reach
+`WorkloadResult.metrics`, and that is the separate `tokenspeed_serve` workload
+documented in [TokenSpeed serving benchmarks](tokenspeed-serving.md).
+
+Two probes run today, in increasing order of usefulness-per-second:
 
 | | What it exercises | Cost per trial | Recipe |
 |---|---|---|---|
 | **Kernel probe** | TokenSpeed's Gluon/Triton kernels via its own benchmark + numerics harness | ~17 s | `recipes/tokenspeed/tokenspeed-kernel-gemm-smoke.yaml` |
 | **Serving probe** | `tokenspeed serve` bring-up: readiness, one completion, teardown | ~5 min, noisy | `recipes/tokenspeed/tokenspeed-serve-probe-smoke.yaml` |
 
-Plus a third path that is not a probe: harvesting kernel code objects and
-running them through aorta's **sanitizer** pipeline (Waitcheck). See
-[Sanitizers](#sanitizers).
+Plus two paths that are not probes:
+
+- harvesting kernel code objects and running them through aorta's **sanitizer**
+  pipeline (Waitcheck, ConSan) — see [Sanitizers](#sanitizers);
+- the **`tokenspeed_serve` workload**, which benchmarks serving performance —
+  see [TokenSpeed serving benchmarks](tokenspeed-serving.md).
 
 The scripts live in
 [`src/aorta/workloads/tokenspeed/`](../src/aorta/workloads/tokenspeed/); that
@@ -315,7 +321,9 @@ kernel is wrong" from "the pipelining around it is wrong".
 ## Serving probe
 
 Bring-up triage only: does the engine come up on this stack, and can it produce
-a token.
+a token. For serving *performance* on the same engine, use the
+[`tokenspeed_serve` workload](tokenspeed-serving.md) instead — this probe cannot
+report a latency or a throughput.
 
 ```bash
 export TS_IMAGE=lightseekorg/tokenspeed-amd:nightly-20260714
@@ -601,11 +609,6 @@ python -m pytest tests/probe/test_tokenspeed_probe.py -q
 
 ## Not done yet
 
-- **Serving metrics.** TTFT / TPOT / ITL / throughput. `tokenspeed bench serve`
-  already emits all of them as JSON (`median_ttft_ms`, `p99_itl_ms`,
-  `output_throughput`, …) and aorta's gating allowlist already covers
-  `prefill_latency_ms`, `decode_latency_ms`, `tokens_per_sec`. Wiring them
-  together needs a workload class, to reach `result.json`'s `metrics` dict.
 - **Attention/MoE *performance*.** Correctness and Waitcheck coverage are done
   via [the suite probe](#suite-probe), but numbers still need the benchmark
   harness, which needs input generators — see

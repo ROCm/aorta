@@ -87,6 +87,23 @@ def test_metric_policy_lookup():
     assert eval_lib.metric_policy("unknown_metric") is None
 
 
+def test_serving_metrics_are_gateable():
+    """The `tokenspeed_serve` workload emits these names verbatim from
+    `tokenspeed bench serve`. Unlisted metrics are never gated, so a nightly
+    would silently record serving regressions instead of failing on them."""
+    for name in (
+        "median_ttft_ms",
+        "p99_ttft_ms",
+        "median_tpot_ms",
+        "p99_tpot_ms",
+        "median_itl_ms",
+        "median_e2el_ms",
+    ):
+        assert eval_lib.metric_policy(name) == "max", name
+    for name in ("output_throughput", "total_token_throughput", "request_throughput"):
+        assert eval_lib.metric_policy(name) == "min", name
+
+
 def test_compare_record_only_when_no_baseline_and_passed():
     harvested = {"cell": "c", "passed": True, "error": None, "metrics": {}}
     out = eval_lib.compare_to_baseline(harvested, None)

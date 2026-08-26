@@ -1,0 +1,94 @@
+# Load-shape sweep for TokenSpeed serving: concurrency and ISL/OSL.
+#
+# One model, one stack, several load shapes. This is the recipe that answers
+# "where does throughput stop scaling, and what does it cost in latency?" --
+# the concurrency cells hold the request shape fixed and raise the in-flight
+# cap, and the shape cells hold concurrency fixed and change the prefill/decode
+# balance.
+#
+#   aorta sweep run --recipe recipes/tokenspeed/tokenspeed-serve-load.yaml \
+#     --output-dir /tmp/ts-serve-load
+#
+# Reading the result: in `perf.md`, `output_throughput` against
+# `max_concurrency` across the conc-* cells is the scaling curve, and
+# `median_ttft_ms` / `p99_ttft_ms` on the same rows is what that scaling cost in
+# queueing delay. The isl-* / osl-* cells separate the two regimes -- a
+# prefill-heavy shape (long ISL, short OSL) stresses attention and TTFT, a
+# decode-heavy shape (short ISL, long OSL) stresses TPOT and the KV cache.
+#
+# `num_prompts` scales with concurrency so every cell keeps the pipeline full
+# for a comparable stretch: 32 requests at a cap of 64 would finish before the
+# server ever reached steady state, and the resulting number would describe the
+# ramp rather than the throughput.
+#
+# As in the multi-model recipe, the confound ratio in `matrix.md` is not
+# meaningful across cells here -- a heavier load is legitimately slower. Read
+# `perf.md`.
+schema_version: 1
+ticket: TOKENSPEED-SERVE-LOAD
+workload: tokenspeed_serve
+trials: 1
+steps: 3
+
+workload_config:
+  image: lightseekorg/tokenspeed-amd:nightly-20260714
+  model: Qwen/Qwen3-0.6B
+  input_len: 512
+  output_len: 128
+  num_warmups: 1
+  warmup_steps: 1
+  ignore_eos: true
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  ready_timeout_sec: 1200
+
+cells:
+  # --- concurrency scaling, fixed 512/128 shape ---
+  - name: conc-1
+    mitigations: [none]
+    environment: local
+    workload_config:
+      max_concurrency: 1
+      num_prompts: 16
+
+  - name: conc-8
+    mitigations: [none]
+    environment: local
+    workload_config:
+      max_concurrency: 8
+      num_prompts: 32
+
+  - name: conc-32
+    mitigations: [none]
+    environment: local
+    workload_config:
+      max_concurrency: 32
+      num_prompts: 128
+
+  - name: conc-64
+    mitigations: [none]
+    environment: local
+    workload_config:
+      max_concurrency: 64
+      num_prompts: 256
+
+  # --- request shape at fixed concurrency 16 ---
+  # Prefill-heavy: 4k in, 128 out.
+  - name: isl-4096-osl-128
+    mitigations: [none]
+    environment: local
+    workload_config:
+      max_concurrency: 16
+      num_prompts: 64
+      input_len: 4096
+      output_len: 128
+
+  # Decode-heavy: 128 in, 1k out.
+  - name: isl-128-osl-1024
+    mitigations: [none]
+    environment: local
+    workload_config:
+      max_concurrency: 16
+      num_prompts: 64
+      input_len: 128
+      output_len: 1024

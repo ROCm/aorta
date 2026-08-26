@@ -406,7 +406,22 @@ def test_empty_export_fails(bash: str, tmp_path: Path) -> None:
 
 
 def _recipes() -> list[Path]:
-    return sorted(_RECIPES.glob("*.yaml"))
+    """The probe-mode recipes in the TokenSpeed recipe directory.
+
+    Filtered by ``mode``, not by filename: the same directory also holds the
+    triage-mode recipes that drive the ``tokenspeed_serve`` workload, which have
+    no ``mitigation_axis`` or ``custom_patterns`` and would fail every
+    assertion below. Selecting on ``mode`` means a new probe recipe is picked up
+    automatically while a new triage recipe is correctly ignored --
+    ``tests/workloads/test_tokenspeed_serve.py`` covers those.
+    """
+    probe_recipes = []
+    for path in sorted(_RECIPES.glob("*.yaml")):
+        with path.open(encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+        if isinstance(doc, dict) and doc.get("mode") == "probe":
+            probe_recipes.append(path)
+    return probe_recipes
 
 
 def _sidecars() -> list[Path]:
