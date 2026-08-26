@@ -620,3 +620,140 @@ class TestRegistryIsAuditable:
         assert int(match.group(1)) == len(
             names
         ), f"docs say {match.group(1)} names, registry has {len(names)}"
+
+
+# ---------------------------------------------------------------------------
+# Layout-agnostic default for --rocm-lib (issue #381)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultRocmLib:
+    """The audit must find the GEMM libraries on both install layouts.
+
+    Before #381 the default was the literal ``/opt/rocm/lib``, so on a wheel
+    install the audit found no libraries and exited 2 -- indistinguishable
+    from a genuinely broken image.
+    """
+
+    @staticmethod
+    def _patch_resolver(monkeypatch, lib_dir: Path):
+        from aorta.instrumentation import rocm_paths
+
+        monkeypatch.setattr(
+            rocm_paths,
+            "resolve_rocm_roots",
+            lambda environ=None: SimpleNamespace(lib_dir=lib_dir),
+        )
+
+    def test_uses_the_resolved_lib_dir_on_a_classic_install(self, monkeypatch):
+        self._patch_resolver(monkeypatch, Path("/opt/rocm/lib"))
+        assert audit.default_rocm_lib() == Path("/opt/rocm/lib")
+
+    def test_uses_the_resolved_lib_dir_on_a_wheel_install(self, monkeypatch):
+        wheel_lib = Path("/opt/venv/lib/python3.14/site-packages/_rocm_sdk_libraries/lib")
+        self._patch_resolver(monkeypatch, wheel_lib)
+        assert audit.default_rocm_lib() == wheel_lib
+
+    def test_falls_back_to_the_classic_path_when_aorta_is_not_importable(
+        self, monkeypatch
+    ):
+        """The script is also run standalone, outside an aorta install.
+
+        A wrong default beats a traceback there: a caller in that situation can
+        still pass ``--rocm-lib`` explicitly. Note gpu-tests.yml no longer does
+        (see ``test_the_gpu_gate_exercises_the_resolved_default``), so in CI
+        this fallback is not the path taken -- aorta is installed there.
+        """
+        monkeypatch.setitem(sys.modules, "aorta.instrumentation.rocm_paths", None)
+        assert audit.default_rocm_lib() == audit.DEFAULT_ROCM_LIB
+        assert audit.DEFAULT_ROCM_LIB == Path("/opt/rocm/lib")
+
+    def test_explicit_rocm_lib_argument_bypasses_discovery(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """``--rocm-lib`` wins when passed, and must not be second-guessed.
+
+        Still supported and still tested -- it is how you audit a tree that is
+        NOT the resolved install. It is simply no longer what CI passes.
+        """
+
+        def fail(environ=None):
+            raise AssertionError("resolver consulted despite an explicit --rocm-lib")
+
+        from aorta.instrumentation import rocm_paths
+
+        monkeypatch.setattr(rocm_paths, "resolve_rocm_roots", fail)
+        explicit = tmp_path / "explicit"
+        explicit.mkdir()
+        _fake_lib(explicit, "libhipblaslt.so", ["HIPBLASLT_LOG_LEVEL"])
+        _fake_lib(explicit, "librocblas.so", [])
+        manifest = tmp_path / "names.txt"
+        manifest.write_text("HIPBLASLT_LOG_LEVEL\n")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "audit_env_knobs.py",
+                "--rocm-lib",
+                str(explicit),
+                "--names-file",
+                str(manifest),
+            ],
+        )
+        assert audit.main() == 0
+        capsys.readouterr()
+
+    def test_audit_finds_libraries_under_a_wheel_layout_without_arguments(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """#381 acceptance: the audit works on a wheel install with no --rocm-lib."""
+        wheel_lib = tmp_path / "site-packages" / "_rocm_sdk_libraries" / "lib"
+        wheel_lib.mkdir(parents=True)
+        # Runtime-only trees ship only the versioned soname, no bare symlink.
+        _fake_lib(
+            wheel_lib,
+            "libhipblaslt.so",
+            ["HIPBLASLT_LOG_LEVEL"],
+            real_name="libhipblaslt.so.1",
+        )
+        _fake_lib(wheel_lib, "librocblas.so", [], real_name="librocblas.so.5")
+        self._patch_resolver(monkeypatch, wheel_lib)
+        manifest = tmp_path / "names.txt"
+        manifest.write_text("HIPBLASLT_LOG_LEVEL\n")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["audit_env_knobs.py", "--names-file", str(manifest)],
+        )
+        assert audit.main() == 0
+        capsys.readouterr()
+
+    def test_the_gpu_gate_exercises_the_resolved_default(self):
+        """The one job that can prove ``default_rocm_lib()`` must not bypass it.
+
+        Not reachable from a unit test of the code it breaks, so it is pinned
+        here the same way this branch pins the other workflow invariants.
+
+        gpu-tests.yml used to run ``--rocm-lib /opt/rocm/lib``, which left the
+        resolved default with no CI coverage anywhere: green on today's classic
+        base, an immediate exit 2 at the deferred wheel-layout flip (#383), and
+        the failure would have read as "the audit broke" rather than "the
+        workflow pinned a path the resolver was supposed to supply". Omitting
+        the argument IS the resolver path, so this job is now the regression
+        test for ``default_rocm_lib()`` -- and this assertion is what keeps it
+        one.
+        """
+        workflow = (
+            Path(__file__).parent.parent.parent / ".github" / "workflows" / "gpu-tests.yml"
+        ).read_text(encoding="utf-8")
+        invocations = [
+            line.strip()
+            for line in workflow.splitlines()
+            if "audit_env_knobs.py" in line and not line.strip().startswith("#")
+        ]
+        assert invocations, "the GPU gate no longer runs the env-knob audit at all"
+        for invocation in invocations:
+            assert "--rocm-lib" not in invocation, (
+                "pinning --rocm-lib here bypasses default_rocm_lib() and removes its "
+                f"only CI coverage: {invocation}"
+            )

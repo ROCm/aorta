@@ -18,8 +18,8 @@ name: CPU Tests
 #
 #   2. The per-version `pytest (CPU, py3.x)` legs must NOT be the required
 #      status checks. GitHub evaluates a job-level `if` *before* expanding a
-#      matrix, so when the `tests` job is skipped the three matrix contexts are
-#      never created -- and a required check pinned to a context that never
+#      matrix, so when the `tests` job is skipped the per-version matrix
+#      contexts are never created -- and a required check pinned to one that never
 #      reports hangs the PR forever (actions/runner#952). gpu-tests.yml dodges
 #      this only because its gated job is a single, non-matrix job whose one
 #      static context still reports "skipped" (== success). A matrix cannot rely
@@ -207,14 +207,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     # Skipped when no CPU-relevant path changed, so CI-only / other-workflow PRs
-    # don't spin up three Python matrix jobs for nothing. These per-version legs
+    # don't spin up a Python matrix job per version for nothing. These per-version legs
     # are deliberately NOT the required checks (a skipped matrix never emits
     # their contexts -- actions/runner#952); the `required` job below is.
     if: needs.changes.outputs.cpu == 'true'
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Check out code
         uses: actions/checkout@v5

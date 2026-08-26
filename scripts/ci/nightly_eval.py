@@ -34,6 +34,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MATRIX = REPO_ROOT / "config" / "ci" / "nightly_eval_matrix.yaml"
 BASELINES = REPO_ROOT / "config" / "ci" / "regression_baselines.yaml"
 
+_SRC = REPO_ROOT / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+from aorta.instrumentation.rocm_paths import read_version_marker, resolve_rocm_roots  # noqa: E402
+
+_ROCM_ROOTS = resolve_rocm_roots()
+
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -71,9 +78,20 @@ def build_metadata() -> dict[str, Any]:
         meta["hip"] = getattr(torch.version, "hip", None)
     except Exception:
         pass
-    for candidate in (Path("/opt/rocm/.info/version"), Path("/opt/rocm/.info/version-dev")):
-        if candidate.exists():
-            meta["rocm"] = candidate.read_text(encoding="utf-8").strip()
+    # Resolved rather than hardcoded to /opt/rocm (issue #381): a TheRock
+    # wheel install keeps .info/version under site-packages, and reading the
+    # literal path there left the dashboard's `rocm` column silently null
+    # while `torch` and `hip` still populated -- the worst kind of gap,
+    # because the row still looked complete.
+    # Via the shared reader, not exists()+read_text(): a zero-byte `version`
+    # from an interrupted install used to shadow a valid `version-dev` (the
+    # loop broke on mere existence), and an unreadable or non-UTF-8 marker
+    # raised out of build_metadata() -- losing the whole result document over a
+    # cosmetic dashboard column. Both now fall through to the next candidate.
+    for candidate in (_ROCM_ROOTS.version_file, _ROCM_ROOTS.version_dev_file):
+        value = read_version_marker(candidate)
+        if value is not None:
+            meta["rocm"] = value
             break
     # Provenance of the exact triggering wheel/commit (set by the workflow) so a
     # dashboard result is attributable to a specific source, not "whatever was
@@ -81,6 +99,21 @@ def build_metadata() -> dict[str, Any]:
     meta["upstream_run_id"] = os.environ.get("UPSTREAM_RUN_ID")
     meta["head_sha"] = os.environ.get("UPSTREAM_HEAD_SHA")
     meta["wheel_file"] = os.environ.get("WHEEL_FILE")
+    # Which lane produced this row, and the base image it ran on (issue #382).
+    #
+    # `lane` defaults to "gate" so every existing caller keeps describing itself
+    # correctly without being changed; the latest-ROCm canary sets "canary" so a
+    # consumer can tell an observed-only row from a gating one. Recording it here
+    # rather than inferring it downstream means the row is self-describing even in
+    # a raw artifact.
+    #
+    # `base_image` is the whole point of the canary: "ran :latest" is not
+    # attributable, "ran :latest, which resolved to sha256:..." is. The canary
+    # resolves the moving tag to a digest at job start and passes it in. It stays
+    # None in the gated lane, where the digest is already pinned in the Dockerfile
+    # and visible in review.
+    meta["lane"] = os.environ.get("AORTA_CI_LANE") or "gate"
+    meta["base_image"] = os.environ.get("AORTA_CI_BASE_IMAGE")
     return meta
 
 

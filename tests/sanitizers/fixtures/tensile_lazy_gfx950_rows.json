@@ -1,0 +1,79 @@
+{
+  "_comment": "Real hipBLASLt hardware-predicate -> Tensile library mapping, extracted from the shipped lazy master index. Ground truth for the variant selection in scripts/sanitizers/prepare_gemm_isa.py: the filename tokens (_CU<n>, _ID<hex>[-<hex>]) restate these predicates, so the selector must reproduce this table. Regenerate by msgpack-decoding the source file below from the image and re-running the extraction.",
+  "source": {
+    "image": "rocm/pytorch:rocm7.14_ubuntu26.04_py3.14_pytorch_release_2.12.0@sha256:8785d67393d9f452cbae2362003f2e211289f9c12163a8c168496724664a0fda",
+    "rocm_version": "7.14.0",
+    "file": "lib/hipblaslt/library/gfx950/TensileLibrary_lazy_gfx950.dat.zlib",
+    "library_type": "Hardware",
+    "family": "SS_SS_HA_Bias_SAV_UA"
+  },
+  "_resolution_comment": "This table is the row DATA only. How the rows are walked is not in it and cannot be inferred from it -- notably that a row whose predicate matches but which offers nothing for a family does not end the walk (findBestSolution guards its return with `if(rv)`), and that a chip id may match a row via the fallback graph. Both come from tensilelite, cited below and mirrored in prepare_gemm_isa.py.",
+  "resolution": {
+    "walk": "tensilelite include/Tensile/ExactLogicLibrary.hpp -- ExactLogicLibrary::findBestSolution, HardwarePredicate::isFallbackMatch",
+    "chip_id_registry": "tensilelite include/Tensile/AMDGPUPredicates.hpp -- ChipIdRegistry::chipIdFallbacks, PciChipIdEqual::operator()",
+    "row_ordering": "hipBLASLt docs, 'PCI chip ID predicates walkthrough' -- Build-time row ordering (fallback-aware)"
+  },
+  "rows": [
+    {
+      "row": 0,
+      "processor": "gfx950",
+      "cu_count": null,
+      "chip_ids": [
+        30120
+      ],
+      "libraries": {}
+    },
+    {
+      "row": 1,
+      "processor": "gfx950",
+      "cu_count": null,
+      "chip_ids": [
+        30114,
+        30115
+      ],
+      "libraries": {
+        "Ailk_Bjlk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Ailk_Bjlk_Cijk_Dijk_ID75a3-75a2_gfx950",
+        "Ailk_Bljk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Ailk_Bljk_Cijk_Dijk_ID75a3-75a2_gfx950",
+        "Alik_Bjlk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Alik_Bjlk_Cijk_Dijk_ID75a3-75a2_gfx950",
+        "Alik_Bljk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Alik_Bljk_Cijk_Dijk_ID75a3-75a2_gfx950"
+      }
+    },
+    {
+      "row": 2,
+      "processor": "gfx950",
+      "cu_count": 256,
+      "chip_ids": [
+        30112
+      ],
+      "libraries": {
+        "Ailk_Bjlk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Ailk_Bjlk_Cijk_Dijk_CU256_ID75a0_gfx950",
+        "Ailk_Bljk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Ailk_Bljk_Cijk_Dijk_CU256_ID75a0_gfx950",
+        "Alik_Bjlk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Alik_Bjlk_Cijk_Dijk_CU256_ID75a0_gfx950",
+        "Alik_Bljk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Alik_Bljk_Cijk_Dijk_CU256_ID75a0_gfx950"
+      }
+    },
+    {
+      "row": 3,
+      "processor": "gfx950",
+      "cu_count": 128,
+      "chip_ids": [
+        30112
+      ],
+      "libraries": {}
+    },
+    {
+      "row": 4,
+      "processor": "gfx950",
+      "cu_count": null,
+      "chip_ids": [
+        30112
+      ],
+      "libraries": {
+        "Ailk_Bjlk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Ailk_Bjlk_Cijk_Dijk_ID75a0_gfx950",
+        "Ailk_Bljk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Ailk_Bljk_Cijk_Dijk_ID75a0_gfx950",
+        "Alik_Bjlk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Alik_Bjlk_Cijk_Dijk_ID75a0_gfx950",
+        "Alik_Bljk": "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Alik_Bljk_Cijk_Dijk_ID75a0_gfx950"
+      }
+    }
+  ]
+}

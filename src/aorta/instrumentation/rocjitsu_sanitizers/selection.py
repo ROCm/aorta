@@ -60,11 +60,12 @@ def _optional_str(value: object) -> str | None:
 def sha256_code_object(path: Path) -> str | None:
     """Lowercase SHA-256 of a non-empty code object, or ``None`` if unreadable.
 
-    Streams the file so a large (~16 MB) code object is not read into memory at
-    once. Returns ``None`` for a missing / empty / unreadable path so callers can
-    degrade gracefully rather than crash: the identity stays digest-less and
-    Waitcheck fails closed (``code_object_identity_required``) exactly as it does
-    today for a kernel source with no committed digest.
+    Streams the file so a large code object (hundreds of MB for a Tensile bundle)
+    is not read into memory at once. Returns ``None`` for a missing / empty /
+    unreadable path so callers can degrade gracefully rather than crash: the
+    identity stays digest-less and Waitcheck fails closed
+    (``code_object_identity_required``) exactly as it does today for a kernel
+    source with no committed digest.
     """
 
     try:

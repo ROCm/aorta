@@ -179,11 +179,31 @@ jobs:
               "${ROCJITSU_PREBUILT}/MANIFEST.json" > "${SANITIZER_ROOT}/rocjitsu_run_id.txt"
 
             # hipcc shells out to clang-offload-bundler, which lives in the ROCm
-            # LLVM bindir but is not on PATH -- the image only exports
-            # /opt/rocm/bin -- so the fixture
-            # build failed with "clang-offload-bundler not found on PATH" (run
-            # 31161251100). Add the LLVM bindir so hipcc can find its tools.
-            export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"
+            # LLVM bindir but is not on PATH in either install layout -- the
+            # classic image exports only /opt/rocm/bin and the wheel image only
+            # the venv bin dir -- so the fixture build failed with
+            # "clang-offload-bundler not found on PATH" (run 31161251100). Add
+            # the LLVM bindir so hipcc can find its tools.
+            #
+            # Derived from the resolver rather than ${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}
+            # (issue #381): that shell chain does no validation, so on a
+            # wheel-layout image -- where both vars are unset and /opt/rocm does
+            # not exist -- it silently expanded to a nonexistent directory and
+            # left the bundler unreachable. aorta is pip-installed above, so the
+            # resolver is importable here.
+            #
+            # NOTE the inner quoting. This whole step is one single-quoted
+            # bash -lc payload, so ANY apostrophe below -- in code, in an echo,
+            # or in a comment like this one -- closes it early and the HOST
+            # shell misparses the remainder. The YAML stays valid and no CPU
+            # check runs this job, so the breakage would surface only at 12:00
+            # UTC. Hence python -c with DOUBLE quotes; the code it runs has no
+            # $ or backtick to expand. Kept to one self-contained line so it is
+            # also pasteable, which is what _ROCM_LLVM_PATH_EXPORT in
+            # gen_sanitizer_dashboard.py hands a reader; the two are asserted
+            # byte-identical by test_rebuild_commands_export_the_rocm_llvm_path.
+            export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
+            echo "[$(date +%T)] setup: ROCm LLVM bindir on PATH -> ${PATH%%:*}"
 
             mkdir -p "${FIXTURES}/bin" "${FIXTURES}/isa"
             echo "[$(date +%T)] fixture build: hipcc consan_lds_race (clean single-wave LDS repro) …"
@@ -192,7 +212,7 @@ jobs:
             echo "[$(date +%T)] fixture build: hipcc consan_lds_race_2wave (racy two-wave LDS repro) …"
             hipcc --offload-arch=gfx950 -O1 -g "${FIXTURES}/repro/consan_lds_race_2wave.hip" \
               -o "${FIXTURES}/bin/consan_lds_race_2wave"
-            echo "[$(date +%T)] fixture build: extracting real per-transpose f32 GEMM code objects for the top-3 shapes (~16MB each; distinct SHA per transpose layout) …"
+            echo "[$(date +%T)] fixture build: extracting real per-transpose f32 GEMM code objects for the top-3 shapes (hundreds of MB each; distinct SHA per transpose layout) …"
             python scripts/sanitizers/prepare_gemm_isa.py \
               --csv "${FIXTURES}/gemm_shapes_unique.csv" --out "${FIXTURES}/isa" --top-n 3
 
@@ -427,7 +447,20 @@ jobs:
             # PATH in this image. prepare_gemm_isa.py also resolves it via PATH and
             # exits if absent, so both the extraction and genco_object below depend on
             # this line.
-            export PATH="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}/lib/llvm/bin:${PATH}"
+            #
+            # Byte-identical to the gate job version above, and derived from the
+            # resolver for the same reason (issue #381): the
+            # ${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}} chain this replaces does no
+            # validation, so on a wheel-layout image -- where both vars are unset
+            # and /opt/rocm does not exist -- it expands to a directory that is not
+            # there and leaves the bundler unreachable. This job pip-installs aorta
+            # above, so the resolver is importable here too.
+            #
+            # The apostrophe rule from the gate job applies to THIS payload as well:
+            # it is its own single-quoted bash -lc block, so any apostrophe below
+            # closes it early. Both payloads are now checked by
+            # test_sanitizer_nightly_payload_has_no_apostrophes.
+            export PATH="$(python -c "from aorta.instrumentation.rocm_paths import resolve_rocm_roots; print(resolve_rocm_roots().llvm_bin_dir)"):${PATH}"
             # This job builds its own fixtures from scratch -- the gate job removes
             # these directories in its cleanup step, and on a fresh runner they never
             # existed -- so create them rather than assuming a previous job did.

@@ -72,6 +72,7 @@ import os
 import platform
 import re
 import shutil
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -89,11 +90,39 @@ from aorta.instrumentation.env_knobs import (
     ENV_KNOBS_BY_NAME,  # noqa: F401 -- re-exported
     EnvironmentKnob,  # noqa: F401 -- re-exported
 )
+from aorta.instrumentation.rocm_paths import (
+    read_version_marker,
+    resolve_rocm_roots,
+    safe_is_dir,
+)
 
 log = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = "1.15"
+SCHEMA_VERSION = "1.16"
+# 1.15 -> 1.16 (issue #381: layout-agnostic ROCm discovery). ROCm paths are no
+# longer hardcoded to /opt/rocm, so the probe reads a TheRock wheel install as
+# well as a classic one. What a snapshot emits changes in four ways:
+#   - ``rocm`` gains ``root``, ``lib_root``, ``root_source``, ``layout`` and
+#     ``version_source``. A null ROCm version used to be unattributable --
+#     "no version file under /opt/rocm" and "no ROCm install at all" read
+#     identically. These say which root answered and which source supplied
+#     the version.
+#   - ``rocm.version`` now falls back past ``.info/version`` to the TheRock
+#     manifest, then pip metadata (``rocm`` / ``rocm-sdk-core``), then torch's
+#     ``+rocm`` local segment, instead of going null on a stripped install.
+#   - a new ``therock`` block records wheel-layout build provenance:
+#     full 40-char upstream submodule pins, ``the_rock_commit``,
+#     ``github_run_id`` and any applied patches. ``status="absent"`` on a
+#     classic install, which ships no manifest -- a documented absence.
+#   - ``hipblaslt`` / ``rocblas`` gain ``upstream_commit`` (the full
+#     ``rocm-libraries`` pin the version header truncates) and
+#     ``upstream_commit_matches_tweak``. Without this the hipBLASLt commit --
+#     core evidence in the NaN escalations -- reads null on a wheel image,
+#     because the version header is a devel-only file.
+# Values on a classic /opt/rocm install are otherwise unchanged: every derived
+# path resolves to the literal it replaced, and the Tensile fingerprint of a
+# flat kernel directory is byte-identical.
 # 1.14 -> 1.15 (recom-NaN follow-up: backend/Stream-K selectors, numeric-check
 # knobs, TorchRec identity fixes). 1.14 already shipped in main (PR #308), so
 # these changes to what a snapshot emits get their own version rather than
@@ -596,17 +625,43 @@ GPU_ARCH_TIMEOUT_SEC = 30.0
 # tests/instrumentation/test_environment.py::TestPathConstants
 # enforces this so a future relative-path typo fails fast.
 
+# ROCm install roots (issue #381). Every ROCm path below is DERIVED from
+# these rather than hardcoding /opt/rocm, so the probe reads a TheRock
+# wheel install (ROCm 7.14+, rocm/pytorch:latest) as well as a classic
+# system install. On a classic install all three roots are /opt/rocm and
+# every derived path is byte-identical to the literal it replaced.
+#
+# Three roots, not one, because the wheel layout splits the tree across
+# sibling site-packages components: headers in _rocm_sdk_devel (absent on
+# runtime-only images), math libraries and their Tensile databases in
+# _rocm_sdk_libraries, and everything else in _rocm_sdk_core. See
+# aorta.instrumentation.rocm_paths for the resolution order.
+_ROCM_ROOTS = resolve_rocm_roots()
+ROCM_ROOT = _ROCM_ROOTS.core
+ROCM_LIB_ROOT = _ROCM_ROOTS.libraries
+ROCM_INCLUDE_ROOT = _ROCM_ROOTS.include
+# Recorded in the snapshot so a null ROCm version is attributable: "found an
+# install but it has no version file" and "found no install at all" are
+# different operator problems that used to look identical.
+ROCM_LAYOUT = _ROCM_ROOTS.layout
+ROCM_ROOT_SOURCE = _ROCM_ROOTS.source
+
 # Per #147 schema: "Explicit ROCm version files".
 # /opt/rocm is conventionally a symlink to the active versioned install
 # (e.g., /opt/rocm-7.2.1), so /opt/rocm/.info/version always points at the
-# active release.
+# active release. The wheel layout ships the same .info/version, just under
+# _rocm_sdk_core (verified 7.15.0a20260716).
 # Canonical ROCm bin dir used for fallback lookup of binaries (e.g.
 # rocm_agent_enumerator) when the operator's PATH doesn't include
 # /opt/rocm/bin (a common state when /etc/profile.d/rocm.sh hasn't
 # been sourced -- happens in non-login shells).
-ROCM_BIN_DIR = Path("/opt/rocm/bin")
-ROCM_VERSION_FILE = Path("/opt/rocm/.info/version")            # release tag, e.g. "7.2.1"
-ROCM_VERSION_DEV_FILE = Path("/opt/rocm/.info/version-dev")    # full build, e.g. "7.2.1-43"
+ROCM_BIN_DIR = _ROCM_ROOTS.bin_dir
+ROCM_VERSION_FILE = _ROCM_ROOTS.version_file          # release tag, e.g. "7.2.1"
+ROCM_VERSION_DEV_FILE = _ROCM_ROOTS.version_dev_file  # full build, e.g. "7.2.1-43"
+# TheRock build provenance, wheel layout only (absent on classic installs).
+# Richer than the classic header parse: full 40-char submodule pins where the
+# header gives a truncated tweak, plus the TheRock commit and CI run id.
+THEROCK_MANIFEST_FILE = _ROCM_ROOTS.manifest_file
 # Linux kernel-side AMDGPU module version (KMD = kernel-mode driver).
 # Provided by the kernel since the amdgpu module exposes a sysfs `version`.
 KMD_VERSION_FILE = Path("/sys/module/amdgpu/version")          # e.g. "6.16.13"
@@ -640,12 +695,12 @@ AMDGPU_PACKAGE_CANDIDATES: tuple[str, ...] = ("amdgpu-dkms", "amdgpu-kmod")
 # hipBLASLt build identity sources. The version header ships in the
 # hipblaslt-dev package; on hosts without it, _capture_hipblaslt's commit
 # / package_version fields fall back to None with a recorded reason.
-HIPBLASLT_VERSION_HEADER = Path(
-    "/opt/rocm/include/hipblaslt/hipblaslt-version.h"
+HIPBLASLT_VERSION_HEADER = (
+    ROCM_INCLUDE_ROOT / "include" / "hipblaslt" / "hipblaslt-version.h"
 )
-HIPBLASLT_LIB_DIR = Path("/opt/rocm/lib")  # libhipblaslt.so* lives here
-HIPBLASLT_TENSILE_DIR = Path(
-    "/opt/rocm/lib/hipblaslt/library"
+HIPBLASLT_LIB_DIR = ROCM_LIB_ROOT / "lib"  # libhipblaslt.so* lives here
+HIPBLASLT_TENSILE_DIR = (
+    ROCM_LIB_ROOT / "lib" / "hipblaslt" / "library"
 )  # Tensile kernel database (.dat on modern builds, .yaml on older)
 
 # rocBLAS build identity sources. Mirrors the hipBLASLt layout exactly --
@@ -655,12 +710,12 @@ HIPBLASLT_TENSILE_DIR = Path(
 # missing -dev package -> commit/package_version fall back to None with a
 # recorded reason; the runtime lib + kernel DB ship with the runtime
 # rocblas package and are usually still present in stripped images.
-ROCBLAS_VERSION_HEADER = Path(
-    "/opt/rocm/include/rocblas/internal/rocblas-version.h"
+ROCBLAS_VERSION_HEADER = (
+    ROCM_INCLUDE_ROOT / "include" / "rocblas" / "internal" / "rocblas-version.h"
 )
-ROCBLAS_LIB_DIR = Path("/opt/rocm/lib")  # librocblas.so* lives here
-ROCBLAS_TENSILE_DIR = Path(
-    "/opt/rocm/lib/rocblas/library"
+ROCBLAS_LIB_DIR = ROCM_LIB_ROOT / "lib"  # librocblas.so* lives here
+ROCBLAS_TENSILE_DIR = (
+    ROCM_LIB_ROOT / "lib" / "rocblas" / "library"
 )  # rocBLAS Tensile kernel database
 
 # Static Tensile catalog (issue #54). The "menu" enumeration walks the
@@ -688,8 +743,10 @@ _GFX_ARCH_RE = re.compile(r"gfx[0-9a-f]+", re.IGNORECASE)
 # its presence as a boolean by checking for its core config header.
 # When the -dev package is stripped from the container, both keys fall
 # back to None / False with a recorded reason.
-CK_VERSION_HEADER = Path("/opt/rocm/include/ck/version.h")
-CK_TILE_CONFIG_HEADER = Path("/opt/rocm/include/ck_tile/core/config.hpp")
+CK_VERSION_HEADER = ROCM_INCLUDE_ROOT / "include" / "ck" / "version.h"
+CK_TILE_CONFIG_HEADER = (
+    ROCM_INCLUDE_ROOT / "include" / "ck_tile" / "core" / "config.hpp"
+)
 
 # Filename of the PyTorch-built HIP shared library, looked up relative to
 # `torch.__file__` at runtime by the composable_kernel probe (we never
@@ -733,9 +790,9 @@ AOTRITON_INSTALLED_PREFIX_ENV = "AOTRITON_INSTALLED_PREFIX"
 # -dev package, runtime lib in /opt/rocm/lib, kernel database under
 # /opt/rocm/share/miopen/db/. Kernel DB files are .txt / .fdb.txt
 # (gfx-target named) -- distinct suffix family from Tensile's .dat/.yaml.
-MIOPEN_VERSION_HEADER = Path("/opt/rocm/include/miopen/version.h")
-MIOPEN_LIB_DIR = Path("/opt/rocm/lib")  # libMIOpen.so* lives here (capital M, capital O)
-MIOPEN_KERNEL_DB_DIR = Path("/opt/rocm/share/miopen/db")
+MIOPEN_VERSION_HEADER = ROCM_INCLUDE_ROOT / "include" / "miopen" / "version.h"
+MIOPEN_LIB_DIR = ROCM_LIB_ROOT / "lib"  # libMIOpen.so* lives here (capital M, capital O)
+MIOPEN_KERNEL_DB_DIR = ROCM_LIB_ROOT / "share" / "miopen" / "db"
 MIOPEN_KERNEL_DB_SUFFIXES: tuple[str, ...] = (".txt",)  # .fdb.txt also matches via final suffix
 
 # MIOpen static catalog (issue #54 follow-up). The "menu" enumeration
@@ -788,14 +845,14 @@ MIOPEN_USER_DB_PATH_ENV = "MIOPEN_USER_DB_PATH"
 ROCFFT_KERNEL_CACHE_NAME = "rocfft_kernel_cache.db"
 ROCFFT_RTC_SYS_CACHE_PATH_ENV = "ROCFFT_RTC_SYS_CACHE_PATH"
 ROCFFT_RTC_CACHE_PATH_ENV = "ROCFFT_RTC_CACHE_PATH"
-ROCFFT_LIB_DIR = Path("/opt/rocm/lib")
+ROCFFT_LIB_DIR = ROCM_LIB_ROOT / "lib"
 
 # RCCL is AMD's NCCL-compatible collective comms library. Header is at
 # /opt/rocm/include/rccl/rccl.h (same name as upstream NCCL's). Version
 # is encoded as a single integer macro NCCL_VERSION_CODE -- decoded
 # below via _decode_nccl_version_code.
-RCCL_VERSION_HEADER = Path("/opt/rocm/include/rccl/rccl.h")
-RCCL_LIB_DIR = Path("/opt/rocm/lib")  # librccl.so*
+RCCL_VERSION_HEADER = ROCM_INCLUDE_ROOT / "include" / "rccl" / "rccl.h"
+RCCL_LIB_DIR = ROCM_LIB_ROOT / "lib"  # librccl.so*
 
 # `rocm_agent_enumerator` returns one gfx-target name per detected GPU
 # (e.g. "gfx942\ngfx942\n..."). Works without /dev/kfd access on most
@@ -1113,6 +1170,15 @@ class EnvSnapshot:
     # NIC probing. Populated by ``_capture_nics()`` in collect_env() /
     # ``_disaster_snapshot()``.
     nics: dict = field(default_factory=dict)
+    # therock: issue #381 (schema 1.16). Build provenance for a wheel-layout
+    # (TheRock) ROCm install: full 40-char upstream submodule pins, the
+    # TheRock commit, and the CI run that produced the build. Always present;
+    # ``{"status": "absent", ...}`` on a classic /opt/rocm install, which has
+    # no manifest -- a documented absence, not a partial. Defaulted so pre-1.16
+    # snapshots load via ``from_dict()`` and older constructors still work.
+    therock: dict = field(
+        default_factory=lambda: _empty_therock()
+    )
     # tensile_catalog / miopen_catalog / rocfft_catalog: issue #54 +
     # follow-ups (schema 1.9). Static kernel-catalog "recipe books" --
     # installed-library identity for the on-disk, runtime-selected
@@ -1190,6 +1256,10 @@ class EnvSnapshot:
         "docker",
         # ROCm runtime + the host-kernel driver that pairs with it
         "rocm",
+        # Directly after `rocm`: it is that install's build provenance, and
+        # without an entry here it fell to the appended tail, landing AFTER
+        # `partial_reasons` and breaking the trailer convention below.
+        "therock",
         "amdgpu_driver",
         "hip",
         # GPU + fabric hardware
@@ -1275,6 +1345,17 @@ class EnvSnapshot:
           which carries only ``package_version`` / ``commit`` -- gains the
           1.15 ``source_*`` / ``distribution_version`` keys as ``null``
           instead of round-tripping into a short dict.
+        * ``rocm`` / ``hipblaslt`` / ``rocblas`` / ``therock`` are merged over
+          their 1.16 null shapes for the same reason (schema 1.16 added keys
+          *inside* existing blocks, not just new top-level ones): a 1.15
+          snapshot gains ``rocm.root`` / ``lib_root`` / ``root_source`` /
+          ``layout`` / ``version_source`` and the GEMM blocks'
+          ``upstream_commit`` / ``upstream_commit_matches_tweak`` as ``null``.
+          The ``rocm`` attribution keys back-fill as ``null`` rather than this
+          host's resolved roots -- see :func:`_null_rocm`. ``therock`` is
+          additive, so a pre-1.16 snapshot that lacks it entirely gets
+          ``status="unknown"`` (see :func:`_null_therock`), not the ``"absent"``
+          the local default would assert on its behalf.
 
         Strictly-required older fields (the schema-1.0/1.1 set) are NOT
         defaulted -- a missing ``rocm`` or ``hipblaslt`` key still
@@ -1297,6 +1378,32 @@ class EnvSnapshot:
         kwargs.setdefault("execution_context", _empty_execution_context())
         kwargs.setdefault("probe_namespace", None)
         kwargs["torchrec"] = {**_empty_torchrec(), **(kwargs.get("torchrec") or {})}
+        # Same merge for the blocks schema 1.16 grew keys inside. Without it a
+        # 1.15 snapshot round-trips into a SHORT dict: `rocm` without
+        # root/lib_root/root_source/layout/version_source, and hipblaslt/rocblas
+        # without upstream_commit{,_matches_tweak}. The 1.16 changelog promises
+        # those keys exist with a null shape, so a consumer indexing the
+        # documented shape would KeyError on an old artifact.
+        #
+        # Only merged when the key is PRESENT: a genuinely missing `rocm` /
+        # `hipblaslt` / `rocblas` must still raise TypeError (see the docstring
+        # above), because that means a malformed dict rather than an older
+        # producer, and defaulting it here would silence that.
+        for name, empty in (
+            ("rocm", _null_rocm),
+            ("hipblaslt", _empty_gemm_library),
+            ("rocblas", _empty_gemm_library),
+            ("therock", _null_therock),
+        ):
+            if name in kwargs:
+                kwargs[name] = {**empty(), **(kwargs[name] or {})}
+        # `therock` is additive (1.16), so unlike the three above it can be
+        # wholly absent. It must NOT fall through to the dataclass default,
+        # which is `_empty_therock()` -- correct for a snapshot built here, but
+        # for a loaded pre-1.16 artifact it would assert "this install shipped
+        # no manifest" and stamp the reading host's manifest_path onto someone
+        # else's capture.
+        kwargs.setdefault("therock", _null_therock())
         return cls(**kwargs)
 
     def summary(self) -> str:
@@ -2182,14 +2289,19 @@ def collect_env(
                 f"{probe_invocation!r}; recorded as 'direct'"
             )
         system_health = _run_rdhc(reasons)
-        rocm = _capture_rocm_version_files(reasons)
+        # Read once and share: the manifest backs both the ROCm version
+        # fallback chain and the therock provenance block.
+        therock_manifest, therock_error = _read_therock_manifest()
+        therock = _capture_therock(therock_manifest, reasons, therock_error)
+        rocm = _capture_rocm_version_files(reasons, therock_manifest)
         # Host-kernel scope: reuses rocm's kmd_version read (no second file
         # read) + package/modinfo/KFD-node probes. Absent on GPU-less hosts
         # without a partial (documented absence).
         amdgpu_driver = _capture_amdgpu_driver(rocm, reasons)
         hip = _capture_hip_toolchain(reasons)
-        hipblaslt = _capture_hipblaslt(reasons)
-        rocblas = _capture_rocblas(reasons)
+        gemm_commit = therock["gemm_libraries_commit"]
+        hipblaslt = _capture_hipblaslt(reasons, gemm_commit)
+        rocblas = _capture_rocblas(reasons, gemm_commit)
         # Shared once per collect_env() call: both _capture_composable_kernel
         # and _capture_pytorch_build's binary_introspection probe grep the
         # demangled libtorch_hip.so symbol table. Without this, the
@@ -2288,6 +2400,7 @@ def collect_env(
             library_introspection_alternates=buck_capture.alternates,
             pytorch_sdpa=pytorch_sdpa,
             nics=nics,
+            therock=therock,
         )
     except Exception as exc:  # noqa: BLE001 -- this is the never-raises gate
         # Restore stdio before logging so the disaster trace reaches the
@@ -2416,7 +2529,7 @@ def _disaster_snapshot(
         schema_version=SCHEMA_VERSION,
         captured_at=captured_at,
         system_health=None,
-        rocm={"version": None, "version_dev": None, "kmd_version": None},
+        rocm=_empty_rocm(),
         amdgpu_driver=_empty_amdgpu_driver(),
         hip={
             "version": None,
@@ -2425,20 +2538,8 @@ def _disaster_snapshot(
             "runtime": None,
             "cpp_config": None,
         },
-        hipblaslt={
-            "rocm_release_tweak": None,
-            "package_version": None,
-            "lib_hash": None,
-            "kernel_db_revision": None,
-            "applied_prs": {},
-        },
-        rocblas={
-            "rocm_release_tweak": None,
-            "package_version": None,
-            "lib_hash": None,
-            "kernel_db_revision": None,
-            "applied_prs": {},
-        },
+        hipblaslt=_empty_gemm_library(),
+        rocblas=_empty_gemm_library(),
         composable_kernel={
             "system": {
                 "version": None,
@@ -2937,36 +3038,497 @@ def _run_rdhc(reasons: list[str]) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# ROCm version files
+# ROCm version files + TheRock build provenance
 # ---------------------------------------------------------------------------
 
 
-def _capture_rocm_version_files(reasons: list[str]) -> dict[str, str | None]:
-    """Read ROCm version markers directly from disk.
+# Local version segment a ROCm torch build carries, e.g.
+# "2.10.0+rocm7.15.0a20260716" -> "7.15.0a20260716".
+_TORCH_ROCM_LOCAL_SEGMENT_RE = re.compile(r"\+rocm([0-9][0-9A-Za-z.\-]*)")
+
+# The submodule whose pin is the upstream identity of the GEMM libraries.
+# ROCm consolidated hipBLASLt and rocBLAS into this monorepo, so they no
+# longer carry individual SHAs -- this one commit IS their provenance.
+THEROCK_GEMM_SUBMODULE = "rocm-libraries"
+
+
+def _clean_manifest_string(value: Any) -> str | None:
+    """Coerce a manifest field to a non-empty string, else ``None``.
+
+    The manifest is third-party JSON: a field can be absent, null, or a
+    non-string. Everything downstream expects ``str | None``.
+    """
+    if value is None or isinstance(value, (dict, list, bool)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+_THEROCK_PIN_SHA_RE = re.compile(r"[0-9a-f]{40}")
+# The hipBLASLt/rocBLAS header tweak, when it is an abbreviated commit at all.
+# Documented as 7-12 chars; measured 10 on ROCm 7.2.4.
+_GEMM_TWEAK_RE = re.compile(r"[A-Fa-f0-9]{7,12}")
+
+
+def _clean_manifest_pin(value: Any) -> str | None:
+    """A manifest ``pin_sha`` as a full 40-char commit, or ``None``.
+
+    Stricter than :func:`_clean_manifest_string` because this field is *used*,
+    not just reported: it is promoted to ``gemm_libraries_commit`` and then
+    prefix-compared against the hipBLASLt header tweak. An abbreviated,
+    non-hex, or numeric-scalar value there would either fail that comparison
+    for the wrong reason or -- worse -- be reported as provenance that looks
+    authoritative and is not. The manifest documents these as full SHAs, so
+    anything else is a manifest we do not understand rather than a shorter
+    answer to the same question.
+
+    Normalised to lowercase so a manifest emitting uppercase hex is accepted
+    and compares equal to the lowercase tweaks we compare it against.
+    """
+    text = _clean_manifest_string(value)
+    if text is None:
+        return None
+    lowered = text.lower()
+    return lowered if _THEROCK_PIN_SHA_RE.fullmatch(lowered) else None
+
+
+def _read_therock_manifest() -> tuple[dict[str, Any] | None, str | None]:
+    """Parse TheRock build manifest. Returns ``(manifest, error)``.
+
+    Both ``None`` means the file is genuinely absent -- the normal reading on a
+    classic ``/opt/rocm`` install, which has no such file and never will. A
+    non-``None`` ``error`` means the file IS there but could not be used:
+    unreadable, not JSON, or not a JSON object.
+
+    The two are reported separately because ``status="absent"`` is a
+    *documented* absence that deliberately does not raise a partial. Collapsing
+    a corrupt manifest into it would describe a damaged wheel install as the
+    expected classic reading and drop all of its provenance without a word --
+    the silent-degradation failure mode #381 exists to remove, reappearing one
+    level in.
+    """
+    text = _read_text_file(THEROCK_MANIFEST_FILE)
+    if text is None:
+        # _read_text_file collapses missing, empty, permission-denied and
+        # non-UTF8 into None, so ask the filesystem which of those it was.
+        #
+        # lstat, not exists(): exists() follows symlinks, so a DANGLING symlink
+        # at the manifest path answers False and would be reported as the
+        # documented classic absence. A dangling symlink is a present directory
+        # entry on a damaged install, which is exactly the "invalid" case. lstat
+        # answers "is there an entry here", which is the question being asked.
+        try:
+            THEROCK_MANIFEST_FILE.lstat()
+            present = True
+        except FileNotFoundError:
+            present = False
+        except OSError as exc:
+            # Cannot even stat it. That is NOT the documented classic absence
+            # -- a stale mount or an unreadable parent directory is a broken
+            # install, and calling it "absent" is the same conflation this
+            # function exists to undo. Only a path we can positively confirm is
+            # missing earns "absent".
+            return None, f"{THEROCK_MANIFEST_FILE} could not be checked ({exc})"
+        if present:
+            return None, f"{THEROCK_MANIFEST_FILE} present but empty or unreadable"
+        return None, None
+    try:
+        manifest = json.loads(text)
+    except ValueError as exc:
+        log.debug("unparseable TheRock manifest %s: %s", THEROCK_MANIFEST_FILE, exc)
+        return None, f"{THEROCK_MANIFEST_FILE} is not valid JSON ({exc})"
+    if not isinstance(manifest, dict):
+        return None, (
+            f"{THEROCK_MANIFEST_FILE} is a JSON {type(manifest).__name__}, "
+            "not an object"
+        )
+    return manifest, None
+
+
+def _distribution_version(name: str) -> str | None:
+    """``importlib.metadata`` version lookup that never raises."""
+    try:
+        import importlib.metadata
+
+        return importlib.metadata.version(name)
+    except Exception as exc:  # noqa: BLE001 -- defensive; never let env probe fail
+        log.debug("distribution %s version lookup failed: %s", name, exc)
+        return None
+
+
+def _rocm_version_from_torch() -> str | None:
+    """Recover the ROCm version torch was built against.
+
+    Last resort in the version chain. A ROCm torch build encodes it in the
+    local segment (``2.10.0+rocm7.15.0a20260716``) and exposes the plain
+    release via ``torch.version.hip``; the local segment is preferred
+    because it carries the full package version, not just ``7.15.0``.
+    Import-only -- reads attributes, never initialises a HIP context.
+    """
+    try:
+        import torch
+    except Exception as exc:  # noqa: BLE001 -- a broken torch must not fail the probe
+        log.debug("torch import for ROCm version fallback failed: %s", exc)
+        return None
+    match = _TORCH_ROCM_LOCAL_SEGMENT_RE.search(str(getattr(torch, "__version__", "")))
+    if match:
+        return match.group(1)
+    hip_version = getattr(getattr(torch, "version", None), "hip", None)
+    return str(hip_version) if hip_version else None
+
+
+#: Every key the schema-1.16 ``rocm`` block carries. One tuple so the two
+#: builders below cannot drift into different shapes.
+_ROCM_BLOCK_KEYS: tuple[str, ...] = (
+    "version",
+    "version_dev",
+    "kmd_version",
+    "version_source",
+    "root",
+    "lib_root",
+    "root_source",
+    "layout",
+)
+
+
+def _empty_rocm() -> dict[str, Any]:
+    """The ``rocm`` block with no version data but full schema-1.16 attribution.
+
+    Used by :func:`_disaster_snapshot`, whose contract is that a crash artifact
+    still carries the shape a 1.16 consumer expects. The attribution keys are
+    filled rather than nulled because root resolution happens at import time and
+    cannot fail, so even a crashed probe can say WHERE it looked -- which is the
+    whole reason those keys exist. Only the version reads, which is what the
+    crash prevented, come back ``None``.
+    """
+    return {
+        **dict.fromkeys(_ROCM_BLOCK_KEYS),
+        "root": str(ROCM_ROOT),
+        "lib_root": str(ROCM_LIB_ROOT),
+        "root_source": ROCM_ROOT_SOURCE,
+        "layout": ROCM_LAYOUT,
+    }
+
+
+def _null_rocm() -> dict[str, Any]:
+    """The same shape, but claiming nothing -- for back-filling an OLD snapshot.
+
+    Distinct from :func:`_empty_rocm` on purpose. That one reports THIS host's
+    resolved roots, which is correct for a local crash artifact and wrong for a
+    1.15 snapshot captured somewhere else: attributing the reader's ``/opt/rocm``
+    to another machine's capture would invent provenance rather than admit the
+    older producer never recorded any. ``None`` is the honest answer.
+    """
+    return dict.fromkeys(_ROCM_BLOCK_KEYS)
+
+
+def _empty_gemm_library() -> dict[str, Any]:
+    """The null-shaped hipBLASLt / rocBLAS block, including the 1.16 fields.
+
+    Both libraries share one shape (see ``_capture_rocblas``), so they share one
+    builder -- otherwise the next field added to the pair drifts into only one of
+    them, which is exactly how ``upstream_commit`` went missing from the disaster
+    path when schema 1.16 landed.
+    """
+    return {
+        "rocm_release_tweak": None,
+        "package_version": None,
+        "lib_hash": None,
+        "kernel_db_revision": None,
+        "upstream_commit": None,
+        "upstream_commit_matches_tweak": None,
+        "applied_prs": {},
+    }
+
+
+def _null_therock() -> dict[str, Any]:
+    """The ``therock`` shape for a snapshot that PREDATES the block.
+
+    Distinct from ``_empty_therock()`` for the same reason :func:`_null_rocm` is
+    distinct from :func:`_empty_rocm`: ``status="absent"`` is a positive claim
+    ("this install ships no manifest"), and a pre-1.16 producer made no such
+    claim -- it may well have been a wheel layout with a perfectly good manifest
+    it never looked for. Reporting ``absent`` plus the *reading* host's
+    ``manifest_path`` would invent both facts.
+
+    ``status="unknown"`` says only that the artifact predates the block.
+    """
+    return {**_empty_therock(), "status": "unknown", "manifest_path": None}
+
+
+def _empty_therock(status: str = "absent") -> dict[str, Any]:
+    """The ``therock`` block with no provenance.
+
+    ``status`` distinguishes *why* there is none: ``"absent"`` (no manifest,
+    the normal classic reading) or ``"invalid"`` (a manifest is there but
+    unusable). Same keys either way, so a consumer indexes one shape.
+    """
+    return {
+        "status": status,
+        "manifest_path": str(THEROCK_MANIFEST_FILE),
+        "rocm_version": None,
+        "rocm_package_version": None,
+        "the_rock_commit": None,
+        "github_run_id": None,
+        "github_job": None,
+        "gemm_libraries_commit": None,
+        "submodules": [],
+    }
+
+
+def _capture_therock(
+    manifest: dict[str, Any] | None,
+    reasons: list[str] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Record TheRock build provenance from the wheel-layout manifest.
+
+    ``status="absent"`` is a documented absence, not a partial: the classic
+    layout has no manifest and never will, so that is the expected reading on
+    the installs most customers run.
+
+    ``status="invalid"`` is the opposite -- a manifest exists but is unusable --
+    and DOES raise a partial reason, because on a wheel install this block is
+    the only source of the full 40-char GEMM pin, so losing it quietly would
+    hide the very evidence the block was added for. ``error`` carries that
+    detail from :func:`_read_therock_manifest`; ``reasons`` is optional so
+    tests and direct callers can inspect the shape without one.
+
+    Where the manifest IS usable it is strictly richer than the classic header
+    parse. ``hipblaslt-version.h`` yields a truncated tweak (measured 10 chars
+    on ROCm 7.2.4, and the field is documented as 7-12); the manifest carries
+    the full 40-char pin of the same commit, plus build provenance the headers
+    have no equivalent for (``the_rock_commit``, ``github_run_id``) and any
+    patches applied on top of each upstream pin.
+    """
+    if error is not None:
+        if reasons is not None:
+            reasons.append(f"therock: {error}")
+        return _empty_therock("invalid")
+    if manifest is None:
+        return _empty_therock()
+
+    submodules: list[dict[str, Any]] = []
+    gemm_commit: str | None = None
+    raw_submodules = manifest.get("submodules")
+    # Malformed shapes are counted, not swallowed. `submodules` is provenance,
+    # so under-reporting what the manifest listed is its own failure: an entry
+    # kept with `name: null` is visibly unidentifiable, whereas a dropped entry
+    # is indistinguishable from a manifest that never listed it. Consumers that
+    # key by name (and the `gemm_libraries_commit` lookup below, which can only
+    # match a real name) are unaffected either way, so the reason is what makes
+    # the difference actionable.
+    malformed_entries = 0
+    unnamed_entries = 0
+    unpinned_entries = 0
+    if raw_submodules is not None and not isinstance(raw_submodules, list):
+        # Distinct from "no submodules": the key was there and unusable.
+        malformed_entries += 1
+    for entry in raw_submodules if isinstance(raw_submodules, list) else []:
+        if not isinstance(entry, dict):
+            malformed_entries += 1
+            continue
+        name = _clean_manifest_string(entry.get("submodule_name"))
+        if name is None:
+            unnamed_entries += 1
+        # A pin that is not a full SHA is dropped rather than reported, because
+        # unlike `name` this field makes a verifiable claim -- someone can check
+        # out `pin_sha` -- and a half-valid commit is worse than a null one. The
+        # count below is what keeps it from being a silent drop.
+        pin_sha = _clean_manifest_pin(entry.get("pin_sha"))
+        if pin_sha is None:
+            unpinned_entries += 1
+        patches = entry.get("patches")
+        submodules.append(
+            {
+                "name": name,
+                "url": _clean_manifest_string(entry.get("submodule_url")),
+                "pin_sha": pin_sha,
+                # Patches applied on top of the pin: a non-empty list means
+                # the built source is NOT what that commit alone contains.
+                "patches": patches if isinstance(patches, list) else [],
+            }
+        )
+        if name == THEROCK_GEMM_SUBMODULE:
+            gemm_commit = pin_sha
+
+    if reasons is not None and (malformed_entries or unnamed_entries or unpinned_entries):
+        reasons.append(
+            f"therock.submodules: {malformed_entries} unusable, "
+            f"{unnamed_entries} unnamed and {unpinned_entries} without a "
+            f"full 40-char pin_sha in {THEROCK_MANIFEST_FILE}"
+        )
+
+    return {
+        "status": "present",
+        "manifest_path": str(THEROCK_MANIFEST_FILE),
+        "rocm_version": _clean_manifest_string(manifest.get("rocm_version")),
+        "rocm_package_version": _clean_manifest_string(
+            manifest.get("rocm_package_version")
+        ),
+        "the_rock_commit": _clean_manifest_string(manifest.get("the_rock_commit")),
+        "github_run_id": _clean_manifest_string(manifest.get("github_run_id")),
+        "github_job": _clean_manifest_string(manifest.get("github_job")),
+        # Promoted out of `submodules` because this is the one the GEMM
+        # libraries' version tweak truncates -- see _gemm_provenance_matches.
+        "gemm_libraries_commit": gemm_commit,
+        "submodules": submodules,
+    }
+
+
+def _gemm_provenance_matches(tweak: str | None, manifest_sha: str | None) -> bool | None:
+    """Cross-check a header tweak against the manifest's monorepo pin.
+
+    Returns ``None`` when either side is absent -- which today is *every*
+    real image, because the classic layout has headers but no manifest and
+    the wheel layout has a manifest but no headers. The check exists for
+    the devel-wheel case where both ship, and to catch a mis-parse from
+    either direction if that combination becomes common.
+
+    Compared by prefix at the tweak's own length rather than a fixed 8
+    characters: the tweak is a short hash of unspecified width (measured 10
+    on ROCm 7.2.4's hipblaslt-version.h).
+
+    ``None`` also when the tweak is not a plausible abbreviated SHA. The header
+    regex accepts any ``[A-Za-z0-9_.+-]`` token, because that is what the
+    reported ``version_tweak`` field should carry verbatim -- but a *comparison*
+    needs both sides valid or its boolean means nothing. Two concrete ways it
+    lied: a one-character tweak prefix-matches roughly one manifest SHA in
+    sixteen and reports ``True`` off almost no evidence, and a non-hex build
+    string (``unknown``, ``dirty``) reported ``False`` -- a positive claim of
+    *mismatch* -- when the honest answer is "not comparable". Bounded at 7-12
+    to match the documented width, mirroring the 7-40 bound the CK commit
+    regex above already applies for the same reason.
+    """
+    if not tweak or not manifest_sha:
+        return None
+    if not _GEMM_TWEAK_RE.fullmatch(tweak):
+        log.debug("hipblaslt/rocblas tweak %r is not an abbreviated SHA", tweak)
+        return None
+    return manifest_sha.lower().startswith(tweak.lower())
+
+
+def _capture_rocm_version_files(
+    reasons: list[str], manifest: dict[str, Any] | None = None
+) -> dict[str, str | None]:
+    """Read ROCm version markers, falling back through non-file sources.
 
     These are explicit reads (not via RDHC) so that ``rocm.version`` is
-    populated even when RDHC is unavailable. All three keys are always
-    present; missing files yield ``None`` and append a reason.
+    populated even when RDHC is unavailable. Every key is always present;
+    an unresolvable value yields ``None`` and appends a reason.
+
+    ``.info/version`` exists in BOTH layouts (the wheel ships it under
+    ``_rocm_sdk_core``), so the fallbacks below are for genuinely stripped
+    installs rather than for wheels per se. They are ordered most to least
+    authoritative: the manifest is generated by the build, the pip metadata
+    is what was installed, and torch's local version segment merely records
+    what torch was compiled against.
+
+    ``version_source`` makes the answer attributable -- reporting ``7.15.0``
+    from a file and inferring it from a torch wheel are not equally strong
+    claims, and before #381 they were indistinguishable.
+
+    The two ``.info`` markers are read with ``rocm_paths.read_version_marker``,
+    not the local ``_read_text_file``, because those same two files decide
+    whether an autodetected ``/opt/rocm`` outranks an importable wheel. Reading
+    them by a different rule than discovery validated them by is what lets a
+    marker be accepted as evidence of an install and then reported as ``None``
+    here -- ``rocm.version: null`` with ``root_source: "opt_rocm"`` on a box
+    whose wheel install is fine. ``kmd_version`` is not a discovery marker and
+    keeps the general reader.
     """
-    block = {
-        "version": _read_text_file(ROCM_VERSION_FILE),
-        "version_dev": _read_text_file(ROCM_VERSION_DEV_FILE),
+    version = read_version_marker(ROCM_VERSION_FILE)
+    version_source: str | None = "version_file" if version else None
+
+    if version is None and manifest is not None:
+        version = _clean_manifest_string(manifest.get("rocm_version"))
+        version_source = "therock_manifest" if version else None
+    # Each step below assigns into ``version`` only once its candidate is known
+    # good. Assigning first and testing after would leave a falsy-but-not-None
+    # value (an empty or whitespace-only pip version) in ``version``: the guard
+    # on the NEXT step tests ``is None``, so the remaining fallbacks would be
+    # skipped, ``version_source`` would stay unset, and the reason loop below
+    # (which also tests ``is None``) would append nothing -- emitting
+    # ``version: ""`` with ``version_source: null`` and no explanation, the
+    # unattributable shape schema 1.16 exists to eliminate.
+    #
+    # These two sources are also the only ones in the chain that are not
+    # already normalised (``read_version_marker`` and ``_clean_manifest_string``
+    # both strip and reject empties), so a "  " out of importlib.metadata would
+    # otherwise be truthy and reported verbatim.
+    if version is None:
+        for distribution in ("rocm", "rocm-sdk-core"):
+            candidate = (_distribution_version(distribution) or "").strip()
+            if candidate:
+                version, version_source = candidate, f"pip:{distribution}"
+                break
+    if version is None:
+        candidate = (_rocm_version_from_torch() or "").strip()
+        if candidate:
+            version, version_source = candidate, "torch"
+
+    version_dev = read_version_marker(ROCM_VERSION_DEV_FILE)
+    if version_dev is None and manifest is not None:
+        # The manifest's package version is the wheel-layout analogue of
+        # .info/version-dev: the precise build, not the release tag.
+        version_dev = _clean_manifest_string(manifest.get("rocm_package_version"))
+
+    block: dict[str, str | None] = {
+        "version": version,
+        "version_dev": version_dev,
         "kmd_version": _read_text_file(KMD_VERSION_FILE),
     }
-    paths = {
-        "version": ROCM_VERSION_FILE,
-        "version_dev": ROCM_VERSION_DEV_FILE,
-        "kmd_version": KMD_VERSION_FILE,
+    # Note: both readers return None for missing, empty, permission denied,
+    # AND non-utf8 cases. Reason wording covers all four so the operator does
+    # not assume "missing" when the file is just empty.
+    unresolved = {
+        "version": f"no version from {ROCM_VERSION_FILE}, TheRock manifest, "
+        "pip metadata, or torch",
+        "version_dev": f"{ROCM_VERSION_DEV_FILE} missing, empty, or unreadable",
+        "kmd_version": f"{KMD_VERSION_FILE} missing, empty, or unreadable",
     }
-    # Note: _read_text_file returns None for missing, empty, permission
-    # denied, AND non-utf8 cases. Reason wording covers all four so the
-    # operator does not assume "missing" when the file is just empty.
     for key, value in block.items():
         if value is None:
-            reasons.append(
-                f"rocm.{key}: {paths[key]} missing, empty, or unreadable"
-            )
+            reasons.append(f"rocm.{key}: {unresolved[key]}")
+
+    # Attribution, appended after the reason loop so these never count as
+    # missing data: they are always populated and describe the lookup itself.
+    block["version_source"] = version_source
+    block["root"] = str(ROCM_ROOT)
+    block["lib_root"] = str(ROCM_LIB_ROOT)
+    block["root_source"] = ROCM_ROOT_SOURCE
+    block["layout"] = ROCM_LAYOUT
     return block
+
+
+def _entry_kind(path: Path) -> str:
+    """``"file"``, ``"dir"`` or ``"other"`` -- and raises ``OSError`` if unreadable.
+
+    Deliberately NOT ``Path.is_file()`` / ``Path.is_dir()``. Since Python 3.14
+    (CPython gh-101357) those return ``False`` for **any** ``OSError`` rather
+    than raising for some kinds and suppressing others, and the pathlib docs
+    now name ``stat()`` as the way to tell "not a file" from "cannot be read".
+
+    That distinction is load-bearing for the kernel-database fingerprints. They
+    are compared across hosts, so an entry that cannot be classified has to
+    invalidate the whole value; a ``False`` makes it indistinguishable from an
+    entry that is simply not a kernel file, which silently converts "an
+    incomplete enumeration invalidates the fingerprint" back into "omit it and
+    publish a confident digest over whatever did read". Those call sites already
+    catch ``OSError`` to invalidate -- on 3.14 the exception just stopped
+    arriving, and this PR is what puts 3.14 in the support matrix.
+
+    ``stat()`` behaves identically on every version we support, so this needs no
+    version check. Callers that legitimately tolerate an ABSENT path still catch
+    ``FileNotFoundError`` themselves: absent is a layout, unreadable is a
+    failure.
+    """
+    mode = path.stat().st_mode
+    if stat_module.S_ISREG(mode):
+        return "file"
+    if stat_module.S_ISDIR(mode):
+        return "dir"
+    return "other"
 
 
 def _read_text_file(path: Path) -> str | None:
@@ -3123,11 +3685,21 @@ _CXX_DEFINE_RE = re.compile(r"-D([A-Za-z_][A-Za-z0-9_]*)(?:=([^\s,]+))?")
 _AOTRITON_VERSION_RE = re.compile(r"libaotriton_v2\.so\.(\d+\.\d+\.\d+)$")
 
 
-def _capture_hipblaslt(reasons: list[str]) -> dict[str, Any]:
+def _capture_hipblaslt(
+    reasons: list[str], gemm_libraries_commit: str | None = None
+) -> dict[str, Any]:
     """Capture hipBLASLt build identity.
 
     Goal: catch GEMM kernel library drift across docker images / conda
     envs / venvs. See issue #147 motivation.
+
+    ``upstream_commit`` (schema 1.16, issue #381) carries the full 40-char
+    ``rocm-libraries`` pin from TheRock's manifest when one is present. It
+    matters most on a wheel-layout install, where the version header is a
+    devel-only file that runtime images do not ship: without it the
+    hipBLASLt provenance -- core evidence in the NaN escalations -- would
+    read ``null`` there. ``None`` on a classic install is expected, not a
+    fallback: that layout has no manifest and the header supplies identity.
 
     NOTE on ``rocm_release_tweak`` vs ``commit``: AMD sets
     ``HIPBLASLT_VERSION_TWEAK`` to the **ROCm release identifier**, not
@@ -3158,6 +3730,13 @@ def _capture_hipblaslt(reasons: list[str]) -> dict[str, Any]:
         "package_version": package_version,
         "lib_hash": lib_hash,
         "kernel_db_revision": kernel_db_revision,
+        "upstream_commit": gemm_libraries_commit,
+        # None whenever either side is absent, which is every layout shipping
+        # only one of the two sources. False is the interesting value: the
+        # header and the manifest disagree about what was built.
+        "upstream_commit_matches_tweak": _gemm_provenance_matches(
+            rocm_release_tweak, gemm_libraries_commit
+        ),
         "applied_prs": {},
     }
     # Distinguish "header file unreadable" from "header readable but the
@@ -3368,28 +3947,52 @@ def _kernel_db_filename_fingerprint(
     of work and add seconds; the filename set already tracks the
     meaningful drift.
 
-    Assumes a **flat layout** -- only the top-level directory is scanned
-    (no recursion). Verified flat on ROCm 5.x / 6.x / 7.x for both
-    ``/opt/rocm/lib/hipblaslt/library/`` and
-    ``/opt/rocm/lib/rocblas/library/``. If a future release switches to
-    per-gfx-target subdirectories, swap ``iterdir()`` for ``rglob("*")``
-    -- but doing so unconditionally would also pull in unrelated cache
-    files some packagers drop alongside the kernel DB.
+    Two layouts are scanned, because ROCm ships both:
+
+    * **flat** -- every kernel file directly in ``<lib>/hipblaslt/library/``.
+      Verified on ROCm 5.x / 6.x / 7.x classic installs (2932 entries on
+      7.2.4).
+    * **per-gfx-target subdirectories** -- ``library/gfx950/...``, which is
+      what the TheRock wheel layout ships (629 entries under ``gfx950`` on
+      7.15.0a20260716, with the parent holding nothing but that directory).
+      Files found there are recorded as ``<arch>/<filename>`` so the same
+      kernel appearing under two targets stays distinguishable.
+
+    Recursion is deliberately limited to one level of ``gfx*``-named
+    directories rather than a blanket ``rglob``: packagers drop unrelated
+    cache files alongside a kernel DB, and hashing those would make the
+    fingerprint drift for reasons that have nothing to do with the kernels.
+
+    A flat directory yields exactly the same digest as before this handled
+    subdirectories, so classic installs see no fingerprint churn.
     """
-    if not directory.is_dir():
+    if not safe_is_dir(directory):
         return None
     try:
-        names = sorted(
+        # _entry_kind, not p.is_file(): on Python 3.14 that returns False for an
+        # unreadable entry instead of raising, so the invalidation below would
+        # never fire and a subset would be hashed as if complete.
+        names = [
             p.name
             for p in directory.iterdir()
-            if p.is_file() and p.suffix in suffixes
-        )
+            if _entry_kind(p) == "file" and p.suffix in suffixes
+        ]
+        for arch_dir in directory.iterdir():
+            if not _GFX_ARCH_RE.fullmatch(arch_dir.name):
+                continue
+            if _entry_kind(arch_dir) != "dir":
+                continue
+            names.extend(
+                f"{arch_dir.name}/{p.name}"
+                for p in arch_dir.iterdir()
+                if _entry_kind(p) == "file" and p.suffix in suffixes
+            )
     except OSError as exc:
         log.debug("kernel-db dir listing failed for %s: %s", directory, exc)
         return None
     if not names:
         return None
-    digest = hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256("\n".join(sorted(names)).encode("utf-8")).hexdigest()
     return f"filenames-sha256:{digest}"
 
 
@@ -4065,7 +4668,9 @@ def _capture_python_package_commit(
 # ---------------------------------------------------------------------------
 
 
-def _capture_rocblas(reasons: list[str]) -> dict[str, Any]:
+def _capture_rocblas(
+    reasons: list[str], gemm_libraries_commit: str | None = None
+) -> dict[str, Any]:
     """Capture rocBLAS build identity.
 
     Same shape and contract as ``_capture_hipblaslt`` -- two trials with
@@ -4076,9 +4681,11 @@ def _capture_rocblas(reasons: list[str]) -> dict[str, Any]:
 
     See ``_capture_hipblaslt`` for the ``rocm_release_tweak`` vs
     upstream-commit distinction -- ``ROCBLAS_VERSION_TWEAK`` is the
-    same ROCm-release-shared identifier, NOT a per-rocBLAS commit.
+    same ROCm-release-shared identifier, NOT a per-rocBLAS commit -- and
+    for what ``upstream_commit`` records. rocBLAS shares hipBLASLt's pin
+    because both now live in the ``rocm-libraries`` monorepo.
 
-    The header lives at ``/opt/rocm/include/rocblas/internal/rocblas-version.h``
+    The header lives at ``<rocm-root>/include/rocblas/internal/rocblas-version.h``
     (note the ``internal/`` subdir, unlike hipblaslt). It ships with
     ``rocblas-dev``; the runtime lib + Tensile DB ship with the runtime
     ``rocblas`` package and are usually present even in stripped images.
@@ -4100,6 +4707,10 @@ def _capture_rocblas(reasons: list[str]) -> dict[str, Any]:
         "package_version": package_version,
         "lib_hash": lib_hash,
         "kernel_db_revision": kernel_db_revision,
+        "upstream_commit": gemm_libraries_commit,
+        "upstream_commit_matches_tweak": _gemm_provenance_matches(
+            rocm_release_tweak, gemm_libraries_commit
+        ),
         "applied_prs": {},
     }
     header_unreadable = header_text is None
@@ -4592,9 +5203,13 @@ def _capture_tensile(reasons: list[str]) -> dict[str, Any]:
         [HIPBLASLT_TENSILE_DIR, ROCBLAS_TENSILE_DIR]
     )
     if combined_hash is None:
+        # "or unreadable" is load-bearing: the fingerprint is now invalidated by
+        # an incomplete listing as well as by an empty one, and a reader chasing
+        # this reason needs to know a permissions problem produces it too.
         reasons.append(
-            "tensile.kernel_db_combined_hash: no kernel files under "
-            f"{HIPBLASLT_TENSILE_DIR} or {ROCBLAS_TENSILE_DIR}"
+            "tensile.kernel_db_combined_hash: no kernel files found, or the "
+            f"listing was incomplete, under {HIPBLASLT_TENSILE_DIR} or "
+            f"{ROCBLAS_TENSILE_DIR}"
         )
     return {
         "package_version": package_version,
@@ -4615,23 +5230,78 @@ def _combined_kernel_db_fingerprint(
     Using ``d.name`` directly would collapse to ``"library"`` for both
     hipBLASLt and rocBLAS -- ``d.parent.name`` is what makes this work.
 
-    Returns ``None`` only when *every* input directory is missing or
-    empty.
+    Also descends ONE level of ``gfx*``-named subdirectories, because the
+    TheRock wheel layout nests the database per target (``library/gfx950/...``)
+    and ``library/`` there contains *only* those directories. Without this the
+    field was ``null`` with a partial reason on a wheel install whose kernel
+    database is perfectly present -- the same nesting the catalog menu already
+    handles, in the one other place that reads this tree (#387).
+
+    Nested entries are tagged ``<library>/<arch>/<filename>``, so a kernel
+    present for two targets stays distinguishable. A flat (classic) directory
+    yields byte-identical output to before: the nested branch adds nothing when
+    there are no ``gfx*`` subdirectories.
+
+    Returns ``None`` when every input directory is missing or empty, and *also*
+    whenever enumeration was incomplete -- a directory that exists but cannot be
+    listed, or an entry that cannot be stat'ed, invalidates the whole answer
+    rather than being skipped (#387, 9th pass).
+
+    Skipping was the wrong failure mode for a *fingerprint* specifically. The
+    value's only use is comparison: two hosts agree or they do not. Hashing the
+    subset that happened to be readable yields a confident-looking digest over
+    an unknown fraction of the database, so two identical installs compare
+    unequal because one had a permissions problem -- and because the result is
+    non-null, the caller records no partial reason to explain it. A missing
+    directory is different and still skipped: only hipBLASLt being installed is
+    a normal layout, not a failure to read one.
     """
     pairs: list[str] = []
     for d in directories:
-        if not d.is_dir():
+        # ABSENT is a layout (only hipBLASLt installed) and is skipped;
+        # UNREADABLE is a failure to read one and must invalidate. safe_is_dir
+        # collapses both to False, so the two are told apart by stat: it is the
+        # same distinction the loop below makes, applied to the root itself.
+        try:
+            if _entry_kind(d) != "dir":
+                continue
+        except FileNotFoundError:
             continue
+        except NotADirectoryError:
+            continue
+        except OSError as exc:
+            log.debug("combined kernel-db root unreadable: %s (%s)", d, exc)
+            return None
         # `d` is e.g. /opt/rocm/lib/hipblaslt/library; the meaningful
         # tag is the library name one level up.
         tag = d.parent.name or d.name
         try:
-            for p in d.iterdir():
-                if p.is_file() and p.suffix in suffixes:
-                    pairs.append(f"{tag}/{p.name}")
+            entries = list(d.iterdir())
         except OSError as exc:
             log.debug("combined kernel-db listing failed for %s: %s", d, exc)
-            continue
+            return None
+        for p in entries:
+            # _entry_kind rather than is_file()/is_dir(): those suppress every
+            # OSError on Python 3.14, which would turn each `return None` below
+            # into a silent `continue`.
+            try:
+                kind = _entry_kind(p)
+                if kind == "file" and p.suffix in suffixes:
+                    pairs.append(f"{tag}/{p.name}")
+                    continue
+                if not (_GFX_ARCH_RE.fullmatch(p.name) and kind == "dir"):
+                    continue
+                nested = list(p.iterdir())
+            except OSError as exc:
+                log.debug("combined kernel-db entry unreadable: %s (%s)", p, exc)
+                return None
+            for q in nested:
+                try:
+                    if _entry_kind(q) == "file" and q.suffix in suffixes:
+                        pairs.append(f"{tag}/{p.name}/{q.name}")
+                except OSError as exc:
+                    log.debug("combined kernel-db entry unreadable: %s (%s)", q, exc)
+                    return None
     if not pairs:
         return None
     pairs.sort()
@@ -4740,7 +5410,14 @@ def _enumerate_catalog_dir(
     as an entry so the hashing step below fails soft (``sha256=None``)
     and correctly downgrades the block to ``partial`` with a reason,
     instead of vanishing from ``files`` and leaving a clean ``status:
-    "ok"`` that silently omitted it. Only entries confirmed (not merely
+    "ok"`` that silently omitted it.
+
+    The same rule covers the nested ``gfx*`` directories of the wheel layout
+    (#387): a confirmed arch directory that cannot be listed hides EVERY kernel
+    for that target, so it forces ``status="partial"``, names the arch in
+    ``reason``, and suppresses ``combined_content_hash``. Emitting a hash there
+    would fingerprint the archs that happened to list -- a clean-looking value
+    for a different catalog than the one on disk. Only entries confirmed (not merely
     assumed) to be directories are excluded.
     """
     base = _empty_menu()
@@ -4755,8 +5432,48 @@ def _enumerate_catalog_dir(
         base["reason"] = f"{kind} dir not listable: {directory} ({exc})"
         return base
 
-    entries: list[tuple[Path, str | None, bool]] = []
-    for p in raw:
+    # The TheRock wheel layout nests the catalog one level deeper, under a
+    # per-gfx-target directory (``library/gfx950/...``), where the classic
+    # layout is flat. Scan both, recording nested files as ``<arch>/<name>``
+    # so a kernel present for two targets stays distinguishable. Limited to
+    # one level of ``gfx*``-named directories on purpose -- see
+    # ``_kernel_db_filename_fingerprint`` for why a blanket rglob is wrong.
+    candidates: list[tuple[Path, str]] = [(p, p.name) for p in raw]
+    unlistable_arch_dirs: list[str] = []
+    for entry in raw:
+        if not _GFX_ARCH_RE.fullmatch(entry.name):
+            continue
+        try:
+            # _entry_kind, not entry.is_dir(): on Python 3.14 the latter answers
+            # False for an unreadable entry, so this except never fires and a
+            # gfx directory we cannot stat is dropped while the block still
+            # reports ok.
+            is_arch_dir = _entry_kind(entry) == "dir"
+        except OSError:
+            # Cannot confirm directory-ness (broken symlink, permission
+            # denied). The entry is already in ``candidates`` under its flat
+            # name, where the hashing loop below fails soft and downgrades the
+            # block -- the same contract the main loop documents, so there is
+            # nothing extra to record here.
+            continue
+        if not is_arch_dir:
+            continue
+        try:
+            nested = list(entry.iterdir())
+        except OSError as exc:
+            # A CONFIRMED arch directory we cannot read hides every kernel
+            # under that target. Skipping it silently would leave
+            # ``status: "ok"`` and a combined hash computed over the archs that
+            # did list -- a clean-looking fingerprint of a different catalog
+            # than the one on disk, which is exactly the partial-not-silent
+            # failure this function's docstring rules out.
+            log.debug("%s arch dir not listable: %s (%s)", kind, entry, exc)
+            unlistable_arch_dirs.append(entry.name)
+            continue
+        candidates.extend((p, f"{entry.name}/{p.name}") for p in nested)
+
+    entries: list[tuple[Path, str, str | None, bool]] = []
+    for p, display_name in candidates:
         include, suffix_label, is_logic = classify(p.name)
         if not include:
             continue
@@ -4770,12 +5487,12 @@ def _enumerate_catalog_dir(
             is_dir = False
         if is_dir:
             continue
-        entries.append((p, suffix_label, is_logic))
+        entries.append((p, display_name, suffix_label, is_logic))
 
-    entries.sort(key=lambda t: t[0].name)
+    entries.sort(key=lambda t: t[1])
     files: list[dict[str, Any]] = []
     any_hash_failed = False
-    for p, suffix_label, is_logic in entries:
+    for p, display_name, suffix_label, is_logic in entries:
         sha = _hash_file_path(p)
         if sha is None:
             any_hash_failed = True
@@ -4785,7 +5502,7 @@ def _enumerate_catalog_dir(
             size = None
         files.append(
             {
-                "name": p.name,
+                "name": display_name,
                 "size": size,
                 "suffix": suffix_label,
                 "is_logic": is_logic,
@@ -4801,7 +5518,19 @@ def _enumerate_catalog_dir(
     # EVERY file hashed cleanly: a value computed over a missing hash is
     # not a true content fingerprint (it would hash the literal "None"),
     # so it must be ``None`` rather than a misleading ``content-sha256:``.
+    # Two independent ways the catalog can be incomplete, reported separately
+    # so an operator can tell "a file would not hash" from "a whole gfx target
+    # is missing from this listing".
+    degraded_reasons: list[str] = []
     if any_hash_failed:
+        degraded_reasons.append(f"one or more {kind} files were unreadable")
+    if unlistable_arch_dirs:
+        degraded_reasons.append(
+            f"{kind} arch dir(s) not listable, so their kernels are absent from "
+            f"this catalog: {', '.join(sorted(unlistable_arch_dirs))}"
+        )
+
+    if degraded_reasons:
         combined_content_hash = None
     else:
         pair_lines = [f"{f['name']}\t{f['sha256']}" for f in files]
@@ -4810,12 +5539,8 @@ def _enumerate_catalog_dir(
 
     base.update(
         {
-            "status": "partial" if any_hash_failed else "ok",
-            "reason": (
-                f"one or more {kind} files were unreadable"
-                if any_hash_failed
-                else None
-            ),
+            "status": "partial" if degraded_reasons else "ok",
+            "reason": "; ".join(degraded_reasons) if degraded_reasons else None,
             "logic_file_count": logic_count,
             "file_count": len(files),
             "gfx_arch_coverage": _extract_gfx_archs(names),
