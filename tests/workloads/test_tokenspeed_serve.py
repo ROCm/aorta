@@ -1430,3 +1430,75 @@ def test_the_in_container_audit_rejects_a_negative_failure_count(tmp_path):
     """
     verdict = _run_script_audit(tmp_path, {"completed": 32, "failed": -1})
     assert verdict.startswith("SHORTFALL"), verdict
+
+
+def test_a_failed_container_removal_is_reported(tmp_path, monkeypatch, caplog):
+    """`docker rm -f` reports a daemon or permission failure by exit code.
+
+    Nothing raises, so checking only for exceptions meant the one outcome worth
+    knowing about -- the container is still running and still holding the GPU --
+    produced no output at all, while the helper's docstring promised cleanup
+    failures were logged. The next cell then fails for a reason recorded nowhere.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    wl._run_token = "tok"
+
+    def fake_run(argv, **kwargs):
+        assert argv[:3] == ["docker", "rm", "-f"]
+        return subprocess.CompletedProcess(
+            argv, 1, stdout="", stderr="permission denied while trying to connect"
+        )
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    with caplog.at_level("DEBUG"):
+        wl._force_remove_container()
+
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+    logged = caplog.text
+    assert "permission denied" in logged, "the docker stderr is what makes it actionable"
+    assert wl._container_name() in logged, "the name is needed to remove it by hand"
+
+
+def test_an_already_gone_container_is_not_reported_as_a_failure(tmp_path, monkeypatch, caplog):
+    """`--rm` usually gets there first, and a trial can fail before the container
+    exists at all. Warning on that would make the real warning above noise."""
+    wl = _make(tmp_path)
+    wl.setup()
+    wl._run_token = "tok"
+
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 1, stdout="", stderr=f"Error: No such container: {wl._container_name()}"
+        ),
+    )
+    with caplog.at_level("DEBUG"):
+        wl._force_remove_container()
+
+    assert not any(r.levelname == "WARNING" for r in caplog.records), caplog.text
+
+
+def test_request_counters_are_published_as_sums_not_also_as_means(tmp_path, monkeypatch):
+    """`completed` and `failed` are per-step counters, not measurements.
+
+    Generic aggregation published them as means beside the `completed_total` /
+    `failed_total` sums, so a three-step 32-prompt trial reported `completed: 32`
+    and `completed_total: 96` in the same performance table -- which reads as a
+    discrepancy rather than as two units. The mean is also the misleading one: it
+    hides a single bad step among good ones, which is why the sums exist.
+    """
+    wl = _make(tmp_path, num_prompts=32, steps=3)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_bench_doc(completed=32, failed=0) for _ in range(3)],
+    )
+    metrics = wl.run().metrics
+
+    assert metrics["completed_total"] == 96
+    assert metrics["failed_total"] == 0
+    assert "completed" not in metrics, "the per-step mean is still published"
+    assert "failed" not in metrics, "the per-step mean is still published"

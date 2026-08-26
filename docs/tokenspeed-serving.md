@@ -225,6 +225,15 @@ re-checks independently, so the guard survives someone editing the script's exit
 codes. This is the same trap `tokenspeed_kernel.benchmark --verify` sets for
 [the kernel probe](tokenspeed.md#the-verdict-does-not-come-from-the-exit-code).
 
+`completed` and `failed` are reported as `completed_total` / `failed_total` —
+sums across the trial's measured steps, since "how many requests did this trial
+serve" is the question and a mean hides one bad step among good ones. The raw
+per-step counters are deliberately kept out of the metric aggregate: published as
+means they would sit beside the sums in `perf.md`, so a three-step 32-prompt
+trial would show `completed: 32` and `completed_total: 96` in the same table,
+which reads as a discrepancy rather than as two units. Per-step counts stay in
+the trial JSON, where a shortfall is attributable to the step that caused it.
+
 The comparison is against zero exactly, in both layers. A negative `failed` is
 not a run that did better than none-failed; it is an export that cannot be
 believed, and reading it as "no failures" would admit `completed ==
@@ -400,6 +409,14 @@ restores the previous disposition and re-raises the signal at itself, so a
 supervisor still sees death by signal (exit 143) rather than a swallowed one. A
 SIGKILL still leaks the container, since no handler survives one, but the runner
 sends SIGTERM first and that is the window this uses.
+
+Removal failures are warned about with docker's exit code and stderr. `docker rm
+-f` reports an unreachable daemon or a permission problem by exit status rather
+than by raising, so checking only for exceptions meant the one outcome worth
+knowing about — the container is still up, still holding the GPU — was the one
+that produced no output. "No such container" is logged at debug instead: `--rm`
+usually gets there first, and a trial that failed before the container existed
+has nothing to leak.
 
 ### `docker_args` cannot displace a generated option
 

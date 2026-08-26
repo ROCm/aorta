@@ -164,7 +164,24 @@ _RESERVED_KEYS = frozenset({"steps"})
 # Dropped from the aggregate because this class already publishes the
 # authoritative value for each, and a duplicate only widens `perf.md`'s metric
 # table with a column that cannot vary within a cell.
-_EXPORT_ECHO_KEYS = frozenset({"num_prompts", "max_concurrency", "burstiness"})
+#
+# `completed` and `failed` are here for a sharper reason: they are per-step
+# request counters, and the generic aggregation below would publish them as
+# *means* alongside the `completed_total` / `failed_total` sums this class adds
+# deliberately. A run of three 32-prompt steps then reports `completed: 32` and
+# `completed_total: 96` side by side in the performance table, which reads as a
+# discrepancy rather than as two units, and the mean is the one that hides a
+# single bad step among good ones -- the exact thing the sums exist to avoid.
+# They stay in the per-step detail, where a shortfall is attributable to a step.
+_EXPORT_ECHO_KEYS = frozenset(
+    {
+        "num_prompts",
+        "max_concurrency",
+        "burstiness",
+        "completed",
+        "failed",
+    }
+)
 
 # The host/container contract. `_container_env` takes the union of this and the
 # values the workload actually set, because neither alone is enough: computing it
@@ -1125,6 +1142,28 @@ class TokenSpeedServeWorkload(Workload):
             return
         if proc.returncode == 0:
             log.info("tokenspeed_serve: removed orphaned container %s", name)
+            return
+        # A nonzero exit is how docker reports most of what can go wrong here --
+        # daemon unreachable, permission denied -- and none of it raises. Ignoring
+        # it meant the one outcome worth knowing about, a container that is still
+        # running and still holding the GPU, produced no output at all while the
+        # docstring promised cleanup failures were logged.
+        stderr = (proc.stderr or "").strip()
+        if "No such container" in stderr:
+            # Expected on the ordinary path: `--rm` already removed it, or the
+            # trial failed before the container was ever created. Not a failure
+            # to clean up, so not a warning -- there is nothing left to leak.
+            log.debug("tokenspeed_serve: no container %s to remove", name)
+            return
+        log.warning(
+            "tokenspeed_serve: could not remove container %s (docker rm -f exited "
+            "%d): %s -- it may still be running and holding the GPU; remove it "
+            "with `docker rm -f %s` before the next run",
+            name,
+            proc.returncode,
+            stderr or "(no stderr)",
+            name,
+        )
 
     def _collect_step_records(self) -> list[_StepRecord]:
         """Parse whatever the bench exported for this trial.
