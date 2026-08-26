@@ -312,12 +312,29 @@ def test_mitigation_env_is_forwarded_into_the_container(tmp_path):
     assert env["HSA_NO_SCRATCH_RECLAIM"] == "1"
 
 
-def test_mitigation_env_wins_over_workload_defaults(tmp_path):
-    wl = _make(tmp_path, _aorta_trial_env={"TS_NUM_PROMPTS": "999"})
+def test_mitigation_env_wins_over_unowned_tokenspeed_vars(tmp_path):
+    """A mitigation may still tune TokenSpeed itself -- the guard below is about
+    the host/container protocol, not about TS_* as a namespace."""
+    wl = _make(tmp_path, _aorta_trial_env={"TS_ATTENTION_BACKEND": "triton"})
     wl.setup()
     wl._run_token = "tok"
     wl._port, wl._control_port = 8000, 8001
-    assert wl._container_env()["TS_NUM_PROMPTS"] == "999"
+    assert wl._container_env()["TS_ATTENTION_BACKEND"] == "triton"
+
+
+@pytest.mark.parametrize("key", ["TS_NUM_PROMPTS", "TS_BENCH_STEPS", "TS_RUN_TOKEN", "TS_OUT_DIR"])
+def test_mitigation_cannot_redefine_the_host_container_protocol(tmp_path, key):
+    """The host computes its audit from its own num_prompts/steps/token and finds
+    the exports by globbing on that token. A mitigation that redefined any of
+    them would leave the container running one configuration while the host
+    audited another -- and the mismatch surfaces as a served-request shortfall on
+    a run that was actually healthy, or worse, as exports the host never finds."""
+    wl = _make(tmp_path, _aorta_trial_env={key: "999"})
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    with pytest.raises(ValueError, match=key):
+        wl._container_env()
 
 
 def test_cache_dirs_are_redirected_into_the_mount(tmp_path):
@@ -459,7 +476,7 @@ def test_scalars_are_averaged_across_steps(tmp_path, monkeypatch):
 
 
 def test_audit_counters_are_summed_not_averaged(tmp_path, monkeypatch):
-    """"How many requests did this trial serve" must not be hidden by a mean."""
+    """ "How many requests did this trial serve" must not be hidden by a mean."""
     wl = _make(tmp_path, steps=2, num_prompts=32)
     wl.setup()
     _stub_docker(wl, monkeypatch, docs=[_bench_doc(), _bench_doc()])
@@ -503,16 +520,20 @@ def test_ports_are_strings_so_perf_md_does_not_average_them(tmp_path, monkeypatc
 
 
 def test_non_finite_export_values_are_dropped(tmp_path, monkeypatch):
-    """NaN/inf do not round-trip through strict JSON, which matrix.json is."""
+    """NaN/inf do not round-trip through strict JSON, which matrix.json is.
+
+    Dropping is only the right response for a metric the verdict does not rest
+    on; a non-finite *core* metric fails the step instead (see the audit tests).
+    """
     doc = _bench_doc()
-    doc["median_ttft_ms"] = float("nan")
-    doc["output_throughput"] = float("inf")
+    doc["std_ttft_ms"] = float("nan")
+    doc["p99_itl_ms"] = float("inf")
     wl = _make(tmp_path)
     wl.setup()
     _stub_docker(wl, monkeypatch, docs=[doc])
     metrics = wl.run().metrics
-    assert "median_ttft_ms" not in metrics
-    assert "output_throughput" not in metrics
+    assert "std_ttft_ms" not in metrics
+    assert "p99_itl_ms" not in metrics
 
 
 def test_booleans_are_not_treated_as_metrics(tmp_path, monkeypatch):
@@ -527,16 +548,12 @@ def test_booleans_are_not_treated_as_metrics(tmp_path, monkeypatch):
 # ------------------------------------------------------ the silent-pass guard
 
 
-def test_failed_requests_fail_the_trial_even_when_the_container_exits_zero(
-    tmp_path, monkeypatch
-):
+def test_failed_requests_fail_the_trial_even_when_the_container_exits_zero(tmp_path, monkeypatch):
     """The core guard. `tokenspeed bench serve` returns 0 with failed>0, so
     trusting the exit code would publish throughput for a broken run."""
     wl = _make(tmp_path, num_prompts=32)
     wl.setup()
-    _stub_docker(
-        wl, monkeypatch, docs=[_bench_doc(completed=30, failed=2)], exit_code=0
-    )
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=30, failed=2)], exit_code=0)
     result = wl.run()
     assert result.passed is False
     reasons = {d["reason"] for d in result.failure_details}
@@ -550,14 +567,10 @@ def test_completed_shortfall_fails_the_trial(tmp_path, monkeypatch):
     _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=20, failed=0)])
     result = wl.run()
     assert result.passed is False
-    assert any(
-        d["reason"] == "served_request_shortfall" for d in result.failure_details
-    )
+    assert any(d["reason"] == "served_request_shortfall" for d in result.failure_details)
 
 
-def test_shortfall_still_measured_so_it_is_not_reported_as_did_not_run(
-    tmp_path, monkeypatch
-):
+def test_shortfall_still_measured_so_it_is_not_reported_as_did_not_run(tmp_path, monkeypatch):
     wl = _make(tmp_path, num_prompts=32)
     wl.setup()
     _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=30, failed=2)])
@@ -573,6 +586,77 @@ def test_unusable_counts_fail_the_trial(tmp_path, monkeypatch):
     result = wl.run()
     assert result.passed is False
     assert any(d["reason"] == "result_json_unusable" for d in result.failure_details)
+
+
+def test_an_export_with_only_request_counts_fails_the_trial(tmp_path, monkeypatch):
+    """Auditing the counters alone left a hole: an export carrying nothing but
+    completed/failed satisfied the shortfall check, and because the shipped
+    recipes gate on nothing, the cell went green having measured no duration, no
+    TTFT and no throughput."""
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[{"completed": 32, "failed": 0}])
+    result = wl.run()
+    assert result.passed is False
+    detail = next(d for d in result.failure_details if d["reason"] == "result_json_unusable")
+    for name in ("duration", "output_throughput", "median_ttft_ms"):
+        assert name in detail["detail"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "duration",
+        "output_throughput",
+        "request_throughput",
+        "total_token_throughput",
+        "mean_ttft_ms",
+        "median_ttft_ms",
+        "mean_tpot_ms",
+        "median_tpot_ms",
+    ],
+)
+def test_a_non_finite_core_metric_fails_the_trial(tmp_path, monkeypatch, name):
+    """A NaN here used to be dropped from the aggregate and otherwise ignored,
+    so a step that produced no usable measurement still passed."""
+    doc = _bench_doc()
+    doc[name] = float("nan")
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+    assert result.passed is False
+    assert any(
+        d["reason"] == "result_json_unusable" and name in d["detail"]
+        for d in result.failure_details
+    )
+
+
+def test_a_zero_length_step_fails_the_trial(tmp_path, monkeypatch):
+    """Whatever throughput a zero-duration step reported is an artefact."""
+    doc = _bench_doc(duration=0.0)
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+    assert result.passed is False
+    assert any(
+        d["reason"] == "result_json_unusable" and "duration" in d["detail"]
+        for d in result.failure_details
+    )
+
+
+def test_tpot_is_not_required_at_a_single_output_token(tmp_path, monkeypatch):
+    """TPOT averages inter-token gaps, so at output_len 1 there are none to
+    average and an absent value is correct rather than a fault. Requiring it
+    would fail a legitimate prefill-only recipe."""
+    doc = _bench_doc()
+    for key in ("mean_tpot_ms", "median_tpot_ms"):
+        doc.pop(key)
+    wl = _make(tmp_path, num_prompts=32, output_len=1)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    assert wl.run().passed is True
 
 
 # ------------------------------------------------------------ failure paths
@@ -686,9 +770,7 @@ def test_throughput_gate_breach_fails_the_trial(tmp_path, monkeypatch):
     _stub_docker(wl, monkeypatch, docs=[_bench_doc(throughput=3585.9)])
     result = wl.run()
     assert result.passed is False
-    breach = next(
-        d for d in result.failure_details if d["reason"] == "perf_gate_breached"
-    )
+    breach = next(d for d in result.failure_details if d["reason"] == "perf_gate_breached")
     assert breach["metric"] == "output_throughput"
     assert breach["bound"] == 10_000
 
@@ -805,3 +887,22 @@ def test_recipe_workload_config_is_accepted_by_the_workload(name, tmp_path):
         config["steps"] = cell.steps or recipe.steps
         config["work_dir"] = str(tmp_path / "work")
         TokenSpeedServeWorkload(config).setup()
+
+
+@pytest.mark.parametrize("name", _RECIPES)
+def test_recipe_image_is_digest_pinned(name):
+    """These recipes carry perf gates, so the image has to be content-addressed.
+    A registry can retarget a date tag, and a baseline blessed against one stack
+    would then be compared against another with nothing in the report saying so.
+    """
+    from aorta.triage.recipe import load_recipe
+
+    recipe = load_recipe(_recipe_dir() / name)
+    image = recipe.workload_config["image"]
+    assert "@sha256:" in image, f"{name}: image {image!r} is not digest-pinned"
+
+
+def test_the_default_image_is_digest_pinned():
+    """Same reasoning as the recipes, for anyone running the workload without
+    one -- and it keeps the comment above _DEFAULT_IMAGE honest."""
+    assert "@sha256:" in mod._DEFAULT_IMAGE

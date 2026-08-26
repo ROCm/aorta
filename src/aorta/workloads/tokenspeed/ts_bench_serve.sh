@@ -149,13 +149,25 @@ SRV_PID=""
 # teardown escalates to SIGKILL and leaves the next cell racing the kernel to
 # reclaim the KV cache -- an amount that scales with the model, so it bites on
 # big models first.
+
+# Liveness of the process *group*, not of its leader. `tokenspeed serve` is an
+# orchestrator: it forks the engine, the scheduler and the smg gateway into its
+# group, and they can outlive it. Checking the leader alone means the exact case
+# this teardown exists for -- children surviving the orchestrator -- reports
+# "already gone" and returns without signalling anything, leaving them holding
+# the GPU and the ports for the next cell in the matrix. `kill -0 -PGID`
+# succeeds while any member of the group survives.
+group_alive() {
+  kill -0 "-${1}" 2>/dev/null
+}
+
 teardown() {
   [ -n "${SRV_PID}" ] || return 0
-  kill -0 "${SRV_PID}" 2>/dev/null || return 0
+  group_alive "${SRV_PID}" || return 0
   echo "TS_BENCH_INFO: tearing down server pgid ${SRV_PID} (grace ${TEARDOWN_GRACE}s)"
   kill -TERM "-${SRV_PID}" 2>/dev/null
   for _ in $(seq 1 "${TEARDOWN_GRACE}"); do
-    kill -0 "${SRV_PID}" 2>/dev/null || {
+    group_alive "${SRV_PID}" || {
       echo "TS_BENCH_INFO: server exited cleanly on SIGTERM"
       return 0
     }
@@ -165,7 +177,21 @@ teardown() {
   kill -KILL "-${SRV_PID}" 2>/dev/null
   wait "${SRV_PID}" 2>/dev/null
 }
-trap teardown EXIT INT TERM
+
+# A bash trap handler returns to where the signal interrupted it, so sharing one
+# handler between EXIT and the signals would tear the server down and then carry
+# on benchmarking against a server that no longer exists -- writing exports the
+# host would then aggregate as if they were measurements. On the runner's SIGTERM
+# that continues until the escalation to SIGKILL. Signals therefore exit
+# explicitly, which re-enters teardown through EXIT; the guard above makes the
+# second call a no-op.
+on_signal() {
+  echo "TS_BENCH_INFO: received ${1}; aborting bench"
+  exit 143
+}
+trap teardown EXIT
+trap 'on_signal SIGINT' INT
+trap 'on_signal SIGTERM' TERM
 
 # `tokenspeed serve` is an orchestrator that starts the engine and the smg
 # gateway, then waits for the gateway to reach /readiness -- and that wait

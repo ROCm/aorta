@@ -27,7 +27,10 @@ trials: 1
 steps: 3
 
 workload_config:
-  image: lightseekorg/tokenspeed-amd:nightly-20260714
+  # Digest, not the :nightly-20260714 tag it came from: a moving tag would
+  # let the image change underneath a blessed baseline while the recipe still
+  # read as pinned, and the perf gates below would then compare across stacks.
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
   num_prompts: 32
   input_len: 512
   output_len: 128

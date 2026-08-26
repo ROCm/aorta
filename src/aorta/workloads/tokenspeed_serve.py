@@ -69,10 +69,17 @@ log = logging.getLogger(__name__)
 _SCRIPTS_DIR = Path(__file__).parent / "tokenspeed"
 _BENCH_SCRIPT = "ts_bench_serve.sh"
 
-# Digest-pinned default. TokenSpeed's Gluon kernels are gfx950/gfx1250 only and
-# the nightly tag moves, so an unpinned default would silently change what a
-# blessed baseline was blessed against.
-_DEFAULT_IMAGE = "lightseekorg/tokenspeed-amd:nightly-20260714"
+# Digest-pinned, and genuinely so: a registry can retarget a date tag, so
+# `:nightly-20260714` would let the default change underneath a blessed baseline
+# while still reading as pinned. This digest is the content every measured number
+# in docs/tokenspeed-serving.md was taken against.
+#
+# The tag it resolved from, for anyone reading a `docker pull` line:
+# lightseekorg/tokenspeed-amd:nightly-20260714
+_DEFAULT_IMAGE = (
+    "lightseekorg/tokenspeed-amd"
+    "@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78"
+)
 _DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 _DEFAULT_WORK_DIR = "/tmp/ts-work-serve"
@@ -155,6 +162,36 @@ _RESERVED_KEYS = frozenset({"steps"})
 # authoritative value for each, and a duplicate only widens `perf.md`'s metric
 # table with a column that cannot vary within a cell.
 _EXPORT_ECHO_KEYS = frozenset({"num_prompts", "max_concurrency", "burstiness"})
+
+# The host/container contract. Every one of these is either used by this class
+# after the run -- to locate exports, to audit served-request counts, to report
+# the cell's configuration -- or determines where the container writes. A cell's
+# mitigation overlay is rejected if it sets one, because the container would act
+# on the new value while the host kept reasoning about the old one, and the
+# resulting failure would read as an engine fault.
+#
+# Deliberately not a blanket "reject every TS_*": a mitigation setting a knob the
+# workload does not itself depend on is legitimate, and this list is the set the
+# workload actually reads back.
+_PROTOCOL_ENV_KEYS = frozenset(
+    {
+        "TS_BENCH_STEPS",
+        "TS_BENCH_WARMUP_STEPS",
+        "TS_NUM_PROMPTS",
+        "TS_INPUT_LEN",
+        "TS_OUTPUT_LEN",
+        "TS_MODEL",
+        "TS_SERVED_MODEL_NAME",
+        "TS_TOKENIZER",
+        "TS_OUT_DIR",
+        "TS_RUN_TOKEN",
+        "TS_PORT",
+        "TS_CONTROL_PORT",
+        "TS_PERCENTILE_METRICS",
+        "TS_METRIC_PERCENTILES",
+        "TS_REQUEST_RATE",
+    }
+)
 
 # Optional per-trial perf gates. The platform has no metric-threshold gate for
 # triage workloads (CI baselines gate *after* the fact, nightly-only), so a
@@ -285,9 +322,7 @@ class TokenSpeedServeWorkload(Workload):
     # not overlap. In-process isolation is enough: this class holds no CUDA/HIP
     # state itself -- everything GPU-touching lives in the container.
     trial_isolation_default: ClassVar[Literal["in_process", "process"]] = "in_process"
-    trial_isolation_supported: ClassVar[frozenset[str]] = frozenset(
-        {"in_process", "process"}
-    )
+    trial_isolation_supported: ClassVar[frozenset[str]] = frozenset({"in_process", "process"})
 
     # ---------------------------------------------------------------- config
 
@@ -327,9 +362,7 @@ class TokenSpeedServeWorkload(Workload):
         steps = cfg.get("steps")
         self._steps = int(steps) if steps is not None else 1
         if self._steps < 1:
-            raise ValueError(
-                f"tokenspeed_serve: steps ({self._steps}) must be >= 1"
-            )
+            raise ValueError(f"tokenspeed_serve: steps ({self._steps}) must be >= 1")
 
         max_conc = cfg.get("max_concurrency")
         if max_conc is None:
@@ -350,23 +383,13 @@ class TokenSpeedServeWorkload(Workload):
         self._run_as_current_user = self._bool("run_as_current_user", True)
         self._keep_work_dir = self._bool("keep_work_dir", True)
 
-        self._percentile_metrics = str(
-            cfg.get("percentile_metrics") or _DEFAULT_PERCENTILE_METRICS
-        )
-        self._metric_percentiles = str(
-            cfg.get("metric_percentiles") or _DEFAULT_METRIC_PERCENTILES
-        )
+        self._percentile_metrics = str(cfg.get("percentile_metrics") or _DEFAULT_PERCENTILE_METRICS)
+        self._metric_percentiles = str(cfg.get("metric_percentiles") or _DEFAULT_METRIC_PERCENTILES)
         self._validate_percentiles(self._metric_percentiles)
 
-        self._ready_timeout = self._positive_int(
-            "ready_timeout_sec", _DEFAULT_READY_TIMEOUT_SEC
-        )
-        self._bench_timeout = self._positive_int(
-            "bench_timeout_sec", _DEFAULT_BENCH_TIMEOUT_SEC
-        )
-        self._teardown_grace = self._positive_int(
-            "teardown_grace_sec", _DEFAULT_TEARDOWN_GRACE_SEC
-        )
+        self._ready_timeout = self._positive_int("ready_timeout_sec", _DEFAULT_READY_TIMEOUT_SEC)
+        self._bench_timeout = self._positive_int("bench_timeout_sec", _DEFAULT_BENCH_TIMEOUT_SEC)
+        self._teardown_grace = self._positive_int("teardown_grace_sec", _DEFAULT_TEARDOWN_GRACE_SEC)
         # Derive rather than hardcode: a 20B model on a cold HF cache spends
         # minutes in readiness alone, and a fixed default would kill the
         # container mid-download and report it as a timeout.
@@ -415,20 +438,15 @@ class TokenSpeedServeWorkload(Workload):
         ):
             if isinstance(value, str) and value != "auto":
                 raise ValueError(
-                    f"tokenspeed_serve: {label} must be an int or \"auto\", "
-                    f"got {value!r}"
+                    f'tokenspeed_serve: {label} must be an int or "auto", ' f"got {value!r}"
                 )
             if not isinstance(value, str) and not 1 <= int(value) <= 65535:
-                raise ValueError(
-                    f"tokenspeed_serve: {label} ({value!r}) must be in 1..65535"
-                )
+                raise ValueError(f"tokenspeed_serve: {label} ({value!r}) must be in 1..65535")
 
         work_dir = cfg.get("work_dir") or _DEFAULT_WORK_DIR
         self._work_dir = Path(str(work_dir)).resolve()
         hf_home = cfg.get("hf_home")
-        self._hf_home = (
-            Path(str(hf_home)).resolve() if hf_home else self._work_dir / "hf"
-        )
+        self._hf_home = Path(str(hf_home)).resolve() if hf_home else self._work_dir / "hf"
         self._hf_token_env = str(cfg.get("hf_token_env") or "HF_TOKEN")
 
         self._gates = self._validated_gates()
@@ -448,18 +466,28 @@ class TokenSpeedServeWorkload(Workload):
     def _bool(self, key: str, default: bool) -> bool:
         value = self.config.get(key, default)
         if not isinstance(value, bool):
-            raise ValueError(
-                f"tokenspeed_serve: {key} must be a bool, got {type(value).__name__}"
-            )
+            raise ValueError(f"tokenspeed_serve: {key} must be a bool, got {type(value).__name__}")
         return value
 
     def _validated_request_rate(self, value: Any) -> str:
-        """Normalise ``request_rate`` to the token the bench CLI accepts."""
-        if isinstance(value, str) and value.strip().lower() == "inf":
+        """Normalise ``request_rate`` to the token the bench CLI accepts.
+
+        Only *positive* infinity means "unlimited". A blanket non-finite check
+        would fold NaN and -inf into it, so a typo'd rate would silently become
+        the most aggressive setting available -- and the cell would still look
+        like it ran the load the recipe asked for.
+        """
+        if isinstance(value, str) and value.strip().lower() in {"inf", "+inf", "infinity"}:
             return "inf"
         rate = float(value)
-        if not math.isfinite(rate):
+        if math.isinf(rate) and rate > 0:
             return "inf"
+        if math.isnan(rate) or math.isinf(rate):
+            raise ValueError(
+                f"tokenspeed_serve: request_rate ({value!r}) is not a usable "
+                'rate; use a positive number, or "inf" to submit every request '
+                "at once"
+            )
         if rate <= 0:
             raise ValueError(
                 f"tokenspeed_serve: request_rate ({value!r}) must be > 0 or "
@@ -473,8 +501,7 @@ class TokenSpeedServeWorkload(Workload):
             token = token.strip()
             if not token:
                 raise ValueError(
-                    f"tokenspeed_serve: metric_percentiles ({spec!r}) has an "
-                    "empty entry"
+                    f"tokenspeed_serve: metric_percentiles ({spec!r}) has an " "empty entry"
                 )
             try:
                 pct = float(token)
@@ -498,8 +525,7 @@ class TokenSpeedServeWorkload(Workload):
         if isinstance(value, (list, tuple)):
             return [str(item) for item in value]
         raise ValueError(
-            f"tokenspeed_serve: {key} must be a string or list, "
-            f"got {type(value).__name__}"
+            f"tokenspeed_serve: {key} must be a string or list, " f"got {type(value).__name__}"
         )
 
     def _validated_gates(self) -> dict[str, float]:
@@ -507,9 +533,7 @@ class TokenSpeedServeWorkload(Workload):
         if raw is None:
             return {}
         if not isinstance(raw, dict):
-            raise ValueError(
-                f"tokenspeed_serve: gates must be a mapping, got {type(raw).__name__}"
-            )
+            raise ValueError(f"tokenspeed_serve: gates must be a mapping, got {type(raw).__name__}")
         gates: dict[str, float] = {}
         for key, value in raw.items():
             if key not in _GATE_SPECS:
@@ -591,9 +615,7 @@ class TokenSpeedServeWorkload(Workload):
         # Syntax-check the staged copy rather than trusting it: a truncated copy
         # or an edit staged by hand would otherwise fail deep inside the
         # container, where the error reads as a container problem.
-        check = subprocess.run(
-            ["bash", "-n", str(staged)], capture_output=True, text=True
-        )
+        check = subprocess.run(["bash", "-n", str(staged)], capture_output=True, text=True)
         if check.returncode != 0:
             raise RuntimeError(
                 f"tokenspeed_serve: staged script {staged} failed 'bash -n':\n"
@@ -681,6 +703,29 @@ class TokenSpeedServeWorkload(Workload):
 
         trial_env = self.config.get("_aorta_trial_env") or {}
         if trial_env:
+            # A mitigation may set anything the workload does not itself depend
+            # on -- that is the point of the matrix, and a mitigation silently
+            # losing to a workload default would make two cells identical while
+            # reporting them as different.
+            #
+            # What it may not do is redefine the protocol between this host and
+            # the container, because only the container would learn about it.
+            # `TS_NUM_PROMPTS=999` would have the script request 999 while
+            # `_build_result` still audited against the recipe's 32, so a
+            # perfectly healthy cell would fail its served-request audit;
+            # `TS_RUN_TOKEN` would have the script write exports under a name the
+            # host's glob does not match, and the cell would fail for finding no
+            # export at all. Both look like engine faults and are neither.
+            collisions = sorted(set(trial_env) & _PROTOCOL_ENV_KEYS)
+            if collisions:
+                raise ValueError(
+                    "tokenspeed_serve: mitigation(s) for this cell set "
+                    f"{', '.join(collisions)}, which the workload owns as part "
+                    "of its contract with ts_bench_serve.sh. Overriding them "
+                    "here would desynchronise the host's expectations from the "
+                    "run. Set the corresponding workload_config field instead "
+                    "(e.g. num_prompts, steps, request_rate)."
+                )
             env.update(trial_env)
         return env
 
@@ -689,6 +734,11 @@ class TokenSpeedServeWorkload(Workload):
             "docker",
             "run",
             "--rm",
+            # Named so a timeout is recoverable: --rm only fires when the
+            # container exits, and a host-side timeout kills the client rather
+            # than the container. See _force_remove_container.
+            "--name",
+            self._container_name(),
             "--device",
             "/dev/kfd",
             "--device",
@@ -765,6 +815,18 @@ class TokenSpeedServeWorkload(Workload):
             stdout = _as_text(exc.stdout)
             stderr = _as_text(exc.stderr)
             exit_code = None
+            # The timeout kills the docker *client*; the daemon keeps the
+            # container running, and `--rm` only fires once it exits. Left alone,
+            # a timed-out cell would hand the next one a live TokenSpeed still
+            # holding the GPU and the gateway port -- so the next cell fails too,
+            # for a reason that is nowhere in its own logs.
+            self._force_remove_container()
+        except BaseException:
+            # Includes KeyboardInterrupt and the SIGTERM the runner sends before
+            # escalating: same orphan, same cleanup, and the original exception
+            # still propagates as the failure.
+            self._force_remove_container()
+            raise
         elapsed = time.monotonic() - start
 
         records = self._collect_step_records()
@@ -777,6 +839,81 @@ class TokenSpeedServeWorkload(Workload):
             stderr=stderr,
         )
 
+    def _missing_core_metrics(self, record: _StepRecord) -> list[str]:
+        """Core metrics a measured step must actually carry.
+
+        Auditing only ``completed``/``failed`` leaves a hole: an export holding
+        just those two counters passes, and with the shipped recipes' empty gate
+        set the cell goes green having measured nothing -- no duration, no TTFT,
+        no throughput. A step that served every request but produced no numbers
+        is not a successful measurement, it is an unusable export.
+
+        Checked against the mean/median/throughput family rather than the
+        percentiles, because those are emitted unconditionally while ``p50``,
+        ``p90`` and ``p99`` depend on ``percentile_metrics`` and
+        ``metric_percentiles`` -- requiring them here would fail a cell for a
+        legitimate recipe choice.
+        """
+        required = [
+            "duration",
+            "output_throughput",
+            "request_throughput",
+            "total_token_throughput",
+            "mean_ttft_ms",
+            "median_ttft_ms",
+        ]
+        # TPOT is an inter-token quantity, so it is only defined once a request
+        # emits a second token. At output_len 1 there are no intervals to
+        # average and an absent or zero value is correct, not a fault.
+        if self._output_len > 1:
+            required += ["mean_tpot_ms", "median_tpot_ms"]
+
+        missing: list[str] = []
+        for name in required:
+            value = record.doc.get(name)
+            if not _is_scalar(value):
+                missing.append(name)
+            elif name == "duration" and float(value) <= 0:
+                # A zero-length step cannot have measured a throughput, so
+                # whatever it reported is an artefact.
+                missing.append(name)
+        return missing
+
+    def _container_name(self) -> str:
+        """The name this trial's container runs under.
+
+        Derived from the run token, which is already per-trial, so two cells on
+        one node never collide. Sanitised because docker only accepts
+        ``[a-zA-Z0-9][a-zA-Z0-9_.-]*``.
+        """
+        suffix = re.sub(r"[^a-zA-Z0-9_.-]", "-", self._run_token)
+        return f"aorta-ts-serve-{suffix}"
+
+    def _force_remove_container(self) -> None:
+        """Stop and remove a container the docker client no longer supervises.
+
+        ``docker rm -f`` covers the running and already-exited cases in one call,
+        so there is no window between a stop and a remove. Best-effort and
+        logged rather than raised: the caller is already reporting the real
+        failure, and a cleanup error must not replace it with a less useful one.
+
+        This cannot help against SIGKILL, which no handler survives -- but aorta
+        sends SIGTERM first, and that is the window this uses.
+        """
+        name = self._container_name()
+        try:
+            proc = subprocess.run(
+                ["docker", "rm", "-f", name],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("tokenspeed_serve: could not remove container %s: %s", name, exc)
+            return
+        if proc.returncode == 0:
+            log.info("tokenspeed_serve: removed orphaned container %s", name)
+
     def _collect_step_records(self) -> list[_StepRecord]:
         """Parse whatever the bench exported for this trial.
 
@@ -786,9 +923,7 @@ class TokenSpeedServeWorkload(Workload):
         """
         records: list[_StepRecord] = []
         pattern = f"bench.{self._run_token}.step*.json"
-        for path in sorted(
-            self._out_dir.glob(pattern), key=lambda p: _step_index(p.name)
-        ):
+        for path in sorted(self._out_dir.glob(pattern), key=lambda p: _step_index(p.name)):
             try:
                 with path.open(encoding="utf-8") as fh:
                     doc = json.load(fh)
@@ -804,9 +939,7 @@ class TokenSpeedServeWorkload(Workload):
                 continue
             scalars = {k: float(v) for k, v in doc.items() if _is_scalar(v)}
             records.append(
-                _StepRecord(
-                    step=_step_index(path.name), path=path, doc=doc, scalars=scalars
-                )
+                _StepRecord(step=_step_index(path.name), path=path, doc=doc, scalars=scalars)
             )
         return records
 
@@ -857,10 +990,7 @@ class TokenSpeedServeWorkload(Workload):
             failure_details.append(
                 {
                     "reason": "incomplete_steps",
-                    "detail": (
-                        f"{len(records)} of {self._steps} bench steps exported a "
-                        "result"
-                    ),
+                    "detail": (f"{len(records)} of {self._steps} bench steps exported a " "result"),
                 }
             )
 
@@ -878,8 +1008,7 @@ class TokenSpeedServeWorkload(Workload):
                         "reason": "result_json_unusable",
                         "step": record.step,
                         "detail": (
-                            f"completed={completed!r} failed={failed!r} in "
-                            f"{record.path.name}"
+                            f"completed={completed!r} failed={failed!r} in " f"{record.path.name}"
                         ),
                     }
                 )
@@ -892,6 +1021,18 @@ class TokenSpeedServeWorkload(Workload):
                         "detail": (
                             f"completed={completed} failed={failed} "
                             f"expected={self._num_prompts}"
+                        ),
+                    }
+                )
+            missing = self._missing_core_metrics(record)
+            if missing:
+                failure_details.append(
+                    {
+                        "reason": "result_json_unusable",
+                        "step": record.step,
+                        "detail": (
+                            "export carries no usable measurement for "
+                            f"{', '.join(missing)} in {record.path.name}"
                         ),
                     }
                 )
@@ -988,9 +1129,7 @@ class TokenSpeedServeWorkload(Workload):
         # trial actually serve" is the question, and a mean hides a single bad
         # step among good ones.
         metrics["completed_total"] = sum(
-            int(r.doc["completed"])
-            for r in records
-            if isinstance(r.doc.get("completed"), int)
+            int(r.doc["completed"]) for r in records if isinstance(r.doc.get("completed"), int)
         )
         metrics["failed_total"] = sum(
             int(r.doc["failed"]) for r in records if isinstance(r.doc.get("failed"), int)
@@ -1007,9 +1146,7 @@ class TokenSpeedServeWorkload(Workload):
         # Per-step detail lands in the trial JSON. The matrix aggregates only
         # scalars, so this list is carried without being summarised -- which is
         # what makes step-to-step variance recoverable after the fact.
-        metrics["steps"] = [
-            {"step": r.scalars.get("step", r.step), **r.scalars} for r in records
-        ]
+        metrics["steps"] = [{"step": r.scalars.get("step", r.step), **r.scalars} for r in records]
         metrics["result_files"] = [str(r.path) for r in records]
         return metrics
 
@@ -1031,18 +1168,13 @@ class TokenSpeedServeWorkload(Workload):
                     }
                 )
                 continue
-            breached = (
-                float(observed) > bound
-                if comparison == "max"
-                else float(observed) < bound
-            )
+            breached = float(observed) > bound if comparison == "max" else float(observed) < bound
             if breached:
                 failures.append(
                     {
                         "reason": "perf_gate_breached",
                         "detail": (
-                            f"{metric_name}={float(observed):.4g} breaches "
-                            f"{gate}={bound:.4g}"
+                            f"{metric_name}={float(observed):.4g} breaches " f"{gate}={bound:.4g}"
                         ),
                         "gate": gate,
                         "metric": metric_name,
@@ -1055,8 +1187,10 @@ class TokenSpeedServeWorkload(Workload):
     # -------------------------------------------------------------- cleanup
 
     def cleanup(self) -> None:
-        # The container is ``--rm`` and tears its own server down, so cleanup is
-        # only about the exported artifacts. Kept by default: they are the raw
+        # The container is ``--rm`` and tears its own server down on every path
+        # that reaches here (the one path that does not -- a host timeout -- is
+        # handled in run() via _force_remove_container), so cleanup is only
+        # about the exported artifacts. Kept by default: they are the raw
         # evidence behind the metrics, and a failed trial's export is exactly
         # what someone will want to read.
         if self._keep_work_dir:
@@ -1081,9 +1215,7 @@ def _port_is_free(port: int) -> bool:
     return True
 
 
-def _resolve_port(
-    request: Any, *, avoid: set[int] | None = None, near: int | None = None
-) -> int:
+def _resolve_port(request: Any, *, avoid: set[int] | None = None, near: int | None = None) -> int:
     """Resolve a ``port`` / ``control_port`` config value to a concrete port.
 
     An explicit request is honoured verbatim -- if an operator pinned a port,

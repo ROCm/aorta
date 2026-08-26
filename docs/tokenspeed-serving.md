@@ -104,49 +104,69 @@ tail. `median_tpot_ms` is the better-behaved per-token metric.
 ## Measured results
 
 Run on one gfx950 (MI355X), ROCm 7.0.2.2, image
-`lightseekorg/tokenspeed-amd:nightly-20260714`, `trials: 1`, `steps: 3`,
-`warmup_steps: 1`, `ignore_eos: true`. Numbers are means across the three
-measured steps. These are what the integration produced, not a performance
-claim about TokenSpeed — one node, one seed, tiny request counts.
+`lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78`
+(the digest the recipes pin, resolved from `:nightly-20260714`), `trials: 1`,
+`steps: 3`, `warmup_steps: 1`, `ignore_eos: true`, otherwise exactly the
+committed recipes. Numbers are means across the three measured steps. These are
+what the integration produced, not a performance claim about TokenSpeed — one
+node, one seed, tiny request counts.
 
 ### Across models (`tokenspeed-serve-models.yaml`)
 
-32 requests, ISL 512 / OSL 128, concurrency 8. All four cells passed with every
-request served.
+32 requests per step, ISL 512 / OSL 128, concurrency 8. All four cells passed
+with all 384 requests served and none failed.
 
 | Model | Startup (s) | TTFT p50 (ms) | TPOT p50 (ms) | Output tok/s | Total tok/s |
 |---|---|---|---|---|---|
-| Qwen3-0.6B | 358 | 45.4 | 1.92 | 3573 | 17867 |
-| Qwen3-1.7B | 280 | 53.5 | 2.03 | 3273 | 16364 |
-| Qwen3-4B | 325 | 58.2 | 3.81 | 1883 | 9414 |
-| Qwen3-8B | 322 | 60.7 | 4.48 | 1620 | 8098 |
+| Qwen3-0.6B | 379 | 46.3 | 1.94 | 3538 | 17688 |
+| Qwen3-1.7B | 283 | 53.3 | 2.04 | 3269 | 16346 |
+| Qwen3-4B | 289 | 56.9 | 3.77 | 1905 | 9527 |
+| Qwen3-8B | 328 | 61.1 | 4.46 | 1625 | 8124 |
 
-Latency and per-token cost rise with parameter count and throughput falls, which
+Per-token cost and latency rise with parameter count and throughput falls, which
 is the expected shape — the point of the run is that all four sizes come up,
 serve, and report coherently through the same code path.
 
+Read the startup column as a floor, not a measurement: it is dominated by weight
+loading and Triton compilation against whatever the node's caches already hold,
+which is why the smallest model here posts the largest number. It is reported
+because `ready_timeout_sec` has to cover it, not because it scales with anything.
+
 ### Across load shapes (`tokenspeed-serve-load.yaml`)
 
-Qwen3-0.6B. All six cells passed; 1656 requests served in total, none failed.
+Qwen3-0.6B, as committed: 16/32/128/256/64/64 prompts per step over the six
+cells, three measured steps each, so 1680 requests. All six cells passed and all
+1680 were served; none failed.
 
-| Cell | Concurrency | TTFT p50 (ms) | TTFT p99 (ms) | TPOT p50 (ms) | Output tok/s | Requests/s |
-|---|---|---|---|---|---|---|
-| conc-1 | 1 | 47.6 | 209 | 1.49 | 540 | 4.2 |
-| conc-8 | 8 | 43.7 | 195 | 1.91 | 3623 | 28.3 |
-| conc-32 | 32 | 60.6 | 316 | 2.02 | 12713 | 99.3 |
-| conc-64 | 64 | 80.5 | 951 | 2.49 | 15726 | 122.9 |
-| isl-4096-osl-128 | 16 | 65.1 | 476 | 2.95 | 4427 | 34.6 |
-| isl-128-osl-1024 | 16 | 49.7 | 2116 | 2.02 | 7695 | 7.5 |
+| Cell | Concurrency | Prompts/step | TTFT p50 (ms) | TTFT p99 (ms) | TPOT p50 (ms) | Output tok/s | Requests/s |
+|---|---|---|---|---|---|---|---|
+| conc-1 | 1 | 16 | 47.6 | 210 | 1.50 | 537 | 4.2 |
+| conc-8 | 8 | 32 | 45.9 | 194 | 1.91 | 3631 | 28.4 |
+| conc-32 | 32 | 128 | 60.5 | 315 | 2.01 | 12770 | 99.8 |
+| conc-64 | 64 | 256 | 77.4 | 426 | 2.49 | 20125 | 157.2 |
+| isl-4096-osl-128 | 16 | 64 | 64.0 | 440 | 2.95 | 4639 | 36.2 |
+| isl-128-osl-1024 | 16 | 64 | 47.4 | 2139 | 2.05 | 7634 | 7.5 |
 
-The concurrency rows are the useful part: throughput scales nearly linearly to
-32 (540 → 12713 tok/s) and then saturates, gaining only 24% from 32 → 64 while
-p99 TTFT triples (316 → 951 ms). That knee, not the peak number, is what the
-recipe exists to find.
+The concurrency rows are the useful part, and what they show is a curve that is
+bending but has not yet flattened: throughput returns 6.8× for the first 8× of
+cap (537 → 3631 tok/s), 3.5× for the next 4× (→ 12770), and 1.58× for the last
+2× (→ 20125). Per unit of cap that is 0.85, 0.88, then 0.79 — so 64 is past the
+efficient point without being the ceiling, and p99 TTFT has risen 35% (315 → 426
+ms) to buy that last 58%. Finding where that trade stops being worth it, not the
+peak number, is what the recipe exists for; on this node it would take cells
+beyond 64 to bracket it.
 
 The two shape rows separate the regimes. Prefill-heavy (ISL 4096) raises TPOT to
 2.95 ms — attention over a long context — while decode-heavy (OSL 1024) leaves
-TPOT alone but pushes p99 TTFT to 2.1 s, because a short request queued behind
-long decodes waits for them.
+TPOT alone (2.05 ms) but pushes p99 TTFT to 2.1 s, because a short request queued
+behind long decodes waits for them.
+
+`num_prompts` rises with the cap on purpose, and the table is only readable
+because it does: 32 requests against a cap of 64 drain before the server reaches
+steady state, so a flat request count across these cells would have the
+high-concurrency rows describing the ramp rather than the throughput. Keep the
+two in step when adding cells, and re-measure the whole table when you change
+either — the rows are not comparable across configurations.
 
 ## Configuration
 
@@ -205,6 +225,34 @@ re-checks independently, so the guard survives someone editing the script's exit
 codes. This is the same trap `tokenspeed_kernel.benchmark --verify` sets for
 [the kernel probe](tokenspeed.md#the-verdict-does-not-come-from-the-exit-code).
 
+Counting requests is not sufficient on its own, though. An export carrying only
+`completed` and `failed` satisfies both checks, and since `gates` is empty by
+default the cell would go green having measured no duration, no TTFT and no
+throughput at all. Every measured step must therefore also carry finite values
+for `duration` (greater than zero), `mean_ttft_ms`, `median_ttft_ms`,
+`output_throughput`, `request_throughput` and `total_token_throughput`, plus
+`mean_tpot_ms` / `median_tpot_ms` whenever `output_len > 1` — TPOT averages
+inter-token gaps, of which a single-token response has none. A step missing any
+of them is reported as `result_json_unusable` rather than as a pass. The
+percentiles are deliberately not required: they depend on `percentile_metrics`
+and `metric_percentiles`, so demanding them would fail a cell for a legitimate
+recipe choice.
+
+### A mitigation cannot redefine the host/container protocol
+
+Cell mitigations are forwarded into the container, which is the whole point of
+the matrix — but a handful of variables are how this workload and
+`ts_bench_serve.sh` agree on what the run is: `TS_NUM_PROMPTS`, `TS_BENCH_STEPS`,
+`TS_RUN_TOKEN`, `TS_OUT_DIR`, the model and shape variables, and the ports. Only
+the container would learn about an override, so `TS_NUM_PROMPTS=999` would have
+the script request 999 requests while the host still audited against the recipe's
+count — failing a healthy cell for a served-request shortfall — and a redefined
+`TS_RUN_TOKEN` would have it write exports under a name the host's glob never
+matches, failing the cell for finding no export. Both read as engine faults and
+are neither, so a mitigation that sets one is rejected up front with the
+`workload_config` field to use instead. Any other `TS_*` knob is forwarded
+normally.
+
 ### The orchestrator's gateway budget is 60s, and a cold start exceeds it
 
 `tokenspeed serve` starts the engine and an smg gateway, then waits for the
@@ -262,6 +310,17 @@ An NFS home under root-squash cannot be bind-mounted: `docker run -v
 workload stages the script from the installed package into `work_dir` for this
 reason, so no manual staging step is needed. Keeping `work_dir` stable across
 runs is also what stops every run from re-downloading weights.
+
+### A timeout kills the docker client, not the server
+
+`subprocess.run(timeout=...)` kills the local `docker run` process. The container
+belongs to the daemon and keeps running, and `--rm` only fires once a container
+exits — so a timed-out cell hands the next one a live TokenSpeed still holding the
+GPU and the gateway port, and the next cell fails for a reason that appears
+nowhere in its own logs. The container is therefore named
+`aorta-ts-serve-<run-token>` and force-removed on timeout and on interruption. A
+SIGKILL to the workload still leaks it, since no handler survives one, but the
+runner sends SIGTERM first and that is the window this uses.
 
 ### Mitigations must be forwarded explicitly
 
