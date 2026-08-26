@@ -18,13 +18,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from aorta.workloads import tokenspeed_serve as mod
 from aorta.workloads.tokenspeed_serve import TokenSpeedServeWorkload
+
+# The SIGTERM test runs a victim process outside pytest, so it needs the import
+# root spelled out rather than inherited from the test session.
+_SRC = Path(mod.__file__).resolve().parents[2]
 
 _REQUIRED_METRICS = (
     "image",
@@ -1201,3 +1207,128 @@ def test_bench_script_still_accepts_unowned_extra_args(tmp_path, env_key, extra)
         env={**os.environ, "TS_OUT_DIR": str(tmp_path), env_key: extra},
     )
     assert "may not set" not in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        (["--name", "other"], "may not set --name"),
+        (["--entrypoint", "sh"], "may not set --entrypoint"),
+        (["-v", "/tmp:/ts-out"], "may not set -v"),
+        (["--volume", "/tmp:/ts-out"], "may not set --volume"),
+        (["--network", "none"], "may not set --network"),
+        (["--user", "0:0"], "may not set --user"),
+        (["--env-file", "/tmp/x"], "may not set --env-file"),
+    ],
+)
+def test_docker_args_cannot_displace_a_generated_option(tmp_path, args, expected):
+    """docker takes the last occurrence, and these are spliced in after ours.
+
+    `--name other` is the dangerous one: the container then runs under a name
+    `_force_remove_container` does not know, so a timed-out trial leaks a live
+    server holding the GPU -- silently undoing the orphan cleanup this class
+    advertises. `-v ...:/ts-out` sends the exports where the host does not glob,
+    and `--entrypoint` means the bench script never runs at all.
+    """
+    wl = _make(tmp_path, docker_args=args)
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        wl.setup()
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["-e TS_RUN_TOKEN=x", "--env TS_RUN_TOKEN=x", "-eTS_RUN_TOKEN=x", "--env=TS_RUN_TOKEN=x"],
+)
+def test_docker_args_cannot_smuggle_a_protocol_variable(tmp_path, spelling):
+    """Otherwise this is a second route to the desynchronisation the mitigation
+    guard rejects -- one that bypasses it entirely, in every spelling docker
+    accepts for -e."""
+    wl = _make(tmp_path, docker_args=spelling.split())
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    with pytest.raises(ValueError, match="TS_RUN_TOKEN"):
+        wl._docker_argv(wl._container_env())
+
+
+def test_docker_args_still_take_unowned_options(tmp_path):
+    """The guard is about displacing generated options, not about docker_args --
+    passing extra docker flags is why the field exists."""
+    wl = _make(tmp_path, docker_args=["--cpus", "8", "-e", "MY_KNOB=1"])
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    argv = wl._docker_argv(wl._container_env())
+    assert "--cpus" in argv and "MY_KNOB=1" in argv
+
+
+def test_auto_ports_never_collide_even_when_the_kernel_reuses_one(tmp_path, monkeypatch):
+    """The ephemeral fallback has to honour `avoid`.
+
+    The gateway's probe socket is closed by the time the control port is
+    resolved, so the kernel may hand back that very port -- and the pair would
+    then be equal, which ts_bench_serve.sh rejects. A perfectly valid `auto`
+    configuration would fail as a usage error, intermittently.
+    """
+    handed_out = iter([41000, 41000, 41000, 41001])
+
+    class FakeSocket:
+        def __init__(self, *a, **k):
+            self._port = None
+
+        def bind(self, addr):
+            self._port = next(handed_out)
+
+        def getsockname(self):
+            return ("127.0.0.1", self._port)
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(mod.socket, "socket", FakeSocket)
+    monkeypatch.setattr(mod, "_port_is_free", lambda port: False)
+
+    gateway = mod._resolve_port("auto")
+    control = mod._resolve_port("auto", avoid={gateway}, near=gateway + 1)
+    assert gateway == 41000
+    assert control != gateway, "the control port must not reuse the gateway's"
+
+
+def test_sigterm_removes_the_container_before_exiting(tmp_path):
+    """SIGTERM does not raise, so `except BaseException` never sees it.
+
+    Under Python's default disposition the interpreter terminates without
+    raising, which meant the case most likely to strand a container -- a
+    cancelled sweep or an expired budget -- was the one not covered. Run in a
+    subprocess because the assertion is about the process actually dying by
+    signal after cleaning up.
+    """
+    marker = tmp_path / "removed.txt"
+    script = tmp_path / "victim.py"
+    script.write_text(
+        "import os, signal, sys, time\n"
+        f"sys.path.insert(0, {str(_SRC)!r})\n"
+        "from aorta.workloads.tokenspeed_serve import TokenSpeedServeWorkload as W\n"
+        f"wl = W({{'work_dir': {str(tmp_path / 'work')!r}, 'steps': 1}})\n"
+        "wl._run_token = 'tok'\n"
+        f"wl._force_remove_container = lambda: open({str(marker)!r}, 'w').write('removed')\n"
+        "with wl._remove_container_on_termination():\n"
+        "    print('ready', flush=True)\n"
+        "    time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, text=True)
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == "ready"
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=30)
+
+    assert marker.exists(), "the container was not removed on SIGTERM"
+    assert (
+        proc.returncode == -signal.SIGTERM
+    ), f"expected death by SIGTERM so a supervisor still reads 143, got {proc.returncode}"

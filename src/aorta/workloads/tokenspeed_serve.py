@@ -48,14 +48,17 @@ instead of quietly benchmarking the same configuration twice.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -426,6 +429,10 @@ class TokenSpeedServeWorkload(Workload):
         self._serve_args = self._arg_list("serve_args")
         self._bench_args = self._arg_list("bench_args")
         self._docker_args = self._arg_list("docker_args")
+        # Checked here as well as at argv-build time so a recipe naming an owned
+        # flag fails before a node is occupied. The env-name half of the check
+        # needs the resolved run token, so it can only run later.
+        self._reject_owned_docker_args()
 
         self._shm_size = str(cfg.get("shm_size") or _DEFAULT_SHM_SIZE)
         hip_devices = cfg.get("hip_visible_devices")
@@ -810,6 +817,7 @@ class TokenSpeedServeWorkload(Workload):
             # delete them -- the exact EPERM the Phase 1 harvest path hit.
             argv += ["--user", f"{os.getuid()}:{os.getgid()}"]
         argv += docker_env_flags(env)
+        self._reject_owned_docker_args(owned_env=set(env))
         argv += self._docker_args
         argv += [
             "--entrypoint",
@@ -818,6 +826,77 @@ class TokenSpeedServeWorkload(Workload):
             f"/ts-scripts/{_BENCH_SCRIPT}",
         ]
         return argv
+
+    # docker takes the last occurrence of most repeated options, and
+    # ``docker_args`` is spliced in after the generated ones -- so an extra flag
+    # does not merely add to the invocation, it replaces what this class relies
+    # on. The consequences do not look like configuration errors:
+    #
+    #   --name other   the container runs under a name _force_remove_container
+    #                  does not know, so a timed-out trial leaks a live
+    #                  TokenSpeed holding the GPU -- silently undoing the
+    #                  orphan-cleanup guarantee this class advertises
+    #   -v ...:/ts-out the exports land somewhere the host does not glob, so a
+    #                  completed run reports no results
+    #   --entrypoint   the bench script never runs, and the trial fails with
+    #                  whatever the replacement did instead
+    #   -e TS_RUN_TOKEN
+    #                  the same desynchronisation the mitigation guard rejects,
+    #                  arriving by a route that bypasses it entirely
+    #
+    # Rejected rather than reordered, for the reason ts_bench_serve.sh rejects
+    # its own owned flags: reordering would make the setting silently ineffective
+    # instead of silently destructive, which is not much better.
+    _OWNED_DOCKER_FLAGS = frozenset(
+        {
+            "--name",
+            "--entrypoint",
+            "-v",
+            "--volume",
+            "--mount",
+            "--env-file",
+            "--network",
+            "--net",
+            "--user",
+            "-u",
+        }
+    )
+
+    def _reject_owned_docker_args(self, *, owned_env: set[str] | None = None) -> None:
+        """Refuse ``docker_args`` that would displace a generated option."""
+        expect_env_value = False
+        for arg in self._docker_args:
+            flag = arg.split("=", 1)[0]
+            if flag in self._OWNED_DOCKER_FLAGS:
+                raise ValueError(
+                    f"tokenspeed_serve: docker_args may not set {flag}; this "
+                    "workload sets it and depends on the value (container "
+                    "naming for orphan cleanup, the mount layout the audit "
+                    "reads, and the entrypoint). Use the corresponding "
+                    "workload_config field -- network, run_as_current_user, "
+                    "work_dir, hf_home -- instead."
+                )
+            # ``-e NAME=value`` and its attached/`=` spellings. Only a name the
+            # workload sets is a problem; anything else is a legitimate knob.
+            name = None
+            if expect_env_value:
+                name = arg.split("=", 1)[0]
+                expect_env_value = False
+            elif arg in ("-e", "--env"):
+                expect_env_value = True
+                continue
+            elif arg.startswith("--env="):
+                name = arg[len("--env=") :].split("=", 1)[0]
+            elif arg.startswith("-e") and len(arg) > 2:
+                name = arg[2:].split("=", 1)[0]
+            if name and owned_env is not None and name in owned_env:
+                raise ValueError(
+                    f"tokenspeed_serve: docker_args may not set {name}; this "
+                    "workload sets it as part of its contract with "
+                    "ts_bench_serve.sh, and overriding it here would bypass the "
+                    "same check that rejects it in a mitigation. Set the "
+                    "corresponding workload_config field instead."
+                )
 
     def run(self) -> WorkloadResult:
         # Token-qualify this trial's exports. ``$$`` inside the container is
@@ -847,12 +926,13 @@ class TokenSpeedServeWorkload(Workload):
         start = time.monotonic()
         timed_out = False
         try:
-            proc = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-            )
+            with self._remove_container_on_termination():
+                proc = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout,
+                )
             stdout, stderr, exit_code = proc.stdout, proc.stderr, proc.returncode
         except subprocess.TimeoutExpired as exc:
             timed_out = True
@@ -866,9 +946,10 @@ class TokenSpeedServeWorkload(Workload):
             # for a reason that is nowhere in its own logs.
             self._force_remove_container()
         except BaseException:
-            # Includes KeyboardInterrupt and the SIGTERM the runner sends before
-            # escalating: same orphan, same cleanup, and the original exception
-            # still propagates as the failure.
+            # KeyboardInterrupt, and anything else raised out of the call. The
+            # runner's SIGTERM does *not* arrive here -- see
+            # _remove_container_on_termination, which is what handles it. The
+            # original exception still propagates as the failure.
             self._force_remove_container()
             raise
         elapsed = time.monotonic() - start
@@ -936,6 +1017,67 @@ class TokenSpeedServeWorkload(Workload):
         suffix = re.sub(r"[^a-zA-Z0-9_.-]", "-", self._run_token)
         return f"aorta-ts-serve-{suffix}"
 
+    @contextlib.contextmanager
+    def _remove_container_on_termination(self):
+        """Remove the container if this process is asked to terminate.
+
+        An ``except BaseException`` around the ``docker run`` call does not cover
+        SIGTERM: under Python's default disposition the interpreter terminates
+        without raising anything, so no handler in the ``try`` block ever runs.
+        SIGTERM is also precisely what the runner sends when a sweep is
+        cancelled or a budget expires -- so the case most likely to strand a
+        container was the one not actually covered.
+
+        The container has to be removed by *someone*: it is daemon-owned, so it
+        survives this process either way, and ``--rm`` only fires once it exits.
+        A stranded TokenSpeed holds the GPU and the gateway port, and the next
+        cell then fails for a reason recorded nowhere in its own logs.
+
+        The handler removes the container, restores the previous disposition and
+        re-raises the signal at itself, so the exit status still reports death by
+        signal rather than a normal exit -- a supervisor reading 143 must keep
+        reading 143.
+
+        Signals can only be installed from the main thread; when called from a
+        worker this degrades to the surrounding exception handling and says so,
+        rather than raising and turning a cleanup nicety into a trial failure.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            log.debug(
+                "tokenspeed_serve: not on the main thread; relying on exception "
+                "handling for container cleanup"
+            )
+            yield
+            return
+
+        previous: dict[int, Any] = {}
+
+        def handler(signum: int, _frame: Any) -> None:
+            log.warning(
+                "tokenspeed_serve: received signal %d; removing container %s " "before exiting",
+                signum,
+                self._container_name(),
+            )
+            self._force_remove_container()
+            signal.signal(signum, previous.get(signum, signal.SIG_DFL))
+            os.kill(os.getpid(), signum)
+
+        # SIGHUP as well: a sweep started from a shell that goes away is the same
+        # orphan by a different route.
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                previous[sig] = signal.signal(sig, handler)
+            except (OSError, ValueError):  # pragma: no cover - platform-specific
+                pass
+        try:
+            yield
+        finally:
+            for sig, prev in previous.items():
+                try:
+                    signal.signal(sig, prev)
+                except (OSError, ValueError):  # pragma: no cover
+                    pass
+
     def _force_remove_container(self) -> None:
         """Stop and remove a container the docker client no longer supervises.
 
@@ -944,8 +1086,11 @@ class TokenSpeedServeWorkload(Workload):
         logged rather than raised: the caller is already reporting the real
         failure, and a cleanup error must not replace it with a less useful one.
 
-        This cannot help against SIGKILL, which no handler survives -- but aorta
-        sends SIGTERM first, and that is the window this uses.
+        Reached from three directions: a host-side timeout, an exception out of
+        the ``docker run`` call, and the signal handler installed by
+        :meth:`_remove_container_on_termination` (SIGTERM does not raise, so the
+        exception path alone would miss it). Nothing can help against SIGKILL,
+        which no handler survives.
         """
         name = self._container_name()
         try:
@@ -1296,10 +1441,31 @@ def _resolve_port(request: Any, *, avoid: set[int] | None = None, near: int | No
     if near is not None and near not in avoid and 1 <= near <= 65535:
         if _port_is_free(near):
             return near
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = int(sock.getsockname()[1])
-    return port
+    # The ephemeral fallback has to respect `avoid` too. Resolving the control
+    # port happens after the gateway's probe socket is already closed, so the
+    # kernel is free to hand back that very port -- and the pair would then be
+    # equal, which ts_bench_serve.sh rejects. A fully valid `auto` configuration
+    # would fail as a usage error, intermittently, which is the worst way for
+    # this to show up.
+    #
+    # Sockets are held open across the loop so a retry cannot be handed the port
+    # the previous attempt just released, then all are closed together.
+    held: list[socket.socket] = []
+    try:
+        for _ in range(20):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            held.append(sock)
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+            if port not in avoid:
+                return port
+    finally:
+        for sock in held:
+            sock.close()
+    raise RuntimeError(
+        "tokenspeed_serve: could not find an ephemeral port outside "
+        f"{sorted(avoid)} after 20 attempts"
+    )
 
 
 def _host_username() -> str:

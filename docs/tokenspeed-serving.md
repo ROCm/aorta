@@ -376,9 +376,47 @@ belongs to the daemon and keeps running, and `--rm` only fires once a container
 exits — so a timed-out cell hands the next one a live TokenSpeed still holding the
 GPU and the gateway port, and the next cell fails for a reason that appears
 nowhere in its own logs. The container is therefore named
-`aorta-ts-serve-<run-token>` and force-removed on timeout and on interruption. A
-SIGKILL to the workload still leaks it, since no handler survives one, but the
-runner sends SIGTERM first and that is the window this uses.
+`aorta-ts-serve-<run-token>` and force-removed on timeout and on interruption.
+
+Interruption includes a signal, which needs its own handler rather than an
+`except` clause: under Python's default disposition SIGTERM terminates the
+interpreter *without raising*, so `except BaseException` around the `docker run`
+call never runs and the case most likely to strand a container — a cancelled
+sweep, an expired job budget — was the one case not covered. SIGTERM and SIGHUP
+are trapped for the duration of the run, and the handler removes the container,
+restores the previous disposition and re-raises the signal at itself, so a
+supervisor still sees death by signal (exit 143) rather than a swallowed one. A
+SIGKILL still leaks the container, since no handler survives one, but the runner
+sends SIGTERM first and that is the window this uses.
+
+### `docker_args` cannot displace a generated option
+
+Extra arguments are spliced in after the ones the workload generates, and docker
+takes the *last* occurrence of a repeated option — so `docker_args` was a way to
+quietly turn off the guarantees above. `--name` is the sharpest: the container
+then runs under a name the cleanup path does not know, so a timed-out trial leaks
+a live server while the workload reports having removed it. `-v ...:/ts-out`
+sends the exports somewhere the host does not look, `--entrypoint` means the
+bench script never runs, and `-e TS_RUN_TOKEN=...` reaches the same
+desynchronisation the mitigation guard rejects while bypassing that guard
+entirely. `--name`, `--entrypoint`, `-v`/`--volume`, `--mount`, `--network`,
+`--user` and `--env-file`, plus any `-e` naming a protocol variable, are
+therefore rejected as configuration errors. Everything else still passes through
+— that is what the field is for.
+
+The same reasoning applies inside the container: `serve_args` and `bench_args`
+may not set the flags `ts_bench_serve.sh` derives itself (`--port`,
+`--base-url`, `--num-prompts`, `--output-file` and the rest), since those are
+what tie the export back to the cell that asked for it.
+
+### Auto-resolved ports must not collide with each other
+
+`port: auto` binds an ephemeral port, records it and closes the probe socket, so
+by the time the control port is resolved the kernel is free to hand back that
+very port — leaving the two equal, which `ts_bench_serve.sh` rejects as a usage
+error. A valid `auto` configuration would fail intermittently, on a node under
+no unusual load. Resolution therefore retries, holding each candidate open until
+one lands outside the set already claimed.
 
 ### Mitigations must be forwarded explicitly
 
