@@ -87,13 +87,23 @@ SRV_PID=""
 # the KV cache and the pinned host memory behind it -- an amount that scales with
 # the model, so the failure shows up on big models first.
 TEARDOWN_GRACE="${TS_TEARDOWN_GRACE:-45}"
+
+# Liveness of the process *group*, not of its leader. `tokenspeed serve` forks
+# scheduler and detokenizer children into the group, and they can outlive the
+# leader: a leader-only check then reports "already gone" and returns without
+# signalling anything, leaving those children holding the GPU for the next
+# trial. `kill -0 -PGID` succeeds while any member survives.
+group_alive() {
+  kill -0 "-${1}" 2>/dev/null
+}
+
 teardown() {
   [ -n "${SRV_PID}" ] || return 0
-  kill -0 "${SRV_PID}" 2>/dev/null || return 0
+  group_alive "${SRV_PID}" || return 0
   echo "TS_PROBE_INFO: tearing down server pgid ${SRV_PID} (grace ${TEARDOWN_GRACE}s)"
   kill -TERM "-${SRV_PID}" 2>/dev/null
   for _ in $(seq 1 "${TEARDOWN_GRACE}"); do
-    kill -0 "${SRV_PID}" 2>/dev/null || {
+    group_alive "${SRV_PID}" || {
       echo "TS_PROBE_INFO: server exited cleanly on SIGTERM"
       return 0
     }
@@ -103,7 +113,20 @@ teardown() {
   kill -KILL "-${SRV_PID}" 2>/dev/null
   wait "${SRV_PID}" 2>/dev/null
 }
-trap teardown EXIT INT TERM
+
+# A bash trap handler returns to where the signal interrupted it, so sharing one
+# handler between EXIT and the signals would tear the server down and then carry
+# on probing a server that is gone -- and on the runner's SIGTERM the probe would
+# keep working until the escalation to SIGKILL. Signals therefore exit
+# explicitly, which re-enters teardown through EXIT; the guard above makes the
+# second call a no-op.
+on_signal() {
+  echo "TS_PROBE_INFO: received ${1}; aborting probe"
+  exit 143
+}
+trap teardown EXIT
+trap 'on_signal SIGINT' INT
+trap 'on_signal SIGTERM' TERM
 
 # setsid so the server leads its own process group and `teardown` can signal the
 # whole tree. Word-splitting TS_SERVE_ARGS is deliberate -- it carries multiple

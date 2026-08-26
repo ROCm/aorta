@@ -19,6 +19,14 @@
 # generator, so `--op attention.mha_prefill` dies in the harness before any
 # kernel launches. That is an upstream TokenSpeed gap, not an aorta one.
 #
+# What THIS file runs, precisely: two gemm.mm solutions (Gluon and torch, both
+# bf16) across two launch-behaviour columns. It is a smoke, not a survey -- the
+# point is a fast solution-vs-knob contrast, so it deliberately does not sweep
+# every gemm.mm kernel. tokenspeed-kernel-sidecar.json carries three more
+# selectors (ts_gemm_triton_fp8_blockscale, ts_gemm_torch_fp8_blockscale,
+# ts_gemm_all_bf16); add them to mitigation_axis to widen the matrix, at ~17s
+# per trial x trials x diagnostic columns.
+#
 # Pre-reqs: gfx950 node, image pulled, scripts staged node-locally. See
 # tokenspeed-serve-probe-smoke.yaml for the exact commands.
 #

@@ -21,6 +21,10 @@
 #   TS_GPUS         HIP_VISIBLE_DEVICES for the trial (default 0)
 #   TS_ENTRY        script to run inside the container
 #                                                     (default ts_serve_probe.sh)
+#   TS_NETWORK      docker network for the trial       (default: bridge, except
+#                                                     `host` for the serving
+#                                                     entries, which resolve the
+#                                                     model through the HF hub)
 #   TS_RUN_TOKEN    tag for this trial's output files (default: minted below;
 #                                                     set it to correlate
 #                                                     artifacts with a caller-
@@ -79,8 +83,28 @@ if ! docker image inspect "${TS_IMAGE}" >/dev/null 2>&1; then
   exit 64
 fi
 
+# Record what actually ran, not what was asked for. A date tag is mutable: it can
+# be retargeted upstream, and the check above only proves *a* image with that tag
+# is present locally, so two nodes can run these same commands against different
+# content and nothing in either run would say so. Printing the digest puts it in
+# the trial's stdout.log, which is what makes a result attributable afterwards.
+TS_IMAGE_DIGEST="$(docker image inspect "${TS_IMAGE}" \
+  --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' 2>/dev/null || echo unknown)"
+echo "host_launch: image_digest=${TS_IMAGE_DIGEST}"
+
 env_file_args=()
-if [ -n "${AORTA_ENV_FILE:-}" ] && [ -r "${AORTA_ENV_FILE}" ]; then
+if [ -n "${AORTA_ENV_FILE:-}" ]; then
+  # Set but unreadable is a hard error, not a fallback. The dispatcher writes
+  # this file to carry the cell's mitigations; silently running container
+  # defaults instead would make every cell in the matrix identical while the
+  # run still reported them as distinct mitigations -- a green matrix that
+  # measured one configuration four times. The no-file path below is only for
+  # manual runs, where the variable is absent altogether.
+  if [ ! -r "${AORTA_ENV_FILE}" ]; then
+    echo "host_launch: AORTA_ENV_FILE=${AORTA_ENV_FILE} is not readable." >&2
+    echo "  The cell's mitigations would be silently dropped." >&2
+    exit 64
+  fi
   env_file_args+=(--env-file "${AORTA_ENV_FILE}")
   echo "host_launch: forwarding cell env from ${AORTA_ENV_FILE}"
   # Echoed so the trial's stdout.log records which mitigation the cell applied;
@@ -103,13 +127,64 @@ for var in TS_MODEL TS_PORT TS_CONTROL_PORT TS_READY_TIMEOUT TS_GEN_TIMEOUT \
   fi
 done
 
-echo "host_launch: image=${TS_IMAGE} entry=${ENTRY} gpus=${GPUS} token=${RUN_TOKEN}"
+# Network defaults per route, because the routes differ in what they need.
+#
+# The kernel and pytest probes run TokenSpeed's own code against the source tree
+# already in the image, reach nothing off-node, and talk to no server -- so they
+# get Docker's default bridge. Host networking would buy them nothing while
+# publishing container ports on a node that may be shared.
+#
+# The serving routes are the documented exception. They resolve the model
+# through huggingface_hub, which contacts the Hub for the revision even when the
+# weights are already cached, so on a node with IPv4 forwarding disabled a
+# bridged container dies during startup with "Temporary failure in name
+# resolution". The probe still calls the gateway on 127.0.0.1 from inside its own
+# container; it is the weight resolution that needs egress.
+#
+# TS_NETWORK overrides either way -- set it to `bridge` for a serving run on a
+# node whose bridge does have egress, or to `host` if a kernel run ever needs it.
+case "${ENTRY}" in
+  *serve*) _default_network=host ;;
+  *) _default_network=bridge ;;
+esac
+NETWORK="${TS_NETWORK:-${_default_network}}"
+
+echo "host_launch: image=${TS_IMAGE} entry=${ENTRY} gpus=${GPUS} token=${RUN_TOKEN} network=${NETWORK}"
+
+# Named and supervised rather than exec'd. aorta escalates to SIGKILL 10s after
+# SIGTERM while container teardown is allowed up to 45s, and killing the
+# foreground docker *client* does not stop the daemon-managed container: a
+# timed-out trial could otherwise leave a server holding the GPUs and the
+# gateway port for every later cell. The name gives us a handle to stop it.
+# Sanitized: a caller-supplied TS_RUN_TOKEN is free-form, and docker only accepts
+# [a-zA-Z0-9][a-zA-Z0-9_.-]* for a name.
+CONTAINER="aorta-ts-$(printf '%s' "${RUN_TOKEN}" | tr -c 'a-zA-Z0-9_.-' '-')"
+
+# Only on the signal paths. If the docker client exits on its own -- pass or
+# fail -- the daemon has already reaped the container via --rm, so an
+# unconditional cleanup would add a pointless `docker rm` to every trial. What
+# needs handling is being killed *before* the client returns, which is exactly
+# when the daemon is left holding the container.
+#
+# A SIGKILL cannot be trapped, so nothing here helps in that case; aorta sends
+# SIGTERM first and escalates 10s later, which is the window this uses. (The
+# same limit applies to a --cidfile approach.)
+on_signal() {
+  echo "host_launch: received ${1}; stopping container ${CONTAINER}" >&2
+  # `docker rm -f` covers both the running and already-exited cases, so no
+  # separate stop is needed.
+  docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+  exit 143
+}
+trap 'on_signal SIGINT' INT
+trap 'on_signal SIGTERM' TERM
 
 # --ipc=host + a large shm are needed because tokenspeed's scheduler and
 # detokenizer talk over shared memory; the 64MB default makes the server die
 # during startup with an opaque bus error.
-exec docker run --rm \
-  --network host \
+docker run --rm \
+  --name "${CONTAINER}" \
+  --network "${NETWORK}" \
   --ipc=host --shm-size=16g \
   --device=/dev/kfd --device=/dev/dri \
   --group-add video --group-add render \
@@ -124,4 +199,7 @@ exec docker run --rm \
   -v "${HF_DIR}:/hf-cache" \
   -v "${OUT_DIR}:/ts-out" \
   "${TS_IMAGE}" \
-  bash "/ts-scripts/${ENTRY}"
+  bash "/ts-scripts/${ENTRY}" &
+DOCKER_PID=$!
+wait "${DOCKER_PID}"
+exit $?

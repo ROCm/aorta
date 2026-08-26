@@ -58,6 +58,25 @@ if [ ! -d "${WORKSPACE}" ]; then
   exit 64
 fi
 
+# Validated as >= 1 before it is ever used in a comparison. This is the
+# all-skipped guard: a suite where every test skipped exits pytest 0 with zero
+# passes, so `passed >= MIN_PASSED` is the only thing standing between that and
+# a green trial. TS_MIN_PASSED=0 disables the guard outright, and a non-numeric
+# value makes `[` error out -- which, because pytest itself returned 0, also
+# falls through to a pass.
+case "${MIN_PASSED}" in
+  ''|*[!0-9]*)
+    echo "TS_PYTEST_FAIL: usage TS_MIN_PASSED must be a positive integer, got '${MIN_PASSED}'"
+    exit 64
+    ;;
+esac
+if [ "${MIN_PASSED}" -lt 1 ]; then
+  echo "TS_PYTEST_FAIL: usage TS_MIN_PASSED must be >= 1, got '${MIN_PASSED}'"
+  echo "  0 would disable the all-skipped guard, which is the only check that"
+  echo "  distinguishes a real pass from a suite that skipped everything."
+  exit 64
+fi
+
 mkdir -p "${OUT_DIR}" || {
   echo "TS_PYTEST_FAIL: usage cannot create out dir ${OUT_DIR}"
   exit 64

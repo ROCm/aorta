@@ -46,6 +46,7 @@ _SCRIPTS = (
 _EXIT_USAGE = 64
 _EXIT_NO_RECORDS = 31
 _EXIT_NUMERICS = 32
+_EXIT_SCHEMA = 34
 _EXIT_PYTEST_FAILED = 40
 _EXIT_PYTEST_NOTHING_RAN = 41
 
@@ -127,7 +128,9 @@ def test_host_launch_reports_missing_entry_script(bash: str, tmp_path: Path) -> 
     assert "entry script ts_kernel_probe.sh not found" in proc.stderr
 
 
-def _run_host_launch_with_docker_stub(bash: str, tmp_path: Path, tag: str) -> str:
+def _run_host_launch_with_docker_stub(
+    bash: str, tmp_path: Path, tag: str, extra_env: dict[str, str] | None = None
+) -> str:
     """Run host_launch.sh against a docker that records its argv instead of running.
 
     Returns the recorded ``docker run`` command line.
@@ -145,7 +148,7 @@ def _run_host_launch_with_docker_stub(bash: str, tmp_path: Path, tag: str) -> st
 
     scripts = tmp_path / "scripts"
     scripts.mkdir(exist_ok=True)
-    for name in ("host_launch.sh", "ts_kernel_probe.sh"):
+    for name in ("host_launch.sh", "ts_kernel_probe.sh", "ts_serve_probe.sh"):
         shutil.copy2(_SOURCE / name, scripts / name)
 
     env = dict(os.environ)
@@ -160,6 +163,7 @@ def _run_host_launch_with_docker_stub(bash: str, tmp_path: Path, tag: str) -> st
         }
     )
     env.pop("TS_RUN_TOKEN", None)
+    env.update(extra_env or {})
     proc = subprocess.run(
         [bash, str(scripts / "host_launch.sh")], capture_output=True, text=True, env=env
     )
@@ -172,6 +176,111 @@ def _token_from(argv: str) -> str:
         if line.startswith("TS_RUN_TOKEN="):
             return line.split("=", 1)[1]
     raise AssertionError(f"TS_RUN_TOKEN not forwarded to docker; argv was:\n{argv}")
+
+
+def test_host_launch_rejects_an_unreadable_env_file(bash: str, tmp_path: Path) -> None:
+    """Set-but-unreadable must fail, not fall back to container defaults.
+
+    The file carries the cell's mitigations. Dropping it silently would make
+    every cell in the matrix run one identical configuration while the run still
+    reported them as distinct -- a green matrix that measured nothing it claimed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # The image-presence check runs first, so it needs to succeed for this test
+    # to reach the env-file check it is about.
+    stub = bin_dir / "docker"
+    stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+    stub.chmod(0o755)
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("host_launch.sh", "ts_kernel_probe.sh"):
+        shutil.copy2(_SOURCE / name, scripts / name)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "TS_IMAGE": "example/image:tag",
+            "TS_SCRIPTS_DIR": str(scripts),
+            "TS_HF_DIR": str(tmp_path / "hf"),
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ENTRY": "ts_kernel_probe.sh",
+            "AORTA_ENV_FILE": str(tmp_path / "does-not-exist.env"),
+        }
+    )
+    proc = subprocess.run(
+        [bash, str(scripts / "host_launch.sh")], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == _EXIT_USAGE
+    assert "is not readable" in proc.stderr
+    assert "silently dropped" in proc.stderr
+
+
+def test_host_launch_picks_the_network_per_route(bash: str, tmp_path: Path) -> None:
+    """Bridge for the routes that need nothing off-node; host only where a
+    documented external dependency requires it.
+
+    The kernel and pytest probes run against the source tree already in the
+    image, so host networking would only publish container ports on a possibly
+    shared node. The serving routes resolve the model through huggingface_hub,
+    which contacts the Hub even for a cached model, and a bridged container on a
+    node with IPv4 forwarding disabled dies during startup with "Temporary
+    failure in name resolution".
+    """
+    argv = _run_host_launch_with_docker_stub(bash, tmp_path, "net-kernel")
+    assert "bridge" in argv.splitlines()
+    assert "host" not in argv.splitlines()
+
+    argv = _run_host_launch_with_docker_stub(
+        bash, tmp_path, "net-serve", extra_env={"TS_ENTRY": "ts_serve_probe.sh"}
+    )
+    assert "host" in argv.splitlines()
+    assert "bridge" not in argv.splitlines()
+
+    # And the override wins over either default.
+    argv = _run_host_launch_with_docker_stub(
+        bash,
+        tmp_path,
+        "net-override",
+        extra_env={"TS_ENTRY": "ts_serve_probe.sh", "TS_NETWORK": "bridge"},
+    )
+    assert "bridge" in argv.splitlines()
+
+
+def test_host_launch_records_the_resolved_image_digest(
+    bash: str, tmp_path: Path
+) -> None:
+    """A date tag is mutable, so the trial log has to say what content ran."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "docker"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "image" ]; then echo "example/image@sha256:abc123"; exit 0; fi\n'
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(exist_ok=True)
+    for name in ("host_launch.sh", "ts_kernel_probe.sh"):
+        shutil.copy2(_SOURCE / name, scripts / name)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "TS_IMAGE": "example/image:tag",
+            "TS_SCRIPTS_DIR": str(scripts),
+            "TS_HF_DIR": str(tmp_path / "hf"),
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ENTRY": "ts_kernel_probe.sh",
+        }
+    )
+    proc = subprocess.run(
+        [bash, str(scripts / "host_launch.sh")], capture_output=True, text=True, env=env
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "image_digest=example/image@sha256:abc123" in proc.stdout
 
 
 def test_host_launch_forwards_a_unique_run_token(bash: str, tmp_path: Path) -> None:
@@ -402,6 +511,40 @@ def test_empty_export_fails(bash: str, tmp_path: Path) -> None:
     assert "benchmark_exported_no_records" in proc.stdout
 
 
+def test_renamed_verdict_field_fails_instead_of_passing(
+    bash: str, tmp_path: Path
+) -> None:
+    """A missing `numerics_passed` must not read as `null`.
+
+    `null` legitimately means "not verified", so reading the field with .get()
+    makes an upstream rename indistinguishable from it -- the wrong-answer gate
+    would quietly stop existing while every trial stayed green. This is the
+    failure mode the probe exists to prevent, so it has to be loud.
+    """
+    record = _record(passed=False, m=1)
+    record["numerics_ok"] = record.pop("numerics_passed")
+    proc = _run_bench_probe(bash, tmp_path, [record])
+    assert proc.returncode == _EXIT_SCHEMA, proc.stdout + proc.stderr
+    assert "export_schema_changed" in proc.stdout
+    assert "has no numerics_passed field" in proc.stdout
+
+
+def test_wrongly_typed_verdict_field_fails(bash: str, tmp_path: Path) -> None:
+    """Same guard for a type change: "false" is a non-empty string, so a truthy
+    check would read a failing record as a pass."""
+    record = _record(passed=True, m=1)
+    record["numerics_passed"] = "false"
+    proc = _run_bench_probe(bash, tmp_path, [record])
+    assert proc.returncode == _EXIT_SCHEMA, proc.stdout + proc.stderr
+    assert "expected bool or null" in proc.stdout
+
+
+def test_non_object_record_fails(bash: str, tmp_path: Path) -> None:
+    proc = _run_bench_probe(bash, tmp_path, ["not-an-object"])
+    assert proc.returncode == _EXIT_SCHEMA, proc.stdout + proc.stderr
+    assert "expected object" in proc.stdout
+
+
 # --- recipes -------------------------------------------------------------
 
 
@@ -621,6 +764,40 @@ def test_pytest_probe_rejects_an_all_skipped_run(bash: str, tmp_path: Path) -> N
     )
     assert proc.returncode == _EXIT_PYTEST_NOTHING_RAN, proc.stdout
     assert "TS_PYTEST_FAIL: nothing_executed" in proc.stdout
+
+
+# An empty value is deliberately absent from this list: `${TS_MIN_PASSED:-1}`
+# treats empty as unset, which is the right reading of `TS_MIN_PASSED=`.
+@pytest.mark.parametrize("value", ["0", "abc", "-1", "1.5"])
+def test_pytest_probe_rejects_an_unusable_min_passed(
+    bash: str, tmp_path: Path, value: str
+) -> None:
+    """TS_MIN_PASSED is what the all-skipped guard compares against, so an
+    unusable value disables the guard rather than being merely wrong: 0 passes
+    trivially, and a non-numeric makes `[` error out -- which, because pytest
+    itself returned 0, also falls through to a green trial."""
+    workspace = _fake_workspace(tmp_path, "def test_ok():\n    assert True\n")
+    proc = _run_pytest_probe(
+        bash,
+        workspace,
+        tmp_path / "out",
+        TS_PYTEST_SUITE="pkg/test/ops/test_stub.py",
+        TS_MIN_PASSED=value,
+    )
+    assert proc.returncode == _EXIT_USAGE, proc.stdout
+    assert "TS_MIN_PASSED must be" in proc.stdout
+
+
+def test_pytest_probe_accepts_a_valid_min_passed(bash: str, tmp_path: Path) -> None:
+    workspace = _fake_workspace(tmp_path, "def test_ok():\n    assert True\n")
+    proc = _run_pytest_probe(
+        bash,
+        workspace,
+        tmp_path / "out",
+        TS_PYTEST_SUITE="pkg/test/ops/test_stub.py",
+        TS_MIN_PASSED="1",
+    )
+    assert proc.returncode == 0, proc.stdout
 
 
 def test_pytest_probe_rejects_an_empty_selection(bash: str, tmp_path: Path) -> None:
@@ -998,6 +1175,227 @@ def test_harvest_suite_root_matches_the_probe_script() -> None:
     assert module._suite_root("some/other/path.py") == "."
 
 
+def test_harvest_does_not_double_prefix_an_absolute_suite() -> None:
+    """An absolute --pytest-suite must survive unchanged.
+
+    `_suite_root` already returns an absolute root for an absolute suite, so
+    prefixing /workspace a second time yields `/workspace//workspace/...` and
+    docker fails on the working directory before pytest ever starts -- which
+    reads as a broken image rather than a bad argument.
+    """
+    import argparse
+
+    module = _harvest_module()
+
+    absolute = argparse.Namespace(
+        pytest_suite="/workspace/tokenspeed-kernel/test/ops/test_attention.py",
+        pytest_k=None,
+    )
+    cmd, workdir, _ = module._driver(absolute)
+    assert workdir == "/workspace/tokenspeed-kernel"
+    assert "/workspace/tokenspeed-kernel/test/ops/test_attention.py" in cmd
+    assert not any("//" in part for part in [workdir, *cmd])
+
+    relative = argparse.Namespace(
+        pytest_suite="tokenspeed-kernel/test/ops/test_attention.py", pytest_k=None
+    )
+    cmd, workdir, _ = module._driver(relative)
+    assert workdir == "/workspace/tokenspeed-kernel"
+    assert "/workspace/tokenspeed-kernel/test/ops/test_attention.py" in cmd
+
+    # No `test` component: the workdir is the mount root, not `/workspace/.`.
+    bare = argparse.Namespace(pytest_suite="some/other/path.py", pytest_k=None)
+    _, workdir, _ = module._driver(bare)
+    assert workdir == "/workspace"
+
+
+def test_harvest_carries_the_kernel_entry_offset_into_the_recipe(
+    tmp_path: Path,
+) -> None:
+    """entry_offset is what makes a harvested identity exact.
+
+    Without it KernelIdentity.exact is False, so Waitcheck collapses every
+    kernel sharing a code object into a single whole-object scan and reports
+    findings with no kernel name -- a helper kernel's finding could then be read
+    as the harvested one's.
+    """
+    module = _harvest_module()
+
+    assert module._entry_offset("0x1200") == 0x1200
+    assert module._entry_offset(4608) == 4608
+    assert module._entry_offset("4608") == 4608
+    # Unusable values degrade to a whole-object scan rather than pinning a wrong
+    # offset, which Waitcheck would reject outright.
+    assert module._entry_offset(None) is None
+    assert module._entry_offset("") is None
+    assert module._entry_offset("not-a-number") is None
+    assert module._entry_offset(True) is None
+
+    recipe = module._write_recipe(
+        tmp_path,
+        "attention",
+        "gfx950",
+        [
+            {
+                "name": "_fwd_kernel",
+                "code_object": str(tmp_path / "a.hsaco"),
+                "sha256": "0" * 64,
+                "code_object_index": 0,
+                "entry_offset": 0x1200,
+            },
+            {
+                "name": "_bwd_kernel",
+                "code_object": str(tmp_path / "b.hsaco"),
+                "sha256": "1" * 64,
+                "code_object_index": 0,
+                "entry_offset": None,
+            },
+        ],
+    )
+    doc = yaml.safe_load(recipe.read_text())
+    kernels = doc["sanitizer_plan"]["source"]["kernels"]
+    assert kernels[0]["entry_offset"] == 0x1200
+    # Absent rather than null: the recipe loader validates this as an integer,
+    # so a null would fail the whole recipe instead of degrading one entry.
+    assert "entry_offset" not in kernels[1]
+
+
+def test_harvest_aborts_when_a_supplied_waitcheck_rejects_the_object(
+    tmp_path: Path,
+) -> None:
+    """A failing inventory must not fall back to a guessed name.
+
+    The fallback exists for the case where no Waitcheck binary was supplied. If
+    one was supplied and rejected the object, a guess would emit a recipe whose
+    names and indices were never verified, and Waitcheck would then attribute a
+    finding to whatever the guess happened to name.
+    """
+    module = _harvest_module()
+
+    failing = tmp_path / "rj_waitcheck"
+    failing.write_text("#!/usr/bin/env bash\necho 'bad code object' >&2\nexit 3\n")
+    failing.chmod(0o755)
+    obj = tmp_path / "kernel.hsaco"
+    obj.write_bytes(b"fake")
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._inventory(failing, obj)
+    assert "--list-kernels failed" in str(excinfo.value)
+    assert "bad code object" in str(excinfo.value)
+
+    # Intentionally omitted stays a soft path: no binary, no inventory, no error.
+    assert module._inventory(None, obj) == []
+    assert module._inventory(tmp_path / "absent", obj) == []
+
+
+def test_harvest_names_its_container_so_a_timeout_is_recoverable() -> None:
+    """`subprocess.run(timeout=...)` kills the docker client, not the container.
+
+    aorta escalates to SIGKILL 10s after SIGTERM while a compile can be given
+    minutes, so without a handle a hung harvest keeps a GPU busy for the rest of
+    the sweep.
+    """
+    source = (_SOURCE / "harvest_code_objects.py").read_text()
+    assert 'f"aorta-ts-harvest-{os.getpid()}"' in source
+    assert "--name" in source
+    assert "_force_remove_container" in source
+    assert "except subprocess.TimeoutExpired" in source
+
+
+def _coverage_module():
+    """Import map_kernel_test_coverage.py by path.
+
+    Importable outside the container because every TokenSpeed import in it is
+    deferred into a function; only the per-suite child needs the real registry.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_ts_coverage_map", _SOURCE / "map_kernel_test_coverage.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_coverage_map_aborts_when_a_suite_probe_produces_no_map(
+    tmp_path: Path,
+) -> None:
+    """A crashed suite must abort, not be silently counted as uncovered.
+
+    Continuing turns "we could not measure this suite" into "these kernels have
+    no test", which understates coverage in the one number this tool exists to
+    state precisely -- and does so without any signal that it happened.
+    """
+    workspace = tmp_path / "ws"
+    suite = workspace / "pkg" / "test" / "ops"
+    suite.mkdir(parents=True)
+    (suite / "test_stub.py").write_text("def test_ok():\n    assert True\n")
+
+    # Run outside the container, so the child's `_registry_inventory` import of
+    # tokenspeed_kernel fails -- exactly the "probe crashed before writing its
+    # map" shape this guards.
+    proc = subprocess.run(
+        [
+            "python3",
+            str(_SOURCE / "map_kernel_test_coverage.py"),
+            "--workspace",
+            str(workspace),
+            "--suite",
+            "pkg/test/ops",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == _EXIT_USAGE, proc.stdout + proc.stderr
+    assert "coverage totals would be incomplete" in proc.stderr
+
+
+def test_coverage_map_separates_dispatch_from_candidacy() -> None:
+    """`covered` has to mean the implementation was selected.
+
+    `get_for_operator` returns every candidate for a family/mode, and upstream's
+    `require` fixture calls it only to decide whether to skip -- before
+    narrowing by dtype. Counting those as covered credits kernels the tests
+    never ran, which is how a coverage claim drifts from reality.
+    """
+    module = _coverage_module()
+    source = (_SOURCE / "map_kernel_test_coverage.py").read_text()
+
+    assert "get_impl" in source, "dispatch must be observed via get_impl"
+    assert '"covered": name in dispatched' in source
+    assert '"candidate_only": name in candidates and name not in dispatched' in source
+    # The returned callable must not be wrapped: Triton entries are invoked as
+    # kernel[grid](...), and a function wrapper does not forward __getitem__, so
+    # instrumenting the call would break the suites being measured.
+    assert "import functools" not in source
+
+    assert "kernels_candidate_only" in source
+    assert callable(module._install_probe)
+
+
+def test_harness_survey_aborts_on_an_import_failure() -> None:
+    """A swallowed import makes an incomplete survey look like a finding.
+
+    The numerics imports are what populate the generator and shape registries
+    every status is derived from, so losing one reclassifies real operators as
+    `no_input_generator` while the tool still exits 0 with normal-looking JSON.
+    """
+    source = (_SOURCE / "list_harness_coverage.py").read_text()
+    assert "raise SystemExit(64)" in source
+    assert "would be incomplete" in source
+
+    # Outside the container the tokenspeed_kernel import fails at module import,
+    # which must not be a zero exit either.
+    proc = subprocess.run(
+        ["python3", str(_SOURCE / "list_harness_coverage.py")],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+
+
 def test_sidecar_pairings_are_self_consistent() -> None:
     """Each cell must carry a dtype its kernel actually accepts.
 
@@ -1054,3 +1452,62 @@ def test_recipes_reference_only_resolvable_mitigations() -> None:
                     f"{recipe.name}: {axis} entry '{entry}' does not resolve "
                     "from the built-ins or any sidecar in recipes/tokenspeed/"
                 )
+
+
+def test_suites_smoke_covers_every_operator_family_it_claims() -> None:
+    """The suite recipe advertises attention, MoE, quantization, sampling and
+    transform coverage, so running the file has to actually reach all of them.
+
+    GDN and transform were previously reachable only by hand-picking a sidecar
+    selector, which made the recipe's own claim unreproducible from the recipe.
+    """
+    doc = yaml.safe_load(
+        (_RECIPES / "tokenspeed-kernel-suites-smoke.yaml").read_text()
+    )
+    axis = set(doc["mitigation_axis"])
+    for required in (
+        "ts_suite_attention",
+        "ts_suite_attention_mla",
+        "ts_suite_attention_dsa",
+        "ts_suite_attention_gdn",
+        "ts_suite_quantization",
+        "ts_suite_transform",
+        "ts_suite_moe_gluon_bf16",
+        "ts_suite_sampling_gluon",
+    ):
+        assert required in axis, f"suites smoke does not run {required}"
+
+
+def test_stage_scripts_mirrors_rather_than_accumulates(
+    bash: str, tmp_path: Path
+) -> None:
+    """Staging must remove what the source no longer has.
+
+    A plain `cp` only ever adds, so a probe renamed or deleted upstream stays
+    behind -- and because recipes name their entry script by filename, the stale
+    copy is still executable. A run pointed at the old name would then succeed
+    against code that no longer exists in the tree.
+    """
+    dest = tmp_path / "staged"
+    dest.mkdir()
+    stale_sh = dest / "ts_removed_probe.sh"
+    stale_sh.write_text("#!/usr/bin/env bash\nexit 0\n")
+    stale_py = dest / "removed_helper.py"
+    stale_py.write_text("x = 1\n")
+    # Caller-owned files in the same directory must survive: the staging dir is
+    # also where an env file or an out dir can sit.
+    keep = dest / "cell.env"
+    keep.write_text("FOO=bar\n")
+
+    proc = subprocess.run(
+        [bash, str(_SOURCE / "stage_scripts.sh"), str(dest)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not stale_sh.exists(), "renamed probe survived staging"
+    assert not stale_py.exists(), "removed helper survived staging"
+    assert keep.read_text() == "FOO=bar\n", "staging clobbered a caller file"
+    # And the real set did land.
+    assert (dest / "host_launch.sh").exists()
+    assert (dest / "ts_kernel_probe.sh").exists()

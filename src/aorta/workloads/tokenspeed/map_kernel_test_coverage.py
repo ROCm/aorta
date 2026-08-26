@@ -10,12 +10,23 @@ every solution in that family is exercised.
 
 Static analysis cannot answer this: the tests parametrize over solutions and skip
 via a ``require`` fixture at run time, so the only honest way to tell a covered
-kernel from a skipped one is to watch the resolution happen. This wraps
-``KernelRegistry.get_for_operator``, runs pytest in-process so the patch holds,
-and records which kernel specs each lookup actually returned. An empty return is
-the skip path, which is exactly the "not covered" signal we want.
+kernel from a skipped one is to watch the dispatch happen. This patches the
+registry, runs pytest in-process so the patch holds, and records two distinct
+things:
 
-Read ``covered`` as "resolved through the registry", not "untested". Two known
+``covered`` comes from ``KernelRegistry.get_impl(name)`` -- the post-selection
+lookup a caller makes to obtain the callable for the one kernel it is about to
+run. A name here is the implementation actually selected.
+
+``candidate_only`` comes from ``get_for_operator``, which returns *every*
+candidate matching a family/mode. The upstream ``require`` fixture calls it only
+to decide whether to skip, before narrowing candidates by dtype, so a name
+appearing there means "a test looked at this operator" -- not that the kernel
+ran. Counting those as covered would overstate what the suites exercise, so they
+are reported as their own category.
+
+Read ``covered`` as "this implementation was dispatched", not "asserted
+correct" -- a test can dispatch a kernel and still be a weak test. Two known
 blind spots, both of which under-report:
 
 * ``tokenspeed-kernel-amd/test/ops`` imports implementations directly
@@ -41,7 +52,9 @@ Mount the staged copy (``stage_scripts.sh`` puts this file there):
 
 Exit codes:
   0   the map was produced (independently of whether the tests passed)
-  64  usage / environment error -- registry not importable, or suites missing
+  64  usage / environment error -- registry not importable, suites missing, or a
+      per-suite probe that produced no map, which would leave its kernels
+      reported as uncovered rather than unknown
 """
 
 from __future__ import annotations
@@ -117,18 +130,42 @@ def _registry_inventory() -> dict[str, dict[str, str]]:
     }
 
 
-def _install_probe(seen: dict[str, set[str]], requested: dict[str, int]) -> None:
-    """Wrap get_for_operator so every resolution is recorded.
+def _install_probe(
+    dispatched: dict[str, set[str]],
+    candidates: dict[str, set[str]],
+    requested: dict[str, int],
+) -> None:
+    """Record what the suites resolve, and separately what they dispatch.
 
-    Patched on the class rather than the singleton, because tests may rebuild
-    the registry and a per-instance patch would then stop recording silently.
+    Two different questions, and conflating them overstates coverage:
+
+    ``get_for_operator`` returns *every* candidate matching a family/mode. The
+    upstream ``require`` fixture calls it only to decide whether to skip, before
+    narrowing candidates by dtype, so a name appearing here means "a test looked
+    at this operator", not "a test ran this kernel". Recorded as ``candidates``.
+
+    ``get_impl(name)`` is the post-selection lookup: it is how a caller obtains
+    the callable for the one kernel it is about to run, so a name appearing here
+    is the implementation actually selected. Recorded as ``dispatched``, and it
+    is what ``covered`` is computed from.
+
+    The returned callable is deliberately *not* wrapped. Triton entry points are
+    invoked as ``kernel[grid](...)``, and a ``functools.wraps`` function wrapper
+    does not forward ``__getitem__`` -- instrumenting the call would break the
+    very suites being measured. The lookup is the strongest signal available
+    without changing behaviour.
+
+    Both are patched on the class rather than the singleton, because tests may
+    rebuild the registry and a per-instance patch would then stop recording
+    silently.
     """
     from tokenspeed_kernel.registry import KernelRegistry
 
-    original = KernelRegistry.get_for_operator
+    original_for_operator = KernelRegistry.get_for_operator
+    original_get_impl = KernelRegistry.get_impl
 
-    def probed(self: Any, *args: Any, **kwargs: Any) -> Any:
-        result = original(self, *args, **kwargs)
+    def probed_for_operator(self: Any, *args: Any, **kwargs: Any) -> Any:
+        result = original_for_operator(self, *args, **kwargs)
 
         family = kwargs.get("family", args[0] if args else "?")
         mode = kwargs.get("mode", args[1] if len(args) > 1 else "?")
@@ -136,18 +173,27 @@ def _install_probe(seen: dict[str, set[str]], requested: dict[str, int]) -> None
         key = f"{family}.{mode}::{solution}"
         requested[key] = requested.get(key, 0) + 1
 
-        # A non-empty result means the lookup selected real kernels; empty is
-        # the skip path. Record names so the join is by kernel identity rather
-        # than by family, which would over-credit multi-solution families.
+        # Record names so the join is by kernel identity rather than by family,
+        # which would over-credit multi-solution families.
         specs = result if isinstance(result, (list, tuple, set)) else [result]
         for spec in specs:
             name = getattr(spec, "name", None)
             if name:
-                seen[str(name)].add(key)
+                candidates[str(name)].add(key)
 
         return result
 
-    KernelRegistry.get_for_operator = probed  # type: ignore[method-assign]
+    def probed_get_impl(self: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+        result = original_get_impl(self, name, *args, **kwargs)
+        # A None result is a miss -- the kernel has no registered implementation,
+        # so nothing was dispatched and recording it would credit a kernel that
+        # cannot run.
+        if result is not None and name:
+            dispatched[str(name)].add("get_impl")
+        return result
+
+    KernelRegistry.get_for_operator = probed_for_operator  # type: ignore[method-assign]
+    KernelRegistry.get_impl = probed_get_impl  # type: ignore[method-assign]
 
 
 def _run_one_suite(args: argparse.Namespace) -> int:
@@ -155,11 +201,12 @@ def _run_one_suite(args: argparse.Namespace) -> int:
     import pytest
 
     suite = Path(args._single)
-    seen: dict[str, set[str]] = defaultdict(set)
+    dispatched: dict[str, set[str]] = defaultdict(set)
+    candidates: dict[str, set[str]] = defaultdict(set)
     requested: dict[str, int] = {}
 
     inventory = _registry_inventory()
-    _install_probe(seen, requested)
+    _install_probe(dispatched, candidates, requested)
 
     argv = [str(suite), "-q", "--no-header", "-p", "no:cacheprovider"]
     argv += args.pytest_arg or []
@@ -167,7 +214,8 @@ def _run_one_suite(args: argparse.Namespace) -> int:
 
     partial = {
         "inventory": inventory,
-        "seen": {name: sorted(keys) for name, keys in seen.items()},
+        "dispatched": {name: sorted(keys) for name, keys in dispatched.items()},
+        "candidates": {name: sorted(keys) for name, keys in candidates.items()},
         "lookups": requested,
         "exit_code": code,
     }
@@ -202,7 +250,8 @@ def main() -> int:
         return 64
 
     inventory: dict[str, dict[str, str]] = {}
-    seen: dict[str, set[str]] = defaultdict(set)
+    dispatched: dict[str, set[str]] = defaultdict(set)
+    candidates: dict[str, set[str]] = defaultdict(set)
     lookups: dict[str, int] = {}
     exit_codes: dict[str, int] = {}
 
@@ -223,17 +272,35 @@ def main() -> int:
                 cmd += ["--pytest-arg", extra]
 
             print(f"=== {label} ===", flush=True)
-            subprocess.run(cmd, cwd=_suite_cwd(workspace, path), check=False)
+            proc = subprocess.run(cmd, cwd=_suite_cwd(workspace, path), check=False)
 
+            # A non-zero rc here is the *wrapper* crashing, not tests failing:
+            # `_run_one_suite` returns 0 and records pytest's own exit code
+            # inside the partial map. So either of these means this suite
+            # contributed no observations, and continuing would report its
+            # kernels as uncovered rather than unknown -- understating coverage
+            # in a number this tool exists to state precisely.
+            if proc.returncode != 0:
+                print(
+                    f"map_kernel_test_coverage: {label} probe exited "
+                    f"{proc.returncode}; coverage totals would be incomplete",
+                    file=sys.stderr,
+                )
+                return 64
             if not part.exists():
-                print(f"  no map produced for {label}", file=sys.stderr)
-                exit_codes[label] = -1
-                continue
+                print(
+                    f"map_kernel_test_coverage: {label} wrote no map to {part}; "
+                    "coverage totals would be incomplete",
+                    file=sys.stderr,
+                )
+                return 64
 
             data = json.loads(part.read_text())
             inventory.update(data["inventory"])
-            for name, keys in data["seen"].items():
-                seen[name].update(keys)
+            for name, keys in data["dispatched"].items():
+                dispatched[name].update(keys)
+            for name, keys in data["candidates"].items():
+                candidates[name].update(keys)
             for key, count in data["lookups"].items():
                 lookups[key] = lookups.get(key, 0) + count
             exit_codes[label] = data["exit_code"]
@@ -244,17 +311,29 @@ def main() -> int:
 
     report: dict[str, Any] = {
         "kernels": {
-            name: {**meta, "covered": name in seen, "via": sorted(seen.get(name, ()))}
+            # `covered` is dispatch, not candidacy. `candidate_only` names the
+            # difference explicitly: a test looked at the operator but the
+            # implementation was never selected (usually filtered out by dtype
+            # after the skip check), so counting it as covered would overstate
+            # what the suites exercise.
+            name: {
+                **meta,
+                "covered": name in dispatched,
+                "candidate_only": name in candidates and name not in dispatched,
+                "via": sorted(candidates.get(name, ())),
+            }
             for name, meta in sorted(inventory.items())
         },
         "lookups": dict(sorted(lookups.items())),
         "suite_exit_codes": exit_codes,
     }
     n_cov = sum(1 for k in report["kernels"].values() if k["covered"])
+    n_cand = sum(1 for k in report["kernels"].values() if k["candidate_only"])
     report["summary"] = {
         "kernels_total": len(inventory),
         "kernels_covered": n_cov,
-        "kernels_uncovered": len(inventory) - n_cov,
+        "kernels_candidate_only": n_cand,
+        "kernels_uncovered": len(inventory) - n_cov - n_cand,
     }
 
     text = json.dumps(report, indent=2, sort_keys=True)
@@ -265,13 +344,17 @@ def main() -> int:
         print(text)
 
     print(f"\nsummary: {report['summary']}")
-    print("\ncovered kernels:")
+    print("\ncovered kernels (implementation dispatched):")
     for name, meta in sorted(report["kernels"].items()):
         if meta["covered"]:
             print(f"  {meta['family']}.{meta['mode']:<26} {name}")
+    print("\ncandidate-only kernels (operator reached, implementation not selected):")
+    for name, meta in sorted(report["kernels"].items()):
+        if meta["candidate_only"]:
+            print(f"  {meta['family']}.{meta['mode']:<26} {name}")
     print("\nuncovered kernels:")
     for name, meta in sorted(report["kernels"].items()):
-        if not meta["covered"]:
+        if not meta["covered"] and not meta["candidate_only"]:
             print(f"  {meta['family']}.{meta['mode']:<26} {name}")
     return 0
 
