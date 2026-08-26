@@ -210,6 +210,61 @@ def test_the_cell_env_file_outranks_the_invoking_shell(bash: str, tmp_path: Path
     assert f"--env-file\n{env_file}" in argv
 
 
+def test_a_cells_operator_survives_a_kernel_name_left_in_the_shell(
+    bash: str, tmp_path: Path
+) -> None:
+    """The two kernel selectors are one decision, so the check is per group.
+
+    ts_kernel_probe.sh resolves TS_KERNEL_NAME first and only falls back to
+    TS_KERNEL_OP. A name-by-name check therefore lets a TS_KERNEL_NAME leaked
+    from the caller's shell through untouched -- it is absent from the cell's env
+    file, so nothing looks like a conflict -- and the container pins that one
+    kernel for every cell of a sweep whose cells each still carry their own
+    operator label. Same substitution the test above pins, entered through the
+    other spelling of the pair.
+    """
+    env_file = tmp_path / "cell.env"
+    env_file.write_text("TS_KERNEL_OP=gemm.mm\n")
+
+    argv = _run_host_launch_with_docker_stub(
+        bash,
+        tmp_path,
+        "selector-group",
+        extra_env={
+            "AORTA_ENV_FILE": str(env_file),
+            "TS_KERNEL_NAME": "gluon_mm_a16w16_gfx950",
+        },
+    )
+
+    assert (
+        "TS_KERNEL_NAME=gluon_mm_a16w16_gfx950" not in argv
+    ), "the shell's kernel name outranks the cell's --op inside the container"
+
+
+def test_a_kernel_name_is_still_forwarded_when_the_cell_names_no_selector(
+    bash: str, tmp_path: Path
+) -> None:
+    """Grouping must not cost the manual run its knob.
+
+    Exporting TS_KERNEL_NAME is how a one-off run picks a kernel; the group only
+    decides who wins when a cell has already made that choice.
+    """
+    env_file = tmp_path / "cell.env"
+    env_file.write_text("TS_KERNEL_DTYPE=bf16\n")
+
+    argv = _run_host_launch_with_docker_stub(
+        bash,
+        tmp_path,
+        "selector-group-free",
+        extra_env={
+            "AORTA_ENV_FILE": str(env_file),
+            "TS_KERNEL_NAME": "gluon_mm_a16w16_gfx950",
+        },
+    )
+
+    assert "TS_KERNEL_NAME=gluon_mm_a16w16_gfx950" in argv
+
+
 def test_host_launch_logs_mitigation_names_without_their_values(bash: str, tmp_path: Path) -> None:
     """Mitigations may carry credentials, and stdout.log is retained broadly.
 
@@ -625,7 +680,22 @@ def test_non_object_record_fails(bash: str, tmp_path: Path) -> None:
 
 
 def _recipes() -> list[Path]:
-    return sorted(_RECIPES.glob("*.yaml"))
+    """The probe-mode recipes in the TokenSpeed recipe directory.
+
+    Filtered by ``mode``, not by filename: the same directory also holds the
+    triage-mode recipes that drive the ``tokenspeed_serve`` workload, which have
+    no ``mitigation_axis`` or ``custom_patterns`` and would fail every
+    assertion below. Selecting on ``mode`` means a new probe recipe is picked up
+    automatically while a new triage recipe is correctly ignored --
+    ``tests/workloads/test_tokenspeed_serve.py`` covers those.
+    """
+    probe_recipes = []
+    for path in sorted(_RECIPES.glob("*.yaml")):
+        with path.open(encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+        if isinstance(doc, dict) and doc.get("mode") == "probe":
+            probe_recipes.append(path)
+    return probe_recipes
 
 
 def _sidecars() -> list[Path]:
