@@ -136,6 +136,23 @@ in_env_file() {
   grep -qE "^[[:space:]]*${1}=" "${AORTA_ENV_FILE}"
 }
 
+# Matching on the name alone is not enough, because some knobs are alternative
+# spellings of one decision rather than independent settings. ts_kernel_probe.sh
+# resolves TS_KERNEL_NAME first and only falls back to TS_KERNEL_OP, so a cell
+# that selects an operator family is still displaced by a TS_KERNEL_NAME left
+# exported in the caller's shell: that name appears nowhere in the cell's env
+# file, the per-name check above sees no conflict and forwards it, and the
+# container then runs one pinned kernel for every cell while each cell keeps its
+# own label -- the exact silent substitution this block exists to stop, just
+# reached through the other half of the pair. So the unit of the check is the
+# group: name a cell's selector in either spelling and the shell loses both.
+selector_group() {
+  case "$1" in
+    TS_KERNEL_OP|TS_KERNEL_NAME) echo "TS_KERNEL_OP TS_KERNEL_NAME" ;;
+    *) echo "$1" ;;
+  esac
+}
+
 ts_env_args=()
 for var in TS_MODEL TS_PORT TS_CONTROL_PORT TS_READY_TIMEOUT TS_GEN_TIMEOUT \
            TS_SERVE_ARGS TS_TEARDOWN_GRACE \
@@ -145,9 +162,21 @@ for var in TS_MODEL TS_PORT TS_CONTROL_PORT TS_READY_TIMEOUT TS_GEN_TIMEOUT \
   if [ -z "${!var:-}" ]; then
     continue
   fi
-  if in_env_file "${var}"; then
-    echo "host_launch: ${var} is set in the environment and in the cell's env" \
-      "file; keeping the cell's value"
+  claimed=""
+  for peer in $(selector_group "${var}"); do
+    if in_env_file "${peer}"; then
+      claimed="${peer}"
+      break
+    fi
+  done
+  if [ -n "${claimed}" ]; then
+    if [ "${claimed}" = "${var}" ]; then
+      echo "host_launch: ${var} is set in the environment and in the cell's env" \
+        "file; keeping the cell's value"
+    else
+      echo "host_launch: ${var} is set in the environment but the cell's env" \
+        "file selects ${claimed}; dropping ${var} so the cell's selector stands"
+    fi
     continue
   fi
   ts_env_args+=(-e "${var}=${!var}")
