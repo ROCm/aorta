@@ -19,11 +19,14 @@ hardware:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -248,9 +251,7 @@ def test_host_launch_picks_the_network_per_route(bash: str, tmp_path: Path) -> N
     assert "bridge" in argv.splitlines()
 
 
-def test_host_launch_records_the_resolved_image_digest(
-    bash: str, tmp_path: Path
-) -> None:
+def test_host_launch_records_the_resolved_image_digest(bash: str, tmp_path: Path) -> None:
     """A date tag is mutable, so the trial log has to say what content ran."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -511,9 +512,7 @@ def test_empty_export_fails(bash: str, tmp_path: Path) -> None:
     assert "benchmark_exported_no_records" in proc.stdout
 
 
-def test_renamed_verdict_field_fails_instead_of_passing(
-    bash: str, tmp_path: Path
-) -> None:
+def test_renamed_verdict_field_fails_instead_of_passing(bash: str, tmp_path: Path) -> None:
     """A missing `numerics_passed` must not read as `null`.
 
     `null` legitimately means "not verified", so reading the field with .get()
@@ -769,9 +768,7 @@ def test_pytest_probe_rejects_an_all_skipped_run(bash: str, tmp_path: Path) -> N
 # An empty value is deliberately absent from this list: `${TS_MIN_PASSED:-1}`
 # treats empty as unset, which is the right reading of `TS_MIN_PASSED=`.
 @pytest.mark.parametrize("value", ["0", "abc", "-1", "1.5"])
-def test_pytest_probe_rejects_an_unusable_min_passed(
-    bash: str, tmp_path: Path, value: str
-) -> None:
+def test_pytest_probe_rejects_an_unusable_min_passed(bash: str, tmp_path: Path, value: str) -> None:
     """TS_MIN_PASSED is what the all-skipped guard compares against, so an
     unusable value disables the guard rather than being merely wrong: 0 passes
     trivially, and a non-numeric makes `[` error out -- which, because pytest
@@ -1352,27 +1349,164 @@ def test_coverage_map_aborts_when_a_suite_probe_produces_no_map(
     assert "coverage totals would be incomplete" in proc.stderr
 
 
-def test_coverage_map_separates_dispatch_from_candidacy() -> None:
-    """`covered` has to mean the implementation was selected.
+@contextlib.contextmanager
+def _fake_registry(monkeypatch, impls: dict[str, object], candidates=()):
+    """Stand in for `tokenspeed_kernel.registry` so the probe can be driven.
 
-    `get_for_operator` returns every candidate for a family/mode, and upstream's
-    `require` fixture calls it only to decide whether to skip -- before
-    narrowing by dtype. Counting those as covered credits kernels the tests
-    never ran, which is how a coverage claim drifts from reality.
+    `_install_probe` patches the class, so a fake class is all it needs -- and
+    driving it directly is the only way to assert what the probe records, which
+    is the whole verdict this tool produces.
+    """
+    import types
+
+    class KernelRegistry:
+        @classmethod
+        def get(cls):
+            return cls()
+
+        def get_for_operator(self, family, mode, **kwargs):
+            return list(candidates)
+
+        def get_impl(self, name, *args, **kwargs):
+            return impls.get(name)
+
+    pkg = types.ModuleType("tokenspeed_kernel")
+    mod = types.ModuleType("tokenspeed_kernel.registry")
+    mod.KernelRegistry = KernelRegistry  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tokenspeed_kernel", pkg)
+    monkeypatch.setitem(sys.modules, "tokenspeed_kernel.registry", mod)
+    yield KernelRegistry
+
+
+def test_coverage_map_counts_entry_not_lookup(monkeypatch) -> None:
+    """`covered` has to mean the kernel *ran*.
+
+    `get_impl` returning a callable proves only that a test asked for one.
+    Upstream's `test/ops/moe/test_latent_input.py` calls it purely to assert each
+    implementation's `__module__` and never launches anything, so crediting the
+    lookup marks kernels covered that never executed -- the same overstatement as
+    counting candidates instead of dispatches, one layer down.
+    """
+    from collections import defaultdict
+
+    module = _coverage_module()
+    entered: dict = defaultdict(set)
+    dispatched: dict = defaultdict(set)
+    candidates: dict = defaultdict(set)
+    requested: dict = {}
+
+    def ran_kernel(*args, **kwargs):
+        return "result"
+
+    inspected_kernel = types.SimpleNamespace(__module__="tokenspeed_kernel.moe.gluon")
+
+    with _fake_registry(monkeypatch, {"k_ran": ran_kernel, "k_inspected": inspected_kernel}):
+        module._install_probe(entered, dispatched, candidates, requested)
+        from tokenspeed_kernel.registry import KernelRegistry  # type: ignore
+
+        registry = KernelRegistry()
+
+        # A test that actually runs the kernel.
+        assert registry.get_impl("k_ran")(1, 2) == "result"
+        # A test that only inspects where the implementation lives.
+        assert registry.get_impl("k_inspected").__module__ == "tokenspeed_kernel.moe.gluon"
+
+    assert set(entered) == {"k_ran"}, "only the entered kernel counts as covered"
+    assert set(dispatched) == {"k_ran", "k_inspected"}, "both were looked up"
+    assert entered["k_ran"] == {"call"}
+
+
+def test_coverage_map_counts_a_triton_launch(monkeypatch) -> None:
+    """Triton entry points are invoked as `kernel[grid](...)`.
+
+    Subscripting is the launch decision -- what it returns is the launcher -- so
+    the probe has to record there. This is why a `functools.wraps` wrapper will
+    not do: it forwards neither `__getitem__` nor `__module__`.
+    """
+    from collections import defaultdict
+
+    module = _coverage_module()
+    entered: dict = defaultdict(set)
+    dispatched: dict = defaultdict(set)
+
+    launched = []
+
+    class JitKernel:
+        __module__ = "tokenspeed_kernel.gluon.attention"
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                launched.append(grid)
+
+            return launch
+
+    with _fake_registry(monkeypatch, {"k_triton": JitKernel()}):
+        module._install_probe(entered, dispatched, defaultdict(set), {})
+        from tokenspeed_kernel.registry import KernelRegistry  # type: ignore
+
+        impl = KernelRegistry().get_impl("k_triton")
+        # Reading metadata is not a launch.
+        assert impl.__module__ == "tokenspeed_kernel.gluon.attention"
+        assert not entered
+        impl[(4, 1, 1)](7)
+
+    assert launched == [(4, 1, 1)]
+    assert entered["k_triton"] == {"launch"}
+
+
+def test_coverage_probe_does_not_disturb_the_suites_it_measures(monkeypatch) -> None:
+    """The suites are the measurement, so the probe must be invisible to them.
+
+    Anything the proxy changes -- an implementation's `__module__`, identity in a
+    set, an attribute write landing on the wrapper instead of the kernel --
+    corrupts the very run it is observing.
     """
     module = _coverage_module()
+    recorded: list = []
+
+    def impl(a, b):
+        return a + b
+
+    impl.solution = "gluon"  # type: ignore[attr-defined]
+    original_module = impl.__module__
+
+    proxy = module._EntryProbe(impl, "k", lambda n, how: recorded.append((n, how)))
+
+    assert impl.__module__ == original_module, "wrapping must not mutate the kernel"
+    assert proxy.__module__ == original_module
+    assert proxy.__name__ == "impl"
+    assert proxy.solution == "gluon"
+    assert repr(impl) in repr(proxy) or "impl" in repr(proxy)
+    assert not recorded, "inspecting the implementation is not an entry"
+
+    # Identity-ish behaviour: a suite holding impls in a set, or comparing two
+    # lookups of the same kernel, must not see two different objects.
+    other = module._EntryProbe(impl, "k", lambda n, how: None)
+    assert proxy == impl and proxy == other
+    assert len({proxy, other, impl}) == 1
+
+    # Attribute writes reach the kernel, not the wrapper.
+    proxy.extra = 5
+    assert impl.extra == 5  # type: ignore[attr-defined]
+
+    assert proxy(2, 3) == 5
+    assert recorded == [("k", "call")]
+
+
+def test_coverage_map_reports_three_states() -> None:
+    """Entered, looked-up-only and candidate-only are different claims, and each
+    of the wider two has at some point been mistaken for coverage."""
     source = (_SOURCE / "map_kernel_test_coverage.py").read_text()
 
-    assert "get_impl" in source, "dispatch must be observed via get_impl"
-    assert '"covered": name in dispatched' in source
-    assert '"candidate_only": name in candidates and name not in dispatched' in source
-    # The returned callable must not be wrapped: Triton entries are invoked as
-    # kernel[grid](...), and a function wrapper does not forward __getitem__, so
-    # instrumenting the call would break the suites being measured.
-    assert "import functools" not in source
-
-    assert "kernels_candidate_only" in source
-    assert callable(module._install_probe)
+    assert '"covered": name in entered' in source
+    assert '"lookup_only": name in dispatched and name not in entered' in source
+    for key in (
+        "kernels_covered",
+        "kernels_lookup_only",
+        "kernels_candidate_only",
+        "kernels_uncovered",
+    ):
+        assert key in source, key
 
 
 def test_harness_survey_aborts_on_an_import_failure() -> None:
@@ -1461,9 +1595,7 @@ def test_suites_smoke_covers_every_operator_family_it_claims() -> None:
     GDN and transform were previously reachable only by hand-picking a sidecar
     selector, which made the recipe's own claim unreproducible from the recipe.
     """
-    doc = yaml.safe_load(
-        (_RECIPES / "tokenspeed-kernel-suites-smoke.yaml").read_text()
-    )
+    doc = yaml.safe_load((_RECIPES / "tokenspeed-kernel-suites-smoke.yaml").read_text())
     axis = set(doc["mitigation_axis"])
     for required in (
         "ts_suite_attention",
@@ -1478,9 +1610,7 @@ def test_suites_smoke_covers_every_operator_family_it_claims() -> None:
         assert required in axis, f"suites smoke does not run {required}"
 
 
-def test_stage_scripts_mirrors_rather_than_accumulates(
-    bash: str, tmp_path: Path
-) -> None:
+def test_stage_scripts_mirrors_rather_than_accumulates(bash: str, tmp_path: Path) -> None:
     """Staging must remove what the source no longer has.
 
     A plain `cp` only ever adds, so a probe renamed or deleted upstream stays

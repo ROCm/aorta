@@ -60,6 +60,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import subprocess
 import sys
@@ -130,39 +131,114 @@ def _registry_inventory() -> dict[str, dict[str, str]]:
     }
 
 
+class _EntryProbe:
+    """Transparent proxy that records when a kernel is actually entered.
+
+    ``get_impl`` returning a callable proves only that a test asked for one.
+    TokenSpeed itself has suites that go no further --
+    ``test/ops/moe/test_latent_input.py`` calls ``get_impl`` solely to assert
+    each implementation's ``__module__`` -- so crediting the lookup marks kernels
+    covered that were never launched, which is the same overstatement as counting
+    candidates instead of dispatches, one layer down.
+
+    Both entry paths are recorded: ``proxy(...)`` for an ordinary callable and
+    ``proxy[grid]`` for a Triton entry point, which is invoked as
+    ``kernel[grid](...)``. Subscripting is the launch decision -- the object it
+    returns is the launcher -- so recording there is what makes this work for
+    Triton kernels, and it is why a plain ``functools.wraps`` wrapper would not
+    do (it forwards neither ``__getitem__`` nor much else).
+
+    Everything else must reach the wrapped object unchanged, because these suites
+    are the measurement: if the proxy alters their behaviour it invalidates the
+    very numbers it is collecting. Attribute access forwards, and
+    ``update_wrapper`` copies ``__module__`` / ``__name__`` / ``__qualname__`` /
+    ``__doc__`` onto the instance -- without that, ``proxy.__module__`` would
+    resolve to *this* module via the class and fail exactly the assertion in
+    ``test_latent_input.py``. Equality and hashing delegate so a suite holding
+    impls in a set or comparing two lookups is unaffected, and proxies are cached
+    per implementation so two lookups of one kernel stay identical objects.
+    """
+
+    def __init__(self, impl: Any, name: str, record: Any) -> None:
+        object.__setattr__(self, "_aorta_impl", impl)
+        object.__setattr__(self, "_aorta_name", name)
+        object.__setattr__(self, "_aorta_record", record)
+        # Not functools.update_wrapper: it assigns via setattr, which this class
+        # forwards to the wrapped object, so it would quietly rewrite the
+        # implementation's own __module__ instead of the proxy's. object's
+        # __setattr__ is the one that puts these on the instance, where they
+        # shadow the class attributes of the same name -- which is the point,
+        # since `proxy.__module__` would otherwise resolve to this module and
+        # fail an upstream assertion about where an implementation lives.
+        for attr in functools.WRAPPER_ASSIGNMENTS:
+            try:
+                object.__setattr__(self, attr, getattr(impl, attr))
+            except AttributeError:
+                pass
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self._aorta_record(self._aorta_name, "call")
+        return self._aorta_impl(*args, **kwargs)
+
+    def __getitem__(self, grid: Any) -> Any:
+        self._aorta_record(self._aorta_name, "launch")
+        return self._aorta_impl[grid]
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(object.__getattribute__(self, "_aorta_impl"), attr)
+
+    def __setattr__(self, attr: str, value: Any) -> None:
+        setattr(self._aorta_impl, attr, value)
+
+    def __repr__(self) -> str:
+        return repr(self._aorta_impl)
+
+    def __eq__(self, other: Any) -> bool:
+        other = getattr(other, "_aorta_impl", other)
+        return bool(self._aorta_impl == other)
+
+    def __hash__(self) -> int:
+        return hash(self._aorta_impl)
+
+
 def _install_probe(
+    entered: dict[str, set[str]],
     dispatched: dict[str, set[str]],
     candidates: dict[str, set[str]],
     requested: dict[str, int],
 ) -> None:
-    """Record what the suites resolve, and separately what they dispatch.
+    """Record what the suites resolve, dispatch, and actually enter.
 
-    Two different questions, and conflating them overstates coverage:
+    Three different questions, and conflating any two of them overstates
+    coverage:
 
     ``get_for_operator`` returns *every* candidate matching a family/mode. The
     upstream ``require`` fixture calls it only to decide whether to skip, before
     narrowing candidates by dtype, so a name appearing here means "a test looked
     at this operator", not "a test ran this kernel". Recorded as ``candidates``.
 
-    ``get_impl(name)`` is the post-selection lookup: it is how a caller obtains
-    the callable for the one kernel it is about to run, so a name appearing here
-    is the implementation actually selected. Recorded as ``dispatched``, and it
-    is what ``covered`` is computed from.
+    ``get_impl(name)`` is the post-selection lookup: how a caller obtains the
+    callable for the kernel it intends to run. Recorded as ``dispatched``.
 
-    The returned callable is deliberately *not* wrapped. Triton entry points are
-    invoked as ``kernel[grid](...)``, and a ``functools.wraps`` function wrapper
-    does not forward ``__getitem__`` -- instrumenting the call would break the
-    very suites being measured. The lookup is the strongest signal available
-    without changing behaviour.
+    Entering that callable -- ``impl(...)`` or ``impl[grid](...)`` -- is the only
+    one of the three that proves the kernel ran, so it is what ``covered`` is
+    computed from. Recorded as ``entered`` via :class:`_EntryProbe`. A lookup
+    with no entry is reported as ``lookup_only``, which is a real state upstream:
+    ``test_latent_input.py`` looks up three MoE implementations purely to assert
+    their ``__module__``.
 
-    Both are patched on the class rather than the singleton, because tests may
-    rebuild the registry and a per-instance patch would then stop recording
-    silently.
+    Both accessors are patched on the class rather than the singleton, because
+    tests may rebuild the registry and a per-instance patch would then stop
+    recording silently.
     """
     from tokenspeed_kernel.registry import KernelRegistry
 
     original_for_operator = KernelRegistry.get_for_operator
     original_get_impl = KernelRegistry.get_impl
+    proxies: dict[int, Any] = {}
+
+    def record_entry(name: str, how: str) -> None:
+        entered[name].add(how)
 
     def probed_for_operator(self: Any, *args: Any, **kwargs: Any) -> Any:
         result = original_for_operator(self, *args, **kwargs)
@@ -188,9 +264,25 @@ def _install_probe(
         # A None result is a miss -- the kernel has no registered implementation,
         # so nothing was dispatched and recording it would credit a kernel that
         # cannot run.
-        if result is not None and name:
-            dispatched[str(name)].add("get_impl")
-        return result
+        if result is None or not name:
+            return result
+        dispatched[str(name)].add("get_impl")
+        if not callable(result) and not hasattr(type(result), "__getitem__"):
+            # Nothing to enter, so nothing to instrument; the lookup is all the
+            # signal there is for this one.
+            return result
+        try:
+            return proxies.setdefault(id(result), _EntryProbe(result, str(name), record_entry))
+        except Exception as exc:  # pragma: no cover - defensive
+            # Never let instrumentation break the suites: an un-proxyable
+            # implementation degrades this kernel to lookup_only rather than
+            # failing the run, and says so instead of quietly under-reporting.
+            print(
+                f"map_kernel_test_coverage: cannot instrument {name} "
+                f"({type(exc).__name__}: {exc}); recording lookup only",
+                file=sys.stderr,
+            )
+            return result
 
     KernelRegistry.get_for_operator = probed_for_operator  # type: ignore[method-assign]
     KernelRegistry.get_impl = probed_get_impl  # type: ignore[method-assign]
@@ -201,12 +293,13 @@ def _run_one_suite(args: argparse.Namespace) -> int:
     import pytest
 
     suite = Path(args._single)
+    entered: dict[str, set[str]] = defaultdict(set)
     dispatched: dict[str, set[str]] = defaultdict(set)
     candidates: dict[str, set[str]] = defaultdict(set)
     requested: dict[str, int] = {}
 
     inventory = _registry_inventory()
-    _install_probe(dispatched, candidates, requested)
+    _install_probe(entered, dispatched, candidates, requested)
 
     argv = [str(suite), "-q", "--no-header", "-p", "no:cacheprovider"]
     argv += args.pytest_arg or []
@@ -214,6 +307,7 @@ def _run_one_suite(args: argparse.Namespace) -> int:
 
     partial = {
         "inventory": inventory,
+        "entered": {name: sorted(keys) for name, keys in entered.items()},
         "dispatched": {name: sorted(keys) for name, keys in dispatched.items()},
         "candidates": {name: sorted(keys) for name, keys in candidates.items()},
         "lookups": requested,
@@ -250,6 +344,7 @@ def main() -> int:
         return 64
 
     inventory: dict[str, dict[str, str]] = {}
+    entered: dict[str, set[str]] = defaultdict(set)
     dispatched: dict[str, set[str]] = defaultdict(set)
     candidates: dict[str, set[str]] = defaultdict(set)
     lookups: dict[str, int] = {}
@@ -297,6 +392,8 @@ def main() -> int:
 
             data = json.loads(part.read_text())
             inventory.update(data["inventory"])
+            for name, keys in data["entered"].items():
+                entered[name].update(keys)
             for name, keys in data["dispatched"].items():
                 dispatched[name].update(keys)
             for name, keys in data["candidates"].items():
@@ -311,15 +408,27 @@ def main() -> int:
 
     report: dict[str, Any] = {
         "kernels": {
-            # `covered` is dispatch, not candidacy. `candidate_only` names the
-            # difference explicitly: a test looked at the operator but the
-            # implementation was never selected (usually filtered out by dtype
-            # after the skip check), so counting it as covered would overstate
-            # what the suites exercise.
+            # Three states, narrowest first, because each of the wider two was at
+            # some point mistaken for coverage:
+            #
+            #   covered      the implementation was entered -- called, or
+            #                subscripted as a Triton entry point. The only one
+            #                that proves the kernel ran.
+            #   lookup_only  get_impl handed the test the callable and the test
+            #                never entered it (upstream does this to assert
+            #                __module__).
+            #   candidate_only
+            #                a test looked at the operator but this
+            #                implementation was never selected, usually filtered
+            #                out by dtype after the skip check.
             name: {
                 **meta,
-                "covered": name in dispatched,
-                "candidate_only": name in candidates and name not in dispatched,
+                "covered": name in entered,
+                "lookup_only": name in dispatched and name not in entered,
+                "candidate_only": (
+                    name in candidates and name not in dispatched and name not in entered
+                ),
+                "entered_via": sorted(entered.get(name, ())),
                 "via": sorted(candidates.get(name, ())),
             }
             for name, meta in sorted(inventory.items())
@@ -328,12 +437,14 @@ def main() -> int:
         "suite_exit_codes": exit_codes,
     }
     n_cov = sum(1 for k in report["kernels"].values() if k["covered"])
+    n_look = sum(1 for k in report["kernels"].values() if k["lookup_only"])
     n_cand = sum(1 for k in report["kernels"].values() if k["candidate_only"])
     report["summary"] = {
         "kernels_total": len(inventory),
         "kernels_covered": n_cov,
+        "kernels_lookup_only": n_look,
         "kernels_candidate_only": n_cand,
-        "kernels_uncovered": len(inventory) - n_cov - n_cand,
+        "kernels_uncovered": len(inventory) - n_cov - n_look - n_cand,
     }
 
     text = json.dumps(report, indent=2, sort_keys=True)
@@ -344,9 +455,14 @@ def main() -> int:
         print(text)
 
     print(f"\nsummary: {report['summary']}")
-    print("\ncovered kernels (implementation dispatched):")
+    print("\ncovered kernels (implementation entered):")
     for name, meta in sorted(report["kernels"].items()):
         if meta["covered"]:
+            via = ",".join(meta["entered_via"])
+            print(f"  {meta['family']}.{meta['mode']:<26} {name} ({via})")
+    print("\nlookup-only kernels (implementation obtained, never entered):")
+    for name, meta in sorted(report["kernels"].items()):
+        if meta["lookup_only"]:
             print(f"  {meta['family']}.{meta['mode']:<26} {name}")
     print("\ncandidate-only kernels (operator reached, implementation not selected):")
     for name, meta in sorted(report["kernels"].items()):
@@ -354,7 +470,7 @@ def main() -> int:
             print(f"  {meta['family']}.{meta['mode']:<26} {name}")
     print("\nuncovered kernels:")
     for name, meta in sorted(report["kernels"].items()):
-        if not meta["covered"] and not meta["candidate_only"]:
+        if not (meta["covered"] or meta["lookup_only"] or meta["candidate_only"]):
             print(f"  {meta['family']}.{meta['mode']:<26} {name}")
     return 0
 
