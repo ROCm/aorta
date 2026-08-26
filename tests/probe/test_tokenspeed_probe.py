@@ -181,6 +181,83 @@ def _token_from(argv: str) -> str:
     raise AssertionError(f"TS_RUN_TOKEN not forwarded to docker; argv was:\n{argv}")
 
 
+def test_the_cell_env_file_outranks_the_invoking_shell(bash: str, tmp_path: Path) -> None:
+    """`docker run -e VAR=` overrides the same name from `--env-file`.
+
+    So a selector left exported in the caller's shell would replace the per-cell
+    value in *every* cell -- the matrix running one identical target while still
+    labelling the cells as different. That is the failure the env file exists to
+    prevent, arriving from the one direction nothing else guards.
+    """
+    env_file = tmp_path / "cell.env"
+    env_file.write_text("TS_KERNEL_NAME=cell_kernel\n")
+
+    argv = _run_host_launch_with_docker_stub(
+        bash,
+        tmp_path,
+        "envfile-precedence",
+        extra_env={
+            "AORTA_ENV_FILE": str(env_file),
+            # Leaked from the caller's shell, naming the same knob as the cell.
+            "TS_KERNEL_NAME": "shell_kernel",
+            # Not named by the cell, so this one should still be forwarded.
+            "TS_KERNEL_DTYPE": "fp16",
+        },
+    )
+
+    assert "TS_KERNEL_NAME=shell_kernel" not in argv
+    assert "TS_KERNEL_DTYPE=fp16" in argv
+    assert f"--env-file\n{env_file}" in argv
+
+
+def test_host_launch_logs_mitigation_names_without_their_values(bash: str, tmp_path: Path) -> None:
+    """Mitigations may carry credentials, and stdout.log is retained broadly.
+
+    A mitigation need only resolve to dict[str, str] and can come from a plugin
+    or sidecar, so aorta's registry declines to repr these; printing them here
+    would undo that. The names are what makes a result attributable, and they are
+    enough for it.
+    """
+    env_file = tmp_path / "cell.env"
+    env_file.write_text("# a comment\n\nTS_KERNEL_NAME=some_kernel\nHF_TOKEN=hf_supersecret\n")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "docker"
+    stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+    stub.chmod(0o755)
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(exist_ok=True)
+    for name in ("host_launch.sh", "ts_kernel_probe.sh"):
+        shutil.copy2(_SOURCE / name, scripts / name)
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "TS_IMAGE": "example/image:tag",
+            "TS_SCRIPTS_DIR": str(scripts),
+            "TS_HF_DIR": str(tmp_path / "hf"),
+            "TS_OUT_DIR": str(tmp_path / "out"),
+            "TS_ENTRY": "ts_kernel_probe.sh",
+            "AORTA_ENV_FILE": str(env_file),
+        }
+    )
+    proc = subprocess.run(
+        [bash, str(scripts / "host_launch.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    combined = proc.stdout + proc.stderr
+    assert "hf_supersecret" not in combined, "a mitigation value reached the log"
+    assert "some_kernel" not in combined
+    for name in ("TS_KERNEL_NAME", "HF_TOKEN"):
+        assert name in combined, f"{name} should still be recorded by name"
+
+
 def test_host_launch_rejects_an_unreadable_env_file(bash: str, tmp_path: Path) -> None:
     """Set-but-unreadable must fail, not fall back to container defaults.
 

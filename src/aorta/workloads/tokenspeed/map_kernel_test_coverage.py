@@ -10,24 +10,29 @@ every solution in that family is exercised.
 
 Static analysis cannot answer this: the tests parametrize over solutions and skip
 via a ``require`` fixture at run time, so the only honest way to tell a covered
-kernel from a skipped one is to watch the dispatch happen. This patches the
-registry, runs pytest in-process so the patch holds, and records two distinct
-things:
+kernel from a skipped one is to watch the kernel run. This patches the registry,
+runs pytest in-process so the patch holds, and records three distinct things,
+narrowest first. Each of the wider two has at some point been mistaken for
+coverage, which is why they are reported rather than folded in:
 
-``covered`` comes from ``KernelRegistry.get_impl(name)`` -- the post-selection
-lookup a caller makes to obtain the callable for the one kernel it is about to
-run. A name here is the implementation actually selected.
+``covered`` means the implementation was **entered** -- called, or subscripted as
+a Triton entry point (``kernel[grid](...)``). This is the only one of the three
+that proves the kernel executed.
+
+``lookup_only`` is ``KernelRegistry.get_impl(name)`` returning the callable and
+the test never entering it. That is a real pattern upstream: a suite may look an
+implementation up purely to assert which module it lives in. This lookup used to
+*be* the definition of ``covered``, which credited kernels that never launched.
 
 ``candidate_only`` comes from ``get_for_operator``, which returns *every*
 candidate matching a family/mode. The upstream ``require`` fixture calls it only
 to decide whether to skip, before narrowing candidates by dtype, so a name
 appearing there means "a test looked at this operator" -- not that the kernel
-ran. Counting those as covered would overstate what the suites exercise, so they
-are reported as their own category.
+ran.
 
-Read ``covered`` as "this implementation was dispatched", not "asserted
-correct" -- a test can dispatch a kernel and still be a weak test. Two known
-blind spots, both of which under-report:
+Read ``covered`` as "this implementation ran", not "asserted correct" -- a test
+can enter a kernel and still be a weak test. Two known blind spots, both of
+which under-report:
 
 * ``tokenspeed-kernel-amd/test/ops`` imports implementations directly
   (``from tokenspeed_kernel_amd.ops.gemm.mm_a16w16_gfx950 import ...``) and

@@ -122,15 +122,35 @@ fi
 
 # Forward only the TS_* knobs that are actually set, so the entry script's own
 # defaults stay authoritative for everything else.
+#
+# The per-cell file wins over the invoking shell, because `docker run -e VAR=...`
+# overrides the same name from `--env-file`. Without the check below, a
+# TS_PYTEST_SUITE or TS_KERNEL_NAME left exported in the caller's shell would
+# replace the selector in *every* cell -- the matrix would run one identical
+# target while still labelling the cells as different, which is the failure this
+# whole file exists to avoid, arriving from the one direction nothing else
+# guards. Exporting a knob is still how a manual run sets it; it just cannot
+# outrank a cell that names the same knob.
+in_env_file() {
+  [ -n "${AORTA_ENV_FILE:-}" ] || return 1
+  grep -qE "^[[:space:]]*${1}=" "${AORTA_ENV_FILE}"
+}
+
 ts_env_args=()
 for var in TS_MODEL TS_PORT TS_CONTROL_PORT TS_READY_TIMEOUT TS_GEN_TIMEOUT \
            TS_SERVE_ARGS TS_TEARDOWN_GRACE \
            TS_KERNEL_OP TS_KERNEL_NAME TS_KERNEL_DTYPE TS_KERNEL_DTYPE_ROLE \
            TS_KERNEL_ARGS TS_KERNEL_MODE TS_KERNEL_WARMUP TS_KERNEL_ITERS \
            TS_PYTEST_SUITE TS_PYTEST_K TS_PYTEST_ARGS TS_WORKSPACE TS_MIN_PASSED; do
-  if [ -n "${!var:-}" ]; then
-    ts_env_args+=(-e "${var}=${!var}")
+  if [ -z "${!var:-}" ]; then
+    continue
   fi
+  if in_env_file "${var}"; then
+    echo "host_launch: ${var} is set in the environment and in the cell's env" \
+      "file; keeping the cell's value"
+    continue
+  fi
+  ts_env_args+=(-e "${var}=${!var}")
 done
 
 # Network defaults per route, because the routes differ in what they need.
