@@ -7,8 +7,9 @@
 # sampling and transform into reach.
 #
 # Coverage, measured with map_kernel_test_coverage.py on nightly-20260714: the
-# eight cells below dispatch 20 of the 38 registered kernels. See
-# docs/tokenspeed.md#what-the-suites-actually-cover for the breakdown and for
+# eight suites below enter 20 of the 38 registered kernels. Eight suites, not
+# eight cells -- the diagnostic axis doubles them, so this file runs 16 cells.
+# See docs/tokenspeed.md#what-the-suites-actually-cover for the breakdown and for
 # why the remaining 18 are out of reach here (gemm belongs to the benchmark
 # harness, the MoE Triton variants have no executing test upstream, and
 # gluon_argmax_gfx950 is reached by a suite that imports it directly rather than

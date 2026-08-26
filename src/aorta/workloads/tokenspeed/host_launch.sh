@@ -107,9 +107,15 @@ if [ -n "${AORTA_ENV_FILE:-}" ]; then
   fi
   env_file_args+=(--env-file "${AORTA_ENV_FILE}")
   echo "host_launch: forwarding cell env from ${AORTA_ENV_FILE}"
-  # Echoed so the trial's stdout.log records which mitigation the cell applied;
-  # the keys are aorta mitigation names, not secrets.
-  sed 's/^/host_launch:   /' "${AORTA_ENV_FILE}"
+  # Names only, never values. Recording which variables a cell set is what makes
+  # a result attributable, and it is enough for that -- but a mitigation may come
+  # from a plugin or sidecar and is only required to resolve to dict[str, str],
+  # so a value may legitimately be a credential. aorta's own registry declines to
+  # repr these for exactly this reason (see src/aorta/registry/mitigations.py),
+  # and stdout.log is a broadly retained artifact, so printing them here would
+  # undo that. Anything that needs the values can read the env file itself.
+  sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/host_launch:   \1/p' \
+    "${AORTA_ENV_FILE}"
 else
   echo "host_launch: no AORTA_ENV_FILE; running with container defaults"
 fi

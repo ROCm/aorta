@@ -274,12 +274,17 @@ Measured with `map_kernel_test_coverage.py`, which patches the registry and runs
 the suites, because static inspection cannot answer this — the tests parametrize
 over solutions and skip at run time.
 
-The tool separates two things that are easy to conflate, and conflating them
-overstates coverage:
+The tool separates three things that are easy to conflate, narrowest first.
+Treating any of the wider two as coverage overstates it:
 
-- **Dispatched** (`covered`) comes from `KernelRegistry.get_impl(name)`, the
-  post-selection lookup a caller makes to obtain the callable for the one kernel
-  it is about to run.
+- **Entered** (`covered`) is the implementation actually being run — called, or
+  subscripted as a Triton entry point (`kernel[grid](...)`). This is the only one
+  that proves the kernel executed, so it is what `covered` means.
+- **Lookup-only** is `KernelRegistry.get_impl(name)` handing a test the callable
+  and the test never entering it. Upstream does exactly this in places: a suite
+  may look an implementation up purely to assert which module it lives in. The
+  lookup was the previous definition of `covered`, so this row exists to make the
+  difference visible rather than absorbed.
 - **Candidate-only** comes from `get_for_operator`, which returns *every*
   candidate for a family/mode. The upstream `require` fixture calls it only to
   decide whether to skip, before narrowing by dtype — so a name there means "a
@@ -289,11 +294,22 @@ Measured on `nightly-20260714`, all 38 registered kernels:
 
 | Status | Kernels | Detail |
 |---|---|---|
-| **Dispatched by the suites** | **20** | attention 15, quantization 3, transform 1, `moe.apply` 1 |
+| **Entered by the suites** | **20** | attention 15, quantization 3, transform 1, `moe.apply` 1 |
+| Looked up but never entered | 0 | none on this image — see below |
 | Candidate-only | 3 | `gluon_*_moe_apply` variants — the operator is reached, this implementation is not selected |
 | Reached only by the benchmark harness | 9 | `gemm.mm` (of which `cublaslt_mm_nvfp4` is a cuBLASLt path that cannot run here at all) |
 | Reached only by a direct-import suite | 1 | `gluon_argmax_gfx950` |
 | No executing test anywhere | 5 | `triton_*_moe_apply` variants |
+
+That the lookup-only row is empty on this image is worth stating plainly: it
+means the 20 is the same number the older lookup-based measurement produced, so
+that measurement was not inflated *here*. The distinction is not academic,
+though. A newer TokenSpeed adds
+`tokenspeed-kernel/test/ops/moe/test_latent_input.py`, which calls `get_impl` for
+three MoE implementations solely to assert their `__module__`; under the old
+definition that image would have reported three kernels as covered without
+launching any of them. The suite list sweeps whole `test/ops` directories, so it
+will pick that file up on its own — and the row above is where it will show.
 
 Two blind spots, both of which make this an under-count rather than an
 over-count. `tokenspeed-kernel-amd/test/ops` imports implementations directly and
@@ -307,8 +323,8 @@ artifact: `moe.apply::gluon` is the only MoE solution any test requests, and the
 `_ep_` names appear solely in `test_kernel_api_selection.py`, which tests
 selection logic without executing anything.
 
-Read `covered` as "this implementation was dispatched", not "asserted correct" —
-a test can dispatch a kernel and still assert weakly.
+Read `covered` as "this implementation ran", not "asserted correct" — a test can
+enter a kernel and still assert weakly.
 
 ### These suites skip heavily, and pytest exits 0 when they do
 
@@ -321,19 +337,22 @@ trial when none ran (`ts_pytest_nothing_executed`, exit 41). Counts come from
 the report rather than the terminal summary because the summary wording shifts
 between pytest versions.
 
-Measured on `nightly-20260714`, one GPU, 12 cells (6 suites × 2 diagnostics),
-all passing in 3 m 29 s. Counts were identical in both columns, so only the
-`none` column is shown; the walltime is the in-container pytest time and
-excludes container start and JIT.
+Measured on `nightly-20260714`, one gfx950, all 16 cells (8 suites × 2
+diagnostics) passing in 3 m 48 s of summed per-cell wall clock. Counts were
+identical in both columns, so only the `none` column is shown; the walltime is
+the in-container pytest time and excludes container start and JIT, which is why
+it sums to less than the figure above.
 
 | Suite | Passed | Skipped | Walltime |
 |---|---|---|---|
-| `test_attention.py` | 46 | 84 | 21 s |
-| `test_attention_dsa.py` | 13 | 0 | 12 s |
-| `test_attention_mla.py` | 6 | 0 | 9 s |
-| `test_moe_gluon_bf16_gfx950.py` | 9 | 0 | 8 s |
+| `test_attention.py` | 46 | 84 | 19 s |
+| `test_attention_dsa.py` | 13 | 0 | 11 s |
+| `test_attention_gdn.py` | 4 | 2 | 10 s |
+| `test_attention_mla.py` | 6 | 0 | 8 s |
+| `test_moe_gluon_bf16_gfx950.py` | 9 | 0 | 7 s |
 | `test_quantization.py` | 17 | 9 | 5 s |
 | `test_sampling_gluon_gfx950.py` | 20 | 0 | 5 s |
+| `test_transform.py` | 1 | 1 | 5 s |
 
 `hip_launch_blocking` changed no verdict and no count here, which is the
 expected result for assertion suites — it serializes launches, so it would only
@@ -528,11 +547,11 @@ proves the object analyzed is the object harvested. `checks[].backend` records
 the `rj_waitcheck` binary's own SHA-256 alongside it, so a report identifies both
 sides of the analysis.
 
-Two caveats on this output. `coverage` is `[]` and `entry_offset` is `null` on the
-`kernel_list` path — the digest plus `code_object_index` is the whole identity, so
-do not expect per-instruction coverage detail here. And re-harvesting the same
-kernel on the same image and node reproduces byte-identical digests, which is
-what makes a report comparable across runs.
+Two caveats on this output. `coverage` is `[]`, so do not expect per-instruction
+coverage detail here — the identity is the digest, the `code_object_index` and,
+when the harvester could read one, the `entry_offset` described above. And
+re-harvesting the same kernel on the same image and node reproduces
+byte-identical digests, which is what makes a report comparable across runs.
 
 ### ConSan reaches gemm, not attention
 
@@ -618,11 +637,19 @@ unavailable.
 
 ## Tests
 
-`tests/probe/test_tokenspeed_probe.py` — 50 tests, no GPU or container required.
+`tests/probe/test_tokenspeed_probe.py` — 73 tests, no GPU or container required.
 They cover script syntax, the guardrails (NFS refusal, missing entry script,
-missing selector), recipe and sidecar wellformedness, per-trial output naming,
-that every recipe axis entry resolves through the real mitigation registry, and
-that nothing in the recipe directory is gitignored.
+missing selector), input validation on the documented settings, recipe and
+sidecar wellformedness, per-trial output naming, that every recipe axis entry
+resolves through the real mitigation registry, and that nothing in the recipe
+directory is gitignored.
+
+The coverage probe is tested against a stand-in registry rather than by asserting
+on its source, because the distinctions it draws are the whole verdict: that
+entering a kernel counts and merely looking it up does not, that a Triton
+`kernel[grid](...)` launch is recorded, and that the proxy doing the recording is
+invisible to the suites it measures — it must not change an implementation's
+`__module__`, its identity in a set, or where an attribute write lands.
 
 Two gates are covered against stubs rather than real kernels, because both guard
 against a *silent* pass that the shipped code cannot be made to produce on

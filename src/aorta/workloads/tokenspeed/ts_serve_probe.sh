@@ -47,9 +47,69 @@ set -uo pipefail
 
 MODEL="${TS_MODEL:-Qwen/Qwen3-0.6B}"
 PORT="${TS_PORT:-8000}"
-CONTROL_PORT="${TS_CONTROL_PORT:-$(( PORT + 1 ))}"
+
+# Validate before anything computes with these. They are documented settings, so
+# a wrong one is an ordinary operator mistake and should say so -- but unchecked
+# they are arithmetic operands and curl/seq arguments, and each misbehaves in a
+# way that points somewhere else:
+#
+#   TS_PORT=abc      aborts inside $(( PORT + 1 )) with a bash arithmetic error,
+#                    not the documented usage exit 64
+#   TS_PORT=65535    computes a control port of 65536, which cannot be bound, and
+#                    reads as a server that failed to start
+#   TS_READY_TIMEOUT=0 or a negative
+#                    makes the readiness `seq` loop empty, so the probe reports
+#                    "never became ready" without having waited at all
+#
+# require_uint <label> <value> <min> <max>
+require_uint() {
+  case "${2}" in
+    ''|*[!0-9]*)
+      echo "TS_PROBE_FAIL: usage ${1} must be a positive integer, got '${2}'"
+      exit 64
+      ;;
+  esac
+  if [ "${2}" -lt "${3}" ] || [ "${2}" -gt "${4}" ]; then
+    echo "TS_PROBE_FAIL: usage ${1} must be between ${3} and ${4}, got '${2}'"
+    exit 64
+  fi
+}
+
+# 1-1023 are privileged and the container does not run as root, so a value there
+# could only fail to bind. 65535 is excluded when TS_CONTROL_PORT is unset
+# because the default derives from PORT + 1.
+if [ -n "${TS_CONTROL_PORT:-}" ]; then
+  require_uint TS_PORT "${PORT}" 1024 65535
+  require_uint TS_CONTROL_PORT "${TS_CONTROL_PORT}" 1024 65535
+  CONTROL_PORT="${TS_CONTROL_PORT}"
+else
+  require_uint TS_PORT "${PORT}" 1024 65534
+  CONTROL_PORT="$(( PORT + 1 ))"
+fi
+
+# Distinct, or readiness would be checked on the gateway and the whole point of
+# splitting them -- a gateway that is up but not wired to the engine still fails
+# the probe -- would be lost, silently.
+if [ "${PORT}" -eq "${CONTROL_PORT}" ]; then
+  echo "TS_PROBE_FAIL: usage TS_PORT and TS_CONTROL_PORT must differ, both '${PORT}'"
+  echo "  Readiness is checked on the control port and the completion is sent to"
+  echo "  the gateway; sharing one port would let a half-wired server pass."
+  exit 64
+fi
+
 READY_TIMEOUT="${TS_READY_TIMEOUT:-900}"
 GEN_TIMEOUT="${TS_GEN_TIMEOUT:-120}"
+# See the teardown function for why the default is 45.
+TEARDOWN_GRACE="${TS_TEARDOWN_GRACE:-45}"
+# Upper bounds are sanity rails, not policy: a day is longer than any plausible
+# model load and catches a millisecond value passed as seconds. The grace period
+# is also a `seq` bound -- at 0 its loop body never runs, so teardown would
+# escalate straight to SIGKILL and hand the next cell a KV cache the kernel is
+# still reclaiming, which is the failure the grace period exists to avoid.
+require_uint TS_READY_TIMEOUT "${READY_TIMEOUT}" 1 86400
+require_uint TS_GEN_TIMEOUT "${GEN_TIMEOUT}" 1 86400
+require_uint TS_TEARDOWN_GRACE "${TEARDOWN_GRACE}" 1 3600
+
 OUT_DIR="${TS_OUT_DIR:-/ts-out}"
 GATEWAY="http://127.0.0.1:${PORT}"
 CONTROL="http://127.0.0.1:${CONTROL_PORT}"
@@ -86,7 +146,8 @@ SRV_PID=""
 # SIGKILL, which leaves the next cell in the matrix racing the kernel to reclaim
 # the KV cache and the pinned host memory behind it -- an amount that scales with
 # the model, so the failure shows up on big models first.
-TEARDOWN_GRACE="${TS_TEARDOWN_GRACE:-45}"
+#
+# Validated with the other settings above, before this script creates anything.
 
 # Liveness of the process *group*, not of its leader. `tokenspeed serve` forks
 # scheduler and detokenizer children into the group, and they can outlive the

@@ -219,8 +219,12 @@ def _run_kernel(args: argparse.Namespace, cache_dir: Path) -> None:
         "--rm",
         "--name",
         container,
+        # Bridge by default, matching host_launch.sh's kernel/pytest routes:
+        # harvesting compiles from generated tensors and contacts nothing
+        # off-node, so there is no reason to hand it the host's network
+        # namespace. Overridable via --network for a node that needs it.
         "--network",
-        "host",
+        args.network,
         # Some MoE and attention tests move data over shared memory; the 64MB
         # docker default makes them die with an opaque bus error.
         "--ipc=host",
@@ -639,6 +643,16 @@ def main() -> int:
     parser.add_argument("--gpus", default="0", help="HIP_VISIBLE_DEVICES")
     parser.add_argument("--waitcheck", default=None, help="path to rj_waitcheck")
     parser.add_argument("--docker-config", default=None, help="DOCKER_CONFIG override")
+    parser.add_argument(
+        "--network",
+        default="bridge",
+        help=(
+            "docker network mode (default: bridge). Harvesting compiles kernels "
+            "from generated tensors and reaches nothing off-node, so it does not "
+            "need the host's network namespace; use --network host only if your "
+            "node needs it to pull the image or a tokenizer."
+        ),
+    )
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument(
         "--consan",

@@ -6,8 +6,13 @@
 # drive gemm.mm, because every other operator family is missing an input
 # generator and a shape list. TokenSpeed's own pytest suites build those inputs
 # themselves, so they reach the attention, MoE, quantization, sampling and
-# transform kernels the benchmark harness cannot. Measured on
-# nightly-20260714 this takes reachable kernels from 8 to 32.
+# transform kernels the benchmark harness cannot. Measured on nightly-20260714
+# the suites enter 20 of the 38 registered kernels, against 9 the benchmark
+# harness can reach (all of them gemm.mm) -- and the two sets do not overlap.
+# "Enter" means the implementation was actually run, which is narrower than
+# either of the two things easily mistaken for it: being looked up, and being one
+# of the candidates considered. See docs/tokenspeed.md for the per-status
+# breakdown.
 #
 # The trade-off is what you get back. These suites assert, they do not measure,
 # so there are no TFLOPs or latency numbers here -- use ts_kernel_probe.sh for
