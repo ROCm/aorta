@@ -73,7 +73,45 @@ MODEL="${TS_MODEL:-Qwen/Qwen3-0.6B}"
 SERVED_MODEL_NAME="${TS_SERVED_MODEL_NAME:-${MODEL}}"
 TOKENIZER="${TS_TOKENIZER:-${MODEL}}"
 PORT="${TS_PORT:-8000}"
-CONTROL_PORT="${TS_CONTROL_PORT:-$(( PORT + 1 ))}"
+
+# Ports and timeouts are checked before anything computes with them, unlike the
+# counts below, which are checked once the run area exists. The difference is
+# that these are arithmetic and `seq` operands: TS_PORT=abc would abort inside
+# `$(( PORT + 1 ))` with a bash arithmetic error instead of the documented usage
+# exit, and a zero timeout produces an empty wait loop, so the bench would report
+# a server that never became ready without having waited at all.
+#
+# require_uint <label> <value> <min> <max>
+require_uint() {
+  case "${2}" in
+    ''|*[!0-9]*)
+      echo "TS_BENCH_FAIL: usage ${1} must be a positive integer, got '${2}'"
+      exit 64
+      ;;
+  esac
+  if [ "${2}" -lt "${3}" ] || [ "${2}" -gt "${4}" ]; then
+    echo "TS_BENCH_FAIL: usage ${1} must be between ${3} and ${4}, got '${2}'"
+    exit 64
+  fi
+}
+
+# 1-1023 are privileged and this does not run as root. 65535 is excluded when
+# TS_CONTROL_PORT is unset, because the default derives from PORT + 1.
+if [ -n "${TS_CONTROL_PORT:-}" ]; then
+  require_uint TS_PORT "${PORT}" 1024 65535
+  require_uint TS_CONTROL_PORT "${TS_CONTROL_PORT}" 1024 65535
+  CONTROL_PORT="${TS_CONTROL_PORT}"
+else
+  require_uint TS_PORT "${PORT}" 1024 65534
+  CONTROL_PORT="$(( PORT + 1 ))"
+fi
+if [ "${PORT}" -eq "${CONTROL_PORT}" ]; then
+  echo "TS_BENCH_FAIL: usage TS_PORT and TS_CONTROL_PORT must differ, both '${PORT}'"
+  echo "  Readiness is checked on the control port and the load is sent to the"
+  echo "  gateway; sharing one port would let a half-wired server be benchmarked."
+  exit 64
+fi
+
 READY_TIMEOUT="${TS_READY_TIMEOUT:-900}"
 BENCH_STEPS="${TS_BENCH_STEPS:-1}"
 WARMUP_STEPS="${TS_BENCH_WARMUP_STEPS:-0}"
@@ -92,6 +130,13 @@ OUT_DIR="${TS_OUT_DIR:-/ts-out}"
 TOKEN="${TS_RUN_TOKEN:-$$}"
 GATEWAY="http://127.0.0.1:${PORT}"
 CONTROL="http://127.0.0.1:${CONTROL_PORT}"
+
+# Day-long ceilings are sanity rails, not policy: they catch a millisecond value
+# passed as seconds. The grace period bounds a `seq` loop, and at 0 teardown
+# would escalate straight to SIGKILL, handing the next cell a KV cache the kernel
+# is still reclaiming -- and it also derives TS_DRAIN_TIMEOUT below.
+require_uint TS_READY_TIMEOUT "${READY_TIMEOUT}" 1 86400
+require_uint TS_TEARDOWN_GRACE "${TEARDOWN_GRACE}" 1 3600
 
 mkdir -p "${OUT_DIR}" || {
   echo "TS_BENCH_FAIL: cannot create out dir ${OUT_DIR}"

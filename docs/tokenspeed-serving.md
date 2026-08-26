@@ -238,6 +238,23 @@ percentiles are deliberately not required: they depend on `percentile_metrics`
 and `metric_percentiles`, so demanding them would fail a cell for a legitimate
 recipe choice.
 
+### Ports and timeouts are validated before anything computes with them
+
+`ts_bench_serve.sh` already checked its counts, but the ports and timeouts reach
+arithmetic and `seq` first, and each misbehaves somewhere other than where the
+mistake is: `TS_PORT=abc` aborts inside `$(( PORT + 1 ))` with a bash arithmetic
+error rather than the documented usage exit 64, `TS_PORT=65535` derives a control
+port of 65536 that cannot be bound and so reads as a server that failed to start,
+and a zero `TS_READY_TIMEOUT` leaves the readiness loop empty — reporting a
+server that never became ready without having waited at all. All of them now exit
+64 with the setting named, before the run area is created. The two ports must also
+differ, since readiness is checked on the control port and the load is sent to the
+gateway; sharing one would let a half-wired server be benchmarked.
+
+The workload validates the same values on the host, so a recipe never reaches
+these. They matter because the script is also meant to be runnable by hand, which
+is what keeps the audit trustworthy independently of the Python layer.
+
 ### A mitigation cannot redefine the host/container protocol
 
 Cell mitigations are forwarded into the container, which is the whole point of

@@ -16,6 +16,7 @@ exist specifically to pin the guard that separates the two.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -148,6 +149,59 @@ def test_bench_script_passes_bash_syntax_check():
     script = mod._SCRIPTS_DIR / mod._BENCH_SCRIPT
     proc = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "env,expected",
+    [
+        ({"TS_PORT": "abc"}, "TS_PORT must be a positive integer"),
+        ({"TS_PORT": "0"}, "TS_PORT must be between"),
+        ({"TS_PORT": "65535"}, "TS_PORT must be between"),
+        ({"TS_PORT": "9000", "TS_CONTROL_PORT": "9000"}, "must differ"),
+        ({"TS_READY_TIMEOUT": "0"}, "TS_READY_TIMEOUT must be between"),
+        ({"TS_TEARDOWN_GRACE": "0"}, "TS_TEARDOWN_GRACE must be between"),
+        ({"TS_TEARDOWN_GRACE": "-5"}, "positive integer"),
+    ],
+)
+def test_bench_script_rejects_unusable_ports_and_timeouts(tmp_path, env, expected):
+    """These are documented settings used as arithmetic and `seq` operands.
+
+    Unvalidated, each fails somewhere other than where the mistake is:
+    `TS_PORT=abc` aborts inside `$(( PORT + 1 ))` with a bash arithmetic error
+    rather than the documented usage exit; `TS_PORT=65535` derives a control port
+    of 65536 that cannot be bound, which reads as a server that failed to start;
+    a zero timeout leaves the readiness loop empty, so the bench reports a server
+    that never became ready without having waited.
+
+    Checked by running the script, not by reading it, because the point is which
+    exit and message a caller actually gets.
+    """
+    script = mod._SCRIPTS_DIR / mod._BENCH_SCRIPT
+    proc = subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TS_OUT_DIR": str(tmp_path), **env},
+    )
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert expected in proc.stdout, proc.stdout
+
+
+def test_bench_script_validates_before_it_creates_anything(tmp_path):
+    """A usage error must not hide behind a side effect.
+
+    The port arithmetic runs before the run area exists, so validating after
+    `mkdir` would report an unwritable directory for what is really a bad port.
+    """
+    out = tmp_path / "never"
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TS_OUT_DIR": str(out), "TS_PORT": "abc"},
+    )
+    assert proc.returncode == 64
+    assert not out.exists(), "validation must precede creating the run area"
 
 
 def test_script_documents_every_exit_code_the_workload_maps():
