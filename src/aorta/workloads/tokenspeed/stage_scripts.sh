@@ -22,6 +22,26 @@ set -euo pipefail
 dest="${1:-/tmp/ts-work/scripts}"
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Staging into the source directory would be destructive, not merely pointless:
+# the mirror step below deletes the set this script owns before copying, so with
+# dest == src it deletes every probe script in the tree and then fails with
+# nothing left to copy. `dest` is a positional argument, and "stage the scripts
+# where the scripts are" is an easy thing to type.
+#
+# Checked before the NFS guard, which would otherwise mask it whenever the tree
+# happens to live under /home -- with a message pointing at the wrong problem,
+# and no coverage of this guard at all on a checkout that does not.
+#
+# Compared after resolving both, so a relative path, a trailing slash or a
+# symlink into the tree cannot walk around the check.
+src_real="$(cd "${src}" && pwd -P)"
+if [ -d "${dest}" ] && [ "$(cd "${dest}" && pwd -P)" = "${src_real}" ]; then
+  echo "stage_scripts: dest is the source directory (${src_real})." >&2
+  echo "  Staging there would delete the scripts it is meant to copy." >&2
+  echo "  Pick a node-local path such as /tmp/ts-work/scripts." >&2
+  exit 64
+fi
+
 case "${dest}" in
   /home/*|/nfs/*)
     echo "stage_scripts: ${dest} is on NFS; the docker daemon cannot read it." >&2
@@ -31,6 +51,15 @@ case "${dest}" in
 esac
 
 mkdir -p "${dest}"
+
+# Re-checked now that the directory exists: `mkdir -p` can have created a path
+# that resolves into the tree (a symlink component, say) which the pre-flight
+# check above could not resolve because it was not there yet.
+if [ "$(cd "${dest}" && pwd -P)" = "${src_real}" ]; then
+  echo "stage_scripts: dest resolves to the source directory (${src_real})." >&2
+  echo "  Staging there would delete the scripts it is meant to copy." >&2
+  exit 64
+fi
 
 # Clear the set this script owns before copying, so the destination really is a
 # mirror. A plain `cp` only ever adds: a probe that was renamed or deleted
