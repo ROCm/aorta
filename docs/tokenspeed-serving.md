@@ -233,10 +233,23 @@ for `duration` (greater than zero), `mean_ttft_ms`, `median_ttft_ms`,
 `output_throughput`, `request_throughput` and `total_token_throughput`, plus
 `mean_tpot_ms` / `median_tpot_ms` whenever `output_len > 1` — TPOT averages
 inter-token gaps, of which a single-token response has none. A step missing any
-of them is reported as `result_json_unusable` rather than as a pass. The
-percentiles are deliberately not required: they depend on `percentile_metrics`
-and `metric_percentiles`, so demanding them would fail a cell for a legitimate
-recipe choice.
+of them is reported as `result_json_unusable` rather than as a pass.
+
+All of them must be strictly *positive*, not merely finite. A step that served
+requests took time, produced tokens and had a latency, so zero or negative is a
+broken measurement rather than a fast one — and the negative case is the one that
+matters, because it is finite enough to pass a naive check and a negative latency
+makes a `max_*` gate read as an improvement.
+
+The percentiles are deliberately not required: they depend on
+`percentile_metrics` and `metric_percentiles`, so demanding them would fail a
+cell for a legitimate recipe choice. They are, however, only published as a
+scalar when *every* measured step carries them. Averaging over whichever steps
+happen to have a key changes what the number means: a `max_p99_tpot_ms` gate over
+three steps, with `p99_tpot_ms` in one, would otherwise evaluate that single step
+while reading as a three-step aggregate — a gate passing on a third of the
+evidence, when the caller was promised a missing metric instead. Partially
+present keys are listed under `partial_metrics` and remain visible per step.
 
 ### Ports and timeouts are validated before anything computes with them
 
@@ -258,17 +271,45 @@ is what keeps the audit trustworthy independently of the Python layer.
 ### A mitigation cannot redefine the host/container protocol
 
 Cell mitigations are forwarded into the container, which is the whole point of
-the matrix — but a handful of variables are how this workload and
-`ts_bench_serve.sh` agree on what the run is: `TS_NUM_PROMPTS`, `TS_BENCH_STEPS`,
-`TS_RUN_TOKEN`, `TS_OUT_DIR`, the model and shape variables, and the ports. Only
-the container would learn about an override, so `TS_NUM_PROMPTS=999` would have
-the script request 999 requests while the host still audited against the recipe's
-count — failing a healthy cell for a served-request shortfall — and a redefined
-`TS_RUN_TOKEN` would have it write exports under a name the host's glob never
-matches, failing the cell for finding no export. Both read as engine faults and
-are neither, so a mitigation that sets one is rejected up front with the
-`workload_config` field to use instead. Any other `TS_*` knob is forwarded
-normally.
+the matrix — but a mitigation may not redefine a value this workload sets itself,
+because only the container would learn about the new one. Three shapes of
+failure, in increasing order of how badly they mislead:
+
+- `TS_NUM_PROMPTS=999` has the script request 999 while the host still audits
+  against the recipe's count, so a healthy cell fails for a served-request
+  shortfall.
+- `TS_RUN_TOKEN` has the script write exports under a name the host's glob never
+  matches, so the cell fails for finding no export at all.
+- `TS_MAX_CONCURRENCY=1` changes the load actually applied while the host keeps
+  reporting the configured value. Nothing fails — the cell passes, carrying a
+  number that describes a run that did not happen. This is the worst case, and
+  the reason the guard covers reported values and not only audited ones.
+
+The owned set is computed from the environment the workload builds, not
+maintained as a list beside it, so anything added to that environment is covered
+without a second place to remember. `_PROTOCOL_ENV_KEYS` still names the
+load-bearing members for readability, and a test asserts it stays a subset of
+what is actually set. Any `TS_*` knob the workload does not set — an engine
+tunable, an attention backend — is forwarded normally; all 22 mitigations in
+aorta's registry pass through untouched.
+
+### Extra arguments cannot shadow the flags the workload owns
+
+`serve_args` and `bench_args` reach `tokenspeed serve` and `tokenspeed bench
+serve` as extra flags, and both CLIs take the *last* occurrence of a repeated
+option. The extras arrive after the flags the workload sets, so a caller's value
+silently won — and each of these fails somewhere that does not mention the cause:
+
+| In | Consequence |
+|---|---|
+| `serve_args: ["--port", "9000"]` | the gateway starts on 9000 while readiness is polled on the resolved port; a healthy server reads as one that never came up |
+| `bench_args: ["--output-file", ...]` | the export lands where neither the in-container audit nor the host's glob looks; a completed benchmark reads as a missing result |
+| `bench_args: ["--num-prompts", "4"]` | the bench runs 4 while the host audits against the recipe's count |
+
+Reordering would fix the precedence but leave the override silently ignored,
+which is its own trap, so `ts_bench_serve.sh` rejects these by name with exit 64
+and names the `workload_config` field instead. Extras that do not collide —
+`--tp`, `--goodput`, engine tunables — are passed through as before.
 
 ### The orchestrator's gateway budget is 60s, and a cold start exceeds it
 

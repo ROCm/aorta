@@ -163,16 +163,19 @@ _RESERVED_KEYS = frozenset({"steps"})
 # table with a column that cannot vary within a cell.
 _EXPORT_ECHO_KEYS = frozenset({"num_prompts", "max_concurrency", "burstiness"})
 
-# The host/container contract. Every one of these is either used by this class
-# after the run -- to locate exports, to audit served-request counts, to report
-# the cell's configuration -- or determines where the container writes. A cell's
-# mitigation overlay is rejected if it sets one, because the container would act
-# on the new value while the host kept reasoning about the old one, and the
-# resulting failure would read as an engine fault.
+# The host/container contract, as a documented floor rather than the operative
+# list. What a mitigation may actually not redefine is computed in
+# `_container_env` from the values this workload sets, because a second
+# hand-maintained list is what drifts -- but naming the load-bearing ones here
+# keeps the intent readable, and a test asserts the floor is still a subset of
+# what the workload sets, so removing one has to be deliberate.
 #
-# Deliberately not a blanket "reject every TS_*": a mitigation setting a knob the
-# workload does not itself depend on is legitimate, and this list is the set the
-# workload actually reads back.
+# Each of these is either read back by this class after the run -- to locate
+# exports, to audit served-request counts, to report the cell's configuration --
+# or determines where the container writes.
+#
+# Note this is not a blanket "reject every TS_*": a mitigation setting a knob the
+# workload does not itself set is legitimate, and is the point of the matrix.
 _PROTOCOL_ENV_KEYS = frozenset(
     {
         "TS_BENCH_STEPS",
@@ -180,6 +183,9 @@ _PROTOCOL_ENV_KEYS = frozenset(
         "TS_NUM_PROMPTS",
         "TS_INPUT_LEN",
         "TS_OUTPUT_LEN",
+        "TS_NUM_WARMUPS",
+        "TS_IGNORE_EOS",
+        "TS_SEED",
         "TS_MODEL",
         "TS_SERVED_MODEL_NAME",
         "TS_TOKENIZER",
@@ -190,6 +196,10 @@ _PROTOCOL_ENV_KEYS = frozenset(
         "TS_PERCENTILE_METRICS",
         "TS_METRIC_PERCENTILES",
         "TS_REQUEST_RATE",
+        "TS_READY_TIMEOUT",
+        "TS_BENCH_TIMEOUT",
+        "TS_TEARDOWN_GRACE",
+        "TS_GATEWAY_STARTUP_TIMEOUT",
     }
 )
 
@@ -442,6 +452,22 @@ class TokenSpeedServeWorkload(Workload):
                 )
             if not isinstance(value, str) and not 1 <= int(value) <= 65535:
                 raise ValueError(f"tokenspeed_serve: {label} ({value!r}) must be in 1..65535")
+
+        # Two services cannot bind one address, so this configuration cannot
+        # come up -- and it would fail as a readiness timeout during bring-up,
+        # which reads as a slow or broken engine rather than as the recipe error
+        # it is. Auto-resolution already keeps the pair distinct.
+        if (
+            not isinstance(self._port_request, str)
+            and not isinstance(self._control_port_request, str)
+            and int(self._port_request) == int(self._control_port_request)
+        ):
+            raise ValueError(
+                "tokenspeed_serve: port and control_port are both "
+                f"{int(self._port_request)}; the gateway and the control "
+                "endpoint are separate listeners and cannot share a port. "
+                'Set one of them to "auto", or give them different values.'
+            )
 
         work_dir = cfg.get("work_dir") or _DEFAULT_WORK_DIR
         self._work_dir = Path(str(work_dir)).resolve()
@@ -708,23 +734,34 @@ class TokenSpeedServeWorkload(Workload):
             # losing to a workload default would make two cells identical while
             # reporting them as different.
             #
-            # What it may not do is redefine the protocol between this host and
-            # the container, because only the container would learn about it.
+            # What it may not do is redefine a value this workload itself set,
+            # because only the container would learn about the new one.
             # `TS_NUM_PROMPTS=999` would have the script request 999 while
             # `_build_result` still audited against the recipe's 32, so a
             # perfectly healthy cell would fail its served-request audit;
             # `TS_RUN_TOKEN` would have the script write exports under a name the
             # host's glob does not match, and the cell would fail for finding no
-            # export at all. Both look like engine faults and are neither.
-            collisions = sorted(set(trial_env) & _PROTOCOL_ENV_KEYS)
+            # export at all; `TS_MAX_CONCURRENCY=1` would change the load while
+            # `_aggregate` still reported the configured 8, so the cell would
+            # *pass*, mislabelled -- the worst of the three, because nothing
+            # fails and the number is wrong.
+            #
+            # The owned set is everything already in `env`, computed rather than
+            # listed: a hand-maintained list is exactly how TS_MAX_CONCURRENCY,
+            # TS_NUM_WARMUPS and TS_IGNORE_EOS came to be missing from it, and
+            # any value added above from here on is covered without anyone
+            # remembering to update a second place.
+            collisions = sorted(set(trial_env) & set(env))
             if collisions:
                 raise ValueError(
                     "tokenspeed_serve: mitigation(s) for this cell set "
-                    f"{', '.join(collisions)}, which the workload owns as part "
-                    "of its contract with ts_bench_serve.sh. Overriding them "
-                    "here would desynchronise the host's expectations from the "
-                    "run. Set the corresponding workload_config field instead "
-                    "(e.g. num_prompts, steps, request_rate)."
+                    f"{', '.join(collisions)}, which this workload sets itself "
+                    "as part of its contract with ts_bench_serve.sh. Overriding "
+                    "them here would desynchronise the host's expectations, its "
+                    "audit, and its reported configuration from the run that "
+                    "actually happened. Set the corresponding workload_config "
+                    "field instead (e.g. num_prompts, steps, request_rate, "
+                    "max_concurrency)."
                 )
             env.update(trial_env)
         return env
@@ -743,8 +780,15 @@ class TokenSpeedServeWorkload(Workload):
             "/dev/kfd",
             "--device",
             "/dev/dri",
+            # Both groups, matching host_launch.sh and harvest_code_objects.py.
+            # Passing the device through is not sufficient under --user: render
+            # nodes are commonly owned by `render` rather than `video`, so
+            # `video` alone leaves /dev/dri/renderD* unopenable and the failure
+            # surfaces as an unhelpful device or HIP init error.
             "--group-add",
             "video",
+            "--group-add",
+            "render",
             "--security-opt",
             "seccomp=unconfined",
             "--ipc",
@@ -868,14 +912,17 @@ class TokenSpeedServeWorkload(Workload):
         if self._output_len > 1:
             required += ["mean_tpot_ms", "median_tpot_ms"]
 
+        # Every one of these must be strictly positive, not merely finite. A
+        # step that served requests took time, produced tokens and had a
+        # latency, so a zero or negative value is a broken measurement rather
+        # than a slow one -- and a negative latency is worse than useless,
+        # because it makes a `max_*` gate read as an improvement. A zero-length
+        # step is the same problem seen from the other side: whatever throughput
+        # it reported cannot have been measured.
         missing: list[str] = []
         for name in required:
             value = record.doc.get(name)
-            if not _is_scalar(value):
-                missing.append(name)
-            elif name == "duration" and float(value) <= 0:
-                # A zero-length step cannot have measured a throughput, so
-                # whatever it reported is an artefact.
+            if not _is_scalar(value) or float(value) <= 0:
                 missing.append(name)
         return missing
 
@@ -1120,10 +1167,25 @@ class TokenSpeedServeWorkload(Workload):
             for key in record.scalars:
                 if key not in keys and key not in _EXPORT_ECHO_KEYS:
                     keys.append(key)
+        # A scalar aggregate is published only when *every* measured step
+        # supplied the metric. Averaging over whichever steps happen to carry a
+        # key silently changes what the number means: a `max_p99_tpot_ms` gate
+        # over three steps, with `p99_tpot_ms` present in one, would evaluate
+        # that single step's value while reading as a three-step aggregate --
+        # and a gate passing on a third of the evidence is worse than one that
+        # reports the metric missing, which is what the caller was promised.
+        # Partial values stay visible in the per-step detail below.
+        partial: list[str] = []
         for key in keys:
             values = [r.scalars[key] for r in records if key in r.scalars]
-            if values:
+            if len(values) == len(records):
                 metrics[key] = _mean(values)
+            elif values:
+                partial.append(key)
+        if partial:
+            # Named rather than dropped, so "the gate found no metric" can be
+            # traced to the export that omitted it.
+            metrics["partial_metrics"] = sorted(partial)
 
         # Sums, not means, for the audit counters: "how many requests did this
         # trial actually serve" is the question, and a mean hides a single bad
@@ -1274,8 +1336,20 @@ def _step_index(name: str) -> int:
 
 
 def _first_failure_step(failure_details: list[dict[str, Any]]) -> int | None:
+    """The earliest failing step, as a zero-based iteration index.
+
+    ``step`` is one-based everywhere it is human-facing -- it comes from the
+    export filename (``bench.<token>.step1.json``) and appears in log lines and
+    failure details, where counting from one is what a reader expects. But
+    ``WorkloadResult.first_failure_iteration`` is an *iteration index* and the
+    rest of the codebase keeps it in ``0..total_iterations-1``, so returning the
+    filename's number put a single-step failure at 1 with one iteration
+    recorded: out of range, and off by one against every other workload.
+    """
     steps = [d["step"] for d in failure_details if isinstance(d.get("step"), int)]
-    return min(steps) if steps else None
+    if not steps:
+        return None
+    return max(0, min(steps) - 1)
 
 
 __all__ = ["TokenSpeedServeWorkload"]

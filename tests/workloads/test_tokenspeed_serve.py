@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -391,6 +392,64 @@ def test_mitigation_cannot_redefine_the_host_container_protocol(tmp_path, key):
         wl._container_env()
 
 
+def test_mitigation_cannot_relabel_the_load_it_changes(tmp_path):
+    """The quietest version of the same bug, and the reason the owned set is
+    computed rather than listed.
+
+    `TS_MAX_CONCURRENCY=1` changes the load the container actually applies while
+    `_aggregate` keeps reporting the configured value. Nothing fails: the cell
+    passes, carrying a number that describes a run that did not happen.
+    """
+    wl = _make(tmp_path, max_concurrency=8, _aorta_trial_env={"TS_MAX_CONCURRENCY": "1"})
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    with pytest.raises(ValueError, match="TS_MAX_CONCURRENCY"):
+        wl._container_env()
+
+
+def test_every_value_the_workload_sets_is_protected(tmp_path):
+    """The guard must cover what the workload sets, not a list someone maintains.
+
+    TS_MAX_CONCURRENCY, TS_NUM_WARMUPS and TS_IGNORE_EOS were all missing from
+    the hand-written set while being both configured and reported, so this walks
+    the real container env instead of naming keys.
+    """
+    wl = _make(
+        tmp_path, max_concurrency=8, serve_args=["--tp", "2"], bench_args=["--burstiness", "1"]
+    )
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    owned = wl._container_env()
+
+    assert "TS_MAX_CONCURRENCY" in owned and "TS_NUM_WARMUPS" in owned
+    for key in sorted(owned):
+        probe = _make(
+            tmp_path,
+            max_concurrency=8,
+            serve_args=["--tp", "2"],
+            bench_args=["--burstiness", "1"],
+            _aorta_trial_env={key: "overlay"},
+        )
+        probe.setup()
+        probe._run_token = "tok"
+        probe._port, probe._control_port = 8000, 8001
+        with pytest.raises(ValueError, match=re.escape(key)):
+            probe._container_env()
+
+
+def test_the_documented_protocol_floor_is_actually_owned(tmp_path):
+    """`_PROTOCOL_ENV_KEYS` is documentation now, so it must not drift into
+    fiction: every key it names has to be one the workload really sets."""
+    wl = _make(tmp_path, max_concurrency=4)
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    owned = set(wl._container_env())
+    assert mod._PROTOCOL_ENV_KEYS <= owned, mod._PROTOCOL_ENV_KEYS - owned
+
+
 def test_cache_dirs_are_redirected_into_the_mount(tmp_path):
     """Under `--user <uid>` the image's /root paths are unwritable, and an unset
     TORCHINDUCTOR_CACHE_DIR makes torch call getpass.getuser(), which raises
@@ -700,6 +759,95 @@ def test_a_zero_length_step_fails_the_trial(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "duration",
+        "output_throughput",
+        "request_throughput",
+        "total_token_throughput",
+        "mean_ttft_ms",
+        "median_ttft_ms",
+        "mean_tpot_ms",
+        "median_tpot_ms",
+    ],
+)
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_a_non_positive_core_metric_fails_the_trial(tmp_path, monkeypatch, name, value):
+    """Finite is not enough: these have to be positive.
+
+    A step that served requests took time, produced tokens and had a latency, so
+    zero or negative is a broken measurement rather than a fast one. The negative
+    case is the dangerous one -- it is finite, so it used to pass the audit, and a
+    negative latency makes a `max_*` gate read as an improvement.
+    """
+    doc = _bench_doc()
+    doc[name] = value
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+    assert result.passed is False
+    assert any(
+        d["reason"] == "result_json_unusable" and name in d["detail"]
+        for d in result.failure_details
+    ), result.failure_details
+
+
+def test_an_optional_metric_is_not_aggregated_from_some_steps(tmp_path, monkeypatch):
+    """A partial metric must not be published as if it summarised every step.
+
+    Otherwise a `max_p99_tpot_ms` gate over three steps, with the metric in one,
+    evaluates that single step while reading as a three-step aggregate -- a gate
+    passing on a third of the evidence, which is worse than one reporting the
+    metric missing, because the caller was promised the latter.
+    """
+    docs = [_bench_doc(), _bench_doc(), _bench_doc()]
+    docs[0]["p99_tpot_ms"] = 12.0
+    for doc in docs[1:]:
+        doc.pop("p99_tpot_ms", None)
+
+    wl = _make(tmp_path, num_prompts=32, steps=3)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=docs)
+    result = wl.run()
+
+    assert result.passed is True
+    assert "p99_tpot_ms" not in result.metrics, "a one-step value was published as an aggregate"
+    assert "p99_tpot_ms" in result.metrics["partial_metrics"]
+    # Still recoverable per step, so nothing is actually lost.
+    assert result.metrics["steps"][0]["p99_tpot_ms"] == 12.0
+
+
+def test_a_metric_present_in_every_step_is_still_aggregated(tmp_path, monkeypatch):
+    """The other half of the rule: complete coverage must aggregate as before."""
+    docs = [_bench_doc(), _bench_doc()]
+    for i, doc in enumerate(docs):
+        doc["p99_tpot_ms"] = 10.0 + i
+    wl = _make(tmp_path, num_prompts=32, steps=2)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=docs)
+    result = wl.run()
+    assert result.metrics["p99_tpot_ms"] == pytest.approx(10.5)
+    assert "partial_metrics" not in result.metrics
+
+
+def test_the_first_failure_iteration_is_zero_based(tmp_path, monkeypatch):
+    """`step` is one-based because it comes from the export filename, but
+    `first_failure_iteration` is an iteration index and the rest of the codebase
+    keeps it in 0..total_iterations-1. Returning the filename's number put a
+    single-step failure at 1 with one iteration recorded: out of range."""
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[{"completed": 1, "failed": 0}])
+    result = wl.run()
+
+    assert result.passed is False
+    assert result.total_iterations == 1
+    assert result.first_failure_iteration == 0
+    assert 0 <= result.first_failure_iteration < result.total_iterations
+
+
 def test_tpot_is_not_required_at_a_single_output_token(tmp_path, monkeypatch):
     """TPOT averages inter-token gaps, so at output_len 1 there are none to
     average and an absent value is correct rather than a fault. Requiring it
@@ -960,3 +1108,96 @@ def test_the_default_image_is_digest_pinned():
     """Same reasoning as the recipes, for anyone running the workload without
     one -- and it keeps the comment above _DEFAULT_IMAGE honest."""
     assert "@sha256:" in mod._DEFAULT_IMAGE
+
+
+def test_equal_explicit_ports_are_rejected(tmp_path):
+    """The gateway and the control endpoint are separate listeners.
+
+    Two equal explicit values passed validation and were then handed over as
+    both ports, so the configuration could not come up -- and it failed as a
+    readiness timeout during bring-up, which reads as a slow or broken engine
+    rather than as the recipe error it is.
+    """
+    wl = _make(tmp_path, port=9000, control_port=9000)
+    with pytest.raises(ValueError, match="cannot share a port"):
+        wl.setup()
+
+
+def test_auto_resolution_still_yields_distinct_ports(tmp_path, monkeypatch):
+    """The other half: rejecting the explicit collision must not disturb auto."""
+    wl = _make(tmp_path, port="auto", control_port="auto")
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc()])
+    wl.run()
+    assert wl._port != wl._control_port
+
+
+def test_one_explicit_port_beside_an_auto_one_is_allowed(tmp_path):
+    """Pinning the gateway and letting the control port float is legitimate."""
+    _make(tmp_path, port=9000, control_port="auto").setup()
+    _make(tmp_path, port="auto", control_port=9000).setup()
+
+
+def test_the_render_group_is_added_alongside_video(tmp_path):
+    """Passing /dev/dri through is not sufficient under --user.
+
+    Render nodes are commonly group-owned by `render` rather than `video`, so
+    `video` alone leaves /dev/dri/renderD* unopenable and the failure surfaces as
+    an unhelpful device or HIP init error. host_launch.sh and
+    harvest_code_objects.py both add the pair; this now matches them.
+    """
+    wl = _make(tmp_path)
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    argv = wl._docker_argv(wl._container_env())
+
+    groups = [argv[i + 1] for i, a in enumerate(argv) if a == "--group-add"]
+    assert groups == ["video", "render"], argv
+
+
+@pytest.mark.parametrize(
+    "env_key,flag",
+    [
+        ("TS_SERVE_ARGS", "--port"),
+        ("TS_SERVE_ARGS", "--control-port"),
+        ("TS_SERVE_ARGS", "--host"),
+        ("TS_BENCH_ARGS", "--num-prompts"),
+        ("TS_BENCH_ARGS", "--output-file"),
+        ("TS_BENCH_ARGS", "--base-url"),
+    ],
+)
+def test_bench_script_rejects_extra_args_that_shadow_owned_flags(tmp_path, env_key, flag):
+    """Both CLIs take the *last* occurrence of a repeated flag, and the extras
+    were appended after the owned ones -- so a caller's value silently won.
+
+    Each failure then pointed somewhere else: `--port` starts the gateway where
+    the readiness poll is not looking, so a healthy server reads as one that
+    never came up; `--output-file` writes the export where neither the in-container
+    audit nor the host's glob looks, so a completed benchmark reads as missing;
+    `--num-prompts` runs a count the host does not audit against.
+    """
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TS_OUT_DIR": str(tmp_path), env_key: f"{flag} somevalue"},
+    )
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert f"{env_key} may not set {flag}" in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "env_key,extra",
+    [("TS_SERVE_ARGS", "--tp 2"), ("TS_BENCH_ARGS", "--goodput ttft:200")],
+)
+def test_bench_script_still_accepts_unowned_extra_args(tmp_path, env_key, extra):
+    """The guard is about the flags the workload owns, not about extras at all --
+    tuning the engine or the bench through these is the point of having them."""
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TS_OUT_DIR": str(tmp_path), env_key: extra},
+    )
+    assert "may not set" not in proc.stdout, proc.stdout

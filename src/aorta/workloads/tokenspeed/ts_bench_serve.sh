@@ -112,6 +112,44 @@ if [ "${PORT}" -eq "${CONTROL_PORT}" ]; then
   exit 64
 fi
 
+# `tokenspeed serve` and `tokenspeed bench serve` both take the *last* occurrence
+# of a repeated flag, so a caller's extra argument silently outranks the value
+# this script and the host agreed on -- and the resulting failure never names the
+# cause. `--port` in TS_SERVE_ARGS starts the gateway somewhere the readiness
+# poll is not looking, so a healthy server reads as one that never came up;
+# `--output-file` in TS_BENCH_ARGS sends the export somewhere neither the audit
+# below nor the host's glob inspects, so a completed benchmark reads as a missing
+# result; `--num-prompts` runs a different request count than the one the host
+# audits against. Reordering would fix the precedence but leave the override
+# silently ignored, which is its own trap, so these are rejected by name.
+#
+# reject_owned_flags <label> <value> <flag>...
+reject_owned_flags() {
+  label="$1"
+  value="$2"
+  shift 2
+  for word in ${value}; do
+    for owned in "$@"; do
+      case "${word}" in
+        "${owned}"|"${owned}="*)
+          echo "TS_BENCH_FAIL: usage ${label} may not set ${owned}"
+          echo "  This script and the host agree on it; overriding it here would"
+          echo "  desynchronise them and the run would fail for an unrelated-"
+          echo "  looking reason. Use the corresponding workload_config field."
+          exit 64
+          ;;
+      esac
+    done
+  done
+}
+
+reject_owned_flags TS_SERVE_ARGS "${TS_SERVE_ARGS:-}" \
+  --host --port --control-port
+reject_owned_flags TS_BENCH_ARGS "${TS_BENCH_ARGS:-}" \
+  --base-url --output-file --num-prompts --label --request-id-prefix \
+  --random-input-len --random-output-len --model --tokenizer --backend \
+  --endpoint --dataset-name --percentile-metrics --metric-percentiles
+
 READY_TIMEOUT="${TS_READY_TIMEOUT:-900}"
 BENCH_STEPS="${TS_BENCH_STEPS:-1}"
 WARMUP_STEPS="${TS_BENCH_WARMUP_STEPS:-0}"
