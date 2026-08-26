@@ -54,6 +54,7 @@ PRIORITY_WORKLOADS = {
         "moe",
         "speculative_decode",
         "continuous_batch",
+        "simple_transformer",
     ],
     "P2": [  # Medium priority - additional coverage
         "activation_ckpt",
@@ -610,6 +611,11 @@ def _print_workload_purpose(workload: str, info) -> None:
         "zero_offload": (
             "  ZeRO-offload memory management. Tests overlap of CPU<->GPU transfers\n"
             "  with computation for memory-constrained training."
+        ),
+        "simple_transformer": (
+            "  GPT-2-style transformer training with pipelined forward pass across\n"
+            "  streams. Each layer group runs on its own stream with explicit\n"
+            "  dependencies, testing queue switch latency under a real training loop."
         ),
         "torch_compile": (
             "  Multi-region torch.compile execution. Tests interaction between\n"
