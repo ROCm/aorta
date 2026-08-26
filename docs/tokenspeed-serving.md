@@ -225,6 +225,12 @@ re-checks independently, so the guard survives someone editing the script's exit
 codes. This is the same trap `tokenspeed_kernel.benchmark --verify` sets for
 [the kernel probe](tokenspeed.md#the-verdict-does-not-come-from-the-exit-code).
 
+The comparison is against zero exactly, in both layers. A negative `failed` is
+not a run that did better than none-failed; it is an export that cannot be
+believed, and reading it as "no failures" would admit `completed ==
+num_prompts, failed == -1` with the metrics computed from whatever produced the
+-1. Two independent audits only help if neither of them is the lenient one.
+
 Counting requests is not sufficient on its own, though. An export carrying only
 `completed` and `failed` satisfies both checks, and since `gates` is empty by
 default the cell would go green having measured no duration, no TTFT and no
@@ -285,11 +291,17 @@ failure, in increasing order of how badly they mislead:
   number that describes a run that did not happen. This is the worst case, and
   the reason the guard covers reported values and not only audited ones.
 
-The owned set is computed from the environment the workload builds, not
-maintained as a list beside it, so anything added to that environment is covered
-without a second place to remember. `_PROTOCOL_ENV_KEYS` still names the
-load-bearing members for readability, and a test asserts it stays a subset of
-what is actually set. Any `TS_*` knob the workload does not set — an engine
+The owned set is the union of two things: the environment the workload actually
+built, and `_PROTOCOL_ENV_KEYS`. Computing it from the environment means anything
+added there later is covered without a second place to remember. The declared set
+is needed as well, because for some keys the workload's setting *is* absence —
+`max_concurrency` defaults to unbounded and expresses that by setting no
+`TS_MAX_CONCURRENCY` at all, so a computed-only set guarded the configured case
+and left the default one open, which is the case most cells run. A test asserts
+every declared key is one the workload sets under some configuration, so the
+declaration cannot overreach and forbid a legitimate mitigation.
+
+Any `TS_*` knob the workload does not set — an engine
 tunable, an attention backend — is forwarded normally; all 22 mitigations in
 aorta's registry pass through untouched.
 

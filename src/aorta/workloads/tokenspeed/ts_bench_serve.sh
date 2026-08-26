@@ -452,7 +452,11 @@ if not isinstance(completed, int) or not isinstance(failed, int):
     print(f"UNPARSEABLE completed={completed!r} failed={failed!r}")
     raise SystemExit(0)
 
-if failed > 0 or completed != expected:
+# `!= 0` rather than `> 0`: the requirement is that none failed, and a negative
+# count is not better than that, it is an export that cannot be trusted. Both
+# this audit and the host's must fail closed on it, or the one that does not
+# becomes the one a malformed export is read through.
+if failed != 0 or completed != expected:
     print(f"SHORTFALL completed={completed} failed={failed} expected={expected}")
     raise SystemExit(0)
 

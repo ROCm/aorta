@@ -166,12 +166,17 @@ _RESERVED_KEYS = frozenset({"steps"})
 # table with a column that cannot vary within a cell.
 _EXPORT_ECHO_KEYS = frozenset({"num_prompts", "max_concurrency", "burstiness"})
 
-# The host/container contract, as a documented floor rather than the operative
-# list. What a mitigation may actually not redefine is computed in
-# `_container_env` from the values this workload sets, because a second
-# hand-maintained list is what drifts -- but naming the load-bearing ones here
-# keeps the intent readable, and a test asserts the floor is still a subset of
-# what the workload sets, so removing one has to be deliberate.
+# The host/container contract. `_container_env` takes the union of this and the
+# values the workload actually set, because neither alone is enough: computing it
+# catches anything added to `_container_env` later without a second list to
+# update, while this set covers the keys whose configured value is *absence* --
+# an unbounded `max_concurrency` sets no TS_MAX_CONCURRENCY, so nothing computed
+# from `env` would reserve it, and the default configuration would be the one
+# left unguarded.
+#
+# A test asserts every name here is one the workload sets under some
+# configuration, so a key cannot be reserved here by mistake and quietly forbid a
+# legitimate mitigation.
 #
 # Each of these is either read back by this class after the run -- to locate
 # exports, to audit served-request counts, to report the cell's configuration --
@@ -188,6 +193,9 @@ _PROTOCOL_ENV_KEYS = frozenset(
         "TS_OUTPUT_LEN",
         "TS_NUM_WARMUPS",
         "TS_IGNORE_EOS",
+        # Absent when unbounded, which is the default -- so this is the one key
+        # the computed set cannot reach on a default configuration.
+        "TS_MAX_CONCURRENCY",
         "TS_SEED",
         "TS_MODEL",
         "TS_SERVED_MODEL_NAME",
@@ -758,7 +766,19 @@ class TokenSpeedServeWorkload(Workload):
             # TS_NUM_WARMUPS and TS_IGNORE_EOS came to be missing from it, and
             # any value added above from here on is covered without anyone
             # remembering to update a second place.
-            collisions = sorted(set(trial_env) & set(env))
+            #
+            # Computing it is necessary but not sufficient, because for some keys
+            # the workload's setting *is* absence. `max_concurrency` defaults to
+            # unbounded, which it expresses by not setting TS_MAX_CONCURRENCY at
+            # all -- so a computed-only set leaves the default configuration
+            # unprotected while the configured one is guarded, and a mitigation
+            # setting TS_MAX_CONCURRENCY=1 there runs the container capped while
+            # `_aggregate` reports max_concurrency: None. That is the mislabelled
+            # pass again, reached only on the default. Unioning the documented
+            # floor closes it: those keys are reserved whether or not this run
+            # happens to carry a value for them.
+            owned = set(env) | _PROTOCOL_ENV_KEYS
+            collisions = sorted(set(trial_env) & owned)
             if collisions:
                 raise ValueError(
                     "tokenspeed_serve: mitigation(s) for this cell set "
@@ -1205,7 +1225,12 @@ class TokenSpeedServeWorkload(Workload):
                     }
                 )
                 continue
-            if failed > 0 or completed != self._num_prompts:
+            # `failed != 0`, not `failed > 0`: the contract is that none failed,
+            # and a negative count is not a run that did better than that -- it
+            # is an export that cannot be believed. Reading it as "no failures"
+            # would let `completed == num_prompts, failed == -1` through with the
+            # metrics computed from whatever produced the -1.
+            if failed != 0 or completed != self._num_prompts:
                 failure_details.append(
                     {
                         "reason": "served_request_shortfall",

@@ -446,8 +446,14 @@ def test_every_value_the_workload_sets_is_protected(tmp_path):
 
 
 def test_the_documented_protocol_floor_is_actually_owned(tmp_path):
-    """`_PROTOCOL_ENV_KEYS` is documentation now, so it must not drift into
-    fiction: every key it names has to be one the workload really sets."""
+    """The floor is half of the operative set, so it must not drift into fiction.
+
+    Every key it reserves has to be one the workload really sets under some
+    configuration -- otherwise reserving it here forbids a mitigation from
+    setting a knob the workload never owned. `max_concurrency` is passed
+    explicitly because the key it controls is absent by default, which is the
+    whole reason the floor exists.
+    """
     wl = _make(tmp_path, max_concurrency=4)
     wl.setup()
     wl._run_token = "tok"
@@ -684,6 +690,22 @@ def test_completed_shortfall_fails_the_trial(tmp_path, monkeypatch):
     wl = _make(tmp_path, num_prompts=32)
     wl.setup()
     _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=20, failed=0)])
+    result = wl.run()
+    assert result.passed is False
+    assert any(d["reason"] == "served_request_shortfall" for d in result.failure_details)
+
+
+def test_a_negative_failure_count_is_a_shortfall_not_a_clean_run(tmp_path, monkeypatch):
+    """`failed > 0` read a negative count as "better than none failed".
+
+    So an export claiming `completed == num_prompts` and `failed == -1` passed
+    the audit outright, and the trial went green on metrics computed by whatever
+    produced the -1. A count below zero is not a stronger version of success, it
+    is an export that cannot be believed.
+    """
+    wl = _make(tmp_path, num_prompts=32)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=32, failed=-1)])
     result = wl.run()
     assert result.passed is False
     assert any(d["reason"] == "served_request_shortfall" for d in result.failure_details)
@@ -1332,3 +1354,79 @@ def test_sigterm_removes_the_container_before_exiting(tmp_path):
     assert (
         proc.returncode == -signal.SIGTERM
     ), f"expected death by SIGTERM so a supervisor still reads 143, got {proc.returncode}"
+
+
+def test_an_unbounded_default_still_reserves_the_concurrency_cap(tmp_path):
+    """The computed owned set cannot reach a key whose value is absence.
+
+    `max_concurrency` defaults to unbounded and expresses that by setting no
+    TS_MAX_CONCURRENCY, so `set(env)` guarded the configured case and left the
+    *default* one open: a mitigation setting TS_MAX_CONCURRENCY=1 there had the
+    container run capped while `_aggregate` published `max_concurrency: None`.
+    Nothing fails, and the reported configuration is not the one that ran --
+    the mislabelled pass, reachable only on the default.
+    """
+    wl = _make(tmp_path, _aorta_trial_env={"TS_MAX_CONCURRENCY": "1"})
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    assert wl._max_concurrency is None, "precondition: the unguarded default"
+    with pytest.raises(ValueError, match="TS_MAX_CONCURRENCY"):
+        wl._container_env()
+
+
+def test_a_mitigation_may_still_set_a_knob_the_workload_does_not_own(tmp_path):
+    """Unioning the floor must not turn the guard into "reject every TS_*".
+
+    Varying a knob the workload does not set is the point of the matrix, and a
+    reserved-key list that overreaches would silently forbid it.
+    """
+    wl = _make(tmp_path, _aorta_trial_env={"TS_SOME_UNOWNED_KNOB": "1"})
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    assert wl._container_env()["TS_SOME_UNOWNED_KNOB"] == "1"
+
+
+def _run_script_audit(tmp_path: Path, doc: dict, *, expected: int = 32) -> str:
+    """Drive `audit_result_json` out of ts_bench_serve.sh directly.
+
+    The in-container audit is the half of the guard that runs where the host
+    cannot see, and it is deliberately independent of the host's -- so it needs
+    its own coverage rather than inheriting confidence from the Python side. The
+    function is extracted rather than the whole script sourced, because sourcing
+    would run the top-level validation and the docker invocation.
+    """
+    script = Path(mod.__file__).with_name("tokenspeed") / "ts_bench_serve.sh"
+    body = subprocess.run(
+        ["awk", "/^audit_result_json\\(\\) \\{/,/^\\}$/", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "audit_result_json" in body, "failed to extract the audit function"
+
+    export = tmp_path / "export.json"
+    export.write_text(json.dumps(doc))
+    harness = tmp_path / "drive.sh"
+    harness.write_text(f'NUM_PROMPTS={expected}\n{body}\naudit_result_json "$1"\n')
+    proc = subprocess.run(["bash", str(harness), str(export)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return proc.stdout.strip()
+
+
+def test_the_in_container_audit_passes_a_clean_export(tmp_path):
+    """Establishes that the extraction harness actually exercises the audit, so
+    the rejection tests below cannot pass by simply failing everything."""
+    assert _run_script_audit(tmp_path, {"completed": 32, "failed": 0}).startswith("OK")
+
+
+def test_the_in_container_audit_rejects_a_negative_failure_count(tmp_path):
+    """`failed > 0` let a negative count through as a clean run.
+
+    Both audits are meant to fail closed on the same contract (`failed == 0`);
+    whichever one reads a negative count as success becomes the one a malformed
+    export is believed through, which defeats the point of running two.
+    """
+    verdict = _run_script_audit(tmp_path, {"completed": 32, "failed": -1})
+    assert verdict.startswith("SHORTFALL"), verdict
