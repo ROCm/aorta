@@ -108,6 +108,13 @@ srun --jobid=$JOBID --overlap \
   bash src/aorta/workloads/tokenspeed/stage_scripts.sh
 ```
 
+The optional destination argument may not be the script's own directory. Staging
+is a mirror — it clears the `.sh` and `.py` set it owns before copying, so
+`stage_scripts.sh <the directory it lives in>` would delete every probe script in
+the tree and then fail with nothing left to copy. That is rejected up front,
+after resolving the path, so a relative spelling, a trailing slash or a symlink
+into the tree cannot get around it.
+
 ## Three things the container namespace breaks
 
 All of these bit during bring-up and are easy to reintroduce, so they have

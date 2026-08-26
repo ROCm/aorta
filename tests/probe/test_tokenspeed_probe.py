@@ -1773,3 +1773,55 @@ def test_stage_scripts_mirrors_rather_than_accumulates(bash: str, tmp_path: Path
     # And the real set did land.
     assert (dest / "host_launch.sh").exists()
     assert (dest / "ts_kernel_probe.sh").exists()
+
+
+@pytest.mark.parametrize("spelling", ["plain", "trailing_slash", "relative", "symlink"])
+def test_stage_scripts_refuses_to_stage_into_its_own_source(
+    bash: str, tmp_path: Path, spelling: str
+) -> None:
+    """`dest == src` would delete the scripts it is supposed to copy.
+
+    The mirror step clears the set this script owns before copying, so pointing
+    it at the source tree wipes every probe `.sh` and `.py` and then fails with
+    nothing left to copy -- taking the working tree with it. `dest` is a
+    positional argument and "stage the scripts where the scripts are" is an easy
+    thing to type, so this has to be rejected rather than documented.
+
+    Parametrised over the spellings that resolve to the same directory: checking
+    the string as given would leave three ways around the guard.
+
+    Run against a *copy* of the script set, never the real tree. The script
+    derives its source directory from ``BASH_SOURCE``, so copying it into
+    ``tmp_path`` makes that the source, and a regression in the guard then
+    deletes throwaway files instead of the checkout. That is not a hypothetical
+    precaution: confirming this test fails without the fix deleted every probe
+    script in the working tree, which is exactly the damage being guarded
+    against.
+    """
+    src = tmp_path / "pkg"
+    src.mkdir()
+    for path in list(_SOURCE.glob("*.sh")) + list(_SOURCE.glob("*.py")):
+        shutil.copy2(path, src / path.name)
+    before = sorted(p.name for p in src.iterdir())
+    assert "host_launch.sh" in before, "precondition: the source set is present"
+
+    if spelling == "plain":
+        dest = str(src)
+    elif spelling == "trailing_slash":
+        dest = f"{src}/"
+    elif spelling == "relative":
+        dest = f"{src}/../{src.name}"
+    else:
+        link = tmp_path / "link-to-src"
+        link.symlink_to(src)
+        dest = str(link)
+
+    proc = subprocess.run(
+        [bash, str(src / "stage_scripts.sh"), dest], capture_output=True, text=True
+    )
+
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert "source directory" in proc.stderr
+    assert (
+        sorted(p.name for p in src.iterdir()) == before
+    ), "stage_scripts deleted its own source files"
