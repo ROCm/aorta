@@ -23,6 +23,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1825,3 +1826,28 @@ def test_stage_scripts_refuses_to_stage_into_its_own_source(
     assert (
         sorted(p.name for p in src.iterdir()) == before
     ), "stage_scripts deleted its own source files"
+
+
+def test_the_documented_test_count_matches_this_file() -> None:
+    """The count in docs/tokenspeed.md went stale twice during review.
+
+    A number nobody can verify while reading is worse than no number, so it is
+    checked here rather than maintained by hand. Counts function definitions
+    rather than collected items, because collection from inside a running session
+    would recurse -- and the function count is the half that drifts when someone
+    adds a test.
+    """
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "tokenspeed.md").read_text()
+    source = Path(__file__).read_text()
+
+    functions = len(re.findall(r"^def test_", source, re.MULTILINE))
+    match = re.search(r"—\s*(\d+)\s*tests\s*\((\d+)\s*functions", doc)
+    assert match, "docs/tokenspeed.md no longer states the test count in the expected form"
+    documented_total, documented_functions = int(match.group(1)), int(match.group(2))
+
+    assert (
+        documented_functions == functions
+    ), f"docs say {documented_functions} test functions, this file has {functions}"
+    assert (
+        documented_total >= functions
+    ), f"documented total {documented_total} is below the {functions} functions in this file"
