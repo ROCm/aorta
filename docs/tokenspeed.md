@@ -81,7 +81,13 @@ produces a confusing failure if missed:
    with `mkdir /home/<user>: permission denied`. Scripts, the HF cache, and
    probe output all have to live node-locally — `/tmp/ts-work/...`.
    `host_launch.sh` and `stage_scripts.sh` refuse `/home` paths up front instead
-   of letting docker produce that error. Note `/tmp` is per-node: an `rm -rf
+   of letting docker produce that error, and `harvest_code_objects.py` resolves
+   its `--dest` against `/proc/mounts` and refuses any network fstype — a path
+   prefix says nothing useful here, since `/home` is often local and `/mnt`,
+   `/shared` or an autofs mount point often is not. It is best-effort: a path
+   whose mount cannot be identified is treated as local, because blocking a
+   harvest on a guess is worse than letting docker report its own error. Note
+   `/tmp` is per-node: an `rm -rf
    /tmp/...` run on the login node does not clear the compute node's copy, and
    aorta will happily resume a cached run you thought you deleted.
 
@@ -653,7 +659,7 @@ unavailable.
 
 ## Tests
 
-`tests/probe/test_tokenspeed_probe.py` — 100 tests (73 functions, the rest
+`tests/probe/test_tokenspeed_probe.py` — 110 tests (78 functions, the rest
 parametrised cases), no GPU or container required. A test asserts this count
 matches the file, since it went stale twice during review.
 They cover script syntax, the guardrails (NFS refusal, missing entry script,

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import types
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import yaml
@@ -1340,6 +1341,113 @@ def test_harvest_keeps_a_hostile_label_out_of_the_waitcheck_recipe(
     # Still a usable recipe, not just a safe one.
     assert recipe["mode"] == "sanitizer"
     assert recipe["sanitizer_plan"]["target"] == "gfx950"
+
+
+def test_harvest_bounds_the_waitcheck_inventory(tmp_path: Path) -> None:
+    """The object being parsed came out of a third-party image.
+
+    Every other subprocess in the harvester is bounded. This one wedging would
+    hang the whole harvest with the GPU still held for the rest of the sweep --
+    the failure the docker timeout exists to prevent, one layer further in.
+    """
+    module = _harvest_module()
+    waitcheck = tmp_path / "waitcheck"
+    waitcheck.write_text("#!/bin/sh\nsleep 60\n")
+    waitcheck.chmod(0o755)
+    obj = tmp_path / "kernel.hsaco"
+    obj.write_bytes(b"object")
+
+    with mock.patch.object(module, "_SUBPROCESS_TIMEOUT_SEC", 1):
+        with pytest.raises(SystemExit) as excinfo:
+            module._inventory(waitcheck, obj)
+
+    message = str(excinfo.value)
+    assert "did not finish within" in message, message
+    # Says what to do about it, since the object is not the operator's to fix.
+    assert "--waitcheck" in message, message
+
+
+def test_harvest_bounds_the_consan_loader(tmp_path: Path) -> None:
+    """Same gap on the ConSan shim, which reads a Triton cache entry the image
+    wrote."""
+    module = _harvest_module()
+    loader = tmp_path / "slow_loader.py"
+    loader.write_text("import time\ntime.sleep(60)\n")
+    kernels = _fake_kernels(1, tmp_path / "cache")
+    dest = tmp_path / "dest"
+
+    with mock.patch.object(module, "_SUBPROCESS_TIMEOUT_SEC", 1):
+        with pytest.raises(SystemExit) as excinfo:
+            module._write_consan_assets(dest, kernels, "gfx950", loader, "lenient", None)
+
+    assert "did not finish within" in str(excinfo.value), excinfo.value
+
+
+@pytest.mark.parametrize(
+    "fstype,expected",
+    [
+        ("nfs4", "nfs4"),
+        ("nfs", "nfs"),
+        ("lustre", "lustre"),
+        ("ext4", None),
+        ("xfs", None),
+        ("overlay", None),
+    ],
+)
+def test_harvest_detects_a_network_dest_by_fstype_not_by_path(
+    tmp_path: Path, fstype: str, expected: str | None
+) -> None:
+    """The old guard matched `/home/` and `/nfs/` prefixes.
+
+    That passes `/mnt`, `/shared`, `/users` and any autofs path, which then
+    fail later with docker's opaque bind-mount error -- the confusion the guard
+    exists to prevent -- and it rejects a perfectly local `/home` on a node
+    that does not export one.
+    """
+    module = _harvest_module()
+    mounts = tmp_path / "mounts"
+    mounts.write_text(
+        "/dev/sda1 / ext4 rw 0 0\n"
+        "tmpfs /tmp tmpfs rw 0 0\n"
+        f"server:/export /mnt/shared {fstype} rw 0 0\n"
+    )
+
+    assert module._network_filesystem(Path("/mnt/shared/run"), mounts) == expected
+    # The longest matching mount wins, so an unrelated shorter one cannot mask it.
+    assert module._network_filesystem(Path("/tmp/ts-work"), mounts) is None
+
+
+def test_harvest_treats_an_unreadable_mount_table_as_local(tmp_path: Path) -> None:
+    """Best-effort by construction: blocking a harvest on a guess is worse than
+    letting docker report its own error."""
+    module = _harvest_module()
+    assert module._network_filesystem(Path("/mnt/shared"), tmp_path / "absent") is None
+
+
+def test_harvest_clears_staged_objects_on_reharvest(tmp_path: Path) -> None:
+    """`triton-cache/` and `consan/` are cleared; `code_objects/` was not.
+
+    Milder than the ConSan case -- staged names are content-addressed, so a
+    leftover is never referenced by this run's recipe -- but these are the
+    largest files the harvest writes, and a re-harvest with a narrower
+    selection kept every object the wider one staged.
+    """
+    module = _harvest_module()
+    objects_dir = tmp_path / "dest" / "code_objects"
+    objects_dir.mkdir(parents=True)
+    stale = objects_dir / "_old_kernel.deadbeef1234.hsaco"
+    stale.write_bytes(b"x" * 1024)
+
+    module._reset_dir(objects_dir)
+
+    assert not stale.exists(), "a staged object from the previous harvest survived"
+    assert objects_dir.is_dir() and not list(objects_dir.iterdir())
+
+    # Also creates the directory when it was never there, which is the
+    # first-harvest path.
+    fresh = tmp_path / "fresh" / "code_objects"
+    module._reset_dir(fresh)
+    assert fresh.is_dir()
 
 
 def test_harvest_replaces_stale_consan_assets(tmp_path: Path) -> None:
