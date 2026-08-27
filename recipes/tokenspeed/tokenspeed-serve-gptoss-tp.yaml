@@ -17,8 +17,14 @@
 # get worse with every GPU added for reasons that say nothing about the stack.
 # At 21B the per-GPU KV-cache headroom actually changes with TP.
 #
-# Requires >= 2 visible GPUs. `hip_visible_devices` is deliberately unset so the
-# engine sees the whole node; TP size is what varies.
+# Requires >= 2 visible GPUs, and each cell pins exactly the ones it needs.
+# Pinning is not cosmetic here: it is what makes each cell's GPU set known, and
+# the workload only attributes unreleased VRAM after teardown to a trial that
+# had an exclusive assignment. Left unset, the engine picks for itself and a
+# co-tenant's allocation is indistinguishable from this trial's leftovers, so
+# the leak check downgrades to an unattributed warning -- on the one recipe
+# where slow release was actually observed. See "A tensor-parallel teardown
+# returns before the GPUs are actually free" in docs/tokenspeed-serving.md.
 #
 # TP=4 is NOT here, and its absence is a finding rather than an oversight. It
 # fails to come up on this image, reproducibly, with an out-of-memory raised
@@ -67,10 +73,12 @@ cells:
     mitigations: [none]
     environment: local
     workload_config:
+      hip_visible_devices: "0"
       serve_args: ["--tensor-parallel-size", "1"]
 
   - name: tp2
     mitigations: [none]
     environment: local
     workload_config:
+      hip_visible_devices: "0,1"
       serve_args: ["--tensor-parallel-size", "2"]

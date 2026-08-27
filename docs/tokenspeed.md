@@ -713,5 +713,9 @@ python -m pytest tests/probe/test_tokenspeed_probe.py -q
 - **Dynamic race evidence anywhere.** The loader instruments but does not
   dispatch, so every ConSan lane here is static-coverage only — see
   [Why the recipes default to `consan_policy: lenient`](#why-the-recipes-default-to-consan_policy-lenient).
-- **A larger model.** `gpt-oss-20b` is TokenSpeed's canonical AMD benchmark
-  model; only Qwen3-0.6B has been run.
+- **A larger model through these probes.** The serving *workload* now runs
+  `gpt-oss-20b`, TokenSpeed's canonical AMD benchmark model, on one GPU and at
+  tensor-parallel sizes 1 and 2 — see
+  [`docs/tokenspeed-serving.md`](tokenspeed-serving.md). The probes in this
+  document have still only been run against Qwen3-0.6B; pointing them at
+  `gpt-oss-20b` needs nothing but `TS_MODEL` and a pre-warmed cache.

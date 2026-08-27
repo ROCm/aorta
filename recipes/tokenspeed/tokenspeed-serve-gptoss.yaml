@@ -11,15 +11,24 @@
 # with a dedicated `_load_mxfp4_weights` path for the packed MoE experts. The
 # repo is ungated and needs no HF token, unlike most models this size.
 #
-# Cost. The weights are ~15 GB and the model takes appreciably longer to load
-# than Qwen3-0.6B, so `ready_timeout_sec` is raised well above the default. On a
-# cold HF cache the first trial spends minutes downloading before it serves
-# anything; pre-warm with
+# Cost. The model takes appreciably longer to load than Qwen3-0.6B, so
+# `ready_timeout_sec` is raised well above the default. On a cold HF cache the
+# first trial spends minutes downloading before it serves anything; pre-warm
+# with
 #
-#   hf download openai/gpt-oss-20b --exclude "original/*" --exclude "metal/*"
+#   HF_HOME=/tmp/ts-work-serve/hf hf download openai/gpt-oss-20b
 #
-# into the same work_dir/hf, or expect the first cell to look slow for a reason
-# that has nothing to do with the engine.
+# or expect the first cell to look slow for a reason that has nothing to do with
+# the engine. Two things about that command are load-bearing:
+#
+#   - The FULL snapshot, ~40 GB. `--exclude "original/*"` looks like an obvious
+#     saving and produces a cache that downloads fine and then fails during
+#     weight loading.
+#   - Run it as the uid the trial runs as. `run_as_current_user` defaults to
+#     true, so a cache populated by a root container leaves the run failing with
+#     PermissionError on the snapshot directory.
+#
+# Both are written up in docs/tokenspeed-serving.md under "Measured: gpt-oss-20b".
 #
 # Single-GPU deliberately: MXFP4 puts the 21B parameters inside one MI355's
 # memory, so this recipe isolates model *size* as the variable. Tensor

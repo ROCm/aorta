@@ -247,7 +247,7 @@ matter most:
 |---|---|---|
 | `model` | `Qwen/Qwen3-0.6B` | Any HF id the container can load. |
 | `num_prompts` | `64` | Requests per bench step. Also the audit target. |
-| `input_len` / `output_len` | `1024` / `128` | Random-dataset ISL/OSL. Ignored for `sharegpt`. |
+| `input_len` / `output_len` | `1024` / `128` | Random-dataset ISL/OSL. Not sent and reported as `null` for `sharegpt`. |
 | `dataset` | `random` | `random` or `sharegpt`. See [Datasets](#datasets). |
 | `dataset_path` | — | Host path to a ShareGPT JSON. Required for `sharegpt`, rejected for `random`. |
 | `max_concurrency` | unbounded | In-flight request cap. |
@@ -379,11 +379,23 @@ waiting stops helping, the trial fails with `gpu_memory_not_reclaimed` naming th
 GPU and the `rocm-smi --gpureset -d N` needed to reclaim it — a real leak is
 worth a red cell, because the alternative is a green one that breaks the next.
 
-The comparison is against a pre-run sample, not an absolute ceiling, so another
-tenant's memory on a shared node is never attributed to this trial. VRAM is read
-from `/sys/class/drm/card*/device/mem_info_vram_used` — no subprocess, no PATH
-assumption — and a node that does not expose it simply skips the check, since a
-missing measurement is not evidence of a leak.
+The comparison is against a pre-run sample rather than an absolute ceiling, but a
+delta only shows that memory grew — it does not show who allocated it. On a
+shared node a co-tenant starting a job mid-trial produces the same delta, and
+blaming it here would redden a healthy cell and point `rocm-smi --gpureset` at
+someone else's device.
+
+So growth is only **attributed** on GPUs the trial can prove it owned: the ones
+named by `hip_visible_devices`, which is the only exclusive assignment the
+workload has. Without it the wait still happens — waiting helps the next cell
+whoever owns the memory — but the outcome is a logged warning rather than a
+failure, and the log says to set `hip_visible_devices` to make the check
+authoritative. `tokenspeed-serve-gptoss-tp.yaml` pins its GPUs per cell for
+exactly this reason; it is the recipe where slow release was observed.
+
+VRAM is read from `/sys/class/drm/card*/device/mem_info_vram_used` — no
+subprocess, no PATH assumption — and a node that does not expose it simply skips
+the check, since a missing measurement is not evidence of a leak.
 
 ### Ports and timeouts are validated before anything computes with them
 
@@ -469,6 +481,21 @@ every request completes, none fail, and the reported configuration is simply not
 the one that ran. They are reserved even at their defaults, where the script
 appends nothing at all, since a guard that covers only the configured case leaves
 the case most cells run unguarded.
+
+### The list form survives the trip into the container
+
+Both fields are lists in the recipe, and they reach the container as a JSON
+array in `TS_SERVE_ARGS` / `TS_BENCH_ARGS` rather than as a space-joined string.
+Joining and re-splitting threw away the boundaries the list form exists to
+express: `bench_args: ["--extra-body", '{"a": 1}']` arrived as three arguments,
+and a value containing `*` or `?` was glob-expanded against the container's
+filesystem before TokenSpeed ever saw it.
+
+`ts_bench_serve.sh` decodes the array through a NUL-separated stream — the one
+delimiter that cannot occur inside an argument — into a Bash array, and the
+owned-flag guard above runs over that array, so a flag is matched exactly rather
+than by substring. Setting either variable by hand means writing JSON:
+`TS_BENCH_ARGS='["--foo","bar baz"]'`. Anything else exits 64 saying so.
 
 Reordering would fix the precedence but leave the override silently ignored,
 which is its own trap, so `ts_bench_serve.sh` rejects these by name with exit 64
@@ -678,9 +705,17 @@ first trial reports slower for a reason that is not the engine.
 
 Both layers validate it, and both do so before a server starts — a dataset
 problem found after the model has loaded costs minutes and reads as a bench
-failure rather than the staging mistake it is. `input_len`/`output_len` are
-dropped for `sharegpt`, since it takes its lengths from the conversations and
-forwarding them would advertise a shape the run did not have.
+failure rather than the staging mistake it is.
+
+`input_len`/`output_len` are dropped for `sharegpt`, since it takes its lengths
+from the conversations. They are not sent to the container, and they are
+published as `null` rather than as the recipe's defaults: reporting them would
+label the result with a shape the run did not have, and a matrix mixing the two
+datasets would compare those labels as though they meant the same thing. The
+TPOT audit follows the same rule — under `random` it asks whether `output_len`
+exceeds 1, and under `sharegpt` it asks the export whether more output tokens
+were produced than requests completed, so a step's validity never depends on a
+field the run ignored.
 
 ## Not done yet
 

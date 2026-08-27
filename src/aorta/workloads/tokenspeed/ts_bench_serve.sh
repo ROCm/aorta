@@ -42,15 +42,18 @@
 #   TS_PORT               gateway port, OpenAI /v1        (default 8000)
 #   TS_CONTROL_PORT       control port, /health           (default TS_PORT + 1)
 #   TS_READY_TIMEOUT      seconds to wait for /health     (default 900)
-#   TS_SERVE_ARGS         extra args for `tokenspeed serve` (word-split)
+#   TS_SERVE_ARGS         extra args for `tokenspeed serve`, as a JSON array
+#                         of strings, e.g. ["--foo","bar baz"]
 #   TS_BENCH_STEPS        measured bench repetitions      (default 1)
 #   TS_BENCH_WARMUP_STEPS discarded bench repetitions run
 #                         first, to absorb Triton JIT     (default 0)
 #   TS_GATEWAY_STARTUP_TIMEOUT  orchestrator gateway budget (default READY_TIMEOUT)
 #   TS_DRAIN_TIMEOUT      gateway drain on shutdown       (default TEARDOWN_GRACE - 5)
 #   TS_NUM_PROMPTS        requests per bench step         (default 64)
-#   TS_INPUT_LEN          random-dataset ISL, tokens      (default 1024)
-#   TS_OUTPUT_LEN         random-dataset OSL, tokens      (default 128)
+#   TS_INPUT_LEN          random-dataset ISL, tokens      (default 1024;
+#                         unset for sharegpt, which takes its lengths from the
+#                         conversations)
+#   TS_OUTPUT_LEN         random-dataset OSL, tokens      (default 128; likewise)
 #   TS_MAX_CONCURRENCY    in-flight request cap           (default unset = unbounded)
 #   TS_REQUEST_RATE       arrival rate, req/s             (default inf = all at once)
 #   TS_NUM_WARMUPS        untimed warmup requests         (default 1)
@@ -58,7 +61,8 @@
 #   TS_SEED               dataset/sampling seed           (default 0)
 #   TS_PERCENTILE_METRICS which metrics get percentiles   (default ttft,tpot,itl,e2el)
 #   TS_METRIC_PERCENTILES which percentiles               (default 50,90,99)
-#   TS_BENCH_ARGS         extra args for `tokenspeed bench serve` (word-split)
+#   TS_BENCH_ARGS         extra args for `tokenspeed bench serve`, as a JSON
+#                         array of strings
 #   TS_BENCH_TIMEOUT      seconds per bench step          (default 1800)
 #   TS_TEARDOWN_GRACE     seconds to wait for SIGTERM     (default 45)
 #   TS_OUT_DIR            where JSON + logs are written   (default /ts-out)
@@ -123,16 +127,71 @@ fi
 # audits against. Reordering would fix the precedence but leave the override
 # silently ignored, which is its own trap, so these are rejected by name.
 #
-# reject_owned_flags <label> <value> <flag>...
+# TS_SERVE_ARGS and TS_BENCH_ARGS arrive as a JSON array of strings, not as a
+# space-joined string. Joining and re-splitting destroys argument boundaries:
+# a single recipe item like `--foo=a b` became two arguments, and a value
+# containing `*` or `?` was glob-expanded against the container's filesystem
+# before TokenSpeed ever saw it. The recipe documents these as lists, so they
+# have to arrive as lists.
+#
+# Decoded through a NUL-separated stream, which is the one delimiter that
+# cannot appear inside an argument. `mapfile` reads it straight into an array;
+# a command substitution could not, since `$()` discards NUL bytes.
+#
+# decode_json_args <array-name> <label> <json>
+decode_json_args() {
+  local -n _decoded="$1"
+  local label="$2" raw="${3:-}"
+  _decoded=()
+  [ -z "${raw}" ] && return 0
+
+  local err
+  if ! err="$(TS_ARGS_RAW="${raw}" python3 -c '
+import json, os, sys
+try:
+    items = json.loads(os.environ["TS_ARGS_RAW"])
+except ValueError as exc:
+    sys.exit(f"is not valid JSON ({exc})")
+if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+    sys.exit("must be a JSON array of strings")
+' 2>&1)"; then
+    echo "TS_BENCH_FAIL: usage ${label} ${err}"
+    echo "  It is serialized by the workload from the recipe's list form; set it"
+    echo "  by hand only as a JSON array, e.g. '[\"--foo\",\"bar baz\"]'."
+    exit 64
+  fi
+
+  mapfile -t -d '' _decoded < <(TS_ARGS_RAW="${raw}" python3 -c '
+import json, os, sys
+for item in json.loads(os.environ["TS_ARGS_RAW"]):
+    sys.stdout.write(item + "\0")
+')
+}
+
+# reject_owned_flags <label> <flag-list-terminator> -- <arg>... -- <owned>...
+# Operates on the decoded argv rather than on a joined string, so a flag can be
+# recognised exactly rather than by substring.
 reject_owned_flags() {
-  label="$1"
-  value="$2"
-  shift 2
-  for word in ${value}; do
-    for owned in "$@"; do
+  local label="$1"
+  shift
+  local -a args=() owned=()
+  local seen_separator=0
+  for token in "$@"; do
+    if [ "${token}" = "--" ] && [ "${seen_separator}" -eq 0 ]; then
+      seen_separator=1
+      continue
+    fi
+    if [ "${seen_separator}" -eq 0 ]; then
+      args+=( "${token}" )
+    else
+      owned+=( "${token}" )
+    fi
+  done
+  for word in "${args[@]+"${args[@]}"}"; do
+    for flag in "${owned[@]}"; do
       case "${word}" in
-        "${owned}"|"${owned}="*)
-          echo "TS_BENCH_FAIL: usage ${label} may not set ${owned}"
+        "${flag}"|"${flag}="*)
+          echo "TS_BENCH_FAIL: usage ${label} may not set ${flag}"
           echo "  This script and the host agree on it; overriding it here would"
           echo "  desynchronise them and the run would fail for an unrelated-"
           echo "  looking reason. Use the corresponding workload_config field."
@@ -143,7 +202,10 @@ reject_owned_flags() {
   done
 }
 
-reject_owned_flags TS_SERVE_ARGS "${TS_SERVE_ARGS:-}" \
+decode_json_args SERVE_EXTRA_ARGS TS_SERVE_ARGS "${TS_SERVE_ARGS:-}"
+decode_json_args BENCH_EXTRA_ARGS TS_BENCH_ARGS "${TS_BENCH_ARGS:-}"
+
+reject_owned_flags TS_SERVE_ARGS "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}" -- \
   --host --port --control-port
 # The load controls belong on this list for a sharper reason than the export
 # plumbing above. `--max-concurrency 1` against a configured cap of 8 changes the
@@ -157,7 +219,7 @@ reject_owned_flags TS_SERVE_ARGS "${TS_SERVE_ARGS:-}" \
 # `--max-concurrency` and `--request-rate` are omitted entirely at their
 # defaults, so reserving only what is currently appended would leave the default
 # unguarded -- and the default is what most cells run.
-reject_owned_flags TS_BENCH_ARGS "${TS_BENCH_ARGS:-}" \
+reject_owned_flags TS_BENCH_ARGS "${BENCH_EXTRA_ARGS[@]+"${BENCH_EXTRA_ARGS[@]}"}" -- \
   --base-url --output-file --num-prompts --label --request-id-prefix \
   --random-input-len --random-output-len --model --tokenizer --backend \
   --endpoint --dataset-name --dataset-path --percentile-metrics \
@@ -339,23 +401,31 @@ DRAIN_TIMEOUT="${TS_DRAIN_TIMEOUT:-$(( TEARDOWN_GRACE > 15 ? TEARDOWN_GRACE - 5 
 serve_args=( --host 127.0.0.1 --port "${PORT}" --control-port "${CONTROL_PORT}" )
 # Only supply these when the caller has not: `tokenspeed serve` takes the last
 # occurrence of a repeated flag, so appending ours unconditionally would silently
-# override an explicit operator choice.
-case " ${TS_SERVE_ARGS:-} " in
-  *" --gateway-startup-timeout"*) ;;
-  *) serve_args+=( --gateway-startup-timeout "${GATEWAY_STARTUP_TIMEOUT}" ) ;;
-esac
-case " ${TS_SERVE_ARGS:-} " in
-  *" --drain-timeout"*) ;;
-  *) serve_args+=( --drain-timeout "${DRAIN_TIMEOUT}" ) ;;
-esac
+# override an explicit operator choice. Matched against the decoded argv, so
+# `--gateway-startup-timeout=30` and a value that merely contains the flag name
+# are told apart.
+supplies_flag() {  # supplies_flag <flag> <arg>...
+  local flag="$1"
+  shift
+  for word in "$@"; do
+    case "${word}" in
+      "${flag}"|"${flag}="*) return 0 ;;
+    esac
+  done
+  return 1
+}
+if ! supplies_flag --gateway-startup-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}"; then
+  serve_args+=( --gateway-startup-timeout "${GATEWAY_STARTUP_TIMEOUT}" )
+fi
+if ! supplies_flag --drain-timeout "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}"; then
+  serve_args+=( --drain-timeout "${DRAIN_TIMEOUT}" )
+fi
 
 # Phase 1: bring the server up. setsid so it leads its own process group and
-# `teardown` can signal the whole tree. Word-splitting TS_SERVE_ARGS is
-# deliberate -- it carries multiple flags.
-# shellcheck disable=SC2086
+# `teardown` can signal the whole tree.
 setsid tokenspeed serve "${MODEL}" \
   "${serve_args[@]}" \
-  ${TS_SERVE_ARGS:-} >"${SERVER_LOG}" 2>&1 &
+  "${SERVE_EXTRA_ARGS[@]+"${SERVE_EXTRA_ARGS[@]}"}" >"${SERVER_LOG}" 2>&1 &
 SRV_PID=$!
 echo "TS_BENCH_INFO: server pid=${SRV_PID}, log=${SERVER_LOG}"
 
@@ -467,14 +537,13 @@ run_bench_step() {
   rm -f "${result_json}"
   echo "TS_BENCH_INFO: ${what} -> ${result_json}"
 
-  # shellcheck disable=SC2086
   timeout --signal=TERM --kill-after=60 "${BENCH_TIMEOUT}" \
     tokenspeed bench serve \
       "${bench_args[@]}" \
       --label "${prefix}-step${step}" \
       --request-id-prefix "aorta-${TOKEN}-${prefix}-s${step}" \
       --output-file "${result_json}" \
-      ${TS_BENCH_ARGS:-}
+      "${BENCH_EXTRA_ARGS[@]+"${BENCH_EXTRA_ARGS[@]}"}"
   return $?
 }
 

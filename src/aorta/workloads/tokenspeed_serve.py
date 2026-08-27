@@ -849,8 +849,6 @@ class TokenSpeedServeWorkload(Workload):
             "TS_GATEWAY_STARTUP_TIMEOUT": str(self._gateway_startup_timeout),
             "TS_DATASET": self._dataset,
             "TS_NUM_PROMPTS": str(self._num_prompts),
-            "TS_INPUT_LEN": str(self._input_len),
-            "TS_OUTPUT_LEN": str(self._output_len),
             "TS_NUM_WARMUPS": str(self._num_warmups),
             "TS_REQUEST_RATE": self._request_rate,
             "TS_SEED": str(self._seed),
@@ -890,14 +888,27 @@ class TokenSpeedServeWorkload(Workload):
             user = _host_username()
             env["USER"] = user
             env["LOGNAME"] = user
+        # ISL/OSL are `random`-only: the bench CLI maps them onto
+        # --random-input-len/--random-output-len, and the script drops them for
+        # any other dataset. Forwarding them anyway left a ShareGPT container
+        # holding a shape it would not use, which is the kind of thing a reader
+        # of the env dump reasonably believes.
+        if self._dataset == _DEFAULT_DATASET:
+            env["TS_INPUT_LEN"] = str(self._input_len)
+            env["TS_OUTPUT_LEN"] = str(self._output_len)
         if self._dataset_path is not None:
             env["TS_DATASET_PATH"] = _CONTAINER_DATASET_PATH
         if self._max_concurrency is not None:
             env["TS_MAX_CONCURRENCY"] = str(self._max_concurrency)
+        # JSON, not a space-joined string. The recipe documents these as lists,
+        # and joining them threw the boundaries away: one item containing a
+        # space arrived as two arguments, and a `*` or `?` in a value was
+        # glob-expanded against the container's filesystem on the way in. The
+        # script decodes these back into a bash array.
         if self._serve_args:
-            env["TS_SERVE_ARGS"] = " ".join(self._serve_args)
+            env["TS_SERVE_ARGS"] = json.dumps(self._serve_args)
         if self._bench_args:
-            env["TS_BENCH_ARGS"] = " ".join(self._bench_args)
+            env["TS_BENCH_ARGS"] = json.dumps(self._bench_args)
         if self._hip_visible_devices is not None:
             env["HIP_VISIBLE_DEVICES"] = self._hip_visible_devices
 
@@ -1212,6 +1223,7 @@ class TokenSpeedServeWorkload(Workload):
         elapsed = time.monotonic() - start
 
         records = self._collect_step_records()
+        outstanding_vram, vram_attributed = self._await_vram_release(vram_before)
         return self._build_result(
             records=records,
             exit_code=exit_code,
@@ -1219,10 +1231,35 @@ class TokenSpeedServeWorkload(Workload):
             elapsed=elapsed,
             stdout=stdout,
             stderr=stderr,
-            leaked_vram=self._await_vram_release(vram_before),
+            leaked_vram=outstanding_vram,
+            leaked_vram_attributed=vram_attributed,
         )
 
-    def _await_vram_release(self, before: dict[int, int]) -> dict[int, int]:
+    def _owned_gpu_indices(self) -> set[int] | None:
+        """GPUs this trial had exclusively, or ``None`` when that is unknown.
+
+        ``hip_visible_devices`` is the only statement of exclusive assignment
+        the workload has: it is what the container was restricted to, so growth
+        on those devices during this trial is this trial's. Anything outside
+        that set -- or the whole node, when the field is unset and the engine
+        chooses for itself -- may equally belong to another tenant.
+
+        Entries that are not plain indices (a UUID form is also accepted by
+        HIP) yield ``None`` rather than a partial set, since a partial set
+        would silently narrow the check to whichever entries happened to parse.
+        """
+        raw = self._hip_visible_devices
+        if raw is None:
+            return None
+        indices: set[int] = set()
+        for part in raw.split(","):
+            part = part.strip()
+            if not part.isdigit():
+                return None
+            indices.add(int(part))
+        return indices or None
+
+    def _await_vram_release(self, before: dict[int, int]) -> tuple[dict[int, int], bool]:
         """Block until the GPUs this trial used are actually free again.
 
         ``docker run`` returning is not the same event as the device memory
@@ -1239,11 +1276,31 @@ class TokenSpeedServeWorkload(Workload):
         `tp4` cell of `tokenspeed-serve-gptoss-tp.yaml` first failed.
 
         So this waits rather than reporting, and only reports what is still held
-        once waiting has stopped helping. Compared against a pre-run sample so
-        another tenant's memory on a shared node is never attributed here.
+        once waiting has stopped helping.
+
+        A before/after delta says memory grew; it does not say who allocated it.
+        On a shared node another tenant starting a job mid-trial produces the
+        same delta, and blaming it here would fail a healthy cell and tell the
+        operator to reset somebody else's GPU. So growth is only *attributed* on
+        the GPUs this trial can prove it owned -- the ones named by
+        ``hip_visible_devices``, which is the only exclusive assignment the
+        workload has.
+
+        Without that evidence the wait still happens, because waiting helps the
+        next cell whoever owns the memory, but the caller is told the result is
+        unattributed and reports it as an observation rather than as this
+        trial's failure.
+
+        Returns ``(outstanding, attributed)``.
         """
         if not before:
-            return {}
+            return {}, False
+
+        owned = self._owned_gpu_indices()
+        attributed = owned is not None
+        watched = before if owned is None else {i: b for i, b in before.items() if i in owned}
+        if not watched:
+            return {}, attributed
 
         deadline = time.monotonic() + _VRAM_RELEASE_TIMEOUT_SEC
         outstanding: dict[int, int] = {}
@@ -1251,7 +1308,7 @@ class TokenSpeedServeWorkload(Workload):
             after = _vram_used_by_gpu()
             outstanding = {
                 index: after[index] - used_before
-                for index, used_before in before.items()
+                for index, used_before in watched.items()
                 if index in after and after[index] - used_before >= _VRAM_LEAK_THRESHOLD_BYTES
             }
             if not outstanding or time.monotonic() >= deadline:
@@ -1264,7 +1321,18 @@ class TokenSpeedServeWorkload(Workload):
                 ),
             )
             time.sleep(_VRAM_RELEASE_POLL_SEC)
-        return outstanding
+        if outstanding and not attributed:
+            log.warning(
+                "tokenspeed_serve: %d GPU(s) still hold memory after teardown (%s), but "
+                "this trial had no exclusive GPU assignment (hip_visible_devices is "
+                "unset), so the growth cannot be attributed to it. Not failing the "
+                "trial; set hip_visible_devices to make this check authoritative.",
+                len(outstanding),
+                ", ".join(
+                    f"GPU {i}: {b / 1024**3:.0f} GiB" for i, b in sorted(outstanding.items())
+                ),
+            )
+        return outstanding, attributed
 
     def _missing_core_metrics(self, record: _StepRecord) -> list[str]:
         """Core metrics a measured step must actually carry.
@@ -1290,9 +1358,32 @@ class TokenSpeedServeWorkload(Workload):
             "median_ttft_ms",
         ]
         # TPOT is an inter-token quantity, so it is only defined once a request
-        # emits a second token. At output_len 1 there are no intervals to
+        # emits a second token. At one output token there are no intervals to
         # average and an absent or zero value is correct, not a fault.
-        if self._output_len > 1:
+        #
+        # Which source answers that depends on the dataset. `random` pins the
+        # output length in the recipe and `--ignore-eos` holds it there, so
+        # `output_len` is exact. ShareGPT takes its lengths from the
+        # conversations and the bench CLI never sees `output_len` at all, so
+        # deciding from it would make a ShareGPT step's validity hinge on a
+        # field the run ignored. The export is the only source that knows:
+        # more output tokens than completed requests means at least one
+        # request emitted a second token.
+        if self._dataset == _DEFAULT_DATASET:
+            tpot_defined = self._output_len > 1
+        else:
+            # Required rather than best-effort, so "we could not tell" is never
+            # a reason to stop asking for TPOT.
+            required.append("total_output_tokens")
+            completed = record.doc.get("completed")
+            total_output = record.doc.get("total_output_tokens")
+            tpot_defined = (
+                _is_scalar(total_output)
+                and type(completed) is int
+                and completed > 0
+                and float(total_output) > completed
+            )
+        if tpot_defined:
             required += ["mean_tpot_ms", "median_tpot_ms"]
 
         # Every one of these must be strictly positive, not merely finite. A
@@ -1469,6 +1560,7 @@ class TokenSpeedServeWorkload(Workload):
         stdout: str,
         stderr: str,
         leaked_vram: dict[int, int] | None = None,
+        leaked_vram_attributed: bool = False,
     ) -> WorkloadResult:
         failure_details: list[dict[str, Any]] = []
 
@@ -1477,7 +1569,14 @@ class TokenSpeedServeWorkload(Workload):
         # because the alternative is a green cell that quietly breaks the next
         # one: nothing in this trial's own numbers looks wrong, and the cost
         # lands later as an out-of-memory error naming a device nobody chose.
-        for index, grown in sorted((leaked_vram or {}).items()):
+        #
+        # Only when the growth is this trial's to claim, though. Without an
+        # exclusive GPU assignment a before/after delta cannot tell this
+        # workload's leftover memory from a co-tenant's new allocation, and
+        # failing the cell there would punish a healthy run for someone else's
+        # job -- and point `rocm-smi --gpureset` at their device.
+        # _await_vram_release logs the unattributed case.
+        for index, grown in sorted((leaked_vram or {}).items() if leaked_vram_attributed else []):
             failure_details.append(
                 {
                     "reason": "gpu_memory_not_reclaimed",
@@ -1626,7 +1725,9 @@ class TokenSpeedServeWorkload(Workload):
             passed=passed,
             failure_count=len(failure_details),
             first_failure_iteration=(
-                _first_failure_step(failure_details) if failure_details else None
+                _first_failure_step(failure_details, main_work_started=main_work_started)
+                if failure_details
+                else None
             ),
             failure_details=failure_details,
             total_iterations=len(records),
@@ -1650,8 +1751,16 @@ class TokenSpeedServeWorkload(Workload):
             "model": self._model,
             "served_model_name": self._served_model_name,
             "num_prompts": self._num_prompts,
-            "input_len": self._input_len,
-            "output_len": self._output_len,
+            "dataset": self._dataset,
+            # Only for `random`, which is the one dataset these describe. Under
+            # ShareGPT the lengths come from the conversations and the bench CLI
+            # is never told these values, so publishing them labelled a result
+            # with a shape it did not run -- and a matrix mixing the two
+            # datasets would compare those labels as if they meant the same
+            # thing. `None` reads as "not applicable" in the trial JSON and is
+            # skipped by the perf aggregate.
+            "input_len": self._input_len if self._dataset == _DEFAULT_DATASET else None,
+            "output_len": self._output_len if self._dataset == _DEFAULT_DATASET else None,
             "max_concurrency": self._max_concurrency,
             "request_rate": self._request_rate,
             "num_warmups": self._num_warmups,
@@ -1899,7 +2008,9 @@ def _step_index(name: str) -> int:
     return int(match.group(1)) if match else 0
 
 
-def _first_failure_step(failure_details: list[dict[str, Any]]) -> int | None:
+def _first_failure_step(
+    failure_details: list[dict[str, Any]], *, main_work_started: bool
+) -> int | None:
     """The earliest failing step, as a zero-based iteration index.
 
     ``step`` is one-based everywhere it is human-facing -- it comes from the
@@ -1911,9 +2022,20 @@ def _first_failure_step(failure_details: list[dict[str, Any]]) -> int | None:
     recorded: out of range, and off by one against every other workload.
     """
     steps = [d["step"] for d in failure_details if isinstance(d.get("step"), int)]
-    if not steps:
-        return None
-    return max(0, min(steps) - 1)
+    if steps:
+        return max(0, min(steps) - 1)
+    # Not every failure names a step. A perf-gate breach is computed from the
+    # aggregate across steps, and a bench step can fail before it identifies
+    # itself. Returning None there says "no failure was observed", which
+    # contradicts both the WorkloadResult contract (_base.py) and the
+    # failure_details sitting beside it. Once measured work has run, index 0 is
+    # the best-effort answer the rest of the codebase gives (hrx_perf.py), and
+    # it is always in range because main_work_started implies an iteration.
+    if main_work_started:
+        return 0
+    # Nothing ran, so there is genuinely no iteration to point at -- the
+    # bring-up failures land here.
+    return None
 
 
 __all__ = ["TokenSpeedServeWorkload"]

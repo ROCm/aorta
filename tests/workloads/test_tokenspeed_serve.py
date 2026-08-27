@@ -457,17 +457,30 @@ def test_the_documented_protocol_floor_is_actually_owned(tmp_path):
 
     Every key it reserves has to be one the workload really sets under some
     configuration -- otherwise reserving it here forbids a mitigation from
-    setting a knob the workload never owned. `max_concurrency` and the sharegpt
-    dataset are passed explicitly because the keys they control are absent by
-    default, which is the whole reason the floor exists.
+    setting a knob the workload never owned.
+
+    Checked against the union over configurations rather than any single one,
+    because no single one sets every key: `max_concurrency` and the ShareGPT
+    dataset path are absent by default, which is the whole reason the floor
+    exists, and `TS_INPUT_LEN`/`TS_OUTPUT_LEN` are the mirror case -- they are
+    sent only for the `random` dataset, since ShareGPT takes its lengths from
+    the conversations and the bench CLI never sees them.
     """
     dataset = tmp_path / "sharegpt.json"
     dataset.write_text("[]", encoding="utf-8")
-    wl = _make(tmp_path, max_concurrency=4, dataset="sharegpt", dataset_path=str(dataset))
-    wl.setup()
-    wl._run_token = "tok"
-    wl._port, wl._control_port = 8000, 8001
-    owned = set(wl._container_env())
+    configs = [
+        {"max_concurrency": 4},
+        {"max_concurrency": 4, "dataset": "sharegpt", "dataset_path": str(dataset)},
+    ]
+
+    owned: set[str] = set()
+    for overrides in configs:
+        wl = _make(tmp_path, **overrides)
+        wl.setup()
+        wl._run_token = "tok"
+        wl._port, wl._control_port = 8000, 8001
+        owned |= set(wl._container_env())
+
     assert mod._PROTOCOL_ENV_KEYS <= owned, mod._PROTOCOL_ENV_KEYS - owned
 
 
@@ -1242,7 +1255,13 @@ def test_bench_script_rejects_extra_args_that_shadow_owned_flags(tmp_path, env_k
         ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
         capture_output=True,
         text=True,
-        env={**os.environ, "TS_OUT_DIR": str(tmp_path), env_key: f"{flag} somevalue"},
+        env={
+            **os.environ,
+            "TS_OUT_DIR": str(tmp_path),
+            # A JSON array, which is how the workload serializes these: joining
+            # a list with spaces destroyed argument boundaries on the way in.
+            env_key: json.dumps([flag, "somevalue"]),
+        },
     )
     assert proc.returncode == 64, proc.stdout + proc.stderr
     assert f"{env_key} may not set {flag}" in proc.stdout, proc.stdout
@@ -1421,6 +1440,145 @@ def test_a_mitigation_may_still_set_a_knob_the_workload_does_not_own(tmp_path):
     wl._run_token = "tok"
     wl._port, wl._control_port = 8000, 8001
     assert wl._container_env()["TS_SOME_UNOWNED_KNOB"] == "1"
+
+
+@pytest.mark.parametrize("field", ["serve_args", "bench_args"])
+def test_extra_args_reach_the_container_with_their_boundaries_intact(tmp_path, field):
+    """The recipe documents these as lists, so they have to arrive as lists.
+
+    They were joined with spaces and word-split again inside the container, so
+    one item containing a space became two arguments and a `*` in a value was
+    glob-expanded against the container's filesystem. Neither is what the recipe
+    asked for, and both change what TokenSpeed was actually told.
+    """
+    items = ["--extra-body", '{"a": 1}', "--label-suffix", "step*"]
+    wl = _make(tmp_path, **{field: items})
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+
+    env_key = "TS_SERVE_ARGS" if field == "serve_args" else "TS_BENCH_ARGS"
+    assert json.loads(wl._container_env()[env_key]) == items
+
+
+@pytest.mark.parametrize("field", ["serve_args", "bench_args"])
+def test_the_script_rebuilds_extra_args_verbatim(tmp_path, field):
+    """The other half of the same contract, checked where it is consumed.
+
+    A JSON array on the host is only useful if the script reconstructs the exact
+    argv from it, so this drives the decoder out of ts_bench_serve.sh rather than
+    trusting that it matches.
+    """
+    script = Path(mod.__file__).with_name("tokenspeed") / "ts_bench_serve.sh"
+    body = subprocess.run(
+        ["awk", "/^decode_json_args\\(\\) \\{/,/^\\}$/", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "decode_json_args" in body, "failed to extract the decoder"
+
+    items = ["--extra-body", '{"a": 1}', "step*", "trailing space "]
+    harness = tmp_path / "drive.sh"
+    harness.write_text(
+        f"{body}\n"
+        "declare -a out\n"
+        'decode_json_args out TS_TEST "$1"\n'
+        'printf "%s\\n" "${#out[@]}"\n'
+        'for item in "${out[@]}"; do printf "[%s]\\n" "${item}"; done\n'
+    )
+    proc = subprocess.run(
+        ["bash", str(harness), json.dumps(items)], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    lines = proc.stdout.splitlines()
+    assert lines[0] == str(len(items)), proc.stdout
+    assert lines[1:] == [f"[{item}]" for item in items], proc.stdout
+
+
+def test_sharegpt_does_not_advertise_a_shape_it_never_ran(tmp_path):
+    """ISL/OSL are `random`-only knobs.
+
+    The bench CLI maps them onto `--random-input-len`/`--random-output-len`, and
+    ShareGPT takes its lengths from the conversations, so the script drops them.
+    Sending them anyway left the container holding a shape it would not use, and
+    publishing them labelled the result with a shape the run did not have --
+    which a matrix mixing the two datasets would compare as if it meant
+    something.
+    """
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+
+    wl = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset))
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    env = wl._container_env()
+    assert "TS_INPUT_LEN" not in env
+    assert "TS_OUTPUT_LEN" not in env
+
+    metrics = wl._aggregate([], stdout="")
+    assert metrics["dataset"] == "sharegpt"
+    assert metrics["input_len"] is None
+    assert metrics["output_len"] is None
+
+    # `random` is unaffected -- there the recipe's shape is exactly what ran.
+    plain = _make(tmp_path)
+    plain.setup()
+    plain._run_token = "tok"
+    plain._port, plain._control_port = 8000, 8001
+    assert plain._container_env()["TS_OUTPUT_LEN"] == str(plain._output_len)
+    assert plain._aggregate([], stdout="")["output_len"] == plain._output_len
+
+
+def test_sharegpt_requires_tpot_from_the_export_not_from_output_len(tmp_path, monkeypatch):
+    """TPOT is required whenever a second token was emitted.
+
+    Under ShareGPT the recipe's `output_len` is ignored by the run, so deciding
+    from it made a step's validity depend on a field that had no effect. The
+    export knows: more output tokens than completed requests means at least one
+    request had an inter-token interval.
+    """
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+
+    # output_len 1 would have waived TPOT under the old rule, but this export
+    # shows 64 requests producing 4096 tokens.
+    wl = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset), output_len=1)
+    wl.setup()
+
+    doc = _bench_doc(completed=32, failed=0)
+    doc["total_output_tokens"] = 4096
+    doc.pop("mean_tpot_ms", None)
+    doc.pop("median_tpot_ms", None)
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+
+    unusable = [d for d in result.failure_details if d["reason"] == "result_json_unusable"]
+    assert unusable, result.failure_details
+    assert "tpot" in unusable[0]["detail"]
+
+
+def test_a_failure_without_a_step_still_points_at_an_iteration(tmp_path, monkeypatch):
+    """`first_failure_iteration=None` means "no failure observed".
+
+    Not every failure names a step -- a perf-gate breach is computed from the
+    aggregate across steps -- so returning None there contradicted both the
+    WorkloadResult contract and the failure_details sitting beside it.
+    """
+    wl = _make(tmp_path, num_prompts=32, gates={"min_output_throughput": 10_000})
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=32, failed=0)])
+    result = wl.run()
+
+    assert result.passed is False
+    assert result.main_work_started is True
+    assert not any(isinstance(d.get("step"), int) for d in result.failure_details), (
+        "this test is only meaningful for a failure that names no step"
+    )
+    assert result.first_failure_iteration == 0
+    assert 0 <= result.first_failure_iteration < result.total_iterations
 
 
 def _run_script_audit(tmp_path: Path, doc: dict, *, expected: int = 32) -> str:
@@ -1856,7 +2014,11 @@ def test_a_slow_tensor_parallel_teardown_is_waited_out(tmp_path, monkeypatch):
 
 def test_memory_never_released_fails_the_trial_that_held_it(tmp_path, monkeypatch):
     """Once waiting has stopped helping, a green cell would quietly break the
-    next one -- nothing in this trial's own numbers looks wrong."""
+    next one -- nothing in this trial's own numbers looks wrong.
+
+    `hip_visible_devices` is what makes the growth this trial's to claim; see
+    the unattributed case below.
+    """
     monkeypatch.setattr(
         mod,
         "_vram_used_by_gpu",
@@ -1865,7 +2027,7 @@ def test_memory_never_released_fails_the_trial_that_held_it(tmp_path, monkeypatc
     monkeypatch.setattr(mod, "_VRAM_RELEASE_POLL_SEC", 0)
     monkeypatch.setattr(mod, "_VRAM_RELEASE_TIMEOUT_SEC", 0)
 
-    wl = _make(tmp_path, num_prompts=64)
+    wl = _make(tmp_path, num_prompts=64, hip_visible_devices="0")
     wl.setup()
     _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
     result = wl.run()
@@ -1874,6 +2036,65 @@ def test_memory_never_released_fails_the_trial_that_held_it(tmp_path, monkeypatc
     assert result.passed is False
     assert [d["gpu"] for d in leaks] == [0], result.failure_details
     assert "gpureset" in leaks[0]["detail"]
+
+
+def test_unreleased_memory_is_not_blamed_on_a_trial_that_did_not_own_the_gpu(
+    tmp_path, monkeypatch, caplog
+):
+    """A before/after delta shows growth; it does not show who allocated it.
+
+    Without an exclusive assignment the workload cannot tell its own leftovers
+    from a co-tenant starting a job mid-trial, and failing here would redden a
+    healthy cell and point `rocm-smi --gpureset` at somebody else's device. The
+    wait still happens -- it helps the next cell whoever owns the memory -- but
+    the outcome is a warning, not this trial's failure.
+    """
+    monkeypatch.setattr(
+        mod,
+        "_vram_used_by_gpu",
+        _cycle_samples([{0: 1 * 1024**3}, {0: 257 * 1024**3}]),
+    )
+    monkeypatch.setattr(mod, "_VRAM_RELEASE_POLL_SEC", 0)
+    monkeypatch.setattr(mod, "_VRAM_RELEASE_TIMEOUT_SEC", 0)
+
+    wl = _make(tmp_path, num_prompts=64)  # no hip_visible_devices
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
+    with caplog.at_level("WARNING"):
+        result = wl.run()
+
+    assert result.passed is True, result.failure_details
+    assert not [d for d in result.failure_details if d["reason"] == "gpu_memory_not_reclaimed"]
+    assert "cannot be attributed" in caplog.text
+
+
+def test_only_the_trials_own_gpus_are_watched_for_unreleased_memory(tmp_path, monkeypatch):
+    """Growth on a GPU this trial was never given is somebody else's.
+
+    The check sampled every card on the node, so a co-tenant allocating on any
+    of them failed this workload. Only the devices named by
+    `hip_visible_devices` are this trial's to answer for.
+    """
+    monkeypatch.setattr(
+        mod,
+        "_vram_used_by_gpu",
+        _cycle_samples(
+            [
+                {0: 1 * 1024**3, 1: 1 * 1024**3},
+                # GPU 1 is the co-tenant's; GPU 0 -- ours -- released cleanly.
+                {0: 2 * 1024**3, 1: 257 * 1024**3},
+            ]
+        ),
+    )
+    monkeypatch.setattr(mod, "_VRAM_RELEASE_POLL_SEC", 0)
+    monkeypatch.setattr(mod, "_VRAM_RELEASE_TIMEOUT_SEC", 0)
+
+    wl = _make(tmp_path, num_prompts=64, hip_visible_devices="0")
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
+    result = wl.run()
+
+    assert result.passed is True, result.failure_details
 
 
 def test_normal_driver_overhead_is_not_reported_as_a_leak(tmp_path, monkeypatch):
