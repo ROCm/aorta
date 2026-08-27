@@ -560,9 +560,7 @@ class TokenSpeedServeWorkload(Workload):
         try:
             value = int(raw)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"tokenspeed_serve: {key} ({raw!r}) must be an integer"
-            ) from exc
+            raise ValueError(f"tokenspeed_serve: {key} ({raw!r}) must be an integer") from exc
         return value
 
     def _positive_int(self, key: str, default: int) -> int:
