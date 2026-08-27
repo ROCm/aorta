@@ -1616,3 +1616,88 @@ def test_the_in_container_audit_rejects_boolean_counters(tmp_path, doc_value):
     """
     verdict = _run_script_audit(tmp_path, {"completed": doc_value, "failed": False}, expected=1)
     assert verdict.startswith("UNPARSEABLE"), verdict
+
+
+@pytest.mark.parametrize("args", [["-d"], ["--detach"], ["-dit"], ["--detach=true"]])
+def test_detaching_the_container_is_rejected(tmp_path, args):
+    """Detach breaks every assumption that follows the `docker run` call.
+
+    It returns 0 immediately, so the trial reports success with no exports while
+    the container keeps benchmarking and holding the GPU -- and since nothing
+    raised or timed out, no cleanup path runs and `_force_remove_container` is
+    never reached. `-dit` is included because a combined short cluster carries
+    `-d` without it ever appearing as a token.
+    """
+    with pytest.raises(ValueError, match="docker_args may not set"):
+        _make(tmp_path, docker_args=args).setup()
+
+
+def test_an_explicit_control_port_is_reserved_before_the_gateway_resolves(tmp_path, monkeypatch):
+    """The mixed case: `port: auto` with an explicit `control_port`.
+
+    Resolving the gateway blind let the kernel hand it the very port the control
+    endpoint is configured to use, and the equality check then rejected a
+    configuration that was entirely valid.
+
+    Driven with a kernel that hands out the configured control port first, since
+    otherwise the collision is a one-in-thousands accident and the test would
+    pass whether or not the reservation exists.
+    """
+    handed_out = iter([9711, 9711, 9712, 9713])
+
+    class FakeSocket:
+        def __init__(self, *a, **k):
+            self._port = None
+
+        def bind(self, addr):
+            self._port = next(handed_out)
+
+        def getsockname(self):
+            return ("127.0.0.1", self._port)
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(mod.socket, "socket", FakeSocket)
+    monkeypatch.setattr(mod, "_port_is_free", lambda port: False)
+
+    wl = _make(tmp_path, port="auto", control_port=9711)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
+    wl.run()
+
+    assert wl._control_port == 9711
+    assert wl._port != wl._control_port, "gateway took the reserved control port"
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("ready_timeout_sec", 86401),
+        ("teardown_grace_sec", 3601),
+    ],
+)
+def test_timeouts_above_the_container_ceiling_fail_here(tmp_path, key, value):
+    """ts_bench_serve.sh caps both with `require_uint`, so a larger value passed
+    setup(), occupied a GPU node, and then exited 64 inside the container --
+    reported as a workload failure with the violated range visible only in the
+    container log."""
+    with pytest.raises(ValueError, match="must be <="):
+        _make(tmp_path, **{key: value}).setup()
+
+
+@pytest.mark.parametrize("key", ["num_prompts", "steps", "input_len", "num_warmups", "seed"])
+@pytest.mark.parametrize("value", [True, 1.9])
+def test_integer_fields_reject_booleans_and_fractions(tmp_path, key, value):
+    """A bare `int()` ran a *different* load rather than failing: `bool` is an
+    int subclass, and a float is truncated, so `num_prompts: true` and
+    `num_prompts: 1.9` both meant one prompt. A recipe that cannot be read the
+    way it was written must not be executed the way it was not."""
+    with pytest.raises(ValueError, match=key):
+        _make(tmp_path, **{key: value}).setup()

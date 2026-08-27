@@ -99,6 +99,13 @@ _DEFAULT_BENCH_TIMEOUT_SEC = 1800
 _DEFAULT_TEARDOWN_GRACE_SEC = 45
 _DEFAULT_SHM_SIZE = "16g"
 
+# Mirrors the `require_uint` ceilings in ts_bench_serve.sh. Day-long sanity rails
+# rather than policy -- they catch a millisecond value passed as seconds -- but
+# the host has to enforce the same ones, or a recipe the container will reject
+# takes a node first and then fails as a workload error instead of a config one.
+_MAX_READY_TIMEOUT_SEC = 86400
+_MAX_TEARDOWN_GRACE_SEC = 3600
+
 # Margin added on top of (readiness + steps x bench) when deriving the default
 # host-side docker timeout: covers image pull, container start, and teardown.
 _TIMEOUT_MARGIN_SEC = 600
@@ -397,16 +404,15 @@ class TokenSpeedServeWorkload(Workload):
         # ``steps`` arrives from the recipe's top-level field, injected by the
         # dispatcher. Guard it here: subprocess with a zero-step loop would
         # produce no JSON and be misreported as a parse failure.
-        steps = cfg.get("steps")
-        self._steps = int(steps) if steps is not None else 1
-        if self._steps < 1:
-            raise ValueError(f"tokenspeed_serve: steps ({self._steps}) must be >= 1")
+        # Via the shared coercion so `steps: true` and `steps: 1.9` are rejected
+        # rather than quietly run as one step, the same as every other int field.
+        self._steps = self._positive_int("steps", 1) if cfg.get("steps") is not None else 1
 
         max_conc = cfg.get("max_concurrency")
         if max_conc is None:
             self._max_concurrency: int | None = None
         else:
-            self._max_concurrency = int(max_conc)
+            self._max_concurrency = self._positive_int("max_concurrency", 1)
             if self._max_concurrency < 1:
                 raise ValueError(
                     "tokenspeed_serve: max_concurrency "
@@ -425,9 +431,17 @@ class TokenSpeedServeWorkload(Workload):
         self._metric_percentiles = str(cfg.get("metric_percentiles") or _DEFAULT_METRIC_PERCENTILES)
         self._validate_percentiles(self._metric_percentiles)
 
-        self._ready_timeout = self._positive_int("ready_timeout_sec", _DEFAULT_READY_TIMEOUT_SEC)
+        # Ceilings mirror ts_bench_serve.sh's `require_uint` bounds, so a recipe
+        # the container would reject fails here instead of after taking a node.
+        self._ready_timeout = self._bounded_int(
+            "ready_timeout_sec", _DEFAULT_READY_TIMEOUT_SEC, maximum=_MAX_READY_TIMEOUT_SEC
+        )
         self._bench_timeout = self._positive_int("bench_timeout_sec", _DEFAULT_BENCH_TIMEOUT_SEC)
-        self._teardown_grace = self._positive_int("teardown_grace_sec", _DEFAULT_TEARDOWN_GRACE_SEC)
+        self._teardown_grace = self._bounded_int(
+            "teardown_grace_sec",
+            _DEFAULT_TEARDOWN_GRACE_SEC,
+            maximum=_MAX_TEARDOWN_GRACE_SEC,
+        )
         # Derive rather than hardcode: a 20B model on a cold HF cache spends
         # minutes in readiness alone, and a fixed default would kill the
         # container mid-download and report it as a timeout.
@@ -520,16 +534,64 @@ class TokenSpeedServeWorkload(Workload):
 
         self._gates = self._validated_gates()
 
+    def _coerced_int(self, key: str, default: int) -> int:
+        """Accept an integer, or a string spelling one, and nothing else.
+
+        A bare ``int()`` accepted two kinds of malformed recipe and quietly ran a
+        *different* load rather than failing: ``true`` (``bool`` is an ``int``
+        subclass) and ``1.9`` (truncated) both mean one prompt. A recipe that
+        cannot be read the way it was written must not be executed the way it was
+        not -- a cell reporting `num_prompts: 1` for a value someone wrote as 1.9
+        is a mislabelled result, which is the failure mode this whole file is
+        organised against.
+        """
+        raw = self.config.get(key, default)
+        if isinstance(raw, bool):
+            raise ValueError(
+                f"tokenspeed_serve: {key} must be an integer, got the boolean "
+                f"{raw!r}; `bool` is an int subclass in Python, so this would "
+                "silently run as 1 or 0."
+            )
+        if isinstance(raw, float) and not raw.is_integer():
+            raise ValueError(
+                f"tokenspeed_serve: {key} ({raw!r}) must be a whole number; "
+                "truncating it would run a different load than the recipe asks for."
+            )
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"tokenspeed_serve: {key} ({raw!r}) must be an integer"
+            ) from exc
+        return value
+
     def _positive_int(self, key: str, default: int) -> int:
-        value = int(self.config.get(key, default))
+        value = self._coerced_int(key, default)
         if value < 1:
             raise ValueError(f"tokenspeed_serve: {key} ({value}) must be >= 1")
         return value
 
     def _non_negative_int(self, key: str, default: int) -> int:
-        value = int(self.config.get(key, default))
+        value = self._coerced_int(key, default)
         if value < 0:
             raise ValueError(f"tokenspeed_serve: {key} ({value}) must be >= 0")
+        return value
+
+    def _bounded_int(self, key: str, default: int, *, maximum: int) -> int:
+        """A positive int the container will also accept.
+
+        ``ts_bench_serve.sh`` caps these, so a value above the ceiling passed
+        ``setup()``, occupied a GPU node, and then exited 64 inside the container
+        -- reported as a workload failure rather than as the configuration error
+        it is, with the range that was violated visible only in the container log.
+        """
+        value = self._positive_int(key, default)
+        if value > maximum:
+            raise ValueError(
+                f"tokenspeed_serve: {key} ({value}) must be <= {maximum}; "
+                "ts_bench_serve.sh rejects anything larger, so this would fail "
+                "inside the container after occupying a node."
+            )
         return value
 
     def _bool(self, key: str, default: bool) -> bool:
@@ -919,8 +981,20 @@ class TokenSpeedServeWorkload(Workload):
             "--device",
             "--group-add",
             "--security-opt",
+            # Detaching breaks every assumption after the `docker run` call:
+            # it returns 0 immediately, so the trial reports success with no
+            # exports while the container keeps benchmarking and holding the
+            # GPU -- and because nothing raised or timed out, no cleanup path
+            # runs. This workload needs an attached client to supervise the
+            # lifecycle at all.
+            "--detach",
+            "-d",
         }
     )
+
+    # `-d` also travels inside a combined short cluster (`-dit`), which no amount
+    # of splitting on `=` would reveal.
+    _OWNED_SHORT_FLAG_LETTERS = frozenset({"d"})
 
     # Short options docker also accepts with the value attached, where splitting
     # on `=` is not enough to recover the flag: `-u0:0` and `-v/tmp:/ts-out` are
@@ -938,6 +1012,16 @@ class TokenSpeedServeWorkload(Workload):
                 if arg.startswith(short) and len(arg) > len(short):
                     flag = short
                     break
+            # A combined cluster of boolean short options: `-dit` is three flags
+            # in one word, so `-d` is present without ever appearing as a token.
+            if (
+                arg.startswith("-")
+                and not arg.startswith("--")
+                and len(arg) > 1
+                and set(arg[1:]) & self._OWNED_SHORT_FLAG_LETTERS
+                and arg[1:].isalpha()
+            ):
+                flag = f"-{next(iter(set(arg[1:]) & self._OWNED_SHORT_FLAG_LETTERS))}"
             if flag in self._OWNED_DOCKER_FLAGS:
                 raise ValueError(
                     f"tokenspeed_serve: docker_args may not set {flag}; this "
@@ -985,7 +1069,17 @@ class TokenSpeedServeWorkload(Workload):
         # Resolved per trial, not in setup(): with `--network host` the gateway
         # binds on the host, so a port held by an unrelated process (or by the
         # previous trial's server still draining) must not fail the cell.
-        self._port = _resolve_port(self._port_request)
+        # The gateway avoids an explicitly configured control port. Resolving it
+        # blind meant the mixed case -- `port: auto` with an explicit
+        # `control_port` -- could hand the gateway that very port, and the
+        # equality check downstream would then reject a configuration that was
+        # entirely valid. Most likely precisely when the explicit value sits in
+        # the ephemeral range, which is where someone picking "a high free port"
+        # would put it.
+        reserved: set[int] = set()
+        if not isinstance(self._control_port_request, str):
+            reserved.add(int(self._control_port_request))
+        self._port = _resolve_port(self._port_request, avoid=reserved)
         self._control_port = _resolve_port(
             self._control_port_request, avoid={self._port}, near=self._port + 1
         )

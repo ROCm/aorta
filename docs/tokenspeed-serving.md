@@ -297,6 +297,21 @@ The workload validates the same values on the host, so a recipe never reaches
 these. They matter because the script is also meant to be runnable by hand, which
 is what keeps the audit trustworthy independently of the Python layer.
 
+"The same values" has to include the *ranges*, in both directions. Where the host
+was more permissive than the script — explicit ports below 1024, a
+`ready_timeout_sec` above 86400, a `teardown_grace_sec` above 3600 — the recipe
+passed `setup()`, took a GPU node, and then exited 64 inside the container. The
+result read as a workload failure with the violated bound visible only in the
+container log, when it was a configuration error that could have been caught
+before anything was allocated.
+
+Integer fields are also checked as integers rather than coerced with `int()`,
+which accepted two shapes of malformed recipe and ran a *different* load instead
+of failing. `num_prompts: true` becomes 1 because `bool` is an `int` subclass,
+and `num_prompts: 1.9` truncates to 1 — in both cases the cell then reports
+`num_prompts: 1` for a value nobody wrote. A recipe that cannot be read the way
+it was written must not be run the way it was not.
+
 ### A mitigation cannot redefine the host/container protocol
 
 Cell mitigations are forwarded into the container, which is the whole point of
@@ -460,7 +475,14 @@ up while no single trial looks wrong.
 `--name`, `--entrypoint`, `-v`/`--volume`, `--mount`, `--network`, `--user`,
 `--env-file`, `--ipc`, `--shm-size`, `--rm`, `--device`, `--group-add` and
 `--security-opt` are therefore rejected as configuration errors, as is any `-e`
-naming a protocol variable. Everything else still passes through — that is what
+naming a protocol variable.
+
+`--detach`/`-d` is rejected for a different reason: it does not displace an
+option, it removes the client this workload supervises the run through. `docker
+run -d` returns 0 immediately, so the trial reports success with no exports
+while the container keeps benchmarking and holding the GPU — and because nothing
+raised and nothing timed out, no cleanup path runs. The combined short cluster
+`-dit` is caught too, since `-d` there never appears as its own token. Everything else still passes through — that is what
 the field is for.
 
 Two details the guard has to get right, because either one makes it avoidable
@@ -485,6 +507,13 @@ very port — leaving the two equal, which `ts_bench_serve.sh` rejects as a usag
 error. A valid `auto` configuration would fail intermittently, on a node under
 no unusual load. Resolution therefore retries, holding each candidate open until
 one lands outside the set already claimed.
+
+The mixed case needs the same care: with `port: auto` and an explicit
+`control_port`, the gateway is resolved with that explicit value already in its
+`avoid` set. Resolving it blind let the kernel hand the gateway the very port the
+control endpoint was configured to use — most likely when the explicit value sits
+in the ephemeral range, which is where anyone picking "a high free port" would
+put it — and the equality check then rejected a configuration that was valid.
 
 Explicit ports are held to 1024..65535, matching what `ts_bench_serve.sh`
 enforces: the container runs unprivileged and cannot bind a reserved port. The
