@@ -10,6 +10,7 @@ summary merge.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 from dataclasses import asdict
 from pathlib import Path
@@ -547,10 +548,13 @@ def test_summarize_metric_keys_are_namespaced_by_collector(tmp_path):
 def test_summarize_survives_a_parser_that_raises(tmp_path, monkeypatch, caplog):
     """An opt-in measurement must never turn a healthy trial into a failure."""
 
-    def boom(_out_dir):
+    def boom(*_args, **_kwargs):
         raise RuntimeError("parser exploded")
 
+    # Patch both entrypoints so the test holds on the fd-relative (streams) path
+    # and the non-POSIX (pathname) fallback alike.
     monkeypatch.setattr(rocprof, "parse_summary", boom)
+    monkeypatch.setattr(rocprof, "parse_summary_from_streams", boom)
     (tmp_path / rocprof.OUTPUT_SUBDIR).mkdir()
     with caplog.at_level("WARNING"):
         assert summarize_collectors(_config(["rocprof"], collect_dir=tmp_path)) == {}
@@ -589,3 +593,149 @@ def test_summarize_does_not_re_resolve_a_results_dir_swapped_for_a_symlink(tmp_p
     assert metrics == {}
     assert "rocprof_kernel_count" not in metrics
     assert "symlink" in caplog.text
+
+
+# ---- fd-relative TOCTOU hardening ---------------------------------------
+
+from aorta.run import _fsafe  # noqa: E402 -- grouped with the guard tests below
+
+_needs_fd = pytest.mark.skipif(
+    not _fsafe.HAVE_FD_TRAVERSAL, reason="fd-relative traversal unsupported here"
+)
+
+
+@_needs_fd
+def test_reset_ancestor_swap_after_fd_open_is_inert(profilers_on_path, tmp_path, monkeypatch):
+    """A swap of the collector dir's ancestor *after* the fd is held is defeated.
+
+    This is the mid-use-swap proof: the guard no longer re-resolves the pathname
+    for the destructive step, so a payload that replaces an ancestor between the
+    check and the delete cannot redirect it. We simulate the race deterministically
+    by planting the swap inside ``open_dir_nofollow`` right after it yields the
+    parent fd, then assert the unlink/mkdir landed on the ORIGINAL inode and the
+    planted external tree survived untouched.
+    """
+    results = tmp_path / "results"
+    workload = results / "wl"
+    collect_dir = workload / "trial_d0_m0_t0"
+    (collect_dir / rocprof.OUTPUT_SUBDIR).mkdir(parents=True)
+    (collect_dir / rocprof.OUTPUT_SUBDIR / "stale.txt").write_text("old", encoding="utf-8")
+
+    outside = tmp_path / "outside"
+    planted = outside / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    planted.mkdir(parents=True)
+    victim = planted / "precious.txt"
+    victim.write_text("keep me", encoding="utf-8")
+
+    real_open = _fsafe.open_dir_nofollow
+    swapped = {"done": False}
+
+    @contextlib.contextmanager
+    def swapping_open(trusted_root, components, **kwargs):
+        with real_open(trusted_root, components, **kwargs) as fd:
+            if not swapped["done"]:
+                swapped["done"] = True
+                # Rename <workload> aside (the held fds still track the real
+                # inodes) and drop a symlink to the planted external tree in its
+                # place -- exactly the pathname swap a surviving payload
+                # descendant would perform mid-run.
+                workload.rename(results / "wl_real")
+                workload.symlink_to(outside, target_is_directory=True)
+            yield fd
+
+    monkeypatch.setattr(_fsafe, "open_dir_nofollow", swapping_open)
+
+    wrap_argv_for_collectors(
+        _config(["rocprof"], collect_dir=collect_dir, results_root=results.resolve()),
+        _INNER,
+    )
+
+    # The delete + recreate ran against the held fd, not the swapped pathname, so
+    # the planted external victim is untouched and the real (renamed) tree got
+    # the fresh rocprof dir.
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    assert (results / "wl_real" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR).is_dir()
+
+
+@_needs_fd
+def test_reset_falls_back_to_lexical_guard_without_fd_traversal(
+    profilers_on_path, tmp_path, monkeypatch
+):
+    """With the fd primitives unavailable, the lexical guard still fails closed."""
+    monkeypatch.setattr(_fsafe, "HAVE_FD_TRAVERSAL", False)
+    results = tmp_path / "results"
+    collect_dir = results / "trial_d0_m0_t0"
+    collect_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (results / "wl").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="cannot prepare the rocprof artifact directory"):
+        wrap_argv_for_collectors(
+            _config(
+                ["rocprof"],
+                collect_dir=results / "wl" / "trial_d0_m0_t0",
+                results_root=results.resolve(),
+            ),
+            _INNER,
+        )
+
+
+@_needs_fd
+def test_summarize_reads_real_artifacts_through_fd(profilers_on_path, tmp_path):
+    """Parity: the fd-relative streams path parses a clean tree like the shim."""
+    subdir = tmp_path / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir()
+    (subdir / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"sgemm",7,1000\n', encoding="utf-8"
+    )
+    metrics = summarize_collectors(
+        _config(["rocprof"], collect_dir=tmp_path, results_root=tmp_path.resolve())
+    )
+    assert metrics["rocprof_kernel_count"] == 7
+    assert metrics["rocprof_top_kernels"] == ["sgemm"]
+
+
+@_needs_fd
+def test_summarize_swap_after_fd_open_does_not_leak_external_metrics(
+    profilers_on_path, tmp_path, monkeypatch
+):
+    """A read-path ancestor swap after the fd is held cannot pull outside data."""
+    results = tmp_path / "results"
+    subdir = results / "wl" / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    subdir.mkdir(parents=True)
+    (subdir / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"real",1,10\n', encoding="utf-8"
+    )
+    outside = tmp_path / "outside"
+    planted = outside / "trial_d0_m0_t0" / rocprof.OUTPUT_SUBDIR
+    planted.mkdir(parents=True)
+    (planted / "aorta_kernel_stats.csv").write_text(
+        '"Name","Calls","TotalDurationNs"\n"leak",999,9\n', encoding="utf-8"
+    )
+
+    real_open = _fsafe.open_dir_nofollow
+    swapped = {"done": False}
+
+    @contextlib.contextmanager
+    def swapping_open(trusted_root, components, **kwargs):
+        with real_open(trusted_root, components, **kwargs) as fd:
+            if not swapped["done"]:
+                swapped["done"] = True
+                (results / "wl").rename(results / "wl_real")
+                (results / "wl").symlink_to(outside, target_is_directory=True)
+            yield fd
+
+    monkeypatch.setattr(_fsafe, "open_dir_nofollow", swapping_open)
+
+    metrics = summarize_collectors(
+        _config(
+            ["rocprof"],
+            collect_dir=results / "wl" / "trial_d0_m0_t0",
+            results_root=results.resolve(),
+        )
+    )
+    # We read the real file through the held fd; the planted "leak" kernel with
+    # its count of 999 never appears.
+    assert metrics.get("rocprof_top_kernels") == ["real"]
+    assert metrics.get("rocprof_kernel_count") == 1

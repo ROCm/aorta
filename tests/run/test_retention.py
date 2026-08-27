@@ -317,3 +317,97 @@ def test_unknown_manifest_class_treated_as_heavy(tmp_path: Path):
 
 def test_levels_constant_is_the_documented_ladder():
     assert RETAIN_LEVELS == ("none", "log", "summary", "full")
+
+
+# ---- fd-relative engine (trusted_root=) ---------------------------------
+
+import contextlib  # noqa: E402 -- grouped with the fd-relative tests
+
+from aorta.run import _fsafe  # noqa: E402
+
+_needs_fd = pytest.mark.skipif(
+    not _fsafe.HAVE_FD_TRAVERSAL, reason="fd-relative traversal unsupported here"
+)
+
+
+@_needs_fd
+def test_fd_engine_prunes_in_tree_and_keeps_the_record(tmp_path: Path):
+    """With a trusted root, the fd engine deletes heavy files but not the record."""
+    results = tmp_path / "results"
+    trial = results / "wl" / "trial_d0_m0_t0"
+    _populate(trial)
+    outcome = apply_retention(trial, "none", trusted_root=results.resolve())
+    names = _names(trial)
+    assert "result.json" in names  # record hard-guarded
+    assert "trace.bin" not in names  # heavy pruned
+    assert "prof/big.pb" in outcome.deleted
+
+
+@_needs_fd
+def test_fd_engine_refuses_a_symlinked_ancestor(tmp_path: Path, caplog):
+    """A symlinked component above the trial dir makes the prune refuse + keep."""
+    results = tmp_path / "results"
+    real_trial = results / "wl_real" / "trial_d0_m0_t0"
+    _populate(real_trial)
+    outside = tmp_path / "outside"
+    (outside / "trial_d0_m0_t0").mkdir(parents=True)
+    victim = outside / "trial_d0_m0_t0" / "trace.bin"
+    victim.write_text("keep me", encoding="utf-8")
+    # <results>/wl is a symlink to the external tree.
+    (results / "wl").symlink_to(outside, target_is_directory=True)
+
+    with caplog.at_level("WARNING"):
+        outcome = apply_retention(
+            results / "wl" / "trial_d0_m0_t0", "none", trusted_root=results.resolve()
+        )
+    assert outcome.no_op
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    assert any("symlink" in r.getMessage() for r in caplog.records)
+
+
+@_needs_fd
+def test_fd_engine_ancestor_swap_after_open_is_inert(tmp_path: Path, monkeypatch):
+    """A mid-prune ancestor swap cannot redirect the deletes (TOCTOU closed)."""
+    results = tmp_path / "results"
+    trial = results / "wl" / "trial_d0_m0_t0"
+    _populate(trial)
+    outside = tmp_path / "outside"
+    planted = outside / "trial_d0_m0_t0"
+    planted.mkdir(parents=True)
+    victim = planted / "trace.bin"
+    victim.write_text("keep me", encoding="utf-8")
+
+    real_open = _fsafe.open_dir_nofollow
+    swapped = {"done": False}
+
+    @contextlib.contextmanager
+    def swapping_open(trusted_root, components, **kwargs):
+        with real_open(trusted_root, components, **kwargs) as fd:
+            if not swapped["done"]:
+                swapped["done"] = True
+                (results / "wl").rename(results / "wl_real")
+                (results / "wl").symlink_to(outside, target_is_directory=True)
+            yield fd
+
+    monkeypatch.setattr(_fsafe, "open_dir_nofollow", swapping_open)
+
+    apply_retention(trial, "none", trusted_root=results.resolve())
+    # The prune ran against the held fd; the planted external victim survives.
+    assert victim.read_text(encoding="utf-8") == "keep me"
+
+
+@_needs_fd
+def test_fd_engine_reads_manifest_no_follow(tmp_path: Path):
+    """The fd engine honours a real manifest entry's class."""
+    results = tmp_path / "results"
+    trial = results / "wl" / "trial_d0_m0_t0"
+    trial.mkdir(parents=True)
+    (trial / "result.json").write_text("{}", encoding="utf-8")
+    (trial / "mystery.dat").write_text("m" * 50, encoding="utf-8")
+    (trial / RETENTION_MANIFEST_NAME).write_text(
+        json.dumps({"artifacts": [{"path": "mystery.dat", "class": "summary"}]}),
+        encoding="utf-8",
+    )
+    # summary-classed mystery.dat is kept at level "summary".
+    apply_retention(trial, "summary", trusted_root=results.resolve())
+    assert "mystery.dat" in _names(trial)

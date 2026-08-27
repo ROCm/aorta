@@ -136,78 +136,6 @@ _TERMINATE_GRACE_SEC = 10.0
 _REAP_AFTER_KILL_SEC = 1.0
 
 
-def _terminate_surviving_process_group(
-    pgid: int, grace_sec: float = _TERMINATE_GRACE_SEC
-) -> None:
-    """Stop descendants left behind after their process-group leader exits.
-
-    ``Popen.wait()`` only reaps the direct child. A successful shell or
-    profiler can exit while a background descendant in the child's process
-    group remains alive; that descendant must be gone before post-run
-    collector parsing and retention use pathname-based guards. Because the
-    direct child led a new session, its pid is the stable process-group id even
-    after that leader has been reaped.
-
-    The common case has no surviving group and returns on ``ESRCH`` without
-    sleeping. A live group gets SIGTERM and a bounded grace period, then
-    SIGKILL. Polling with signal 0 closes the gap between queueing the signal
-    and allowing post-run filesystem operations to begin.
-    """
-    if pgid == os.getpgrp():
-        log.warning(
-            "refusing to clean up child process group %d because it is the "
-            "aorta process group",
-            pgid,
-        )
-        return
-
-    def _signal(sig: int) -> bool:
-        try:
-            os.killpg(pgid, sig)
-            return True
-        except ProcessLookupError:
-            return False
-        except OSError as exc:
-            log.warning(
-                "killpg(%d, %s) failed after the process leader exited: %s; "
-                "background descendants may still be running",
-                pgid,
-                signal.Signals(sig).name,
-                exc,
-            )
-            return False
-
-    def _alive() -> bool:
-        try:
-            os.killpg(pgid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            # A group we cannot signal still exists; let the subsequent
-            # delivery attempt report the actionable EPERM warning.
-            return True
-
-    if not _signal(signal.SIGTERM):
-        return
-    try:
-        deadline = time.monotonic() + grace_sec
-        while _alive() and time.monotonic() < deadline:
-            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
-        if not _alive():
-            return
-        if not _signal(signal.SIGKILL):
-            return
-        deadline = time.monotonic() + min(grace_sec, _REAP_AFTER_KILL_SEC)
-        while _alive() and time.monotonic() < deadline:
-            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
-    except KeyboardInterrupt:
-        # Match _terminate_process_tree's interrupt discipline: never let a
-        # second Ctrl-C abandon a group that is keeping collector paths live.
-        _signal(signal.SIGKILL)
-        raise
-
-
 def _terminate_process_tree(
     proc: subprocess.Popen, grace_sec: float = _TERMINATE_GRACE_SEC
 ) -> None:
@@ -648,18 +576,6 @@ class SubprocessWorkload(Workload):
                     )
                     hang_monitor.start()
                     exit_code = proc.wait(timeout=timeout)
-                    from aorta.run.collectors import active_collectors
-
-                    if active_collectors(self.config):
-                        # A successful leader can leave shell/profiler
-                        # background descendants alive. They share the leader's
-                        # process group because Popen created a new session;
-                        # tear that group down before collector parsing or
-                        # retention performs pathname checks and operations.
-                        # Runs only for collected trials: uncollected probe
-                        # commands retain their historical ability to launch a
-                        # deliberate background service.
-                        _terminate_surviving_process_group(proc.pid)
                 except subprocess.TimeoutExpired:
                     timed_out = True
                     # Tear down the whole child process group, not just the
@@ -1223,6 +1139,7 @@ class SubprocessWorkload(Workload):
         """
         from aorta.run.collectors import (
             CONFIG_KEY_COLLECT_DIR,
+            CONFIG_KEY_RESULTS_ROOT,
             active_collectors,
             unsafe_collector_paths,
         )
@@ -1233,15 +1150,21 @@ class SubprocessWorkload(Workload):
         if not isinstance(raw, str) or not raw:
             return outcome
         collect_root = Path(raw)
-        # Re-checked here, after the command ran, and not only by the pre-launch
-        # reset: the payload is handed this path and can replace the directory
-        # with a symlink while it executes. ``is_dir()`` and
-        # ``apply_retention()`` both follow links, so pruning through one would
-        # delete files in the link's target -- outside the results tree, at any
-        # level below ``full``. Keep the artifacts rather than risk that.
-        #
-        # Every collector subdirectory is checked, not just the shared root:
-        # ``apply_retention`` recurses into ``<root>/rocprof`` and
+        # The payload is handed this path and can replace the directory with a
+        # symlink while it executes, so the delete must not follow links. When
+        # the dispatcher threaded the trusted ``--results-dir`` anchor,
+        # ``apply_retention`` runs its fd-relative engine: it descends to
+        # ``collect_root`` with ``O_NOFOLLOW`` on every component and deletes
+        # relative to the held directory fds, so a swap of any ancestor after
+        # the check cannot redirect the prune outside the results tree -- the
+        # time-of-check/time-of-use window the pathname guard could not close.
+        raw_root = self.config.get(CONFIG_KEY_RESULTS_ROOT)
+        trusted_root = Path(raw_root) if isinstance(raw_root, str) and raw_root else None
+        # Fast pre-filter (and the source of the "kept" log line): on the
+        # non-POSIX fallback path there is no fd engine, so this lexical check is
+        # the guard; on POSIX it is a cheap probe and the fd engine is
+        # authoritative. Every collector subdirectory is checked, not just the
+        # shared root -- ``apply_retention`` recurses into ``<root>/rocprof`` and
         # ``<root>/proton``, so swapping one of those is the same exposure one
         # level down.
         unsafe = unsafe_collector_paths(self.config)
@@ -1252,10 +1175,8 @@ class SubprocessWorkload(Workload):
                 ", ".join(str(path) for path in unsafe),
             )
             return outcome
-        if not collect_root.is_dir():
-            return outcome
         try:
-            collected = apply_retention(collect_root, level)
+            collected = apply_retention(collect_root, level, trusted_root=trusted_root)
         except Exception as exc:  # noqa: BLE001 -- retention is best-effort
             log.warning(
                 "retention: pruning collector artifacts in %s at level %r "

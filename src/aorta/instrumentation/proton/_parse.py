@@ -12,10 +12,12 @@ or a Proton build that emitted nothing all degrade to fewer metrics.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 #: How many kernel names to carry in ``proton_top_kernels``.
 TOP_N = 5
@@ -113,18 +115,20 @@ def _walk(node: Any, by_name: dict[str, float], counts: dict[str, int | None]) -
     counts[name] = None if leaf_count is None or previous is None else previous + leaf_count
 
 
-def parse_profile(path: Path | str) -> tuple[dict[str, float], dict[str, int | None]]:
-    """Aggregate one ``.hatchet`` file into per-kernel ms totals + call counts.
+def parse_profile_stream(stream: TextIO) -> tuple[dict[str, float], dict[str, int | None]]:
+    """Aggregate one open ``.hatchet`` handle into per-kernel ms totals + counts.
 
-    Returns ``({}, {})`` when the file is missing, unreadable, or not a Proton
-    tree profile. A ``None`` count means that kernel's launch total was not
-    readable, so it must not be summed into a published metric.
+    The stream-taking core of :func:`parse_profile`. The caller owns the handle
+    -- the collector path opens it ``O_NOFOLLOW`` under a directory fd so a
+    payload symlink swapped in after the guard cannot redirect the read.
+    Returns ``({}, {})`` when the handle is unreadable or not a Proton tree
+    profile. A ``None`` count means that kernel's launch total was not readable,
+    so it must not be summed into a published metric.
     """
     by_name: dict[str, float] = {}
     counts: dict[str, int | None] = {}
     try:
-        with Path(path).open(encoding="utf-8") as stream:
-            database = json.load(stream)
+        database = json.load(stream)
     except (OSError, ValueError, UnicodeDecodeError):
         return by_name, counts
     roots = database if isinstance(database, list) else [database]
@@ -133,35 +137,36 @@ def parse_profile(path: Path | str) -> tuple[dict[str, float], dict[str, int | N
     return by_name, counts
 
 
-def parse_summary(out_dir: Path | str) -> dict[str, Any]:
-    """Summarise a Proton output directory into trial metrics.
+def parse_profile(path: Path | str) -> tuple[dict[str, float], dict[str, int | None]]:
+    """Aggregate one ``.hatchet`` file into per-kernel ms totals + call counts.
 
-    Args:
-        out_dir: The directory Proton's ``-n <out_dir>/<name>`` wrote into.
-
-    Returns:
-        ``{}`` when the directory does not exist. Otherwise
-        ``{"proton_artifact_dir": str}`` plus, when a tree profile with timing
-        was found, the flat numeric ``proton_kernel_count`` /
-        ``proton_gpu_time_ms`` / ``proton_top_kernel_ms`` and the non-numeric
-        ``proton_top_kernels`` name list. ``proton_kernel_count`` is omitted --
-        while the timings are still reported -- when any leaf's launch count
-        was unreadable, since a leaf aggregates launches and there is no safe
-        substitute for the real number.
+    Path-based convenience wrapper over :func:`parse_profile_stream`. Returns
+    ``({}, {})`` when the file is missing, unreadable, or not a Proton tree
+    profile.
     """
-    root = Path(out_dir)
     try:
-        if not root.is_dir():
-            return {}
-        profiles = sorted(root.rglob("*.hatchet"))
+        with Path(path).open(encoding="utf-8") as stream:
+            return parse_profile_stream(stream)
     except OSError:
-        return {}
+        return {}, {}
 
-    metrics: dict[str, Any] = {"proton_artifact_dir": str(root)}
+
+def parse_summary_from_streams(
+    artifact_dir: str, profile_streams: Sequence[TextIO]
+) -> dict[str, Any]:
+    """Summarise pre-opened ``.hatchet`` handles into trial metrics.
+
+    The stream-taking core of :func:`parse_summary`. The caller supplies the
+    already-open profile handles -- the collector path opens them ``O_NOFOLLOW``
+    under a directory fd so a payload symlink swapped in after the guard cannot
+    redirect the read -- and the display string for ``proton_artifact_dir``.
+    Same metrics contract as :func:`parse_summary`; never raises.
+    """
+    metrics: dict[str, Any] = {"proton_artifact_dir": artifact_dir}
     by_name: dict[str, float] = {}
     counts: dict[str, int | None] = {}
-    for profile in profiles:
-        file_by_name, file_counts = parse_profile(profile)
+    for stream in profile_streams:
+        file_by_name, file_counts = parse_profile_stream(stream)
         for name, elapsed_ms in file_by_name.items():
             by_name[name] = by_name.get(name, 0.0) + elapsed_ms
         for name, calls in file_counts.items():
@@ -190,4 +195,44 @@ def parse_summary(out_dir: Path | str) -> dict[str, Any]:
     return metrics
 
 
-__all__ = ["TOP_N", "parse_profile", "parse_summary"]
+def parse_summary(out_dir: Path | str) -> dict[str, Any]:
+    """Summarise a Proton output directory into trial metrics.
+
+    Path-based convenience wrapper over :func:`parse_summary_from_streams`: it
+    globs the ``.hatchet`` profiles and opens them itself. The collector
+    post-run path uses the stream entrypoint instead, opening each file
+    ``O_NOFOLLOW`` under a directory fd so a payload symlink cannot redirect the
+    read; this wrapper follows symlinks like any ``open`` and is for callers
+    that already hold a trusted directory (tests, an operator's own tree).
+
+    Args:
+        out_dir: The directory Proton's ``-n <out_dir>/<name>`` wrote into.
+
+    Returns:
+        ``{}`` when the directory does not exist. Otherwise
+        ``{"proton_artifact_dir": str}`` plus, when a tree profile with timing
+        was found, the flat numeric ``proton_kernel_count`` /
+        ``proton_gpu_time_ms`` / ``proton_top_kernel_ms`` and the non-numeric
+        ``proton_top_kernels`` name list. ``proton_kernel_count`` is omitted --
+        while the timings are still reported -- when any leaf's launch count
+        was unreadable, since a leaf aggregates launches and there is no safe
+        substitute for the real number.
+    """
+    root = Path(out_dir)
+    try:
+        if not root.is_dir():
+            return {}
+        profiles = sorted(root.rglob("*.hatchet"))
+    except OSError:
+        return {}
+    with contextlib.ExitStack() as stack:
+        streams: list[TextIO] = []
+        for profile in profiles:
+            try:
+                streams.append(stack.enter_context(profile.open(encoding="utf-8")))
+            except OSError:
+                continue
+        return parse_summary_from_streams(str(root), streams)
+
+
+__all__ = ["TOP_N", "parse_profile", "parse_profile_stream", "parse_summary", "parse_summary_from_streams"]

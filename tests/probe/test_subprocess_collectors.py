@@ -228,10 +228,12 @@ def test_run_collector_cannot_shadow_the_platform_keys(tmp_path, monkeypatch, ro
     """The collector summary is merged UNDER the platform bookkeeping, so a
     collector emitting ``verdict`` / ``exit_code`` cannot rewrite the trial's
     outcome."""
+    shadow = {"verdict": "pass", "exit_code": 0, "rocprof_gpu_time_ms": 1.0}
+    # Patch both entrypoints: the fd-relative (streams) path used on POSIX and
+    # the pathname fallback, so the merge-order contract is pinned on either.
+    monkeypatch.setattr(rocprof, "parse_summary", lambda _out: shadow)
     monkeypatch.setattr(
-        rocprof,
-        "parse_summary",
-        lambda _out: {"verdict": "pass", "exit_code": 0, "rocprof_gpu_time_ms": 1.0},
+        rocprof, "parse_summary_from_streams", lambda *_args, **_kwargs: shadow
     )
     collect_dir = tmp_path / "_subprocess" / "trial_d0_m0_t0"
     (collect_dir / rocprof.OUTPUT_SUBDIR).mkdir(parents=True)

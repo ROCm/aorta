@@ -23,12 +23,18 @@ package docstring).
 
 from __future__ import annotations
 
+import contextlib
+import fnmatch
 import logging
+import os
 import shutil
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
+
+from aorta.run import _fsafe
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +85,18 @@ class CollectorSpec:
         wrap: Rewrites the launch argv to attach the collector, or ``None``
             for a collector the platform does not launch itself.
         summarize: Parses the collector's artifacts into flat trial metrics,
-            or ``None`` for a collector the platform does not parse.
+            or ``None`` for a collector the platform does not parse. Follows
+            symlinks; used only on the non-POSIX fallback path where the
+            fd-relative reader is unavailable.
+        summarize_streams: Parses artifacts supplied as already-open text
+            handles into the same metrics. The POSIX post-run path opens each
+            matching file ``O_NOFOLLOW`` under a directory fd and calls this, so
+            a payload symlink swapped in after the guard cannot redirect the
+            read. Signature: ``(artifact_dir: str, *stream_groups) -> dict``,
+            with one positional stream group per entry of ``glob_groups``.
+        glob_groups: One basename glob per stream group the parser expects, in
+            the order ``summarize_streams`` takes them. ``rocprof`` reads two
+            families (stats, then trace); ``proton`` reads one (``*.hatchet``).
     """
 
     name: str
@@ -87,6 +104,8 @@ class CollectorSpec:
     validate: Callable[[Mapping[str, str] | None], Any]
     wrap: Callable[..., list[str]] | None = None
     summarize: Callable[[Path], dict[str, Any]] | None = None
+    summarize_streams: Callable[..., dict[str, Any]] | None = None
+    glob_groups: tuple[str, ...] = ()
 
 
 def _accept_any(options: Mapping[str, str] | None) -> dict[str, str]:
@@ -116,6 +135,8 @@ def _registry() -> dict[str, CollectorSpec]:
             validate=rocprof.validate_options,
             wrap=rocprof.wrap_argv,
             summarize=rocprof.parse_summary,
+            summarize_streams=rocprof.parse_summary_from_streams,
+            glob_groups=("*_kernel_stats.csv", "*_kernel_trace.csv"),
         ),
         "proton": CollectorSpec(
             name="proton",
@@ -123,6 +144,8 @@ def _registry() -> dict[str, CollectorSpec]:
             validate=proton.validate_options,
             wrap=proton.wrap_argv,
             summarize=proton.parse_summary,
+            summarize_streams=proton.parse_summary_from_streams,
+            glob_groups=("*.hatchet",),
         ),
         "numerics": CollectorSpec("numerics", None, _accept_any),
         "layer_numerics": CollectorSpec("layer_numerics", "layer_numerics", _accept_any),
@@ -243,8 +266,25 @@ def collector_root_is_traversable(root: Path, trusted_root: Path | None = None) 
     That fallback is only for a programmatic caller that did not thread
     :data:`CONFIG_KEY_RESULTS_ROOT`; it still misses a swapped ancestor, which
     is why the dispatcher always supplies the operator's ``--results-dir``.
+
+    On POSIX this is a *probe*: it descends the path once with ``O_NOFOLLOW``
+    and reports whether the leaf is reachable without crossing a symlink. It is
+    a pre-filter and a log-message source -- the race-free guarantee comes from
+    the caller (:func:`_reset_output_dir`, :func:`summarize_collectors`,
+    :func:`aorta.run.retention.apply_retention`) *holding* the dir fd across the
+    operation, not from this check. Where the platform lacks the fd primitives
+    it keeps the historical lexical ``resolve()`` + component-walk.
     """
     trusted = trusted_root if trusted_root is not None else root.parent
+    if _fsafe.HAVE_FD_TRAVERSAL:
+        components = _fsafe.relative_components(trusted, root)
+        if components is None:
+            return False
+        try:
+            with _fsafe.open_dir_nofollow(trusted, components):
+                return True
+        except OSError:
+            return False
     try:
         if not root.resolve().is_relative_to(trusted):
             return False
@@ -295,6 +335,9 @@ def _reset_output_dir(out_dir: Path, trusted_root: Path) -> None:
         OSError: the directory could not be cleared or created, or it is not
             traversable inside ``trusted_root``.
     """
+    if _fsafe.HAVE_FD_TRAVERSAL:
+        _reset_output_dir_fd(out_dir, trusted_root)
+        return
     if not collector_root_is_traversable(out_dir, trusted_root):
         raise OSError(
             f"refusing to prepare {out_dir}: a path component at or below "
@@ -307,6 +350,51 @@ def _reset_output_dir(out_dir: Path, trusted_root: Path) -> None:
     elif out_dir.is_dir():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
+
+
+def _reset_output_dir_fd(out_dir: Path, trusted_root: Path) -> None:
+    """Race-free :func:`_reset_output_dir`: clear+recreate through directory fds.
+
+    The parent chain below ``trusted_root`` (``<workload>/<trial>``) is opened
+    -- and created if a first attempt has not made it yet -- with ``O_NOFOLLOW``
+    on every component, so the reset holds a fd to the collector directory's
+    parent that no ancestor swap can redirect. The leaf (``rocprof`` / ``proton``)
+    is then inspected ``lstat``-style and removed **relative to that parent fd**:
+    a symlink or file is unlinked, a real directory is recursively emptied and
+    ``rmdir``-ed, and the fresh directory is ``mkdir``-ed back -- all by name
+    under the held fd, never by re-resolving the pathname the payload can swap.
+    """
+    parent = out_dir.parent
+    leaf = out_dir.name
+    components = _fsafe.relative_components(trusted_root, parent)
+    if components is None or not leaf:
+        raise OSError(
+            f"refusing to prepare {out_dir}: it is not lexically inside "
+            f"{trusted_root}, so clearing it could delete outside that "
+            "directory. Point --results-dir at a real directory."
+        )
+    try:
+        with _fsafe.open_dir_nofollow(
+            trusted_root, components, create_missing=True
+        ) as parent_fd:
+            info = _fsafe.stat_at(parent_fd, leaf)
+            if info is not None and stat.S_ISLNK(info.st_mode):
+                # A symlink where the collector output dir belongs is never a
+                # legitimate prior attempt -- the payload planted it. Refuse
+                # rather than unlink-and-recreate, matching the pre-launch
+                # contract that a swapped leaf aborts the trial's collection.
+                raise _fsafe.UnsafePathError(
+                    f"{out_dir} is a symlink; refusing to clear it"
+                )
+            _fsafe.remove_entry_at(parent_fd, leaf)
+            os.mkdir(leaf, dir_fd=parent_fd)
+    except _fsafe.UnsafePathError as exc:
+        raise OSError(
+            f"refusing to prepare {out_dir}: a path component at or below "
+            f"{trusted_root} is a symlink or resolves outside that directory, "
+            "so clearing it would delete through the link. Remove the symlink "
+            f"in that path, or point --results-dir at a real directory. ({exc})"
+        ) from exc
 
 
 def validate_collectors(
@@ -453,33 +541,83 @@ def summarize_collectors(config: Mapping[str, Any]) -> dict[str, Any]:
     root = _collect_root(config)
     if root is None:
         return {}
-    unsafe = unsafe_collector_paths(config)
-    if unsafe:
-        # Read-only here, but the parsers ``rglob`` these directories, so one
-        # swapped for a symlink while the command ran would pull file contents
-        # from outside the results tree into the trial metrics. Checked per
-        # collector directory, not just the shared root -- the payload can swap
-        # either. Same guard as the retention pass, which has the destructive
-        # version of this exposure.
-        log.warning(
-            "collect: %s is (or is under) a symlink after the run; refusing to "
-            "parse artifacts through it. No collector metrics for this trial.",
-            ", ".join(str(path) for path in unsafe),
-        )
-        return {}
+    trusted = _trusted_root(config, root)
     metrics: dict[str, Any] = {}
     registry = _registry()
     for name in active_collectors(config):
         spec = registry.get(name)
-        if spec is None or spec.summarize is None or spec.output_subdir is None:
+        if spec is None or spec.output_subdir is None:
             continue
+        subdir = root / spec.output_subdir
         try:
-            metrics.update(spec.summarize(root / spec.output_subdir))
+            if _fsafe.HAVE_FD_TRAVERSAL and spec.summarize_streams is not None:
+                metrics.update(_summarize_streamed(spec, root, subdir, trusted))
+            elif spec.summarize is not None:
+                # Non-POSIX fallback: guard lexically, then parse by pathname.
+                # The parsers ``rglob`` the subdirectory, so one swapped for a
+                # symlink while the command ran would pull file contents from
+                # outside the results tree into the trial metrics.
+                if not collector_root_is_traversable(subdir, trusted):
+                    log.warning(
+                        "collect: %s is (or is under) a symlink after the run; "
+                        "refusing to parse artifacts through it. No %s metrics "
+                        "for this trial.",
+                        subdir,
+                        name,
+                    )
+                    continue
+                metrics.update(spec.summarize(subdir))
+        except _fsafe.UnsafePathError:
+            # A component of the collector directory was a symlink after the
+            # run: refuse to read through it (same exposure the destructive
+            # retention pass guards). Skip this collector, keep the trial.
+            log.warning(
+                "collect: %s is (or is under) a symlink after the run; refusing "
+                "to parse artifacts through it. No %s metrics for this trial.",
+                subdir,
+                name,
+            )
         except Exception:
             # An opt-in measurement must never turn a healthy trial into a
             # failure, so the catch is deliberately unbounded.
             log.warning("collect: %s summary parsing failed; skipping.", name, exc_info=True)
     return metrics
+
+
+def _summarize_streamed(
+    spec: CollectorSpec, root: Path, subdir: Path, trusted: Path
+) -> dict[str, Any]:
+    """Parse one collector's artifacts through no-follow, fd-relative reads.
+
+    Descends to the collector subdirectory holding a dir fd no ancestor swap can
+    redirect, walks it without following any symlink, and opens each file whose
+    basename matches one of ``spec.glob_groups`` with ``O_NOFOLLOW`` under that
+    held fd. The open handles -- grouped in ``glob_groups`` order -- are passed
+    to ``spec.summarize_streams`` and closed when it returns.
+
+    Raises:
+        UnsafePathError: a component of the collector directory is a symlink.
+    """
+    components = _fsafe.relative_components(trusted, subdir)
+    if components is None:
+        raise _fsafe.UnsafePathError(
+            f"{subdir} is not lexically inside the trusted root {trusted}"
+        )
+    assert spec.summarize_streams is not None  # guarded by the caller
+    with _fsafe.open_dir_nofollow(trusted, components) as base_fd, contextlib.ExitStack() as stack:
+        groups: list[list[TextIO]] = [[] for _ in spec.glob_groups]
+        for _rel, dir_fd, fname, _size in _fsafe.iter_regular_files(base_fd):
+            for index, pattern in enumerate(spec.glob_groups):
+                if fnmatch.fnmatch(fname, pattern):
+                    try:
+                        stream = stack.enter_context(
+                            _fsafe.secure_open_read(dir_fd, fname, encoding="utf-8", newline="")
+                        )
+                    except OSError:
+                        continue
+                    groups[index].append(stream)
+                    break
+        return spec.summarize_streams(str(subdir), *groups)
 
 
 __all__ = [

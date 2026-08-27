@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import signal
-import sys
 from pathlib import Path
 
 import pytest
@@ -555,72 +554,6 @@ def test_child_started_in_new_session(tmp_path, monkeypatch):
     wl.setup()
     wl.run()
     assert captured.get("start_new_session") is True
-
-
-def test_successful_leader_reaps_background_descendants_before_return(tmp_path):
-    """Post-run filesystem passes must not race a surviving child descendant.
-
-    The direct process exits 0 after spawning a same-group background child.
-    That child records SIGTERM before exiting; seeing the marker when
-    ``run()`` returns proves normal completion waits for group teardown rather
-    than merely reaping the leader.
-    """
-    ready = tmp_path / "child.ready"
-    stopped = tmp_path / "child.stopped"
-    child = tmp_path / "child.py"
-    child.write_text(
-        "\n".join(
-            [
-                "import signal",
-                "import sys",
-                "import time",
-                "from pathlib import Path",
-                "ready = Path(sys.argv[1])",
-                "stopped = Path(sys.argv[2])",
-                "def stop(_signum, _frame):",
-                "    stopped.write_text('stopped', encoding='utf-8')",
-                "    raise SystemExit(0)",
-                "signal.signal(signal.SIGTERM, stop)",
-                "ready.write_text('ready', encoding='utf-8')",
-                "deadline = time.monotonic() + 2",
-                "while time.monotonic() < deadline:",
-                "    time.sleep(0.05)",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    parent = tmp_path / "parent.py"
-    parent.write_text(
-        "\n".join(
-            [
-                "import subprocess",
-                "import sys",
-                "import time",
-                "from pathlib import Path",
-                "child, ready, stopped = sys.argv[1:]",
-                "subprocess.Popen([sys.executable, child, ready, stopped])",
-                "deadline = time.monotonic() + 5",
-                "while not Path(ready).exists():",
-                "    if time.monotonic() >= deadline:",
-                "        raise RuntimeError('background child did not start')",
-                "    time.sleep(0.01)",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    wl = _make_workload(
-        tmp_path,
-        [sys.executable, str(parent), str(child), str(ready), str(stopped)],
-    )
-    # A validated-only collector is enough to activate the post-run
-    # filesystem contract without requiring a profiler binary on the host.
-    wl.config["_aorta_collect"] = ["layer_numerics"]
-    wl.setup()
-    result = wl.run()
-
-    assert result.passed is True
-    assert stopped.read_text(encoding="utf-8") == "stopped"
 
 
 def test_terminate_process_tree_escalates_term_then_kill(monkeypatch):
