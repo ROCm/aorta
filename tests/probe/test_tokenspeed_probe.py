@@ -1304,6 +1304,44 @@ def test_harvest_keeps_a_hostile_kernel_name_out_of_every_path(tmp_path: Path) -
     assert recipe["sanitizer_plan"]["source"]["kernel"]["name"] == "../../../../tmp/pwned"
 
 
+@pytest.mark.parametrize(
+    "label",
+    [
+        "../../../../tmp/pwned",
+        "attn\nticket: HIJACKED",
+        "attn: fused",
+        "..",
+    ],
+)
+def test_harvest_keeps_a_hostile_label_out_of_the_waitcheck_recipe(
+    tmp_path: Path, label: str
+) -> None:
+    """`--kernel` / `--op` is pasted from an inventory of third-party names.
+
+    The waitcheck recipe used it raw in two places with different escaping
+    rules: as the filename under `--dest`, where `../` escapes the directory,
+    and as an unquoted YAML ticket, where a newline or a colon reshapes the
+    document into something other than what was harvested.
+    """
+    module = _harvest_module()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    kernels = _fake_kernels(1, tmp_path / "cache")
+
+    recipe_path = module._write_recipe(dest, label, "gfx950", kernels)
+
+    assert dest.resolve() in recipe_path.resolve().parents, recipe_path
+    assert not (tmp_path / "tmp").exists(), "the recipe escaped dest"
+
+    recipe = yaml.safe_load(recipe_path.read_text())
+    assert "HIJACKED" not in recipe, "the label injected a top-level key"
+    assert recipe["ticket"].startswith("TOKENSPEED-WAITCHECK-")
+    assert re.fullmatch(r"TOKENSPEED-WAITCHECK-[A-Z0-9-]+", recipe["ticket"]), recipe["ticket"]
+    # Still a usable recipe, not just a safe one.
+    assert recipe["mode"] == "sanitizer"
+    assert recipe["sanitizer_plan"]["target"] == "gfx950"
+
+
 def test_harvest_replaces_stale_consan_assets(tmp_path: Path) -> None:
     """Re-harvesting the same --dest must not leave the previous run's recipes.
 
