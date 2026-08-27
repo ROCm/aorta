@@ -1343,6 +1343,95 @@ def test_harvest_keeps_a_hostile_label_out_of_the_waitcheck_recipe(
     assert recipe["sanitizer_plan"]["target"] == "gfx950"
 
 
+def test_host_launch_puts_the_cidfile_in_a_private_directory(bash: str, tmp_path: Path) -> None:
+    """`mktemp -u` only reserves a name in a shared namespace.
+
+    Another local user could create that path as a symlink to a file holding a
+    different container's id; docker would refuse to start against an existing
+    cidfile, and the EXIT trap would then read the planted id and force-remove
+    *that* container. `mktemp -d` is atomic and 0700, so the directory cannot be
+    pre-created or its contents substituted.
+    """
+    argv = _run_host_launch_with_docker_stub(bash, tmp_path, "cid-dir")
+    lines = argv.splitlines()
+    cidfile = Path(lines[lines.index("--cidfile") + 1])
+
+    assert cidfile.name == "cid", cidfile
+    assert cidfile.parent.name.startswith("aorta-ts-cid."), cidfile
+
+    script = (_SOURCE / "host_launch.sh").read_text()
+    # Comments discuss `mktemp -u` by name, so only code lines are checked.
+    code = [
+        line for line in script.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert any("mktemp -d" in line for line in code)
+    assert not [line for line in code if "mktemp -u" in line], "the racy reservation is still used"
+    # The whole directory is removed, not just the file inside it.
+    assert any('rm -rf "${CID_DIR}"' in line for line in code)
+
+
+@pytest.mark.parametrize(
+    "rc,pytest_args,expected",
+    [
+        (0, [], None),
+        # Tests that failed still ran, and a kernel entered by a failing test
+        # was entered.
+        (1, [], None),
+        (2, [], "interrupted"),
+        (3, [], "internal error"),
+        (4, [], "usage error"),
+        (5, [], "collected no tests"),
+        # rc=1 stops meaning "ran everything" once an early exit is requested.
+        (1, ["--maxfail=1"], "early-exit"),
+        (1, ["-x"], "early-exit"),
+        (1, ["--exitfirst"], "early-exit"),
+        (0, ["-x"], None),
+    ],
+)
+def test_coverage_mapper_rejects_a_suite_that_did_not_finish(
+    rc: int, pytest_args: list[str], expected: str | None
+) -> None:
+    """The child pytest exit code was recorded and never validated.
+
+    A collection error, an internal error or an early exit still wrote a partial
+    map, which was merged as though the suite had run -- so every test that
+    never ran became an uncovered kernel and the tool exited 0. That is the same
+    unknown-as-uncovered answer the missing-map guard prevents, reached from a
+    suite that did start, and it feeds a number quoted in docs/tokenspeed.md.
+    """
+    module = _coverage_module()
+    reason = module._incomplete_suite_reason(rc, pytest_args)
+
+    if expected is None:
+        assert reason is None, reason
+    else:
+        assert reason is not None and expected in reason, reason
+
+
+def test_kernel_probe_extra_args_cannot_disable_verification() -> None:
+    """`TS_KERNEL_ARGS` used to come after the probe's own flags.
+
+    argparse takes the last occurrence, so `--no-verify` won. The export then
+    carried `numerics_passed: null`, which the summary deliberately tolerates
+    because some kernels have no numerics check, and `bench` mode exited 0
+    having verified nothing.
+    """
+    script = (_SOURCE / "ts_kernel_probe.sh").read_text()
+
+    for owned in ("--verify", "--export"):
+        # The caller's args must appear before every option the verdict depends
+        # on, in each invocation that uses them.
+        for invocation in re.findall(r"python3 -m tokenspeed_kernel\.\w+ \\\n(?:.*\\\n)*.*", script):
+            if owned not in invocation:
+                continue
+            assert invocation.index("TS_KERNEL_ARGS") < invocation.index(owned), invocation
+
+    # And the selector/dtype, which the probe reports the run as having used.
+    for invocation in re.findall(r"python3 -m tokenspeed_kernel\.\w+ \\\n(?:.*\\\n)*.*", script):
+        assert "TS_KERNEL_ARGS" in invocation, invocation
+        assert invocation.index("TS_KERNEL_ARGS") < invocation.index("--dtype"), invocation
+
+
 def test_harvest_bounds_the_waitcheck_inventory(tmp_path: Path) -> None:
     """The object being parsed came out of a third-party image.
 

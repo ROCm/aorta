@@ -44,7 +44,10 @@
 #                         moe.apply, logits for sampling.argmax (default a)
 #   TS_KERNEL_WARMUP      warmup iters                (default 5)
 #   TS_KERNEL_ITERS       bench iters                 (default 20)
-#   TS_KERNEL_ARGS        extra args, word-split
+#   TS_KERNEL_ARGS        extra args, word-split. Placed BEFORE the options this
+#                         probe owns (--verify, --export, the selector, dtype),
+#                         so a caller can add arguments but cannot override the
+#                         ones the reported verdict depends on.
 #   TS_OUT_DIR            where the export lands      (default /ts-out)
 #   TS_RUN_TOKEN          tag qualifying this trial's export filename; set by
 #                         host_launch.sh. Falls back to $$, which is only
@@ -95,9 +98,12 @@ echo "TS_KERNEL_INFO: arch=$(python3 -c 'import torch; print(torch.cuda.get_devi
 if [ "${MODE}" = "numerics" ] || [ "${MODE}" = "both" ]; then
   echo "TS_KERNEL_INFO: running numerics"
   # shellcheck disable=SC2086
+  # Caller args first, for the same reason as the benchmark invocation below:
+  # the selector and dtype are what this probe reports the run as having used,
+  # so they must be the values that take effect.
   python3 -m tokenspeed_kernel.numerics \
-    "${selector[@]}" --dtype "${DTYPE}" --dtype-role "${DTYPE_ROLE}" \
-    ${TS_KERNEL_ARGS:-}
+    ${TS_KERNEL_ARGS:-} \
+    "${selector[@]}" --dtype "${DTYPE}" --dtype-role "${DTYPE_ROLE}"
   rc=$?
   if [ "${rc}" -ne 0 ]; then
     echo "TS_KERNEL_FAIL: numerics_cli_rc=${rc}"
@@ -116,11 +122,19 @@ if [ "${MODE}" = "bench" ] || [ "${MODE}" = "both" ]; then
   rm -f "${export_path}"
   echo "TS_KERNEL_INFO: running benchmark (warmup=${WARMUP} iters=${ITERS})"
   # shellcheck disable=SC2086
+  # Caller args go FIRST, before the options this probe owns. argparse takes the
+  # last occurrence of a repeated option, so with TS_KERNEL_ARGS last a caller
+  # could pass --no-verify and win: the export would then carry
+  # `numerics_passed: null`, which the summary below deliberately tolerates
+  # (some kernels have no numerics check), and `bench` mode would exit 0 having
+  # verified nothing. Same for --export, which would send the export somewhere
+  # the summary does not read. Ordering them first means a caller can still add
+  # arguments but cannot silently take the verdict away.
   python3 -m tokenspeed_kernel.benchmark \
+    ${TS_KERNEL_ARGS:-} \
     "${selector[@]}" --dtype "${DTYPE}" --dtype-role "${DTYPE_ROLE}" \
     --verify --warmup-iters "${WARMUP}" --bench-iters "${ITERS}" \
-    --export "${export_path}" \
-    ${TS_KERNEL_ARGS:-}
+    --export "${export_path}"
   rc=$?
   if [ "${rc}" -ne 0 ]; then
     echo "TS_KERNEL_FAIL: benchmark_cli_rc=${rc}"
