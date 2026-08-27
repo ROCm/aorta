@@ -299,6 +299,16 @@ Measured with `map_kernel_test_coverage.py`, which patches the registry and runs
 the suites, because static inspection cannot answer this — the tests parametrize
 over solutions and skip at run time.
 
+The numbers below therefore depend on the suites having actually run, so the tool
+refuses to report when one did not. A pytest exit code of 2, 3, 4 or 5 —
+interrupted, internal error, usage error, nothing collected — means the suite
+stopped short of executing what it collected, and its unrun tests would be
+counted as *uncovered* kernels rather than unknown ones, understating the very
+number this section quotes. Exit code 1 is fine on its own (a kernel entered by a
+failing test was still entered) but not when an early-exit option such as
+`--maxfail` or `-x` is in effect, since the run was then cut short. Pass
+`--allow-incomplete-suites` to report anyway.
+
 The tool separates three things that are easy to conflate, narrowest first.
 Treating any of the wider two as coverage overstates it:
 
@@ -664,7 +674,7 @@ unavailable.
 
 ## Tests
 
-`tests/probe/test_tokenspeed_probe.py` — 110 tests (78 functions, the rest
+`tests/probe/test_tokenspeed_probe.py` — 122 tests (81 functions, the rest
 parametrised cases), no GPU or container required. A test asserts this count
 matches the file, since it went stale twice during review.
 They cover script syntax, the guardrails (NFS refusal, missing entry script,

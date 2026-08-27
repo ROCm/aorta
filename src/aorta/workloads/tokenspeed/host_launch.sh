@@ -226,9 +226,18 @@ CONTAINER="aorta-ts-$(printf '%s' "${RUN_TOKEN}" | tr -c 'a-zA-Z0-9_.-' '-').$$.
 
 # The daemon writes the container id here, so cleanup can target the exact
 # container this trial started rather than trusting that a name still refers to
-# it. mktemp -u only reserves the name: docker refuses to start if the cidfile
-# already exists.
-CID_FILE="$(mktemp -u "${TMPDIR:-/tmp}/aorta-ts-cid.XXXXXXXX")"
+# it.
+#
+# The file has to be absent for docker to accept it, so it lives inside a
+# private directory rather than being a reserved name in the shared /tmp
+# namespace. `mktemp -u` only promises the name was unused at the time it
+# looked: another local user could then create that path as a symlink to a file
+# holding some other container's id, and while docker would refuse to start
+# against an existing cidfile, the EXIT trap below would go on to read the
+# planted id and force-remove *that* container. `mktemp -d` is atomic and
+# 0700, so the directory cannot be pre-created or its contents substituted.
+CID_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aorta-ts-cid.XXXXXXXX")"
+CID_FILE="${CID_DIR}/cid"
 
 # Idempotent, because it runs from both a signal trap and the EXIT trap below.
 cleanup_container() {
@@ -240,7 +249,7 @@ cleanup_container() {
   # separate stop is needed. Falling back to the name matters when the client
   # died before the daemon wrote the cidfile.
   docker rm -f "${cid:-${CONTAINER}}" >/dev/null 2>&1 || true
-  rm -f "${CID_FILE}" 2>/dev/null || true
+  rm -rf "${CID_DIR}" 2>/dev/null || true
 }
 
 on_signal() {

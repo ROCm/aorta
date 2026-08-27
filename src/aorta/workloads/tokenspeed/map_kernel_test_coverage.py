@@ -102,6 +102,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="extra arg passed through to pytest; repeatable",
     )
     p.add_argument(
+        "--allow-incomplete-suites",
+        action="store_true",
+        help=(
+            "report coverage even if a suite did not run to completion. Off by "
+            "default because unrun tests are counted as uncovered kernels, "
+            "which understates coverage rather than admitting it is unknown."
+        ),
+    )
+    p.add_argument(
         "--_single",
         default=None,
         help=argparse.SUPPRESS,  # internal: run exactly one suite in-process
@@ -358,6 +367,34 @@ def _run_one_suite(args: argparse.Namespace) -> int:
     return 0
 
 
+# pytest's documented exit codes. 1 is deliberately not here: tests that fail
+# still ran, and a kernel entered by a failing test was entered. The rest all
+# mean the suite stopped short of executing everything it collected, so its
+# unrun tests carry no information either way.
+_INCOMPLETE_PYTEST_RCS = {
+    2: "pytest was interrupted",
+    3: "pytest hit an internal error",
+    4: "pytest usage error",
+    5: "pytest collected no tests",
+}
+
+# Options that make pytest stop at the first failures. With one of these, rc=1
+# no longer means "ran everything, some failed" -- it means the run was cut
+# short, which is the --maxfail case.
+_EARLY_EXIT_OPTS = ("-x", "--exitfirst", "--maxfail")
+
+
+def _incomplete_suite_reason(rc: int, pytest_args: list[str]) -> str | None:
+    """Why this suite's map should not be merged, or ``None`` if it is sound."""
+    if rc in _INCOMPLETE_PYTEST_RCS:
+        return f"{_INCOMPLETE_PYTEST_RCS[rc]} (rc={rc})"
+    if rc == 1 and any(
+        arg == opt or arg.startswith(f"{opt}=") for arg in pytest_args for opt in _EARLY_EXIT_OPTS
+    ):
+        return "a test failed while an early-exit option was in effect (rc=1)"
+    return None
+
+
 def _suite_cwd(workspace: Path, suite: Path) -> Path:
     """The package root a suite must run from -- the parent of its `test` dir."""
     for parent in suite.parents:
@@ -441,7 +478,28 @@ def main() -> int:
                 candidates[name].update(keys)
             for key, count in data["lookups"].items():
                 lookups[key] = lookups.get(key, 0) + count
-            exit_codes[label] = data["exit_code"]
+
+            # pytest's own exit code, which the guards above deliberately do not
+            # see: the wrapper returns 0 and records it here. It was reported and
+            # never checked, so a collection error, an internal error, or an
+            # early exit from --maxfail produced a partial map that was merged
+            # as though the suite had run -- and every test that never ran
+            # became an uncovered kernel. That is the same unknown-as-uncovered
+            # answer the missing-map guard above exists to prevent, arriving
+            # from a suite that did start.
+            suite_rc = data["exit_code"]
+            exit_codes[label] = suite_rc
+            incomplete = _incomplete_suite_reason(suite_rc, args.pytest_arg or [])
+            if incomplete and not args.allow_incomplete_suites:
+                print(
+                    f"map_kernel_test_coverage: {label} did not run to "
+                    f"completion ({incomplete}); its unrun tests would be "
+                    "counted as uncovered kernels, understating coverage in a "
+                    "number this tool exists to state precisely. Fix the suite, "
+                    "or pass --allow-incomplete-suites to report anyway.",
+                    file=sys.stderr,
+                )
+                return 64
 
     if not inventory:
         print("no registry inventory collected; nothing to report", file=sys.stderr)
