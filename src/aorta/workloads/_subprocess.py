@@ -136,6 +136,78 @@ _TERMINATE_GRACE_SEC = 10.0
 _REAP_AFTER_KILL_SEC = 1.0
 
 
+def _terminate_surviving_process_group(
+    pgid: int, grace_sec: float = _TERMINATE_GRACE_SEC
+) -> None:
+    """Stop descendants left behind after their process-group leader exits.
+
+    ``Popen.wait()`` only reaps the direct child. A successful shell or
+    profiler can exit while a background descendant in the child's process
+    group remains alive; that descendant must be gone before post-run
+    collector parsing and retention use pathname-based guards. Because the
+    direct child led a new session, its pid is the stable process-group id even
+    after that leader has been reaped.
+
+    The common case has no surviving group and returns on ``ESRCH`` without
+    sleeping. A live group gets SIGTERM and a bounded grace period, then
+    SIGKILL. Polling with signal 0 closes the gap between queueing the signal
+    and allowing post-run filesystem operations to begin.
+    """
+    if pgid == os.getpgrp():
+        log.warning(
+            "refusing to clean up child process group %d because it is the "
+            "aorta process group",
+            pgid,
+        )
+        return
+
+    def _signal(sig: int) -> bool:
+        try:
+            os.killpg(pgid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError as exc:
+            log.warning(
+                "killpg(%d, %s) failed after the process leader exited: %s; "
+                "background descendants may still be running",
+                pgid,
+                signal.Signals(sig).name,
+                exc,
+            )
+            return False
+
+    def _alive() -> bool:
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # A group we cannot signal still exists; let the subsequent
+            # delivery attempt report the actionable EPERM warning.
+            return True
+
+    if not _signal(signal.SIGTERM):
+        return
+    try:
+        deadline = time.monotonic() + grace_sec
+        while _alive() and time.monotonic() < deadline:
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        if not _alive():
+            return
+        if not _signal(signal.SIGKILL):
+            return
+        deadline = time.monotonic() + min(grace_sec, _REAP_AFTER_KILL_SEC)
+        while _alive() and time.monotonic() < deadline:
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    except KeyboardInterrupt:
+        # Match _terminate_process_tree's interrupt discipline: never let a
+        # second Ctrl-C abandon a group that is keeping collector paths live.
+        _signal(signal.SIGKILL)
+        raise
+
+
 def _terminate_process_tree(
     proc: subprocess.Popen, grace_sec: float = _TERMINATE_GRACE_SEC
 ) -> None:
@@ -576,6 +648,18 @@ class SubprocessWorkload(Workload):
                     )
                     hang_monitor.start()
                     exit_code = proc.wait(timeout=timeout)
+                    from aorta.run.collectors import active_collectors
+
+                    if active_collectors(self.config):
+                        # A successful leader can leave shell/profiler
+                        # background descendants alive. They share the leader's
+                        # process group because Popen created a new session;
+                        # tear that group down before collector parsing or
+                        # retention performs pathname checks and operations.
+                        # Runs only for collected trials: uncollected probe
+                        # commands retain their historical ability to launch a
+                        # deliberate background service.
+                        _terminate_surviving_process_group(proc.pid)
                 except subprocess.TimeoutExpired:
                     timed_out = True
                     # Tear down the whole child process group, not just the

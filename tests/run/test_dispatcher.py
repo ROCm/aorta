@@ -639,7 +639,8 @@ class TestRunTrials:
         # back to a boundary the payload controls.
         results_root = captured_config["_aorta_results_root"]
         assert Path(results_root).is_absolute()
-        assert Path(collect_dir).parent == Path(results_root)
+        assert Path(collect_dir).parent.name == "collect_dir"
+        assert Path(collect_dir).parent.parent == Path(results_root)
         assert results_root == str(Path(results_root).resolve())
         # No log prefix, because save_logs was not requested -- proves the two
         # are decoupled.
@@ -687,13 +688,65 @@ class TestRunTrials:
                 collect=("layer_numerics",),
             )
             run_trials(req)
-        workload_dir = link / "collect_dir_symlink"
-        assert captured_config["_aorta_results_root"] == str(workload_dir.resolve())
-        assert captured_config["_aorta_results_root"] != str(workload_dir.absolute())
+        workload_dir = real / "collect_dir_symlink"
+        assert captured_config["_aorta_results_root"] == str(real.resolve())
+        assert captured_config["_aorta_results_root"] != str(link.absolute())
         assert captured_config["_aorta_collect_dir"] == str(
-            workload_dir.resolve() / "trial_d0_m0_t0"
+            workload_dir / "trial_d0_m0_t0"
         )
         assert not Path(captured_config["_aorta_results_root"]).is_symlink()
+
+    def test_workload_symlink_is_not_folded_into_the_collector_anchor(self, tmp_path):
+        """A stale workload link remains below the operator-owned boundary.
+
+        Resolving ``<results>/<workload>`` would trust its outside target.
+        Resolving only ``--results-dir`` and appending the workload lexically
+        lets the collector guard reject that payload-owned component.
+        """
+        captured_config: dict = {}
+
+        class ConfigCapturingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                captured_config.update(self.config)
+
+            def run(self):
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        results = tmp_path / "results"
+        results.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (results / "stale_workload_link").symlink_to(outside, target_is_directory=True)
+
+        mock_ep = MagicMock()
+        mock_ep.name = "stale_workload_link"
+        mock_ep.load.return_value = ConfigCapturingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            run_trials(
+                RunRequest(
+                    workload="stale_workload_link",
+                    trials=1,
+                    results_dir=results,
+                    collect=("layer_numerics",),
+                )
+            )
+
+        assert captured_config["_aorta_results_root"] == str(results.resolve())
+        assert captured_config["_aorta_collect_dir"] == str(
+            results.resolve() / "stale_workload_link" / "trial_d0_m0_t0"
+        )
+        assert outside.resolve() not in Path(
+            captured_config["_aorta_collect_dir"]
+        ).parents
 
     def test_results_root_is_frozen_once_for_the_whole_trial_loop(self, tmp_path):
         """Trial 0's payload must not be able to re-anchor trial 1.
@@ -722,7 +775,7 @@ class TestRunTrials:
                 # Only the first trial does it, so a re-anchored second trial
                 # shows up as a differing anchor rather than a second swap.
                 if len(roots) == 1:
-                    workload_dir = Path(roots[0])
+                    workload_dir = Path(collect_dirs[0]).parent
                     shutil.rmtree(workload_dir)
                     workload_dir.symlink_to(outside, target_is_directory=True)
                 return WorkloadResult(passed=True)
@@ -739,7 +792,7 @@ class TestRunTrials:
         # Pinned BEFORE the run on purpose: after trial 0 plants the symlink,
         # resolving this same path yields ``outside``, which is precisely the
         # value a per-trial anchor would have picked up.
-        expected_root = (tmp_path / "swap_results_dir").resolve()
+        expected_root = tmp_path.resolve()
 
         with patch("importlib.metadata.entry_points", return_value=mock_eps):
             req = RunRequest(
