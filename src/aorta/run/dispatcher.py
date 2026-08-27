@@ -678,6 +678,13 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     results_dir = request.results_dir / request.workload
     if should_write:
         results_dir.mkdir(parents=True, exist_ok=True)
+    # Freeze the collector trust anchor here, once, before the FIRST trial
+    # runs -- not per trial. Trial 0's payload can replace ``results_dir``
+    # itself with a symlink; a per-trial ``resolve()`` would then hand trial 1
+    # a brand-new anchor pointing outside the operator's tree, and
+    # ``_reset_output_dir`` would happily clear a planted trial directory
+    # there. Every trial receives this same unchanged path.
+    collector_results_root = results_dir.resolve() if request.collect else None
     isolation_generation = (
         _next_isolation_generation()
         if effective_trial_isolation == "process"
@@ -720,6 +727,7 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
                     startup_env=startup_env,
                     isolation_generation=isolation_generation,
                     results_dir=results_dir,
+                    results_root=collector_results_root,
                     should_write=should_write,
                 )
             except TrialWorkerError as exc:
@@ -734,6 +742,7 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
                 env_descriptor=env_descriptor,
                 mitigation_env=mitigation_env,
                 results_dir=results_dir,
+                results_root=collector_results_root,
                 should_write=should_write,
             )
         if should_write:
@@ -782,6 +791,7 @@ def _run_single_trial_in_process_worker(
     startup_env: dict[str, str],
     isolation_generation: int,
     results_dir: Path,
+    results_root: Path | None,
     should_write: bool,
 ) -> TrialResult:
     trial_id = (
@@ -846,6 +856,11 @@ def _run_single_trial_in_process_worker(
             "env_descriptor": asdict(env_descriptor),
             "mitigation_env": dict(mitigation_env),
             "results_dir": str(results_dir),
+            # The frozen collector anchor from before the trial loop. Sent
+            # explicitly so the worker inherits the parent's canonical path
+            # instead of resolving one in a process that starts after an
+            # earlier trial's payload has already run.
+            "results_root": str(results_root) if results_root is not None else None,
             "should_write": should_write,
             "store_prefix": (
                 f"aorta/{os.environ.get('TORCHELASTIC_RUN_ID', 'static')}/"
@@ -919,6 +934,7 @@ def _run_single_trial(
     mitigation_env: dict[str, str],
     results_dir: Path,
     should_write: bool,
+    results_root: Path | None = None,
     persist_result: bool = True,
     result_transform: (
         Callable[[WorkloadResult, str], tuple[WorkloadResult, str]] | None
@@ -935,6 +951,13 @@ def _run_single_trial(
         mitigation_env: Environment variables from mitigations.
         results_dir: Directory for JSON output.
         should_write: Whether to write JSON (rank 0 only).
+        results_root: Canonical collector trust anchor, frozen by
+            :func:`run_trials` before the first trial. ``None`` for a caller
+            that runs a single trial directly; this function then resolves
+            ``results_dir`` itself, which is still pre-launch for that one
+            trial. Only a multi-trial loop needs the freeze, because the
+            exposure is one trial's payload rewriting the tree the next trial
+            would resolve.
 
     Returns:
         TrialResult with execution outcome.
@@ -1054,26 +1077,26 @@ def _run_single_trial(
     # ``_aorta_log_prefix``, which the dispatcher only sets when
     # ``save_logs=True``; that coupled an unrelated debug knob to collector
     # output landing in the right place (and being picked up by ``aorta
-    # bundle``). This is an absolute path stem with no extension. Canonicalized
-    # with ``.resolve()`` so a relative ``results_dir`` still yields a usable
-    # path for a subprocess with a different cwd, and so the symlink guards
-    # pin a pre-launch trust anchor. Only set on rank 0 (matches the trial-JSON
-    # / log-capture write gate) and only when a collector was requested, so
+    # bundle``). This is an absolute path stem with no extension, canonical so
+    # a relative ``results_dir`` still yields a usable path for a subprocess
+    # with a different cwd. Only set on rank 0 (matches the trial-JSON /
+    # log-capture write gate) and only when a collector was requested, so
     # non-collector runs are unchanged.
     if request.collect and should_write:
         trial_basename = (
             f"trial_d{request.dataset_index}_m{request.mitigation_index}_t{trial_idx}"
         )
-        # Canonicalize before any trial runs. The payload can replace the
-        # results directory itself with a symlink after launch; the guards
-        # compare against this saved resolution and must not resolve it again.
-        # ``resolve()`` also folds operator-owned links *above* this root
-        # (a ``--results-dir`` that lives under a mounted scratch path), and
-        # the collect dir is built from the same canonical prefix so the
-        # payload-symlink walk has a lexical path inside that prefix.
-        results_root = results_dir.resolve()
-        config["_aorta_collect_dir"] = str(results_root / trial_basename)
-        config["_aorta_results_root"] = str(results_root)
+        # The trust anchor for the collector symlink guards. Taken from the
+        # caller when it froze one before the trial loop -- resolving it here
+        # would be *after* an earlier trial's payload ran, and that payload can
+        # replace ``results_dir`` with a symlink. ``resolve()`` also folds
+        # operator-owned links above this root (a ``--results-dir`` under a
+        # mounted scratch path), and the collect dir is built from the same
+        # canonical prefix so the payload-symlink walk has a lexical path
+        # inside it.
+        trusted_root = results_root if results_root is not None else results_dir.resolve()
+        config["_aorta_collect_dir"] = str(trusted_root / trial_basename)
+        config["_aorta_results_root"] = str(trusted_root)
 
     # Compute the effective controlled overlay in the platform env-precedence
     # order (lowest to highest):

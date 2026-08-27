@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -693,6 +694,69 @@ class TestRunTrials:
             workload_dir.resolve() / "trial_d0_m0_t0"
         )
         assert not Path(captured_config["_aorta_results_root"]).is_symlink()
+
+    def test_results_root_is_frozen_once_for_the_whole_trial_loop(self, tmp_path):
+        """Trial 0's payload must not be able to re-anchor trial 1.
+
+        The anchor is resolved before the loop, so a workload that replaces
+        the results directory with a symlink to an outside tree cannot hand
+        the next trial a new trusted root: trial 1 still carries the original
+        canonical path, and its collect dir stays under it.
+        """
+        roots: list[str] = []
+        collect_dirs: list[str] = []
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        class ResultsDirSwappingWorkload(Workload):
+            launch_mode = "single_process"
+            min_world_size = 1
+
+            def setup(self):
+                roots.append(self.config["_aorta_results_root"])
+                collect_dirs.append(self.config["_aorta_collect_dir"])
+
+            def run(self):
+                # What a hostile (or merely buggy) payload can do to the tree
+                # it was handed: swap the whole results directory for a link.
+                # Only the first trial does it, so a re-anchored second trial
+                # shows up as a differing anchor rather than a second swap.
+                if len(roots) == 1:
+                    workload_dir = Path(roots[0])
+                    shutil.rmtree(workload_dir)
+                    workload_dir.symlink_to(outside, target_is_directory=True)
+                return WorkloadResult(passed=True)
+
+            def cleanup(self):
+                pass
+
+        mock_ep = MagicMock()
+        mock_ep.name = "swap_results_dir"
+        mock_ep.load.return_value = ResultsDirSwappingWorkload
+        mock_eps = MagicMock()
+        mock_eps.select.return_value = [mock_ep]
+
+        # Pinned BEFORE the run on purpose: after trial 0 plants the symlink,
+        # resolving this same path yields ``outside``, which is precisely the
+        # value a per-trial anchor would have picked up.
+        expected_root = (tmp_path / "swap_results_dir").resolve()
+
+        with patch("importlib.metadata.entry_points", return_value=mock_eps):
+            req = RunRequest(
+                workload="swap_results_dir",
+                trials=2,
+                results_dir=tmp_path,
+                collect=("layer_numerics",),
+            )
+            run_trials(req)
+
+        assert len(roots) == 2
+        assert roots[0] == roots[1]
+        assert Path(roots[0]) == expected_root
+        assert (tmp_path / "swap_results_dir").resolve() == outside.resolve()
+        # The second trial's artifact path is still anchored in the operator's
+        # tree rather than under the symlink the first trial planted.
+        assert not Path(collect_dirs[1]).is_relative_to(outside.resolve())
 
     def test_collect_dir_absent_without_collector(self, tmp_path):
         """No collector keys for a run with no collector -- back-compat

@@ -179,8 +179,9 @@ def _trusted_root(config: Mapping[str, Any], root: Path) -> Path:
 
     Falls back to ``root.parent`` when the key is absent, which only happens for
     a direct programmatic caller -- the dispatcher always supplies it alongside
-    ``_aorta_collect_dir``. That fallback still catches a swapped collector root
-    or subdirectory; it cannot catch a swapped ancestor.
+    ``_aorta_collect_dir``. Being lexical, that fallback fails closed rather
+    than guessing: a symlink anywhere above the collector root makes the
+    containment check refuse, even when the operator put it there.
     """
     raw = config.get(CONFIG_KEY_RESULTS_ROOT)
     if isinstance(raw, str) and raw:

@@ -365,6 +365,14 @@ def _main(request_path: Path, response_path: Path) -> int:
             env_descriptor=env_descriptor,
             mitigation_env=dict(envelope["mitigation_env"]),
             results_dir=Path(envelope["results_dir"]),
+            # The parent froze this before its trial loop; inheriting it is
+            # what keeps an isolated trial from resolving a fresh anchor after
+            # an earlier trial's payload has run.
+            results_root=(
+                Path(envelope["results_root"])
+                if envelope.get("results_root") is not None
+                else None
+            ),
             should_write=bool(envelope["should_write"]),
             persist_result=False,
             result_transform=(
