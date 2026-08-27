@@ -43,12 +43,6 @@ _SITE_FIELDS = (
     "text",
     "mnemonic",
 )
-# Which per-site field explains each failing outcome. A site that succeeded
-# carries _NO_REASON in both, so only failures contribute an attribution.
-_FAILURE_REASON_FIELDS = {
-    "placement_or_lowering_failed": "lowering_reason",
-    "resource_failed": "resource_reason",
-}
 _NO_REASON = "none"
 
 
@@ -122,6 +116,18 @@ class _SiteRecord:
     @property
     def identity(self) -> tuple[int, int | None]:
         return self.reader, self.load
+
+    @property
+    def failure_reason(self) -> str | None:
+        """Why this site failed, or None if it succeeded or gave no reason."""
+
+        if self.outcome == "placement_or_lowering_failed":
+            reason = self.lowering_reason
+        elif self.outcome == "resource_failed":
+            reason = self.resource_reason
+        else:
+            return None
+        return None if reason == _NO_REASON else reason
 
 
 def _fields(payload: str, context: str) -> dict[str, str]:
@@ -288,11 +294,8 @@ def _failure_attributions(sites: list[_SiteRecord]) -> list[str]:
 
     tally: dict[tuple[str, str, str], int] = {}
     for site in sites:
-        field = _FAILURE_REASON_FIELDS.get(site.outcome)
-        if field is None:
-            continue
-        reason = getattr(site, field)
-        if reason == _NO_REASON:
+        reason = site.failure_reason
+        if reason is None:
             continue
         key = (site.kind, site.outcome, reason)
         tally[key] = tally.get(key, 0) + 1

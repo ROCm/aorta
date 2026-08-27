@@ -295,6 +295,25 @@ def test_unitemized_coverage_still_reports_why_sites_failed() -> None:
     assert [item.access for item in consan.coverage] == ["0/3"]
 
 
+def test_unitemized_sites_never_pass_even_when_the_counts_look_healthy() -> None:
+    # Every count reconciles and the verdict claims complete analysis -- except
+    # that the 2 barrier sites the hook says it patched were never itemized, so
+    # nothing corroborates them. This is the case where downgrading the parse
+    # error could have bought a PASS, and it must not: coverage that was not
+    # seen is not trusted, however healthy the aggregate looks.
+    output = _healthy_evidence().replace(
+        _zero_counts("barrier"),
+        "barrier_discovered=2 barrier_supported=2 barrier_selected=2 "
+        "barrier_patched=2 barrier_unsupported=0 barrier_resource_failed=0 "
+        "barrier_placement_or_lowering_failed=0 barrier_expert_limit_omitted=0",
+    ).replace("barrier=0/0", "barrier=2/2")
+
+    _waitcheck, consan = evaluate_record_replay(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.verdict is Verdict.ERROR
+    assert "reader 1 barrier sites not itemized: 0 of 2" in str(consan.reason)
+
+
 def test_partially_itemized_site_kind_is_still_a_parse_error() -> None:
     # One missing site out of three is lossy output, not a reportable gap: the
     # remaining records cannot be reconciled, so this must stay fail-closed on
@@ -380,7 +399,8 @@ def test_run_consan_requests_debug_log_level(
 ) -> None:
     # The strict coverage cross-check needs per-site coverage_site records, which
     # the hook only emits at its debug level (kLogDebug=3). A boolean-truthy
-    # RJ_CONSAN_LOG=1 (kLogInfo) omits them and would fail closed on a clean run.
+    # RJ_CONSAN_LOG=1 (kLogInfo) omits them, so every kind would report as
+    # un-itemized and an otherwise clean run would fail closed.
     env = _capture_consan_env(monkeypatch, tmp_path, consan_log=True)
 
     assert "RJ_CONSAN_LOG" in env
