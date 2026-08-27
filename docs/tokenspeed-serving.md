@@ -63,6 +63,8 @@ Then read:
 | `tokenspeed-serve-bench-smoke.yaml` | Qwen3-0.6B, two mitigation cells. The shape check to run first. |
 | `tokenspeed-serve-models.yaml` | Qwen3 0.6B / 1.7B / 4B / 8B, identical load. |
 | `tokenspeed-serve-load.yaml` | Concurrency 1→64, plus prefill-heavy and decode-heavy shapes. |
+| `tokenspeed-serve-gptoss.yaml` | gpt-oss-20b, two mitigation cells. TokenSpeed's canonical AMD benchmark model. |
+| `tokenspeed-serve-gptoss-tp.yaml` | gpt-oss-20b at `--tensor-parallel-size` 1 / 2 / 4. |
 
 In the multi-model and load recipes the cells differ by *workload*, not by
 mitigation, so `matrix.md`'s confound ratio (a step-time comparison against the
@@ -132,6 +134,37 @@ loading and Triton compilation against whatever the node's caches already hold,
 which is why the smallest model here posts the largest number. It is reported
 because `ready_timeout_sec` has to cover it, not because it scales with anything.
 
+### gpt-oss-20b (`tokenspeed-serve-gptoss.yaml`)
+
+TokenSpeed's canonical AMD benchmark model, and the size at which the numbers
+start to mean something: 21B parameters with MXFP4-packed MoE experts, served
+from a single MI355X. Both cells passed, 96/96 requests served per cell, none
+failed. Same load as the model sweep above (32 requests per step, ISL 512 / OSL
+128, concurrency 8), so the rows are directly comparable.
+
+| Cell | Startup (s) | TTFT p50 (ms) | TPOT p50 (ms) | Output tok/s |
+|---|---|---|---|---|
+| baseline | 316 | 67.1 | 7.61 | 994 |
+| `hsa_no_scratch_reclaim` | 286 | 66.7 | 7.49 | 1008 |
+
+Against Qwen3-0.6B on the same node and load: TTFT ~1.45×, TPOT ~3.9×, output
+throughput ~0.28×. That is a reasonable shape for a 21B MoE against a 0.6B dense
+model — decode is where the cost lands, prefill much less so — and the mitigation
+is within noise of baseline, as it was at every smaller size.
+
+TokenSpeed supports the architecture first-class (`runtime/models/gpt_oss.py`,
+with a dedicated MXFP4 weight-loading path), and the repo is ungated, so no HF
+token is needed. Two practical notes, both learned the hard way:
+
+- The **full** snapshot is required, ~40 GB. Excluding `original/` fails during
+  weight loading rather than at download time.
+- Pre-warm the cache **as the uid the trial will run as**. `run_as_current_user`
+  defaults to true, so a cache populated by a root container leaves the run
+  failing with `PermissionError` on the snapshot directory — the same EPERM
+  described in [`--user <uid>` breaks torch's cache
+  directory](#--user-uid-breaks-torchs-cache-directory), arriving by a different
+  route.
+
 ### Across load shapes (`tokenspeed-serve-load.yaml`)
 
 Qwen3-0.6B, as committed: 16/32/128/256/64/64 prompts per step over the six
@@ -177,7 +210,9 @@ matter most:
 |---|---|---|
 | `model` | `Qwen/Qwen3-0.6B` | Any HF id the container can load. |
 | `num_prompts` | `64` | Requests per bench step. Also the audit target. |
-| `input_len` / `output_len` | `1024` / `128` | Random-dataset ISL/OSL. |
+| `input_len` / `output_len` | `1024` / `128` | Random-dataset ISL/OSL. Ignored for `sharegpt`. |
+| `dataset` | `random` | `random` or `sharegpt`. See [Datasets](#datasets). |
+| `dataset_path` | — | Host path to a ShareGPT JSON. Required for `sharegpt`, rejected for `random`. |
 | `max_concurrency` | unbounded | In-flight request cap. |
 | `request_rate` | `inf` | `inf` submits everything at once. |
 | `warmup_steps` | `1` | Discarded bench steps. See below. |
@@ -555,13 +590,35 @@ recipe parser, resolved against the real mitigation registry, and pushed through
 the workload's own validation, so a typo'd key fails on the CPU gate rather than
 on a GPU node.
 
+## Datasets
+
+`dataset: random` (the default) generates its prompts from `input_len` and
+`output_len`, which is what makes it self-contained and reproducible — every
+existing recipe uses it.
+
+`dataset: sharegpt` benches against real conversation lengths, which is what
+makes a number comparable to a published one. It requires `dataset_path`
+pointing at a ShareGPT JSON file **on the host**, which the workload mounts
+read-only at `/ts-data/dataset.json`. That is deliberately stricter than the
+bench CLI, which downloads ShareGPT from the Hub when given no path — convenient,
+and wrong here three ways over: the recipe stops being reproducible (the URL is
+not pinned and the file is not content-addressed), a bridged container often has
+no route to the Hub, and the download lands *inside the measured window*, so the
+first trial reports slower for a reason that is not the engine.
+
+Both layers validate it, and both do so before a server starts — a dataset
+problem found after the model has loaded costs minutes and reads as a bench
+failure rather than the staging mistake it is. `input_len`/`output_len` are
+dropped for `sharegpt`, since it takes its lengths from the conversations and
+forwarding them would advertise a shape the run did not have.
+
 ## Not done yet
 
-- **`gpt-oss-20b`.** TokenSpeed's canonical AMD benchmark model. The workload has
-  no size-specific logic, but it has not been run.
-- **Multi-GPU serving.** `serve_args: --tensor-parallel-size N` should work and
-  is untested; RCCL mitigations would become relevant.
 - **Blessed nightly baselines.** The metrics are gateable but no serving recipe
-  is in the nightly matrix yet, so nothing is gated.
-- **`sharegpt` dataset.** Only the self-contained `random` dataset is wired;
-  `--dataset-name sharegpt` needs a dataset file staged into the container.
+  is in the nightly matrix yet, so nothing is gated. The matrix lives in
+  `aorta-internal`, where perf gating is still awaiting review.
+- **`sharegpt` measured on hardware.** The plumbing is tested; no run has been
+  made against a real ShareGPT file, so there are no numbers from it yet.
+- **TP above 4, and RCCL mitigations.** `tokenspeed-serve-gptoss-tp.yaml` covers
+  1/2/4 on one node. Wider TP and the RCCL knobs that become relevant with it
+  are untouched.

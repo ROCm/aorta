@@ -1,0 +1,65 @@
+# TokenSpeed serving: tensor parallelism on gfx950.
+#
+# Everything else in this directory serves on one GPU. That leaves the whole
+# multi-GPU path -- the one where RCCL is on the critical path and where most
+# real serving deployments live -- untested, and it is the axis where mitigations
+# stop being a formality: a collective that stalls or falls back to a slower
+# algorithm shows up as latency, not as a failure.
+#
+# TP is the axis, not the mitigation. Each cell serves the same model at a
+# different `--tensor-parallel-size`, so the matrix answers two questions at
+# once: does it work at all above 1, and does the scaling look like anything
+# sane. Bad TP scaling is a real finding; a broken collective is a different and
+# louder one.
+#
+# Why gpt-oss-20b rather than Qwen3-0.6B: at 0.6B the model fits so comfortably
+# in one MI355 that TP measures overhead and nothing else, and the numbers would
+# get worse with every GPU added for reasons that say nothing about the stack.
+# At 21B the per-GPU KV-cache headroom actually changes with TP.
+#
+# Requires >= 4 visible GPUs. `hip_visible_devices` is deliberately unset so the
+# engine sees the whole node; TP size is what varies.
+
+schema_version: 1
+ticket: TOKENSPEED-SERVE-GPTOSS-TP
+workload: tokenspeed_serve
+trials: 1
+
+steps: 3
+
+workload_config:
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  model: openai/gpt-oss-20b
+  num_prompts: 32
+  input_len: 512
+  output_len: 128
+  max_concurrency: 8
+  num_warmups: 1
+  ignore_eos: true
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  # Higher than the single-GPU recipe: TP adds collective initialisation to
+  # startup, and on a cold Gluon cache each rank JITs its own kernels.
+  ready_timeout_sec: 2400
+
+cells:
+  # TP=1 is the control, not a formality: without it a regression in the
+  # multi-GPU path cannot be told apart from a regression in the model or the
+  # image, since there would be nothing on this node to compare against.
+  - name: tp1
+    mitigations: [none]
+    environment: local
+    workload_config:
+      serve_args: ["--tensor-parallel-size", "1"]
+
+  - name: tp2
+    mitigations: [none]
+    environment: local
+    workload_config:
+      serve_args: ["--tensor-parallel-size", "2"]
+
+  - name: tp4
+    mitigations: [none]
+    environment: local
+    workload_config:
+      serve_args: ["--tensor-parallel-size", "4"]

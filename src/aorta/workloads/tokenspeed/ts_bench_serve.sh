@@ -160,12 +160,44 @@ reject_owned_flags TS_SERVE_ARGS "${TS_SERVE_ARGS:-}" \
 reject_owned_flags TS_BENCH_ARGS "${TS_BENCH_ARGS:-}" \
   --base-url --output-file --num-prompts --label --request-id-prefix \
   --random-input-len --random-output-len --model --tokenizer --backend \
-  --endpoint --dataset-name --percentile-metrics --metric-percentiles \
+  --endpoint --dataset-name --dataset-path --percentile-metrics \
+  --metric-percentiles \
   --max-concurrency --request-rate --num-warmups --ignore-eos --seed
 
 READY_TIMEOUT="${TS_READY_TIMEOUT:-900}"
 BENCH_STEPS="${TS_BENCH_STEPS:-1}"
 WARMUP_STEPS="${TS_BENCH_WARMUP_STEPS:-0}"
+DATASET="${TS_DATASET:-random}"
+case "${DATASET}" in
+  random)
+    if [ -n "${TS_DATASET_PATH:-}" ]; then
+      echo "TS_BENCH_FAIL: usage TS_DATASET_PATH is meaningless for TS_DATASET=random"
+      echo "  The bench CLI rejects the combination; random generates its prompts"
+      echo "  from TS_INPUT_LEN/TS_OUTPUT_LEN."
+      exit 64
+    fi
+    ;;
+  sharegpt)
+    # Checked here, before a server is started, rather than where bench_args are
+    # assembled: a dataset problem found after the model has loaded costs minutes
+    # and reports as a bench failure instead of a usage error.
+    if [ -z "${TS_DATASET_PATH:-}" ]; then
+      echo "TS_BENCH_FAIL: usage TS_DATASET=sharegpt requires TS_DATASET_PATH"
+      echo "  Without it the bench CLI would download the dataset mid-run: not"
+      echo "  reproducible, and it would be measured as serving time."
+      exit 64
+    fi
+    if [ ! -r "${TS_DATASET_PATH}" ]; then
+      echo "TS_BENCH_FAIL: usage TS_DATASET_PATH (${TS_DATASET_PATH}) is not readable"
+      echo "  The host is expected to mount the dataset read-only at this path."
+      exit 64
+    fi
+    ;;
+  *)
+    echo "TS_BENCH_FAIL: usage TS_DATASET (${DATASET}) must be random or sharegpt"
+    exit 64
+    ;;
+esac
 NUM_PROMPTS="${TS_NUM_PROMPTS:-64}"
 INPUT_LEN="${TS_INPUT_LEN:-1024}"
 OUTPUT_LEN="${TS_OUTPUT_LEN:-128}"
@@ -388,9 +420,7 @@ bench_args=(
   --endpoint /v1/completions
   --model "${SERVED_MODEL_NAME}"
   --tokenizer "${TOKENIZER}"
-  --dataset-name random
-  --random-input-len "${INPUT_LEN}"
-  --random-output-len "${OUTPUT_LEN}"
+  --dataset-name "${DATASET}"
   --num-prompts "${NUM_PROMPTS}"
   --num-warmups "${NUM_WARMUPS}"
   --request-rate "${REQUEST_RATE}"
@@ -399,6 +429,17 @@ bench_args=(
   --metric-percentiles "${METRIC_PERCENTILES}"
   --disable-tqdm
 )
+# ISL/OSL are `random`-only knobs: the bench CLI maps them onto
+# --random-input-len/--random-output-len, and sharegpt takes its lengths from the
+# conversations themselves. Passing them for sharegpt would advertise a shape the
+# run did not have.
+if [ "${DATASET}" = "random" ]; then
+  bench_args+=( --random-input-len "${INPUT_LEN}" --random-output-len "${OUTPUT_LEN}" )
+else
+  # Presence and readability were established during validation above, before any
+  # server was started.
+  bench_args+=( --dataset-path "${TS_DATASET_PATH}" )
+fi
 # Unbounded unless asked: `--max-concurrency` defaults to None, and passing an
 # empty string would be parsed as an int and fail.
 if [ -n "${TS_MAX_CONCURRENCY:-}" ]; then

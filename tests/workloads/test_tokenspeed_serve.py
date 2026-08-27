@@ -457,11 +457,13 @@ def test_the_documented_protocol_floor_is_actually_owned(tmp_path):
 
     Every key it reserves has to be one the workload really sets under some
     configuration -- otherwise reserving it here forbids a mitigation from
-    setting a knob the workload never owned. `max_concurrency` is passed
-    explicitly because the key it controls is absent by default, which is the
-    whole reason the floor exists.
+    setting a knob the workload never owned. `max_concurrency` and the sharegpt
+    dataset are passed explicitly because the keys they control are absent by
+    default, which is the whole reason the floor exists.
     """
-    wl = _make(tmp_path, max_concurrency=4)
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+    wl = _make(tmp_path, max_concurrency=4, dataset="sharegpt", dataset_path=str(dataset))
     wl.setup()
     wl._run_token = "tok"
     wl._port, wl._control_port = 8000, 8001
@@ -1078,15 +1080,27 @@ def test_cleanup_before_run_is_safe(tmp_path):
 # ---------------------------------------------------------------- recipes
 
 
-_RECIPES = (
-    "tokenspeed-serve-bench-smoke.yaml",
-    "tokenspeed-serve-models.yaml",
-    "tokenspeed-serve-load.yaml",
-)
-
-
 def _recipe_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "recipes" / "tokenspeed"
+
+
+def _discover_recipes() -> tuple[str, ...]:
+    """Every committed recipe for this workload, found rather than listed.
+
+    A hand-maintained tuple silently excludes new recipes from all four checks
+    below, which is the opposite of what a list like this is for -- the recipe
+    most likely to be malformed is the one just added. Selected by declared
+    workload so the Phase 1 probe recipes in the same directory stay out.
+    """
+    names = []
+    for path in sorted(_recipe_dir().glob("tokenspeed-serve-*.yaml")):
+        if "workload: tokenspeed_serve" in path.read_text(encoding="utf-8"):
+            names.append(path.name)
+    assert names, "no tokenspeed_serve recipes discovered"
+    return tuple(names)
+
+
+_RECIPES = _discover_recipes()
 
 
 @pytest.mark.parametrize("name", _RECIPES)
@@ -1701,3 +1715,96 @@ def test_integer_fields_reject_booleans_and_fractions(tmp_path, key, value):
     way it was written must not be executed the way it was not."""
     with pytest.raises(ValueError, match=key):
         _make(tmp_path, **{key: value}).setup()
+
+
+def test_random_dataset_needs_no_file_and_keeps_the_length_knobs(tmp_path):
+    """The default has to stay self-contained -- it is what every existing recipe
+    uses, and its prompts are generated from input_len/output_len."""
+    wl = _make(tmp_path)
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    env = wl._container_env()
+    assert env["TS_DATASET"] == "random"
+    assert "TS_DATASET_PATH" not in env
+    assert int(env["TS_INPUT_LEN"]) > 0 and int(env["TS_OUTPUT_LEN"]) > 0
+
+
+def test_sharegpt_requires_a_staged_file(tmp_path):
+    """Given no path the bench CLI downloads ShareGPT from the Hub on first use.
+
+    That is wrong here three ways over: the recipe stops being reproducible (the
+    URL is not pinned and the file is not content-addressed), a bridged container
+    often has no route to the Hub, and the download lands inside the measured
+    window -- so the first trial reports as slower for a reason that is not the
+    engine.
+    """
+    with pytest.raises(ValueError, match="requires dataset_path"):
+        _make(tmp_path, dataset="sharegpt").setup()
+
+
+def test_a_missing_dataset_file_fails_before_the_model_loads(tmp_path):
+    """Otherwise this surfaces after the engine has come up, and reads as a bench
+    failure rather than as the staging mistake it is."""
+    with pytest.raises(ValueError, match="is not a file"):
+        _make(tmp_path, dataset="sharegpt", dataset_path=str(tmp_path / "absent.json")).setup()
+
+
+def test_sharegpt_is_mounted_read_only_and_drops_the_random_knobs(tmp_path):
+    """The dataset defines what was measured, so a run able to rewrite it would
+    make its own results unfalsifiable. The ISL/OSL knobs are `random`-only --
+    sharegpt takes its lengths from the conversations, and forwarding them would
+    advertise a shape the run did not have.
+    """
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+    wl = _make(tmp_path, dataset="sharegpt", dataset_path=str(dataset))
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    env = wl._container_env()
+    argv = wl._docker_argv(env)
+
+    assert env["TS_DATASET"] == "sharegpt"
+    assert env["TS_DATASET_PATH"] == mod._CONTAINER_DATASET_PATH
+    mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+    assert f"{dataset}:{mod._CONTAINER_DATASET_PATH}:ro" in mounts, mounts
+
+
+def test_dataset_path_is_rejected_for_the_random_dataset(tmp_path):
+    """The bench CLI raises "Cannot use 'random' dataset with --dataset-path";
+    catching it here names the recipe field instead of the CLI flag."""
+    dataset = tmp_path / "sharegpt.json"
+    dataset.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="meaningless for"):
+        _make(tmp_path, dataset_path=str(dataset)).setup()
+
+
+def test_an_unknown_dataset_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="must be one of"):
+        _make(tmp_path, dataset="wikitext").setup()
+
+
+@pytest.mark.parametrize(
+    "env_overrides,expect",
+    [
+        ({"TS_DATASET": "sharegpt"}, "requires TS_DATASET_PATH"),
+        ({"TS_DATASET": "wikitext"}, "must be random or sharegpt"),
+        (
+            {"TS_DATASET": "sharegpt", "TS_DATASET_PATH": "/nonexistent/ds.json"},
+            "is not readable",
+        ),
+    ],
+)
+def test_the_script_validates_the_dataset_independently(tmp_path, env_overrides, expect):
+    """The script is meant to be runnable by hand, which is what keeps its audit
+    trustworthy independently of the Python layer -- so it re-checks the dataset
+    contract rather than trusting the host to have done it."""
+    proc = subprocess.run(
+        ["bash", str(mod._SCRIPTS_DIR / mod._BENCH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TS_OUT_DIR": str(tmp_path), **env_overrides},
+    )
+    assert proc.returncode == 64, proc.stdout + proc.stderr
+    assert expect in proc.stdout, proc.stdout

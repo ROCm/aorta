@@ -1,0 +1,63 @@
+# TokenSpeed serving: gpt-oss-20b on gfx950.
+#
+# gpt-oss-20b is TokenSpeed's canonical AMD benchmark model, and until this
+# recipe existed every serving number in the repo came from Qwen3-0.6B -- a
+# model small enough that a single MI355 barely notices it. The interesting
+# question is not whether the workload can drive a larger model (it has no
+# size-specific logic) but whether the *numbers* stay meaningful at a size where
+# MoE routing, MXFP4 dequantisation and KV-cache pressure actually matter.
+#
+# TokenSpeed supports the architecture first-class: `runtime/models/gpt_oss.py`
+# with a dedicated `_load_mxfp4_weights` path for the packed MoE experts. The
+# repo is ungated and needs no HF token, unlike most models this size.
+#
+# Cost. The weights are ~15 GB and the model takes appreciably longer to load
+# than Qwen3-0.6B, so `ready_timeout_sec` is raised well above the default. On a
+# cold HF cache the first trial spends minutes downloading before it serves
+# anything; pre-warm with
+#
+#   hf download openai/gpt-oss-20b --exclude "original/*" --exclude "metal/*"
+#
+# into the same work_dir/hf, or expect the first cell to look slow for a reason
+# that has nothing to do with the engine.
+#
+# Single-GPU deliberately: MXFP4 puts the 21B parameters inside one MI355's
+# memory, so this recipe isolates model *size* as the variable. Tensor
+# parallelism is a separate axis and is covered by
+# tokenspeed-serve-gptoss-tp.yaml.
+
+schema_version: 1
+ticket: TOKENSPEED-SERVE-GPTOSS
+workload: tokenspeed_serve
+trials: 1
+
+# Three steps for the same reason as the smoke recipe: model load dominates a
+# single short bench, so one step would mostly measure loading. It matters more
+# here -- this model loads slower, so a one-step trial would be almost entirely
+# load time.
+steps: 3
+
+workload_config:
+  image: lightseekorg/tokenspeed-amd@sha256:60c12e37c01496891053b9c30c4204e5d1cf9b4b641859d3aadcbd95bccc7c78
+  model: openai/gpt-oss-20b
+  num_prompts: 32
+  input_len: 512
+  output_len: 128
+  max_concurrency: 8
+  num_warmups: 1
+  ignore_eos: true
+  seed: 0
+  work_dir: /tmp/ts-work-serve
+  # 30 min, not the 900s default: this covers a cold-cache download plus MXFP4
+  # weight loading and the Gluon JIT. A tight value here fails as a readiness
+  # timeout, which reads as a broken engine rather than as a slow first load.
+  ready_timeout_sec: 1800
+
+cells:
+  - name: baseline
+    mitigations: [none]
+    environment: local
+
+  - name: no-scratch-reclaim
+    mitigations: [hsa_no_scratch_reclaim]
+    environment: local

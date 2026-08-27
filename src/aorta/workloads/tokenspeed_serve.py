@@ -106,6 +106,15 @@ _DEFAULT_SHM_SIZE = "16g"
 _MAX_READY_TIMEOUT_SEC = 86400
 _MAX_TEARDOWN_GRACE_SEC = 3600
 
+_DEFAULT_DATASET = "random"
+# `random` generates its own prompts, so it is the only one that needs nothing
+# staged; `sharegpt` measures against real conversation lengths, which is what
+# makes a serving number comparable to a published one.
+_SUPPORTED_DATASETS = frozenset({"random", "sharegpt"})
+# Read-only, and under its own path rather than beside the exports: /ts-out is
+# writable by the container, and a dataset the run could rewrite is not evidence.
+_CONTAINER_DATASET_PATH = "/ts-data/dataset.json"
+
 # Margin added on top of (readiness + steps x bench) when deriving the default
 # host-side docker timeout: covers image pull, container start, and teardown.
 _TIMEOUT_MARGIN_SEC = 600
@@ -221,6 +230,11 @@ _PROTOCOL_ENV_KEYS = frozenset(
         # the computed set cannot reach on a default configuration.
         "TS_MAX_CONCURRENCY",
         "TS_SEED",
+        "TS_DATASET",
+        # Absent for `random`, which is the default, and points at a host mount
+        # the container cannot create for itself -- so overriding it would send
+        # the bench at a path that does not exist, or at an unmounted one.
+        "TS_DATASET_PATH",
         "TS_MODEL",
         "TS_SERVED_MODEL_NAME",
         "TS_TOKENIZER",
@@ -390,6 +404,8 @@ class TokenSpeedServeWorkload(Workload):
         self._served_model_name = str(cfg.get("served_model_name") or self._model)
         self._tokenizer = str(cfg.get("tokenizer") or self._model)
 
+        self._dataset, self._dataset_path = self._validated_dataset()
+
         self._num_prompts = self._positive_int("num_prompts", _DEFAULT_NUM_PROMPTS)
         self._input_len = self._positive_int("input_len", _DEFAULT_INPUT_LEN)
         self._output_len = self._positive_int("output_len", _DEFAULT_OUTPUT_LEN)
@@ -533,6 +549,58 @@ class TokenSpeedServeWorkload(Workload):
         self._hf_token_env = str(cfg.get("hf_token_env") or "HF_TOKEN")
 
         self._gates = self._validated_gates()
+
+    def _validated_dataset(self) -> tuple[str, Path | None]:
+        """Resolve ``dataset`` and, for ``sharegpt``, the file to bench against.
+
+        ``sharegpt`` is the reason this needs validating rather than forwarding.
+        Given no ``--dataset-path`` the bench CLI downloads ShareGPT from the Hub
+        on first use, which is wrong here in three separate ways: the recipe is
+        no longer reproducible (the URL is not pinned and the file is not
+        content-addressed), a bridged container often has no route to the Hub at
+        all, and the download lands inside the measured window -- so a cell would
+        report the first trial as slower for a reason that is not the engine.
+
+        So the host resolves the file and mounts it. ``dataset_path`` is required
+        for ``sharegpt`` and must exist before the trial starts, which turns "the
+        dataset was not staged" from a mid-run failure into a config error.
+        """
+        name = str(self.config.get("dataset") or _DEFAULT_DATASET).strip()
+        if name not in _SUPPORTED_DATASETS:
+            raise ValueError(
+                f"tokenspeed_serve: dataset ({name!r}) must be one of "
+                f"{', '.join(sorted(_SUPPORTED_DATASETS))}"
+            )
+
+        raw_path = self.config.get("dataset_path")
+        if name == "random":
+            if raw_path:
+                # The bench CLI raises "Cannot use 'random' dataset with
+                # --dataset-path". Catching it here names the field instead.
+                raise ValueError(
+                    "tokenspeed_serve: dataset_path is meaningless for "
+                    "dataset: random, which generates its prompts from "
+                    "input_len/output_len. Set dataset: sharegpt to bench "
+                    "against a file."
+                )
+            return name, None
+
+        if not raw_path:
+            raise ValueError(
+                "tokenspeed_serve: dataset: sharegpt requires dataset_path "
+                "pointing at a ShareGPT JSON file on the host. Without it the "
+                "bench CLI downloads the dataset itself, which is not "
+                "reproducible, needs Hub access from inside the container, and "
+                "puts the download inside the measured window."
+            )
+        path = Path(str(raw_path)).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(
+                f"tokenspeed_serve: dataset_path ({path}) is not a file. It must "
+                "exist before the trial starts -- otherwise this fails after the "
+                "model has loaded, and reads as a bench failure."
+            )
+        return name, path
 
     def _coerced_int(self, key: str, default: int) -> int:
         """Accept an integer, or a string spelling one, and nothing else.
@@ -768,6 +836,7 @@ class TokenSpeedServeWorkload(Workload):
             "TS_BENCH_STEPS": str(self._steps),
             "TS_BENCH_WARMUP_STEPS": str(self._warmup_steps),
             "TS_GATEWAY_STARTUP_TIMEOUT": str(self._gateway_startup_timeout),
+            "TS_DATASET": self._dataset,
             "TS_NUM_PROMPTS": str(self._num_prompts),
             "TS_INPUT_LEN": str(self._input_len),
             "TS_OUTPUT_LEN": str(self._output_len),
@@ -810,6 +879,8 @@ class TokenSpeedServeWorkload(Workload):
             user = _host_username()
             env["USER"] = user
             env["LOGNAME"] = user
+        if self._dataset_path is not None:
+            env["TS_DATASET_PATH"] = _CONTAINER_DATASET_PATH
         if self._max_concurrency is not None:
             env["TS_MAX_CONCURRENCY"] = str(self._max_concurrency)
         if self._serve_args:
@@ -919,6 +990,10 @@ class TokenSpeedServeWorkload(Workload):
             "-v",
             f"{self._hf_home}:/hf-cache",
         ]
+        if self._dataset_path is not None:
+            # Read-only: the dataset defines what was measured, so a run that
+            # could rewrite it would make its own results unfalsifiable.
+            argv += ["-v", f"{self._dataset_path}:{_CONTAINER_DATASET_PATH}:ro"]
         if self._run_as_current_user:
             # Without this the container writes the HF cache and the exported
             # JSON as root, and the next run (or the caller's cleanup) cannot
