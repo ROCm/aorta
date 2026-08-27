@@ -504,7 +504,7 @@ def _write_recipe(dest: Path, label: str, target: str, kernels: list[dict]) -> P
         f"ticket: TOKENSPEED-WAITCHECK-{_ticket_suffix(label)}",
         "",
         "sanitizer_plan:",
-        f"  target: {target}",
+        f"  target: {_yaml_scalar(target)}",
         "  source:",
         "    kind: kernel_list",
         "    kernels:",
@@ -514,15 +514,18 @@ def _write_recipe(dest: Path, label: str, target: str, kernels: list[dict]) -> P
             [
                 f"      - name: {_yaml_scalar(kernel['name'])}",
                 f"        code_object: {_yaml_scalar(kernel['code_object'])}",
-                f"        code_object_sha256: {kernel['sha256']}",
-                f"        code_object_index: {kernel['code_object_index']}",
+                f"        code_object_sha256: {_yaml_digest(kernel['sha256'])}",
+                f"        code_object_index: {_yaml_int('code_object_index', kernel['code_object_index'])}",
             ]
         )
         # Only when inventory resolved one: an absent entry_offset is a
         # whole-object scan, which is a weaker but valid identity. Emitting a
         # null would fail the recipe's integer validation instead.
         if kernel.get("entry_offset") is not None:
-            lines.append(f"        entry_offset: {kernel['entry_offset']}")
+            lines.append(
+                f"        entry_offset: "
+                f"{_yaml_int('entry_offset', kernel['entry_offset'])}"
+            )
     lines.extend(
         [
             "  scope:",
@@ -591,6 +594,42 @@ def _ticket_suffix(name: str) -> str:
     """A ticket-safe rendering of an untrusted kernel name: ``[A-Z0-9-]`` only."""
     cleaned = "".join(ch if ch.isalnum() else "-" for ch in str(name)).strip("-").upper()
     return cleaned or "KERNEL"
+
+
+def _yaml_digest(value: object) -> str:
+    """A sha256 from the inventory, checked to be one.
+
+    Emitted unquoted because the recipe schema wants a scalar string of hex, and
+    quoting would not make a malformed value safe -- it would make it a
+    well-formed recipe selecting a digest that cannot match anything. So this
+    validates instead: the field comes from the same third-party JSON as the
+    kernel names, and everything else derived from it is either quoted or, like
+    this, constrained to a shape that cannot carry YAML syntax.
+    """
+    text = str(value)
+    if len(text) != 64 or not all(ch in "0123456789abcdef" for ch in text.lower()):
+        raise SystemExit(
+            f"harvest: inventory reported sha256 {text!r}, which is not a "
+            "64-character hex digest. The code object's metadata is malformed; "
+            "re-harvest, or exclude this kernel."
+        )
+    return text.lower()
+
+
+def _yaml_int(field: str, value: object) -> str:
+    """An integer field from the inventory, checked to be one.
+
+    Same reasoning as ``_yaml_digest``: the recipe schema wants a number here,
+    so the fix is to require one rather than to quote whatever arrived.
+    """
+    try:
+        return str(int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"harvest: inventory reported {field}={value!r}, which is not an "
+            "integer. The code object's metadata is malformed; re-harvest, or "
+            "exclude this kernel."
+        ) from exc
 
 
 def _yaml_scalar(value: object) -> str:
@@ -716,16 +755,16 @@ def _write_consan_recipe(
             f"ticket: TOKENSPEED-CONSAN-{_ticket_suffix(kernel['name'])}",
             "",
             "sanitizer_plan:",
-            f"  target: {target}",
+            f"  target: {_yaml_scalar(target)}",
             "  source:",
             "    kind: kernel",
             "    kernel:",
             f"      name: {_yaml_scalar(kernel['name'])}",
             f"      code_object: {_yaml_scalar(staged_object)}",
-            f"      code_object_sha256: {kernel['sha256']}",
-            f"      code_object_index: {kernel['code_object_index']}",
+            f"      code_object_sha256: {_yaml_digest(kernel['sha256'])}",
+            f"      code_object_index: {_yaml_int('code_object_index', kernel['code_object_index'])}",
             *(
-                [f"      entry_offset: {kernel['entry_offset']}"]
+                [f"      entry_offset: {_yaml_int('entry_offset', kernel['entry_offset'])}"]
                 if kernel.get("entry_offset") is not None
                 else []
             ),
