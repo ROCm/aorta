@@ -43,6 +43,9 @@ Then:
   aorta sweep run --recipe /tmp/ts-work/sanitizer-run/waitcheck-<label>.yaml \
       --output-dir /tmp/ts-work/sanitizer-out
 
+where <label> is the --kernel / --op value reduced to [a-z0-9-]; the exact path
+is printed at the end of the harvest.
+
 ``--consan`` additionally emits ConSan assets: one loader shim and one
 single-kernel recipe per harvested object, built with the generic Triton loader
 from ROCm/aorta#403. ConSan takes exactly one code object per run, so these are
@@ -67,6 +70,83 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# Ceiling for the host-side helpers that read objects produced by the image:
+# the Waitcheck inventory and the ConSan loader. Both parse third-party binaries
+# and neither has any reason to take minutes, so this is generous rather than
+# tuned -- its job is to turn a wedge into a diagnosable failure while the GPU
+# is still needed by the rest of the sweep.
+_SUBPROCESS_TIMEOUT_SEC = 120
+
+
+# Filesystems the docker daemon cannot bind-mount from, or can only mount with
+# root-squash surprises. Matched on fstype rather than on path, because the
+# path spelling says nothing: /home is often local and /mnt, /shared, /users or
+# an autofs mount point is often not.
+_NETWORK_FSTYPES = frozenset(
+    {
+        "afs",
+        "beegfs",
+        "ceph",
+        "cifs",
+        "fuse.cephfs",
+        "fuse.glusterfs",
+        "fuse.sshfs",
+        "gfs2",
+        "glusterfs",
+        "gpfs",
+        "lustre",
+        "nfs",
+        "nfs4",
+        "smb3",
+    }
+)
+
+
+def _network_filesystem(path: Path, mounts: Path = Path("/proc/mounts")) -> str | None:
+    """The network fstype backing ``path``, or ``None`` if it looks local.
+
+    Resolved by finding the longest mount point in /proc/mounts that is a
+    prefix of the path, which is the mount the kernel would use. Best-effort by
+    construction: a platform without /proc/mounts, or a path whose mount cannot
+    be identified, is treated as local rather than blocking a harvest on a
+    guess -- docker's own error is the backstop.
+    """
+    try:
+        entries = mounts.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+
+    target = path if path.is_absolute() else path.resolve()
+    best: tuple[int, str] | None = None
+    for entry in entries:
+        fields = entry.split()
+        if len(fields) < 3:
+            continue
+        # /proc/mounts octal-escapes spaces and tabs in the mount point.
+        mount_point = fields[1].replace("\\040", " ").replace("\\011", "\t")
+        fstype = fields[2]
+        try:
+            mount = Path(mount_point)
+        except ValueError:
+            continue
+        if mount != target and mount not in target.parents:
+            continue
+        depth = len(mount.parts)
+        if best is None or depth > best[0]:
+            best = (depth, fstype)
+
+    if best is None:
+        return None
+    fstype = best[1]
+    return fstype if fstype in _NETWORK_FSTYPES else None
+
+
+def _reset_dir(path: Path) -> None:
+    """Replace ``path`` with an empty directory, creating parents as needed."""
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
 
 
 def _sha256(path: Path) -> str:
@@ -311,11 +391,24 @@ def _inventory(waitcheck: Path | None, obj: Path) -> list[dict]:
         )
     if not os.access(waitcheck, os.X_OK):
         raise SystemExit(f"harvest: --waitcheck {waitcheck} is not executable.")
-    proc = subprocess.run(
-        [str(waitcheck), "--list-kernels", str(obj)],
-        capture_output=True,
-        text=True,
-    )
+    # Bounded, because the object being parsed came out of a third-party image.
+    # Every other subprocess here is already bounded; this one wedging would
+    # hang the harvest with the GPU still held, which is the failure the docker
+    # timeout exists to prevent, one layer further in.
+    try:
+        proc = subprocess.run(
+            [str(waitcheck), "--list-kernels", str(obj)],
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(
+            f"harvest: {waitcheck} --list-kernels did not finish within "
+            f"{_SUBPROCESS_TIMEOUT_SEC}s on {obj}. The object comes from the "
+            "image and may be malformed; re-run with --waitcheck omitted to "
+            "harvest with guessed names, or exclude this kernel."
+        ) from exc
     if proc.returncode != 0:
         # A binary was supplied and it rejected the object, so this is a real
         # inventory failure. Falling back to the guessed stem here would emit a
@@ -378,8 +471,20 @@ def _write_recipe(dest: Path, label: str, target: str, kernels: list[dict]) -> P
     Written by hand rather than via a YAML library so the file carries the same
     explanatory comments a committed recipe would, and so this script has no
     dependency beyond the standard library.
+
+    ``label`` reaches two places with different escaping rules -- a path
+    component and an unquoted YAML scalar -- so it is reduced to the character
+    set that is safe in both before either use. It comes from ``--kernel`` /
+    ``--op``, which in practice is pasted from an inventory of third-party
+    kernel names: one containing ``../`` would write the recipe outside
+    ``--dest``, and one containing a newline or a colon would reshape the
+    generated YAML. Same treatment the ConSan assets already get, including the
+    containment check, since a sanitized name is an argument about the sanitizer
+    rather than a proof about the path.
     """
-    recipe_path = dest / f"waitcheck-{label}.yaml"
+    slug = _ticket_suffix(label).lower()
+    recipe_path = dest / f"waitcheck-{slug}.yaml"
+    _ensure_within(dest, recipe_path)
     lines = [
         "# GENERATED by harvest_code_objects.py -- do not commit.",
         "#",
@@ -396,7 +501,7 @@ def _write_recipe(dest: Path, label: str, target: str, kernels: list[dict]) -> P
         "# entry-point allowlist and would instrument everything indiscriminately.",
         "schema_version: 1",
         "mode: sanitizer",
-        f"ticket: TOKENSPEED-WAITCHECK-{label.upper().replace('_', '-')}",
+        f"ticket: TOKENSPEED-WAITCHECK-{_ticket_suffix(label)}",
         "",
         "sanitizer_plan:",
         f"  target: {target}",
@@ -518,25 +623,37 @@ def _emit_consan_shim(
     shim = bin_dir / f"consan_{stem}"
     _ensure_within(isa_dir, staged_object)
     _ensure_within(bin_dir, shim)
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(loader),
-            "emit-command",
-            "--hsaco",
-            kernel["cache_object"],
-            # One object can hold several kernels, and ConSan takes exactly one
-            # per run, so name the kernel rather than letting it fail closed.
-            "--kernel-name",
-            kernel["name"],
-            "--copy-object",
-            str(staged_object),
-            "--output",
-            str(shim),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    # Bounded for the same reason as the --list-kernels parse: the object this
+    # reads is a Triton cache entry written by the third-party image, so a hang
+    # here wedges the --consan path with the GPU still held.
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(loader),
+                "emit-command",
+                "--hsaco",
+                kernel["cache_object"],
+                # One object can hold several kernels, and ConSan takes exactly
+                # one per run, so name the kernel rather than letting it fail
+                # closed.
+                "--kernel-name",
+                kernel["name"],
+                "--copy-object",
+                str(staged_object),
+                "--output",
+                str(shim),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(
+            f"harvest: the ConSan loader did not finish within "
+            f"{_SUBPROCESS_TIMEOUT_SEC}s on {kernel['cache_object']}. Re-run "
+            "without --consan, or narrow the selection with --consan-limit."
+        ) from exc
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout[-2000:])
         sys.stderr.write(proc.stderr[-2000:])
@@ -777,19 +894,24 @@ def main() -> int:
         parser.error("--consan-limit must be at least 1")
 
     dest = Path(args.dest).resolve()
-    if str(dest).startswith(("/home/", "/nfs/")):
+    network_fs = _network_filesystem(dest)
+    if network_fs:
         raise SystemExit(
-            f"harvest: {dest} is on NFS; the docker daemon cannot bind-mount it. "
-            "Use a node-local path such as /tmp/ts-work/sanitizer-run."
+            f"harvest: {dest} is on a {network_fs} filesystem; the docker daemon "
+            "cannot bind-mount it. Use a node-local path such as "
+            "/tmp/ts-work/sanitizer-run."
         )
     cache_dir = dest / "triton-cache"
     objects_dir = dest / "code_objects"
     # Start from an empty cache so the inventory contains only what this run
     # compiled, rather than whatever a previous harvest left behind.
-    if cache_dir.exists():
-        shutil.rmtree(cache_dir)
-    cache_dir.mkdir(parents=True)
-    objects_dir.mkdir(parents=True, exist_ok=True)
+    _reset_dir(cache_dir)
+    # Cleared for the same reason as consan/, though the consequence is milder:
+    # staged object names are content-addressed, so a leftover is never
+    # referenced by this run's recipe. It is disk that nothing will reclaim --
+    # a re-harvest with a narrower selection keeps every .hsaco the wider one
+    # staged, and these are the largest files the harvest writes.
+    _reset_dir(objects_dir)
 
     _run_kernel(args, cache_dir)
 
