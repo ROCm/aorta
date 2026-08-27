@@ -683,8 +683,11 @@ def run_trials(request: RunRequest) -> list[TrialResult]:
     # itself with a symlink; a per-trial ``resolve()`` would then hand trial 1
     # a brand-new anchor pointing outside the operator's tree, and
     # ``_reset_output_dir`` would happily clear a planted trial directory
-    # there. Every trial receives this same unchanged path.
-    collector_results_root = results_dir.resolve() if request.collect else None
+    # there. Every trial receives this same unchanged path. Only computed on
+    # the rank that threads collector paths at all.
+    collector_results_root = (
+        results_dir.resolve() if request.collect and should_write else None
+    )
     isolation_generation = (
         _next_isolation_generation()
         if effective_trial_isolation == "process"
