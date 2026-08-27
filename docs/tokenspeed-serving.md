@@ -64,7 +64,7 @@ Then read:
 | `tokenspeed-serve-models.yaml` | Qwen3 0.6B / 1.7B / 4B / 8B, identical load. |
 | `tokenspeed-serve-load.yaml` | Concurrency 1→64, plus prefill-heavy and decode-heavy shapes. |
 | `tokenspeed-serve-gptoss.yaml` | gpt-oss-20b, two mitigation cells. TokenSpeed's canonical AMD benchmark model. |
-| `tokenspeed-serve-gptoss-tp.yaml` | gpt-oss-20b at `--tensor-parallel-size` 1 / 2 / 4. |
+| `tokenspeed-serve-gptoss-tp.yaml` | gpt-oss-20b at `--tensor-parallel-size` 1 / 2. |
 
 In the multi-model and load recipes the cells differ by *workload*, not by
 mitigation, so `matrix.md`'s confound ratio (a step-time comparison against the
@@ -164,6 +164,43 @@ token is needed. Two practical notes, both learned the hard way:
   described in [`--user <uid>` breaks torch's cache
   directory](#--user-uid-breaks-torchs-cache-directory), arriving by a different
   route.
+
+### Tensor parallelism (`tokenspeed-serve-gptoss-tp.yaml`)
+
+Both cells passed, 96/96 requests each, none failed. Same load as above.
+
+| Cell | Startup (s) | TTFT p50 (ms) | TPOT p50 (ms) | Output tok/s |
+|---|---|---|---|---|
+| `tp1` | 199 | 67.2 | 7.63 | 991 |
+| `tp2` | 282 | 65.6 | 7.23 | 1036 |
+
+TP=1 reproduces the single-GPU numbers above to within a percent, which is the
+control this axis needs — without it a change in the multi-GPU path could not be
+told apart from a change in the model or the image.
+
+TP=2 buys about 4.5% throughput for a second GPU. That is a poor trade, and an
+unsurprising one: at 21B with MXFP4 the model already fits in one MI355X, so the
+second rank relieves no real constraint and pays collective cost on every step.
+The interesting result here is that the path works and reports coherently, not
+that it is fast.
+
+**TP=4 does not come up.** Reproducibly, on this image, with an out-of-memory
+raised while `FlatMemoryExecutor` builds its host-side KV mirror:
+
+```
+File ".../tokenspeed/runtime/cache/flat_host_mirror.py", line 127, in __init__
+  torch.zeros(
+torch.AcceleratorError: CUDA error: out of memory
+```
+
+Two things it is not. Not container shared memory: the failure is identical at
+`shm_size: 16g` and `256g`. Not contamination from an earlier cell: the GPUs were
+reset clean immediately before the run. The node has 3 TB of host RAM and eight
+309 GB cards, so neither is scarce, and the error naming CUDA for what the
+traceback shows to be a host allocation is part of why this took a while to pin
+down. Not yet diagnosed further; the cell is left out of the recipe rather than
+shipped red, because ranks that die this way hold their GPU memory long enough to
+poison whatever runs next.
 
 ### Across load shapes (`tokenspeed-serve-load.yaml`)
 
@@ -314,6 +351,39 @@ Keeping only `stderr_tail` was survivable while a failure also produced no
 records, since the `no_bench_export` branch carries stdout; but a later step
 failing after earlier ones exported never reaches that branch, and the trial then
 reported an exit code with the message that explains it discarded.
+
+### A tensor-parallel teardown returns before the GPUs are actually free
+
+`docker run` returning is not the same event as the device memory coming back.
+Measured on gfx950 after a **passing** `--tensor-parallel-size 2` cell: the
+container is gone, `docker ps -a` is empty, `rocm-smi --showpids` reports no KFD
+processes — and one GPU still holds 256 GB of its 309 GB. Only rank 0's device is
+released promptly. The rest clears on its own after roughly 30–45 s.
+
+Nothing about the trial that causes this looks wrong, which is what makes it
+dangerous. aorta starts the next cell immediately, so the cost lands there: the
+next tensor-parallel cell dies during startup with
+
+```
+torch.AcceleratorError: CUDA error: out of memory
+```
+
+naming a device it never chose, for a model that fits comfortably. That is
+exactly how the `tp4` cell of `tokenspeed-serve-gptoss-tp.yaml` first failed —
+and read as "TP=4 does not work on this stack", which was wrong.
+
+So the workload samples per-GPU VRAM before the run and waits for it to come back
+afterwards, up to 5 minutes, before returning the result. The common case exits
+on the first sample and costs nothing. If memory is still outstanding when
+waiting stops helping, the trial fails with `gpu_memory_not_reclaimed` naming the
+GPU and the `rocm-smi --gpureset -d N` needed to reclaim it — a real leak is
+worth a red cell, because the alternative is a green one that breaks the next.
+
+The comparison is against a pre-run sample, not an absolute ceiling, so another
+tenant's memory on a shared node is never attributed to this trial. VRAM is read
+from `/sys/class/drm/card*/device/mem_info_vram_used` — no subprocess, no PATH
+assumption — and a node that does not expose it simply skips the check, since a
+missing measurement is not evidence of a leak.
 
 ### Ports and timeouts are validated before anything computes with them
 
@@ -619,6 +689,10 @@ forwarding them would advertise a shape the run did not have.
   `aorta-internal`, where perf gating is still awaiting review.
 - **`sharegpt` measured on hardware.** The plumbing is tested; no run has been
   made against a real ShareGPT file, so there are no numbers from it yet.
-- **TP above 4, and RCCL mitigations.** `tokenspeed-serve-gptoss-tp.yaml` covers
-  1/2/4 on one node. Wider TP and the RCCL knobs that become relevant with it
-  are untouched.
+- **TP=4 and above.** TP 1 and 2 work; 4 fails to come up, diagnosed as far as
+  the host-side KV mirror allocation but no further (see above). The RCCL
+  mitigations that would become relevant at wider TP are untouched.
+- **Why crashed TP ranks keep their memory.** A clean teardown clears in 30-45s
+  and the workload waits it out. Ranks that die during startup hold theirs past
+  a 5-minute wait and need `rocm-smi --gpureset`. Worth understanding, since it
+  is what turns one failed TP cell into a failed sweep.

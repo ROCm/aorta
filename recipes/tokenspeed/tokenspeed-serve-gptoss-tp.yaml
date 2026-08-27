@@ -17,8 +17,25 @@
 # get worse with every GPU added for reasons that say nothing about the stack.
 # At 21B the per-GPU KV-cache headroom actually changes with TP.
 #
-# Requires >= 4 visible GPUs. `hip_visible_devices` is deliberately unset so the
+# Requires >= 2 visible GPUs. `hip_visible_devices` is deliberately unset so the
 # engine sees the whole node; TP size is what varies.
+#
+# TP=4 is NOT here, and its absence is a finding rather than an oversight. It
+# fails to come up on this image, reproducibly, with an out-of-memory raised
+# while `FlatMemoryExecutor` builds its host-side KV mirror:
+#
+#   flat_host_mirror.py:127, in __init__
+#     torch.zeros(...)
+#   torch.AcceleratorError: CUDA error: out of memory
+#
+# Ruled out: container shared memory (identical failure at `shm_size: 16g` and
+# `256g`), and contamination from an earlier cell (the GPUs were reset clean
+# immediately beforehand). The node has 3 TB of host RAM and eight 309 GB cards,
+# so it is not short of either. Adding the cell back would also leave the node
+# needing `rocm-smi --gpureset` after every sweep, because ranks that die this
+# way hold their memory for longer than the workload is willing to wait -- see
+# "A tensor-parallel teardown returns before the GPUs are actually free" in
+# docs/tokenspeed-serving.md.
 
 schema_version: 1
 ticket: TOKENSPEED-SERVE-GPTOSS-TP
@@ -57,9 +74,3 @@ cells:
     environment: local
     workload_config:
       serve_args: ["--tensor-parallel-size", "2"]
-
-  - name: tp4
-    mitigations: [none]
-    environment: local
-    workload_config:
-      serve_args: ["--tensor-parallel-size", "4"]

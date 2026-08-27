@@ -1808,3 +1808,111 @@ def test_the_script_validates_the_dataset_independently(tmp_path, env_overrides,
     )
     assert proc.returncode == 64, proc.stdout + proc.stderr
     assert expect in proc.stdout, proc.stdout
+
+
+def _cycle_samples(samples: list[dict[int, int]]):
+    """VRAM readings: each entry once, then the last one forever.
+
+    The poll loop reads until the memory comes back or the deadline passes, so a
+    fixed-length iterator would raise StopIteration instead of exercising it.
+    """
+    remaining = list(samples)
+
+    def read() -> dict[int, int]:
+        return remaining.pop(0) if len(remaining) > 1 else dict(remaining[0])
+
+    return read
+
+
+def test_a_slow_tensor_parallel_teardown_is_waited_out(tmp_path, monkeypatch):
+    """`docker run` returning is not the same event as the memory coming back.
+
+    Measured after a *passing* TP=2 cell on gfx950: container gone, nothing
+    holding /dev/kfd, and one GPU still reporting 256 GB of its 309 GB. It clears
+    on its own in 30-45s -- only rank 0's device is released promptly. aorta
+    starts the next cell immediately, which is how the `tp4` cell first died,
+    with an out-of-memory error that mentioned neither tensor parallelism nor the
+    cell that actually caused it.
+    """
+    samples = iter(
+        [
+            {0: 3 * 1024**3, 1: 1 * 1024**3},  # before
+            {0: 3 * 1024**3, 1: 257 * 1024**3},  # still held right after exit
+            {0: 3 * 1024**3, 1: 257 * 1024**3},
+            {0: 3 * 1024**3, 1: 2 * 1024**3},  # released
+        ]
+    )
+    monkeypatch.setattr(mod, "_vram_used_by_gpu", lambda: next(samples))
+    monkeypatch.setattr(mod, "_VRAM_RELEASE_POLL_SEC", 0)
+
+    wl = _make(tmp_path, num_prompts=64)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
+    result = wl.run()
+
+    assert result.passed is True, result.failure_details
+    assert not [d for d in result.failure_details if d["reason"] == "gpu_memory_not_reclaimed"]
+
+
+def test_memory_never_released_fails_the_trial_that_held_it(tmp_path, monkeypatch):
+    """Once waiting has stopped helping, a green cell would quietly break the
+    next one -- nothing in this trial's own numbers looks wrong."""
+    monkeypatch.setattr(
+        mod,
+        "_vram_used_by_gpu",
+        _cycle_samples([{0: 1 * 1024**3}, {0: 257 * 1024**3}]),
+    )
+    monkeypatch.setattr(mod, "_VRAM_RELEASE_POLL_SEC", 0)
+    monkeypatch.setattr(mod, "_VRAM_RELEASE_TIMEOUT_SEC", 0)
+
+    wl = _make(tmp_path, num_prompts=64)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
+    result = wl.run()
+
+    leaks = [d for d in result.failure_details if d["reason"] == "gpu_memory_not_reclaimed"]
+    assert result.passed is False
+    assert [d["gpu"] for d in leaks] == [0], result.failure_details
+    assert "gpureset" in leaks[0]["detail"]
+
+
+def test_normal_driver_overhead_is_not_reported_as_a_leak(tmp_path, monkeypatch):
+    """A few GiB survives any run, so the check is against growth past a margin.
+    Reporting that as a leak would make every cell red and the signal useless."""
+    samples = iter([{0: 1 * 1024**3}, {0: 3 * 1024**3}])
+    monkeypatch.setattr(mod, "_vram_used_by_gpu", lambda: next(samples))
+
+    wl = _make(tmp_path, num_prompts=64)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
+    result = wl.run()
+
+    assert result.passed is True, result.failure_details
+    assert not [d for d in result.failure_details if d["reason"] == "gpu_memory_not_reclaimed"]
+
+
+def test_another_tenants_memory_is_not_attributed_to_this_trial(tmp_path, monkeypatch):
+    """Compared against a pre-run sample, not an absolute ceiling: on a shared
+    node a GPU can already be busy, and that is not this trial's doing."""
+    samples = iter([{0: 200 * 1024**3}, {0: 200 * 1024**3}])
+    monkeypatch.setattr(mod, "_vram_used_by_gpu", lambda: next(samples))
+
+    wl = _make(tmp_path, num_prompts=64)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
+    result = wl.run()
+
+    assert result.passed is True, result.failure_details
+
+
+def test_the_leak_check_disables_itself_when_vram_cannot_be_read(tmp_path, monkeypatch):
+    """A missing measurement is not evidence of a leak, and this has to keep
+    working on any node whose sysfs does not expose the attribute."""
+    monkeypatch.setattr(mod, "_vram_used_by_gpu", dict)
+
+    wl = _make(tmp_path, num_prompts=64)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
+    result = wl.run()
+
+    assert result.passed is True, result.failure_details

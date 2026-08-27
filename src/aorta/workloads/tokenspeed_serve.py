@@ -106,6 +106,17 @@ _DEFAULT_SHM_SIZE = "16g"
 _MAX_READY_TIMEOUT_SEC = 86400
 _MAX_TEARDOWN_GRACE_SEC = 3600
 
+# A few GiB of driver and runtime overhead survives any run, so the check is
+# against growth past a margin rather than against zero. The leak this exists for
+# is two orders of magnitude larger -- 256 GB on a 309 GB card.
+_VRAM_LEAK_THRESHOLD_BYTES = 8 * 1024**3
+# Generous against the ~30-45s observed for a tensor-parallel teardown, because
+# the failure this prevents is expensive (the next cell dies during startup) and
+# the wait costs nothing when there is nothing to wait for -- the common case
+# exits on the first sample.
+_VRAM_RELEASE_TIMEOUT_SEC = 300
+_VRAM_RELEASE_POLL_SEC = 5
+
 _DEFAULT_DATASET = "random"
 # `random` generates its own prompts, so it is the only one that needs nothing
 # staged; `sharegpt` measures against real conversation lengths, which is what
@@ -1168,6 +1179,7 @@ class TokenSpeedServeWorkload(Workload):
             self._run_token,
         )
 
+        vram_before = _vram_used_by_gpu()
         start = time.monotonic()
         timed_out = False
         try:
@@ -1207,7 +1219,52 @@ class TokenSpeedServeWorkload(Workload):
             elapsed=elapsed,
             stdout=stdout,
             stderr=stderr,
+            leaked_vram=self._await_vram_release(vram_before),
         )
+
+    def _await_vram_release(self, before: dict[int, int]) -> dict[int, int]:
+        """Block until the GPUs this trial used are actually free again.
+
+        ``docker run`` returning is not the same event as the device memory
+        coming back. With ``--tensor-parallel-size 2`` on gfx950, measured after
+        a *passing* cell: the container is gone, nothing holds /dev/kfd, and one
+        GPU still reports 256 GB of its 309 GB in use. It clears on its own after
+        roughly 30-45s -- only rank 0's device is released promptly.
+
+        Nothing in the trial that caused this looks wrong, which is what makes it
+        worth handling here. aorta starts the next cell immediately, so the cost
+        lands there instead: a tensor-parallel cell run straight after another
+        one dies during startup with an out-of-memory error, naming a device it
+        never chose and a model that fits comfortably. That is exactly how the
+        `tp4` cell of `tokenspeed-serve-gptoss-tp.yaml` first failed.
+
+        So this waits rather than reporting, and only reports what is still held
+        once waiting has stopped helping. Compared against a pre-run sample so
+        another tenant's memory on a shared node is never attributed here.
+        """
+        if not before:
+            return {}
+
+        deadline = time.monotonic() + _VRAM_RELEASE_TIMEOUT_SEC
+        outstanding: dict[int, int] = {}
+        while True:
+            after = _vram_used_by_gpu()
+            outstanding = {
+                index: after[index] - used_before
+                for index, used_before in before.items()
+                if index in after and after[index] - used_before >= _VRAM_LEAK_THRESHOLD_BYTES
+            }
+            if not outstanding or time.monotonic() >= deadline:
+                break
+            log.info(
+                "tokenspeed_serve: waiting for %d GPU(s) to release memory after " "teardown (%s)",
+                len(outstanding),
+                ", ".join(
+                    f"GPU {i}: {b / 1024**3:.0f} GiB" for i, b in sorted(outstanding.items())
+                ),
+            )
+            time.sleep(_VRAM_RELEASE_POLL_SEC)
+        return outstanding
 
     def _missing_core_metrics(self, record: _StepRecord) -> list[str]:
         """Core metrics a measured step must actually carry.
@@ -1411,8 +1468,33 @@ class TokenSpeedServeWorkload(Workload):
         elapsed: float,
         stdout: str,
         stderr: str,
+        leaked_vram: dict[int, int] | None = None,
     ) -> WorkloadResult:
         failure_details: list[dict[str, Any]] = []
+
+        # Only reached after waiting past the point where waiting helps -- see
+        # _await_vram_release. Reported as a failure rather than a warning
+        # because the alternative is a green cell that quietly breaks the next
+        # one: nothing in this trial's own numbers looks wrong, and the cost
+        # lands later as an out-of-memory error naming a device nobody chose.
+        for index, grown in sorted((leaked_vram or {}).items()):
+            failure_details.append(
+                {
+                    "reason": "gpu_memory_not_reclaimed",
+                    "detail": (
+                        f"GPU {index} still holds {grown / 1024**3:.1f} GiB more "
+                        "than before this trial, "
+                        f"{_VRAM_RELEASE_TIMEOUT_SEC}s after the container "
+                        "exited. A tensor-parallel teardown normally clears in "
+                        "30-45s; this did not. The next cell on this GPU will "
+                        "fail during startup with an out-of-memory error that "
+                        "does not mention tensor parallelism. Reclaim with "
+                        f"`rocm-smi --gpureset -d {index}`."
+                    ),
+                    "gpu": index,
+                    "leaked_bytes": grown,
+                }
+            )
 
         if timed_out:
             failure_details.append(
@@ -1757,6 +1839,31 @@ def _resolve_port(request: Any, *, avoid: set[int] | None = None, near: int | No
         "tokenspeed_serve: could not find an ephemeral port outside "
         f"{sorted(avoid)} after 20 attempts"
     )
+
+
+def _vram_used_by_gpu() -> dict[int, int]:
+    """Bytes of VRAM in use per GPU, or ``{}`` if that cannot be determined.
+
+    Read from the amdgpu sysfs nodes rather than by shelling out to rocm-smi:
+    this runs on the hot path around every trial, sysfs needs no subprocess and
+    no PATH assumption, and a node without the attribute simply drops out of the
+    comparison instead of failing the trial. An empty result disables the leak
+    check, which is the right default -- a missing measurement is not evidence of
+    a leak.
+    """
+    cards: list[tuple[int, int]] = []
+    for path in sorted(Path("/sys/class/drm").glob("card*/device/mem_info_vram_used")):
+        try:
+            card = int(path.parent.parent.name[len("card") :])
+            cards.append((card, int(path.read_text().strip())))
+        except (OSError, ValueError):
+            continue
+    # Keyed by position, not by the DRM card number. Those are not the indices
+    # anyone reading the report has in mind: on this gfx950 node the cards
+    # enumerate 0, 8, 16, ... , so reporting "GPU 8" would name a device that
+    # does not exist as far as rocm-smi is concerned -- and the `--gpureset -d`
+    # hint alongside it would be wrong.
+    return {position: used for position, (_card, used) in enumerate(sorted(cards))}
 
 
 def _host_username() -> str:
