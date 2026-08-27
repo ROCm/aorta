@@ -133,6 +133,7 @@ def _stub_docker(
     def fake_run(argv, **kwargs):
         if capture is not None:
             capture["argv"] = argv
+            capture["kwargs"] = kwargs
         for index, doc in enumerate(docs or [], start=1):
             path = wl._out_dir / f"bench.{wl._run_token}.step{index}.json"
             path.write_text(json.dumps(doc), encoding="utf-8")
@@ -510,12 +511,18 @@ def test_username_env_omitted_when_not_running_as_current_user(tmp_path):
 
 
 def test_hf_token_forwarded_by_name_only(tmp_path, monkeypatch):
+    """Read from the host env named by `hf_token_env`, so no recipe holds it --
+    and kept out of `_container_env`, since everything there is rendered into
+    the docker client's argv as `-e KEY=VALUE`."""
     monkeypatch.setenv("MY_HF_TOKEN", "secret-value")
     wl = _make(tmp_path, hf_token_env="MY_HF_TOKEN")
     wl.setup()
     wl._run_token = "tok"
     wl._port, wl._control_port = 8000, 8001
-    assert wl._container_env()["HF_TOKEN"] == "secret-value"
+    assert "HF_TOKEN" not in wl._container_env()
+    assert wl._secret_env() == {"HF_TOKEN": "secret-value"}
+    argv = wl._docker_argv(wl._container_env())
+    assert argv[argv.index("HF_TOKEN") - 1] == "-e"
 
 
 def test_offline_mode_sets_hub_offline(tmp_path):
@@ -2436,3 +2443,91 @@ def test_the_leak_check_disables_itself_when_vram_cannot_be_read(tmp_path, monke
     result = wl.run()
 
     assert result.passed is True, result.failure_details
+
+
+def test_elapsed_covers_the_drain_wait_the_cell_actually_spent(tmp_path, monkeypatch):
+    """The GPU is unusable for the whole post-exit wait, so the clock cannot
+    stop at container exit.
+
+    A sweep's budget is summed from `elapsed_sec`, and stopping early made every
+    cell under-report by its own drain time -- up to `_VRAM_RELEASE_TIMEOUT_SEC`
+    each, which on a TP teardown is the 30-45s this workload explicitly waits
+    for. The container-only figure is still available, as a metric.
+    """
+    clock = iter([1000.0, 1010.0, 1042.0])  # start, container exit, after drain
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(mod, "_vram_used_by_gpu", dict)  # drain wait returns at once
+
+    wl = _make(tmp_path, num_prompts=64)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)])
+    result = wl.run()
+
+    assert result.elapsed_sec == pytest.approx(42.0)
+    assert result.metrics["container_elapsed_sec"] == pytest.approx(10.0)
+
+
+def test_an_hf_token_is_never_written_into_the_docker_command_line(tmp_path, monkeypatch):
+    """`/proc/<pid>/cmdline` is world-readable, and the client lives for the
+    whole trial.
+
+    `-e HF_TOKEN=<value>` put a credential in that argv for the hours a serving
+    sweep runs, on nodes that are shared by construction. The name is forwarded
+    on its own instead, and the value travels in the client's environment, which
+    only the owning uid and root can read.
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_value")
+    capture: dict = {}
+
+    wl = _make(tmp_path, num_prompts=64)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[_bench_doc(completed=64, failed=0)], capture=capture)
+    wl.run()
+
+    argv = capture["argv"]
+    assert not [arg for arg in argv if "hf_secret_value" in arg], argv
+    assert "HF_TOKEN" in argv, argv
+    assert capture["kwargs"]["env"]["HF_TOKEN"] == "hf_secret_value"
+
+
+def test_an_env_name_is_not_mistaken_for_a_short_flag_cluster(tmp_path):
+    """A short cluster holds boolean flags only as far as the first option that
+    takes a value.
+
+    `-emodel_id=x` is `-e` with an attached value, but scanning the whole word
+    for owned letters found the `d` in `model` and rejected it as if the recipe
+    had asked for `--detach`. The message named a flag that was never written,
+    on a recipe that was correct.
+    """
+    wl = _make(tmp_path, docker_args=["-emodel_id=x"])
+    wl.setup()
+    wl._run_token = "tok"
+    wl._port, wl._control_port = 8000, 8001
+    assert "-emodel_id=x" in wl._docker_argv(wl._container_env())
+
+
+def test_two_users_on_one_node_get_separate_scratch(tmp_path, monkeypatch):
+    """A fixed path in /tmp belongs to whoever created it.
+
+    The second user failed while creating `scripts/` beneath a root made at the
+    first user's umask -- a permission error unrelated to anything in their
+    recipe -- and where the mode did allow writing, `keep_work_dir: false`
+    removed the other user's exports mid-run. Every recipe here names the same
+    `/tmp/ts-work-serve`, so the scoping applies to the configured value.
+    """
+    root = tmp_path / "shared"
+    dirs = []
+    for uid in (1000, 1001):
+        monkeypatch.setattr(mod.os, "getuid", lambda uid=uid: uid)
+        wl = _make(tmp_path, work_dir=str(root))
+        wl.setup()
+        dirs.append(wl._out_dir)
+        # The cache is shared on purpose: content-addressed, read-only in
+        # practice, and ~40 GB for gpt-oss.
+        assert wl._hf_home == root / "hf"
+
+    assert dirs[0] != dirs[1]
+    assert all(str(d).startswith(str(root)) for d in dirs)
+    # Enterable and writable by every user, sticky like /tmp so neither can
+    # remove the other's scratch.
+    assert root.stat().st_mode & 0o1777 == 0o1777

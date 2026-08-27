@@ -364,9 +364,14 @@ class TokenSpeedServeWorkload(Workload):
         bench_args: extra ``tokenspeed bench serve`` args (list or string).
         work_dir: node-local scratch root for scripts, HF cache and exported
             JSON (default ``"/tmp/ts-work-serve"``). Must be node-local: an
-            NFS home under root-squash cannot be bind-mounted.
-        hf_home: HF cache directory (default ``<work_dir>/hf``). Persisting
-            this across runs is what keeps a big model from re-downloading.
+            NFS home under root-squash cannot be bind-mounted. Scripts and
+            exports go to a per-uid ``<work_dir>/u<uid>`` so two users on one
+            node do not collide.
+        hf_home: HF cache directory (default ``<work_dir>/hf``, shared across
+            users of the node rather than per-uid, since a snapshot is large
+            and read-only in practice). Persisting this across runs is what
+            keeps a big model from re-downloading; point it elsewhere when the
+            shared cache is not readable by this user.
         hf_token_env: name of a host env var holding an HF token, forwarded
             for gated models (default ``"HF_TOKEN"``; skipped when unset).
         hf_offline: serve strictly from the pre-populated HF cache
@@ -566,10 +571,23 @@ class TokenSpeedServeWorkload(Workload):
                 'Set one of them to "auto", or give them different values.'
             )
 
-        work_dir = cfg.get("work_dir") or _DEFAULT_WORK_DIR
-        self._work_dir = Path(str(work_dir)).resolve()
+        # `work_dir` is the shared root; the scratch this trial writes to is a
+        # per-uid directory under it. A fixed path in /tmp is owned by whoever
+        # got there first, at that user's umask, so the second user on the node
+        # failed creating `scripts/` inside it -- a permission error with no
+        # connection to anything in their recipe -- and where the mode did
+        # permit writing, `keep_work_dir: false` deleted the other user's
+        # exports mid-run. Every recipe here names the same `/tmp/ts-work-serve`,
+        # so scoping only the default would have left that unfixed.
+        self._work_root = Path(str(cfg.get("work_dir") or _DEFAULT_WORK_DIR)).resolve()
+        self._work_dir = self._work_root / f"u{os.getuid()}"
+        # The cache stays on the shared root on purpose: it is content-addressed
+        # and read-only in practice, a gpt-oss snapshot is ~40 GB, and per-uid
+        # copies would mean each user on the node downloading it again. Sharing
+        # depends on the pre-warm being world-readable; `hf_home` is the way out
+        # when it is not.
         hf_home = cfg.get("hf_home")
-        self._hf_home = Path(str(hf_home)).resolve() if hf_home else self._work_dir / "hf"
+        self._hf_home = Path(str(hf_home)).resolve() if hf_home else self._work_root / "hf"
         self._hf_token_env = str(cfg.get("hf_token_env") or "HF_TOKEN")
 
         self._gates = self._validated_gates()
@@ -823,6 +841,31 @@ class TokenSpeedServeWorkload(Workload):
         # container do it: as a non-root user the container can create paths
         # *under* the mount but the mount root must already exist and be owned
         # by the caller.
+        # The shared root has to be enterable and writable by every user of the
+        # node, or the second one cannot create their own `u<uid>` beneath a
+        # root the first created at a 022 umask. Same reasoning as /tmp itself,
+        # including the sticky bit, which is what stops one user removing
+        # another's scratch. Only attempted on creation: an existing root is the
+        # administrator's (or the first user's) to set, and silently widening it
+        # would be its own surprise.
+        try:
+            existed = self._work_root.exists()
+            self._work_root.mkdir(parents=True, exist_ok=True)
+            if not existed:
+                # mkdir's mode argument is masked by the umask, which is the
+                # very thing being worked around here, so set it afterwards.
+                # Suppressed on failure: losing the race to another user's
+                # setup() leaves their mode in place, which is the same
+                # outcome as finding the root already there.
+                with contextlib.suppress(OSError):
+                    os.chmod(self._work_root, 0o1777)
+        except OSError as exc:
+            raise RuntimeError(
+                f"tokenspeed_serve: cannot create {self._work_root}: {exc}. "
+                "work_dir must be a node-local, writable path (an NFS home "
+                "under root-squash cannot be bind-mounted into a container)."
+            ) from exc
+
         for directory in (
             self._scripts_dir,
             self._out_dir,
@@ -944,11 +987,12 @@ class TokenSpeedServeWorkload(Workload):
         if self._hip_visible_devices is not None:
             env["HIP_VISIBLE_DEVICES"] = self._hip_visible_devices
 
-        # Gated models need a token. Forwarded by name from the host env so the
-        # value never appears in a recipe or in run artifacts.
-        token = os.environ.get(self._hf_token_env)
-        if token:
-            env["HF_TOKEN"] = token
+        # Gated models need a token, and it is deliberately *not* put in here.
+        # Everything in this mapping becomes `-e KEY=VALUE` in the docker
+        # client's argv, which /proc/<pid>/cmdline exposes to every user on the
+        # node for as long as the trial runs. Keeping the token out of the
+        # recipe and out of the logs is not enough on its own if the value ends
+        # up there. See _docker_argv and _secret_env for how it is passed.
         if self._hf_offline:
             # For nodes with no egress: serve strictly from the pre-populated
             # cache and fail loudly rather than hanging on a doomed download.
@@ -1006,6 +1050,21 @@ class TokenSpeedServeWorkload(Workload):
             env.update(trial_env)
         return env
 
+    def _secret_env(self) -> dict[str, str]:
+        """Values forwarded by name rather than by value.
+
+        Anything here is passed as a bare ``-e NAME``, so docker picks it up
+        from its own environment instead of carrying it in argv. The distinction
+        matters because ``/proc/<pid>/cmdline`` is world-readable while
+        ``/proc/<pid>/environ`` is not, and the docker client lives for the
+        whole trial.
+
+        Read from the host environment under ``hf_token_env``, so the value
+        never appears in a recipe either.
+        """
+        token = os.environ.get(self._hf_token_env)
+        return {"HF_TOKEN": token} if token else {}
+
     def _docker_argv(self, env: dict[str, str]) -> list[str]:
         argv = [
             "docker",
@@ -1054,7 +1113,14 @@ class TokenSpeedServeWorkload(Workload):
             # delete them -- the exact EPERM the Phase 1 harvest path hit.
             argv += ["--user", f"{os.getuid()}:{os.getgid()}"]
         argv += docker_env_flags(env)
-        self._reject_owned_docker_args(owned_env=set(env))
+        # Passed by name, with no value: docker reads it from its own
+        # environment, which we populate when spawning the client. That keeps
+        # the token out of the argv, where it would be world-readable via
+        # /proc/<pid>/cmdline, and confines it to /proc/<pid>/environ, which is
+        # readable only by the owning uid and root.
+        for name in self._secret_env():
+            argv += ["-e", name]
+        self._reject_owned_docker_args(owned_env=set(env) | set(self._secret_env()))
         argv += self._docker_args
         argv += [
             "--entrypoint",
@@ -1130,6 +1196,14 @@ class TokenSpeedServeWorkload(Workload):
     # artifacts, `-v/tmp:/ts-out` displaces the mount the audit reads.
     _OWNED_ATTACHED_SHORT_FLAGS = ("-v", "-u")
 
+    # A short cluster holds boolean flags only up to the first option that takes
+    # a value: in `-emodel=x` the `e` consumes the remainder, so the letters
+    # after it are a *value*, not flags. Scanning the whole word for owned
+    # letters read that value as a cluster and rejected `-emodel=...` -- a legal
+    # env-var spelling -- claiming it set `-d`. These are docker's value-taking
+    # short options; a letter outside the set is boolean and keeps the scan going.
+    _SHORT_OPTS_WITH_VALUE = frozenset("evuplwmach")
+
     def _reject_owned_docker_args(self, *, owned_env: set[str] | None = None) -> None:
         """Refuse ``docker_args`` that would displace a generated option."""
         expect_env_value = False
@@ -1141,14 +1215,13 @@ class TokenSpeedServeWorkload(Workload):
                     break
             # A combined cluster of boolean short options: `-dit` is three flags
             # in one word, so `-d` is present without ever appearing as a token.
-            if (
-                arg.startswith("-")
-                and not arg.startswith("--")
-                and len(arg) > 1
-                and set(arg[1:]) & self._OWNED_SHORT_FLAG_LETTERS
-                and arg[1:].isalpha()
-            ):
-                flag = f"-{next(iter(set(arg[1:]) & self._OWNED_SHORT_FLAG_LETTERS))}"
+            if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+                for letter in arg[1:]:
+                    if letter in self._OWNED_SHORT_FLAG_LETTERS:
+                        flag = f"-{letter}"
+                        break
+                    if letter in self._SHORT_OPTS_WITH_VALUE or not letter.isalpha():
+                        break
             if flag in self._OWNED_DOCKER_FLAGS:
                 raise ValueError(
                     f"tokenspeed_serve: docker_args may not set {flag}; this "
@@ -1232,6 +1305,10 @@ class TokenSpeedServeWorkload(Workload):
                     capture_output=True,
                     text=True,
                     timeout=self._timeout,
+                    # Carries the values referenced by the bare `-e NAME` flags
+                    # in argv. Inherits the rest, since docker needs its own
+                    # environment (DOCKER_HOST, PATH) to work at all.
+                    env={**os.environ, **self._secret_env()},
                 )
             stdout, stderr, exit_code = proc.stdout, proc.stderr, proc.returncode
         except subprocess.TimeoutExpired as exc:
@@ -1252,15 +1329,24 @@ class TokenSpeedServeWorkload(Workload):
             # original exception still propagates as the failure.
             self._force_remove_container()
             raise
-        elapsed = time.monotonic() - start
+        container_elapsed = time.monotonic() - start
 
         records = self._collect_step_records()
         outstanding_vram, vram_attributed = self._await_vram_release(vram_before)
+        # After the drain wait, not before it. That wait blocks this cell for up
+        # to _VRAM_RELEASE_TIMEOUT_SEC and the GPU is unusable for the whole of
+        # it, so stopping the clock at container exit reported a trial that
+        # occupied the node for minutes longer than its own `elapsed_sec` -- and
+        # a sweep's budget, summed from these, came out short by the drain time
+        # of every cell. The container-only figure is still what benchmark
+        # duration means, so it stays, as a metric.
+        elapsed = time.monotonic() - start
         return self._build_result(
             records=records,
             exit_code=exit_code,
             timed_out=timed_out,
             elapsed=elapsed,
+            container_elapsed=container_elapsed,
             stdout=stdout,
             stderr=stderr,
             leaked_vram=outstanding_vram,
@@ -1603,6 +1689,7 @@ class TokenSpeedServeWorkload(Workload):
         exit_code: int | None,
         timed_out: bool,
         elapsed: float,
+        container_elapsed: float | None = None,
         stdout: str,
         stderr: str,
         leaked_vram: dict[int, int] | None = None,
@@ -1745,6 +1832,8 @@ class TokenSpeedServeWorkload(Workload):
                 )
 
         metrics = self._aggregate(records, stdout=stdout)
+        if container_elapsed is not None:
+            metrics["container_elapsed_sec"] = container_elapsed
         # Gates are only meaningful against a measurement. With no export there
         # is nothing to compare, and reporting `gate_metric_missing` here would
         # point the reader at percentile_metrics -- a recipe problem -- when the

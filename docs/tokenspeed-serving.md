@@ -89,6 +89,7 @@ across the measured steps:
 | `duration`, `total_input_tokens`, `total_output_tokens` | Work done per step |
 | `completed_total`, `failed_total` | Served-request audit (sums, not means) |
 | `server_startup_sec` | Bring-up time, from the script's marker |
+| `container_elapsed_sec` | `docker run` wall clock, excluding the VRAM drain wait |
 
 `tokens_per_sec` is an alias for `output_throughput`, present because AORTA's CI
 gating allowlist already knew that name. TTFT is deliberately **not** aliased to
@@ -97,6 +98,13 @@ would gate a differently-defined quantity.
 
 `step_times_ms` is the per-step bench `duration`, so `perf.md`'s step-timing
 columns describe the bench runs.
+
+`elapsed_sec` covers the whole cell, including the post-exit wait for VRAM to be
+released. That wait blocks the trial and the GPU stays unusable throughout it, so
+stopping the clock at container exit reported a cell that held the node for
+minutes longer than its own `elapsed_sec`, and a sweep budget summed from those
+came out short by the drain time of every cell. `container_elapsed_sec` is the
+`docker run` duration on its own, for when benchmark time is what is wanted.
 
 A note on `median_itl_ms`: it is often near zero while `p99_itl_ms` is tens of
 milliseconds. That is not a bug — the gateway delivers several tokens per SSE
@@ -255,7 +263,7 @@ matter most:
 | `warmup_steps` | `1` | Discarded bench steps. See below. |
 | `num_warmups` | `1` | Warmup requests *within* a bench step. |
 | `ignore_eos` | `true` | Holds OSL fixed so cells do equal work. |
-| `work_dir` | `/tmp/ts-work-serve` | Must be node-local. |
+| `work_dir` | `/tmp/ts-work-serve` | Must be node-local. Scratch is per-uid beneath it; the HF cache is not. See below. |
 | `ready_timeout_sec` | `900` | Raise it for big models on a cold cache. |
 | `network` | `host` | See below. |
 | `port` / `control_port` | `auto` | Free ports, picked per trial. Explicit values must be in 1024..65535 and must differ. |
@@ -585,6 +593,36 @@ An NFS home under root-squash cannot be bind-mounted: `docker run -v
 workload stages the script from the installed package into `work_dir` for this
 reason, so no manual staging step is needed. Keeping `work_dir` stable across
 runs is also what stops every run from re-downloading weights.
+
+### `work_dir` is a shared root; scratch beneath it is per-uid
+
+Scripts and exports go to `<work_dir>/u<uid>`, not to `work_dir` itself. A fixed
+path in `/tmp` is owned by whichever user got there first, at that user's umask,
+so the second user on the node failed while creating `scripts/` — a permission
+error with nothing to do with their recipe — and where the mode did permit
+writing, `keep_work_dir: false` deleted the other user's exports mid-run. Every
+recipe in this repo names the same `/tmp/ts-work-serve`, so this is applied to
+the configured value and not only to the default. The root is created `1777`
+when the workload creates it, for the same reason `/tmp` is: the sticky bit lets
+everyone create their own subdirectory while stopping anyone removing another's.
+
+The HF cache is the deliberate exception. It stays at `<work_dir>/hf`, shared
+across users of the node, because a snapshot is content-addressed, read-only in
+practice, and large — a gpt-oss pre-warm is roughly 40 GB, and a per-uid copy
+would mean every user downloading it again. That works as long as the pre-warmed
+cache is readable by the running user; set `hf_home` explicitly when it is not.
+
+### An HF token is passed by name, never by value
+
+Gated models need a token, read from the host environment variable named by
+`hf_token_env` (default `HF_TOKEN`) so the value is never in a recipe. It is
+forwarded to the container as a bare `docker run -e HF_TOKEN`, with no value:
+docker takes it from its own environment, which the workload populates when it
+spawns the client. The value-carrying spelling, `-e HF_TOKEN=<value>`, would put
+the token in the docker client's argv, and `/proc/<pid>/cmdline` is readable by
+every user on the node for as long as the trial runs — minutes to hours on a
+serving benchmark, on shared nodes. `/proc/<pid>/environ` is readable only by
+the owning uid and root, which is where it lives instead.
 
 ### A timeout kills the docker client, not the server
 
