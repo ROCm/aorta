@@ -259,8 +259,15 @@ def test_declared_isolation_matches_registered_policy():
         ("metric_percentiles", "50,100", "must be in"),
         ("metric_percentiles", "50,abc", "is not a number"),
         ("metric_percentiles", "50,,90", "empty entry"),
-        ("port", 0, "1..65535"),
-        ("port", 70000, "1..65535"),
+        ("port", 0, "1024..65535"),
+        ("port", 70000, "1024..65535"),
+        # Rejected here because ts_bench_serve.sh rejects it in the container:
+        # the engine runs unprivileged and cannot bind a reserved port. Accepting
+        # it meant a recipe passed setup() and was then guaranteed to fail with
+        # the script's exit 64, after occupying a node, reported as a workload
+        # failure rather than as the configuration error it is.
+        ("port", 80, "1024..65535"),
+        ("control_port", 1023, "1024..65535"),
         ("port", "nope", 'must be an int or "auto"'),
         ("ignore_eos", "yes", "must be a bool"),
         ("serve_args", 5, "must be a string or list"),
@@ -1193,6 +1200,18 @@ def test_the_render_group_is_added_alongside_video(tmp_path):
         ("TS_BENCH_ARGS", "--num-prompts"),
         ("TS_BENCH_ARGS", "--output-file"),
         ("TS_BENCH_ARGS", "--base-url"),
+        # The load controls, which are worse than the plumbing above rather than
+        # merely equivalent: `--max-concurrency 1` against a configured cap of 8
+        # changes the load actually applied while the host still publishes 8, and
+        # both request audits pass -- every request completed, none failed -- so
+        # the cell goes green describing a run that did not happen. Reserved even
+        # at their defaults, where the script appends nothing at all, because the
+        # default is what most cells run.
+        ("TS_BENCH_ARGS", "--max-concurrency"),
+        ("TS_BENCH_ARGS", "--request-rate"),
+        ("TS_BENCH_ARGS", "--num-warmups"),
+        ("TS_BENCH_ARGS", "--ignore-eos"),
+        ("TS_BENCH_ARGS", "--seed"),
     ],
 )
 def test_bench_script_rejects_extra_args_that_shadow_owned_flags(tmp_path, env_key, flag):
@@ -1264,13 +1283,15 @@ def test_docker_args_cannot_displace_a_generated_option(tmp_path, args, expected
 def test_docker_args_cannot_smuggle_a_protocol_variable(tmp_path, spelling):
     """Otherwise this is a second route to the desynchronisation the mitigation
     guard rejects -- one that bypasses it entirely, in every spelling docker
-    accepts for -e."""
-    wl = _make(tmp_path, docker_args=spelling.split())
-    wl.setup()
-    wl._run_token = "tok"
-    wl._port, wl._control_port = 8000, 8001
+    accepts for -e.
+
+    Caught at `setup()`, because the check now consults the declared protocol
+    floor and not only the keys this run happens to have populated -- so it no
+    longer needs the resolved run token to fire, and a bad recipe fails before a
+    node is occupied.
+    """
     with pytest.raises(ValueError, match="TS_RUN_TOKEN"):
-        wl._docker_argv(wl._container_env())
+        _make(tmp_path, docker_args=spelling.split()).setup()
 
 
 def test_docker_args_still_take_unowned_options(tmp_path):
@@ -1502,3 +1523,96 @@ def test_request_counters_are_published_as_sums_not_also_as_means(tmp_path, monk
     assert metrics["failed_total"] == 0
     assert "completed" not in metrics, "the per-step mean is still published"
     assert "failed" not in metrics, "the per-step mean is still published"
+
+
+@pytest.mark.parametrize("doc_value", [True, False])
+def test_boolean_request_counters_are_rejected_not_counted(tmp_path, monkeypatch, doc_value):
+    """`bool` is a subclass of `int`, and `json` decodes true/false into it.
+
+    So `isinstance(completed, int)` accepted an export whose counters were
+    booleans, and with the legitimate `num_prompts: 1` the values then compared
+    equal to 1 and 0 -- an export that counted nothing satisfying the
+    served-request audit outright.
+    """
+    doc = _bench_doc(completed=1, failed=0)
+    doc["completed"] = doc_value
+    doc["failed"] = False
+    wl = _make(tmp_path, num_prompts=1)
+    wl.setup()
+    _stub_docker(wl, monkeypatch, docs=[doc])
+    result = wl.run()
+
+    assert result.passed is False
+    assert any(d["reason"] == "result_json_unusable" for d in result.failure_details)
+    assert "completed_total" not in result.metrics or result.metrics["completed_total"] == 0
+
+
+@pytest.mark.parametrize(
+    "args", [["-u0:0"], ["-v/tmp/x:/ts-out"], ["--ipc=none"], ["--shm-size=1m"], ["--rm=false"]]
+)
+def test_attached_and_late_owned_docker_options_are_rejected(tmp_path, args):
+    """docker accepts a value attached to a short option, and the guard split on
+    `=` only -- so `-u0:0` and `-v/tmp:/ts-out` walked straight past a check that
+    blocked their spaced spellings. `-u0:0` restores root-owned artifacts the
+    next run cannot delete; `-v .../ts-out` displaces the mount the audit reads.
+
+    `--ipc` and `--shm-size` are here because TokenSpeed's scheduler sizes its
+    shared memory against them and a later smaller value fails at load time with
+    an error about shared memory rather than about docker_args; `--rm=false`
+    leaves every completed container behind, so a sweep fills the node up while
+    no single trial looks wrong.
+    """
+    with pytest.raises(ValueError, match="docker_args may not set"):
+        _make(tmp_path, docker_args=args).setup()
+
+
+def test_docker_args_cannot_smuggle_a_key_whose_value_is_absence(tmp_path):
+    """The same absence hole that was fixed for mitigations, one field sideways.
+
+    `owned_env` can only name keys that are present, and an unbounded
+    `max_concurrency` sets no TS_MAX_CONCURRENCY -- so on the default
+    configuration this route ran the container capped while the host reported
+    `max_concurrency: None`.
+    """
+    assert (
+        _make(tmp_path).config.get("max_concurrency") is None
+    ), "precondition: the unguarded default"
+    with pytest.raises(ValueError, match="TS_MAX_CONCURRENCY"):
+        _make(tmp_path, docker_args=["-e", "TS_MAX_CONCURRENCY=1"]).setup()
+
+
+def test_a_late_step_failure_keeps_the_message_that_explains_it(tmp_path, monkeypatch):
+    """Every TS_BENCH_FAIL diagnostic is printed, not raised.
+
+    The nonzero-exit branch kept only stderr, which was survivable while a
+    failure also produced no records -- the `no_bench_export` branch carries
+    stdout. But a later step failing after earlier ones exported leaves that
+    branch unreached, so the trial reported an exit code with the message
+    explaining it discarded.
+    """
+    wl = _make(tmp_path, num_prompts=32, steps=3)
+    wl.setup()
+    _stub_docker(
+        wl,
+        monkeypatch,
+        docs=[_bench_doc(completed=32, failed=0)],
+        exit_code=55,
+        stdout="TS_BENCH_INFO: step 1 ok\nTS_BENCH_FAIL: step 2 SHORTFALL completed=3\n",
+    )
+    result = wl.run()
+
+    assert result.passed is False
+    tails = " ".join(str(d.get("stdout_tail", "")) for d in result.failure_details)
+    assert "TS_BENCH_FAIL: step 2" in tails, result.failure_details
+
+
+@pytest.mark.parametrize("doc_value", [True, False])
+def test_the_in_container_audit_rejects_boolean_counters(tmp_path, doc_value):
+    """The other half of the boolean hole: neither audit may be the lenient one.
+
+    With `num_prompts: 1` a `completed: true` compares equal to 1, so the
+    script's standalone guard would have echoed OK for an export that counted
+    nothing.
+    """
+    verdict = _run_script_audit(tmp_path, {"completed": doc_value, "failed": False}, expected=1)
+    assert verdict.startswith("UNPARSEABLE"), verdict

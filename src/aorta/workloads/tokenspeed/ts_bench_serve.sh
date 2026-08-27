@@ -145,10 +145,23 @@ reject_owned_flags() {
 
 reject_owned_flags TS_SERVE_ARGS "${TS_SERVE_ARGS:-}" \
   --host --port --control-port
+# The load controls belong on this list for a sharper reason than the export
+# plumbing above. `--max-concurrency 1` against a configured cap of 8 changes the
+# load that was actually applied while the host still publishes 8, and both
+# request-count audits pass -- 32 of 32 completed, none failed -- so the cell goes
+# green carrying a number that describes a run that did not happen. Nothing
+# detects it, which is the same mislabelled pass the mitigation guard exists to
+# prevent, arriving through the one field that was still appended unchecked.
+#
+# Included whether or not this script sets the flag for a given configuration:
+# `--max-concurrency` and `--request-rate` are omitted entirely at their
+# defaults, so reserving only what is currently appended would leave the default
+# unguarded -- and the default is what most cells run.
 reject_owned_flags TS_BENCH_ARGS "${TS_BENCH_ARGS:-}" \
   --base-url --output-file --num-prompts --label --request-id-prefix \
   --random-input-len --random-output-len --model --tokenizer --backend \
-  --endpoint --dataset-name --percentile-metrics --metric-percentiles
+  --endpoint --dataset-name --percentile-metrics --metric-percentiles \
+  --max-concurrency --request-rate --num-warmups --ignore-eos --seed
 
 READY_TIMEOUT="${TS_READY_TIMEOUT:-900}"
 BENCH_STEPS="${TS_BENCH_STEPS:-1}"
@@ -448,7 +461,11 @@ if not isinstance(doc, dict):
 
 completed = doc.get("completed")
 failed = doc.get("failed")
-if not isinstance(completed, int) or not isinstance(failed, int):
+# `type(...) is not int`, not `isinstance`: `bool` subclasses `int` in Python and
+# `json` decodes `true`/`false` into it, so with the legitimate `num_prompts: 1`
+# an export carrying `completed: true, failed: false` would compare equal to 1
+# and 0 and satisfy this audit. Neither audit may be the lenient one.
+if type(completed) is not int or type(failed) is not int:
     print(f"UNPARSEABLE completed={completed!r} failed={failed!r}")
     raise SystemExit(0)
 

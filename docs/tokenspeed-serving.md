@@ -186,7 +186,7 @@ matter most:
 | `work_dir` | `/tmp/ts-work-serve` | Must be node-local. |
 | `ready_timeout_sec` | `900` | Raise it for big models on a cold cache. |
 | `network` | `host` | See below. |
-| `port` / `control_port` | `auto` | Free ports, picked per trial. |
+| `port` / `control_port` | `auto` | Free ports, picked per trial. Explicit values must be in 1024..65535 and must differ. |
 | `gates` | none | Optional per-trial perf gates. |
 
 ### Perf gates
@@ -240,6 +240,12 @@ believed, and reading it as "no failures" would admit `completed ==
 num_prompts, failed == -1` with the metrics computed from whatever produced the
 -1. Two independent audits only help if neither of them is the lenient one.
 
+Both layers also check the counters' type exactly, not with `isinstance`. `bool`
+is a subclass of `int` in Python and `json` decodes `true`/`false` into it, so
+with the legitimate `num_prompts: 1` an export carrying `completed: true,
+failed: false` compares equal to 1 and 0 — counters that measured nothing,
+satisfying the guard.
+
 Counting requests is not sufficient on its own, though. An export carrying only
 `completed` and `failed` satisfies both checks, and since `gates` is empty by
 default the cell would go green having measured no duration, no TTFT and no
@@ -265,6 +271,14 @@ three steps, with `p99_tpot_ms` in one, would otherwise evaluate that single ste
 while reading as a three-step aggregate — a gate passing on a third of the
 evidence, when the caller was promised a missing metric instead. Partially
 present keys are listed under `partial_metrics` and remain visible per step.
+
+When a step does fail, the message explaining it is on **stdout** — every
+`TS_BENCH_FAIL` diagnostic is printed, not raised — so `stdout_tail` is retained
+on the nonzero-exit and incomplete-step failures as well as on `no_bench_export`.
+Keeping only `stderr_tail` was survivable while a failure also produced no
+records, since the `no_bench_export` branch carries stdout; but a later step
+failing after earlier ones exported never reaches that branch, and the trial then
+reported an exit code with the message that explains it discarded.
 
 ### Ports and timeouts are validated before anything computes with them
 
@@ -326,6 +340,15 @@ silently won — and each of these fails somewhere that does not mention the cau
 | `serve_args: ["--port", "9000"]` | the gateway starts on 9000 while readiness is polled on the resolved port; a healthy server reads as one that never came up |
 | `bench_args: ["--output-file", ...]` | the export lands where neither the in-container audit nor the host's glob looks; a completed benchmark reads as a missing result |
 | `bench_args: ["--num-prompts", "4"]` | the bench runs 4 while the host audits against the recipe's count |
+| `bench_args: ["--max-concurrency", "1"]` | the applied load changes while the host still publishes the configured cap; both request audits pass, so the cell goes **green** describing a run that did not happen |
+
+That last row is the worst of them and the reason the list covers the load
+controls — `--max-concurrency`, `--request-rate`, `--num-warmups`,
+`--ignore-eos`, `--seed` — and not only the export plumbing. Nothing detects it:
+every request completes, none fail, and the reported configuration is simply not
+the one that ran. They are reserved even at their defaults, where the script
+appends nothing at all, since a guard that covers only the configured case leaves
+the case most cells run unguarded.
 
 Reordering would fix the precedence but leave the override silently ignored,
 which is its own trap, so `ts_bench_serve.sh` rejects these by name with exit 64
@@ -428,10 +451,26 @@ a live server while the workload reports having removed it. `-v ...:/ts-out`
 sends the exports somewhere the host does not look, `--entrypoint` means the
 bench script never runs, and `-e TS_RUN_TOKEN=...` reaches the same
 desynchronisation the mitigation guard rejects while bypassing that guard
-entirely. `--name`, `--entrypoint`, `-v`/`--volume`, `--mount`, `--network`,
-`--user` and `--env-file`, plus any `-e` naming a protocol variable, are
-therefore rejected as configuration errors. Everything else still passes through
-— that is what the field is for.
+entirely. Two more with less obvious symptoms: a later `--ipc` or `--shm-size`
+replaces what TokenSpeed's scheduler sizes its shared memory against, and fails
+at load time with an error about shared memory rather than about `docker_args`;
+`--rm=false` leaves every completed container behind, so a sweep fills the node
+up while no single trial looks wrong.
+
+`--name`, `--entrypoint`, `-v`/`--volume`, `--mount`, `--network`, `--user`,
+`--env-file`, `--ipc`, `--shm-size`, `--rm`, `--device`, `--group-add` and
+`--security-opt` are therefore rejected as configuration errors, as is any `-e`
+naming a protocol variable. Everything else still passes through — that is what
+the field is for.
+
+Two details the guard has to get right, because either one makes it avoidable
+rather than strict. Docker accepts a value attached to a short option, so `-u0:0`
+and `-v/tmp:/ts-out` are the spaced forms under another spelling and are
+normalised before the check. And the `-e` half is compared against the declared
+protocol floor, not only the variables this run populated: `max_concurrency`
+defaults to unbounded and sets no `TS_MAX_CONCURRENCY`, so checking only what is
+present left the default configuration open to exactly the mislabelled pass
+described above.
 
 The same reasoning applies inside the container: `serve_args` and `bench_args`
 may not set the flags `ts_bench_serve.sh` derives itself (`--port`,
@@ -446,6 +485,12 @@ very port — leaving the two equal, which `ts_bench_serve.sh` rejects as a usag
 error. A valid `auto` configuration would fail intermittently, on a node under
 no unusual load. Resolution therefore retries, holding each candidate open until
 one lands outside the set already claimed.
+
+Explicit ports are held to 1024..65535, matching what `ts_bench_serve.sh`
+enforces: the container runs unprivileged and cannot bind a reserved port. The
+host used to accept 1..65535, so such a recipe passed `setup()` and was then
+guaranteed to fail with the script's exit 64 — after occupying a node, and
+reported as a workload failure rather than the configuration error it is.
 
 ### Mitigations must be forwarded explicitly
 

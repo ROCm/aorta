@@ -482,8 +482,19 @@ class TokenSpeedServeWorkload(Workload):
                 raise ValueError(
                     f'tokenspeed_serve: {label} must be an int or "auto", ' f"got {value!r}"
                 )
-            if not isinstance(value, str) and not 1 <= int(value) <= 65535:
-                raise ValueError(f"tokenspeed_serve: {label} ({value!r}) must be in 1..65535")
+            # 1024, not 1, to match `ts_bench_serve.sh`: the container runs
+            # unprivileged and cannot bind a reserved port, so the script rejects
+            # anything below 1024 outright. Accepting 1..1023 here meant such a
+            # recipe passed `setup()` and was then guaranteed to fail with the
+            # script's exit 64 -- after the trial had occupied a node, and
+            # reported as a workload failure rather than as the configuration
+            # error it is.
+            if not isinstance(value, str) and not 1024 <= int(value) <= 65535:
+                raise ValueError(
+                    f"tokenspeed_serve: {label} ({value!r}) must be in 1024..65535. "
+                    "Ports below 1024 are privileged and the container runs "
+                    "unprivileged, so ts_bench_serve.sh rejects them."
+                )
 
         # Two services cannot bind one address, so this configuration cannot
         # come up -- and it would fail as a readiness timeout during bring-up,
@@ -884,6 +895,12 @@ class TokenSpeedServeWorkload(Workload):
     # Rejected rather than reordered, for the reason ts_bench_serve.sh rejects
     # its own owned flags: reordering would make the setting silently ineffective
     # instead of silently destructive, which is not much better.
+    #   --ipc / --shm-size
+    #                  TokenSpeed's scheduler sizes its shared memory against
+    #                  these; a smaller later value fails at load time with an
+    #                  error about shared memory, not about docker_args
+    #   --rm=false     every completed container is left behind, so the node
+    #                  fills up over a sweep rather than in any single trial
     _OWNED_DOCKER_FLAGS = frozenset(
         {
             "--name",
@@ -896,14 +913,31 @@ class TokenSpeedServeWorkload(Workload):
             "--net",
             "--user",
             "-u",
+            "--ipc",
+            "--shm-size",
+            "--rm",
+            "--device",
+            "--group-add",
+            "--security-opt",
         }
     )
+
+    # Short options docker also accepts with the value attached, where splitting
+    # on `=` is not enough to recover the flag: `-u0:0` and `-v/tmp:/ts-out` are
+    # the spaced forms by another spelling, and blocking only the spaced ones
+    # would leave the guard trivially avoidable -- `-u0:0` restores root-owned
+    # artifacts, `-v/tmp:/ts-out` displaces the mount the audit reads.
+    _OWNED_ATTACHED_SHORT_FLAGS = ("-v", "-u")
 
     def _reject_owned_docker_args(self, *, owned_env: set[str] | None = None) -> None:
         """Refuse ``docker_args`` that would displace a generated option."""
         expect_env_value = False
         for arg in self._docker_args:
             flag = arg.split("=", 1)[0]
+            for short in self._OWNED_ATTACHED_SHORT_FLAGS:
+                if arg.startswith(short) and len(arg) > len(short):
+                    flag = short
+                    break
             if flag in self._OWNED_DOCKER_FLAGS:
                 raise ValueError(
                     f"tokenspeed_serve: docker_args may not set {flag}; this "
@@ -926,7 +960,14 @@ class TokenSpeedServeWorkload(Workload):
                 name = arg[len("--env=") :].split("=", 1)[0]
             elif arg.startswith("-e") and len(arg) > 2:
                 name = arg[2:].split("=", 1)[0]
-            if name and owned_env is not None and name in owned_env:
+            # Unioned with the declared floor for the same reason the mitigation
+            # check is: `owned_env` can only name keys that are *present*, and an
+            # unbounded `max_concurrency` sets no TS_MAX_CONCURRENCY -- so
+            # `docker_args: ["-e", "TS_MAX_CONCURRENCY=1"]` on the default
+            # configuration ran the container capped while the host reported
+            # `max_concurrency: None`. Fixing that for mitigations and not here
+            # just moved the same hole one field sideways.
+            if name and name in (owned_env or set()) | _PROTOCOL_ENV_KEYS:
                 raise ValueError(
                     f"tokenspeed_serve: docker_args may not set {name}; this "
                     "workload sets it as part of its contract with "
@@ -1223,6 +1264,15 @@ class TokenSpeedServeWorkload(Workload):
                     "detail": f"ts_bench_serve.sh exited {exit_code}",
                     "exit_code": exit_code,
                     "stderr_tail": _tail(stderr),
+                    # stdout as well, because that is where the script says what
+                    # went wrong: every TS_BENCH_FAIL line is printed, not raised.
+                    # Keeping only stderr was survivable while a failure also
+                    # produced no records -- the `no_bench_export` branch below
+                    # carries stdout -- but a later step failing after earlier
+                    # ones exported leaves that branch unreached, and the trial
+                    # then reported an exit code with the message that explains
+                    # it thrown away.
+                    "stdout_tail": _tail(stdout),
                 }
             )
 
@@ -1242,6 +1292,8 @@ class TokenSpeedServeWorkload(Workload):
                 {
                     "reason": "incomplete_steps",
                     "detail": (f"{len(records)} of {self._steps} bench steps exported a " "result"),
+                    # Same reasoning: which step stopped and why is on stdout.
+                    "stdout_tail": _tail(stdout),
                 }
             )
 
@@ -1253,7 +1305,12 @@ class TokenSpeedServeWorkload(Workload):
         for record in records:
             completed = record.doc.get("completed")
             failed = record.doc.get("failed")
-            if not isinstance(completed, int) or not isinstance(failed, int):
+            # `type(...) is not int` rather than `isinstance`, because `bool` is a
+            # subclass of `int` in Python and `json` decodes `true`/`false` to it.
+            # With `num_prompts: 1` -- a legitimate configuration --
+            # `completed: true, failed: false` compares equal to 1 and 0, so an
+            # export with meaningless counters would satisfy the audit outright.
+            if type(completed) is not int or type(failed) is not int:
                 failure_details.append(
                     {
                         "reason": "result_json_unusable",
@@ -1399,11 +1456,14 @@ class TokenSpeedServeWorkload(Workload):
         # Sums, not means, for the audit counters: "how many requests did this
         # trial actually serve" is the question, and a mean hides a single bad
         # step among good ones.
+        # `type(...) is int` for the same reason as the audit above: a JSON
+        # boolean is an `int` to `isinstance`, and summing it would report
+        # `completed_total: 1` for an export that never counted anything.
         metrics["completed_total"] = sum(
-            int(r.doc["completed"]) for r in records if isinstance(r.doc.get("completed"), int)
+            r.doc["completed"] for r in records if type(r.doc.get("completed")) is int
         )
         metrics["failed_total"] = sum(
-            int(r.doc["failed"]) for r in records if isinstance(r.doc.get("failed"), int)
+            r.doc["failed"] for r in records if type(r.doc.get("failed")) is int
         )
 
         # Alias to the name AORTA's CI gating allowlist already knows, so a
