@@ -466,6 +466,34 @@ def test_host_launch_removes_the_container_even_without_a_signal(
     ), f"no teardown for {container}; docker was called with:\n{calls}"
 
 
+def test_host_launch_container_name_is_unique_per_launcher(bash: str, tmp_path: Path) -> None:
+    """The container name must not be derivable from TS_RUN_TOKEN alone.
+
+    A caller may reuse a token deliberately, to correlate artifacts across
+    trials. But the name is what the EXIT trap falls back to when the daemon
+    never wrote a cidfile -- and the daemon not writing one is exactly what
+    happens when the name is already taken. A shared name would have this
+    trial's cleanup force-remove the other trial's container.
+    """
+    token = "cell7-trial2"
+    first = _run_host_launch_with_docker_stub(
+        bash, tmp_path, "name-a", extra_env={"TS_RUN_TOKEN": token}
+    )
+    second = _run_host_launch_with_docker_stub(
+        bash, tmp_path, "name-b", extra_env={"TS_RUN_TOKEN": token}
+    )
+
+    def name_of(argv: str) -> str:
+        lines = argv.splitlines()
+        return lines[lines.index("--name") + 1]
+
+    assert name_of(first) != name_of(second), "two launchers shared a container name"
+    # The token still leads the name, so `docker ps` ties back to the artifacts.
+    assert name_of(first).startswith(f"aorta-ts-{token}")
+    # And the token itself is untouched for artifact naming.
+    assert _token_from(first) == token
+
+
 def test_host_launch_does_not_share_the_host_ipc_namespace(bash: str, tmp_path: Path) -> None:
     """Processes in one container already share a private IPC namespace.
 
@@ -1953,30 +1981,81 @@ def test_stage_scripts_mirrors_rather_than_accumulates(bash: str, tmp_path: Path
     behind -- and because recipes name their entry script by filename, the stale
     copy is still executable. A run pointed at the old name would then succeed
     against code that no longer exists in the tree.
+
+    Exercised across two staging runs, which is how the situation actually
+    arises: what the second run may delete is what the first one recorded
+    staging, not whatever happens to match `*.sh` in the destination.
     """
+    src = tmp_path / "src"
+    shutil.copytree(_SOURCE, src, ignore=shutil.ignore_patterns("__pycache__"))
+    renamed_away = src / "ts_removed_probe.sh"
+    renamed_away.write_text("#!/usr/bin/env bash\nexit 0\n")
+
     dest = tmp_path / "staged"
     dest.mkdir()
-    stale_sh = dest / "ts_removed_probe.sh"
-    stale_sh.write_text("#!/usr/bin/env bash\nexit 0\n")
-    stale_py = dest / "removed_helper.py"
-    stale_py.write_text("x = 1\n")
     # Caller-owned files in the same directory must survive: the staging dir is
     # also where an env file or an out dir can sit.
     keep = dest / "cell.env"
     keep.write_text("FOO=bar\n")
 
+    def stage() -> subprocess.CompletedProcess[str]:
+        proc = subprocess.run(
+            [bash, str(src / "stage_scripts.sh"), str(dest)],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return proc
+
+    stage()
+    assert (dest / "ts_removed_probe.sh").exists(), "the first run staged the full set"
+
+    # Upstream renames it away; the next staging run must not leave it behind.
+    renamed_away.unlink()
+    stage()
+
+    assert not (dest / "ts_removed_probe.sh").exists(), "renamed probe survived staging"
+    assert keep.read_text() == "FOO=bar\n", "staging clobbered a caller file"
+    # And the real set did land.
+    assert (dest / "host_launch.sh").exists()
+    assert (dest / "ts_kernel_probe.sh").exists()
+
+
+def test_stage_scripts_only_deletes_what_it_staged(bash: str, tmp_path: Path) -> None:
+    """`dest` is a positional argument, so it may be a directory nobody owns.
+
+    The mirror step used to `rm -f "$dest"/*.sh "$dest"/*.py`, which in a shared
+    location deleted whatever matched -- `stage_scripts.sh /tmp` removed other
+    people's staging scripts before copying. Deletion is now scoped to a
+    manifest this script wrote, so a first run into a populated directory
+    removes nothing.
+    """
+    dest = tmp_path / "shared"
+    dest.mkdir()
+    foreign_sh = dest / "someone_elses_run.sh"
+    foreign_sh.write_text("#!/usr/bin/env bash\necho theirs\n")
+    foreign_py = dest / "their_helper.py"
+    foreign_py.write_text("theirs = True\n")
+
+    for _ in range(2):
+        proc = subprocess.run(
+            [bash, str(_SOURCE / "stage_scripts.sh"), str(dest)],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert foreign_sh.exists(), "staging deleted an unrelated script"
+        assert foreign_py.exists(), "staging deleted an unrelated helper"
+
+    # A syntax error in a file this script did not stage is likewise none of its
+    # business -- globbing the destination made it fail the whole staging run.
+    (dest / "broken_of_theirs.sh").write_text("if then fi\n")
     proc = subprocess.run(
         [bash, str(_SOURCE / "stage_scripts.sh"), str(dest)],
         capture_output=True,
         text=True,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert not stale_sh.exists(), "renamed probe survived staging"
-    assert not stale_py.exists(), "removed helper survived staging"
-    assert keep.read_text() == "FOO=bar\n", "staging clobbered a caller file"
-    # And the real set did land.
-    assert (dest / "host_launch.sh").exists()
-    assert (dest / "ts_kernel_probe.sh").exists()
 
 
 @pytest.mark.parametrize("spelling", ["plain", "trailing_slash", "relative", "symlink"])
