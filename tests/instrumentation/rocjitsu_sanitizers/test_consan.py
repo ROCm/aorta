@@ -62,6 +62,46 @@ def _healthy_evidence() -> str:
     return "\n".join((coverage, *sites, verdict))
 
 
+def _attention_evidence(*, access_sites: int = 3) -> str:
+    """Evidence shaped like TokenSpeed's Gluon attention kernels (issue #405).
+
+    Every discovered site is reported supported and then fails to lower, and the
+    hook itemizes the access sites but never the barrier sites it counted.
+    """
+
+    coverage = (
+        f"{_PREFIX} coverage reader=1 load=1 flavor=moi engine=record_replay "
+        "analysis_complete=false expert_limit=false "
+        "access_discovered=3 access_supported=3 access_selected=3 "
+        "access_patched=0 access_unsupported=0 access_resource_failed=0 "
+        "access_placement_or_lowering_failed=3 access_expert_limit_omitted=0 "
+        "barrier_discovered=2 barrier_supported=2 barrier_selected=2 "
+        "barrier_patched=0 barrier_unsupported=0 barrier_resource_failed=0 "
+        "barrier_placement_or_lowering_failed=2 barrier_expert_limit_omitted=0 "
+        f"{_zero_counts('atomic')} {_zero_counts('fence')}"
+    )
+    sites = [
+        (
+            f"{_PREFIX} coverage_site reader=1 load=1 kind=access "
+            "disposition=supported reason=none "
+            "outcome=placement_or_lowering_failed "
+            "lowering_reason=instrumentation_patch_missing resource_reason=none "
+            f"container=k scope=kernel text=0x{index:x} mnemonic=ds_read_b64_tr_b16"
+        )
+        for index in range(access_sites)
+    ]
+    verdict = (
+        f"{_PREFIX} analysis verdict applicable=true "
+        "analysis_complete=false static_complete=false dynamic_complete=true "
+        "applicable_code_objects=1 incomplete_code_objects=1 "
+        "access=0/3 barrier=0/2 atomic=0/0 fence=0/0 "
+        "visible_evidence=0 dynamic_incomplete=0 replay_unsupported_access=0 "
+        "replay_unsupported_atomics=0 replay_unsupported_fences=0 "
+        "replay_metadata_full=0"
+    )
+    return "\n".join((coverage, *sites, verdict))
+
+
 def _worklist() -> KernelWorklist:
     return KernelWorklist(
         requirement=SelectionRequirement.TOP_TIME,
@@ -225,6 +265,63 @@ def test_inconsistent_aggregate_coverage_never_passes() -> None:
 
     assert consan.verdict is Verdict.ERROR
     assert "aggregate disagrees" in str(consan.reason)
+
+
+def test_unitemized_site_kind_is_a_coverage_gap_not_a_parse_error() -> None:
+    # The hook counts 2 barrier sites and itemizes none of them. That is a hole
+    # in the evidence, not malformed output, so it must not be reported as if
+    # aorta failed to read the log.
+    _waitcheck, consan = evaluate_record_replay(
+        ProcessResult(("app",), 0, _attention_evidence(), "")
+    )
+
+    assert consan.verdict is Verdict.ERROR
+    assert "parse_error" not in str(consan.reason)
+    assert "consan_coverage_incomplete" in str(consan.reason)
+    assert "reader 1 barrier sites not itemized: 0 of 2" in str(consan.reason)
+
+
+def test_unitemized_coverage_still_reports_why_sites_failed() -> None:
+    # The actionable numbers -- 0 of 3 access sites patched, and the lowering
+    # reason every one of them reported -- have to survive into the check, since
+    # that is the whole story of the run.
+    _waitcheck, consan = evaluate_record_replay(
+        ProcessResult(("app",), 0, _attention_evidence(), "")
+    )
+
+    assert "access placement_or_lowering_failed: 3 instrumentation_patch_missing" in str(
+        consan.reason
+    )
+    assert [item.access for item in consan.coverage] == ["0/3"]
+
+
+def test_partially_itemized_site_kind_is_still_a_parse_error() -> None:
+    # One missing site out of three is lossy output, not a reportable gap: the
+    # remaining records cannot be reconciled, so this must stay fail-closed on
+    # the parse path.
+    _waitcheck, consan = evaluate_record_replay(
+        ProcessResult(("app",), 0, _attention_evidence(access_sites=2), "")
+    )
+
+    assert consan.verdict is Verdict.ERROR
+    assert "parse_error" in str(consan.reason)
+    assert "access site count mismatch" in str(consan.reason)
+
+
+def test_race_in_an_unitemized_run_is_not_discarded() -> None:
+    # A race found while coverage was incomplete is still a race. The old parse
+    # error threw the findings away with the rest of the parsed output.
+    output = "\n".join(
+        (
+            f"{_PREFIX} MOI auto replay diagnostic kind=1 conflict=true diagnostics=1",
+            _attention_evidence(),
+        )
+    )
+
+    _waitcheck, consan = evaluate_record_replay(ProcessResult(("app",), 0, output, ""))
+
+    assert consan.verdict is Verdict.FAIL
+    assert len(consan.findings) == 1
 
 
 def test_strict_mode_relies_on_backend_exit_and_coverage_gate() -> None:
