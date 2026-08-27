@@ -1539,6 +1539,67 @@ def test_harvest_clears_staged_objects_on_reharvest(tmp_path: Path) -> None:
     assert fresh.is_dir()
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["gfx950", "gfx950\nticket: HIJACKED", "gfx950: sub", "gfx950 #comment"],
+)
+def test_harvest_quotes_the_target_in_every_recipe(tmp_path: Path, target: str) -> None:
+    """`target` comes from the Waitcheck JSON, so it is object-derived too.
+
+    The kernel names were quoted and this was not, even though both arrive in
+    the same parsed record -- a target carrying a newline or a colon reshapes
+    the generated recipe into something other than what was harvested.
+    """
+    module = _harvest_module()
+    loader = tmp_path / "triton_consan_loader.py"
+    loader.write_text(_FAKE_LOADER)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    kernels = _fake_kernels(1, tmp_path / "cache")
+
+    waitcheck = module._write_recipe(dest, "attn", target, kernels)
+    recipe = yaml.safe_load(waitcheck.read_text())
+    assert recipe["sanitizer_plan"]["target"] == target
+    assert "HIJACKED" not in recipe
+
+    module._write_consan_assets(dest, kernels, target, loader, "lenient", None)
+    consan = yaml.safe_load(next((dest / "consan").glob("consan-*.yaml")).read_text())
+    assert consan["sanitizer_plan"]["target"] == target
+    assert "HIJACKED" not in consan
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("sha256", "not-a-digest"),
+        ("sha256", "deadbeef"),  # right alphabet, wrong length
+        ("sha256", "z" * 64),  # right length, wrong alphabet
+        ("sha256", "0\nticket: HIJACKED"),
+        ("code_object_index", "0: sub"),
+        ("code_object_index", "not-an-int"),
+    ],
+)
+def test_harvest_rejects_malformed_inventory_numbers(tmp_path: Path, field: str, value: str) -> None:
+    """The digest and index fields are emitted unquoted, because the recipe
+    schema wants a hex scalar and a number.
+
+    Quoting them would not make a malformed value safe -- it would produce a
+    well-formed recipe selecting something that cannot match. So they are
+    required to be what they claim, which also means they cannot carry YAML
+    syntax.
+    """
+    module = _harvest_module()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    kernels = _fake_kernels(1, tmp_path / "cache")
+    kernels[0][field] = value
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._write_recipe(dest, "attn", "gfx950", kernels)
+
+    assert "malformed" in str(excinfo.value), excinfo.value
+
+
 def test_harvest_replaces_stale_consan_assets(tmp_path: Path) -> None:
     """Re-harvesting the same --dest must not leave the previous run's recipes.
 
